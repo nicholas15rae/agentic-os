@@ -40,7 +40,7 @@ class ChatHistoryTests(unittest.TestCase):
                                   "content": "", "timestamp": ""})
         history = server.load_chat_history()
         history["messages"] = []
-        server.CHAT_HISTORY_FILE.write_text(__import__("json").dumps(history))
+        server.CHAT_HISTORY_FILE.write_text(__import__("json").dumps(history), encoding="utf-8")
         status, data = self.h.api("GET", "/api/chat/history")
         self.assertEqual(status, 200)
         self.assertEqual(data["total"], 0)
@@ -155,7 +155,7 @@ class MemoryGraphTests(unittest.TestCase):
 
     def test_memory_graph_has_nodes(self):
         (self.h.tmp / "brain" / "graph-note.md").write_text(
-            "zephyrquadrant graph connectivity notes"
+            "zephyrquadrant graph connectivity notes", encoding="utf-8"
         )
         status, _ = self.h.api("POST", "/api/memory/reindex")
         self.assertEqual(status, 200)

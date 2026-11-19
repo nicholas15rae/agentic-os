@@ -62,6 +62,36 @@ class TestResolveCli(unittest.TestCase):
             server.resolve_cli(["definitely-not-a-real-cli-xyz"])
 
 
+class TestHermesHome(unittest.TestCase):
+    def setUp(self):
+        self.saved = {k: os.environ.get(k) for k in ("HERMES_HOME", "LOCALAPPDATA")}
+        self.tmp = Path(tempfile.mkdtemp(prefix="aos-hermes-"))
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_env_override_wins(self):
+        os.environ["HERMES_HOME"] = str(self.tmp / "custom")
+        self.assertEqual(server.hermes_home(), self.tmp / "custom")
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only")
+    def test_native_windows_location(self):
+        os.environ.pop("HERMES_HOME", None)
+        os.environ["LOCALAPPDATA"] = str(self.tmp)
+        (self.tmp / "hermes").mkdir()
+        self.assertEqual(server.hermes_home(), self.tmp / "hermes")
+
+    def test_falls_back_to_dot_hermes(self):
+        os.environ.pop("HERMES_HOME", None)
+        os.environ["LOCALAPPDATA"] = str(self.tmp)  # no hermes\ inside
+        self.assertEqual(server.hermes_home(), Path.home() / ".hermes")
+
+
 class TestUtf8Files(unittest.TestCase):
     def test_read_file_round_trips_non_ascii(self):
         tmp = Path(tempfile.mkdtemp(prefix="aos-utf8-"))

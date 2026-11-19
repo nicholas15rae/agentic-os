@@ -870,11 +870,30 @@ def run_cli(args: list, timeout: int = 30) -> tuple:
                        encoding="utf-8", errors="replace", timeout=timeout)
     return r.returncode, r.stdout, r.stderr
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+def _is_rule(line: str) -> bool:
+    """A horizontal rule line such as '────────'."""
+    s = line.strip()
+    return len(s) >= 3 and set(s) <= set("─━═-")
+
 def clean_hermes_output(raw: str) -> str:
     """Strip CLI metadata from Hermes output, returning only the AI response."""
     if not raw:
         return ""
+    raw = ANSI_ESCAPE.sub("", raw).replace("\r\n", "\n")
     lines = raw.split('\n')
+    # Hermes v0.2x: response framed as  ──── / ☤ Hermes / <text> / ────
+    for i, line in enumerate(lines):
+        if line.strip().startswith("☤"):
+            body = []
+            for nxt in lines[i + 1:]:
+                if _is_rule(nxt):
+                    break
+                body.append(nxt.rstrip())
+            text = "\n".join(body).strip()
+            if text:
+                return text
     in_box = False
     content_lines = []
     for line in lines:
@@ -892,7 +911,9 @@ def clean_hermes_output(raw: str) -> str:
     if content_lines:
         return '\n'.join(content_lines)
     # Fallback: if no box found, return last non-metadata line
-    non_meta = [l.strip() for l in lines if l.strip() and not l.startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:', 'Duration:', 'Messages:'))]
+    non_meta = [l.strip() for l in lines if l.strip() and not _is_rule(l)
+                and not l.strip().startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:',
+                                              'Duration:', 'Messages:', 'hermes --resume', 'hermes -c'))]
     return '\n'.join(non_meta[-5:]) or raw
 
 def execute_agent(agent: str, message: str) -> str:

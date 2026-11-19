@@ -92,6 +92,26 @@ class TestHermesHome(unittest.TestCase):
         self.assertEqual(server.hermes_home(), Path.home() / ".hermes")
 
 
+class TestCleanHermesOutput(unittest.TestCase):
+    # Captured from Hermes v0.23.2 `hermes chat -q` on Windows (colours included).
+    V023 = ("\x1b[38;2;255;191;0m" + "─" * 40 + "\x1b[0m\n"
+            "\x1b[1;38;2;255;191;0m☤ Hermes\x1b[0m\n"
+            "\x1b[38;2;255;248;220mHermes online\x1b[0m\n"
+            "\x1b[38;2;255;191;0m" + "─" * 40 + "\x1b[0m\n"
+            "hermes --resume local-dcc5c3a6d1cda55a\n")
+
+    def test_v023_framed_reply_without_ansi(self):
+        self.assertEqual(server.clean_hermes_output(self.V023), "Hermes online")
+
+    def test_multiline_reply_kept(self):
+        raw = self.V023.replace("Hermes online", "line one\n\nline two")
+        self.assertEqual(server.clean_hermes_output(raw), "line one\n\nline two")
+
+    def test_legacy_box_format_still_works(self):
+        raw = "Query: hi\n╭─ Hermes ─╮\n  hello there  \n╰──────────╯\nSession: x\n"
+        self.assertEqual(server.clean_hermes_output(raw), "hello there")
+
+
 class TestUtf8Files(unittest.TestCase):
     def test_read_file_round_trips_non_ascii(self):
         tmp = Path(tempfile.mkdtemp(prefix="aos-utf8-"))

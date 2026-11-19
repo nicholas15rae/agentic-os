@@ -342,6 +342,8 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("brave-search", "Brave Search", false, "Web search (needs a Brave API key in Settings)."),
         builtin("gmail", "Gmail", false, "Search and read your inbox via your Google Apps Script deployment (or the read-only n8n workflow \"gmail-recent\")."),
         builtin("spotify", "Spotify", false, "Now playing, playback control, recent tracks and playlists (connect in Settings → Integrations)."),
+        builtin("maps", "Maps / OpenStreetMap", true, "Geocoding (Nominatim), driving routes and ETAs (OSRM, no live traffic) and the Route Map widget. No key needed."),
+        builtin("instagram", "Instagram", true, "Your Instagram Professional account: profile stats, recent posts and insights, comments. Replies and publishing only after the confirmation card (needs INSTAGRAM_ACCESS_TOKEN)."),
         McpServer {
             id: "whatsapp".into(),
             name: "WhatsApp Bridge".into(),
@@ -850,15 +852,17 @@ pub fn gate(bridge: &BridgeState, tier: Tier, what: &str, approved: bool, detail
 // to that service. The webview can set / check / delete, never read.
 
 const SERVICE: &str = "agentic-os-command-center";
-pub const OS_SECRETS: [&str; 12] = [
+pub const OS_SECRETS: [&str; 13] = [
     "anthropic", "gemini", "brave", "twelvedata", "vault", "gateway-token", "anythingllm-remote", "gmail-script-id", "gmail-script-key",
     // Remote MCP tokens: each is only ever sent to its own host (see `mcp::REMOTE_AUTH`).
     "github-pat", "sentry-token", "agentmail-key",
+    // Instagram API with Instagram Login (`instagram.rs`): only ever sent to graph.instagram.com.
+    "instagram-token",
 ];
 
 /// Secrets only Rust writes (OAuth state). The webview can neither set nor delete them
 /// (`os_secret_set` / `os_secret_delete` refuse); `devqueue::known_secrets` still scrubs them.
-pub const INTERNAL_SECRETS: [&str; 3] = ["spotify-refresh", "spotify-session", "spotify-grant"];
+pub const INTERNAL_SECRETS: [&str; 4] = ["spotify-refresh", "spotify-session", "spotify-grant", "instagram-refreshed"];
 
 fn os_entry(name: &str) -> Result<keyring::Entry, String> {
     if !OS_SECRETS.contains(&name) && !INTERNAL_SECRETS.contains(&name) {

@@ -3,6 +3,7 @@ import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve as resolveRoute } from "@/features/dispatcher/router";
 import { extractJson } from "@/features/orchestrator/extract-json";
 import { parseDraftEmail, type DraftParse } from "@/features/orchestrator/draft-email";
+import { parseInstagramIntent, type InstagramIntent } from "@/features/orchestrator/instagram-intent";
 import { isOsControlPhrase } from "@/features/os/os-intent-parse";
 import { isCommitCue, parseDefer } from "@/features/dialogue/tier";
 import { useOs } from "@/features/os/os-store";
@@ -141,6 +142,12 @@ function readBackFor(p: Pick<ActionPlan, "role" | "intent" | "target" | "missing
   if (p.target.kind === "tool" && p.target.tool === "gmail.create_draft") {
     const a = p.target.args;
     s = `Got it — saving a Gmail draft to ${a.to}, subject "${a.subject}". It won't be sent.`;
+  } else if (p.target.kind === "tool" && p.target.tool === "instagram.publish_post") {
+    const a = p.target.args;
+    const what = a.videoUrl ? "a Reel" : "a photo";
+    s = `Ready to publish ${what} to Instagram ${a.caption ? `with the caption "${a.caption}"` : "with no caption"}. This goes live on your account.`;
+  } else if (p.target.kind === "tool" && p.target.tool === "instagram.reply_comment") {
+    s = `Ready to reply publicly to Instagram comment ${p.target.args.commentId}: "${p.target.args.message}".`;
   } else {
     const who = p.target.kind === "n8n" ? `running the ${p.target.workflow} workflow` : `instructing ${SUB_AGENTS[p.role].label}`;
     s = `Got it — ${who} to ${p.intent}.`;
@@ -177,6 +184,8 @@ export function heuristicPlan(utterance: string, role?: AgentRole): ActionPlan {
   // user's own inbox, so it still asks for the address.
   const deskDraft = draft?.kind === "ask" && r !== "general" && !/\breply\b/i.test(utterance);
   if (draft && !deskDraft) return draftPlan(utterance, r, intent, draft);
+  const ig = parseInstagramIntent(draftText);
+  if (ig) return instagramPlan(utterance, r, intent, ig);
   // "turn off gabagool mode" matches MUTATING's `turn (on|off)`, but the OS-control
   // intent layer (voice-controller.ts) owns these phrases before the plan is ever
   // built — they must never become a mutating plan for a gateway agent.
@@ -232,6 +241,45 @@ function draftPlan(utterance: string, role: AgentRole, intent: string, d: DraftP
   plan.target = { kind: "tool", tool: "gmail.create_draft", args };
   plan.payload = args;
   plan.summary = `Save a Gmail draft to ${d.to}: "${d.subject}"`;
+  plan.readBack = readBackFor(plan);
+  return plan;
+}
+
+/** An Instagram publish / comment reply: a mutating plan bound to its approved-only Rust
+ * command (the card is the gate before anything goes live), or Tony's follow-up question. */
+function instagramPlan(utterance: string, role: AgentRole, intent: string, ig: InstagramIntent): ActionPlan {
+  const plan: ActionPlan = {
+    id: crypto.randomUUID(),
+    utterance,
+    role,
+    intent,
+    summary: "Instagram",
+    readBack: "",
+    mutating: false,
+    target: { kind: "agent" },
+    payload: {},
+    missing: [],
+    verification: { status: "skipped", notes: [] },
+    planner: "heuristic",
+    plannerNote: "Instagram binding",
+  };
+  if (ig.kind === "ask" || !isTauri()) {
+    const text = ig.kind === "ask" ? ig.reply : "Instagram posts and replies go through the desktop app — ask me there.";
+    plan.run = async () => ({ text, meta: "instagram" });
+    return plan;
+  }
+  plan.mutating = true;
+  if (ig.kind === "publish") {
+    const args = { caption: ig.caption, ...(ig.videoUrl ? { videoUrl: ig.videoUrl } : { imageUrl: ig.imageUrl }) };
+    plan.target = { kind: "tool", tool: "instagram.publish_post", args };
+    plan.payload = args;
+    plan.summary = `Publish ${ig.videoUrl ? "a Reel" : "a photo"} to Instagram${ig.caption ? `: "${ig.caption}"` : ""}`;
+  } else {
+    const args = { commentId: ig.commentId, message: ig.message };
+    plan.target = { kind: "tool", tool: "instagram.reply_comment", args };
+    plan.payload = args;
+    plan.summary = `Reply to Instagram comment ${ig.commentId}: "${ig.message}"`;
+  }
   plan.readBack = readBackFor(plan);
   return plan;
 }

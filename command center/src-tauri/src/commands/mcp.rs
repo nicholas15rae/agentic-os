@@ -71,6 +71,18 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
             t(id, "gmail.create_draft", "Save a draft email (not sent). Only after the user's confirmation card.", &["to", "subject", "body"]),
         ],
         "spotify" => spotify_tools(id),
+        "maps" => vec![
+            t(id, "maps.route", "Driving route + ETA (OpenStreetMap; baseline, no live traffic) and draw it on the Route Map. destination: address, place or \"lat,lng\"; origin defaults to home; stops: optional list of places in order.", &["destination", "origin?", "stops?"]),
+            t(id, "maps.geocode", "Find an address or place on the map (lat/lng and full address).", &["query"]),
+            t(id, "maps.reverse", "The street address at a latitude/longitude.", &["lat", "lng"]),
+        ],
+        "instagram" => vec![
+            t(id, "instagram.get_profile", "The user's Instagram account stats: username, followers, following, post count.", &[]),
+            t(id, "instagram.list_media", "The user's recent Instagram posts/Reels with likes, comments and ids; insights true adds reach/saves/shares for the newest three.", &["limit?", "insights?"]),
+            t(id, "instagram.list_comments", "Comments on one Instagram post (media_id from instagram.list_media), with comment ids.", &["media_id", "limit?"]),
+            t(id, "instagram.reply_comment", "Reply to an Instagram comment. Only after the user's confirmation card.", &["comment_id", "message"]),
+            t(id, "instagram.publish_post", "Publish a photo (image_url) or Reel (video_url) with a caption. Only after the user's confirmation card.", &["caption", "image_url?", "video_url?"]),
+        ],
         _ => vec![],
     }
 }
@@ -109,7 +121,7 @@ fn spotify_tools(id: &str) -> Vec<ToolInfo> {
 
 /// A builtin's tools, or an error when its backend isn't configured, so the
 /// registry never shows a false "ok" for a server that can't answer.
-fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: impl Fn() -> bool, spotify: impl Fn() -> Result<(), String>) -> Result<Vec<ToolInfo>, String> {
+fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: impl Fn() -> bool, spotify: impl Fn() -> Result<(), String>, has_instagram_token: impl Fn() -> bool) -> Result<Vec<ToolInfo>, String> {
     match id {
         "gmail" => match gmail() {
             GmailSource::None => Err(super::gmail::NO_BACKEND.into()),
@@ -118,6 +130,7 @@ fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: imp
         },
         "brave-search" if !has_brave_key() => Err("Brave Search: no API key — add one in Settings → Integrations".into()),
         "spotify" => spotify().map(|_| builtin_tools(id)),
+        "instagram" if !has_instagram_token() => Err(super::instagram::NO_TOKEN.into()),
         _ => Ok(builtin_tools(id)),
     }
 }
@@ -136,7 +149,7 @@ pub(crate) fn unavailable_reason(state: &DispatchState, cfg: &OsConfig, id: &str
 }
 
 fn listing(state: &DispatchState, id: &str) -> Result<Vec<ToolInfo>, String> {
-    builtin_listing(id, || super::gmail::source(state), || brave_key(state).is_some(), || super::spotify::readiness(state))
+    builtin_listing(id, || super::gmail::source(state), || brave_key(state).is_some(), || super::spotify::readiness(state), || super::envfile::os_key(state, super::instagram::SECRET).is_some())
 }
 
 // ── Listing ─────────────────────────────────────────────────────────────────
@@ -963,6 +976,9 @@ pub async fn call_tool_with(state: &DispatchState, os: &OsState, bridge: &Bridge
             // Drafts never run from here (whatever `approved` says): only `gmail_create_draft`, after the confirmation card.
             gmail if gmail.starts_with("gmail.") && server_on("gmail") => super::gmail::tool(state, os, gmail, args, false).await,
             spotify if spotify.starts_with("spotify.") && server_on("spotify") => super::spotify::tool(state, os, spotify, args).await,
+            maps if maps.starts_with("maps.") && server_on("maps") => super::maps::tool(state, os, maps, args).await,
+            // Replies / publishing never run from here (whatever `approved` says): only the approved-card commands.
+            ig if ig.starts_with("instagram.") && server_on("instagram") => super::instagram::tool(state, os, ig, args, false).await,
             "skills.read" => read_skill(&cfg, &arg("name"), agent),
             other => {
                 let (sid, tool) = other.split_once('.').ok_or("unknown tool")?;
@@ -1927,6 +1943,18 @@ mod tests {
     }
 
     #[test]
+    fn instagram_writes_are_mutating_and_reads_and_maps_are_not() {
+        for t in ["instagram.reply_comment", "instagram.publish_post"] {
+            assert!(is_mutating_tool(t), "{t}");
+        }
+        for t in ["instagram.get_profile", "instagram.list_media", "instagram.list_comments", "maps.route", "maps.geocode", "maps.reverse"] {
+            assert!(!is_mutating_tool(t), "{t}");
+        }
+        assert_eq!(server_of_tool("maps.route"), "maps");
+        assert_eq!(server_of_tool("instagram.list_media"), "instagram");
+    }
+
+    #[test]
     fn gmail_tools_split_read_only_and_draft() {
         let names: Vec<String> = builtin_tools("gmail").into_iter().map(|t| t.name).collect();
         assert_eq!(names, ["gmail.recent", "gmail.search", "gmail.read_thread", "gmail.create_draft"]);
@@ -1971,17 +1999,21 @@ mod tests {
     #[test]
     fn builtin_listing_is_honest_about_backends() {
         let ok = || Ok(());
-        let e = builtin_listing("gmail", || GmailSource::None, || true, ok).unwrap_err();
+        let e = builtin_listing("gmail", || GmailSource::None, || true, ok, || true).unwrap_err();
         assert!(e.starts_with("Gmail: no backend"), "{e}");
-        let n8n: Vec<String> = builtin_listing("gmail", || GmailSource::N8n("gmail-digest"), || true, ok).unwrap().into_iter().map(|t| t.name).collect();
+        let n8n: Vec<String> = builtin_listing("gmail", || GmailSource::N8n("gmail-digest"), || true, ok, || true).unwrap().into_iter().map(|t| t.name).collect();
         assert_eq!(n8n, ["gmail.recent"]);
-        assert_eq!(builtin_listing("gmail", || GmailSource::Script, || true, ok).unwrap().len(), 4);
-        assert!(builtin_listing("brave-search", || GmailSource::None, || false, ok).is_err());
-        assert_eq!(builtin_listing("brave-search", || GmailSource::None, || true, ok).unwrap().len(), 1);
-        assert_eq!(builtin_listing("weather", || GmailSource::None, || false, ok).unwrap().len(), 1);
-        let e = builtin_listing("spotify", || GmailSource::None, || true, || Err(super::super::spotify::NOT_CONNECTED.into())).unwrap_err();
+        assert_eq!(builtin_listing("gmail", || GmailSource::Script, || true, ok, || true).unwrap().len(), 4);
+        assert!(builtin_listing("brave-search", || GmailSource::None, || false, ok, || true).is_err());
+        assert_eq!(builtin_listing("brave-search", || GmailSource::None, || true, ok, || true).unwrap().len(), 1);
+        assert_eq!(builtin_listing("weather", || GmailSource::None, || false, ok, || true).unwrap().len(), 1);
+        let e = builtin_listing("spotify", || GmailSource::None, || true, || Err(super::super::spotify::NOT_CONNECTED.into()), || true).unwrap_err();
         assert!(e.starts_with("Spotify isn't connected"), "{e}");
-        assert_eq!(builtin_listing("spotify", || GmailSource::None, || true, ok).unwrap().len(), 23);
+        assert_eq!(builtin_listing("spotify", || GmailSource::None, || true, ok, || true).unwrap().len(), 23);
+        // Instagram: no token → an honest error, never a false "ok"; maps needs no key.
+        assert!(builtin_listing("instagram", || GmailSource::None, || true, ok, || false).unwrap_err().contains("INSTAGRAM_ACCESS_TOKEN"));
+        assert_eq!(builtin_listing("instagram", || GmailSource::None, || true, ok, || true).unwrap().len(), 5);
+        assert_eq!(builtin_listing("maps", || GmailSource::None, || false, ok, || false).unwrap().len(), 3);
     }
 
     #[test]

@@ -447,6 +447,7 @@ const SECRET_SERVICES: [OsSecret, string][] = [
   ["github-pat", "GitHub"],
   ["sentry-token", "Sentry"],
   ["agentmail-key", "AgentMail"],
+  ["instagram-token", "Instagram"],
   ["vault", "Vault"],
   ["gateway-token", "Gateway token"],
 ];

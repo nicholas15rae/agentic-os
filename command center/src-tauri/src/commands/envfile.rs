@@ -82,11 +82,12 @@ pub(crate) const ENV_FOR: &[(&str, &str)] = &[
     ("github-pat", "GITHUB_PAT"),
     ("sentry-token", "SENTRY_AUTH_TOKEN"),
     ("agentmail-key", "AGENTMAIL_API_KEY"),
+    ("instagram-token", "INSTAGRAM_ACCESS_TOKEN"),
 ];
 
 /// Credential env vars read elsewhere (not OS secrets) that `devqueue::known_secrets`
 /// must also scrub when they come from the process environment.
-pub(crate) const OTHER_SECRET_ENV: &[&str] = &["ELEVENLABS_API_KEY", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REFRESH_TOKEN"];
+pub(crate) const OTHER_SECRET_ENV: &[&str] = &["ELEVENLABS_API_KEY", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REFRESH_TOKEN", "INSTAGRAM_APP_SECRET", "INSTAGRAM_VERIFY_TOKEN"];
 
 pub(crate) fn env_var_for(name: &str) -> Option<&'static str> {
     ENV_FOR.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)

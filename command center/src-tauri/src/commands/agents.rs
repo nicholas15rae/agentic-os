@@ -500,13 +500,21 @@ fn media_command(text: &str, os_name: &str) -> bool {
     .is_match(&core)
 }
 
-/// Gmail / WhatsApp / Spotify tools are only offered to the router when the
+/// Gmail / WhatsApp / Spotify / Maps / Instagram tools are only offered to the router when the
 /// request itself names their subject (`norm` is `routing::normalize`d).
 fn router_keyword_ok(server: &str, norm: &str) -> bool {
     static GMAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static WHATSAPP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static SPOTIFY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static MAPS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static INSTAGRAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     match server {
+        "maps" => MAPS
+            .get_or_init(|| {
+                regex::Regex::new(r"(maps?|route|routes|directions?|drive|driving|commute|eta|navigate|navigation|how far|distance (to|from|between)|how long (will it take|does it take|to get|to drive|is the drive)|get (to|there)|address (of|for)|where is|coordinates|lat(itude)?|plot)").unwrap()
+            })
+            .is_match(norm),
+        "instagram" => INSTAGRAM.get_or_init(|| regex::Regex::new(r"(instagram|insta|ig|reels?|followers?)").unwrap()).is_match(norm),
         "gmail" => GMAIL.get_or_init(|| regex::Regex::new(r"\b(gmail|e ?mails?|inbox|mails?)\b").unwrap()).is_match(norm),
         "whatsapp" => WHATSAPP.get_or_init(|| regex::Regex::new(r"\b(whatsapp|messages?|texts?|chats?|dms?)\b").unwrap()).is_match(norm),
         "spotify" => SPOTIFY

@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, Archive, Check, ChevronDown, Mail, Mic, Send, ShieldAlert, ShieldCheck, ShieldQuestion, Workflow, X } from "lucide-react";
+import { AlertTriangle, Archive, Camera, Check, ChevronDown, Mail, Mic, Send, ShieldAlert, ShieldCheck, ShieldQuestion, Workflow, X } from "lucide-react";
 import { SUB_AGENTS } from "@/features/dispatcher/agents";
 import { useVoice } from "@/features/voice/voice-store";
 import { approve, parkPending, reject } from "@/features/voice/voice-controller";
 import { Waveform } from "@/features/voice/Waveform";
+
+const TOOL_LABEL: Record<string, string> = {
+  "gmail.create_draft": "Gmail · draft (not sent)",
+  "instagram.publish_post": "Instagram · publishes LIVE to your account",
+  "instagram.reply_comment": "Instagram · public reply",
+};
 
 /**
  * High-contrast confirmation gate for every mutating action. Global (portal)
@@ -81,7 +87,8 @@ export function ConfirmCard() {
                 </>
               ) : plan.target.kind === "tool" ? (
                 <>
-                  <Mail size={12} className="text-amber-soft" /> {plan.target.tool === "gmail.create_draft" ? "Gmail · draft (not sent)" : plan.target.tool}
+                  {plan.target.tool.startsWith("instagram.") ? <Camera size={12} className="text-amber-soft" /> : <Mail size={12} className="text-amber-soft" />}{" "}
+                  {TOOL_LABEL[plan.target.tool] ?? plan.target.tool}
                 </>
               ) : plan.target.kind === "bridge" ? (
                 <>

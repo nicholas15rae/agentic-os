@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Container, Copy, Download, FlaskConical, Loader2, Mail, Music2, Plus, Radar, ShieldCheck, Trash2, Unplug } from "lucide-react";
+import { Camera, Container, Copy, Download, FlaskConical, Loader2, Mail, Map as MapIcon, Music2, Plus, Radar, RefreshCw, ShieldCheck, Trash2, Unplug } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
 import { cmd, isTauri, onNativeEvent, type N8nDiscovery, type NativeCommands, type SpotifyReauthEvent, type SpotifyStatus, type WorkflowInfo } from "@/lib/platform";
 import { cc, type CcConfig } from "@/lib/cc-api";
@@ -7,7 +7,8 @@ import { syncCalendar } from "@/features/reminders/scheduler";
 import { setMcpEnabled } from "@/features/integrations/mcp-enable";
 import { useSpotifyAuthRefresh, useSpotifyConnect } from "@/features/integrations/spotify-connect";
 import { cardButton, expiryHint, missingScopesLine, spotifyFix, spotifyFixText } from "@/widgets/spotify/spotify-ui";
-import { notifyIntegrationsChanged } from "@/features/integrations/changed";
+import { notifyIntegrationsChanged, useOnIntegrationsChanged } from "@/features/integrations/changed";
+import { instagramBadge, mapsBadge, tokenExpiryLine, type Tone } from "@/features/integrations/live-status";
 import { useProviders } from "./use-providers";
 import { SecretRow, Toggle, useOsCfg } from "./os-ui";
 
@@ -460,6 +461,146 @@ export function LocalLlmCard() {
       </div>
       {msg && <p className={`mt-2 text-xs ${/not reach|Gateway|fail/i.test(msg) ? "text-alert" : "text-teal"}`}>{msg}</p>}
       {!isTauri() && <p className="mt-2 text-xs text-ink-3">These settings live on the gateway, so they apply to every device.</p>}
+    </Card>
+  );
+}
+
+/** Re-read a live status on mount, every 30 s, on window focus and on integrations-changed,
+ * so a token added to `.env` (or saved here) never leaves a stale "disconnected" badge. */
+function useLiveStatus<T>(load: (force: boolean) => Promise<T>) {
+  const [status, setStatus] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = useCallback(
+    (force = false) =>
+      void load(force)
+        .then((s) => {
+          setStatus(s);
+          setError(null);
+        })
+        .catch((e) => setError(String(e))),
+    [load],
+  );
+  useEffect(() => {
+    refresh();
+    const t = setInterval(() => refresh(), 30_000);
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refresh]);
+  useOnIntegrationsChanged(() => refresh(true));
+  return { status, error, refresh };
+}
+
+const LIVE_TONE: Record<Tone, string> = { ok: "text-teal", warn: "text-amber", down: "text-alert", idle: "text-ink-3" };
+
+/** OpenStreetMap: OpenFreeMap tiles, Nominatim geocoding, OSRM routing. No key. */
+export function MapsCard() {
+  const { cfg } = useOsCfg();
+  const server = cfg?.mcps.find((m) => m.id === "maps");
+  const load = useCallback((force: boolean) => cmd("maps_status", { force }), []);
+  const { status, error, refresh } = useLiveStatus(load);
+  const [busy, setBusy] = useState(false);
+  const [out, setOut] = useState<{ ok: boolean; text: string } | null>(null);
+  const badge = mapsBadge(status);
+  const test = async () => {
+    setBusy(true);
+    try {
+      const text = await cmd("mcp_call", { name: "maps.route", args: { destination: "CN Tower, Toronto" }, approved: true, agent: "tony" });
+      setOut({ ok: true, text: text.slice(0, 700) });
+    } catch (e) {
+      setOut({ ok: false, text: String(e) });
+    } finally {
+      setBusy(false);
+      refresh(true);
+    }
+  };
+  return (
+    <Card
+      title="Maps · OpenStreetMap"
+      hint="Free map stack, no key or card: OpenFreeMap tiles, Nominatim geocoding (1 request/second, cached) and OSRM driving routes. ETAs are baseline estimates — public OSRM has no live traffic. Google Maps is on hold behind the same provider interface."
+      action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
+    >
+      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+        <MapIcon size={15} className={LIVE_TONE[badge.tone]} />
+        <span className={`label-caps ${LIVE_TONE[badge.tone]}`} title={error ?? status?.detail}>
+          {badge.label}
+        </span>
+        <button onClick={() => void test()} disabled={busy || !server?.enabled} className="pill-glass ml-auto !h-8 text-xs" title="Route from home to the CN Tower (draws on the Route Map widget)">
+          <FlaskConical size={13} /> Test route
+        </button>
+      </div>
+      {server && <Toggle on={server.enabled} onChange={(v) => void setMcpEnabled("maps", v).then(() => refresh(true))} label="Maps tools on" hint="Off: Tony can't plan routes or look up addresses." />}
+      <p className="mt-1 text-xs text-ink-3">
+        {status?.status === "error" ? `${status.detail} · ` : ""}Home for “how long to get to…”:{" "}
+        {status?.homeSet ? "MAP_HOME from .env" : "Toronto city centre — set MAP_HOME (address or “lat,lng”) in the repo-root .env"}. Add the Route Map widget to see routes.
+      </p>
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+    </Card>
+  );
+}
+
+/** Instagram API with Instagram Login. The token stays in Rust; this card shows status only. */
+export function InstagramCard() {
+  const { cfg } = useOsCfg();
+  const server = cfg?.mcps.find((m) => m.id === "instagram");
+  const load = useCallback((force: boolean) => cmd("instagram_status", { force }), []);
+  const { status, error, refresh } = useLiveStatus(load);
+  const [busy, setBusy] = useState<"test" | "renew" | null>(null);
+  const [out, setOut] = useState<{ ok: boolean; text: string } | null>(null);
+  const badge = instagramBadge(status);
+  const run = async (what: "test" | "renew", fn: () => Promise<string>) => {
+    setBusy(what);
+    try {
+      setOut({ ok: true, text: (await fn()).slice(0, 700) });
+    } catch (e) {
+      setOut({ ok: false, text: String(e) });
+    } finally {
+      setBusy(null);
+      refresh(true);
+    }
+  };
+  return (
+    <Card
+      title="Instagram"
+      hint="Your Instagram Professional account via the Instagram API with Instagram Login (Graph API v26.0). Tony reads profile stats, recent posts, insights and comments; replying to a comment or publishing a post always shows a confirmation card first."
+      action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
+    >
+      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+        <Camera size={15} className={LIVE_TONE[badge.tone]} />
+        <span className={`label-caps ${LIVE_TONE[badge.tone]}`} title={error ?? undefined}>
+          {badge.label}
+        </span>
+        {status?.status === "ok" && (
+          <span className="font-mono text-[11px] text-ink-3 tabular">
+            {status.followers ?? "?"} followers · {status.mediaCount ?? "?"} posts
+          </span>
+        )}
+        <button
+          onClick={() => void run("test", () => cmd("mcp_call", { name: "instagram.get_profile", args: {}, approved: true, agent: "tony" }))}
+          disabled={!!busy || !server?.enabled || status?.status === "missing"}
+          className="pill-glass ml-auto !h-8 text-xs"
+          title="Pull /me"
+        >
+          <FlaskConical size={13} /> Test
+        </button>
+        <button onClick={() => void run("renew", () => cmd("instagram_refresh_token"))} disabled={!!busy || status?.status === "missing"} className="pill-glass !h-8 text-xs" title="Renew the 60-day token now (needs a token ≥ 24 h old)">
+          <RefreshCw size={13} /> Renew token
+        </button>
+      </div>
+      {server && <Toggle on={server.enabled} onChange={(v) => void setMcpEnabled("instagram", v).then(() => refresh(true))} label="Instagram tools on" hint="Off: Tony can't read your account; replies and publishing are refused." />}
+      <SecretRow
+        name="instagram-token"
+        label="Instagram access token"
+        placeholder="IGAA…"
+        hint="INSTAGRAM_ACCESS_TOKEN (environment or repo-root .env) takes priority; a token pasted here is saved in the OS keychain as the fallback."
+        onChange={() => refresh(true)}
+      />
+      {status && status.status !== "missing" && <p className="mt-1 text-xs text-ink-3">{tokenExpiryLine(status)}</p>}
+      {status && (status.status === "error" || status.status === "missing") && <p className="mt-1 text-xs text-alert">{status.detail}</p>}
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>
   );
 }

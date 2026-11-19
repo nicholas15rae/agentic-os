@@ -3048,7 +3048,7 @@ fn logged(bridge: &BridgeState, what: &str, out: Result<String, String>) -> Resu
     out
 }
 
-fn open_browser(url: &str) -> std::io::Result<()> {
+pub(crate) fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(windows)]
     let mut c = {
         use std::os::windows::process::CommandExt;

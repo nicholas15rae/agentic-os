@@ -1,6 +1,8 @@
 # Queued phase — OpenStreetMap stack + Instagram API ("Gabagool" integrations)
 
-**Status: QUEUED. Don't start this until the in-flight builds on `feat/command-center` have landed.**
+**Status: BUILT (Nov 18 2026). See `HANDOFF.md` §11 for what shipped and the manual checks.** The original brief follows.
+
+~~QUEUED. Don't start this until the in-flight builds on `feat/command-center` have landed.~~
 Those builds are Phase 2 voice reflexes, the memmap `GabagoulBadge`, reminders/os-alarm, the Spotify overhaul and any other
 open instance. Start gate: `git status` is clean or committed, `npm run typecheck`, `npx vitest run` and
 `cargo test --lib` pass, and nobody else is editing `envfile.rs`, `IntegrationSettings.tsx`, `orchestrator/*` or

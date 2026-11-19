@@ -37,6 +37,31 @@ describe("heuristicPlan — Gmail draft binding", () => {
   });
 });
 
+describe("heuristicPlan — Instagram writes are gated tool plans", () => {
+  it("a publish request is a mutating instagram.publish_post plan with a live-post read-back", () => {
+    desktop();
+    const p = heuristicPlan("Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "general");
+    expect(p.mutating).toBe(true);
+    expect(p.target).toEqual({ kind: "tool", tool: "instagram.publish_post", args: { caption: "New headshots", imageUrl: "https://cdn.example.com/headshot.jpg" } });
+    expect(p.readBack).toMatch(/publish a photo to Instagram with the caption "New headshots".*goes live.*Proceed\?$/);
+    expect(p.run).toBeUndefined();
+  });
+
+  it("a comment reply is a mutating instagram.reply_comment plan", () => {
+    desktop();
+    const p = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "general");
+    expect(p.mutating).toBe(true);
+    expect(p.target).toEqual({ kind: "tool", tool: "instagram.reply_comment", args: { commentId: "17890012345", message: "thank you!" } });
+  });
+
+  it("no media link → Tony asks, nothing is planned", async () => {
+    desktop();
+    const p = heuristicPlan("post my new headshot to Instagram", "general");
+    expect(p.mutating).toBe(false);
+    expect((await p.run!()).text).toMatch(/https link/);
+  });
+});
+
 describe("heuristicPlan — music controls are never gateway actions", () => {
   it.each(["set the volume to 30", "pause music", "pause the music", "play some jazz on spotify", "skip this song", "turn it down", "set spotify to 40%", "spotify volume 20", "resume spotify", "change the song", "start my workout playlist", "restart the track"])("%s", (s) => {
     const p = heuristicPlan(s, "general");

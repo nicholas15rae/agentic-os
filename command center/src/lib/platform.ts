@@ -110,6 +110,21 @@ export interface NativeCommands {
   gmail_import_anythingllm: { args: undefined; result: { imported: boolean; detail: string } };
   /** Only after the confirmation card: returns `PERMISSION_REQUIRED:gmail-draft` unless `approved`. */
   gmail_create_draft: { args: { to: string; subject: string; body: string; approved?: boolean }; result: string };
+  /** OpenStreetMap routing (Rust: Nominatim + OSRM). Also emits `map-route` for the Route Map widget. */
+  map_route: { args: { destination: string; origin?: string; stops?: string[] }; result: MapRoute };
+  map_geocode: { args: { query: string }; result: MapPlace[] };
+  map_reverse: { args: { lat: number; lng: number }; result: MapPlace };
+  /** Opens Google Maps directions (built in Rust from coordinates) in the system browser. */
+  map_open_in_maps: { args: { lat: number; lng: number; stops?: MapPlace[] }; result: string };
+  /** Live maps health (tiny OSRM probe, cached 60 s; `force` re-probes). */
+  maps_status: { args: { force?: boolean }; result: MapsStatus };
+  /** Live Instagram status via `GET /me` (cached 60 s; `force` re-checks). Never returns the token. */
+  instagram_status: { args: { force?: boolean }; result: InstagramStatus };
+  instagram_refresh_token: { args: undefined; result: string };
+  /** Only after the confirmation card: `PERMISSION_REQUIRED:instagram-reply` unless `approved`. */
+  instagram_reply_comment: { args: { commentId: string; message: string; approved?: boolean }; result: string };
+  /** Only after the confirmation card: `PERMISSION_REQUIRED:instagram-publish` unless `approved`. */
+  instagram_publish_post: { args: { caption: string; imageUrl?: string; videoUrl?: string; approved?: boolean }; result: string };
   /** Opens Spotify's consent page in the system browser and returns its URL (fallback link);
    * the outcome arrives as the `spotify-auth` event. */
   spotify_auth_start: { args: undefined; result: { url: string } };
@@ -249,7 +264,7 @@ export interface TtsUnpinEvent {
 }
 
 /** Subscribe to a Rust → webview event. Returns an unsubscribe function. No-op on the PWA. */
-export async function onNativeEvent<P = unknown>(event: "voice-toggle" | "memory-progress" | "pipeline-step" | "pipeline-failed" | "gpu-slot" | "droplet-status" | "tony-token" | "tts-fallback" | "tts-unpin" | "spotify-auth" | "spotify-session" | "spotify-reauth" | "tools-changed" | "audio-engine" | "os-trace" | "dev-fix-progress" | "devqueue-changed", handler: (payload: P) => void): Promise<() => void> {
+export async function onNativeEvent<P = unknown>(event: "voice-toggle" | "memory-progress" | "pipeline-step" | "pipeline-failed" | "gpu-slot" | "droplet-status" | "tony-token" | "tts-fallback" | "tts-unpin" | "spotify-auth" | "spotify-session" | "spotify-reauth" | "tools-changed" | "audio-engine" | "os-trace" | "dev-fix-progress" | "devqueue-changed" | "map-route", handler: (payload: P) => void): Promise<() => void> {
   if (!isTauri()) return () => undefined;
   const { listen } = await import("@tauri-apps/api/event");
   return listen<P>(event, (e) => handler(e.payload));
@@ -522,9 +537,47 @@ export type OsSecret =
   | "gmail-script-key"
   | "github-pat"
   | "sentry-token"
-  | "agentmail-key";
+  | "agentmail-key"
+  | "instagram-token";
 /** Where a credential was found (Rust `envfile::KeySource`). */
 export type KeySourceKind = "env" | "env-file" | "keychain" | "missing";
+
+/** Rust `maps::Place` / `maps::Route` (provider-neutral: OSM today, Google Maps later). */
+export interface MapPlace {
+  lat: number;
+  lng: number;
+  label: string;
+}
+export interface MapRoute {
+  provider: string;
+  distanceM: number;
+  durationS: number;
+  waypoints: MapPlace[];
+  steps: { instruction: string; distanceM: number; durationS: number }[];
+  /** GeoJSON LineString ([lng, lat] pairs). */
+  geometry: { type: "LineString"; coordinates: [number, number][] };
+  trafficAware: boolean;
+  note: string;
+  openInMaps: string;
+}
+export interface MapsStatus {
+  provider: string;
+  status: "ok" | "error" | "off" | "blocked";
+  detail: string;
+  homeSet: boolean;
+  latencyMs: number | null;
+}
+export interface InstagramStatus {
+  status: "ok" | "error" | "missing" | "off" | "blocked";
+  source: KeySourceKind | null;
+  username: string | null;
+  accountType: string | null;
+  followers: number | null;
+  mediaCount: number | null;
+  tokenExpiresAt: number | null;
+  refreshedAt: number | null;
+  detail: string;
+}
 export interface OsKeyStatus {
   source: KeySourceKind;
   /** The env var that overrides this secret; null = keychain-only. */

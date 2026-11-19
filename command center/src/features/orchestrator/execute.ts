@@ -17,7 +17,8 @@ export interface ExecutionResult {
  * Routing:
  *   read-only        → dispatch() chat (local model / cloud fallback / gateway)
  *   mutating + n8n   → named n8n webhook (Rust, URL from providers.json)
- *   mutating + tool  → that tool's approved-only Rust command (gmail_create_draft)
+ *   mutating + tool  → that tool's approved-only Rust command (gmail_create_draft,
+ *                      instagram_publish_post, instagram_reply_comment)
  *   mutating + agent → Agentic OS agent via the gateway (opencode has real
  *                      tools). A plain chat model has NO tools and would
  *                      only *claim* it acted, so it is never used to
@@ -106,9 +107,21 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
 
 /** An approved tool plan: each tool has its own Rust command that refuses without `approved`. */
 async function runTool(tool: string, args: Record<string, unknown>): Promise<ExecutionResult> {
-  if (tool !== "gmail.create_draft") throw new Error(`Nothing was done — ${tool} has no approved-action path.`);
   const started = performance.now();
   const s = (k: string) => (typeof args[k] === "string" ? (args[k] as string) : "");
+  const denied = (what: string) => (e: unknown): never => {
+    const raw = e instanceof Error ? e.message : String(e);
+    throw new Error(raw.startsWith("PERMISSION_DENIED") ? "Nothing was done — MCP tools are set to Deny in Settings → Integrations." : `${what} — ${raw}`);
+  };
+  if (tool === "instagram.publish_post") {
+    const text = await cmd("instagram_publish_post", { caption: s("caption"), imageUrl: s("imageUrl") || undefined, videoUrl: s("videoUrl") || undefined, approved: true }).catch(denied("Nothing was published"));
+    return { text, meta: `Instagram · publish · ${Math.round(performance.now() - started)}ms` };
+  }
+  if (tool === "instagram.reply_comment") {
+    const text = await cmd("instagram_reply_comment", { commentId: s("commentId"), message: s("message"), approved: true }).catch(denied("No reply was posted"));
+    return { text, meta: `Instagram · reply · ${Math.round(performance.now() - started)}ms` };
+  }
+  if (tool !== "gmail.create_draft") throw new Error(`Nothing was done — ${tool} has no approved-action path.`);
   const text = await cmd("gmail_create_draft", { to: s("to"), subject: s("subject"), body: s("body"), approved: true }).catch((e) => {
     const raw = e instanceof Error ? e.message : String(e);
     throw new Error(raw.startsWith("PERMISSION_DENIED") ? "Nothing was done — MCP tools are set to Deny in Settings → Integrations." : `No draft was saved — ${raw}`);

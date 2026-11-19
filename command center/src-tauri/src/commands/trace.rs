@@ -101,6 +101,12 @@ pub fn install(app: &tauri::AppHandle) {
     let _ = APP.set(app.clone());
 }
 
+/// The app handle once `install` ran (None in unit tests), for modules that emit
+/// webview events from code paths that don't carry one (e.g. `maps.route` → `map-route`).
+pub(crate) fn app() -> Option<&'static tauri::AppHandle> {
+    APP.get()
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }

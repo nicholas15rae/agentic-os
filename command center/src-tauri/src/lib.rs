@@ -3,7 +3,7 @@ mod commands;
 mod exe_resolve;
 mod proc;
 
-use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, modellab, dispatch, gmail, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
+use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, instagram, modellab, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -58,6 +58,8 @@ pub fn run() {
             tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
             // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
             tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
+            // Renew the Instagram long-lived token before its 60 days run out.
+            tauri::async_runtime::spawn(instagram::refresh_loop(app.handle().clone()));
             // GPU baton events → top-bar "ACTIVE GPU SLOT" pill; droplet auto-reconnect.
             {
                 use tauri::Emitter;
@@ -155,6 +157,15 @@ pub fn run() {
             gmail::gmail_status,
             gmail::gmail_import_anythingllm,
             gmail::gmail_create_draft,
+            maps::map_route,
+            maps::map_geocode,
+            maps::map_reverse,
+            maps::maps_status,
+            maps::map_open_in_maps,
+            instagram::instagram_status,
+            instagram::instagram_refresh_token,
+            instagram::instagram_reply_comment,
+            instagram::instagram_publish_post,
             spotify::spotify_auth_start,
             spotify::spotify_status,
             spotify::spotify_disconnect,

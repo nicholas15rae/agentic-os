@@ -39,6 +39,11 @@ import {
   tonyMicBusy,
   upsertTask,
   visibleTasks,
+  canDispatchFix,
+  devFixMode,
+  errorSummary,
+  fixChip,
+  isFixRunning,
 } from "./format";
 
 const task = (o: Partial<DevTask> & { id: string }): DevTask => ({
@@ -506,5 +511,51 @@ describe("frame gate", () => {
       }
     }
     expect(painted).toBe(30);
+  });
+});
+
+describe("P6 Dev Fix queue helpers", () => {
+  const base = { kind: "fix" as const, status: "Queued" as DevTaskStatus, dispatch: {} as DevTask["dispatch"] };
+
+  it("fixChip names each state", () => {
+    expect(fixChip({ ...base, status: "Pending" }).label).toBe("draft");
+    expect(fixChip(base).label).toBe("queued");
+    expect(fixChip({ ...base, status: "In Progress" }).label).toBe("in progress");
+    expect(fixChip({ ...base, status: "In Progress", dispatch: { state: "running" } })).toEqual({ label: "running", tone: "running" });
+    expect(fixChip({ ...base, status: "Done", dispatch: { verify: { ok: true, steps: [] } } }).label).toBe("done · verified");
+    expect(fixChip({ ...base, status: "Done" }).label).toBe("done");
+    expect(fixChip({ ...base, dispatch: { mode: "live", state: "finished", verify: { ok: false, steps: [{ label: "vitest", ok: false, ms: 1 }] } } })).toEqual({ label: "queued · verify failed", tone: "failed" });
+    expect(fixChip({ ...base, dispatch: { state: "interrupted" } }).tone).toBe("failed");
+  });
+
+  it("only one live run at a time, never on Done or non-fixes", () => {
+    expect(canDispatchFix(base, false)).toBe(true);
+    expect(canDispatchFix({ ...base, status: "Pending" }, false)).toBe(true);
+    expect(canDispatchFix(base, true)).toBe(false);
+    expect(canDispatchFix({ ...base, status: "Done" }, false)).toBe(false);
+    expect(canDispatchFix({ ...base, kind: "task" as const }, false)).toBe(false);
+    expect(canDispatchFix({ ...base, dispatch: { state: "running" } }, false)).toBe(false);
+    expect(isFixRunning({ dispatch: { state: "running" } })).toBe(true);
+    expect(isFixRunning({})).toBe(false);
+  });
+
+  it("a running fix's status pill doesn't cycle", () => {
+    expect(nextStatus("In Progress", { dispatch: { state: "running" } })).toBe("In Progress");
+    expect(nextStatus("In Progress", { dispatch: {} })).toBe("Done");
+    expect(nextStatus("Queued")).toBe("In Progress");
+  });
+
+  it("the Dev Fix tab is desktop-only: the phone gets a read-only message and no dispatch", () => {
+    expect(devFixMode(true)).toEqual({ readOnly: false, canDispatch: true, message: null });
+    const phone = devFixMode(false);
+    expect(phone.readOnly).toBe(true);
+    expect(phone.canDispatch).toBe(false);
+    expect(phone.message).toMatch(/desktop/);
+  });
+
+  it("errorSummary reads the snapshot's recent errors, else the failing step", () => {
+    expect(errorSummary({ contextSnapshot: {} })).toBeNull();
+    expect(errorSummary({ contextSnapshot: { trace: { hop: "tool", label: "spotify.play", error: "HTTP 401" } } })).toBe("failing step: tool spotify.play — HTTP 401");
+    expect(errorSummary({ contextSnapshot: { errors: [{ source: "gateway", label: "spotify · auth", error: "boom" }, { source: "trace", hop: "stt", label: "whisper", error: "timeout" }] } })).toBe("2 recent errors · last: stt whisper — timeout");
   });
 });

@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod alarm;
 pub mod bridge;
+pub mod claude_fix;
 pub mod clihub;
 pub mod devqueue;
 pub mod dispatch;

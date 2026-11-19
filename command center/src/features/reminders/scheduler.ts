@@ -3,7 +3,7 @@ import { collections, useCollection } from "@/lib/cc-api";
 import { cmd, isTauri, platform } from "@/lib/platform";
 import { announce } from "@/features/voice/voice-controller";
 import { chime, systemNotify, useToasts } from "./notify";
-import { cancelOsAlarm, localAlarmIds, pruneOsAlarms, ringsOnOs, scheduleOsAlarm } from "./os-alarm";
+import { cancelOsAlarm, localAlarmIds, osAlarmRang, pruneOsAlarms, reconcileOsAlarms, ringsOnOs, scheduleOsAlarm, taskedDueAt } from "./os-alarm";
 import { nextOccurrence, type Reminder } from "./types";
 
 const DEVICE = `${platform}-${(crypto.randomUUID?.() ?? Math.random().toString(36)).slice(0, 6)}`;
@@ -19,19 +19,21 @@ let pruned = false; // Windows alarms are pruned once per app run
 export function useReminderScheduler() {
   const { items, loaded, error } = useCollection<Reminder>("reminders"); // keeps the collection syncing
 
-  // Once per run, after the first successful load (a failed sync leaves the list empty): drop
-  // Windows alarms whose reminder is gone (also deleted on the phone), fired or dismissed.
-  // Alarms saved while the gateway was down are kept.
+  // After a successful load (a failed sync leaves the list empty): once per run, drop Windows
+  // alarms whose reminder is gone (also deleted on the phone), fired or dismissed; then on every
+  // sync, follow changes made anywhere (deleted / dismissed / fired elsewhere: cancel; dueAt
+  // moved: re-register). Alarms saved while the gateway was down are kept.
   useEffect(() => {
-    if (!loaded || error || pruned) return;
-    pruned = true;
-    const now = Date.now();
-    const live = collections
-      .snapshot<Reminder>("reminders")
-      .filter((r) => ringsOnOs(r) && !r.dismissed && !r.firedAt && r.dueAt > now)
-      .map((r) => r.id);
-    void pruneOsAlarms([...live, ...localAlarmIds()]);
-  }, [loaded, error]);
+    if (!loaded || error) return;
+    const all = collections.snapshot<Reminder>("reminders");
+    if (!pruned) {
+      pruned = true;
+      const now = Date.now();
+      const live = all.filter((r) => ringsOnOs(r) && !r.dismissed && !r.firedAt && r.dueAt > now).map((r) => r.id);
+      void pruneOsAlarms([...live, ...localAlarmIds()]);
+    }
+    reconcileOsAlarms(all);
+  }, [items, loaded, error]);
 
   useEffect(() => {
     const tick = () => {
@@ -64,10 +66,14 @@ export function useReminderScheduler() {
 
 async function fire(r: Reminder & { id: string }) {
   const next = nextOccurrence(r);
+  // The app was closed at the due time and Windows already showed this alarm: don't ring twice.
+  const rangOnOs = ringsOnOs(r) && osAlarmRang(taskedDueAt(r.id), r.dueAt, Date.now());
   // This app rings it: the Windows alarm must not ring too. A repeat moves it to the next time.
   if (ringsOnOs(r)) void (next ? scheduleOsAlarm(r.id, r.title, next) : cancelOsAlarm(r.id));
   // Claim it first so another device doesn't fire it too.
-  await collections.update<Reminder>("reminders", r.id, next ? { dueAt: next, firedAt: null, firedBy: DEVICE } : { firedAt: Date.now(), firedBy: DEVICE });
+  const by = rangOnOs ? `${DEVICE} (windows alarm)` : DEVICE;
+  await collections.update<Reminder>("reminders", r.id, next ? { dueAt: next, firedAt: null, firedBy: by } : { firedAt: Date.now(), firedBy: by });
+  if (rangOnOs) return;
 
   const label = r.kind === "alarm" ? "Alarm" : r.kind === "event" ? "Upcoming" : "Reminder";
   void chime(r.kind === "alarm" ? 3 : 2);

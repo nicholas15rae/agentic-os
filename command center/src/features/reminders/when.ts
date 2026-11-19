@@ -49,6 +49,17 @@ function parseClock(s: string): { h: number; m: number; matched: string } | null
 const DURATION_RE =
   /\b(?:(?:in|for)\s+)?(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty-five|half an?)\s*-?\s*(seconds?|secs?|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w)\b(\s+and a half)?/;
 
+/** A further length part right after the first ("… and 30 minutes", ", 15 seconds"); never "a day". */
+const MORE_RE =
+  /^\s*,?\s*(?:and\s+)?(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty-five)\s*-?\s*(seconds?|secs?|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w)\b(\s+and a half)?/;
+
+/** One "N unit" part in ms (0 when the unit is unknown). */
+function partMs(num: string, unitWord: string, andAHalf: boolean): number {
+  const n = num.startsWith("half") ? 0.5 : (WORDNUM[num] ?? Number(num));
+  const unit = unitWord.replace(/s$/, "");
+  return (UNIT_MS[unit] ?? UNIT_MS[unit.replace(/s$/, "")] ?? 0) * (n + (andAHalf ? 0.5 : 0));
+}
+
 /** `duration`: the line is a timer, so a bare length ("for 10 minutes") counts from now. */
 export function parseWhen(text: string, now = new Date(), opts: { duration?: boolean } = {}): When | null {
   const s = text.toLowerCase();
@@ -59,10 +70,16 @@ export function parseWhen(text: string, now = new Date(), opts: { duration?: boo
     ? s.match(DURATION_RE)
     : s.match(/\bin\s+(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty-five|half an?)\s*(seconds?|secs?|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w)\b(\s+and a half)?/);
   if (rel) {
-    const n = rel[1].startsWith("half") ? 0.5 : (WORDNUM[rel[1]] ?? Number(rel[1]));
-    const unit = rel[2].replace(/s$/, "");
-    const ms = (UNIT_MS[unit] ?? UNIT_MS[unit.replace(/s$/, "")]) * (n + (rel[3] ? 0.5 : 0));
-    if (ms) return { at: new Date(now.getTime() + ms), matched: [rel[0]], hasTime: true };
+    // "1 hour and 30 minutes", "2 minutes 30 seconds": every part right after the first adds up.
+    let ms = partMs(rel[1], rel[2], !!rel[3]);
+    let span = rel[0];
+    let rest = s.slice((rel.index ?? 0) + rel[0].length);
+    for (let more = rest.match(MORE_RE); more && ms; more = rest.match(MORE_RE)) {
+      ms += partMs(more[1], more[2], !!more[3]);
+      span += more[0];
+      rest = rest.slice(more[0].length);
+    }
+    if (ms) return { at: new Date(now.getTime() + ms), matched: [span], hasTime: true };
   }
 
   const at = new Date(now);

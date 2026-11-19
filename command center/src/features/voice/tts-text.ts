@@ -4,6 +4,8 @@
  * imports, so these are unit-testable under Vitest's node environment).
  */
 
+import type { SpeakOpts } from "./tts-types";
+
 /** Strip markdown, code fences and emoji before anything is spoken — none of it should
  * ever be read aloud ("asterisk asterisk bold asterisk asterisk"). */
 export function stripForSpeech(text: string): string {
@@ -102,4 +104,36 @@ export function nextStreamChunk(buffered: string, spokenUpTo: number): { chunk: 
   const lead = /^\s*/.exec(pending)![0].length;
   const m = (spokenUpTo === 0 ? /^[\s\S]{20,}?[.!?…,;:](?=\s)/ : /^[\s\S]{40,}?[.!?…](?=\s)/).exec(pending.slice(lead));
   return m ? { chunk: m[0].trim(), end: spokenUpTo + lead + m[0].length } : null;
+}
+
+// ── P1: per-sentence TTS opts and the IPC args they become ───────────────────
+
+/** `sentences(text)` with each one's own opts, chaining `previousText` from the sentence
+ * right before it (the caller's own `opts.previousText`, if any, only applies to the
+ * first) — ElevenLabs prosody continuity (Part 6 §2). Every other opt, including the
+ * reply's `utteranceId` (the breaker scope), reaches every sentence unchanged. */
+export function perSentenceOpts(text: string, opts?: SpeakOpts): { s: string; opts: SpeakOpts }[] {
+  let prev = opts?.previousText;
+  return sentences(text).map((s) => {
+    const sOpts: SpeakOpts = { ...opts, previousText: prev };
+    prev = s;
+    return { s, opts: sOpts };
+  });
+}
+
+/** The `tts_synthesize` args for one sentence. A `cache: true` line (intros, acks, the
+ * greeting) sends neither `previousText` nor `utteranceId`: it is kept for the session, so
+ * it must not be rendered under a reply's breaker. It sends its `pinId` instead: when Rust
+ * answers it with a local engine (a cooldown, a failure, the kill switch) it emits
+ * `tts-unpin` and the cache drops it (`tts-pin.ts`), so local audio is never pinned. */
+export function synthArgs(s: string, opts?: SpeakOpts, pinId?: string): { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string } {
+  if (opts?.cache) return pinId ? { text: s, voice: opts.voice, agent: opts.agent, pinId } : { text: s, voice: opts.voice, agent: opts.agent };
+  return { text: s, voice: opts?.voice, agent: opts?.agent, previousText: opts?.previousText, utteranceId: opts?.utteranceId };
+}
+
+/** The breaker scope for one agent's part of one `osRun` turn: `${streamId}-${agent}`, so a
+ * handoff's second voice gets its own breaker. Clipped to Rust's rule (1–64 chars of
+ * `[A-Za-z0-9-]`; anything else is replaced) so it is never silently ignored. */
+export function utteranceIdFor(streamId: string, agent: string): string {
+  return `${streamId}-${agent}`.replace(/[^A-Za-z0-9-]/g, "-").slice(0, 64);
 }

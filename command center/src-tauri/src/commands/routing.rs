@@ -31,6 +31,40 @@ pub enum RouteKind {
     Tab,
     Llm,
     Default,
+    /// The line addresses Tony himself ("thanks tony", "ask the dispatcher…", "system status")
+    /// and nothing else: Tony answers, never a delegation. `Self` is a keyword in Rust.
+    #[serde(rename = "Self")]
+    Own,
+}
+
+impl RouteKind {
+    /// The wire / TS spelling ("Self" for `Own`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RouteKind::Named => "Named",
+            RouteKind::Domain => "Domain",
+            RouteKind::Tab => "Tab",
+            RouteKind::Llm => "Llm",
+            RouteKind::Default => "Default",
+            RouteKind::Own => "Self",
+        }
+    }
+}
+
+/// Role ids that ARE Tony (the OS itself): never a delegation target. The OS name
+/// (lower-cased) counts too. Mirrors `SELF_ROLE_IDS` in router.ts.
+pub const SELF_ROLE_IDS: [&str; 6] = ["general", "tony", "os", "dispatcher", "orchestrator", "jarvis"];
+/// Words that address Tony in a line, plus the OS name. "general" / "os" are role ids only
+/// (too common as words). Mirrors `SELF_NAMES` in router.ts.
+pub const SELF_NAMES: [&str; 4] = ["tony", "jarvis", "dispatcher", "orchestrator"];
+
+/// `id` is Tony: a self alias (`SELF_ROLE_IDS`) or the configured OS name, any case.
+pub fn is_self_role(id: &str, os_name: &str) -> bool {
+    let v = id.trim().to_lowercase();
+    if v.is_empty() {
+        return false;
+    }
+    SELF_ROLE_IDS.contains(&v.as_str()) || (!os_name.trim().is_empty() && v == os_name.trim().to_lowercase())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -146,15 +180,23 @@ fn role_rank(role: &str) -> usize {
     DOMAIN_TIEBREAK.iter().position(|r| *r == role).unwrap_or(DOMAIN_TIEBREAK.len())
 }
 
-/// All (role, normalized trigger phrase) pairs for every role's `names`.
+/// All (role, normalized trigger phrase) pairs for every role's `names`. A self-alias role key
+/// counts as `general`, and the built-in self names (+ the OS name) are added as `general`'s.
 fn name_pairs(cfg: &OsConfig) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for (role, t) in &cfg.routing.agents {
+    for (key, t) in &cfg.routing.agents {
+        let role = if is_self_role(key, &cfg.os_name) { "general".to_string() } else { key.clone() };
         for n in &t.names {
             let norm = normalize(n);
             if !norm.is_empty() {
                 out.push((role.clone(), norm));
             }
+        }
+    }
+    for n in SELF_NAMES.iter().copied().chain(std::iter::once(cfg.os_name.as_str())) {
+        let norm = normalize(n);
+        if !norm.is_empty() && !out.iter().any(|(r, p)| r == "general" && *p == norm) {
+            out.push(("general".to_string(), norm));
         }
     }
     out
@@ -215,12 +257,18 @@ fn domain_score(toks: &[&str], t: &AgentTriggers) -> usize {
 ///  (a) explicit delegation pattern → Named, high
 ///  (b) any name trigger mentioned anywhere → Named, medium
 ///  (c) domain trigger score (longest phrases win; ties → `DOMAIN_TIEBREAK`) → Domain
-///  (d) nothing → Default (the caller decides: keep the current tab, or `general`)
+///  (d) only Tony himself was addressed / matched → `Own` ("Self", role general)
+///  (e) nothing → Default (the caller decides: keep the current tab, or `general`)
+///
+/// Tony (`general`, any self alias, `SELF_NAMES`, `cfg.os_name`) is never a delegation target:
+/// a self match is skipped and the scan goes on, so "ask tony to ask the coder…" is coder.
 pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
     let original = text.trim().to_string();
     let norm = normalize(&original);
     let toks = tokenize(&norm);
-    let names = name_pairs(cfg);
+    let all = name_pairs(cfg);
+    let (self_names, names): (Vec<_>, Vec<_>) = all.iter().cloned().partition(|(r, _)| r == "general");
+    let mut self_hit = false;
 
     // (a) "tell/ask/have/get/let/send/route/hand/pass (it)? (to)? (my/the/our)? NAME (agent/desk)? (to/about/for)? …"
     for i in 0..toks.len() {
@@ -237,7 +285,11 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         if matches!(tok_at(&toks, j), Some("my") | Some("the") | Some("our")) {
             j += 1;
         }
-        if let Some((role, nlen)) = match_name_at(&toks, j, &names) {
+        if let Some((role, nlen)) = match_name_at(&toks, j, &all) {
+            if role == "general" {
+                self_hit = true; // "ask tony to …": keep scanning for a real agent
+                continue;
+            }
             let mut k = j + nlen;
             if matches!(tok_at(&toks, k), Some("agent") | Some("desk")) {
                 k += 1;
@@ -255,11 +307,19 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
             };
         }
     }
-    // (a) "NAME,? (please)? VERB…" — direct address at the start of the utterance.
-    if let Some((role, nlen)) = match_name_at(&toks, 0, &names) {
-        let mut k = nlen;
+    // (a) "NAME,? (please)? VERB…" — direct address at the start of the utterance. A leading
+    // self name ("tony, coder, fix the build") is skipped once and the address retried after it.
+    let mut pos = 0;
+    for _ in 0..2 {
+        let Some((role, nlen)) = match_name_at(&toks, pos, &all) else { break };
+        let mut k = pos + nlen;
         if tok_at(&toks, k) == Some("please") {
             k += 1;
+        }
+        if role == "general" {
+            self_hit = true;
+            pos = k;
+            continue;
         }
         if matches!(tok_at(&toks, k), Some(v) if VERBS_B.contains(&v)) {
             let task = toks[k..].join(" ");
@@ -271,17 +331,28 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
                 task: if task.is_empty() { original } else { task },
             };
         }
+        break;
     }
-    // (b) any name trigger mentioned anywhere.
+    // (b) any (non-self) name trigger mentioned anywhere.
     if let Some(role) = match_name_anywhere(&toks, &names) {
         return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
     }
-    // (c) domain triggers.
+    if match_name_anywhere(&toks, &self_names).is_some() {
+        self_hit = true;
+    }
+    // (c) domain triggers (Tony's own topics only mark a self hit).
     let mut best: Option<(&str, usize)> = None;
     for role in DOMAIN_TIEBREAK.iter().copied() {
         let Some(t) = cfg.routing.agents.get(role) else { continue };
         let score = domain_score(&toks, t);
-        if score > 0 && best.map(|(_, bs)| score > bs).unwrap_or(true) {
+        if score == 0 {
+            continue;
+        }
+        if role == "general" {
+            self_hit = true;
+            continue;
+        }
+        if best.map(|(_, bs)| score > bs).unwrap_or(true) {
             best = Some((role, score));
         }
     }
@@ -294,7 +365,11 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
             task: original,
         };
     }
-    // (d) nothing matched.
+    // (d) only Tony himself.
+    if self_hit {
+        return Route { role: Some("general".into()), reason: "you addressed the OS itself".into(), confidence: "high".into(), kind: RouteKind::Own, task: original };
+    }
+    // (e) nothing matched.
     Route { role: None, reason: "no name or trigger matched".into(), confidence: "low".into(), kind: RouteKind::Default, task: original }
 }
 
@@ -305,14 +380,21 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
 // Named delegation still wins (the caller checks that); a write aimed at the
 // service ("reply to Sam on WhatsApp", "draft an email") never matches.
 
-/// Write verbs: the line asks to change something, not to read it.
-const DIRECT_WRITE: &str = r"\b(?:send|sending|reply|replying|respond|draft|delete|write|compose|forward|archive|trash|unsubscribe)\b|\b(?:text|message|tell|email|ping|call) (?:him|her|them|back)\b|\blet (?:him|her|them) know\b";
+/// Write verbs: the line asks to change something, not to read it ("add a weather widget",
+/// "order an umbrella", "mark all emails from Sam as read", "email the forecast to Sam").
+const DIRECT_WRITE: &str = r"\b(?:send|sending|reply|replying|respond|draft|delete|write|compose|forward|archive|trash|unsubscribe|add|set|create|make|build|fix|buy|order|purchase|pay|cancel|book|schedule|reschedule|mark|mute|unmute|block|move|remove|change|edit|rename|update|install|configure|deploy|save|share|post|upload|invite|enable|disable|subscribe|turn on|turn off)\b|\b(?:text|message|tell|email|ping|call) (?:him|her|them|back)\b|\blet (?:him|her|them) know\b|(?:^|\b(?:and|then|please|tony) )(?:email|text|message|dm|ping) (?:the|this|that|it|a|an|my|to)\b";
+/// "update" as a noun ("give me an update on WhatsApp") asks for news: dropped before DIRECT_WRITE.
+const DIRECT_UPDATE_NOUN: &str = r"\b(?:an?|any|the|latest|status|quick|no) updates?\b|\bupdate me\b";
 const DIRECT_WHATSAPP_READ: &str = r"\b(?:check|read|any|anything|new|latest|last|recent|unread|updates?|messages?|texts?|chats?|today|whats new|who)\b";
-/// Whisper's "what's up" also normalizes to "whatsapp": that form needs a messaging noun.
-const DIRECT_WHATSAPP_NOUN: &str = r"\b(?:messages?|texts?|chats?|updates?|unread)\b";
+/// Whisper's "what's up" also normalizes to "whatsapp": that spelling needs the app named as a
+/// place ("on / from / check whatsapp") or a messaging noun right after it — never "any updates?".
+const DIRECT_WHATSAPP_NOUN: &str = r"\b(?:on|from|in|my|check) whatsapp\b|\bwhatsapp (?:messages?|texts?|chats?|unread)\b";
 const DIRECT_GMAIL: &str = r"\b(?:gmail|inbox|emails?|mail)\b";
-const DIRECT_GMAIL_READ: &str = r"\b(?:check|read|any|anything|new|latest|last|recent|unread|updates?|whats in|from|today|got)\b";
-const DIRECT_WEATHER: &str = r"\b(?:weather|forecast|umbrella)\b|\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b";
+const DIRECT_GMAIL_READ: &str = r"\b(?:check|read|any|anything|latest|last|recent|unread|updates?|whats in|what is in|did i get|have i got|got any|who emailed|new (?:emails?|mail|messages?))\b";
+/// Weather words only in read form: a question or check, or next to a time / place word.
+const DIRECT_WEATHER: &str = r"\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$";
+/// Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read.
+const DIRECT_NOT_LIVE: &str = r"\b(?:widget|server|config|api|bug|code|app|script|dashboard|spreadsheet|sheet|sales|revenue|budget|quarter|q[1-4]|filter|settings?)\b";
 const DIRECT_SPOTIFY: &str = r"\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b";
 
 fn direct_re(slot: &'static std::sync::OnceLock<regex::Regex>, pat: &str) -> &'static regex::Regex {
@@ -330,8 +412,10 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     static GMAIL_READ: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static WEATHER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static SPOTIFY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static UPDATE_NOUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static NOT_LIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let n = normalize(text);
-    if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&n) {
+    if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&direct_re(&UPDATE_NOUN, DIRECT_UPDATE_NOUN).replace_all(&n, " ")) {
         return None;
     }
     if direct_re(&WA, r"\bwhatsapp\b").is_match(&n) {
@@ -342,10 +426,11 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
             return Some("whatsapp");
         }
     }
-    if direct_re(&GMAIL, DIRECT_GMAIL).is_match(&n) && direct_re(&GMAIL_READ, DIRECT_GMAIL_READ).is_match(&n) {
+    let work = direct_re(&NOT_LIVE, DIRECT_NOT_LIVE).is_match(&n);
+    if !work && direct_re(&GMAIL, DIRECT_GMAIL).is_match(&n) && direct_re(&GMAIL_READ, DIRECT_GMAIL_READ).is_match(&n) {
         return Some("gmail");
     }
-    if direct_re(&WEATHER, DIRECT_WEATHER).is_match(&n) {
+    if !work && direct_re(&WEATHER, DIRECT_WEATHER).is_match(&n) {
         return Some("weather");
     }
     if direct_re(&SPOTIFY, DIRECT_SPOTIFY).is_match(&n) {
@@ -374,13 +459,49 @@ mod tests {
     }
 
     fn kind_str(k: RouteKind) -> &'static str {
-        match k {
-            RouteKind::Named => "Named",
-            RouteKind::Domain => "Domain",
-            RouteKind::Tab => "Tab",
-            RouteKind::Llm => "Llm",
-            RouteKind::Default => "Default",
+        k.as_str()
+    }
+
+    #[test]
+    fn is_self_role_matches_aliases_and_os_name() {
+        for id in ["tony", "Tony", "general", "dispatcher", "orchestrator", "os", "jarvis", " TONY "] {
+            assert!(is_self_role(id, "Tony"), "{id}");
         }
+        assert!(is_self_role("friday", "Friday"));
+        for id in ["prompter", "coder", "booking", "", "friday"] {
+            assert!(!is_self_role(id, "Tony"), "{id}");
+        }
+    }
+
+    #[test]
+    fn self_kind_serializes_as_self() {
+        assert_eq!(serde_json::to_string(&RouteKind::Own).unwrap(), "\"Self\"");
+        assert_eq!(serde_json::from_str::<RouteKind>("\"Self\"").unwrap(), RouteKind::Own);
+        assert_eq!(RouteKind::Own.as_str(), "Self");
+    }
+
+    #[test]
+    fn tony_is_never_a_delegation_target() {
+        let cfg = OsConfig::default();
+        let r = resolve("ask tony to ask the coder to fix it", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
+        assert!(r.task.contains("fix"));
+        // A leading self address is skipped once, then the real agent is addressed.
+        let r = resolve("tony, coder, fix the build", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
+        // The renamed OS is a self name too; an old config that still lists "tony" / a self key
+        // never yields a Named general.
+        let mut cfg = OsConfig::default();
+        cfg.os_name = "Friday".into();
+        cfg.routing.agents.get_mut("general").unwrap().names = vec!["tony".into()];
+        cfg.routing.agents.insert("dispatcher".into(), AgentTriggers { names: vec!["boss".into()], domains: vec![] });
+        for text in ["thanks friday", "thanks tony", "ask the boss what time it is"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
+        }
+        // A sub-agent topic still wins over a mere self address.
+        let r = resolve("tony check my whatsapp messages", &OsConfig::default());
+        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Domain));
     }
 
     #[test]
@@ -411,10 +532,40 @@ mod tests {
             ("is it going to snow tonight", "weather"),
             ("how cold is it outside", "weather"),
             ("what song is this", "spotify"),
+            ("give me an update on WhatsApp", "whatsapp"),
+            ("do I need an umbrella today", "weather"),
+            ("weather forecast for Paris", "weather"),
+            ("what's the weather", "weather"),
+            ("check my what's up messages", "whatsapp"),
         ] {
             assert_eq!(direct_tool(text), Some(tool), "{text}");
         }
         for text in ["send a whatsapp to Sam", "delete my last email", "tell him on whatsapp I'm late", "play purple rain", "what's the CPU temperature", "hey what's up", ""] {
+            assert_eq!(direct_tool(text), None, "{text}");
+        }
+        // Writes and work talk that merely mention the weather / mail / WhatsApp words.
+        for text in [
+            "add a weather widget to the dashboard",
+            "set the forecast widget to Toronto",
+            "order an umbrella",
+            "buy an umbrella on amazon",
+            "create a filter for new emails from Amazon",
+            "check the new mail server config",
+            "pay the invoice from the latest email",
+            "add the new emails from Sam to my todo list",
+            "mark all emails from Sam as read",
+            "cancel the meeting from my inbox invite",
+            "add umbrella to my shopping list",
+            "update the sales forecast spreadsheet",
+            "schedule a meeting with Sam about the forecast",
+            "email the forecast to Sam",
+            "mute the WhatsApp chat with Sam",
+            "what's up, any updates on the build?",
+            "hey what's up, any updates?",
+            "fix the weather api bug in the code",
+            "Ops, turn off the weather alerts",
+            "Booking, order an umbrella for the shoot",
+        ] {
             assert_eq!(direct_tool(text), None, "{text}");
         }
     }

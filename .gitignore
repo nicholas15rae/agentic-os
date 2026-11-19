@@ -31,3 +31,9 @@ training_logs/
 
 # System Map session briefs (dev task queue exports)
 memory/session_handoffs/
+
+
+# Claude Code fix queue (P6): queue file + live-run logs (local paths, scrubbed error text)
+.agenticos/
+# Live-run worktrees junction node_modules to the main tree; never track the link
+command center/node_modules

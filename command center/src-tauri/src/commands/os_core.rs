@@ -141,7 +141,9 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "ops".to_string(),
         trig(&["ops", "operations", "business", "finance"], &["invoice", "receipt", "bf supplements", "contracting", "quote", "schedule", "calendar", "droplet"]),
     );
-    m.insert("general".to_string(), trig(&["tony"], &["system status", "switch model"]));
+    // Tony has no name triggers: addressing him ("thanks tony", "ask the dispatcher…") is
+    // `routing::SELF_NAMES` → kind Self, never a delegation to himself.
+    m.insert("general".to_string(), trig(&[], &["system status", "switch model"]));
     m
 }
 
@@ -242,13 +244,46 @@ impl McpServer {
     }
 }
 
-/// `"tony"` is accepted as an alias of `"general"` everywhere a role id is
-/// compared (ground rule) — never renamed on disk, just treated the same.
-fn canon_agent(a: &str) -> &str {
-    if a == "tony" {
+/// `"tony"` (and every other self alias: dispatcher, orchestrator, os, jarvis — see
+/// `routing::SELF_ROLE_IDS`) is accepted as an alias of `"general"` everywhere a role id is
+/// compared (ground rule) — never renamed on disk in grant lists, just treated the same.
+pub(crate) fn canon_agent(a: &str) -> &str {
+    if super::routing::is_self_role(a, "") {
         "general"
     } else {
         a
+    }
+}
+
+/// Self-alias keys in `routing.agents` / `anythingllm.workspaces` ("tony", "dispatcher", the OS
+/// name…) fold into `general` (default B-a: canonicalised, not rejected). Triggers merge into
+/// general's lists (deduped); a workspace slug only fills general when it has none.
+pub(crate) fn canonicalize_self_keys(cfg: &mut OsConfig) {
+    let os_name = cfg.os_name.clone();
+    let alias = |k: &str| k != "general" && super::routing::is_self_role(k, &os_name);
+    let keys: Vec<String> = cfg.routing.agents.keys().filter(|k| alias(k)).cloned().collect();
+    for k in keys {
+        let Some(t) = cfg.routing.agents.remove(&k) else { continue };
+        let g = cfg.routing.agents.entry("general".into()).or_default();
+        for n in t.names {
+            if !g.names.iter().any(|x| x.eq_ignore_ascii_case(&n)) {
+                g.names.push(n);
+            }
+        }
+        for d in t.domains {
+            if !g.domains.iter().any(|x| x.eq_ignore_ascii_case(&d)) {
+                g.domains.push(d);
+            }
+        }
+    }
+    let keys: Vec<String> = cfg.anythingllm.workspaces.keys().filter(|k| alias(k)).cloned().collect();
+    for k in keys {
+        if let Some(slug) = cfg.anythingllm.workspaces.remove(&k) {
+            let g = cfg.anythingllm.workspaces.entry("general".into()).or_default();
+            if g.is_empty() {
+                *g = slug;
+            }
+        }
     }
 }
 
@@ -470,6 +505,8 @@ impl Default for OsConfig {
 
 /// Migration id: WhatsApp became read-only by default.
 const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
+/// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
+const MIGRATE_SELF_ROUTING: &str = "self-routing";
 
 /// One-time upgrades of a saved config. `read_only: false` is never written to disk, so an
 /// older os.json can't say whether WhatsApp was left writable on purpose: mark it read-only
@@ -480,6 +517,14 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
             m.read_only = true;
         }
         cfg.migrations.push(MIGRATE_WHATSAPP_READ_ONLY.into());
+    }
+    // "tony" in general.names made "thanks tony" a Named route to Tony himself (the
+    // "TONY → TONY" relay). Self-address is `routing::SELF_NAMES` now; drop it once.
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_SELF_ROUTING) {
+        if let Some(g) = cfg.routing.agents.get_mut("general") {
+            g.names.retain(|n| super::routing::normalize(n) != "tony");
+        }
+        cfg.migrations.push(MIGRATE_SELF_ROUTING.into());
     }
 }
 
@@ -524,6 +569,8 @@ impl OsState {
             }),
             Err(_) => OsConfig::default(),
         };
+        // Self-alias keys ("tony", "dispatcher"…) fold into general before any back-fill.
+        canonicalize_self_keys(&mut cfg);
         // Upgrades: add new built-in MCPs without touching the user's toggles.
         for d in default_mcps() {
             if !cfg.mcps.iter().any(|m| m.id == d.id) {
@@ -573,6 +620,7 @@ impl OsState {
     pub fn update(&self, f: impl FnOnce(&mut OsConfig) -> Result<(), String>) -> Result<OsConfig, String> {
         let mut next = self.snapshot();
         f(&mut next)?;
+        canonicalize_self_keys(&mut next);
         validate(&next)?;
         self.slot.set_capacity(next.scheduler.max_concurrency as usize);
         *self.config.write().unwrap() = next.clone();
@@ -1261,7 +1309,8 @@ mod tests {
         let agents = default_routing_agents();
         for role in ["booking", "prompter", "coder", "designer", "librarian", "ops", "general"] {
             let t = agents.get(role).unwrap_or_else(|| panic!("missing default routing role {role}"));
-            assert!(!t.names.is_empty(), "{role} has no name triggers");
+            // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self).
+            assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
         }
         assert!(agents["booking"].domains.contains(&"whatsapp".to_string()));
     }
@@ -1361,7 +1410,54 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string()]);
+    }
+
+    #[test]
+    fn self_routing_migration_drops_tony_from_general_once() {
+        assert!(default_routing_agents()["general"].names.is_empty(), "fresh installs have no self name trigger");
+        let raw = r#"{"routing":{"autoSwitch":true,"agents":{"general":{"names":["tony","Tony","boss"],"domains":["system status"]}}}}"#;
+        let mut cfg: OsConfig = serde_json::from_str(raw).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.routing.agents["general"].names, vec!["boss".to_string()]);
+        // Re-adding it later is the user's choice: the marker keeps the migration from re-running.
+        cfg.routing.agents.get_mut("general").unwrap().names.push("tony".into());
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.routing.agents["general"].names, vec!["boss".to_string(), "tony".to_string()]);
+        // …and resolve() still never routes "thanks tony" to a Named Tony.
+        let r = super::super::routing::resolve("thanks tony", &cfg);
+        assert_eq!(r.kind, super::super::routing::RouteKind::Own);
+    }
+
+    #[test]
+    fn self_alias_keys_fold_into_general() {
+        let raw = r#"{"routing":{"autoSwitch":true,"agents":{
+            "general":{"names":[],"domains":["system status"]},
+            "tony":{"names":["boss"],"domains":["System Status","uptime"]},
+            "Dispatcher":{"names":["chief"],"domains":[]}
+        }},"anythingllm":{"baseUrl":"http://127.0.0.1:3001","timeoutSecs":90,"workspaces":{"tony":"tony-ws","orchestrator":"other","coder":"coder"}}}"#;
+        let mut cfg: OsConfig = serde_json::from_str(raw).unwrap();
+        canonicalize_self_keys(&mut cfg);
+        let g = &cfg.routing.agents["general"];
+        assert_eq!(g.names, vec!["chief".to_string(), "boss".to_string()]); // BTreeMap order: "Dispatcher" < "tony"
+        assert_eq!(g.domains, vec!["system status".to_string(), "uptime".to_string()]);
+        assert!(!cfg.routing.agents.contains_key("tony") && !cfg.routing.agents.contains_key("Dispatcher"));
+        // general had no workspace: the first alias's slug fills it; the rest are dropped.
+        assert_eq!(cfg.anythingllm.workspaces.get("general").map(String::as_str), Some("other"));
+        assert_eq!(cfg.anythingllm.workspaces.keys().cloned().collect::<Vec<_>>(), vec!["coder".to_string(), "general".to_string()]);
+        // An existing general slug always wins.
+        let mut cfg = OsConfig::default();
+        cfg.anythingllm.workspaces.insert("tony".into(), "tony-ws".into());
+        canonicalize_self_keys(&mut cfg);
+        assert_eq!(cfg.anythingllm.workspaces["general"], "my-workspace");
+        assert!(!cfg.anythingllm.workspaces.contains_key("tony"));
+        // The OS name is a self key too.
+        let mut cfg = OsConfig::default();
+        cfg.os_name = "Friday".into();
+        cfg.routing.agents.insert("friday".into(), AgentTriggers { names: vec!["fri".into()], domains: vec![] });
+        canonicalize_self_keys(&mut cfg);
+        assert!(cfg.routing.agents["general"].names.contains(&"fri".to_string()));
+        assert!(agent_matches(&["dispatcher".to_string()], "general") && agent_matches(&["tony".to_string()], "general"));
     }
 
     #[test]

@@ -588,7 +588,7 @@ pub async fn inbox_loop(app: AppHandle) {
                     .map(|c| json!({ "killSwitch": c.privacy.kill_switch, "computeMode": c.compute.mode })),
                 Some("turn") => {
                     let text = p["text"].as_str().unwrap_or("").to_string();
-                    if looks_like_idea(&text) {
+                    if inbox_turn_route(p) == InboxTurnRoute::Capture {
                         capture(&app, &st, &os, &text).await.map(|r| json!({ "answer": r.reply, "idea": r.idea, "steps": r.steps }))
                     } else {
                         let bridge = app.state::<BridgeState>();
@@ -620,6 +620,36 @@ pub async fn inbox_loop(app: AppHandle) {
     }
 }
 
+/// Where a queued phone turn goes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InboxTurnRoute {
+    /// Stage 1 idea capture (Prompter breakdown + ledger).
+    Capture,
+    /// A normal Tony turn (`run_os_turn`).
+    OsTurn,
+}
+
+/// P3: the phone's own tier classifier decides. `capture: true` is an approved Tier-3 "yes"
+/// on a build-shaped idea; `noDelegate` (a Tier-2 brainstorm) never reaches the Prompter. A
+/// current client always sends `noDelegate`, so the old idea-shaped shortcut only remains for
+/// stale phone builds that don't send it at all.
+pub(crate) fn inbox_turn_route(p: &Value) -> InboxTurnRoute {
+    if p["noDelegate"].as_bool() == Some(true) {
+        return InboxTurnRoute::OsTurn;
+    }
+    if p["capture"].as_bool() == Some(true) {
+        return InboxTurnRoute::Capture;
+    }
+    if p.get("noDelegate").is_some() {
+        return InboxTurnRoute::OsTurn;
+    }
+    if looks_like_idea(p["text"].as_str().unwrap_or("")) {
+        InboxTurnRoute::Capture
+    } else {
+        InboxTurnRoute::OsTurn
+    }
+}
+
 /// "I've been thinking about building an app that…" → Stage 1.
 pub fn looks_like_idea(text: &str) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -645,6 +675,21 @@ mod tests {
         assert!(looks_like_idea("I've been thinking about building a tool that tracks auditions"));
         assert!(looks_like_idea("I have an idea for an app"));
         assert!(!looks_like_idea("what's the weather"));
+    }
+
+    #[test]
+    fn inbox_turn_routes() {
+        let idea = "I've been thinking about building a tool that tracks auditions";
+        // Tier 2 from a current phone: never the Prompter, even when it's idea-shaped.
+        assert_eq!(inbox_turn_route(&json!({ "text": idea, "noDelegate": true })), InboxTurnRoute::OsTurn);
+        assert_eq!(inbox_turn_route(&json!({ "text": idea, "noDelegate": true, "capture": true })), InboxTurnRoute::OsTurn);
+        // A current client that isn't brainstorming: a normal turn, no idea shortcut.
+        assert_eq!(inbox_turn_route(&json!({ "text": idea, "noDelegate": false })), InboxTurnRoute::OsTurn);
+        // An approved Tier-3 build "yes" from the phone.
+        assert_eq!(inbox_turn_route(&json!({ "text": idea, "noDelegate": false, "capture": true })), InboxTurnRoute::Capture);
+        // Stale phone builds keep the old shortcut.
+        assert_eq!(inbox_turn_route(&json!({ "text": idea })), InboxTurnRoute::Capture);
+        assert_eq!(inbox_turn_route(&json!({ "text": "what's the weather" })), InboxTurnRoute::OsTurn);
     }
 
     #[test]

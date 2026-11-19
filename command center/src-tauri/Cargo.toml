@@ -42,6 +42,9 @@ tauri-plugin-global-shortcut = "2"
 # crashing) also ends its node / python grandchildren (src/proc.rs `Job`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Local media ducking (src/audio/ducker.rs): WASAPI session volume of Spotify.exe. Same version and
+# a subset of the features cpal 0.18 already compiles, so this adds no new crate build.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
 
 [profile.release]
 codegen-units = 1

@@ -1,11 +1,32 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { History, ListMusic, Loader2, Music2, Pause, Play, SkipBack, SkipForward, Volume2 } from "lucide-react";
+import { History, ListMusic, Loader2, Music2, Pause, Play, SkipBack, SkipForward, Volume1, Volume2, VolumeX } from "lucide-react";
 import { Empty, WidgetHeader } from "@/components/WidgetHeader";
 import type { WidgetProps } from "@/core/widgets/types";
 import { cmd, isTauri, type SpotifyAction, type SpotifyItem, type SpotifyNowPlaying, type SpotifyStatus } from "@/lib/platform";
 import { spotifyErrorReply } from "@/features/os/media-reply";
 import { useSpotifyAuthRefresh, useSpotifyConnect } from "@/features/integrations/spotify-connect";
-import { POLL_MS, VOLUME_DEBOUNCE_MS, fmtTime, needsReconnect, progressAt, progressFraction, shownVolume, spotifyFix, spotifyFixText, type QuickList } from "./spotify-ui";
+import {
+  POLL_MS,
+  VOLUME_DEBOUNCE_MS,
+  fmtTime,
+  isNoVolumeReply,
+  muteTarget,
+  noVolumeNote,
+  needsReconnect,
+  progressAt,
+  progressFraction,
+  seekSeconds,
+  shownPosition,
+  shownVolume,
+  spotifyFix,
+  spotifyFixText,
+  volumeLevel,
+  type QuickList,
+} from "./spotify-ui";
+
+const VOLUME_ICON = { mute: VolumeX, low: Volume1, high: Volume2 } as const;
+/** Keys that move a range input: the scrubber seeks when one is released. */
+const SEEK_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
 
 type Config = { quick: QuickList };
 
@@ -110,6 +131,13 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
   const [err, setErr] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [localVol, setLocalVol] = useState<{ value: number; at: number } | null>(null);
+  const [localPos, setLocalPos] = useState<{ value: number; at: number } | null>(null);
+  /** The scrubber's value while it is being dragged / keyed (committed on release). */
+  const [scrub, setScrub] = useState<number | null>(null);
+  const scrubRef = useRef<number | null>(null);
+  /** A device that answered a volume change with the soft NO_VOLUME reply, and that reply. */
+  const [noVol, setNoVol] = useState<{ device: string; reply: string } | null>(null);
+  const lastVol = useRef<number | null>(null);
   const [lists, setLists] = useState<Partial<Record<QuickList, SpotifyItem[]>>>({});
   const [listErr, setListErr] = useState<string | null>(null);
   const seq = useRef(0);
@@ -168,11 +196,18 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
     followUp.current = setTimeout(() => void poll(), 900);
   };
 
+  // The last non-zero volume, for unmute.
+  useEffect(() => {
+    const v = np?.data.volume;
+    if (v != null && v > 0) lastVol.current = v;
+  }, [np]);
+
   // A click on the widget is the user's own action, so it counts as approval; Deny and the kill switch still refuse in Rust.
-  const run = async (call: () => Promise<string>) => {
+  const run = async (call: () => Promise<string>, onReply?: (reply: string) => void) => {
     try {
-      await call();
+      const reply = await call();
       setErr(null);
+      onReply?.(reply);
     } catch (e) {
       fail(e);
     }
@@ -187,12 +222,23 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
         return { data: { ...p.data, isPlaying: action === "resume", progressMs: progressAt(p.data, p.at, at) }, at };
       });
     }
+    if (action === "next" || action === "previous") setLocalPos(null);
     void run(() => cmd("spotify_control", { action, value, approved: true }));
   };
-  const setVolume = (value: number) => {
+  /** Slider edits wait out the debounce; the mute button sends at once (`delay` 0). */
+  const setVolume = (value: number, delay = VOLUME_DEBOUNCE_MS) => {
+    if (value > 0) lastVol.current = value;
     setLocalVol({ value, at: Date.now() });
     clearTimeout(volTimer.current);
-    volTimer.current = setTimeout(() => void run(() => cmd("spotify_control", { action: "volume", value, approved: true })), VOLUME_DEBOUNCE_MS);
+    const device = np?.data.device ?? "";
+    // NO_VOLUME comes back as Ok: drop the optimistic level and disable the controls. Its line is
+    // shown from `noVol` (not `err`, which the next poll clears) for as long as that device plays.
+    const onReply = (reply: string) => {
+      if (!isNoVolumeReply(reply)) return;
+      setLocalVol(null);
+      setNoVol({ device, reply });
+    };
+    volTimer.current = setTimeout(() => void run(() => cmd("spotify_control", { action: "volume", value, approved: true }), onReply), delay);
   };
 
   const showList = size.h >= 3;
@@ -210,9 +256,46 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
   }, [showList, visible, listLoaded, tab, loadList]);
 
   const d = np?.data;
-  const pos = d ? progressAt(d, np.at, now) : 0;
+  const pos = scrub ?? (d ? shownPosition(progressAt(d, np.at, now), localPos, now, playing, d.durationMs) : 0);
   const vol = shownVolume(d?.volume ?? null, localVol, now);
   const items = lists[tab];
+  const noVolNote = noVolumeNote(noVol, d?.device);
+  const volWhy = vol == null ? "This device doesn't report its volume" : noVolNote;
+  const VolIcon = vol == null ? Volume2 : VOLUME_ICON[volumeLevel(vol)];
+  const fill = d ? progressFraction(pos, d.durationMs) * 100 : 0;
+
+  /** Send the scrubbed position (whole seconds), optimistically: the bar holds it while polls catch up. */
+  const commitSeek = () => {
+    const ms = scrubRef.current;
+    scrubRef.current = null;
+    setScrub(null);
+    if (ms == null || !d || d.durationMs <= 0) return;
+    const sec = seekSeconds(ms, d.durationMs);
+    const at = Date.now();
+    seq.current++; // an in-flight poll would snap the bar back
+    setLocalPos({ value: sec * 1000, at });
+    setNp((p) => (p ? { data: { ...p.data, progressMs: sec * 1000 }, at } : p));
+    setNow(at);
+    void run(() => cmd("spotify_control", { action: "seek", value: sec, approved: true }));
+  };
+  // The window-level pointerup listener outlives this render: it calls the latest commitSeek.
+  const commitRef = useRef(commitSeek);
+  commitRef.current = commitSeek;
+  /** A drag can end outside the input, so the release is caught on the window. */
+  const onScrubStart = () => {
+    const end = () => {
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      commitRef.current();
+    };
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  };
+  const toggleMute = () => {
+    if (vol != null && vol > 0) lastVol.current = vol;
+    const target = muteTarget(vol, lastVol.current);
+    if (target != null) setVolume(target, 0);
+  };
 
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
@@ -227,16 +310,41 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
           </div>
         )}
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-ink">{d?.track ?? (np ? "Nothing playing" : "…")}</p>
-          <p className="truncate text-xs text-ink-2">{d?.track ? d.artists.join(", ") : np ? "Open Spotify on a device, or pick something below." : ""}</p>
+          <p className="truncate text-sm font-semibold text-ink" title={d?.track ?? undefined}>
+            {d?.track ?? (np ? "Nothing playing" : "…")}
+          </p>
+          <p className="truncate text-xs text-ink-2" title={d?.track ? d.artists.join(", ") : undefined}>
+            {d?.track ? d.artists.join(", ") : np ? "Open Spotify on a device, or pick something below." : ""}
+          </p>
+          {showList && d?.track && d.album && (
+            <p className="truncate text-[11px] text-ink-3" title={d.album}>
+              {d.album}
+            </p>
+          )}
         </div>
       </div>
 
       {d?.track && (
         <div className="mt-2">
-          <div className="well h-1 w-full overflow-hidden rounded-full" role="progressbar" aria-label="Track position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progressFraction(pos, d.durationMs) * 100)}>
-            <div className="h-full rounded-full bg-gradient-to-r from-teal to-teal-light" style={{ width: `${progressFraction(pos, d.durationMs) * 100}%` }} />
-          </div>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(0, d.durationMs)}
+            step={1000}
+            value={Math.min(pos, Math.max(0, d.durationMs))}
+            disabled={d.durationMs <= 0}
+            onChange={(e) => {
+              scrubRef.current = Number(e.target.value);
+              setScrub(scrubRef.current);
+            }}
+            onPointerDown={onScrubStart}
+            onKeyUp={(e) => SEEK_KEYS.has(e.key) && commitSeek()}
+            onBlur={commitSeek}
+            aria-label="Seek"
+            aria-valuetext={`${fmtTime(pos)} of ${fmtTime(d.durationMs)}`}
+            className="block h-3 w-full cursor-pointer appearance-none bg-transparent bg-[length:100%_4px] bg-center bg-no-repeat disabled:cursor-default [&::-webkit-slider-thumb]:size-2.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-teal-soft [&::-webkit-slider-thumb]:shadow-[0_0_6px_#00e5c3]"
+            style={{ backgroundImage: `linear-gradient(to right, var(--color-teal) 0%, var(--color-teal-light) ${fill}%, rgba(255,255,255,0.08) ${fill}%)` }}
+          />
           <div className="mt-0.5 flex justify-between font-mono text-[10px] text-ink-3 tabular">
             <span>{fmtTime(pos)}</span>
             <span>{fmtTime(d.durationMs)}</span>
@@ -245,37 +353,49 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
       )}
 
       <div className="mt-2 flex items-center gap-1.5">
-        <button aria-label="Previous track" onClick={() => control("previous")} className="well grid size-8 place-items-center rounded-full text-ink-2 hover:text-ink">
+        <button aria-label="Previous track" onClick={() => control("previous")} className="well grid size-8 shrink-0 place-items-center rounded-full text-ink-2 hover:text-ink">
           <SkipBack size={14} />
         </button>
         <button
           aria-label={playing ? "Pause" : "Play"}
           onClick={() => control(playing ? "pause" : "resume")}
-          className="grid size-9 place-items-center rounded-full bg-gradient-to-tr from-teal to-teal-light text-canvas"
+          className="grid size-9 shrink-0 place-items-center rounded-full bg-gradient-to-tr from-teal to-teal-light text-canvas"
         >
           {playing ? <Pause size={15} /> : <Play size={15} className="translate-x-px" />}
         </button>
-        <button aria-label="Next track" onClick={() => control("next")} className="well grid size-8 place-items-center rounded-full text-ink-2 hover:text-ink">
+        <button aria-label="Next track" onClick={() => control("next")} className="well grid size-8 shrink-0 place-items-center rounded-full text-ink-2 hover:text-ink">
           <SkipForward size={14} />
         </button>
-        {vol != null && (
-          <label className="ml-auto flex min-w-0 items-center gap-1.5 text-ink-3">
-            <Volume2 size={13} className="shrink-0" />
+        {(d?.device || vol != null) && (
+          <div className="ml-auto flex min-w-0 items-center gap-1" title={volWhy ?? undefined}>
+            <button
+              type="button"
+              onClick={toggleMute}
+              disabled={!!volWhy}
+              aria-label="Mute Spotify"
+              aria-pressed={vol === 0}
+              title={volWhy ?? (vol === 0 ? "Unmute" : "Mute")}
+              className="grid size-7 shrink-0 place-items-center rounded-full text-ink-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-ink-2"
+            >
+              <VolIcon size={14} />
+            </button>
             <input
               type="range"
               min={0}
               max={100}
               step={1}
-              value={vol}
+              value={vol ?? 0}
+              disabled={!!volWhy}
               onChange={(e) => setVolume(Number(e.target.value))}
               aria-label="Spotify volume"
-              className="w-20 min-w-0 accent-teal"
+              title={volWhy ?? undefined}
+              className="w-20 min-w-0 shrink accent-teal disabled:cursor-not-allowed disabled:opacity-40"
             />
-          </label>
+          </div>
         )}
       </div>
 
-      {err && <p className="mt-1.5 text-xs text-amber-light">{err}</p>}
+      {(err ?? noVolNote) && <p className="mt-1.5 text-xs text-amber-light">{err ?? noVolNote}</p>}
 
       {showList && (
         <div className="mt-2 flex min-h-0 flex-1 flex-col">

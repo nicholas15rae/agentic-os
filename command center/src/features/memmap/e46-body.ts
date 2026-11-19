@@ -13,9 +13,12 @@
  *     crease, the door bulge, the rocker tuck-under and a flat floor.
  *  4. Lines: rings every RING_EVERY stations, longitudinal feature lines at fixed section
  *     indices, wheel arches cut out of both, plus the details that make it an E46: the
- *     greenhouse with its Hofmeister kink and separate quarter glass, tilted kidneys with
- *     surround and slats, twin angel-eye rings, power-dome hood lines, roof rails, the
- *     L-shaped tail lamps that wrap onto the flank.
+ *     greenhouse with its Hofmeister kink and separate quarter glass (tapering to the tail),
+ *     facelift kidneys with surround and slats, notched facelift headlights with twin
+ *     angel-eye rings (their own `halo` group), the M-Tech bumper intakes and fogs,
+ *     power-dome hood lines, low roof rails, the raked tailgate with its glass and spoiler
+ *     lip, and the L-shaped tail lamps (with their light bars) that wrap onto the flank.
+ *     Every rear and roof detail derives from the profile, so reshaping it moves them too.
  *  5. A closed indexed shell (depth only, for occlusion and the Fresnel rim).
  *  6. An inner chassis / drivetrain group (engine, gearbox, shaft, diff, exhaust run,
  *     subframes, seats) drawn as an x-ray layer.

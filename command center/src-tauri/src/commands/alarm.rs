@@ -21,6 +21,9 @@ const MAX_AHEAD_MS: i64 = 366 * 86_400_000;
 /// PowerShell's own AppUserModelID: registered on every Windows install, so the toast shows
 /// for dev and bundled builds alike (an unregistered app id is dropped silently).
 const TOAST_APP_ID: &str = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe";
+/// A missed alarm (PC off / asleep at the due time) never rings later than this: the in-app
+/// scheduler's own stale window (`FIRE_WINDOW_MS` in scheduler.ts).
+const LATE_MAX_MIN: i64 = 10;
 /// Most ids `alarm_os_prune` keeps in one call.
 const PRUNE_MAX: usize = 1000;
 
@@ -87,20 +90,24 @@ fn encode(script: &str) -> String {
 }
 
 /// The script the task runs at the due time: an alarm toast (looping sound, Dismiss), then it
-/// deletes its own task. `title` is already cleaned.
-fn toast_script(id: &str, title: &str) -> String {
+/// deletes its own task. `title` is already cleaned. A run starting more than `LATE_MAX_MIN` after
+/// `due_at_ms` (a missed run that `-StartWhenAvailable` started late) only deletes the task.
+fn toast_script(id: &str, title: &str, due_at_ms: i64) -> String {
     let xml = format!(
         r#"<toast scenario="alarm" duration="long"><visual><binding template="ToastGeneric"><text>Command Center</text><text>{}</text></binding></visual><audio src="ms-winsoundevent:Notification.Looping.Alarm" loop="true"/><actions><action activationType="system" arguments="dismiss" content=""/></actions></toast>"#,
         xml_text(title)
     );
     format!(
         "$ErrorActionPreference = 'SilentlyContinue'\n\
+         if ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -le {late}) {{\n\
          [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null\n\
          [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null\n\
          $x = New-Object Windows.Data.Xml.Dom.XmlDocument\n\
          $x.LoadXml({xml})\n\
          [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({app}).Show([Windows.UI.Notifications.ToastNotification]::new($x))\n\
+         }}\n\
          Unregister-ScheduledTask -TaskPath {path} -TaskName {name} -Confirm:$false\n",
+        late = due_at_ms.saturating_add(LATE_MAX_MIN * 60_000),
         xml = ps_quote(&xml),
         app = ps_quote(TOAST_APP_ID),
         path = ps_quote(TASK_PATH),
@@ -115,15 +122,17 @@ fn build_script(id: &str, title: &str, due_at_ms: i64, now_ms: i64) -> Result<St
     check_due(due_at_ms, now_ms)?;
     let due = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(due_at_ms).ok_or("invalid alarm time")?;
     let iso = due.format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
-    let action_args = format!("-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}", encode(&toast_script(id, &title)));
+    let action_args = format!("-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}", encode(&toast_script(id, &title, due_at_ms)));
     Ok(format!(
         "$ErrorActionPreference = 'Stop'\n\
          $at = [DateTimeOffset]::Parse({iso}, [Globalization.CultureInfo]::InvariantCulture).LocalDateTime\n\
          $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument {args}\n\
          $trigger = New-ScheduledTaskTrigger -Once -At $at\n\
+         $trigger.EndBoundary = $at.AddMinutes({late}).ToString('s')\n\
          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)\n\
          Register-ScheduledTask -TaskPath {path} -TaskName {name} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null\n",
         iso = ps_quote(&iso),
+        late = LATE_MAX_MIN,
         args = ps_quote(&action_args),
         path = ps_quote(TASK_PATH),
         name = ps_quote(&format!("{TASK_PREFIX}{id}")),
@@ -263,6 +272,19 @@ mod tests {
         assert!(s.contains("[DateTimeOffset]::Parse('2027-01-15T08:01:00+00:00', [Globalization.CultureInfo]::InvariantCulture).LocalDateTime"), "{s}");
         assert!(s.contains("Register-ScheduledTask -TaskPath '\\AgenticOS\\' -TaskName 'Alarm-r1'"));
         assert!(!s.contains("schtasks"));
+    }
+
+    #[test]
+    fn a_missed_alarm_never_rings_late() {
+        let s = build_script("r1", "Wake up", NOW + 60_000, NOW).unwrap();
+        // The trigger expires 10 min after the due time, so -StartWhenAvailable can't run it hours later…
+        assert!(s.contains("$trigger.EndBoundary = $at.AddMinutes(10).ToString('s')"), "{s}");
+        // …and a run that still starts late only removes its task.
+        let toast = inner(&s);
+        let late = NOW + 60_000 + 10 * 60_000;
+        assert!(toast.contains(&format!("if ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -le {late}) {{")), "{toast}");
+        let (show, cleanup) = toast.split_once("}\n").unwrap();
+        assert!(show.contains(".Show(") && cleanup.contains("Unregister-ScheduledTask"));
     }
 
     #[test]

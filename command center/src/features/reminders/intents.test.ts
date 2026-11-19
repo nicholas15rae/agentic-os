@@ -88,6 +88,15 @@ describe("parseWhen duration mode", () => {
     expect(parseWhen("in 10 minutes", NOW)?.at.getTime()).toBe(NOW.getTime() + 600_000);
   });
 
+  it("adds up a length given in parts", () => {
+    const at = (line: string, duration = true) => (parseWhen(line, NOW, { duration })?.at.getTime() ?? 0) - NOW.getTime();
+    expect(at("set a timer for 1 hour and 30 minutes")).toBe(5_400_000);
+    expect(at("timer for 2 minutes 30 seconds")).toBe(150_000);
+    expect(at("timer for 1 hour, 15 minutes and 10 seconds")).toBe(4_510_000);
+    expect(at("remind me in 1 hour and 30 minutes to stretch", false)).toBe(5_400_000);
+    expect(at("remind me in 2 hours a day before the shoot", false)).toBe(7_200_000);
+  });
+
   it("durationText reads naturally", () => {
     expect(durationText(600_000)).toBe("10 minutes");
     expect(durationText(5_400_000)).toBe("1 hour 30 minutes");

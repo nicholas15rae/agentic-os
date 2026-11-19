@@ -310,7 +310,7 @@ async function introText(w: CueWidget): Promise<string> {
   try {
     const now = new Date().toLocaleString("en-CA", { weekday: "long", hour: "numeric", minute: "2-digit" });
     const r = await cmd("dispatch_chat", {
-      req: { messages: [{ role: "system", content: `You are Tony. Reply with ONE short spoken line (max 20 words), no quotes. It is ${now}.` }, { role: "user", content: w.intro.text }], priority: "interactive", maxSecs: 15 },
+      req: { messages: [{ role: "system", content: `You are Tony, talking to Nic (Nicholas or Nicky). Reply with ONE short spoken line (max 15 words), no quotes, no apologies or meta. It is ${now}.` }, { role: "user", content: w.intro.text }], priority: "interactive", maxSecs: 15 },
     });
     return r.content.trim() || w.intro.text;
   } catch {

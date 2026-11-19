@@ -160,6 +160,9 @@ describe("edgesForStep", () => {
 
   it("router / rules", () => {
     expect(edgesForStep(step({ hop: "router", label: "chat → Tony" })).flash).toBe("tony");
+    // P2: a turn Tony answers himself has no arrow ("Tony · direct (Self)") and still flashes Tony.
+    expect(edgesForStep(step({ hop: "router", label: "Tony · direct (Self)" })).flash).toBe("tony");
+    expect(edgesForStep(step({ hop: "router", label: "Tony · direct (Default)" })).flash).toBe("tony");
     expect(edgesForStep(step({ hop: "router", label: "build · os → coder", traceId: "pipeline:p" })).edges).toEqual(["tony-subagents"]);
     expect(edgesForStep(step({ hop: "router", label: "ledger · os → librarian", traceId: "pipeline:p" })).flash).toBe("tony");
     expect(edgesForStep(step({ hop: "rules", label: "MASTER_IDENTITY.md → Tony" })).edges).toEqual(["fs-tony"]);

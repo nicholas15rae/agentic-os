@@ -69,6 +69,23 @@ describe("FallbackTts", () => {
     expect(backup.calls).toHaveLength(0);
   });
 
+  it("retry without voice keeps utteranceId (same breaker scope)", async () => {
+    const seen: (SpeakOpts | undefined)[] = [];
+    let first = true;
+    const primary = fakeEngine("primary");
+    primary.speak = vi.fn(async (_text: string, o?: SpeakOpts) => {
+      seen.push(o);
+      if (first) {
+        first = false;
+        throw new Error("voice unavailable on this engine");
+      }
+    });
+    const tts = new FallbackTts(primary, fakeEngine("backup"));
+    await tts.speak("hi", { voice: "cue-voice", agent: "general", utteranceId: "turn-1-general", previousText: "x" });
+    expect(seen.map((o) => o?.utteranceId)).toEqual(["turn-1-general", "turn-1-general"]);
+    expect(seen[1]).toEqual({ agent: "general", utteranceId: "turn-1-general" });
+  });
+
   it("uses the backup directly when the primary is unsupported", async () => {
     const primary = fakeEngine("primary", { supported: false });
     const backup = fakeEngine("backup");

@@ -3,7 +3,7 @@ mod commands;
 mod exe_resolve;
 mod proc;
 
-use commands::{agents, bridge, clihub, devqueue, introspect, modellab, dispatch, gmail, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
+use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, modellab, dispatch, gmail, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -17,6 +17,7 @@ pub fn run() {
         .manage(pipelines::PipelineState::default())
         .manage(os_core::OsState::default())
         .manage(devqueue::DevQueueState::default())
+        .manage(claude_fix::ClaudeFixState::default())
         .manage(audio::commands::AudioEngineState::default())
         .manage(introspect::IntrospectState::default())
         .setup(|app| {
@@ -40,6 +41,10 @@ pub fn run() {
                 pipelines::load_last_sync(&state, &app.state::<pipelines::PipelineState>());
                 // System Map dev task queue: <config dir>/devqueue.db (works without the gateway).
                 app.state::<devqueue::DevQueueState>().init(&dir);
+                // P6: a run the last session left "running" died with it (its job was killed).
+                claude_fix::recover_interrupted(&app.state::<devqueue::DevQueueState>());
+                // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
+                audio::ducker::recover(&dir);
             }
             // Spotify: load the saved session / refresh silently so the widget's first status
             // check is instant. Never opens a browser; no-op when not connected.
@@ -51,6 +56,8 @@ pub fn run() {
             tauri::async_runtime::spawn(memory::auto_monthly_loop(app.handle().clone()));
             // Phone HUD → desktop: Tony turns, pipelines, kill switch / compute mode.
             tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
+            // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
+            tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
             // GPU baton events → top-bar "ACTIVE GPU SLOT" pill; droplet auto-reconnect.
             {
                 use tauri::Emitter;
@@ -105,6 +112,9 @@ pub fn run() {
             audio::commands::audio_engine_status,
             audio::commands::audio_engine_barge_in,
             audio::commands::audio_engine_test_tone,
+            audio::commands::media_duck,
+            audio::commands::media_unduck,
+            audio::commands::media_duck_status,
             n8n::n8n_workflows,
             n8n::n8n_workflows_set,
             n8n::n8n_trigger,
@@ -188,12 +198,20 @@ pub fn run() {
             devqueue::dev_task_update,
             devqueue::dev_task_delete,
             devqueue::dev_brief_export,
+            devqueue::dev_fix_queue,
+            claude_fix::dev_fix_dispatch,
+            claude_fix::dev_fix_cancel,
             introspect::system_introspect,
             introspect::app_uptime,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Jarvis Command Center")
         .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                // Never leave Spotify at the duck level: its session volume back now, before
+                // anything slow (no-op unless something was ducked this run).
+                audio::ducker::restore_now();
+            }
             // Clean exit → one last Drive sync, if auto-sync (the standing consent) is on.
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 use tauri::Manager;

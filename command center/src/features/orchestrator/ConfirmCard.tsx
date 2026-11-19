@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, Check, ChevronDown, Mail, Mic, ShieldAlert, ShieldCheck, ShieldQuestion, Workflow, X } from "lucide-react";
+import { AlertTriangle, Archive, Check, ChevronDown, Mail, Mic, Send, ShieldAlert, ShieldCheck, ShieldQuestion, Workflow, X } from "lucide-react";
 import { SUB_AGENTS } from "@/features/dispatcher/agents";
 import { useVoice } from "@/features/voice/voice-store";
-import { approve, reject } from "@/features/voice/voice-controller";
+import { approve, parkPending, reject } from "@/features/voice/voice-controller";
 import { Waveform } from "@/features/voice/Waveform";
 
 /**
@@ -34,6 +34,8 @@ export function ConfirmCard() {
   const AgentIcon = agent.icon;
   const v = plan.verification;
   const listening = state === "listening" || state === "transcribing";
+  // P3 Tier 3: a delegation OFFER — Delegate / Park it / Not now (closing it is always quiet).
+  const offer = plan.offer === "delegate";
 
   return createPortal(
     <div className="fixed inset-0 z-[60] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px] animate-[fade-in_180ms_ease-out]">
@@ -59,7 +61,7 @@ export function ConfirmCard() {
         <div className="p-5 sm:p-6">
           <div className="flex items-center gap-2">
             <AlertTriangle size={16} className="text-amber" />
-            <h2 id="confirm-title" className="label-caps text-amber">Confirm action</h2>
+            <h2 id="confirm-title" className="label-caps text-amber">{offer ? "Delegate?" : "Confirm action"}</h2>
             <VerificationBadge status={v.status} by={v.by} />
           </div>
 
@@ -129,16 +131,40 @@ export function ConfirmCard() {
               <Waveform state="listening" height={28} className="max-w-40" />
             ) : (
               <span className="truncate text-xs text-ink-2">
-                Say <b className="text-ink">“yes”</b> or <b className="text-ink">“no”</b>
+                {offer ? (
+                  <>
+                    Say <b className="text-ink">“yes”</b>, <b className="text-ink">“park it”</b> or <b className="text-ink">“not now”</b>
+                  </>
+                ) : (
+                  <>
+                    Say <b className="text-ink">“yes”</b> or <b className="text-ink">“no”</b>
+                  </>
+                )}
               </span>
             )}
           </div>
-          <button onClick={() => reject("declined")} className="pill-glass shrink-0">
-            <X size={15} /> Cancel
-          </button>
-          <button onClick={() => void approve("tap")} className="pill-primary shrink-0">
-            <Check size={15} /> Approve
-          </button>
+          {offer ? (
+            <>
+              <button onClick={() => reject("declined")} className="pill-glass shrink-0">
+                <X size={15} /> Not now
+              </button>
+              <button onClick={() => parkPending()} className="pill-glass shrink-0" title="Save this brainstorm to your Brainstorm list — nothing runs">
+                <Archive size={15} /> Park it
+              </button>
+              <button onClick={() => void approve("tap")} className="pill-primary shrink-0">
+                <Send size={15} /> Delegate
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => reject("declined")} className="pill-glass shrink-0">
+                <X size={15} /> Cancel
+              </button>
+              <button onClick={() => void approve("tap")} className="pill-primary shrink-0">
+                <Check size={15} /> Approve
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>,

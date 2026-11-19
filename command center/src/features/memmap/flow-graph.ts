@@ -189,7 +189,7 @@ export function edgesForStep(s: TraceStep): FlowHit {
   }
 }
 
-const IPC_MEMWRITE = new Set(["dev_task_add", "dev_task_update", "dev_task_delete", "memory_harvest", "memory_flush", "memory_mount"]);
+const IPC_MEMWRITE = new Set(["dev_task_add", "dev_task_update", "dev_task_delete", "dev_fix_queue", "memory_harvest", "memory_flush", "memory_mount"]);
 const IPC_MEDIA = new Set(["spotify_control", "spotify_play", "spotify_play_uri"]);
 
 /**

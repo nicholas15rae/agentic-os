@@ -17,9 +17,13 @@
 //! SSE loop wrapped in [`barge::BargeIn::until_cancelled`]. No echo cancellation: on open speakers
 //! the assistant's own voice can trigger barge-in, so use a headset or set `bargeIn: false` until
 //! AEC lands.
+//!
+//! `ducker` is separate from the engine: the only WASAPI *session* code (it lowers the Spotify
+//! desktop app's own session volume while you talk to Tony; see its module docs).
 
 pub mod barge;
 pub mod commands;
+pub mod ducker;
 pub mod engine;
 pub mod resample;
 pub mod ring;

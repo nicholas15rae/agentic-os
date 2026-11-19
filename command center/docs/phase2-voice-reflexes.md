@@ -32,12 +32,14 @@ not included yet; don't invent it.
   and non-empty, send it as the multipart `prompt` field. Check that whisper.cpp's server reads
   `prompt` on the `--inference-path /v1/audio/transcriptions` route (check `whisper.cpp/examples/server`).
 - Default value (written as natural speech on purpose, not a comma list):
-  `"Tony, Gabagool mode. Take it ease. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint."`
+  `"Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint."`
 - Add an editable text box for it in Settings → Voice (STT section), saved through the existing provider-update path.
 - **Hallucination guard (required).** `base.en` sometimes repeats its prompt back on near-silent clips. In
   `stt_transcribe`, after the existing `junk` filter, drop the transcript when it contains a run of **4 or more
   consecutive prompt words in prompt order** (case- and punctuation-insensitive). Short real phrases like "cut it"
-  or "take it ease" must still pass. Add Rust unit tests for both cases.
+  or "take it easy" must still pass. Add Rust unit tests for both cases.
+- **P5 update:** the default now says "Take it easy." as its own sentence (never right after "Tony"/"Hey"), so a real
+  "Tony, take it easy" / "Hey, take it easy" can never match a 4-word prompt run and be dropped.
 
 ---
 
@@ -59,15 +61,23 @@ easy to extend; every new phrase that shows up in live use goes in as a test cas
 | Kind | Phrases (+ Whisper variants) |
 |---|---|
 | **cut** | cut it, cut it out, cut that, cutit, yo tony cut it, tony cut it, stop talking, stop stop |
-| **hold — multi-word** | take it ease, take it easy, take it eas, take it ees, take it knees, take at ease, take it is, madone, madonna, ma donna, my donna, mad one, aspetta, aspett, aspet, a spetta, ah spet |
+| **cut — leading or standalone only** | stop, stop it, shut off, shut it off, shut it down |
+| **"take it easy" family — depends on context (P5)** | take it ease, take it easy, take it eas, take it ees, take it knees, take at ease, take it is; hey kitties (Whisper's "take it easy", only as the whole line) |
+| **hold — multi-word** | madone, madonna, ma donna, my donna, mad one, aspetta, aspett, aspet, a spetta, ah spet |
 | **hold — single syllable** | whoa, woah, oh, eh, aye, ay |
-| **hold — only if standalone** | hey kitties (a Whisper mishearing of "take it ease"; never match it as a prefix) |
 | **resume** | keep going, go on, continue, carry on, where were you, you were saying |
 | **submit** | go ahead, run that, over to you, that's it, send it |
 
 Rules:
 1. **cut** matches when the whole utterance is ≤ 5 words and contains a cut phrase, or when it starts with one. It
-   applies in every state.
+   applies in every state. A cut phrase straight after a negator ("don't cut it", "don't stop talking") never
+   counts, and the stop-initial phrases (stop talking, stop stop) count only at the start of the line.
+   **Bare hard stops** (stop, stop it, shut off, shut it off, shut it down) cut only when the line *is* one or
+   *starts* with one, after address words or "please" ("Stop.", "Tony, shut it off", "stop, what's next?",
+   "stop the timer"). Anywhere else, mid-sentence or negated ("don't stop the music", "please don't stop", "when
+   does the music stop"), the line goes to the normal grammars and the LLM. Whatever follows a leading stop is
+   dropped with the turn. These carry `needsAddress`: a passive hands-free listen needs the wake word for them, a
+   yes/no listen keeps a bare "stop" as its "no", and while a cue plays it is the cue's own stop.
 2. **Single-syllable holds** (oh/eh/aye/whoa) count only when `busy || holding` **and** the whole utterance is that
    word, repeats allowed ("whoa whoa"). "Oh, and add milk" is **never** a hold. In **speakers** mode (see
    Decisions → audio route), add `ctx.ttsAudible: boolean` and don't count them while Tony/an agent is audibly speaking
@@ -75,7 +85,20 @@ Rules:
    holds and cut phrases always count.
 3. **Multi-word holds** count standalone or as a prefix. As a prefix, return `kind: "hold"` with `rest` = what
    came after it, which becomes the first held segment. When idle (`!busy && !holding`) they still enter hold.
-   This is the "thought-form lock": "take it ease, I'm thinking about…".
+   This is the "thought-form lock": "madone, I'm thinking about…" / "take it easy, I'm thinking about…".
+3a. **The "take it easy" family (P5, supersedes the old always-hold rule)** depends on context. While Tony is talking
+   or a turn is thinking/executing (`busy`), or while already holding, it is a **hold** exactly as before (a prefix
+   keeps its rest). When Tony is idle / just listening and the phrase is the **whole line** (lead words hey/yo/ok/
+   okay/alright/so/um/uh/tony/yeah/please; tail words please/tony/now/then/yeah/man/nic/nicky/buddy/bro/okay/ok), it is
+   a **stand-down** (`kind: "standdown"`). Idle with more after it stays the hold-with-rest thought-form lock.
+   Mid-sentence and negated uses ("I take it easy on weekends", "don't take it easy") are `null`. Never a
+   stand-down while Tony is audible (`ttsAudible`), and a passive listen ignores it while Spotify is audible here
+   (`musicAudible`: a lyric) unless the wake word came first. Cut still wins over everything.
+   **Stand-down** (`standDown()` in the controller): drops a hold (media released first), cancels every stream and
+   Tony's speech, rejects a pending card silently (never approves), turns hands-free **off and persists it**
+   (`wakeMode:false`), stops the mic and releases every duck, then says one short cached line ("Got it, taking it
+   easy."). It never pauses Spotify, never re-arms, opens no barge-in or follow-up listen. It acts without the wake
+   word in a passive listen and inside a yes/no listen. Typed "take it easy" (idle) stands down too.
 4. **resume / submit** only count when `holding`. Otherwise return `null`, so "go ahead and book it" still works as a
    normal command.
 5. Otherwise return `null`, which means a normal command.
@@ -83,7 +106,9 @@ Rules:
 **Required fixtures** (my real phrasing, said in a row):
 `"Take it ease." "Take it easy" "take it eas" "eh" "aye" "whoa" "oh" "madone" "aspetta" "Aspet" "aspett"`.
 Each one is a hold when `busy`. Negative cases: `"oh and add milk"` (busy) → null; `"oh"` (idle) → null;
-`"go ahead and email Sam"` (not holding) → null; `"take it easy on the bass"` (busy) → hold with rest `"on the bass"`.
+`"go ahead and email Sam"` (not holding) → null; `"take it easy on the bass"` (busy, or idle) → hold with rest `"on the bass"`.
+P5 fixtures: `"take it easy"`, `"Hey, take it easy"`, `"Hey Tony, take it easy"`, `"take it easy man"`, `"Take it easy, Nic."`,
+`"Hey kitties."` → stand-down when idle, hold when busy or holding.
 
 ---
 
@@ -116,7 +141,7 @@ Each one is a hold when `busy`. Negative cases: `"oh and add milk"` (busy) → n
   (`stopAllAudio()` in `player.ts`; the Spotify pause in `os-intents.ts`). Spotify is only *paused*, never
   disconnected, and it doesn't auto-resume after a cut.
 
-### 3c. Hold mode — "take it ease" / "whoa" / "aspetta"
+### 3c. Hold mode — "whoa" / "madone" / "aspetta" (and "take it easy" over a busy turn)
 - New voice state `"holding"` in `voice-store.ts`, shown as **HOLDING** on the orb, HUD and TopBar (same style as
   STANDBY).
 - On enter:
@@ -137,6 +162,52 @@ Each one is a hold when `busy`. Negative cases: `"oh and add milk"` (busy) → n
   - **cut** → `killTurn()`.
   - **Timeout:** 90 s with no speech → drop the paused audio quietly, keep the turns on screen, go idle.
 - Typed equivalents: the Esc key still means hard stop (`stopVoice`). Add a HUD **Resume** button while holding.
+
+### 3d. Music duck while you talk to Tony (P4)
+- **BY, not TO.** Spotify drops BY `conversation.mediaDuck.reductionPct` (default **15 %**, so it plays at 85 %;
+  Settings slider 0–50 %, step 5). It never mutes, and Tony's own voice and the cue audio are never lowered.
+- **Local first.** Rust `media_duck` / `media_unduck` (`src-tauri/src/audio/ducker.rs`) fade the Spotify desktop
+  app's own Windows audio session (WASAPI `ISimpleAudioVolume` on Spotify.exe sessions, every active render
+  endpoint) down in **120 ms** and back in **320 ms**, interpolated in dB and timed by `Instant::elapsed`. One
+  COM-initialised worker thread owns every COM object. Spotify only: there is deliberately no "all apps" scope.
+- **Never ourselves.** Our whole process tree (ToolHelp walk from our PID) is excluded, which covers the WebView2
+  audio utility that actually plays Tony and the cues. System sounds, inactive, muted and multi-process sessions
+  are skipped too.
+- **Web API fallback.** Only when no local Spotify session exists (`spotifyLocal: false`) and the toggle is on:
+  one relative `spotify_duck { reduction }` PUT, no fade (rate limits + 200–600 ms client lag). Never both, so
+  never 85 % × 85 %.
+- **When.** Explicit triggers (tap, Ctrl+Shift+Space, orb, a yes/no card listen, "Hey Tony" then a listen, a line
+  that passed the wake word) duck at listen start (`duckOnTrigger`). Passive hands-free and follow-up listens
+  duck on VAD onset, only with `onWakeListen`. A command holds the duck until its turn settles **and** Tony is
+  quiet (`ttsIdle()`, which also resolves the moment speech is cancelled), capped at 15 s (3 s when only the Web
+  API duck is active). Between the end of speech ('transcribing') and the transcript nothing restores (capped at 15 s for
+  a transcript that never arrives), so a slow Whisper round trip can't bring the music back before a command is known.
+  A line that wasn't for Tony comes back after `restoreMs` (default 800 ms), then a 4 s
+  anti-pumping cooldown. A cut / hold restores once its pause lands; a stand-down restores at once.
+- **Ownership.** The original level is snapshotted once per live duck; a restore leaves alone a session the
+  user moved since (> 0.02 from what we last set); a duck arriving mid-ramp reverses from where it is.
+- **Gates.** The kill switch blocks NEW ducks (local and Web API); restores are never gated. Silent: no card, no
+  bridge log line, no process names in logs.
+- **Crash safety.** `<config dir>/media-duck.json` is written before the first level change. `ducker::recover`
+  (app setup) puts back any session still at the duck target, matching the same session or, if Spotify was
+  restarted, the same app; if Spotify isn't running it keeps the entry for the next duck. `restore_now` runs on
+  `ExitRequested` / `Exit`.
+- **Settings v6.** `conversation.spotifyDuck{level}` (the old absolute "TO 15 %") became
+  `conversation.mediaDuck{enabled, reductionPct, restoreMs, onWakeListen, webApiFallback}`; the migration keeps
+  `enabled` / `onWakeListen`, forces 15 %, and drops `level` so it can't be reread with the new meaning.
+- **Barge-in `onError` fix.** An STT error over a ducked reply now un-ducks Tony, resets `barged`/`ducked`, keeps
+  the orb on "speaking" and re-arms the barge-in listen (at most twice per reply); otherwise it shows the error
+  and re-arms hands-free. Previously Tony stayed at the duck gain, no follow-up listen opened and the orb said
+  "error" while he talked.
+- **Manual checks (not verified by the build).**
+  1. Spotify playing on this PC → tap the mic: it drops to about 85 % in about 0.1 s; after Tony's confirmation
+     it comes back in about 0.3 s. Tony and the Gabagool theme are never lowered.
+  2. Kill the app mid-duck (Task Manager), relaunch: Spotify is back at its level.
+  3. Does Spotify mirror its Windows session volume into its Connect `volume_percent` (the widget slider)? If yes,
+     the widget would show 85 % while ducked: extend `shown_volume` in `spotify.rs` to mask the local duck.
+  4. Windows Sound → Communications: if "reduce other sounds by 80 %" stacks with this when the mic opens, set
+     it to "Do nothing".
+  5. Lyrics through open speakers trip the VAD more at −1.4 dB than under the old deep duck (accepted, U11).
 
 ---
 
@@ -170,7 +241,9 @@ Details:
   wasn't exercised live.
 - Live test checklist for me to run in `npm run desktop:dev`:
   1. Ask a long question → say "cut it" mid-answer → silence within a second; no more tokens stream.
-  2. Ask a long question → "take it ease" → HOLDING shows, Tony is paused → "keep going" → he restarts the same sentence.
+  2. Ask a long question → "take it easy" → HOLDING shows, Tony is paused → "keep going" → he restarts the same sentence.
+     Idle, hands-free on → "Hey, take it easy" (no wake word) → short ack, orb idle, hands-free off, Spotify unducked
+     but not paused, no follow-up listen.
   3. Spotify playing → "whoa" mid-answer → music and Tony pause → add a thought → "go ahead" → one combined turn is
      sent; Spotify resumes.
   4. Idle → "oh what's the weather" → normal answer (no hold).

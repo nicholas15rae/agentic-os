@@ -3,13 +3,15 @@ import type { WidgetProps } from "@/core/widgets/types";
 import { STATE_LABEL, useThreadTurns, useVoice } from "@/features/voice/voice-store";
 import { useOsName } from "@/features/os/os-store";
 import { Waveform } from "@/features/voice/Waveform";
-import { CommandInput, MicButton, STATE_DOT } from "@/features/voice/VoiceParts";
+import { CommandInput, MicButton, STATE_DOT, useTonyThread } from "@/features/voice/VoiceParts";
 import { voiceCaps } from "@/features/voice/voice-controller";
 
 /** The docked voice HUD — anchored centre stage on the Command board. */
 export default function VoiceConsole({ size }: WidgetProps) {
   const { state, partial, error } = useVoice();
-  const turns = useThreadTurns();
+  // Tony's own thread (where voice writes), never whichever Agents tab is open.
+  const tonyThread = useTonyThread();
+  const turns = useThreadTurns(tonyThread);
   const name = useOsName();
   const setConsoleVisible = useVoice((s) => s.setConsoleVisible);
   const ref = useRef<HTMLDivElement>(null);
@@ -57,7 +59,7 @@ export default function VoiceConsole({ size }: WidgetProps) {
 
       {tall && (
         <div className="mt-3">
-          <CommandInput thread="auto" />
+          <CommandInput thread={tonyThread} />
         </div>
       )}
     </div>

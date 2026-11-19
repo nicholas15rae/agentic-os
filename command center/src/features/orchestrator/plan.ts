@@ -4,6 +4,7 @@ import { DEFAULT_ROUTING_CONFIG, directTool, resolve as resolveRoute } from "@/f
 import { extractJson } from "@/features/orchestrator/extract-json";
 import { parseDraftEmail, type DraftParse } from "@/features/orchestrator/draft-email";
 import { isOsControlPhrase } from "@/features/os/os-intent-parse";
+import { isCommitCue, parseDefer } from "@/features/dialogue/tier";
 import { useOs } from "@/features/os/os-store";
 import { useSettings } from "@/stores/settings";
 import type { ThreadId } from "@/features/voice/voice-store";
@@ -60,13 +61,20 @@ export interface ActionPlan {
   /** In-memory only: for bridge plans, what to run once approved / when cancelled. */
   run?: () => Promise<{ text: string; meta: string }>;
   onCancel?: () => void;
+  /** P3 Tier 3: a delegation OFFER card (Delegate / Park it / Not now). Its replies accept
+   * "park it" / "save it for later", and every way it closes without a yes is silent. */
+  offer?: "delegate";
+  /** P3 Tier 2: Tony answers himself — `os_turn` gets `noDelegate`, nothing is re-routed. */
+  noDelegate?: boolean;
+  /** P3 Tier 3: the approved delegation's agent (osRun routes there instead of resolving). */
+  delegateTo?: AgentRole;
 }
 
 // ── Heuristics ───────────────────────────────────────────────────────────────
 
 /** Verbs that change the world. Over-matching is fine: it only adds a confirmation. */
 const MUTATING =
-  /\b(cancel|delete|remove|erase|wipe|send|reply|forward|post|publish|tweet|share|upload|book|reserve|rsvp|buy|purchase|order|pay|transfer|refund|schedule|reschedule|move|create|add|invite|update|change|edit|rename|set|turn (on|off)|deploy|push|merge|commit|restart|reboot|stop|kill|shut ?down|start|launch|run|trigger|execute|unsubscribe|archive|install|uninstall|approve|accept|decline|sign)\b/i;
+  /\b(cancel|delete|remove|erase|wipe|send|reply|forward|post|publish|tweet|share|upload|book|reserve|rsvp|buy|purchase|order|pay|transfer|refund|schedule|reschedule|move|create|add|invite|update|change|edit|rename|set|turn (on|off)|deploy|push|merge|commit|restart|reboot|stop|kill|shut ?down|start|launch|run|trigger|execute|unsubscribe|archive|mark|mute|unmute|block|install|uninstall|approve|accept|decline|sign)\b/i;
 
 /** A plain question ("when is my dinner?") isn't an action — unless it chains one ("…and cancel it"). */
 const QUESTION = /^(what|when|where|who|whom|whose|why|how|which|is|are|was|were|do|does|did|has|have|any)\b/i;
@@ -80,12 +88,14 @@ const COMMAND_VERB = /(^|\b(and|then|also)\s+)(e-?mail|text|message|dm|ping|call
  * Spotify library edits ("add this song to my Late Night playlist") are Tony's too: the Rust tool
  * path gates them (MCP tier + destructive gate) and raises the card itself (`askCards`). Other
  * library-ish verbs without a Spotify/playlist word ("send this song to Sam") stay mutating. */
-const PLAYBACK = /\b(play(ing)?|pause|resume|skip|next|previous|restart|start|change|switch|put on|stop|turn|set|queue|shuffle|repeat|like|add|save|create|make)\b.*\b(spotify|music|songs?|tracks?|playlists?|albums?|tunes?|volume)\b/i;
+const PLAYBACK = /\b(play(ing)?|pause|resume|mute|unmute|skip|next|previous|restart|start|change|switch|put on|stop|turn|set|queue|shuffle|repeat|like|add|save|create|make)\b.*\b(spotify|music|songs?|tracks?|playlists?|albums?|tunes?|volume)\b/i;
 const LIBRARY_EDIT = /\b(add|save|like|remove|delete|create|follow|unfollow|share|send|post|rename)\b/i;
 const isPlayback = (s: string) => PLAYBACK.test(s) && (!LIBRARY_EDIT.test(s) || /\b(spotify|playlists?|liked songs)\b/i.test(s));
 
-/** "update" as a noun ("any updates?", "give me an update", "update me on…") asks for news, not a change. */
-const UPDATE_NOUN = /\b(?:an?|any|the|latest|status|quick)\s+updates?\b|\bupdate me\b|\bgive me (?:an? )?updates?\b/gi;
+/** "update" as a noun in a request for news ("any updates?", "give me an update", "ask the coder for
+ * an update", "update me on…"), not a change. Only after a news-asking word: "apply the latest
+ * update" / "ship the update" keep their only MUTATING word and stay actions. */
+const UPDATE_NOUN = /\b(?:give me|get me|send me|any|for|need|want|got|whats|what's|what is|is there|are there)\s+(?:(?:an?|the|any)\s+)?(?:(?:latest|status|quick|new)\s+)?updates?\b|\bupdate me\b|\bstatus updates?\b/gi;
 
 function looksMutating(utterance: string): boolean {
   const s = utterance.trim().replace(filler(), "").replace(UPDATE_NOUN, " ");
@@ -149,6 +159,12 @@ function fallbackRole(utterance: string): AgentRole {
   return (route.role as AgentRole) ?? "general";
 }
 
+/** A read question for Tony's own live tools; a Named delegation keeps its agent (and its card). */
+function liveRead(utterance: string): boolean {
+  if (!directTool(utterance)) return false;
+  return resolveRoute(utterance, useOs.getState().cfg?.routing ?? DEFAULT_ROUTING_CONFIG).kind !== "Named";
+}
+
 export function heuristicPlan(utterance: string, role?: AgentRole): ActionPlan {
   const r = role ?? fallbackRole(utterance);
   const intent = cleanIntent(utterance);
@@ -164,8 +180,12 @@ export function heuristicPlan(utterance: string, role?: AgentRole): ActionPlan {
   // "turn off gabagool mode" matches MUTATING's `turn (on|off)`, but the OS-control
   // intent layer (voice-controller.ts) owns these phrases before the plan is ever
   // built — they must never become a mutating plan for a gateway agent.
-  // A live-tool read question ("any WhatsApp updates?") is never an action (`directTool`).
-  const mutating = looksMutating(utterance) && !isOsControlPhrase(utterance, useSettings.getState().osName) && !isPlayback(utterance) && !directTool(utterance);
+  // A live-tool read question ("any WhatsApp updates?") is never an action (`directTool`), unless
+  // it's a Named delegation ("Booking, order an umbrella…"): that agent's write keeps its card.
+  // A Tier-4 save ("add it to my brainstorming list") is parked in-process by the voice
+  // controller — never a mutating plan for a gateway agent, even if it reached the planner.
+  const osName = useSettings.getState().osName;
+  const mutating = looksMutating(utterance) && !isOsControlPhrase(utterance, osName) && !isPlayback(utterance) && !liveRead(utterance) && !parseDefer(utterance, osName || "Tony");
   const plan: ActionPlan = {
     id: crypto.randomUUID(),
     utterance,
@@ -366,4 +386,28 @@ export function parseConfirmation(reply: string): "yes" | "no" | "unclear" {
   if (NO.test(r)) return "no";
   if (YES.test(r) && !/\b(but|except|instead|change|wait|not)\b/i.test(r)) return "yes";
   return "unclear";
+}
+
+/** "Delegate it" / "send it over" — a yes that only makes sense on a delegation offer. */
+const DELEGATE = /^(delegate( it| that)?|send it( over)?|hand it (off|over)|pass it on)\b/i;
+/** Park / save on an offer card — checked BEFORE NO, so "nah, save it for later" saves. */
+const PARK_REPLY = /^((nah|no|nope|naw)[\s,.!]+)?((park|shelve)\b|(save|stash|keep|hold onto|hang onto) (it|this|that)\b|save (it )?for later\b)|^(maybe )?later\b|^(for|till|until) later\b|^another time\b/i;
+/** "Not now" closes the offer without saving (the card's "Not now" button). */
+const NOT_NOW = /^(not (now|yet|today|right now)|no thanks|no thank you)\b/i;
+
+/**
+ * Replies to a Tier-3 delegation OFFER card. Park / save comes first (so "nah, save it for later"
+ * is not a no), then the normal strict yes / no; anything else is "other" (the card drops
+ * silently and the line is a new turn). `parseConfirmation` is unchanged for every other card.
+ */
+export function parseOfferReply(reply: string): "yes" | "no" | "park" | "other" {
+  const r = reply.trim().replace(filler(), "").replace(/^[^\w']+/, "");
+  if (PARK_REPLY.test(r) || parseDefer(reply, useSettings.getState().osName || "Tony")) return "park";
+  if (NOT_NOW.test(r)) return "no";
+  if (DELEGATE.test(r) && !/\b(but|except|instead|wait|not)\b/i.test(r)) return "yes";
+  const v = parseConfirmation(reply);
+  // A commit cue ("ok let's do it", "sounds good", "lock it in", "ship it") is the yes the offer
+  // asked for: as "other" it re-entered as a new Tier-3 turn and raised the same card again.
+  if (v === "unclear" && isCommitCue(reply, useSettings.getState().osName || "Tony")) return "yes";
+  return v === "unclear" ? "other" : v;
 }

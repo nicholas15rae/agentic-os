@@ -260,3 +260,13 @@ Switches (via `useOsCfg()`: errors surface under them; disabled outside the desk
 - **Overload Cap**: `compute.mode` hybrid ⇄ local. Disabled (not collapsed) when the mode is `cloud`. Hybrid also offloads heavy contexts, and the hint says so; `vramThresholdPct` is shown read-only.
 
 **Bottom dock** (`TaskDock.tsx`): retitled **Future tasks & autonomous queue**. "Dev queue" tab = the devqueue rows with a coloured status accent (Pending amber, Queued cyan, In Progress teal, Done grey) and the priority badge. "Scheduled" tab = `futureRuns(snap, now)` (format.ts): enabled gateway scheduler jobs with a next run, daemon loops (last run + interval; overdue flagged), active n8n workflows and the GPU-slot queue, sorted by due time; the scheduler / n8n notes show when those sources are missing.
+
+## 9. P6: Claude Code fix queue (2026-11-18)
+
+The dev task queue now feeds Claude Code. Full notes: `HANDOFF.md` §10.
+
+- **Schema v2** (appended, never edits v1): `dispatch TEXT '{}'` (run metadata: mode, state, branch, worktree, logPath, verify, note, commit…) and `tags TEXT '[]'`. Statuses unchanged: Pending = draft, Queued = in the Claude queue, In Progress, Done.
+- **`dev_fix_queue`**: Queued + kind fix + tags `dev-fix`/`claude-queue`; snapshot gains `errors` (≤ 20, `ERROR_KEYS` source/at/hop/label/error, sources trace|gateway|bus|bridge|ui) and UI keys `route` + `focus`. `dev_task_update` can patch `body` (scrubbed).
+- **Queue file** `<repo>/.agenticos/claude-fix-queue.json` + reconcile rules (status/note/commit only, allowed transitions, Done needs a note, SQLite authoritative); 10 s poll.
+- **Live dispatch** `claude_fix.rs`: always a card (Rust-enforced), own worktree on `fix/<id8>`, fixed argv, Rust-run verify decides Done.
+- **UI**: Ledger tab "Dev Fix · Claude Queue", TaskDock Claude button, TraceStream Queue fix → `queueFix`. `dev_fix_queue` flashes the Memory DB node (IPC_MEMWRITE).

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { heuristicPlan, stripWake } from "./plan";
+import { heuristicPlan, parseConfirmation, parseOfferReply, stripWake } from "./plan";
 
 const desktop = () => vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
 afterEach(() => vi.unstubAllGlobals());
@@ -110,5 +110,75 @@ describe("heuristicPlan — 'update' questions are read-only", () => {
     expect(heuristicPlan("set the meeting for Friday", "booking").mutating).toBe(true);
     expect(heuristicPlan("update my status update template", "general").mutating).toBe(true);
     expect(heuristicPlan("reply to Sam on WhatsApp", "general").mutating).toBe(true);
+  });
+
+  it.each(["apply the latest update to the server", "roll back the update", "ship the update to production", "download the update"])(
+    "an 'update' noun after an action verb stays mutating: %s",
+    (s) => {
+      expect(heuristicPlan(s, "general").mutating).toBe(true);
+    },
+  );
+});
+
+describe("heuristicPlan — live-tool words never hide a write", () => {
+  it.each([
+    "pay the invoice from the latest email",
+    "add the new emails from Sam to my todo list",
+    "mark all emails from Sam as read",
+    "cancel the meeting from my inbox invite",
+    "add umbrella to my shopping list",
+    "update the sales forecast spreadsheet",
+    "schedule a meeting with Sam about the forecast",
+    "email the forecast to Sam",
+    "mute the WhatsApp chat with Sam",
+    "buy an umbrella on amazon",
+    "Booking, order an umbrella for the shoot",
+    "Ops, turn off the weather alerts",
+  ])("%s", (s) => {
+    expect(heuristicPlan(s, "general").mutating).toBe(true);
+  });
+
+  it("a live read question stays read-only", () => {
+    expect(heuristicPlan("check my inbox", "general").mutating).toBe(false);
+    expect(heuristicPlan("will it rain tomorrow", "general").mutating).toBe(false);
+  });
+});
+
+describe("P3 — offer replies and defer lines", () => {
+  it("parseConfirmation is unchanged: nah / no / not now are never a yes", () => {
+    expect(parseConfirmation("nah")).toBe("no");
+    expect(parseConfirmation("nah, save it for later")).toBe("no");
+    expect(parseConfirmation("no")).toBe("no");
+    expect(parseConfirmation("yes")).toBe("yes");
+    expect(parseConfirmation("yes, but change the time")).toBe("unclear");
+    expect(parseConfirmation("park it")).toBe("unclear");
+  });
+
+  it("parseOfferReply: park / save before no", () => {
+    for (const r of ["nah, save it for later", "nah save it", "park it", "Park it.", "save it for later", "later", "maybe later", "put it in Play Place", "add it to my brainstorming list", "no, park that"]) {
+      expect(parseOfferReply(r), r).toBe("park");
+    }
+  });
+
+  it("parseOfferReply: yes / delegate", () => {
+    for (const r of ["yes", "yeah", "go ahead", "do it", "Hey Tony, yes", "delegate it", "send it over"]) expect(parseOfferReply(r), r).toBe("yes");
+    expect(parseOfferReply("yes but not yet")).toBe("other");
+  });
+
+  it("parseOfferReply: no / not now", () => {
+    for (const r of ["no", "nope", "nah", "not now", "no thanks", "cancel"]) expect(parseOfferReply(r), r).toBe("no");
+  });
+
+  it("parseOfferReply: anything else is a new turn", () => {
+    for (const r of ["actually what about dark mode", "what would it cost", "keep going", "tell me more"]) expect(parseOfferReply(r), r).toBe("other");
+  });
+
+  it("a defer line never becomes a mutating plan", () => {
+    for (const u of ["add it to my brainstorming list", "add this to the ideas and tasks ledger", "put it in Play Place", "move that to the ledger"]) {
+      expect(heuristicPlan(u, "general").mutating, u).toBe(false);
+    }
+    // …while ordinary adds keep their card.
+    expect(heuristicPlan("add a todo to Linear", "general").mutating).toBe(true);
+    expect(heuristicPlan("add milk to my shopping list", "general").mutating).toBe(true);
   });
 });

@@ -33,6 +33,42 @@ export function shownVolume(polled: number | null, local: { value: number; at: n
   return polled;
 }
 
+/** After a seek, polls don't move the scrubber for this long (Spotify reports the old position briefly). */
+export const SEEK_HOLD_MS = 2000;
+/** Unmute target when no earlier non-zero volume is known. */
+export const UNMUTE_FALLBACK = 50;
+
+/** The `seek` action's value: whole SECONDS (Rust's position_sec), floored and kept below the last
+ * second so a seek never skips the track (Rust clamps to duration − 1 s too). */
+export function seekSeconds(ms: number, durationMs: number): number {
+  const s = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000));
+  return durationMs > 0 ? Math.min(s, Math.max(0, Math.floor(durationMs / 1000) - 1)) : s;
+}
+
+/** The scrubber's position: a recent local seek (advanced while playing) wins over the polled one. */
+export function shownPosition(polled: number, local: { value: number; at: number } | null, now: number, playing: boolean, durationMs: number): number {
+  if (!local || now - local.at >= SEEK_HOLD_MS) return polled;
+  const p = local.value + (playing ? Math.max(0, now - local.at) : 0);
+  return durationMs > 0 ? Math.min(p, durationMs) : p;
+}
+
+/** The mute button's volume: 0 when audible, else the last non-zero level (or 50); null when the device has no volume. */
+export function muteTarget(current: number | null, last: number | null): number | null {
+  if (current == null) return null;
+  if (current > 0) return 0;
+  return last != null && last > 0 ? Math.min(100, Math.round(last)) : UNMUTE_FALLBACK;
+}
+
+/** Which speaker icon a volume shows. */
+export const volumeLevel = (v: number): "mute" | "low" | "high" => (v <= 0 ? "mute" : v < 50 ? "low" : "high");
+
+/** Rust's soft NO_VOLUME reply (an Ok string, not an error): the device refused a volume change. */
+export const isNoVolumeReply = (reply: string) => /doesn't let me change its volume/i.test(reply);
+
+/** The NO_VOLUME line to keep showing: only while the device that refused is still the one playing. */
+export const noVolumeNote = (noVol: { device: string; reply: string } | null, device: string | null | undefined) =>
+  noVol && noVol.device === (device ?? "") ? noVol.reply : null;
+
 /** Error replies the widget's player treats as "the sign-in may be dead": it stops polling and
  * re-reads its status, whose `problemKind` then decides what to show. A plain 401 ("Spotify
  * refused the request") is not one of them: a fresh sign-in rarely fixes it. */

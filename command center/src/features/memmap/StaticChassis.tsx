@@ -1,4 +1,4 @@
-import { ARCH_R, BELT, CAR, doorCuts, frameAt, inArch, sideGlass, sideOutline, stationFrames, tailLamp, type V2 } from "./e46-body";
+import { ARCH_R, BELT, CAR, doorCuts, faceProfileX, frameAt, HEADLIGHT, inArch, sideGlass, sideOutline, stationFrames, tailLamp, type V2 } from "./e46-body";
 import { WHEEL } from "./wheel-geometry";
 
 /**
@@ -7,8 +7,11 @@ import { WHEEL } from "./wheel-geometry";
  * Hofmeister kink, door cuts, wheels), so the narrow layout and the 3D fallback match the
  * hologram. It stands in for the 3D view below `md` and while the 3D chunk loads, or when
  * WebGL is unavailable. Purely decorative: no animation, no loop. Paths are built once at
- * module load.
+ * module load. Same cyan / amber as the 3D car (not the --color-holo / --color-ember tokens).
  */
+
+const CYAN = "#00f0ff";
+const AMBER = "#ffaa00";
 
 const K = 92;
 const X0 = 240;
@@ -35,6 +38,9 @@ function clipArches(pts: readonly V2[]): V2[][] {
 const frames = stationFrames();
 const glass = sideGlass();
 const lamp = tailLamp(1).flank.map(([x, y]) => [x, y] as V2);
+/** The headlight's side view: its height on the nose, wrapping back onto the wing. */
+const headTop = Math.max(...HEADLIGHT.map(([, y]) => y));
+const headLow = Math.min(...HEADLIGHT.map(([, y]) => y));
 
 const D = {
   body: path(sideOutline(), true),
@@ -51,17 +57,17 @@ const D = {
     .join(""),
   rail: path(
     Array.from({ length: 13 }, (_, k) => {
-      const x = 0.12 - (2.02 * k) / 12;
-      return [x, frameAt(x).yTop + 0.045] as V2;
+      const x = 0.1 - (1.85 * k) / 12;
+      return [x, frameAt(x).yTop + 0.03] as V2;
     }),
   ),
   tail: path(lamp, true),
   head: path(
     [
-      [2.12, 0.735],
-      [2.215, 0.72],
-      [2.235, 0.64],
-      [2.15, 0.625],
+      [2.08, headTop - 0.004],
+      [faceProfileX("front", headTop) - 0.008, headTop],
+      [faceProfileX("front", headLow) - 0.008, headLow],
+      [2.1, headLow],
     ],
     true,
   ),
@@ -85,12 +91,12 @@ export function StaticChassis({ className = "" }: { className?: string }) {
           </feMerge>
         </filter>
         <pattern id="memmap-grid" width="16" height="16" patternUnits="userSpaceOnUse">
-          <path d="M16 0H0V16" fill="none" stroke="#00d2ff" strokeOpacity="0.07" strokeWidth="0.6" />
+          <path d="M16 0H0V16" fill="none" stroke={CYAN} strokeOpacity="0.07" strokeWidth="0.6" />
         </pattern>
       </defs>
       <rect width="480" height="200" fill="url(#memmap-grid)" />
-      <line x1="20" y1={GROUND} x2="460" y2={GROUND} stroke="#00d2ff" strokeOpacity="0.25" strokeDasharray="2 4" />
-      <g fill="none" stroke="#00d2ff" strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round" filter="url(#memmap-glow)">
+      <line x1="20" y1={GROUND} x2="460" y2={GROUND} stroke={CYAN} strokeOpacity="0.25" strokeDasharray="2 4" />
+      <g fill="none" stroke={CYAN} strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round" filter="url(#memmap-glow)">
         {/* Body: the side profile spline over the long wagon roof, sill and both arches. */}
         <path d={D.body} />
         {/* Greenhouse: front door, rear door, quarter glass with the Hofmeister kink. */}
@@ -102,7 +108,7 @@ export function StaticChassis({ className = "" }: { className?: string }) {
         <path d={D.doors} strokeOpacity="0.35" />
         <path d={D.rail} strokeOpacity="0.6" />
         {/* Lamps. */}
-        <path d={D.tail} stroke="#f59e0b" strokeOpacity="0.9" />
+        <path d={D.tail} stroke={AMBER} strokeOpacity="0.9" />
         <path d={D.head} strokeOpacity="0.9" />
         {/* 18-inch wheels: tyre, rim lip, twin spokes, rotor. */}
         {WHEELS.map(({ cx, cy }) => (
@@ -120,8 +126,8 @@ export function StaticChassis({ className = "" }: { className?: string }) {
         ))}
       </g>
       <g>
-        <rect x="200" y="176" width="80" height="18" rx="3" fill="#06080c" stroke="#f59e0b" strokeOpacity="0.8" />
-        <text x="240" y="189" textAnchor="middle" fontFamily="JetBrains Mono Variable, monospace" fontSize="10" fontWeight="700" letterSpacing="1.5" fill="#f59e0b">
+        <rect x="200" y="176" width="80" height="18" rx="3" fill="#06080c" stroke={AMBER} strokeOpacity="0.8" />
+        <text x="240" y="189" textAnchor="middle" fontFamily="JetBrains Mono Variable, monospace" fontSize="10" fontWeight="700" letterSpacing="1.5" fill={AMBER}>
           GABAGOUL
         </text>
       </g>

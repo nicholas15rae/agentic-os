@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { commandText, hasOnVerb, isOsControlPhrase, parseDevTask, parseOsIntent, resolveModel, type OsIntent } from "./os-intent-parse";
+import { commandText, hasOnVerb, isOsControlPhrase, parseDevDispatch, parseDevTask, parseOsIntent, resolveModel, type OsIntent } from "./os-intent-parse";
+import { parseDefer } from "@/features/dialogue/tier";
 
 const parse = (t: string, cueActive = true) => parseOsIntent(t, { osName: "Tony", cueActive, cuePlaying: cueActive });
 
@@ -395,5 +396,62 @@ describe("parseOsIntent — dev task queue (System Map)", () => {
     expect(parseDevTask("Hi Tony, queue a fix for the mic")?.taskKind).toBe("fix");
     for (const lead of ["Ayo", "Oi", "Ayy", "Ay"]) expect(parseDevTask(`${lead} Tony, log a dev note: the HUD flickers`)?.title).toBe("The HUD flickers");
     expect(parseDevTask("Yeah, log a dev note: the HUD flickers")?.title).toBe("The HUD flickers");
+  });
+});
+
+describe("parseOsIntent — Claude Code fix queue (P6)", () => {
+  it.each<[string, string]>([
+    ["log a dev fix: mic stutters", "Mic stutters"],
+    ["queue a Claude fix for the 401 loop", "The 401 loop"],
+    ["dev fix - HUD flicker", "HUD flicker"],
+    ["Dev fix: the duck stays on", "The duck stays on"],
+    ["claude fix the login loop", "The login loop"],
+    ["Hey Tony, log a Claude Code fix for the Spotify reconnect", "The Spotify reconnect"],
+    ["queue up a dev fix: whisper hangs on long lines", "Whisper hangs on long lines"],
+    ["add a claude fix for the stale bus card", "The stale bus card"],
+    ["queue a fix for the GitHub 401", "The GitHub 401"],
+  ])("%s → a fix for the Claude queue", (text, title) => {
+    expect(parse(text)).toEqual({ kind: "dev-task", taskKind: "fix", title });
+  });
+
+  it.each([
+    "tell the coder to queue a fix for the mic",
+    "ask claude to fix the login loop",
+    "log a fix for the mic", // `log` needs the dev / claude qualifier
+    "dev fix: this",
+    "claude fix",
+    "queue a claude fix for the mic and email it to Sam",
+    "what's in the claude fix queue",
+  ])("%s → not a queued fix", (text) => {
+    const r = parse(text);
+    expect(r?.kind === "dev-task" && r.taskKind === "fix").toBe(false);
+  });
+
+  it.each<[string, string]>([
+    ["run the mic fix with Claude Code", "mic"],
+    ["Tony, send fix 401 loop to Claude", "401 loop"],
+    ["send the fix for the HUD flicker to Claude Code.", "the HUD flicker"],
+    ["dispatch the duck release fix over to claude", "duck release"],
+    ["please run fix stale bus card with claude code", "stale bus card"],
+  ])("%s → a dispatch intent (raises the card, never runs directly)", (text, query) => {
+    expect(parse(text)).toEqual({ kind: "dev-fix-dispatch", query });
+    expect(isOsControlPhrase(text)).toBe(true);
+  });
+
+  it.each(["run the tests with claude", "tell claude to run the fix", "send it to claude", "run the fix", "send this fix to claude", "play the fix by claude"])("%s → no dispatch", (text) => {
+    expect(parseDevDispatch(text)).toBeNull();
+    expect(parse(text)?.kind).not.toBe("dev-fix-dispatch");
+  });
+
+  it("dev-queue phrases beat Part C's defer phrases, and defer lines stay defers", () => {
+    // Part C: "add it to the ledger" parks the conversation (Tier 4), not a dev task.
+    expect(parseDefer("add it to the ledger")).toMatchObject({ target: "ledger" });
+    expect(parse("add it to the ledger")).toBeNull();
+    // "add this to the dev queue: X" stays a dev task, never a defer.
+    expect(parse("add this to the dev queue: wire the blueprint toggle")).toEqual({ kind: "dev-task", taskKind: "task", title: "Wire the blueprint toggle" });
+    expect(parseDefer("add this to the dev queue: wire the blueprint toggle")).toBeNull();
+    // "queue a fix for X" is a Claude-queue fix, never a defer.
+    expect(parse("queue a fix for the mic")).toEqual({ kind: "dev-task", taskKind: "fix", title: "The mic" });
+    expect(parseDefer("queue a fix for the mic")).toBeNull();
   });
 });

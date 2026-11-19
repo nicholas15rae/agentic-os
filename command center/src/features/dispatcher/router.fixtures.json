@@ -223,5 +223,73 @@
     "text": "chat with the designer about the layout",
     "role": "designer",
     "kind": "Named"
+  },
+  {
+    "desc": "not direct: 'what's up, any updates?' is a greeting, not a WhatsApp read",
+    "text": "hey what's up, any updates?",
+    "role": "booking",
+    "kind": "Domain"
+  },
+  {
+    "desc": "not direct: a write that mentions the weather",
+    "text": "add a weather widget to the dashboard",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "not direct: a purchase that mentions an umbrella",
+    "text": "buy an umbrella on amazon",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "not direct: mail-server work, not an inbox read",
+    "text": "check the new mail server config",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "self: a delegation through Tony skips him and keeps scanning for the real agent",
+    "text": "ask tony to ask the coder to fix the build",
+    "role": "coder",
+    "kind": "Named",
+    "taskContains": "fix"
+  },
+  {
+    "desc": "self: thanking Tony is never a routing to Tony",
+    "text": "thanks tony",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: Tony addressed at the head with no agent or topic",
+    "text": "tony what do you think",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: 'tell tony to …' with Tony's own topic stays with Tony",
+    "text": "tell tony to give me the system status",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: Tony's own domain trigger alone",
+    "text": "system status",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: 'the dispatcher' is a self alias, not an agent",
+    "text": "ask the dispatcher to check the build",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: a sub-agent topic still wins over a bare self address",
+    "text": "tony check my whatsapp messages",
+    "role": "booking",
+    "kind": "Domain",
+    "direct": "whatsapp"
   }
 ]

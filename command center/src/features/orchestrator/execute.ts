@@ -54,7 +54,7 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
         vaultNote = ` · vault ${hits.results.length} (${hits.mode})`;
       }
     }
-    const { result } = await dispatch(utterance, { role: plan.role, history });
+    const { result } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate });
     return {
       text: result.content || "(no response)",
       meta: `${agent.label} · ${result.providerId}${result.fellBack ? " · fallback" : ""}${vaultNote} · ${result.latencyMs}ms`,

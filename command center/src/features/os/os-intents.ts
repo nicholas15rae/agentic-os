@@ -60,7 +60,45 @@ export async function runOsIntent(intent: OsIntent, channel?: string): Promise<O
     case "status":
       return { reply: statusSummary() };
     case "dev-task":
+      if (intent.taskKind === "fix") return queueFixAction(intent.title, channel === "voice" ? "voice" : "typed");
       return devTaskAction(intent.taskKind, intent.title, channel === "voice" ? "voice" : "typed");
+    case "dev-fix-dispatch":
+      return dispatchFixAction(intent.query, channel === "voice" ? "voice" : "text");
+  }
+}
+
+/**
+ * "Queue a Claude fix for …" / "dev fix: …" / "queue a fix for …": straight into the Claude
+ * Code fix queue (devqueue.db → `.agenticos/claude-fix-queue.json`) as Queued, with the recent
+ * failed trace steps and the UI route attached. Local and reversible: no card, no agent. The
+ * store is loaded on demand so the System Map chunk stays out of the main bundle.
+ */
+async function queueFixAction(title: string, source: "voice" | "typed"): Promise<OsIntentResult> {
+  if (!isTauri()) return { reply: "The dev queue lives in the desktop app." };
+  try {
+    const { queueFix } = await import("@/features/memmap/dev-queue");
+    const t = await queueFix({ title, source });
+    notifyDevQueueChanged();
+    return { reply: `Queued a fix for Claude Code (${t.category}, P${t.priority}). It's in the Dev Fix queue.` };
+  } catch (e) {
+    return { reply: `Couldn't queue that fix: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * "Run the mic fix with Claude Code": find the open fix and RAISE the confirmation card. Nothing
+ * runs before its yes (and Rust refuses the run without `approved: true` anyway).
+ */
+async function dispatchFixAction(query: string, channel: "voice" | "text"): Promise<OsIntentResult> {
+  if (!isTauri()) return { reply: "Claude Code fix runs start from the desktop app." };
+  try {
+    const { dispatchFix, matchFix } = await import("@/features/memmap/dev-queue");
+    const t = matchFix(await cmd("dev_task_list", {}), query);
+    if (!t) return { reply: `I couldn't find an open fix matching “${query}”. Queue it first: “queue a Claude fix for …”.` };
+    void dispatchFix(t, channel).catch(() => undefined);
+    return { reply: `Running “${t.title}” with Claude Code in its own worktree needs your OK.`, card: true };
+  } catch (e) {
+    return { reply: `Couldn't start that fix: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 

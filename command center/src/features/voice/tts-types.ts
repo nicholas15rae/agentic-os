@@ -19,6 +19,12 @@ export interface SpeakOpts {
   /** Keep this line's audio for the session (Phase 2 §4: Tony's per-agent intro lines), so
    * repeats cost no synthesis call or wait. Engines without a cache ignore it. */
   cache?: boolean;
+  /** P1: the reply this line belongs to — the scope of Rust's ElevenLabs circuit breaker
+   * (one failure sends the rest of the reply to local TTS, with one notice). Every
+   * `prefetch`/`speak` pair of one reply must pass the same id. NOT part of the prefetch
+   * cache key, and never sent for `cache: true` lines (they use Rust's per-call path, so a
+   * breaker cooldown can't pin local audio for an intro). `speak()` mints one if missing. */
+  utteranceId?: string;
 }
 
 export interface TtsEngine {

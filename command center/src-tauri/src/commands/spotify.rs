@@ -1316,7 +1316,13 @@ fn parse_now_playing(v: &Value) -> NowPlaying {
 }
 
 async fn now_playing(state: &DispatchState) -> Result<NowPlaying, String> {
-    get(state, "/me/player", &[("additional_types", "episode".into())]).await.map(|v| parse_now_playing(&v))
+    let v = get(state, "/me/player", &[("additional_types", "episode".into())]).await?;
+    let mut np = parse_now_playing(&v);
+    // Never wait on a duck / restore in flight: a poll then just shows the raw level.
+    if let Ok(duck) = DUCK.try_lock() {
+        np.volume = shown_volume(np.volume, duck.as_ref(), v["device"]["id"].as_str());
+    }
+    Ok(np)
 }
 
 fn mmss(ms: u64) -> String {
@@ -2488,12 +2494,18 @@ async fn h_volume(state: &DispatchState, args: &Value) -> Result<String, String>
         return Ok(NO_VOLUME.into());
     }
     let reported = p["device"]["volume_percent"].as_u64().map(|v| v.min(100) as u8);
-    // An explicit volume change while ducked: "+15" counts from the real (pre-duck) level, and
-    // taking the duck means no restore runs over the new value. Waits out a duck still in flight.
-    let duck = DUCK.lock().await.take();
-    let current = volume_base(reported, duck.as_ref(), p["device"]["id"].as_str());
-    let pct = volume_target(current, args.get("percent"))?;
-    soft(control_call(state, reqwest::Method::PUT, "/me/player/volume", &[("volume_percent", pct.to_string())]).await, format!("Spotify volume {pct}%."))
+    let device_id = p["device"]["id"].as_str();
+    // An explicit volume change while ducked: "+15" counts from the real (pre-duck) level. The lock
+    // is held through the PUT (waiting out a duck in flight, and keeping a restore from racing it);
+    // the duck is dropped only once the new level landed, so a bad percent or a failed PUT leaves
+    // it for the normal restore.
+    let mut duck = DUCK.lock().await;
+    let pct = volume_target(volume_base(reported, duck.as_ref(), device_id), args.get("percent"))?;
+    let r = control_call(state, reqwest::Method::PUT, "/me/player/volume", &[("volume_percent", pct.to_string())]).await;
+    if r.is_ok() && duck.as_ref().is_some_and(|d| device_id == Some(d.device_id.as_str())) {
+        *duck = None;
+    }
+    soft(r, format!("Spotify volume {pct}%."))
 }
 
 async fn h_shuffle(state: &DispatchState, args: &Value) -> Result<String, String> {
@@ -2723,12 +2735,16 @@ async fn control(state: &DispatchState, os: &OsState, action: &str, value: Optio
 
 // ── Speech ducking (Phase 2 reflex) ─────────────────────────────────────────
 //
-// While you talk over music on THIS PC, Spotify drops to a low level so the mic hears you,
-// then comes back (`spotify-duck.ts` decides when). Best effort and silent: any refusal is just
-// "not ducked". Not a tool: no bridge log line, since it fires on every speech onset.
+// While you talk over music on THIS PC, Spotify drops a little so the mic hears you, then comes
+// back (`media-duck.ts` decides when). P4: the local WASAPI session duck (`audio/ducker.rs`) is
+// the primary path; this Web API duck is only the fallback when no local Spotify session exists
+// but Spotify plays on this PC (a single relative PUT, no fade: rate limits + 200-600 ms client
+// lag). Best effort and silent: any refusal is just "not ducked". Not a tool: no bridge log line.
 
-/// Default duck level (%).
+/// Default absolute duck level (%) for the legacy `{ level }` call.
 const DUCK_LEVEL: u8 = 15;
+/// A relative duck smaller than this many points isn't worth a PUT.
+const MIN_DUCK_DROP: u8 = 2;
 /// A reflex: past this the duck is pointless, so give up (no 429 sleep, no retry).
 const DUCK_TIMEOUT: Duration = Duration::from_millis(1500);
 /// A restore isn't latency-critical, but must never hang.
@@ -2759,7 +2775,40 @@ fn duck_level(level: Option<u8>) -> u8 {
     level.unwrap_or(DUCK_LEVEL).clamp(5, 50)
 }
 
-/// Kill switch, a Deny MCP tier, or the Spotify server off / read-only: no duck and no restore.
+/// How far to duck: TO an absolute level (legacy `{ level }`), or BY a percentage (P4 `{ reduction }`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DuckAmount {
+    To(u8),
+    By(u8),
+}
+
+/// `reduction` wins when given (clamped to 0..=50); else the legacy absolute level.
+fn duck_amount(level: Option<u8>, reduction: Option<u8>) -> DuckAmount {
+    match reduction {
+        Some(r) => DuckAmount::By(r.min(50)),
+        None => DuckAmount::To(duck_level(level)),
+    }
+}
+
+/// The level to duck `prev` to, or None when it isn't worth it (already quiet / too small a drop).
+fn duck_target(prev: u8, amount: DuckAmount) -> Option<u8> {
+    match amount {
+        DuckAmount::To(level) => (prev > level.saturating_add(5)).then_some(level),
+        DuckAmount::By(r) => {
+            let target = ((u32::from(prev) * (100 - u32::from(r)) + 50) / 100) as u8;
+            (prev.saturating_sub(target) >= MIN_DUCK_DROP).then_some(target)
+        }
+    }
+}
+
+/// Read-back tolerance for one duck: +-3, tighter for a small relative drop so "still at the duck
+/// level" and "back at the user's level" stay distinguishable.
+fn duck_tolerance(d: &Duck) -> u8 {
+    DUCK_TOLERANCE.min(d.prev.abs_diff(d.target) / 2).max(1)
+}
+
+/// Kill switch, a Deny MCP tier, or the Spotify server off / read-only: no new duck. (The restore
+/// is deliberately not gated by this; see `spotify_unduck`.)
 /// An Ask tier is allowed on purpose: the duck is a reversible, speech-initiated micro-action
 /// that undoes itself within seconds, and a card on every speech onset would make it useless.
 fn duck_allowed(cfg: &OsConfig) -> bool {
@@ -2772,9 +2821,10 @@ fn player_device(p: &Value) -> Option<Device> {
     device::parse_devices(&json!({ "devices": [p["device"].clone()] })).pop()
 }
 
-/// What to duck, from `GET /me/player`: (device id, the volume to restore later). None unless
-/// Spotify is playing on this PC, the device takes volume changes and isn't already quiet.
-fn duck_plan(p: &Value, host: &str, refused: &[String], level: u8) -> Option<(String, u8)> {
+/// What to duck, from `GET /me/player`: (device id, the volume to restore later, the duck level).
+/// None unless Spotify is playing on this PC, the device takes volume changes and the drop is
+/// worth it (`duck_target`).
+fn duck_plan(p: &Value, host: &str, refused: &[String], amount: DuckAmount) -> Option<(String, u8, u8)> {
     if !p["is_playing"].as_bool().unwrap_or(false) {
         return None;
     }
@@ -2783,7 +2833,8 @@ fn duck_plan(p: &Value, host: &str, refused: &[String], level: u8) -> Option<(St
         return None;
     }
     let prev = d.volume_percent?;
-    (prev > level.saturating_add(5)).then_some((d.id, prev))
+    let target = duck_target(prev, amount)?;
+    Some((d.id, prev, target))
 }
 
 /// The volume is still ours: same device, and at the target (± tolerance) — or, while the PUT
@@ -2791,7 +2842,38 @@ fn duck_plan(p: &Value, host: &str, refused: &[String], level: u8) -> Option<(St
 /// (widget slider, phone, "volume 40"), so a restore leaves it alone.
 fn should_restore(d: &Duck, device_id: Option<&str>, volume: Option<u8>, age: Duration) -> bool {
     let Some(v) = volume else { return false };
-    device_id == Some(d.device_id.as_str()) && (v.abs_diff(d.target) <= DUCK_TOLERANCE || (age < DUCK_SETTLE && v.abs_diff(d.prev) <= DUCK_TOLERANCE))
+    let tol = duck_tolerance(d);
+    device_id == Some(d.device_id.as_str()) && (v.abs_diff(d.target) <= tol || (age < DUCK_SETTLE && v.abs_diff(d.prev) <= tol))
+}
+
+/// What a restore's read-back says about a duck.
+#[derive(Debug, PartialEq)]
+enum Readback {
+    /// Same device, the volume is still ours: put `prev` back.
+    Ours,
+    /// Same device, someone changed the volume since: leave it, forget the duck.
+    Changed,
+    /// Playback moved to another device, or nothing is active (client closed).
+    Elsewhere,
+}
+
+fn readback(d: &Duck, device_id: Option<&str>, volume: Option<u8>, age: Duration) -> Readback {
+    if device_id != Some(d.device_id.as_str()) {
+        Readback::Elsewhere
+    } else if should_restore(d, device_id, volume, age) {
+        Readback::Ours
+    } else {
+        Readback::Changed
+    }
+}
+
+/// The volume to show for this device: the user's own (pre-duck) level while the speech duck holds
+/// it down, so the widget's slider / mute memory never learn the duck level as "yours".
+fn shown_volume(reported: Option<u8>, duck: Option<&Duck>, device_id: Option<&str>) -> Option<u8> {
+    match (duck, reported) {
+        (Some(d), Some(v)) if device_id == Some(d.device_id.as_str()) && v.abs_diff(d.target) <= duck_tolerance(d) => Some(d.prev),
+        _ => reported,
+    }
 }
 
 /// `h_volume`'s base for a relative change: the pre-duck level while that device is ducked.
@@ -2818,25 +2900,29 @@ async fn volume_put(state: &DispatchState, pct: u8, device_id: &str) -> Result<V
 }
 
 /// Duck now; true = ducked (now, or still from before).
-async fn duck(state: &DispatchState, level: u8) -> bool {
+async fn duck(state: &DispatchState, amount: DuckAmount) -> bool {
     let mut g = DUCK.lock().await;
     let Ok(p) = player_state(state).await else { return false };
     let dev = player_device(&p);
     let (dev_id, vol) = (dev.as_ref().map(|d| d.id.as_str()), dev.as_ref().and_then(|d| d.volume_percent));
     if let Some(d) = g.as_mut() {
-        // Never re-snapshot over a live duck: `prev` stays the original level.
-        if should_restore(d, dev_id, vol, d.at.elapsed()) {
-            d.at = std::time::Instant::now();
-            return true;
+        match readback(d, dev_id, vol, d.at.elapsed()) {
+            // Never re-snapshot over a live duck: `prev` stays the original level. This also picks
+            // up a duck parked while playback was elsewhere, now that its device is back at the duck level.
+            Readback::Ours => {
+                d.at = std::time::Instant::now();
+                return true;
+            }
+            Readback::Changed => *g = None, // changed since: start over from what it is now
+            Readback::Elsewhere => {}       // parked for its own device; kept unless replaced below
         }
-        *g = None; // moved since (or a stale duck): start over from what it is now
     }
     let refused = NO_VOLUME_DEVICES.lock().map(|v| v.clone()).unwrap_or_default();
-    let Some((device_id, prev)) = duck_plan(&p, &device::this_pc_name(), &refused, level) else { return false };
+    let Some((device_id, prev, target)) = duck_plan(&p, &device::this_pc_name(), &refused, amount) else { return false };
     // Recorded before the PUT: if the caller's timeout drops this mid-request the PUT may still
     // land, and the restore's read-back decides (at the target → restore; still `prev` → nothing).
-    *g = Some(Duck { prev, target: level, device_id: device_id.clone(), at: std::time::Instant::now() });
-    match volume_put(state, level, &device_id).await {
+    let parked = g.replace(Duck { prev, target, device_id: device_id.clone(), at: std::time::Instant::now() });
+    match volume_put(state, target, &device_id).await {
         Ok(_) => true,
         Err(e) => {
             if refuses_volume(&e) {
@@ -2844,28 +2930,53 @@ async fn duck(state: &DispatchState, level: u8) -> bool {
                     v.push(device_id);
                 }
             }
-            *g = None;
+            *g = parked;
             false
         }
     }
 }
 
-/// Put the pre-duck volume back unless it was changed since (`should_restore`). Idempotent.
-async fn unduck(state: &DispatchState) {
-    let mut g = DUCK.lock().await;
-    let Some(d) = g.take() else { return };
-    let Ok(p) = player_state(state).await else {
-        *g = Some(d); // couldn't look: the next duck / restore tries again
-        return;
-    };
-    let dev = player_device(&p);
-    if !should_restore(&d, dev.as_ref().map(|x| x.id.as_str()), dev.as_ref().and_then(|x| x.volume_percent), d.at.elapsed()) {
-        return;
-    }
-    if let Err(e) = volume_put(state, d.prev, &d.device_id).await {
-        if restore_retry(&e) {
+/// One restore PUT of `d.prev` to its own device, retried once on a network / 5xx / 429 error.
+async fn restore_put(state: &DispatchState, d: &Duck) -> bool {
+    match volume_put(state, d.prev, &d.device_id).await {
+        Ok(_) => true,
+        Err(e) if restore_retry(&e) => {
             tokio::time::sleep(Duration::from_millis(400)).await;
-            let _ = volume_put(state, d.prev, &d.device_id).await;
+            volume_put(state, d.prev, &d.device_id).await.is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Put the pre-duck volume back unless it was changed since (`readback`). Idempotent. The duck
+/// stays recorded until a restore PUT lands or the volume proves not ours, so a failed GET / PUT,
+/// a 429, or the caller's timeout dropping this at any await never strands the music at the duck
+/// level. True = still ducked on the active device: worth another try soon.
+async fn unduck(state: &DispatchState) -> bool {
+    let mut g = DUCK.lock().await;
+    let Some(d) = g.clone() else { return false };
+    let Ok(p) = player_state(state).await else { return true };
+    let dev = player_device(&p);
+    match readback(&d, dev.as_ref().map(|x| x.id.as_str()), dev.as_ref().and_then(|x| x.volume_percent), d.at.elapsed()) {
+        Readback::Changed => {
+            *g = None;
+            false
+        }
+        Readback::Ours => {
+            let done = restore_put(state, &d).await;
+            if done {
+                *g = None;
+            }
+            !done
+        }
+        // Playback moved (another device picked, the client closed): best effort on the ducked
+        // device itself; if it can't take it now the duck stays parked, and `duck` resumes it
+        // once that device is active at the duck level again. Retrying now wouldn't help.
+        Readback::Elsewhere => {
+            if restore_put(state, &d).await {
+                *g = None;
+            }
+            false
         }
     }
 }
@@ -3321,24 +3432,27 @@ pub async fn spotify_tool(state: State<'_, DispatchState>, os: State<'_, OsState
     }
 }
 
-/// Speech ducking: Spotify to `level`% (5..=50, default 15) while you talk, only when it plays on
-/// this PC with volume control. `false` = not ducked (gated, nothing here, refused, too slow);
-/// never an error, card or log line.
+/// Speech ducking over the Web API (the P4 fallback): Spotify BY `reduction`% (0..=50; P4 callers)
+/// or, legacy, TO `level`% (5..=50, default 15) while you talk, only when it plays on this PC with
+/// volume control. One PUT, no fade. The TS side calls this only when `media_duck` found no local
+/// Spotify session, so the two never stack. `false` = not ducked (gated, nothing here, refused,
+/// too slow); never an error, card or log line.
 #[tauri::command]
-pub async fn spotify_duck(state: State<'_, DispatchState>, os: State<'_, OsState>, level: Option<u8>) -> Result<bool, String> {
+pub async fn spotify_duck(state: State<'_, DispatchState>, os: State<'_, OsState>, level: Option<u8>, reduction: Option<u8>) -> Result<bool, String> {
     if !duck_allowed(&os.snapshot()) {
         return Ok(false);
     }
-    Ok(tokio::time::timeout(DUCK_TIMEOUT, duck(&state, duck_level(level))).await.unwrap_or(false))
+    Ok(tokio::time::timeout(DUCK_TIMEOUT, duck(&state, duck_amount(level, reduction))).await.unwrap_or(false))
 }
 
-/// Undo `spotify_duck` unless the volume was changed since. Silent; a no-op when nothing is ducked.
+/// Undo `spotify_duck` unless the volume was changed since. Silent; a no-op (no network) when
+/// nothing is ducked. Not gated: it only undoes this app's own temporary change, so turning on the
+/// kill switch / Deny / read-only mid-duck must not strand the music at the duck level.
+/// Confirmed with the user: the restore PUT may go out with the kill switch on.
+/// True = still ducked (the restore failed or timed out): the caller may try again shortly.
 #[tauri::command]
-pub async fn spotify_unduck(state: State<'_, DispatchState>, os: State<'_, OsState>) -> Result<(), String> {
-    if duck_allowed(&os.snapshot()) {
-        let _ = tokio::time::timeout(UNDUCK_TIMEOUT, unduck(&state)).await;
-    }
-    Ok(())
+pub async fn spotify_unduck(state: State<'_, DispatchState>) -> Result<bool, String> {
+    Ok(tokio::time::timeout(UNDUCK_TIMEOUT, unduck(&state)).await.unwrap_or(true))
 }
 
 #[cfg(test)]
@@ -4254,19 +4368,64 @@ mod suite_tests {
         cfg.privacy.kill_switch = true;
         assert!(!duck_allowed(&cfg));
         assert_eq!((duck_level(None), duck_level(Some(0)), duck_level(Some(90)), duck_level(Some(25))), (15, 5, 50, 25));
+        assert_eq!(duck_amount(None, None), DuckAmount::To(15), "legacy call");
+        assert_eq!(duck_amount(Some(25), None), DuckAmount::To(25));
+        assert_eq!(duck_amount(Some(25), Some(15)), DuckAmount::By(15), "reduction wins");
+        assert_eq!(duck_amount(None, Some(90)), DuckAmount::By(50));
+    }
+
+    #[test]
+    fn duck_target_by_and_to() {
+        let by = DuckAmount::By(15);
+        assert_eq!(duck_target(60, by), Some(51));
+        assert_eq!(duck_target(100, by), Some(85));
+        assert_eq!(duck_target(33, by), Some(28), "rounded: 28.05");
+        assert_eq!(duck_target(10, by), None, "9 is too small a drop");
+        assert_eq!(duck_target(0, by), None);
+        assert_eq!(duck_target(60, DuckAmount::By(0)), None);
+        assert_eq!(duck_target(60, DuckAmount::By(50)), Some(30));
+        assert_eq!(duck_target(60, DuckAmount::To(15)), Some(15));
+        assert_eq!(duck_target(20, DuckAmount::To(15)), None, "already quiet");
     }
 
     #[test]
     fn duck_plan_only_this_pc_playing_with_volume() {
         let p = |playing: bool, name: &str, kind: &str, vol: u64, supports: bool| json!({ "is_playing": playing, "device": { "id": "dev1", "name": name, "type": kind, "volume_percent": vol, "supports_volume": supports } });
-        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, true), "my-pc", &[], 15), Some(("dev1".into(), 60)));
-        assert_eq!(duck_plan(&p(false, "MY-PC", "Computer", 60, true), "my-pc", &[], 15), None, "paused");
-        assert_eq!(duck_plan(&p(true, "Pixel 8", "Smartphone", 60, true), "my-pc", &[], 15), None, "phone");
-        assert_eq!(duck_plan(&p(true, "OTHER-PC", "Computer", 60, true), "my-pc", &[], 15), None, "another computer");
-        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, false), "my-pc", &[], 15), None, "no volume control");
-        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, true), "my-pc", &["dev1".into()], 15), None, "refused before");
-        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 20, true), "my-pc", &[], 15), None, "already quiet");
-        assert_eq!(duck_plan(&Value::Null, "my-pc", &[], 15), None, "nothing playing (204)");
+        let to = DuckAmount::To(15);
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, true), "my-pc", &[], to), Some(("dev1".into(), 60, 15)));
+        assert_eq!(duck_plan(&p(false, "MY-PC", "Computer", 60, true), "my-pc", &[], to), None, "paused");
+        assert_eq!(duck_plan(&p(true, "Pixel 8", "Smartphone", 60, true), "my-pc", &[], to), None, "phone");
+        assert_eq!(duck_plan(&p(true, "OTHER-PC", "Computer", 60, true), "my-pc", &[], to), None, "another computer");
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, false), "my-pc", &[], to), None, "no volume control");
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, true), "my-pc", &["dev1".into()], to), None, "refused before");
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 20, true), "my-pc", &[], to), None, "already quiet");
+        assert_eq!(duck_plan(&Value::Null, "my-pc", &[], to), None, "nothing playing (204)");
+        // P4 fallback: BY 15 %.
+        let by = DuckAmount::By(15);
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 60, true), "my-pc", &[], by), Some(("dev1".into(), 60, 51)));
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 20, true), "my-pc", &[], by), Some(("dev1".into(), 20, 17)), "a quiet level still drops by 15 %");
+        assert_eq!(duck_plan(&p(true, "MY-PC", "Computer", 10, true), "my-pc", &[], by), None, "too small a change");
+        assert_eq!(duck_plan(&p(true, "Pixel 8", "Smartphone", 60, true), "my-pc", &[], by), None, "phone");
+        assert_eq!(duck_plan(&p(false, "MY-PC", "Computer", 60, true), "my-pc", &[], by), None, "paused");
+    }
+
+    #[test]
+    fn relative_duck_readback_and_display() {
+        let d = duck_at(60, 51, "dev1", Duration::from_secs(5));
+        assert_eq!(duck_tolerance(&d), 3);
+        assert!(should_restore(&d, Some("dev1"), Some(51), Duration::from_secs(5)));
+        assert!(should_restore(&d, Some("dev1"), Some(53), Duration::from_secs(5)));
+        assert!(!should_restore(&d, Some("dev1"), Some(60), Duration::from_secs(5)), "back at prev long after: not ours");
+        assert!(should_restore(&d, Some("dev1"), Some(60), Duration::from_millis(500)), "PUT not landed yet");
+        assert_eq!(readback(&d, Some("dev1"), Some(30), Duration::from_secs(5)), Readback::Changed);
+        assert_eq!(shown_volume(Some(51), Some(&d), Some("dev1")), Some(60), "the widget learns 60, not 51");
+        assert_eq!(volume_target(volume_base(Some(51), Some(&d), Some("dev1")), Some(&json!("+10"))), Ok(70));
+        // A small drop (20 -> 17) tightens the tolerance so the two levels stay apart.
+        let small = duck_at(20, 17, "dev1", Duration::from_secs(5));
+        assert_eq!(duck_tolerance(&small), 1);
+        assert!(should_restore(&small, Some("dev1"), Some(17), Duration::from_secs(5)));
+        assert!(!should_restore(&small, Some("dev1"), Some(20), Duration::from_secs(5)), "the user's own level");
+        assert_eq!(shown_volume(Some(20), Some(&small), Some("dev1")), Some(20));
     }
 
     #[test]
@@ -4279,6 +4438,27 @@ mod suite_tests {
         assert!(!should_restore(&d, None, None, Duration::from_secs(5)), "nothing playing");
         assert!(should_restore(&d, Some("dev1"), Some(60), Duration::from_millis(500)), "PUT not landed yet");
         assert!(!should_restore(&d, Some("dev1"), Some(60), Duration::from_secs(5)), "back at prev long after: not ours");
+    }
+
+    #[test]
+    fn readback_keeps_a_duck_unless_the_volume_was_changed_on_its_device() {
+        let d = duck_at(60, 15, "dev1", Duration::from_secs(5));
+        assert_eq!(readback(&d, Some("dev1"), Some(16), Duration::from_secs(5)), Readback::Ours);
+        assert_eq!(readback(&d, Some("dev1"), Some(40), Duration::from_secs(5)), Readback::Changed);
+        assert_eq!(readback(&d, Some("dev1"), None, Duration::from_secs(5)), Readback::Changed, "no volume reported");
+        // Moved / closed: not "changed" — the ducked device still sits at 15 and must get its level back.
+        assert_eq!(readback(&d, Some("dev2"), Some(15), Duration::from_secs(5)), Readback::Elsewhere);
+        assert_eq!(readback(&d, None, None, Duration::from_secs(5)), Readback::Elsewhere, "204, nothing active");
+    }
+
+    #[test]
+    fn polls_show_the_users_level_while_ducked() {
+        let d = duck_at(60, 15, "dev1", Duration::from_secs(1));
+        assert_eq!(shown_volume(Some(15), Some(&d), Some("dev1")), Some(60), "ducked: the mute memory learns 60, not 15");
+        assert_eq!(shown_volume(Some(40), Some(&d), Some("dev1")), Some(40), "changed since: the real value");
+        assert_eq!(shown_volume(Some(15), Some(&d), Some("dev2")), Some(15), "another device");
+        assert_eq!(shown_volume(Some(15), None, Some("dev1")), Some(15));
+        assert_eq!(shown_volume(None, Some(&d), Some("dev1")), None);
     }
 
     #[test]

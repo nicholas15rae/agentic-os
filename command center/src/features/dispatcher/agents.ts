@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import { BookOpen, CalendarCheck, Code2, ListTree, Palette, Radar, Sparkles } from "lucide-react";
 import type { Priority } from "@/lib/platform";
 import { osName } from "@/features/os/os-store";
+import { TONY_STYLE } from "@/features/voice/persona";
 
 /**
  * Sub-agent catalogue. The dispatcher picks one per request, prepends its
@@ -109,7 +110,7 @@ export const SUB_AGENTS: Record<AgentRole, SubAgent> = {
     priority: "interactive",
     keywords: [],
     get systemPrompt() {
-      return `You are ${osName()}, a calm, concise voice assistant. Answer in one to three sentences unless asked for detail. ${GUARDRAIL}`;
+      return `You are ${osName()}, Nic's personal operating system. ${TONY_STYLE} ${GUARDRAIL}`;
     },
   },
 };

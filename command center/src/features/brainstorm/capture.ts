@@ -21,6 +21,9 @@ export interface BrainstormNote {
   };
   organizedAt?: number;
   tags?: string[];
+  /** Who made it: Listen Mode, or a Tony brainstorm parked with "save it for later" (P3). */
+  source?: "listen" | "tony";
+  summary?: string;
 }
 
 /**

@@ -75,7 +75,9 @@ export function RoutingSettings() {
   // Voice-only preference, kept in the app settings (not os.json): see voice-controller `osRun`.
   const announcerHandoff = useSettings((s) => s.routing.announcerHandoff);
   const setSettings = useSettings((s) => s.set);
-  const result = useMemo(() => (routing && testPhrase.trim() ? resolve(testPhrase, routing) : null), [routing, testPhrase]);
+  const osName = useSettings((st) => st.osName || "Tony");
+  // Same inputs as the live resolver (Rust reads `os_name`): "thanks <OS name>" is Self.
+  const result = useMemo(() => (routing && testPhrase.trim() ? resolve(testPhrase, routing, osName) : null), [routing, testPhrase, osName]);
   if (!cfg || !routing) return null;
 
   const saveAgents = (agents: Record<string, AgentTriggers>) => save({ routing: { agents } });

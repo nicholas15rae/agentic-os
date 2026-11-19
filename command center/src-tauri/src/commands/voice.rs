@@ -10,8 +10,10 @@
 //! folder into the Kokoro / XTTS container). Audio crosses IPC as raw bytes.
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::State;
 
@@ -114,7 +116,7 @@ fn prompt_words(s: &str) -> Vec<String> {
 
 /// Hallucination guard: true when `text` contains a run of 4+ consecutive prompt words in
 /// prompt order (case- and punctuation-insensitive). Short real phrases from the prompt
-/// ("cut it", "take it ease") are 2–3 words and always pass.
+/// ("cut it", "take it easy") are 2–3 words and always pass.
 pub(crate) fn echoes_prompt(text: &str, prompt: &str) -> bool {
     const RUN: usize = 4;
     let t = prompt_words(text);
@@ -358,6 +360,299 @@ fn text_len_ok(s: &str) -> bool {
     (1..=2000).contains(&s.chars().count())
 }
 
+// ── TTS breaker (P1): one failed ElevenLabs call per reply, not one per sentence ──
+//
+// A reply is synthesized sentence by sentence, often several calls in flight at once.
+// Before the breaker, a model/key problem (eleven_v3's 400s, a dead key) failed EVERY
+// sentence: N doomed API calls and N "Voice fell back" notices per reply. Now the
+// first failure trips the reply's `utterance_id`, its remaining sentences go straight to
+// local TTS, and exactly one `tts-fallback` event is emitted. 402 (paid voice) and 429
+// (rate/quota) also pause ElevenLabs for a while. Pure (time injected) so it is unit-
+// tested; held in a module static, so neither `DispatchState` nor `lib.rs` changes.
+
+/// Forget utterances after this long (a reply never takes 5 min).
+const BREAKER_TTL: Duration = Duration::from_secs(300);
+/// Bound on every map: ids come from the webview.
+const BREAKER_CAP: usize = 64;
+/// No utterance id: one notice per reason per 10 s.
+const EMIT_DEDUPE: Duration = Duration::from_secs(10);
+/// 402 = this voice needs a paid plan; pause only that voice.
+const VOICE_COOLDOWN_SECS: u64 = 120;
+/// 429 without a usable Retry-After.
+const GLOBAL_COOLDOWN_SECS: u64 = 30;
+/// Clamp a Retry-After so a huge value can't silence the cloud voice for hours.
+const MAX_COOLDOWN_SECS: u64 = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BreakScope {
+    /// This reply only (400/401/403/422, timeouts, unreachable, config errors).
+    Utterance,
+    /// This voice id, every reply (402).
+    Voice,
+    /// Every ElevenLabs call (429).
+    Global,
+}
+
+impl BreakScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            BreakScope::Utterance => "utterance",
+            BreakScope::Voice => "voice",
+            BreakScope::Global => "global",
+        }
+    }
+}
+
+/// Why a call is short-circuited: who it applies to, the status that caused it, and
+/// (for a cooldown) how long is left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Block {
+    pub scope: BreakScope,
+    pub status: Option<u16>,
+    pub remaining_secs: u64,
+}
+
+impl Block {
+    /// The error an explicit preview gets instead of an API call.
+    fn preview_error(&self) -> String {
+        let code = self.status.map(|c| format!("HTTP {c}")).unwrap_or_else(|| "unreachable".into());
+        match self.scope {
+            BreakScope::Utterance => format!("ElevenLabs skipped for this reply ({code})"),
+            _ => format!("ElevenLabs paused {}s ({code})", self.remaining_secs),
+        }
+    }
+}
+
+/// What to put in a `tts-fallback` event (never more than one per fallback event).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Notice {
+    /// "utterance" | "voice" | "global" | "call" (no utterance id).
+    pub scope: &'static str,
+    pub status: Option<u16>,
+    pub cooldown_secs: Option<u64>,
+}
+
+/// What a failure does to the breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    Utterance,
+    Cooldown(BreakScope, u64),
+    Nothing,
+}
+
+fn effect_of(status: Option<u16>, retry_after: Option<u64>) -> Effect {
+    match status {
+        // Timeout / unreachable / no key / bad voice id: the next sentence fails the same way.
+        None => Effect::Utterance,
+        Some(400 | 401 | 403 | 422) => Effect::Utterance,
+        Some(402) => Effect::Cooldown(BreakScope::Voice, VOICE_COOLDOWN_SECS),
+        Some(429) => Effect::Cooldown(BreakScope::Global, retry_after.filter(|s| *s > 0).unwrap_or(GLOBAL_COOLDOWN_SECS).min(MAX_COOLDOWN_SECS)),
+        // 404 (one voice gone), 5xx (transient): fall back for this call only, keep trying.
+        Some(_) => Effect::Nothing,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UttState {
+    at: Instant,
+    tripped: Option<Option<u16>>,
+    announced: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Cooldown {
+    until: Instant,
+    status: u16,
+    announced: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TtsBreaker {
+    utts: HashMap<String, UttState>,
+    /// "*" (global) or "voice:<id>".
+    cooldowns: HashMap<String, Cooldown>,
+    /// No-id notices: reason → when last reported.
+    recent: HashMap<String, Instant>,
+}
+
+fn secs_left(until: Instant, now: Instant) -> u64 {
+    let d = until.saturating_duration_since(now);
+    (d.as_secs() + u64::from(d.subsec_nanos() > 0)).max(1)
+}
+
+/// Drop the oldest entries until `map` fits under the cap.
+fn cap_map<V>(map: &mut HashMap<String, V>, at: impl Fn(&V) -> Instant) {
+    while map.len() > BREAKER_CAP {
+        let Some(oldest) = map.iter().min_by_key(|(_, v)| at(v)).map(|(k, _)| k.clone()) else { break };
+        map.remove(&oldest);
+    }
+}
+
+impl TtsBreaker {
+    fn voice_key(voice: &str) -> String {
+        format!("voice:{voice}")
+    }
+
+    /// The active cooldown covering `voice` (global first), if any.
+    fn cooldown_for(&self, voice: &str, now: Instant) -> Option<(String, &Cooldown)> {
+        ["*".to_string(), Self::voice_key(voice)].into_iter().find_map(|k| {
+            let c = self.cooldowns.get(&k).filter(|c| c.until > now)?;
+            Some((k, c))
+        })
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.utts.retain(|_, u| now.saturating_duration_since(u.at) < BREAKER_TTL);
+        self.cooldowns.retain(|_, c| c.until > now);
+        self.recent.retain(|_, t| now.saturating_duration_since(*t) < EMIT_DEDUPE);
+        cap_map(&mut self.utts, |u| u.at);
+        cap_map(&mut self.cooldowns, |c| c.until);
+        cap_map(&mut self.recent, |t| *t);
+    }
+
+    /// Should a call for `utt`/`voice` skip ElevenLabs right now?
+    pub(crate) fn blocked(&self, utt: Option<&str>, voice: &str, now: Instant) -> Option<Block> {
+        if let Some((k, c)) = self.cooldown_for(voice, now) {
+            let scope = if k == "*" { BreakScope::Global } else { BreakScope::Voice };
+            return Some(Block { scope, status: Some(c.status), remaining_secs: secs_left(c.until, now) });
+        }
+        let u = self.utts.get(utt?)?;
+        let status = u.tripped?;
+        (now.saturating_duration_since(u.at) < BREAKER_TTL).then_some(Block { scope: BreakScope::Utterance, status, remaining_secs: 0 })
+    }
+
+    /// Record a failed call. True only on a closed→open transition (this call tripped
+    /// the utterance or started a cooldown); concurrent failures of the same utterance
+    /// or inside an active cooldown return false. Check-and-insert happens under the
+    /// caller's single lock, so exactly one of N parallel failures sees `true`.
+    pub(crate) fn record_failure(&mut self, utt: Option<&str>, voice: &str, status: Option<u16>, retry_after: Option<u64>, now: Instant) -> bool {
+        self.prune(now);
+        let mut opened = false;
+        let trip_utt = match effect_of(status, retry_after) {
+            Effect::Nothing => false,
+            Effect::Utterance => true,
+            Effect::Cooldown(scope, secs) => {
+                let key = if scope == BreakScope::Global { "*".to_string() } else { Self::voice_key(voice) };
+                if !self.cooldowns.get(&key).is_some_and(|c| c.until > now) {
+                    self.cooldowns.insert(key, Cooldown { until: now + Duration::from_secs(secs), status: status.unwrap_or_default(), announced: false });
+                    opened = true;
+                }
+                true
+            }
+        };
+        if let (true, Some(id)) = (trip_utt, utt) {
+            let u = self.utts.entry(id.to_string()).or_insert(UttState { at: now, tripped: None, announced: false });
+            if u.tripped.is_none() {
+                u.tripped = Some(status);
+                opened = true;
+            }
+        }
+        cap_map(&mut self.utts, |u| u.at);
+        cap_map(&mut self.cooldowns, |c| c.until);
+        opened
+    }
+
+    /// Whether this live fallback (a failed call, or one skipped by the breaker) gets a
+    /// `tts-fallback` event: once per cooldown window, else once per utterance, else
+    /// (no id) once per `reason` per 10 s.
+    pub(crate) fn announce(&mut self, utt: Option<&str>, voice: &str, status: Option<u16>, reason: &str, now: Instant) -> Option<Notice> {
+        self.prune(now);
+        let mut notice = None;
+        let mut covered = false;
+        if let Some((k, c)) = self.cooldown_for(voice, now).map(|(k, c)| (k, c.clone())) {
+            covered = true;
+            if !c.announced {
+                if let Some(entry) = self.cooldowns.get_mut(&k) {
+                    entry.announced = true;
+                }
+                let scope = if k == "*" { BreakScope::Global } else { BreakScope::Voice };
+                notice = Some(Notice { scope: scope.as_str(), status: Some(c.status), cooldown_secs: Some(secs_left(c.until, now)) });
+            }
+        }
+        if let Some(id) = utt {
+            // Only a reply the breaker actually tripped (or a cooldown covers) is "on local for
+            // this reply". A 404 / 5xx falls back for this one call and the next sentence tries
+            // ElevenLabs again, so it gets a per-call notice and leaves the reply unannounced: a
+            // later real trip of the same reply still gets its one line.
+            let tripped = self.utts.get(id).is_some_and(|u| u.tripped.is_some());
+            if covered || tripped {
+                let u = self.utts.entry(id.to_string()).or_insert(UttState { at: now, tripped: None, announced: false });
+                let first = !u.announced;
+                u.announced = true;
+                cap_map(&mut self.utts, |u| u.at);
+                if covered || !first {
+                    return notice;
+                }
+                return Some(Notice { scope: BreakScope::Utterance.as_str(), status, cooldown_secs: None });
+            }
+        } else if covered {
+            return notice;
+        }
+        if self.recent.get(reason).is_some_and(|t| now.saturating_duration_since(*t) < EMIT_DEDUPE) {
+            return None;
+        }
+        self.recent.insert(reason.to_string(), now);
+        cap_map(&mut self.recent, |t| *t);
+        Some(Notice { scope: "call", status, cooldown_secs: None })
+    }
+}
+
+fn breaker() -> &'static Mutex<TtsBreaker> {
+    static B: OnceLock<Mutex<TtsBreaker>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(TtsBreaker::default()))
+}
+
+fn with_breaker<T>(f: impl FnOnce(&mut TtsBreaker) -> T) -> T {
+    let mut g = breaker().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut g)
+}
+
+/// A webview-supplied utterance id: 1–64 chars of `[A-Za-z0-9-]`, else `None`
+/// (the call then uses the per-call path with the 10 s notice dedupe).
+pub(crate) fn valid_utterance_id(id: Option<String>) -> Option<String> {
+    id.filter(|s| (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
+/// An opaque, stable tag for one voice id (the webview dedupes per-voice cooldown notices
+/// by it). A hash, so the event never carries the voice id itself.
+fn voice_tag(voice: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    voice.hash(&mut h);
+    format!("v{:016x}", h.finish())
+}
+
+/// The `tts-fallback` event body. No key material: the reason is our own hint text
+/// or ElevenLabs' `detail`, clipped. `cooldownKey` names the cooldown a notice is
+/// about ("*" = global, a voice tag for a per-voice 402 pause), so two voices'
+/// pauses are two notices.
+fn fallback_payload(to: &str, reason: &str, n: &Notice, utt: Option<&str>, voice: &str) -> serde_json::Value {
+    let cooldown_key = match n.scope {
+        "global" => Some("*".to_string()),
+        "voice" => Some(voice_tag(voice)),
+        _ => None,
+    };
+    serde_json::json!({
+        "from": "elevenlabs",
+        "to": to,
+        "reason": reason,
+        "status": n.status,
+        "utteranceId": utt,
+        "cooldownSecs": n.cooldown_secs,
+        "scope": n.scope,
+        "cooldownKey": cooldown_key,
+    })
+}
+
+/// A cached line (`pinId`) came back from a local engine instead of the configured cloud
+/// voice: tell the webview not to keep that audio for the session.
+fn emit_unpin(app: &tauri::AppHandle, pin: Option<&str>) {
+    use tauri::Emitter;
+    if let Some(id) = pin {
+        let _ = app.emit("tts-unpin", serde_json::json!({ "pinId": id }));
+    }
+}
+
 #[tauri::command]
 pub async fn tts_synthesize(
     state: State<'_, DispatchState>,
@@ -371,8 +666,17 @@ pub async fn tts_synthesize(
     // sentence-by-sentence calls the streaming pipeline makes. Ignored by
     // local engines (Kokoro/XTTS) and by previews/cue clips that don't pass it.
     previous_text: Option<String>,
+    // P1: the reply this sentence belongs to (the TTS breaker's scope). Optional;
+    // invalid ids are ignored (per-call behaviour with a deduped notice).
+    utterance_id: Option<String>,
+    // A `cache: true` line the webview keeps for the session. When a local engine answers it
+    // instead of ElevenLabs (breaker cooldown, failure, kill switch), Rust emits `tts-unpin`
+    // so that fallback audio plays once and is not pinned. Same id rules as `utterance_id`.
+    pin_id: Option<String>,
 ) -> Result<Response, String> {
     use tauri::Emitter;
+    let utt = valid_utterance_id(utterance_id);
+    let pin = valid_utterance_id(pin_id);
     let text = text.trim();
     if !text_len_ok(text) {
         return Err("text must be 1–2000 characters".into());
@@ -406,30 +710,60 @@ pub async fn tts_synthesize(
     if p.engine.as_deref() == Some("elevenlabs") && lockdown {
         let local = state.snapshot().providers.into_iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() != Some("elevenlabs")).ok_or("kill switch on and no local TTS configured")?;
         let bytes = synth_local(&state, &local, text, local.voice.clone()).await?;
+        emit_unpin(&app, pin.as_deref());
         return Ok(Response::new(bytes));
     }
     if p.engine.as_deref() == Some("elevenlabs") {
         let chosen = explicit.clone().or_else(|| roster_voice.clone()).or_else(|| p.voice.clone()).ok_or("pick an ElevenLabs voice in Settings → Voice")?;
         let model = roster_model.as_deref().filter(|m| !m.is_empty());
+        let local_tts = || state.snapshot().providers.into_iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() != Some("elevenlabs"));
+
+        // P1 breaker: this reply already failed, or ElevenLabs is paused (402/429).
+        if let Some(block) = with_breaker(|b| b.blocked(utt.as_deref(), &chosen, Instant::now())) {
+            // An explicit preview must never swap voices silently: say why instead.
+            if explicit.is_some() {
+                return Err(block.preview_error());
+            }
+            // Live: straight to local, no API call. A cooldown nobody was told about
+            // yet (started by a preview) gets its one notice here.
+            let local = local_tts().ok_or_else(|| block.preview_error())?;
+            let bytes = synth_local(&state, &local, text, local.voice.clone()).await?;
+            emit_unpin(&app, pin.as_deref());
+            let reason = block.status.map(|c| format!("HTTP {c}")).unwrap_or_else(|| "unreachable".into());
+            if let Some(n) = with_breaker(|b| b.announce(utt.as_deref(), &chosen, block.status, &reason, Instant::now())) {
+                let _ = app.emit("tts-fallback", fallback_payload(&local.id, &reason, &n, utt.as_deref(), &chosen));
+            }
+            return Ok(Response::new(bytes));
+        }
+
         match elevenlabs::synthesize(&state, &p, text, &chosen, model, previous_text.as_deref()).await {
             Ok(bytes) => return Ok(Response::new(bytes)),
             // Live speech (no explicit voice = a real reply, not a preview — a roster
             // voice counts as live here): fall back to local TTS so Jarvis still talks
             // when ElevenLabs is offline or out of quota.
             Err(e) if explicit.is_none() => {
-                let local = state.snapshot().providers.into_iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() != Some("elevenlabs"));
-                if let Some(local) = local {
+                let now = Instant::now();
+                with_breaker(|b| b.record_failure(utt.as_deref(), &chosen, e.status, e.retry_after, now));
+                if let Some(local) = local_tts() {
                     if let Ok(bytes) = synth_local(&state, &local, text, local.voice.clone()).await {
-                        eprintln!("[tts] ElevenLabs failed ({e}); spoke with {} instead", local.label);
-                        // Reported to the UI (not only stderr) so a silent voice swap
-                        // is visible; best-effort — a missing listener is harmless.
-                        let _ = app.emit("tts-fallback", serde_json::json!({ "from": "elevenlabs", "to": local.id, "reason": e }));
+                        emit_unpin(&app, pin.as_deref());
+                        let reason = e.reason();
+                        // Reported to the UI (not only stderr) so a silent voice swap is
+                        // visible — once per reply / cooldown, not once per sentence.
+                        if let Some(n) = with_breaker(|b| b.announce(utt.as_deref(), &chosen, e.status, &reason, Instant::now())) {
+                            eprintln!("[tts] ElevenLabs failed ({e}); spoke with {} instead", local.label);
+                            let _ = app.emit("tts-fallback", fallback_payload(&local.id, &reason, &n, utt.as_deref(), &chosen));
+                        }
                         return Ok(Response::new(bytes));
                     }
                 }
-                return Err(e);
+                return Err(e.to_string());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // A preview's 402/429 still pauses live replies (same account/voice).
+                with_breaker(|b| b.record_failure(utt.as_deref(), &chosen, e.status, e.retry_after, Instant::now()));
+                return Err(e.to_string());
+            }
         }
     }
     let bytes = synth_local(&state, &p, text, explicit.or(roster_voice)).await?;
@@ -472,7 +806,7 @@ mod stt_prompt_tests {
     #[test]
     fn prompt_echo_is_dropped() {
         let p = DEFAULT_STT_PROMPT;
-        assert!(echoes_prompt("Tony, Gabagool mode. Take it ease.", p));
+        assert!(echoes_prompt("Tony, Gabagool mode. Take it easy.", p));
         assert!(echoes_prompt("prompter designer coder booking desk", p));
         assert!(echoes_prompt("WhatsApp, Gmail, Spotify, Tauri", p));
         // Case/punctuation-insensitive and found mid-transcript.
@@ -482,7 +816,12 @@ mod stt_prompt_tests {
     #[test]
     fn short_real_phrases_pass() {
         let p = DEFAULT_STT_PROMPT;
-        for ok in ["Cut it.", "cut it", "Take it ease.", "take it ease", "Whoa.", "madone", "aspetta", "Tony, cut it", "play Bilmuri on Spotify", "check my Gmail", "tell the Booking Desk to check WhatsApp", "take it easy on the bass"] {
+        for ok in ["Cut it.", "cut it", "Take it easy.", "take it easy", "Take it ease.", "take it ease", "Whoa.", "madone", "aspetta", "Tony, cut it", "play Bilmuri on Spotify", "check my Gmail", "tell the Booking Desk to check WhatsApp", "take it easy on the bass"] {
+            assert!(!echoes_prompt(ok, p), "{ok} must pass");
+        }
+        // P5: the stand-down said with its address words is a real line, never an echo (the prompt
+        // keeps "Take it easy." as its own sentence, not after "Tony"/"Hey").
+        for ok in ["Hey, take it easy", "Tony, take it easy", "Hey Tony, take it easy man", "hey take it easy"] {
             assert!(!echoes_prompt(ok, p), "{ok} must pass");
         }
         // Prompt words out of prompt order are a real sentence, not an echo.
@@ -587,5 +926,196 @@ mod part3_tests {
         assert!(!text_len_ok(""));
         assert!(!text_len_ok(&"x".repeat(2001)));
         assert!(text_len_ok(&"x".repeat(2000)));
+    }
+}
+
+#[cfg(test)]
+mod breaker_tests {
+    use super::*;
+
+    const V: &str = "QhEKgDl6KUJsO1FPiuSD";
+
+    #[test]
+    fn breaker_trips_once_per_utterance() {
+        let mut b = TtsBreaker::default();
+        let t0 = Instant::now();
+        // N parallel sentences of one reply all 400: only the first is the transition.
+        assert!(b.record_failure(Some("u1"), V, Some(400), None, t0));
+        assert!(!b.record_failure(Some("u1"), V, Some(400), None, t0));
+        assert!(!b.record_failure(Some("u1"), V, Some(401), None, t0));
+        assert_eq!(b.blocked(Some("u1"), V, t0), Some(Block { scope: BreakScope::Utterance, status: Some(400), remaining_secs: 0 }));
+        // Another reply (and a call with no id) still tries ElevenLabs.
+        assert_eq!(b.blocked(Some("u2"), V, t0), None);
+        assert_eq!(b.blocked(None, V, t0), None);
+        // Exactly one notice for the reply, however many sentences fell back.
+        let n = b.announce(Some("u1"), V, Some(400), "HTTP 400", t0).expect("first notice");
+        assert_eq!(n, Notice { scope: "utterance", status: Some(400), cooldown_secs: None });
+        for _ in 0..5 {
+            assert_eq!(b.announce(Some("u1"), V, Some(400), "HTTP 400", t0), None);
+        }
+        assert!(b.announce(Some("u2"), V, Some(400), "HTTP 400", t0).is_some());
+    }
+
+    #[test]
+    fn breaker_codes() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        // 400 / 401 / timeouts: this utterance only, no cooldown.
+        for status in [Some(400), Some(401), None] {
+            let mut b = TtsBreaker::default();
+            assert!(b.record_failure(Some("u"), V, status, None, t0), "{status:?} trips");
+            assert!(b.blocked(Some("u"), V, t0).is_some());
+            assert_eq!(b.blocked(Some("other"), V, t0), None, "{status:?} must not cool down");
+        }
+        // 404 and 5xx don't trip at all.
+        for status in [404, 500, 503] {
+            let mut b = TtsBreaker::default();
+            assert!(!b.record_failure(Some("u"), V, Some(status), None, t0), "{status}");
+            assert_eq!(b.blocked(Some("u"), V, t0), None, "{status}");
+        }
+        // 402: this voice is paused 120 s for every reply; other voices are not.
+        let mut b = TtsBreaker::default();
+        assert!(b.record_failure(Some("u"), V, Some(402), None, t0));
+        let blk = b.blocked(Some("new"), V, t0 + s(10)).expect("voice cooldown");
+        assert_eq!((blk.scope, blk.status, blk.remaining_secs), (BreakScope::Voice, Some(402), 110));
+        assert_eq!(b.blocked(Some("new"), "SomeOtherVoice12345", t0 + s(10)), None);
+        assert_eq!(b.blocked(Some("new"), V, t0 + s(121)), None, "cooldown ends");
+        // 429: global, honours Retry-After, default 30 s.
+        let mut b = TtsBreaker::default();
+        assert!(b.record_failure(None, V, Some(429), Some(60), t0));
+        assert!(!b.record_failure(None, V, Some(429), Some(60), t0 + s(1)), "already open");
+        let blk = b.blocked(None, "AnyVoiceAtAll12345", t0 + s(15)).expect("global cooldown");
+        assert_eq!((blk.scope, blk.remaining_secs), (BreakScope::Global, 45));
+        assert_eq!(b.blocked(None, V, t0 + s(61)), None);
+        let mut b = TtsBreaker::default();
+        b.record_failure(None, V, Some(429), None, t0);
+        assert!(b.blocked(None, V, t0 + s(29)).is_some());
+        assert!(b.blocked(None, V, t0 + s(31)).is_none());
+        // A huge Retry-After is clamped.
+        let mut b = TtsBreaker::default();
+        b.record_failure(None, V, Some(429), Some(86_400), t0);
+        assert!(b.blocked(None, V, t0 + s(MAX_COOLDOWN_SECS + 1)).is_none());
+        // The preview message names the pause.
+        let blk = Block { scope: BreakScope::Global, status: Some(429), remaining_secs: 12 };
+        assert_eq!(blk.preview_error(), "ElevenLabs paused 12s (HTTP 429)");
+    }
+
+    #[test]
+    fn breaker_cooldown_notice_once_per_window() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut b = TtsBreaker::default();
+        b.record_failure(Some("a"), V, Some(429), Some(60), t0);
+        let n = b.announce(Some("a"), V, Some(429), "HTTP 429", t0).unwrap();
+        assert_eq!((n.scope, n.cooldown_secs), ("global", Some(60)));
+        // Other replies inside the window (in flight or skipped): no further notice.
+        assert_eq!(b.announce(Some("b"), V, Some(429), "HTTP 429", t0 + s(5)), None);
+        assert_eq!(b.announce(None, V, Some(429), "HTTP 429", t0 + s(5)), None);
+        // A new window after it ends gets a new notice.
+        b.record_failure(Some("c"), V, Some(429), None, t0 + s(70));
+        assert!(b.announce(Some("c"), V, Some(429), "HTTP 429", t0 + s(70)).is_some());
+        // A cooldown a preview started (never announced) is announced by the first live skip.
+        let mut b = TtsBreaker::default();
+        b.record_failure(None, V, Some(402), None, t0);
+        let n = b.announce(Some("live"), V, Some(402), "HTTP 402", t0 + s(1)).unwrap();
+        assert_eq!((n.scope, n.cooldown_secs), ("voice", Some(119)));
+        assert_eq!(b.announce(Some("live2"), V, Some(402), "HTTP 402", t0 + s(2)), None);
+    }
+
+    #[test]
+    fn breaker_no_id_dedupes_by_reason() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut b = TtsBreaker::default();
+        assert_eq!(b.announce(None, V, Some(400), "HTTP 400", t0).map(|n| n.scope), Some("call"));
+        assert_eq!(b.announce(None, V, Some(400), "HTTP 400", t0 + s(9)), None);
+        assert!(b.announce(None, V, None, "ElevenLabs timed out", t0 + s(9)).is_some(), "different reason");
+        assert!(b.announce(None, V, Some(400), "HTTP 400", t0 + s(11)).is_some(), "window over");
+    }
+
+    #[test]
+    fn breaker_prunes_and_caps() {
+        let t0 = Instant::now();
+        let mut b = TtsBreaker::default();
+        for i in 0..200 {
+            b.record_failure(Some(&format!("u{i}")), V, Some(400), None, t0 + Duration::from_millis(i));
+            b.announce(None, V, Some(400), &format!("reason {i}"), t0 + Duration::from_millis(i));
+        }
+        assert!(b.utts.len() <= BREAKER_CAP, "{}", b.utts.len());
+        assert!(b.recent.len() <= BREAKER_CAP);
+        // The newest survive the cap, the oldest are evicted.
+        assert!(b.blocked(Some("u199"), V, t0 + Duration::from_secs(1)).is_some());
+        assert!(b.blocked(Some("u0"), V, t0 + Duration::from_secs(1)).is_none());
+        // Everything is forgotten after 5 min.
+        let later = t0 + BREAKER_TTL + Duration::from_secs(1);
+        assert!(b.blocked(Some("u199"), V, later).is_none());
+        b.record_failure(Some("fresh"), V, Some(500), None, later);
+        assert!(b.utts.is_empty());
+        assert!(b.recent.is_empty());
+    }
+
+    #[test]
+    fn utterance_id_validation() {
+        let ok = "3f2b9c1e-8a4d-4f6b-9c2d-1e5f7a8b9c0d-general";
+        assert_eq!(valid_utterance_id(Some(ok.into())).as_deref(), Some(ok));
+        assert_eq!(valid_utterance_id(Some("a".into())).as_deref(), Some("a"));
+        assert_eq!(valid_utterance_id(Some("x".repeat(64))).map(|s| s.len()), Some(64));
+        let long = "x".repeat(65);
+        for bad in ["", long.as_str(), "has space", "under_score", "slash/../x", "\u{e9}moji", "semi;colon"] {
+            assert_eq!(valid_utterance_id(Some(bad.to_string())), None, "{bad:?}");
+        }
+        assert_eq!(valid_utterance_id(None), None);
+    }
+
+    #[test]
+    fn fallback_payload_shape() {
+        let n = Notice { scope: "utterance", status: Some(400), cooldown_secs: None };
+        let v = fallback_payload("kokoro", "HTTP 400 \u{b7} bad", &n, Some("u1"), V);
+        assert_eq!(v["from"], "elevenlabs");
+        assert_eq!(v["to"], "kokoro");
+        assert_eq!(v["reason"], "HTTP 400 \u{b7} bad");
+        assert_eq!(v["status"], 400);
+        assert_eq!(v["utteranceId"], "u1");
+        assert!(v["cooldownSecs"].is_null());
+        assert_eq!(v["scope"], "utterance");
+        assert!(v["cooldownKey"].is_null());
+        assert_eq!(v.as_object().unwrap().len(), 8, "no extra fields (nothing key-shaped)");
+    }
+
+    #[test]
+    fn fallback_payload_cooldown_key_is_per_voice_and_opaque() {
+        // Fix pass: two voices' 402 pauses must be two webview notices, so the event names
+        // which cooldown it is about, as a hash, never the voice id itself.
+        let n = Notice { scope: "voice", status: Some(402), cooldown_secs: Some(120) };
+        let a = fallback_payload("kokoro", "HTTP 402", &n, Some("u1"), V);
+        let b = fallback_payload("kokoro", "HTTP 402", &n, Some("u2"), "AnotherVoiceId98765");
+        let (ka, kb) = (a["cooldownKey"].as_str().unwrap(), b["cooldownKey"].as_str().unwrap());
+        assert_ne!(ka, kb);
+        assert_eq!(Some(ka), fallback_payload("kokoro", "HTTP 402", &n, None, V)["cooldownKey"].as_str(), "stable per voice");
+        assert!(!a.to_string().contains(V), "voice id never in the payload");
+        let g = Notice { scope: "global", status: Some(429), cooldown_secs: Some(30) };
+        assert_eq!(fallback_payload("kokoro", "HTTP 429", &g, None, V)["cooldownKey"], "*");
+    }
+
+    #[test]
+    fn non_tripping_failure_is_a_per_call_notice_not_the_reply() {
+        // Fix pass: a 503 / 404 falls back for this call only (the next sentence tries
+        // ElevenLabs again), so it must not announce "for this reply" or use up the reply's
+        // one notice.
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut b = TtsBreaker::default();
+        assert!(!b.record_failure(Some("u1"), V, Some(503), None, t0));
+        let n = b.announce(Some("u1"), V, Some(503), "HTTP 503", t0).expect("a notice");
+        assert_eq!(n.scope, "call");
+        // Same reason within 10 s: deduped like any per-call notice.
+        assert!(!b.record_failure(Some("u1"), V, Some(503), None, t0 + s(1)));
+        assert_eq!(b.announce(Some("u1"), V, Some(503), "HTTP 503", t0 + s(1)), None);
+        assert_eq!(b.blocked(Some("u1"), V, t0 + s(1)), None, "the reply is not tripped");
+        // A later real trip of the same reply still gets its one "for this reply" notice.
+        assert!(b.record_failure(Some("u1"), V, Some(400), None, t0 + s(2)));
+        let n = b.announce(Some("u1"), V, Some(400), "HTTP 400", t0 + s(2)).expect("trip notice");
+        assert_eq!(n, Notice { scope: "utterance", status: Some(400), cooldown_secs: None });
+        assert_eq!(b.announce(Some("u1"), V, Some(400), "HTTP 400", t0 + s(3)), None);
     }
 }

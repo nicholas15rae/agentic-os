@@ -1,6 +1,27 @@
 import { describe, expect, it } from "vitest";
 import type { SpotifyStatus } from "@/lib/platform";
-import { ALLOWLIST_FIX_TEXT, VOLUME_HOLD_MS, cardButton, expiryHint, fmtTime, missingScopesLine, needsReconnect, progressAt, progressFraction, shownVolume, spotifyFix, spotifyFixText } from "./spotify-ui";
+import {
+  ALLOWLIST_FIX_TEXT,
+  SEEK_HOLD_MS,
+  UNMUTE_FALLBACK,
+  VOLUME_HOLD_MS,
+  cardButton,
+  expiryHint,
+  fmtTime,
+  isNoVolumeReply,
+  noVolumeNote,
+  missingScopesLine,
+  muteTarget,
+  needsReconnect,
+  progressAt,
+  progressFraction,
+  seekSeconds,
+  shownPosition,
+  shownVolume,
+  spotifyFix,
+  spotifyFixText,
+  volumeLevel,
+} from "./spotify-ui";
 
 describe("spotify widget helpers", () => {
   it("formats track times", () => {
@@ -101,5 +122,55 @@ describe("spotify widget helpers", () => {
     expect(cardButton(st(true, "owner_premium"))).toEqual({ label: "Check again", recheck: true });
     expect(cardButton(st(true, "transient"))).toEqual({ label: "Reconnect", recheck: false });
     expect(cardButton(st(true, null))).toEqual({ label: "Reconnect", recheck: false });
+  });
+});
+
+describe("spotify scrubber and mute helpers", () => {
+  it("seeks in whole seconds, never past the last second", () => {
+    expect(seekSeconds(61_900, 200_000)).toBe(61);
+    expect(seekSeconds(-500, 200_000)).toBe(0);
+    expect(seekSeconds(NaN, 200_000)).toBe(0);
+    expect(seekSeconds(200_000, 200_000)).toBe(199);
+    expect(seekSeconds(199_500, 199_500)).toBe(198);
+    expect(seekSeconds(500, 800)).toBe(0);
+    expect(seekSeconds(90_000, 0)).toBe(90);
+  });
+
+  it("a recent seek holds the scrubber against stale polls, then lets go", () => {
+    const local = { value: 60_000, at: 1000 };
+    expect(shownPosition(10_000, null, 5000, true, 200_000)).toBe(10_000);
+    expect(shownPosition(10_000, local, 1000 + 500, false, 200_000)).toBe(60_000);
+    expect(shownPosition(10_000, local, 1000 + 500, true, 200_000)).toBe(60_500);
+    expect(shownPosition(10_000, local, 1000 + 500, true, 60_200)).toBe(60_200);
+    expect(shownPosition(10_000, local, 1000 + SEEK_HOLD_MS, true, 200_000)).toBe(10_000);
+  });
+
+  it("mute goes to 0 and unmute restores the last level", () => {
+    expect(muteTarget(40, 70)).toBe(0);
+    expect(muteTarget(0, 70)).toBe(70);
+    expect(muteTarget(0, null)).toBe(UNMUTE_FALLBACK);
+    expect(muteTarget(0, 0)).toBe(UNMUTE_FALLBACK);
+    expect(muteTarget(0, 140)).toBe(100);
+    expect(muteTarget(null, 70)).toBeNull();
+  });
+
+  it("picks the speaker icon and spots the soft NO_VOLUME reply", () => {
+    expect(volumeLevel(0)).toBe("mute");
+    expect(volumeLevel(30)).toBe("low");
+    expect(volumeLevel(50)).toBe("high");
+    expect(isNoVolumeReply("That device doesn't let me change its volume.")).toBe(true);
+    expect(isNoVolumeReply("Spotify volume 0%.")).toBe(false);
+  });
+});
+
+describe("noVolumeNote", () => {
+  const nv = { device: "Pixel 8", reply: "That device doesn't let me change its volume." };
+  it("stays up while the refusing device plays (a poll can't wipe it)", () => {
+    expect(noVolumeNote(nv, "Pixel 8")).toBe(nv.reply);
+  });
+  it("goes away once another device plays, or nothing refused", () => {
+    expect(noVolumeNote(nv, "MY-PC")).toBeNull();
+    expect(noVolumeNote(nv, null)).toBeNull();
+    expect(noVolumeNote(null, "Pixel 8")).toBeNull();
   });
 });

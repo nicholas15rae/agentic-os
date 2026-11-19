@@ -2,6 +2,7 @@ import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode 
 import { StaticChassis } from "./StaticChassis";
 import { ZoneCallouts } from "./ZoneCallouts";
 import { GabagoolBlueprint } from "./GabagoolBlueprint";
+import { GabagoulBadge, type GabagoulBadgeState } from "./GabagoulBadge";
 import { RoutingFlowchart } from "./RoutingFlowchart";
 
 /** Below this stage height the exhaust callout goes compact (no node pills, bottom row).
@@ -55,9 +56,11 @@ function useShorterThan(el: React.RefObject<HTMLElement | null>, px: number, rem
  * with leader lines into the car, and the Gabagool blueprint inset sits bottom-right. The
  * stage keeps a 340 px minimum (the page scrolls instead of crushing the car). Below `md`:
  * the flowchart stacked vertically, the static SVG chassis, the callouts as a list and the
- * blueprint card.
+ * blueprint card. The ONTARIO // GABAGOUL badge sits top-centre on the stage (hidden while the
+ * stage is too narrow to clear the engine and cargo cards), or above the chassis when narrow;
+ * `badgeState` passes Phase 3 telemetry through to it.
  */
-export function CentreStage({ narrow, className = "" }: { narrow: boolean; className?: string }) {
+export function CentreStage({ narrow, className = "", badgeState }: { narrow: boolean; className?: string; badgeState?: GabagoulBadgeState }) {
   const stage = useRef<HTMLDivElement>(null);
   const short = useShorterThan(stage, SHORT_STAGE_PX, narrow);
   if (narrow) {
@@ -65,6 +68,9 @@ export function CentreStage({ narrow, className = "" }: { narrow: boolean; class
       <div className={`space-y-2 ${className}`}>
         <RoutingFlowchart orient="v" />
         <div data-slot="viewport" className="rounded-[14px] border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2">
+          <div className="mb-2 flex justify-center">
+            <GabagoulBadge state={badgeState} />
+          </div>
           <StaticChassis className="h-auto w-full" />
         </div>
         <ZoneCallouts layout="stack" />
@@ -87,6 +93,13 @@ export function CentreStage({ narrow, className = "" }: { narrow: boolean; class
           </HoloBoundary>
         </div>
         <ZoneCallouts layout="overlay" compact={short} />
+        {/* Top-centre is the only free edge. Its max width is the gap between the engine and cargo
+            cards (each min(230px,38%) at 0.75rem, plus a 0.5rem margin); below 46rem that gap is
+            narrower than the full-size main line, so from 42rem to 46rem the badge drops to its compact type
+            (GabagoulBadge's @max-[46rem] classes) and below 42rem it hides. */}
+        <div className="pointer-events-none absolute left-1/2 top-3 hidden max-w-[calc(100%_-_2*(min(230px,38%)_+_1.25rem))] -translate-x-1/2 @min-[42rem]:flex">
+          <GabagoulBadge state={badgeState} />
+        </div>
         <div className="pointer-events-auto absolute bottom-3 right-3 w-[min(200px,32%)]">
           <GabagoolBlueprint />
         </div>

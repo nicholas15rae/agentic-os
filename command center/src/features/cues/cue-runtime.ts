@@ -5,7 +5,7 @@ import { useVoice, THREADS, type ThreadId } from "@/features/voice/voice-store";
 import { useToasts } from "@/features/reminders/notify";
 import { hasOnVerb, type OsIntent } from "@/features/os/os-intent-parse";
 import type { SpotifyIntent } from "@/lib/platform";
-import { DEFAULT_CUES, type CueWidget } from "./types";
+import { cueIntroMigration, DEFAULT_CUES, type CueWidget } from "./types";
 import { norm } from "./gaba";
 import { runCue, stopAllAudio, useCueRun } from "./player";
 
@@ -85,6 +85,11 @@ export function useCueScheduler() {
   useEffect(() => {
     if (!loaded) return;
     for (const d of DEFAULT_CUES) if (!items.some((i) => i.builtin === d.builtin)) void create(d);
+    // One-time upgrade of an untouched old default line (P5: the startup greeting).
+    for (const i of items) {
+      const intro = i._deleted ? null : cueIntroMigration(i);
+      if (intro) void update(i.id, { intro }).catch(() => undefined);
+    }
   }, [loaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

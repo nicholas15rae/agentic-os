@@ -7,7 +7,7 @@ import { isTauri, onNativeEvent } from "@/lib/platform";
 import { STATE_LABEL, useVoice } from "./voice-store";
 import { Waveform } from "./Waveform";
 import { resumeHold, startListening, stopVoice, toggleListening, voiceCaps } from "./voice-controller";
-import { CommandInput, MicButton, STATE_DOT, Transcript } from "./VoiceParts";
+import { CommandInput, MicButton, STATE_DOT, Transcript, useTonyThread } from "./VoiceParts";
 import { ListenControls } from "./ListenControls";
 import { useOsName } from "@/features/os/os-store";
 
@@ -22,6 +22,8 @@ import { useOsName } from "@/features/os/os-store";
 export function VoiceHUD() {
   const osLabel = useOsName();
   const { state, expanded, partial, error, consoleVisible, setExpanded } = useVoice();
+  // Tony's own thread (Auto, or his Agents tab) — where voice writes; never a sub-agent's.
+  const tonyThread = useTonyThread();
   useVoiceLaunchers();
 
   // Minimised: the floating orb. It hides only while the docked Voice Console
@@ -73,9 +75,9 @@ export function VoiceHUD() {
 
         {expanded ? (
           <>
-            <Transcript className="max-h-56 border-t border-white/5 px-4 py-3" />
+            <Transcript thread={tonyThread} className="max-h-56 border-t border-white/5 px-4 py-3" />
             <div className="px-4 pb-3 pt-1">
-              <CommandInput thread="auto" autoFocus />
+              <CommandInput thread={tonyThread} autoFocus />
             </div>
             <p className="flex items-center gap-2 px-4 pb-3 font-mono text-[10px] text-ink-3">
               {!voiceCaps.stt && <MicOff size={11} />}
@@ -149,7 +151,7 @@ function FloatingOrb() {
 }
 
 /**
- * Hold mode (Phase 2): what you've said since "take it ease", live, and a Resume button —
+ * Hold mode (Phase 2): what you've said since the hold ("whoa" / "madone" / "aspetta"), live, and a Resume button —
  * the typed/tap equivalent of "keep going" (sends what's held, or resumes Tony if nothing is).
  */
 function HoldBar() {

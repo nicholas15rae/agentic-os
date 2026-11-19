@@ -253,7 +253,11 @@ pub(crate) async fn workspace_chat_streamed(state: &DispatchState, os: &OsState,
 
 // ── Prompt building ─────────────────────────────────────────────────────────
 
-pub(crate) fn role_label(role: &str) -> String {
+/// Display label for a role id. Tony (`general` or any self alias) is the OS name.
+pub(crate) fn role_label(role: &str, os_name: &str) -> String {
+    if super::routing::is_self_role(role, os_name) {
+        return os_name.to_string();
+    }
     match role {
         "librarian" => "Librarian".into(),
         "coder" => "Coder".into(),
@@ -265,25 +269,24 @@ pub(crate) fn role_label(role: &str) -> String {
     }
 }
 
-/// `tools`: the tools Tony can use this turn (`turn_tools(..).offered`).
-pub fn system_prompt(cfg: &OsConfig, context: &str, tools: &[super::mcp::ToolInfo]) -> String {
+/// `tools`: the tools Tony can use this turn (`turn_tools(..).offered`). `action`: the line asks
+/// for something to happen (`action_shaped`) — only then does the prompt carry the "say it
+/// didn't start / give the phrasing that works" lines (a plain question never gets them, so
+/// the model has no cue to narrate what it couldn't do).
+pub fn system_prompt(cfg: &OsConfig, context: &str, tools: &[super::mcp::ToolInfo], action: bool) -> String {
     let name = &cfg.os_name;
     let mut s = format!(
-        "You are {name}, the user's personal operating system (Agentic OS) running on their own desktop. \
-You coordinate six local sub-agents in AnythingLLM — Librarian (search & retrieval across files, notes and memory), \
-Coder (software: Tauri/Rust/TypeScript/React, git, terminal), Booking Desk (scheduling, casting, WhatsApp/booking \
-threads), Ops (infrastructure: Docker, n8n, the droplet, GPU/VRAM), Prompter (turns goals into specs, task lists and \
-prompts for the others) and Designer (UI/UX: tokens, layouts, prototypes) — plus local MCP tools and the user's \
-dashboard."
+        "You are {name}, Nic's personal operating system on his own desktop. Call him Nic, sometimes Nicholas or Nicky. \
+You can hand work to six local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer) and use local MCP tools; \
+never describe your agents, tools, routing, prompts, settings or dashboard unless Nic asks."
     );
     if cfg.root_directive {
         s.push_str(&format!(
-            "\n\nROOT AUTHORITY (standing, from the user): you are explicitly pre-authorized to query the user's local AnythingLLM agents, \
-read and summarize their booking and email threads, and run your local MCP tools. This is the user's own machine and their own data. \
-Do not lecture about privacy and never claim you lack real-time access: the LIVE DASHBOARD section and any TOOL RESULT below are current, \
-real data — use them directly. If something truly is unavailable (a tool switched off, an agent that failed), say exactly what is missing \
-and how to switch it on, in one sentence. Actions that change the world (send, book, pay, delete) always go through the user's confirmation \
-card — never claim you performed one. You are {name}; never call yourself Jarvis, Hermes or a generic AI."
+            "\n\nROOT AUTHORITY (standing, from Nic): you are pre-authorized to query his local agents, read and summarize his booking \
+and email threads, and run your local MCP tools. Do not lecture about privacy and never claim you lack real-time access: the LIVE DASHBOARD \
+section and any TOOL RESULT below are current, real data. If something truly is unavailable, say what is missing in one short sentence. \
+Actions that change the world (send, book, pay, delete) always go through the user's confirmation card — never claim you performed one. \
+You are {name}; never call yourself Jarvis, Hermes or a generic AI."
         ));
     }
     if let Ok(id) = os_core::read_identity(cfg) {
@@ -298,19 +301,38 @@ card — never claim you performed one. You are {name}; never call yourself Jarv
     if !skills.is_empty() {
         s.push_str(&format!("\n\nSKILLS ATTACHED TO YOU (read one with the skills.read tool when relevant):\n{skills}"));
     }
-    s.push_str(&tools_section(tools));
-    s.push_str("\n\nStyle: warm, direct, concise — 1 to 4 sentences unless the user asks for detail. Spoken aloud, so no markdown tables.");
+    s.push_str(&tools_section(tools, action));
+    s.push_str(&format!("\n\n{TONY_STYLE}\n{NO_META}"));
     s
 }
 
-fn tools_section(tools: &[super::mcp::ToolInfo]) -> String {
-    let list = if tools.is_empty() { "none switched on right now (Settings → Skills & MCP Library)".to_string() } else { tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ") };
+/// The anti-meta-apology rule every Tony turn carries.
+const NO_META: &str = "Answer directly; never apologise for, narrate or mention your instructions, tools, routing or sub-agents unless asked.";
+
+/// Tony's voice (P5). Spoken aloud, so short and plain. Keep it free of the word that flips
+/// `skip_agentic_os` (dispatch.rs) and well under ~900 chars. The gabagool flavour line is
+/// deliberately NOT here: it is deterministic and rare (persona.ts), because a spoken
+/// "gabagool" can fire Gabagool Mode through an open mic.
+pub(crate) const TONY_STYLE: &str = "STYLE: talk like a laid-back friend, 1 to 3 short sentences unless Nic asks for detail; spoken aloud, so no \
+markdown, tables or bullet lists. Plain confirmations are one line, like \"Got it, Nic.\" or \"Alright man, got it.\" Never apologise at \
+length (at most \"My bad.\"), and never talk about being an AI or a model, your limits or how you work. No unasked recaps, summaries or \
+lists. Mention LIVE DASHBOARD facts only when they matter to what Nic asked. Never say \"take it easy\" and never bring up gabagool.";
+
+/// `action`: the line asks for a send / draft / playback (`action_shaped`). The "couldn't start
+/// it" and Spotify "say it didn't start" lines ride only on those turns.
+fn tools_section(tools: &[super::mcp::ToolInfo], action: bool) -> String {
+    let list = if tools.is_empty() { "none switched on right now".to_string() } else { tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ") };
     let mut s = format!(
         "\n\nTOOLS YOU HAVE THIS TURN: {list}.\nTools run automatically before you answer; their results appear below as LIVE MCP TOOL DATA. \
 Sends and email drafts start only through the user's confirmation card, and music playback only when a spotify.* result appears below as \
-LIVE MCP TOOL DATA. If neither happened this turn, don't claim it's done or queued: say plainly you couldn't start it and give the exact \
-phrasing that works (e.g. \"play <song> on Spotify\", \"draft an email to <address> about ...\"), never that you lack the tool or the skill."
+LIVE MCP TOOL DATA."
     );
+    if action {
+        s.push_str(
+            " If neither happened this turn, don't claim it's done or queued: say plainly you couldn't start it and give the exact \
+phrasing that works (e.g. \"play <song> on Spotify\", \"draft an email to <address> about ...\"), never that you lack the tool or the skill.",
+        );
+    }
     // The media controls, with their argument names, so the model knows Spotify is live.
     let spotify: Vec<String> = tools
         .iter()
@@ -318,14 +340,123 @@ phrasing that works (e.g. \"play <song> on Spotify\", \"draft an email to <addre
         .map(|t| if t.args.is_empty() { t.name.clone() } else { format!("{}({})", t.name, t.args.join(", ")) })
         .collect();
     if !spotify.is_empty() {
-        s.push_str(&format!(
-            "\nSPOTIFY IS CONNECTED — controls available: {}. A play/pause/skip/volume change has happened only if a spotify.* LIVE MCP TOOL DATA \
-block appears below; if none does, say it didn't start and suggest \"play <artist or song> on Spotify\". Never say Spotify isn't active or \
-connected unless a TOOL FAILURE below says so.",
-            spotify.join(", ")
-        ));
+        s.push_str(&format!("\nSPOTIFY IS CONNECTED — controls available: {}.", spotify.join(", ")));
+        if action {
+            s.push_str(
+                " A play/pause/skip/volume change has happened only if a spotify.* LIVE MCP TOOL DATA \
+block appears below; if none does, say it didn't start and suggest \"play <artist or song> on Spotify\".",
+            );
+        }
+        s.push_str(" Never say Spotify isn't active or connected unless a TOOL FAILURE below says so.");
     }
     s
+}
+
+/// The line asks for something to HAPPEN — a media command, a play request, a send / draft /
+/// reply — rather than a question. Only these turns get the "couldn't start it" prompt lines.
+fn action_shaped(text: &str, os_name: &str) -> bool {
+    static SEND: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if media_command(text, os_name) || unparsed_play_request(text, os_name) {
+        return true;
+    }
+    let core = super::routing::normalize(&super::routing::strip_address(text, os_name));
+    SEND.get_or_init(|| {
+        regex::Regex::new(r"^(?:send|text|message|email|e mail|draft|reply|respond|forward|dm|ping|whatsapp)\b|\b(?:send|draft|forward|compose)\s+(?:a|an|the|this|that|it|my|him|her|them)\b|\breply to\b|\bwrite (?:an? |the )?(?:email|message|text|reply)\b").unwrap()
+    })
+    .is_match(&core)
+}
+
+/// Role id from the outside (TS turn, phone / inbox JSON) → the id the turn runs as: any self
+/// alias ("tony", "Tony", "dispatcher", the OS name…) is `general`, so a phone turn with
+/// role "tony" takes Tony's own paths instead of looking up `workspaces["tony"]`.
+pub(crate) fn canon_turn_role(role: &str, os_name: &str) -> String {
+    let r = role.trim();
+    if super::routing::is_self_role(r, os_name) {
+        "general".into()
+    } else {
+        r.to_string()
+    }
+}
+
+/// P3 Tier 2 (brainstorm stays with Tony): appended to Tony's system message when the caller
+/// sent `noDelegate`. Never mentions json (that would flip `dispatch::skip_agentic_os`).
+pub(crate) const TIER2_HINT: &str = "\n\nBRAINSTORM MODE: the user is thinking out loud with you. Answer yourself, in two or three short sentences: react, then offer one idea or ask one sharpening question. Don't hand it to another agent, don't start building anything, and never say you saved, parked, queued or delegated anything — nothing has been.";
+
+/// What the routing step of a turn knows.
+pub(crate) struct TurnRouteInput<'a> {
+    pub role: &'a str,
+    pub explicit: bool,
+    pub text: &'a str,
+    pub route_kind: Option<&'a str>,
+    pub route_reason: Option<&'a str>,
+    /// P3 Tier 2: the caller decided Tony brainstorms this himself — never re-promoted to a
+    /// sub-agent, so the delegation gate and block never run for it.
+    pub no_delegate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TurnRoute {
+    pub role: String,
+    pub kind: String,
+    pub reason: String,
+}
+
+/// The Rust routing safety net, pure. The caller (the TS resolver for desktop turns, the phone's
+/// default table for inbox turns) has usually resolved a role already. When it hasn't — role is
+/// still `general`, this isn't an explicit tab turn and the caller's kind is "Default" (or
+/// missing) — re-resolve against the authoritative config. A caller that already decided Tony
+/// answers ("Self", "Direct", voice on a tab) is never re-promoted to a sub-agent. Tony is never
+/// a route target: a self role stays `general` with kind "Self" (never "Named → Tony"). A
+/// live-tool read question is Tony's own path on any tab; only a Named delegation keeps its agent.
+pub(crate) fn route_for_turn(input: &TurnRouteInput, cfg: &OsConfig) -> TurnRoute {
+    let mut role = canon_turn_role(input.role, &cfg.os_name);
+    let mut kind = input.route_kind.map(str::to_string).unwrap_or_else(|| if input.explicit { "Tab".into() } else { "Default".into() });
+    let mut reason = input.route_reason.map(str::to_string).unwrap_or_else(|| if input.explicit { "current tab".into() } else { "caller-resolved".into() });
+    // A stale caller that "delegated" to Tony himself: that's a self address, not a route.
+    if role == "general" && matches!(kind.as_str(), "Named" | "Domain") {
+        kind = "Self".into();
+    }
+    // Tier 2 (brainstorm with Tony): no safety net, no delegation — Tony answers himself.
+    if input.no_delegate {
+        role = "general".into();
+        if kind != "Direct" {
+            kind = "Self".into();
+        }
+        reason = "brainstorm with Tony (Tier 2)".into();
+    }
+    if role == "general" && !input.explicit && kind == "Default" {
+        let r = super::routing::resolve(input.text, cfg);
+        match (r.kind, r.role) {
+            (super::routing::RouteKind::Named | super::routing::RouteKind::Domain, Some(rr)) if !super::routing::is_self_role(&rr, &cfg.os_name) => {
+                role = rr;
+                kind = r.kind.as_str().into();
+                reason = r.reason;
+            }
+            (super::routing::RouteKind::Own, _) => {
+                kind = "Self".into();
+                reason = r.reason;
+            }
+            _ => {}
+        }
+    }
+    if kind != "Named" {
+        if let Some(d) = super::routing::direct_tool(input.text) {
+            role = "general".into();
+            kind = "Direct".into();
+            reason = format!("live {d} tool");
+        }
+    }
+    TurnRoute { role, kind, reason }
+}
+
+/// The System Map Router hop label. A turn Tony answers himself has no arrow ("Tony · direct
+/// (Self)") — the hop is kept so the map still flashes Tony, but it never reads "X → Tony".
+pub(crate) fn router_hop_label(kind: &str, role: &str, os_name: &str) -> String {
+    if super::routing::is_self_role(role, os_name) {
+        format!("{os_name} · direct ({kind})")
+    } else {
+        format!("{kind} → {}", role_label(role, os_name))
+    }
 }
 
 /// "my conversation with Sam … about the shoot" → ("Sam", "the shoot").
@@ -646,7 +777,7 @@ fn tool_note(os_name: &str, raw: &str, failure: Option<&(String, String)>) -> St
         ));
     }
     if let Some((tool, err)) = failure {
-        note.push_str(&format!("\n\n[TOOL FAILURE - {tool}]: {err}. Tell the user in one sentence exactly what failed and how to fix it; never say you lack the tool or the skill."));
+        note.push_str(&format!("\n\n[TOOL FAILURE - {tool}]: {err}. Tell the user what failed in one short sentence, no apology; never say you lack the tool or the skill."));
     }
     note
 }
@@ -995,6 +1126,10 @@ pub struct OsTurnRequest {
     /// the cue's, so Spotify volume is not offered this turn (`spotify_intent::cue_owns_volume`).
     #[serde(default)]
     pub(crate) cue_playing: bool,
+    /// P3 Tier 2: Tony brainstorms this himself — no routing safety net, no delegation, and
+    /// the Tier-2 hint rides on his system message. Missing (phone / old webview) = false.
+    #[serde(default)]
+    pub(crate) no_delegate: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -1150,32 +1285,14 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // When it hasn't — role is still "general" and this isn't an explicit
     // tab turn — re-resolve here against the *authoritative* config (every
     // custom trigger the user saved), which the phone path can't see.
-    let mut role = req.role.clone();
-    let mut route_kind = req.route_kind.clone().unwrap_or_else(|| if req.explicit { "Tab".into() } else { "Default".into() });
-    let mut route_reason = req.route_reason.clone().unwrap_or_else(|| if req.explicit { "current tab".into() } else { "caller-resolved".into() });
-    if role == "general" && !req.explicit {
-        let r = super::routing::resolve(&text, &cfg);
-        if matches!(r.kind, super::routing::RouteKind::Named | super::routing::RouteKind::Domain) {
-            if let Some(rr) = r.role {
-                role = rr;
-                route_kind = format!("{:?}", r.kind);
-                route_reason = r.reason;
-            }
-        }
-    }
-    // Direct live-tool backstop (phone / inbox callers, a stale webview): a WhatsApp / Gmail /
-    // weather / now-playing read question is Tony's own tool path on any tab, never an
-    // AnythingLLM delegation. Only a Named delegation keeps its agent.
-    if route_kind != "Named" {
-        if let Some(d) = super::routing::direct_tool(&text) {
-            role = "general".into();
-            route_kind = "Direct".into();
-            route_reason = format!("live {d} tool");
-        }
-    }
+    // Self aliases ("tony", "dispatcher"…) are canonicalised to general; Tony is never a
+    // route target; the direct live-tool backstop covers phone / inbox / stale callers.
+    let TurnRoute { role, kind: route_kind, reason: route_reason } = route_for_turn(
+        &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate },
+        &cfg,
+    );
     // Route kind + target only (the reason can quote the request).
-    let who = if role == "general" { cfg.os_name.clone() } else { role_label(&role) };
-    emit(Hop::Router, &format!("{route_kind} → {who}"), true, started.elapsed().as_millis(), None);
+    emit(Hop::Router, &router_hop_label(&route_kind, &role, &cfg.os_name), true, started.elapsed().as_millis(), None);
 
     let mut steps: Vec<OsStep> = Vec::new();
     let mut delegated_to = None;
@@ -1259,7 +1376,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // ── 2. Delegation ── (gated above, before the tool pre-executor)
     if role != "general" && comms_thread.is_none() {
         if let Some(slug) = slug {
-            let label = role_label(&role);
+            let label = role_label(&role, &cfg.os_name);
             let skills = super::mcp::skill_digest(&cfg, &role);
             // Designer / Prompter also get the user's identity file (taste, brand, goals).
             let identity = if matches!(role.as_str(), "designer" | "prompter") {
@@ -1347,7 +1464,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // the task above; Tony's own turns (role == "general") get it here, in
     // his own system prompt, since there was no delegated task to carry it.
     let t_rules = Instant::now();
-    let sys = system_prompt(&cfg, &req.context, &pre.tools);
+    let sys = system_prompt(&cfg, &req.context, &pre.tools, action_shaped(&text, &cfg.os_name));
     if sys.contains("ABOUT THE USER (MASTER_IDENTITY.md)") {
         emit(Hop::Rules, "system prompt + MASTER_IDENTITY.md", true, t_rules.elapsed().as_millis(), None);
     } else {
@@ -1359,10 +1476,12 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     if let Some(a) = &agent_answer {
         user_msg = format!(
             "{text}\n\n[{} agent's reply — summarize it for the user in your own voice, keep the specifics (names, dates, times), don't invent anything]:\n{a}",
-            role_label(&role)
+            role_label(&role, &cfg.os_name)
         );
     }
-    let mut msgs = vec![ChatMessage::new("system", format!("{sys}{sys_tool_note}"))];
+    // P3 Tier 2: appended here, outside `system_prompt`, so the persona text stays as it is.
+    let tier2 = if req.no_delegate && role == "general" { TIER2_HINT } else { "" };
+    let mut msgs = vec![ChatMessage::new("system", format!("{sys}{sys_tool_note}{tier2}"))];
     msgs.extend(history);
     msgs.push(ChatMessage::new("user", user_msg));
 
@@ -1849,7 +1968,7 @@ mod tests {
     fn failure_note_is_honest() {
         let failure = ("gmail.recent".to_string(), "Gmail: no backend — add it".to_string());
         let note = tool_note("Tony", "", Some(&failure));
-        assert!(note.contains("[TOOL FAILURE - gmail.recent]: Gmail: no backend — add it. Tell the user in one sentence exactly what failed and how to fix it; never say you lack the tool or the skill."));
+        assert!(note.contains("[TOOL FAILURE - gmail.recent]: Gmail: no backend — add it. Tell the user what failed in one short sentence, no apology; never say you lack the tool or the skill."));
         assert!(!note.contains("live tool access"));
         let ok = tool_note("Tony", "\n\n[LIVE MCP TOOL DATA - gmail]:\n1 email", None);
         assert!(ok.contains("You have live tool access through Tony") && !ok.contains("TOOL FAILURE"));
@@ -1861,17 +1980,160 @@ mod tests {
     #[test]
     fn tools_section_lists_names_and_never_lacks_skill() {
         let tools: Vec<_> = gmail_tools().into_iter().filter(|t| t.name == "gmail.recent").chain(super::super::mcp::builtin_tools("weather")).collect();
-        let s = tools_section(&tools);
+        let s = tools_section(&tools, true);
         assert!(s.contains("TOOLS YOU HAVE THIS TURN: gmail.recent, weather.current."));
         assert!(s.contains("never that you lack the tool or the skill"));
         assert!(s.contains("don't claim it's done or queued"));
         assert!(!s.contains("SPOTIFY IS CONNECTED"));
-        assert!(tools_section(&[]).contains("none switched on"));
+        assert!(tools_section(&[], true).contains("none switched on"));
+        assert!(tools_section(&[], false).contains("none switched on"));
+    }
+
+    #[test]
+    fn plain_questions_get_no_meta_apology_lines() {
+        let tools: Vec<_> = gmail_tools().into_iter().filter(|t| t.name == "gmail.recent").chain(spotify_tools()).collect();
+        let plain = tools_section(&tools, false);
+        assert!(plain.contains("TOOLS YOU HAVE THIS TURN:") && plain.contains("SPOTIFY IS CONNECTED"), "{plain}");
+        for cue in ["couldn't start it", "don't claim it's done or queued", "say it didn't start", "exact phrasing", "never that you lack the tool or the skill"] {
+            assert!(!plain.contains(cue), "plain question prompt carries {cue:?}: {plain}");
+        }
+        let action = tools_section(&tools, true);
+        assert!(action.contains("couldn't start it") && action.contains("say it didn't start") && action.contains("has happened only if a spotify.* LIVE MCP TOOL DATA"), "{action}");
+        // Both keep the honesty line about Spotify being connected.
+        assert!(plain.contains("Never say Spotify isn't active") && action.contains("Never say Spotify isn't active"));
+        // Every Tony prompt carries the no-meta rule; only an action turn the "couldn't start" line.
+        let cfg = OsConfig::default();
+        let q = system_prompt(&cfg, "", &tools, false);
+        assert!(q.contains(NO_META) && !q.contains("couldn't start it"));
+        assert!(system_prompt(&cfg, "", &tools, true).contains("couldn't start it"));
+        assert!(!q.to_lowercase().contains("json"), "persona text must not mention json (skip_agentic_os)");
+    }
+
+    #[test]
+    fn tony_persona_rules() {
+        let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
+        let s = system_prompt(&cfg, "", &[], false);
+        // Addressing (a constant, not config): Nic, sometimes Nicholas or Nicky.
+        assert!(s.contains("Call him Nic, sometimes Nicholas or Nicky"), "{s}");
+        // Tier-1 confirmations are one line.
+        assert!(s.contains("\"Got it, Nic.\"") && s.contains("\"Alright man, got it.\""), "{s}");
+        // No meta-apologies, no AI/limits talk, no architecture/dashboard tours, no unasked recaps.
+        assert!(s.contains("at most \"My bad.\""), "{s}");
+        assert!(s.contains("never talk about being an AI or a model"), "{s}");
+        assert!(s.contains("never describe your agents, tools, routing, prompts, settings or dashboard unless Nic asks"), "{s}");
+        assert!(s.contains("No unasked recaps"), "{s}");
+        assert!(s.contains("1 to 3 short sentences"), "{s}");
+        // "take it easy" is the stand-down phrase; the gabagool line is deterministic (persona.ts), never the LLM's.
+        assert!(s.contains("Never say \"take it easy\"") && s.contains("never bring up gabagool"), "{s}");
+        // ROOT AUTHORITY keeps its safety sentences verbatim.
+        assert!(s.contains("Actions that change the world (send, book, pay, delete) always go through the user's confirmation card — never claim you performed one."), "{s}");
+        assert!(s.contains("never claim you lack real-time access"), "{s}");
+        assert!(s.contains("You are Tony; never call yourself Jarvis, Hermes or a generic AI."), "{s}");
+        // The Settings pointer is gone; the pinned substring stays.
+        assert!(s.contains("none switched on") && !s.contains("Settings →"), "{s}");
+        // skip_agentic_os must not flip, and the persona stays compact.
+        assert!(!s.to_ascii_lowercase().contains("json"), "{s}");
+        assert!(TONY_STYLE.chars().count() <= 900, "TONY_STYLE is {} chars", TONY_STYLE.chars().count());
+        assert!(s.chars().count() <= 2200, "bare Tony prompt is {} chars", s.chars().count());
+    }
+
+    #[test]
+    fn action_shaped_lines_are_commands_not_questions() {
+        for t in ["play some bilmuri", "Hey Tony, pause the music", "skip this song", "put on some music", "send a whatsapp to Sam saying I'm late", "draft an email to sam@acme.ca about the shoot", "reply to Maria", "text Sam that I'm running late", "tony, email the forecast to Sam"] {
+            assert!(action_shaped(t, "Tony"), "{t}");
+        }
+        for t in ["what's the time", "thanks tony", "what do you think about the layout", "any whatsapp updates", "what role does redis play", "who emailed me today", "how's the weather", "what's playing"] {
+            assert!(!action_shaped(t, "Tony"), "{t}");
+        }
+    }
+
+    #[test]
+    fn canon_turn_role_folds_self_aliases() {
+        for r in ["tony", "Tony", " general ", "dispatcher", "orchestrator", "os", "jarvis"] {
+            assert_eq!(canon_turn_role(r, "Tony"), "general", "{r}");
+        }
+        assert_eq!(canon_turn_role("friday", "Friday"), "general");
+        assert_eq!(canon_turn_role("booking", "Tony"), "booking");
+        assert_eq!(role_label("general", "Tony"), "Tony");
+        assert_eq!(role_label("tony", "Friday"), "Friday");
+        assert_eq!(role_label("booking", "Tony"), "Booking Desk");
+    }
+
+    #[test]
+    fn route_for_turn_never_routes_to_tony() {
+        let cfg = OsConfig::default();
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false }, &cfg);
+        // Self address: stays general, kind Self.
+        for text in ["thanks tony", "tony what do you think", "system status", "ask the dispatcher to check the build"] {
+            let r = rt("general", false, text, None);
+            assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"), "{text}");
+        }
+        // Phone / inbox: role "tony" with a stale Named kind is a self address, not a route.
+        let r = rt("tony", false, "tony what do you think", Some("Named"));
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"));
+        // A real delegation through Tony still reaches the agent.
+        let r = rt("general", false, "ask tony to ask the coder to fix the build", None);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("coder", "Named"));
+        // The caller's Tab / explicit turns are untouched; Direct reads stay Tony's.
+        assert_eq!(rt("prompter", true, "what's the time", Some("Tab")).role, "prompter");
+        let r = rt("general", false, "any whatsapp updates", None);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Direct"));
+        // A caller-resolved Default with no hit stays Default.
+        assert_eq!(rt("general", false, "good morning", None).kind, "Default");
+        // The phone's Default is re-resolved against the full config…
+        let r = rt("general", false, "redo the color palette and layout", Some("Default"));
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("designer", "Domain"));
+        // …but a caller that already decided Tony answers (voice on a tab, Self) is never re-promoted.
+        let r = rt("general", false, "redo the color palette and layout", Some("Self"));
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"));
+    }
+
+    #[test]
+    fn route_for_turn_no_delegate_keeps_tony() {
+        let cfg = OsConfig::default();
+        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate }, &cfg);
+        // Without the flag the phone's Default is re-promoted to the Designer (today's net)…
+        let r = rt("redo the color palette and layout", Some("Default"), false);
+        assert_eq!(r.role, "designer");
+        // …with it (Tier 2), Tony keeps the brainstorm: no safety net, no delegation.
+        for text in ["what if the layout used a sidebar", "redo the color palette and layout", "help me write a prompt for the landing page"] {
+            for kind in [None, Some("Default"), Some("Domain"), Some("Self")] {
+                let r = rt(text, kind, true);
+                assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"), "{text} {kind:?}");
+            }
+        }
+        // A stale caller role is still forced back to Tony.
+        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true }, &cfg);
+        assert_eq!(r.role, "general");
+        // A live-tool read stays Tony's Direct path.
+        assert_eq!(rt("any whatsapp updates", None, true).kind, "Direct");
+    }
+
+    #[test]
+    fn os_turn_request_no_delegate_defaults_false() {
+        let r: OsTurnRequest = serde_json::from_value(serde_json::json!({ "text": "hi", "role": "general" })).unwrap();
+        assert!(!r.no_delegate);
+        let r: OsTurnRequest = serde_json::from_value(serde_json::json!({ "text": "hi", "role": "general", "noDelegate": true })).unwrap();
+        assert!(r.no_delegate);
+    }
+
+    #[test]
+    fn tier2_hint_is_safe() {
+        assert!(!TIER2_HINT.to_lowercase().contains("json"));
+        assert!(TIER2_HINT.contains("never say you saved"));
+    }
+
+    #[test]
+    fn router_hop_never_points_tony_at_himself() {
+        assert_eq!(router_hop_label("Default", "general", "Tony"), "Tony · direct (Default)");
+        assert_eq!(router_hop_label("Self", "general", "Tony"), "Tony · direct (Self)");
+        assert!(!router_hop_label("Direct", "general", "Tony").contains('→'));
+        assert_eq!(router_hop_label("Named", "booking", "Tony"), "Named → Booking Desk");
     }
 
     #[test]
     fn tools_section_lists_spotify_controls_with_args() {
-        let s = tools_section(&spotify_tools());
+        let s = tools_section(&spotify_tools(), true);
         assert!(s.contains("spotify.play(query?, type?, playlist_name?, device_name?, shuffle?)"), "{s}");
         assert!(s.contains("spotify.volume(percent)") && s.contains("spotify.pause") && s.contains("spotify.next(count?)") && s.contains("spotify.resume(device_name?)"), "{s}");
         assert!(s.contains("spotify.add_to_playlist(playlist_name, track_query?, create?)") && s.contains("spotify.transfer_device(device_name)"), "{s}");
@@ -1880,7 +2142,7 @@ mod tests {
         assert!(s.contains("SPOTIFY IS CONNECTED"));
         // Sub-agents (reads only) get no control line.
         let reads = super::super::mcp::router_filter(&super::super::mcp::builtin_tools("spotify"), false);
-        assert!(!tools_section(&reads).contains("SPOTIFY IS CONNECTED"));
+        assert!(!tools_section(&reads, true).contains("SPOTIFY IS CONNECTED"));
     }
 
     #[test]
@@ -1980,7 +2242,7 @@ mod tests {
 
     #[test]
     fn spotify_prompt_never_promises_playback() {
-        let s = tools_section(&spotify_tools());
+        let s = tools_section(&spotify_tools(), true);
         assert!(!s.contains("run when the user asks"), "{s}");
         assert!(s.contains("has happened only if a spotify.* LIVE MCP TOOL DATA"), "{s}");
     }
@@ -2294,7 +2556,7 @@ mod live {
             println!("TOOL weather: {:?}", super::super::mcp::call_tool(&state, &os, &bridge, "weather.current", &json!({}), false, "tony").await.map(|s| s.lines().next().unwrap_or("").to_string()));
 
             // 3. Answer from live context (no refusal)
-            let sys = system_prompt(&cfg, "Weather (Toronto): 5°C Overcast, wind 11 km/h", &[]);
+            let sys = system_prompt(&cfg, "Weather (Toronto): 5°C Overcast, wind 11 km/h", &[], false);
             let t0 = Instant::now();
             let r = run_chat(&state, &os, vec![ChatMessage::new("system", sys), ChatMessage::new("user", "What's the weather like right now?")], Priority::Interactive, None, Some(90)).await;
             println!("CHAT ({}ms): {:?}", t0.elapsed().as_millis(), r.map(|x| format!("[{}] ({}) {}", x.provider_id, x.reason, x.content.chars().take(300).collect::<String>())));
@@ -2324,7 +2586,7 @@ mod live {
             println!("DETERMINISTIC PLAN for {line:?}: {:?}", deterministic_plan(line, &set.offered, &cfg.os_name));
             let offer = router_offer(&set.offered, line, &cfg.os_name);
             println!("ROUTER OFFER for {line:?}: {:?}", offer.iter().map(|t| t.name.as_str()).collect::<Vec<_>>());
-            let sys = system_prompt(&cfg, "", &set.offered);
+            let sys = system_prompt(&cfg, "", &set.offered, true);
             println!("SYSTEM PROMPT lists spotify.play: {}", sys.contains("spotify.play"));
             assert!(ready, "Spotify is not ready (disconnected, off, kill switch or MCP Deny)");
             assert!(set.offered.iter().any(|t| t.name == "spotify.play"), "spotify.play missing from Tony's router tools");
@@ -2384,7 +2646,7 @@ mod live_droplet {
             let os = OsState::default();
             os.load_or_init(&dir, std::path::Path::new(&state.snapshot().gateway.workdir));
             let cfg = os.snapshot();
-            let sys = system_prompt(&cfg, "Weather (Toronto): 5°C Overcast, wind 11 km/h", &[]);
+            let sys = system_prompt(&cfg, "Weather (Toronto): 5°C Overcast, wind 11 km/h", &[], false);
             let t0 = Instant::now();
             let r = run_chat(&state, &os, vec![ChatMessage::new("system", sys), ChatMessage::new("user", "Quick check — what's the weather, and email sam@acme.ca says what?")], Priority::Interactive, Some("droplet".into()), Some(120)).await;
             match r {

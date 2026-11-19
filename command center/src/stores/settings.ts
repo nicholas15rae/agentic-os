@@ -12,14 +12,21 @@ export type SystemMapMode = "streamlined" | "xray";
 /** Where Tony's voice comes out (Phase 2): see `features/voice/audio-route.ts`. */
 export type AudioRoute = "auto" | "headset" | "speakers";
 
-/** Spotify ducking while you talk (Phase 2): see `features/voice/spotify-duck.ts`.
- * `onWakeListen`: also duck for speech heard by a passive hands-free wake listen. */
-export interface SpotifyDuckSettings {
+/** Lowering Spotify while you talk to Tony (P4): see `features/voice/media-duck.ts`.
+ * `reductionPct`: BY how much (0–50 %, default 15 → it plays at 85 %), never TO a level.
+ * `restoreMs`: how soon it comes back after a line that wasn't for Tony (noise / room talk).
+ * `onWakeListen`: also duck for speech heard by a passive hands-free wake listen or a follow-up listen.
+ * `webApiFallback`: when no local Spotify session exists but Spotify plays on this PC, one Web API
+ * volume change instead (no fade). Spotify only — there is deliberately no "all apps" scope. */
+export interface MediaDuckSettings {
   enabled: boolean;
-  level: number;
+  reductionPct: number;
   restoreMs: number;
   onWakeListen: boolean;
+  webApiFallback: boolean;
 }
+
+export const MEDIA_DUCK_DEFAULTS: MediaDuckSettings = { enabled: true, reductionPct: 15, restoreMs: 800, onWakeListen: true, webApiFallback: true };
 
 export interface SettingsState {
   /** Agentic OS FastAPI backend. On mobile, use the desktop's NetBird IP. */
@@ -66,9 +73,9 @@ export interface SettingsState {
    * Conversation: reopen the mic after Tony answers; let you talk over him.
    * `bargeEndSilenceMs`: end-of-speech pause for a listen opened over Tony (Phase 2 reflexes).
    * `audioRoute`: headset vs open speakers ("auto" reads the default output device's name).
-   * `spotifyDuck`: Spotify (on this PC) drops to `level`% while you talk, back `restoreMs` after you stop.
+   * `mediaDuck`: Spotify (on this PC) fades down BY `reductionPct`% while you talk to Tony (v6; was `spotifyDuck`).
    */
-  conversation: { followUp: boolean; followUpSecs: number; bargeIn: boolean; bargeEndSilenceMs: number; audioRoute: AudioRoute; spotifyDuck: SpotifyDuckSettings };
+  conversation: { followUp: boolean; followUpSecs: number; bargeIn: boolean; bargeEndSilenceMs: number; audioRoute: AudioRoute; mediaDuck: MediaDuckSettings };
   /** Voice routing: `announcerHandoff` = Tony introduces a delegated agent, which then speaks its own answer in its own voice. */
   routing: { announcerHandoff: boolean };
   /** Alarms & reminders: `osFallback` = also register a Windows alarm that rings even when the app is closed. */
@@ -103,7 +110,7 @@ const defaults: Omit<SettingsState, "set"> = {
   glassOpacity: 8,
   gatewayToken: "",
   vad: { sensitivity: 60, endSilenceMs: 700, maxUtteranceMs: 15000 },
-  conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", spotifyDuck: { enabled: true, level: 15, restoreMs: 2500, onWakeListen: true } },
+  conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true },
   reminders: { osFallback: true },
   systemMapMode: "streamlined",
@@ -150,6 +157,29 @@ export function deepMergeDefaults<T>(partial: DeepPartial<T> | null | undefined,
   return out as T;
 }
 
+/**
+ * Persisted-settings migration (exported for tests). v6 (P4): `conversation.spotifyDuck{level}` —
+ * an ABSOLUTE "duck TO level%" — becomes `conversation.mediaDuck{reductionPct}`, "duck BY %".
+ * `enabled` and `onWakeListen` carry over; `reductionPct` is forced to 15 and the old `level` /
+ * `restoreMs` (tuned for the old deep duck) are dropped, so "15" can never be reread as a new meaning.
+ */
+export function migrateSettings(persisted: unknown, from: number): SettingsState {
+  const s = (persisted ?? {}) as Partial<SettingsState> & { conversation?: Record<string, unknown> };
+  // v4: the OS is called Tony now — retire the old default subtitle.
+  if (from < 4 && s?.identity?.subtitle === "JARVIS ACTIVE") s.identity = { ...s.identity, subtitle: "TONY ACTIVE" };
+  if (from < 6 && isPlainObject(s.conversation)) {
+    const { spotifyDuck: old, ...conversation } = s.conversation;
+    if (isPlainObject(old)) {
+      const mediaDuck: MediaDuckSettings = { ...MEDIA_DUCK_DEFAULTS };
+      if (typeof old.enabled === "boolean") mediaDuck.enabled = old.enabled;
+      if (typeof old.onWakeListen === "boolean") mediaDuck.onWakeListen = old.onWakeListen;
+      s.conversation = { ...conversation, mediaDuck };
+    } else s.conversation = conversation;
+  }
+  // `merge` (below) backfills any still-missing fields right after this runs.
+  return s as unknown as SettingsState;
+}
+
 export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
@@ -158,14 +188,8 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: "cc.settings",
-      version: 5,
-      migrate: (persisted, from) => {
-        const s = (persisted ?? {}) as Partial<SettingsState>;
-        // v4: the OS is called Tony now — retire the old default subtitle.
-        if (from < 4 && s?.identity?.subtitle === "JARVIS ACTIVE") s.identity = { ...s.identity, subtitle: "TONY ACTIVE" };
-        // `merge` (below) backfills any still-missing fields right after this runs.
-        return s as unknown as SettingsState;
-      },
+      version: 6,
+      migrate: migrateSettings,
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults
       // instead of leaving that field `undefined`. Runs on every load, not just on a version bump.

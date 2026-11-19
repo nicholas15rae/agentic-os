@@ -100,6 +100,12 @@ impl BridgeState {
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
+    /// A bridge with a fixed policy and no log (tests of other modules' gates).
+    #[cfg(test)]
+    pub(crate) fn with_policy(policy: BridgePolicy) -> Self {
+        Self { policy: RwLock::new(policy), ..Default::default() }
+    }
+
     pub fn log_dir(&self) -> Option<PathBuf> {
         self.log_dir.read().unwrap().clone()
     }

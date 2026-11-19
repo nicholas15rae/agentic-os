@@ -29,8 +29,11 @@ export type OsIntent =
   | { kind: "compute"; mode: ComputeModeId }
   | { kind: "kill-switch"; on: boolean }
   | { kind: "status" }
-  /** System Map dev task queue: "log a dev note …", "queue a fix for …", "add … to the dev queue". `title` keeps the user's casing. */
-  | { kind: "dev-task"; taskKind: DevNoteKind; title: string };
+  /** System Map dev task queue: "log a dev note …", "queue a fix for …", "add … to the dev queue". `title` keeps the user's casing.
+   * `taskKind: "fix"` goes to the Claude Code fix queue (`queueFix`). */
+  | { kind: "dev-task"; taskKind: DevNoteKind; title: string }
+  /** P6 live run: "run the mic fix with Claude Code", "send fix 401 loop to Claude". Only ever RAISES the confirmation card. */
+  | { kind: "dev-fix-dispatch"; query: string };
 
 export type DevNoteKind = "note" | "fix" | "task";
 
@@ -224,7 +227,13 @@ const DEV_WORD = String.raw`dev(?:eloper)?(?:\s+|-)?note`;
 const DEV_NOTE_LOOSE = new RegExp(String.raw`^(?:log|take|save|jot(?: down)?|record|leave)\s+(?:a\s+|an\s+|another\s+)?${DEV_WORD}(?:${DEV_SEP}|(?<bare>\s+))(?<body>.+)$`, "is");
 const DEV_NOTE_STRICT = new RegExp(String.raw`^(?:add|make|write(?: down)?|create)\s+(?:a\s+|an\s+|another\s+)?${DEV_WORD}${DEV_SEP}(?<body>.+)$`, "is");
 const DEV_NOTE_BARE = new RegExp(String.raw`^${DEV_WORD}\s*${DEV_PUNCT}+\s*(?<body>.+)$`, "is");
-const DEV_FIX = new RegExp(String.raw`^queue\s+(?:up\s+)?(?:a\s+)?fix(?:\s+(?:for|to|on)\s+|\s*${DEV_PUNCT}+\s*)(?<body>.+)$`, "is");
+/** "dev fix", "developer fix", "claude fix", "claude code fix" (the P6 Claude Code fix queue). */
+const FIX_WHO = String.raw`(?:dev(?:eloper)?|claude(?:\s+code)?)\s+`;
+const DEV_FIX = new RegExp(String.raw`^queue\s+(?:up\s+)?(?:a\s+|an\s+|another\s+)?(?:${FIX_WHO})?fix(?:\s+(?:for|to|on)\s+|\s*${DEV_PUNCT}+\s*)(?<body>.+)$`, "is");
+/** "log a dev fix: …", "log a Claude fix for …" — `log`/`file`/`add` need the dev/claude qualifier. */
+const DEV_FIX_LOG = new RegExp(String.raw`^(?:log|file|add)\s+(?:a\s+|an\s+|another\s+)?${FIX_WHO}fix(?:\s+(?:for|to|on|about)\s+|\s*${DEV_PUNCT}+\s*)(?<body>.+)$`, "is");
+/** "dev fix: HUD flicker", "dev fix - HUD flicker", "claude fix the login loop". */
+const DEV_FIX_BARE = new RegExp(String.raw`^(?:dev|claude(?:\s+code)?)\s+fix(?:\s*${DEV_PUNCT}+\s*|\s+(?:for|to|on)\s+|\s+)(?<body>.+)$`, "is");
 const DEV_ADD_TO = new RegExp(String.raw`^add\s+(?:this\s+|that\s+)?to\s+the\s+dev(?:eloper)?\s+queue(?:${DEV_SEP}|\s+)(?<body>.+)$`, "is");
 const DEV_ADD_X_TO = /^add\s+(?<body>.+?)\s+to\s+the\s+dev(?:eloper)?\s+queue[.!]?$/is;
 const DEV_PATTERNS: [RegExp, DevNoteKind][] = [
@@ -232,6 +241,8 @@ const DEV_PATTERNS: [RegExp, DevNoteKind][] = [
   [DEV_NOTE_STRICT, "note"],
   [DEV_NOTE_BARE, "note"],
   [DEV_FIX, "fix"],
+  [DEV_FIX_LOG, "fix"],
+  [DEV_FIX_BARE, "fix"],
   [DEV_ADD_TO, "task"],
   [DEV_ADD_X_TO, "task"],
 ];
@@ -269,6 +280,33 @@ export function parseDevTask(text: string, osName = "Tony"): { taskKind: DevNote
   return null;
 }
 
+const CLAUDE = String.raw`claude(?:\s+code)?`;
+const DISPATCH_VERB = String.raw`(?:run|send|dispatch|hand|give)`;
+const DISPATCH_TO = String.raw`(?:to|with|through|over\s+to|in)`;
+/** "run the mic fix with Claude Code", "send the 401 fix over to Claude". */
+const DISPATCH_NAMED = new RegExp(String.raw`^${DISPATCH_VERB}\s+(?:the\s+|that\s+|my\s+)?(?<q>.+?)\s+fix\s+${DISPATCH_TO}\s+${CLAUDE}$`, "i");
+/** "run fix 401 loop with Claude Code", "send the fix for the HUD flicker to Claude". */
+const DISPATCH_FIX_FOR = new RegExp(String.raw`^${DISPATCH_VERB}\s+(?:the\s+)?fix\s+(?:for\s+|on\s+|about\s+)?(?<q>.+?)\s+${DISPATCH_TO}\s+${CLAUDE}$`, "i");
+
+/** The P6 live-run phrasing, or null. `query` names the fix ("mic", "401 loop"). Never runs anything itself. */
+export function parseDevDispatch(text: string, osName = "Tony"): { query: string } | null {
+  const name = escape(osName.trim() || "Tony");
+  const wake = new RegExp(String.raw`^(?:(?:${INTERJ})[\s,]+)?(?:${name}|tony|jarvis)[\s,.:!]+`, "i");
+  let t = text.trim();
+  for (let i = 0; i < 3; i++) {
+    const before = t;
+    t = t.replace(DEV_LEAD, "").replace(wake, "").trim();
+    if (t === before) break;
+  }
+  t = t.replace(DEV_TRAIL, "").replace(/[.!?]+$/, "").replace(/\s+/g, " ").trim();
+  for (const re of [DISPATCH_FIX_FOR, DISPATCH_NAMED]) {
+    const q = re.exec(t)?.groups?.q?.replace(/^["'“‘]+|["'”’]+$/g, "").trim();
+    if (!q || q.replace(/[^\p{L}\p{N}]+/gu, "").length < 2 || DEV_PRONOUN.test(q)) continue;
+    return { query: q };
+  }
+  return null;
+}
+
 /**
  * Parse an OS-control command. Returns null for anything else (it then goes on to
  * idea capture, local intents and the planner).
@@ -277,6 +315,8 @@ export function parseOsIntent(text: string, opts: ParseOpts = {}): OsIntent | nu
   const osName = opts.osName || "Tony";
   const dev = parseDevTask(text, osName);
   if (dev) return { kind: "dev-task", ...dev };
+  const run = parseDevDispatch(text, osName);
+  if (run) return { kind: "dev-fix-dispatch", ...run };
   const t = commandText(text, osName);
   if (!t) return null;
   // Long rambles only count as volume ("I want to hear the gabagool music a little louder").

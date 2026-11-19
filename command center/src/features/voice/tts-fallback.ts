@@ -18,10 +18,12 @@ export class FallbackTts implements TtsEngine {
         return await this.primary.speak(text, opts);
       } catch (e) {
         // A cue's voice that the current engine doesn't have: retry without it
-        // (still the primary engine) before giving up on this one call.
+        // (still the primary engine) before giving up on this one call. The retry keeps
+        // the reply's `utteranceId` (P1), so it stays in the same breaker scope.
         if (opts?.voice) {
+          const retry = opts.agent || opts.utteranceId ? { agent: opts.agent, utteranceId: opts.utteranceId } : undefined;
           try {
-            return await this.primary.speak(text, opts.agent ? { agent: opts.agent } : undefined);
+            return await this.primary.speak(text, retry);
           } catch {
             /* engine really is down — fall through to the backup for this call */
           }

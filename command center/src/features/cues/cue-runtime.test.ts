@@ -39,3 +39,22 @@ describe("cueFor with a Spotify intent", () => {
     h.running = null;
   });
 });
+
+describe("startup cue migration (P5 greeting)", () => {
+  it("the built-in startup line is the persona greeting", async () => {
+    const { DEFAULT_CUES, STARTUP_INTRO } = await import("./types");
+    expect(STARTUP_INTRO).toBe("Hey Nicky, what's up?");
+    expect(DEFAULT_CUES.find((c) => c.builtin === "startup")?.intro.text).toBe(STARTUP_INTRO);
+  });
+  it("replaces only the exact old default text, keeping the rest of the intro", async () => {
+    const { cueIntroMigration } = await import("./types");
+    const old = "Command center online. What are we building today?";
+    expect(cueIntroMigration({ builtin: "startup", intro: { mode: "static", text: old, voice: "v1" } })).toEqual({ mode: "static", text: "Hey Nicky, what's up?", voice: "v1" });
+    // Edited by Nic, already migrated, another built-in, or a user cue: untouched.
+    expect(cueIntroMigration({ builtin: "startup", intro: { mode: "static", text: "Morning, boss." } })).toBeNull();
+    expect(cueIntroMigration({ builtin: "startup", intro: { mode: "static", text: `${old} ` } })).toBeNull();
+    expect(cueIntroMigration({ builtin: "startup", intro: { mode: "static", text: "Hey Nicky, what's up?" } })).toBeNull();
+    expect(cueIntroMigration({ builtin: "gabagool", intro: { mode: "static", text: old } })).toBeNull();
+    expect(cueIntroMigration({ intro: { mode: "static", text: old } })).toBeNull();
+  });
+});

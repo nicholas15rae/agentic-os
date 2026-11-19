@@ -13,6 +13,34 @@ export interface DispatchOptions {
   history?: ChatMessage[];
   /** Force a provider id (desktop only). */
   provider?: string;
+  /** P3 Tier 2: Tony brainstorms this himself — the queued phone turn carries `noDelegate`, so
+   * the desktop never re-routes it and never runs the Prompter's idea capture. */
+  noDelegate?: boolean;
+}
+
+/** The desktop's answer to a queued phone item (`result` of `/api/os/inbox/{id}`). */
+export type DesktopResult = { answer?: string; providerId?: string; idea?: { id?: string; title?: string } } & Record<string, unknown>;
+
+/**
+ * Queue a turn payload for the desktop app and wait for its result (null if the desktop isn't
+ * picking up within 12 s). Every current caller sends `noDelegate` (true or false), so the
+ * desktop's legacy idea-shaped shortcut (`pipeline.rs inbox_turn_route`) never fires for them;
+ * `capture: true` is an approved Tier-3 build "yes" (Prompter breakdown + ledger).
+ */
+export async function queueDesktopTurn(payload: Record<string, unknown> & { noDelegate: boolean }): Promise<DesktopResult | null> {
+  const q = await gateway<{ id: string }>("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind: "turn", payload }) });
+  const t0 = Date.now();
+  while (Date.now() - t0 < 240_000) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const r = await gateway<{ status: string; result: { ok: boolean; result?: DesktopResult; error?: string } | null }>(`/api/os/inbox/${q.id}`);
+    if (r.status === "pending") {
+      if (Date.now() - t0 > 12_000) return null; // desktop app not running → fall back
+      continue;
+    }
+    if (r.result?.ok && r.result.result) return r.result.result;
+    throw new Error(r.result?.error ?? "desktop turn failed");
+  }
+  return null;
 }
 
 /**
@@ -30,23 +58,12 @@ async function desktopTurn(
   routeKind: string,
   routeReason: string,
   history: ChatMessage[],
+  noDelegate: boolean,
 ): Promise<{ answer: string; providerId?: string } | null> {
-  const q = await gateway<{ id: string }>("/api/os/inbox", {
-    method: "POST",
-    body: JSON.stringify({ kind: "turn", payload: { text, role, explicit, routeKind, routeReason, history: history.slice(-8), context: "" } }),
-  });
-  const t0 = Date.now();
-  while (Date.now() - t0 < 240_000) {
-    await new Promise((r) => setTimeout(r, 1500));
-    const r = await gateway<{ status: string; result: { ok: boolean; result?: { answer?: string; providerId?: string }; error?: string } | null }>(`/api/os/inbox/${q.id}`);
-    if (r.status === "pending") {
-      if (Date.now() - t0 > 12_000) return null; // desktop app not running → fall back
-      continue;
-    }
-    if (r.result?.ok && r.result.result?.answer) return { answer: r.result.result.answer, providerId: r.result.result.providerId };
-    throw new Error(r.result?.error ?? "desktop turn failed");
-  }
-  return null;
+  const r = await queueDesktopTurn({ text, role, explicit, routeKind, routeReason, history: history.slice(-8), context: "", noDelegate });
+  if (!r) return null;
+  if (!r.answer) throw new Error("desktop turn failed");
+  return { answer: r.answer, providerId: r.providerId };
 }
 
 export async function dispatch(text: string, opts: DispatchOptions = {}): Promise<DispatchOutcome> {
@@ -61,8 +78,13 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
   // only a Named delegation keeps its agent (Rust applies the same backstop to inbox turns).
   const direct = resolved.kind === "Named" ? null : directTool(text);
   const routed = direct ? { ...resolved, role: "general", kind: "Direct" as const, reason: `live ${direct} tool` } : resolved;
-  const role = direct ? "general" : (opts.role ?? (routed.role as AgentRole) ?? "general");
-  const explicit = !direct && !opts.role && routed.kind === "Named";
+  // "Self" (the line addresses Tony himself: "thanks tony", "ask the dispatcher…") is Tony,
+  // never explicit — Rust then answers as Tony and never re-promotes it.
+  const role = direct || routed.kind === "Self" || opts.noDelegate ? "general" : (opts.role ?? (routed.role as AgentRole) ?? "general");
+  const explicit = !direct && !opts.role && !opts.noDelegate && routed.kind === "Named";
+  // Tier 2: Tony keeps it ("Self"), whatever the default table read into it.
+  const routeKind = opts.noDelegate && !direct ? "Self" : routed.kind;
+  const routeReason = opts.noDelegate && !direct ? "brainstorm with Tony (Tier 2)" : routed.reason;
   const agent = SUB_AGENTS[role];
 
   if (isTauri()) {
@@ -77,7 +99,7 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
 
   const started = performance.now();
   // Phone: queue the turn for the desktop's OS core (same Tony, tools, sub-agents).
-  const viaDesktop = await desktopTurn(text, role, explicit, routed.kind, routed.reason, opts.history ?? []).catch(() => null);
+  const viaDesktop = await desktopTurn(text, role, explicit, routeKind, routeReason, opts.history ?? [], !!opts.noDelegate).catch(() => null);
   if (viaDesktop) {
     return {
       role,

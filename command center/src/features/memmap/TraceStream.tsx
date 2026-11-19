@@ -7,7 +7,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { ipcSummary, useIpcRing } from "@/lib/ipc-ring";
 import { groupTraces, stepsSince, useTrace, type TraceGroup } from "./trace-store";
 import { fixTitle, fmtClock, fmtMs, slowestHop } from "./format";
-import { useDevQueue } from "./dev-queue";
+import { queueFix } from "./dev-queue";
 import { Panel, Tag, useNow } from "./parts";
 
 /** A trace counts as live (the "Active" badge) this long after its last step. */
@@ -150,14 +150,14 @@ function StepLine({ s, xray, slowest }: { s: TraceStep; xray: boolean; slowest: 
 const queued = new Set<string>();
 
 function QueueFix({ s }: { s: TraceStep }) {
-  const add = useDevQueue((q) => q.add);
   const [state, setState] = useState<"idle" | "busy" | "done">(() => (queued.has(stepKey(s)) ? "done" : "idle"));
   if (!isTauri()) return null;
   const run = async () => {
     setState("busy");
     try {
       const { traceId, seq, hop, zone, label, ok, ms, error, at } = s;
-      await add({ title: fixTitle(s), body: error ?? "", kind: "fix", source: "trace", trace: { traceId, seq, hop, zone, label, ok, ms, error, at } });
+      // Straight into the Claude Code fix queue, with this step and the other recent failures attached.
+      await queueFix({ title: fixTitle(s), description: error ?? "", source: "trace", trace: { traceId, seq, hop, zone, label, ok, ms, error, at } });
       queued.add(stepKey(s));
       setState("done");
     } catch (e) {
@@ -171,7 +171,7 @@ function QueueFix({ s }: { s: TraceStep }) {
       disabled={state !== "idle"}
       onClick={() => void run()}
       className={`flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px text-[9px] uppercase tracking-wider transition-colors ${state === "done" ? "border-teal/30 text-teal-soft" : "border-ember/40 text-ember hover:bg-ember/10"} disabled:cursor-default`}
-      title="Log this failure to the dev task queue (the step and its error are attached)"
+      title="Queue a fix for Claude Code (this step, its error and the other recent failures are attached, secrets scrubbed)"
     >
       <Wrench size={9} /> {state === "done" ? "Queued" : state === "busy" ? "…" : "Queue fix"}
     </button>

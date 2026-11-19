@@ -6,7 +6,7 @@ import type { QuickList } from "./spotify-ui";
 export default defineWidget({
   id: "spotify",
   title: "Spotify",
-  description: "Now playing with play / pause / skip / volume, plus your recent tracks and playlists. Desktop app; playback control needs Premium.",
+  description: "Now playing with play / pause / skip, a seekable scrubber, volume and quick mute, plus your recent tracks and playlists. Desktop app; playback control needs Premium.",
   icon: Music2,
   defaultSize: { w: 3, h: 3 },
   minSize: { w: 3, h: 2 },

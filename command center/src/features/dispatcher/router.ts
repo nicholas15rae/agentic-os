@@ -10,8 +10,10 @@ import type { RoutingConfig } from "@/lib/platform";
  * for the full algorithm description; this file follows it step for step.
  */
 
-/** "Direct": a live-tool read question Tony answers himself (`directTool`); never from `resolve`. */
-export type RouteKind = "Named" | "Domain" | "Tab" | "Llm" | "Default" | "Direct";
+/** "Direct": a live-tool read question Tony answers himself (`directTool`); never from `resolve`.
+ * "Self": the line addresses Tony himself ("thanks tony", "ask the dispatcher…", "system status")
+ * and nothing else — Tony answers; never a delegation, never a routing notice. */
+export type RouteKind = "Named" | "Domain" | "Tab" | "Llm" | "Default" | "Direct" | "Self";
 export type Confidence = "high" | "medium" | "low";
 
 export interface Route {
@@ -27,12 +29,26 @@ export interface Route {
  * triggers are mostly intercepted earlier by the OS-control intent layer). */
 export const DOMAIN_TIEBREAK = ["booking", "ops", "coder", "designer", "librarian", "prompter", "general"] as const;
 
+/** Role ids that ARE Tony (the OS itself): never a delegation target. The OS name (lower-cased)
+ * counts too (`isSelfRoleId(id, osName)`). Mirrors `SELF_ROLE_IDS` in routing.rs. */
+export const SELF_ROLE_IDS = ["general", "tony", "os", "dispatcher", "orchestrator", "jarvis"] as const;
+/** Words that address Tony in a line ("ask tony…", "thanks jarvis", "ask the dispatcher…"),
+ * plus the OS name. "general" / "os" are role ids only — too common as words. */
+export const SELF_NAMES = ["tony", "jarvis", "dispatcher", "orchestrator"] as const;
+
+export function isSelfRoleId(id: string, osName = ""): boolean {
+  const v = id.trim().toLowerCase();
+  if (!v) return false;
+  return (SELF_ROLE_IDS as readonly string[]).includes(v) || (!!osName.trim() && v === osName.trim().toLowerCase());
+}
+
 const VERBS_A = ["tell", "ask", "have", "get", "let", "send", "route", "hand", "pass"];
 const VERBS_B = ["check", "draft", "find", "look", "search", "tell", "send", "book", "schedule", "fetch", "get", "read", "email", "call", "write", "create", "cancel", "update", "confirm", "fix"];
 const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
 /** The exact default trigger matrix (mirrors `default_routing_agents()` in os_core.rs). */
 export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
+  // `general` (Tony) has no name triggers: addressing him is `SELF_NAMES` → kind "Self".
   autoSwitch: true,
   agents: {
     booking: {
@@ -59,7 +75,7 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
       names: ["ops", "operations", "business", "finance"],
       domains: ["invoice", "receipt", "bf supplements", "contracting", "quote", "schedule", "calendar", "droplet"],
     },
-    general: { names: ["tony"], domains: ["system status", "switch model"] },
+    general: { names: [], domains: ["system status", "switch model"] },
   },
 };
 
@@ -106,13 +122,20 @@ const roleRank = (role: string): number => {
   return i < 0 ? DOMAIN_TIEBREAK.length : i;
 };
 
-function namePairs(cfg: RoutingConfig): [string, string][] {
+/** Every (role, normalized name) pair; a self-alias role key counts as `general`, and the
+ * built-in self names (+ the OS name) are added as `general`'s. */
+function namePairs(cfg: RoutingConfig, osName: string): [string, string][] {
   const out: [string, string][] = [];
-  for (const [role, t] of Object.entries(cfg.agents)) {
+  for (const [key, t] of Object.entries(cfg.agents)) {
+    const role = isSelfRoleId(key, osName) ? "general" : key;
     for (const n of t.names) {
       const norm = normalize(n);
       if (norm) out.push([role, norm]);
     }
+  }
+  for (const n of [...SELF_NAMES, osName]) {
+    const norm = normalize(n);
+    if (norm && !out.some(([r, p]) => r === "general" && p === norm)) out.push(["general", norm]);
   }
   return out;
 }
@@ -170,13 +193,21 @@ function domainScore(toks: string[], domains: string[]): number {
  *  (a) explicit delegation pattern → Named, high
  *  (b) any name trigger mentioned anywhere → Named, medium
  *  (c) domain trigger score (longest phrases win; ties → `DOMAIN_TIEBREAK`) → Domain
- *  (d) nothing → Default (the caller decides: keep the current tab, or general)
+ *  (d) only Tony himself was addressed / matched → Self (role general)
+ *  (e) nothing → Default (the caller decides: keep the current tab, or general)
+ *
+ * Tony (`general`, any self alias, `SELF_NAMES`, the OS name) is never a delegation target:
+ * a self match is skipped and the scan goes on, so "ask tony to ask the coder…" is coder.
+ * `osName`: the configured OS name (Rust reads `cfg.os_name`); "tony" is built in either way.
  */
-export function resolve(text: string, cfg: RoutingConfig): Route {
+export function resolve(text: string, cfg: RoutingConfig, osName = ""): Route {
   const original = text.trim();
   const norm = normalize(original);
   const toks = tokenize(norm);
-  const names = namePairs(cfg);
+  const all = namePairs(cfg, osName);
+  const names = all.filter(([r]) => r !== "general");
+  const selfNames = all.filter(([r]) => r === "general");
+  let selfHit = false;
 
   // (a) "tell/ask/have/get/let/send/route/hand/pass (it)? (to)? (my/the/our)? NAME (agent/desk)? (to/about/for)? …"
   for (let i = 0; i < toks.length; i++) {
@@ -185,7 +216,11 @@ export function resolve(text: string, cfg: RoutingConfig): Route {
     if (tokAt(toks, j) === "it") j += 1;
     if (tokAt(toks, j) === "to") j += 1;
     if (["my", "the", "our"].includes(tokAt(toks, j) ?? "")) j += 1;
-    const m = matchNameAt(toks, j, names);
+    const m = matchNameAt(toks, j, all);
+    if (m && m[0] === "general") {
+      selfHit = true; // "ask tony to …": keep scanning for a real agent
+      continue;
+    }
     if (m) {
       const [role, nlen] = m;
       let k = j + nlen;
@@ -195,49 +230,73 @@ export function resolve(text: string, cfg: RoutingConfig): Route {
       return { role, reason: "you named this agent directly", confidence: "high", kind: "Named", task: task || original };
     }
   }
-  // (a) "NAME,? (please)? VERB…" — direct address at the start of the utterance.
-  const head = matchNameAt(toks, 0, names);
-  if (head) {
+  // (a) "NAME,? (please)? VERB…" — direct address at the start of the utterance. A leading
+  // self name ("tony, coder, fix the build") is skipped once and the address retried after it.
+  let pos = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    const head = matchNameAt(toks, pos, all);
+    if (!head) break;
     const [role, nlen] = head;
-    let k = nlen;
+    let k = pos + nlen;
     if (tokAt(toks, k) === "please") k += 1;
+    if (role === "general") {
+      selfHit = true;
+      pos = k;
+      continue;
+    }
     const v = tokAt(toks, k);
     if (v !== undefined && VERBS_B.includes(v)) {
       const task = toks.slice(k).join(" ");
       return { role, reason: "you named this agent directly", confidence: "high", kind: "Named", task: task || original };
     }
+    break;
   }
-  // (b) any name trigger mentioned anywhere.
+  // (b) any (non-self) name trigger mentioned anywhere.
   const mentioned = matchNameAnywhere(toks, names);
   if (mentioned) return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
+  if (matchNameAnywhere(toks, selfNames)) selfHit = true;
 
-  // (c) domain triggers.
+  // (c) domain triggers (Tony's own topics only mark a self hit).
   let best: [string, number] | null = null;
   for (const role of DOMAIN_TIEBREAK) {
     const t = cfg.agents[role];
     if (!t) continue;
     const score = domainScore(toks, t.domains);
-    if (score > 0 && (!best || score > best[1])) best = [role, score];
+    if (score <= 0) continue;
+    if (role === "general") {
+      selfHit = true;
+      continue;
+    }
+    if (!best || score > best[1]) best = [role, score];
   }
   if (best) {
     const [role, score] = best;
     return { role, reason: "matched this agent's trigger words", confidence: score >= 6 ? "medium" : "low", kind: "Domain", task: original };
   }
-  // (d) nothing matched.
+  // (d) only Tony himself.
+  if (selfHit) return { role: "general", reason: "you addressed the OS itself", confidence: "high", kind: "Self", task: original };
+  // (e) nothing matched.
   return { role: null, reason: "no name or trigger matched", confidence: "low", kind: "Default", task: original };
 }
 
 // ── Direct live-tool questions ──────────────────────────────────────────────
 // Mirrors `direct_tool` in routing.rs exactly (shared fixtures, `direct` field).
 
-/** Write verbs: the line asks to change something, not to read it. */
-const DIRECT_WRITE = /\b(?:send|sending|reply|replying|respond|draft|delete|write|compose|forward|archive|trash|unsubscribe)\b|\b(?:text|message|tell|email|ping|call) (?:him|her|them|back)\b|\blet (?:him|her|them) know\b/;
+/** Write verbs: the line asks to change something, not to read it ("add a weather widget",
+ * "order an umbrella", "mark all emails from Sam as read", "email the forecast to Sam"). */
+const DIRECT_WRITE = /\b(?:send|sending|reply|replying|respond|draft|delete|write|compose|forward|archive|trash|unsubscribe|add|set|create|make|build|fix|buy|order|purchase|pay|cancel|book|schedule|reschedule|mark|mute|unmute|block|move|remove|change|edit|rename|update|install|configure|deploy|save|share|post|upload|invite|enable|disable|subscribe|turn on|turn off)\b|\b(?:text|message|tell|email|ping|call) (?:him|her|them|back)\b|\blet (?:him|her|them) know\b|(?:^|\b(?:and|then|please|tony) )(?:email|text|message|dm|ping) (?:the|this|that|it|a|an|my|to)\b/;
+/** "update" as a noun ("give me an update on WhatsApp") asks for news: dropped before DIRECT_WRITE. */
+const DIRECT_UPDATE_NOUN = /\b(?:an?|any|the|latest|status|quick|no) updates?\b|\bupdate me\b/g;
 const DIRECT_WHATSAPP_READ = /\b(?:check|read|any|anything|new|latest|last|recent|unread|updates?|messages?|texts?|chats?|today|whats new|who)\b/;
-/** Whisper's "what's up" also normalizes to "whatsapp": that form needs a messaging noun. */
-const DIRECT_WHATSAPP_NOUN = /\b(?:messages?|texts?|chats?|updates?|unread)\b/;
+/** Whisper's "what's up" also normalizes to "whatsapp": that spelling needs the app named as a
+ * place ("on / from / check whatsapp") or a messaging noun right after it — never "any updates?". */
+const DIRECT_WHATSAPP_NOUN = /\b(?:on|from|in|my|check) whatsapp\b|\bwhatsapp (?:messages?|texts?|chats?|unread)\b/;
 const DIRECT_GMAIL = /\b(?:gmail|inbox|emails?|mail)\b/;
-const DIRECT_GMAIL_READ = /\b(?:check|read|any|anything|new|latest|last|recent|unread|updates?|whats in|from|today|got)\b/;
-const DIRECT_WEATHER = /\b(?:weather|forecast|umbrella)\b|\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b/;
+const DIRECT_GMAIL_READ = /\b(?:check|read|any|anything|latest|last|recent|unread|updates?|whats in|what is in|did i get|have i got|got any|who emailed|new (?:emails?|mail|messages?))\b/;
+/** Weather words only in read form: a question or check, or next to a time / place word. */
+const DIRECT_WEATHER = /\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$/;
+/** Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read. */
+const DIRECT_NOT_LIVE = /\b(?:widget|server|config|api|bug|code|app|script|dashboard|spreadsheet|sheet|sales|revenue|budget|quarter|q[1-4]|filter|settings?)\b/;
 const DIRECT_SPOTIFY = /\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b/;
 
 export type DirectTool = "whatsapp" | "gmail" | "weather" | "spotify";
@@ -249,15 +308,16 @@ export type DirectTool = "whatsapp" | "gmail" | "weather" | "spotify";
  */
 export function directTool(text: string): DirectTool | null {
   const n = normalize(text);
-  if (!n || DIRECT_WRITE.test(n)) return null;
+  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " "))) return null;
   if (/\bwhatsapp\b/.test(n)) {
     const lower = text.toLowerCase();
     const saysApp = lower.includes("sapp") || lower.includes("s app");
     const read = saysApp ? n === "whatsapp" || DIRECT_WHATSAPP_READ.test(n) : DIRECT_WHATSAPP_NOUN.test(n);
     if (read) return "whatsapp";
   }
-  if (DIRECT_GMAIL.test(n) && DIRECT_GMAIL_READ.test(n)) return "gmail";
-  if (DIRECT_WEATHER.test(n)) return "weather";
+  const work = DIRECT_NOT_LIVE.test(n);
+  if (!work && DIRECT_GMAIL.test(n) && DIRECT_GMAIL_READ.test(n)) return "gmail";
+  if (!work && DIRECT_WEATHER.test(n)) return "weather";
   if (DIRECT_SPOTIFY.test(n)) return "spotify";
   return null;
 }

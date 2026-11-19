@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, CalendarClock, CheckCircle2, Cpu, FileDown, ListTodo, Loader2, NotebookPen, Repeat, Trash2, Workflow, Wrench } from "lucide-react";
+import { AlertTriangle, Bot, CalendarClock, CheckCircle2, Cpu, FileDown, ListTodo, Loader2, NotebookPen, Repeat, Trash2, Workflow, Wrench } from "lucide-react";
 import { DEV_TASK_CATEGORIES, isTauri, type DevTask, type DevTaskStatus } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { useToasts } from "@/features/reminders/notify";
-import { useDevQueue } from "./dev-queue";
-import { briefButtonState, fmtAgo, fmtDue, futureRuns, nextStatus, openCounts, PRIORITY_LABEL, visibleTasks, type CategoryFilter, type FutureRun } from "./format";
+import { dispatchFix, ensureFixEvents, useDevQueue } from "./dev-queue";
+import { briefButtonState, canDispatchFix, fixChip, fmtAgo, fmtDue, futureRuns, isFixRunning, nextStatus, openCounts, PRIORITY_LABEL, visibleTasks, type CategoryFilter, type FutureRun } from "./format";
 import { useMemmapData } from "./use-memmap-data";
 import { Panel, useNow } from "./parts";
 
@@ -44,6 +44,7 @@ export function TaskDock({ className = "" }: { className?: string }) {
   const future = futureRuns(snap, now);
 
   useEffect(() => {
+    ensureFixEvents();
     void useDevQueue.getState().load();
   }, []);
 
@@ -51,6 +52,7 @@ export function TaskDock({ className = "" }: { className?: string }) {
   const rows = visibleTasks(q.tasks, q.filter, q.showDone);
   const done = q.tasks.filter((t) => t.status === "Done").length;
   const brief = briefButtonState({ desktop, exporting: q.exporting, open: counts.all });
+  const fixRunning = q.tasks.some(isFixRunning);
 
   const exportBrief = async () => {
     try {
@@ -137,7 +139,7 @@ export function TaskDock({ className = "" }: { className?: string }) {
                 {!desktop ? "Desktop app only." : !q.loaded ? "Loading…" : q.tasks.length ? "Nothing open in this filter." : "Queue is empty. Dispatch a note, say \"log a dev note …\", or queue a failed trace step."}
               </li>
             ) : (
-              rows.map((t) => <TaskRow key={t.id} t={t} xray={xray} now={now} />)
+              rows.map((t) => <TaskRow key={t.id} t={t} xray={xray} now={now} fixRunning={fixRunning} />)
             )}
           </ul>
         </>
@@ -214,7 +216,7 @@ function ScheduledList({ runs, notes, now, why }: { runs: FutureRun[]; notes: st
   );
 }
 
-function TaskRow({ t, xray, now }: { t: DevTask; xray: boolean; now: number }) {
+function TaskRow({ t, xray, now, fixRunning }: { t: DevTask; xray: boolean; now: number; fixRunning: boolean }) {
   const { cycleStatus, cyclePriority, remove } = useDevQueue.getState();
   const [confirmDelete, setConfirmDelete] = useState(false);
   useEffect(() => {
@@ -255,10 +257,11 @@ function TaskRow({ t, xray, now }: { t: DevTask; xray: boolean; now: number }) {
           {xray && ` · ${t.id.slice(0, 8)}${snap.git?.branch ? ` · ${snap.git.branch}` : ""}`}
         </p>
       </div>
+      {t.kind === "fix" && <ClaudeButton t={t} fixRunning={fixRunning} />}
       <button
         type="button"
         onClick={() => void cycleStatus(t.id)}
-        title={`Click: ${t.status} → ${nextStatus(t.status)}`}
+        title={isFixRunning(t) ? "Claude Code is running this fix — cancel it from the Ledger's Dev Fix tab" : `Click: ${t.status} → ${nextStatus(t.status, t)}`}
         className={`label-caps h-6 shrink-0 rounded-full border px-2 !text-[9px] transition-colors ${STATUS_PILL[t.status]}`}
       >
         {t.status}
@@ -274,5 +277,35 @@ function TaskRow({ t, xray, now }: { t: DevTask; xray: boolean; now: number }) {
         {confirmDelete && <span className="ml-1 font-mono text-[9px] uppercase">sure?</span>}
       </button>
     </li>
+  );
+}
+
+/** P6: a fix row's Claude Code control. Raises the confirmation card; never runs directly. */
+function ClaudeButton({ t, fixRunning }: { t: DevTask; fixRunning: boolean }) {
+  const chip = fixChip(t);
+  if (isFixRunning(t)) {
+    return (
+      <span className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-teal/50 px-1.5 font-mono text-[9px] text-teal-soft" title={`Claude Code is working on ${t.dispatch?.branch ?? "this fix"}`}>
+        <Loader2 size={10} className="animate-spin" /> claude
+      </span>
+    );
+  }
+  if (!isTauri() || !canDispatchFix(t, fixRunning)) {
+    return chip.tone === "failed" || chip.tone === "done" ? (
+      <span className={`shrink-0 font-mono text-[9px] ${chip.tone === "failed" ? "text-alert" : "text-teal-soft"}`} title={t.dispatch?.note ?? chip.label}>
+        {chip.label}
+      </span>
+    ) : null;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => void dispatchFix(t).catch((e) => useToasts.getState().push({ title: "Claude Code didn't start", body: e instanceof Error ? e.message : String(e), tone: "error" }))}
+      title={`Run with Claude Code (asks first; own worktree, never commits; the app's checks decide Done)${chip.tone === "failed" ? `\nLast run: ${t.dispatch?.note ?? ""}` : ""}`}
+      aria-label="Run with Claude Code"
+      className={`flex h-6 shrink-0 items-center rounded-full px-1.5 transition-colors hover:bg-holo/10 ${chip.tone === "failed" ? "text-alert" : "text-holo"}`}
+    >
+      <Bot size={12} />
+    </button>
   );
 }

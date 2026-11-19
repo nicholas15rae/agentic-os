@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 import type { AgentRole } from "@/features/dispatcher/agents";
 import type { ActionPlan } from "@/features/orchestrator/plan";
+import type { Section } from "@/stores/nav";
 
 /**
  * The conversation store. The floating HUD, the Voice Console widget, the
@@ -20,12 +21,38 @@ export type VoiceState =
   | "thinking" // planning, verifying or executing
   | "confirming" // a mutating plan is waiting for yes/no
   | "speaking"
-  | "holding" // Phase 2: "take it ease" — reply paused, collecting your thought
+  | "holding" // Phase 2: "whoa" / "madone" / "aspetta" (or "take it easy" over a busy turn) — reply paused, collecting your thought
   | "error";
 
 export type Channel = "voice" | "text";
 export type ThreadId = "auto" | AgentRole;
 export const THREADS: ThreadId[] = ["auto", "general", "prompter", "designer", "coder", "booking", "librarian", "ops"];
+
+/** The phone HUD (`/cc/?view=hud`, MobileHud): Tony's thread there is always "general". */
+const HUD_VIEW = typeof location !== "undefined" && new URLSearchParams(location.search).get("view") === "hud";
+
+/**
+ * Tony's own conversation thread (P2/U2) — where voice turns and every Tony output land, and
+ * what the Tony views (VoiceHUD, VoiceConsole, MobileHud's Tony pill) show: "general" while the
+ * Agents section's Tony tab is open (and always on the phone HUD), else "auto". Never a
+ * sub-agent thread, whichever tab is open.
+ */
+export function tonyThreadFor(section: Section, activeThread: ThreadId, hud = false): ThreadId {
+  if (hud) return "general";
+  return section === "agents" && activeThread === "general" ? "general" : "auto";
+}
+
+/** The visible section, registered by the voice controller (`setSectionSource`) — this store
+ * stays free of the nav store, which reads `location` at import. */
+let sectionSource: () => Section = () => "command";
+export const setSectionSource = (fn: () => Section) => {
+  sectionSource = fn;
+};
+
+export const tonyThread = (): ThreadId => tonyThreadFor(sectionSource(), useVoice.getState().activeThread, HUD_VIEW);
+
+/** Tony's thread for a view that already knows the section (`useTonyThread` in VoiceParts). */
+export const tonyThreadForView = (section: Section, activeThread: ThreadId): ThreadId => tonyThreadFor(section, activeThread, HUD_VIEW);
 
 export interface VoiceTurn {
   id: string;
@@ -69,7 +96,7 @@ interface VoiceStore {
   activeThread: ThreadId;
   pending: PendingConfirmation | null;
   error: string | null;
-  /** Hold mode: what you've said since "take it ease" (live in the HUD); null when not holding. */
+  /** Hold mode: what you've said since the hold began (live in the HUD); null when not holding. */
   held: string[] | null;
   setHeld: (h: string[] | null) => void;
   setState: (s: VoiceState) => void;
@@ -127,7 +154,8 @@ export const useVoice = create<VoiceStore>()(
       setPartial: (partial) => set({ partial }),
       setActiveThread: (activeThread) => set({ activeThread }),
       pushTurn: (t) => {
-        const turn: VoiceTurn = { ...t, thread: t.thread ?? get().activeThread, id: crypto.randomUUID(), at: Date.now() };
+        // No thread given ⇒ Tony's thread, never whichever sub-agent tab happens to be open.
+        const turn: VoiceTurn = { ...t, thread: t.thread ?? tonyThreadFor(sectionSource(), get().activeThread, HUD_VIEW), id: crypto.randomUUID(), at: Date.now() };
         set((s) => ({ turns: cap([...s.turns, turn]) }));
         return turn;
       },

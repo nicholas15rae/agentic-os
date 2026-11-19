@@ -322,7 +322,7 @@ async fn agents_block(st: &DispatchState, os: &OsState, osc: &OsConfig) -> (Vec<
             let ws = workspaces.as_ref().and_then(|w| w.iter().find(|x| &x.slug == slug));
             json!({
                 "role": role,
-                "label": if is_tony { osc.os_name.clone() } else { super::agents::role_label(role) },
+                "label": if is_tony { osc.os_name.clone() } else { super::agents::role_label(role, &osc.os_name) },
                 "slug": slug,
                 "found": workspaces.as_ref().map(|_| ws.is_some()),
                 "threads": ws.map(|w| w.threads),

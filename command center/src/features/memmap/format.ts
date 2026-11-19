@@ -216,9 +216,41 @@ export function hardwareChip(snap: SystemSnapshot | null): string | null {
 
 const CYCLE: Record<DevTaskStatus, DevTaskStatus> = { Pending: "Queued", Queued: "In Progress", "In Progress": "Done", Done: "Pending" };
 
-/** The status pill's click: Pending → Queued → In Progress → Done → Pending. */
-export function nextStatus(s: DevTaskStatus): DevTaskStatus {
+/** The status pill's click: Pending → Queued → In Progress → Done → Pending. A fix that Claude
+ * Code is running live keeps its status (the run owns it until it ends or is cancelled). */
+export function nextStatus(s: DevTaskStatus, t?: Pick<DevTask, "dispatch">): DevTaskStatus {
+  if (t && isFixRunning(t)) return s;
   return CYCLE[s] ?? "Pending";
+}
+
+/** A live Claude Code run is working on this fix right now. */
+export const isFixRunning = (t: Pick<DevTask, "dispatch">): boolean => t.dispatch?.state === "running";
+
+/** P6 Dev Fix queue chip: what a fix's state means for Claude Code. */
+export function fixChip(t: Pick<DevTask, "status" | "dispatch">): { label: string; tone: "draft" | "queued" | "running" | "progress" | "done" | "failed" } {
+  const d = t.dispatch ?? {};
+  if (d.state === "running") return { label: "running", tone: "running" };
+  if (t.status === "Done") return { label: d.verify?.ok ? "done · verified" : "done", tone: "done" };
+  if (t.status === "In Progress") return { label: "in progress", tone: "progress" };
+  if (t.status === "Queued" && d.mode === "live" && d.verify && !d.verify.ok) return { label: "queued · verify failed", tone: "failed" };
+  if (t.status === "Queued" && d.state === "interrupted") return { label: "queued · interrupted", tone: "failed" };
+  if (t.status === "Queued") return { label: "queued", tone: "queued" };
+  return { label: "draft", tone: "draft" };
+}
+
+/** May this fix be sent to Claude Code now? (Not Done, not already running, and nothing else running.) */
+export function canDispatchFix(t: Pick<DevTask, "kind" | "status" | "dispatch">, anyRunning: boolean): boolean {
+  return t.kind === "fix" && t.status !== "Done" && !isFixRunning(t) && !anyRunning;
+}
+
+/** One line for a fix's error snapshot ("3 recent errors · last: tool spotify.play — HTTP 401"). */
+export function errorSummary(t: Pick<DevTask, "contextSnapshot">): string | null {
+  const errs = t.contextSnapshot.errors ?? [];
+  const tr = t.contextSnapshot.trace;
+  const last = errs[errs.length - 1];
+  const what = last ? `${last.hop ?? last.source} ${last.label ?? ""}`.trim() + (last.error ? ` — ${last.error}` : "") : tr?.hop ? `${tr.hop} ${tr.label ?? ""}`.trim() + (tr.error ? ` — ${tr.error}` : "") : null;
+  if (!errs.length && !what) return null;
+  return errs.length ? `${errs.length} recent error${errs.length === 1 ? "" : "s"} · last: ${what}` : `failing step: ${what}`;
 }
 
 export function nextPriority(p: DevTaskPriority): DevTaskPriority {
@@ -470,4 +502,12 @@ export function osSwitchBlock(kind: "delegation" | "overload", fresh: Pick<OsCon
   if (kind === "overload" && fresh.compute.mode === "cloud") return "Compute mode is now cloud (changed elsewhere), so nothing was changed.";
   if (kind === "delegation" && fresh.permissions.delegation === "deny") return "Delegation is now deny (changed elsewhere), so nothing was changed.";
   return null;
+}
+
+/** The Ledger's Dev Fix tab: the full queue with dispatch on the desktop; on the phone a
+ * read-only "desktop only" view (the queue lives in the desktop's devqueue.db) with no dispatch. */
+export function devFixMode(desktop: boolean): { readOnly: boolean; canDispatch: boolean; message: string | null } {
+  return desktop
+    ? { readOnly: false, canDispatch: true, message: null }
+    : { readOnly: true, canDispatch: false, message: "The Dev Fix · Claude queue lives in the desktop app (devqueue.db). Queue and run fixes from there." };
 }

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Mic, Send, Square } from "lucide-react";
-import { useThreadTurns, useVoice, type ThreadId, type VoiceState } from "./voice-store";
+import { tonyThreadForView, useThreadTurns, useVoice, type ThreadId, type VoiceState } from "./voice-store";
 import { askOverseer, handleInput, runTurnAction, toggleListening } from "./voice-controller";
+import { isSelfRelay } from "./route-for";
 import { useFocus } from "@/features/os/focus-store";
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { agentBadge, useOsName } from "@/features/os/os-store";
@@ -20,6 +21,14 @@ export const STATE_DOT: Record<VoiceState, string> = {
   holding: "bg-amber-light shadow-[0_0_10px_#ffb37a]",
   error: "bg-alert",
 };
+
+/** Tony's own thread (hook): where voice writes — Auto, or his Agents tab; never a sub-agent's.
+ * Re-renders when the section or the Agents tab changes. */
+export function useTonyThread(): ThreadId {
+  const section = useNav((s) => s.section);
+  const active = useVoice((s) => s.activeThread);
+  return tonyThreadForView(section, active);
+}
 
 export function MicButton({ size = 44 }: { size?: number }) {
   const state = useVoice((s) => s.state);
@@ -63,6 +72,8 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
               — {t.text}
             </p>
           );
+        // Never "TONY → TONY": a relay from Tony to himself (any alias, or one saved before P2).
+        if (t.who === "relay" && (isSelfRelay(t, name) || agentBadge(t.from ?? "os") === agentBadge(t.to ?? "user"))) return null;
         if (t.who === "relay")
           return (
             <div key={t.id} className={`rounded-[12px] border px-3 py-2 text-[13px] ${t.tone === "warn" ? "border-amber/30 bg-amber/[0.05]" : "border-volt/20 bg-volt/[0.04]"}`}>

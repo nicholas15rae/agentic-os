@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeList, nextStreamChunk, sentences, stripForSpeech } from "./tts-text";
+import { looksLikeList, nextStreamChunk, perSentenceOpts, sentences, stripForSpeech, synthArgs, utteranceIdFor } from "./tts-text";
 
 describe("stripForSpeech", () => {
   it("strips fenced code blocks and inline code", () => {
@@ -181,5 +181,34 @@ describe("nextStreamChunk", () => {
 
   it("does not mistake a mid-line number for a list line", () => {
     expect(nextStreamChunk("We moved it to 3. That works for everyone involved, right? ", 0)).not.toBeNull();
+  });
+});
+
+describe("perSentenceOpts / synthArgs (P1 utteranceId)", () => {
+  const text = "The first sentence is long enough to stand alone. The second one is also long enough here. And a third sentence closes the reply.";
+
+  it("the reply's utteranceId reaches every sentence while previousText still chains", () => {
+    const out = perSentenceOpts(text, { agent: "general", utteranceId: "turn-1-general", previousText: "before" });
+    expect(out.length).toBe(3);
+    expect(out.map((o) => o.opts.utteranceId)).toEqual(["turn-1-general", "turn-1-general", "turn-1-general"]);
+    expect(out.map((o) => o.opts.previousText)).toEqual(["before", out[0].s, out[1].s]);
+    expect(out.every((o) => o.opts.agent === "general")).toBe(true);
+  });
+
+  it("synthArgs forwards utteranceId and previousText for a live line", () => {
+    expect(synthArgs("hi", { agent: "coder", previousText: "p", utteranceId: "u-coder" })).toEqual({ text: "hi", voice: undefined, agent: "coder", previousText: "p", utteranceId: "u-coder" });
+  });
+
+  it("a cache:true line sends neither utteranceId nor previousText", () => {
+    const a = synthArgs("Here's Coder.", { agent: "general", cache: true, utteranceId: "u-general", previousText: "p" });
+    expect(a).toEqual({ text: "Here's Coder.", voice: undefined, agent: "general" });
+    expect("utteranceId" in a).toBe(false);
+  });
+
+  it("utteranceIdFor is `${streamId}-${agent}` and always passes Rust's validation", () => {
+    const id = "0b7c2f5e-8d0a-4c1e-9f3b-2a6d5e4c3b21";
+    expect(utteranceIdFor(id, "general")).toBe(`${id}-general`);
+    const odd = utteranceIdFor(id, "booking_desk with spaces and a very long name");
+    expect(odd).toMatch(/^[A-Za-z0-9-]{1,64}$/);
   });
 });

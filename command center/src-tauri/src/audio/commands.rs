@@ -180,3 +180,39 @@ pub fn audio_engine_test_tone(state: State<'_, AudioEngineState>, freq_hz: Optio
         .map(|_| ())
         .map_err(|e| format!("spawning tone thread: {e}"))
 }
+
+// ── Local media ducking (P4, `ducker.rs`) ───────────────────────────────────
+//
+// A reversible, speech-initiated micro-action (like `spotify_duck`): no card, no bridge log line,
+// never an error for "nothing to duck". The kill switch blocks NEW ducks only; a restore is never
+// gated (it only undoes this app's own temporary change).
+
+/// First call includes COM start-up and the endpoint scan; later ones take a few ms.
+const DUCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+const UNDUCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+const STATUS_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Lower the Spotify desktop app's own session BY `reduction_pct` % (0..=50, default 15) over
+/// `fade_ms` (60..=200, default 120). `spotifyLocal` = an active local Spotify session exists.
+#[tauri::command]
+pub async fn media_duck(os: State<'_, crate::commands::os_core::OsState>, reduction_pct: Option<u8>, fade_ms: Option<u32>) -> Result<super::ducker::DuckReport, String> {
+    if os.snapshot().privacy.kill_switch {
+        return Ok(super::ducker::DuckReport::default());
+    }
+    let (r, f) = (super::ducker::clamp_reduction(reduction_pct), super::ducker::clamp_fade_down(fade_ms));
+    // A failed blocking task is "unknown" like a timeout: the fade may have been queued.
+    Ok(blocking(move || super::ducker::duck(r, f, DUCK_WAIT)).await.unwrap_or_else(|_| super::ducker::DuckReport::unknown()))
+}
+
+/// Ramp the ducked sessions back over `fade_ms` (60..=600, default 320); a session moved since is
+/// left alone. True = the ducker didn't answer (still ducked as far as we know). Never gated.
+#[tauri::command]
+pub async fn media_unduck(fade_ms: Option<u32>) -> Result<bool, String> {
+    let f = super::ducker::clamp_fade_up(fade_ms);
+    Ok(blocking(move || super::ducker::restore(f, UNDUCK_WAIT)).await.unwrap_or(true))
+}
+
+#[tauri::command]
+pub async fn media_duck_status() -> Result<super::ducker::DuckStatus, String> {
+    Ok(blocking(|| super::ducker::status(STATUS_WAIT)).await.unwrap_or_default())
+}

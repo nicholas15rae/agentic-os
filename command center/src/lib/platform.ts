@@ -65,8 +65,11 @@ export interface NativeCommands {
   /** Returns raw audio bytes (mp3 for Kokoro, wav for XTTS). `voice` overrides for previews;
    * `agent` (Part 3) picks a voice-roster entry when no explicit `voice` is given.
    * `previousText` (Part 6 §2) is the sentence spoken right before this one in the
-   * same reply, for ElevenLabs prosody continuity; ignored by local engines. */
-  tts_synthesize: { args: { text: string; voice?: string; agent?: string; previousText?: string }; result: ArrayBuffer };
+   * same reply, for ElevenLabs prosody continuity; ignored by local engines.
+   * `utteranceId` (P1) names the reply this sentence belongs to — the ElevenLabs circuit
+   * breaker's scope: after one failure the rest of that reply goes straight to local TTS
+   * with a single `tts-fallback` event. 1–64 chars of `[A-Za-z0-9-]`, else ignored. */
+  tts_synthesize: { args: { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string }; result: ArrayBuffer };
   /** `engine` previews an engine's voices even when it isn't the current `policy.tts`. */
   tts_voices: { args: { engine?: string }; result: VoicesView };
   n8n_workflows: { args: undefined; result: WorkflowInfo[] };
@@ -126,11 +129,21 @@ export interface NativeCommands {
   /** Run one Spotify tool. Kill switch, server on/read-only, `may_read` (reads) or the MCP tier +
    * destructive gate (writes) apply in Rust. Resolves to a speakable reply (no IDs / URIs). */
   spotify_tool: { args: { name: SpotifyToolName; args?: Record<string, unknown>; approved?: boolean }; result: string };
-  /** Speech ducking (Phase 2): Spotify to `level`% (5–50, default 15) while you talk, only when it plays
-   * on this PC with volume control. False = not ducked; never throws for a refusal, never logged. */
-  spotify_duck: { args: { level?: number }; result: boolean };
-  /** Undo `spotify_duck` unless the volume was changed since. Silent no-op when nothing is ducked. */
-  spotify_unduck: { args: undefined; result: void };
+  /** Speech ducking over the Web API — the P4 FALLBACK, used only when `media_duck` found no local
+   * Spotify session: BY `reduction`% (0–50) with one PUT, no fade (legacy `level` = TO that %). Only
+   * when it plays on this PC with volume control. False = not ducked; never throws for a refusal, never logged. */
+  spotify_duck: { args: { level?: number; reduction?: number }; result: boolean };
+  /** P4 local duck: the Spotify desktop app's own Windows audio session fades down BY `reductionPct`%
+   * (0–50, default 15) over `fadeMs` (60–200, default 120). Kill switch = no new duck. `spotifyLocal`:
+   * an active local Spotify session exists (then the Web API fallback must not run). Never throws. */
+  media_duck: { args: { reductionPct?: number; fadeMs?: number }; result: MediaDuckReport };
+  /** Ramp back over `fadeMs` (60–600, default 320); a session moved since is left alone. Never gated.
+   * True = the ducker didn't answer (still ducked as far as Rust knows). */
+  media_unduck: { args: { fadeMs?: number }; result: boolean };
+  media_duck_status: { args: undefined; result: MediaDuckStatus };
+  /** Undo `spotify_duck` unless the volume was changed since. Silent no-op when nothing is ducked; never
+   * gated (it only undoes the app's own change). True = still ducked (restore failed / timed out): retry. */
+  spotify_unduck: { args: undefined; result: boolean };
   /** Windows OS-alarm fallback (alarm.rs): a one-shot Scheduled Task under \AgenticOS\ that shows an alarm
    * toast at `dueAtMs` even when the app is closed. id: 1–64 [A-Za-z0-9-]; title: 1–120 chars; due: 5 s–366 days ahead. */
   alarm_os_schedule: { args: { id: string; title: string; dueAtMs: number }; result: void };
@@ -169,11 +182,23 @@ export interface NativeCommands {
     result: DevTask;
   };
   dev_task_list: { args: { status?: DevTaskStatus; category?: DevTaskCategory }; result: DevTask[] };
-  dev_task_update: { args: { id: string; status?: DevTaskStatus; priority?: DevTaskPriority; title?: string; category?: DevTaskCategory }; result: DevTask };
+  dev_task_update: { args: { id: string; status?: DevTaskStatus; priority?: DevTaskPriority; title?: string; category?: DevTaskCategory; body?: string }; result: DevTask };
   /** Resolves `false` when no such task existed. */
   dev_task_delete: { args: { id: string }; result: boolean };
   /** Writes `<repo>/memory/session_handoffs/YYYY-MM-DD-HHMM.md` and returns its Markdown (copy it to the clipboard). */
   dev_brief_export: { args: undefined; result: DevBriefExport };
+  // ── P6 Claude Code fix queue (deterministic only: a phrase, a button or this command — never an LLM router tool) ──
+  /** Queue a fix straight to `Queued` (kind fix, tags dev-fix + claude-queue) with a scrubbed snapshot that
+   * adds `errors` (these + the gateway's /api/errors) and the UI route. Rewrites `<repo>/.agenticos/claude-fix-queue.json`. */
+  dev_fix_queue: {
+    args: { title: string; description?: string; priority?: DevTaskPriority; errors?: DevErrorItem[]; ui?: DevUiState; source?: DevTaskSource; trace?: DevTraceStep };
+    result: DevTask;
+  };
+  /** Live run in its own worktree on `fix/<short>`. Rust refuses with `PERMISSION_REQUIRED:claude-dispatch` unless
+   * `approved: true` — only ever call it from the confirmation card (`dispatchFix` in dev-queue.ts). */
+  dev_fix_dispatch: { args: { id: string; approved?: boolean }; result: DevTask };
+  /** Stop the live run of `id`; `false` when it isn't running. */
+  dev_fix_cancel: { args: { id: string }; result: boolean };
   // ── System Map introspection (read-only, no LLM, secret-scrubbed in Rust) ──
   /** Cached 10 s in Rust; `deep: true` re-probes and re-lists every external MCP server. */
   system_introspect: { args: { deep?: boolean }; result: SystemSnapshot };
@@ -201,8 +226,30 @@ function timed<T>(name: string, p: Promise<T>): Promise<T> {
   return p;
 }
 
+/** Payload of the `tts-fallback` event (Rust `voice.rs` `fallback_payload`): a live line
+ * fell back from ElevenLabs to a local engine. Rust emits at most one per reply
+ * (`utteranceId`), per cooldown window (402 per voice / 429 global), or — with no id —
+ * per `reason` per 10 s. `reason` is our own hint or ElevenLabs' clipped `detail`, never
+ * key material. `scope`: "utterance" | "voice" | "global" | "call" (no utterance id). */
+export interface TtsFallbackEvent {
+  from: string;
+  to: string;
+  reason: string;
+  status?: number | null;
+  utteranceId?: string | null;
+  cooldownSecs?: number | null;
+  scope?: "utterance" | "voice" | "global" | "call" | null;
+  /** Which cooldown a cooldown notice is about: "*" (global 429) or an opaque per-voice tag (402). */
+  cooldownKey?: string | null;
+}
+
+/** `tts-unpin`: a `cache: true` line (sent with this `pinId`) was answered by a local engine. */
+export interface TtsUnpinEvent {
+  pinId: string;
+}
+
 /** Subscribe to a Rust → webview event. Returns an unsubscribe function. No-op on the PWA. */
-export async function onNativeEvent<P = unknown>(event: "voice-toggle" | "memory-progress" | "pipeline-step" | "pipeline-failed" | "gpu-slot" | "droplet-status" | "tony-token" | "tts-fallback" | "spotify-auth" | "spotify-session" | "spotify-reauth" | "tools-changed" | "audio-engine" | "os-trace", handler: (payload: P) => void): Promise<() => void> {
+export async function onNativeEvent<P = unknown>(event: "voice-toggle" | "memory-progress" | "pipeline-step" | "pipeline-failed" | "gpu-slot" | "droplet-status" | "tony-token" | "tts-fallback" | "tts-unpin" | "spotify-auth" | "spotify-session" | "spotify-reauth" | "tools-changed" | "audio-engine" | "os-trace" | "dev-fix-progress" | "devqueue-changed", handler: (payload: P) => void): Promise<() => void> {
   if (!isTauri()) return () => undefined;
   const { listen } = await import("@tauri-apps/api/event");
   return listen<P>(event, (e) => handler(e.payload));
@@ -216,6 +263,23 @@ export function cmd<K extends keyof NativeCommands>(
 }
 
 // ── Shared types (mirrors of the Rust structs, camelCase via serde) ──────────
+
+/** `media_duck` (audio/ducker.rs `DuckReport`). */
+export interface MediaDuckReport {
+  /** Local Spotify sessions now held down (0 = nothing ducked here). */
+  ducked: number;
+  /** An active Spotify desktop session exists on this PC (ducked or not). */
+  spotifyLocal: boolean;
+  /** Rust's worker didn't answer in time: whether Spotify plays here is UNKNOWN (no Web API fallback). */
+  timedOut?: boolean;
+}
+
+/** `media_duck_status` (audio/ducker.rs `DuckStatus`). */
+export interface MediaDuckStatus {
+  ducked: number;
+  /** Ducks a crash left behind, waiting for Spotify to come back. */
+  pendingRecovery: number;
+}
 
 export interface GpuStats {
   name: string;
@@ -626,6 +690,18 @@ export interface DevUiState {
   sttEngine?: string;
   ttsEngine?: string;
   viewMode?: string;
+  /** The URL hash when a fix was queued. */
+  route?: string;
+  /** The focused card / zone. */
+  focus?: string;
+}
+/** One recent failure attached to a fix (Rust keeps only these keys, at most 20, scrubbed). */
+export interface DevErrorItem {
+  source: "trace" | "gateway" | "bus" | "bridge" | "ui";
+  at?: number | string;
+  hop?: string;
+  label?: string;
+  error?: string;
 }
 /** What the OS looked like when a task was logged. Built in Rust from cached data, secret-scrubbed. */
 export interface DevContextSnapshot {
@@ -640,6 +716,8 @@ export interface DevContextSnapshot {
   ui?: DevUiState;
   git?: { branch: string | null; head: string | null };
   trace?: Partial<DevTraceStep>;
+  /** Recent failures (fixes queued for Claude Code). */
+  errors?: DevErrorItem[];
 }
 /** AnythingLLM workspace; null models = AnythingLLM's system default. */
 export interface WorkspaceInfo {
@@ -869,6 +947,33 @@ export interface DevTask {
   /** Unix milliseconds. */
   createdAt: number;
   updatedAt: number;
+  /** Claude fix run metadata (`{}` when never dispatched). Optional for rows from older builds. */
+  dispatch?: DevFixDispatch;
+  tags?: string[];
+}
+/** `dispatch` of a fix: "queue" = Claude Code's /fix-queue edited it; "live" = a worktree run. */
+export interface DevFixDispatch {
+  mode?: "queue" | "live";
+  state?: "running" | "finished" | "interrupted";
+  branch?: string;
+  worktree?: string;
+  logPath?: string;
+  sessionId?: string | null;
+  startedAt?: number;
+  finishedAt?: number | null;
+  timeoutMin?: number;
+  note?: string | null;
+  commit?: string | null;
+  verify?: { ok: boolean; steps: { label: string; ok: boolean; ms: number; tail?: string }[]; files?: number } | null;
+  result?: { isError?: boolean | null; numTurns?: number | null; durationMs?: number | null } | null;
+  reconciledAt?: number;
+}
+/** `dev-fix-progress` event: a scrubbed phase line from a live run (never tool input or output). */
+export interface DevFixProgress {
+  id: string;
+  phase: "start" | "init" | "text" | "tool" | "result" | "verify" | "done" | "failed";
+  text: string;
+  at: number;
 }
 export interface DevBriefExport {
   markdown: string;
@@ -924,6 +1029,8 @@ export interface OsTurnRequest {
   askCards?: boolean;
   /** A Gabagool cue is playing: Rust won't offer `spotify.volume` for a bare volume line. */
   cuePlaying?: boolean;
+  /** P3 Tier 2: Tony brainstorms this himself — Rust never re-routes or delegates it. */
+  noDelegate?: boolean;
 }
 export interface OsStep {
   kind: "delegate" | "reply" | "tool" | "step-in" | "error" | "overseer" | "verify";
@@ -948,8 +1055,12 @@ export interface Idea {
   summary?: string;
   tasks: { id: string; text: string; done: boolean }[];
   spec?: Record<string, unknown>;
-  status: "captured" | "prototyping" | "staged" | "approved" | "archived";
+  /** "parked": saved from a Tony brainstorm (P3 Tier 4) — no tasks yet, nothing ran. */
+  status: "captured" | "prototyping" | "staged" | "approved" | "archived" | "parked";
   cardId?: string;
+  tags?: string[];
+  /** When a Tier-4 save parked it (ms). */
+  savedAt?: number;
 }
 
 export interface PlayCard {
@@ -964,7 +1075,11 @@ export interface PlayCard {
   coderOutput?: string;
   html?: string;
   hasHtml?: boolean;
-  status: "staged" | "building" | "approved" | "committed" | "archived";
+  /** "parked": a text card saved from a Tony brainstorm (P3 Tier 4) — no HTML, nothing built. */
+  status: "staged" | "building" | "approved" | "committed" | "archived" | "parked";
+  summary?: string;
+  tags?: string[];
+  savedAt?: number;
   versions?: { at: number; by: string; notes: string }[];
   vaultPath?: string;
   _updated?: number;

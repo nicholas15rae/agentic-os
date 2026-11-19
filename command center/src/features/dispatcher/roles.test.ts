@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ROLE_IDS, SUB_AGENT_IDS, isRoleId, toRoleId, toggleGrant } from "./roles";
+import { ROLE_IDS, SELF_ROLE_ALIASES, SUB_AGENT_IDS, isRoleId, isSelfRole, roleLabel, toRoleId, toggleGrant } from "./roles";
 
 describe("toggleGrant", () => {
   const ALL = ["tony", ...SUB_AGENT_IDS] as const;
@@ -47,6 +47,17 @@ describe("roles", () => {
     expect(toRoleId("Tony")).toBe("general");
     expect(toRoleId("coder")).toBe("coder");
     expect(toRoleId("nonsense")).toBeNull();
+  });
+
+  it("every self alias (and the OS name) is Tony: general, never a delegation target", () => {
+    for (const a of [...SELF_ROLE_ALIASES, "Tony", "DISPATCHER"]) {
+      expect(isSelfRole(a), a).toBe(true);
+      expect(toRoleId(a), a).toBe("general");
+      expect(roleLabel(a), a).toBe("Tony");
+    }
+    for (const id of SUB_AGENT_IDS) expect(isSelfRole(id), id).toBe(false);
+    expect(isSelfRole("")).toBe(false);
+    expect(isSelfRole(null)).toBe(false);
   });
 
   it("isRoleId rejects unknown ids", () => {

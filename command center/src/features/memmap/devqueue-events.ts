@@ -17,7 +17,7 @@ export function onDevQueueChanged(cb: () => void): () => void {
 }
 
 /** The whitelisted UI keys a task's context snapshot keeps (Rust drops anything else). Scalars only — never what was said. */
-export function uiState(parts: { voiceState?: string; section?: string; thread?: string; sttEngine?: string; ttsEngine?: string; viewMode?: string; listening?: boolean; voiceChannel?: string }): DevUiState {
+export function uiState(parts: { voiceState?: string; section?: string; thread?: string; sttEngine?: string; ttsEngine?: string; viewMode?: string; listening?: boolean; voiceChannel?: string; route?: string; focus?: string }): DevUiState {
   const out: DevUiState = {};
   for (const [k, v] of Object.entries(parts) as [keyof DevUiState, string | boolean | undefined][]) {
     if (v === undefined || v === "") continue;

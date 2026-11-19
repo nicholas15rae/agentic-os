@@ -60,6 +60,23 @@ export const newClip = (fileId: string, name: string, duration: number): AudioCl
   loop: false,
 });
 
+/** The startup cue's line (P5 persona greeting). */
+export const STARTUP_INTRO = "Hey Nicky, what's up?";
+/** Earlier built-in default texts, by builtin id: a stored copy still holding one exactly is upgraded once. */
+export const LEGACY_DEFAULT_INTROS: Partial<Record<NonNullable<CueWidget["builtin"]>, { from: string; to: string }>> = {
+  startup: { from: "Command center online. What are we building today?", to: STARTUP_INTRO },
+};
+
+/**
+ * The intro patch a stored built-in cue needs, or null. Only a text that is EXACTLY the old
+ * default is replaced, so anything Nic edited himself survives.
+ */
+export function cueIntroMigration(c: Pick<CueWidget, "builtin" | "intro">): CueWidget["intro"] | null {
+  const m = c.builtin ? LEGACY_DEFAULT_INTROS[c.builtin] : undefined;
+  if (!m || c.intro?.text !== m.from) return null;
+  return { ...c.intro, text: m.to };
+}
+
 export const DEFAULT_CUES: CueWidget[] = [
   {
     name: "Gabagool Mode",
@@ -81,7 +98,7 @@ export const DEFAULT_CUES: CueWidget[] = [
     time: "",
     days: [],
     startup: true,
-    intro: { mode: "static", text: "Command center online. What are we building today?" },
+    intro: { mode: "static", text: STARTUP_INTRO },
     soundbite: null,
     theme: null,
     action: { kind: "none", value: "" },

@@ -594,7 +594,9 @@ pub struct ProviderPatch {
 
 /// Whisper vocabulary bias (Phase 2 §1). Natural speech on purpose, not a comma list:
 /// Whisper treats the prompt as preceding transcript, so it biases spelling best this way.
-pub const DEFAULT_STT_PROMPT: &str = "Tony, Gabagool mode. Take it ease. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
+/// "Take it easy." (P5: the hold / stand-down family) stays its own sentence, never right after
+/// "Tony"/"Hey", so a real 4-word "Tony, take it easy" can't match a prompt run in `echoes_prompt`.
+pub const DEFAULT_STT_PROMPT: &str = "Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
 
 /// Switch model / voice / URL etc. for one provider (Settings dropdowns).
 #[tauri::command]

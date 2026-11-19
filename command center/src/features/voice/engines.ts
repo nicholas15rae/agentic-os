@@ -1,11 +1,12 @@
-import { cmd, isTauri, nativeRaw } from "@/lib/platform";
+import { cmd, isTauri, nativeRaw, onNativeEvent, type TtsUnpinEvent } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { voiceLevel } from "./voice-store";
 import { SileroStream, preloadSilero, sileroThresholds } from "./silero";
 import { utteranceShouldEnd } from "./vad-rules";
-import { sentences, stripForSpeech } from "./tts-text";
+import { perSentenceOpts, sentences, stripForSpeech, synthArgs } from "./tts-text";
 import type { SpeakOpts, TtsEngine } from "./tts-types";
 import { FallbackTts } from "./tts-fallback";
+import { PinCache, unpinEverywhere } from "./tts-pin";
 
 // Re-exported so existing importers (`voice-controller.ts` et al.) are unaffected by
 // the split — these three live in their own files so they're testable under Vitest
@@ -433,6 +434,16 @@ export class WebSpeechStt implements SttEngine {
 
 // ── Kokoro TTS (desktop) ─────────────────────────────────────────────────────
 
+let unpinListening = false;
+/** One `tts-unpin` listener for every Kokoro cache (started on the first cached line). */
+function listenForUnpins() {
+  if (unpinListening) return;
+  unpinListening = true;
+  void onNativeEvent<TtsUnpinEvent>("tts-unpin", (e) => unpinEverywhere(e?.pinId)).catch(() => {
+    unpinListening = false;
+  });
+}
+
 export class KokoroTts implements TtsEngine {
   readonly name = "Kokoro";
   readonly supported = isTauri();
@@ -442,52 +453,38 @@ export class KokoroTts implements TtsEngine {
   /** Synth requests started ahead of playback (sentence N+1 renders while N plays). */
   private ahead = new Map<string, { at: number; p: Promise<ArrayBuffer> }>();
 
+  /** Deliberately excludes `utteranceId`: callers pass the same id to a reply's prefetch and
+   * speak (osRun), and a speak() that mints its own id still reuses the prefetched audio. */
   private key(s: string, opts?: SpeakOpts) {
     return `${opts?.agent ?? ""}|${opts?.voice ?? ""}|${opts?.previousText ?? ""}|${s}`;
   }
 
-  /** Session cache for `cache: true` lines (intro lines). Holds the raw bytes; each play gets a
-   * copy because decodeAudioData detaches the buffer it's given. */
-  private pinned = new Map<string, Promise<ArrayBuffer>>();
+  /** Session cache for `cache: true` lines (intros, acks, the greeting). Holds the raw bytes;
+   * each play gets a copy. A line Rust answered with a local engine instead of the cloud voice
+   * is unpinned (`tts-unpin`), so a breaker cooldown can't keep it in Kokoro all session. */
+  private pinned = new PinCache();
 
   private synth(s: string, opts?: SpeakOpts): Promise<ArrayBuffer> {
     const key = this.key(s, opts);
     if (opts?.cache) {
-      let p = this.pinned.get(key);
-      if (!p) {
-        p = cmd("tts_synthesize", { text: s, voice: opts.voice, agent: opts.agent });
-        this.pinned.set(key, p);
-        p.catch(() => this.pinned.delete(key)); // a failed synth is retried next time
-      }
-      return p.then((b) => b.slice(0));
+      listenForUnpins();
+      return this.pinned.get(key, (pinId) => cmd("tts_synthesize", synthArgs(s, opts, pinId))); // no previousText / utteranceId
     }
     const hit = this.ahead.get(key);
     if (hit) {
       this.ahead.delete(key);
       return hit.p;
     }
-    return cmd("tts_synthesize", { text: s, voice: opts?.voice, agent: opts?.agent, previousText: opts?.previousText });
-  }
-
-  /** `sentences(text)` with each one's own opts, chaining `previousText` from
-   * the sentence right before it (the caller's own `opts.previousText`, if
-   * any, only applies to the first) — ElevenLabs prosody continuity (Part 6 §2). */
-  private perSentenceOpts(text: string, opts?: SpeakOpts): { s: string; opts: SpeakOpts }[] {
-    let prev = opts?.previousText;
-    return sentences(text).map((s) => {
-      const sOpts: SpeakOpts = { ...opts, previousText: prev };
-      prev = s;
-      return { s, opts: sOpts };
-    });
+    return cmd("tts_synthesize", synthArgs(s, opts));
   }
 
   prefetch(text: string, opts?: SpeakOpts) {
     const now = Date.now();
     for (const [k, v] of this.ahead) if (now - v.at > 60_000) this.ahead.delete(k);
-    for (const { s, opts: sOpts } of this.perSentenceOpts(text, opts)) {
+    for (const { s, opts: sOpts } of perSentenceOpts(text, opts)) {
       const key = this.key(s, sOpts);
       if (this.ahead.has(key)) continue;
-      const p = cmd("tts_synthesize", { text: s, voice: sOpts.voice, agent: sOpts.agent, previousText: sOpts.previousText });
+      const p = cmd("tts_synthesize", synthArgs(s, sOpts));
       p.catch(() => this.ahead.delete(key));
       this.ahead.set(key, { at: now, p });
     }
@@ -562,8 +559,11 @@ export class KokoroTts implements TtsEngine {
     };
     this.raf = requestAnimationFrame(meter);
 
+    // P1: every sentence of one speak() shares a breaker scope — the caller's reply id, or a
+    // fresh one, so a failing ElevenLabs call trips this line once instead of per sentence.
+    const uOpts: SpeakOpts | undefined = opts?.cache || opts?.utteranceId ? opts : { ...opts, utteranceId: crypto.randomUUID() };
     // Fire all synth requests now; play strictly in order as each resolves.
-    const pending = this.perSentenceOpts(text, opts).map(({ s, opts: sOpts }) => this.synth(s, sOpts).then((bytes) => ac.decodeAudioData(bytes)));
+    const pending = perSentenceOpts(text, uOpts).map(({ s, opts: sOpts }) => this.synth(s, sOpts).then((bytes) => ac.decodeAudioData(bytes)));
     try {
       for (let i = 0; i < pending.length; ) {
         const audio = await pending[i];

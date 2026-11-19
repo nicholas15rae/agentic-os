@@ -6,6 +6,7 @@ import { roleLabel } from "@/features/dispatcher/roles";
 import { useSettings } from "@/stores/settings";
 import { audioContext } from "@/features/voice/engines";
 import { detectRoute, detectedRoute, detectedRouteLabel, effectiveRoute, onRouteChange } from "@/features/voice/audio-route";
+import { duckReadout } from "@/features/voice/media-duck";
 import { modelsFor, useProviders } from "./use-providers";
 import { ModelSelect } from "./ServicesSettings";
 import { Toggle } from "./os-ui";
@@ -358,7 +359,8 @@ function RosterRow({ role, entry, defaultEngine, note, onPatch }: { role: string
   const preview = async () => {
     setBusy("Previewing…");
     try {
-      const bytes = await cmd("tts_synthesize", { text: `Hey Nic, ${roleLabel(role)} online. What are we building?`, agent: role });
+      // Its own breaker scope (P1): a failing click falls back once with ONE notice.
+      const bytes = await cmd("tts_synthesize", { text: `Hey Nic, ${roleLabel(role)} online. What are we building?`, agent: role, utteranceId: crypto.randomUUID() });
       const ac = await audioContext();
       const buf = await ac.decodeAudioData(bytes);
       const src = ac.createBufferSource();
@@ -442,7 +444,7 @@ const KEY_SOURCE: Record<NonNullable<VoicesView["keySource"]>, string> = {
 };
 
 /**
- * Phase 2 voice reflexes ("cut it", "take it ease", "whoa"): where Tony's voice comes out and
+ * Phase 2 voice reflexes ("cut it", "whoa", "take it easy"): where Tony's voice comes out and
  * how fast a listen over him ends. Speakers mode ignores one-syllable holds while he's audible
  * (his own "oh" can reach the mic) and uses a stricter barge-in trigger.
  */
@@ -450,8 +452,8 @@ export function ConversationReflexesCard() {
   const conversation = useSettings((s) => s.conversation);
   const set = useSettings((s) => s.set);
   const up = (p: Partial<typeof conversation>) => set({ conversation: { ...conversation, ...p } });
-  const duck = conversation.spotifyDuck;
-  const upDuck = (p: Partial<typeof duck>) => up({ spotifyDuck: { ...duck, ...p } });
+  const duck = conversation.mediaDuck;
+  const upDuck = (p: Partial<typeof duck>) => up({ mediaDuck: { ...duck, ...p } });
   const [detected, setDetected] = useState(detectedRoute());
   const [label, setLabel] = useState(detectedRouteLabel());
   useEffect(() => {
@@ -468,7 +470,7 @@ export function ConversationReflexesCard() {
   return (
     <Card
       title="Voice reflexes"
-      hint="Say “cut it” to stop everything, “take it ease” / “whoa” / “aspetta” to pause and add a thought, then “keep going” or “go ahead”."
+      hint="Say “cut it” to stop everything, “whoa” / “aspetta” (or “take it easy” while Tony talks) to pause and add a thought, then “keep going” or “go ahead”. “Take it easy” on its own while he’s idle turns hands-free off."
     >
       <div className="grid gap-2 sm:grid-cols-2">
         <Field label="Audio route">
@@ -498,26 +500,61 @@ export function ConversationReflexesCard() {
       </p>
       <div className="mt-3 border-t border-white/5 pt-2">
         <Toggle
-          on={duck.enabled}
-          onChange={(enabled) => upDuck({ enabled })}
-          label="Duck Spotify while I talk"
-          hint="Only when Spotify plays on this PC. It comes back after you stop talking; a cut or a hold pauses it instead."
+          on={conversation.bargeIn}
+          onChange={(bargeIn) => up({ bargeIn })}
+          label="Let me talk over Tony"
+          hint="Off: the mic stays closed while he speaks, so he's never interrupted (and “cut it” has to wait for him to finish)."
+        />
+        <Toggle
+          on={conversation.followUp}
+          onChange={(followUp) => up({ followUp })}
+          label="Keep listening after Tony answers"
+          hint="A short window for your follow-up, no wake word needed (hands-free, or a turn you started by tapping)."
         />
         <div className="mt-1 grid gap-2 sm:grid-cols-2">
-          <Field label="Ducked level">
-            <Select value={String(duck.level)} disabled={!duck.enabled} onChange={(e) => upDuck({ level: Number(e.target.value) })}>
-              {[10, 15, 25, 35].map((p) => (
-                <option key={p} value={p}>
-                  {p}%{p === 15 ? " (default)" : ""}
+          <Field label="Follow-up window">
+            <Select value={String(conversation.followUpSecs)} disabled={!conversation.followUp} onChange={(e) => up({ followUpSecs: Number(e.target.value) })}>
+              {[4, 6, 8, 12].map((sec) => (
+                <option key={sec} value={sec}>
+                  {sec} s{sec === 6 ? " (default)" : ""}
                 </option>
               ))}
             </Select>
           </Field>
-          <Field label="Back to full after you stop">
+        </div>
+      </div>
+      <div className="mt-3 border-t border-white/5 pt-2">
+        <Toggle
+          on={duck.enabled}
+          onChange={(enabled) => upDuck({ enabled })}
+          label="Lower Spotify while I talk to Tony"
+          hint="Spotify on this PC fades down in about 0.1 s and back in about 0.3 s once Tony has answered. It never mutes, and Tony's own voice is never lowered; a cut or a hold pauses the music instead."
+        />
+        <label className="mt-1 block text-sm text-ink-2">
+          Lower it by
+          <div className="mt-1 flex items-center gap-3">
+            <span className="w-16 text-[11px] text-ink-3">barely</span>
+            <input
+              type="range"
+              min={0}
+              max={50}
+              step={5}
+              value={duck.reductionPct}
+              disabled={!duck.enabled}
+              onChange={(e) => upDuck({ reductionPct: Number(e.target.value) })}
+              className="flex-1 accent-teal disabled:opacity-50"
+              aria-label="How much to lower Spotify while you talk"
+            />
+            <span className="w-16 text-right text-[11px] text-ink-3">half</span>
+            <span className="w-36 text-right font-mono text-ink">{duckReadout(duck.reductionPct)}</span>
+          </div>
+        </label>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <Field label="Back up after a line that wasn't for Tony">
             <Select value={String(duck.restoreMs)} disabled={!duck.enabled} onChange={(e) => upDuck({ restoreMs: Number(e.target.value) })}>
-              {[1500, 2500, 4000].map((ms) => (
+              {[500, 800, 1500, 2500].map((ms) => (
                 <option key={ms} value={ms}>
-                  {ms / 1000} s{ms === 2500 ? " (default)" : ""}
+                  {ms / 1000} s{ms === 800 ? " (default)" : ""}
                 </option>
               ))}
             </Select>
@@ -528,7 +565,14 @@ export function ConversationReflexesCard() {
           disabled={!duck.enabled}
           onChange={(onWakeListen) => upDuck({ onWakeListen })}
           label="Also while hands-free waits for the wake word"
-          hint="Room talk and loud vocals can trip it; after a line that wasn't for Tony it waits a few seconds before ducking again."
+          hint="And in the follow-up window after Tony. Room talk and loud vocals can trip it; after a line that wasn't for Tony it waits a few seconds before lowering again."
+        />
+        <Toggle
+          on={duck.webApiFallback}
+          disabled={!duck.enabled}
+          onChange={(webApiFallback) => upDuck({ webApiFallback })}
+          label="Spotify Web API fallback"
+          hint="Only when Windows shows no Spotify audio here but Spotify says it's playing on this PC: one volume change through your Spotify account instead (no fade)."
         />
       </div>
     </Card>

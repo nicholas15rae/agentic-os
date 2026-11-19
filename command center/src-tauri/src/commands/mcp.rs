@@ -1910,6 +1910,22 @@ mod tests {
         }
     }
 
+    /// P6: the Claude fix queue and live dispatch are deterministic (phrase / button / Tauri
+    /// command) — never a builtin tool, so never offered to any router.
+    #[test]
+    fn dev_fix_commands_are_never_router_tools() {
+        let ids = ["weather", "time", "fetch", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "devqueue", "dev", "claude", "claude_fix", "claude-code"];
+        for id in ids {
+            for t in builtin_tools(id) {
+                let n = t.name.to_ascii_lowercase();
+                assert!(!["dispatch", "run_fix", "queue_fix", "dev_fix", "claude"].iter().any(|w| n.contains(w)), "{}", t.name);
+            }
+        }
+        for name in ["devqueue.run_fix", "claude.run_fix"] {
+            assert!(!offered_to_router(name, true), "{name}");
+        }
+    }
+
     #[test]
     fn gmail_tools_split_read_only_and_draft() {
         let names: Vec<String> = builtin_tools("gmail").into_iter().map(|t| t.name).collect();

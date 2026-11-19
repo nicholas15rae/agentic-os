@@ -1,4 +1,5 @@
 import { osName } from "@/features/os/os-store";
+import { SELF_ROLE_IDS, isSelfRoleId } from "./router";
 
 /**
  * The ONE shared list of agent role ids (Tony first, then the sub-agents in routing
@@ -9,16 +10,23 @@ export type RoleId = (typeof ROLE_IDS)[number];
 
 export const isRoleId = (s: string): s is RoleId => (ROLE_IDS as readonly string[]).includes(s);
 
-/** "tony" → "general"; anything unknown → null. */
+/** Every id that means Tony himself (general, tony, os, dispatcher, orchestrator, jarvis);
+ * the configured OS name counts too (`isSelfRole`). */
+export const SELF_ROLE_ALIASES = SELF_ROLE_IDS;
+
+/** `id` is Tony (a self alias or the OS name, any case): never a delegation target. */
+export const isSelfRole = (id: string | null | undefined): boolean => !!id && isSelfRoleId(id, osName());
+
+/** Any self alias ("tony", "dispatcher", the OS name…) → "general"; anything unknown → null. */
 export function toRoleId(s: string): RoleId | null {
   const v = s.trim().toLowerCase();
-  if (v === "tony") return "general";
+  if (isSelfRole(v)) return "general";
   return isRoleId(v) ? v : null;
 }
 
 /** Display label: general → the OS name ("Tony"), booking → "Booking Desk", others capitalised. */
 export function roleLabel(id: string): string {
-  if (id === "general" || id === "tony") return osName();
+  if (isSelfRole(id)) return osName();
   if (id === "booking") return "Booking Desk";
   return id.charAt(0).toUpperCase() + id.slice(1);
 }

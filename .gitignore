@@ -32,6 +32,8 @@ training_logs/
 # System Map session briefs (dev task queue exports)
 memory/session_handoffs/
 
+# Instagram webhook event log (may contain user data)
+data/instagram/
 
 # Claude Code fix queue (P6): queue file + live-run logs (local paths, scrubbed error text)
 .agenticos/

@@ -136,6 +136,13 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         host = (request.client.host if request.client else "") or ""
         loopback = host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
+        # Tunnels (ngrok etc.) connect from loopback but carry forwarding headers. Such traffic
+        # is the public internet: confine it to the public webhook endpoints only.
+        proxied = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"))
+        if proxied:
+            if path.startswith("/webhook/"):
+                return await call_next(request)
+            return JSONResponse({"detail": "Not found"}, status_code=404)
         # Defense in depth: besides loopback, only the NetBird mesh (100.64.0.0/10) may talk to the gateway.
         if not loopback and not _in_mesh(host):
             return JSONResponse({"detail": "Only localhost and the NetBird mesh may reach this gateway."}, status_code=403)
@@ -695,6 +702,59 @@ def webhook_receiver(data: dict):
         return {"status": "processed", "event": event_type, "skill": skill_name, "result": result}
     append_audit({"action": "webhook_received", "event": event_type})
     return {"status": "received", "event": event_type}
+
+# ─── Instagram Webhooks (Meta Graph API) ─────────────────────────
+# Public via an ngrok tunnel; ZeroTrustMiddleware confines tunnelled traffic to /webhook/*.
+
+def _dotenv_value(key: str) -> str:
+    """Read a key from the environment, falling back to the project .env (read per call)."""
+    if os.environ.get(key):
+        return os.environ[key]
+    env_file = BASE_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    return ""
+
+
+@app.get("/webhook/instagram")
+def instagram_webhook_verify(request: Request):
+    """Meta verification handshake: echo hub.challenge when the verify token matches."""
+    import hmac
+    q = request.query_params
+    expected = _dotenv_value("INSTAGRAM_VERIFY_TOKEN")
+    sent = q.get("hub.verify_token", "")
+    if q.get("hub.mode") == "subscribe" and expected and hmac.compare_digest(sent.encode(), expected.encode()):
+        append_audit({"action": "instagram_webhook_verified"})
+        return Response(content=q.get("hub.challenge", ""), media_type="text/plain", status_code=200)
+    return Response(content="Forbidden", media_type="text/plain", status_code=403)
+
+
+@app.post("/webhook/instagram")
+async def instagram_webhook_event(request: Request):
+    """Receive Instagram webhook events, log them, and ack with 200."""
+    import hmac, hashlib
+    body = await request.body()
+    # If INSTAGRAM_APP_SECRET is set, require a valid X-Hub-Signature-256 from Meta.
+    secret = _dotenv_value("INSTAGRAM_APP_SECRET")
+    if secret:
+        sig = request.headers.get("x-hub-signature-256", "")
+        good = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig.encode(), good.encode()):
+            return Response(content="Invalid signature", media_type="text/plain", status_code=403)
+    try:
+        payload = json.loads(body or b"{}")
+    except ValueError:
+        payload = {"raw": body.decode("utf-8", "replace")[:4000]}
+    log_dir = BASE_DIR / "data" / "instagram"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with open(log_dir / "webhook-events.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"received_at": get_timestamp(), "payload": payload}) + "\n")
+    print(f"[instagram webhook] {json.dumps(payload)[:500]}")
+    append_audit({"action": "instagram_webhook_event", "object": payload.get("object") if isinstance(payload, dict) else None})
+    return Response(content="EVENT_RECEIVED", media_type="text/plain", status_code=200)
 
 @app.get("/api/scheduler/events")
 def get_scheduler_events(limit: int = Query(50, le=200)):

@@ -97,6 +97,12 @@ if (-not (Test-Path $settingsFile)) {
 }
 
 # -- Agent CLIs (optional, like install.sh) ---------------------------------
+# Re-read PATH from the registry: installers (npm -g, agy, Hermes) add their
+# folders to the User PATH, which a terminal opened before them never sees.
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$env:Path = ((@($env:Path, $userPath, $machinePath) -join ';').Split(';') |
+    Where-Object { $_ } | Select-Object -Unique) -join ';'
 foreach ($tool in 'node', 'opencode', 'hermes', 'agy') {
     $cmd = Get-Command $tool -ErrorAction SilentlyContinue
     if ($cmd) { Write-Host ("  {0,-9} found  ({1})" -f $tool, $cmd.Source) -ForegroundColor DarkGreen }

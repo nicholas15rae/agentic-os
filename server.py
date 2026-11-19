@@ -45,8 +45,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Agentic OS", version="4.0", lifespan=lifespan)
 
+def hermes_home() -> Path:
+    """Hermes data dir: $HERMES_HOME, else %LOCALAPPDATA%\\hermes for the
+    native Windows install, else ~/.hermes (Linux/macOS/WSL)."""
+    if os.environ.get("HERMES_HOME"):
+        return Path(os.environ["HERMES_HOME"])
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        native = Path(os.environ["LOCALAPPDATA"]) / "hermes"
+        if native.exists():
+            return native
+    return Path.home() / ".hermes"
+
 # Load OpenRouter API key from Hermes .env
-HERMES_ENV = Path.home() / ".hermes" / ".env"
+HERMES_ENV = hermes_home() / ".env"
 if HERMES_ENV.exists():
     for line in HERMES_ENV.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -1635,7 +1646,7 @@ def list_sessions():
                     "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
                     "source": "opencode",
                 })
-        hermes_sessions = Path.home() / ".hermes" / "sessions.json"
+        hermes_sessions = hermes_home() / "sessions.json"
         if hermes_sessions.exists():
             sessions.append({
                 "id": "hermes-sessions",

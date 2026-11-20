@@ -10,6 +10,7 @@ import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { agentBadge, useOsName } from "@/features/os/os-store";
 import { isTauri } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
+import { AgentConversationCard } from "@/features/transcript/AgentConversationCard";
 
 /** Shared building blocks for the floating HUD, the Voice Console widget and the Agents section. */
 
@@ -62,6 +63,8 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
   return (
     <div className={`space-y-3 overflow-y-auto ${className}`} aria-live="polite">
       {turns.map((t) => {
+        // An Agent Conversation card (the setting hides it; on the phone it's a plain line).
+        if (t.convId) return <AgentConversationCard key={t.id} convId={t.convId} fallback={t.text} />;
         if (t.who === "system")
           return (
             <p key={t.id} className={`font-mono text-[11px] ${t.tone === "error" ? "text-alert" : t.tone === "warn" ? "text-amber-soft" : "text-teal"}`}>

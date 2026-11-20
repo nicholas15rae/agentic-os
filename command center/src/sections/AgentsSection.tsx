@@ -6,6 +6,7 @@ import { THREADS, useVoice, type ThreadId } from "@/features/voice/voice-store";
 import { CommandInput, MicButton, Transcript } from "@/features/voice/VoiceParts";
 import { useOsName } from "@/features/os/os-store";
 import { HandoffChip, HandoffToggle } from "@/features/voice/HandoffToggle";
+import { AgentConversationToggle } from "@/features/transcript/AgentConversationCard";
 
 /**
  * The Dispatcher. Each tab is its own isolated thread: Auto-route, every
@@ -21,7 +22,8 @@ export function AgentsSection() {
   const thread = useVoice((s) => s.activeThread);
   const setThread = useVoice((s) => s.setActiveThread);
   const state = useVoice((s) => s.state);
-  const counts = useVoice((s) => THREADS.map((t) => s.turns.filter((x) => x.thread === t && x.who !== "system").length).join(","));
+  // Agent Conversation cards count as part of a thread (they are system turns with a convId).
+  const counts = useVoice((s) => THREADS.map((t) => s.turns.filter((x) => x.thread === t && (x.who !== "system" || !!x.convId)).length).join(","));
   const clear = useVoice((s) => s.clear);
   const name = useOsName();
   const n = Object.fromEntries(THREADS.map((t, i) => [t, Number(counts.split(",")[i])])) as Record<ThreadId, number>;
@@ -52,6 +54,7 @@ export function AgentsSection() {
         <div className="ml-auto flex items-center gap-2">
           <HandoffChip />
           <HandoffToggle />
+          <AgentConversationToggle />
         </div>
         {isTauri() && (
           <button onClick={() => setDrawer(true)} className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[13px] text-ink-2 hover:text-ink" title="Skills & MCP library">

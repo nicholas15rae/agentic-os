@@ -46,4 +46,5 @@ pub mod system;
 pub mod taskworker;
 pub mod telemetry;
 pub mod trace;
+pub mod transcript;
 pub mod voice;

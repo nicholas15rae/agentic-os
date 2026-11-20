@@ -42,6 +42,7 @@ use super::librarian::{self, Packet, Query, Sources};
 use super::roles::Role;
 use super::scheduler::GpuSlot;
 use super::staging;
+use super::transcript::{self, NewMessage, TranscriptStore};
 
 // ── Stages ──────────────────────────────────────────────────────────────────
 
@@ -201,6 +202,11 @@ pub trait WorkerEnv: Send + Sync {
     fn ingest(&self, title: String, text: String) -> BoxFuture<'_, Result<(), String>>;
     /// Legacy webview events (`pipeline-step`, `pipeline-failed`).
     fn legacy(&self, event: &str, payload: Value);
+    /// The Agent Conversation transcript (what each agent was asked and answered). None = not
+    /// recorded; recording is best-effort and never affects the stage.
+    fn transcript(&self) -> Option<&TranscriptStore> {
+        None
+    }
 }
 
 /// Timing knobs (tests shorten them).
@@ -936,17 +942,39 @@ impl<'a> Worker<'a> {
         }
     }
 
-    /// One model call under its hard ceiling.
-    async fn ask(&self, e: &Envelope, agent: &'static str, stage: &'static str, user: String, _s: &WorkerSettings, offload: Option<String>, cwd: Option<PathBuf>) -> Result<ModelReply, StageErr> {
+    /// Record one message in the task's Agent Conversation (best-effort, never fails the stage).
+    fn tlog(&self, e: &Envelope, m: NewMessage, known: &[String]) {
+        let Some(s) = self.env.transcript() else { return };
+        let o = transcript::task_open(e);
+        let conv = o.conv_id.clone();
+        transcript::open_conv_in(s, o, known);
+        transcript::record_in(s, &conv, m, known);
+    }
+
+    /// One model call under its hard ceiling. The prompt the agent received and its answer (or
+    /// why there was none) go to the task's Agent Conversation.
+    async fn ask(&self, e: &Envelope, agent: &'static str, stage: &'static str, user: String, s: &WorkerSettings, offload: Option<String>, cwd: Option<PathBuf>) -> Result<ModelReply, StageErr> {
         let secs = stage_def(stage).map(|d| d.secs).unwrap_or(180);
+        let it = Some(e.iteration_count);
+        let via = offload.as_deref().map(|o| format!(", offloaded to {o}")).unwrap_or_default();
+        self.tlog(e, NewMessage::new("tony", agent, "prompt", format!("Brief for the {} — {stage} step ({} chars{via})", label(agent), user.chars().count())).body(user.clone()).stage(Some(stage), it), &s.known);
         let call = ModelCall { agent, task_id: e.task_id.clone(), stage, system: role_prompt(agent), user, secs, offload, cwd };
-        match tokio::time::timeout(call_ceiling(secs), self.env.model(call)).await {
+        let r = match tokio::time::timeout(call_ceiling(secs), self.env.model(call)).await {
             Ok(Ok(r)) if !r.text.trim().is_empty() => Ok(r),
             Ok(Ok(_)) => Err(StageErr::retry(format!("the {} returned an empty answer", label(agent)))),
             Ok(Err(err)) if backend_unreachable(&err) => Err(StageErr::down(format!("{} unavailable: {}", label(agent), clip(&one_line(&err), 200)))),
             Ok(Err(err)) => Err(StageErr::retry(format!("{} unavailable: {}", label(agent), clip(&one_line(&err), 200)))),
             Err(_) => Err(StageErr::retry(format!("{} timed out after {}s", label(agent), call_ceiling(secs).as_secs()))),
+        };
+        match &r {
+            Ok(rep) => {
+                let said = voice(&extract_json(&rep.text)).map(|v| format!(": {v}")).unwrap_or_default();
+                let summary = format!("{} answered ({} chars via {}){said}", label(agent), rep.text.chars().count(), rep.by);
+                self.tlog(e, NewMessage::new(agent, "tony", "reply", summary).body(rep.text.clone()).stage(Some(stage), it), &s.known);
+            }
+            Err(err) => self.tlog(e, NewMessage::new(agent, "tony", "error", err.msg.clone()).body(err.msg.clone()).stage(Some(stage), it).failed(), &s.known),
         }
+        r
     }
 
     // ── Stage handlers ──────────────────────────────────────────────────────
@@ -2289,6 +2317,10 @@ impl WorkerEnv for AppEnv {
     fn legacy(&self, event: &str, payload: Value) {
         use tauri::Emitter;
         let _ = self.app.emit(event, payload);
+    }
+
+    fn transcript(&self) -> Option<&TranscriptStore> {
+        Some(transcript::store())
     }
 }
 

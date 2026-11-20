@@ -77,6 +77,10 @@ export interface VoiceTurn {
   actions?: { label: string; run: string }[];
   /** The build (worker task) an agent / pipeline turn belongs to (grouping, review). */
   taskId?: string;
+  /** An Agent Conversation card (transcript-store.ts): the reviewable Tony ↔ agents record of
+   * one task / build / delegation. Rendered from Rust's transcript, hidden by
+   * `chat.showAgentConversation`; on the phone it is a plain line. */
+  convId?: string;
   /** Bumped by every in-place `updateTurn` (token streaming): the phone mirror replaces a copy
    * it already holds when the desktop's is newer (it used to keep the first, cut-off one). */
   rev?: number;
@@ -103,6 +107,9 @@ interface VoiceStore {
   error: string | null;
   /** Hold mode: what you've said since the hold began (live in the HUD); null when not holding. */
   held: string[] | null;
+  /** When each thread was last cleared: Agent Conversation cards older than that aren't re-added
+   * by a restart's rebuild. */
+  clearedAt: Partial<Record<ThreadId, number>>;
   setHeld: (h: string[] | null) => void;
   setState: (s: VoiceState) => void;
   setExpanded: (v: boolean) => void;
@@ -155,6 +162,7 @@ export const useVoice = create<VoiceStore>()(
       pending: null,
       error: null,
       held: null,
+      clearedAt: {},
       setHeld: (held) => set({ held }),
       // While holding, the interrupted turn keeps running quietly; its state changes
       // ("speaking", "thinking"…) must not knock HOLDING off the orb/HUD/header.
@@ -177,7 +185,7 @@ export const useVoice = create<VoiceStore>()(
       setError: (error) => set({ error, state: error ? "error" : "idle" }),
       clear: (thread) => {
         const th = thread ?? get().activeThread;
-        set((s) => ({ turns: s.turns.filter((t) => t.thread !== th), partial: "", error: null }));
+        set((s) => ({ turns: s.turns.filter((t) => t.thread !== th), partial: "", error: null, clearedAt: { ...s.clearedAt, [th]: Date.now() } }));
       },
       mergeRemote: (remote) =>
         set((s) => {
@@ -202,7 +210,7 @@ export const useVoice = create<VoiceStore>()(
       // always pass thread "auto" explicitly, and a resumed session should
       // never silently inherit whatever tab was open when it was last closed
       // (that's how a stale "Prompter" tab used to swallow every request).
-      partialize: (s) => ({ turns: s.turns }),
+      partialize: (s) => ({ turns: s.turns, clearedAt: s.clearedAt }),
     },
   ),
 );

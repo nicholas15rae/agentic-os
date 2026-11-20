@@ -599,7 +599,19 @@ fn emit(app: &AppHandle, id: &str, phase: &str, text: &str, known: &[String], lo
             let _ = writeln!(f, "{}", json!({ "at": p.at, "phase": p.phase, "text": p.text }));
         }
     }
+    // The run's Agent Conversation (best-effort; the conversation was opened at the start).
+    super::transcript::record(&super::transcript::dev_conv(id), progress_message(phase, &p.text), known);
     let _ = app.emit(PROGRESS_EVENT, p);
+}
+
+/// The Agent Conversation message for one progress line of a Claude Code run. Pure.
+pub fn progress_message(phase: &str, text: &str) -> super::transcript::NewMessage {
+    use super::transcript::NewMessage;
+    match phase {
+        "done" => NewMessage::new("claude", "tony", "reply", text).body(text),
+        "failed" => NewMessage::new("claude", "tony", "error", text).body(text).failed(),
+        _ => NewMessage::new("claude", "tony", "status", text).body(text).stage(Some(phase), None),
+    }
 }
 
 fn patch(pairs: &[(&str, Value)]) -> Map<String, Value> {
@@ -697,6 +709,14 @@ async fn start_run(app: &AppHandle, dq: &DevQueueState, state: &DispatchState, o
     devqueue::sync_queue_file(dq, &repo, &known);
     bridge.log(json!({ "type": "claude-dispatch", "phase": "start", "id": id, "branch": branch, "timeoutMin": mins }));
     let _ = app.emit(CHANGED_EVENT, 1);
+    // Agent Conversation: the prompt Claude Code receives opens (or continues) the item's chat.
+    {
+        use super::transcript as tr;
+        let conv = tr::dev_conv(&id);
+        tr::open_conv(tr::OpenConv { conv_id: conv.clone(), kind: "dev", title: task.title.clone(), thread: Some("auto".into()), ..Default::default() }, &known);
+        tr::status(&conv, "running");
+        tr::record(&conv, tr::NewMessage::new("tony", "claude", "prompt", format!("Run on {branch} ({} chars)", prompt.chars().count())).body(prompt.clone()), &known);
+    }
     emit(app, &id, "start", &format!("Claude Code started on {branch}"), &known, Some(&log_path));
 
     let ctx = RunCtx { app: app.clone(), id, program, repo, wt, branch, base, log_path, prompt, mins, started_at, cancelled, known };
@@ -764,6 +784,7 @@ impl RunCtx {
         devqueue::sync_queue_file(&dq, &self.repo, &self.known);
         let steps: Vec<Value> = verify.as_ref().and_then(|v| v.get("steps")).and_then(Value::as_array).map(|a| a.iter().map(|s| json!({ "label": s["label"], "ok": s["ok"], "ms": s["ms"] })).collect()).unwrap_or_default();
         self.app.state::<BridgeState>().log(json!({ "type": "claude-dispatch", "phase": "end", "id": self.id, "branch": self.branch, "ok": done, "ms": finished - self.started_at, "verify": steps }));
+        super::transcript::status(&super::transcript::dev_conv(&self.id), if done { "done" } else { "failed" });
         self.progress(if done { "done" } else { "failed" }, &if done { format!("Verified — Done. Review and merge {}", self.branch) } else { note });
         let _ = self.app.emit(CHANGED_EVENT, 1);
         self.app.state::<ClaudeFixState>().release(&self.id);

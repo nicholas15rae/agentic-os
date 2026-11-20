@@ -6,6 +6,7 @@
 import { isTauri, native } from "@/lib/platform";
 import type { HealthSnapshot } from "@/features/lifecycle/health";
 import type { BuildEnvelope, BuildHubView, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport } from "@/features/buildhub/types";
+import type { TranscriptConversation, TranscriptMessage, TranscriptPage } from "@/features/transcript/types";
 
 export interface ExtCommands {
   // ── Phase 1: lifecycle ──
@@ -22,7 +23,10 @@ export interface ExtCommands {
   build_intake_questions: { args: { notes: { title: string; text: string }[] }; result: { questions: IntakeQuestion[]; source: "prompter" | "fallback" } };
   /** Append one compiled envelope to the FIFO staging queue. Refused with `PERMISSION_REQUIRED:build-dispatch`
    * unless `approved: true` — only ever from the confirmation card (`requestHubDispatch`). */
-  build_enqueue: { args: { envelope: BuildEnvelope; brief: string; noteIds: string[]; approved?: boolean }; result: BuildEnvelope };
+  build_enqueue: {
+    args: { envelope: BuildEnvelope; brief: string; noteIds: string[]; approved?: boolean; intake?: { q: string; a: string }[]; intakeSource?: "prompter" | "fallback" };
+    result: BuildEnvelope;
+  };
   build_reorder: { args: { buildId: string; direction: "up" | "down" | "top" }; result: BuildHubView };
   build_pause: { args: { buildId: string }; result: BuildEnvelope };
   build_resume: { args: { buildId: string }; result: BuildEnvelope };
@@ -38,13 +42,20 @@ export interface ExtCommands {
   build_peek_status: { args: { buildId: string; watch?: boolean }; result: PeekStatus };
   build_open_window: { args: { buildId: string }; result: void };
   build_open_browser: { args: { buildId: string }; result: void };
+  // ── Agent Conversation transcripts (transcript.rs; read-only) ──
+  /** Root conversations, newest activity first (default 50, max 200). */
+  transcript_conversations: { args: { limit?: number; before?: number; roots_only?: boolean }; result: TranscriptConversation[] };
+  /** One page of a conversation (`ORDER BY at, seq`) + its nested ones; a task is backfilled from tasks.db first. */
+  transcript_get: { args: { conv_id: string; after_seq?: number; limit?: number }; result: TranscriptPage };
+  /** One message with its body (loaded lazily when a row is opened). */
+  transcript_message: { args: { seq: number }; result: TranscriptMessage };
 }
 
 export function xcmd<K extends keyof ExtCommands>(name: K, ...args: ExtCommands[K]["args"] extends undefined ? [] : [ExtCommands[K]["args"]]): Promise<ExtCommands[K]["result"]> {
   return native<ExtCommands[K]["result"]>(name, args[0] as Record<string, unknown> | undefined);
 }
 
-export type ExtEventName = "gateway-health" | "build-hub";
+export type ExtEventName = "gateway-health" | "build-hub" | "agent-transcript";
 
 /** Subscribe to one of this feature's Rust → webview events. No-op on the PWA. */
 export async function onExtEvent<P>(event: ExtEventName, handler: (payload: P) => void): Promise<() => void> {

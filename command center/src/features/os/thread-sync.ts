@@ -5,6 +5,7 @@ import { useVoice, type VoiceTurn } from "@/features/voice/voice-store";
 import { useSettings } from "@/stores/settings";
 import { useOs } from "./os-store";
 import { startPipelineFeed } from "./pipeline-store";
+import { startTranscriptFeed } from "@/features/transcript/transcript-store";
 
 /**
  * What decides a re-push: the turn count, plus the id / revision / meta of the newest turns, so
@@ -37,6 +38,8 @@ export function useOsBoot() {
   useEffect(() => {
     void useOs.getState().load();
     startPipelineFeed();
+    // Agent Conversation cards: rebuilt from Rust's transcripts.db, then kept live (desktop only).
+    startTranscriptFeed();
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (isTauri()) {
       let last = "";

@@ -137,6 +137,9 @@ export interface Compiled {
   envelope: BuildEnvelope;
   brief: string;
   noteIds: string[];
+  /** The interview as asked and answered (the build's Agent Conversation opens with it; Rust
+   * scrubs and caps it again). */
+  intake?: { q: string; a: string }[];
 }
 
 export function compileEnvelope(notes: readonly IntakeNote[], questions: readonly IntakeQuestion[], answers: Answers, ctx: CompileCtx): Compiled {
@@ -172,7 +175,7 @@ export function compileEnvelope(notes: readonly IntakeNote[], questions: readonl
     status: "queued",
     human_override: [],
   };
-  return { envelope, brief, noteIds: ordered.map((n) => n.id) };
+  return { envelope, brief, noteIds: ordered.map((n) => n.id), intake: qa };
 }
 
 /** Structural check of an envelope (mirrors Rust `validate_new`'s shape rules). */

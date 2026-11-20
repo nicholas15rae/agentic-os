@@ -1254,10 +1254,33 @@ pub async fn run_os_turn(state: &DispatchState, os: &OsState, bridge: &BridgeSta
     // Phase 3: a live Tony turn keeps idle memory compaction away (entry and exit).
     let _touch = super::compaction::Touch::start();
     let id = req.trace_id.clone().filter(|t| super::trace::valid_id(t)).unwrap_or_else(super::trace::new_id);
-    let mut r = super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app)).await?;
+    // Agent Conversation of a delegated turn: `turn:<stream id|trace id>`.
+    let conv = super::transcript::turn_conv(req.stream_id.as_deref().filter(|s| !s.is_empty()).unwrap_or(&id));
+    let (explicit, request) = (req.explicit, req.text.trim().to_string());
+    let mut r = super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app, &conv)).await?;
     // Steps are shown in chat, persisted in localStorage and mirrored to the phone: scrub them.
-    scrub_steps(&mut r.steps, &super::devqueue::known_secrets(state, os));
+    let known = super::devqueue::known_secrets(state, os);
+    scrub_steps(&mut r.steps, &known);
+    if !explicit {
+        record_turn(&conv, &request, &r.steps, Some(&r.answer), None, &known);
+    }
     Ok(r)
+}
+
+/// Does a turn's step list involve another agent (a delegation or an overseer escalation)? Only
+/// those become an Agent Conversation: a plain Tony turn (or a tab's own direct chat, which IS
+/// that agent's thread) has nothing to review. Pure.
+pub(crate) fn involves_agents(steps: &[OsStep]) -> bool {
+    steps.iter().any(|s| s.kind == "delegate" || s.kind == "overseer")
+}
+
+/// Record a delegated turn in the Agent Conversation transcript (best-effort).
+fn record_turn(conv: &str, request: &str, steps: &[OsStep], answer: Option<&str>, error: Option<&str>, known: &[String]) {
+    if !involves_agents(steps) {
+        return;
+    }
+    let rows: Vec<(String, String, String, String, bool)> = steps.iter().map(|s| (s.kind.clone(), s.from.clone(), s.to.clone(), s.text.clone(), s.ok)).collect();
+    super::transcript::record_turn(conv, request, super::transcript::turn_messages(request, &rows, answer, error), known);
 }
 
 /// System Map label for a model call: `provider · model`.
@@ -1269,7 +1292,7 @@ fn model_label(state: &DispatchState, provider_id: &str) -> String {
 }
 
 /// `run_os_turn`'s body, inside its trace scope: emits router / rules / memory / model steps.
-async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>) -> Result<OsTurnResult, String> {
+async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>, conv: &str) -> Result<OsTurnResult, String> {
     use super::trace::{emit, emit_with, Hop};
     let (state, os, bridge) = (state, os, bridge);
     let started = Instant::now();
@@ -1576,8 +1599,14 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             }
             // Nothing answered. What Tony DID send and hear (the delegate prompt, the agent's
             // error, tool results) still reaches the chat and the audit log.
-            emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &super::devqueue::known_secrets(state, os));
+            let known = super::devqueue::known_secrets(state, os);
+            emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &known);
             log_failed_turn(bridge, &role, &text, &steps, &e);
+            if !req.explicit {
+                let mut shown = steps.clone();
+                scrub_steps(&mut shown, &known);
+                record_turn(conv, &text, &shown, None, Some(&e), &known);
+            }
             return Err(e);
         }
     };

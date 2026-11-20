@@ -74,6 +74,12 @@ describe("the intake dispatch waits for the card (regressions)", () => {
     expect(turn?.text).toContain("the Prompter's questions");
     expect(turn?.text).toContain("MUST work offline");
     expect(turn?.text).toContain("Acceptance criteria");
+    // The interview also opens the build's Agent Conversation: Rust gets the questions and
+    // answers (and who asked them) with the approved enqueue — never without the card's yes.
+    const call = h.xcmd.mock.calls.find(([n]) => n === "build_enqueue")!;
+    expect(call[1]).toMatchObject({ approved: true, intakeSource: "prompter" });
+    expect(call[1].intake).toContainEqual({ q: "What does done look like?", a: "MUST work offline" });
+    expect(c.intake).toHaveLength(3);
   });
   it("interviewOf reads only the interview block", () => {
     expect(interviewOf("Intake interview:\nQ: a?\nA: b\n\nBrainstorm notes (1, oldest first):\n## x\ny")).toBe("Q: a?\nA: b");

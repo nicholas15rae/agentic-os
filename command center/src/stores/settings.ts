@@ -89,6 +89,12 @@ export interface SettingsState {
   };
   /** Alarms & reminders: `osFallback` = also register a Windows alarm that rings even when the app is closed. */
   reminders: { osFallback: boolean };
+  /**
+   * Chat: `showAgentConversation` shows the Agent Conversation cards (the full Tony ↔ agents
+   * record of each build / delegation, from Rust's transcripts.db). Visual only — independent
+   * of the spoken Agent Chatter (`routing.vocalHandoffs`) and the narrator.
+   */
+  chat: { showAgentConversation: boolean };
   /** System Map: Streamlined OS (default) or Dev X-Ray. */
   systemMapMode: SystemMapMode;
   /** System Map routing flowchart strip: expanded / collapsed; null = expand only on tall screens (≥ 900 px). */
@@ -122,6 +128,7 @@ const defaults: Omit<SettingsState, "set"> = {
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true, vocalHandoffs: true },
   reminders: { osFallback: true },
+  chat: { showAgentConversation: true },
   systemMapMode: "streamlined",
   systemMapFlowOpen: null,
   waveColors: ["#00F0FF", "#A855F7", "#FF6B4A"],

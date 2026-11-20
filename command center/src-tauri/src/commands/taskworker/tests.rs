@@ -108,6 +108,7 @@ pub(super) struct Fake {
     pub legacy_log: Mutex<Vec<(String, Value)>>,
     pub fg_during: Option<&'static str>,
     pub fg_spawned: AtomicBool,
+    pub transcript: &'static TranscriptStore,
 }
 
 impl Fake {
@@ -133,6 +134,7 @@ impl Fake {
             legacy_log: Mutex::default(),
             fg_during: None,
             fg_spawned: AtomicBool::new(false),
+            transcript: Box::leak(Box::new(TranscriptStore::in_memory())),
         }
     }
 
@@ -224,6 +226,9 @@ impl WorkerEnv for Fake {
     }
     fn legacy(&self, event: &str, payload: Value) {
         self.legacy_log.lock().unwrap().push((event.to_string(), payload));
+    }
+    fn transcript(&self) -> Option<&TranscriptStore> {
+        Some(self.transcript)
     }
 }
 
@@ -1730,6 +1735,59 @@ fn a_cancel_patches_the_idea_ledger() {
     assert_eq!((path.as_str(), body["status"].as_str()), ("/api/cc/c/ideas/idea-3", Some("failed")));
     let quiet = create_task(&store, &CreateArgs { raw_intent: "y".into(), source: "typed".into(), idea_id: Some("idea-4".into()), options: Some(json!({ "noMirror": true })), ..Default::default() }, 3, &[]).unwrap().0;
     assert!(cancelled_idea_patch(&quiet).is_none());
+}
+
+// ── Agent Conversation transcript ───────────────────────────────────────────
+
+/// Every model stage leaves what the agent was asked and what it answered in the task's
+/// conversation, in order, secret-scrubbed; tasks.db rows stay compact (no prompts, no HTML).
+#[test]
+fn each_agent_prompt_and_reply_is_recorded_in_the_tasks_conversation() {
+    let root = tmp("transcript");
+    let store = leak_store();
+    let script: Script = Box::new(|c, _| {
+        let r = default_reply(c);
+        // The Designer pastes a key-shaped string into its answer.
+        Ok(if c.stage == "design" { r.replace("single card", &format!("single card {SECRET}")) } else { r })
+    });
+    let fake = Fake::new(&root, Some(store), script);
+    fake.settings.lock().unwrap().known = vec!["synthetic-known-value-123".into()];
+    let t = new_task(store, "Build me a tip calculator synthetic-known-value-123");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let p = fake.transcript.page(&transcript::task_conv(&t.task_id), None, 400).unwrap().expect("the task's conversation exists");
+    let pairs: Vec<(String, String, String, Option<String>)> = p.messages.iter().filter(|m| m.kind == "prompt" || m.kind == "reply").map(|m| (m.kind.clone(), m.from.clone(), m.to.clone(), m.stage.clone())).collect();
+    let mut want = Vec::new();
+    for (stage, agent) in [("triage", "prompter"), ("preflight", "librarian"), ("spec", "prompter"), ("design", "designer"), ("merge", "prompter"), ("code", "coder"), ("audit", "librarian"), ("verify", "prompter")] {
+        want.push(("prompt".to_string(), "tony".to_string(), agent.to_string(), Some(stage.to_string())));
+        want.push(("reply".to_string(), agent.to_string(), "tony".to_string(), Some(stage.to_string())));
+    }
+    assert_eq!(pairs, want);
+    // Ordered by (at, seq); the Coder's reply keeps the page it built (bounded, not dropped).
+    assert!(p.messages.windows(2).all(|w| (w[0].at, w[0].seq) <= (w[1].at, w[1].seq)));
+    let code = p.messages.iter().find(|m| m.kind == "reply" && m.stage.as_deref() == Some("code")).unwrap();
+    assert!(fake.transcript.message(code.seq).unwrap().unwrap().body.contains("Tip calculator"));
+    // The agents' own words reach the summary line.
+    assert!(p.messages.iter().any(|m| m.summary.contains("The blueprint is a single dark card")));
+    // No fake key and no known value anywhere in the transcript.
+    let dump: String = fake.transcript.with(|c| c.query_row("SELECT group_concat(summary || body, '|') FROM message", [], |r| r.get(0)).map_err(|e| e.to_string())).unwrap();
+    assert!(!dump.contains(SECRET) && !dump.contains("synthetic-known-value-123"));
+    // tasks.db stays compact: no prompt text or HTML in its rows.
+    assert!(e.handoff_log.iter().all(|h| !h.summary_payload.to_string().contains("<html") && !h.short_summary.contains("TASK ")));
+}
+
+/// A model that fails is in the conversation as an error from that agent.
+#[test]
+fn a_failed_model_call_is_recorded_as_an_error() {
+    let root = tmp("transcript-err");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| if c.stage == "triage" { Err("model exploded".into()) } else { Ok(default_reply(c)) }));
+    let t = new_task(store, "Build a stopwatch");
+    run(store, &fake);
+    let p = fake.transcript.page(&transcript::task_conv(&t.task_id), None, 400).unwrap().unwrap();
+    let err = p.messages.iter().find(|m| m.kind == "error" && m.from == "prompter").expect("an error from the Prompter");
+    assert!(!err.ok && err.summary.contains("model exploded"), "{}", err.summary);
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

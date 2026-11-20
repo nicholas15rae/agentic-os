@@ -34,6 +34,7 @@ use super::devqueue::{self, DevQueueState};
 use super::dispatch::DispatchState;
 use super::envelope::{self, TaskStore};
 use super::os_core::OsState;
+use super::transcript::{self as tr, NewMessage, OpenConv};
 use smoke::SmokeReport;
 
 pub const HUB_EVENT: &str = "build-hub";
@@ -821,6 +822,56 @@ pub fn override_lines(e: &TaskEnvelope) -> Vec<String> {
     e.human_override.iter().map(|o| o.directive.clone()).collect()
 }
 
+// ── Agent Conversation (transcripts.db) ─────────────────────────────────────
+
+/// One intake interview exchange as the webview compiled it (question, Nic's answer). The only
+/// transcript input the webview supplies; Rust scrubs and caps it again before it is stored.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct IntakeLine {
+    pub q: String,
+    pub a: String,
+}
+
+/// Intake lines kept per build (and chars per side).
+pub const INTAKE_LINES_MAX: usize = 30;
+pub const INTAKE_TEXT_MAX: usize = 2000;
+
+/// The agent id of an assigned worker.
+pub fn worker_id(w: AssignedWorker) -> &'static str {
+    match w {
+        AssignedWorker::Claude => "claude",
+        AssignedWorker::Coder => "coder",
+        AssignedWorker::Designer => "designer",
+    }
+}
+
+/// The hub conversation of a build (a root card; its worker task / Claude item nest inside).
+pub fn hub_open(e: &TaskEnvelope) -> OpenConv {
+    OpenConv { conv_id: tr::hub_conv(&e.build_id), kind: "hub", title: e.title.clone(), thread: Some("auto".into()), ..Default::default() }
+}
+
+/// What the hub conversation records at enqueue: the interview (the Prompter's — or the
+/// standard — questions and Nic's answers), then Tony's hand-off with the contract and the full
+/// brief the worker will read. Pure.
+pub fn enqueue_messages(e: &TaskEnvelope, brief: &str, intake: &[IntakeLine], prompter_asked: bool) -> Vec<NewMessage> {
+    let asker = if prompter_asked { "prompter" } else { "system" };
+    let mut out = Vec::new();
+    for l in intake.iter().take(INTAKE_LINES_MAX) {
+        let q = envelope::clip(l.q.trim(), INTAKE_TEXT_MAX);
+        let a = envelope::clip(l.a.trim(), INTAKE_TEXT_MAX);
+        if q.is_empty() {
+            continue;
+        }
+        out.push(NewMessage::new(asker, "nic", "question", q.clone()).body(q).stage(Some("intake"), None));
+        let a = if a.is_empty() { "(no answer — use your judgment)".to_string() } else { a };
+        out.push(NewMessage::new("nic", asker, "answer", a.clone()).body(a).stage(Some("intake"), None));
+    }
+    let to = worker_id(e.assigned_worker);
+    let body = format!("{}\n\n{}", contract_block(e), brief.trim());
+    out.push(NewMessage::new("tony", to, "handoff", format!("Staged “{}” for the {to} ({} acceptance criteria)", e.title, e.acceptance_criteria.len())).body(body));
+    out
+}
+
 // ── View ────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone, Debug)]
@@ -1092,6 +1143,11 @@ async fn dispatch_worker(app: &AppHandle, id: &str) -> Result<(), String> {
         return bound.map(|_| ());
     }
     envelope::set_paused(&tid, false);
+    // Agent Conversation: the worker task's chat nests inside the build's card.
+    let hub_conv = tr::hub_conv(&b.envelope.build_id);
+    tr::open_conv(OpenConv { parent: Some(hub_conv.clone()), ..tr::task_open(&task) }, &known);
+    tr::nest(&tr::task_conv(&tid), &hub_conv);
+    hub_record(&b.envelope.build_id, Some(Status::Building), NewMessage::new("staging", "prompter", "handoff", format!("Pass {} of “{}” handed to the agent pipeline (task {tid})", b.smoke.failures + 1, b.envelope.title)).body(worker_brief(&b)));
     super::taskworker::announce_queued(app, &task);
     Ok(())
 }
@@ -1103,12 +1159,20 @@ async fn dispatch_claude(app: &AppHandle, id: &str) -> Result<(), String> {
     // While the Dev Fix Queue call is in flight, Pause / Remove wait (`dispatching`); afterwards the
     // item is bound only if the build is still waiting for it, else the orphan item is deleted.
     hub.dispatching.lock().unwrap().insert(id.to_string());
-    let queued = devqueue::dev_fix_queue(app.state(), app.state(), app.state(), format!("Build: {}", b.envelope.title), Some(desc), Some(1), None, None, None, None).await;
+    let queued = devqueue::dev_fix_queue(app.state(), app.state(), app.state(), format!("Build: {}", b.envelope.title), Some(desc.clone()), Some(1), None, None, None, None).await;
     let bound = queued.as_ref().map_err(Clone::clone).and_then(|t| hub.with(|f| f.bind_dev(id, &t.id, now_ms())));
     hub.dispatching.lock().unwrap().remove(id);
     let t = queued?;
     if !bound? {
         let _ = devqueue::dev_task_delete(app.state(), app.state(), app.state(), t.id.clone()).await;
+    } else {
+        // Agent Conversation: Claude Code's run nests inside the build's card.
+        let hub_conv = tr::hub_conv(&b.envelope.build_id);
+        let dconv = tr::dev_conv(&t.id);
+        tr::open_conv(OpenConv { conv_id: dconv.clone(), kind: "dev", title: b.envelope.title.clone(), thread: Some("auto".into()), parent: Some(hub_conv.clone()), task_id: None }, &[]);
+        tr::nest(&dconv, &hub_conv);
+        tr::record(&dconv, NewMessage::new("tony", "claude", "prompt", format!("Dev Fix item for “{}” ({} chars)", b.envelope.title, desc.chars().count())).body(desc.clone()), &[]);
+        hub_record(&b.envelope.build_id, None, NewMessage::new("staging", "claude", "handoff", format!("“{}” handed to Claude Code (Dev Fix item {})", b.envelope.title, t.id)).body(desc.clone()));
     }
     let _ = app.emit("devqueue-changed", 1);
     Ok(())
@@ -1293,10 +1357,31 @@ pub fn smoke_outcome_line(title: &str, s: Status, failed: &[String]) -> Option<(
     }
 }
 
+/// The Agent Conversation message for a smoke verdict. Pure.
+pub fn smoke_message(title: &str, s: Status, failed: &[String]) -> NewMessage {
+    let passed = s == Status::ReadyForMerge;
+    let body = if failed.is_empty() { "All required checks passed.".to_string() } else { format!("Failed checks:\n- {}", failed.join("\n- ")) };
+    let m = NewMessage::new("staging", "tony", "smoke", format!("Smoke test for “{title}”: {}", if passed { "passed" } else { "failed" })).body(body);
+    if passed {
+        m
+    } else {
+        m.failed()
+    }
+}
+
 /// Tell the chat about a hub outcome: a bus note traced `hub:<build_id>` (the webview posts it
 /// to Tony's thread). Templated text only (titles / check names are scrubbed by the bus).
 fn hub_note(build_id: &str, event: &str, severity: &str, summary: &str) {
     super::events::publish_note_capped("staging", event, severity, summary, Some(&format!("hub:{build_id}")), 600);
+}
+
+/// Record a hub outcome in the build's Agent Conversation (best-effort), with its new status.
+fn hub_record(build_id: &str, status: Option<Status>, m: NewMessage) {
+    let conv = tr::hub_conv(build_id);
+    if let Some(s) = status {
+        tr::status(&conv, status_str(s));
+    }
+    tr::record(&conv, m, &[]);
 }
 
 /// Run the smoke test for `id` on the blocking pool and fold the result.
@@ -1349,11 +1434,13 @@ fn spawn_smoke(app: &AppHandle, id: String) {
                     if let Some((sev, line)) = smoke_outcome_line(&b.envelope.title, s, &failed) {
                         hub_note(&id, "hub_smoke", sev, &line);
                     }
+                    hub_record(&id, Some(s), smoke_message(&b.envelope.title, s, &failed));
                 }
             }
             Err(e) => {
                 // A crashed check never wedges the lane: the build leaves smoke_testing for repair.
                 hub_note(&id, "hub_smoke", "critical", &format!("“{}”'s smoke test crashed — it's in the Repair Queue", b.envelope.title));
+                hub_record(&id, Some(Status::RepairQueue), NewMessage::new("staging", "tony", "smoke", format!("“{}”'s smoke test crashed", b.envelope.title)).body(e.to_string()).failed());
                 let _ = hub.with(|f| {
                     let b = f.get_mut(&id)?;
                     b.committing = false;
@@ -1414,6 +1501,8 @@ async fn pass(app: &AppHandle) {
             if nb.envelope.status == Status::RepairQueue && b.envelope.status != Status::RepairQueue {
                 let reason = nb.repair.as_ref().map(|r| r.reason.clone()).unwrap_or_default();
                 hub_note(&id, "hub_repair", "critical", &format!("“{}” is in the Repair Queue: {reason}", nb.envelope.title));
+                let trace = nb.repair.as_ref().map(|r| format!("{}\n\n{}", r.failed_assertions.join("\n"), r.trace)).unwrap_or_default();
+                hub_record(&id, Some(Status::RepairQueue), NewMessage::new("staging", "tony", "repair", format!("“{}” is in the Repair Queue: {reason}", nb.envelope.title)).body(trace).failed());
             }
         }
         if effect == Effect::Smoke {
@@ -1645,8 +1734,9 @@ pub async fn build_set_external_base(app: AppHandle, path: String) -> Result<Run
 /// confirmation card's approve() (`approved: true`); Solo mode queues nothing. Order matters:
 /// validate → refuse an existing external folder → enqueue (duplicate check) → scaffold, and a
 /// failed scaffold takes the build back out — nothing is ever written over someone else's folder.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub async fn build_enqueue(app: AppHandle, envelope: TaskEnvelope, brief: String, note_ids: Vec<String>, approved: Option<bool>) -> Result<TaskEnvelope, String> {
+pub async fn build_enqueue(app: AppHandle, envelope: TaskEnvelope, brief: String, note_ids: Vec<String>, approved: Option<bool>, intake: Option<Vec<IntakeLine>>, intake_source: Option<String>) -> Result<TaskEnvelope, String> {
     if approved != Some(true) {
         return Err("PERMISSION_REQUIRED:build-dispatch".into());
     }
@@ -1677,7 +1767,18 @@ pub async fn build_enqueue(app: AppHandle, envelope: TaskEnvelope, brief: String
     })
     .await?;
     changed(&app);
-    build_of(&app, &id)
+    let queued = build_of(&app, &id)?;
+    // Agent Conversation: the build's card opens with the interview and Tony's hand-off — only
+    // once the enqueue succeeded; scrubbed again with the known values (best-effort).
+    if let Some(b) = app.state::<HubState>().snapshot().get(&id) {
+        let conv = tr::hub_conv(&id);
+        tr::open_conv(hub_open(&queued), &known);
+        tr::status(&conv, status_str(queued.status));
+        for m in enqueue_messages(&queued, &b.brief, intake.as_deref().unwrap_or_default(), intake_source.as_deref() == Some("prompter")) {
+            tr::record(&conv, m, &known);
+        }
+    }
+    Ok(queued)
 }
 
 #[tauri::command]
@@ -1733,6 +1834,8 @@ pub async fn build_steer(app: AppHandle, build_id: String, directive: String) ->
     // Steer is part of the conversation with the agents: it is recorded in the chat too.
     if let Some(o) = b.envelope.human_override.last() {
         hub_note(&build_id, "hub_steer", "handoff", &format!("Steer for “{}” (next agent step): {}", b.envelope.title, o.directive));
+        let to = worker_id(b.envelope.assigned_worker);
+        hub_record(&build_id, None, NewMessage::new("nic", to, "override", format!("Steer: {}", o.directive)).body(o.directive.clone()));
     }
     if let Some(d) = &b.dev_task_id {
         if let Ok(Some(t)) = app.state::<DevQueueState>().with(|c| devqueue::get(c, d)) {

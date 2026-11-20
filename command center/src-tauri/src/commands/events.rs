@@ -346,6 +346,15 @@ pub fn publish_note(agent_id: &str, event_type: &str, severity: &str, summary: &
     publish(note(agent_id, event_type, severity, summary, trace_id, &f))
 }
 
+/// Emit any other Rust → webview event through the installed app handle (no-op before
+/// `install`, e.g. in unit tests). For payloads that are already scrubbed and capped.
+pub fn emit_raw<T: Serialize + Clone>(name: &str, payload: &T) {
+    if let Some(app) = APP.get() {
+        use tauri::Emitter;
+        let _ = app.emit(name, payload.clone());
+    }
+}
+
 /// Called once from `lib.rs` setup: start the consumer (webview emit + gateway mirror).
 pub fn install(app: &tauri::AppHandle) {
     if APP.set(app.clone()).is_ok() {

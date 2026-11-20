@@ -218,3 +218,29 @@ The Exit button sits at the bottom of the left rail.
 **Quitting.** `app_exit` stops the preview servers and calls `AppHandle::exit`, which runs the usual RunEvent::Exit cleanup: the Spotify duck restore and the Drive sync. MCP servers and Claude fix runs live in kill-on-close Job Objects, so nothing is orphaned.
 
 **The gateway is left running on purpose:** it is the phone's sync hub.
+
+## AD-10: The Agent Conversation feed (a reviewable Tony ↔ agent record)
+
+Every build and delegation gets a chat thread you can review: what Tony and the agents actually said to each other. That covers the brief, each agent's prompt and full reply, hand-offs, the intake interview, steers, smoke verdicts, repairs and Claude Code's run.
+
+- **Where it lives.** A separate Rust-owned SQLite file, `<app config dir>/transcripts.db` (`transcript.rs`). It uses the tasks.db pattern: a `user_version` ladder, WAL, `busy_timeout 3000`, a lazy reopen and `in_memory()` for tests. It is not a tasks.db table, for two reasons: the Librarian reads tasks.db as compact rows, never raw logs, and a migration there would lock an older binary out. The Librarian never opens transcripts.db, and nothing in it is fed back into a prompt.
+- **Who writes.** Only Rust:
+  - every handoff_log row is mirrored right after `publish_entry`, and backfilled from tasks.db on read (keyed by `handoff_seq`, so it is idempotent);
+  - the worker records each model call's prompt and reply (`WorkerEnv::transcript`);
+  - the hub records the interview, Tony's hand-off, steers, smoke tests and repairs;
+  - Claude Code's runs record their progress;
+  - a delegated Tony turn records its steps.
+
+  The only webview input is the intake interview, passed with the approved `build_enqueue`. Rust scrubs it again.
+- **Hygiene.**
+  - Every summary and body goes through `devqueue::scrub` (known values and key patterns).
+  - Summaries are one line of up to 160 chars. Bodies keep up to 16 K chars; for a longer one, the first 12 K and the last 4 K are kept, with a marker between them.
+  - `message` is append-only (an UPDATE aborts).
+  - A conversation keeps 800 messages. After that it keeps only hand-offs, errors, smoke tests, repairs and overrides, and counts the rest as dropped.
+  - Past 400 conversations, the oldest finished or 30-day-idle ones are pruned.
+- **Best-effort.** A recording error is logged once. It never fails or delays a stage, a turn or an enqueue. If the file can't be opened, the feed is off and the app runs normally.
+- **The chat.**
+  - Each root conversation (`task:`, `hub:`, `turn:`, `dev:`) gets one card, in the thread that started it. A hub build's worker task and Claude item nest inside its card.
+  - Live updates come over `agent-transcript`, which carries only the head and the summary. A message body loads when its row is opened.
+  - After a restart or reload, the cards are rebuilt from `transcript_conversations` / `transcript_get`, never from bus delivery.
+- **Additive.** The relay and system lines are unchanged. So are the spoken Agent Chatter (`routing.vocalHandoffs`), the narrator and verbosity 0–3. The **Agent Log** switch in the Agents header (`chat.showAgentConversation`, default on) only shows or hides the cards. The approve() / Tier-3 / dispatch gates and the staging-only writes are untouched: the feed only reads and never dispatches.

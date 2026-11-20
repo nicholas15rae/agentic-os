@@ -55,7 +55,7 @@ function stageBehindCard(c: Compiled, onQueued: ((buildId: string) => void) | un
     // Phase 5: the enqueue goes out first; the vocal handoff (Tony → Coder / Designer) starts beside
     // it and is never awaited. Claude Code isn't one of Tony's voiced crew: chip only.
     const role = e.assigned_worker === "claude" ? null : e.assigned_worker;
-    const { result, cue } = withHandoff(() => xcmd("build_enqueue", { envelope: e, brief: c.brief, noteIds: c.noteIds, approved: true }), () => (role ? startHandoffCue(role) : null));
+    const { result, cue } = withHandoff(() => xcmd("build_enqueue", { envelope: e, brief: c.brief, noteIds: c.noteIds, approved: true, intake: c.intake, intakeSource: source }), () => (role ? startHandoffCue(role) : null));
     noteHandoff(role ?? "claude", !!cue);
     // A refused hand-off (Solo mode, validation) drops the rest of the exchange.
     const queued = await result.catch((err: unknown) => {

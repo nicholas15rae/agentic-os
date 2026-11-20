@@ -192,7 +192,7 @@ pub async fn capture_task(app: &AppHandle, state: &DispatchState, os: &OsState, 
     let title = working_title(text);
     let item = gw(state, &cfg, reqwest::Method::POST, "/api/cc/c/ideas", Some(json!({ "title": title, "idea": text, "summary": "", "tasks": [], "spec": {}, "status": "prototyping", "by": cfg.os_name }))).await.ok();
     let idea_id = item.as_ref().and_then(|i| i["id"].as_str()).filter(|s| !s.is_empty()).map(String::from);
-    let args = CreateArgs { raw_intent: text.to_string(), title: Some(title), thread: None, source: source.into(), idea_id, options: None, dedupe_key: dedupe };
+    let args = CreateArgs { raw_intent: text.to_string(), title: Some(title), thread: None, source: source.into(), idea_id, options: None, dedupe_key: dedupe, project_slug: None };
     let (e, _) = taskworker::create_task(store.inner(), &args, cfg.worker.max_iterations, &known)?;
     taskworker::announce_queued(app, &e);
     let mut idea = item.unwrap_or_else(|| json!({ "id": e.task_id, "title": e.title, "tasks": [] }));
@@ -213,7 +213,7 @@ pub async fn task_from_idea(app: &AppHandle, state: &DispatchState, os: &OsState
     let idea = list["items"].as_array().into_iter().flatten().find(|i| i["id"] == idea_id).cloned().ok_or("idea not found in the ledger")?;
     let title = idea["title"].as_str().unwrap_or("Prototype").to_string();
     let text = idea["idea"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or(&title).to_string();
-    let args = CreateArgs { raw_intent: text, title: Some(title), thread: None, source: "ledger".into(), idea_id: Some(idea_id.to_string()), options: None, dedupe_key: dedupe };
+    let args = CreateArgs { raw_intent: text, title: Some(title), thread: None, source: "ledger".into(), idea_id: Some(idea_id.to_string()), options: None, dedupe_key: dedupe, project_slug: None };
     let (e, created) = taskworker::create_task(store.inner(), &args, cfg.worker.max_iterations, &super::devqueue::known_secrets(state, os))?;
     if created {
         let _ = gw(state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/ideas/{idea_id}"), Some(json!({ "status": "prototyping", "taskId": e.task_id }))).await;
@@ -330,10 +330,27 @@ async fn approve_inner(app: &AppHandle, state: &DispatchState, os: &OsState, cfg
 }
 
 /// `play-place/<date>-<slug>` under Tony's notes root.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn commit_dir_rel(date: &str, title: &str) -> String {
+    commit_dir_rel_with(date, title, |_| false)
+}
+
+/// `commit_dir_rel`, skipping folders `taken` says belong to another card (a different card
+/// with a same-slug title, committed the same day, is never overwritten).
+pub(crate) fn commit_dir_rel_with(date: &str, title: &str, taken: impl Fn(&str) -> bool) -> String {
     let base = slugify(title);
-    let slug = super::staging::slug_for(if base.is_empty() { "prototype" } else { &base }, |_| false);
+    let slug = super::staging::slug_for(if base.is_empty() { "prototype" } else { &base }, |s| taken(&format!("play-place/{date}-{s}")));
     format!("play-place/{date}-{slug}")
+}
+
+/// The marker file naming the card a Vault commit folder belongs to.
+const COMMIT_CARD_FILE: &str = ".card";
+
+/// Is `root/rel` an existing commit folder of a card other than `card_id`? (A re-commit of the
+/// same card reuses its folder.)
+pub(crate) fn commit_dir_taken(root: &Path, rel: &str, card_id: &str) -> bool {
+    let d = root.join(rel);
+    d.exists() && std::fs::read_to_string(d.join(COMMIT_CARD_FILE)).map(|s| s.trim() != card_id).unwrap_or(true)
 }
 
 fn write_note_file(root: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf, String> {
@@ -353,7 +370,7 @@ pub async fn playplace_commit(state: State<'_, DispatchState>, os: State<'_, OsS
     let workdir = PathBuf::from(state.snapshot().gateway.workdir);
     let root = super::documenter::notes_root(&cfg, &workdir)?;
     std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
-    let dir_rel = commit_dir_rel(&chrono::Local::now().format("%Y-%m-%d").to_string(), &title);
+    let dir_rel = commit_dir_rel_with(&chrono::Local::now().format("%Y-%m-%d").to_string(), &title, |rel| commit_dir_taken(&root, rel, &card_id));
     let spec = format!(
         "# {title}\n\n## Idea\n{}\n\n## Design brief\n{}\n\n## Blueprint\n{}\n\n## Build plan\n{}\n",
         c["idea"].as_str().unwrap_or(""),
@@ -362,6 +379,7 @@ pub async fn playplace_commit(state: State<'_, DispatchState>, os: State<'_, OsS
         c["buildPlan"].as_str().unwrap_or("(not approved for build yet)")
     );
     let spec_path = write_note_file(&root, &format!("{dir_rel}/spec.md"), spec.as_bytes())?;
+    write_note_file(&root, &format!("{dir_rel}/{COMMIT_CARD_FILE}"), card_id.as_bytes())?;
     write_note_file(&root, &format!("{dir_rel}/prototype.html"), c["html"].as_str().unwrap_or("").as_bytes())?;
     write_note_file(&root, &format!("{dir_rel}/prompt-chain.json"), serde_json::to_string_pretty(&json!({ "buildPrompt": c["buildPrompt"], "chain": c["chain"], "versions": c["versions"] })).unwrap_or_default().as_bytes())?;
     let dir = spec_path.parent().map(Path::to_path_buf).unwrap_or(root);
@@ -463,6 +481,7 @@ pub(crate) fn inbox_action(queue_id: &str, kind: Option<&str>, p: &Value) -> Inb
             idea_id: p["idea_id"].as_str().or_else(|| p["ideaId"].as_str()).map(String::from),
             options: p.get("options").cloned().filter(Value::is_object),
             dedupe_key: Some(queue_id.to_string()),
+            project_slug: None,
         }),
         Some("pipeline") => InboxAction::Pipeline(p["ideaId"].as_str().unwrap_or("").to_string()),
         Some("turn") => match inbox_turn_route(p) {
@@ -712,7 +731,7 @@ mod tests {
         let a = inbox_action("q1", Some("task"), &json!({ "raw_intent": { "text": "a tip calculator" }, "title": "Tip calc", "thread": "general", "ideaId": "i9", "options": { "localOnly": true } }));
         assert_eq!(
             a,
-            InboxAction::Task(CreateArgs { raw_intent: "a tip calculator".into(), title: Some("Tip calc".into()), thread: Some("general".into()), source: "phone".into(), idea_id: Some("i9".into()), options: Some(json!({ "localOnly": true })), dedupe_key: Some("q1".into()) })
+            InboxAction::Task(CreateArgs { raw_intent: "a tip calculator".into(), title: Some("Tip calc".into()), thread: Some("general".into()), source: "phone".into(), idea_id: Some("i9".into()), options: Some(json!({ "localOnly": true })), dedupe_key: Some("q1".into()), project_slug: None })
         );
         assert_eq!(inbox_action("q2", Some("task"), &json!({ "raw_intent": "plain string" })), InboxAction::Task(CreateArgs { raw_intent: "plain string".into(), source: "phone".into(), dedupe_key: Some("q2".into()), ..Default::default() }));
         assert_eq!(inbox_action("q3", Some("pipeline"), &json!({ "ideaId": "abc" })), InboxAction::Pipeline("abc".into()));
@@ -804,5 +823,22 @@ mod tests {
         assert_eq!(commit_dir_rel("2026-11-19", "Audition Tracker — v2!"), "play-place/2026-11-19-audition-tracker-v2");
         assert_eq!(commit_dir_rel("2026-11-19", "!!!"), "play-place/2026-11-19-prototype");
         assert!(super::super::staging::check_rel(&commit_dir_rel("2026-11-19", "..\\..\\x")).is_ok());
+    }
+
+    /// Regression: two different cards with same-slug titles committed the same day shared one
+    /// folder, so the second commit silently replaced the first card's spec / prototype / chain.
+    #[test]
+    fn a_second_card_never_overwrites_another_cards_vault_commit() {
+        let root = std::env::temp_dir().join(format!("pp-commit-{}-{}", std::process::id(), super::super::envelope::now_ms()));
+        let first = commit_dir_rel_with("2026-11-19", "Tip Calculator", |rel| commit_dir_taken(&root, rel, "card-a"));
+        std::fs::create_dir_all(root.join(&first)).unwrap();
+        std::fs::write(root.join(&first).join(COMMIT_CARD_FILE), "card-a").unwrap();
+        // The same card re-committing reuses its folder…
+        assert_eq!(commit_dir_rel_with("2026-11-19", "Tip Calculator", |rel| commit_dir_taken(&root, rel, "card-a")), first);
+        // …another card with a same-slug title gets its own.
+        let second = commit_dir_rel_with("2026-11-19", "Tip calculator!", |rel| commit_dir_taken(&root, rel, "card-b"));
+        assert_ne!(second, first);
+        assert_eq!(second, "play-place/2026-11-19-tip-calculator-2");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

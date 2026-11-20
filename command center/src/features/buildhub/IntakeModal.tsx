@@ -4,7 +4,7 @@ import { xcmd } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
 import { useNav } from "@/stores/nav";
 import { compileEnvelope, deriveTitle, envelopeProblems, type Answers, type IntakeNote } from "./compile";
-import { requestHubDispatch } from "./dispatch";
+import { HubDispatchCancelled, requestHubDispatch } from "./dispatch";
 import { errText } from "./hub-store";
 import type { IntakeQuestion, RuntimeConfig } from "./types";
 
@@ -81,14 +81,21 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
   const dispatch = async () => {
     if (!compiled || problems.length) return;
     setBusy(true);
+    setError(null);
     try {
-      await requestHubDispatch(compiled, () => {
-        useToasts.getState().push({ title: "Staged", body: `“${compiled.envelope.title}” is in the Play Place queue.`, tone: "info" });
-        useNav.getState().go("playplace");
-      });
+      // Waits for the card's answer AND the enqueue: the modal (answers, title, envelope) stays
+      // open on a decline, a timeout, a superseding card or a refusal, so nothing is retyped.
+      await requestHubDispatch(
+        compiled,
+        () => {
+          useToasts.getState().push({ title: "Staged", body: `“${compiled.envelope.title}” is in the Play Place queue.`, tone: "info" });
+          useNav.getState().go("playplace");
+        },
+        source,
+      );
       onClose();
     } catch (e) {
-      setError(errText(e));
+      setError(e instanceof HubDispatchCancelled ? "Not staged (the card was declined, timed out or replaced) — your answers are still here." : errText(e));
     } finally {
       setBusy(false);
     }

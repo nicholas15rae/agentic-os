@@ -1368,6 +1368,9 @@ pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messa
     let mut content = String::new();
     // Generation rate for the System Map trace: content deltas between the first and last token.
     let (mut deltas, mut usage_tokens, mut first_at, mut last_at) = (0u32, None::<u64>, None::<Instant>, Instant::now());
+    // Did the model actually finish ([DONE] / a finish_reason)? A timeout or a dropped
+    // connection mid-body ends the loop too, and must never pass for a complete answer.
+    let mut completed = false;
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else { break };
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -1376,9 +1379,13 @@ pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messa
             buf.drain(..=nl);
             let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
             if data == "[DONE]" {
+                completed = true;
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                if v["choices"][0]["finish_reason"].as_str().is_some_and(|r| !r.is_empty()) {
+                    completed = true;
+                }
                 if let Some(u) = v["usage"]["completion_tokens"].as_u64() {
                     usage_tokens = Some(u);
                 }
@@ -1401,12 +1408,40 @@ pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messa
         return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
     }
     let tps = first_at.and_then(|f| super::trace::tokens_per_sec(deltas, usage_tokens, last_at.duration_since(f).as_secs_f64() * 1000.0));
-    Ok(DispatchResult { provider_id: p.id.clone(), content: content.trim().to_string(), fell_back: false, reason: "chain · streamed".into(), latency_ms: started.elapsed().as_millis(), redacted: false, tps })
+    let (content, reason) = stream_outcome(content.trim(), completed);
+    if !completed {
+        let _ = app.emit("tony-token", serde_json::json!({ "streamId": stream_id, "delta": CUT_OFF_MARK }));
+    }
+    Ok(DispatchResult { provider_id: p.id.clone(), content, fell_back: false, reason, latency_ms: started.elapsed().as_millis(), redacted: false, tps })
+}
+
+/// Appended to a streamed answer the model never finished (timeout / dropped connection).
+pub const CUT_OFF_MARK: &str = " … [cut off: the model stopped mid-answer]";
+
+/// A streamed answer and its reason: one that never reached [DONE] / a finish_reason is marked
+/// as cut off (in the text Nic reads and hears, and in the reason), never passed off as whole. Pure.
+pub fn stream_outcome(content: &str, completed: bool) -> (String, String) {
+    if completed {
+        (content.to_string(), "chain · streamed".into())
+    } else {
+        (format!("{content}{CUT_OFF_MARK}"), "chain · streamed · cut off".into())
+    }
 }
 
 #[cfg(test)]
 mod part4_tests {
     use super::*;
+
+    /// Regression: a stream that broke mid-answer (90 s timeout, dropped connection) returned
+    /// the partial text as a complete answer with normal meta.
+    #[test]
+    fn a_stream_that_never_finished_is_marked_cut_off() {
+        let (c, r) = stream_outcome("The landing page has three", false);
+        assert!(c.starts_with("The landing page has three") && c.contains("cut off"), "{c}");
+        assert!(r.contains("cut off"));
+        let (c, r) = stream_outcome("Done.", true);
+        assert_eq!((c.as_str(), r.as_str()), ("Done.", "chain · streamed"));
+    }
 
     #[test]
     fn hermes_label_and_model_migrate() {

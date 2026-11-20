@@ -102,7 +102,10 @@ pub const OFFLOAD_ENGINES: [&str; 3] = ["claude-cli", "gemini-cli", "llm-cli"];
 pub const FORBIDDEN_WORKSPACES: [&str; 2] = ["my-workspace", "booking"];
 
 // Prompt budget for a 16k-context / parallel-2 server: input ≤ ~4k tokens.
-const RAW_IN: usize = 1500;
+/// How much of the raw request the Prompter (triage / preflight / spec) and the verifier read.
+/// Hub briefs lead with their contract and interview answers, voice briefs with Nic's own lines,
+/// so the head of this window is what defines the build.
+pub const RAW_IN: usize = 3000;
 const BRIEF_IN: usize = 1400;
 const SPEC_IN: usize = 3000;
 const DESIGN_IN: usize = 4000;
@@ -207,11 +210,15 @@ pub struct Tuning {
     pub retry_backoff: Duration,
     /// Longest wait for Tony's queued foreground turns before a stage.
     pub fg_wait_max: Duration,
+    /// Model backend unreachable: how long the task waits before the stage is tried again…
+    pub backend_wait: Duration,
+    /// …and how long it may keep waiting in total before the stage fails after all.
+    pub backend_budget: Duration,
 }
 
 impl Default for Tuning {
     fn default() -> Self {
-        Self { attempts: STAGE_ATTEMPTS, retry_backoff: Duration::from_secs(5), fg_wait_max: Duration::from_secs(120) }
+        Self { attempts: STAGE_ATTEMPTS, retry_backoff: Duration::from_secs(5), fg_wait_max: Duration::from_secs(120), backend_wait: Duration::from_secs(30), backend_budget: Duration::from_secs(20 * 60) }
     }
 }
 
@@ -225,6 +232,11 @@ pub struct WorkerStats {
     pub mirror_pending: Mutex<BTreeSet<String>>,
     /// The earliest next `flush_mirrors` pass (a down gateway is not hammered).
     pub mirror_retry_at: Mutex<Option<Instant>>,
+    /// review_ready tasks whose Play Place card POST (and idea PATCH) failed: re-sent by
+    /// `flush_mirrors` once the gateway is back.
+    pub card_pending: Mutex<BTreeSet<String>>,
+    /// Task id → when its stage first found the model backend unreachable.
+    pub backend_down_since: Mutex<HashMap<String, Instant>>,
 }
 
 /// How often a pending mirror is re-sent while the gateway is unreachable.
@@ -623,15 +635,55 @@ pub fn prompt_verify(e: &Envelope, digest: &str, audit: &Value, at_limit: bool) 
 pub struct StageErr {
     pub msg: String,
     pub retry: bool,
+    /// The run no longer owns the task (cancelled / retried meanwhile): drop it, write nothing.
+    pub stale: bool,
+    /// The local model backend is unreachable (connection refused, 503): wait for it instead of
+    /// failing the build.
+    pub backend_down: bool,
 }
 
 impl StageErr {
     fn retry(m: impl Into<String>) -> Self {
-        Self { msg: m.into(), retry: true }
+        Self { msg: m.into(), retry: true, stale: false, backend_down: false }
     }
     fn fatal(m: impl Into<String>) -> Self {
-        Self { msg: m.into(), retry: false }
+        Self { msg: m.into(), retry: false, stale: false, backend_down: false }
     }
+    fn stale() -> Self {
+        Self { msg: "the task changed while this stage ran".into(), retry: false, stale: true, backend_down: false }
+    }
+    fn down(m: impl Into<String>) -> Self {
+        Self { msg: m.into(), retry: true, stale: false, backend_down: true }
+    }
+}
+
+/// Largest staged page embedded in a Play Place card (the gateway caps a card body at 512 KB).
+pub const CARD_HTML_MAX: usize = 300 * 1024;
+
+/// The card id an earlier task on the same project folder already has (a hub repair pass). Pure SQL.
+pub fn earlier_card(c: &rusqlite::Connection, e: &Envelope) -> Option<String> {
+    let slug = e.project_slug.as_deref()?;
+    c.query_row(
+        "SELECT card_id FROM task_envelope WHERE project_slug = ?1 AND task_id != ?2 AND card_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1",
+        rusqlite::params![slug, e.task_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// The title a stage may set: the model's, unless the task came from the Play Place hub, whose
+/// title Nic chose (and his card / chat show) — that one is kept. Pure.
+pub fn keep_title(e: &Envelope, model: Option<String>) -> String {
+    if e.raw_intent.memory_reference["source"] == "playplace" && e.title.chars().any(char::is_alphanumeric) {
+        return e.title.clone();
+    }
+    model.filter(|t| t.chars().any(char::is_alphanumeric)).unwrap_or_else(|| e.title.clone())
+}
+
+/// Does a model-call error mean the backend itself is unreachable (vs. a bad reply)? Pure.
+pub fn backend_unreachable(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    ["connection refused", "error sending request", "failed to connect", "connect error", "tcp connect", "service unavailable", " 503", "(503", "no connection could be made", "actively refused"].iter().any(|p| e.contains(p))
 }
 
 /// What a stage produced.
@@ -725,6 +777,8 @@ impl<'a> Worker<'a> {
                 Err(_) => break,
             }
         }
+        // Cards whose POST failed ride the same (rate-limited) pass.
+        self.flush_cards().await;
         ok
     }
 
@@ -801,15 +855,69 @@ impl<'a> Worker<'a> {
                 Err(err) if err.retry && attempt < attempts => {
                     self.stats.retries.fetch_add(1, Ordering::Relaxed);
                     eprintln!("[worker] {} {stage} attempt {attempt} failed: {}", cur.task_id, clip(&err.msg, 200));
+                    // A cancelled / retried task is never worked on again by this run.
+                    if !self.owns(&cur) {
+                        return;
+                    }
+                    // Visible in the task's log and chat, not just on stderr.
+                    let row = HandoffRow::new(agent, agent, "note", "handoff", format!("{} — trying again (attempt {}/{attempts})", clip(&one_line(&err.msg), 150), attempt + 1));
+                    let _ = self.note(&cur, &row, &s.known);
                     attempt += 1;
                     tokio::time::sleep(self.tuning.retry_backoff).await;
+                    if !self.owns(&cur) {
+                        return;
+                    }
                 }
                 Err(err) => break Err(err),
             }
         };
         match outcome {
-            Ok(o) => self.commit(stage, &cur, o, &s).await,
-            Err(err) => self.fail_task(&cur, agent, &err.msg, &s.known).await,
+            Ok(o) => {
+                self.stats.backend_down_since.lock().unwrap().remove(&cur.task_id);
+                self.commit(stage, &cur, o, &s).await
+            }
+            Err(err) if err.stale => eprintln!("[worker] {} {stage}: dropped ({})", cur.task_id, err.msg),
+            Err(err) if err.backend_down && self.wait_for_backend(&cur, agent, &err.msg, &s.known) => {}
+            Err(err) => {
+                self.stats.backend_down_since.lock().unwrap().remove(&cur.task_id);
+                self.fail_task(&cur, agent, &err.msg, &s.known).await
+            }
+        }
+    }
+
+    /// Does this run still hold `e` (same lease, status and stage)? A cancel / retry meanwhile
+    /// makes it stale: nothing it produces may land in staging or the log.
+    fn owns(&self, e: &Envelope) -> bool {
+        self.store.with(|c| envelope::get_bare(c, &e.task_id)).ok().flatten().is_some_and(|x| x.lease_until == e.lease_until && x.status == e.status && x.stage == e.stage)
+    }
+
+    /// The model backend is unreachable (LM Studio closed / reloading): instead of failing the
+    /// build, park the stage for `backend_wait` (its lease pushed out, so it is re-claimed then)
+    /// with one note row, until `backend_budget` has passed. Returns false when the budget is
+    /// spent (the caller fails the stage).
+    fn wait_for_backend(&self, cur: &Envelope, agent: &str, msg: &str, known: &[String]) -> bool {
+        let first = {
+            let mut m = self.stats.backend_down_since.lock().unwrap();
+            let since = *m.entry(cur.task_id.clone()).or_insert_with(Instant::now);
+            if since.elapsed() >= self.tuning.backend_budget {
+                return false;
+            }
+            !cur.handoff_log.iter().any(|h| h.event_type == "progress" && h.short_summary.starts_with("Waiting for the local model"))
+        };
+        let wait_ms = self.tuning.backend_wait.as_millis().max(1) as i64;
+        let n = Next { status: &cur.status, stage: cur.stage.as_deref(), owner: &cur.current_owner };
+        let row = if first {
+            HandoffRow::new(agent, "tony", "progress", "milestone", format!("Waiting for the local model ({}); the {} step resumes when it answers", clip(&one_line(msg), 100), cur.stage.as_deref().unwrap_or("next")))
+        } else {
+            HandoffRow::new(agent, agent, "progress", "verbose", "Still waiting for the local model")
+        };
+        let patch = Patch { lease_until: Some(Some(envelope::now_ms() + wait_ms)), ..Default::default() };
+        match self.store.transition(&cur.task_id, expect_of(cur), n, &patch, &row, known) {
+            Ok(_) => true,
+            Err(err) => {
+                eprintln!("[worker] wait for backend {}: {err}", cur.task_id);
+                true // stale: someone else owns it now; never fail it from here
+            }
         }
     }
 
@@ -835,6 +943,7 @@ impl<'a> Worker<'a> {
         match tokio::time::timeout(call_ceiling(secs), self.env.model(call)).await {
             Ok(Ok(r)) if !r.text.trim().is_empty() => Ok(r),
             Ok(Ok(_)) => Err(StageErr::retry(format!("the {} returned an empty answer", label(agent)))),
+            Ok(Err(err)) if backend_unreachable(&err) => Err(StageErr::down(format!("{} unavailable: {}", label(agent), clip(&one_line(&err), 200)))),
             Ok(Err(err)) => Err(StageErr::retry(format!("{} unavailable: {}", label(agent), clip(&one_line(&err), 200)))),
             Err(_) => Err(StageErr::retry(format!("{} timed out after {}s", label(agent), call_ceiling(secs).as_secs()))),
         }
@@ -846,7 +955,7 @@ impl<'a> Worker<'a> {
         let r = self.ask(e, "prompter", "triage", prompt_triage(e), s, None, None).await?;
         let j = extract_json(&r.text);
         let jj = j.clone().unwrap_or(Value::Null);
-        let title = Some(s_clip(&jj["title"], 60)).filter(|t| t.chars().any(char::is_alphanumeric)).unwrap_or_else(|| e.title.clone());
+        let title = keep_title(e, Some(s_clip(&jj["title"], 60)));
         let slug = match &e.project_slug {
             Some(sl) => sl.clone(),
             None => {
@@ -1008,7 +1117,7 @@ impl<'a> Worker<'a> {
         let ps = &jj["prompt_spec"];
         let sp = &jj["spec"];
         let has_ui = jj["has_ui"].as_bool().or_else(|| e.prompt_spec["triage"]["has_ui"].as_bool()).unwrap_or(true);
-        let title = Some(s_clip(&jj["title"], 60)).filter(|t| t.chars().any(char::is_alphanumeric)).unwrap_or_else(|| e.title.clone());
+        let title = keep_title(e, Some(s_clip(&jj["title"], 60)));
         let goal = Some(s_clip(&ps["goal"], 300)).filter(|g| !g.is_empty()).unwrap_or_else(|| clip(&one_line(&e.raw_intent.text), 300));
         let prompt_spec = json!({
             "triage": e.prompt_spec["triage"],
@@ -1033,22 +1142,33 @@ impl<'a> Worker<'a> {
         // Tony's documenter: the task note under memory/tony/ideas (best-effort).
         let mut mref = Map::new();
         let slug = e.project_slug.clone().unwrap_or_else(|| "task".into());
-        let note_written = s.notes_root.as_ref().and_then(|root| {
-            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let rel = super::documenter::idea_note_rel(&date, &slug).ok()?;
-            super::documenter::tony_document(root, &rel, &task_note(e, &title, &prompt_spec)).map_err(|err| eprintln!("[worker] task note: {err}")).ok()
-        });
-        if let Some(p) = &note_written {
-            mref.insert("memoryDoc".into(), json!(p.display().to_string()));
+        let note_written: Result<PathBuf, String> = match s.notes_root.as_ref() {
+            None => Err("the notes folder isn't available (memory.notesDir)".into()),
+            Some(root) => {
+                let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+                super::documenter::idea_note_rel(&date, &slug).and_then(|rel| super::documenter::tony_document(root, &rel, &task_note(e, &title, &prompt_spec)))
+            }
+        };
+        let mut extra = vec![];
+        match &note_written {
+            Ok(p) => {
+                mref.insert("memoryDoc".into(), json!(p.display().to_string()));
+            }
+            Err(err) => {
+                // Never silent: the missing note lands in the log / chat, and the audit flags it.
+                eprintln!("[worker] task note: {err}");
+                mref.insert("memoryDoc".into(), json!(format!("unavailable: {}", clip(&one_line(err), 160))));
+                extra.push(HandoffRow::new("tony", "tony", "note", "milestone", format!("Couldn't write Tony's task note: {}", clip(&one_line(err), 140))));
+            }
         }
         let patch = Patch { title: Some(title.clone()), prompt_spec: Some(prompt_spec), memory_reference: (!mref.is_empty()).then_some(mref), ..Default::default() };
         let v = voice(&j);
         if has_ui {
             let row = HandoffRow::new("prompter", "designer", "handoff", "handoff", format!("Spec ready for \"{}\"; over to the Designer", clip(&title, 60))).voice(v.as_deref());
-            Ok(Outcome::Next { stage: "design", patch, row, extra: vec![] })
+            Ok(Outcome::Next { stage: "design", patch, row, extra })
         } else {
             let row = HandoffRow::new("prompter", "prompter", "stage_completed", "handoff", "Spec ready; no UI, so the Designer is skipped").voice(v.as_deref()).payload(json!({ "designer_skipped": "no UI in the spec" }));
-            Ok(Outcome::Next { stage: "merge", patch, row, extra: vec![] })
+            Ok(Outcome::Next { stage: "merge", patch, row, extra })
         }
     }
 
@@ -1124,20 +1244,28 @@ impl<'a> Worker<'a> {
         if let Some(d) = &cwd {
             let _ = std::fs::create_dir_all(&s.staging_root).and_then(|_| if staging::is_reparse(&s.staging_root) { Ok(()) } else { std::fs::create_dir_all(d) });
         }
+        let mut fell_back: Option<String> = None;
         let r = match engine.clone() {
             Some(eng) => match self.ask(e, "coder", "code", user.clone(), s, Some(eng.clone()), cwd.clone()).await {
                 Ok(r) => r,
                 Err(err) => {
                     eprintln!("[worker] offload {eng} failed ({}); building locally", clip(&err.msg, 160));
+                    if !self.owns(e) {
+                        return Err(StageErr::stale());
+                    }
+                    fell_back = Some(format!("{eng} failed ({}); the Coder built it locally instead", clip(&one_line(&err.msg), 120)));
                     self.ask(e, "coder", "code", user, s, None, None).await?
                 }
             },
             None => self.ask(e, "coder", "code", user, s, None, None).await?,
         };
         // Consume the forced offload only while this run still holds the task: a cancel + retry
-        // meanwhile (possibly with a new "offload to …") belongs to the next run.
-        let still_ours = self.store.with(|c| envelope::get_bare(c, &e.task_id)).ok().flatten().is_some_and(|x| x.lease_until == e.lease_until && x.status == e.status && x.stage == e.stage);
-        if still_ours {
+        // meanwhile (possibly with a new "offload to …") belongs to the next run — and a stale run
+        // never writes into staging (it would overwrite the archived iteration / the retry's page).
+        if !self.owns(e) {
+            return Err(StageErr::stale());
+        }
+        {
             let mut m = self.forced_offload.lock().unwrap();
             if m.get(&e.task_id) == forced.as_ref() {
                 m.remove(&e.task_id);
@@ -1171,8 +1299,9 @@ impl<'a> Worker<'a> {
             };
         }
         let kb = (a.bytes as f64 / 1024.0 * 10.0).round() / 10.0;
-        let row = HandoffRow::new("coder", "system", "stage_completed", "handoff", format!("Coder staged index.html ({kb} KB)")).voice(voice(&j).as_deref()).payload(json!({ "bytes": a.bytes, "by": r.by, "offloaded": engine.is_some(), "known_issues": known_issues, "verifier": verifier }));
-        Ok(Outcome::Next { stage: "evaluate", patch: Patch { code_artifacts: Some(Value::Array(arts)), ..Default::default() }, row, extra: vec![] })
+        let row = HandoffRow::new("coder", "system", "stage_completed", "handoff", format!("Coder staged index.html ({kb} KB)")).voice(voice(&j).as_deref()).payload(json!({ "bytes": a.bytes, "by": r.by, "offloaded": engine.is_some() && fell_back.is_none(), "known_issues": known_issues, "verifier": verifier }));
+        let extra = fell_back.map(|m| vec![HandoffRow::new("coder", "tony", "note", "milestone", format!("Offload: {m}"))]).unwrap_or_default();
+        Ok(Outcome::Next { stage: "evaluate", patch: Patch { code_artifacts: Some(Value::Array(arts)), ..Default::default() }, row, extra })
     }
 
     fn h_evaluate(&self, e: &Envelope, s: &WorkerSettings) -> Result<Outcome, StageErr> {
@@ -1301,6 +1430,10 @@ impl<'a> Worker<'a> {
         last_eval["complete"] = json!(true);
         let slug = e.project_slug.clone().unwrap_or_default();
         let status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "known_blockers": blockers, "at": envelope::now_ms() });
+        // A cancelled task never gets a review_ready .status.json (the Librarian reads it).
+        if !self.owns(e) {
+            return Err(StageErr::stale());
+        }
         if let Err(err) = staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, &slug, ".status.json", serde_json::to_string_pretty(&status).unwrap_or_default().as_bytes()) {
             eprintln!("[worker] .status.json: {err}");
         }
@@ -1422,33 +1555,21 @@ impl<'a> Worker<'a> {
     async fn after_done(&self, e: Envelope, s: &WorkerSettings) {
         let o = Opts::of(&e);
         let mut e = e;
-        // Best-effort Play Place card (Ideas Ledger + phone), then the idea PATCH.
+        // Play Place card (Ideas Ledger + phone), then the idea PATCH. A failed POST is never a
+        // silent loss: the task goes on `card_pending` (re-sent by `flush_mirrors`) and the chat
+        // hears it once.
         if !o.no_mirror {
-            let slug = e.project_slug.clone().unwrap_or_default();
-            let html = staging::resolve(&s.staging_root, &slug, "index.html").ok().and_then(|p| std::fs::read(p).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            let chain: Vec<Value> = e.handoff_log.iter().filter(|h| h.event_type != "stage_started").map(|h| json!({ "from": h.from_agent, "to": h.to_agent, "kind": h.event_type, "text": h.voice_summary.clone().unwrap_or_else(|| h.short_summary.clone()) })).collect();
-            let card = json!({
-                "title": e.title, "idea": clip(&e.raw_intent.text, 4000), "ideaId": e.idea_id, "brief": e.prompt_spec["summary"],
-                "blueprint": compact(&e.design_artifacts, 6000), "buildPrompt": e.coder_brief["build_brief"], "html": html,
-                "source": "coder", "status": "staged", "pipelineId": e.task_id, "taskId": e.task_id, "stagingPath": format!("staging/{slug}"),
-                "by": { "coder": e.coder_brief["by"], "designer": e.design_artifacts["by"] },
-                "versions": [{ "at": envelope::now_ms() / 1000, "by": "coder", "notes": format!("iteration {}", e.iteration_count) }],
-                "chain": chain,
-            });
-            match self.env.gateway(reqwest::Method::POST, "/api/play-place".into(), Some(card)).await {
-                Ok(c) => {
-                    if let Some(cid) = c["id"].as_str().filter(|c| !c.is_empty()) {
-                        let n = Next { status: &e.status, stage: e.stage.as_deref(), owner: &e.current_owner };
-                        let row = HandoffRow::new("staging", "tony", "note", "verbose", "Play Place card created");
-                        match self.store.transition(&e.task_id, expect_of(&e), n, &Patch { card_id: Some(cid.to_string()), ..Default::default() }, &row, &s.known) {
-                            Ok(x) => e = x,
-                            Err(err) => eprintln!("[worker] card id: {err}"),
-                        }
+            let (x, ok) = self.post_card(e, s).await;
+            e = x;
+            if !ok {
+                let first = self.stats.card_pending.lock().unwrap().insert(e.task_id.clone());
+                if first {
+                    let row = HandoffRow::new("staging", "tony", "note", "milestone", "Couldn't post the Play Place card (the gateway didn't answer); it retries shortly");
+                    if let Some(n) = self.note(&e, &row, &s.known) {
+                        e = n;
                     }
                 }
-                Err(err) => eprintln!("[worker] Play Place card {}: {}", e.task_id, clip(&err, 160)),
             }
-            self.idea_patch(&e, json!({ "status": "staged", "cardId": e.card_id, "taskId": e.task_id })).await;
         }
         self.legacy_step(&e, "verify");
         self.mirror(&e).await;
@@ -1461,10 +1582,97 @@ impl<'a> Worker<'a> {
                 if let Ok(text) = std::fs::read_to_string(doc) {
                     if let Err(err) = self.env.ingest(format!("Idea: {}", e.title), text).await {
                         eprintln!("[worker] ingest: {}", clip(&err, 160));
+                        // On the task's log and in its chat (the note itself is safe on disk).
+                        let row = HandoffRow::new("tony", "librarian", "note", "milestone", format!("Couldn't index the task note for the Librarian ({}); the note is still saved on disk", clip(&one_line(&err), 120)));
+                        let _ = self.note(&e, &row, &s.known);
                     }
                 }
             }
         }
+    }
+
+    /// POST the review_ready task's Play Place card, record its id, then PATCH the idea (the
+    /// idea's cardId only when there is one: a null would wipe a card an earlier run made).
+    /// Returns the (possibly updated) envelope and whether the card exists now.
+    async fn post_card(&self, e: Envelope, s: &WorkerSettings) -> (Envelope, bool) {
+        let mut e = e;
+        let mut ok = e.card_id.is_some();
+        if !ok {
+            let slug = e.project_slug.clone().unwrap_or_default();
+            let html = staging::resolve(&s.staging_root, &slug, "index.html").ok().and_then(|p| std::fs::read(p).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            // The gateway refuses a card body over 512 KB (and JSON escaping inflates HTML): a big
+            // page is referenced by its staging path instead of embedded.
+            let html = if html.len() > CARD_HTML_MAX { String::new() } else { html };
+            let chain: Vec<Value> = e.handoff_log.iter().filter(|h| h.event_type != "stage_started").map(|h| json!({ "from": h.from_agent, "to": h.to_agent, "kind": h.event_type, "text": h.voice_summary.clone().unwrap_or_else(|| h.short_summary.clone()) })).collect();
+            let card = json!({
+                "title": e.title, "idea": clip(&e.raw_intent.text, 4000), "ideaId": e.idea_id, "brief": e.prompt_spec["summary"],
+                "blueprint": compact(&e.design_artifacts, 6000), "buildPrompt": e.coder_brief["build_brief"], "html": html,
+                "source": "coder", "status": "staged", "pipelineId": e.task_id, "taskId": e.task_id, "stagingPath": format!("staging/{slug}"),
+                "by": { "coder": e.coder_brief["by"], "designer": e.design_artifacts["by"] },
+                "versions": [{ "at": envelope::now_ms() / 1000, "by": "coder", "notes": format!("iteration {}", e.iteration_count) }],
+                "chain": chain,
+            });
+            // A hub repair pass (a new task on the same build folder) updates the card the first
+            // pass made instead of posting a second "staged" card for the same build.
+            let earlier = (e.raw_intent.memory_reference["source"] == "playplace").then(|| self.store.with(|c| Ok(earlier_card(c, &e))).ok().flatten()).flatten();
+            let (method, path) = match &earlier {
+                Some(cid) => (reqwest::Method::PATCH, format!("/api/cc/c/playplace/{cid}")),
+                None => (reqwest::Method::POST, "/api/play-place".to_string()),
+            };
+            match self.env.gateway(method, path, Some(card)).await.map(|c| match &earlier {
+                Some(cid) => json!({ "id": cid }),
+                None => c,
+            }) {
+                Ok(c) => {
+                    if let Some(cid) = c["id"].as_str().filter(|c| !c.is_empty()) {
+                        let n = Next { status: &e.status, stage: e.stage.as_deref(), owner: &e.current_owner };
+                        let row = HandoffRow::new("staging", "tony", "note", "verbose", "Play Place card created");
+                        match self.store.transition(&e.task_id, expect_of(&e), n, &Patch { card_id: Some(cid.to_string()), ..Default::default() }, &row, &s.known) {
+                            Ok(x) => e = x,
+                            Err(err) => eprintln!("[worker] card id: {err}"),
+                        }
+                        ok = true;
+                    }
+                }
+                Err(err) => eprintln!("[worker] Play Place card {}: {}", e.task_id, clip(&err, 160)),
+            }
+        }
+        let mut body = json!({ "status": "staged", "taskId": e.task_id });
+        if let Some(c) = &e.card_id {
+            body["cardId"] = json!(c);
+        }
+        self.idea_patch(&e, body).await;
+        if ok {
+            self.stats.card_pending.lock().unwrap().remove(&e.task_id);
+        }
+        (e, ok)
+    }
+
+    /// Re-send the Play Place cards whose POST failed (see `after_done`).
+    async fn flush_cards(&self) -> usize {
+        let ids: Vec<String> = self.stats.card_pending.lock().unwrap().iter().take(MIRROR_FLUSH_MAX).cloned().collect();
+        if ids.is_empty() {
+            return 0;
+        }
+        let Ok(s) = self.env.settings() else { return 0 };
+        let mut n = 0;
+        for id in ids {
+            let e = match self.store.with(|c| envelope::get(c, &id)) {
+                Ok(Some(e)) if e.status == "review_ready" && e.card_id.is_none() && !Opts::of(&e).no_mirror => e,
+                Ok(_) => {
+                    self.stats.card_pending.lock().unwrap().remove(&id);
+                    continue;
+                }
+                Err(_) => break,
+            };
+            let (e, ok) = self.post_card(e, &s).await;
+            if !ok {
+                break;
+            }
+            self.mirror(&e).await;
+            n += 1;
+        }
+        n
     }
 
     async fn fail_task(&self, cur: &Envelope, agent: &str, reason: &str, known: &[String]) {
@@ -1692,6 +1900,9 @@ pub struct CreateArgs {
     pub idea_id: Option<String>,
     pub options: Option<Value>,
     pub dedupe_key: Option<String>,
+    /// The staging folder slug, when the creator already owns one (a Play Place hub build: every
+    /// hand-off — first pass and repair passes — builds in the hub's own folder).
+    pub project_slug: Option<String>,
 }
 
 /// A task was just queued (any creator): wake the worker and PUT the queued snapshot to the
@@ -1708,20 +1919,40 @@ pub fn announce_queued(app: &tauri::AppHandle, e: &Envelope) {
     });
 }
 
+/// A raw intent that fits the store's `RAW_INTENT_MAX`: an over-long one (a parked brainstorm
+/// run from the ledger) keeps its head — the opening idea and the brief's contract — and its
+/// tail, with an explicit marker between, instead of the whole task being refused. Pure.
+pub fn fit_raw_intent(text: &str) -> String {
+    let max = envelope::RAW_INTENT_MAX;
+    let t = text.trim();
+    let n = t.chars().count();
+    if n <= max {
+        return t.to_string();
+    }
+    let marker = "\n\n[…earlier discussion trimmed to fit…]\n\n";
+    // A little headroom: the store's secret scrub may lengthen a redacted value.
+    let budget = max - marker.chars().count() - 64;
+    let head = budget * 2 / 3;
+    let tail = budget - head;
+    let h: String = t.chars().take(head).collect();
+    let tl: String = t.chars().skip(n - tail).collect();
+    format!("{h}{marker}{tl}")
+}
+
 /// Create (or find, by dedupe key / open idea) a task. Returns `(envelope, created)`.
 pub fn create_task(store: &TaskStore, args: &CreateArgs, max_iterations: u8, known: &[String]) -> Result<(Envelope, bool), String> {
     if let Some(u) = store.unavailable() {
         return Err(format!("the task store is unavailable: {u}"));
     }
     let n = NewEnvelope {
-        raw_intent: args.raw_intent.clone(),
+        raw_intent: fit_raw_intent(&args.raw_intent),
         raw_intent_at: None,
         source: if args.source.trim().is_empty() { "typed".into() } else { args.source.clone() },
         thread: args.thread.clone(),
         turn_ids: vec![],
         idea_id: args.idea_id.clone().filter(|s| !s.trim().is_empty()),
         title: args.title.clone(),
-        project_slug: None,
+        project_slug: args.project_slug.clone(),
         dedupe_key: args.dedupe_key.clone(),
         options: args.options.clone().unwrap_or(json!({})),
         max_iterations: Some((max_iterations as u32).clamp(1, MAX_LOOP_ITERATIONS)),
@@ -1751,11 +1982,26 @@ pub fn retry_task(store: &TaskStore, task_id: &str, known: &[String]) -> Result<
     if e.status != "failed" {
         return Err(format!("only a failed task can be retried (this one is {})", e.status));
     }
-    let next = match e.stage.as_deref() {
-        Some(s) if stage_def(s).is_some() => Next::stage(stage_def(s).unwrap().name)?,
-        _ => Next { status: "queued", stage: None, owner: "tony" },
+    // A Play Place hub build owns its worker task: retrying it here would run it behind the hub's
+    // back (stuck paused in the Repair Queue, or unowned after a remove). Re-queue it there.
+    if e.raw_intent.memory_reference["source"] == "playplace" {
+        return Err("this build belongs to the Play Place hub: re-queue it from the Repair Queue there".into());
+    }
+    // Stopped by the loop breaker: re-running the deterministic check on the same page would fail
+    // again at once. Go back to the build brief with exactly one more pass.
+    let breaker = e.error.as_deref().is_some_and(|m| m.starts_with("max iterations"));
+    let (next, from) = match e.stage.as_deref() {
+        _ if breaker => (Next::stage("merge")?, "the build brief (one more pass after the loop limit)".to_string()),
+        Some(s) if stage_def(s).is_some() => (Next::stage(stage_def(s).unwrap().name)?, s.to_string()),
+        _ => (Next { status: "queued", stage: None, owner: "tony" }, "the start".to_string()),
     };
-    let row = HandoffRow::new("tony", next.owner, "retry", "handoff", format!("Retrying from {}", e.stage.as_deref().unwrap_or("the start")));
+    let row = HandoffRow::new("tony", next.owner, "retry", "handoff", format!("Retrying from {from}")).payload(json!({ "after_breaker": breaker }));
+    if breaker {
+        let limit = e.max_iterations.min(MAX_LOOP_ITERATIONS);
+        store.with(|c| c.execute("UPDATE task_envelope SET iteration_count = ?1 WHERE task_id = ?2 AND status = 'failed'", rusqlite::params![limit.saturating_sub(1) as i64, task_id]).map(|_| ()).map_err(|er| er.to_string()))?;
+        let e2 = store.with(|c| envelope::get_bare(c, task_id))?.ok_or_else(|| format!("task {task_id} not found"))?;
+        return store.transition(task_id, expect_of(&e2), next, &Patch { error: Some(None), lease_until: Some(None), ..Default::default() }, &row, known);
+    }
     store.transition(task_id, expect_of(&e), next, &Patch { error: Some(None), lease_until: Some(None), ..Default::default() }, &row, known)
 }
 
@@ -2102,7 +2348,7 @@ pub fn task_create(app: tauri::AppHandle, raw_intent: String, title: Option<Stri
     let os = app.state::<super::os_core::OsState>();
     let max = os.snapshot().worker.max_iterations;
     let policy = os.modes.effective().dispatch;
-    let args = CreateArgs { raw_intent, title, thread, source: source.unwrap_or_else(|| "typed".into()), idea_id, options, dedupe_key };
+    let args = CreateArgs { raw_intent, title, thread, source: source.unwrap_or_else(|| "typed".into()), idea_id, options, dedupe_key, project_slug: None };
     let (e, created) = create_task_gated(app.state::<TaskStore>().inner(), &args, max, &known_of(&app), policy, auto.unwrap_or(false))?;
     announce_queued(&app, &e);
     Ok(json!({ "task_id": e.task_id, "created": created, "status": e.status, "title": e.title }))
@@ -2119,8 +2365,10 @@ pub fn task_list(store: tauri::State<'_, TaskStore>, status: Option<String>, lim
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn task_status(store: tauri::State<'_, TaskStore>, agent: Option<String>, slug: Option<String>) -> Result<Value, String> {
-    store.with(|c| status_text(c, agent.as_deref(), slug.as_deref()))
+pub fn task_status(store: tauri::State<'_, TaskStore>, hub: tauri::State<'_, super::buildhub::HubState>, agent: Option<String>, slug: Option<String>) -> Result<Value, String> {
+    let v = store.with(|c| status_text(c, agent.as_deref(), slug.as_deref()))?;
+    // The Play Place hub owns smoke tests, repair and merge: its state wins for its builds.
+    Ok(super::buildhub::status_with_hub(v, &hub.snapshot(), slug.as_deref()))
 }
 
 /// Retry a failed task from its failed stage; `offload` (a CLI engine) re-runs the code stage
@@ -2133,6 +2381,8 @@ pub fn task_retry(app: tauri::AppHandle, task_id: String, offload: Option<String
             return Err(format!("offload engine must be one of {} (no paid APIs in the worker)", OFFLOAD_ENGINES.join(", ")));
         }
     }
+    // A retry re-runs a build: Solo (surface_only) builds nothing, from any button.
+    super::modes::check_dispatch(app.state::<super::os_core::OsState>().modes.effective().dispatch, super::modes::DispatchKind::BuildPipeline { auto: false })?;
     let e = retry_task(app.state::<TaskStore>().inner(), &task_id, &known_of(&app))?;
     let ws = app.state::<WorkerState>();
     if let Some(o) = offload {
@@ -2145,7 +2395,37 @@ pub fn task_retry(app: tauri::AppHandle, task_id: String, offload: Option<String
 #[tauri::command(rename_all = "snake_case")]
 pub fn task_cancel(app: tauri::AppHandle, task_id: String) -> Result<Envelope, String> {
     use tauri::Manager;
-    cancel_task(app.state::<TaskStore>().inner(), &task_id, &known_of(&app))
+    let e = cancel_task(app.state::<TaskStore>().inner(), &task_id, &known_of(&app))?;
+    announce_cancelled(&app, &e);
+    Ok(e)
+}
+
+/// The idea-ledger PATCH a cancelled task needs (None: no idea, or `noMirror`). Pure.
+pub fn cancelled_idea_patch(e: &Envelope) -> Option<(String, Value)> {
+    let id = e.idea_id.as_deref()?;
+    if Opts::of(e).no_mirror {
+        return None;
+    }
+    Some((format!("/api/cc/c/ideas/{id}"), json!({ "status": "failed", "taskId": e.task_id, "error": e.error })))
+}
+
+/// A task was just cancelled (any canceller): the same outward side effects a worker failure
+/// gets — the gateway task mirror (phone) and the idea ledger — so a
+/// cancelled build never keeps showing as in flight. Best-effort, off the caller's thread.
+pub fn announce_cancelled(app: &tauri::AppHandle, e: &Envelope) {
+    use tauri::Manager;
+    let (app, e) = (app.clone(), e.clone());
+    tauri::async_runtime::spawn(async move {
+        let env = AppEnv { app: app.clone() };
+        let ws = app.state::<WorkerState>();
+        mirror_put(&env, &ws.stats, &e).await;
+        if let Some((path, body)) = cancelled_idea_patch(&e) {
+            if let Err(err) = env.gateway(reqwest::Method::PATCH, path, Some(body)).await {
+                eprintln!("[worker] idea mirror (cancel): {}", clip(&err, 160));
+            }
+        }
+        super::compaction::mark_dirty();
+    });
 }
 
 #[cfg(test)]

@@ -32,7 +32,7 @@ export interface CompileCtx {
 
 export const SUMMARY_MAX = 2000;
 export const BRIEF_MAX = 8000;
-export const NOTE_MAX = 1500;
+export const NOTE_MAX = 3000;
 export const LIST_MAX = 12;
 
 /** Oldest first, then id — selection order never matters. */
@@ -76,6 +76,14 @@ export function outputDirectory(runtime: TargetRuntime, slug: string, ctx: Pick<
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/** Cut `s` to `max` chars with an explicit, counted marker (never a silent cut). Pure. */
+export function clipMarked(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const marker = (n: number) => `\n[…${n} more chars not included]`;
+  const keep = Math.max(0, max - marker(s.length).length);
+  return `${s.slice(0, keep)}${marker(s.length - keep)}`;
+}
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 const answerText = (a: Answer | undefined) => oneLine([a?.choice, a?.text].filter(Boolean).join(" — "));
 
@@ -106,7 +114,9 @@ export function criteriaFor(runtime: TargetRuntime, a: Answers, questions: reado
       const ans = a[q.id];
       if (!ans?.choice && !ans?.text) continue;
       const head = q.question.replace(/\?\s*$/, "");
-      if (ans.choice && !/own|type/i.test(ans.choice)) out.push(`${head}: ${ans.choice}`);
+      // Skip only the free-text chip ("My own criteria (type them)"), never an answer that merely
+      // contains the letters ("Dropdown menu", "Prototype layout", "Countdown").
+      if (ans.choice && !/\b(?:my own|type (?:them|it|my own))\b/i.test(ans.choice)) out.push(`${head}: ${ans.choice}`);
       for (const l of (ans.text ?? "").split(/[\n;]+/)) if (l.trim()) out.push(oneLine(l));
     }
   }
@@ -139,16 +149,15 @@ export function compileEnvelope(notes: readonly IntakeNote[], questions: readonl
   const firstText = oneLine(ordered[0].text).slice(0, 300);
   const extra = questions.filter((q) => q.id !== "runtime" && q.id !== "worker").map((q) => `${q.question} ${answerText(answers[q.id]) || "—"}`);
   const summary = clip(oneLine(`${title}. ${firstText} ${extra.join(" ")}`), SUMMARY_MAX);
-  const brief = clip(
-    [
-      `Brainstorm notes (${ordered.length}, oldest first):`,
-      ...ordered.map((n) => `## ${oneLine(n.title) || "Untitled"}\n${clip(n.text.trim(), NOTE_MAX)}`),
-      "",
-      "Intake interview:",
-      ...qa.map(({ q, a }) => `Q: ${q}\nA: ${a}`),
-    ].join("\n"),
-    BRIEF_MAX,
-  );
+  // The interview answers LEAD (they are what Nic decided; the worker reads the head of the
+  // brief), then the notes, each with a fair share of what's left and a visible cut marker — the
+  // answers used to come last and were the first thing cut with 5-6 long notes.
+  const qaBlock = ["Intake interview:", ...qa.map(({ q, a }) => `Q: ${q}\nA: ${a}`)].join("\n");
+  const header = `Brainstorm notes (${ordered.length}, oldest first):`;
+  const titles = ordered.map((n) => `## ${oneLine(n.title) || "Untitled"}`);
+  const room = BRIEF_MAX - qaBlock.length - header.length - titles.reduce((a, t) => a + t.length + 2, 0) - 4;
+  const share = Math.min(NOTE_MAX, Math.max(200, Math.floor(room / ordered.length)));
+  const brief = clip([qaBlock, "", header, ...ordered.map((n, i) => `${titles[i]}\n${clipMarked(n.text.trim(), share)}`)].join("\n"), BRIEF_MAX);
   const envelope: BuildEnvelope = {
     build_id: newBuildId(ctx.now, ctx.rand),
     project_slug: slug,

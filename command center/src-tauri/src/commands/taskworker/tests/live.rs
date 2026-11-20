@@ -257,7 +257,7 @@ fn smoke_asserts(root: &Path, e: &Envelope, env: &SmokeEnv, peak_mb: u64, t0: In
 fn run_live(store: &TaskStore, env: &SmokeEnv) {
     let stats = WorkerStats::default();
     let forced = Mutex::new(HashMap::new());
-    let w = Worker { store, env, tuning: Tuning { attempts: 2, retry_backoff: Duration::from_secs(3), fg_wait_max: Duration::from_secs(60) }, stats: &stats, forced_offload: &forced };
+    let w = Worker { store, env, tuning: Tuning { attempts: 2, retry_backoff: Duration::from_secs(3), fg_wait_max: Duration::from_secs(60), ..Default::default() }, stats: &stats, forced_offload: &forced };
     tauri::async_runtime::block_on(w.run_until_idle(60));
     eprintln!("[smoke] mirror failures (expected, closed port): {}", stats.mirror_failed.load(Ordering::SeqCst));
 }

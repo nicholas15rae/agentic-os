@@ -84,10 +84,9 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
  * three Whisper mangles the spec calls out ("whats up/app", "what sapp" →
  * "whatsapp"); spell out number words 1..10.
  *
- * NOTE: a matching-only normalization — `Route.task` is built from this
- * normalized text (lower-case, punctuation-stripped), not the original
- * casing/punctuation, to keep this implementation and the Rust one simple
- * and identical. Deliberate, documented simplification.
+ * NOTE: a matching-only normalization. A Named address's `Route.task` is cut
+ * from the ORIGINAL text (`originalTail`): the agent gets Nic's exact words
+ * (file names, versions, URLs), never this lower-cased, punctuation-stripped form.
  */
 export function normalize(text: string): string {
   let cleaned = "";
@@ -116,6 +115,26 @@ export function normalize(text: string): string {
 }
 
 const tokenize = (s: string): string[] => s.split(" ").filter(Boolean);
+
+/**
+ * The ORIGINAL text after the first `k` normalized tokens (a Named address's delegation phrase
+ * stripped), keeping Nic's casing, punctuation, file names, versions, URLs and decimals. Words
+ * are mapped by how many normalized tokens each one yields; when that bookkeeping doesn't add up
+ * (a Whisper mangle merged two words) the normalized tail is used, as before. Pure.
+ */
+export function originalTail(original: string, k: number): string {
+  const words = original.trim().split(/\s+/).filter(Boolean);
+  const counts = words.map((w) => tokenize(normalize(w)).length);
+  const total = tokenize(normalize(original)).length;
+  if (counts.reduce((a, b) => a + b, 0) !== total) return tokenize(normalize(original)).slice(k).join(" ");
+  let seen = 0;
+  let i = 0;
+  while (i < words.length && seen + counts[i] <= k) seen += counts[i++];
+  if (seen !== k) return tokenize(normalize(original)).slice(k).join(" ");
+  // Leading punctuation-only words ("—", ",") never start the task.
+  while (i < words.length && counts[i] === 0) i++;
+  return words.slice(i).join(" ").replace(/^[,:;.\-–—\s]+/, "").trim();
+}
 const tokAt = (toks: string[], i: number): string | undefined => toks[i];
 const roleRank = (role: string): number => {
   const i = (DOMAIN_TIEBREAK as readonly string[]).indexOf(role);
@@ -226,7 +245,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = ""): Route {
       let k = j + nlen;
       if (["agent", "desk"].includes(tokAt(toks, k) ?? "")) k += 1;
       if (["to", "about", "for"].includes(tokAt(toks, k) ?? "")) k += 1;
-      const task = toks.slice(k).join(" ");
+      const task = originalTail(original, k);
       return { role, reason: "you named this agent directly", confidence: "high", kind: "Named", task: task || original };
     }
   }
@@ -246,7 +265,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = ""): Route {
     }
     const v = tokAt(toks, k);
     if (v !== undefined && VERBS_B.includes(v)) {
-      const task = toks.slice(k).join(" ");
+      const task = originalTail(original, k);
       return { role, reason: "you named this agent directly", confidence: "high", kind: "Named", task: task || original };
     }
     break;

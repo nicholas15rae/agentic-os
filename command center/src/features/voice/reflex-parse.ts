@@ -165,6 +165,22 @@ export function parseReflex(text: string, ctx: ReflexCtx): Reflex {
 }
 
 /**
+ * Is the line ONLY a cut — the phrase plus address / politeness words ("Cut it.", "Tony, stop",
+ * "no no, cut it out please")? A line that merely starts with or contains one ("Stop motion
+ * studio app, I want…", "let's cut that feature") is not: with nothing running to cut it is an
+ * ordinary line, and while holding it is one more held segment. Pure.
+ */
+export function isBareCut(text: string): boolean {
+  const w = toks(norm(text));
+  if (!w.length) return false;
+  const filler = new Set([...CUT_LEAD, ...TAIL]);
+  const core = w.filter((x) => !filler.has(x));
+  if (!core.length) return false;
+  const s = core.join(" ");
+  return [...CUT, ...CUT_LEADING].includes(s) || /^(?:(?:cut it|cut that|stop)(?: (?:out|it|that|talking))?)(?: (?:stop|cut it))*$/.test(s);
+}
+
+/**
  * Whether a normal / wake / yes-no listen acts on a parsed reflex before anything else. A
  * stand-down (P5) acts in every listen — a passive one without the wake word, a yes/no one
  * (the card is rejected silently) — but never while Tony is audible (his own words could leak

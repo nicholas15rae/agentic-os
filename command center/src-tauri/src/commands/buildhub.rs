@@ -465,6 +465,11 @@ impl HubFile {
         if matches!(b.envelope.status, Status::Deployed) {
             return Err("this build is already deployed".into());
         }
+        // No agent step runs again for these: a steer would sit "pending" forever. Rebuilding
+        // with it is an explicit Repair (the note becomes the override).
+        if matches!(b.envelope.status, Status::ReadyForMerge | Status::SmokeTesting | Status::RepairQueue) {
+            return Err(format!("no agent step runs again on a {} build — send it to Repair with this as the note to rebuild with it", status_str(b.envelope.status).replace('_', " ")));
+        }
         let d = devqueue::scrub(&clean(directive, OVERRIDE_MAX), known);
         if d.is_empty() {
             return Err("the steer directive is empty".into());
@@ -548,10 +553,10 @@ impl HubFile {
         let trace = r.trace.clone();
         b.smoke.last = Some(r);
         if b.envelope.status == Status::Paused {
-            // Paused while the check ran: keep the result, stay paused.
-            if !passed {
-                b.smoke.failures += 1;
-            }
+            // Paused while the check ran: keep the result, stay paused. The failure is NOT
+            // counted: Resume re-runs the check on the same output and counts it once (counting
+            // here too skipped the automatic repair pass and sent it straight to repair).
+            b.smoke.attempts -= 1;
             return Ok(Status::Paused);
         }
         if passed {
@@ -601,6 +606,38 @@ impl HubFile {
             return Err("pause it first: this build is running".into());
         }
         Ok(self.builds.remove(i))
+    }
+
+    /// Copy a bound worker task's newer handoff rows onto the card log ONLY (no status / folder
+    /// effect): the rows a task commits after review_ready (the Librarian's Read-report
+    /// discrepancies, "card created", an ingest failure) arrive once the build is already at the
+    /// smoke checkpoint or beyond, and the card's agent transcript must not end early. Pure.
+    pub fn apply_rows(&mut self, id: &str, w: &WorkerSnap) -> Result<usize, String> {
+        let b = self.get_mut(id)?;
+        let mut n = 0;
+        for r in &w.rows {
+            if r.seq <= b.last_log_seq {
+                continue;
+            }
+            b.last_log_seq = r.seq;
+            let stream = if r.severity == "critical" { "stderr" } else { "stdout" };
+            push_log(b, r.at, stream, format!("[{}→{}] {}", r.from, r.to, r.text));
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Bind a freshly created worker task to its build — only if the build still waits for it
+    /// (Queued, unbound). `Ok(false)`: removed / paused / bound meanwhile, so the caller must
+    /// cancel the orphan task (never left running unowned).
+    pub fn bind_worker(&mut self, id: &str, task_id: &str, now: i64) -> Result<bool, String> {
+        let Some(b) = self.builds.iter_mut().find(|b| b.envelope.build_id == id) else { return Ok(false) };
+        if b.envelope.status != Status::Queued || b.worker_task_id.is_some() || b.dev_task_id.is_some() {
+            return Ok(false);
+        }
+        b.worker_task_id = Some(task_id.to_string());
+        push_log(b, now, "event", format!("Handed to the worker (task {task_id})"));
+        Ok(true)
     }
 
     /// Fold the bound worker task's state into the build (pure).
@@ -716,23 +753,67 @@ fn push_log(b: &mut Build, at: i64, stream: &str, text: String) {
     }
 }
 
-/// The worker's raw intent for a hub build: the compiled brief plus the envelope contract (pure).
-pub fn worker_brief(b: &Build) -> String {
-    let e = &b.envelope;
+/// The summary's share of the contract header (the full summary stays on the hub card).
+const CONTRACT_SUMMARY_MAX: usize = 600;
+
+/// The build contract block (target runtime, acceptance criteria, milestones, summary) — it
+/// LEADS every hand-off brief, so no truncation of the notes can drop it. Pure.
+pub fn contract_block(e: &TaskEnvelope) -> String {
     let runtime = match e.target_runtime {
         Runtime::InternalWidget => "INTERNAL WIDGET: one self-contained index.html that renders inside a sandboxed iframe on the Command Center dashboard (no parent/top access, no cookies, no network calls to private hosts).",
         Runtime::ExternalOs => "EXTERNAL APP: one self-contained index.html that runs on its own in a browser; it ships outside AgenticOS.",
     };
-    let mut s = format!(
-        "{}\n\nBUILD CONTRACT (from the Play Place hub, build {}):\n- Target: {runtime}\n- Summary: {}\n- Milestones: {}\n- Acceptance criteria:\n{}",
-        b.brief.trim(),
+    format!(
+        "BUILD CONTRACT (from the Play Place hub, build {}):\n- Target: {runtime}\n- Acceptance criteria:\n{}\n- Milestones: {}\n- Summary: {}",
         e.build_id,
-        e.spec_summary.trim(),
+        e.acceptance_criteria.iter().map(|c| format!("  - {c}")).collect::<Vec<_>>().join("\n"),
         e.milestones.join(" → "),
-        e.acceptance_criteria.iter().map(|c| format!("  - {c}")).collect::<Vec<_>>().join("\n")
-    );
-    s.truncate(s.char_indices().nth(BRIEF_MAX).map(|(i, _)| i).unwrap_or(s.len()));
-    s
+        envelope::clip(e.spec_summary.trim(), CONTRACT_SUMMARY_MAX),
+    )
+}
+
+/// `head` followed by `body` cut to fit `max` chars in all, with an explicit marker when the
+/// body was cut (the head — contract, destination, overrides — is never cut). Pure.
+pub fn lead_then_fit(head: &str, body: &str, max: usize) -> String {
+    let head = head.trim();
+    let body = body.trim();
+    let sep = "\n\n";
+    let n_head = head.chars().count() + sep.chars().count();
+    if n_head >= max {
+        return head.chars().take(max).collect();
+    }
+    let room = max - n_head;
+    if body.chars().count() <= room {
+        return format!("{head}{sep}{body}");
+    }
+    let marker = "\n[…brief truncated to fit…]";
+    let keep = room.saturating_sub(marker.chars().count());
+    format!("{head}{sep}{}{marker}", body.chars().take(keep).collect::<String>())
+}
+
+/// The worker's raw intent for a hub build: the envelope contract FIRST, then the compiled brief
+/// (interview answers, then notes) cut to fit (pure).
+pub fn worker_brief(b: &Build) -> String {
+    lead_then_fit(&contract_block(&b.envelope), &b.brief, BRIEF_MAX)
+}
+
+/// The Claude lane's Dev Fix item body: destination and HUMAN OVERRIDES first, then the
+/// contract-led brief cut to the Dev Fix Queue's body cap (it keeps only the head). Pure.
+pub fn claude_brief(b: &Build) -> String {
+    let mut head = format!("Write the result to: {}\\{}", served_dir(&b.envelope).display(), smoke::ENTRY);
+    if !b.envelope.human_override.is_empty() {
+        head.push_str(&format!("\n\nHUMAN OVERRIDES (highest priority):\n- {}", override_lines(&b.envelope).join("\n- ")));
+    }
+    lead_then_fit(&head, &worker_brief(b), CLAUDE_BODY_MAX)
+}
+
+/// The Dev Fix Queue's body cap (`devqueue::BODY_MAX`).
+pub const CLAUDE_BODY_MAX: usize = 8000;
+
+/// One worker task per hand-off (an automatic repair pass is a new hand-off). Only characters
+/// the task store accepts in a dedupe key (`[A-Za-z0-9-_.:]`). Pure.
+pub fn worker_dedupe_key(build_id: &str, now: i64) -> String {
+    format!("{build_id}:{now}")
 }
 
 /// The override block the worker's prompts carry (`envelope::set_overrides`).
@@ -986,23 +1067,31 @@ async fn dispatch_worker(app: &AppHandle, id: &str) -> Result<(), String> {
     let args = super::taskworker::CreateArgs {
         raw_intent: worker_brief(&b),
         title: Some(b.envelope.title.clone()),
-        thread: None,
+        // Outcomes reach Tony's main thread (never the hidden "general" fallback).
+        thread: Some("auto".into()),
         source: "playplace".into(),
         idea_id: None,
         options: Some(json!({})),
-        // One worker task per hand-off (an automatic repair pass is a new hand-off).
-        dedupe_key: Some(format!("{}#{}", b.envelope.build_id, now_ms())),
+        dedupe_key: Some(worker_dedupe_key(&b.envelope.build_id, now_ms())),
+        // The hub owns the folder: every pass (repair passes too) builds in staging/<slug>,
+        // so the Peek, the smoke test and the agents all look at the same output.
+        project_slug: Some(b.envelope.project_slug.clone()),
     };
     let known = known_of(app);
-    let (task, _created) = super::taskworker::create_task_gated(app.state::<TaskStore>().inner(), &args, max, &known, policy, false)?;
+    let store = app.state::<TaskStore>();
+    let (task, _created) = super::taskworker::create_task_gated(store.inner(), &args, max, &known, policy, false)?;
+    // Paused until it is bound: a Pause / Remove landing meanwhile can't let it run unowned.
+    envelope::set_paused(&task.task_id, true);
     envelope::set_overrides(&task.task_id, override_lines(&b.envelope));
     let tid = task.task_id.clone();
-    hub.with(|f| {
-        let b = f.get_mut(id)?;
-        b.worker_task_id = Some(tid.clone());
-        push_log(b, now_ms(), "event", format!("Handed to the worker (task {tid})"));
-        Ok(())
-    })?;
+    let bound = hub.with(|f| f.bind_worker(id, &tid, now_ms()));
+    if !matches!(bound, Ok(true)) {
+        if let Some(e) = release_worker_task_env(store.inner(), &tid, &known) {
+            super::taskworker::announce_cancelled(app, &e);
+        }
+        return bound.map(|_| ());
+    }
+    envelope::set_paused(&tid, false);
     super::taskworker::announce_queued(app, &task);
     Ok(())
 }
@@ -1010,11 +1099,7 @@ async fn dispatch_worker(app: &AppHandle, id: &str) -> Result<(), String> {
 async fn dispatch_claude(app: &AppHandle, id: &str) -> Result<(), String> {
     let hub = app.state::<HubState>();
     let b = hub.snapshot().get(id).cloned().ok_or("build vanished")?;
-    let mut desc = worker_brief(&b);
-    desc.push_str(&format!("\n\nWrite the result to: {}\\{}", served_dir(&b.envelope).display(), smoke::ENTRY));
-    if !b.envelope.human_override.is_empty() {
-        desc.push_str(&format!("\n\nHUMAN OVERRIDES (highest priority):\n- {}", override_lines(&b.envelope).join("\n- ")));
-    }
+    let desc = claude_brief(&b);
     // While the Dev Fix Queue call is in flight, Pause / Remove wait (`dispatching`); afterwards the
     // item is bound only if the build is still waiting for it, else the orphan item is deleted.
     hub.dispatching.lock().unwrap().insert(id.to_string());
@@ -1038,6 +1123,28 @@ fn worker_snap(app: &AppHandle, task_id: &str, after_seq: i64) -> Option<WorkerS
         .map(|r| WorkerRow { seq: r.seq, at: r.timestamp, event_type: r.event_type.clone(), severity: r.severity.clone(), from: r.from_agent.clone(), to: r.to_agent.clone(), text: r.short_summary.clone(), stage: r.stage.clone() })
         .collect();
     Some(WorkerSnap { status: e.status, stage: e.stage, iteration: e.iteration_count, max_iterations: e.max_iterations, error: e.error, project_slug: e.project_slug, rows })
+}
+
+/// A Claude-lane build is Building but its Dev Fix item is back to Queued: the run ended without
+/// Done (claude_fix sets In Progress → Queued on any unfinished run). Pure.
+pub fn claude_run_failed(dev_status: &str, build: Status) -> bool {
+    build == Status::Building && dev_status == "Queued"
+}
+
+/// The output entry's modification time (ms), if it exists.
+fn entry_mtime_ms(dir: &Path) -> Option<i64> {
+    let m = std::fs::metadata(dir.join(smoke::ENTRY)).ok()?.modified().ok()?;
+    m.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as i64)
+}
+
+/// Did the Claude run leave a fresh output (written after the build started)? Pure.
+pub fn claude_output_ready(entry_mtime: Option<i64>, started_at: Option<i64>) -> bool {
+    matches!((entry_mtime, started_at), (Some(m), Some(s)) if m >= s)
+}
+
+/// Claude's own closing note on a run (`dispatch.note`), one line, capped. Pure.
+pub fn claude_note(dispatch: &Value) -> Option<String> {
+    dispatch["note"].as_str().map(|n| envelope::clip(&envelope::one_line(n), 300)).filter(|n| !n.is_empty())
 }
 
 /// Claude lane status → (hub effect). Done = output ready (smoke), back to Pending = paused.
@@ -1067,8 +1174,29 @@ fn claude_effect(app: &AppHandle, id: &str, dev_id: &str) -> Option<Effect> {
                 b.envelope.status = Status::SmokeTesting;
                 b.progress = 96;
                 b.preview_version += 1;
-                push_log(b, now, "event", "Claude Code marked it done → smoke test".into());
+                let note = claude_note(&t.dispatch);
+                push_log(b, now, "event", format!("Claude Code marked it done → smoke test{}", note.map(|n| format!(" ({n})")).unwrap_or_default()));
                 Ok(Some(Effect::Smoke))
+            }
+            // The run ended without Done (failed verify, timeout, cancel, non-zero exit, an
+            // interrupted run after a restart): the item went back to Queued. Never leave the
+            // card "working" forever with the lane blocked — say why, and send it to repair.
+            // Claude's run judges "done" by changes in ITS git worktree, but a hub build's output
+            // goes to the (gitignored) staging folder: a fresh index.html there IS the output —
+            // smoke-test it instead of calling the run a failure.
+            s if claude_run_failed(s, b.envelope.status) && claude_output_ready(entry_mtime_ms(&served_dir(&b.envelope)), b.started_at) => {
+                b.envelope.status = Status::SmokeTesting;
+                b.progress = 96;
+                b.preview_version += 1;
+                let note = claude_note(&t.dispatch).map(|n| format!(" (its run said: {n})")).unwrap_or_default();
+                push_log(b, now, "event", format!("Claude Code wrote the output{note} → smoke test"));
+                Ok(Some(Effect::Smoke))
+            }
+            s if claude_run_failed(s, b.envelope.status) => {
+                let note = claude_note(&t.dispatch).unwrap_or_else(|| "Claude Code's run ended without finishing".into());
+                push_log(b, now, "stderr", format!("Claude Code's run ended without Done: {note}"));
+                f.to_repair(id, "Claude Code's run didn't finish", &note, vec![format!("claude: {note}")], true, now)?;
+                Ok(None)
             }
             _ => Ok(None),
         }
@@ -1118,6 +1246,59 @@ fn copy_tree(from: &Path, to: &Path) -> Result<usize, String> {
     Ok(n)
 }
 
+/// What the hub says about a build, for "status of X" / "where's the build at" (None while the
+/// worker's own status is the truth: building). Pure.
+pub fn hub_status_line(b: &Build) -> Option<String> {
+    let t = &b.envelope.title;
+    Some(match b.envelope.status {
+        Status::Building => return None,
+        Status::Queued if b.worker_task_id.is_some() => return None,
+        Status::Queued => format!("“{t}” is queued in the Play Place for its {} pass.", if b.smoke.failures > 0 { "repair" } else { "next" }),
+        Status::Paused => format!("“{t}” is paused in the Play Place."),
+        Status::SmokeTesting => format!("“{t}” is being smoke-tested in the Play Place."),
+        Status::ReadyForMerge => format!("“{t}” passed its smoke test and is ready for merge in the Play Place."),
+        Status::RepairQueue => format!("“{t}” is in the Repair Queue: {}.", b.repair.as_ref().map(|r| r.reason.as_str()).unwrap_or("needs a fix")),
+        Status::Deployed => format!("“{t}” is deployed."),
+    })
+}
+
+/// Fold the hub into a `task_status` answer: a task bound to a hub build reports the hub's
+/// state (smoke test, Repair Queue, ready for merge…), and "no builds in progress" lists the
+/// hub builds that are still in flight. Pure.
+pub fn status_with_hub(mut v: Value, f: &HubFile, slug: Option<&str>) -> Value {
+    let task = v["task_id"].as_str().map(String::from);
+    let bound = f.builds.iter().find(|b| task.is_some() && b.worker_task_id == task).or_else(|| slug.and_then(|s| f.builds.iter().find(|b| b.envelope.project_slug == s.trim())));
+    if let Some(line) = bound.and_then(hub_status_line) {
+        v["text"] = json!(line);
+        return v;
+    }
+    let idle = matches!(v["text"].as_str(), Some("No builds in progress.") | Some("I don't have a build with that name."));
+    if idle {
+        let lines: Vec<String> = f.builds.iter().filter(|b| matches!(b.envelope.status, Status::Queued | Status::Building | Status::SmokeTesting | Status::Paused | Status::RepairQueue)).filter(|b| slug.map_or(true, |s| b.envelope.project_slug == s.trim())).filter_map(hub_status_line).take(3).collect();
+        if !lines.is_empty() {
+            v["text"] = json!(lines.join(" "));
+        }
+    }
+    v
+}
+
+/// The chat line for a hub outcome (smoke pass / repair pass / Repair Queue). Pure.
+pub fn smoke_outcome_line(title: &str, s: Status, failed: &[String]) -> Option<(&'static str, String)> {
+    let first = failed.first().map(|f| envelope::clip(f, 120)).unwrap_or_default();
+    match s {
+        Status::ReadyForMerge => Some(("milestone", format!("“{title}” passed its smoke test — ready for merge in the Play Place"))),
+        Status::Queued => Some(("milestone", format!("“{title}” failed its smoke test ({first}); one automatic repair pass is running"))),
+        Status::RepairQueue => Some(("critical", format!("“{title}” is in the Repair Queue: {first}"))),
+        _ => None,
+    }
+}
+
+/// Tell the chat about a hub outcome: a bus note traced `hub:<build_id>` (the webview posts it
+/// to Tony's thread). Templated text only (titles / check names are scrubbed by the bus).
+fn hub_note(build_id: &str, event: &str, severity: &str, summary: &str) {
+    super::events::publish_note_capped("staging", event, severity, summary, Some(&format!("hub:{build_id}")), 600);
+}
+
 /// Run the smoke test for `id` on the blocking pool and fold the result.
 fn spawn_smoke(app: &AppHandle, id: String) {
     let hub = app.state::<HubState>();
@@ -1150,7 +1331,8 @@ fn spawn_smoke(app: &AppHandle, id: String) {
         let now = now_ms();
         match r {
             Ok((report, copied)) => {
-                let _ = hub.with(|f| {
+                let failed = report.failed_assertions.clone();
+                let outcome = hub.with(|f| {
                     let b = f.get_mut(&id)?;
                     b.committing = false;
                     match copied {
@@ -1163,9 +1345,15 @@ fn spawn_smoke(app: &AppHandle, id: String) {
                     }
                     f.record_smoke(&id, report, now)
                 });
+                if let Ok(s) = outcome {
+                    if let Some((sev, line)) = smoke_outcome_line(&b.envelope.title, s, &failed) {
+                        hub_note(&id, "hub_smoke", sev, &line);
+                    }
+                }
             }
             Err(e) => {
                 // A crashed check never wedges the lane: the build leaves smoke_testing for repair.
+                hub_note(&id, "hub_smoke", "critical", &format!("“{}”'s smoke test crashed — it's in the Repair Queue", b.envelope.title));
                 let _ = hub.with(|f| {
                     let b = f.get_mut(&id)?;
                     b.committing = false;
@@ -1200,6 +1388,13 @@ async fn pass(app: &AppHandle) {
         }
         let effect = if let Some(t) = &b.worker_task_id {
             if !matches!(b.envelope.status, Status::Queued | Status::Building | Status::Paused) {
+                // Past the hand-off (smoke / ready / repair): keep copying the task's late rows
+                // (Read-report discrepancies, card created, index failures) onto the card log.
+                if matches!(b.envelope.status, Status::SmokeTesting | Status::ReadyForMerge | Status::RepairQueue) {
+                    if let Some(w) = worker_snap(app, t, b.last_log_seq).filter(|w| !w.rows.is_empty()) {
+                        let _ = hub.with(|f| f.apply_rows(&id, &w));
+                    }
+                }
                 continue;
             }
             match worker_snap(app, t, b.last_log_seq) {
@@ -1214,6 +1409,13 @@ async fn pass(app: &AppHandle) {
         } else {
             Effect::None
         };
+        // A worker / Claude failure that moved the build to the Repair Queue reaches the chat.
+        if let Some(nb) = hub.snapshot().get(&id) {
+            if nb.envelope.status == Status::RepairQueue && b.envelope.status != Status::RepairQueue {
+                let reason = nb.repair.as_ref().map(|r| r.reason.clone()).unwrap_or_default();
+                hub_note(&id, "hub_repair", "critical", &format!("“{}” is in the Repair Queue: {reason}", nb.envelope.title));
+            }
+        }
         if effect == Effect::Smoke {
             spawn_smoke(app, id);
         }
@@ -1346,12 +1548,53 @@ fn not_dispatching(app: &AppHandle, id: &str) -> Result<(), String> {
 /// Cancel the build's worker task if it is still live, so a build the hub dropped (removed, or
 /// sent to the Repair Queue) never keeps running unowned in the worker. Terminal tasks are left
 /// alone. Returns whether a live task was cancelled.
+#[cfg_attr(not(test), allow(dead_code))] // the commands use `release_worker_task_env`
 pub fn release_worker_task(store: &TaskStore, task_id: &str, known: &[String]) -> bool {
+    release_worker_task_env(store, task_id, known).is_some()
+}
+
+/// `release_worker_task`, returning the cancelled envelope (for `announce_cancelled`).
+pub fn release_worker_task_env(store: &TaskStore, task_id: &str, known: &[String]) -> Option<envelope::Envelope> {
     let live = store.with(|c| envelope::get_bare(c, task_id)).ok().flatten().is_some_and(|e| !envelope::TERMINAL.contains(&e.status.as_str()));
-    let cancelled = live && super::taskworker::cancel_task(store, task_id, known).is_ok();
+    let cancelled = if live { super::taskworker::cancel_task(store, task_id, known).ok() } else { None };
     envelope::set_overrides(task_id, vec![]);
     envelope::set_paused(task_id, false);
     cancelled
+}
+
+/// What to do with a build's bound Dev Fix item when the hub drops the build (remove / repair):
+/// a waiting item is deleted (Claude must never build a build that no longer exists, and a
+/// re-queue would add a second item for the same folder); a running one can't be stopped here.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DevItemRelease {
+    Delete,
+    Running,
+    Keep,
+}
+
+pub fn dev_item_release(dev_status: &str) -> DevItemRelease {
+    match dev_status {
+        "Queued" | "Pending" => DevItemRelease::Delete,
+        "In Progress" => DevItemRelease::Running,
+        _ => DevItemRelease::Keep,
+    }
+}
+
+/// Release a dropped build's Dev Fix item (see `dev_item_release`). Returns a card log line.
+async fn release_dev_item(app: &AppHandle, dev_id: &str) -> Option<String> {
+    let t = app.state::<DevQueueState>().with(|c| devqueue::get(c, dev_id)).ok().flatten()?;
+    match dev_item_release(&t.status) {
+        DevItemRelease::Delete => {
+            let r = devqueue::dev_task_delete(app.state(), app.state(), app.state(), dev_id.to_string()).await;
+            let _ = app.emit("devqueue-changed", 1);
+            Some(match r {
+                Ok(_) => format!("Removed its waiting Dev Fix Queue item ({dev_id}) so Claude Code won't build it"),
+                Err(e) => format!("Couldn't remove its Dev Fix Queue item ({dev_id}): {e}"),
+            })
+        }
+        DevItemRelease::Running => Some(format!("Claude Code is still running its Dev Fix item ({dev_id}) — stop it from the Dev Fix Queue")),
+        DevItemRelease::Keep => None,
+    }
 }
 
 /// Stop and forget a build's preview servers (`<id>#widget`, plus `<id>` unless `widget_only`).
@@ -1487,6 +1730,10 @@ pub async fn build_steer(app: AppHandle, build_id: String, directive: String) ->
     let id = build_id.clone();
     mutate_bg(&app, move |f, now, known| f.steer(&id, &directive, now, known)).await?;
     let b = app.state::<HubState>().snapshot().get(&build_id).cloned().ok_or("build vanished")?;
+    // Steer is part of the conversation with the agents: it is recorded in the chat too.
+    if let Some(o) = b.envelope.human_override.last() {
+        hub_note(&build_id, "hub_steer", "handoff", &format!("Steer for “{}” (next agent step): {}", b.envelope.title, o.directive));
+    }
     if let Some(d) = &b.dev_task_id {
         if let Ok(Some(t)) = app.state::<DevQueueState>().with(|c| devqueue::get(c, d)) {
             if matches!(t.status.as_str(), "Queued" | "Pending") {
@@ -1507,11 +1754,33 @@ pub async fn build_to_repair(app: AppHandle, build_id: String, reason: Option<St
     let reason = reason.map(|r| clean(&r, 200)).filter(|r| !r.is_empty()).unwrap_or_else(|| "sent by Nic".into());
     let id = build_id.clone();
     mutate_bg(&app, move |f, now, known| f.to_repair(&id, &devqueue::scrub(&reason, known), &trace, failed, false, now)).await?;
-    if let Some(t) = b.worker_task_id {
-        let (a, known) = (app.clone(), known_of(&app));
-        let _ = blocking(move || Ok(release_worker_task(a.state::<TaskStore>().inner(), &t, &known))).await;
-    }
+    release_bound_work(&app, &build_id, b.worker_task_id, b.dev_task_id).await;
     build_of(&app, &build_id)
+}
+
+/// A build the hub dropped (Repair / Remove): cancel its live worker task (with the cancel's
+/// outward effects: phone mirror, idea ledger) and delete its waiting Dev Fix item.
+async fn release_bound_work(app: &AppHandle, build_id: &str, worker: Option<String>, dev: Option<String>) {
+    if let Some(t) = worker {
+        let (a, known) = (app.clone(), known_of(app));
+        if let Ok(Some(e)) = blocking(move || Ok(release_worker_task_env(a.state::<TaskStore>().inner(), &t, &known))).await {
+            super::taskworker::announce_cancelled(app, &e);
+        }
+    }
+    if let Some(d) = dev {
+        if let Some(line) = release_dev_item(app, &d).await {
+            let _ = app.state::<HubState>().with(|f| {
+                if let Ok(b) = f.get_mut(build_id) {
+                    if line.starts_with("Removed") {
+                        b.dev_task_id = None;
+                    }
+                    push_log(b, now_ms(), "event", line.clone());
+                }
+                Ok(())
+            });
+            changed(app);
+        }
+    }
 }
 
 #[tauri::command]
@@ -1582,10 +1851,7 @@ pub async fn build_remove(app: AppHandle, build_id: String) -> Result<HubView, S
         evict_previews(&mut hub.previews.lock().unwrap(), &build_id, false);
         hub.peeks.lock().unwrap().unwatch(&build_id);
     }
-    if let Some(t) = removed.worker_task_id {
-        let (a, known) = (app.clone(), known_of(&app));
-        let _ = blocking(move || Ok(release_worker_task(a.state::<TaskStore>().inner(), &t, &known))).await;
-    }
+    release_bound_work(&app, &build_id, removed.worker_task_id, removed.dev_task_id).await;
     changed(&app);
     Ok(view(&app))
 }
@@ -1605,8 +1871,16 @@ pub async fn build_widget_url(app: AppHandle, build_id: String) -> Result<String
     }
     let key = format!("{build_id}#widget");
     let hub = app.state::<HubState>();
-    if let Some(p) = hub.previews.lock().unwrap().get(&key) {
-        return Ok(p.url());
+    {
+        let mut previews = hub.previews.lock().unwrap();
+        if let Some(p) = previews.get(&key) {
+            if !preview_is_stale(&p.root, &dir) {
+                return Ok(p.url());
+            }
+            if let Some(old) = previews.remove(&key) {
+                old.stop();
+            }
+        }
     }
     let p = preview::start(dir).await?;
     let url = p.url();
@@ -1622,6 +1896,13 @@ pub struct PeekStatus {
     pub version: u64,
 }
 
+/// Is a running preview serving a folder other than the build's current output? Windows paths
+/// compare case- and slash-insensitively. Pure.
+pub fn preview_is_stale(served: &Path, current: &Path) -> bool {
+    let norm = |p: &Path| p.display().to_string().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    norm(served) != norm(current)
+}
+
 /// Start the build's loopback preview server once its output folder exists (idempotent).
 async fn ensure_preview(app: &AppHandle, build_id: &str) -> Result<Option<String>, String> {
     let b = app.state::<HubState>().snapshot().get(build_id).cloned().ok_or_else(|| format!("no build {build_id}"))?;
@@ -1629,10 +1910,19 @@ async fn ensure_preview(app: &AppHandle, build_id: &str) -> Result<Option<String
         return Ok(Some(u));
     }
     let hub = app.state::<HubState>();
-    if let Some(p) = hub.previews.lock().unwrap().get(build_id) {
-        return Ok(Some(p.url()));
-    }
     let dir = served_dir(&b.envelope);
+    {
+        let mut previews = hub.previews.lock().unwrap();
+        if let Some(p) = previews.get(build_id) {
+            if !preview_is_stale(&p.root, &dir) {
+                return Ok(Some(p.url()));
+            }
+            // The output folder moved (worker slug, repair pass): never keep serving the old one.
+            if let Some(old) = previews.remove(build_id) {
+                old.stop();
+            }
+        }
+    }
     if !should_start_preview(None, false, dir.is_dir()) {
         return Ok(None);
     }

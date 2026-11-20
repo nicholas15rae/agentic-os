@@ -50,7 +50,7 @@ export async function queueDesktopTurn(payload: Record<string, unknown> & { noDe
  * as `queueDesktopTurn`). A desktop refusal (e.g. the mode gate's `MODE_SURFACE_ONLY` /
  * `MODE_NOT_AUTO` on a `task`) throws its error text, so the caller never claims success.
  */
-export async function queueDesktopItem(kind: "turn" | "task", payload: Record<string, unknown>, opts: { capMs?: number } = {}): Promise<DesktopResult | null> {
+export async function queueDesktopItem(kind: "turn" | "task" | "pipeline", payload: Record<string, unknown>, opts: { capMs?: number } = {}): Promise<DesktopResult | null> {
   const q = await gateway<{ id: string }>("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind, payload }) });
   const t0 = Date.now();
   const cap = opts.capMs ?? DESKTOP_ANSWER_CAP_MS;

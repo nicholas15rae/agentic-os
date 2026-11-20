@@ -310,7 +310,7 @@ fn pause_holds_state_and_resume_returns_to_it() {
 #[test]
 fn a_paused_task_is_never_claimed_by_the_worker() {
     let store = TaskStore::in_memory();
-    let mk = |t: &str| super::super::taskworker::CreateArgs { raw_intent: format!("build {t}"), title: Some(t.into()), thread: None, source: "playplace".into(), idea_id: None, options: None, dedupe_key: Some(format!("k-{t}")) };
+    let mk = |t: &str| super::super::taskworker::CreateArgs { raw_intent: format!("build {t}"), title: Some(t.into()), thread: None, source: "playplace".into(), idea_id: None, options: None, dedupe_key: Some(format!("k-{t}")), project_slug: None };
     let (a, _) = super::super::taskworker::create_task(&store, &mk("first"), 3, &[]).unwrap();
     let (b, _) = super::super::taskworker::create_task(&store, &mk("second"), 3, &[]).unwrap();
     // Whichever the worker would claim first, pause it: the other one must run instead.
@@ -557,7 +557,7 @@ fn review4_release_cancels_a_live_worker_task_and_hold_keeps_repair_paused() {
     assert!(hold_worker(Status::Paused) && hold_worker(Status::RepairQueue));
     assert!(!hold_worker(Status::Building) && !hold_worker(Status::Queued));
     let store = TaskStore::in_memory();
-    let args = super::super::taskworker::CreateArgs { raw_intent: "build x".into(), title: Some("x".into()), thread: None, source: "playplace".into(), idea_id: None, options: None, dedupe_key: Some("k-release".into()) };
+    let args = super::super::taskworker::CreateArgs { raw_intent: "build x".into(), title: Some("x".into()), thread: None, source: "playplace".into(), idea_id: None, options: None, dedupe_key: Some("k-release".into()), project_slug: None };
     let (t, _) = super::super::taskworker::create_task(&store, &args, 3, &[]).unwrap();
     envelope::set_paused(&t.task_id, true);
     assert!(release_worker_task(&store, &t.task_id, &[]), "a live task is cancelled");
@@ -655,4 +655,208 @@ fn review18_promote_drops_the_live_widget_preview() {
         assert!(map.is_empty());
     });
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Thoughtform pipeline hardening (regressions) ──
+
+/// Regression: the hub's dedupe key used '#', which the task store rejects
+/// (`[A-Za-z0-9-_.:]` only), so EVERY Coder / Designer hub build failed to reach the worker.
+#[test]
+fn a_hub_hand_off_creates_its_worker_task_in_the_hubs_folder() {
+    let store = TaskStore::in_memory();
+    let h = hub_with(&[("b-tip", AssignedWorker::Coder)]);
+    let b = h.get("b-tip").unwrap();
+    let args = super::super::taskworker::CreateArgs {
+        raw_intent: worker_brief(b),
+        title: Some(b.envelope.title.clone()),
+        thread: Some("auto".into()),
+        source: "playplace".into(),
+        idea_id: None,
+        options: Some(json!({})),
+        dedupe_key: Some(worker_dedupe_key(&b.envelope.build_id, now_ms())),
+        project_slug: Some(b.envelope.project_slug.clone()),
+    };
+    let (t, created) = super::super::taskworker::create_task(&store, &args, 3, &[]).expect("the hub's dedupe key is accepted");
+    assert!(created);
+    assert_eq!(t.project_slug.as_deref(), Some(b.envelope.project_slug.as_str()), "a repair pass reuses the hub's folder");
+    assert_eq!(t.raw_intent.memory_reference["thread"], "auto");
+}
+
+/// Regression: the contract (target runtime, acceptance criteria) was appended AFTER an up to
+/// 8000-char brief and then cut off; the worker's Prompter only reads the head of the request.
+#[test]
+fn the_contract_leads_the_worker_brief_even_with_a_full_brief() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    h.get_mut("b-a").unwrap().brief = format!("Intake interview:\n- What does done look like? → MUST work offline\n\n{}", "note text ".repeat(900));
+    let s = worker_brief(h.get("b-a").unwrap());
+    assert!(s.chars().count() <= BRIEF_MAX);
+    assert!(s.starts_with("BUILD CONTRACT"), "{}", &s[..60]);
+    assert!(s.contains("INTERNAL WIDGET") && s.contains("- Renders"));
+    assert!(s.contains("MUST work offline"), "the interview answers come right after the contract");
+    assert!(s.contains("[…brief truncated to fit…]"), "a cut is marked");
+    let head: String = s.chars().take(super::super::taskworker::RAW_IN).collect();
+    assert!(head.contains("Acceptance criteria") && head.contains("MUST work offline"), "the Prompter's window holds the contract and answers");
+    // Short briefs are untouched apart from the order.
+    let h = hub_with(&[("b-b", AssignedWorker::Coder)]);
+    assert!(worker_brief(h.get("b-b").unwrap()).ends_with("brief"));
+}
+
+/// Regression: the Claude item body (capped at 8000) lost the output path and every HUMAN
+/// OVERRIDE (including the auto smoke-repair directive) because they were appended last.
+#[test]
+fn the_claude_brief_keeps_destination_and_overrides_first() {
+    let mut h = hub_with(&[("b-c", AssignedWorker::Claude)]);
+    h.get_mut("b-c").unwrap().brief = "x".repeat(9000);
+    h.steer("b-c", "dark theme only", 1, &[]).unwrap();
+    let s = claude_brief(h.get("b-c").unwrap());
+    assert!(s.chars().count() <= CLAUDE_BODY_MAX);
+    assert!(s.starts_with("Write the result to:") && s.contains("index.html"));
+    assert!(s.contains("HUMAN OVERRIDES (highest priority):\n- dark theme only"));
+    assert!(s.contains("BUILD CONTRACT"));
+}
+
+/// Regression: a steer on a ready-for-merge / smoke-testing build was accepted and sat
+/// "⏳ next step" forever (no agent step runs again).
+#[test]
+fn steer_is_refused_once_no_agent_step_will_run() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    for s in [Status::ReadyForMerge, Status::SmokeTesting, Status::RepairQueue] {
+        h.get_mut("b-a").unwrap().envelope.status = s;
+        let err = h.steer("b-a", "bigger buttons", 1, &[]).unwrap_err();
+        assert!(err.contains("Repair"), "{err}");
+    }
+    assert!(h.get("b-a").unwrap().envelope.human_override.is_empty());
+}
+
+/// Regression: a failure while paused was counted, and the Resume re-check counted the same
+/// output again: the build skipped its automatic repair pass and went straight to repair.
+#[test]
+fn a_smoke_failure_while_paused_is_counted_once_after_resume() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    running(&mut h, "b-a");
+    h.pause("b-a", 21).unwrap();
+    assert_eq!(h.record_smoke("b-a", smoke_fail("body"), 22).unwrap(), Status::Paused);
+    assert_eq!(h.get("b-a").unwrap().smoke.failures, 0);
+    h.resume("b-a", 23).unwrap();
+    assert_eq!(h.get("b-a").unwrap().envelope.status, Status::SmokeTesting);
+    assert_eq!(h.record_smoke("b-a", smoke_fail("body"), 24).unwrap(), Status::Queued, "the one automatic repair pass");
+    assert_eq!(h.get("b-a").unwrap().smoke.failures, 1);
+}
+
+/// Regression: the worker task was created before the bind and never undone, so a build removed
+/// / paused meanwhile left an unowned task running.
+#[test]
+fn a_worker_task_binds_only_to_a_build_still_waiting_for_it() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder), ("b-p", AssignedWorker::Coder)]);
+    assert!(h.bind_worker("b-a", "t-1", 1).unwrap());
+    assert_eq!(h.get("b-a").unwrap().worker_task_id.as_deref(), Some("t-1"));
+    assert!(!h.bind_worker("b-a", "t-2", 2).unwrap(), "already bound");
+    assert!(!h.bind_worker("b-gone", "t-3", 3).unwrap(), "removed meanwhile");
+    h.pause("b-p", 4).unwrap();
+    assert!(!h.bind_worker("b-p", "t-4", 5).unwrap(), "paused meanwhile");
+    let store = TaskStore::in_memory();
+    let args = super::super::taskworker::CreateArgs { raw_intent: "build x".into(), source: "playplace".into(), dedupe_key: Some("k-orphan".into()), ..Default::default() };
+    let (t, _) = super::super::taskworker::create_task(&store, &args, 3, &[]).unwrap();
+    let e = release_worker_task_env(&store, &t.task_id, &[]).expect("the orphan is cancelled");
+    assert_eq!(e.status, "failed");
+}
+
+/// Regression: rows the task committed after review_ready (Read-report discrepancies, card
+/// created) never reached the card log once the build moved to the smoke checkpoint.
+#[test]
+fn late_worker_rows_still_reach_the_card_log() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    running(&mut h, "b-a");
+    let before = h.get("b-a").unwrap().logs.len();
+    let row = WorkerRow { seq: 50, at: 30, event_type: "discrepancy".into(), severity: "milestone".into(), from: "librarian".into(), to: "tony".into(), text: "Read-report: x is missing".into(), stage: Some("done".into()) };
+    let w = WorkerSnap { status: "review_ready".into(), rows: vec![row], ..Default::default() };
+    assert_eq!(h.apply_rows("b-a", &w).unwrap(), 1);
+    assert_eq!(h.apply_rows("b-a", &w).unwrap(), 0, "never twice");
+    let b = h.get("b-a").unwrap();
+    assert_eq!(b.logs.len(), before + 1);
+    assert!(b.logs.last().unwrap().text.contains("Read-report"));
+    assert_eq!(b.envelope.status, Status::SmokeTesting, "rows only: no status effect");
+}
+
+/// Regression: the preview server was cached by build id and never re-checked, so Live Peek kept
+/// serving the first folder after the output moved.
+#[test]
+fn a_preview_on_a_moved_output_folder_is_stale() {
+    assert!(!preview_is_stale(Path::new(r"D:\x\staging\tip"), Path::new("d:/x/staging/tip/")));
+    assert!(preview_is_stale(Path::new(r"D:\x\staging\tip"), Path::new(r"D:\x\staging\tip-2")));
+}
+
+/// Regression: a Claude run that ended without Done (item back to Queued) left the card
+/// "working" forever, the failure note unseen, and the Claude lane blocked.
+#[test]
+fn an_unfinished_claude_run_is_detected_with_its_note() {
+    assert!(claude_run_failed("Queued", Status::Building));
+    assert!(!claude_run_failed("Queued", Status::Queued), "not started yet");
+    assert!(!claude_run_failed("In Progress", Status::Building));
+    assert_eq!(claude_note(&json!({ "note": "verify failed:\n 2 tests" })).as_deref(), Some("verify failed: 2 tests"));
+    assert_eq!(claude_note(&json!({})), None);
+    // Its output lands in the gitignored staging folder (the run calls that "no changes"): a
+    // fresh index.html there is the output, smoke-tested instead of failed.
+    assert!(claude_output_ready(Some(2_000), Some(1_000)));
+    assert!(!claude_output_ready(Some(500), Some(1_000)), "a stale file from before the run");
+    assert!(!claude_output_ready(None, Some(1_000)));
+}
+
+/// Regression: Remove / Repair left the build's waiting Dev Fix item queued, so Claude could
+/// still build a dropped build and a re-queue made a second item.
+#[test]
+fn a_dropped_builds_waiting_dev_item_is_deleted() {
+    assert_eq!(dev_item_release("Queued"), DevItemRelease::Delete);
+    assert_eq!(dev_item_release("Pending"), DevItemRelease::Delete);
+    assert_eq!(dev_item_release("In Progress"), DevItemRelease::Running);
+    assert_eq!(dev_item_release("Done"), DevItemRelease::Keep);
+}
+
+/// Regression: the smoke test checked every inline script as a strict ES module and only
+/// skipped a few types, failing valid pages (GLSL shaders, JSON-LD, sloppy classic scripts).
+#[test]
+fn smoke_checks_only_real_javascript_with_the_right_goal() {
+    let scripts = r#"<script type="x-shader/x-fragment">void main(){ gl_FragColor = vec4(1.0); }</script>
+<script type="application/ld+json">{"@type":"Thing"}</script>
+<script data-src="lazy.js">var package = 1; with (Math) { max(1, 2); }</script>
+<script type="module">export const a = 1;</script>"#;
+    let s = smoke::inline_scripts_typed(scripts);
+    assert_eq!(s.len(), 2, "{s:?}");
+    assert!(s[0].0.starts_with("var package") && !s[0].1, "data-src is not src; classic script");
+    assert!(s[1].1, "type=module is a module");
+    assert!(smoke::inline_scripts(r#"<script src="a.js"></script>"#).is_empty());
+    // End to end (when Node is on PATH): a sloppy classic script and a shader pass the check.
+    let dir = std::env::temp_dir().join(format!("buildhub-sloppy-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), format!("<!doctype html><html><head><title>t</title></head><body><h1>A widget with a shader and a classic script</h1>{scripts}</body></html>")).unwrap();
+    let r = smoke::run(&dir, Runtime::InternalWidget, 1);
+    assert!(!r.failed_assertions.iter().any(|f| f.starts_with("script-syntax")), "{:?}", r.failed_assertions);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Regression: status on demand read tasks.db only, so a build in the Repair Queue was reported
+/// as "ready for review" and an idle worker said "No builds in progress." over a queued build.
+#[test]
+fn status_on_demand_reports_the_hubs_state() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder), ("b-b", AssignedWorker::Coder)]);
+    h.get_mut("b-a").unwrap().worker_task_id = Some("t-a".into());
+    h.to_repair("b-a", "failed the smoke test 2 times", "", vec![], true, 1).unwrap();
+    let v = status_with_hub(json!({ "text": "\"Build slug-0\" is ready for review in staging/slug-0.", "task_id": "t-a" }), &h, None);
+    assert!(v["text"].as_str().unwrap().contains("Repair Queue: failed the smoke test 2 times"), "{v}");
+    let v = status_with_hub(json!({ "text": "No builds in progress.", "task_id": null }), &h, None);
+    let t = v["text"].as_str().unwrap();
+    assert!(t.contains("Build slug-1") && t.contains("queued"), "{t}");
+    h.get_mut("b-b").unwrap().envelope.status = Status::SmokeTesting;
+    let v = status_with_hub(json!({ "text": "I don't have a build with that name.", "task_id": null }), &h, Some("slug-1"));
+    assert!(v["text"].as_str().unwrap().contains("smoke-tested"));
+}
+
+/// Regression: smoke outcomes (pass / repair pass / Repair Queue) never reached the chat.
+#[test]
+fn smoke_outcomes_have_a_chat_line() {
+    assert_eq!(smoke_outcome_line("Tip", Status::ReadyForMerge, &[]).unwrap().0, "milestone");
+    let (sev, l) = smoke_outcome_line("Tip", Status::Queued, &["body: boom".into()]).unwrap();
+    assert!(sev == "milestone" && l.contains("body: boom") && l.contains("repair pass"));
+    assert_eq!(smoke_outcome_line("Tip", Status::RepairQueue, &["x".into()]).unwrap().0, "critical");
+    assert!(smoke_outcome_line("Tip", Status::Paused, &[]).is_none());
 }

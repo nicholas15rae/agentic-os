@@ -1,6 +1,7 @@
 import { heuristicPlan } from "@/features/orchestrator/plan";
 import { requestConfirmation } from "@/features/voice/voice-controller";
 import { useToasts } from "@/features/reminders/notify";
+import type { ThreadId } from "@/features/voice/voice-store";
 
 /**
  * Show the standard confirmation card for a user-initiated outbound action
@@ -46,7 +47,7 @@ export function confirmThen<T>(opts: { action: string; summary: string; readBack
  * the request came from; "voice" speaks the card's read-back (default "text").
  */
 export function gated<T>(
-  opts: { action: string; summary: string; detail?: Record<string, unknown>; required?: string; channel?: "voice" | "text" },
+  opts: { action: string; summary: string; detail?: Record<string, unknown>; required?: string; channel?: "voice" | "text"; thread?: ThreadId; silent?: boolean },
   call: (approved: boolean) => Promise<T>,
   describe: (r: T) => string,
 ): Promise<T | null> {
@@ -68,11 +69,14 @@ export function gated<T>(
       plan.target = { kind: "bridge", action: opts.action, scopes };
       plan.payload = opts.detail ?? {};
       plan.verification = { status: "verified", notes: [], by: "built from your own click" };
+      // The card (and its "Approved" line) lands in the thread that asked, not Tony's.
+      if (opts.thread) plan.thread = opts.thread;
       plan.run = async () => {
         try {
           const r = await call(true);
           resolve(r);
-          return { text: describe(r), meta: `Permission Bridge · ${opts.action} · ${scopes.join("+")}` };
+          // `silent`: the caller posts the result itself (an os_turn answer): never a second copy.
+          return { text: opts.silent ? "" : describe(r), meta: `Permission Bridge · ${opts.action} · ${scopes.join("+")}` };
         } catch (e) {
           reject(e);
           throw e;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ROUTING_CONFIG } from "@/features/dispatcher/router";
-import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice } from "./route-for";
-import { THREADS, setSectionSource, tonyThread, tonyThreadFor, useVoice, type Channel, type ThreadId } from "./voice-store";
+import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice, soloHold } from "./route-for";
+import { THREADS, remoteIsNewer, setSectionSource, tonyThread, tonyThreadFor, useVoice, type Channel, type ThreadId } from "./voice-store";
 
 const cfg = DEFAULT_ROUTING_CONFIG;
 const rf = (utterance: string, thread: ThreadId, channel: Channel) => routeFor({ utterance, thread, channel, cfg, osName: "Tony" });
@@ -128,5 +128,39 @@ describe("Tony's thread", () => {
     expect(useVoice.getState().pushTurn({ who: "system", text: "y", thread: "coder" }).thread).toBe("coder");
     useVoice.getState().setActiveThread("auto");
     setSectionSource(() => "command");
+  });
+});
+
+describe("Solo hold mirrored from Rust (regression)", () => {
+  // Under Solo the chat used to say "Routing … to Coder…" and play the handoff cue, then Rust kept
+  // the turn with Tony: the transcript recorded a delegation that never happened.
+  it("a Domain / low-confidence hit stays with Tony under surface_only; a Named-high address doesn't", () => {
+    const solo = { explicit: false, dispatch: "surface_only" };
+    expect(soloHold(rf("I think the coder should check the landing page", "auto", "text"), solo)).toMatchObject({ role: "general", kind: "Self" });
+    expect(soloHold(rf("fix bug in the repo script", "auto", "text"), solo)).toMatchObject({ role: "general", kind: "Self" });
+    expect(soloHold(rf("tell the coder to fix the build", "auto", "text"), solo)).toMatchObject({ role: "coder", kind: "Named" });
+    expect(soloHold(rf("fix bug in the repo script", "auto", "text"), { explicit: false, dispatch: "ask_before_dispatch" }).role).toBe("coder");
+    expect(soloHold(rf("check my last five whatsapp messages from the casting call", "auto", "text"), solo).role).not.toBe("general");
+  });
+});
+
+describe("the phone mirror of a streamed answer (regression)", () => {
+  // The phone kept the first ~1.5 s of a streamed answer ("streaming…") for good: mergeRemote
+  // ignored every id it already had, and the desktop never re-pushed an in-place update.
+  it("a newer revision of a turn the phone already holds replaces it", () => {
+    useVoice.setState({ turns: [] });
+    const t = useVoice.getState().pushTurn({ who: "agent", from: "os", text: "Once", thread: "auto", meta: "streaming…" });
+    const partial = useVoice.getState().turns[0];
+    useVoice.getState().updateTurn(t.id, { text: "Once upon a time, the end.", meta: "local" });
+    const full = useVoice.getState().turns[0];
+    expect(full.rev).toBe(1);
+    expect(remoteIsNewer(partial, full)).toBe(true);
+    useVoice.setState({ turns: [partial] });
+    useVoice.getState().mergeRemote([full]);
+    expect(useVoice.getState().turns).toHaveLength(1);
+    expect(useVoice.getState().turns[0]).toMatchObject({ text: "Once upon a time, the end.", meta: "local" });
+    // An older copy never overwrites a newer local one.
+    useVoice.getState().mergeRemote([partial]);
+    expect(useVoice.getState().turns[0].text).toBe("Once upon a time, the end.");
   });
 });

@@ -1140,6 +1140,9 @@ pub struct OsTurnResult {
     /// The Spotify write the card must run (D14); `answer` is "" then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pending_spotify: Option<PendingSpotifyCall>,
+    /// Who produced `answer`: "agent" (the sub-agent itself), "os" (Tony's synthesis — also
+    /// when he stepped in for a failed agent), "overseer", or "tool".
+    pub(crate) answered_by: String,
 }
 
 pub(crate) fn step(kind: &str, from: &str, to: &str, text: impl Into<String>, ok: bool, ms: u128) -> OsStep {
@@ -1203,6 +1206,24 @@ pub fn os_turn_cancel(stream_id: String) {
 }
 
 #[cfg(test)]
+mod turn_steps_tests {
+    use super::*;
+
+    /// Regression: tool output and the delegate prompt (with raw live tool data and the identity
+    /// file) reached chat / localStorage / the phone mirror unscrubbed and verbatim.
+    #[test]
+    fn steps_are_scrubbed_and_the_delegate_step_names_its_attachments() {
+        let mut s = vec![step("tool", "os", "gmail.search", "q=invoice\n→ token sk-abcdefghijklmnopqrstuvwx1234 in the body", true, 3)];
+        scrub_steps(&mut s, &[]);
+        assert!(!s[0].text.contains("sk-abcdefghijklmnopqrstuvwx1234"), "{}", s[0].text);
+        let shown = delegate_shown("Request: fix the build", true, 1834);
+        assert!(shown.starts_with("Request: fix the build"));
+        assert!(shown.contains("[+ MASTER_IDENTITY.md attached]") && shown.contains("1834 chars"));
+        assert_eq!(delegate_shown("Request: x", false, 0), "Request: x");
+    }
+}
+
+#[cfg(test)]
 mod turn_cancel_tests {
     use super::*;
     use futures_util::FutureExt;
@@ -1233,7 +1254,10 @@ pub async fn run_os_turn(state: &DispatchState, os: &OsState, bridge: &BridgeSta
     // Phase 3: a live Tony turn keeps idle memory compaction away (entry and exit).
     let _touch = super::compaction::Touch::start();
     let id = req.trace_id.clone().filter(|t| super::trace::valid_id(t)).unwrap_or_else(super::trace::new_id);
-    super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app)).await
+    let mut r = super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app)).await?;
+    // Steps are shown in chat, persisted in localStorage and mirrored to the phone: scrub them.
+    scrub_steps(&mut r.steps, &super::devqueue::known_secrets(state, os));
+    Ok(r)
 }
 
 /// System Map label for a model call: `provider · model`.
@@ -1314,6 +1338,10 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     }
     let pre = if comms_thread.is_none() { prefetch_tools(state, os, bridge, &cfg, prefetch_agent, &text, &req.context, req.approved, req.ask_cards, req.cue_playing).await } else { Prefetch::default() };
     steps.extend(pre.steps);
+    // Steps reach the webview as they happen ("os-step"), so a turn that then fails or is cut
+    // ("cut it") still shows what was asked and answered.
+    let known = super::devqueue::known_secrets(state, os);
+    let mut emitted = emit_steps(app, req.stream_id.as_deref(), &steps, 0, &known);
     let tool_note = tool_note(&cfg.os_name, &pre.block, pre.failure.as_ref());
     let tool_used = pre.used;
 
@@ -1334,6 +1362,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             route_reason: route_reason.clone(),
             route_kind: route_kind.clone(),
             pending_spotify: pending,
+            answered_by: "tool".into(),
         };
         if let Some(p) = pre.pending_spotify {
             let res = spotify_turn(String::new(), Some(p.name.clone()), "spotify approval card", Some(p), steps);
@@ -1365,18 +1394,21 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             } else {
                 String::new()
             };
-            let task = if req.explicit {
-                if skills.is_empty() && identity.is_empty() { text.clone() } else { format!("{text}{}{identity}", if skills.is_empty() { String::new() } else { format!("\n\n(Your attached skills: {})", skills.replace('\n', "; ")) }) }
+            let base = if req.explicit {
+                if skills.is_empty() { text.clone() } else { format!("{text}\n\n(Your attached skills: {})", skills.replace('\n', "; ")) }
             } else {
                 format!(
                     "[{} → {label} agent] The user asked {} (their OS) to get this from you. Answer from your workspace data and documents; be specific and concise.{}\n\nRequest: {text}",
                     cfg.os_name,
                     cfg.os_name,
                     if skills.is_empty() { String::new() } else { format!("\nYour attached skills:\n{skills}") }
-                ) + &identity
+                )
             };
-            let task = format!("{task}{tool_note}");
-            steps.push(step("delegate", "os", &role, &task, true, 0));
+            let task = format!("{base}{identity}{tool_note}");
+            // The chat shows the request as sent, with the identity file and raw live tool data
+            // named rather than pasted (they stay in the prompt; never in a transcript).
+            steps.push(step("delegate", "os", &role, delegate_shown(&base, !identity.is_empty(), tool_note.chars().count()), true, 0));
+            emitted = emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &known);
             let t0 = Instant::now();
             // Talking directly to this agent's tab (no Tony synthesis to follow):
             // stream its reply with its OWN voice as it arrives, instead of
@@ -1414,6 +1446,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     steps.push(step("step-in", "os", "user", format!("{} stepped in with its own tools.", cfg.os_name), true, 0));
                 }
             }
+            emitted = emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &known);
         }
     }
 
@@ -1433,6 +1466,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             route_reason: route_reason.clone(),
             route_kind: route_kind.clone(),
             pending_spotify: None,
+            answered_by: "agent".into(),
         };
         log_turn(bridge, &role, &text, &res);
         return Ok(res);
@@ -1479,35 +1513,46 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     }
     let res = match answer {
         Ok(r) => r,
-        Err(e) if cfg.overseer.auto_escalate => {
-            steps.push(step("error", "os", "user", format!("local chain failed: {e}"), false, 0));
-            let t0 = Instant::now();
-            let escalated = overseer_call(state, os, &cfg, &msgs).await;
-            match &escalated {
-                Ok((_, engine, _)) => emit(Hop::Model, &format!("overseer · {engine}"), true, t0.elapsed().as_millis(), None),
-                Err(e) => emit_with(Hop::Model, "overseer", false, t0.elapsed().as_millis(), Some(e), None, &super::devqueue::known_secrets(state, os)),
-            }
-            let (answer, engine, redacted) = escalated?;
-            steps.push(step("overseer", &engine, "os", "auto-escalated", true, t0.elapsed().as_millis()));
-            let out = OsTurnResult {
-                answer,
-                steps,
-                provider_id: engine,
-                delegated_to,
-                tool: tool_used,
-                latency_ms: started.elapsed().as_millis(),
-                reason: "auto-escalated to overseer".into(),
-                redacted,
-                comms_thread: comms_thread.clone(),
-                routed_role: role.clone(),
-                route_reason: route_reason.clone(),
-                route_kind: route_kind.clone(),
-                pending_spotify: None,
-            };
-            log_turn(bridge, &role, &text, &out);
-            return Ok(out);
-        }
         Err(e) => {
+            let mut e = e;
+            if cfg.overseer.auto_escalate {
+                steps.push(step("error", "os", "user", format!("local chain failed: {e}"), false, 0));
+                let t0 = Instant::now();
+                let escalated = overseer_call(state, os, &cfg, &msgs).await;
+                match &escalated {
+                    Ok((_, engine, _)) => emit(Hop::Model, &format!("overseer · {engine}"), true, t0.elapsed().as_millis(), None),
+                    Err(e) => emit_with(Hop::Model, "overseer", false, t0.elapsed().as_millis(), Some(e), None, &super::devqueue::known_secrets(state, os)),
+                }
+                match escalated {
+                    Ok((answer, engine, redacted)) => {
+                        steps.push(step("overseer", &engine, "os", "auto-escalated", true, t0.elapsed().as_millis()));
+                        let out = OsTurnResult {
+                            answer,
+                            steps,
+                            provider_id: engine,
+                            delegated_to,
+                            tool: tool_used,
+                            latency_ms: started.elapsed().as_millis(),
+                            reason: "auto-escalated to overseer".into(),
+                            redacted,
+                            comms_thread: comms_thread.clone(),
+                            routed_role: role.clone(),
+                            route_reason: route_reason.clone(),
+                            route_kind: route_kind.clone(),
+                            pending_spotify: None,
+                            answered_by: "overseer".into(),
+                        };
+                        log_turn(bridge, &role, &text, &out);
+                        return Ok(out);
+                    }
+                    // The overseer failed too: never drop an agent reply that DID arrive — fall
+                    // through to the raw-reply hand-over below (as without auto-escalation).
+                    Err(oe) => {
+                        steps.push(step("error", "overseer", "os", format!("overseer failed: {oe}"), false, t0.elapsed().as_millis()));
+                        e = format!("{e}; overseer: {oe}");
+                    }
+                }
+            }
             // The sub-agent answered but no model is up to summarize: hand it over as-is.
             if let Some(a) = agent_answer {
                 let out = OsTurnResult {
@@ -1524,10 +1569,15 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     route_reason: route_reason.clone(),
                     route_kind: route_kind.clone(),
                     pending_spotify: None,
+                    answered_by: "agent".into(),
                 };
                 log_turn(bridge, &role, &text, &out);
                 return Ok(out);
             }
+            // Nothing answered. What Tony DID send and hear (the delegate prompt, the agent's
+            // error, tool results) still reaches the chat and the audit log.
+            emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &super::devqueue::known_secrets(state, os));
+            log_failed_turn(bridge, &role, &text, &steps, &e);
             return Err(e);
         }
     };
@@ -1549,9 +1599,57 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         route_reason,
         route_kind,
         pending_spotify: None,
+        answered_by: "os".into(),
     };
     log_turn(bridge, &role, &text, &out);
     Ok(out)
+}
+
+/// The delegate step as the chat shows it: the request as sent, with the attached identity file
+/// and live tool data named (and sized) instead of pasted. Pure.
+pub(crate) fn delegate_shown(base: &str, identity: bool, tool_chars: usize) -> String {
+    let mut s = base.to_string();
+    if identity {
+        s.push_str("\n\n[+ MASTER_IDENTITY.md attached]");
+    }
+    if tool_chars > 0 {
+        s.push_str(&format!("\n\n[+ live tool data attached: {tool_chars} chars]"));
+    }
+    s
+}
+
+/// Emit `steps[from..]` as `os-step` events for the turn's stream (scrubbed), so the webview can
+/// show what was sent / answered even when the turn then fails or is cut. Returns the new mark.
+fn emit_steps(app: Option<&tauri::AppHandle>, stream_id: Option<&str>, steps: &[OsStep], from: usize, known: &[String]) -> usize {
+    if let (Some(app), Some(sid)) = (app, stream_id) {
+        use tauri::Emitter;
+        for (i, s) in steps.iter().enumerate().skip(from) {
+            let mut s = s.clone();
+            s.text = super::devqueue::scrub(&s.text, known);
+            let _ = app.emit("os-step", json!({ "streamId": sid, "index": i, "step": s }));
+        }
+    }
+    steps.len()
+}
+
+/// Every step's text through the secret scrub (tool output / agent replies can carry a token
+/// pasted into an email or a doc). Pure.
+pub(crate) fn scrub_steps(steps: &mut [OsStep], known: &[String]) {
+    for s in steps {
+        s.text = super::devqueue::scrub(&s.text, known);
+    }
+}
+
+/// The audit-log record of a turn that produced no answer (its steps still count).
+fn log_failed_turn(bridge: &BridgeState, role: &str, text: &str, steps: &[OsStep], err: &str) {
+    bridge.log(json!({
+        "type": "os-turn",
+        "role": role,
+        "upstream": text,
+        "error": err.chars().take(300).collect::<String>(),
+        "steps": steps.len(),
+        "stepKinds": steps.iter().map(|s| format!("{}:{}→{}", s.kind, s.from, s.to)).collect::<Vec<_>>(),
+    }));
 }
 
 /// The whole trimmed reply is itself a JSON object / fenced JSON / tool-call

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve } from "@/features/dispatcher/router";
 import { parseDevTask } from "@/features/os/os-intent-parse";
 import { BRAINSTORM_IDLE_MS, useDialogue } from "./dialogue-store";
-import { classifyTier, isCommitCue, leadsBrainstorm, looksBrainstorm, offerTarget, parseDefer, type TierCtx } from "./tier";
+import { classifyTier, commitStrength, isCommitCue, leadsBrainstorm, looksBrainstorm, looksBuildShaped, offerTarget, parseDefer, type TierCtx } from "./tier";
 
 const cfg = DEFAULT_ROUTING_CONFIG;
 /** The voice controller's inputs for a line, from the real router (mutating is supplied per case). */
@@ -71,6 +71,18 @@ describe("parseDefer (Tier 4)", () => {
     expect(parseDefer("nah, save it for later", "Tony")).toEqual({ target: "brainstorm", explicit: false });
     expect(parseDefer("save it to my brainstorm list for now", "Tony")).toEqual({ target: "brainstorm", explicit: true });
     expect(parseDefer("put that in the play place for now", "Tony")).toEqual({ target: "playplace", explicit: true });
+  });
+});
+
+describe("thoughtform hardening (regressions)", () => {
+  it("bare agreement is a weak cue (never Builder's no-card auto build); a real commit is strong", () => {
+    for (const l of ["sounds good", "Sounds good.", "yeah that works", "Go.", "so do it"]) expect(commitStrength(l), l).toBe("weak");
+    for (const l of ["ok let's do it", "lock it in", "ship it", "that's the plan", "let's build it", "sounds good, let's do it"]) expect(commitStrength(l), l).toBe("strong");
+    expect(commitStrength("what's the plan")).toBeNull();
+  });
+  it("a bare 'thinking about…' opener is not build-shaped unless it names something to build", () => {
+    for (const l of ["I've been thinking about emailing Sam about the contract renewal", "I'm thinking about calling my mom tonight", "I have an idea"]) expect(looksBuildShaped(l), l).toBe(false);
+    for (const l of ["I've been thinking about building an audition tracker", "I've been thinking about an app that sends reminders", "I have an idea for a habit tracker app", "I want to build a landing page"]) expect(looksBuildShaped(l), l).toBe(true);
   });
 });
 
@@ -156,7 +168,10 @@ describe("dialogue-store sessions", () => {
     d.touch("auto", "t1", { topicRole: "designer" }, 1000);
     d.touch("auto", "t2", { buildShaped: true }, 2000);
     expect(useDialogue.getState().active("auto", 2500)).toMatchObject({ fromTurnId: "t1", topicRole: "designer", buildShaped: true, startedAt: 1000, lastAt: 2000 });
-    expect(useDialogue.getState().active("general", 2500)).toBeNull();
+    // Tony's conversation is one brainstorm on both his threads ("auto" / "general": the view
+    // decides which a voice line lands in); a sub-agent thread has its own.
+    expect(useDialogue.getState().active("general", 2500)).toMatchObject({ fromTurnId: "t1" });
+    expect(useDialogue.getState().active("coder", 2500)).toBeNull();
   });
   it("ends on end() and after 20 minutes idle", () => {
     const d = useDialogue.getState();

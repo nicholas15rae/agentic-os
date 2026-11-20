@@ -52,12 +52,35 @@ interface CaptureState {
   organize: (id?: string) => Promise<void>;
 }
 
+/** The engine listening right now (stop / abort / restartProfile act on it). */
 let engine: SttEngine | null = null;
-const getEngine = () => (engine ??= ((w) => (w.supported ? w : new WebSpeechStt()))(new WhisperStt()));
+let probe: SttEngine | null = null;
+/** Whisper (desktop) or Web Speech (phones), as one support probe. */
+const getEngine = () => (probe ??= ((w) => (w.supported ? w : new WebSpeechStt()))(new WhisperStt()));
+/** A fresh engine of the supported kind per listen: Whisper transcribes the last utterance on its
+ * own engine while the next one already records (the mic is never closed for the round trip). */
+const newEngine = (): SttEngine => (getEngine() instanceof WhisperStt ? new WhisperStt() : getEngine());
 
 /** Resolves once the in-flight utterance (if any) has been transcribed and appended. `stop()` awaits this instead of discarding it. */
 let pendingFinal: Promise<void> = Promise.resolve();
 let resolvePendingFinal: (() => void) | null = null;
+/** Appends land in spoken order, one after the other (transcriptions can overlap now). */
+let appendChain: Promise<void> = Promise.resolve();
+/** Phrases transcribed but not saved yet (the gateway blipped): saved with the next one that lands. */
+let unsaved: { t: number; text: string }[] = [];
+/** Continuous profile: one clip is cut and sent at most this often (Whisper's clip cap is ~8.7 min
+ * and its call times out at 180 s), while recording carries straight on. */
+export const CONTINUOUS_SEGMENT_MS = 90_000;
+let segmentTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Listen Mode holds Tony's hands-free wake listen (one mic, one listener): a brain-dump line that
+ * starts with "Hey Tony" or a short "cut it" must never run as a command, nor be transcribed twice. */
+let wakeHeld = false;
+function holdTonyWake(on: boolean) {
+  if (on === wakeHeld) return;
+  wakeHeld = on;
+  void import("@/features/voice/voice-controller").then((m) => m.holdWake(on)).catch(() => undefined);
+}
 
 export const useBrainstorm = create<CaptureState>((set, get) => ({
   noteId: null,
@@ -72,30 +95,32 @@ export const useBrainstorm = create<CaptureState>((set, get) => ({
     const stt = getEngine();
     if (!stt.supported) return set({ error: "No speech-to-text available here (desktop needs Whisper; phones need Chrome)." });
     let id = existing ?? get().noteId;
-    if (!id) {
-      const note = await collections.create<BrainstormNote>("notes", {
-        title: `Brainstorm · ${new Date().toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`,
-        rawText: "",
-        segments: [],
-      });
-      id = note.id;
-    }
+    // Never reuse a note that was deleted meanwhile (a PATCH would bring it back holding only the
+    // new phrase): a missing note means a new one.
+    if (id && !(await noteExists(id))) id = null;
+    if (!id) id = await newNote();
     set({ noteId: id, listening: true, error: null, sinceOrganize: 0 });
+    holdTonyWake(true);
     loop(id);
   },
 
   stop: async () => {
     set({ listening: false, phase: "idle" });
+    clearTimeout(segmentTimer);
+    holdTonyWake(false);
     // Flush (not abort): transcribe whatever was captured since the last pause instead of
-    // throwing it away, and wait for it to land before organizing.
+    // throwing it away, and wait for it (and every earlier phrase) to land before organizing.
     engine?.stop();
     await pendingFinal;
+    await appendChain;
     const id = get().noteId;
     if (id && get().sinceOrganize > 0) await get().organize(id);
   },
 
   abort: () => {
     set({ listening: false, phase: "idle" });
+    clearTimeout(segmentTimer);
+    holdTonyWake(false);
     engine?.abort(); // calls no handlers: the last phrase is never transcribed
     resolvePendingFinal?.();
     resolvePendingFinal = null;
@@ -111,10 +136,12 @@ export const useBrainstorm = create<CaptureState>((set, get) => ({
     const target = id ?? get().noteId;
     if (!target) return;
     set({ organizing: true, error: null });
+    // Only the phrases this pass read are organized: ones appended while it ran still count.
+    const read = get().sinceOrganize;
     try {
       await cc.organize(target);
       await collections.sync("notes");
-      set({ sinceOrganize: 0 });
+      set({ sinceOrganize: Math.max(0, get().sinceOrganize - read) });
     } catch (e) {
       set({ error: `Organize: ${e instanceof Error ? e.message : e}` });
     } finally {
@@ -127,54 +154,131 @@ function loop(noteId: string) {
   const s = useBrainstorm.getState();
   if (!s.listening || s.noteId !== noteId || !micEnabled()) return;
   pendingFinal = new Promise<void>((resolve) => (resolvePendingFinal = resolve));
+  let done = false;
+  const resolveMine = resolvePendingFinal;
   const settle = () => {
-    resolvePendingFinal?.();
-    resolvePendingFinal = null;
+    if (done) return;
+    done = true;
+    resolveMine?.();
+    if (resolvePendingFinal === resolveMine) resolvePendingFinal = null;
+  };
+  // Re-arm exactly once per listen: right when the utterance ends (Whisper), else after it lands.
+  let rearmed = false;
+  const rearm = (ms: number) => {
+    if (rearmed) return;
+    rearmed = true;
+    clearTimeout(segmentTimer);
+    if (useBrainstorm.getState().listening) setTimeout(() => loop(noteId), ms);
   };
   const profile = useSettings.getState().brainstorm.listenProfile;
-  getEngine().start(
+  const stt = newEngine();
+  engine = stt;
+  const overlap = stt instanceof WhisperStt;
+  stt.start(
     {
       onPartial: () => undefined,
-      onPhase: (phase) => useBrainstorm.setState({ phase }),
+      onPhase: (phase) => {
+        // A finished phrase being transcribed: the next listen starts NOW (its own engine), so
+        // nothing said during the Whisper round trip and the note save is lost.
+        if (phase === "transcribing" && overlap) {
+          if (engine === stt) useBrainstorm.setState({ phase });
+          return rearm(0);
+        }
+        if (engine === stt) useBrainstorm.setState({ phase });
+      },
       onFinal: (text) => {
-        void (async () => {
-          try {
-            if (text) await append(noteId, text);
-          } finally {
-            settle();
-          }
+        const at = Date.now();
+        const saved = text ? enqueueAppend(noteId, text, at) : appendChain;
+        void saved.finally(() => {
+          settle();
           // Keep listening until the user turns it off (or re-reads a just-changed profile).
-          if (useBrainstorm.getState().listening) setTimeout(() => loop(noteId), 120);
-        })();
+          rearm(120);
+        });
       },
       onError: (e) => {
         settle();
         useBrainstorm.setState({ error: e });
-        if (useBrainstorm.getState().listening) setTimeout(() => loop(noteId), 1500);
+        rearm(1500);
       },
     },
     LISTEN_PROFILES[profile],
   );
+  // Continuous: never one huge clip (it would exceed Whisper's limit and lose the whole session):
+  // cut and transcribe on a cadence while the next segment records.
+  if (profile === "continuous" && overlap) {
+    clearTimeout(segmentTimer);
+    segmentTimer = setTimeout(() => {
+      if (engine === stt && useBrainstorm.getState().listening) stt.stop();
+    }, CONTINUOUS_SEGMENT_MS);
+  }
+}
+
+/** Queue one phrase's append behind the earlier ones (spoken order). Never rejects. */
+function enqueueAppend(noteId: string, text: string, at: number): Promise<void> {
+  appendChain = appendChain.then(() => appendSafe(noteId, text, at));
+  return appendChain;
+}
+
+/** Append a phrase; a failed save keeps it (with any earlier unsaved ones) for the next try and
+ * says so — the transcribed thought is never thrown away, and Listen Mode keeps listening. */
+async function appendSafe(noteId: string, text: string, at: number): Promise<void> {
+  unsaved.push({ t: at, text });
+  const batch = unsaved;
+  try {
+    const id = await append(useBrainstorm.getState().noteId ?? noteId, batch);
+    unsaved = unsaved.filter((u) => !batch.includes(u));
+    if (id !== useBrainstorm.getState().noteId) useBrainstorm.setState({ noteId: id });
+    if (useBrainstorm.getState().error?.startsWith("Couldn't save")) useBrainstorm.setState({ error: null });
+  } catch (e) {
+    useBrainstorm.setState({ error: `Couldn't save ${batch.length === 1 ? "that thought" : `${batch.length} thoughts`} yet (${e instanceof Error ? e.message : String(e)}) — kept, and saved with the next one` });
+  }
 }
 
 // Phase 2 Part B: locking the mic ends Listen Mode at once. The phrase in flight is discarded,
 // not flushed (flushing would send audio heard before the mute to Whisper).
 onMicChange((on) => {
   if (on || !useBrainstorm.getState().listening) return;
+  holdTonyWake(false);
   useBrainstorm.getState().abort();
   useBrainstorm.setState({ error: "Mic locked off: Listen Mode stopped (last phrase discarded)" });
 });
 
-async function append(noteId: string, text: string) {
+const newNote = async () =>
+  (
+    await collections.create<BrainstormNote>("notes", {
+      title: `Brainstorm · ${new Date().toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`,
+      rawText: "",
+      segments: [],
+    })
+  ).id;
+
+/** Is the note still there (not deleted)? A sync failure counts as "yes" (don't fork a note offline). */
+async function noteExists(id: string): Promise<boolean> {
   await collections.sync("notes");
-  const note = collections.snapshot<BrainstormNote>("notes").find((n) => n.id === noteId);
-  const segments = [...(note?.segments ?? []), { t: Date.now(), text, device: platform }];
-  await collections.update<BrainstormNote>("notes", noteId, {
+  const snap = collections.snapshot<BrainstormNote>("notes");
+  return snap.length === 0 || snap.some((n) => n.id === id);
+}
+
+/** Append phrases to the note. A note deleted meanwhile is never resurrected with only the new
+ * phrase: a fresh note takes it (and Listen Mode moves to it). Returns the note id written. */
+async function append(noteId: string, items: { t: number; text: string }[]): Promise<string> {
+  await collections.sync("notes");
+  const snap = collections.snapshot<BrainstormNote>("notes");
+  let id = noteId;
+  let note = snap.find((n) => n.id === noteId);
+  if (!note && snap.length > 0) {
+    id = await newNote();
+    note = undefined;
+    useBrainstorm.setState({ error: "That note was deleted — kept listening in a new one" });
+  }
+  const segments = [...(note?.segments ?? []), ...items.map((i) => ({ t: i.t, text: i.text, device: platform }))];
+  await collections.update<BrainstormNote>("notes", id, {
     segments,
     rawText: segments.map((s) => s.text).join("\n"),
   });
-  const n = useBrainstorm.getState().sinceOrganize + 1;
+  const n = useBrainstorm.getState().sinceOrganize + items.length;
   useBrainstorm.setState({ sinceOrganize: n });
   const every = useSettings.getState().brainstorm.autoOrganizeEvery;
-  if (every > 0 && n >= every && !useBrainstorm.getState().organizing) void useBrainstorm.getState().organize(noteId);
+  if (every > 0 && n >= every && !useBrainstorm.getState().organizing) void useBrainstorm.getState().organize(id);
+  return id;
 }

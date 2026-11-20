@@ -2,9 +2,9 @@ import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { DEFAULT_ROUTING_CONFIG, isSelfRoleId, resolve } from "@/features/dispatcher/router";
 import { execute } from "@/features/orchestrator/execute";
 import { heuristicPlan, parseConfirmation, parseOfferReply, planIntent, stripWake, type ActionPlan } from "@/features/orchestrator/plan";
-import { classifyTier, DEFER_LABEL, looksBuildShaped, offerTarget, parseDefer, type DeferTarget, type OfferTarget } from "@/features/dialogue/tier";
+import { classifyTier, commitStrength, DEFER_LABEL, looksBuildShaped, offerTarget, parseDefer, type DeferTarget, type OfferTarget } from "@/features/dialogue/tier";
 import { useDialogue } from "@/features/dialogue/dialogue-store";
-import { buildArtifact, conversationSlice, fallbackTitle, rawContextOf, saveArtifact } from "@/features/dialogue/package";
+import { briefOf, buildArtifact, conversationSlice, fallbackTitle, fitBrief, saveArtifact } from "@/features/dialogue/package";
 import { roleLabel } from "@/features/dispatcher/roles";
 import { dispatch, queueDesktopItem } from "@/features/dispatcher/dispatch";
 import { handleLocalIntent } from "@/features/reminders/intents";
@@ -31,10 +31,10 @@ import { introLine } from "./handoff";
 import { currentPool, loadPool, noteHandoff, pickExchange, playExchange, type CueHandle } from "./handoff-cues";
 import { ack, GREETING, maybeFlavour, standDownLine } from "./persona";
 import { setSectionSource, tonyThread, useVoice, type Channel, type ThreadId, type VoiceTurn } from "./voice-store";
-import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice, type RoutedTurn } from "./route-for";
+import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice, soloHold, type RoutedTurn } from "./route-for";
 import { toggleAction, type TurnOrigin } from "./voice-status";
 import { wakeCommand } from "./wake-word";
-import { listenTakesReflex, parseReflex, type Reflex, type ReflexCtx } from "./reflex-parse";
+import { isBareCut, listenTakesReflex, parseReflex, type Reflex, type ReflexCtx } from "./reflex-parse";
 import { detectRoute, detectedRoute, effectiveRoute } from "./audio-route";
 import { hydrateMic, micEnabled, onMicChange, requestMicEnabled, MIC_LOCKED_MSG } from "./mic-gate";
 import { syncThresholdFromOs } from "./threshold";
@@ -281,7 +281,7 @@ function speechHandlers() {
         // Reflexes first (< 15 ms: a pure parse), before wake-word handling and handleInput. Over
         // Tony "take it easy" is a hold; in the follow-up listen after him, a stand-down (P5).
         const r = parseReflex(t, reflexCtx());
-        if (r) return applyReflex(r);
+        if (r && takeReflex(r, t)) return;
         // A new command said over Tony (or over a turn still thinking): he stops, the old turn's
         // server stream is dropped and it goes quiet (its bubble stays on screen).
         if (overTony || sayDepth > 0) {
@@ -477,6 +477,7 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
         clientTrace.sttFinal(voiceCaps.sttName, !!t);
         setCueDuck("user", false);
         store().setPartial("");
+        wakeErrorStreak = 0;
         if (t) {
           // Phase 2 reflexes, before wake-word handling. A yes/no listen only takes "cut it"
           // (it cancels the card) or a stand-down (rejects it silently). A passive hands-free
@@ -487,14 +488,14 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
           const ctx = reflexCtx();
           const r = parseReflex(t, ctx);
           const bare = wakeListen && useSettings.getState().wakeRequire;
-          if (r && listenTakesReflex(r, { forConfirmation: opts.forConfirmation, bare, busy: ctx.busy, cueActive: cueRecentlyActive(), ttsAudible: ctx.ttsAudible, musicAudible: ctx.musicAudible })) return applyReflex(r);
+          if (r && listenTakesReflex(r, { forConfirmation: opts.forConfirmation, bare, busy: ctx.busy, cueActive: cueRecentlyActive(), ttsAudible: ctx.ttsAudible, musicAudible: ctx.musicAudible }) && takeReflex(r, t)) return;
         }
         if (t && wakeListen) {
           // Hands-free: only lines that start with a wake word ("Hey Tony…") count.
           const cmdText = useSettings.getState().wakeRequire ? afterWakeWord(t) : t;
           const wctx = reflexCtx();
           const wr = cmdText ? parseReflex(cmdText, wctx) : null;
-          if (wr && listenTakesReflex(wr, { bare: false, busy: false, cueActive: cueRecentlyActive(), ttsAudible: wctx.ttsAudible })) return applyReflex(wr);
+          if (wr && cmdText && listenTakesReflex(wr, { bare: false, busy: false, cueActive: cueRecentlyActive(), ttsAudible: wctx.ttsAudible }) && takeReflex(wr, cmdText)) return;
           if (cmdText === null) {
             // People shout "stop" / "turn it down" at a cue without the wake word.
             const intent = cueRecentlyActive() ? parseOsLine(t) : null;
@@ -535,10 +536,34 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
         const p = store().pending;
         store().setError(e);
         if (p) store().setState("confirming"); // keep the card; tap still works
+        // Words Nic said were lost (Whisper failed on them): the chat says so, so the thought
+        // isn't silently gone. A passive wake listen that heard nothing stays quiet.
+        if (heardSpeech && !opts.forConfirmation) store().pushTurn({ who: "system", text: `Didn't catch that (${e}). Say it again?`, tone: "warn", thread: tonyThread() });
+        // Hands-free must never go deaf after one failed listen (Whisper reloading, a 5xx, a
+        // getUserMedia hiccup): re-arm, bounded, with a single line once it gives up.
+        if (wakeListen && wake.armed) rearmWakeAfterError(e);
       },
     },
     { maxSilenceStartMs: opts.forConfirmation ? 8000 : 7000 },
   );
+}
+
+/** Consecutive failed hands-free listens (reset by any finished listen). */
+let wakeErrorStreak = 0;
+export const MAX_WAKE_ERROR_REARMS = 4;
+
+/** A hands-free listen failed: re-arm with backoff, up to `MAX_WAKE_ERROR_REARMS` times in a row;
+ * then pause hands-free with one visible line (a dead Whisper must not spin). */
+function rearmWakeAfterError(e: string) {
+  wakeErrorStreak++;
+  if (wakeErrorStreak > MAX_WAKE_ERROR_REARMS) {
+    wakeErrorStreak = 0;
+    setWakeMode(false);
+    store().pushTurn({ who: "system", text: `Hands-free paused: speech-to-text isn't answering (${e}). Tap the mic or turn hands-free back on to retry.`, tone: "error", thread: tonyThread() });
+    return;
+  }
+  clearTimeout(wake.timer);
+  wake.timer = setTimeout(() => rearmWake(), 400 * 2 ** (wakeErrorStreak - 1));
 }
 
 /** Mic button while listening: stop and use what was said so far. */
@@ -726,7 +751,9 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
         // offers to park it; everything else is today's spoken offer card.
         switch (tier3Action(useModes.getState().effective, target)) {
           case "auto":
-            if (target.kind === "pipeline") return autoDelegateBuild(t, thread, opts.channel, slice);
+            // Only a real commit ("let's do it", "lock it in") skips the card: bare agreement
+            // ("sounds good", "yeah that works") mid-brainstorm is usually a yes to a sub-point.
+            if (target.kind === "pipeline" && commitStrength(t, osName) === "strong") return autoDelegateBuild(t, thread, opts.channel, slice);
             break;
           case "solo":
             return offerPark(t, thread, opts.channel, slice);
@@ -894,9 +921,12 @@ export async function approve(via: "voice" | "tap" | "typed") {
   cancelTts();
   store().setPending(null);
   store().pushTurn({ who: "system", text: `Approved (${via}): ${p.plan.summary}`, tone: "ok", thread: p.plan.thread });
-  // An approved delegation ends the brainstorm it came from (P3).
-  if (p.plan.offer) useDialogue.getState().end(p.plan.thread ?? tonyThread());
+  const failedBefore = failCount;
   await run(p.plan, p.channel);
+  // An approved delegation ends the brainstorm it came from (P3) — only once the hand-off DID
+  // happen: a refused / failed one (a Solo refusal, the task store down) keeps the session, so
+  // "switch modes and I'll build it" or "park it" still find the brainstorm.
+  if (p.plan.offer && failCount === failedBefore) useDialogue.getState().end(p.plan.thread ?? tonyThread());
 }
 
 /** `silent`: no spoken "Cancelled." (a "cut it" never makes Tony say a sentence). A delegation
@@ -930,6 +960,9 @@ async function run(plan: Parameters<typeof execute>[0], channel: Channel) {
   try {
     const traceId = clientTrace.id ?? undefined;
     const r = await execute(plan, history(thread).slice(0, -1));
+    // An empty result: the runner's caller posts (and speaks) the outcome itself (a gated
+    // os_turn): never a second copy, and the turn's state is the caller's.
+    if (!r.text) return;
     store().pushTurn({ who: "agent", text: r.text, role: plan.role, meta: r.meta, thread, from: "os" });
     clientTrace.ui(traceId, "reply shown");
     if (gen !== micGen) return;
@@ -968,7 +1001,11 @@ function calmMessage(raw: string): string {
   return raw;
 }
 
+/** Failures surfaced so far (approve() compares it around a run). */
+let failCount = 0;
+
 function fail(e: unknown, thread?: ThreadId) {
+  failCount++;
   const raw = e instanceof Error ? e.message : String(e);
   const calm = calmMessage(raw);
   store().pushTurn({ who: "system", text: calm, tone: "error", thread, meta: calm === raw ? undefined : raw });
@@ -981,8 +1018,6 @@ function fail(e: unknown, thread?: ThreadId) {
 
 /** The Tier-3 offer card's spoken read-back (exact). */
 export const OFFER_READBACK = "Want me to go ahead and delegate that, or park it for later?";
-/** The brief a delegate gets: the conversation itself, bounded. */
-const BRIEF_MAX = 4000;
 
 /** Tier 2: Tony answers himself — never a worker agent, no planner, no card. */
 function brainstormTurn(t: string, thread: ThreadId, channel: Channel) {
@@ -1041,7 +1076,7 @@ async function deferTurn(target: DeferTarget, thread: ThreadId, channel: Channel
 async function offerDelegation(t: string, thread: ThreadId, channel: Channel, target: OfferTarget, slice: VoiceTurn[]) {
   const osName = useSettings.getState().osName || "Tony";
   const title = fallbackTitle(slice);
-  const brief = rawContextOf(slice, osName).slice(-BRIEF_MAX);
+  const brief = briefOf(slice, osName, { dropText: t });
   const who = target.kind === "pipeline" ? "the Prompter → Designer → Coder pipeline" : roleLabel(target.role);
   const plan = heuristicPlan(stripWake(t), target.kind === "agent" ? target.role : "prompter");
   plan.mutating = true;
@@ -1110,12 +1145,14 @@ async function autoDelegateBuild(t: string, thread: ThreadId, channel: Channel, 
   const gen = micGen;
   const osName = useSettings.getState().osName || "Tony";
   const title = fallbackTitle(slice);
-  const brief = rawContextOf(slice, osName).slice(-BRIEF_MAX);
-  useDialogue.getState().end(thread);
+  const brief = briefOf(slice, osName, { dropText: t });
   store().setState("thinking");
   let r: { text: string; meta: string };
   try {
     r = await delegateBuild(brief, title, thread, channel === "voice" ? "voice" : "typed", { auto: true });
+    // The brainstorm ends only once the build IS queued: a MODE_* fallback card (or a failure)
+    // keeps it, so Park / a second commit cue still package the whole conversation.
+    useDialogue.getState().end(thread);
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
     if (raw.includes(MODE_NOT_AUTO)) return offerDelegation(t, thread, channel, { kind: "pipeline" }, slice);
@@ -1186,11 +1223,10 @@ export function requestPipeline(ideaId: string, title: string, thread: ThreadId,
   plan.target = { kind: "bridge", action: "pipeline", scopes: ["delegation"] };
   plan.payload = { ideaId };
   plan.verification = { status: "verified", notes: [], by: "built from your own request" };
-  plan.run = async () => {
-    // Returns at once: the worker builds it in the background (status on demand / narration).
-    void runPipeline(ideaId, title, thread);
-    return { text: `Queued “${title}”. The Prompter's on it. Ask me where the build's at anytime.`, meta: "pipeline · task" };
-  };
+  // Waits for the task to EXIST (task_from_idea is quick; the worker builds in the background) and
+  // reports the real outcome: a refusal (Solo, an oversized idea, the ledger down) throws into the
+  // calm-error path instead of "Queued…" followed by "Couldn't start".
+  plan.run = async () => ({ text: await runPipeline(ideaId, title, thread), meta: "pipeline · task" });
   return requestConfirmation(plan, channel);
 }
 
@@ -1205,7 +1241,7 @@ export function requestBuild(text: string, title: string, thread: ThreadId = ton
   plan.target = { kind: "bridge", action: "pipeline", scopes: ["delegation"] };
   plan.payload = { title };
   plan.verification = { status: "verified", notes: [], by: "built from your own click" };
-  plan.run = () => delegateBuild(text.slice(-BRIEF_MAX), title, thread, "playplace");
+  plan.run = () => delegateBuild(fitBrief(text), title, thread, "playplace");
   return requestConfirmation(plan, "text");
 }
 
@@ -1224,6 +1260,13 @@ export function runTurnAction(run: string, thread: ThreadId) {
 
 // ── OS core turn (desktop) ───────────────────────────────────────────────────
 
+/** Did the sub-agent itself produce this answer? Rust says so (`answeredBy`); for an older build
+ * that doesn't, a turn where Tony "stepped in" for the agent is his. Pure. */
+export function answeredByAgent(r: Pick<OsTurnResult, "answeredBy" | "steps">): boolean {
+  if (r.answeredBy) return r.answeredBy === "agent";
+  return !r.steps.some((s) => s.kind === "step-in");
+}
+
 async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   const gen = micGen;
   const isLive = () => gen === micGen;
@@ -1234,18 +1277,22 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   const routingCfg = useOs.getState().cfg?.routing ?? DEFAULT_ROUTING_CONFIG;
   // P3: a Tier-2 brainstorm stays Tony's ("Self" + `noDelegate`, so Rust never re-routes it); an
   // approved Tier-3 delegation goes to the agent the card named, with the packaged brief as its task.
-  const routed: RoutedTurn = plan.delegateTo
+  const routed0: RoutedTurn = plan.delegateTo
     ? { role: plan.delegateTo, kind: "Named", confidence: "high", reason: "approved delegation (Tier 3)", task: typeof plan.payload.brief === "string" ? plan.payload.brief : plan.utterance }
     : plan.noDelegate
       ? { role: "general", kind: "Self", confidence: "high", reason: "brainstorm with Tony (Tier 2)", task: plan.utterance }
       : routeFor(routeOpts(plan.utterance, thread, channel, routingCfg));
-  const role = routed.role;
-  const task = routed.task;
   // "Explicit" = talking directly to the tab you're on — no Tony synthesis,
   // no relay turn, no link pill. A Named/Domain route that pulls you to a
   // *different* agent than the one you're looking at is never explicit, even
   // from that agent's own tab (fixes: naming another agent from Tony's tab,
   // or from a different agent's tab, used to be silently ignored).
+  // Solo (surface_only) keeps a Domain / low-confidence hit with Tony exactly as Rust will, so
+  // the chat never announces "Routing … to Coder…" (and plays the handoff cue) for a delegation
+  // that doesn't happen. An approved Tier-3 hand-off is never held.
+  const routed: RoutedTurn = plan.delegateTo ? routed0 : soloHold(routed0, { explicit: thread !== "auto" && routed0.role === thread, dispatch: useModes.getState().effective?.dispatch });
+  const role = routed.role;
+  const task = routed.task;
   const explicit = thread !== "auto" && role === thread;
 
   // Phase 2 §4 announcer handoff (voice, delegated): Tony speaks a short cached intro, then the
@@ -1350,7 +1397,18 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   const offAgent = handoff ? await onAgentReply((e) => e.streamId === streamId && queueAgentReply(e.agent, e.text)) : () => undefined;
   const off = await onNativeEvent<{ streamId: string; delta: string; agent?: string }>("tony-token", (e) => {
     if (e.streamId !== streamId) return;
-    streamAgent = e.agent ?? "general";
+    const agent = e.agent ?? "general";
+    if (live && agent !== streamAgent) {
+      // The sub-agent's stream broke off and Tony took over under the same stream: the agent's
+      // partial reply keeps its own (now closed) bubble; Tony's answer gets a new one — never
+      // glued together and labelled as the agent.
+      store().updateTurn(live, { meta: "interrupted" });
+      live = null;
+      buffered = "";
+      spokenUpTo = 0;
+      lastSpokenChunk = undefined;
+    }
+    streamAgent = agent;
     buffered += e.delta;
     if (!live) live = store().pushTurn({ who: "agent", from: finalFromFor(streamAgent), text: buffered, thread, meta: "streaming…" }).id;
     else store().updateTurn(live, { text: buffered });
@@ -1377,28 +1435,62 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // askCards: a Spotify write held by the Ask tier comes back as `pendingSpotify` (card below), not a failure note.
   // cuePlaying: Rust keeps "volume 30" during a Gabagool cue away from Spotify (same rule as cueOwnsVolume).
   const req = { text: task, role, explicit, routeKind: routed.kind, routeReason: routed.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate };
+  // The steps Rust reports as they happen (`os-step`): what Tony sent an agent and what came back
+  // still reach the chat when the turn then fails or is cut.
+  const liveSteps: OsTurnResult["steps"] = [];
+  const offSteps = await onNativeEvent<{ streamId: string; index: number; step: OsTurnResult["steps"][number] }>("os-step", (e) => {
+    if (e.streamId === streamId && Number.isInteger(e.index) && e.index >= 0 && e.index < 64) liveSteps[e.index] = e.step;
+  });
+  const osName = useSettings.getState().osName || "Tony";
+  // Inter-agent dialogue: delegation lives in that agent's own tab. Tony's thread stays a clean
+  // Nic↔Tony transcript (U3): tool / step-in relays go to the agent's tab or the System Map
+  // trace only (`relayThreadFor`), and a Tony → Tony relay is never pushed anywhere.
+  const renderSteps = (steps: OsTurnResult["steps"], finalRole: AgentRole, finalExplicit: boolean) => {
+    const relayThread: ThreadId = finalExplicit ? thread : finalRole === "general" ? thread : finalRole;
+    for (const s of steps) {
+      if (!s) continue;
+      if (finalExplicit && s.kind === "delegate") continue; // you're already talking to it directly
+      if (finalExplicit && s.kind === "reply") continue; // shown as the answer below
+      let target: ThreadId | null;
+      if (isSubAgentThread(thread)) {
+        // Typed on a sub-agent tab: that tab is the agent's own log, as before.
+        const inAgentTab = s.kind === "delegate" || s.kind === "reply" || (s.kind === "error" && s.from === finalRole);
+        target = isSelfRelay(s, osName) ? null : inAgentTab ? relayThread : thread;
+      } else target = relayThreadFor(s, { finalRole, relayThread, tonyThread: thread, osName });
+      if (!target) continue;
+      store().pushTurn({ who: "relay", text: s.text, from: s.from, to: s.to, tone: s.ok ? undefined : "warn", meta: s.ms ? `${s.kind} · ${s.ms}ms` : s.kind, thread: target });
+    }
+    return relayThread;
+  };
   let r: OsTurnResult | null;
   try {
-    r = await gated(
-      { action: "os-turn", summary: `Let ${useSettings.getState().osName} use ${role === "general" ? "its tools" : SUB_AGENTS[role].label}`, detail: { role } },
-      (approved) => cmd("os_turn", { req: { ...req, approved } }),
-      (x) => x.answer,
-    );
+    const call = (approved: boolean) => cmd("os_turn", { req: { ...req, approved } });
+    // An approved Tier-3 hand-off was already approved on its card (`approve()`): no second card.
+    // Otherwise the delegation gate's card lands in this thread, is spoken on a voice turn, and
+    // never posts the answer itself (this function does, once, as the right speaker).
+    r = plan.delegateTo
+      ? await call(true)
+      : await gated({ action: "os-turn", summary: `Let ${useSettings.getState().osName} use ${role === "general" ? "its tools" : SUB_AGENTS[role].label}`, detail: { role }, channel, thread, silent: true }, call, (x) => x.answer);
   } catch (e) {
     off();
     offAgent();
+    offSteps();
     activeStreams.delete(streamId);
     cueProtected.delete(streamId);
+    // Whatever was asked / answered before it failed or was cut is part of the record.
+    renderSteps(liveSteps, role, explicit);
     // "Cut it" dropped this turn server-side: no error, the partial bubble just stays.
     if (String(e instanceof Error ? e.message : e).includes(TURN_CANCELLED)) {
       if (live) store().updateTurn(live, { meta: "cut" });
       return;
     }
+    if (live) store().updateTurn(live, { meta: "interrupted" });
     endIdleBargeIn();
     return fail(e, thread);
   }
   off();
   offAgent();
+  offSteps();
   activeStreams.delete(streamId);
   cueProtected.delete(streamId);
   if (!r) {
@@ -1414,35 +1506,12 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // refined the role; fall back to what we already computed when it didn't.
   const finalRole = (r.routedRole as AgentRole) || role;
   const finalExplicit = explicit && finalRole === role;
-
-  // Inter-agent dialogue: delegation lives in that agent's own tab. Tony's thread stays a clean
-  // Nic↔Tony transcript (U3): tool / step-in relays go to the agent's tab or the System Map
-  // trace only (`relayThreadFor`), and a Tony → Tony relay is never pushed anywhere.
-  const relayThread: ThreadId = finalExplicit ? thread : finalRole === "general" ? thread : finalRole;
-  const osName = useSettings.getState().osName || "Tony";
-  for (const s of r.steps) {
-    if (finalExplicit && s.kind === "delegate") continue; // you're already talking to it directly
-    if (finalExplicit && s.kind === "reply") continue; // shown as the answer below
-    let target: ThreadId | null;
-    if (isSubAgentThread(thread)) {
-      // Typed on a sub-agent tab: that tab is the agent's own log, as before.
-      const inAgentTab = s.kind === "delegate" || s.kind === "reply" || (s.kind === "error" && s.from === finalRole);
-      target = isSelfRelay(s, osName) ? null : inAgentTab ? relayThread : thread;
-    } else target = relayThreadFor(s, { finalRole, relayThread, tonyThread: thread, osName });
-    if (!target) continue;
-    store().pushTurn({
-      who: "relay",
-      text: s.text,
-      from: s.from,
-      to: s.to,
-      tone: s.ok ? undefined : "warn",
-      meta: s.ms ? `${s.kind} · ${s.ms}ms` : s.kind,
-      thread: target,
-    });
-  }
+  const relayThread = renderSteps(r.steps, finalRole, finalExplicit);
   const linked = r.delegatedTo && !finalExplicit && relayThread !== thread ? relayThread : undefined;
   const meta = [r.providerId, r.tool && `tool ${r.tool}`, r.redacted && "privacy-diffused", `${r.latencyMs}ms`].filter(Boolean).join(" · ");
-  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit ? finalRole : "os", link: linked, commsThread: r.commsThread };
+  // The answer is the agent's only when the agent itself produced it: on an explicit tab where
+  // the agent failed (or has no workspace) Tony answers, and it is labelled — and voiced — as Tony.
+  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread };
   // Who the answer is spoken as: the sub-agent itself only for an explicit-tab
   // direct answer (`final.from` is the agent, not "os"); every Tony-synthesized
   // reply — delegated or his own — speaks as "general", matching `final.from`.
@@ -1716,6 +1785,29 @@ function reflexCtx(): ReflexCtx {
   return { busy, holding: hold.active, ttsAudible: speakers && audible, musicAudible: speakers && !hold.active && musicPlayingHere() };
 }
 
+/** Is there anything a cut would stop (a turn, a card, a hold, a cue)? */
+function cutHasTarget(): boolean {
+  return turnBusy() || !!store().pending || hold.active || cueRecentlyActive();
+}
+
+/**
+ * Act on a parsed reflex heard in `line`. A cut that is more than a bare "cut it" / "stop"
+ * ("Stop motion studio app, I want…", "let's cut that feature") is NOT a cut when nothing is
+ * running: it's an ordinary line, and the caller carries on with it (returns false). Over a busy
+ * turn it still cuts, and anything said after the cut phrase becomes the next turn (it used to be
+ * dropped with no trace in the chat).
+ */
+function takeReflex(r: NonNullable<Reflex>, line: string): boolean {
+  if (r.kind === "cut" && !isBareCut(line)) {
+    if (!cutHasTarget()) return false;
+    killTurn();
+    if (r.rest.trim()) void handleInput(r.rest, { channel: "voice" });
+    return true;
+  }
+  applyReflex(r);
+  return true;
+}
+
 function applyReflex(r: NonNullable<Reflex>) {
   convo.barged = false;
   clientTrace.phase(`reflex:${r.kind}`);
@@ -1822,7 +1914,12 @@ function cancelStreams(keep: ReadonlySet<string> = new Set()) {
  */
 export function killTurn() {
   cancelStreams();
-  if (hold.active) clearHold(); // whatever the hold paused stays stopped
+  if (hold.active) {
+    // A cut drops the held thought — never silently: what was held stays in the chat.
+    const lost = hold.segments.join(" ").trim();
+    if (lost) store().pushTurn({ who: "system", text: `Cut — the held thought was not sent: ${lost}`, tone: "warn", thread: tonyThread() });
+    clearHold(); // whatever the hold paused stays stopped
+  }
   cancelTts();
   releaseTtsDuck();
   restoreAfterPause(cutMedia()); // the speech duck comes back only once Spotify is paused
@@ -1917,6 +2014,8 @@ function holdListen() {
       onError: (e) => {
         hold.listening = false;
         clientTrace.sttError(voiceCaps.sttName, e);
+        // A segment Nic spoke was lost: say so, so "go ahead" isn't sent without it unknowingly.
+        if (hold.active && heardSpeech) store().pushTurn({ who: "system", text: `Missed that last part (${e}) — say it again.`, tone: "warn", thread: tonyThread() });
         if (hold.active) setTimeout(holdListen, 1000); // the 90 s timeout still bounds this
       },
     },
@@ -1927,7 +2026,9 @@ function holdListen() {
 /** A line heard (or typed) while holding: a reflex, else one more held segment. */
 function holdInput(t: string) {
   const r = parseReflex(t, reflexCtx());
-  if (r) return applyReflex(r);
+  // While holding only a BARE cut cuts: "Stop button should be red" / "and cut that intro" are
+  // part of the thought being held (a cut used to wipe every held segment).
+  if (r && !(r.kind === "cut" && !isBareCut(t))) return applyReflex(r);
   addSegment(t);
   bumpHoldDeadline();
   holdListen();

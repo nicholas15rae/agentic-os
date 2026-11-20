@@ -219,6 +219,7 @@ export interface NativeCommands {
   task_status: { args: { agent?: string; slug?: string }; result: TaskStatusAnswer };
   task_retry: { args: { task_id: string; offload?: string }; result: TaskEnvelope };
   task_cancel: { args: { task_id: string }; result: TaskEnvelope };
+  agent_events_replay: { args: { afterSeq?: number }; result: { boot: number; events: AgentEvent[] } };
   playplace_iterate: { args: { cardId: string; notes: string; target: "designer" | "coder" }; result: PlayCard };
   playplace_approve: { args: { cardId: string }; result: PlayCard };
   playplace_commit: { args: { cardId: string }; result: PlayCard };
@@ -317,6 +318,7 @@ export type NativeEventName =
   | "gpu-slot"
   | "droplet-status"
   | "tony-token"
+  | "os-step"
   | "tts-fallback"
   | "tts-unpin"
   | "spotify-auth"
@@ -731,6 +733,12 @@ export interface AgentEvent {
   owner?: string;
   /** `shortSummary` is the agent's own voice summary (speak it in its voice). */
   fromVoiceSummary?: boolean;
+  /** Task events: who the committed row was addressed to (the post-commit `owner` often isn't). */
+  toAgent?: string;
+  /** Task events: the durable handoff_log seq of the row. */
+  rowSeq?: number;
+  /** Task events carrying a voice summary: the app's templated summary (the facts) too. */
+  templateSummary?: string;
 }
 export type TaskStatus = "queued" | "prompting" | "designing" | "coding" | "review_ready" | "failed";
 export type TaskSource = "voice" | "typed" | "phone" | "playplace" | "ledger";
@@ -1502,6 +1510,9 @@ export interface OsTurnResult {
   /** Only with `askCards`: the Spotify write the gate held back (`answer` is then ""). Approve it
    * with `spotify_tool(name, args, approved: true)` — never by re-running the turn. */
   pendingSpotify?: PendingSpotifyCall;
+  /** Who produced `answer`: the sub-agent itself ("agent"), Tony's synthesis ("os" — also when he
+   * stepped in for a failed agent), the overseer, or a tool. Older builds omit it. */
+  answeredBy?: "agent" | "os" | "overseer" | "tool";
 }
 
 export interface ToolInfo {

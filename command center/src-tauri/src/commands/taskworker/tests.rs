@@ -104,6 +104,7 @@ pub(super) struct Fake {
     pub fetches: AtomicUsize,
     pub verifier_calls: AtomicUsize,
     pub ingests: AtomicUsize,
+    pub ingest_ok: AtomicBool,
     pub legacy_log: Mutex<Vec<(String, Value)>>,
     pub fg_during: Option<&'static str>,
     pub fg_spawned: AtomicBool,
@@ -128,6 +129,7 @@ impl Fake {
             fetches: AtomicUsize::new(0),
             verifier_calls: AtomicUsize::new(0),
             ingests: AtomicUsize::new(0),
+            ingest_ok: AtomicBool::new(true),
             legacy_log: Mutex::default(),
             fg_during: None,
             fg_spawned: AtomicBool::new(false),
@@ -214,6 +216,9 @@ impl WorkerEnv for Fake {
     fn ingest(&self, _title: String, _text: String) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
             self.ingests.fetch_add(1, Ordering::SeqCst);
+            if !self.ingest_ok.load(Ordering::SeqCst) {
+                return Err("Librarian index failed: workspace not found".into());
+            }
             Ok(())
         })
     }
@@ -231,7 +236,7 @@ fn default_script() -> Script {
 }
 
 pub(super) fn tuning() -> Tuning {
-    Tuning { attempts: 2, retry_backoff: Duration::from_millis(1), fg_wait_max: Duration::from_secs(5) }
+    Tuning { attempts: 2, retry_backoff: Duration::from_millis(1), fg_wait_max: Duration::from_secs(5), backend_wait: Duration::from_millis(1), backend_budget: Duration::ZERO }
 }
 
 /// Run the worker over `store` until idle. Returns (stages run, mirror failures).
@@ -1505,6 +1510,226 @@ fn embed_only_skips_the_documenter_ingest_but_keeps_the_note() {
     assert_eq!(fake.ingests.load(Ordering::SeqCst), 0, "embedOnly: no per-note ingest");
     let doc = e.raw_intent.memory_reference["memoryDoc"].as_str().unwrap();
     assert!(Path::new(doc).is_file(), "the note itself is still written");
+}
+
+// ── Thoughtform pipeline hardening (regressions) ────────────────────────────
+
+fn worker_with<'a>(store: &'a TaskStore, env: &'a Fake, stats: &'a WorkerStats, forced: &'a Mutex<HashMap<String, String>>, t: Tuning) -> Worker<'a> {
+    Worker { store, env, tuning: t, stats, forced_offload: forced }
+}
+
+/// Regression: with LM Studio closed / reloading every queued build failed within seconds.
+/// Now an unreachable backend parks the stage (one milestone row) until it answers.
+#[test]
+fn an_unreachable_model_backend_waits_instead_of_failing_the_build() {
+    let root = tmp("backenddown");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, n| if c.stage == "triage" && n <= 4 { Err("error sending request for url (http://127.0.0.1:1235/v1/chat/completions): connection refused".into()) } else { Ok(default_reply(c)) }));
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    let (stats, forced) = (WorkerStats::default(), Mutex::new(HashMap::new()));
+    let t = Tuning { backend_wait: Duration::from_millis(1), backend_budget: Duration::from_secs(60), ..tuning() };
+    let w = worker_with(store, &fake, &stats, &forced, t);
+    for _ in 0..400 {
+        if get(store, &id).status == "review_ready" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = tauri::async_runtime::block_on(w.run_once());
+    }
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert!(!e.handoff_log.iter().any(|h| h.event_type == "failed"));
+    let waits: Vec<_> = e.handoff_log.iter().filter(|h| h.short_summary.starts_with("Waiting for the local model")).collect();
+    assert_eq!(waits.len(), 1, "one visible milestone, not one per attempt");
+    assert_eq!(waits[0].severity, "milestone");
+    // With no budget left the stage fails as before.
+    assert!(backend_unreachable("tcp connect error: No connection could be made because the target machine actively refused it"));
+    assert!(!backend_unreachable("the Coder returned no HTML file"));
+}
+
+/// Regression: Retry on a build stopped by the loop breaker re-ran the deterministic check on the
+/// same page and failed again at once. Now it goes back to the build brief for one more pass.
+#[test]
+fn retry_after_the_loop_limit_gets_one_more_real_pass() {
+    let root = tmp("breakerretry");
+    let store = leak_store();
+    let good = Arc::new(AtomicBool::new(false));
+    let g = good.clone();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" && !g.load(Ordering::SeqCst) { "```html\n<!doctype html><html><body><h1>Tip</h1><p>Bill</p></body>\n```".into() } else { default_reply(c) })));
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    assert!(get(store, &id).error.as_deref().unwrap().contains("max iterations"));
+    let r = retry_task(store, &id, &[]).unwrap();
+    assert_eq!((r.status.as_str(), r.stage.as_deref()), ("prompting", Some("merge")), "back to the build brief");
+    assert_eq!(r.iteration_count, 2, "exactly one more pass under the limit");
+    good.store(true, Ordering::SeqCst);
+    let merges_before = fake.count("merge");
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.count("merge"), merges_before + 1);
+    assert!(e.handoff_log.iter().any(|h| h.event_type == "retry" && h.summary_payload["after_breaker"] == true));
+}
+
+/// Regression: a Play Place hub task retried from the chat ran behind the hub's back.
+#[test]
+fn a_hub_owned_task_is_not_retried_outside_the_hub() {
+    let store = TaskStore::in_memory();
+    let t = create_task(&store, &CreateArgs { raw_intent: "build x".into(), source: "playplace".into(), ..Default::default() }, 3, &[]).unwrap().0;
+    cancel_task(&store, &t.task_id, &[]).unwrap();
+    assert!(retry_task(&store, &t.task_id, &[]).unwrap_err().contains("Play Place"));
+}
+
+/// Regression: a run whose task was cancelled mid-stage still wrote index.html (and archived the
+/// previous page from it) before its stale commit was dropped.
+#[test]
+fn a_cancelled_code_stage_never_writes_into_staging() {
+    let root = tmp("cancelwrite");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, _| {
+            if c.stage == "code" {
+                cancel_task(store, &c.task_id, &[]).unwrap();
+            }
+            Ok(default_reply(c))
+        }),
+    );
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!((e.status.as_str(), e.error.as_deref()), ("failed", Some("cancelled by user")));
+    assert!(!root.join("staging").join("tip-calculator").join("index.html").exists(), "the stale page never landed");
+    assert_eq!(e.handoff_log.iter().filter(|h| h.event_type == "failed").count(), 1);
+}
+
+/// Regression: a stage retry (timeout, bad output) was only an eprintln: the chat sat on
+/// "Coder is building" for up to two call ceilings with no word.
+#[test]
+fn a_stage_retry_is_visible_in_the_log() {
+    let root = tmp("retryrow");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, n| Ok(if c.stage == "code" && n == 1 { "no html here".into() } else { default_reply(c) })));
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready");
+    let r = e.handoff_log.iter().find(|h| h.event_type == "note" && h.short_summary.contains("trying again")).expect("a retry row");
+    assert_eq!((r.from_agent.as_str(), r.severity.as_str()), ("coder", "handoff"));
+}
+
+/// Regression: a task note that couldn't be written was only an eprintln, and with no
+/// memoryDoc the audit never flagged it.
+#[test]
+fn a_task_note_failure_is_logged_and_flagged() {
+    let root = tmp("notefail");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.settings.lock().unwrap().notes_root = None;
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready");
+    assert!(e.handoff_log.iter().any(|h| h.severity == "milestone" && h.short_summary.starts_with("Couldn't write Tony's task note")));
+    assert!(e.raw_intent.memory_reference["memoryDoc"].as_str().unwrap().starts_with("unavailable:"));
+    assert!(e.librarian_notes["read_report"]["memory_discrepancies"].to_string().contains("task note is missing"), "the read-report flags it");
+}
+
+/// Regression: a failed Librarian ingest was a task-less verbose note the chat never showed.
+#[test]
+fn an_ingest_failure_lands_on_the_task() {
+    let root = tmp("ingestfail");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.ingest_ok.store(false, Ordering::SeqCst);
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready");
+    let r = e.handoff_log.iter().find(|h| h.short_summary.starts_with("Couldn't index the task note")).expect("an ingest row");
+    assert_eq!(r.severity, "milestone");
+}
+
+/// Regression: a failed Play Place card POST was lost for good (and the idea PATCH sent
+/// cardId:null). Now it is announced once, retried by the flush, and never nulls a cardId.
+#[test]
+fn a_failed_card_post_is_retried_when_the_gateway_is_back() {
+    let root = tmp("cardretry");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.gateway_ok.store(false, Ordering::SeqCst);
+    let id = create_task(store, &CreateArgs { raw_intent: "Build me a tip calculator".into(), source: "ledger".into(), idea_id: Some("idea-9".into()), ..Default::default() }, 3, &[]).unwrap().0.task_id;
+    let (stats, forced) = (WorkerStats::default(), Mutex::new(HashMap::new()));
+    let w = worker_with(store, &fake, &stats, &forced, tuning());
+    tauri::async_runtime::block_on(w.run_until_idle(300));
+    let e = get(store, &id);
+    assert_eq!((e.status.as_str(), e.card_id.as_deref()), ("review_ready", None));
+    assert!(stats.card_pending.lock().unwrap().contains(&id));
+    assert!(e.handoff_log.iter().any(|h| h.short_summary.starts_with("Couldn't post the Play Place card")));
+    let gw = fake.gateway_log.lock().unwrap().clone();
+    assert!(gw.iter().filter(|(m, p, _)| m == "PATCH" && p == "/api/cc/c/ideas/idea-9").all(|(_, _, b)| b.get("cardId").is_none()), "never a null cardId");
+    fake.gateway_ok.store(true, Ordering::SeqCst);
+    tauri::async_runtime::block_on(w.flush_mirrors(true));
+    let e = get(store, &id);
+    assert_eq!(e.card_id.as_deref(), Some("card-1"));
+    assert!(stats.card_pending.lock().unwrap().is_empty());
+    let gw = fake.gateway_log.lock().unwrap().clone();
+    assert!(gw.iter().any(|(m, p, b)| m == "PATCH" && p == "/api/cc/c/ideas/idea-9" && b["cardId"] == "card-1"));
+}
+
+/// Regression: every hub repair pass (a new task on the same build folder) posted another
+/// "staged" Play Place card; the first pass's card is updated instead.
+#[test]
+fn a_hub_repair_pass_updates_the_first_passes_card() {
+    let root = tmp("hubcard");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    let mk = |k: &str| create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), dedupe_key: Some(k.into()), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    let a = mk("b-1:1");
+    run(store, &fake);
+    assert_eq!(get(store, &a.task_id).card_id.as_deref(), Some("card-1"));
+    let b = mk("b-1:2");
+    run(store, &fake);
+    assert_eq!(get(store, &b.task_id).card_id.as_deref(), Some("card-1"));
+    let gw = fake.gateway_log.lock().unwrap().clone();
+    assert_eq!(gw.iter().filter(|(m, p, _)| m == "POST" && p == "/api/play-place").count(), 1, "one card per build");
+    assert!(gw.iter().any(|(m, p, _)| m == "PATCH" && p == "/api/cc/c/playplace/card-1"));
+    // The hub's title is kept (Nic named it), the folder is the hub's.
+    let e = get(store, &b.task_id);
+    assert_eq!((e.title.as_str(), e.project_slug.as_deref()), ("Tip Calculator", Some("tip-calculator")));
+}
+
+#[test]
+fn the_hub_title_survives_triage_and_spec() {
+    let store = TaskStore::in_memory();
+    let mut e = create_task(&store, &CreateArgs { raw_intent: "x".into(), title: Some("Focus timer (+2)".into()), source: "playplace".into(), ..Default::default() }, 3, &[]).unwrap().0;
+    assert_eq!(keep_title(&e, Some("Pomodoro Pal".into())), "Focus timer (+2)");
+    e.raw_intent.memory_reference["source"] = json!("voice");
+    assert_eq!(keep_title(&e, Some("Pomodoro Pal".into())), "Pomodoro Pal");
+}
+
+/// Regression: a parked brainstorm over 8000 chars could never be run from the ledger.
+#[test]
+fn an_over_long_raw_intent_is_fitted_not_refused() {
+    let text = format!("OPENING IDEA {}{}", "middle ".repeat(2000), " FINAL DECISION");
+    let store = TaskStore::in_memory();
+    let (e, _) = create_task(&store, &CreateArgs { raw_intent: text, source: "ledger".into(), ..Default::default() }, 3, &[]).unwrap();
+    let t = &e.raw_intent.text;
+    assert!(t.chars().count() <= envelope::RAW_INTENT_MAX);
+    assert!(t.starts_with("OPENING IDEA") && t.ends_with("FINAL DECISION") && t.contains("trimmed to fit"));
+    assert_eq!(fit_raw_intent("short"), "short");
+}
+
+#[test]
+fn a_cancel_patches_the_idea_ledger() {
+    let store = TaskStore::in_memory();
+    let t = create_task(&store, &CreateArgs { raw_intent: "x".into(), source: "ledger".into(), idea_id: Some("idea-3".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    let c = cancel_task(&store, &t.task_id, &[]).unwrap();
+    let (path, body) = cancelled_idea_patch(&c).unwrap();
+    assert_eq!((path.as_str(), body["status"].as_str()), ("/api/cc/c/ideas/idea-3", Some("failed")));
+    let quiet = create_task(&store, &CreateArgs { raw_intent: "y".into(), source: "typed".into(), idea_id: Some("idea-4".into()), options: Some(json!({ "noMirror": true })), ..Default::default() }, 3, &[]).unwrap().0;
+    assert!(cancelled_idea_patch(&quiet).is_none());
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

@@ -1,7 +1,7 @@
 import { heuristicPlan } from "@/features/orchestrator/plan";
 import { requestConfirmation, startHandoffCue } from "@/features/voice/voice-controller";
 import { noteHandoff, withHandoff } from "@/features/voice/handoff-cues";
-import { tonyThread } from "@/features/voice/voice-store";
+import { tonyThread, useVoice } from "@/features/voice/voice-store";
 import { xcmd } from "@/lib/native-ext";
 import { useHub } from "./hub-store";
 import type { Compiled } from "./compile";
@@ -9,12 +9,38 @@ import { RUNTIME_BADGE } from "./format";
 
 const WORKER_LABEL = { claude: "Claude Code", coder: "the Coder", designer: "the Designer" } as const;
 
+/** The card was declined, timed out or replaced by another one: nothing was staged. */
+export class HubDispatchCancelled extends Error {
+  constructor(readonly reason = "not staged") {
+    super(reason);
+  }
+}
+
+/** The "Intake interview:" block of a (Rust-scrubbed) build brief, for the chat record. Pure. */
+export function interviewOf(brief: string): string | null {
+  const i = brief.indexOf("Intake interview:");
+  if (i < 0) return null;
+  const rest = brief.slice(i + "Intake interview:".length);
+  const end = rest.search(/\n\s*\nBrainstorm notes \(/);
+  const block = (end >= 0 ? rest.slice(0, end) : rest).trim();
+  return block || null;
+}
+
 /**
  * Phase 2 dispatch: a compiled TaskEnvelope goes into the Play Place staging queue only behind
  * the confirmation card — `approve()` runs `plan.run`, the one caller that sends `approved: true`
- * (Rust refuses anything else, and Solo mode queues nothing). Returns once the card is answered.
+ * (Rust refuses anything else, and Solo mode queues nothing). Settles once the card is ANSWERED
+ * and the enqueue is done: resolves with the build id; rejects with `HubDispatchCancelled` (no /
+ * timeout / superseded) or the enqueue's own refusal — so the interview stays open, answers
+ * intact, until it really is staged. `source`: who asked the interview questions (for the record).
  */
-export function requestHubDispatch(c: Compiled, onQueued?: (buildId: string) => void) {
+export function requestHubDispatch(c: Compiled, onQueued?: (buildId: string) => void, source?: "prompter" | "fallback"): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    void stageBehindCard(c, onQueued, source, resolve, reject);
+  });
+}
+
+function stageBehindCard(c: Compiled, onQueued: ((buildId: string) => void) | undefined, source: "prompter" | "fallback" | undefined, resolve: (id: string) => void, reject: (e: unknown) => void) {
   const e = c.envelope;
   const plan = heuristicPlan(`Stage the build ${e.title}`, "prompter");
   plan.mutating = true;
@@ -34,12 +60,30 @@ export function requestHubDispatch(c: Compiled, onQueued?: (buildId: string) => 
     // A refused hand-off (Solo mode, validation) drops the rest of the exchange.
     const queued = await result.catch((err: unknown) => {
       cue?.cancel();
+      reject(err);
       throw err;
     });
-    void xcmd("build_hub_view").then((v) => useHub.getState().set(v)).catch(() => undefined);
+    const view = await xcmd("build_hub_view").catch(() => null);
+    if (view) useHub.getState().set(view);
+    const built = view?.builds.find((b) => b.envelope.build_id === queued.build_id);
+    // The interview (the Prompter's questions and Nic's answers) is part of the conversation:
+    // recorded in Tony's thread from the brief Rust stored (secret-scrubbed), with the contract.
+    const iv = built ? interviewOf(built.brief ?? "") : null;
+    if (iv) {
+      const criteria = queued.acceptance_criteria.map((a) => `• ${a}`).join("\n");
+      useVoice.getState().pushTurn({
+        who: "agent",
+        from: "prompter",
+        thread: plan.thread,
+        text: `Intake interview for “${queued.title}” (${source === "prompter" ? "the Prompter's questions" : "standard questions"}):\n${iv}\n\nAcceptance criteria:\n${criteria}`,
+        meta: `play place · intake · ${queued.build_id}`,
+      });
+    }
     onQueued?.(queued.build_id);
-    const pos = useHub.getState().view?.builds.find((b) => b.envelope.build_id === queued.build_id)?.position;
+    resolve(queued.build_id);
+    const pos = built?.position;
     return { text: `Staged “${queued.title}”${pos ? ` — #${pos} in the queue` : ""}. Watch it in the Play Place.`, meta: "play place · staged" };
   };
+  plan.onCancel = () => reject(new HubDispatchCancelled());
   return requestConfirmation(plan, "text");
 }

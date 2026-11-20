@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ROUTING_CONFIG, directTool, isSelfRoleId, normalize, resolve } from "./router";
+import { DEFAULT_ROUTING_CONFIG, directTool, isSelfRoleId, normalize, originalTail, resolve } from "./router";
 import fixtures from "./router.fixtures.json";
 
 interface Fixture {
@@ -133,5 +133,26 @@ describe("self (Tony) is never a delegation target", () => {
   });
   it("the default matrix gives Tony no name triggers", () => {
     expect(DEFAULT_ROUTING_CONFIG.agents.general.names).toEqual([]);
+  });
+});
+
+describe("a Named delegation's task keeps Nic's exact words (regression)", () => {
+  // It used to be the lower-cased, punctuation-stripped normalized text: "rename configjson to
+  // settingsjson and bump it to v25" reached the Coder.
+  it("file names, versions, URLs, hex colours and decimals survive", () => {
+    const cases: [string, string, string][] = [
+      ["Tell the coder to rename config.json to settings.json and bump it to v2.5", "coder", "rename config.json to settings.json and bump it to v2.5"],
+      ["Ask the coder to fix the bug at https://localhost:5173/play?id=3 — it's 1 off", "coder", "fix the bug at https://localhost:5173/play?id=3 — it's 1 off"],
+      ["Designer, fix the hero: 1.5x bigger with #FF5500 accents", "designer", "fix the hero: 1.5x bigger with #FF5500 accents"],
+      ["hey tony, tell my booking agent to check my last five WhatsApp messages", "booking", "check my last five WhatsApp messages"],
+    ];
+    for (const [text, role, task] of cases) {
+      const r = resolve(text, DEFAULT_ROUTING_CONFIG);
+      expect([r.role, r.kind, r.confidence], text).toEqual([role, "Named", "high"]);
+      expect(r.task, text).toBe(task);
+    }
+  });
+  it("falls back to the normalized tail when a Whisper mangle merges words", () => {
+    expect(originalTail("tell the coder to check whats up messages", 4)).toBe("check whatsapp messages");
   });
 });

@@ -11,6 +11,13 @@ import type { ThreadId } from "@/features/voice/voice-store";
  */
 export const BRAINSTORM_IDLE_MS = 20 * 60_000;
 
+/** Tony's conversation is ONE brainstorm whichever view is open: voice writes to "auto" on most
+ * views and "general" on Agents → Tony, so both key the same session (a commit cue after
+ * switching views still finds it). Sub-agent threads keep their own. */
+export const dialogueKey = (thread: ThreadId): ThreadId => (thread === "general" ? "auto" : thread);
+/** Do two threads belong to the same conversation (Tony's "auto" / "general" are one)? */
+export const sameConversation = (a: string, b: string): boolean => a === b || ((a === "auto" || a === "general") && (b === "auto" || b === "general"));
+
 export interface BrainstormSession {
   startedAt: number;
   lastAt: number;
@@ -34,21 +41,23 @@ interface DialogueStore {
 export const useDialogue = create<DialogueStore>((set, get) => ({
   sessions: {},
   touch: (thread, turnId, info = {}, now = Date.now()) => {
-    const cur = get().active(thread, now);
+    const key = dialogueKey(thread);
+    const cur = get().active(key, now);
     const next: BrainstormSession = cur
       ? { ...cur, lastAt: now, topicRole: cur.topicRole ?? info.topicRole, buildShaped: cur.buildShaped || !!info.buildShaped }
       : { startedAt: now, lastAt: now, fromTurnId: turnId, topicRole: info.topicRole, buildShaped: !!info.buildShaped };
-    set((s) => ({ sessions: { ...s.sessions, [thread]: next } }));
+    set((s) => ({ sessions: { ...s.sessions, [key]: next } }));
   },
   end: (thread) =>
     set((s) => {
-      if (!s.sessions[thread]) return s;
+      const key = dialogueKey(thread);
+      if (!s.sessions[key]) return s;
       const sessions = { ...s.sessions };
-      delete sessions[thread];
+      delete sessions[key];
       return { sessions };
     }),
   active: (thread, now = Date.now()) => {
-    const s = get().sessions[thread];
+    const s = get().sessions[dialogueKey(thread)];
     if (!s) return null;
     if (now - s.lastAt > BRAINSTORM_IDLE_MS) {
       get().end(thread);

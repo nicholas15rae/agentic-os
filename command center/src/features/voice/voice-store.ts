@@ -75,6 +75,11 @@ export interface VoiceTurn {
   cardId?: string;
   /** One-tap answers under the message ("Yes, run the pipeline"). */
   actions?: { label: string; run: string }[];
+  /** The build (worker task) an agent / pipeline turn belongs to (grouping, review). */
+  taskId?: string;
+  /** Bumped by every in-place `updateTurn` (token streaming): the phone mirror replaces a copy
+   * it already holds when the desktop's is newer (it used to keep the first, cut-off one). */
+  rev?: number;
 }
 
 export interface PendingConfirmation {
@@ -116,6 +121,14 @@ interface VoiceStore {
 }
 
 const PER_THREAD = 120;
+
+/** Should a mirrored copy of a turn replace the local one? Pure. */
+export function remoteIsNewer(local: VoiceTurn, remote: VoiceTurn): boolean {
+  const lr = local.rev ?? 0;
+  const rr = remote.rev ?? 0;
+  if (rr !== lr) return rr > lr;
+  return remote.at >= local.at && (remote.text !== local.text || remote.meta !== local.meta);
+}
 
 function cap(turns: VoiceTurn[]): VoiceTurn[] {
   const counts = new Map<ThreadId, number>();
@@ -159,7 +172,7 @@ export const useVoice = create<VoiceStore>()(
         set((s) => ({ turns: cap([...s.turns, turn]) }));
         return turn;
       },
-      updateTurn: (id, patch) => set((s) => ({ turns: s.turns.map((t) => (t.id === id ? { ...t, ...patch } : t)) })),
+      updateTurn: (id, patch) => set((s) => ({ turns: s.turns.map((t) => (t.id === id ? { ...t, ...patch, rev: (t.rev ?? 0) + 1 } : t)) })),
       setPending: (pending) => set({ pending }),
       setError: (error) => set({ error, state: error ? "error" : "idle" }),
       clear: (thread) => {
@@ -168,8 +181,16 @@ export const useVoice = create<VoiceStore>()(
       },
       mergeRemote: (remote) =>
         set((s) => {
-          const seen = new Set(s.turns.map((t) => t.id));
-          const merged = [...s.turns, ...remote.filter((t) => !seen.has(t.id) && THREADS.includes(t.thread))].sort((a, b) => a.at - b.at);
+          const byId = new Map(remote.filter((t) => t && THREADS.includes(t.thread)).map((t) => [t.id, t]));
+          // A turn both sides hold: the remote copy wins when it is a newer revision (a streamed
+          // answer finished after the first push) or differs at an equal-or-later time.
+          const kept = s.turns.map((t) => {
+            const r = byId.get(t.id);
+            if (!r) return t;
+            byId.delete(t.id);
+            return remoteIsNewer(t, r) ? r : t;
+          });
+          const merged = [...kept, ...byId.values()].sort((a, b) => a.at - b.at);
           return { turns: cap(merged) };
         }),
     }),

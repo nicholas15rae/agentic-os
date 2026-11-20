@@ -190,17 +190,44 @@ fn prompt_words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Hallucination guard: true when `text` contains a run of 4+ consecutive prompt words in
-/// prompt order (case- and punctuation-insensitive). Short real phrases from the prompt
-/// ("cut it", "take it easy") are 2–3 words and always pass.
+/// The spoken reflex phrases (and their address words). A line made only of these is a real
+/// command even when the prompt lists the same words ("Take it easy, cut it").
+const REFLEX_PHRASES: &[&[&str]] = &[&["take", "it", "easy"], &["take", "it", "ease"], &["cut", "it", "out"], &["cut", "it"], &["cut", "that"], &["whoa"], &["madone"], &["aspetta"], &["hey"], &["yo"], &["tony"], &["ok"], &["okay"], &["man"]];
+
+fn only_reflex_phrases(words: &[String]) -> bool {
+    let mut i = 0;
+    'outer: while i < words.len() {
+        for p in REFLEX_PHRASES {
+            if words.len() - i >= p.len() && p.iter().zip(&words[i..]).all(|(a, b)| a == b) {
+                i += p.len();
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Hallucination guard: true when the transcript is MOSTLY the prompt read back — the words
+/// covered by runs of 4+ consecutive prompt words (in prompt order, case- and
+/// punctuation-insensitive) make up at least 70% of it. A long real dictation that merely
+/// contains a 4-word run ("…loop in the booking desk, librarian and ops…") is never thrown
+/// away whole, and a line made only of reflex phrases ("Take it easy, cut it") always passes.
 pub(crate) fn echoes_prompt(text: &str, prompt: &str) -> bool {
     const RUN: usize = 4;
     let t = prompt_words(text);
     let p = prompt_words(prompt);
-    if t.len() < RUN || p.len() < RUN {
+    if t.len() < RUN || p.len() < RUN || only_reflex_phrases(&t) {
         return false;
     }
-    t.windows(RUN).any(|w| p.windows(RUN).any(|q| q == w))
+    let mut covered = vec![false; t.len()];
+    for (i, w) in t.windows(RUN).enumerate() {
+        if p.windows(RUN).any(|q| q == w) {
+            covered[i..i + RUN].iter_mut().for_each(|c| *c = true);
+        }
+    }
+    let n = covered.iter().filter(|c| **c).count();
+    n * 10 >= t.len() * 7
 }
 
 /// Whisper selector: model variant + language. whisper.cpp loads the new
@@ -938,6 +965,21 @@ mod stt_prompt_tests {
         assert!(!echoes_prompt("Spotify Gmail WhatsApp Tauri", p));
         // An empty/short prompt never drops anything.
         assert!(!echoes_prompt("take it ease cut it", "cut it"));
+    }
+
+    /// Regression: ANY 4-word prompt run threw the whole transcript away — a long dictated idea
+    /// that mentions "the booking desk, librarian and ops", or the reflex combo "Take it easy,
+    /// cut it" (so the cut never fired).
+    #[test]
+    fn a_real_line_that_contains_a_prompt_run_is_kept() {
+        let p = DEFAULT_STT_PROMPT;
+        let idea = "I want a landing page with a hero, a pricing table and a signup form, and then loop in the booking desk, librarian and ops so they know it's coming. Make the colors warm.";
+        assert!(!echoes_prompt(idea, p), "a long dictation is never dropped whole");
+        for ok in ["Take it easy, cut it.", "take it easy cut it", "Hey Tony, take it easy, cut it", "Cut it, take it easy."] {
+            assert!(!echoes_prompt(ok, p), "{ok} must pass");
+        }
+        // A read-back is still dropped.
+        assert!(echoes_prompt("Tony, Gabagool mode. Take it easy. Cut it. Whoa.", p));
     }
 
     #[test]

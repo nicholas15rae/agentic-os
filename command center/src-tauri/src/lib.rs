@@ -257,6 +257,7 @@ pub fn run() {
             taskworker::task_status,
             taskworker::task_retry,
             taskworker::task_cancel,
+            events::agent_events_replay,
             os_core::droplet_link,
             os_core::gpu_slot_view,
             clihub::cli_install,

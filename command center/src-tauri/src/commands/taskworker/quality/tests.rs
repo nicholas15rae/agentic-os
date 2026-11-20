@@ -153,14 +153,14 @@ fn probe_steps_are_validated_as_untrusted_data() {
     assert!(bad(json!(vec![json!({ "op": "click", "sel": "#a" }); 9])).contains("at most 8"));
     assert!(bad(json!("click the button")).contains("not a list"));
     // Values are inert JSON in the harness: a closing script tag cannot break out.
-    let p = Probe { answer: 0, criterion: "x".into(), steps: parse_probe(&json!([{ "op": "set", "sel": "#a", "value": "</script><script>alert(1)</script>" }, { "op": "expect_count", "sel": "#a", "count": 1 }])).unwrap() };
+    let p = Probe { answer: 0, criterion: "x".into(), carried: false, steps: parse_probe(&json!([{ "op": "set", "sel": "#a", "value": "</script><script>alert(1)</script>" }, { "op": "expect_count", "sel": "#a", "count": 1 }])).unwrap() };
     let page = with_probes("<html><head></head><body></body></html>", &[p]);
     assert_eq!(page.matches("</script>").count(), 1, "only the harness's own closing tag");
     assert!(page.contains("\\u003c/script\\u003e"));
 }
 
 fn probe(answer: usize, steps: Value) -> Probe {
-    Probe { answer, criterion: format!("c{answer}"), steps: parse_probe(&steps).unwrap() }
+    Probe { answer, criterion: format!("c{answer}"), steps: parse_probe(&steps).unwrap(), carried: false }
 }
 
 #[test]
@@ -173,10 +173,11 @@ fn probe_results_name_the_steps_and_both_values() {
         &[toggle, order, ghost, threw.clone(), threw],
         &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }, { "ok": false, "k": "fail", "at": 0, "got": "3, 5, 4" }, { "ok": false, "k": "nomatch", "at": 0 }, { "ok": false, "k": "threw", "at": 0, "got": "Uncaught TypeError: x is undefined" }]),
     );
-    assert_eq!(r[0].detail, "after set #weight-input=165, click #kg-toggle expected #weight-input value ≈74.8 (±0.5), got 165");
-    assert_eq!(r[1].detail, "on a fresh load expected .split-btn (data-meals) in the order 3, 4, 5, got 3, 5, 4");
+    // What the page produced leads (a fix line is clipped from its end).
+    assert_eq!(r[0].detail, "got 165; expected #weight-input value ≈74.8 (±0.5) after set #weight-input=165, click #kg-toggle");
+    assert_eq!(r[1].detail, "got 3, 5, 4; expected .split-btn (data-meals) in the order 3, 4, 5 on a fresh load");
     assert!(r[2].error && r[2].detail.contains("#nope matches nothing"), "{:?}", r[2]);
-    assert!(!r[3].error && r[3].detail.contains("click #go[1] the page threw: Uncaught TypeError"), "{:?}", r[3]);
+    assert!(!r[3].error && r[3].detail.starts_with("the page threw: Uncaught TypeError: x is undefined; after click #go[1]"), "{:?}", r[3]);
     assert!(!r[4].ran, "a probe the page never reached");
 }
 
@@ -199,16 +200,16 @@ fn judging_counts_probe_failures_first_and_a_broken_probe_only_without_evidence(
     let run = ProbeRun::Ran(probe_results(&probes, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }, { "ok": false, "k": "nomatch", "at": 0 }, { "ok": false, "k": "nomatch", "at": 0 }])));
     let j = judge(&answers, html, false, &run);
     assert_eq!(j.unmet.len(), 2, "{:?}", j.unmet);
-    assert!(j.unmet[0].starts_with("probe failed for The lb/kg toggle converts the weight: after set #w=165, click #kg expected #w value ≈74.8"), "{:?}", j.unmet);
+    assert!(j.unmet[0].starts_with("probe failed for The lb/kg toggle converts the weight: got 165; expected #w value ≈74.8"), "{:?}", j.unmet);
     // Criterion 2: its probe's selector matched nothing but the evidence is real: not counted.
     assert!(!j.unmet.iter().any(|u| u.contains("Meal split")));
     assert_eq!(j.criteria[1]["probe"]["error"], true);
     // Criterion 3: no real evidence AND a broken probe: unmet, with the probe named.
     assert!(j.unmet[1].starts_with("no working code found for: Saved state") && j.unmet[1].contains("#ghost matches nothing"), "{:?}", j.unmet);
     // Probes that did not run: evidence decides, the record says why.
-    let skipped = judge(&answers, html, false, &ProbeRun::Failed("no result after 40s".into()));
+    let skipped = judge(&answers, html, false, &ProbeRun::Skipped("Edge is not installed".into()));
     assert_eq!(skipped.unmet.len(), 1, "only the unevidenced one");
-    assert_eq!(skipped.criteria[0]["probe"]["detail"], "skipped: no result after 40s");
+    assert_eq!(skipped.criteria[0]["probe"]["detail"], "skipped: Edge is not installed");
     // Undecided criteria: "not shown" when the code was cut, never unmet.
     let shown = read_answers(&json!([{ "n": 1, "criterion": "x", "met": null }]), &crit_list()[..1]);
     let j = judge(&shown, html, true, &ProbeRun::Skipped("no probes".into()));
@@ -372,17 +373,199 @@ fn probes_catch_the_protein_tracker_bugs_in_a_real_browser() {
     std::fs::write(&fixed, &fixed_html).unwrap();
     let probes = protein_probes();
     let t = Duration::from_secs(40);
-    let ProbeRun::Ran(b) = run_probes(&bug, &probes, t) else { panic!("edge ran") };
+    let ProbeRun::Ran(b) = run_probes(&bug, &probes, t, t * 6) else { panic!("edge ran") };
     let d: Vec<&str> = b.iter().map(|r| r.detail.as_str()).collect();
-    assert!(b[0].ran && !b[0].passed && !b[0].error && d[0].contains("expected #weight-input value ≈74.8 (±0.5), got 165"), "{d:?}");
+    assert!(b[0].ran && !b[0].passed && !b[0].error && d[0].starts_with("got 165; expected #weight-input value ≈74.8 (±0.5)"), "{d:?}");
     assert!(!b[1].passed && d[1].contains("got 3, 5, 4"), "{d:?}");
     assert!(!b[2].passed && d[2].contains("#lbs-toggle"), "{d:?}");
-    assert!(!b[3].passed && d[3].contains("after set #weight-input=170, reload expected #weight-input value ≈170 (±0.5), got 165"), "{d:?}");
+    assert!(!b[3].passed && d[3] == "got 165; expected #weight-input value ≈170 (±0.5) after set #weight-input=170, reload", "{d:?}");
     assert!(b[4].passed, "{d:?}");
     assert!(b[5].error && d[5].contains("#nope matches nothing"), "{d:?}");
-    let ProbeRun::Ran(f) = run_probes(&fixed, &probes, t) else { panic!("edge ran") };
+    let ProbeRun::Ran(f) = run_probes(&fixed, &probes, t, t * 6) else { panic!("edge ran") };
     let fd: Vec<&str> = f.iter().map(|r| r.detail.as_str()).collect();
     assert!(f[..5].iter().all(|r| r.passed), "{fd:?}");
     assert!(f[5].error, "{fd:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Review fixes on the probes (af2bc62) ────────────────────────────────────
+
+/// A storage-ok flag guards only the use inside its `if` branch (or after `if (!flag) return`);
+/// any other earlier mention of a flag function guards nothing.
+#[test]
+fn a_storage_flag_guards_only_its_own_branch() {
+    let page = |s: &str| format!("<html><body><script>{s}</script></body></html>");
+    let load = "function loadState(){ try { const raw = localStorage.getItem('pt'); if (!raw) return false; Object.assign(state, JSON.parse(raw)); return true; } catch (e) { return false; } }\n";
+    // The finding's pattern: `if (loadState())` guards the toast, not the later setItem.
+    assert_eq!(unguarded_storage(&page(&format!("{load}function init(){{ if (loadState()) showToast('Welcome back'); render(); localStorage.setItem('lastVisit', Date.now()); }}\ninit();"))), 1);
+    // Inside the branch (statement or block) it is guarded.
+    assert_eq!(unguarded_storage(&page(&format!("{load}function init(){{ if (loadState()) localStorage.setItem('lastVisit', 1); }}"))), 0);
+    assert_eq!(unguarded_storage(&page(&format!("{load}function init(){{ if (loadState()) {{ render(); localStorage.setItem('lastVisit', 1); }} }}"))), 0);
+    // A negated flag only guards after an early return, not after an early anything-else.
+    let ok = "let ok = false; try { localStorage.setItem('t','t'); ok = true } catch (e) {}\n";
+    assert_eq!(unguarded_storage(&page(&format!("{ok}function save(){{ if (!ok) {{ return; }} localStorage.setItem('k','v') }}"))), 0);
+    assert_eq!(unguarded_storage(&page(&format!("{ok}function save(){{ if (!ok) console.log('no'); localStorage.setItem('k','v') }}"))), 1);
+    // A flag read in an unrelated call / a nested callback's early return guards nothing.
+    assert_eq!(unguarded_storage(&page(&format!("{ok}function save(){{ log(ok); localStorage.setItem('k','v') }}"))), 1);
+    assert_eq!(unguarded_storage(&page(&format!("{ok}function save(){{ list.forEach(x => {{ if (!ok) return; }}); localStorage.setItem('k','v') }}"))), 1);
+    // The flag before the use inside the condition itself.
+    assert_eq!(unguarded_storage(&page(&format!("{ok}if (ok && localStorage.getItem('k')) go();"))), 0);
+}
+
+/// Only the markup's middle cut (the scripts fit whole) is a cut too: the omitted markup can hold
+/// the very buttons a criterion is about, so those criteria may be "not shown".
+#[test]
+fn a_markup_only_cut_is_reported_as_a_cut() {
+    let script = format!("<script>\n{}</script>", "const value = compute(1); // a script line\n".repeat(180));
+    let markup = "<div class=\"row\"><button class=\"split-btn\" data-meals=\"3\">3 meals</button></div>\n".repeat(45);
+    let html = format!("<html><body>{markup}{script}</body></html>");
+    let (view, cut) = verify_view(&html, 11_000);
+    assert!(view.contains("chars omitted"), "the markup was cut");
+    assert!(cut, "a markup cut is reported");
+    assert!(view.chars().count() <= 11_000);
+    assert!(!view[..view.find("the page's markup").unwrap()].contains("chars omitted"), "the scripts are whole");
+}
+
+/// A probe fix line keeps what the page produced even with a long criterion and step trail.
+#[test]
+fn a_probe_fix_line_keeps_the_observed_value() {
+    let long = probe(0, json!([
+        { "op": "set", "sel": "#protein-goal-input", "value": "150" }, { "op": "select", "sel": "#meal-count-select", "value": "4" },
+        { "op": "click", "sel": "#save-settings-btn" }, { "op": "reload" },
+        { "op": "expect_text", "sel": ".meal-card .protein-amount", "nth": 2, "contains": "37.5g" }
+    ]));
+    let r = probe_results(&[long], &json!([{ "ok": false, "k": "fail", "at": 4, "got": "50g" }]));
+    let crit = "Each meal card shows the per-meal protein share once the goal and the meal count are saved and the page is reloaded later";
+    let answers = Answers { list: vec![Answer { idx: Some(0), name: crit.into(), met: Some(true), evidence: String::new(), fix: String::new(), probe: Some(Ok(vec![])) }], missing: vec![] };
+    let j = judge(&answers, "", false, &ProbeRun::Ran(r));
+    assert!(j.unmet[0].chars().count() <= 300, "{}", j.unmet[0].chars().count());
+    assert!(j.unmet[0].contains("got 50g;"), "{}", j.unmet[0]);
+}
+
+/// A probe that never finished is that probe's failure, naming the step in flight when known.
+#[test]
+fn an_unfinished_probe_is_a_failure_of_that_probe() {
+    let p = probe(1, json!([{ "op": "set", "sel": "#w", "value": "165" }, { "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }]));
+    let r = unfinished(&p, Some(&json!({ "p": 0, "s": 2, "R": [] })), "no result after 20s");
+    assert!(r.ran && !r.passed && !r.error && r.answer == 1, "{r:?}");
+    assert_eq!(r.detail, "the page hung or navigated away after set #w=165, click #kg (no result after 20s)");
+    let none = unfinished(&p, None, "no result after 20s");
+    assert!(none.detail.contains("during set #w=165, click #kg"), "{}", none.detail);
+    assert!(unfinished(&p, Some(&json!({ "s": 0 })), "x").detail.contains("on load"));
+    // Judged as a probe failure even with real evidence.
+    let html = "<script>function toggleUnit(unit) { state.unit = unit; convert(); }</script>";
+    let answers = read_answers(&json!([{ "n": 1, "criterion": "The lb/kg toggle converts the weight", "met": true, "evidence": "function toggleUnit(unit) { state.unit = unit; convert(); }", "probe": [{ "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }] }]), &crit_list()[..1]);
+    let hung = unfinished(&probes_of(&answers)[0], None, "no result after 20s");
+    let j = judge(&answers, html, false, &ProbeRun::Ran(vec![hung]));
+    assert!(j.unmet[0].starts_with("probe failed for The lb/kg toggle converts the weight: the page hung"), "{:?}", j.unmet);
+}
+
+/// A probe that failed once is carried to the next verify and run again whatever the verifier
+/// writes then; it fails the criterion again (also when it now matches nothing and no new probe
+/// for it passed) and stays open until it passes.
+#[test]
+fn a_failed_probe_is_carried_and_rechecked() {
+    let html = "<script>\nfunction toggleUnit(unit) { state.unit = unit; if (state.unit !== unit) convert(); }\n</script>";
+    let ev = "function toggleUnit(unit) { state.unit = unit; if (state.unit !== unit) convert(); }";
+    let steps = json!([{ "op": "set", "sel": "#w", "value": "165" }, { "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }]);
+    // Pass 1: the verifier's probe fails; it is recorded as open, keyed by criterion.
+    let a1 = read_answers(&json!([{ "n": 1, "criterion": "The lb/kg toggle converts the weight", "met": true, "evidence": ev, "probe": steps }]), &crit_list());
+    let p1 = probes_of(&a1);
+    let run1 = ProbeRun::Ran(probe_results(&p1, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }])));
+    let open = open_probes(&p1, &run1, &a1);
+    assert_eq!(open.as_array().unwrap().len(), 1);
+    assert_eq!(open[0]["idx"], 0);
+    // Pass 2: the verifier quotes the code and writes no probe: the carried one still runs.
+    let a2 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev }]), &crit_list());
+    let carried = carried_probes(&open, &a2, &probes_of(&a2));
+    assert_eq!(carried.len(), 1);
+    assert!(carried[0].carried && carried[0].answer == 0);
+    let again = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }])));
+    let j = judge(&a2, html, false, &again);
+    assert!(j.unmet[0].starts_with("probe failed again for lb/kg toggle: got 165;"), "{:?}", j.unmet);
+    assert_eq!(j.criteria[0]["probe"]["rechecked"][0]["passed"], false);
+    assert_eq!(open_probes(&carried, &again, &a2).as_array().unwrap().len(), 1, "still open");
+    // The Coder renamed the button: the carried probe matches nothing and nothing new passed.
+    let gone = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": false, "k": "nomatch", "at": 1 }])));
+    let j = judge(&a2, html, false, &gone);
+    assert!(j.unmet[0].starts_with("a probe that failed before now matches nothing for lb/kg toggle"), "{:?}", j.unmet);
+    // …but a new probe for the same criterion that passes settles it, and closes the old one.
+    let a3 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev, "probe": [{ "op": "click", "sel": "#to-kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }] }]), &crit_list());
+    let mut all = probes_of(&a3);
+    let more = carried_probes(&open, &a3, &all);
+    all.extend(more);
+    assert_eq!(all.len(), 2);
+    let run3 = ProbeRun::Ran(probe_results(&all, &json!([{ "ok": true }, { "ok": false, "k": "nomatch", "at": 1 }])));
+    assert!(judge(&a3, html, false, &run3).unmet.is_empty());
+    assert_eq!(open_probes(&all, &run3, &a3), json!([]));
+    // Passing again closes it; a run that never happened keeps it open.
+    let passed = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": true }])));
+    assert!(judge(&a2, html, false, &passed).unmet.is_empty());
+    assert_eq!(open_probes(&carried, &passed, &a2), json!([]));
+    assert_eq!(open_probes(&carried, &ProbeRun::Skipped("no Edge".into()), &a2).as_array().unwrap().len(), 1);
+    // The same steps written again by the verifier run once.
+    let a4 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev, "probe": steps }]), &crit_list());
+    assert!(carried_probes(&open, &a4, &probes_of(&a4)).is_empty());
+}
+
+const PROBE_FIX_PAGE: &str = r#"<!doctype html><html><head><title>t</title></head><body>
+<p id="range">120 - 165 g</p><p id="both">165 lbs (74.8 kg)</p><p id="comma">74,8 kg</p>
+<input id="w" type="number" value="74.8">
+<select id="unit"><option value="kg">kg</option><option value="lbs" selected>lbs</option></select>
+<select id="act"><option value="1.2">Light</option><option value="1.6" selected>Moderate</option></select>
+<div><button class="split" data-split="3">3 Meals</button><button class="split" data-split="4">4 Meals</button><button class="split" data-split="5">5 Meals</button></div>
+<ul><li class="meal">Breakfast</li><li class="meal">Lunch</li><li class="meal">Dinner</li></ul>
+<input id="k" type="number"><p id="kout">0</p><input id="d" type="number"><p id="dout">0</p>
+<input id="b" type="number"><p id="bout">0</p><input id="cb" type="checkbox"><p id="cbout">off</p>
+<a id="away" href="https://example.invalid/learn">Learn more</a>
+<button id="go" onclick="location.href='missing.html'">Go</button><button id="hang" onclick="while(true){}">Hang</button>
+<script>
+const $ = (i) => document.getElementById(i);
+$('k').addEventListener('keyup', () => { $('kout').textContent = $('k').value * 2; });
+let t; $('d').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { $('dout').textContent = $('d').value * 2; }, 300); });
+$('b').onblur = () => { $('bout').textContent = $('b').value * 2; };
+$('cb').addEventListener('click', () => { $('cbout').textContent = $('cb').checked ? 'on' : 'off'; });
+</script></body></html>"#;
+
+/// Real headless Edge: numbers anywhere in the text, form controls read by state, order labels
+/// matched loosely, typing-like events and settle waits, navigation blocked, and a probe that hangs
+/// the page fails alone without costing the other probes their results.
+#[test]
+fn probes_read_pages_like_a_person_and_a_hang_fails_only_its_probe() {
+    let Some(dir) = edge_dir("probe-fixes") else { return };
+    let page = dir.join("page.html");
+    std::fs::write(&page, PROBE_FIX_PAGE).unwrap();
+    let probes = vec![
+        probe(0, json!([
+            { "op": "expect_text", "sel": "#range", "approx": 165 }, { "op": "expect_text", "sel": "#both", "approx": 74.8 },
+            { "op": "expect_text", "sel": "#comma", "approx": 74.8 }, { "op": "expect_text", "sel": "#w", "approx": 74.8 },
+            { "op": "expect_value", "sel": "#act", "equals": "Moderate" }, { "op": "expect_text", "sel": "#act", "contains": "moderate" }
+        ])),
+        probe(1, json!([{ "op": "expect_text", "sel": "#unit", "contains": "kg" }])),
+        probe(2, json!([
+            { "op": "expect_order", "sel": ".split", "attr": "data-meals", "order": ["3", "4", "5"] },
+            { "op": "expect_order", "sel": ".meal", "order": ["breakfast", "lunch", "dinner"] }
+        ])),
+        probe(3, json!([{ "op": "expect_order", "sel": ".split", "order": ["Small", "Medium", "Large"] }])),
+        probe(4, json!([
+            { "op": "set", "sel": "#k", "value": "21" }, { "op": "set", "sel": "#d", "value": "21" }, { "op": "set", "sel": "#b", "value": "21" },
+            { "op": "set", "sel": "#cb", "value": "true" }, { "op": "expect_text", "sel": "#kout", "approx": 42 },
+            { "op": "expect_text", "sel": "#dout", "approx": 42 }, { "op": "expect_text", "sel": "#bout", "approx": 42 }, { "op": "expect_text", "sel": "#cbout", "equals": "on" }
+        ])),
+        probe(5, json!([{ "op": "click", "sel": "#away" }, { "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "#range", "contains": "120" }])),
+        probe(6, json!([{ "op": "set", "sel": "#w", "value": "5" }, { "op": "click", "sel": "#hang" }, { "op": "expect_count", "sel": ".split", "count": 3 }])),
+        probe(7, json!([{ "op": "expect_text", "sel": "#range", "approx": 999 }])),
+    ];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(10), Duration::from_secs(150)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert_eq!(r.len(), 8, "{d:?}");
+    assert!(r[0].passed, "any number in the text, an input's value, a select's label: {d:?}");
+    assert!(!r[1].passed && !r[1].error && d[1].contains("got lbs"), "a select reads its selected option only: {d:?}");
+    assert!(r[2].passed, "labels by leading number / case, attr falls back to the text: {d:?}");
+    assert!(r[3].error && d[3].contains("does not name the expected Small, Medium, Large"), "{d:?}");
+    assert!(r[4].passed, "keyup, debounce, blur and a checkbox click handler all ran: {d:?}");
+    assert!(r[5].passed, "leaving the page is blocked: {d:?}");
+    assert!(r[6].ran && !r[6].passed && !r[6].error && d[6].contains("the page hung or navigated away") && d[6].contains("click #hang"), "{d:?}");
+    assert!(r[7].ran && !r[7].passed && d[7].starts_with("got 120 - 165 g;"), "the probe after the hang still ran: {d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

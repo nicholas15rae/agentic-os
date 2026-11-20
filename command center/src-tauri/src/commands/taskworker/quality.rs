@@ -534,6 +534,19 @@ struct Frame {
     is_try: bool,
     fn_id: Option<usize>,
     try_storage: bool,
+    /// The body of any function, named or not (an arrow callback too): its open token.
+    body: Option<usize>,
+}
+
+/// Does the `{` at token `k` open a function body (named, anonymous or an arrow)?
+fn is_fn_body(t: &[Tok], k: usize) -> bool {
+    if k == 0 {
+        return false;
+    }
+    if t[k - 1].t == Tk::P(b'A') || fn_name_before(t, k).is_some() {
+        return true;
+    }
+    t[k - 1].t == Tk::P(b')') && open_paren(t, k - 1).is_some_and(|o| (o >= 1 && is_id(&t[o - 1], "function")) || (o >= 2 && is_id(&t[o - 2], "function")))
 }
 
 /// Byte offsets (in `src`) of localStorage / sessionStorage uses that are not guarded. Guarded:
@@ -548,10 +561,13 @@ fn storage_sites(src: &str) -> Vec<usize> {
     // (name, body open token, body close token)
     let mut fns: Vec<(String, usize, usize)> = Vec::new();
     let mut info: Vec<(bool, Vec<usize>)> = Vec::with_capacity(n);
+    // The innermost function body (any function) each token is in.
+    let mut scope: Vec<Option<usize>> = Vec::with_capacity(n);
     let mut flags: HashSet<String> = HashSet::new();
     let mut uses: Vec<usize> = Vec::new();
     for k in 0..n {
         info.push((stack.iter().any(|f| f.is_try), stack.iter().filter_map(|f| f.fn_id).collect()));
+        scope.push(stack.iter().rev().find_map(|f| f.body));
         match &toks[k].t {
             Tk::P(b'{') => {
                 let is_try = k > 0 && is_id(&toks[k - 1], "try");
@@ -559,7 +575,8 @@ fn storage_sites(src: &str) -> Vec<usize> {
                     fns.push((nm, k, n));
                     fns.len() - 1
                 });
-                stack.push(Frame { is_try, fn_id, try_storage: false });
+                let body = is_fn_body(&toks, k).then_some(k);
+                stack.push(Frame { is_try, fn_id, try_storage: false, body });
             }
             Tk::P(b'}') => {
                 if let Some(f) = stack.pop() {
@@ -622,16 +639,89 @@ fn storage_sites(src: &str) -> Vec<usize> {
             if *in_try || encl.iter().any(|&m| guarded[m]) {
                 return false;
             }
-            // A flag READ before the use in the same function (not its declaration / assignment).
-            let from = encl.last().map(|&m| fns[m].1).unwrap_or(0);
-            !(from..k).any(|q| {
-                matches!(&toks[q].t, Tk::Id(w) if flags.contains(w))
-                    && !(q > 0 && ["function", "let", "const", "var"].iter().any(|d| is_id(&toks[q - 1], d)))
-                    && toks.get(q + 1).map(|t| &t.t) != Some(&Tk::P(b'='))
-            })
+            // Guarded by a storage-ok flag read in an `if` of the same function: the use sits in
+            // that `if`'s branch (or after the flag in its condition), or after `if (!flag) return`.
+            let from = scope[k].unwrap_or(0);
+            !(from..k).any(|q| scope[q] == scope[k] && flag_if_guards(&toks, &flags, q, k))
         })
         .map(|k| toks[k].pos)
         .collect()
+}
+
+/// The token closing the bracket opened at `open` (`(`/`[`/`{`), if any.
+fn close_of(t: &[Tok], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (j, tok) in t.iter().enumerate().skip(open) {
+        match tok.t {
+            Tk::P(b'(') | Tk::P(b'[') | Tk::P(b'{') => depth += 1,
+            Tk::P(b')') | Tk::P(b']') | Tk::P(b'}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The last token of the statement starting at `s`: a `{ … }` block, else up to the first `;`
+/// (or the enclosing block's `}`) at depth 0.
+fn statement_end(t: &[Tok], s: usize) -> usize {
+    if t.get(s).map(|x| &x.t) == Some(&Tk::P(b'{')) {
+        return close_of(t, s).unwrap_or(t.len().saturating_sub(1));
+    }
+    let mut depth = 0i32;
+    for (j, tok) in t.iter().enumerate().skip(s) {
+        match tok.t {
+            Tk::P(b'(') | Tk::P(b'[') | Tk::P(b'{') => depth += 1,
+            Tk::P(b')') | Tk::P(b']') | Tk::P(b'}') => {
+                if depth == 0 {
+                    return j.saturating_sub(1);
+                }
+                depth -= 1;
+            }
+            Tk::P(b';') if depth == 0 => return j,
+            _ => {}
+        }
+    }
+    t.len().saturating_sub(1)
+}
+
+/// Does the `if` at token `q` guard the storage use at token `k` with a storage-ok flag? Yes when
+/// its condition reads a flag (`if (ok)` / `if (storageOk())`) and `k` is inside its branch or
+/// after that flag inside the condition itself (`if (ok && localStorage…)`), or when the
+/// condition is a negated flag whose branch returns (`if (!ok) return;`) and `k` comes after it.
+/// Any other earlier mention of the flag guards nothing.
+fn flag_if_guards(t: &[Tok], flags: &HashSet<String>, q: usize, k: usize) -> bool {
+    if !is_id(&t[q], "if") || t.get(q + 1).map(|x| &x.t) != Some(&Tk::P(b'(')) {
+        return false;
+    }
+    let Some(close) = close_of(t, q + 1) else { return false };
+    let reads = |lo: usize, hi: usize| -> (bool, bool) {
+        let (mut pos, mut neg) = (false, false);
+        for c in lo..hi {
+            if matches!(&t[c].t, Tk::Id(w) if flags.contains(w)) && t.get(c + 1).map(|x| &x.t) != Some(&Tk::P(b'=')) {
+                if c > 0 && t[c - 1].t == Tk::P(b'!') {
+                    neg = true;
+                } else {
+                    pos = true;
+                }
+            }
+        }
+        (pos, neg)
+    };
+    if k < close {
+        return k > q + 1 && reads(q + 2, k).0;
+    }
+    let (pos, neg) = reads(q + 2, close);
+    let end = statement_end(t, close + 1);
+    if pos && k <= end {
+        return true;
+    }
+    let returns = is_id(&t[close + 1], "return") || (t[close + 1].t == Tk::P(b'{') && t.get(close + 2).is_some_and(|x| is_id(x, "return")));
+    neg && returns && k > end
 }
 
 /// The line (1-based, in the page) of every unguarded storage use in the inline scripts. Pure.
@@ -670,9 +760,9 @@ fn cut_middle(s: &str, max: usize) -> String {
 }
 
 /// The page's code as the verifier reads it: every inline script FIRST (whole when it fits),
-/// then the markup with the scripts pulled out and CSS bodies dropped. The middle of the scripts
-/// is cut only when the scripts alone do not fit; `.1` = that happened (a criterion whose code
-/// was cut may then be "not shown" rather than unmet). Pure.
+/// then the markup with the scripts pulled out and CSS bodies dropped. The markup's middle is cut
+/// first, the scripts' middle only when the scripts alone do not fit; `.1` = anything was cut
+/// (a criterion whose code was cut may then be "not shown" rather than unmet). Pure.
 pub fn verify_view(html: &str, max: usize) -> (String, bool) {
     static STYLE: OnceLock<regex::Regex> = OnceLock::new();
     let spans = script_spans(html);
@@ -697,8 +787,11 @@ pub fn verify_view(html: &str, max: usize) -> (String, bool) {
     let markup = dedent(&markup);
     let markup_floor = len(&markup).min(1500);
     if len(&js) + markup_floor <= room {
+        // The scripts whole, the markup's middle cut when it does not fit: that is a cut too (the
+        // omitted markup can hold the very buttons a criterion is about).
         let m = cut_middle(&markup, room - len(&js));
-        return (format!("{head}{js}{mid}{m}"), false);
+        let cut = m != markup;
+        return (format!("{head}{js}{mid}{m}"), cut);
     }
     let j = cut_middle(&js, room.saturating_sub(markup_floor));
     let m = cut_middle(&markup, markup_floor);
@@ -884,6 +977,9 @@ pub struct Probe {
     pub answer: usize,
     pub criterion: String,
     pub steps: Vec<Value>,
+    /// Carried over from an earlier verify where it failed (`open_probes`): re-run whatever the
+    /// verifier writes this time.
+    pub carried: bool,
 }
 
 fn sel_ok(s: &str) -> bool {
@@ -1000,11 +1096,56 @@ pub fn probes_of(answers: &Answers) -> Vec<Probe> {
         .iter()
         .enumerate()
         .filter_map(|(i, a)| match &a.probe {
-            Some(Ok(steps)) => Some(Probe { answer: i, criterion: a.name.clone(), steps: steps.clone() }),
+            Some(Ok(steps)) => Some(Probe { answer: i, criterion: a.name.clone(), steps: steps.clone(), carried: false }),
             _ => None,
         })
         .take(MAX_PROBES)
         .collect()
+}
+
+/// The probes that failed on an earlier verify (`last_eval.open_probes`), matched to this
+/// verify's answers by requested criterion (else by name), to run again alongside the verifier's
+/// new ones: a bug a probe caught cannot pass the next round on quoted code alone. A criterion
+/// left unanswered is already a verify gap; one whose new probe has the very same steps runs
+/// once. The steps are validated again (stored data is still untrusted). Pure.
+pub fn carried_probes(open: &Value, answers: &Answers, fresh: &[Probe]) -> Vec<Probe> {
+    let mut out: Vec<Probe> = Vec::new();
+    for o in open.as_array().into_iter().flatten().take(MAX_PROBES) {
+        let Ok(steps) = parse_probe(&o["steps"]) else { continue };
+        let name = o["criterion"].as_str().unwrap_or("");
+        let idx = o["idx"].as_u64().map(|x| x as usize);
+        let answer = answers.list.iter().position(|a| idx.is_some() && a.idx == idx).or_else(|| answers.list.iter().position(|a| !name.is_empty() && a.name == name));
+        let Some(answer) = answer else { continue };
+        if fresh.iter().chain(out.iter()).any(|p| p.answer == answer && p.steps == steps) {
+            continue;
+        }
+        out.push(Probe { answer, criterion: answers.list[answer].name.clone(), steps, carried: true });
+    }
+    out
+}
+
+/// The probes to re-check on the next verify: every probe that failed this time (a carried one
+/// also when its selector now matches nothing, unless a new probe for the same criterion passed),
+/// and carried ones that could not run. Keyed by requested criterion. Pure.
+pub fn open_probes(probes: &[Probe], run: &ProbeRun, answers: &Answers) -> Value {
+    let results: &[ProbeResult] = match run {
+        ProbeRun::Ran(v) if v.len() == probes.len() => v,
+        _ => &[],
+    };
+    let fresh_passed = |answer: usize| probes.iter().zip(results).any(|(p, r)| !p.carried && p.answer == answer && r.ran && r.passed);
+    let mut out: Vec<Value> = Vec::new();
+    for (i, p) in probes.iter().enumerate() {
+        let keep = match results.get(i) {
+            Some(r) if r.ran => !r.passed && (!r.error || (p.carried && !fresh_passed(p.answer))),
+            _ => p.carried,
+        };
+        let entry = json!({ "idx": answers.list.get(p.answer).and_then(|a| a.idx), "criterion": p.criterion, "steps": p.steps });
+        if keep && !out.iter().any(|o| o["steps"] == entry["steps"] && o["idx"] == entry["idx"]) {
+            out.push(entry);
+        }
+    }
+    out.truncate(MAX_PROBES);
+    Value::Array(out)
 }
 
 fn at(st: &Value) -> String {
@@ -1059,6 +1200,8 @@ pub struct ProbeResult {
     /// The probe itself was broken (its selector matches nothing / no such option), not the page.
     pub error: bool,
     pub detail: String,
+    /// The probe was carried over from an earlier failure (`Probe::carried`).
+    pub carried: bool,
 }
 
 /// The probe run as a whole.
@@ -1066,8 +1209,8 @@ pub struct ProbeResult {
 pub enum ProbeRun {
     /// Not run (no probes, no Edge, runtime checks off): the evidence-only rule applies.
     Skipped(String),
-    /// Edge ran but gave no result (timeout, the page hung or navigated away): skipped too.
-    Failed(String),
+    /// Each probe's result. `run_probes` runs every probe on its own, so a probe that hangs or
+    /// navigates away is that probe's failure (`unfinished`), never a whole run thrown away.
     Ran(Vec<ProbeResult>),
 }
 
@@ -1075,7 +1218,6 @@ impl ProbeRun {
     pub fn summary(&self) -> Value {
         match self {
             ProbeRun::Skipped(r) => json!({ "ran": false, "skipped": r }),
-            ProbeRun::Failed(r) => json!({ "ran": false, "failed": r }),
             ProbeRun::Ran(v) => json!({ "ran": true, "count": v.len(), "passed": v.iter().filter(|r| r.passed).count() }),
         }
     }
@@ -1089,28 +1231,54 @@ pub fn probe_results(probes: &[Probe], raw: &Value) -> Vec<ProbeResult> {
         .enumerate()
         .map(|(i, p)| {
             let Some(r) = arr.get(i) else {
-                return ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: "not run (the page ran out of time)".into() };
+                return ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: "not run (the page ran out of time)".into(), carried: p.carried };
             };
             if r["ok"] == true {
-                return ProbeResult { answer: p.answer, ran: true, passed: true, error: false, detail: "passed".into() };
+                return ProbeResult { answer: p.answer, ran: true, passed: true, error: false, detail: "passed".into(), carried: p.carried };
             }
             let k = r["at"].as_u64().unwrap_or(0) as usize;
             let st = p.steps.get(k).cloned().unwrap_or(Value::Null);
             let got = clip_chars(&r["got"].as_str().map(String::from).unwrap_or_else(|| r["got"].to_string()), 120);
-            let did: Vec<String> = p.steps.iter().take(k).filter(|s| !s["op"].as_str().unwrap_or("").starts_with("expect_")).map(action).collect();
-            let after = if did.is_empty() { "on a fresh load".to_string() } else { format!("after {}", did.join(", ")) };
+            let after = actions_before(p, k).map(|a| format!("after {a}")).unwrap_or_else(|| "on a fresh load".to_string());
+            // What the page produced comes FIRST: a fix line is clipped from its end, and the
+            // value is what the Coder needs most.
             let (error, detail) = match r["k"].as_str().unwrap_or("") {
                 "nomatch" => (true, format!("{} matches nothing (probe step {})", at(&st), k + 1)),
+                "nolabels" => (true, format!("{} shows {got}, which does not name the expected {} (probe step {})", at(&st), st["order"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default(), k + 1)),
                 "nooption" => (true, format!("{} has no option \"{}\" (it shows \"{got}\")", at(&st), st["value"].as_str().unwrap_or(""))),
-                "threw" => {
-                    let upto: Vec<String> = p.steps.iter().take(k + 1).filter(|s| !s["op"].as_str().unwrap_or("").starts_with("expect_")).map(action).collect();
-                    (false, format!("after {} the page threw: {got}", upto.join(", ")))
-                }
-                _ => (false, format!("{after} {}, got {got}", want(&st))),
+                "threw" => (false, format!("the page threw: {got}; after {}", actions_before(p, k + 1).unwrap_or_default())),
+                _ => (false, format!("got {got}; {} {after}", want(&st))),
             };
-            ProbeResult { answer: p.answer, ran: true, passed: false, error, detail: clip_chars(&detail, 220) }
+            ProbeResult { answer: p.answer, ran: true, passed: false, error, detail: clip_chars(&detail, 220), carried: p.carried }
         })
         .collect()
+}
+
+/// The actions (set / select / click / reload) among the first `k` steps, joined; None if none.
+fn actions_before(p: &Probe, k: usize) -> Option<String> {
+    let did: Vec<String> = p.steps.iter().take(k).filter(|s| !s["op"].as_str().unwrap_or("").starts_with("expect_")).map(action).collect();
+    (!did.is_empty()).then(|| did.join(", "))
+}
+
+/// A probe whose page never produced a result (it hung, kept reloading, or navigated / replaced
+/// itself): a FAILURE of that probe, never a silent skip. `partial` is the harness's
+/// `data-tf-probe-partial` record (`{s}` = steps started) when Edge still printed the page; it
+/// names the step in flight. Pure.
+pub fn unfinished(p: &Probe, partial: Option<&Value>, why: &str) -> ProbeResult {
+    let started = partial.and_then(|v| v["s"].as_u64()).map(|s| s as usize);
+    let doing = match started {
+        Some(s) if s >= 1 => match actions_before(p, s) {
+            Some(a) => format!("after {a}"),
+            None => "while checking the fresh page".to_string(),
+        },
+        Some(_) => "on load, before the probe's first step".to_string(),
+        None => match actions_before(p, p.steps.len()) {
+            Some(a) => format!("during {a}"),
+            None => "while checking the fresh page".to_string(),
+        },
+    };
+    let detail = format!("the page hung or navigated away {doing} ({})", clip_chars(why, 90));
+    ProbeResult { answer: p.answer, ran: true, passed: false, error: false, detail: clip_chars(&detail, 220), carried: p.carried }
 }
 
 // ── Judging ─────────────────────────────────────────────────────────────────
@@ -1143,20 +1311,36 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun) -> Judged
     for (i, a) in answers.list.iter().enumerate() {
         let name: String = clip_chars(&a.name, 100);
         let found = !a.evidence.is_empty() && evidence_found(&hn, &a.evidence);
-        let res = results.iter().find(|r| r.answer == i);
-        let probe_json = match (&a.probe, res) {
+        let res = results.iter().find(|r| r.answer == i && !r.carried);
+        let again: Vec<&ProbeResult> = results.iter().filter(|r| r.answer == i && r.carried).collect();
+        let mut probe_json = match (&a.probe, res) {
             (Some(Err(why)), _) => json!({ "ran": false, "passed": false, "error": true, "detail": format!("probe rejected: {why}") }),
             (Some(Ok(_)), Some(r)) => json!({ "ran": r.ran, "passed": r.passed, "error": r.error, "detail": r.detail }),
-            (Some(Ok(_)), None) => json!({ "ran": false, "passed": false, "error": false, "detail": match run { ProbeRun::Skipped(r) | ProbeRun::Failed(r) => format!("skipped: {r}"), ProbeRun::Ran(_) => format!("skipped: at most {MAX_PROBES} probes run") } }),
+            (Some(Ok(_)), None) => json!({ "ran": false, "passed": false, "error": false, "detail": match run { ProbeRun::Skipped(r) => format!("skipped: {r}"), ProbeRun::Ran(_) => format!("skipped: at most {MAX_PROBES} probes run") } }),
             (None, _) => Value::Null,
         };
+        if !again.is_empty() {
+            let rechecked: Vec<Value> = again.iter().map(|r| json!({ "ran": r.ran, "passed": r.passed, "error": r.error, "detail": r.detail })).collect();
+            if probe_json.is_null() {
+                probe_json = json!({});
+            }
+            probe_json["rechecked"] = json!(rechecked);
+        }
         let probe_failed = res.is_some_and(|r| r.ran && !r.passed && !r.error);
+        // A probe that failed on an earlier pass and fails again — or now matches nothing while no
+        // new probe for this criterion passed — is a failure, whatever the quoted code says.
+        let fresh_passed = res.is_some_and(|r| r.ran && r.passed);
+        let failed_again = again.iter().find(|r| r.ran && !r.passed && (!r.error || !fresh_passed));
         let probe_note = res.filter(|r| r.error).map(|r| format!("; its probe: {}", r.detail)).or_else(|| match &a.probe {
             Some(Err(why)) => Some(format!("; its probe was rejected: {why}")),
             _ => None,
         });
+        // ≤ 300 chars a line (`FIX_LINE`): name ≤ 60, detail ≤ 220, the observed value first.
         if probe_failed {
-            probe_lines.push(format!("probe failed for {}: {}", clip_chars(&a.name, 80), res.map(|r| r.detail.as_str()).unwrap_or("")));
+            probe_lines.push(format!("probe failed for {}: {}", clip_chars(&a.name, 60), res.map(|r| r.detail.as_str()).unwrap_or("")));
+        } else if let Some(r) = failed_again {
+            let what = if r.error { "a probe that failed before now matches nothing for" } else { "probe failed again for" };
+            probe_lines.push(clip_chars(&format!("{what} {}: {}", clip_chars(&a.name, 50), r.detail), 300));
         } else {
             match a.met {
                 Some(false) => {
@@ -1205,35 +1389,75 @@ setTimeout(function(){document.documentElement.setAttribute('data-tf-smoke',JSON
 
 /// The probe runner (storage NOT blocked). Its state lives in `window.name` across reloads: every
 /// probe starts on a fresh load with storage cleared; `reload` reloads keeping storage; a step is
-/// saved before it acts, so a page that reloads itself resumes at the next step.
+/// saved before it acts, so a page that reloads itself resumes at the next step. Progress is also
+/// mirrored onto <html> (`data-tf-probe-partial`), so a page that never finishes still shows which
+/// step was in flight. Leaving the page (a link, `location.href = …`) is cancelled through the
+/// Navigation API; reloads and same-document navigations go through.
+///
+/// `set` behaves like typing: focus, keydown, the value, input, keyup, change, blur (a checkbox /
+/// radio is clicked when its state must change). Every action is followed by a settle wait, and
+/// an expectation is polled for a while before it fails (debounced handlers, late renders).
+/// Expectations read form controls by state: an input's value, a select's value AND its selected
+/// label, a checkbox's checked state. `approx` passes when ANY number in the text is within tol
+/// (a range "120 - 165 g", "165 lbs (74.8 kg)", a decimal comma). `expect_order` matches labels
+/// case-insensitively (exact, then by leading number, then contained); `attr` falls back to the
+/// text when no element carries it; values that name fewer than two of the expected labels are a
+/// broken probe (`nolabels`), not a page failure.
 const PROBE_JS: &str = r#"var P=__PROBES__;var S=null;try{S=JSON.parse(window.name)}catch(x){}
 if(!S||S.k!=='__tfp'){S={k:'__tfp',p:0,s:0,R:[]}}
 if(S.s===0){try{localStorage.clear();sessionStorage.clear()}catch(x){}}
-function save(){window.name=JSON.stringify(S)}
-function done(r){S.R.push(r);S.p++;S.s=0;if(S.p<P.length){save();location.reload()}else{window.name='';document.documentElement.setAttribute('data-tf-probe',JSON.stringify(S.R))}}
+var WAIT=500,POLL=100,PATIENCE=1200;
+function mark(){try{document.documentElement.setAttribute('data-tf-probe-partial',JSON.stringify({p:S.p,s:S.s,R:S.R}))}catch(x){}}
+function save(){window.name=JSON.stringify(S);mark()}
+mark();
+try{if(window.navigation){navigation.addEventListener('navigate',function(e){if(e.navigationType==='reload'||e.hashChange||(e.destination&&e.destination.sameDocument)||!e.cancelable)return;e.preventDefault()})}}catch(x){}
+document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a&&!/^#/.test(a.getAttribute('href')||'')&&!(e.defaultPrevented))e.preventDefault()},false);
+function done(r){S.R.push(r);S.p++;S.s=0;if(S.p<P.length){save();location.reload()}else{window.name='';mark();document.documentElement.setAttribute('data-tf-probe',JSON.stringify(S.R))}}
 function all(q){try{return Array.prototype.slice.call(document.querySelectorAll(q))}catch(x){return null}}
 function nm(s){return String(s==null?'':s).replace(/\s+/g,' ').trim()}
-function num(s){var m=String(s).replace(/,/g,'').match(/-?\d+(?:\.\d+)?/);return m?parseFloat(m[0]):null}
-function val(el){return /^(INPUT|SELECT|TEXTAREA|OUTPUT)$/.test(el.tagName)?el.value:(el.textContent||'')}
-function fire(el){el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}
+function nums(s){var o=[],re=/-?\d[\d,]*(?:\.\d+)?/g,m,t;s=String(s);while((m=re.exec(s))){t=m[0];if(t.charAt(0)==='-'&&m.index>0&&/[\w)]/.test(s.charAt(m.index-1)))t=t.slice(1);t=t.replace(/,+$/,'');if(/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)){o.push(parseFloat(t.replace(/,/g,'')))}else if(/^-?\d+,\d{1,2}$/.test(t)){o.push(parseFloat(t.replace(',','.')))}else{t.split(',').forEach(function(x){var v=parseFloat(x);if(!isNaN(v))o.push(v)})}}return o}
+function tick(el){var ty=(el.type||'').toLowerCase();return el.tagName==='INPUT'&&(ty==='checkbox'||ty==='radio')}
+function reads(el,op){if(el.tagName==='SELECT'){var o=el.options&&el.options[el.selectedIndex];return [nm(el.value),o?nm(o.textContent):'']}
+if(tick(el))return el.checked?['checked','true','on','yes']:['unchecked','false','off','no'];
+if(/^(INPUT|TEXTAREA|OUTPUT)$/.test(el.tagName))return [nm(el.value)];
+return [nm(op==='expect_value'?el.textContent:(el.innerText||el.textContent))]}
+function ev(el,n,b,key){var e;try{if(key!=null){e=new KeyboardEvent(n,{bubbles:b,cancelable:true,key:key})}else if(/^(focus|blur|focusin|focusout)$/.test(n)){e=new FocusEvent(n,{bubbles:b})}else{e=new Event(n,{bubbles:b})}}catch(x){e=new Event(n,{bubbles:b})}el.dispatchEvent(e)}
+function typeIn(el,v){var key=v?String(v).slice(-1):'Unidentified';ev(el,'focus',false);ev(el,'focusin',true);ev(el,'keydown',true,key);el.value=v;ev(el,'input',true);ev(el,'keyup',true,key);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
+function lead(s){var m=String(s).match(/^\D{0,12}?(-?\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):null}
+function order(st,l){var hasA=st.attr&&l.some(function(e){return e.hasAttribute(st.attr)});
+var v=l.map(function(e){return nm(hasA?e.getAttribute(st.attr):(e.innerText||e.textContent))});
+var want=st.order.map(function(x){return nm(x).toLowerCase()});
+function which(s){s=s.toLowerCase();var i=want.indexOf(s);if(i>=0)return i;var n=lead(s);if(n!==null){for(i=0;i<want.length;i++){if(lead(want[i])===n)return i}}for(i=0;i<want.length;i++){if(want[i]&&s.indexOf(want[i])>=0)return i}return -1}
+var w=[];v.forEach(function(s){var i=which(s);if(i>=0)w.push(i)});
+var seen=w.filter(function(x,j){return w.indexOf(x)===j});var got=v.slice(0,12).join(', ');
+if(seen.length<2)return {ok:false,k:'nolabels',got:got};
+return {ok:w.join(',')===want.map(function(x,j){return j}).join(','),got:got}}
+function check(st,el,l){var ok=false,got='';
+if(st.op==='expect_text'||st.op==='expect_value'){var r=reads(el,st.op),ex=tick(el);
+got=ex?r[0]:r.filter(function(x,j){return x!==''&&r.indexOf(x)===j}).join(' / ');
+for(var j=0;j<r.length&&!ok;j++){var g=r[j].toLowerCase();
+if(st.contains!=null){var c=nm(st.contains).toLowerCase();ok=ex?g===c:g.indexOf(c)>=0}
+else if(st.equals!=null){ok=g===nm(st.equals).toLowerCase()}
+else{ok=nums(r[j]).some(function(x){return Math.abs(x-st.approx)<=st.tol})}}
+return {ok:ok,got:got}}
+if(st.op==='expect_class')return {ok:el.classList.contains(st.cls)===st.present,got:nm(el.className)||'(no class)'};
+if(st.op==='expect_count')return {ok:l.length===st.count,got:String(l.length)};
+if(st.op==='expect_order')return order(st,l);
+return {ok:false,got:''}}
+function expect(st,i,t){var l=all(st.sel);var many=st.op==='expect_count'||st.op==='expect_order';var el=l?(l[st.nth||0]||null):null;
+var r=(!l||(!many&&!el))?{ok:false,k:'nomatch',got:''}:check(st,el,l);
+if(r.ok){setTimeout(step,0);return}
+if(t<PATIENCE){setTimeout(function(){expect(st,i,t+POLL)},POLL);return}
+done({ok:false,k:r.k||'fail',at:i,got:String(r.got).slice(0,120)})}
 function step(){if(S.p>=P.length)return;var st=P[S.p][S.s];if(!st){done({ok:true});return}
 var i=S.s;S.s++;save();var n0=E.length;
 if(st.op==='reload'){location.reload();return}
-var l=all(st.sel);if(!l){done({ok:false,k:'nomatch',at:i});return}
-var el=l[st.nth||0]||null;var many=st.op==='expect_count'||st.op==='expect_order';
-if(!many&&!el){done({ok:false,k:'nomatch',at:i});return}
-if(st.op==='set'){if(el.type==='checkbox'||el.type==='radio'){el.checked=/^(true|1|on|yes|checked)$/i.test(st.value)}else{el.value=st.value}fire(el)}
-else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}el.selectedIndex=o;fire(el)}
+if(/^expect_/.test(st.op)){expect(st,i,0);return}
+var l=all(st.sel);var el=l?(l[st.nth||0]||null):null;if(!el){done({ok:false,k:'nomatch',at:i});return}
+if(st.op==='set'){if(tick(el)){var on=/^(true|1|on|yes|checked)$/i.test(st.value);if(el.checked!==on)el.click()}else{typeIn(el,st.value)}}
+else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}ev(el,'focus',false);el.selectedIndex=o;ev(el,'input',true);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
 else if(st.op==='click'){el.click()}
-else{var ok=true,got='';
-if(st.op==='expect_text'||st.op==='expect_value'){got=nm(st.op==='expect_value'?val(el):(el.innerText||el.textContent));
-if(st.contains!=null){ok=got.toLowerCase().indexOf(nm(st.contains).toLowerCase())>=0}else if(st.equals!=null){ok=got.toLowerCase()===nm(st.equals).toLowerCase()}else{var x=num(got);ok=x!==null&&Math.abs(x-st.approx)<=st.tol}}
-else if(st.op==='expect_class'){ok=el.classList.contains(st.cls)===st.present;got=nm(el.className)||'(no class)'}
-else if(st.op==='expect_count'){ok=l.length===st.count;got=String(l.length)}
-else if(st.op==='expect_order'){var v=l.map(function(e){return nm(st.attr?e.getAttribute(st.attr):(e.innerText||e.textContent))});var w=v.filter(function(y){return st.order.indexOf(y)>=0});ok=w.join('\u0001')===st.order.join('\u0001');got=v.slice(0,12).join(', ')}
-if(!ok){done({ok:false,k:'fail',at:i,got:String(got).slice(0,120)});return}
-setTimeout(step,0);return}
-setTimeout(function(){if(E.length>n0){done({ok:false,k:'threw',at:i,got:E[n0]});return}step()},80)}
+setTimeout(function(){if(E.length>n0){done({ok:false,k:'threw',at:i,got:E[n0]});return}step()},WAIT)}
 addEventListener('load',function(){setTimeout(step,150)});"#;
 
 /// `js` (newlines removed, so the page keeps its line numbers) injected first in <head> (or after
@@ -1307,8 +1531,9 @@ fn sweep_stale() {
 enum EdgeOut {
     /// Could not run at all (no Edge, no temp dir, Edge printed nothing).
     Unavailable(String),
-    /// Ran but gave no result (timeout, the page hung, reloaded forever or navigated away).
-    Failed(String),
+    /// Ran but gave no result (timeout, the page hung, reloaded forever or navigated away), with
+    /// whatever page Edge still printed.
+    Failed(String, Option<String>),
     Dom(String),
 }
 
@@ -1383,7 +1608,9 @@ fn edge_in(exe: &Path, dir: &Path, page_html: &str, attr: &str, timeout: Duratio
             Ok(None) => {
                 if t0.elapsed() > timeout {
                     kill(&mut child, &job);
-                    return EdgeOut::Failed(format!("no result after {}s: the page hung, kept reloading or never finished", timeout.as_secs()));
+                    drop(job);
+                    let dom = std::fs::read_to_string(&out_path).ok().filter(|d| !d.trim().is_empty());
+                    return EdgeOut::Failed(format!("no result after {}s: the page hung, kept reloading or never finished", timeout.as_secs()), dom);
                 }
                 polls += 1;
                 // The result is already printed but Edge lingers (e.g. after a download): done.
@@ -1406,7 +1633,7 @@ fn edge_in(exe: &Path, dir: &Path, page_html: &str, attr: &str, timeout: Duratio
         return EdgeOut::Unavailable("Edge printed no page".into());
     }
     if !dom.contains(&needle) {
-        return EdgeOut::Failed("the page navigated away or replaced itself before the check finished".into());
+        return EdgeOut::Failed("the page navigated away, replaced itself or never finished the check".into(), Some(dom));
     }
     EdgeOut::Dom(dom)
 }
@@ -1430,7 +1657,7 @@ pub fn runtime_smoke(page: &Path, timeout: Duration) -> Smoke {
     let Ok(html) = std::fs::read_to_string(page) else { return Smoke::Skipped("the staged page could not be read".into()) };
     match run_edge(&with_harness(&html), "data-tf-smoke", timeout, 5000) {
         EdgeOut::Unavailable(r) => Smoke::Skipped(r),
-        EdgeOut::Failed(r) => Smoke::Failed(r),
+        EdgeOut::Failed(r, _) => Smoke::Failed(r),
         EdgeOut::Dom(dom) => match parse_dump(&dom) {
             Some((errs, load, lines)) => Smoke::Ran {
                 errors: errs.iter().enumerate().map(|(i, e)| if i < load { format!("the page throws on load: {e}") } else { format!("the page throws when its controls are used: {e}") }).collect(),
@@ -1441,21 +1668,38 @@ pub fn runtime_smoke(page: &Path, timeout: Duration) -> Smoke {
     }
 }
 
-/// Run the verifier's probes in headless Edge (storage working, a fresh load per probe). Blocking.
-pub fn run_probes(page: &Path, probes: &[Probe], timeout: Duration) -> ProbeRun {
+/// Run the verifier's probes in headless Edge (storage working), each probe in its own Edge run on
+/// a fresh load: a probe that hangs the page or navigates away is THAT probe's failure (with the
+/// step in flight when Edge still printed the page) and never costs the other probes their
+/// results. `each` caps one probe, `total` the whole run (probes past it are "not run"). Blocking.
+pub fn run_probes(page: &Path, probes: &[Probe], each: Duration, total: Duration) -> ProbeRun {
     if probes.is_empty() {
         return ProbeRun::Skipped("no probes".into());
     }
     let Ok(html) = std::fs::read_to_string(page) else { return ProbeRun::Skipped("the staged page could not be read".into()) };
-    let budget = 2000 + 1500 * probes.len() as u64;
-    match run_edge(&with_probes(&html, probes), "data-tf-probe", timeout, budget) {
-        EdgeOut::Unavailable(r) => ProbeRun::Skipped(r),
-        EdgeOut::Failed(r) => ProbeRun::Failed(r),
-        EdgeOut::Dom(dom) => match attr_json(&dom, "data-tf-probe") {
-            Some(v) => ProbeRun::Ran(probe_results(probes, &v)),
-            None => ProbeRun::Failed("the probe results could not be read".into()),
-        },
+    let deadline = Instant::now() + total;
+    let mut out: Vec<ProbeResult> = Vec::new();
+    for p in probes {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let not_run = |why: String| ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: why, carried: p.carried };
+        if left < Duration::from_secs(3) {
+            out.push(not_run("not run (the probes ran out of time)".into()));
+            continue;
+        }
+        let one = std::slice::from_ref(p);
+        // Virtual time: the load, then per step a settle wait or an expectation's patience.
+        let budget = 2500 + 1400 * p.steps.len() as u64;
+        match run_edge(&with_probes(&html, one), "data-tf-probe", left.min(each), budget) {
+            EdgeOut::Unavailable(r) if out.is_empty() => return ProbeRun::Skipped(r),
+            EdgeOut::Unavailable(r) => out.push(not_run(format!("not run ({r})"))),
+            EdgeOut::Dom(dom) => match attr_json(&dom, "data-tf-probe") {
+                Some(v) => out.extend(probe_results(one, &v)),
+                None => out.push(unfinished(p, attr_json(&dom, "data-tf-probe-partial").as_ref(), "its result could not be read")),
+            },
+            EdgeOut::Failed(r, dom) => out.push(unfinished(p, dom.as_deref().and_then(|d| attr_json(d, "data-tf-probe-partial")).as_ref(), &r)),
+        }
     }
+    ProbeRun::Ran(out)
 }
 
 #[cfg(test)]

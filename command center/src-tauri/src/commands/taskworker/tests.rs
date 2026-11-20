@@ -2000,7 +2000,7 @@ fn a_failing_probe_overrides_a_pass_with_evidence_and_loops_to_the_coder() {
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
     assert_eq!(e.iteration_count, 1, "the probe failure became one loop");
-    let line = "probe failed for Shows the per-person total: after set #bill=100, click #go expected #out text to contain \"$39.33\", got $0.00 per person";
+    let line = "probe failed for Shows the per-person total: got $0.00 per person; expected #out text to contain \"$39.33\" after set #bill=100, click #go";
     let codes = fake.calls_for("code");
     assert!(codes[1].user.contains(line), "{}", codes[1].user);
     let looped = e.handoff_log.iter().find(|h| h.event_type == "loop_iteration" && h.summary_payload["from"] == "verify").expect("a verify loop row");
@@ -2094,7 +2094,7 @@ fn a_verify_that_leaves_criteria_out_is_retried_then_names_them() {
 fn the_coder_reads_the_latest_fixes_first_and_nics_latest_words() {
     let mut e = new_task(&TaskStore::in_memory(), &format!("I want 5 meals a day. {} Actually, default to 4 meals.", "and some more talk about it ".repeat(200)));
     e.coder_brief = json!({ "build_brief": "Build it.", "fix_instructions": vec!["stale fix from the last merge ".repeat(6); 12] });
-    let probe_line = "probe failed for the meal split: on a fresh load expected .split-btn (data-meals) in the order 3, 4, 5, got 3, 5, 4".to_string();
+    let probe_line = "probe failed for the meal split: got 3, 5, 4; expected .split-btn (data-meals) in the order 3, 4, 5 on a fresh load".to_string();
     let p = prompt_code(&e, &[probe_line.clone()]);
     assert!(p.contains("Actually, default to 4 meals.") && p.contains("I want 5 meals a day."), "head and tail of a long brainstorm");
     assert!(p.find(&probe_line).unwrap() < p.find("stale fix").unwrap(), "the latest fixes first");
@@ -2134,6 +2134,79 @@ fn a_hub_build_failing_the_gate_at_the_limit_fails_instead_of_handing_on() {
     assert_eq!(e.status, "failed", "{:?}", e.last_eval);
     assert!(e.last_eval.get("gate_blockers").is_none());
     assert_eq!(fake.count("verify"), 0);
+}
+
+/// A probe that caught a bug runs again on the next verify even when the verifier drops it and
+/// quotes the code: the bug cannot pass on evidence alone (it loops, then is a known blocker at
+/// the limit); once the page is fixed the carried probe passes and nothing stays open.
+#[test]
+fn a_failed_probe_is_rechecked_on_the_next_verify_even_when_the_verifier_drops_it() {
+    let no_probe = || json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"] }], "verdict": "pass" }).to_string();
+    // Fixed on the third Coder pass.
+    let root = tmp("probe-carry");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) | ("code", 2) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", 1) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => no_probe(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 2, "the dropped probe still failed once more, then passed");
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 3);
+    assert!(!calls[0][0].carried && calls[1][0].carried && calls[2][0].carried, "{calls:?}");
+    let codes = fake.calls_for("code");
+    assert!(codes[2].user.contains("probe failed again for Shows the per-person total: got $0.00 per person"), "{}", codes[2].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]));
+    assert_eq!(e.last_eval["open_probes"], json!([]), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["probe"]["rechecked"][0]["passed"], true);
+    // Never fixed: the carried probe is still failing at the limit and is named first.
+    let root = tmp("probe-carry-limit");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, n| Ok(match (c.stage, n) { ("verify", 1) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(), ("verify", _) => no_probe(), _ => default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].starts_with("probe failed again for Shows the per-person total"), "{kb:?}");
+}
+
+/// A Play Place hub build whose probe still fails on the last pass fails (into the Repair Queue)
+/// instead of being staged review_ready, which the hub would smoke-test and mark mergeable.
+#[test]
+fn a_hub_build_whose_probe_still_fails_at_the_limit_fails_instead_of_handing_on() {
+    let root = tmp("hubprobe");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    assert_eq!(fake.count("verify"), 1 + MAX_LOOP_ITERATIONS as usize);
+    let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
+    assert!(!status.contains("review_ready"), "{status}");
+    // A non-hub build in the same state is staged with the probe as a known blocker
+    // (`a_probe_still_failing_at_the_limit_is_a_known_blocker`).
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

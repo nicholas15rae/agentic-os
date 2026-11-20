@@ -115,8 +115,10 @@ const INTENT_RECAP_IN: usize = 2500;
 const VERIFY_CODE_IN: usize = 11_000;
 /// Headless runtime smoke cap.
 const RUNTIME_SMOKE_SECS: u64 = 25;
-/// Headless cap for the verifier's behavioural probes (one Edge run, a fresh load per probe).
-const PROBE_SECS: u64 = 40;
+/// Headless caps for the verifier's behavioural probes: one Edge run per probe (a fresh load each;
+/// a probe that hangs fails alone), and the whole set.
+const PROBE_EACH_SECS: u64 = 20;
+const PROBE_SECS: u64 = 120;
 const BRIEF_IN: usize = 1400;
 const SPEC_IN: usize = 3000;
 const DESIGN_IN: usize = 4000;
@@ -231,7 +233,7 @@ pub trait WorkerEnv: Send + Sync {
     /// The verifier's behavioural probes on the staged page (headless Edge; `quality::run_probes`).
     fn run_probes(&self, page: PathBuf, probes: Vec<quality::Probe>) -> BoxFuture<'_, quality::ProbeRun> {
         Box::pin(async move {
-            tauri::async_runtime::spawn_blocking(move || quality::run_probes(&page, &probes, Duration::from_secs(PROBE_SECS))).await.unwrap_or_else(|e| quality::ProbeRun::Skipped(format!("the probe task failed: {e}")))
+            tauri::async_runtime::spawn_blocking(move || quality::run_probes(&page, &probes, Duration::from_secs(PROBE_EACH_SECS), Duration::from_secs(PROBE_SECS))).await.unwrap_or_else(|e| quality::ProbeRun::Skipped(format!("the probe task failed: {e}")))
         })
     }
 }
@@ -756,7 +758,7 @@ pub fn verify_criteria(e: &Envelope) -> Vec<String> {
 }
 
 /// The verifier's behavioural probe DSL, as the prompt states it (`quality::parse_probe`).
-const PROBE_RULES: &str = "For each criterion about BEHAVIOUR (a unit conversion, a default, a total that updates, an order, a saved value) add a \"probe\": up to 8 steps the system runs in a real browser on a fresh page load, using selectors that exist in the code. Steps: {\"op\":\"set\",\"sel\":\"#weight\",\"value\":\"165\"} (fills it, fires input+change), {\"op\":\"select\",\"sel\":\"#activity\",\"value\":\"active\"}, {\"op\":\"click\",\"sel\":\"#kg\"} (add \"nth\":1 for the 2nd match), {\"op\":\"reload\"} (storage kept), {\"op\":\"expect_value\" or \"expect_text\",\"sel\":\"#weight\",\"approx\":74.8,\"tol\":0.5} (or \"contains\":\"...\" / \"equals\":\"...\"), {\"op\":\"expect_class\",\"sel\":\"#kg\",\"class\":\"active\",\"present\":true}, {\"op\":\"expect_count\",\"sel\":\".row\",\"count\":3}, {\"op\":\"expect_order\",\"sel\":\".split-btn\",\"attr\":\"data-meals\",\"order\":[\"3\",\"4\",\"5\"]}. Expect what Nic asked for, not what the code happens to do. At most 6 probes.";
+const PROBE_RULES: &str = "For each criterion about BEHAVIOUR (a unit conversion, a default, a total that updates, an order, a saved value) add a \"probe\": up to 8 steps the system runs in a real browser on a fresh page load, using selectors that exist in the code. Steps: {\"op\":\"set\",\"sel\":\"#weight\",\"value\":\"165\"} (types it: key, input, change and blur events), {\"op\":\"select\",\"sel\":\"#activity\",\"value\":\"active\"}, {\"op\":\"click\",\"sel\":\"#kg\"} (add \"nth\":1 for the 2nd match), {\"op\":\"reload\"} (storage kept), {\"op\":\"expect_value\" or \"expect_text\",\"sel\":\"#weight\",\"approx\":74.8,\"tol\":0.5} (approx passes when ANY number shown in the element is within tol; an input/select is read by its value and selected label; or \"contains\":\"...\" / \"equals\":\"...\"), {\"op\":\"expect_class\",\"sel\":\"#kg\",\"class\":\"active\",\"present\":true}, {\"op\":\"expect_count\",\"sel\":\".row\",\"count\":3}, {\"op\":\"expect_order\",\"sel\":\".split-btn\",\"attr\":\"data-meals\",\"order\":[\"3\",\"4\",\"5\"]} (labels match case-insensitively, by their leading number or contained; without attr the text is used). Expect what Nic asked for, not what the code happens to do. At most 6 probes.";
 
 /// Evidence-based verify: per criterion, met or not plus the exact code that implements it, and
 /// a behavioural probe the system runs. `code` is the staged page (`quality::verify_view` here).
@@ -1491,6 +1493,11 @@ impl<'a> Worker<'a> {
         };
         ev["iteration"] = json!(e.iteration_count);
         ev["at"] = json!(envelope::now_ms());
+        // Probes that failed on an earlier verify are re-run on the next one (whatever the
+        // verifier writes then): keep them through this pass's new record.
+        if e.last_eval["open_probes"].as_array().is_some_and(|a| !a.is_empty()) {
+            ev["open_probes"] = e.last_eval["open_probes"].clone();
+        }
         let complete = ev["complete"].as_bool() == Some(true);
         let missing = str_list(&ev["missing"], 10, 240);
         // The last allowed pass with a real page that still misses items: hand it on to review
@@ -1599,17 +1606,21 @@ impl<'a> Worker<'a> {
                 }));
             }
             // Behavioural probes (AD-11): run in headless Edge, storage working, a fresh load each.
-            let probes = quality::probes_of(&answers);
+            // Probes that failed on an earlier pass run again alongside the verifier's new ones.
+            let mut probes = quality::probes_of(&answers);
+            let carried = quality::carried_probes(&e.last_eval["open_probes"], &answers, &probes);
+            probes.extend(carried);
             let run = if probes.is_empty() {
                 quality::ProbeRun::Skipped("the verifier gave no probes".into())
             } else if !s.runtime_smoke {
                 quality::ProbeRun::Skipped("runtime checks are off".into())
             } else {
                 match page.clone().filter(|_| !html.is_empty()) {
-                    Some(p) => self.env.run_probes(p, probes).await,
+                    Some(p) => self.env.run_probes(p, probes.clone()).await,
                     None => quality::ProbeRun::Skipped("no staged page".into()),
                 }
             };
+            let open = quality::open_probes(&probes, &run, &answers);
             // A criterion counts only when it is met, its quoted code is in the page, and its probe
             // (if it ran) did not fail.
             let judged = quality::judge(&answers, &html, cut, &run);
@@ -1657,12 +1668,18 @@ impl<'a> Worker<'a> {
                 }
             }
             blockers.truncate(12);
-            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), voice(&j))
+            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), voice(&j))
         };
         let mut last_eval = e.last_eval.clone();
         last_eval["verify"] = decision.clone();
+        last_eval["open_probes"] = if decision["open_probes"].is_array() { decision["open_probes"].clone() } else { json!([]) };
         let wants_loop = decision["verdict"] == "loop";
-        if wants_loop && !at_limit {
+        // A Play Place hub build whose criteria are still unmet (a failed probe, unmet or
+        // unevidenced) on the last pass fails into the hub's Repair Queue (the loop breaker fails
+        // it) instead of review_ready, which the hub would smoke-test and mark mergeable.
+        let hub = e.raw_intent.memory_reference["source"] == "playplace";
+        let hub_unmet = hub && at_limit && decision["unmet"].as_u64().unwrap_or(0) > 0;
+        if wants_loop && (!at_limit || hub_unmet) {
             let to_agent = if decision["loop_to"] == "designer" { "designer" } else { "coder" };
             let fixes = str_list(&decision["fix_instructions"], 10, FIX_LINE);
             let pre_row = HandoffRow::new("prompter", "prompter", "stage_completed", "verbose", format!("Prompter wants another pass ({} fix{})", fixes.len(), if fixes.len() == 1 { "" } else { "es" })).voice(v.as_deref());

@@ -7,7 +7,8 @@ export interface Toast {
   id: string;
   title: string;
   body?: string;
-  tone: "alarm" | "info" | "error";
+  /** `warn`: needs a look but is not a failure (a build staged with items that couldn't be checked). */
+  tone: "alarm" | "info" | "warn" | "error";
   actions?: { label: string; run: () => void }[];
 }
 

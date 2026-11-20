@@ -126,6 +126,12 @@ const CODER_BRIEF_IN: usize = 3000;
 const FIX_IN: usize = 1800;
 /// One fix line as it travels in loop rows (a probe failure names the steps and both values).
 const FIX_LINE: usize = 300;
+/// The worker's own fix when the verifier says "loop" but names none: it sends the Coder another
+/// pass, but it is never the verifier's fix (`open_model_fixes`), and when staged it is the
+/// `BARE_LOOP_NOTE` note (AD-13 round 7).
+pub const BARE_LOOP_FIX: &str = "address the acceptance criteria the build does not meet";
+/// What a staged build says about a bare "loop" (no fix named): a note, never a failing item.
+pub const BARE_LOOP_NOTE: &str = "the verifier still asked for another pass but named no fix";
 const DIGEST_IN: usize = 2500;
 const DESIGN_STORE_MAX: usize = 24 * 1024;
 const RESEARCH_SEARCHES: usize = 3;
@@ -281,6 +287,9 @@ pub struct WorkerStats {
     /// probe): fed into the verify prompt on the stage's one retry for it. Keyed by the claim so a
     /// later claim (the retry never ran: paused / cancelled during the backoff) never inherits it.
     pub verify_feedback: Mutex<HashMap<String, (u32, Option<i64>, Vec<String>)>>,
+    /// Task id → (iteration, the claim's lease, the requested criteria (0-based) whose expectation
+    /// the verifier was asked to recheck on that retry): the wrong-number guard (AD-13 round 4).
+    pub verify_recheck: Mutex<HashMap<String, (u32, Option<i64>, Vec<usize>)>>,
 }
 
 /// How often a pending mirror is re-sent while the gateway is unreachable.
@@ -533,6 +542,15 @@ pub fn gate_repair_pending(e: &Envelope) -> bool {
     e.last_eval["gate_repair"] == "pending" && e.last_eval["iteration"].as_u64() == Some(u64::from(e.iteration_count))
 }
 
+/// The gate items of THIS iteration's pass that went on to verify anyway (`h_evaluate`'s early
+/// behavioural feedback, AD-13 round 4): verify sends them to the Coder with its own findings. Pure.
+pub fn gate_open(e: &Envelope) -> Vec<String> {
+    if e.last_eval["iteration"].as_u64() != Some(u64::from(e.iteration_count)) {
+        return vec![];
+    }
+    str_list(&e.last_eval["gate_open"], 10, 240)
+}
+
 /// Where the page from before a gate repair pass is kept (`h_evaluate`).
 fn pre_repair_rel(iteration: u32) -> String {
     format!(".iterations/{iteration}-pre-repair.html")
@@ -732,6 +750,10 @@ pub fn prompt_triage(e: &Envelope) -> String {
     )
 }
 
+/// What the Librarian may say about earlier staged projects (AD-13 round 4, live run 4: it told
+/// Nic it "found three ready-to-use modules" that all needed fixes). `librarian::staged_label`.
+pub const STAGED_RULE: &str = "Earlier staged projects are listed by name and status only: you have NOT seen their code. Never call a project marked \"needs fixes\", \"unverified\" or \"staged before verdicts were recorded\" ready-to-use, reusable or a module to build on; only one marked \"ready\" may be suggested, as a reference to look at, and any other label means not reusable.";
+
 pub fn prompt_preflight(e: &Envelope, p: &Packet) -> String {
     let mut ctx = String::new();
     for (i, it) in p.items.iter().enumerate() {
@@ -741,7 +763,7 @@ pub fn prompt_preflight(e: &Envelope, p: &Packet) -> String {
         ctx = "(nothing relevant was found)\n".into();
     }
     format!(
-        "{}\nPre-flight research for the Prompter, Designer and Coder.\nThe user's request:\n{}\nContext gathered for you by the read-only system:\n{ctx}Reply ONLY with JSON:\n{{\"read_only_confirmed\": true, \"retrieved_context\": [{{\"source\": \"one of the listed sources, exactly\", \"type\": \"internal | external\", \"summary\": \"compact actionable rule or fact\"}}], \"value_add_brief\": \"the key facts, patterns or pitfalls for the build, in under 120 words\", \"discrepancies_flagged\": [{{\"severity\": \"info | warning | conflict\", \"detail\": \"...\", \"affected_agent\": \"prompter | designer | coder | tony\"}}], \"voice_summary\": \"...\"}}",
+        "{}\nPre-flight research for the Prompter, Designer and Coder.\nThe user's request:\n{}\nContext gathered for you by the read-only system:\n{ctx}{STAGED_RULE}\nReply ONLY with JSON:\n{{\"read_only_confirmed\": true, \"retrieved_context\": [{{\"source\": \"one of the listed sources, exactly\", \"type\": \"internal | external\", \"summary\": \"compact actionable rule or fact\"}}], \"value_add_brief\": \"the key facts, patterns or pitfalls for the build, in under 120 words\", \"discrepancies_flagged\": [{{\"severity\": \"info | warning | conflict\", \"detail\": \"...\", \"affected_agent\": \"prompter | designer | coder | tony\"}}], \"voice_summary\": \"...\"}}",
         header(e, "preflight"),
         intent_block(e)
     )
@@ -881,8 +903,13 @@ pub fn fit_lines(lines: &[String], max: usize) -> Vec<String> {
 /// retry for it.
 pub fn prompt_verify(e: &Envelope, code: &str, audit: &Value, at_limit: bool, retry: &[String]) -> String {
     let crit: Vec<String> = verify_criteria(e).iter().enumerate().map(|(i, c)| format!("{}. {c}", i + 1)).collect();
-    let (quotes, probes): (Vec<String>, Vec<String>) = retry.iter().cloned().partition(|l| l.ends_with(quality::STALE_TAIL));
+    let (rechecks, rest): (Vec<String>, Vec<String>) = retry.iter().cloned().partition(|l| l.starts_with(quality::RECHECK_HEAD));
+    let (quotes, probes): (Vec<String>, Vec<String>) = rest.into_iter().partition(|l| l.ends_with(quality::STALE_TAIL));
     let mut retry = String::new();
+    if !rechecks.is_empty() {
+        let lines: Vec<String> = rechecks.iter().map(|l| l[quality::RECHECK_HEAD.len()..].to_string()).collect();
+        retry += &format!("Your probe failed again with the same value after the Coder's fix pass for these criteria. Before the Coder is asked again, check YOUR expected value against Nic's request, real-world facts and the page's code: if the page's value is right, correct the probe's expected value; if the page's value is wrong, keep the probe exactly as it was (it then stays a known blocker):\n- {}\n", fit_lines(&lines, 2200).join("\n- "));
+    }
     if !probes.is_empty() {
         retry += &format!("Your last answer gave no working probe for these behavioural criteria; give each one a probe that runs (selectors that exist in the code; an action before the expectation, except an on-load check, which expects first; the pinned value where one is stated):\n- {}\n", fit_lines(&probes, 1500).join("\n- "));
     }
@@ -891,7 +918,14 @@ pub fn prompt_verify(e: &Envelope, code: &str, audit: &Value, at_limit: bool, re
     }
     let (view, cut) = quality::verify_view(code, VERIFY_CODE_IN);
     let gate = str_list(&e.last_eval["gate_blockers"], 6, 160);
-    let checks = if gate.is_empty() { format!("The deterministic checks passed: {}", compact(&e.last_eval["checks"], 400)) } else { format!("The deterministic checks still fail on this last pass (they go to review as known blockers): {}", gate.join("; ")) };
+    let open = gate_open(e);
+    let checks = if !gate.is_empty() {
+        format!("The deterministic checks still fail on this last pass (they go to review as known blockers): {}", gate.join("; "))
+    } else if !open.is_empty() {
+        format!("The deterministic checks fail on this pass (the Coder gets them together with your findings; judge the behaviour as it is now): {}", open.iter().take(6).map(|g| clip(g, 160)).collect::<Vec<_>>().join("; "))
+    } else {
+        format!("The deterministic checks passed: {}", compact(&e.last_eval["checks"], 400))
+    };
     let cut_note = if cut { "Code marked /* … omitted … */ was cut for length: for a criterion whose code you cannot see, set met to null.\n" } else { "" };
     format!(
         "{}\nVerify the staged build against what Nic asked for, by reading its code. For EACH numbered criterion give its number n, decide met true/false and copy the 1-3 lines of code that implement it VERBATIM into evidence (no paraphrase). A criterion whose behaviour you cannot point to in the code is NOT met. Trace the data flow: an input whose handler never stores or uses the value does not count; check the order of statements (a value changed before it is compared, saved data applied after the page was drawn).\n{PROBE_RULES}\n{cut_note}{}{checks}\nNic's request:\n{}\nCriteria:\n{}\nLibrarian audit: {}\nMemory/Librarian bookkeeping (Tony's notes, memoryDoc, tasks.db, prompt backups) is not the Coder's or Designer's job: never loop on it.\nThe page's code:\n{}\n{}{retry}Reply ONLY with JSON:\n{{\"criteria\": [{{\"n\": 1, \"criterion\": \"...\", \"met\": true, \"evidence\": \"verbatim code\", \"probe\": [{{\"op\": \"...\"}}], \"fix\": \"only when not met\"}}], \"verdict\": \"pass | loop\", \"loop_to\": \"coder | designer\", \"fix_instructions\": [\"exact fixes, only when verdict is loop\"], \"known_blockers\": [], \"voice_summary\": \"...\"}}",
@@ -941,6 +975,27 @@ const UNCHECKED_PREFIXES: [&str; 2] = ["couldn't be checked in a browser: ", "co
 /// At most this many known blockers are listed; past it the last line counts the rest.
 pub const BLOCKERS_MAX: usize = 16;
 
+/// The verifier's own fixes still open when a build is staged (AD-13 round 6, the critic's
+/// remove-bug page): every criterion met, yet the verifier loops with the same fix on every pass
+/// and the Coder returns the page unchanged until the limit. A decision that still says "loop"
+/// when staged is at the limit; when nothing deterministic fails (`failing`: the gate's items,
+/// failed / unmet criteria) the loop is the verifier's alone, and its fix instructions are what
+/// still fails: the verdict is needs-fixes, never unverified or a pass. With deterministic
+/// failures they stay notes (they mostly restate them, and the verdict is needs-fixes anyway).
+/// A held wrong number never gets here (the guard turns that loop into a pass, its fixes into
+/// notes). Clipped as the blocker list clips them, so a line is never counted twice.
+/// Only fixes the verifier itself gave count (round 7): `model_open` records them (its own
+/// non-bookkeeping fixes, when it said "loop" and no unmet criterion or gate item forced the
+/// loop), never the worker's `BARE_LOOP_FIX` for a bare "loop", nor a hub gap's line. A decision
+/// stored before `model_open` existed reads its fix instructions without `BARE_LOOP_FIX`. Pure.
+pub fn open_model_fixes(decision: &Value, failing: &[String]) -> Vec<String> {
+    if decision["verdict"] != "loop" || !failing.is_empty() {
+        return vec![];
+    }
+    let own = if decision.get("model_open").is_some() { &decision["model_open"] } else { &decision["fix_instructions"] };
+    str_list(own, 10, FIX_LINE).into_iter().filter(|f| f != BARE_LOOP_FIX).collect()
+}
+
 /// The review_ready voice line, deterministic whenever blockers exist (the verifier's own line
 /// said "passes all functional criteria" next to two blockers). What fails ("Built, but 2 things
 /// still don't work: …") is told apart from what could not be proven ("Built, but 3 things
@@ -963,15 +1018,72 @@ pub fn review_voice(failing: &[String], unchecked: &[String], notes: &[String]) 
     } else {
         return None;
     };
-    let tidy = |s: &str| s.trim_end_matches(['.', ';', ':', ',', ' ']).to_string();
-    // The head already says what kind of item it is: never "couldn't be checked: couldn't be
-    // checked in a browser: …" (the blocker lines keep their prefix).
-    let bare = |s: &str| UNCHECKED_PREFIXES.iter().find_map(|p| s.strip_prefix(p)).unwrap_or(s).to_string();
-    // A clip ends in "…": never ";…" or ".…".
-    let items: Vec<String> = items.iter().map(|b| clip(&tidy(&bare(&one_line(b))), 90)).map(|c| c.strip_suffix('\u{2026}').map(|h| format!("{}\u{2026}", tidy(h))).unwrap_or(c)).collect();
+    let items: Vec<String> = items.iter().map(|b| voice_item(b)).collect();
     let body = format!("{head}: {}", items.join("; "));
     let end = if body.ends_with(['.', '\u{2026}', '!', '?']) { "" } else { "." };
     Some(format!("{body}{end}"))
+}
+
+/// Internal heads of a failing item's blocker line the spoken line drops (`voice_item`).
+const INTERNAL_PREFIXES: [&str; 2] = ["probe failed for ", "probe failed again for "];
+
+/// `s` cut before its first "(" that is never closed. Pure.
+fn cut_open_bracket(s: &str) -> &str {
+    let mut open: Vec<usize> = Vec::new();
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => open.push(i),
+            ')' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open.first().map_or(s, |&i| &s[..i])
+}
+
+/// One item of the spoken review line (AD-13 round 4): the head already says what kind it is,
+/// so the blocker line's own head ("couldn't be checked in a browser: ", "probe failed for ")
+/// and a trailing "(…)" reason are dropped BEFORE clipping; a clip never ends inside brackets,
+/// with "…:", ";…" or ".…". The blocker lines keep their wording. Pure.
+fn voice_item(b: &str) -> String {
+    let tidy = |s: &str| s.trim_end_matches(['.', ';', ':', ',', ' ', '\u{2014}', '-']).to_string();
+    let line = one_line(b);
+    let mut s: &str = UNCHECKED_PREFIXES.iter().chain(&INTERNAL_PREFIXES).find_map(|p| line.strip_prefix(p)).unwrap_or(&line);
+    // A trailing reason in brackets, closed ("… (no probe was given)") or already cut ("… (its
+    // probe was rejected: it expects…").
+    let t = s.trim_end();
+    s = if t.ends_with(')') {
+        let mut depth = 0i32;
+        let mut at = None;
+        for (i, c) in t.char_indices().rev() {
+            match c {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        at = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match at {
+            Some(i) if !t[..i].trim().is_empty() => t[..i].trim_end(),
+            _ => t,
+        }
+    } else {
+        cut_open_bracket(t).trim_end()
+    };
+    let c = clip(&tidy(s), 90);
+    match c.strip_suffix('\u{2026}') {
+        Some(h) => {
+            let h = tidy(cut_open_bracket(h));
+            if h.ends_with('\u{2026}') { h } else { format!("{h}\u{2026}") }
+        }
+        None => c,
+    }
 }
 
 /// Largest staged page embedded in a Play Place card (the gateway caps a card body at 512 KB).
@@ -1743,10 +1855,21 @@ impl<'a> Worker<'a> {
         if !complete && at_limit && usable && !hub {
             ev["gate_blockers"] = json!(missing);
         }
-        if complete || ev.get("gate_blockers").is_some() {
+        // Early behavioural feedback (AD-13 round 4, live run 4): a usable page (HTML present, no
+        // throw on load, no hang) that fails the gate on a pass that is not the last still gets
+        // verify and its probes on this pass; verify then sends the Coder the gate items AND the
+        // behavioural failures together in one loop (`gate_open`). An unusable page skips verify
+        // and goes back to the Prompter as before; the iteration count is unchanged.
+        let early = !complete && usable && !at_limit;
+        if early {
+            ev["gate_open"] = json!(missing);
+        }
+        if complete || ev.get("gate_blockers").is_some() || early {
             let audit = s.librarian_audit;
             let text = if complete {
                 if audit { "Build checks passed; Librarian audit next".to_string() } else { "Build checks passed; Prompter verify next".to_string() }
+            } else if early {
+                format!("Build checks miss {} item{}; the page loads, so verify and its probes run on this pass too and the Coder gets both together", missing.len(), if missing.len() == 1 { "" } else { "s" })
             } else {
                 format!("Build checks still miss {} item{} on the last pass; they go to review as known blockers", missing.len(), if missing.len() == 1 { "" } else { "s" })
             };
@@ -1829,6 +1952,11 @@ impl<'a> Worker<'a> {
             // The one retry for missing / broken probes reads why they did not work (only this
             // claim's: a retry that never ran must not suppress the next claim's own).
             let feedback: Vec<String> = self.stats.verify_feedback.lock().unwrap().remove(&e.task_id).filter(|(it, lease, _)| *it == e.iteration_count && *lease == e.lease_until).map(|(_, _, f)| f).unwrap_or_default();
+            // The criteria whose expectation that retry asked the verifier to recheck (the
+            // wrong-number guard, AD-13 round 4): their failures now are its answer.
+            let rechecked: Vec<usize> = self.stats.verify_recheck.lock().unwrap().remove(&e.task_id).filter(|(it, lease, _)| *it == e.iteration_count && *lease == e.lease_until).map(|(_, _, v)| v).unwrap_or_default();
+            // Gate items of this pass that came on to verify (early behavioural feedback).
+            let open_gate = gate_open(e);
             let r = self.ask(e, "prompter", "verify", prompt_verify(e, &html, &audit, at_limit, &feedback), s, None, None).await?;
             let j = extract_json(&r.text);
             let (expected, needs) = verify_plan(e);
@@ -1850,6 +1978,13 @@ impl<'a> Worker<'a> {
             // Carried probes (a bug a probe caught before) run FIRST, inside the time budget.
             let fresh = quality::probes_of(&answers, &needs);
             let mut probes = quality::carried_probes(&e.last_eval["open_probes"], &answers, &fresh, &needs);
+            // A rechecked criterion is decided by the verifier's answer to the recheck (its new
+            // probe), never by the old probe it was asked about; with no new probe the old one
+            // runs (the verifier kept it). An answer that passes only by no longer expecting what
+            // the old probe did is a disputed expectation, never a pass (`disputed_rechecks`).
+            let set_aside = |p: &quality::Probe| p.carried && fresh.iter().any(|f| f.answer == p.answer) && answers.list.get(p.answer).and_then(|a| a.idx).is_some_and(|i| rechecked.contains(&i));
+            let dropped: Vec<quality::Probe> = probes.iter().filter(|p| set_aside(p)).cloned().collect();
+            probes.retain(|p| !set_aside(p));
             probes.extend(fresh);
             let can_probe = s.runtime_smoke && page.is_some() && !html.is_empty() && self.env.probes_available();
             let run = if probes.is_empty() {
@@ -1862,7 +1997,10 @@ impl<'a> Worker<'a> {
                     None => quality::ProbeRun::Skipped("no staged page".into()),
                 }
             };
-            let open = quality::open_probes(&probes, &run, &answers);
+            let mut open = quality::open_probes(&probes, &run, &answers);
+            // The wrong-number guard's blind spot (AD-13 round 5): a recheck answer that copies the
+            // page's value. Not met, not a Coder loop: unchecked, so the build is not called working.
+            let disputes = quality::disputed_rechecks(&e.last_eval["open_probes"], &dropped, &probes, &run, &answers);
             // Where probes run, a behavioural criterion needs one that ran and passed (AD-12); a
             // run that could not start (no Edge after all) keeps the evidence-only rule.
             let probes_on = can_probe && (probes.is_empty() || matches!(run, quality::ProbeRun::Ran(_)));
@@ -1893,14 +2031,71 @@ impl<'a> Worker<'a> {
             // (the probe cap, the time budget).
             let mut feedback_now = quality::probe_feedback(&gaps);
             feedback_now.extend(quality::stale_feedback(&stale));
-            if !feedback_now.is_empty() && judged.unmet.is_empty() && !last && feedback.is_empty() {
+            // The wrong-number guard (AD-13 round 4): a probe that fails again after a Coder pass
+            // with the same value, or on a page the Coder returned unchanged, may expect a wrong
+            // number (a real Coder would then "fix" a correct page to match). The verifier is asked
+            // once to confirm or correct it, with the value the page shows and its code, BEFORE any
+            // further Coder pass for it; kept, it is a known blocker and never loops the Coder
+            // again. Not for a hub build (its unmet criteria go to the Repair Queue as before).
+            let hub = e.raw_intent.memory_reference["source"] == "playplace";
+            let sig = quality::page_sig(&html);
+            let fails: Vec<(usize, Vec<Value>, String)> = match &run {
+                quality::ProbeRun::Ran(rs) if rs.len() == probes.len() => probes.iter().zip(rs).filter(|(_, r)| r.ran && !r.passed && !r.error).filter_map(|(p, r)| answers.list.get(p.answer).and_then(|a| a.idx).map(|i| (i, p.steps.clone(), r.detail.clone()))).collect(),
+                _ => vec![],
+            };
+            let guard = if hub { quality::Guard::default() } else { quality::wrong_number_guard(&e.last_eval["open_probes"], &fails, &sig, &rechecked) };
+            let mut held: Vec<usize> = guard.held.clone();
+            if !guard.suspects.is_empty() {
+                if !last && feedback.is_empty() {
+                    let mut lines: Vec<String> = guard
+                        .suspects
+                        .iter()
+                        .filter_map(|i| fails.iter().find(|(x, _, _)| x == i).map(|(_, steps, detail)| (*i, steps, detail)))
+                        .map(|(i, steps, detail)| {
+                            let quote = answers.list.iter().find(|a| a.idx == Some(i)).map(|a| clip(&one_line(&a.evidence), 160)).filter(|q| !q.is_empty());
+                            let code = [quote.unwrap_or_default(), quality::code_for(&html, steps, 400)].into_iter().filter(|c| !c.is_empty()).collect::<Vec<_>>().join(" | ");
+                            quality::recheck_line(i + 1, expected.get(i).map(String::as_str).unwrap_or(""), detail, &code)
+                        })
+                        .collect();
+                    let n = lines.len();
+                    lines.extend(feedback_now);
+                    self.stats.verify_feedback.lock().unwrap().insert(e.task_id.clone(), (e.iteration_count, e.lease_until, lines));
+                    self.stats.verify_recheck.lock().unwrap().insert(e.task_id.clone(), (e.iteration_count, e.lease_until, guard.suspects.clone()));
+                    return Err(StageErr::retry(format!("the Prompter's verify is asked to recheck {n} expectation{} that failed again with the same value after the Coder's pass", if n == 1 { "" } else { "s" })));
+                }
+                // No retry left on this claim: never another Coder pass on an unconfirmed number.
+                held.extend(guard.suspects.iter().copied());
+            }
+            for o in open.as_array_mut().into_iter().flatten() {
+                o["page"] = json!(sig);
+                if o["idx"].as_u64().is_some_and(|i| held.contains(&(i as usize))) {
+                    o["kept"] = json!(true);
+                }
+            }
+            // A disputed criterion's old probe runs again on any later verify, kept (a known
+            // blocker there, never a Coder loop), so a later answer cannot pass it either.
+            if let Some(list) = open.as_array_mut() {
+                for d in &disputes {
+                    if !list.iter().any(|o| o["idx"].as_u64() == Some(d.idx as u64) && o["steps"] == Value::Array(d.steps.clone())) {
+                        list.insert(0, json!({ "idx": d.idx, "criterion": expected.get(d.idx).cloned().unwrap_or_default(), "steps": d.steps, "detail": d.detail, "page": sig, "kept": true }));
+                    }
+                }
+                list.truncate(quality::MAX_CARRIED);
+            }
+            let dispute_lines: Vec<String> = disputes.iter().map(|d| d.line.clone()).collect();
+            // What fails, minus what the guard holds back from the Coder (still failing: a known
+            // blocker, and the build is not called working).
+            let (coder_unmet, held_lines): (Vec<String>, Vec<String>) = {
+                let (c, h): (Vec<_>, Vec<_>) = judged.unmet.iter().zip(&judged.unmet_idx).partition(|(_, i)| !i.is_some_and(|i| held.contains(&i)));
+                (c.into_iter().map(|(l, _)| l.clone()).collect(), h.into_iter().map(|(l, _)| l.clone()).collect())
+            };
+            if !feedback_now.is_empty() && coder_unmet.is_empty() && open_gate.is_empty() && !last && feedback.is_empty() {
                 let n = feedback_now.len();
                 self.stats.verify_feedback.lock().unwrap().insert(e.task_id.clone(), (e.iteration_count, e.lease_until, feedback_now));
                 return Err(StageErr::retry(format!("the Prompter's verify could not be checked for {n} criteri{} (no working probe, or code not in the page)", if n == 1 { "on" } else { "a" })));
             }
             // A Play Place hub build is smoke-tested and marked mergeable from review_ready, never
             // reading its blockers: an unproven behaviour there is treated like an unmet one.
-            let hub = e.raw_intent.memory_reference["source"] == "playplace";
             // An unproven criterion is named as one that could not be checked, never as broken (P1-2).
             let gap_lines: Vec<String> = gaps.iter().map(|g| format!("couldn't be checked in a browser: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120))).collect();
             let pinned_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.pinned).map(|(_, l)| l.clone()).collect();
@@ -1934,10 +2129,20 @@ impl<'a> Worker<'a> {
             dropped.extend(dropped_blockers);
             // Unmet / unevidenced / probe-failed criteria override a "pass" and go FIRST, so the
             // Coder always sees the deterministic findings before the model's own wording.
-            let mut fixes: Vec<String> = judged.unmet.clone();
+            let mut fixes: Vec<String> = coder_unmet.clone();
+            let mut model_blockers = model_blockers;
             if verdict == "loop" && fixes.is_empty() {
-                if model_fixes.is_empty() {
-                    fixes.push("address the acceptance criteria the build does not meet".into());
+                if !held.is_empty() && open_gate.is_empty() {
+                    // Only what the guard holds back fails: the model's own loop (most likely about
+                    // the same number) never sends the Coder after it; its fixes are known blockers.
+                    verdict = "pass";
+                    for f in &kept {
+                        if !model_blockers.contains(f) {
+                            model_blockers.push(f.clone());
+                        }
+                    }
+                } else if model_fixes.is_empty() {
+                    fixes.push(BARE_LOOP_FIX.into());
                 } else if kept.is_empty() {
                     verdict = "pass";
                 }
@@ -1949,8 +2154,8 @@ impl<'a> Worker<'a> {
             // Nic's pinned checks whose probe still finds an element missing after the retry (the
             // verifier was told what to fix) on a pass that is not the last: the page lacks what
             // the check needs, so the Coder gets another pass (AD-13, narrowed by P1-2).
-            let pinned_loop = !hub && !at_limit && judged.unmet.is_empty() && !page_pinned_lines.is_empty();
-            if !judged.unmet.is_empty() || hub_gaps || pinned_loop {
+            let pinned_loop = !hub && !at_limit && coder_unmet.is_empty() && !page_pinned_lines.is_empty();
+            if !coder_unmet.is_empty() || hub_gaps || pinned_loop || !open_gate.is_empty() {
                 verdict = "loop";
             }
             if hub_gaps {
@@ -1969,16 +2174,31 @@ impl<'a> Worker<'a> {
                     fixes.push(format!("Nic's pinned check finds an element missing in a browser, {g}: add it and make it work on a fresh load, with clear, stable ids for its controls and for the element that shows the value"));
                 }
             }
-            for f in kept {
-                if !fixes.contains(&f) {
-                    fixes.push(f);
+            if verdict == "loop" {
+                for f in &kept {
+                    if !fixes.contains(f) {
+                        fixes.push(f.clone());
+                    }
                 }
             }
+            // The gate items of this pass go to the Coder in the same loop as the behavioural
+            // failures (early behavioural feedback): a few gate items first, then what the probes
+            // and the verifier found, then the rest of the gate's, so a cap never drops either kind.
+            if !open_gate.is_empty() {
+                let lead = open_gate.len().min(4);
+                let mut both: Vec<String> = open_gate[..lead].to_vec();
+                both.extend(fixes.iter().filter(|f| !open_gate.contains(f)).cloned());
+                both.extend(open_gate[lead..].iter().cloned());
+                fixes = both;
+            }
             fixes.truncate(10);
-            let loop_to = if judged.unmet.is_empty() && !hub_gaps && !pinned_loop { loop_to } else { "coder" };
+            let loop_to = if coder_unmet.is_empty() && !hub_gaps && !pinned_loop && open_gate.is_empty() { loop_to } else { "coder" };
             // The verifier's own gaps come before its wording: Nic's pinned checks first, then no
             // list / not judged / not shown, then the other unproven behaviours. Nothing is cut here.
-            let mut verify_blockers: Vec<String> = pinned_lines.clone();
+            // A probe failure the guard holds back from the Coder still fails: listed first.
+            let mut verify_blockers: Vec<String> = held_lines.clone();
+            verify_blockers.extend(dispute_lines.iter().cloned());
+            verify_blockers.extend(pinned_lines.iter().cloned());
             if judged.absent {
                 verify_blockers.push("verify could not show code evidence per criterion".into());
             }
@@ -1986,7 +2206,7 @@ impl<'a> Worker<'a> {
             verify_blockers.extend(gap_lines.iter().filter(|l| !pinned_lines.contains(l)).cloned());
             verify_blockers.extend(stale_lines.iter().cloned());
             // For the voice: what fails, and what could not be proven (the rest are notes).
-            let mut unchecked: Vec<String> = pinned_lines.iter().chain(gap_lines.iter().filter(|l| !pinned_lines.contains(l))).filter(|l| !note_lines.contains(l)).cloned().collect();
+            let mut unchecked: Vec<String> = dispute_lines.iter().chain(&pinned_lines).chain(gap_lines.iter().filter(|l| !pinned_lines.contains(l))).filter(|l| !note_lines.contains(l)).cloned().collect();
             if judged.absent {
                 unchecked.insert(0, "verify could not show code evidence per criterion".into());
             }
@@ -2004,7 +2224,10 @@ impl<'a> Worker<'a> {
             // the checks forced (P3).
             let model_loop = jj["verdict"].as_str().is_some_and(|v| v.trim().eq_ignore_ascii_case("loop"));
             let spoken = voice(&j).filter(|_| verdict != "loop" || model_loop);
-            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
+            // The fixes the verifier itself still asks for (`open_model_fixes`, round 7): its own
+            // loop, not one an unmet criterion or a gate item forced; never the worker's lines.
+            let model_open: Vec<String> = if verdict == "loop" && model_loop && coder_unmet.is_empty() && open_gate.is_empty() { kept.clone() } else { vec![] };
+            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "model_open": model_open, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "held": held_lines, "rechecked": rechecked.iter().map(|i| i + 1).collect::<Vec<_>>(), "disputed": dispute_lines, "gate_open": open_gate.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
         };
         let mut last_eval = e.last_eval.clone();
         last_eval["verify"] = decision.clone();
@@ -2017,8 +2240,16 @@ impl<'a> Worker<'a> {
         let hub = e.raw_intent.memory_reference["source"] == "playplace";
         let open_gaps = decision["gaps"].as_u64().unwrap_or(0).saturating_sub(decision["note_gaps"].as_u64().unwrap_or(0));
         let stale = decision["stale"].as_u64().unwrap_or(0);
-        let open_items = decision["unmet"].as_u64().unwrap_or(0) + open_gaps + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true) + stale;
-        let hub_unmet = hub && at_limit && open_items > 0;
+        // A recheck answer that only copies the page's value (`disputed`, AD-13 round 5).
+        let disputed = decision["disputed"].as_array().map_or(0, |a| a.len() as u64);
+        let open_items = decision["unmet"].as_u64().unwrap_or(0) + open_gaps + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true) + stale + disputed;
+        // What fails: the gate's items, then failed / unmet criteria, then (AD-13 round 6) the
+        // verifier's own fixes still open at the limit when nothing else fails (`open_model_fixes`).
+        let gate_items = str_list(&e.last_eval["gate_blockers"], 10, 240);
+        let mut failing = gate_items.clone();
+        failing.extend(str_list(&decision["failing"], 40, 240));
+        let model_open = open_model_fixes(&decision, &failing);
+        let hub_unmet = hub && at_limit && (open_items > 0 || !model_open.is_empty());
         if wants_loop && (!at_limit || hub_unmet) {
             let to_agent = if decision["loop_to"] == "designer" { "designer" } else { "coder" };
             let fixes = str_list(&decision["fix_instructions"], 10, FIX_LINE);
@@ -2036,11 +2267,11 @@ impl<'a> Worker<'a> {
                 blockers.push(b);
             }
         };
-        let gate_items = str_list(&e.last_eval["gate_blockers"], 10, 240);
         gate_items.iter().cloned().for_each(&mut push);
         str_list(&decision["verify_blockers"], 40, 240).into_iter().for_each(&mut push);
         if wants_loop {
-            str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().for_each(&mut push);
+            // The worker's own line for a bare "loop" is no fix the verifier named: a note.
+            str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().map(|f| if f == BARE_LOOP_FIX { BARE_LOOP_NOTE.to_string() } else { f }).for_each(&mut push);
         }
         str_list(&decision["known_blockers"], 40, 240).into_iter().for_each(&mut push);
         // Never a silent cut: past the cap the last line says how many more there are.
@@ -2055,27 +2286,36 @@ impl<'a> Worker<'a> {
         // The honest verdict (AD-13): staged with gate items, a failing probe, an unproven
         // behaviour, a criterion the verifier did not judge, no per-criterion list at all, or one
         // only claimed with code that is not in the page (`stale`), the build does NOT work yet,
-        // whatever the verifier said.
-        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0;
-        let verdict = if !works { "needs_fixes" } else if blockers.is_empty() { "pass" } else { "pass_with_notes" };
-        last_eval["known_blockers"] = json!(blockers);
-        last_eval["works"] = json!(works);
-        last_eval["verdict"] = json!(verdict);
-        last_eval["complete"] = json!(true);
-        // What fails (the gate's items, then failed / unmet criteria), what could not be proven,
-        // and the rest as notes — for the spoken line only (P3).
-        let mut failing = gate_items.clone();
-        failing.extend(str_list(&decision["failing"], 40, 240));
+        // whatever the verifier said; nor with a fix the verifier itself still asks for (round 6).
+        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0 && disputed == 0 && model_open.is_empty();
+        // What fails (above), what could not be proven, and the rest as notes — for the verdict
+        // and the spoken line (P3).
+        failing.extend(model_open);
         let unchecked = str_list(&decision["unchecked"], 40, 240);
         // A decision stored before these lists existed (a restart across an upgrade): not working
         // with nothing sorted means its blockers are what fails.
         if !works && failing.is_empty() && unchecked.is_empty() {
             failing = blockers.iter().filter(|b| !b.starts_with("… and ")).cloned().collect();
         }
+        // Unverified is not needs-fixes (AD-13 round 4): nothing failed, only unproven items
+        // remain (no working probe, a criterion not judged, quoted code not in the page). It is
+        // still not called working (`works` false), and a hub build still counts them as unmet.
+        let unverified = !works && failing.is_empty() && !unchecked.is_empty();
+        let verdict = if unverified { "unverified" } else if !works { "needs_fixes" } else if blockers.is_empty() { "pass" } else { "pass_with_notes" };
+        last_eval["known_blockers"] = json!(blockers);
+        last_eval["works"] = json!(works);
+        last_eval["verdict"] = json!(verdict);
+        last_eval["complete"] = json!(true);
+        if unverified {
+            last_eval["unchecked_total"] = json!(unchecked.len());
+        }
         let notes: Vec<String> = blockers.iter().filter(|b| !failing.contains(b) && !unchecked.contains(b) && !b.starts_with("… and ")).cloned().collect();
         let v = review_voice(&failing, &unchecked, &notes).or(v);
         let slug = e.project_slug.clone().unwrap_or_default();
-        let status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "known_blockers": blockers, "known_blockers_total": total, "works": works, "verdict": verdict, "at": envelope::now_ms() });
+        let mut status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "known_blockers": blockers, "known_blockers_total": total, "works": works, "verdict": verdict, "at": envelope::now_ms() });
+        if unverified {
+            status["unchecked_total"] = json!(unchecked.len());
+        }
         // A cancelled task never gets a review_ready .status.json (the Librarian reads it).
         if !self.owns(e) {
             return Err(StageErr::stale());
@@ -2092,6 +2332,9 @@ impl<'a> Worker<'a> {
         }
         let summary = if blockers.is_empty() {
             format!("\"{}\" is ready for review in staging/{slug}", clip(&e.title, 60))
+        } else if unverified {
+            let n = unchecked.len();
+            format!("\"{}\" is staged, but {n} thing{} couldn't be checked (staging/{slug})", clip(&e.title, 50), if n == 1 { "" } else { "s" })
         } else if !works {
             format!("\"{}\" is staged but needs fixes: {total} known blocker{} (staging/{slug})", clip(&e.title, 50), if total == 1 { "" } else { "s" })
         } else {

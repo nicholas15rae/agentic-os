@@ -594,7 +594,7 @@ fn intent_checks_pin_nics_own_values() {
     // AD-13: the default's unit is the one selected on load (after the ranges: a cap cuts it first).
     assert_eq!(c[3].kind, CheckKind::Unit { unit: "lb".into(), other: "kg".into() });
     assert!(c[3].criterion.contains("pinned unit: lb;") && c[3].criterion.contains("not kg"), "{}", c[3].criterion);
-    assert_eq!(c[3].need(), Need { probe: true, action: false, fresh: true, value: false, check: Some(c[3].clone()), toggle: false, shows: vec![] });
+    assert_eq!(c[3].need(), Need { probe: true, action: false, fresh: true, value: false, check: Some(c[3].clone()), toggle: false, shows: vec![], zero: false });
     // Another domain, same rules: °F/°C with a stated default.
     let t = intent_checks("A thermostat card. Default to 72°F, with a °F/°C switch.");
     assert_eq!(t.len(), 3, "{t:#?}");
@@ -1565,8 +1565,8 @@ fn an_acting_value_probe_must_show_a_change() {
 
 /// P1-3 c in a real browser: a select that changes nothing fails as "nothing changed" even when
 /// the copied expectation (0) matches; a page that updates passes, and a read that legitimately
-/// keeps its value next to one that changes is fine; a zero after a typed number that was already
-/// there fails on its own.
+/// keeps its value next to one that changes is fine; a zero after a typed number — or, since
+/// round 4, after a non-zero select — that was already there fails on its own.
 #[test]
 fn nothing_changed_after_the_action_fails_in_a_real_browser() {
     let Some(dir) = edge_dir("same") else { return };
@@ -1582,7 +1582,8 @@ fn nothing_changed_after_the_action_fails_in_a_real_browser() {
         chg(0, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
         chg(1, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#live", "approx": 37 }, { "op": "expect_text", "sel": "#target", "approx": 132 }])),
         probe(2, json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 0 }])),
-        probe(3, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
+        probe(3, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#target", "approx": 132 }])),
+        probe(4, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
     ];
     let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(200)) else { panic!("edge ran") };
     let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
@@ -1590,6 +1591,7 @@ fn nothing_changed_after_the_action_fails_in_a_real_browser() {
     assert!(r[1].passed, "{d:?}");
     assert!(!r[2].passed && d[2].starts_with("nothing changed after set #g=30, click #add: #total still shows 0g"), "{d:?}");
     assert!(r[3].passed, "no change asked for: {d:?}");
+    assert!(!r[4].passed && d[4].starts_with("nothing changed after select #meals=4: #per still shows 0g"), "a zero after a non-zero select: {d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1837,4 +1839,114 @@ document.getElementById('resetTally').addEventListener('click', function () { ta
     assert!(d[6].starts_with("nothing changed after set #g=30, click #dead: #sum still shows 0 g"), "{d:?}");
     assert!(d[7].starts_with("nothing changed after select #split=5: #tally still shows 0 g"), "{d:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── AD-13 round 4 ───────────────────────────────────────────────────────────
+
+/// F3 b (critic P1, fixed3-c): an unasked zero expected on a computed value after a non-zero set
+/// OR select is rejected (a verifier retry, never a Coder loop); a zero asked for by a reset / a
+/// zero option, or a "0 before, 30 after" pair on the same element, is fine.
+#[test]
+fn an_unasked_zero_on_a_computed_value_after_a_nonzero_input_is_rejected() {
+    let crits: Vec<String> = ["Per-meal split divides the total target into equal portions for selected meal count (3-5).", "Running tally accurately sums added food protein grams against the daily target.", "Reset clears the running tally back to 0 g."].iter().map(|s| s.to_string()).collect();
+    let needs: Vec<Need> = crits.iter().map(|c| need_of(c, &[])).collect();
+    let select_zero = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 0 }]);
+    let why = enforced_one(&crits, &needs, 1, select_zero.clone()).0.unwrap_err();
+    assert!(why.starts_with("it expects 0 on #perMealDisplay after select #mealSplitSelect=4"), "{why}");
+    let steps = parse_probe(&select_zero).unwrap();
+    assert_eq!(zero_reads(&steps), vec![1], "a non-zero select arms the zero read too");
+    assert!(zero_reads(&parse_probe(&json!([{ "op": "select", "sel": "#tip", "value": "0" }, { "op": "expect_text", "sel": "#t", "approx": 0 }])).unwrap()).is_empty(), "a zero option");
+    // A zero before the add, the sum after it: a real change.
+    let before_after = json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "expect_text", "sel": "#total", "approx": 0 }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 30 }]);
+    assert!(enforced_one(&crits, &needs, 2, before_after).0.is_ok());
+    // Never does what produces the value: only zeros after typing a name.
+    let name_only = json!([{ "op": "click", "sel": "#toggleFoodForm" }, { "op": "set", "sel": "#foodName", "value": "Chicken" }, { "op": "expect_text", "sel": "#intakeDisplay", "approx": 0 }]);
+    assert!(enforced_one(&crits, &needs, 2, name_only).0.unwrap_err().starts_with("it expects only 0 after its actions"));
+    // A reset asks for its zero.
+    let reset = json!([{ "op": "set", "sel": "#foodGrams", "value": "30" }, { "op": "click", "sel": "#addFood" }, { "op": "expect_text", "sel": "#tally", "approx": 30 }, { "op": "click", "sel": "#resetTally" }, { "op": "expect_text", "sel": "#tally", "approx": 0 }]);
+    assert!(enforced_one(&crits, &needs, 3, reset).0.is_ok());
+    // The right number after the select is fine.
+    assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 37, "tol": 1.5 }])).0.is_ok());
+}
+
+/// F6: sums, tallies, totals, running totals and "adds up" compute a value, so a running-tally
+/// criterion gets the must-change mark; a dash empty-state criterion stays a text check.
+#[test]
+fn a_running_tally_computes_and_must_change() {
+    for c in ["Running tally accurately sums added food protein grams against the daily target.", "The running total updates when a food is added.", "Adding foods keeps a tally of protein eaten today.", "The eaten grams add up to the shown total."] {
+        let n = need_of(c, &[]);
+        assert!(n.probe && n.value && n.action && must_change(Some(&n)), "{c}: {n:?}");
+    }
+    let dash = need_of("On page load the tip and total show a dash (—) as their empty state.", &[]);
+    assert!(!dash.value && dash.shows == vec![Placeholder::Dash], "{dash:?}");
+    assert!(!need_of("UI is responsive on mobile devices and works offline.", &[]).value);
+}
+
+// ── AD-13 round 5 ───────────────────────────────────────────────────────────
+
+/// F3b review (round 5): correct legitimate-zero probes pass the zero rule. A no-tip option
+/// spelled as an attribute selector, a camel-case None id, or a "0%" / "0.00" option is a zero
+/// option (`zeroing`), and a zero the criterion names ("$0.00", "never below 0") passes when
+/// another, non-control element proves the change. An unasked zero on a criterion that names no
+/// zero (fixed3-c) is still rejected, even with a change elsewhere.
+#[test]
+fn a_zero_the_criterion_asks_for_is_not_rejected() {
+    let tip = "Choosing the No tip option makes the tip $0.00 and the total equal to the bill.";
+    let left = "Shows the grams left to reach the daily target: the target minus the running total, never below 0.";
+    let crits: Vec<String> = [tip, left, "Per-meal split divides the total target into equal portions for selected meal count (3-5)."].iter().map(|s| s.to_string()).collect();
+    let needs: Vec<Need> = crits.iter().map(|c| need_of(c, &[])).collect();
+    assert!(needs[0].value && needs[0].zero && needs[1].value && needs[1].zero && !needs[2].zero, "{needs:?}");
+    for (op, sel, value) in [("click", r#"button[data-pct="0"]"#, ""), ("click", ".tip-btn[data-pct='0']", ""), ("click", "#tipNone", ""), ("select", "#tipPct", "0%"), ("select", "#tipPct", "0.00"), ("select", "#tipPct", "0 %")] {
+        let mut act = json!({ "op": op, "sel": sel });
+        if !value.is_empty() {
+            act["value"] = json!(value);
+        }
+        let probe = json!([{ "op": "set", "sel": "#bill", "value": "80" }, act, { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }, { "op": "expect_text", "sel": "#total", "approx": 80 }]);
+        let steps = parse_probe(&probe).unwrap();
+        assert!(zeroing(&steps[1]), "{sel} {value} is a zero option");
+        assert!(zero_reads(&steps).is_empty() && asked_zero_reads(&steps) == vec![2], "{sel} {value}");
+        assert!(enforced_one(&crits, &needs, 1, probe).0.is_ok(), "{sel} {value}");
+        // Without the total read, the zero option alone still asks for its zero.
+        let alone = json!([{ "op": "set", "sel": "#bill", "value": "80" }, steps[1].clone(), { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }]);
+        assert!(enforced_one(&crits, &needs, 1, alone).0.is_ok(), "{sel} {value}");
+    }
+    assert!(!zeroing(&json!({ "op": "select", "sel": "#tipPct", "value": "0.5" })) && !zeroing(&json!({ "op": "click", "sel": "button[data-pct='05']" })) && !zeroing(&json!({ "op": "click", "sel": "#nonexistent" })));
+    // The goal-reached boundary: add 165 g, left 0, tally 165 (the tally proves the add).
+    let boundary = json!([{ "op": "set", "sel": "#grams", "value": "165" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#left", "approx": 0 }, { "op": "expect_text", "sel": "#tally", "approx": 165 }]);
+    assert_eq!(zero_reads(&parse_probe(&boundary).unwrap()), vec![2]);
+    assert!(enforced_one(&crits, &needs, 2, boundary).0.is_ok());
+    // A zero-naming criterion with only the zero read, or with a non-zero read only on the input it
+    // typed into, proves no change: still rejected.
+    let lone = json!([{ "op": "set", "sel": "#grams", "value": "165" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#left", "approx": 0 }]);
+    assert!(enforced_one(&crits, &needs, 2, lone).0.unwrap_err().starts_with("it expects 0 on #left"));
+    let echo = json!([{ "op": "set", "sel": "#grams", "value": "165" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#left", "approx": 0 }, { "op": "expect_value", "sel": "#grams", "approx": 165 }]);
+    assert!(enforced_one(&crits, &needs, 2, echo).0.is_err());
+    // fixed3-c stays rejected, even with a non-zero read elsewhere: its criterion names no zero.
+    let per_meal = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 0 }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 150 }]);
+    assert!(enforced_one(&crits, &needs, 3, per_meal).0.unwrap_err().starts_with("it expects 0 on #perMealDisplay"));
+}
+
+/// AD-13 round 6: a dispute line always says what the verifier now expects (the real permeal
+/// runs were cut at 240 chars inside the "before" detail and never reached it); only the old
+/// probe's finding is clipped, and it is left out when too little room remains.
+#[test]
+fn a_dispute_line_always_says_what_is_now_expected() {
+    let crit = "Per-meal split divides the total target into equal portions for selected meal count (3-5).";
+    let before = "got 41g; expected #perMealDisplay text ≈37 (±1.5) after select #mealSplitSelect=4";
+    let now = "expected #perMealDisplay text ≈41 (±1.5)";
+    let l = dispute_line(crit, now, before);
+    assert!(l.chars().count() <= DISPUTE_LINE, "{l}");
+    assert!(l.starts_with("couldn't be checked: on recheck the verifier switched to the page's value, for Per-meal split"), "{l}");
+    assert!(l.contains("; now expected #perMealDisplay text ≈41 (±1.5); before: got 41g; expected #perMealDisplay text ≈37 (±1.5"), "{l}");
+    // The longest criterion and expectation still fit whole (clipped to their own caps); the
+    // "before" detail is what gets cut.
+    let long = dispute_line(&"c".repeat(300), &format!("expected #x text ≈41 {}", "n".repeat(300)), &"b".repeat(300));
+    assert!(long.chars().count() <= DISPUTE_LINE, "{long}");
+    assert!(long.contains(&format!("; now expected #x text ≈41 {}", "n".repeat(30))), "{long}");
+    assert!(!long.contains("; before: ") || long.ends_with('\u{2026}'), "{long}");
+    let bare = dispute_line(crit, now, "");
+    assert!(bare.ends_with(&format!("; now {now}")) && !bare.contains("before"), "{bare}");
+    // Real lengths: the whole line is under the cap with the old finding's numbers in it.
+    let b = dispute_line(crit, now, &format!("{before} {}", "z".repeat(200)));
+    assert!(b.chars().count() <= DISPUTE_LINE && b.ends_with('\u{2026}') && b.contains("≈37"), "{b}");
 }

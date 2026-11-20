@@ -166,10 +166,20 @@ export function relayText(ev: Pick<AgentEvent, "shortSummary" | "templateSummary
  * blocker count (`last_eval.known_blockers_total`): past the cap the stored list ends in an
  * "… and N more" line, which is not a blocker itself. `works` is the worker's honest verdict
  * (`last_eval.works`, AD-13): `false` reads "needs fixes" (never "ready"), `true` with blockers
- * reads "ready, with N notes"; an older record without it keeps the neutral wording. Pure. */
-export function readyText(o: { title: string; slug: string | null | undefined; blockers: readonly string[]; hub: boolean; summary?: string; total?: number; works?: boolean }): string {
+ * reads "ready, with N notes"; an older record without it keeps the neutral wording.
+ * `unverified` (verdict "unverified", AD-13 round 4: nothing failed, only items that couldn't be
+ * checked) reads "is staged, but N things couldn't be checked" — `unchecked` is that N
+ * (`last_eval.unchecked_total`, else `total`). Pure. */
+export function readyText(o: { title: string; slug: string | null | undefined; blockers: readonly string[]; hub: boolean; summary?: string; total?: number; works?: boolean; unverified?: boolean; unchecked?: number }): string {
   const where = o.slug ? ` It's in staging/${o.slug}.` : "";
   const hubNext = o.hub ? " (the Play Place smoke test runs next)" : "";
+  if (o.unverified) {
+    const total = typeof o.total === "number" && o.total > 0 ? o.total : o.blockers.length;
+    const n = typeof o.unchecked === "number" && o.unchecked > 0 ? o.unchecked : total;
+    const list = o.blockers.slice(0, 5).map((b) => `• ${b}`).join("\n");
+    const head = `“${o.title}” is staged, but ${n === 1 ? "1 thing" : `${n} things`} couldn't be checked${hubNext}.${where}`;
+    return list ? `${head}\n${list}` : head;
+  }
   if (!o.blockers.length) {
     if (o.works === false) return `“${o.title}” is staged but needs fixes${hubNext}.${where}`;
     const head = o.hub ? `“${o.title}”: the agents finished; the Play Place smoke test runs next.` : `“${o.title}” is ready for review.`;
@@ -232,6 +242,10 @@ interface TaskExtras {
   total?: number;
   /** The worker's honest verdict (`last_eval.works`); absent on older records. */
   works?: boolean;
+  /** Nothing failed, only items that couldn't be checked (`last_eval.verdict` "unverified"). */
+  unverified?: boolean;
+  /** How many couldn't be checked (`last_eval.unchecked_total`). */
+  unchecked?: number;
 }
 
 /** Desktop: re-read one task (title, slug, card, origin thread, verdict) before its outcome is
@@ -247,12 +261,14 @@ async function refreshTask(taskId: string): Promise<TaskExtras> {
     // Remember where it goes (the stored thread, else Tony's main thread): looked up once per task.
     if (!origin.has(taskId)) origin.set(taskId, storedThread(t) ?? "auto");
     const mref = t.raw_intent?.memory_reference as { source?: unknown } | null | undefined;
-    const le = t.last_eval as { known_blockers?: unknown; known_blockers_total?: unknown; works?: unknown; verdict?: unknown } | null | undefined;
+    const le = t.last_eval as { known_blockers?: unknown; known_blockers_total?: unknown; works?: unknown; verdict?: unknown; unchecked_total?: unknown } | null | undefined;
     const kb = le?.known_blockers;
     const total = typeof le?.known_blockers_total === "number" ? le.known_blockers_total : undefined;
     // The honest verdict: `works`, else read from `verdict` ("needs_fixes" / "pass…"); absent → unknown.
     const works = typeof le?.works === "boolean" ? le.works : le?.verdict === "needs_fixes" ? false : typeof le?.verdict === "string" && le.verdict.startsWith("pass") ? true : undefined;
-    return { source: typeof mref?.source === "string" ? mref.source : null, blockers: Array.isArray(kb) ? kb.filter((b): b is string => typeof b === "string") : [], total, works };
+    const unverified = le?.verdict === "unverified";
+    const unchecked = typeof le?.unchecked_total === "number" ? le.unchecked_total : undefined;
+    return { source: typeof mref?.source === "string" ? mref.source : null, blockers: Array.isArray(kb) ? kb.filter((b): b is string => typeof b === "string") : [], total, works, unverified, unchecked };
   } catch {
     return none; // the event's own fields are enough
   }
@@ -335,11 +351,14 @@ export async function onAgentEvent(ev: AgentEvent): Promise<void> {
   }
   if (kind === "ready") {
     const hub = extras.source === "playplace";
-    const text = readyText({ title, slug: row?.slug, blockers: extras.blockers, hub, total: extras.total, works: extras.works });
-    const needsFixes = extras.works === false || (extras.works === undefined && extras.blockers.length > 0);
-    const turn = push({ who: "agent", from: "os", thread: back, text, cardId: row?.cardId, taskId, tone: needsFixes ? "warn" : undefined });
+    const text = readyText({ title, slug: row?.slug, blockers: extras.blockers, hub, total: extras.total, works: extras.works, unverified: extras.unverified, unchecked: extras.unchecked });
+    // Unverified (nothing failed, items couldn't be checked) is a warning, never an error.
+    const unverified = extras.unverified === true;
+    const needsFixes = !unverified && (extras.works === false || (extras.works === undefined && extras.blockers.length > 0));
+    const turn = push({ who: "agent", from: "os", thread: back, text, cardId: row?.cardId, taskId, tone: needsFixes || unverified ? "warn" : undefined });
     if (!row?.cardId) readyTurn.set(taskId, turn.id);
-    useToasts.getState().push({ title: `${osName()} · ${hub ? "output ready" : extras.works === false ? "needs fixes" : "ready for review"}`, body: text, tone: needsFixes ? "error" : "info" });
+    const label = hub ? "output ready" : unverified ? "couldn't be checked" : extras.works === false ? "needs fixes" : "ready for review";
+    useToasts.getState().push({ title: `${osName()} · ${label}`, body: text, tone: unverified ? "warn" : needsFixes ? "error" : "info" });
     // A hub build counts as new only once its smoke test passes (the hub's own note).
     if (!hub) usePipelines.setState((s) => ({ unseen: s.unseen + 1 }));
     return;

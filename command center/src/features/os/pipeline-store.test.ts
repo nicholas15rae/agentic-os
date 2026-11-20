@@ -286,6 +286,25 @@ describe("thoughtform hardening (regressions)", () => {
     expect(readyText({ title: "X", slug: "x", blockers: ["a"], hub: false })).toContain("staged with 1 known blocker");
   });
 
+  it("an unverified build (nothing failed, items couldn't be checked) reads 'couldn't be checked' as a warning, never needs fixes", async () => {
+    h.cmd.mockResolvedValue(env({ status: "review_ready", stage: "done", last_eval: { known_blockers: ["couldn't be checked in a browser: Shows the total (no probe was given)", "a model note"], known_blockers_total: 2, unchecked_total: 1, works: false, verdict: "unverified" } }));
+    await onAgentEvent(ev({ eventType: "review_ready", status: "review_ready", stage: "done" }));
+    expect(turns()[0].text).toContain("is staged, but 1 thing couldn't be checked");
+    expect(turns()[0].text).not.toContain("needs fixes");
+    expect(turns()[0].text).not.toContain("ready for review");
+    expect(turns()[0].tone).toBe("warn");
+    expect(h.toast).toHaveBeenCalledTimes(1);
+    expect(h.toast.mock.calls[0][0]).toMatchObject({ tone: "warn" });
+    expect(h.toast.mock.calls[0][0].title).toContain("couldn't be checked");
+    expect(readyText({ title: "X", slug: "x", blockers: ["a", "b", "c"], hub: false, works: false, unverified: true, total: 3 })).toBe("“X” is staged, but 3 things couldn't be checked. It's in staging/x.\n• a\n• b\n• c");
+    expect(readyText({ title: "X", slug: null, blockers: [], hub: true, works: false, unverified: true, unchecked: 2 })).toBe("“X” is staged, but 2 things couldn't be checked (the Play Place smoke test runs next).");
+    // A needs-fixes build still toasts as an error.
+    h.toast.mockReset();
+    h.cmd.mockResolvedValue(env({ status: "review_ready", stage: "done", last_eval: { known_blockers: ["probe failed for X: got 0"], works: false, verdict: "needs_fixes" } }));
+    await onAgentEvent(ev({ seq: 9, eventType: "review_ready", status: "review_ready", stage: "done" }));
+    expect(h.toast.mock.calls[0][0]).toMatchObject({ tone: "error" });
+  });
+
   it("a verdict without works is read; a passing build with notes is not a warning", async () => {
     h.cmd.mockResolvedValue(env({ status: "review_ready", stage: "done", last_eval: { known_blockers: ["model note"], verdict: "pass_with_notes" } }));
     await onAgentEvent(ev({ eventType: "review_ready", status: "review_ready", stage: "done" }));

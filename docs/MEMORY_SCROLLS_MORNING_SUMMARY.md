@@ -1,3 +1,5 @@
+> **Superseded:** see [MORNING_SUMMARY_2026-11-20.md](MORNING_SUMMARY_2026-11-20.md). The memory preview was applied later on 2026-11-20 (`293153e`).
+
 # Memory Scrolls: overnight summary (2026-11-20)
 
 **Bottom line:** I did **not** run `--apply`. Nothing was written to `D:\ai-hub-memory` or `D:\ai-hub-archive`. `C:\ai-hub` is byte-for-byte unchanged. The Librarian workspace is untouched.

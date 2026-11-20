@@ -316,7 +316,44 @@ fn history(p: &mut Packet, db: &Path, q: &Query, known: &[String]) {
     p.push(&format!("tasks.db ({})", db.display()), "internal", &format!("Related earlier tasks: {text}"), known);
 }
 
-/// Other staged projects and their `.status.json` status; this project's existing files.
+/// What an earlier staged project's `.status.json` says it is, for the Librarian (AD-13 round 4,
+/// live run 4: "found three ready-to-use modules" from "name (review_ready)" labels on builds that
+/// needed fixes). Reads `works` / `verdict` / `known_blockers(_total)` / `unchecked_total`,
+/// tolerating their absence and older shapes: `works: false` or verdict `needs_fixes` → "needs
+/// fixes (N known blockers), not reusable"; verdict `unverified` → "unverified (N things couldn't
+/// be checked), not proven"; `works: true` → "ready"; a review_ready record from before the
+/// verdict existed → "needs fixes (N known blockers), not reusable" when it lists blockers, else
+/// "staged before verdicts were recorded, not proven to work"; anything else → its status
+/// ("failed", "unknown"). Only "ready" means reusable.
+/// Pure.
+pub fn staged_label(v: &Value) -> String {
+    let status = v["status"].as_str().unwrap_or("unknown");
+    let listed = v["known_blockers"].as_array().map(|a| a.iter().filter(|b| b.as_str().is_some_and(|b| !b.starts_with("… and "))).count()).unwrap_or(0);
+    let total = v["known_blockers_total"].as_u64().map(|n| n as usize).unwrap_or(listed);
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let verdict = v["verdict"].as_str().unwrap_or("");
+    if verdict == "unverified" {
+        let n = v["unchecked_total"].as_u64().map(|n| n as usize).unwrap_or(total);
+        return format!("unverified ({} couldn't be checked), not proven to work", plural(n, "thing", "things"));
+    }
+    if v["works"] == false || verdict == "needs_fixes" {
+        return format!("needs fixes ({}), not reusable", plural(total, "known blocker", "known blockers"));
+    }
+    if v["works"] == true {
+        return "ready".into();
+    }
+    if status == "review_ready" {
+        // A record from before the verdict fields: its blockers were found by the verify pass
+        // (AD-13 round 5: "staged with 7 known blockers, never verified" for a verified, failing
+        // build), so any blocker means it needs fixes. A blocker-free one may or may not have been
+        // verified, so it is not called ready either.
+        return if total > 0 { format!("needs fixes ({}), not reusable", plural(total, "known blocker", "known blockers")) } else { "staged before verdicts were recorded, not proven to work".into() };
+    }
+    status.to_string()
+}
+
+/// Other staged projects and their `.status.json` status (`staged_label`; names and status only,
+/// never their code); this project's existing files.
 fn staging_outputs(p: &mut Packet, root: &Path, q: &Query, known: &[String]) {
     let Ok(canon) = std::fs::canonicalize(root) else { return };
     let Ok(rd) = std::fs::read_dir(root) else { return };
@@ -327,7 +364,8 @@ fn staging_outputs(p: &mut Packet, root: &Path, q: &Query, known: &[String]) {
         if name == SCROLLS_PREVIEW_DIR || !path.is_dir() || !inside(&canon, &path) || super::staging::validate_slug(&name).is_err() {
             continue;
         }
-        let status = read_capped(&path.join(".status.json"), 4096).and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["status"].as_str().map(String::from)).unwrap_or_else(|| "unknown".into());
+        // A .status.json lists its blockers: read enough of it for the verdict fields.
+        let status = read_capped(&path.join(".status.json"), 64 * 1024).and_then(|s| serde_json::from_str::<Value>(&s).ok()).map(|v| staged_label(&v)).unwrap_or_else(|| "unknown".into());
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
         projects.push((mtime, name, status));
     }
@@ -335,7 +373,7 @@ fn staging_outputs(p: &mut Packet, root: &Path, q: &Query, known: &[String]) {
     let own = q.slug.unwrap_or("");
     let related: Vec<String> = projects.iter().filter(|(_, n, _)| n != own && (q.keywords.is_empty() || hits(&n.replace('-', " "), q.keywords) > 0)).take(5).map(|(_, n, s)| format!("{n} ({s})")).collect();
     if !related.is_empty() {
-        p.push(&root.display().to_string(), "internal", &format!("Related staged projects: {}", related.join(", ")), known);
+        p.push(&root.display().to_string(), "internal", &format!("Related staged projects (names and status only; their code was not read): {}. Only a project marked \"ready\" may be suggested for reuse; anything else (needs fixes, unverified, staged before verdicts were recorded, failed, unknown) is never ready-to-use or reusable", related.join("; ")), known);
     }
     if !own.is_empty() {
         if let Ok(dir) = super::staging::resolve(root, own, "x").map(|x| x.parent().map(Path::to_path_buf).unwrap_or_default()) {
@@ -812,7 +850,7 @@ mod tests {
         assert!(all.contains("tip-calculator.md"), "{all}");
         assert!(all.contains("SKILL.md"), "{all}");
         assert!(all.contains("Related earlier tasks"), "{all}");
-        assert!(all.contains("tip-calculator-v1 (review_ready)"), "{all}");
+        assert!(all.contains("tip-calculator-v1 (staged before verdicts were recorded, not proven to work)"), "{all}");
         assert!(!all.contains("should-never-be-read") && !all.contains("calculator-token"), "secret-looking files must not be read: {all}");
         assert!(p.chars() <= PACKET_MAX);
         drop(store);
@@ -1053,8 +1091,59 @@ mod tests {
         let kws = keywords(&["memory scrolls widget preview"], 8);
         let p = gather_local(&Sources { staging_root: Some(staging), ..Default::default() }, &Query { task_id: None, keywords: &kws, slug: None }, &[]);
         let all = serde_json::to_string(&p).unwrap();
-        assert!(all.contains("memory-widget (review_ready)"), "{all}");
+        assert!(all.contains("memory-widget (staged before verdicts were recorded, not proven to work)"), "{all}");
         assert!(!all.contains(SCROLLS_PREVIEW_DIR), "{all}");
+    }
+
+    /// AD-13 round 4 (live run 4: "found three ready-to-use modules" that all needed fixes): the
+    /// Librarian sees each earlier staged project's honest verdict from its `.status.json`, in a
+    /// temp staging dir (never the real one), tolerating older shapes and a broken file.
+    #[test]
+    fn staged_projects_are_labelled_by_their_verdict_not_review_ready() {
+        let root = tmp("staged-labels");
+        let staging = root.join("staging");
+        let fixtures: [(&str, &str); 7] = [
+            ("protein-tracker", r#"{"status":"review_ready","iteration":0,"known_blockers":[],"title":"Protein Tracker"}"#),
+            ("protein-tracker-2", r#"{"status":"review_ready","known_blockers":["probe failed for x","probe failed for y","… and 4 more (see the verify record)"],"known_blockers_total":6,"works":false,"verdict":"needs_fixes"}"#),
+            ("protein-tracker-3", r#"{"status":"review_ready","known_blockers":["a","b","c"],"verdict":"needs_fixes"}"#),
+            ("protein-intake-tracker", r#"{"status":"review_ready","known_blockers":["couldn't be checked in a browser: x"],"known_blockers_total":3,"unchecked_total":2,"works":false,"verdict":"unverified"}"#),
+            ("protein-calc", r#"{"status":"review_ready","known_blockers":["a note"],"works":true,"verdict":"pass_with_notes"}"#),
+            ("protein-old", r#"{"status":"failed"}"#),
+            ("protein-broken", "{not json"),
+        ];
+        for (name, body) in fixtures {
+            std::fs::create_dir_all(staging.join(name)).unwrap();
+            std::fs::write(staging.join(name).join(".status.json"), body).unwrap();
+        }
+        let kws = keywords(&["protein tracker"], 8);
+        let p = gather_local(&Sources { staging_root: Some(staging.clone()), ..Default::default() }, &Query { task_id: None, keywords: &kws, slug: None }, &[]);
+        let line = p.items.iter().find(|i| i.text.starts_with("Related staged projects")).map(|i| i.text.clone()).unwrap_or_default();
+        assert!(line.contains("names and status only; their code was not read"), "{line}");
+        assert!(line.contains("never ready-to-use or reusable"), "{line}");
+        // Five of the seven are listed (the newest first); every label is checked on its own.
+        assert!(!line.contains("(review_ready)"), "{line}");
+        let label = |body: &str| staged_label(&serde_json::from_str(body).unwrap());
+        assert_eq!(label(fixtures[0].1), "staged before verdicts were recorded, not proven to work");
+        assert_eq!(label(fixtures[1].1), "needs fixes (6 known blockers), not reusable");
+        assert_eq!(label(fixtures[2].1), "needs fixes (3 known blockers), not reusable", "verdict alone, the list counted");
+        assert_eq!(label(fixtures[3].1), "unverified (2 things couldn't be checked), not proven to work");
+        assert_eq!(label(fixtures[4].1), "ready");
+        assert_eq!(label(fixtures[5].1), "failed");
+        // AD-13 round 5: an older record a verify pass failed (the real protein-intake-tracker
+        // shape: iteration 2, probe failures, no works/verdict) needs fixes; it was verified.
+        assert_eq!(label(r#"{"status":"review_ready","known_blockers":["x"]}"#), "needs fixes (1 known blocker), not reusable");
+        let legacy_failed = r#"{"at":1795176790057,"iteration":2,"known_blockers":["the script looks up ids no element has: #proteinGrams","the page throws when its controls are used: Uncaught TypeError","probe failed again for Toggle switch: got Loading...; expected ≈132","a","b","c","d"],"status":"review_ready","title":"Protein Intake Tracker"}"#;
+        assert_eq!(label(legacy_failed), "needs fixes (7 known blockers), not reusable");
+        assert!(!label(legacy_failed).contains("never verified"));
+        // A blocker-free older record is not "ready" and not "never verified" (it may have passed).
+        assert_eq!(label(r#"{"status":"review_ready","iteration":2,"known_blockers":[]}"#), "staged before verdicts were recorded, not proven to work");
+        assert!(line.contains("anything else") && line.contains("staged before verdicts were recorded"), "{line}");
+        assert_eq!(label(r#"{"works":false}"#), "needs fixes (0 known blockers), not reusable");
+        assert_eq!(label("{}"), "unknown");
+        // The broken file reads "unknown"; nothing in the staging dir was changed.
+        let p2 = gather_local(&Sources { staging_root: Some(staging.clone()), ..Default::default() }, &Query { task_id: None, keywords: &keywords(&["protein broken"], 8), slug: None }, &[]);
+        assert!(serde_json::to_string(&p2).unwrap().contains("protein-broken (unknown)"));
+        assert_eq!(std::fs::read_to_string(staging.join("protein-broken").join(".status.json")).unwrap(), "{not json");
     }
 
     /// `<root>/YYYY/MM/<id>.jsonl.gz` in the host's archive format (built with the encoder

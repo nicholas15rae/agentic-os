@@ -513,9 +513,42 @@ pub fn evaluate_build(html: &str, prompt_spec: &Value, intent: &str, smoke: &qua
 /// The first fix line of a gate repair pass (AD-13).
 pub const GATE_REPAIR_LEAD: &str = "LAST-PASS REPAIR: fix ONLY the build-check items below; keep everything else in the page exactly as it is";
 
-/// Has this iteration already had its one gate repair pass (`h_evaluate`)? Pure.
+/// Has this iteration already had its one gate repair pass (`h_evaluate`)? Read first from the
+/// stored evaluation (`last_eval.gate_repair` "pending" / true for this iteration), which a full
+/// handoff log can never drop; else from the repair row, counting only rows after the latest
+/// `retry` (a retried task reuses its iteration number, and its "one more pass" gets its own
+/// repair; `retry_task` also clears the stored state). Pure.
 pub fn gate_repair_done(e: &Envelope) -> bool {
-    e.handoff_log.iter().any(|h| h.event_type == "loop_iteration" && h.iteration == Some(e.iteration_count) && h.summary_payload["gate_repair"] == true)
+    let g = &e.last_eval["gate_repair"];
+    if (*g == true || *g == "pending") && e.last_eval["iteration"].as_u64() == Some(u64::from(e.iteration_count)) {
+        return true;
+    }
+    let since = e.handoff_log.iter().rposition(|h| h.event_type == "retry").map_or(0, |i| i + 1);
+    e.handoff_log[since..].iter().any(|h| h.event_type == "loop_iteration" && h.iteration == Some(e.iteration_count) && h.summary_payload["gate_repair"] == true)
+}
+
+/// Is this iteration's gate repair pass under way (`h_evaluate` sent the page to the Coder and its
+/// gate has not run again)? Pure.
+pub fn gate_repair_pending(e: &Envelope) -> bool {
+    e.last_eval["gate_repair"] == "pending" && e.last_eval["iteration"].as_u64() == Some(u64::from(e.iteration_count))
+}
+
+/// Where the page from before a gate repair pass is kept (`h_evaluate`).
+fn pre_repair_rel(iteration: u32) -> String {
+    format!(".iterations/{iteration}-pre-repair.html")
+}
+
+/// The repair pass's Coder failed for good (no HTML, a timeout, the backend gone): instead of
+/// failing a build that had a usable page, run the gate again on the page as it was — it is then
+/// staged with its gate items as known blockers, as before the repair existed (AD-13 review).
+/// Never for a Play Place hub build (its failures go to the Repair Queue). Pure.
+fn gate_repair_fallback(e: &Envelope, why: &str) -> Option<Outcome> {
+    if !gate_repair_pending(e) || e.raw_intent.memory_reference["source"] == "playplace" {
+        return None;
+    }
+    let row = HandoffRow::new("coder", "system", "note", "milestone", format!("The repair pass failed ({}); the page from before it is checked again and staged with its blockers", clip(&one_line(why), 140)))
+        .payload(json!({ "gate_repair_failed": true }));
+    Some(Outcome::Next { stage: "evaluate", patch: Patch::default(), row, extra: vec![] })
 }
 
 /// Hosts the page loads code or styles from (`<script src>` / `<link href>` over http(s) or
@@ -1136,7 +1169,10 @@ impl<'a> Worker<'a> {
             Err(err) if err.backend_down && self.wait_for_backend(&cur, agent, &err.msg, &s.known) => {}
             Err(err) => {
                 self.stats.backend_down_since.lock().unwrap().remove(&cur.task_id);
-                self.fail_task(&cur, agent, &err.msg, &s.known).await
+                match gate_repair_fallback(&cur, &err.msg).filter(|_| stage == "code") {
+                    Some(o) => self.commit(stage, &cur, o, &s).await,
+                    None => self.fail_task(&cur, agent, &err.msg, &s.known).await,
+                }
             }
         }
     }
@@ -1624,13 +1660,55 @@ impl<'a> Worker<'a> {
         if repaired {
             ev["gate_repair"] = json!(true);
         }
+        // The repair pass never leaves Nic worse off (AD-13 review): a repaired page that now
+        // crashes, hangs or misses more items than before is replaced by the page from before the
+        // repair, which is staged with its own gate items as known blockers.
+        let mut restored_arts: Option<Value> = None;
+        let pre = &e.last_eval["gate_repair_pre"];
+        let (mut missing, mut usable) = (missing, usable);
+        if repaired && !complete && !hub && pre["iteration"].as_u64() == Some(u64::from(e.iteration_count)) {
+            let pre_missing = str_list(&pre["missing"], 10, 240);
+            if !usable || missing.len() > pre_missing.len() {
+                let old = staging::resolve(&s.staging_root, &slug, &pre_repair_rel(e.iteration_count)).ok().and_then(|p| std::fs::read(p).ok());
+                if let Some(old) = old {
+                    match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, &slug, "index.html", &old) {
+                        Ok(a) => {
+                            let mut arts: Vec<Value> = e.code_artifacts.as_array().cloned().unwrap_or_default();
+                            arts.push(json!({ "path": a.path, "rel": a.rel, "sha256": a.sha256, "bytes": a.bytes, "iteration": e.iteration_count, "by": "restored (the repair pass made the page worse)" }));
+                            restored_arts = Some(Value::Array(arts));
+                            let why = if usable { format!("it missed {} build-check items instead of {}", missing.len(), pre_missing.len()) } else { "it crashed on load or hung".to_string() };
+                            let mut back = json!({ "complete": false, "missing": pre_missing, "fixable": pre["fixable"].clone(), "checks": pre["checks"].clone(), "by": "deterministic" });
+                            back["iteration"] = json!(e.iteration_count);
+                            back["at"] = json!(envelope::now_ms());
+                            back["gate_repair"] = json!(true);
+                            back["restored"] = json!({ "why": why, "repaired_missing": missing });
+                            if ev.get("open_probes").is_some() {
+                                back["open_probes"] = ev["open_probes"].clone();
+                            }
+                            ev = back;
+                            missing = pre_missing;
+                            usable = true;
+                        }
+                        Err(err) => eprintln!("[worker] restore the page from before the repair: {err}"),
+                    }
+                }
+            }
+        }
         let fixable = str_list(&ev["fixable"], 10, 240);
         if !complete && at_limit && usable && !repaired && !fixable.is_empty() {
             ev["gate_repair"] = json!("pending");
+            // Keep the page and its gate result from before the repair (restored if it gets worse).
+            if let Some(h) = &html {
+                match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, &slug, &pre_repair_rel(e.iteration_count), h.as_bytes()) {
+                    Ok(_) => ev["gate_repair_pre"] = json!({ "iteration": e.iteration_count, "missing": missing, "fixable": fixable, "checks": ev["checks"].clone() }),
+                    Err(err) => eprintln!("[worker] keep the page from before the repair: {err}"),
+                }
+            }
             let mut fixes = vec![GATE_REPAIR_LEAD.to_string()];
             fixes.extend(fixable.iter().cloned());
             let n = fixable.len();
-            let row = HandoffRow::new("system", "coder", "loop_iteration", "handoff", format!("Last pass: one repair pass for the Coder ({n} build-check item{}), then the checks again", if n == 1 { "" } else { "s" }))
+            // A milestone: never dropped by a full handoff log (`pending_fixes` reads it).
+            let row = HandoffRow::new("system", "coder", "loop_iteration", "milestone", format!("Last pass: one repair pass for the Coder ({n} build-check item{}), then the checks again", if n == 1 { "" } else { "s" }))
                 .payload(json!({ "fix_instructions": fixes, "from": "evaluate", "gate_repair": true, "missing": missing }));
             return Ok(Outcome::Next { stage: "code", patch: Patch { last_eval: Some(ev), ..Default::default() }, row, extra: vec![] });
         }
@@ -1644,8 +1722,12 @@ impl<'a> Worker<'a> {
             } else {
                 format!("Build checks still miss {} item{} on the last pass; they go to review as known blockers", missing.len(), if missing.len() == 1 { "" } else { "s" })
             };
+            let text = match ev["restored"]["why"].as_str() {
+                Some(why) => format!("{text} (the repair pass made the page worse: {why}; the page from before it is staged)"),
+                None => text,
+            };
             let row = HandoffRow::new("system", if audit { "librarian" } else { "prompter" }, "handoff", "handoff", text).payload(json!({ "missing": missing }));
-            Ok(Outcome::Next { stage: if audit { "audit" } else { "verify" }, patch: Patch { last_eval: Some(ev), ..Default::default() }, row, extra: vec![] })
+            Ok(Outcome::Next { stage: if audit { "audit" } else { "verify" }, patch: Patch { last_eval: Some(ev), code_artifacts: restored_arts, ..Default::default() }, row, extra: vec![] })
         } else {
             let pre_row = HandoffRow::new("system", "system", "stage_completed", "verbose", format!("Build checks failed: {} item{} missing", missing.len(), if missing.len() == 1 { "" } else { "s" })).payload(json!({ "missing": missing }));
             let row = HandoffRow::new("system", "prompter", "loop_iteration", "handoff", format!("Back to the Prompter to fix {} item{} (iteration {}/{})", missing.len(), if missing.len() == 1 { "" } else { "s" }, e.iteration_count + 1, e.max_iterations)).payload(json!({ "fix_instructions": missing, "from": "evaluate" }));
@@ -1785,6 +1867,19 @@ impl<'a> Worker<'a> {
             let hub = e.raw_intent.memory_reference["source"] == "playplace";
             let gap_lines: Vec<String> = gaps.iter().map(|g| format!("no working probe for: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120))).collect();
             let pinned_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.pinned).map(|(_, l)| l.clone()).collect();
+            // A unit control the harness cannot read (`ProbeGap::unreadable`) is a known note: the
+            // Coder cannot change what the harness sees, so it never loops the Coder, never fails a
+            // hub build and never makes the build "not working".
+            let note_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.unreadable()).map(|(_, l)| l.clone()).collect();
+            let open_gap_lines: Vec<String> = gap_lines.iter().filter(|l| !note_lines.contains(l)).cloned().collect();
+            let open_pinned_lines: Vec<String> = pinned_lines.iter().filter(|l| !note_lines.contains(l)).cloned().collect();
+            // Nic's pinned checks the verifier left out or left undecided: unproven like a pinned gap.
+            let pinned_unjudged: Vec<String> = needs
+                .iter()
+                .enumerate()
+                .filter(|(i, n)| n.check.is_some() && !answers.list.iter().any(|a| a.idx == Some(*i) && a.met.is_some()))
+                .map(|(i, _)| format!("not judged by the verifier: {}", clip(expected.get(i).map(String::as_str).unwrap_or(""), 160)))
+                .collect();
             // Unparseable → the deterministic result (the gate already passed).
             let jj = j.clone().unwrap_or(Value::Null);
             let mut verdict = if jj["verdict"].as_str().map(|v| v.trim().eq_ignore_ascii_case("loop")).unwrap_or(false) { "loop" } else { "pass" };
@@ -1808,16 +1903,16 @@ impl<'a> Worker<'a> {
             }
             // A hub build: an unproven behaviour, a criterion the verifier did not judge, or no
             // per-criterion list at all is treated like an unmet one (AD-13 adds the last two).
-            let hub_gaps = hub && (!gap_lines.is_empty() || !judged.not_judged.is_empty() || judged.absent);
+            let hub_gaps = hub && (!open_gap_lines.is_empty() || !judged.not_judged.is_empty() || judged.absent);
             // Nic's pinned checks still unproven after the retry (the verifier was told what to
             // fix) on a pass that is not the last: the page is the likelier cause, so the Coder
             // gets another pass instead of a "pass" with an unproven pinned value (AD-13).
-            let pinned_loop = !hub && !at_limit && judged.unmet.is_empty() && !pinned_lines.is_empty();
+            let pinned_loop = !hub && !at_limit && judged.unmet.is_empty() && (!open_pinned_lines.is_empty() || !pinned_unjudged.is_empty());
             if !judged.unmet.is_empty() || hub_gaps || pinned_loop {
                 verdict = "loop";
             }
             if hub_gaps {
-                for g in &gap_lines {
+                for g in &open_gap_lines {
                     fixes.push(format!("{g}: make sure it really works, with clear, stable ids the verifier can use"));
                 }
                 if judged.absent {
@@ -1828,8 +1923,11 @@ impl<'a> Worker<'a> {
                 }
             }
             if pinned_loop {
-                for g in &pinned_lines {
+                for g in &open_pinned_lines {
                     fixes.push(format!("Nic's pinned check is still unproven in a browser, {g}: make it work on a fresh load, with clear, stable ids for its controls and for the element that shows the value"));
+                }
+                for g in &pinned_unjudged {
+                    fixes.push(format!("Nic's pinned check was {g}: make it clearly visible and working on a fresh load, with clear, stable ids for its controls and for the element that shows the value"));
                 }
             }
             for f in kept {
@@ -1853,7 +1951,7 @@ impl<'a> Worker<'a> {
                     blockers.push(b);
                 }
             }
-            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "pinned_gaps": pinned_lines.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), voice(&j))
+            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), voice(&j))
         };
         let mut last_eval = e.last_eval.clone();
         last_eval["verify"] = decision.clone();
@@ -1864,7 +1962,8 @@ impl<'a> Worker<'a> {
         // Queue (the loop breaker fails it) instead of review_ready, which the hub would
         // smoke-test and mark mergeable without reading its blockers.
         let hub = e.raw_intent.memory_reference["source"] == "playplace";
-        let open_items = decision["unmet"].as_u64().unwrap_or(0) + decision["gaps"].as_u64().unwrap_or(0) + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true);
+        let open_gaps = decision["gaps"].as_u64().unwrap_or(0).saturating_sub(decision["note_gaps"].as_u64().unwrap_or(0));
+        let open_items = decision["unmet"].as_u64().unwrap_or(0) + open_gaps + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true);
         let hub_unmet = hub && at_limit && open_items > 0;
         if wants_loop && (!at_limit || hub_unmet) {
             let to_agent = if decision["loop_to"] == "designer" { "designer" } else { "coder" };
@@ -1896,9 +1995,12 @@ impl<'a> Worker<'a> {
             blockers.push(format!("… and {} more (see the verify record)", total - (BLOCKERS_MAX - 1)));
             last_eval["blockers_dropped"] = json!(total - (BLOCKERS_MAX - 1));
         }
-        // The honest verdict (AD-13): staged with gate items, a failing probe or an unproven
-        // behaviour, the build does NOT work yet, whatever the verifier said.
-        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && decision["gaps"].as_u64().unwrap_or(0) == 0;
+        // The true count (the list may end in an "… and N more" line), for the app's ready line.
+        last_eval["known_blockers_total"] = json!(total);
+        // The honest verdict (AD-13): staged with gate items, a failing probe, an unproven
+        // behaviour, a criterion the verifier did not judge or no per-criterion list at all, the
+        // build does NOT work yet, whatever the verifier said.
+        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true;
         let verdict = if !works { "needs_fixes" } else if blockers.is_empty() { "pass" } else { "pass_with_notes" };
         last_eval["known_blockers"] = json!(blockers);
         last_eval["works"] = json!(works);
@@ -1906,7 +2008,7 @@ impl<'a> Worker<'a> {
         last_eval["complete"] = json!(true);
         let v = review_voice(works, &blockers, total).or(v);
         let slug = e.project_slug.clone().unwrap_or_default();
-        let status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "known_blockers": blockers, "works": works, "verdict": verdict, "at": envelope::now_ms() });
+        let status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "known_blockers": blockers, "known_blockers_total": total, "works": works, "verdict": verdict, "at": envelope::now_ms() });
         // A cancelled task never gets a review_ready .status.json (the Librarian reads it).
         if !self.owns(e) {
             return Err(StageErr::stale());
@@ -2479,13 +2581,19 @@ pub fn retry_task(store: &TaskStore, task_id: &str, known: &[String]) -> Result<
         _ => (Next { status: "queued", stage: None, owner: "tony" }, "the start".to_string()),
     };
     let row = HandoffRow::new("tony", next.owner, "retry", "handoff", format!("Retrying from {from}")).payload(json!({ "after_breaker": breaker }));
+    // The retried run gets its own gate repair (its iteration number is reused).
+    let mut last_eval = e.last_eval.clone();
+    if let Some(o) = last_eval.as_object_mut() {
+        o.remove("gate_repair");
+        o.remove("gate_repair_pre");
+    }
     if breaker {
         let limit = e.max_iterations.min(MAX_LOOP_ITERATIONS);
         store.with(|c| c.execute("UPDATE task_envelope SET iteration_count = ?1 WHERE task_id = ?2 AND status = 'failed'", rusqlite::params![limit.saturating_sub(1) as i64, task_id]).map(|_| ()).map_err(|er| er.to_string()))?;
         let e2 = store.with(|c| envelope::get_bare(c, task_id))?.ok_or_else(|| format!("task {task_id} not found"))?;
-        return store.transition(task_id, expect_of(&e2), next, &Patch { error: Some(None), lease_until: Some(None), ..Default::default() }, &row, known);
+        return store.transition(task_id, expect_of(&e2), next, &Patch { error: Some(None), lease_until: Some(None), last_eval: Some(last_eval), ..Default::default() }, &row, known);
     }
-    store.transition(task_id, expect_of(&e), next, &Patch { error: Some(None), lease_until: Some(None), ..Default::default() }, &row, known)
+    store.transition(task_id, expect_of(&e), next, &Patch { error: Some(None), lease_until: Some(None), last_eval: Some(last_eval), ..Default::default() }, &row, known)
 }
 
 /// Stop a task: `failed` with "cancelled by user" (never deleted).

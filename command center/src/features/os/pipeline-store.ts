@@ -162,13 +162,16 @@ export function relayText(ev: Pick<AgentEvent, "shortSummary" | "templateSummary
 }
 
 /** The "ready" line: blockers named when the Prompter shipped with known blockers; a Play Place
- * hub build is only "output ready" — the hub's smoke test still decides. Pure. */
-export function readyText(o: { title: string; slug: string | null | undefined; blockers: readonly string[]; hub: boolean; summary?: string }): string {
+ * hub build is only "output ready" — the hub's smoke test still decides. `total` is the true
+ * blocker count (`last_eval.known_blockers_total`): past the cap the stored list ends in an
+ * "… and N more" line, which is not a blocker itself. Pure. */
+export function readyText(o: { title: string; slug: string | null | undefined; blockers: readonly string[]; hub: boolean; summary?: string; total?: number }): string {
   const where = o.slug ? ` It's in staging/${o.slug}.` : "";
   const head = o.hub ? `“${o.title}”: the agents finished; the Play Place smoke test runs next.` : `“${o.title}” is ready for review.`;
   if (!o.blockers.length) return `${head}${where}`;
+  const n = typeof o.total === "number" && o.total > 0 ? o.total : o.blockers.length;
   const list = o.blockers.slice(0, 5).map((b) => `• ${b}`).join("\n");
-  return `“${o.title}” is staged with ${o.blockers.length} known blocker${o.blockers.length === 1 ? "" : "s"}${o.hub ? " (the Play Place smoke test runs next)" : ""}.${where}\n${list}`;
+  return `“${o.title}” is staged with ${n} known blocker${n === 1 ? "" : "s"}${o.hub ? " (the Play Place smoke test runs next)" : ""}.${where}\n${list}`;
 }
 
 const SPECIALIST_TABS: readonly ThreadId[] = ["prompter", "designer", "coder", "librarian"];
@@ -212,6 +215,8 @@ const level = () => feedbackLevel(useOs.getState().cfg);
 interface TaskExtras {
   source: string | null;
   blockers: string[];
+  /** The true blocker count (the list may end in an "… and N more" line). */
+  total?: number;
 }
 
 /** Desktop: re-read one task (title, slug, card, origin thread, verdict) before its outcome is
@@ -227,8 +232,10 @@ async function refreshTask(taskId: string): Promise<TaskExtras> {
     // Remember where it goes (the stored thread, else Tony's main thread): looked up once per task.
     if (!origin.has(taskId)) origin.set(taskId, storedThread(t) ?? "auto");
     const mref = t.raw_intent?.memory_reference as { source?: unknown } | null | undefined;
-    const kb = (t.last_eval as { known_blockers?: unknown } | null | undefined)?.known_blockers;
-    return { source: typeof mref?.source === "string" ? mref.source : null, blockers: Array.isArray(kb) ? kb.filter((b): b is string => typeof b === "string") : [] };
+    const le = t.last_eval as { known_blockers?: unknown; known_blockers_total?: unknown } | null | undefined;
+    const kb = le?.known_blockers;
+    const total = typeof le?.known_blockers_total === "number" ? le.known_blockers_total : undefined;
+    return { source: typeof mref?.source === "string" ? mref.source : null, blockers: Array.isArray(kb) ? kb.filter((b): b is string => typeof b === "string") : [], total };
   } catch {
     return none; // the event's own fields are enough
   }
@@ -311,7 +318,7 @@ export async function onAgentEvent(ev: AgentEvent): Promise<void> {
   }
   if (kind === "ready") {
     const hub = extras.source === "playplace";
-    const text = readyText({ title, slug: row?.slug, blockers: extras.blockers, hub });
+    const text = readyText({ title, slug: row?.slug, blockers: extras.blockers, hub, total: extras.total });
     const turn = push({ who: "agent", from: "os", thread: back, text, cardId: row?.cardId, taskId, tone: extras.blockers.length ? "warn" : undefined });
     if (!row?.cardId) readyTurn.set(taskId, turn.id);
     useToasts.getState().push({ title: `${osName()} · ${hub ? "output ready" : "ready for review"}`, body: text, tone: extras.blockers.length ? "error" : "info" });

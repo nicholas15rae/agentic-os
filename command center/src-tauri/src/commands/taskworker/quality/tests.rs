@@ -1149,7 +1149,7 @@ fn nics_default_unit_is_checked_on_load() {
     // The harness gets the spellings from the table, with non-ASCII escaped.
     let p = Probe { answer: 0, criterion: "u".into(), carried: false, steps: parse_probe(&json!([{ "op": "expect_unit", "sel": "#u", "unit": "°f", "other": "°c" }])).unwrap() };
     let page = with_probes("<html><head></head><body></body></html>", &[p]);
-    assert!(page.contains("\"U\":\"\\u00b0f|f|fahrenheit\"") && page.contains("\"UL\":\"\\u00b0f\""), "{}", &page[page.find("var P=").unwrap()..page.find("var P=").unwrap() + 200]);
+    assert!(page.contains("\"U\":\"\\u00b0f|f|fahrenheit|imperial|us|us customary\"") && page.contains("\"O\":\"\\u00b0c|c|celsius|centigrade|metric|si\"") && page.contains("\"UL\":\"\\u00b0f\""), "{}", &page[page.find("var P=").unwrap()..page.find("var P=").unwrap() + 200]);
     let r = probe_results(&[probe(0, json!([{ "op": "expect_unit", "sel": "#u", "unit": "lb", "other": "kg" }]))], &json!([{ "ok": false, "k": "fail", "at": 0, "got": "kg" }]));
     assert_eq!(r[0].detail, "got kg; expected #u to have lb selected on a fresh load");
 }
@@ -1165,7 +1165,8 @@ fn intent_recall_reads_more_ways_nic_states_his_values() {
     assert_eq!(pinned("Track protein for my weight (165 pounds) with a pounds/kilograms switch."), vec!["165", "74.84", "lb"]);
     assert_eq!(pinned("My weight is 165 lbs, show it in lb or kg."), vec!["165", "74.84", "lb"]);
     assert_eq!(pinned("Make it 165 lb. That's the default."), vec!["165"]);
-    assert_eq!(pinned("Plan 3 to 5 meals per day."), vec!["3, 4, 5"]);
+    assert_eq!(pinned("Plan 3 to 5 meals per day and show the per-meal split."), vec!["3, 4, 5"]);
+    assert_eq!(pinned("Let me choose 3 to 5 meals per day."), vec!["3, 4, 5"]);
     assert_eq!(pinned("Take my daily protein and split it across 3-5 meals."), vec!["3, 4, 5"]);
     // Negatives: an age next to a back-reference (another number sits between), kids' ages,
     // a delivery time, a price range, dates and a time of day.
@@ -1250,5 +1251,209 @@ fn a_page_stuck_on_loading_fails_the_gate_in_a_real_browser() {
     assert!(got(&fixed).0.is_empty(), "rendered on startup; empty-state copy is fine");
     assert_eq!(got(&nan).0, vec![("#perMealTotal".to_string(), "NaN g".to_string())], "the innermost output only");
     assert!(got(&empty).0.is_empty(), "nothing typed yet: '--' is an empty state; a hidden element never counts");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── AD-13 review (round 14): recall, pinning, round trips, smoke and unit reads ──
+
+/// A back-reference to a value stays in its own clause, or is the whole next clause, and
+/// "default" must not name something else ("the default page / tab / tool").
+#[test]
+fn a_back_reference_never_crosses_into_another_sentence_or_names_another_thing() {
+    let pinned = |t: &str| intent_checks(t).iter().map(|x| x.pinned()).collect::<Vec<_>>();
+    assert!(pinned("I'm 165 lbs. Build me a meal planner; this is the default page I open every morning.").is_empty());
+    assert!(pinned("Build a protein tracker for 165 lbs. It's the default tool on my phone.").is_empty());
+    assert!(pinned("I'm 165 lbs. Build me a stretching routine timer and make it the default tab.").is_empty());
+    assert!(pinned("I'm 165 lbs, make it the default tab of my browser.").is_empty());
+    // Still read: right after the value, in its clause or as the whole next clause.
+    assert_eq!(pinned("I weigh 165 lbs; use that as the default."), vec!["165"]);
+    assert_eq!(pinned("Make it 165 lb. That's the default."), vec!["165"]);
+    assert_eq!(pinned("I'm 165 lbs, so use that as the default weight."), vec!["165"]);
+    assert_eq!(pinned("I'm 165 lbs, use that as the default for the weight input."), vec!["165"]);
+}
+
+/// "my <adjective> 10 lbs" is not a stat about Nic; "my (current) weight …" and "my … is …" are.
+#[test]
+fn a_personal_stat_needs_a_weight_noun_or_is() {
+    let pinned = |t: &str| intent_checks(t).iter().map(|x| x.pinned()).collect::<Vec<_>>();
+    assert!(pinned("Build a weight-loss tracker with a lb/kg toggle. I want to lose my last 10 lbs by June.").is_empty());
+    assert!(pinned("I carry my old 30 lb pack; build a hiking planner with a lb/kg switch.").is_empty());
+    assert_eq!(pinned("My current weight is 165 lbs, show it in lb or kg."), vec!["165", "74.84", "lb"]);
+    assert_eq!(pinned("Track protein for my weight (165 pounds) with a pounds/kilograms switch."), vec!["165", "74.84", "lb"]);
+    assert_eq!(pinned("My daily run is 5 miles; show it in miles or km."), vec!["5", "8.05", "mi"]);
+}
+
+/// "N-M <noun> a/per day" is a habit unless a choice word governs its sentence, or it is meals in
+/// a request that asks for a per-meal split.
+#[test]
+fn a_daily_range_is_a_choice_only_with_a_choice_or_a_meal_split() {
+    for ask in [
+        "I drink 6-8 glasses a day; build a water intake tracker.",
+        "Build a water tracker. I drink 6-8 glasses per day; add a + button to log each glass",
+        "I eat 3 to 5 meals per day. Build a running protein tally",
+        "I do 4-6 pomodoros a day; show today's count",
+        "I take 2-3 walks a day; build something that totals my walks",
+        "I have 2-3 coffees a day, track my caffeine.",
+    ] {
+        assert!(intent_checks(ask).is_empty(), "{ask}: {:#?}", intent_checks(ask));
+    }
+    let pinned = |t: &str| intent_checks(t).iter().map(|x| x.pinned()).collect::<Vec<_>>();
+    assert_eq!(pinned("I eat 3 to 5 meals per day; split my protein per meal."), vec!["3, 4, 5"]);
+    assert_eq!(pinned("Let me pick 2-4 sessions a day."), vec!["2, 3, 4"]);
+}
+
+/// Nic naming the OTHER unit as the default unit means his stat's unit is not checked as selected.
+#[test]
+fn no_unit_check_when_nic_names_the_other_default_unit() {
+    let pinned = |t: &str| intent_checks(t).iter().map(|x| x.pinned()).collect::<Vec<_>>();
+    for ask in [
+        "I'm 165 lbs. Build a protein calculator with a lb/kg toggle, default unit kg",
+        "I'm 165 lbs. Build a protein calculator; the lb/kg toggle should default to kg.",
+        "I'm 165 lbs. Build a protein calculator with a lb/kg toggle, metric by default.",
+        "I'm 165 lbs. Build a protein calculator with a lb/kg toggle, kg by default.",
+        "I'm 165 lbs. Build a protein calculator with a lb/kg toggle; start in kg.",
+    ] {
+        let p = pinned(ask);
+        assert!(!p.contains(&"lb".to_string()), "{ask}: {p:?}");
+        assert_eq!(p, vec!["165", "74.84"], "{ask}");
+    }
+    // Naming lb (his own unit) as the default keeps the check.
+    assert_eq!(pinned("I'm 165 lbs. Build a protein calculator with a lb/kg toggle, default unit lb"), vec!["165", "74.84", "lb"]);
+}
+
+/// pin(Unit) rewrites the step on the unit control, not a read of the weight number before it.
+#[test]
+fn the_unit_pin_rewrites_the_unit_step_not_the_number_read() {
+    let checks = intent_checks(PROTEIN_ASK);
+    let expected: Vec<String> = checks.iter().map(|c| c.criterion.clone()).collect();
+    let needs: Vec<Need> = checks.iter().map(|c| c.need()).collect();
+    let enforced = |probe: Value| {
+        let mut a = read_answers(&json!([{ "n": 4, "criterion": expected[3], "met": true, "evidence": "", "probe": probe }]), &expected);
+        enforce(&mut a, &needs);
+        a.list.remove(0).probe.unwrap()
+    };
+    let r = enforced(json!([{ "op": "expect_value", "sel": "#weight", "approx": 165 }, { "op": "expect_class", "sel": "#lbBtn", "class": "active" }])).unwrap();
+    assert_eq!(r[0]["op"], "expect_value", "{r:?}");
+    assert_eq!(r[1], json!({ "op": "expect_unit", "sel": "#lbBtn", "unit": "lb", "other": "kg" }));
+    // A unit word in the expected text counts too; a non-number read wins over a number read.
+    let r = enforced(json!([{ "op": "expect_value", "sel": "#weight", "approx": 165 }, { "op": "expect_text", "sel": "#mode", "contains": "lb" }])).unwrap();
+    assert_eq!(r[1]["op"], "expect_unit", "{r:?}");
+    let r = enforced(json!([{ "op": "expect_value", "sel": "#weight", "approx": 165 }, { "op": "expect_class", "sel": "#pick", "class": "on" }])).unwrap();
+    assert_eq!((r[0]["op"].clone(), r[1]["op"].clone()), (json!("expect_value"), json!("expect_unit")), "{r:?}");
+    // Only a number read there: it is the one rewritten (as before).
+    assert_eq!(enforced(json!([{ "op": "expect_value", "sel": "#weight", "approx": 165 }])).unwrap()[0]["op"], "expect_unit");
+}
+
+/// A set between two switches is a real conversion, and a stepper or "Add" clicked twice is not
+/// a toggle flipped back; a toggle flipped back with nothing typed in between still is.
+#[test]
+fn round_trips_need_a_toggle_and_nothing_typed_between() {
+    let crits = vec!["The weight unit toggle switches between lb and kg".to_string(), "Meal count buttons switch the per-meal split".to_string(), "The running tally adds up foods and does not change when switching units".to_string()];
+    let needs: Vec<Need> = crits.iter().map(|c| need_of(c, &[])).collect();
+    assert!(needs.iter().all(|n| n.toggle), "{needs:?}");
+    let one = |n: usize, steps: Value| {
+        let mut a = read_answers(&json!([{ "n": n, "criterion": crits[n - 1], "met": true, "evidence": "", "probe": steps }]), &crits);
+        enforce(&mut a, &needs);
+        a.list.remove(0).probe.unwrap()
+    };
+    assert!(one(1, json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "set", "sel": "#weight", "value": "80" }, { "op": "click", "sel": "#unitToggle" }, { "op": "expect_value", "sel": "#weight", "approx": 176.37 }])).is_ok());
+    assert!(one(1, json!([{ "op": "select", "sel": "#unit", "value": "kg" }, { "op": "set", "sel": "#weight", "value": "80" }, { "op": "select", "sel": "#unit", "value": "lb" }, { "op": "expect_value", "sel": "#weight", "approx": 176.37 }])).is_ok());
+    assert!(one(2, json!([{ "op": "click", "sel": "#mealsUp" }, { "op": "click", "sel": "#mealsUp" }, { "op": "expect_text", "sel": "#perMeal", "approx": 33 }])).is_ok());
+    assert!(one(3, json!([{ "op": "set", "sel": "#grams", "value": "30" }, { "op": "click", "sel": "#addBtn" }, { "op": "click", "sel": "#addBtn" }, { "op": "expect_text", "sel": "#tally", "approx": 60 }])).is_ok());
+    // Still a round trip: the toggle flipped back with nothing typed between, or kg → lb alone.
+    assert!(one(1, json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "click", "sel": "#unitToggle" }, { "op": "expect_value", "sel": "#weight", "approx": 160 }])).unwrap_err().contains("clicks #unitToggle 2 times"));
+    assert!(one(1, json!([{ "op": "select", "sel": "#unit", "value": "kg" }, { "op": "select", "sel": "#unit", "value": "lb" }, { "op": "expect_value", "sel": "#weight", "approx": 160 }])).unwrap_err().contains("switches to kg and back to lb"));
+}
+
+/// The converted value is substituted only on the element that shows the weight: a read of the
+/// protein target (whose upper bound is 165 g with Nic's numbers) is a gap, never a 74.84 probe.
+#[test]
+fn convert_substitution_only_on_the_weight_element() {
+    let checks = intent_checks(PROTEIN_ASK);
+    let expected: Vec<String> = checks.iter().map(|c| c.criterion.clone()).collect();
+    let needs: Vec<Need> = checks.iter().map(|c| c.need()).collect();
+    let enforced = |list: Vec<Value>| {
+        let mut a = read_answers(&Value::Array(list), &expected);
+        enforce(&mut a, &needs);
+        a.list.into_iter().map(|x| x.probe.unwrap()).collect::<Vec<_>>()
+    };
+    let conv = |probe: Value| json!({ "n": 2, "criterion": expected[1], "met": true, "evidence": "", "probe": probe });
+    for probe in [
+        json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "expect_text", "sel": "#targetMax", "approx": "165 g" }]),
+        json!([{ "op": "select", "sel": "#unit", "value": "kg" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 165 }]),
+    ] {
+        let r = enforced(vec![conv(probe)]).remove(0);
+        assert!(r.as_ref().unwrap_err().contains("use the pinned value 74.84"), "{r:?}");
+    }
+    // The weight element is still corrected: named for weight, an input read, or the element the
+    // Default probe read on load.
+    let r = enforced(vec![conv(json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "expect_text", "sel": "#weightDisplay", "approx": 165 }]))]).remove(0);
+    assert_eq!(r.unwrap()[1]["approx"], json!(74.84));
+    let r = enforced(vec![
+        json!({ "n": 1, "criterion": expected[0], "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#shown", "approx": 165 }] }),
+        conv(json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "expect_text", "sel": "#shown", "approx": 165 }])),
+    ]);
+    assert_eq!(r[1].as_ref().unwrap()[1]["approx"], json!(74.84), "{r:?}");
+}
+
+/// The smoke flags a placeholder only where everything to compute from is there, only the bare
+/// word "Loading" / "Calculating", and only when it is still there after a short delay.
+#[test]
+fn the_stuck_smoke_leaves_empty_states_values_and_short_delays_alone_in_a_real_browser() {
+    let Some(dir) = edge_dir("stuck2") else { return };
+    let w = |name: &str, html: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, html).unwrap();
+        p
+    };
+    let tally = w("tally.html", r#"<!doctype html><html><head><title>t</title></head><body><input id="weight" type="number" value="165"><p id="targetDisplay">132 - 165 g</p><input id="foodName" type="text"><input id="grams" type="number"><select id="meal"><option>Breakfast</option><option>Lunch</option></select><p id="tallyTotal">—</p></body></html>"#);
+    let tip = w("tip.html", r#"<!doctype html><html><head><title>t</title></head><body><input id="bill" type="number"><select id="tipPct"><option>15</option><option>20</option></select><p id="tipAmount">--</p><p id="totalAmount">--</p></body></html>"#);
+    let goal = w("goal.html", r#"<!doctype html><html><head><title>t</title></head><body><select id="phase"><option>Carb loading</option></select><p id="phaseDisplay">Carb loading</p></body></html>"#);
+    let delay = w("delay.html", r#"<!doctype html><html><head><title>t</title></head><body><input id="weight" type="number" value="165"><p id="targetDisplay">Calculating...</p><script>setTimeout(function(){document.getElementById('targetDisplay').textContent='132 - 165 g'},1200)</script></body></html>"#);
+    let dash = w("dash.html", r#"<!doctype html><html><head><title>t</title></head><body><input id="weight" type="number" value="165"><select id="act"><option>Active</option></select><p id="targetDisplay">--</p><p id="status" class="result">Target: Loading...</p></body></html>"#);
+    let t = Duration::from_secs(30);
+    let got = |p: &Path| match runtime_smoke(p, t) {
+        Smoke::Ran { stuck, .. } => stuck,
+        o => panic!("{o:?}"),
+    };
+    assert!(got(&tally).is_empty(), "the tally before the first food (its grams field is empty)");
+    assert!(got(&tip).is_empty(), "nothing typed in the bill yet; a select alone is nothing to compute from");
+    assert!(got(&goal).is_empty(), "'Carb loading' is a value");
+    assert!(got(&delay).is_empty(), "rendered after 1.2 s");
+    assert_eq!(got(&dash), vec![("#targetDisplay".to_string(), "--".to_string()), ("#status".to_string(), "Target: Loading...".to_string())], "every input filled, still a dash; a labelled Loading");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// expect_unit reads the unit-control designs a correct page uses: a lone toggle showing its unit,
+/// colour-only buttons, a checkbox slider with the units beside it, "unit-active" classes and
+/// Imperial / Metric labels; a control naming no unit of the pair is a broken probe.
+#[test]
+fn more_unit_controls_read_right_in_a_real_browser() {
+    let Some(dir) = edge_dir("units2") else { return };
+    let page = dir.join("units.html");
+    std::fs::write(&page, r#"<!doctype html><html><head><title>t</title><style>.bg-blue-600{background:#2563eb;color:#fff}.bg-gray-200{background:#e5e7eb}</style></head><body>
+<div><button id="unitToggle">lb</button></div>
+<div><button id="switchTo">Switch to kg</button></div>
+<div><button id="kgToggle">kg</button></div>
+<div><button id="lbT" class="px-3 bg-blue-600">lb</button><button id="kgT" class="px-3 bg-gray-200">kg</button></div>
+<div><button id="lbR" class="px-3 bg-gray-200">lb</button><button id="kgR" class="px-3 bg-blue-600">kg</button></div>
+<div><span>lb</span><label class="switch"><input type="checkbox" id="unitSwitch"><span class="slider"></span></label><span>kg</span></div>
+<div><span>lb</span><label class="switch"><input type="checkbox" id="unitSwitchOn" checked><span class="slider"></span></label><span>kg</span></div>
+<div><button class="u2-btn u2-active">lb</button><button class="u2-btn inactive">kg</button></div>
+<select id="unitSystem"><option value="imperial" selected>Imperial</option><option value="metric">Metric</option></select>
+<div><button class="sys active">Imperial</button><button class="sys">Metric</button></div>
+<div><button class="m active">Dark</button><button class="m">Light</button></div>
+</body></html>"#).unwrap();
+    let u = |i: usize, sel: &str| probe(i, json!([{ "op": "expect_unit", "sel": sel, "unit": "lb", "other": "kg" }]));
+    let probes = vec![u(0, "#unitToggle"), u(1, "#switchTo"), u(2, "#kgToggle"), u(3, "#lbT"), u(4, "#lbR"), u(5, "#unitSwitch"), u(6, "#unitSwitchOn"), u(7, ".u2-btn"), u(8, "#unitSystem"), u(9, ".sys"), u(10, ".m")];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(240)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    for i in [0, 1, 3, 5, 7, 8, 9] {
+        assert!(r[i].passed, "{i}: {d:?}");
+    }
+    for i in [2, 4, 6] {
+        assert!(!r[i].passed && !r[i].error, "{i}: kg selected is a page failure: {d:?}");
+    }
+    assert!(r[10].error && d[10].contains("shows no selected unit"), "{d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

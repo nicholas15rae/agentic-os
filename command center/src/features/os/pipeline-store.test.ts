@@ -262,6 +262,16 @@ describe("thoughtform hardening (regressions)", () => {
     expect(readyText({ title: "X", slug: "x", blockers: [], hub: true })).toContain("smoke test runs next");
   });
 
+  it("past the blocker cap the ready line counts the true total, not the '… and N more' line", async () => {
+    const kb = [...Array.from({ length: 15 }, (_, i) => `blocker ${i + 1}`), "… and 5 more (see the verify record)"];
+    h.cmd.mockResolvedValue(env({ status: "review_ready", stage: "done", last_eval: { known_blockers: kb, known_blockers_total: 20, blockers_dropped: 5 } }));
+    await onAgentEvent(ev({ eventType: "review_ready", status: "review_ready", stage: "done" }));
+    expect(turns()[0].text).toContain("staged with 20 known blockers");
+    expect(turns()[0].text).not.toContain("16 known");
+    // An older record without the total still counts its list.
+    expect(readyText({ title: "X", slug: "x", blockers: ["a", "b"], hub: false })).toContain("staged with 2 known blockers");
+  });
+
   it("an untracked task's outcome goes to the thread stored in its raw intent, else Tony's main thread", async () => {
     h.cmd.mockResolvedValue(env({ task_id: "t-phone", status: "review_ready", stage: "done", raw_intent: { text: "x", timestamp: 1, memory_reference: { source: "phone", thread: "auto" } } }));
     await onAgentEvent(ev({ taskId: "t-phone", eventType: "review_ready", status: "review_ready", stage: "done" }));

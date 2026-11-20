@@ -402,21 +402,20 @@ enum Stated {
 
 /// Is this occurrence of a literal (number at byte `p`, unit ending at `end`) stated as Nic's
 /// default, or as a personal stat? A default: "default 165 lb", "starts at …", "… by default",
-/// or a back-reference right after it with no other number between ("I weigh 165 lbs; use that
-/// as the default", "… that's the default"). Personal: "I'm …", "I am …", "I weigh …", "my
-/// weight is …", "my weight (165 pounds)". Pure.
+/// or a back-reference to it (`back_reference`: "I weigh 165 lbs; use that as the default", "…
+/// that's the default"). Personal: "I'm …", "I am …", "I weigh …", "my weight is …", "my
+/// weight (165 pounds)", "my daily run is …" — never "my last 10 lbs" or "my old 30 lb pack"
+/// (an adjective after "my" is not a stat about Nic). Pure.
 fn stated_default(lower: &str, p: usize, end: usize) -> Option<Stated> {
     static STRONG: OnceLock<regex::Regex> = OnceLock::new();
     static PERSONAL: OnceLock<regex::Regex> = OnceLock::new();
     static AFTER: OnceLock<regex::Regex> = OnceLock::new();
-    static BACKREF: OnceLock<regex::Regex> = OnceLock::new();
     let strong = rx(&STRONG, r"(?:\bdefaults?\b(?:\s+[a-z]+){0,2}|\bstarts?\s+(?:at|with|on))[\s:=(]*$");
-    let personal = rx(&PERSONAL, r"(?:\bi['’]?m|\bi\s+am|\bi\s+weigh(?:s)?|\bmy\s+[a-z]+(?:\s+[a-z]+){0,2})[\s:=(]*$");
-    let after = rx(&AFTER, r"^[\s,)]*(?:by\s+default|as\s+(?:the\s+|a\s+|my\s+)?default|\(?\s*default\b)");
-    let backref = rx(
-        &BACKREF,
-        r"^[^\d\n]{0,60}?\b(?:(?:use|make|set|keep|treat|take)\s+(?:that|this|it)\s+(?:as\s+)?(?:the\s+|my\s+|a\s+|our\s+)?(?:starting\s+)?default|(?:that|this|it)(?:['’]s|\s+is|\s+should\s+be|\s+will\s+be)\s+(?:the\s+|my\s+)?(?:starting\s+)?default)\b",
+    let personal = rx(
+        &PERSONAL,
+        r"(?:\bi['’]?m|\bi\s+am|\bi\s+weigh(?:s)?|\bmy\s+(?:(?:current|actual|own|usual|present|starting|body)\s+){0,2}weight(?:\s+(?:is|of))?|\bmy\s+[a-z]+(?:\s+[a-z]+)?\s+(?:is|=))[\s:=(]*$",
     );
+    let after = rx(&AFTER, r"^[\s,)]*(?:by\s+default|as\s+(?:the\s+|a\s+|my\s+)?default|\(?\s*default\b)");
     let a = floor_boundary(lower, p.saturating_sub(48));
     let mut win = &lower[a..p];
     // Within the same sentence only.
@@ -424,12 +423,36 @@ fn stated_default(lower: &str, p: usize, end: usize) -> Option<Stated> {
         win = &win[i + 1..];
     }
     let tail = &lower[end..floor_boundary(lower, end + 90)];
-    if strong.is_match(win) || after.is_match(&lower[end..]) || backref.is_match(tail) {
+    if strong.is_match(win) || after.is_match(&lower[end..]) || back_reference(tail) {
         Some(Stated::Default)
     } else if personal.is_match(win) {
         Some(Stated::Personal)
     } else {
         None
+    }
+}
+
+/// Does the text right after a value (its unit included) refer back to it as the default? Within
+/// the value's own clause ("165 lbs, so use that as the default"), or — when a sentence end
+/// follows the value at once — in the next clause, which must BE the back-reference ("165 lbs;
+/// use that as the default", "165 lb. That's the default."). "default" must end its clause or be
+/// followed by value / weight / setting … or a preposition: "make it the default tab", "this is
+/// the default page I open" and "It's the default tool on my phone" name something else. Never
+/// across a further sentence end or another number. Pure.
+fn back_reference(tail: &str) -> bool {
+    static SAME: OnceLock<regex::Regex> = OnceLock::new();
+    static NEXT: OnceLock<regex::Regex> = OnceLock::new();
+    const CORE: &str = r"(?:(?:use|make|set|keep|treat|take)\s+(?:that|this|it)\s+(?:as\s+)?(?:the\s+|my\s+|a\s+|our\s+)?(?:starting\s+)?default|(?:that|this|it)(?:['’]s|\s+is|\s+should\s+be|\s+will\s+be)\s+(?:the\s+|my\s+)?(?:starting\s+)?default)";
+    const END: &str = r"(?:\s+(?:value|weight|setting|number|amount|entry|one))?\s*(?:$|[,:()]|\s+(?:for|on|in|when|if|please|and|so|but)\b)";
+    let same = rx(&SAME, &format!(r"^[^\d]{{0,60}}?\b{CORE}{END}"));
+    let next = rx(&NEXT, &format!(r"^{CORE}{END}"));
+    let stop = |s: &str| s.find(['.', '!', '?', ';', '\n']).unwrap_or(s.len());
+    let rest = tail.trim_start_matches(|c: char| c.is_whitespace() || c == ',' || c == ')');
+    if rest.starts_with(['.', '!', '?', ';', '\n']) {
+        let next_clause = rest[1..].trim_start();
+        next.is_match(&next_clause[..stop(next_clause)])
+    } else {
+        same.is_match(&rest[..stop(rest)])
     }
 }
 
@@ -535,7 +558,7 @@ pub fn intent_checks(text: &str) -> Vec<IntentCheck> {
         let Some(home) = unit_key(&l.unit) else { continue };
         for (a, b) in UNIT_PAIRS {
             let other = if home == a { b } else if home == b { a } else { continue };
-            if !names_pair(&lower, a, b) || out.iter().any(|c| matches!(&c.kind, CheckKind::Unit { unit, .. } if unit == home)) {
+            if !names_pair(&lower, a, b) || out.iter().any(|c| matches!(&c.kind, CheckKind::Unit { unit, .. } if unit == home)) || default_unit_named(&lower, other) {
                 continue;
             }
             out.push(IntentCheck {
@@ -555,6 +578,41 @@ pub fn intent_checks(text: &str) -> Vec<IntentCheck> {
     out
 }
 
+/// The unit system a unit key belongs to.
+fn metric(key: &str) -> bool {
+    matches!(key, "kg" | "km" | "°c" | "g" | "cm" | "m")
+}
+
+/// Does the (ASCII-lowercased) request name `key` as the default UNIT ("default unit kg", "the
+/// lb/kg toggle should default to kg", "kg by default", "start in kg", "metric by default")? Then
+/// Nic's personal stat in the other unit says nothing about the unit selected on load. Pure.
+fn default_unit_named(lower: &str, key: &str) -> bool {
+    let (_, long) = unit_spellings(key);
+    let short = match key {
+        "lb" => "lbs?",
+        "kg" => "kgs?",
+        "mi" => "mi",
+        "km" => "kms?",
+        "°f" => "°f|f",
+        "°c" => "°c|c",
+        "oz" => "oz",
+        "g" => "g",
+        "in" => "inch|inches",
+        "cm" => "cms?",
+        "ft" => "ft",
+        _ => "met(?:er|re)s?",
+    };
+    let system = if metric(key) { "metric" } else { "imperial|us customary" };
+    let u = format!(r"(?:{long}|{short}|{system})");
+    let pats = [
+        format!(r"\bdefaults?\s+(?:the\s+)?(?:unit|units|system)?\s*(?:is\s+|of\s+|to\s+|=\s*|:\s*|in\s+)?(?:the\s+)?{u}(?:$|[^a-z])"),
+        format!(r"(?:^|[^a-z°]){u}\s+(?:units?\s+)?(?:by|as\s+the|as)\s+default\b"),
+        format!(r"\b(?:starts?|start\s+it|starting)\s+(?:out\s+)?(?:in|on|with)\s+(?:the\s+)?{u}(?:$|[^a-z])"),
+        format!(r"\bdefault\s+(?:unit|units|system)\s*(?:should\s+be\s+|is\s+|=\s*|:\s*)?{u}(?:$|[^a-z])"),
+    ];
+    pats.iter().any(|p| regex::Regex::new(p).is_ok_and(|r| r.is_match(lower)))
+}
+
 /// Every unit key the pinned checks use (`unit_key`), for validating stored steps.
 const UNIT_KEYS: [&str; 12] = ["lb", "kg", "mi", "km", "°f", "°c", "oz", "g", "in", "cm", "ft", "m"];
 
@@ -569,7 +627,8 @@ pub const MAX_CHECKS: usize = 4;
 /// (c): "3-5 meals" / "3 to 5 meals" (integers, 1 ≤ M-N ≤ 6) that are themselves offered as
 /// choices: a choice word right before the range ("split (3-5 meals)", "pick 2 to 4 laps",
 /// "choose from 3-5 plans", "split it across 3-5 meals") or right after its noun ("3-5 meal
-/// options", "3-5 meals as buttons", "3 to 5 meals per day").
+/// options", "3-5 meals as buttons"); "3 to 5 meals per day" only with a choice word in its
+/// sentence or a per-meal split asked for (never "I drink 6-8 glasses a day").
 /// A "button" or "toggle" elsewhere in the sentence does not make "5-10 questions" a choice;
 /// never a measured range ("20-25 minutes", "8-12 reps"). At most 2. Pure.
 fn range_checks(text: &str) -> Vec<IntentCheck> {
@@ -577,10 +636,18 @@ fn range_checks(text: &str) -> Vec<IntentCheck> {
     static BEFORE: OnceLock<regex::Regex> = OnceLock::new();
     static AFTER: OnceLock<regex::Regex> = OnceLock::new();
     static MEASURE: OnceLock<regex::Regex> = OnceLock::new();
+    static PER_DAY: OnceLock<regex::Regex> = OnceLock::new();
+    static CHOICE: OnceLock<regex::Regex> = OnceLock::new();
+    static SPLIT_ASK: OnceLock<regex::Regex> = OnceLock::new();
     let range = rx(&RANGE, r"(?i)(?:^|[^\w.,])(\d{1,3})\s?(?:-|–|to)\s?(\d{1,3})\s?([a-z]{2,20})\b");
     let before = rx(&BEFORE, r"(?i)\b(?:split|splits|splitting|spread|divide|dividing|choose|choosing|choice|choices|pick|picking|select|selecting|selector|option|options|dropdown|tabs?)\b(?:\s+(?:of|from|between|into|in|any|a|an|the|number|count|it|them|this|that|across|over|among|up|out|evenly))*\s*[(:]?\s*$");
-    // "3 to 5 meals per day" / "3-5 meals a day": a daily count Nic picks from.
-    let after = rx(&AFTER, r"(?i)^[\s)]*(?:(?:(?:as|in)\s+)?(?:(?:a|an|the)\s+)?(?:split|splits|options?|choices?|buttons?|tabs?|dropdown|selector|picker|toggle)\b|(?:a|per|each|every)\s+day\b)");
+    let after = rx(&AFTER, r"(?i)^[\s)]*(?:(?:as|in)\s+)?(?:(?:a|an|the)\s+)?(?:split|splits|options?|choices?|buttons?|tabs?|dropdown|selector|picker|toggle)\b");
+    // "3 to 5 meals per day" is a daily count Nic picks from only with a choice word in its own
+    // sentence, or for meals in a request that asks for a per-meal split: "I drink 6-8 glasses a
+    // day" and "I eat 3 to 5 meals per day. Build a running tally" describe habits, not choices.
+    let per_day = rx(&PER_DAY, r"(?i)^[\s)]*(?:a|per|each|every)\s+day\b");
+    let choice_word = rx(&CHOICE, r"(?i)\b(?:split|splits|splitting|choose|choosing|choice|choices|pick|picking|select|selecting|selector|options?|dropdown|picker|between)\b");
+    let split_ask = rx(&SPLIT_ASK, r"(?i)\b(?:split|splits|splitting|per[- ]meal|divid\w*|spread)\b");
     let measure = rx(&MEASURE, r"(?i)^(?:lbs?|pounds?|kgs?|kilos?|kilograms?|grams?|g|oz|ounces?|cups?|ml|liters?|litres?|kcal|calories|cal|minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?|months?|years?|percent|miles?|km|meters?|metres?|feet|ft|inches|dollars?|usd|bpm|reps?|sets?|times|am|pm|of|to|and|or|per|times)$");
     let mut out: Vec<IntentCheck> = Vec::new();
     for c in range.captures_iter(text) {
@@ -591,7 +658,12 @@ fn range_checks(text: &str) -> Vec<IntentCheck> {
         let (n1, noun) = (c.get(1).unwrap(), c.get(3).unwrap());
         let a = floor_boundary(text, n1.start().saturating_sub(40));
         let z = floor_boundary(text, noun.end() + 40);
-        if !before.is_match(&text[a..n1.start()]) && !after.is_match(&text[noun.end()..z]) {
+        let daily = per_day.is_match(&text[noun.end()..z]) && {
+            let lower = text.to_ascii_lowercase();
+            let sentence = sentences(&lower).into_iter().find(|(s, t)| *s <= n1.start() && noun.end() <= s + t.len()).map(|(_, t)| t.to_string()).unwrap_or_default();
+            choice_word.is_match(&sentence) || ((c[3].eq_ignore_ascii_case("meals") || c[3].eq_ignore_ascii_case("meal")) && split_ask.is_match(text))
+        };
+        if !before.is_match(&text[a..n1.start()]) && !after.is_match(&text[noun.end()..z]) && !daily {
             continue;
         }
         let order: Vec<String> = (lo..=hi).map(|x| x.to_string()).collect();
@@ -1804,44 +1876,69 @@ fn action_unit(st: &Value) -> Option<&'static str> {
     UNIT_KEYS.iter().copied().find(|k| regex::Regex::new(&format!(r"[^a-z°](?:{})[^a-z]", unit_spellings(k).1)).is_ok_and(|r| r.is_match(&text)))
 }
 
-/// Do these steps (the ones before a read) switch something and then switch it back? Yes when
-/// one control is clicked an even number of times (a toggle flipped back), or the last
-/// unit-naming action names `home` (Nic's starting unit) after another of its pair was chosen —
-/// or, with no known home unit, names the other unit of the pair the first one named. The
-/// reason, or None. Pure.
+/// A read of the converted quantity itself: a selector naming weight, mass or a unit of the pair
+/// ("#weight", "#weightDisplay", "#kgValue"), or an input read (`expect_value`) of an element not
+/// named as an output (target / total / result …). Pure.
+fn quantity_sel(st: &Value, from: &str, to: &str) -> bool {
+    static OUT: OnceLock<regex::Regex> = OnceLock::new();
+    static QTY: OnceLock<regex::Regex> = OnceLock::new();
+    let w = format!(" {} ", words_of(st["sel"].as_str().unwrap_or("")));
+    let output = rx(&OUT, r"\s(?:targets?|totals?|results?|displays?|outputs?|summary|amounts?|tally|protein|per|meals?|goal|range|max|min)\s").is_match(&w);
+    let qty = rx(&QTY, r"\s(?:weight|wt|mass|body|units?|value|converted)\s").is_match(&w)
+        || regex::Regex::new(&format!(r"\s(?:{}|{})\s", unit_spellings(from).0, unit_spellings(to).0)).is_ok_and(|r| r.is_match(&w));
+    qty || (!output && st["op"] == "expect_value")
+}
+
+/// A control that switches between two states: its selector names a toggle, a switch, a unit, a
+/// mode or a unit of a pair ("#unitToggle", "#kg", ".mode-switch"), or its value is on / off. A
+/// "+" stepper or an "Add" button clicked twice is not one. Pure.
+fn toggle_like(st: &Value) -> bool {
+    static T: OnceLock<regex::Regex> = OnceLock::new();
+    let t = rx(&T, r"(?:^|\s)(?:toggles?|switch(?:es)?|units?|modes?|system|flip|on|off)(?:\s|$)");
+    action_unit(st).is_some() || t.is_match(&words_of(st["sel"].as_str().unwrap_or(""))) || t.is_match(&words_of(st["value"].as_str().unwrap_or("")))
+}
+
+/// Do these steps (the ones before a read) switch something and then switch it back, with
+/// nothing typed in between? Yes when one toggle-like control (`toggle_like`) is clicked an even
+/// number of times, or the last unit-naming action names `home` (Nic's starting unit) after
+/// another of its pair was chosen — or, with no known home unit, names the other unit of the
+/// pair the first one named. A `set` between the two switches makes it a real conversion ("kg,
+/// type 80, back to lb, expect 176.37"), not a round trip. The reason, or None. Pure.
 fn round_trip(steps: &[Value], home: Option<&str>) -> Option<String> {
-    let acts: Vec<&Value> = steps.iter().filter(|s| is_action(s)).collect();
-    let mut clicks: Vec<(String, usize)> = Vec::new();
-    for a in acts.iter().filter(|a| a["op"] == "click") {
+    let set_between = |a: usize, b: usize| a < b && steps[a + 1..b].iter().any(|s| s["op"] == "set");
+    let mut clicks: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, a) in steps.iter().enumerate().filter(|(_, a)| a["op"] == "click" && toggle_like(a)) {
         let key = at(a);
         match clicks.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, n)) => *n += 1,
-            None => clicks.push((key, 1)),
+            Some((_, v)) => v.push(i),
+            None => clicks.push((key, vec![i])),
         }
     }
-    if let Some((k, n)) = clicks.iter().find(|(_, n)| *n >= 2 && n % 2 == 0) {
-        return Some(format!("it clicks {k} {n} times, which switches it back"));
+    if let Some((k, v)) = clicks.iter().find(|(_, v)| v.len() >= 2 && v.len() % 2 == 0 && !set_between(v[0], v[v.len() - 1])) {
+        return Some(format!("it clicks {k} {} times, which switches it back", v.len()));
     }
-    let units: Vec<&'static str> = acts.iter().filter_map(|a| action_unit(a)).collect();
-    let (Some(first), Some(last)) = (units.first().copied(), units.last().copied()) else { return None };
+    let units: Vec<(usize, &'static str)> = steps.iter().enumerate().filter(|(_, a)| is_action(a)).filter_map(|(i, a)| action_unit(a).map(|u| (i, u))).collect();
+    let (Some(&(_, first)), Some(&(li, last))) = (units.first(), units.last()) else { return None };
     let back = match home {
-        Some(h) => last == h && units.iter().any(|u| pair_of(u) == Some(h)),
+        Some(h) => last == h && units.iter().any(|(_, u)| pair_of(u) == Some(h)),
         None => pair_of(first) == Some(last),
     };
-    let away = units.iter().copied().find(|u| *u != last).unwrap_or(first);
-    back.then(|| format!("it switches to {} and back to {} before it reads", unit_label(away), unit_label(last)))
+    let (ai, away) = units.iter().copied().find(|(_, u)| *u != last).unwrap_or((li, first));
+    (back && !set_between(ai, li)).then(|| format!("it switches to {} and back to {} before it reads", unit_label(away), unit_label(last)))
 }
 
 /// Hold a probe for an intent check to Nic's pinned value: the expectation is the value computed
 /// here (the model only supplies selectors and actions). Correct, don't reject (AD-13): an Order
 /// probe always gets the pinned list; a Convert probe whose single-number read follows the switch
-/// gets the pinned number in its place (a read that expected the starting value or a wrong
-/// factor already looked at the right element); a round trip is still rejected. A Default read
+/// gets the pinned number in its place when it reads the weight element (`quantity_sel`, or one of
+/// `known`, the elements the Default probe read on load) and expected the starting value or a
+/// wrong factor; a round trip is still rejected. A Unit probe's step on the unit control (not a
+/// number read) becomes `expect_unit`. A Default read
 /// must expect the pinned number (another number may be another element). The step held is chosen
 /// by its number, not its position: extra reads and a return toggle after the converted value are
 /// kept as the model wrote them. Reads of the whole page (`weak_sel`) never count. Returns the
 /// steps and a note when a value was substituted. Pure.
-fn pin(steps: &[Value], c: &IntentCheck) -> Result<(Vec<Value>, Option<String>), String> {
+fn pin(steps: &[Value], c: &IntentCheck, known: &[String]) -> Result<(Vec<Value>, Option<String>), String> {
     let v = c.pinned();
     let mut out = steps.to_vec();
     let near = |x: f64| (x - c.value).abs() <= c.tol;
@@ -1881,8 +1978,14 @@ fn pin(steps: &[Value], c: &IntentCheck) -> Result<(Vec<Value>, Option<String>),
             // The read holding the converted value: one that already expects it; else one that
             // expected the starting value (it read the right element; the page or the model never
             // converted) or a plausible wrong factor (within 25 % of the pinned number).
+            // Substituted only on the element that shows the converted quantity (the weight input,
+            // a unit-named element, or the one the Default probe read on load): with Nic's own
+            // numbers a target's upper bound can equal his weight (165 g at 1 g/lb), and that read
+            // must not become a 74.84 probe on a correct page.
             let plausible = |x: f64| (x - start).abs() <= (start.abs() * 0.006).max(0.5) || (x - c.value).abs() <= c.value.abs() * 0.25;
-            let Some(&(k, x)) = reads.iter().find(|(_, x)| near(*x)).or_else(|| reads.iter().find(|(_, x)| plausible(*x))) else {
+            let read_before = |i: usize| steps[..first_action].iter().any(|s| is_read(s) && at(s) == at(&steps[i]));
+            let holds_it = |i: usize| known.contains(&at(&steps[i])) || read_before(i) || quantity_sel(&steps[i], from, to);
+            let Some(&(k, x)) = reads.iter().find(|(_, x)| near(*x)).or_else(|| reads.iter().find(|(i, x)| plausible(*x) && holds_it(*i))) else {
                 return Err(match reads.first() {
                     Some(&(_, x)) => format!("it expects {}, but the converted value is pinned: use the pinned value {v}", fmt_num(x)),
                     None if weak_only(first_action + 1, steps.len()) => whole_page,
@@ -1906,7 +2009,12 @@ fn pin(steps: &[Value], c: &IntentCheck) -> Result<(Vec<Value>, Option<String>),
             Ok((out, note))
         }
         CheckKind::Unit { unit, other } => {
-            let k = steps[..first_action].iter().position(|s| is_expect(s) && s["sel"].as_str().is_some_and(|x| !weak_sel(x))).ok_or_else(|| {
+            // The step on the unit control: one whose selector or expected value names a unit of
+            // the pair (or "unit"), else one that does not expect a number (a class, a label),
+            // else the first — never a read of the number input when a unit step is there.
+            let cands: Vec<usize> = (0..first_action).filter(|&i| is_expect(&steps[i]) && steps[i]["sel"].as_str().is_some_and(|x| !weak_sel(x))).collect();
+            let number_read = |i: usize| is_read(&steps[i]) && !expected_numbers(&steps[i]).is_empty();
+            let k = cands.iter().copied().find(|&i| names_unit(&steps[i], unit, other)).or_else(|| cands.iter().copied().find(|&i| !number_read(i))).or(cands.first().copied()).ok_or_else(|| {
                 if first_action < steps.len() {
                     format!("check the unit control on a fresh load, before any set / select / click (pinned unit {v})")
                 } else {
@@ -1917,6 +2025,21 @@ fn pin(steps: &[Value], c: &IntentCheck) -> Result<(Vec<Value>, Option<String>),
             Ok((out, None))
         }
     }
+}
+
+/// Does a step's selector or expected value name a unit of the pair, or the unit control itself
+/// ("#lbBtn", ".unit-btn", "#unitSystem", contains "kg")? Pure.
+fn names_unit(st: &Value, unit: &str, other: &str) -> bool {
+    let text = format!(
+        " {} {} {} {} {} ",
+        words_of(st["sel"].as_str().unwrap_or("")),
+        words_of(st["value"].as_str().unwrap_or("")),
+        words_of(st["cls"].as_str().or_else(|| st["class"].as_str()).unwrap_or("")),
+        words_of(st["contains"].as_str().unwrap_or("")),
+        words_of(st["equals"].as_str().unwrap_or(""))
+    );
+    let pat = format!(r"[^a-z°](?:units?|system|{}|{})[^a-z]", unit_spellings(unit).0, unit_spellings(other).0);
+    regex::Regex::new(&pat).is_ok_and(|r| r.is_match(&text))
 }
 
 fn is_expect(st: &Value) -> bool {
@@ -1997,19 +2120,20 @@ pub fn enforce(answers: &mut Answers, needs: &[Need]) {
     for a in &answers.list {
         let Some(c) = a.idx.and_then(|i| needs.get(i)).and_then(|n| n.check.as_ref()).filter(|c| c.kind == CheckKind::Default) else { continue };
         if let Some(Ok(steps)) = &a.probe {
-            if let Ok((pinned, _)) = pin(steps, c) {
+            if let Ok((pinned, _)) = pin(steps, c, &[]) {
                 let first_action = pinned.iter().position(is_action).unwrap_or(pinned.len());
                 let want = (c.value * 100.0).round() / 100.0;
                 initial.extend(pinned[..first_action].iter().filter(|s| s["approx"].as_f64() == Some(want)).map(|s| (at(s), c.value)));
             }
         }
     }
+    let known: Vec<String> = initial.iter().map(|(s, _)| s.clone()).collect();
     for a in answers.list.iter_mut() {
         let Some(need) = a.idx.and_then(|i| needs.get(i)) else { continue };
         let Some(Ok(steps)) = &a.probe else { continue };
         let mut note = None;
         let checked = if let Some(c) = &need.check {
-            pin(steps, c).map(|(s, n)| {
+            pin(steps, c, &known).map(|(s, n)| {
                 note = n;
                 s
             })
@@ -2280,6 +2404,15 @@ pub struct ProbeGap {
     pub pinned: bool,
 }
 
+impl ProbeGap {
+    /// The harness could not read which unit the page's control shows (`nounit`) even after the
+    /// retry: the Coder cannot change what the harness sees, so this is a known note — never a
+    /// Coder loop, never "does not work" (AD-13 review).
+    pub fn unreadable(&self) -> bool {
+        self.pinned && self.why.contains("shows no selected unit")
+    }
+}
+
 /// The reasons fed back to the verifier on its one retry: per criterion it can fix, why no probe
 /// for it worked (the parse error, the selector that matched nothing, the pinned value to use).
 /// Nic's pinned checks first. Pure.
@@ -2428,35 +2561,43 @@ var AC=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=funct
 /// The smoke: storage blocked (a sandboxed preview or a locked-down browser throws on it; each
 /// blocked access records the calling line), then after load (and 800 ms of virtual time) record
 /// the output-like elements still showing a placeholder (`stuck`, BEFORE any interaction: a page
-/// that only renders once a control changes shows "Loading..." to Nic), fill the inputs, change
-/// the selects, click the buttons still on the page, and write the result onto <html>.
+/// that only renders once a control changes shows "Loading..." to Nic) — sampled again 1.5 s
+/// later, and only those still showing the same text count (a page that renders after a short
+/// "Calculating..." delay is fine) — fill the inputs, change the selects, click the buttons still
+/// on the page, and write the result onto <html>.
 ///
 /// Output-like: an `<output>`, or an element whose id / class names a display, result, total,
 /// target, output, summary, amount, readout, answer or tally (form controls never). Visible text
-/// of at most 60 chars that ends in "Loading" / "Calculating" (with dots), holds NaN, undefined,
-/// null, Infinity or [object Object] as a token, or — only when the page has a filled-in input or
-/// a select, so there is something to compute from — is only dashes / an ellipsis (an optional
-/// unit after it). Empty-state copy ("No foods yet") never counts; of nested matches the innermost
-/// is kept; at most 4.
+/// of at most 60 chars that is just "Loading" / "Calculating" (with dots, an optional "Label:"
+/// before it; "Carb loading" is a value), holds NaN, undefined, null, Infinity or [object Object]
+/// as a token, or — only when every visible text / number input on the page is filled in, so
+/// there is everything to compute from — is only dashes / an ellipsis (an optional unit after
+/// it). A select alone, or an empty bill / grams field, leaves "--" an empty state (a tip total
+/// before the bill, a tally before the first food). Empty-state copy ("No foods yet") never
+/// counts; of nested matches the innermost is kept; at most 4.
 const SMOKE_JS: &str = r#"var H=[];function site(){try{var f=String(new Error().stack||'').split('\n')[3]||'';var m=f.match(/:(\d+):\d+\)?\s*$/);if(m&&H.length<40)H.push(+m[1])}catch(x){}}
 function block(n){try{Object.defineProperty(window,n,{configurable:true,get:function(){site();throw new DOMException(n+' is blocked here (guard storage with try/catch)','SecurityError')}})}catch(x){}}
 block('localStorage');block('sessionStorage');
 function txt(e){return String(e.innerText||'').replace(/\s+/g,' ').trim()}
 function stuck(){var pat=/(display|result|total|target|output|summary|amount|readout|answer|tally)/i;
-var st=Array.prototype.some.call(document.querySelectorAll('input,select,textarea'),function(i){var t=(i.type||'').toLowerCase();if(/^(hidden|button|submit|reset|checkbox|radio|file|image)$/.test(t))return false;return i.tagName==='SELECT'||String(i.value).trim()!==''});
+var ins=Array.prototype.filter.call(document.querySelectorAll('input'),function(i){return /^(text|number|search|tel|range|)$/.test((i.type||'').toLowerCase())&&i.getClientRects().length>0});
+var st=ins.length>0&&ins.every(function(i){return String(i.value).trim()!==''});
 var c=[];Array.prototype.forEach.call(document.querySelectorAll('output,[id],[class]'),function(el){if(c.length>=12)return;if(/^(INPUT|SELECT|TEXTAREA|BUTTON|SCRIPT|STYLE|OPTION|LABEL|HTML|BODY|HEAD|TITLE|META|LINK|TEMPLATE)$/.test(el.tagName))return;
 var n=(el.id||'')+' '+(typeof el.className==='string'?el.className:'');if(el.tagName!=='OUTPUT'&&!pat.test(n))return;
 if(!el.getClientRects().length)return;var cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none')return;
 var t=txt(el);if(!t||t.length>60)return;
-if(/(^|[:\s])(loading|calculating)(\.{1,3}|\u2026)?$/i.test(t)||/(^|[^\w])(NaN|undefined|null|-?Infinity|\[object Object\])(?![\w])/.test(t)||(st&&/^(-{2,}|[\u2013\u2014]+|\u2026|\.{3})\s*[a-z%]{0,6}$/i.test(t)))c.push(el)});
+if(/^([^:]{0,30}:\s*)?(loading|calculating)(\.{1,3}|\u2026)?$/i.test(t)||/(^|[^\w])(NaN|undefined|null|-?Infinity|\[object Object\])(?![\w])/.test(t)||(st&&/^(-{2,}|[\u2013\u2014]+|\u2026|\.{3})\s*[a-z%]{0,6}$/i.test(t)))c.push(el)});
 c=c.filter(function(e){return !c.some(function(d){return d!==e&&e.contains(d)})});
 return c.slice(0,4).map(function(e){var k=typeof e.className==='string'?e.className.trim():'';return {sel:e.id?'#'+e.id:e.tagName.toLowerCase()+(k?'.'+k.split(/\s+/)[0]:''),text:txt(e).slice(0,40)}})}
-addEventListener('load',function(){setTimeout(function(){var L=E.length;var PH=[];try{PH=stuck()}catch(x){}
+addEventListener('load',function(){setTimeout(function(){var PH=[];try{PH=stuck()}catch(x){}
+function go(){var L=E.length;
 try{document.querySelectorAll('input').forEach(function(i){var t=(i.type||'text').toLowerCase();if(t==='number'||t==='range'){i.value='50'}else if(t==='checkbox'||t==='radio'){i.checked=!i.checked}else if(t==='text'||t==='search'||t===''){i.value='Test item'}else{return}
 i.dispatchEvent(new Event('input',{bubbles:true}));i.dispatchEvent(new Event('change',{bubbles:true}))});
 document.querySelectorAll('select').forEach(function(s){if(s.options.length>1){s.selectedIndex=1;s.dispatchEvent(new Event('change',{bubbles:true}))}});
 Array.prototype.slice.call(document.querySelectorAll('button'),0,30).forEach(function(b){if(!b.isConnected||b.disabled)return;b.click()})}catch(x){rec('while using the page: '+x.message)}
-setTimeout(function(){document.documentElement.setAttribute('data-tf-smoke',JSON.stringify({errors:E,load:L,storage:H,stuck:PH}))},300)},800)});"#;
+setTimeout(function(){document.documentElement.setAttribute('data-tf-smoke',JSON.stringify({errors:E,load:L,storage:H,stuck:PH}))},300)}
+if(!PH.length){go();return}
+setTimeout(function(){var again=[];try{again=stuck()}catch(x){}PH=PH.filter(function(a){return again.some(function(b){return b.sel===a.sel&&b.text===a.text})});go()},1500)},800)});"#;
 
 /// The probe runner (storage NOT blocked). Its state lives in `window.name` across reloads: every
 /// probe starts on a fresh load with storage cleared; `reload` reloads keeping storage; a step is
@@ -2481,10 +2622,14 @@ setTimeout(function(){document.documentElement.setAttribute('data-tf-smoke',JSON
 /// broken probe (`nolabels`), not a page failure. `expect_unit` (Nic's default unit, AD-13) reads
 /// the unit control: a select's selected option, the checked radio / checkbox (an unchecked
 /// checkbox labelled with the other unit means this one), or the element(s) marked active /
-/// selected / on / aria-pressed / aria-checked / aria-selected / aria-current — among the matches,
-/// else inside the first match, else among its siblings of the same tag; the selected label must
-/// name the unit and not the other one; a control that shows no selected unit is a broken probe
-/// (`nounit`).
+/// selected / on / aria-pressed / aria-checked / aria-selected / aria-current (any class token
+/// such as "unit-active" or "btn-selected", never "inactive") — among the matches, else inside
+/// the first match, else among its siblings of the same tag. A checkbox slider with no unit in its
+/// label reads the unit texts beside it (unchecked = the one before it). A lone toggle button with
+/// no marker and no unit-named sibling shows its current unit as its text ("lb"; "Switch to kg"
+/// means lb). Unit buttons marked only by colour: the one coloured button among grey ones. A unit
+/// system names its units ("Imperial" = lb). The selected label must name the unit and not the
+/// other one; a control that shows no selected unit of the pair is a broken probe (`nounit`).
 /// A text read that passed on an element with more than `BIG_TEXT` chars of text is recorded
 /// (`w`, step indices): a container, not the value.
 const PROBE_JS: &str = r#"var P=__PROBES__;var S=null;try{S=JSON.parse(window.name)}catch(x){}
@@ -2520,15 +2665,23 @@ if(seen.length<2)return {ok:false,k:'nolabels',got:got};
 return {ok:w.join(',')===want.map(function(x,j){return j}).join(','),got:got}}
 function unitOf(st,l){var U=new RegExp('(^|[^a-z\u00b0])(?:'+st.U+')(?![a-z])','i'),O=new RegExp('(^|[^a-z\u00b0])(?:'+st.O+')(?![a-z])','i');
 function lab(e){var t=nm(e.innerText||e.textContent||'');var v=e.getAttribute('value')||e.getAttribute('data-unit')||e.getAttribute('aria-label')||'';if(e.id){try{var f=document.querySelector('label[for="'+e.id+'"]');if(f)t+=' '+nm(f.textContent)}catch(x){}}var p=e.closest?e.closest('label'):null;if(p)t+=' '+nm(p.textContent);return nm(t+' '+v).toLowerCase()}
-function on(e){var c=' '+(typeof e.className==='string'?e.className:'')+' ';return /\s(active|selected|is-active|is-selected|on|checked|current|chosen)\s/i.test(c)||['aria-pressed','aria-checked','aria-selected'].some(function(a){return e.getAttribute(a)==='true'})||(e.getAttribute('aria-current')!=null&&e.getAttribute('aria-current')!=='false')}
+function on(e){var c=(typeof e.className==='string'?e.className:'').split(/\s+/);return c.some(function(t){return /^(on|checked)$/i.test(t)||(/^([a-z0-9]+-)*(active|selected|current|chosen|checked)(-[a-z0-9]+)*$/i.test(t)&&!/(^|-)(not|non|un|in)-/i.test(t))})||['aria-pressed','aria-checked','aria-selected'].some(function(a){return e.getAttribute(a)==='true'})||(e.getAttribute('aria-current')!=null&&e.getAttribute('aria-current')!=='false')}
+function one(t){t=nm(t).toLowerCase();var u=U.test(t),o=O.test(t);return u&&!o?'u':o&&!u?'o':''}
+function txt(e){return nm(e.innerText||e.textContent||'')}
+function sides(e){var n=(e.closest&&e.closest('label'))||e;for(var d=0;d<2&&n;d++){var p=n.previousElementSibling,q=n.nextElementSibling;var a=p?one(txt(p)):'',b=q?one(txt(q)):'';if(a&&b&&a!==b)return [a,b];n=n.parentElement}return null}
 var Q=[],seen=false;
-function scan(list){list.forEach(function(e){if(!e||!e.getAttribute)return;if(e.tagName==='SELECT'){seen=true;var o=e.options[e.selectedIndex];if(o)Q.push((nm(o.textContent)+' '+o.value).toLowerCase())}else if(tick(e)){seen=true;var t=lab(e);if(e.checked)Q.push(t);else if((e.type||'').toLowerCase()==='checkbox'){if(O.test(t)&&!U.test(t))Q.push(st.UL);else if(U.test(t)&&!O.test(t))Q.push(st.OL)}}else if(on(e)){seen=true;Q.push(lab(e))}})}
+function put(w){Q.push(w==='u'?st.UL:st.OL)}
+function scan(list){list.forEach(function(e){if(!e||!e.getAttribute)return;if(e.tagName==='SELECT'){seen=true;var o=e.options[e.selectedIndex];if(o)Q.push((nm(o.textContent)+' '+o.value).toLowerCase())}else if(tick(e)){seen=true;var t=lab(e);if(!one(t)&&(e.type||'').toLowerCase()==='checkbox'){var sd=sides(e);if(sd){put(e.checked?sd[1]:sd[0]);return}}if(e.checked)Q.push(t);else if((e.type||'').toLowerCase()==='checkbox'){if(O.test(t)&&!U.test(t))Q.push(st.UL);else if(U.test(t)&&!O.test(t))Q.push(st.OL)}}else if(on(e)){seen=true;Q.push(lab(e))}})}
 scan(l);
 if(!seen&&l.length){scan(Array.prototype.slice.call(l[0].querySelectorAll('select,input,button,[role=button],[role=radio],[role=tab],[aria-pressed],[aria-checked],[aria-selected],.active,.selected')))}
-if(!seen&&l.length===1&&l[0].parentElement){scan(Array.prototype.slice.call(l[0].parentElement.children).filter(function(e){return e!==l[0]&&e.tagName===l[0].tagName}))}
+var sib=l.length===1&&l[0].parentElement?Array.prototype.slice.call(l[0].parentElement.children).filter(function(e){return e!==l[0]&&e.tagName===l[0].tagName}):[];
+if(!seen&&sib.length){scan(sib)}
+if(!seen&&l.length===1&&!l[0].querySelector('select,input')&&!sib.some(function(e){return one(txt(e))})){var t1=nm(txt(l[0])||l[0].value||'').toLowerCase(),w=one(t1);if(w){seen=true;var m=(w==='u'?U:O).exec(t1);var pre=m?t1.slice(0,m.index+m[1].length):'';put(/(\bto|\bswitch|\buse|\bshow|\bconvert|\bchange|\u2192|->)\W*(in\W+)?$/i.test(pre)?(w==='u'?'o':'u'):w)}}
+if(!seen){var gr=(l.length>1?l:l.concat(sib)).filter(function(e){return one(txt(e))});if(gr.length>=2){var col=gr.filter(function(e){return chroma(e)>=60}),grey=gr.filter(function(e){return chroma(e)<30});if(col.length===1&&grey.length===gr.length-1){seen=true;put(one(txt(col[0])))}}}
 Q=Q.filter(function(t){return !(U.test(t)&&O.test(t))});
-if(!seen||!Q.length)return {ok:false,k:'nounit',got:l.map(function(e){return nm(e.innerText||e.textContent||e.value||'')}).join(' / ').slice(0,120)};
+if(!seen||!Q.some(function(t){return U.test(t)||O.test(t)}))return {ok:false,k:'nounit',got:l.map(function(e){return nm(e.innerText||e.textContent||e.value||'')}).join(' / ').slice(0,120)};
 return {ok:Q.some(function(t){return U.test(t)})&&!Q.some(function(t){return O.test(t)}),got:Q.join(' / ').slice(0,120)}}
+function chroma(e){try{var m=getComputedStyle(e).backgroundColor.match(/[\d.]+/g);if(!m||m.length<3||(m.length>3&&+m[3]<0.5))return 0;return Math.max(+m[0],+m[1],+m[2])-Math.min(+m[0],+m[1],+m[2])}catch(x){return 0}}
 function check(st,el,l){var ok=false,got='';
 if(st.op==='expect_text'||st.op==='expect_value'){var r=reads(el,st.op),ex=tick(el);
 got=ex?r[0]:r.filter(function(x,j){return x!==''&&r.indexOf(x)===j}).join(' / ');
@@ -2577,6 +2730,12 @@ pub fn with_harness(html: &str) -> String {
     with_prelude(html, &format!("{GUARDS}{SMOKE_JS}"))
 }
 
+/// What names a unit on a unit control: its spellings, plus its system ("Imperial" / "US" for
+/// lb, mi, °F, oz, in, ft; "Metric" / "SI" for kg, km, °C, g, cm, m). Pure.
+fn unit_pattern(key: &str) -> String {
+    format!("{}|{}", unit_spellings(key).0, if metric(key) { "metric|si" } else { "imperial|us|us customary" })
+}
+
 /// The page with the probe runner injected (the probes as inert JSON; an `expect_unit` step gets
 /// its unit spellings from the table here, never from the stored step). Non-ASCII is escaped
 /// (`\u00b0` for "°"), so a page without a charset still reads the data right. Pure.
@@ -2589,8 +2748,8 @@ pub fn with_probes(html: &str, probes: &[Probe]) -> String {
                 .map(|st| {
                     let mut st = st.clone();
                     if let (true, Some(u), Some(o)) = (st["op"] == "expect_unit", st["unit"].as_str().map(String::from), st["other"].as_str().map(String::from)) {
-                        st["U"] = json!(unit_spellings(&u).0);
-                        st["O"] = json!(unit_spellings(&o).0);
+                        st["U"] = json!(unit_pattern(&u));
+                        st["O"] = json!(unit_pattern(&o));
                         st["UL"] = json!(unit_label(&u).to_lowercase());
                         st["OL"] = json!(unit_label(&o).to_lowercase());
                     }

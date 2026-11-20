@@ -1895,6 +1895,12 @@ fn nics_exact_values_are_carried_and_checked() {
             Ok(match (c.stage, n) {
                 ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
                 ("code", _) => format!("```html\n{}\n```", GOOD_HTML.replace("value=\"84.50\"", "value=\"165\"").replace("Bill amount</label>", "Bill amount (lb)</label>")),
+                // The verifier judges Nic's pinned default too (an unjudged pinned check loops).
+                ("verify", _) => {
+                    let mut list = crit().as_array().cloned().unwrap();
+                    list.push(json!({ "n": 2, "criterion": "Nic's default 165 lbs", "met": true, "evidence": "const total = Number($(\"bill\").value)" }));
+                    json!({ "criteria": list, "verdict": "pass", "voice_summary": "It meets the criteria." }).to_string()
+                }
                 _ => default_reply(c),
             })
         }),
@@ -1903,7 +1909,7 @@ fn nics_exact_values_are_carried_and_checked() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
-    assert_eq!(e.iteration_count, 1);
+    assert_eq!(e.iteration_count, 1, "{}", e.last_eval);
     for st in ["spec", "merge", "code", "verify"] {
         assert!(fake.calls_for(st)[0].user.contains("Nic's exact values") && fake.calls_for(st)[0].user.contains("165 lbs"), "{st}");
     }
@@ -2722,6 +2728,254 @@ fn the_repair_prompt_and_the_review_voice_are_deterministic() {
     assert!(v.starts_with("Built, but 2 things still don't work: the page throws when its controls are used: Cannot read") && v.ends_with("; the script looks up ids no element has: #proteinGrams."), "{v}");
     assert!(review_voice(true, &two[..1], 1).unwrap().starts_with("Built; 1 thing still to check:"));
     assert_eq!(review_voice(true, &[], 0), None);
+}
+
+// ── AD-13 review (round 14): repair never makes it worse, honest verdicts, true counts ──
+
+fn page_165() -> String {
+    GOOD_HTML.replace("value=\"84.50\"", "value=\"165\"").replace("Bill amount</label>", "Bill amount (lb)</label>")
+}
+
+fn staged_page(root: &Path, e: &Envelope) -> String {
+    std::fs::read_to_string(root.join("staging").join(e.project_slug.as_deref().unwrap()).join("index.html")).unwrap()
+}
+
+/// Nic's pinned check the verifier leaves out loops the Coder like a pinned gap; at the limit, and
+/// with no per-criterion list at all, the build is staged as not working.
+#[test]
+fn an_unjudged_pinned_check_loops_and_an_unjudged_build_is_not_working() {
+    let root = tmp("unjudged");
+    let store = leak_store();
+    let page = page_165();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{page}\n```") } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator. I'm 165 lbs, use that as the default.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS, "the unjudged pinned check looped the Coder");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("Nic's pinned check was not judged by the verifier"), "{}", codes[1].user);
+    assert_eq!(e.last_eval["verify"]["pinned_unjudged"], 1);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
+    // No per-criterion list at all: staged, but never "works".
+    let root = tmp("absent");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string() } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.last_eval["verify"]["absent"], true);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert!(row.short_summary.contains("needs fixes"), "{}", row.short_summary);
+}
+
+/// The repair pass makes the page crash on load: the page from before it is put back and staged
+/// with its gate items as known blockers (never a failed build).
+#[test]
+fn a_repair_pass_that_breaks_the_page_restores_the_page_from_before() {
+    let root = tmp("repair-worse");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let broken = GOOD_HTML.replace("<h1 ", "<h1 data-broken=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => format!("```html\n{broken}\n```"),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|html: &str| quality::Smoke::Ran {
+        errors: if html.contains("data-broken") { vec!["the page throws on load: Uncaught TypeError: x is null".into()] } else { vec![] },
+        storage_lines: vec![],
+        stuck: vec![],
+    }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "one repair pass");
+    let staged = staged_page(&root, &e);
+    assert!(staged.contains("proteinGrams") && !staged.contains("data-broken"), "the page from before the repair is staged");
+    assert!(e.last_eval["restored"]["why"].as_str().unwrap_or("").contains("crashed"), "{}", e.last_eval);
+    assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")));
+    assert!(e.code_artifacts.as_array().unwrap().iter().any(|a| a["by"].as_str().is_some_and(|b| b.starts_with("restored"))));
+}
+
+/// The repair pass's Coder returns no HTML on every attempt: the page from before it is checked
+/// again and staged with its blockers, never a failed build.
+#[test]
+fn a_repair_pass_whose_coder_fails_stages_the_page_from_before() {
+    let root = tmp("repair-nohtml");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => "Sorry, I could not finish the page.".to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("code"), 1 + MAX_LOOP_ITERATIONS as usize + tuning().attempts as usize, "the repair pass tried, then gave up");
+    assert!(e.handoff_log.iter().any(|h| h.short_summary.starts_with("The repair pass failed")), "{:?}", flow(&e));
+    assert!(staged_page(&root, &e).contains("proteinGrams"));
+    assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
+    assert_eq!(e.last_eval["works"], json!(false));
+}
+
+/// The one-repair bound holds with a handoff log already at its row cap (handoff rows are dropped
+/// there): the stored evaluation says the repair ran, and the repair row is a milestone.
+#[test]
+fn the_gate_repair_bound_survives_a_full_handoff_log() {
+    let root = tmp("repair-cap");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let good = GOOD_HTML.replace("<h1 ", "<h1 data-rendered=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                // Never fixed: without a bound the repair would repeat until the run gives up.
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => format!("```html\n{}\n```", if n > 2 + MAX_LOOP_ITERATIONS as usize { &good } else { &bad }),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] }));
+    let t = new_task(store, "Build me a tip calculator");
+    let id = t.task_id.clone();
+    store
+        .with(|c| {
+            for _ in 0..envelope::LOG_ROWS_PER_TASK_MAX {
+                c.execute("INSERT INTO handoff_log (task_id, timestamp, from_agent, to_agent, event_type, severity, short_summary, summary_payload, stage, iteration) VALUES (?1, ?2, 'system', 'system', 'note', 'verbose', 'filler', '{}', NULL, 0)", rusqlite::params![id, envelope::now_ms()]).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "exactly one repair pass");
+    assert!(fake.calls_for("code").last().unwrap().user.contains(GATE_REPAIR_LEAD), "the repair row was written (a milestone)");
+    assert_eq!(e.handoff_log.iter().filter(|h| h.summary_payload["gate_repair"] == true).count(), 1);
+    assert_eq!(e.last_eval["gate_repair"], true);
+    assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
+}
+
+/// A retried build reuses its iteration number: the old run's repair row and stored state do not
+/// count for it, so its "one more pass" gets its own repair.
+#[test]
+fn a_retried_build_gets_its_own_gate_repair() {
+    let store = leak_store();
+    let t = new_task(store, "Build me a tip calculator");
+    let id = t.task_id.clone();
+    store
+        .with(|c| {
+            c.execute("INSERT INTO handoff_log (task_id, timestamp, from_agent, to_agent, event_type, severity, short_summary, summary_payload, stage, iteration) VALUES (?1, ?2, 'system', 'coder', 'loop_iteration', 'milestone', 'repair', '{\"gate_repair\":true}', 'evaluate', 3)", rusqlite::params![id, envelope::now_ms()]).map_err(|e| e.to_string())?;
+            c.execute("UPDATE task_envelope SET iteration_count = 3, status = 'failed', stage = 'evaluate', error = 'max iterations (3) reached', last_eval = '{\"gate_repair\":true,\"iteration\":3}' WHERE task_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert!(gate_repair_done(&get(store, &id)));
+    retry_task(store, &id, &[]).unwrap();
+    let e = get(store, &id);
+    assert!(e.last_eval.get("gate_repair").is_none(), "{}", e.last_eval);
+    // The retried run's loop brings it back to iteration 3.
+    store.with(|c| c.execute("UPDATE task_envelope SET iteration_count = 3 WHERE task_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())).unwrap();
+    assert!(!gate_repair_done(&get(store, &id)), "the old run's repair row is before the retry");
+}
+
+/// A unit control the harness cannot read is a known note: no Coder loop, and the build still
+/// "works" when everything else is proven.
+#[test]
+fn an_unreadable_unit_control_is_a_note_not_a_coder_loop() {
+    let root = tmp("nounit");
+    let store = leak_store();
+    let page = page_165();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, _| {
+            Ok(match c.stage {
+                "code" => format!("```html\n{page}\n```"),
+                "verify" => {
+                    let mut list = probed_crit().as_array().cloned().unwrap();
+                    list.push(json!({ "n": 2, "criterion": "default", "met": true, "evidence": "", "probe": [{ "op": "expect_value", "sel": "#bill", "approx": 165 }] }));
+                    list.push(json!({ "n": 3, "criterion": "convert", "met": true, "evidence": "", "probe": [{ "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#bill", "approx": 74.84 }] }));
+                    list.push(json!({ "n": 4, "criterion": "unit", "met": true, "evidence": "", "probe": [{ "op": "expect_class", "sel": "#lbBtn", "class": "active" }] }));
+                    json!({ "criteria": list, "verdict": "pass" }).to_string()
+                }
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|_html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if p.steps.iter().any(|s| s["op"] == "expect_unit") { json!({ "ok": false, "k": "nounit", "at": 0, "got": "lb" }) } else { json!({ "ok": true }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a protein calculator. Default 165 lb, with a lb/kg toggle.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 0, "no Coder loop for what the harness cannot read: {}", e.last_eval);
+    assert_eq!((e.last_eval["verify"]["gaps"].clone(), e.last_eval["verify"]["note_gaps"].clone()), (json!(1), json!(1)), "{}", e.last_eval);
+    assert!(e.last_eval["known_blockers"].to_string().contains("shows no selected unit"), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")));
+}
+
+/// Past the blocker cap the stored list ends in "… and N more"; the true total is stored for the app.
+#[test]
+fn past_the_blocker_cap_the_true_total_is_stored() {
+    let root = tmp("blocker-total");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => {
+                    let mut s: Value = serde_json::from_str(&default_reply(c)).unwrap();
+                    s["prompt_spec"]["acceptance_criteria"] = json!((1..=10).map(|i| format!("Card layout detail number {i} is styled")).collect::<Vec<_>>());
+                    s.to_string()
+                }
+                "verify" => {
+                    let list: Vec<Value> = (1..=10).map(|i| json!({ "n": i, "criterion": format!("Card layout detail number {i} is styled"), "met": null })).collect();
+                    json!({ "criteria": list, "verdict": "pass", "known_blockers": (1..=8).map(|i| format!("model note {i}")).collect::<Vec<_>>() }).to_string()
+                }
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let kb = e.last_eval["known_blockers"].as_array().unwrap();
+    assert_eq!(kb.len(), BLOCKERS_MAX);
+    assert!(kb.last().unwrap().as_str().unwrap().starts_with("… and 3 more"), "{kb:?}");
+    assert_eq!((e.last_eval["known_blockers_total"].clone(), e.last_eval["blockers_dropped"].clone()), (json!(18), json!(3)));
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert!(row.short_summary.contains("18 known blockers"), "{}", row.short_summary);
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

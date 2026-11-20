@@ -398,3 +398,42 @@ Every build and delegation gets a chat thread you can review: what Tony and the 
 - The retry feedback keeps whole lines, then "… and N more" (`fit_lines`).
 - Gap and not-judged lines are no longer capped at 8. `known_blockers` keeps 16, and past that its last line says "… and N more (see the verify record)" (`last_eval.blockers_dropped`).
 - Probes carried from an earlier failure run BEFORE the verifier's new ones, so the 120 s budget never skips a bug that was already caught.
+
+**AD-13 review fixes.** Twenty review findings on the commit above are fixed:
+
+- **The repair never makes it worse.**
+  - Before the repair pass, `h_evaluate` keeps the page as `.iterations/<n>-pre-repair.html`, with its gate result in `last_eval.gate_repair_pre`.
+  - If the repaired page crashes on load, hangs, or misses more items than before, the old page is put back and staged with its own gate items as blockers (`last_eval.restored`).
+  - If the repair Coder fails for good (no HTML, a timeout), the gate runs again on the old page instead of failing the build (`gate_repair_fallback`). This applies to non-hub builds only.
+- **The one-repair bound uses state that cannot be dropped.**
+  - `gate_repair_done` reads `last_eval.gate_repair` ("pending" / true) for this iteration first.
+  - The repair row is a milestone, which a full handoff log always writes.
+  - Rows count only after the latest `retry`. `retry_task` clears the stored repair state, so a retried build gets its own repair.
+- **Verdicts.**
+  - `works` is false when the verifier did not judge a criterion or gave no list.
+  - A pinned check the verifier left out or left undecided loops the Coder like a pinned gap (`verify.pinned_unjudged`).
+  - A unit control the harness cannot read (`ProbeGap::unreadable`) is a known note (`verify.note_gaps`): no Coder loop, no hub failure, and the build can still "work".
+- **The true blocker count.** `last_eval.known_blockers_total` (also in `.status.json`) holds the true count. The app's ready line uses it, not the length of a list that ends in "… and N more".
+- **Recall.**
+  - A back-reference must sit in the value's own clause, or be the whole next clause. It must end at "default" (or "default value / weight …" or a preposition). "This is the default page", "make it the default tab" and "It's the default tool" pin nothing.
+  - "my <adjective> 10 lbs" is not a personal stat. Only "my (current) weight …" and "my … is …" are.
+  - "N-M <noun> a/per day" is a choice only when a choice word is in its sentence, or for meals in a request that asks for a per-meal split. "I drink 6-8 glasses a day" pins nothing.
+  - When Nic names the other unit as the default ("default unit kg", "default to kg", "kg / metric by default", "start in kg"), no Unit check is pinned.
+- **Pinning.**
+  - The Unit pin rewrites the step on the unit control: one naming a unit or "unit", else one that does not read a number. It never rewrites the weight read before it.
+  - A Convert value is substituted only on the weight element: one named for weight, mass or a unit, an input read not named as an output, or the element the Default probe read. A read of the target (its upper bound is 165 g with Nic's numbers) stays a gap.
+- **Round trips.**
+  - Only a toggle-like control (one that names a toggle, switch, unit, mode or a unit of a pair) clicked an even number of times counts.
+  - A `set` between the two switches makes it a real conversion. A "+" stepper or "Add" clicked twice is fine.
+- **Stuck placeholders.**
+  - A dash or ellipsis counts only when every visible text or number input is filled. A select alone, or an empty bill or grams field, leaves "--" as an empty state.
+  - "Loading" / "Calculating" counts only as the whole text, with an optional "Label:" before it. "Carb loading" is a value.
+  - The page is sampled again 1.5 s later, and only a placeholder still showing then counts.
+- **Reading the unit control (`expect_unit`).** These designs are read:
+  - any class token such as "unit-active" or "btn-selected" ("inactive" never counts);
+  - a checkbox slider with the unit texts beside it (unchecked means the one before it);
+  - a lone toggle button showing its unit as text ("Switch to kg" means lb);
+  - colour-only buttons (the one coloured button among grey ones);
+  - Imperial / US / Metric / SI labels.
+
+  A control naming no unit of the pair is `nounit`, never a failure.

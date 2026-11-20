@@ -969,6 +969,22 @@ const UNCHECKED_PREFIXES: [&str; 2] = ["couldn't be checked in a browser: ", "co
 /// At most this many known blockers are listed; past it the last line counts the rest.
 pub const BLOCKERS_MAX: usize = 16;
 
+/// The verifier's own fixes still open when a build is staged (AD-13 round 6, the critic's
+/// remove-bug page): every criterion met, yet the verifier loops with the same fix on every pass
+/// and the Coder returns the page unchanged until the limit. A decision that still says "loop"
+/// when staged is at the limit; when nothing deterministic fails (`failing`: the gate's items,
+/// failed / unmet criteria) the loop is the verifier's alone, and its fix instructions are what
+/// still fails: the verdict is needs-fixes, never unverified or a pass. With deterministic
+/// failures they stay notes (they mostly restate them, and the verdict is needs-fixes anyway).
+/// A held wrong number never gets here (the guard turns that loop into a pass, its fixes into
+/// notes). Clipped as the blocker list clips them, so a line is never counted twice. Pure.
+pub fn open_model_fixes(decision: &Value, failing: &[String]) -> Vec<String> {
+    if decision["verdict"] != "loop" || !failing.is_empty() {
+        return vec![];
+    }
+    str_list(&decision["fix_instructions"], 10, FIX_LINE)
+}
+
 /// The review_ready voice line, deterministic whenever blockers exist (the verifier's own line
 /// said "passes all functional criteria" next to two blockers). What fails ("Built, but 2 things
 /// still don't work: …") is told apart from what could not be proven ("Built, but 3 things
@@ -2213,7 +2229,13 @@ impl<'a> Worker<'a> {
         // A recheck answer that only copies the page's value (`disputed`, AD-13 round 5).
         let disputed = decision["disputed"].as_array().map_or(0, |a| a.len() as u64);
         let open_items = decision["unmet"].as_u64().unwrap_or(0) + open_gaps + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true) + stale + disputed;
-        let hub_unmet = hub && at_limit && open_items > 0;
+        // What fails: the gate's items, then failed / unmet criteria, then (AD-13 round 6) the
+        // verifier's own fixes still open at the limit when nothing else fails (`open_model_fixes`).
+        let gate_items = str_list(&e.last_eval["gate_blockers"], 10, 240);
+        let mut failing = gate_items.clone();
+        failing.extend(str_list(&decision["failing"], 40, 240));
+        let model_open = open_model_fixes(&decision, &failing);
+        let hub_unmet = hub && at_limit && (open_items > 0 || !model_open.is_empty());
         if wants_loop && (!at_limit || hub_unmet) {
             let to_agent = if decision["loop_to"] == "designer" { "designer" } else { "coder" };
             let fixes = str_list(&decision["fix_instructions"], 10, FIX_LINE);
@@ -2231,7 +2253,6 @@ impl<'a> Worker<'a> {
                 blockers.push(b);
             }
         };
-        let gate_items = str_list(&e.last_eval["gate_blockers"], 10, 240);
         gate_items.iter().cloned().for_each(&mut push);
         str_list(&decision["verify_blockers"], 40, 240).into_iter().for_each(&mut push);
         if wants_loop {
@@ -2250,12 +2271,11 @@ impl<'a> Worker<'a> {
         // The honest verdict (AD-13): staged with gate items, a failing probe, an unproven
         // behaviour, a criterion the verifier did not judge, no per-criterion list at all, or one
         // only claimed with code that is not in the page (`stale`), the build does NOT work yet,
-        // whatever the verifier said.
-        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0 && disputed == 0;
-        // What fails (the gate's items, then failed / unmet criteria), what could not be proven,
-        // and the rest as notes — for the verdict and the spoken line (P3).
-        let mut failing = gate_items.clone();
-        failing.extend(str_list(&decision["failing"], 40, 240));
+        // whatever the verifier said; nor with a fix the verifier itself still asks for (round 6).
+        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0 && disputed == 0 && model_open.is_empty();
+        // What fails (above), what could not be proven, and the rest as notes — for the verdict
+        // and the spoken line (P3).
+        failing.extend(model_open);
         let unchecked = str_list(&decision["unchecked"], 40, 240);
         // A decision stored before these lists existed (a restart across an upgrade): not working
         // with nothing sorted means its blockers are what fails.

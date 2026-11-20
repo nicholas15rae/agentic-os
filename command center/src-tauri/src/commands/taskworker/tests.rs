@@ -3253,7 +3253,7 @@ fn a_recheck_answer_that_copies_the_pages_wrong_value_never_passes_the_build() {
     assert_eq!(e.last_eval["works"], json!(false), "{}", e.last_eval);
     assert_eq!(e.last_eval["verdict"], json!("unverified"), "{}", e.last_eval);
     let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
-    assert!(kb[0].contains("the verifier changed its expected value on recheck to what the page shows") && kb[0].contains("got 41g"), "{kb:?}");
+    assert!(kb[0].contains("on recheck the verifier switched to the page's value") && kb[0].contains("; now expected #perMeal text ≈41") && kb[0].contains("got 41g"), "{kb:?}");
     let unchecked = str_list(&e.last_eval["verify"]["unchecked"], 20, 400);
     assert_eq!(unchecked.first(), kb.first(), "{unchecked:?}");
     // The 37 probe stays open, kept: a later verify runs it again and holds it.
@@ -3333,6 +3333,102 @@ fn an_unproven_build_is_unverified_not_needs_fixes() {
     assert_eq!(librarian::staged_label(&status), "unverified (1 thing couldn't be checked), not proven to work");
     // A failing probe next to an unchecked item is still needs-fixes.
     assert_eq!(review_voice(&["probe failed for X: got 0".into()], &["couldn't be checked in a browser: Y (no probe was given)".into()], &[]).unwrap(), "Built, but 1 thing still doesn't work and 1 couldn't be checked: X: got 0; Y.");
+}
+
+// ── AD-13 round 6: a fix the verifier still asks for at the limit fails the build ──
+
+const REMOVE_FIX: &str = "Removing a food item adds its grams to the tally instead of subtracting them: the remove handler does state.intakeGrams += item.grams; use -=";
+
+/// Round 6 (r15 remove-modelfix): every criterion met and every probe passing, but the verifier
+/// loops with the same fix on every pass and the Coder returns the same page until the limit.
+/// The open fix is what fails: needs-fixes (never unverified or a pass), "still doesn't work",
+/// .status.json and the Librarian's label say so, and the fix is counted once.
+#[test]
+fn a_fix_the_verifier_still_asks_for_at_the_limit_fails_the_build() {
+    let root = tmp("model-open");
+    let store = leak_store();
+    let looping = json!({ "criteria": probed_crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": [REMOVE_FIX], "voice_summary": "Removing a food breaks the tally." }).to_string();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { looping.clone() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, e.max_iterations.min(MAX_LOOP_ITERATIONS), "looped to the limit");
+    assert_eq!(e.last_eval["verify"]["verdict"], "loop");
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
+    assert!(e.last_eval["unchecked_total"].is_null(), "{}", e.last_eval);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert_eq!(kb.iter().filter(|b| b.as_str() == REMOVE_FIX).count(), 1, "{kb:?}");
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert!(row.short_summary.contains("needs fixes"), "{}", row.short_summary);
+    assert_eq!(row.summary_payload["verdict"], "needs_fixes");
+    let voice = row.voice_summary.clone().unwrap();
+    assert!(voice.starts_with("Built, but 1 thing still doesn't work: Removing a food item adds its grams"), "{voice}");
+    let status: Value = serde_json::from_str(&std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap()).unwrap();
+    assert_eq!((status["works"].clone(), status["verdict"].clone()), (json!(false), json!("needs_fixes")), "{status}");
+    assert!(librarian::staged_label(&status).starts_with("needs fixes ("), "{}", librarian::staged_label(&status));
+}
+
+/// Round 6: the verifier's open fixes count only when the loop is its alone (nothing
+/// deterministic fails), and only on a decision that still says "loop". Pure.
+#[test]
+fn open_model_fixes_count_only_when_the_loop_is_the_verifiers_alone() {
+    let d = json!({ "verdict": "loop", "fix_instructions": [REMOVE_FIX, "", format!("x{}", "y".repeat(400))] });
+    let open = open_model_fixes(&d, &[]);
+    assert_eq!(open.len(), 2, "{open:?}");
+    assert_eq!(open[0], REMOVE_FIX);
+    assert_eq!(open[1], str_list(&d["fix_instructions"], 10, FIX_LINE)[1], "clipped as the blocker list clips it");
+    assert!(open_model_fixes(&d, &["probe failed for X: got 0".into()]).is_empty(), "deterministic failures already fail it");
+    assert!(open_model_fixes(&json!({ "verdict": "pass", "fix_instructions": [REMOVE_FIX] }), &[]).is_empty());
+    assert!(open_model_fixes(&json!({ "verdict": "loop" }), &[]).is_empty());
+}
+
+/// Round 6: a hub build the verifier still loops on at the limit is not handed on to the hub
+/// (which would mark it mergeable without reading blockers): it fails into the Repair Queue.
+#[test]
+fn a_hub_build_the_verifier_still_loops_on_at_the_limit_fails_instead_of_handing_on() {
+    let root = tmp("hub-model-open");
+    let store = leak_store();
+    let looping = json!({ "criteria": probed_crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": [REMOVE_FIX] }).to_string();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { looping.clone() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
+    assert!(!status.contains("review_ready"), "{status}");
+}
+
+/// Round 6 leaves the wrong-number guard alone: a number the verifier keeps on its recheck is
+/// held (a known blocker that fails the build, never another Coder pass), and its own loop about
+/// the same number is a note, not a second failing item.
+#[test]
+fn a_held_wrong_number_with_the_verifiers_own_loop_fails_once() {
+    let probe = json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#perMeal", "approx": 37, "tol": 1 }]);
+    let ans = json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"], "probe": probe }], "verdict": "loop", "loop_to": "coder", "fix_instructions": ["The per-meal split divides the max target: 4 meals shows 41 g, it should be 37 g"] }).to_string();
+    let root = tmp("held-model-loop");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { ans.clone() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|_: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|_| json!({ "ok": false, "k": "fail", "at": 1, "got": "41g" })).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (1, 2, 3), "one Coder loop, the recheck, then no further Coder pass");
+    assert_eq!(e.last_eval["verify"]["held"].as_array().map(Vec::len), Some(1), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["verdict"], "pass", "the held number turns the verifier's loop into known blockers");
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    let voice = row.voice_summary.clone().unwrap();
+    assert!(voice.starts_with("Built, but 1 thing still doesn't work: Shows the per-person total"), "{voice}");
 }
 
 /// F5 (critic P3): the spoken line drops the internal "probe failed for " head and a trailing

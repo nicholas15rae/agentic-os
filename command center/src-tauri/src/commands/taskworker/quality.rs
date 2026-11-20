@@ -2852,6 +2852,22 @@ pub struct Dispute {
     pub detail: String,
 }
 
+/// The longest a dispute line may be (the verdict lists clip their items to it).
+pub const DISPUTE_LINE: usize = 240;
+
+/// The unchecked line for a disputed recheck (AD-13 round 6): the head, the criterion and what
+/// the verifier now expects ("now expected …") always fit in `DISPUTE_LINE`; the old probe's
+/// finding ("before: got 41g; expected … ≈37 …") takes what is left, and is the only part cut
+/// (left out when too little room remains to say anything). Pure.
+pub fn dispute_line(criterion: &str, now: &str, before: &str) -> String {
+    let head = format!("couldn't be checked: on recheck the verifier switched to the page's value, for {}; now {}", clip_chars(criterion, 56), clip_chars(now, 70));
+    let room = DISPUTE_LINE.saturating_sub(head.chars().count() + "; before: ".len());
+    if before.is_empty() || room < 16 {
+        return head;
+    }
+    format!("{head}; before: {}", clip_chars(before, room))
+}
+
 /// Does `new` still expect everything `old` expected? Each of the old probe's expectations must
 /// be matched by one of the new probe's: a number within either step's tolerance (at least 0.6 %
 /// or 0.01), anything else by the same expectation fields (selector and position aside). Pure.
@@ -2904,8 +2920,7 @@ pub fn disputed_rechecks(prev: &Value, dropped: &[Probe], probes: &[Probe], run:
         }
         let before = prev.as_array().into_iter().flatten().find(|o| o["idx"].as_u64() == Some(idx as u64) && o["steps"] == Value::Array(d.steps.clone())).and_then(|o| o["detail"].as_str()).unwrap_or("").to_string();
         let now = p.steps.iter().rev().find(|s| is_expect(s)).map(want).unwrap_or_default();
-        let was = if before.is_empty() { String::new() } else { format!("; before: {}", clip_chars(&before, 80)) };
-        let line = clip_chars(&format!("couldn't be checked: the verifier changed its expected value on recheck to what the page shows, for {}{was}; now {}", clip_chars(&d.criterion, 60), clip_chars(&now, 70)), 240);
+        let line = dispute_line(&d.criterion, &now, &before);
         out.push(Dispute { idx, line, steps: d.steps.clone(), detail: before });
     }
     out

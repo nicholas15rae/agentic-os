@@ -1925,3 +1925,28 @@ fn a_zero_the_criterion_asks_for_is_not_rejected() {
     let per_meal = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 0 }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 150 }]);
     assert!(enforced_one(&crits, &needs, 3, per_meal).0.unwrap_err().starts_with("it expects 0 on #perMealDisplay"));
 }
+
+/// AD-13 round 6: a dispute line always says what the verifier now expects (the real permeal
+/// runs were cut at 240 chars inside the "before" detail and never reached it); only the old
+/// probe's finding is clipped, and it is left out when too little room remains.
+#[test]
+fn a_dispute_line_always_says_what_is_now_expected() {
+    let crit = "Per-meal split divides the total target into equal portions for selected meal count (3-5).";
+    let before = "got 41g; expected #perMealDisplay text ≈37 (±1.5) after select #mealSplitSelect=4";
+    let now = "expected #perMealDisplay text ≈41 (±1.5)";
+    let l = dispute_line(crit, now, before);
+    assert!(l.chars().count() <= DISPUTE_LINE, "{l}");
+    assert!(l.starts_with("couldn't be checked: on recheck the verifier switched to the page's value, for Per-meal split"), "{l}");
+    assert!(l.contains("; now expected #perMealDisplay text ≈41 (±1.5); before: got 41g; expected #perMealDisplay text ≈37 (±1.5"), "{l}");
+    // The longest criterion and expectation still fit whole (clipped to their own caps); the
+    // "before" detail is what gets cut.
+    let long = dispute_line(&"c".repeat(300), &format!("expected #x text ≈41 {}", "n".repeat(300)), &"b".repeat(300));
+    assert!(long.chars().count() <= DISPUTE_LINE, "{long}");
+    assert!(long.contains(&format!("; now expected #x text ≈41 {}", "n".repeat(30))), "{long}");
+    assert!(!long.contains("; before: ") || long.ends_with('\u{2026}'), "{long}");
+    let bare = dispute_line(crit, now, "");
+    assert!(bare.ends_with(&format!("; now {now}")) && !bare.contains("before"), "{bare}");
+    // Real lengths: the whole line is under the cap with the old finding's numbers in it.
+    let b = dispute_line(crit, now, &format!("{before} {}", "z".repeat(200)));
+    assert!(b.chars().count() <= DISPUTE_LINE && b.ends_with('\u{2026}') && b.contains("≈37"), "{b}");
+}

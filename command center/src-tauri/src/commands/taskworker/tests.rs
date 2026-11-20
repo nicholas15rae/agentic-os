@@ -246,6 +246,9 @@ impl WorkerEnv for Fake {
     fn runtime_smoke(&self, _page: PathBuf) -> BoxFuture<'_, quality::Smoke> {
         Box::pin(async move { quality::Smoke::Skipped("fake: no browser".into()) })
     }
+    fn probes_available(&self) -> bool {
+        self.probe_runner.lock().unwrap().is_some()
+    }
     fn run_probes(&self, page: PathBuf, probes: Vec<quality::Probe>) -> BoxFuture<'_, quality::ProbeRun> {
         Box::pin(async move {
             self.probe_calls.lock().unwrap().push(probes.clone());
@@ -1221,7 +1224,7 @@ fn prompts_stay_inside_the_budget() {
     e.prompt_spec = json!({ "goal": "g".repeat(5000), "requirements": vec!["r".repeat(300); 40], "acceptance_criteria": vec!["a".repeat(300); 40], "spec": { "coreFeatures": vec!["f".repeat(300); 40] } });
     e.design_artifacts = json!({ "notes": "d".repeat(30_000), "design_tokens": { "x": "t".repeat(9000) } });
     e.coder_brief = json!({ "build_brief": "b".repeat(9000), "must_include": vec!["m".repeat(300); 40] });
-    for (name, p) in [("spec", prompt_spec(&e)), ("design", prompt_design(&e, &["fix".repeat(500)])), ("merge", prompt_merge(&e, &["fix".repeat(500)])), ("code", prompt_code(&e, &["fix".repeat(500)])), ("verify", prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), false))] {
+    for (name, p) in [("spec", prompt_spec(&e)), ("design", prompt_design(&e, &["fix".repeat(500)])), ("merge", prompt_merge(&e, &["fix".repeat(500)])), ("code", prompt_code(&e, &["fix".repeat(500)])), ("verify", prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), false, &[]))] {
         // ~4 chars per token: input ≤ ~4k tokens; verify also reads the page's code (≤ ~6k tokens).
         let cap = if name == "verify" { 24_000 } else { 17_000 };
         assert!(p.chars().count() <= cap, "{name} prompt is {} chars", p.chars().count());
@@ -2099,7 +2102,7 @@ fn the_coder_reads_the_latest_fixes_first_and_nics_latest_words() {
     assert!(p.contains("Actually, default to 4 meals.") && p.contains("I want 5 meals a day."), "head and tail of a long brainstorm");
     assert!(p.find(&probe_line).unwrap() < p.find("stale fix").unwrap(), "the latest fixes first");
     assert!(!p.contains("source of truth"));
-    let v = prompt_verify(&e, "<p>x</p>", &Value::Null, false);
+    let v = prompt_verify(&e, "<p>x</p>", &Value::Null, false, &[]);
     assert!(v.contains("Actually, default to 4 meals."));
     let h = head_tail(&"a".repeat(5000), 2500);
     assert!(h.chars().count() <= 2500 && h.contains("middle trimmed"));
@@ -2114,7 +2117,7 @@ fn the_verify_prompt_names_open_gate_items_and_stays_in_budget() {
     e.prompt_spec = json!({ "acceptance_criteria": vec!["a".repeat(300); 40] });
     e.last_eval = json!({ "checks": { "offline": false }, "gate_blockers": ["no external scripts or stylesheets (cdn.tailwindcss.com): inline all CSS"] });
     let page = format!("<html><head><style>{}</style></head><body><script>{}</script></body></html>", "a{b:c}".repeat(3000), "let x = 1;\n".repeat(4000));
-    let p = prompt_verify(&e, &page, &json!({ "a": "b".repeat(5000) }), true);
+    let p = prompt_verify(&e, &page, &json!({ "a": "b".repeat(5000) }), true, &[]);
     assert!(p.contains("still fail on this last pass") && p.contains("cdn.tailwindcss.com") && !p.contains("checks passed"), "{}", &p[..600]);
     assert!(p.contains("was cut for length"));
     assert!(p.chars().count() <= 24_000, "{}", p.chars().count());
@@ -2207,6 +2210,134 @@ fn a_hub_build_whose_probe_still_fails_at_the_limit_fails_instead_of_handing_on(
     assert!(!status.contains("review_ready"), "{status}");
     // A non-hub build in the same state is staged with the probe as a known blocker
     // (`a_probe_still_failing_at_the_limit_is_a_known_blocker`).
+}
+
+// ── Required probes and pinned intent checks (AD-12) ─────────────────────────
+
+/// A stand-in browser where every probe passes.
+fn passing_probes() -> ProbeFn {
+    Box::new(|_html: &str, probes: &[quality::Probe]| quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(probes.iter().map(|_| json!({ "ok": true })).collect()))))
+}
+
+/// A behavioural criterion the verifier calls met with quoted code but no probe is not met: the
+/// verify is asked once more with the exact reason, and a probe that then runs and passes
+/// settles it. Still none on the last attempt: a known blocker, never a Coder loop.
+#[test]
+fn a_behavioural_criterion_without_a_probe_is_asked_again_then_named() {
+    let root = tmp("probe-required");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((fake.count("verify"), e.iteration_count, fake.count("code")), (2, 0, 1));
+    let v = fake.calls_for("verify");
+    assert!(!v[0].user.contains("no working probe"));
+    assert!(v[1].user.contains("Your last answer gave no working probe") && v[1].user.contains("- 1. Shows the per-person total: no probe was given"), "{}", v[1].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["probe"]["passed"], true);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["needs_probe"], true);
+    // The verifier never writes one: staged with the gap as a known blocker, the Coder untouched.
+    let root = tmp("probe-required-none");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((fake.count("verify"), e.iteration_count, fake.count("code")), (STAGE_ATTEMPTS as usize, 0, 1));
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert_eq!(kb, vec!["no working probe for: Shows the per-person total (no probe was given)".to_string()], "{kb:?}");
+    assert_eq!(e.last_eval["verify"]["unmet"], 0);
+}
+
+/// Nic's own values are pinned in Rust: the verifier's round-trip toggle probe and its copy of
+/// the page's own order are rejected with "use the pinned value", the retry's probes are
+/// rewritten to the computed numbers, and they run.
+#[test]
+fn nics_pinned_values_hold_the_verifiers_probes() {
+    let page = GOOD_HTML.replace("</main>", "<p id=\"w\">165 lb</p><button id=\"kg\">kg</button><div><button class=\"m\">3 meals</button><button class=\"m\">4 meals</button><button class=\"m\">5 meals</button></div>\n</main>");
+    let ask = "Build me a tip calculator that also shows my weight. I'm 165 lbs, default 165 lb, with a lb/kg toggle and a per-meal split (3-5 meals).";
+    let root = tmp("probe-pinned");
+    let store = leak_store();
+    let first = json!({ "criteria": [
+        probed_crit()[0].clone(),
+        { "n": 2, "criterion": "default", "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#w", "approx": 165 }] },
+        { "n": 3, "criterion": "kg", "met": true, "evidence": "", "probe": [{ "op": "click", "sel": "#kg" }, { "op": "click", "sel": "#kg" }, { "op": "expect_text", "sel": "#w", "contains": "165" }] },
+        { "n": 4, "criterion": "split", "met": true, "evidence": "", "probe": [{ "op": "expect_order", "sel": ".m", "order": ["3", "5", "4"] }] }
+    ], "verdict": "pass" });
+    let mut second = first.clone();
+    second["criteria"][2]["probe"] = json!([{ "op": "click", "sel": "#kg" }, { "op": "expect_text", "sel": "#w", "contains": "74.8 kg" }]);
+    second["criteria"][3]["probe"] = json!([{ "op": "expect_order", "sel": ".m", "order": ["3", "4", "5"] }]);
+    let (first, second) = (first.to_string(), second.to_string());
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", _) => format!("```html\n{page}\n```"),
+                ("verify", 1) => first.clone(),
+                ("verify", _) => second.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, ask);
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("verify"), 2);
+    let v = fake.calls_for("verify");
+    assert!(v[0].user.contains("2. On a fresh load, before any action, the page shows Nic's default \"165 lbs\" (pinned value: 165;"), "{}", v[0].user);
+    assert!(v[0].user.contains("3. After switching the unit from lb to kg") && v[0].user.contains("pinned value: 74.84;"));
+    assert!(v[0].user.contains("4. The choices for Nic's \"3-5 meals\" read 3, 4, 5"));
+    assert!(v[1].user.contains("round trip") && v[1].user.contains("use the pinned value 74.84") && v[1].user.contains("use the pinned order 3, 4, 5"), "{}", v[1].user);
+    assert!(v[1].user.contains("- 3. After switching the unit from lb to kg"), "the feedback names the requested criterion, not the model's \"kg\"");
+    // The retry's probes ran with the values computed here, not the model's text.
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    let last = calls.last().unwrap();
+    let kg = last.iter().find(|p| p.steps.iter().any(|s| s["sel"] == "#kg")).unwrap();
+    assert_eq!(kg.steps.last().unwrap(), &json!({ "op": "expect_text", "sel": "#w", "nth": 0, "approx": 74.84, "tol": 0.5 }));
+    assert_eq!(last.len(), 4, "every criterion's probe ran");
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["criteria"][2]["pinned"], "74.84");
+}
+
+/// The probe examples come from another domain (examples from the page being checked prime the
+/// 9B verifier to copy them), and the prompt says where expected values come from; the verify
+/// prompt with intent checks and retry feedback stays inside its budget.
+#[test]
+fn the_verify_prompt_is_de_primed_and_stays_in_budget_with_checks() {
+    for bad in ["#weight", "#kg", "74.8", ".split-btn", "data-meals", "165", "[\"3\",\"4\",\"5\"]", "meal", "protein", "lb"] {
+        assert!(!PROBE_RULES.contains(bad), "{bad}");
+    }
+    let e = new_task(&TaskStore::in_memory(), "Build me a tip calculator");
+    let p = prompt_verify(&e, "<p>x</p>", &Value::Null, false, &[]);
+    assert!(p.contains("NEVER from the page's own code or formula") && p.contains("implausible in the real world"), "{p}");
+    assert!(p.contains("a number matches only as a whole number") && p.contains("counts as met ONLY when its probe runs and passes"));
+    let mut e = new_task(&TaskStore::in_memory(), &format!("I'm 165 lbs, default 165 lb, lb/kg toggle, per-meal split (3-5 meals). {}", "word ".repeat(1500)));
+    e.prompt_spec = json!({ "acceptance_criteria": vec!["a".repeat(300); 40] });
+    let fb = vec!["f".repeat(300); 20];
+    let p = prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), true, &fb);
+    assert!(p.contains("13. The choices for Nic's \"3-5 meals\"") && p.contains("Your last answer gave no working probe"), "{}", &p[..2000]);
+    assert!(p.chars().count() <= 24_000, "{}", p.chars().count());
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

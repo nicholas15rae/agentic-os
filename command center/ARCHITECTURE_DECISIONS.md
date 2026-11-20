@@ -251,7 +251,7 @@ Every build and delegation gets a chat thread you can review: what Tony and the 
 
 **What the verifier reads.** `quality::verify_view` puts every inline script first, whole when it fits, then the markup with the scripts pulled out and the CSS bodies dropped. The markup's middle is cut first and the middle of a script only when the scripts alone do not fit; either cut is reported, the prompt then says so, and a criterion the model leaves undecided (`met: null`) is recorded as "not shown", never counted as unmet.
 
-**Probes: a tiny DSL, never model JavaScript.** Each criterion in the verify reply may carry a `probe`: up to 8 steps, at most 6 probes per pass.
+**Probes: a tiny DSL, never model JavaScript.** Each criterion in the verify reply may carry a `probe`: up to 8 steps, at most 6 probes per pass (12 since AD-12, where a behavioural criterion needs one that ran and passed).
 
 - Actions: `set` (types like a person: focus, keydown, the value, input, keyup, change, blur; a checkbox or radio is clicked when its state must change), `select`, `click` (first match or `nth`), `reload` (storage kept). Each action is followed by a 500 ms settle wait (virtual time), and each expectation is polled for about a second before it fails, so debounced and keyup / blur handlers count.
 - Expectations: `expect_text` / `expect_value` with `contains`, `equals` or `approx` + `tol` (ANY number in the text: a range "120 - 165 g", "165 lbs (74.8 kg)", a decimal comma), `expect_class` (`present`), `expect_count`, `expect_order` (an attribute, or the text when no element carries it, e.g. `data-meals` 3, 4, 5; labels match case-insensitively, by leading number or contained; values naming fewer than two expected labels are a broken probe). Form controls are read by state: an input's value, a select's value and its selected label, a checkbox's checked state.
@@ -276,3 +276,28 @@ Every build and delegation gets a chat thread you can review: what Tony and the 
 - Nic's values are checked as a number with a unit word near it, with CSS and comments stripped. Ranges ("3-5 meals") and thousands ("10,000 steps") are kept whole.
 - A Play Place hub build that still fails the gate on the last pass fails into its Repair Queue instead of being handed on as review_ready.
 - The Coder reads the latest loop's fixes before the brief's older ones, and Nic's own words with head and tail kept.
+
+## AD-12: Required probes and pinned intent checks (the verifier cannot pass behaviour it did not run)
+
+**Why.** A review of AD-11 on the protein-calculator run ("I'm 165 lbs … default 165 lb, with lb/kg toggle … per-meal split (3-5 meals)") found the probes optional: a criterion that was met with real quoted code still passed when its probe was missing, rejected, matched nothing, or was past the 6-probe cap. The same 9B model also wrote expectations it copied from the page's own code (a kg → lb round trip back to 165, the page's own formula output), and the prompt's examples were literally the protein answers (`#weight`, `#kg`, 74.8, `.split-btn` / `data-meals`, 3, 4, 5). A numeric `contains` was a substring match ("0" matched "40 g"). The page that shipped had a kg toggle that never converted, splits ordered 3, 5, 4, and implausible targets.
+
+**Required probes.**
+
+- A criterion is *behavioural* when it describes something that changes, computes, converts, toggles, totals, adds / removes, resets, orders, saves / restores, or shows a default or initial value, or when it carries one of Nic's literal values (`quality::need_of`).
+- Where probes can run (runtime checks on, a staged page, a local Edge), a behavioural criterion counts as met only when a probe for it ran and passed. A passing probe also stands in for quoted evidence; a failing one is a Coder fix as in AD-11.
+- No working probe (missing, rejected by `parse_probe` or the rules below, matching nothing, or skipped by the cap or the time budget) is a *probe gap*, not an unmet criterion. The verify stage is retried once with the exact reasons fed back into its prompt: which criteria, the parse error text, the selector that matched nothing, the pinned value to use. If the last attempt still has gaps, each becomes a known blocker `no working probe for: <criterion> (<why>)`. It never loops the Coder, because the page may be fine.
+- Where probes cannot run, the evidence-only rule of AD-11 still decides.
+- The cap is now 12 new probes per pass (plus up to 6 carried), with the behavioural criteria's probes first. That covers 10 acceptance criteria plus up to 4 intent checks. Edge time stays bounded by the existing caps: 20 s per probe and 120 s for the whole run, and probes past the budget are "not run" (a gap).
+- A behavioural probe must act (`set` / `select` / `click`) before its first expectation, unless the criterion is an on-load default or order check. A probe that only reads the page is rejected with that reason.
+- `parse_probe` normalises the usual small-model variations instead of rejecting them. Keys `action` / `type` / `step` become `op`, `selector` / `target` / `css` become `sel`, and `text` / `val` become `value`. The op aliases are `fill` / `type` / `input` → `set`, `choose` → `select`, `press` / `tap` → `click`, and `assert_text` / `expect` → `expect_text`. Numeric strings are accepted. The selector charset, caps and inert JSON are unchanged.
+
+**Pinned intent checks** (`quality::intent_checks`; the model supplies selectors and actions only).
+
+- (a) A literal stated as a default ("default 165 lb", "I'm …", "I am …", "my … is …") means that number shows on a fresh load, before any action.
+- (b) A unit pair named in the request ("lb/kg", "miles or km"; also mi/km, °F/°C, oz/g, in/cm and ft/m) plus such a default in one of its units means that, after switching, the value reads the converted number. Rust computes it (165 lb → 74.84 kg), with a tolerance of 0.6 % or 0.5, whichever is larger. The probe must act before its final expectation, and that expectation must not be the starting value (a round trip is rejected).
+- (c) An integer range offered as choices ("3-5 meals" near split / choose / pick / options / buttons …, with 1 ≤ M-N ≤ 6, and never a measured range such as minutes or reps) means the options read N..M ascending (`expect_order`).
+- The checks are added to the verifier's numbered criteria with the pinned value stated. A probe for a check passes only with the pinned expectation, and Rust rewrites the step to that value. A probe expecting another number is rejected with "use the pinned value X". The checks stay generic and conservative: when the request does not clearly yield one (no stated default, two conflicting defaults, no choice word), none is derived.
+
+**Prompt.** The probe examples come from another domain (a tip calculator: `#bill`, `#tip-15`, `.row`) so the model is not primed with the answers. The prompt also says that expected values come from Nic's request and well-known real-world facts the model computes itself, never from the page's own code or formula. A computed recommendation that is implausible in the real world is marked unmet, with the reason.
+
+**Numbers in `contains`.** A numeric `contains` (optionally with a currency sign and a unit word: "40 g", "$39.33 per person") matches its number as a whole number token followed by the unit, so "0" does not match "40 g" and "40" does not match "140 g". Other text stays a case-insensitive substring.

@@ -195,10 +195,10 @@ fn judging_counts_probe_failures_first_and_a_broken_probe_only_without_evidence(
         ]),
         &crit_list(),
     );
-    let probes = probes_of(&answers);
+    let probes = probes_of(&answers, &[]);
     assert_eq!(probes.len(), 3);
     let run = ProbeRun::Ran(probe_results(&probes, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }, { "ok": false, "k": "nomatch", "at": 0 }, { "ok": false, "k": "nomatch", "at": 0 }])));
-    let j = judge(&answers, html, false, &run);
+    let j = judge(&answers, html, false, &run, &[], false);
     assert_eq!(j.unmet.len(), 2, "{:?}", j.unmet);
     assert!(j.unmet[0].starts_with("probe failed for The lb/kg toggle converts the weight: got 165; expected #w value ≈74.8"), "{:?}", j.unmet);
     // Criterion 2: its probe's selector matched nothing but the evidence is real: not counted.
@@ -207,19 +207,19 @@ fn judging_counts_probe_failures_first_and_a_broken_probe_only_without_evidence(
     // Criterion 3: no real evidence AND a broken probe: unmet, with the probe named.
     assert!(j.unmet[1].starts_with("no working code found for: Saved state") && j.unmet[1].contains("#ghost matches nothing"), "{:?}", j.unmet);
     // Probes that did not run: evidence decides, the record says why.
-    let skipped = judge(&answers, html, false, &ProbeRun::Skipped("Edge is not installed".into()));
+    let skipped = judge(&answers, html, false, &ProbeRun::Skipped("Edge is not installed".into()), &[], false);
     assert_eq!(skipped.unmet.len(), 1, "only the unevidenced one");
     assert_eq!(skipped.criteria[0]["probe"]["detail"], "skipped: Edge is not installed");
     // Undecided criteria: "not shown" when the code was cut, never unmet.
     let shown = read_answers(&json!([{ "n": 1, "criterion": "x", "met": null }]), &crit_list()[..1]);
-    let j = judge(&shown, html, true, &ProbeRun::Skipped("no probes".into()));
+    let j = judge(&shown, html, true, &ProbeRun::Skipped("no probes".into()), &[], false);
     assert!(j.unmet.is_empty() && j.not_judged[0].starts_with("not shown to the verifier"), "{j:?}");
     // A rejected probe is reported, never run.
     let rejected = read_answers(&json!([{ "n": 1, "criterion": "x", "met": true, "evidence": "function toggleUnit(unit) {", "probe": [{ "op": "eval" }] }]), &crit_list()[..1]);
-    assert!(probes_of(&rejected).is_empty());
-    let j = judge(&rejected, html, false, &ProbeRun::Skipped("no probes".into()));
+    assert!(probes_of(&rejected, &[]).is_empty());
+    let j = judge(&rejected, html, false, &ProbeRun::Skipped("no probes".into()), &[], false);
     assert!(j.criteria[0]["probe"]["detail"].as_str().unwrap().starts_with("probe rejected"));
-    assert!(judge(&read_answers(&Value::Null, &crit_list()), html, false, &ProbeRun::Skipped(String::new())).absent);
+    assert!(judge(&read_answers(&Value::Null, &crit_list()), html, false, &ProbeRun::Skipped(String::new()), &[], false).absent);
 }
 
 #[test]
@@ -437,7 +437,7 @@ fn a_probe_fix_line_keeps_the_observed_value() {
     let r = probe_results(&[long], &json!([{ "ok": false, "k": "fail", "at": 4, "got": "50g" }]));
     let crit = "Each meal card shows the per-meal protein share once the goal and the meal count are saved and the page is reloaded later";
     let answers = Answers { list: vec![Answer { idx: Some(0), name: crit.into(), met: Some(true), evidence: String::new(), fix: String::new(), probe: Some(Ok(vec![])) }], missing: vec![] };
-    let j = judge(&answers, "", false, &ProbeRun::Ran(r));
+    let j = judge(&answers, "", false, &ProbeRun::Ran(r), &[], false);
     assert!(j.unmet[0].chars().count() <= 300, "{}", j.unmet[0].chars().count());
     assert!(j.unmet[0].contains("got 50g;"), "{}", j.unmet[0]);
 }
@@ -455,8 +455,8 @@ fn an_unfinished_probe_is_a_failure_of_that_probe() {
     // Judged as a probe failure even with real evidence.
     let html = "<script>function toggleUnit(unit) { state.unit = unit; convert(); }</script>";
     let answers = read_answers(&json!([{ "n": 1, "criterion": "The lb/kg toggle converts the weight", "met": true, "evidence": "function toggleUnit(unit) { state.unit = unit; convert(); }", "probe": [{ "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }] }]), &crit_list()[..1]);
-    let hung = unfinished(&probes_of(&answers)[0], None, "no result after 20s");
-    let j = judge(&answers, html, false, &ProbeRun::Ran(vec![hung]));
+    let hung = unfinished(&probes_of(&answers, &[])[0], None, "no result after 20s");
+    let j = judge(&answers, html, false, &ProbeRun::Ran(vec![hung]), &[], false);
     assert!(j.unmet[0].starts_with("probe failed for The lb/kg toggle converts the weight: the page hung"), "{:?}", j.unmet);
 }
 
@@ -470,42 +470,42 @@ fn a_failed_probe_is_carried_and_rechecked() {
     let steps = json!([{ "op": "set", "sel": "#w", "value": "165" }, { "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }]);
     // Pass 1: the verifier's probe fails; it is recorded as open, keyed by criterion.
     let a1 = read_answers(&json!([{ "n": 1, "criterion": "The lb/kg toggle converts the weight", "met": true, "evidence": ev, "probe": steps }]), &crit_list());
-    let p1 = probes_of(&a1);
+    let p1 = probes_of(&a1, &[]);
     let run1 = ProbeRun::Ran(probe_results(&p1, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }])));
     let open = open_probes(&p1, &run1, &a1);
     assert_eq!(open.as_array().unwrap().len(), 1);
     assert_eq!(open[0]["idx"], 0);
     // Pass 2: the verifier quotes the code and writes no probe: the carried one still runs.
     let a2 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev }]), &crit_list());
-    let carried = carried_probes(&open, &a2, &probes_of(&a2));
+    let carried = carried_probes(&open, &a2, &probes_of(&a2, &[]));
     assert_eq!(carried.len(), 1);
     assert!(carried[0].carried && carried[0].answer == 0);
     let again = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }])));
-    let j = judge(&a2, html, false, &again);
+    let j = judge(&a2, html, false, &again, &[], false);
     assert!(j.unmet[0].starts_with("probe failed again for lb/kg toggle: got 165;"), "{:?}", j.unmet);
     assert_eq!(j.criteria[0]["probe"]["rechecked"][0]["passed"], false);
     assert_eq!(open_probes(&carried, &again, &a2).as_array().unwrap().len(), 1, "still open");
     // The Coder renamed the button: the carried probe matches nothing and nothing new passed.
     let gone = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": false, "k": "nomatch", "at": 1 }])));
-    let j = judge(&a2, html, false, &gone);
+    let j = judge(&a2, html, false, &gone, &[], false);
     assert!(j.unmet[0].starts_with("a probe that failed before now matches nothing for lb/kg toggle"), "{:?}", j.unmet);
     // …but a new probe for the same criterion that passes settles it, and closes the old one.
     let a3 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev, "probe": [{ "op": "click", "sel": "#to-kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }] }]), &crit_list());
-    let mut all = probes_of(&a3);
+    let mut all = probes_of(&a3, &[]);
     let more = carried_probes(&open, &a3, &all);
     all.extend(more);
     assert_eq!(all.len(), 2);
     let run3 = ProbeRun::Ran(probe_results(&all, &json!([{ "ok": true }, { "ok": false, "k": "nomatch", "at": 1 }])));
-    assert!(judge(&a3, html, false, &run3).unmet.is_empty());
+    assert!(judge(&a3, html, false, &run3, &[], false).unmet.is_empty());
     assert_eq!(open_probes(&all, &run3, &a3), json!([]));
     // Passing again closes it; a run that never happened keeps it open.
     let passed = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": true }])));
-    assert!(judge(&a2, html, false, &passed).unmet.is_empty());
+    assert!(judge(&a2, html, false, &passed, &[], false).unmet.is_empty());
     assert_eq!(open_probes(&carried, &passed, &a2), json!([]));
     assert_eq!(open_probes(&carried, &ProbeRun::Skipped("no Edge".into()), &a2).as_array().unwrap().len(), 1);
     // The same steps written again by the verifier run once.
     let a4 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev, "probe": steps }]), &crit_list());
-    assert!(carried_probes(&open, &a4, &probes_of(&a4)).is_empty());
+    assert!(carried_probes(&open, &a4, &probes_of(&a4, &[])).is_empty());
 }
 
 const PROBE_FIX_PAGE: &str = r#"<!doctype html><html><head><title>t</title></head><body>
@@ -568,4 +568,227 @@ fn probes_read_pages_like_a_person_and_a_hang_fails_only_its_probe() {
     assert!(r[6].ran && !r[6].passed && !r[6].error && d[6].contains("the page hung or navigated away") && d[6].contains("click #hang"), "{d:?}");
     assert!(r[7].ran && !r[7].passed && d[7].starts_with("got 120 - 165 g;"), "the probe after the hang still ran: {d:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Required probes and pinned intent checks (AD-12) ────────────────────────
+
+const PROTEIN_ASK: &str = "Build me a protein intake calculator. I'm 165 lbs, so default 165 lb, with a lb/kg toggle and a per-meal split (3-5 meals).";
+
+/// Nic's own values become checks whose expectations are computed here: the default on load,
+/// the converted number after switching units, and the range's choices in order. Generic (a
+/// temperature request gets the same treatment) and conservative (nothing when unclear).
+#[test]
+fn intent_checks_pin_nics_own_values() {
+    let c = intent_checks(PROTEIN_ASK);
+    assert_eq!(c.len(), 3, "{c:#?}");
+    assert_eq!((&c[0].kind, c[0].value), (&CheckKind::Default, 165.0));
+    match &c[1].kind {
+        CheckKind::Convert { from, to, start } => assert_eq!((from.as_str(), to.as_str(), *start), ("lb", "kg", 165.0)),
+        k => panic!("{k:?}"),
+    }
+    assert!((c[1].value - 74.84).abs() < 0.01 && (c[1].tol - 0.5).abs() < 1e-9, "{:?}", c[1]);
+    assert_eq!(c[2].kind, CheckKind::Order(vec!["3".into(), "4".into(), "5".into()]));
+    assert!(c[0].criterion.contains("pinned value: 165;"), "{}", c[0].criterion);
+    assert!(c[1].criterion.contains("from lb to kg") && c[1].criterion.contains("pinned value: 74.84;"), "{}", c[1].criterion);
+    assert!(c[2].criterion.contains("pinned order: 3, 4, 5"), "{}", c[2].criterion);
+    // Another domain, same rules: °F/°C with a stated default.
+    let t = intent_checks("A thermostat card. Default to 72°F, with a °F/°C switch.");
+    assert_eq!(t.len(), 2, "{t:#?}");
+    assert!((t[1].value - 22.22).abs() < 0.01 && t[1].criterion.contains("from °F to °C"), "{t:#?}");
+    let m = intent_checks("My daily run is 5 miles; show it in miles or km and let me pick 2 to 4 laps between breaks.");
+    assert_eq!(m.iter().map(|x| x.pinned()).collect::<Vec<_>>(), vec!["5", "8.05", "2, 3, 4"], "{m:#?}");
+    // Nothing when it is not clearly a default, a named pair or a choice.
+    assert!(intent_checks("I went from 180 to 165 lbs").is_empty());
+    assert!(intent_checks("Convert 165 lb for me, with lb/kg shown").is_empty(), "not stated as a default");
+    assert!(intent_checks("a 25-30 minute workout with 8-12 reps, choose a plan").is_empty(), "measured ranges are not choices");
+    assert!(intent_checks("show 3-5 meals").is_empty(), "a range with no choice word");
+    assert_eq!(intent_checks("I'm 165 lbs").len(), 1, "a default without a unit pair");
+    assert!(intent_checks("default 5 meals. Actually, default to 4 meals.").is_empty(), "Nic changed his mind: pin neither");
+}
+
+/// Which criteria need a probe, and which may start with an expectation.
+#[test]
+fn behavioural_criteria_need_probes() {
+    let lits = intent_literals(PROTEIN_ASK);
+    for c in ["The lb/kg toggle converts the weight", "Saved state is restored after a reload", "Adding a food updates the total", "Reset clears the log", "Meal split offers 3, 4 and 5 meals in order", "Shows the default weight on load", "Uses Nic's 165 lb"] {
+        assert!(behavioural(c, &lits), "{c}");
+    }
+    for c in ["Has a dark card layout", "Works offline", "Readable on a phone"] {
+        assert!(!behavioural(c, &lits), "{c}");
+    }
+    assert!(need_of("The lb/kg toggle converts the weight", &lits).action);
+    assert!(!need_of("Shows the default weight on load", &lits).action, "an on-load default needs no action");
+    assert!(!need_of("Meal split offers 3, 4 and 5 meals in order", &lits).action);
+    assert!(need_of("Switching to kg converts the default weight", &lits).action, "a default that is switched still needs the switch");
+    assert_eq!(need_of("Works offline", &lits), Need::default());
+}
+
+/// A probe for an intent check must expect the pinned value (it is rewritten to it), a convert
+/// probe must switch first and never expect its starting value (round trip), and a behavioural
+/// probe must act before it expects.
+#[test]
+fn pinned_probes_are_held_to_nics_values() {
+    let checks = intent_checks(PROTEIN_ASK);
+    let mut expected = crit_list();
+    let lits = intent_literals(PROTEIN_ASK);
+    let mut needs: Vec<Need> = expected.iter().map(|c| need_of(c, &lits)).collect();
+    for c in &checks {
+        expected.push(c.criterion.clone());
+        needs.push(c.need());
+    }
+    let ans = |n: usize, probe: Value| json!({ "n": n, "criterion": expected[n - 1], "met": true, "evidence": "x", "probe": probe });
+    let enforced = |list: Vec<Value>| {
+        let mut a = read_answers(&Value::Array(list), &expected);
+        enforce(&mut a, &needs);
+        a.list.into_iter().map(|x| x.probe.unwrap()).collect::<Vec<_>>()
+    };
+    let r = enforced(vec![
+        // 1: behavioural, reads only → rejected; 2: on-load order → fine without an action.
+        ans(1, json!([{ "op": "expect_value", "sel": "#w", "approx": 74.8 }])),
+        ans(2, json!([{ "op": "expect_count", "sel": ".m", "count": 3 }])),
+        // 4: default — an action first is rejected.
+        ans(4, json!([{ "op": "set", "sel": "#w", "value": "165" }, { "op": "expect_value", "sel": "#w", "approx": 165 }])),
+        // 5: convert — the round trip the 9B verifier wrote.
+        ans(5, json!([{ "op": "click", "sel": "#kg" }, { "op": "click", "sel": "#lb" }, { "op": "expect_value", "sel": "#w", "approx": 165 }])),
+        // 6: order — the page's own order.
+        ans(6, json!([{ "op": "expect_order", "sel": ".m", "order": ["3", "5", "4"] }])),
+    ]);
+    assert!(r[0].as_ref().unwrap_err().contains("only reads the page"), "{:?}", r[0]);
+    assert!(r[1].is_ok());
+    assert!(r[2].as_ref().unwrap_err().contains("before any set / select / click (pinned value 165)"), "{:?}", r[2]);
+    assert!(r[3].as_ref().unwrap_err().contains("round trip") && r[3].as_ref().unwrap_err().contains("use the pinned value 74.84"), "{:?}", r[3]);
+    assert!(r[4].as_ref().unwrap_err().contains("use the pinned order 3, 4, 5"), "{:?}", r[4]);
+    // The page's own wrong factor; an order check without expect_order; no switch at all.
+    let r = enforced(vec![
+        ans(5, json!([{ "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#w", "approx": 72.6 }])),
+        ans(6, json!([{ "op": "expect_count", "sel": ".m", "count": 3 }])),
+    ]);
+    assert!(r[0].as_ref().unwrap_err().contains("it expects 72.6, but the converted value is pinned: use the pinned value 74.84"), "{:?}", r[0]);
+    assert!(r[1].as_ref().unwrap_err().contains("use expect_order"), "{:?}", r[1]);
+    assert!(enforced(vec![ans(5, json!([{ "op": "expect_value", "sel": "#w", "approx": 74.84 }]))])[0].as_ref().unwrap_err().contains("switch the unit to kg first"));
+    // Right: rewritten to the value computed here (the model's "74.8 kg" text becomes approx).
+    let r = enforced(vec![
+        ans(4, json!([{ "op": "expect_value", "sel": "#w", "contains": "165" }])),
+        ans(5, json!([{ "op": "click", "sel": "#kg" }, { "op": "expect_text", "sel": "#w", "contains": "74.8 kg" }])),
+        ans(6, json!([{ "op": "expect_order", "sel": ".m", "order": ["3 meals", "4 meals", "5 meals"] }])),
+    ]);
+    let s4 = r[0].as_ref().unwrap();
+    assert_eq!(s4[0], json!({ "op": "expect_value", "sel": "#w", "nth": 0, "approx": 165.0, "tol": 0.99 }));
+    let s5 = r[1].as_ref().unwrap();
+    assert_eq!(s5[1], json!({ "op": "expect_text", "sel": "#w", "nth": 0, "approx": 74.84, "tol": 0.5 }));
+    assert_eq!(r[2].as_ref().unwrap()[0]["order"], json!(["3", "4", "5"]));
+}
+
+/// Where probes run, a behavioural criterion is met only when a probe for it ran and passed;
+/// without one it is a gap (never a Coder loop) that names why; a passing probe stands in for
+/// evidence; the cap runs the behavioural criteria's probes first.
+#[test]
+fn a_behavioural_criterion_needs_a_probe_that_ran_and_passed() {
+    let html = "<script>\nfunction toggleUnit(unit) { state.unit = unit; convert(); }\n</script>";
+    let ev = "function toggleUnit(unit) { state.unit = unit; convert(); }";
+    let crits = vec!["The lb/kg toggle converts the weight".to_string(), "Has a dark card layout".to_string(), "Saved state is restored after a reload".to_string()];
+    let needs: Vec<Need> = crits.iter().map(|c| need_of(c, &[])).collect();
+    // Only quoted code, no probe: a gap for the behavioural one, nothing for the layout.
+    let a = read_answers(&json!([{ "n": 1, "criterion": crits[0], "met": true, "evidence": ev }, { "n": 2, "criterion": crits[1], "met": true, "evidence": ev }]), &crits[..2]);
+    let j = judge(&a, html, false, &ProbeRun::Skipped("the verifier gave no probes".into()), &needs, true);
+    assert!(j.unmet.is_empty(), "{:?}", j.unmet);
+    assert_eq!(j.gaps, vec![ProbeGap { n: Some(1), criterion: crits[0].clone(), why: "no probe was given".into() }]);
+    assert_eq!(j.criteria[0]["needs_probe"], true);
+    assert_eq!(probe_feedback(&j.gaps), vec!["1. The lb/kg toggle converts the weight: no probe was given".to_string()]);
+    // Probes cannot run here (no Edge / runtime checks off): the evidence-only rule.
+    assert!(judge(&a, html, false, &ProbeRun::Skipped("Edge is not installed".into()), &needs, false).gaps.is_empty());
+    // Rejected, matching nothing, past the cap: each a gap with its reason.
+    let a = read_answers(
+        &json!([
+            { "n": 1, "criterion": crits[0], "met": true, "evidence": ev, "probe": [{ "op": "eval" }] },
+            { "n": 3, "criterion": crits[2], "met": true, "evidence": ev, "probe": [{ "op": "set", "sel": "#w", "value": "170" }, { "op": "reload" }, { "op": "expect_value", "sel": "#w", "approx": 170 }] }
+        ]),
+        &crits,
+    );
+    let p = probes_of(&a, &needs);
+    let nomatch = ProbeRun::Ran(probe_results(&p, &json!([{ "ok": false, "k": "nomatch", "at": 0 }])));
+    let j = judge(&a, html, false, &nomatch, &needs, true);
+    assert!(j.gaps[0].why.starts_with("its probe was rejected: step 1: unknown op"), "{:?}", j.gaps);
+    assert_eq!(j.gaps[1].why, "its probe did not run: #w matches nothing (probe step 1)");
+    assert!(j.unmet.is_empty(), "{:?}", j.unmet);
+    let j = judge(&a, html, false, &ProbeRun::Ran(vec![]), &needs, true);
+    assert_eq!(j.gaps[1].why, format!("skipped: at most {MAX_PROBES} probes run"));
+    // A passing probe settles it, even without quoted code; a failing one is a Coder fix as before.
+    let a = read_answers(&json!([{ "n": 3, "criterion": crits[2], "met": true, "evidence": "", "probe": [{ "op": "set", "sel": "#w", "value": "170" }, { "op": "reload" }, { "op": "expect_value", "sel": "#w", "approx": 170 }] }]), &crits);
+    let p = probes_of(&a, &needs);
+    let ok = judge(&a, html, false, &ProbeRun::Ran(probe_results(&p, &json!([{ "ok": true }]))), &needs, true);
+    assert!(ok.unmet.is_empty() && ok.gaps.is_empty(), "{ok:?}");
+    let bad = judge(&a, html, false, &ProbeRun::Ran(probe_results(&p, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }]))), &needs, true);
+    assert!(bad.unmet[0].starts_with("probe failed for Saved state") && bad.gaps.is_empty(), "{bad:?}");
+    // The cap: behavioural criteria's probes run first.
+    let many: Vec<String> = (0..14).map(|i| if i < 4 { format!("Has a nice card layout number {i}") } else { format!("Adding item {i} updates the total") }).collect();
+    let many_needs: Vec<Need> = many.iter().map(|c| need_of(c, &[])).collect();
+    let list: Vec<Value> = many.iter().enumerate().map(|(i, c)| json!({ "n": i + 1, "criterion": c, "met": true, "evidence": "x", "probe": [{ "op": "click", "sel": "#add" }, { "op": "expect_count", "sel": ".row", "count": 1 }] })).collect();
+    let a = read_answers(&Value::Array(list), &many);
+    let p = probes_of(&a, &many_needs);
+    assert_eq!(p.len(), MAX_PROBES);
+    assert!(p[..10].iter().all(|x| x.answer >= 4) && p[10].answer == 0, "{:?}", p.iter().map(|x| x.answer).collect::<Vec<_>>());
+}
+
+/// Small-model variations are normalised, not rejected; a numeric contains is marked for
+/// whole-number matching.
+#[test]
+fn probe_steps_from_a_small_model_are_normalised() {
+    let ok = parse_probe(&json!([
+        { "action": "fill", "selector": "#bill", "text": "80" },
+        { "type": "tap", "target": "#tip-15" },
+        { "step": "choose", "css": "#people", "val": 2 },
+        { "op": "assert_text", "sel": "#total", "value": "92" },
+        { "op": "expect", "sel": "#each", "text": "per person" },
+        { "op": "expect_value", "sel": "#total", "approx": "92.0", "tol": "0.5" },
+        { "op": "Expect-Text", "sel": "#each", "contains": "$46 per person", "nth": "1" }
+    ]))
+    .unwrap();
+    assert_eq!(ok[0], json!({ "op": "set", "sel": "#bill", "nth": 0, "value": "80" }));
+    assert_eq!(ok[1], json!({ "op": "click", "sel": "#tip-15", "nth": 0 }));
+    assert_eq!(ok[2], json!({ "op": "select", "sel": "#people", "nth": 0, "value": "2" }));
+    assert_eq!((ok[3]["op"].as_str(), ok[3]["approx"].as_f64()), (Some("expect_text"), Some(92.0)), "a bare number → approx");
+    assert_eq!((ok[4]["contains"].as_str(), ok[4].get("num")), (Some("per person"), None), "bare text → contains");
+    assert_eq!((ok[5]["approx"].as_f64(), ok[5]["tol"].as_f64()), (Some(92.0), Some(0.5)));
+    assert_eq!((ok[6]["op"].as_str(), ok[6]["nth"].as_u64()), (Some("expect_text"), Some(1)));
+    assert_eq!(ok[6]["num"], json!({ "pre": "$", "n": "46", "unit": "per person" }));
+    assert_eq!(parse_probe(&json!([{ "op": "expect_text", "sel": "#a", "contains": "40 g" }])).unwrap()[0]["num"], json!({ "pre": "", "n": "40", "unit": "g" }));
+    // The security posture holds through the aliases.
+    assert!(parse_probe(&json!([{ "action": "tap", "target": "a</script>" }, { "op": "expect_count", "sel": "a", "count": 1 }])).unwrap_err().contains("selector"));
+    assert!(parse_probe(&json!([{ "action": "eval", "js": "x()" }])).unwrap_err().contains("unknown op"));
+}
+
+/// Real headless Edge: a numeric contains matches a whole number ("0" is not in "40 g", "40" is
+/// not in "140 g"); text stays a substring.
+#[test]
+fn a_numeric_contains_matches_whole_numbers_in_a_real_browser() {
+    let Some(dir) = edge_dir("numeric") else { return };
+    let page = dir.join("page.html");
+    std::fs::write(&page, "<!doctype html><html><head><title>t</title></head><body><p id=a>40 g</p><p id=b>140 g</p><p id=c>$39.33 per person</p><p id=d>1,200 kcal</p></body></html>").unwrap();
+    let c = |i: usize, sel: &str, s: &str| probe(i, json!([{ "op": "expect_text", "sel": sel, "contains": s }]));
+    let probes = vec![c(0, "#a", "0"), c(1, "#b", "40"), c(2, "#a", "40 g"), c(3, "#c", "$39.33"), c(4, "#c", "9.33"), c(5, "#c", "Per Person"), c(6, "#d", "1,200 kcal"), c(7, "#b", "140 g")];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(150)) else { panic!("edge ran") };
+    let got: Vec<bool> = r.iter().map(|x| x.passed).collect();
+    assert_eq!(got, vec![false, false, true, true, false, true, true, true], "{:?}", r.iter().map(|x| &x.detail).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Real headless Edge: a temp folder whose path holds '#' and '%' still loads as a file URL
+/// (`url::Url::from_file_path` percent-encodes them; a hand-built URL would cut at '#').
+#[test]
+fn a_temp_path_with_hash_and_percent_still_loads() {
+    let Some(exe) = browser() else { return };
+    let dir = std::env::temp_dir().join(format!("tf-smoke-test-a#b%41c-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = edge_in(&exe, &dir, &with_harness("<!doctype html><html><head><title>t</title></head><body><p>ok</p></body></html>"), "data-tf-smoke", Duration::from_secs(30), 3000);
+    for _ in 0..10 {
+        if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    match out {
+        EdgeOut::Dom(dom) => assert_eq!(parse_dump(&dom).map(|d| d.0), Some(vec![])),
+        EdgeOut::Failed(r, _) | EdgeOut::Unavailable(r) => panic!("{r}"),
+    }
 }

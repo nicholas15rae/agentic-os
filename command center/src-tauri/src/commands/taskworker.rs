@@ -230,6 +230,11 @@ pub trait WorkerEnv: Send + Sync {
             tauri::async_runtime::spawn_blocking(move || quality::runtime_smoke(&page, Duration::from_secs(RUNTIME_SMOKE_SECS))).await.unwrap_or_else(|e| quality::Smoke::Skipped(format!("the smoke task failed: {e}")))
         })
     }
+    /// Can the probes run here at all (a local Edge)? Where they cannot, verify keeps the
+    /// evidence-only rule instead of requiring a passing probe per behavioural criterion.
+    fn probes_available(&self) -> bool {
+        quality::edge_available()
+    }
     /// The verifier's behavioural probes on the staged page (headless Edge; `quality::run_probes`).
     fn run_probes(&self, page: PathBuf, probes: Vec<quality::Probe>) -> BoxFuture<'_, quality::ProbeRun> {
         Box::pin(async move {
@@ -272,6 +277,9 @@ pub struct WorkerStats {
     pub card_pending: Mutex<BTreeSet<String>>,
     /// Task id → when its stage first found the model backend unreachable.
     pub backend_down_since: Mutex<HashMap<String, Instant>>,
+    /// Task id → (iteration, why its behavioural criteria had no working probe): fed into the
+    /// verify prompt on the stage's one retry for it.
+    pub verify_feedback: Mutex<HashMap<String, (u32, Vec<String>)>>,
 }
 
 /// How often a pending mirror is re-sent while the gateway is unreachable.
@@ -745,8 +753,15 @@ pub fn prompt_audit(e: &Envelope, report: &Value, digest: &str) -> String {
     )
 }
 
-/// What verify checks: the acceptance criteria, else the requirements, else Nic's request itself.
+/// What verify checks: the acceptance criteria (else the requirements, else Nic's request
+/// itself), then the intent checks pinned from Nic's own values (`quality::intent_checks`).
 pub fn verify_criteria(e: &Envelope) -> Vec<String> {
+    verify_plan(e).0
+}
+
+/// The numbered criteria and what each needs from its probe (behavioural → a probe that ran and
+/// passed; an intent check → its pinned value). Pure.
+pub fn verify_plan(e: &Envelope) -> (Vec<String>, Vec<quality::Need>) {
     let mut c = str_list(&e.prompt_spec["acceptance_criteria"], 10, 200);
     if c.is_empty() {
         c = str_list(&e.prompt_spec["requirements"], 10, 200);
@@ -754,22 +769,33 @@ pub fn verify_criteria(e: &Envelope) -> Vec<String> {
     if c.is_empty() {
         c.push("every feature, default and constraint in Nic's request works".into());
     }
-    c
+    let lits = quality::intent_literals(&e.raw_intent.text);
+    let mut needs: Vec<quality::Need> = c.iter().map(|x| quality::need_of(x, &lits)).collect();
+    for check in quality::intent_checks(&e.raw_intent.text) {
+        needs.push(check.need());
+        c.push(check.criterion);
+    }
+    (c, needs)
 }
 
-/// The verifier's behavioural probe DSL, as the prompt states it (`quality::parse_probe`).
-const PROBE_RULES: &str = "For each criterion about BEHAVIOUR (a unit conversion, a default, a total that updates, an order, a saved value) add a \"probe\": up to 8 steps the system runs in a real browser on a fresh page load, using selectors that exist in the code. Steps: {\"op\":\"set\",\"sel\":\"#weight\",\"value\":\"165\"} (types it: key, input, change and blur events), {\"op\":\"select\",\"sel\":\"#activity\",\"value\":\"active\"}, {\"op\":\"click\",\"sel\":\"#kg\"} (add \"nth\":1 for the 2nd match), {\"op\":\"reload\"} (storage kept), {\"op\":\"expect_value\" or \"expect_text\",\"sel\":\"#weight\",\"approx\":74.8,\"tol\":0.5} (approx passes when ANY number shown in the element is within tol; an input/select is read by its value and selected label; or \"contains\":\"...\" / \"equals\":\"...\"), {\"op\":\"expect_class\",\"sel\":\"#kg\",\"class\":\"active\",\"present\":true}, {\"op\":\"expect_count\",\"sel\":\".row\",\"count\":3}, {\"op\":\"expect_order\",\"sel\":\".split-btn\",\"attr\":\"data-meals\",\"order\":[\"3\",\"4\",\"5\"]} (labels match case-insensitively, by their leading number or contained; without attr the text is used). Expect what Nic asked for, not what the code happens to do. At most 6 probes.";
+/// The verifier's behavioural probe DSL, as the prompt states it (`quality::parse_probe`). Its
+/// examples are from another domain on purpose: examples from the page being checked prime a
+/// 9B model to copy them as its answers.
+const PROBE_RULES: &str = "For each criterion about BEHAVIOUR (something that changes, computes, converts, toggles, totals, adds/removes, resets, orders, saves/restores, or shows a default) add a \"probe\": up to 8 steps the system runs in a real browser on a fresh page load, using selectors that exist in the code. Such a criterion counts as met ONLY when its probe runs and passes. Act first (set / select / click), then expect the result; only an on-load default or order check may start with an expectation. Steps: {\"op\":\"set\",\"sel\":\"#bill\",\"value\":\"80\"} (types it: key, input, change and blur events), {\"op\":\"select\",\"sel\":\"#people\",\"value\":\"2\"}, {\"op\":\"click\",\"sel\":\"#tip-15\"} (add \"nth\":1 for the 2nd match), {\"op\":\"reload\"} (storage kept), {\"op\":\"expect_text\" or \"expect_value\",\"sel\":\"#total\",\"approx\":92,\"tol\":0.5} (passes when ANY number shown in the element is within tol; an input/select is read by its value and selected label), or \"contains\":\"46 each\" (a number matches only as a whole number: \"6\" never matches \"46\"; other text is a case-insensitive substring) or \"equals\":\"...\", {\"op\":\"expect_class\",\"sel\":\"#tip-15\",\"class\":\"on\",\"present\":true}, {\"op\":\"expect_count\",\"sel\":\".row\",\"count\":2}, {\"op\":\"expect_order\",\"sel\":\".tip-btn\",\"attr\":\"data-pct\",\"order\":[\"10\",\"15\",\"20\"]} (labels match case-insensitively, by their leading number or contained; without attr the text is used). Expected values come from Nic's request and well-known real-world facts you compute yourself, NEVER from the page's own code or formula; a criterion that states a pinned value must expect exactly that value. If a number the page computes or recommends is implausible in the real world, set met false and say why in fix. Probe the behavioural criteria first; at most 12 probes.";
 
 /// Evidence-based verify: per criterion, met or not plus the exact code that implements it, and
 /// a behavioural probe the system runs. `code` is the staged page (`quality::verify_view` here).
-pub fn prompt_verify(e: &Envelope, code: &str, audit: &Value, at_limit: bool) -> String {
+/// `retry` = why the last answer's probes did not work (`quality::probe_feedback`), on the one
+/// retry for it.
+pub fn prompt_verify(e: &Envelope, code: &str, audit: &Value, at_limit: bool, retry: &[String]) -> String {
     let crit: Vec<String> = verify_criteria(e).iter().enumerate().map(|(i, c)| format!("{}. {c}", i + 1)).collect();
+    let retry = if retry.is_empty() { String::new() } else { format!("Your last answer gave no working probe for these behavioural criteria; give each one a probe that runs (selectors that exist in the code, an action before the expectation, the pinned value where one is stated):\n- {}\n", clip(&retry.join("\n- "), 1500)) };
     let (view, cut) = quality::verify_view(code, VERIFY_CODE_IN);
     let gate = str_list(&e.last_eval["gate_blockers"], 6, 160);
     let checks = if gate.is_empty() { format!("The deterministic checks passed: {}", compact(&e.last_eval["checks"], 400)) } else { format!("The deterministic checks still fail on this last pass (they go to review as known blockers): {}", gate.join("; ")) };
     let cut_note = if cut { "Code marked /* … omitted … */ was cut for length: for a criterion whose code you cannot see, set met to null.\n" } else { "" };
     format!(
-        "{}\nVerify the staged build against what Nic asked for, by reading its code. For EACH numbered criterion give its number n, decide met true/false and copy the 1-3 lines of code that implement it VERBATIM into evidence (no paraphrase). A criterion whose behaviour you cannot point to in the code is NOT met. Trace the data flow: an input whose handler never stores or uses the value does not count; check the order of statements (a value changed before it is compared, saved data applied after the page was drawn).\n{PROBE_RULES}\n{cut_note}{}{checks}\nNic's request:\n{}\nCriteria:\n{}\nLibrarian audit: {}\nMemory/Librarian bookkeeping (Tony's notes, memoryDoc, tasks.db, prompt backups) is not the Coder's or Designer's job: never loop on it.\nThe page's code:\n{}\n{}Reply ONLY with JSON:\n{{\"criteria\": [{{\"n\": 1, \"criterion\": \"...\", \"met\": true, \"evidence\": \"verbatim code\", \"probe\": [{{\"op\": \"...\"}}], \"fix\": \"only when not met\"}}], \"verdict\": \"pass | loop\", \"loop_to\": \"coder | designer\", \"fix_instructions\": [\"exact fixes, only when verdict is loop\"], \"known_blockers\": [], \"voice_summary\": \"...\"}}",
+        "{}\nVerify the staged build against what Nic asked for, by reading its code. For EACH numbered criterion give its number n, decide met true/false and copy the 1-3 lines of code that implement it VERBATIM into evidence (no paraphrase). A criterion whose behaviour you cannot point to in the code is NOT met. Trace the data flow: an input whose handler never stores or uses the value does not count; check the order of statements (a value changed before it is compared, saved data applied after the page was drawn).\n{PROBE_RULES}\n{cut_note}{}{checks}\nNic's request:\n{}\nCriteria:\n{}\nLibrarian audit: {}\nMemory/Librarian bookkeeping (Tony's notes, memoryDoc, tasks.db, prompt backups) is not the Coder's or Designer's job: never loop on it.\nThe page's code:\n{}\n{}{retry}Reply ONLY with JSON:\n{{\"criteria\": [{{\"n\": 1, \"criterion\": \"...\", \"met\": true, \"evidence\": \"verbatim code\", \"probe\": [{{\"op\": \"...\"}}], \"fix\": \"only when not met\"}}], \"verdict\": \"pass | loop\", \"loop_to\": \"coder | designer\", \"fix_instructions\": [\"exact fixes, only when verdict is loop\"], \"known_blockers\": [], \"voice_summary\": \"...\"}}",
         header(e, "verify"),
         literals_rule(e),
         intent_recap(e),
@@ -1591,11 +1617,15 @@ impl<'a> Worker<'a> {
                 let (build, memory): (Vec<Value>, Vec<Value>) = a["discrepancies_flagged"].as_array().cloned().unwrap_or_default().into_iter().partition(|d| discrepancy_scope(d) == "build");
                 json!({ "discrepancies": build, "memory_items_for_tony": memory.len(), "brief": a["value_add_brief"] })
             }).unwrap_or(Value::Null);
-            let r = self.ask(e, "prompter", "verify", prompt_verify(e, &html, &audit, at_limit), s, None, None).await?;
+            // The one retry for missing / broken probes reads why they did not work.
+            let feedback: Vec<String> = self.stats.verify_feedback.lock().unwrap().remove(&e.task_id).filter(|(it, _)| *it == e.iteration_count).map(|(_, f)| f).unwrap_or_default();
+            let r = self.ask(e, "prompter", "verify", prompt_verify(e, &html, &audit, at_limit, &feedback), s, None, None).await?;
             let j = extract_json(&r.text);
-            let expected = verify_criteria(e);
+            let (expected, needs) = verify_plan(e);
             let cut = quality::verify_view(&html, VERIFY_CODE_IN).1;
-            let answers = quality::read_answers(&j.as_ref().map(|j| j["criteria"].clone()).unwrap_or(Value::Null), &expected);
+            let mut answers = quality::read_answers(&j.as_ref().map(|j| j["criteria"].clone()).unwrap_or(Value::Null), &expected);
+            // Intent checks expect Nic's pinned values; behavioural probes act before they expect.
+            quality::enforce(&mut answers, &needs);
             // No per-criterion list, a requested criterion left out, or one left undecided although
             // its code was shown: ask again (the last attempt names the gap as a blocker).
             if answers.incomplete(cut) && !last && !at_limit {
@@ -1607,9 +1637,10 @@ impl<'a> Worker<'a> {
             }
             // Behavioural probes (AD-11): run in headless Edge, storage working, a fresh load each.
             // Probes that failed on an earlier pass run again alongside the verifier's new ones.
-            let mut probes = quality::probes_of(&answers);
+            let mut probes = quality::probes_of(&answers, &needs);
             let carried = quality::carried_probes(&e.last_eval["open_probes"], &answers, &probes);
             probes.extend(carried);
+            let can_probe = s.runtime_smoke && page.is_some() && !html.is_empty() && self.env.probes_available();
             let run = if probes.is_empty() {
                 quality::ProbeRun::Skipped("the verifier gave no probes".into())
             } else if !s.runtime_smoke {
@@ -1621,9 +1652,26 @@ impl<'a> Worker<'a> {
                 }
             };
             let open = quality::open_probes(&probes, &run, &answers);
+            // Where probes run, a behavioural criterion needs one that ran and passed (AD-12); a
+            // run that could not start (no Edge after all) keeps the evidence-only rule.
+            let probes_on = can_probe && (probes.is_empty() || matches!(run, quality::ProbeRun::Ran(_)));
             // A criterion counts only when it is met, its quoted code is in the page, and its probe
             // (if it ran) did not fail.
-            let judged = quality::judge(&answers, &html, cut, &run);
+            let judged = quality::judge(&answers, &html, cut, &run, &needs, probes_on);
+            // Behavioural criteria with no working probe: ask once more with the exact reasons
+            // (the page may be fine, so never a Coder loop); the last attempt names them.
+            // Named by the requested criterion (the model's own name for it can be a single word).
+            let gaps: Vec<quality::ProbeGap> = judged.gaps.iter().cloned().map(|mut g| {
+                if let Some(c) = g.n.and_then(|n| expected.get(n - 1)) {
+                    g.criterion = c.clone();
+                }
+                g
+            }).collect();
+            if !gaps.is_empty() && !last && feedback.is_empty() {
+                let n = gaps.len();
+                self.stats.verify_feedback.lock().unwrap().insert(e.task_id.clone(), (e.iteration_count, quality::probe_feedback(&gaps)));
+                return Err(StageErr::retry(format!("the Prompter's verify gave no working probe for {n} behavioural criteri{}", if n == 1 { "on" } else { "a" })));
+            }
             // Unparseable → the deterministic result (the gate already passed).
             let jj = j.clone().unwrap_or(Value::Null);
             let mut verdict = if jj["verdict"].as_str().map(|v| v.trim().eq_ignore_ascii_case("loop")).unwrap_or(false) { "loop" } else { "pass" };
@@ -1661,6 +1709,7 @@ impl<'a> Worker<'a> {
                 verify_blockers.push("verify could not show code evidence per criterion".into());
             }
             verify_blockers.extend(judged.not_judged.iter().take(8).cloned());
+            verify_blockers.extend(gaps.iter().take(8).map(|g| format!("no working probe for: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120))));
             let mut blockers = verify_blockers.clone();
             for b in model_blockers {
                 if !blockers.contains(&b) {

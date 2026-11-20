@@ -7,7 +7,10 @@ import { AtmosphereSwitch } from "@/widgets/weather/Weather";
 import { STATE_LABEL, useVoice } from "@/features/voice/voice-store";
 import { STATE_DOT } from "@/features/voice/VoiceParts";
 import { headerSubtitle } from "@/features/voice/voice-status";
-import { ActiveSlotPill, ComputeModeSwitch, DropletBadge, GabagoolPill, KillSwitch, PrivacyPill } from "@/features/os/OsControls";
+import { ActiveSlotPill, ComputeModeSwitch, DropletBadge, KillSwitch, PrivacyPill } from "@/features/os/OsControls";
+import { ModePill } from "@/features/modes/ModePill";
+import { MicLockBadge, useMicIndicator } from "@/features/voice/MicLockBadge";
+import { isMicOff } from "@/features/voice/mic-indicator";
 
 export function TopBar() {
   const identity = useSettings((s) => s.identity);
@@ -17,6 +20,8 @@ export function TopBar() {
   const setEditing = useLayout((s) => s.setEditing);
   const wakeMode = useSettings((s) => s.wakeMode);
   const voiceState = useVoice((s) => s.state);
+  // Phase 2 Part D: a locked-off mic replaces the state dot with a static red MicOff at every width.
+  const mic = useMicIndicator();
   // Derived on every render, never written back: the subtitle setting stays what the user typed.
   // "error" is a resting state (capture already stopped), so it reads STANDBY; the dot still shows red.
   const status = headerSubtitle(identity.subtitle, wakeMode || (voiceState !== "idle" && voiceState !== "error"), voiceState === "holding");
@@ -38,7 +43,7 @@ export function TopBar() {
   return (
     <header className="flex items-center gap-3 px-4 pb-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] md:px-6 xl:px-8">
       <div className="glass-thin flex h-11 min-w-0 items-center gap-3 rounded-full px-4">
-        <span className={`size-2 shrink-0 rounded-full ${STATE_DOT[voiceState]}`} />
+        {isMicOff(mic) ? <MicLockBadge variant="dot" /> : <span className={`size-2 shrink-0 rounded-full ${STATE_DOT[voiceState]}`} />}
         <span className="truncate font-mono text-[13px] font-semibold tracking-wider text-ink">{identity.callsign}</span>
         <span className="hidden h-4 w-px bg-white/15 sm:block" />
         <span className="label-caps hidden text-teal sm:block">{status.text}</span>
@@ -57,7 +62,7 @@ export function TopBar() {
         <ActiveSlotPill />
         <ComputeModeSwitch compact />
         <DropletBadge />
-        <GabagoolPill />
+        <ModePill />
         <PrivacyPill />
         <KillSwitch />
       </div>

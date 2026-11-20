@@ -212,3 +212,12 @@ describe("perSentenceOpts / synthArgs (P1 utteranceId)", () => {
     expect(odd).toMatch(/^[A-Za-z0-9-]{1,64}$/);
   });
 });
+
+describe("synthArgs localOnly (Part 6 narration on local Kokoro)", () => {
+  it("is sent only when set, on live and cached lines alike", () => {
+    expect(synthArgs("Spec is in.", { agent: "prompter", localOnly: true, utteranceId: "u1" })).toMatchObject({ agent: "prompter", localOnly: true, utteranceId: "u1" });
+    expect(synthArgs("Spec is in.", { agent: "prompter", cache: true, localOnly: true }, "p1")).toEqual({ text: "Spec is in.", voice: undefined, agent: "prompter", pinId: "p1", localOnly: true });
+    expect("localOnly" in synthArgs("Hi.", { agent: "general" })).toBe(false);
+    expect("localOnly" in synthArgs("Hi.", { agent: "general", cache: true })).toBe(false);
+  });
+});

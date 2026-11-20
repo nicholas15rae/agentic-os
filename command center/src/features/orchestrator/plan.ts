@@ -62,9 +62,9 @@ export interface ActionPlan {
   /** In-memory only: for bridge plans, what to run once approved / when cancelled. */
   run?: () => Promise<{ text: string; meta: string }>;
   onCancel?: () => void;
-  /** P3 Tier 3: a delegation OFFER card (Delegate / Park it / Not now). Its replies accept
+  /** P3 Tier 3: a delegation OFFER card (Delegate / Park it / Not now; "park": Solo mode's park-only card). Its replies accept
    * "park it" / "save it for later", and every way it closes without a yes is silent. */
-  offer?: "delegate";
+  offer?: "delegate" | "park";
   /** P3 Tier 2: Tony answers himself — `os_turn` gets `noDelegate`, nothing is re-routed. */
   noDelegate?: boolean;
   /** P3 Tier 3: the approved delegation's agent (osRun routes there instead of resolving). */

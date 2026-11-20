@@ -197,7 +197,10 @@ async fn build(app: &tauri::AppHandle, deep: bool) -> Result<Value, String> {
             let host = host_block(&app);
             let rules = rules_block(&osc, &workdir);
             let skills = skills_block(&osc, &workdir);
-            let stores = stores_block(config_dir.as_deref(), &workdir);
+            let mut stores = stores_block(config_dir.as_deref(), &workdir);
+            // Phase 3 tiers: Memory Scrolls (Tier 2) and the cold archive (Tier 3), counted only.
+            let (_, archive) = super::taskworker::memory_roots(&osc, &workdir);
+            stores.extend(memory_tier_stores(&osc.memory.scrolls.scrolls_root(), archive.as_deref()));
             (host, rules, skills, stores)
         })
     };
@@ -311,6 +314,10 @@ async fn agents_block(st: &DispatchState, os: &OsState, osc: &OsConfig) -> (Vec<
         Err(e) => (None, Some(format!("models unavailable: {e}"))),
     };
     let active = os.slot.view().active;
+    // Audit flags (Part 3): compared against the LM Studio model the app pins as Tony's brain
+    // (no extra request on this path; the full audit is `anythingllm_workspace_audit`).
+    let pinned = st.provider("lmstudio").map(|p| p.model).filter(|m| !m.is_empty());
+    let all_roles: Vec<String> = osc.anythingllm.workspaces.keys().cloned().collect();
     let mut roles: Vec<(&String, &String)> = osc.anythingllm.workspaces.iter().collect();
     // Tony first, then the dispatcher's role order.
     let order = |r: &str| super::dispatch::ROLE_IDS.iter().position(|x| *x == r).unwrap_or(usize::MAX);
@@ -320,6 +327,7 @@ async fn agents_block(st: &DispatchState, os: &OsState, osc: &OsConfig) -> (Vec<
         .map(|(role, slug)| {
             let is_tony = role == "general";
             let ws = workspaces.as_ref().and_then(|w| w.iter().find(|x| &x.slug == slug));
+            let flags = workspaces.as_ref().map(|w| super::allm_audit::role_flags(role, slug, w, &osc.os_name, &all_roles, pinned.as_deref())).unwrap_or_else(|| json!({}));
             json!({
                 "role": role,
                 "label": if is_tony { osc.os_name.clone() } else { super::agents::role_label(role, &osc.os_name) },
@@ -331,6 +339,10 @@ async fn agents_block(st: &DispatchState, os: &OsState, osc: &OsConfig) -> (Vec<
                 "agentProvider": ws.and_then(|w| w.agent_provider.clone()),
                 "agentModel": ws.and_then(|w| w.agent_model.clone()),
                 "active": role_active(&active, slug, is_tony),
+                "duplicateOf": flags.get("duplicateOf").cloned().unwrap_or(Value::Null),
+                "unused": flags.get("unused").cloned().unwrap_or(Value::Null),
+                "nameMismatch": flags.get("nameMismatch").cloned().unwrap_or(Value::Null),
+                "modelMismatch": flags.get("modelMismatch").cloned().unwrap_or(Value::Null),
             })
         })
         .collect();
@@ -591,10 +603,19 @@ pub(crate) fn count_lines(path: &Path, max_bytes: u64) -> std::io::Result<usize>
 
 /// Entities in a knowledge-graph file: `{entities: [...]}` JSON or the MCP memory server's JSONL.
 pub(crate) fn kg_entities(raw: &str) -> usize {
-    match serde_json::from_str::<Value>(raw) {
-        Ok(v) => v["entities"].as_array().map_or(0, Vec::len),
-        Err(_) => raw.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["type"] == "entity").count(),
+    kg_entity_values(raw).len()
+}
+
+/// The knowledge graph's entities: legacy pretty `{entities: [...]}` JSON, else the MCP memory
+/// server's JSONL (`{"type":"entity",...}` per line). A one-line JSONL file parses as a single
+/// object with a `type` key and no `entities`, so it is read line by line too (Phase 3 fix).
+pub(crate) fn kg_entity_values(raw: &str) -> Vec<Value> {
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if let Some(a) = v.get("entities").and_then(Value::as_array) {
+            return a.clone();
+        }
     }
+    raw.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).filter(|v| v["type"] == "entity").collect()
 }
 
 fn store_base(id: &str, label: &str, kind: &str, path: &Path) -> serde_json::Map<String, Value> {
@@ -644,6 +665,14 @@ fn stores_block(config_dir: Option<&Path>, workdir: &Path) -> Vec<Value> {
         Some(d) => out.push(sqlite_store("devqueue", "Dev task queue", &d.join("devqueue.db"), |_, _| {})),
         None => out.push(json!({ "id": "devqueue", "label": "Dev task queue", "kind": "sqlite", "exists": false, "health": "missing", "error": "app config dir unknown", "tables": [], "metrics": {} })),
     }
+    // TaskEnvelope store (the agent worker's source of truth, read-only here).
+    match config_dir {
+        Some(d) => out.push(sqlite_store("tasks", "Task envelopes (tasks.db)", &d.join("tasks.db"), |p, m| {
+            m.insert("openTasks".into(), json!(sqlite_scalar(p, "SELECT COUNT(*) FROM task_envelope WHERE status NOT IN ('review_ready','failed')")));
+            m.insert("handoffRows".into(), json!(sqlite_scalar(p, "SELECT COUNT(*) FROM handoff_log")));
+        })),
+        None => out.push(json!({ "id": "tasks", "label": "Task envelopes (tasks.db)", "kind": "sqlite", "exists": false, "health": "missing", "error": "app config dir unknown", "tables": [], "metrics": {} })),
+    }
     out.push(sqlite_store("cc", "Gateway store (cc.db)", &workdir.join("data").join("command-center").join("cc.db"), |p, m| {
         // RAG vectors = vault rows that carry an embedding (what /api/cc/health reports as `embedded`).
         m.insert("ragVectors".into(), json!(sqlite_scalar(p, "SELECT COUNT(*) FROM vault WHERE vector IS NOT NULL")));
@@ -685,6 +714,78 @@ fn stores_block(config_dir: Option<&Path>, workdir: &Path) -> Vec<Value> {
         m.insert("error".into(), json!(format!("{} does not exist — kg.search has nothing to read", kg.display())));
     }
     out.push(Value::Object(m));
+    out
+}
+
+/// Phase 3 rows: `scrolls` (count, bytes, newest `last_updated`, from each scroll's
+/// frontmatter) and `memory-archive` (file count and bytes; the archive is never parsed or
+/// decompressed here). Read-only; a missing root is reported, never created.
+fn memory_tier_stores(scrolls_root: &Path, archive_root: Option<&Path>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut m = store_base("scrolls", "Memory Scrolls", "dir", scrolls_root);
+    if scrolls_root.is_dir() && !super::staging::is_reparse(scrolls_root) {
+        let (mut n, mut bytes, mut newest, mut invalid) = (0u64, 0u64, String::new(), 0u64);
+        for (dir, cat) in [("core", "core"), ("projects", "project"), ("patterns", "pattern")] {
+            let Ok(rd) = std::fs::read_dir(scrolls_root.join(dir)) else { continue };
+            for e in rd.flatten().take(200) {
+                let p = e.path();
+                let Ok(md) = std::fs::symlink_metadata(&p) else { continue };
+                if !md.is_file() || p.extension().is_none_or(|x| x != "md") || md.len() > 256 * 1024 {
+                    continue;
+                }
+                bytes += md.len();
+                match std::fs::read_to_string(&p).ok().and_then(|t| super::librarian::parse_scroll(&t, Some(cat))) {
+                    Some((meta, _)) => {
+                        n += 1;
+                        if meta.last_updated > newest {
+                            newest = meta.last_updated;
+                        }
+                    }
+                    None => invalid += 1,
+                }
+            }
+        }
+        m.insert("bytes".into(), json!(bytes));
+        m.insert("health".into(), json!(if invalid > 0 { "error" } else { "ok" }));
+        if invalid > 0 {
+            m.insert("error".into(), json!(format!("{invalid} scroll(s) with invalid frontmatter")));
+        }
+        m.insert("newest".into(), if newest.is_empty() { Value::Null } else { json!(newest) });
+        m.insert("metrics".into(), json!({ "scrolls": n }));
+    } else {
+        m.insert("exists".into(), json!(false));
+        m.insert("health".into(), json!("missing"));
+        m.insert("error".into(), json!("no Memory Scrolls yet (run compact-memory or the Settings button)"));
+        m.insert("metrics".into(), json!({ "scrolls": 0 }));
+    }
+    out.push(Value::Object(m));
+    match archive_root {
+        Some(root) if root.is_dir() && !super::staging::is_reparse(root) => {
+            let mut m = store_base("memory-archive", "Cold memory archive", "dir", root);
+            let (mut files, mut bytes) = (0u64, 0u64);
+            let mut stack = vec![(root.to_path_buf(), 0usize)];
+            while let Some((d, depth)) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten().take(5000) {
+                    let Ok(md) = std::fs::symlink_metadata(e.path()) else { continue };
+                    if md.is_dir() && depth < 3 && !md.file_type().is_symlink() {
+                        stack.push((e.path(), depth + 1));
+                    } else if md.is_file() {
+                        files += 1;
+                        bytes += md.len();
+                    }
+                }
+            }
+            m.insert("bytes".into(), json!(bytes));
+            m.insert("health".into(), json!("ok"));
+            m.insert("metrics".into(), json!({ "files": files }));
+            out.push(Value::Object(m));
+        }
+        other => out.push(json!({
+            "id": "memory-archive", "label": "Cold memory archive", "kind": "dir", "path": other.map(|p| p.display().to_string()),
+            "exists": false, "health": "missing", "error": "no cold archive yet (pinned by the first compaction)", "tables": [], "metrics": { "files": 0 }
+        })),
+    }
     out
 }
 
@@ -777,6 +878,24 @@ mod tests {
         let d = std::env::temp_dir().join(format!("introspect-{tag}-{}-{}", std::process::id(), now_ms()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn stores_block_reports_tasks_db() {
+        let d = tmp_dir("tasks-store");
+        let store = super::super::envelope::TaskStore::default();
+        store.init(&d).unwrap();
+        store.create(&super::super::envelope::NewEnvelope { raw_intent: "status card".into(), source: "typed".into(), ..Default::default() }, &[]).unwrap();
+        let stores = stores_block(Some(&d), &d);
+        let t = stores.iter().find(|s| s["id"] == "tasks").expect("tasks store listed");
+        assert_eq!(t["health"], "ok", "{t}");
+        assert_eq!(t["metrics"]["openTasks"], 1);
+        assert_eq!(t["metrics"]["handoffRows"], 1);
+        assert!(t["tables"].as_array().unwrap().iter().any(|x| x["name"] == "task_envelope"), "{t}");
+        let none = stores_block(None, &d);
+        assert_eq!(none.iter().find(|s| s["id"] == "tasks").unwrap()["health"], "missing");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -963,7 +1082,38 @@ name: one
         assert!(count_lines(&dir.join("none.jsonl"), 1024).is_err());
         assert_eq!(kg_entities("{\"entities\":[{\"name\":\"a\"},{\"name\":\"b\"}]}"), 2);
         assert_eq!(kg_entities("{\"type\":\"entity\",\"name\":\"a\"}\n{\"type\":\"relation\"}\n{\"type\":\"entity\"}"), 2);
+        // Phase 3 fix: a ONE-line JSONL graph (a single entity) used to count 0.
+        assert_eq!(kg_entities("{\"type\":\"entity\",\"name\":\"proj-agentic-os\",\"entityType\":\"scroll\",\"observations\":[]}\n"), 1);
+        assert_eq!(kg_entities("{\"type\":\"entity\",\"name\":\"a\"}"), 1);
+        assert_eq!(kg_entities("{\"type\":\"relation\",\"from\":\"a\",\"to\":\"b\"}"), 0);
+        assert_eq!(kg_entities("{\"entities\":[],\"relations\":[]}"), 0, "legacy shape unchanged");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn memory_tier_rows_count_scrolls_and_archive_files() {
+        let d = tmp_dir("tiers");
+        let none = memory_tier_stores(&d.join("no-scrolls"), None);
+        assert_eq!((none[0]["id"].as_str(), none[0]["health"].as_str()), (Some("scrolls"), Some("missing")));
+        assert_eq!((none[1]["id"].as_str(), none[1]["health"].as_str()), (Some("memory-archive"), Some("missing")));
+        assert!(!d.join("no-scrolls").exists(), "never created");
+        let scrolls = d.join("scrolls");
+        std::fs::create_dir_all(scrolls.join("projects")).unwrap();
+        std::fs::create_dir_all(scrolls.join("core")).unwrap();
+        let fm = |id: &str, cat: &str, at: &str| format!("---\nscroll_id: \"{id}\"\ncategory: \"{cat}\"\nlast_updated: \"{at}\"\nversion: 1\nsource_archive_ids: []\nsupersedes: []\n---\n# X\n");
+        std::fs::write(scrolls.join("projects").join("agentic-os.md"), fm("proj-agentic-os", "project", "2026-11-19T09:00:00-05:00")).unwrap();
+        std::fs::write(scrolls.join("core").join("architecture_decisions.md"), fm("core-architecture-decisions", "core", "2026-11-18T09:00:00-05:00")).unwrap();
+        let archive = d.join("archive");
+        std::fs::create_dir_all(archive.join("2026").join("11")).unwrap();
+        std::fs::write(archive.join("2026").join("11").join("arch-2026-11-19-01.jsonl.gz"), b"not parsed").unwrap();
+        std::fs::write(archive.join("manifest.jsonl"), b"{}\n").unwrap();
+        let rows = memory_tier_stores(&scrolls, Some(&archive));
+        assert_eq!(rows[0]["health"], "ok", "{}", rows[0]);
+        assert_eq!(rows[0]["metrics"]["scrolls"], 2);
+        assert_eq!(rows[0]["newest"], "2026-11-19T09:00:00-05:00");
+        assert_eq!(rows[1]["metrics"]["files"], 2);
+        assert_eq!(rows[1]["bytes"], 13);
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]

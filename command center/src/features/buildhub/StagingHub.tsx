@@ -5,7 +5,7 @@ import { isTauri } from "@/lib/platform";
 import { xcmd, type ExtCommands } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
 import { useLayout } from "@/core/widgets/layout-store";
-import { errText, startHub, useHub } from "./hub-store";
+import { clearOnSuccess, errText, startHub, useHub } from "./hub-store";
 import { currentMilestone, elapsedEta, hubCounts, RUNTIME_BADGE, smokeBadge, STATUS_LABEL, workerIndicator } from "./format";
 import { PeekView } from "./PeekView";
 import { SandboxView } from "./SandboxView";
@@ -209,8 +209,7 @@ function BuildCard({ b }: { b: BuildView }) {
             ev.preventDefault();
             const d = steer.trim();
             if (!d) return;
-            setSteer("");
-            void act("Steer", "build_steer", { buildId: id, directive: d });
+            void clearOnSuccess(act("Steer", "build_steer", { buildId: id, directive: d }), () => setSteer(""));
           }}
         >
           <input value={steer} onChange={(ev) => setSteer(ev.target.value)} maxLength={500} placeholder="Steer — e.g. “dark theme, bigger buttons” (next agent step, no restart)" className="field !h-8 min-w-0 flex-1 !py-1 text-[11px]" />
@@ -319,7 +318,7 @@ function RepairCard({ b }: { b: BuildView }) {
         className="mt-2 flex gap-1.5"
         onSubmit={(ev) => {
           ev.preventDefault();
-          void act("Re-queue", "build_requeue", { buildId: id, note: note.trim() || undefined }).then(() => setNote(""));
+          void clearOnSuccess(act("Re-queue", "build_requeue", { buildId: id, note: note.trim() || undefined }), () => setNote(""));
         }}
       >
         <input value={note} onChange={(ev) => setNote(ev.target.value)} maxLength={500} placeholder="Fix note for the agents (optional) — e.g. “inline the CSS, no CDN”" className="field !h-8 min-w-0 flex-1 !py-1 text-[11px]" />

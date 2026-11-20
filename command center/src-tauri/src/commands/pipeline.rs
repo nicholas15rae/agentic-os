@@ -1,25 +1,27 @@
-//! Idea-to-Execution pipeline, Play Place actions, Comms recall/WhatsApp, and
-//! the phone → desktop queue.
+//! Ideas, Play Place actions, Comms recall/WhatsApp, and the phone → desktop queue.
 //!
-//!   Stage 1  idea_capture   Tony → Prompter (task breakdown) → Librarian (Ideas & Tasks ledger)
-//!   Stage 2  pipeline_run   Prompter → Designer (design brief ⇄ UI blueprint)
-//!   Stage 3                 Prompter → Coder (build prompt) → prototype → Play Place card
-//!   Stage 4                 at every handoff a non-blocking Verifier check (privacy-diffused if remote)
+//! The Idea-to-Execution pipeline itself is the sequential TaskEnvelope worker
+//! (`taskworker.rs`, Part 5): Tony → Prompter → Librarian → Prompter → Designer → Prompter →
+//! Coder → checks → Librarian audit → Prompter verify → `staging/<slug>/`. What stays here:
 //!
-//! Every agent-to-agent message is emitted as a `pipeline-step` event with the
-//! thread it belongs to (Designer / Coder / Prompter / Librarian tabs) and as
-//! progress to the gateway for the phone HUD.
+//! - thin compatibility shims for the old commands (`idea_capture` / `idea_pipeline_run` →
+//!   a task, `pipeline_resume` → `task_retry`), until the webview calls `task_*` directly;
+//! - the Play Place actions (iterate / approve / commit), still inline;
+//! - `inbox_loop`: every phone queue item is CLAIMED first; build kinds only create a task and
+//!   answer at once (the worker runs it), Tony turns and commands run inline.
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::agents::{workspace_chat_t, OsStep};
 use super::bridge::BridgeState;
 use super::dispatch::{extract_json, run_chat, short, ChatMessage, DispatchState, Priority};
+use super::envelope::{clip, one_line, TaskStore};
 use super::os_core::{self, OsConfig, OsState};
+use super::taskworker::{self, CreateArgs};
 
 // ── Gateway client (loopback; carries the mesh token when the lock is on) ──
 
@@ -69,7 +71,7 @@ fn slugify(s: &str) -> String {
     out.trim_matches('-').chars().take(48).collect::<String>().trim_end_matches('-').to_string()
 }
 
-// ── Events ──────────────────────────────────────────────────────────────────
+// ── Events (Play Place actions) ─────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +109,7 @@ impl Run<'_> {
         });
     }
 
-    /// Stage 4: non-blocking verifier at a handoff. Reports into the same thread.
+    /// Non-blocking verifier at a Play Place handoff (never under the kill switch).
     fn verify(&self, handoff: &str, thread: &str, original: &str, payload: &str) {
         let app = self.app.clone();
         let (id, idea, thread, handoff) = (self.id.clone(), self.idea_id.clone(), thread.to_string(), handoff.to_string());
@@ -119,6 +121,9 @@ impl Run<'_> {
         tauri::async_runtime::spawn(async move {
             let st = app.state::<DispatchState>();
             let os = app.state::<OsState>();
+            if os.snapshot().privacy.kill_switch {
+                return;
+            }
             let t0 = Instant::now();
             let r = run_chat(&st, &os, vec![ChatMessage::new("system", "You are a terse verifier."), ChatMessage::new("user", msg)], Priority::Background, Some("verifier".into()), Some(45)).await;
             let (ok, text) = match r.ok().and_then(|r| extract_json(&r.content)) {
@@ -132,9 +137,9 @@ impl Run<'_> {
     }
 }
 
-/// Ask a role. `offload` = run it on an external engine (Claude/Gemini/llm CLI…)
-/// instead of the local GPU. Otherwise: its AnythingLLM workspace, then the local
-/// chain as stand-in. Pipeline work is BACKGROUND — Tony keeps the GPU first.
+/// Ask a role for a Play Place action. `offload` = an external engine (Claude/Gemini/llm CLI…)
+/// instead of the local GPU. Otherwise: its AnythingLLM workspace, then the local chain as
+/// stand-in. BACKGROUND work: Tony keeps the GPU first. (The task worker never uses this.)
 async fn ask(state: &DispatchState, os: &OsState, role: &str, prompt: &str, secs: u64, offload: Option<&str>) -> Result<(String, String), String> {
     if let Some(engine) = offload {
         let (a, _) = super::agents::external_chat(state, os, engine, &[ChatMessage::new("user", prompt.to_string())], secs).await?;
@@ -142,7 +147,7 @@ async fn ask(state: &DispatchState, os: &OsState, role: &str, prompt: &str, secs
     }
     let cfg = os.snapshot();
     if let Ok(s) = slug(&cfg, role) {
-        if let Ok((a, _)) = workspace_chat_t(state, os, &s, prompt, Some(secs), false).await {
+        if let Ok((a, _)) = workspace_chat_t(state, os, &s, role, prompt, Some(secs), false, super::allm::ChatTarget::TonyMonthly).await {
             return Ok((a, format!("anythingllm:{s}")));
         }
     }
@@ -150,7 +155,7 @@ async fn ask(state: &DispatchState, os: &OsState, role: &str, prompt: &str, secs
     Ok((r.content, format!("{} (stand-in for {role})", r.provider_id)))
 }
 
-// ── Stage 1: idea capture ───────────────────────────────────────────────────
+// ── Compatibility shims → TaskEnvelope worker ───────────────────────────────
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,260 +163,96 @@ pub struct IdeaResult {
     idea: Value,
     reply: String,
     steps: Vec<OsStep>,
+    task_id: String,
 }
 
-#[tauri::command]
-pub async fn idea_capture(app: AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, text: String) -> Result<IdeaResult, String> {
-    capture(&app, &state, &os, &text).await
+/// A short working title from the user's words (the Prompter's triage names it properly).
+fn working_title(text: &str) -> String {
+    let t = one_line(text);
+    clip(&t.split(' ').take(8).collect::<Vec<_>>().join(" "), 60)
 }
 
-pub async fn capture(app: &AppHandle, state: &DispatchState, os: &OsState, text: &str) -> Result<IdeaResult, String> {
+/// The task an inbox item already created (its queue id is the dedupe key).
+fn task_for_dedupe(store: &TaskStore, key: &str) -> Option<String> {
+    store.with(|c| Ok(c.query_row("SELECT task_id FROM task_envelope WHERE dedupe_key = ?1", rusqlite::params![key], |r| r.get::<_, String>(0)).ok())).ok().flatten()
+}
+
+/// Approved build (Tier-3 yes / Build prototype click / the phone's `capture:true`): a ledger
+/// idea (best-effort mirror) and a queued task. Returns at once; the worker does the rest.
+pub async fn capture_task(app: &AppHandle, state: &DispatchState, os: &OsState, text: &str, source: &str, dedupe: Option<String>) -> Result<IdeaResult, String> {
+    // Phase 2 Part C: Tony's mode gates every build (Solo queues nothing).
+    super::modes::check_dispatch(os.modes.effective().dispatch, super::modes::DispatchKind::BuildPipeline { auto: false })?;
     let cfg = os.snapshot();
-    let mut run = Run { app, id: format!("idea-{}", os_core::now_secs()), idea_id: None, steps: vec![] };
-    let ask_prompter = format!(
-        "[{} → Prompter] Break this idea into a buildable spec. Reply ONLY with JSON: {{\"title\": short name, \"summary\": 2 sentences, \"tasks\": [5-10 concrete tasks as strings], \"spec\": {{\"problem\": str, \"users\": str, \"coreFeatures\": [str], \"screens\": [str], \"dataModel\": str, \"risks\": [str]}}}}.\n\nIdea (in the user's words): {text}",
-        cfg.os_name
-    );
-    run.emit("capture", 10, "prompter", super::agents::step("delegate", "os", "prompter", &ask_prompter, true, 0), None);
-    let t0 = Instant::now();
-    let (raw, by) = ask(state, os, "prompter", &ask_prompter, 180, None).await.unwrap_or_else(|e| (format!("({e})"), "none".into()));
-    let j = extract_json(&raw).unwrap_or_else(|| json!({ "title": text.chars().take(48).collect::<String>(), "summary": raw.chars().take(400).collect::<String>(), "tasks": [], "spec": {} }));
-    run.emit("capture", 40, "prompter", super::agents::step("reply", "prompter", "os", format!("{}\n\nTasks:\n{}", j["summary"].as_str().unwrap_or(""), j["tasks"].as_array().map(|t| t.iter().filter_map(|x| x.as_str()).map(|x| format!("• {x}")).collect::<Vec<_>>().join("\n")).unwrap_or_default()), true, t0.elapsed().as_millis()), None);
-    run.verify("Tony → Prompter", "prompter", text, &raw);
-
-    // Librarian: ledger entry (synced + vault-indexed), markdown in C:\ai-hub\memory, and the librarian workspace.
-    let title = j["title"].as_str().unwrap_or("Untitled idea").to_string();
-    let tasks: Vec<Value> = j["tasks"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|t| t.as_str().map(|s| json!({ "id": uuid_like(), "text": s, "done": false }))).collect();
-    run.emit("ledger", 60, "librarian", super::agents::step("delegate", "os", "librarian", format!("Save “{title}” to the Ideas & Tasks Ledger"), true, 0), None);
-    let item = gw(state, &cfg, reqwest::Method::POST, "/api/cc/c/ideas", Some(json!({ "title": title, "idea": text, "summary": j["summary"], "tasks": tasks, "spec": j["spec"], "status": "captured", "by": by }))).await?;
-    let idea_id = item["id"].as_str().unwrap_or("").to_string();
-    run.idea_id = Some(idea_id.clone());
-    let md = format!(
-        "# {title}\n\n_{}_ · captured by {}\n\n## The idea\n{text}\n\n## Summary\n{}\n\n## Tasks\n{}\n\n## Spec\n```json\n{}\n```\n",
-        chrono::Local::now().format("%Y-%m-%d %H:%M"),
-        cfg.os_name,
-        j["summary"].as_str().unwrap_or(""),
-        tasks.iter().filter_map(|t| t["text"].as_str()).map(|t| format!("- [ ] {t}")).collect::<Vec<_>>().join("\n"),
-        serde_json::to_string_pretty(&j["spec"]).unwrap_or_default()
-    );
-    let path = ideas_dir().join(format!("{}-{}.md", chrono::Local::now().format("%Y-%m-%d"), slugify(&title)));
-    let saved_file = std::fs::create_dir_all(ideas_dir()).and_then(|_| std::fs::write(&path, &md)).is_ok();
-    let in_ws = librarian_ingest(state, os, &format!("Idea: {title}"), &md).await;
-    run.emit(
-        "ledger",
-        80,
-        "librarian",
-        super::agents::step("reply", "librarian", "os", format!("Saved to the Ideas & Tasks Ledger{}{}", if saved_file { format!(" · {}", path.display()) } else { String::new() }, if in_ws { " · indexed in the Librarian workspace" } else { "" }), true, 0),
-        None,
-    );
-    let reply = format!(
-        "I broke “{title}” into {} tasks and saved the concept to your Ideas & Tasks Ledger. Want me to have the Prompter, Designer, and Coder spin up a prototype in the Play Place?",
-        tasks.len()
-    );
-    Ok(IdeaResult { idea: item, reply, steps: run.steps })
+    let store = app.state::<TaskStore>();
+    let known = super::devqueue::known_secrets(state, os);
+    if let Some(id) = dedupe.as_deref().and_then(|k| task_for_dedupe(store.inner(), k)) {
+        let e = store.with(|c| super::envelope::get_bare(c, &id))?.ok_or("task vanished")?;
+        return Ok(IdeaResult { idea: json!({ "id": e.idea_id.clone().unwrap_or_else(|| e.task_id.clone()), "title": e.title, "tasks": [], "taskId": e.task_id }), reply: format!("\"{}\" is already queued.", e.title), steps: vec![], task_id: e.task_id });
+    }
+    let title = working_title(text);
+    let item = gw(state, &cfg, reqwest::Method::POST, "/api/cc/c/ideas", Some(json!({ "title": title, "idea": text, "summary": "", "tasks": [], "spec": {}, "status": "prototyping", "by": cfg.os_name }))).await.ok();
+    let idea_id = item.as_ref().and_then(|i| i["id"].as_str()).filter(|s| !s.is_empty()).map(String::from);
+    let args = CreateArgs { raw_intent: text.to_string(), title: Some(title), thread: None, source: source.into(), idea_id, options: None, dedupe_key: dedupe };
+    let (e, _) = taskworker::create_task(store.inner(), &args, cfg.worker.max_iterations, &known)?;
+    taskworker::announce_queued(app, &e);
+    let mut idea = item.unwrap_or_else(|| json!({ "id": e.task_id, "title": e.title, "tasks": [] }));
+    idea["taskId"] = json!(e.task_id);
+    Ok(IdeaResult { idea, reply: format!("Queued \"{}\" for the Prompter. Ask me where the build's at anytime.", e.title), steps: vec![], task_id: e.task_id })
 }
 
-fn ideas_dir() -> PathBuf {
-    PathBuf::from(r"C:\ai-hub\memory\ideas")
-}
-
-fn uuid_like() -> String {
-    use aes_gcm::aead::rand_core::RngCore;
-    let mut b = [0u8; 8];
-    aes_gcm::aead::OsRng.fill_bytes(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-/// Put a document into the Librarian's AnythingLLM workspace (best-effort).
-async fn librarian_ingest(state: &DispatchState, os: &OsState, title: &str, text: &str) -> bool {
-    let cfg = os.snapshot();
-    let (Ok(ws), Some(key)) = (slug(&cfg, "librarian"), super::secrets::get(state, "anythingllm")) else { return false };
-    super::agents::allm(state, &cfg.anythingllm.base_url, &key, reqwest::Method::POST, "/v1/document/raw-text", Some(json!({ "textContent": text, "addToWorkspaces": ws, "metadata": { "title": title, "docSource": "agentic-os" } })), 60)
-        .await
-        .is_ok()
-}
-
-// ── Stages 2 + 3: blueprint → prototype → Play Place ────────────────────────
-
-const PROTOTYPE_RULES: &str = "Output ONE complete, self-contained HTML document in a single ```html fenced block: Tailwind via <script src=\"https://cdn.tailwindcss.com\"></script>, vanilla JS (or React via https://esm.sh if truly needed), realistic sample data, every button wired, dark cinematic glass look unless the brief says otherwise, mobile-first. No external images except https URLs. No explanations outside the code block beyond 3 short lines.";
-
-/// Everything a pipeline knows so far — written as a checkpoint before every
-/// handoff, so a failed step rolls back to here and can be retried or offloaded.
-#[derive(Serialize, serde::Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct PipeState {
-    pipeline_id: String,
-    idea_id: String,
-    title: String,
-    original: String,
-    tasks: String,
-    spec: Value,
-    brief: String,
-    blueprint: String,
-    by_designer: String,
-    build_prompt: String,
-    code: String,
-    by_coder: String,
-    /// Stages finished (0–4): brief, blueprint, build prompt, code.
-    done: u8,
-    failed_stage: Option<String>,
-    error: Option<String>,
-}
-
-const STAGES: [&str; 4] = ["brief", "blueprint", "merge", "build"];
-
-fn checkpoint_dir() -> PathBuf {
-    PathBuf::from(r"C:\ai-hub\memory\checkpoints")
-}
-
-fn save_checkpoint(st: &PipeState, step: &str) -> Option<String> {
-    let dir = checkpoint_dir();
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{}-{step}.json", st.pipeline_id));
-    std::fs::write(&path, serde_json::to_string_pretty(st).ok()?).ok()?;
-    Some(path.display().to_string())
-}
-
-#[tauri::command]
-pub async fn idea_pipeline_run(app: AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, idea_id: String) -> Result<Value, String> {
-    run_pipeline(&app, &state, &os, &idea_id).await
-}
-
-pub async fn run_pipeline(app: &AppHandle, state: &DispatchState, os: &OsState, idea_id: &str) -> Result<Value, String> {
+/// A ledger idea → a task (an open task for the same idea is returned, not duplicated).
+pub async fn task_from_idea(app: &AppHandle, state: &DispatchState, os: &OsState, idea_id: &str, dedupe: Option<String>) -> Result<Value, String> {
+    super::modes::check_dispatch(os.modes.effective().dispatch, super::modes::DispatchKind::BuildPipeline { auto: false })?;
+    let store = app.state::<TaskStore>();
+    if let Some(e) = store.with(|c| super::envelope::get_bare(c, idea_id))? {
+        // Already a task id (the shim's `idea.id` when the ledger was unreachable).
+        return Ok(json!({ "taskId": e.task_id, "created": false, "cardId": e.card_id, "hasHtml": false, "steps": [] }));
+    }
     let cfg = os.snapshot();
     let list = gw(state, &cfg, reqwest::Method::GET, "/api/pipeline/ideas", None).await?;
     let idea = list["items"].as_array().into_iter().flatten().find(|i| i["id"] == idea_id).cloned().ok_or("idea not found in the ledger")?;
-    let st = PipeState {
-        pipeline_id: format!("pipe-{}", os_core::now_secs()),
-        idea_id: idea_id.to_string(),
-        title: idea["title"].as_str().unwrap_or("Prototype").to_string(),
-        original: idea["idea"].as_str().unwrap_or("").to_string(),
-        tasks: idea["tasks"].as_array().map(|t| t.iter().filter_map(|x| x["text"].as_str()).map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n")).unwrap_or_default(),
-        spec: idea["spec"].clone(),
-        ..Default::default()
-    };
-    let _ = gw(state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/ideas/{idea_id}"), Some(json!({ "status": "prototyping" }))).await;
-    advance(app, state, os, st, None).await
+    let title = idea["title"].as_str().unwrap_or("Prototype").to_string();
+    let text = idea["idea"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or(&title).to_string();
+    let args = CreateArgs { raw_intent: text, title: Some(title), thread: None, source: "ledger".into(), idea_id: Some(idea_id.to_string()), options: None, dedupe_key: dedupe };
+    let (e, created) = taskworker::create_task(store.inner(), &args, cfg.worker.max_iterations, &super::devqueue::known_secrets(state, os))?;
+    if created {
+        let _ = gw(state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/ideas/{idea_id}"), Some(json!({ "status": "prototyping", "taskId": e.task_id }))).await;
+    }
+    taskworker::announce_queued(app, &e);
+    Ok(json!({ "taskId": e.task_id, "created": created, "cardId": e.card_id, "hasHtml": false, "steps": [] }))
 }
 
-/// Retry a failed step from its checkpoint, optionally on an external engine.
+/// Shim: an approved build → a queued task (no blocking model call any more).
 #[tauri::command]
-pub async fn pipeline_resume(app: AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, checkpoint: String, offload: Option<String>) -> Result<Value, String> {
-    let path = PathBuf::from(&checkpoint);
-    let canon = std::fs::canonicalize(&path).map_err(|_| "checkpoint not found")?;
-    if !canon.starts_with(std::fs::canonicalize(checkpoint_dir()).map_err(|e| e.to_string())?) {
-        return Err("not a pipeline checkpoint".into());
-    }
-    let mut st: PipeState = serde_json::from_str(&std::fs::read_to_string(&canon).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let stage = st.failed_stage.take().unwrap_or_else(|| STAGES.get(st.done as usize).unwrap_or(&"build").to_string());
-    st.error = None;
-    if let Some(e) = &offload {
-        if !["claude-cli", "gemini-cli", "llm-cli", "claude-api", "gemini-api"].contains(&e.as_str()) {
-            return Err("offload engine must be claude-cli, gemini-cli, llm-cli, claude-api or gemini-api".into());
-        }
-    }
-    advance(&app, &state, &os, st, offload.map(|e| (stage, e))).await
+pub async fn idea_capture(app: AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, text: String) -> Result<IdeaResult, String> {
+    capture_task(&app, &state, &os, &text, "typed", None).await
 }
 
-async fn advance(app: &AppHandle, state: &DispatchState, os: &OsState, mut st: PipeState, forced: Option<(String, String)>) -> Result<Value, String> {
-    let cfg = os.snapshot();
-    let sc = cfg.scheduler.clone();
-    let mut run = Run { app, id: st.pipeline_id.clone(), idea_id: Some(st.idea_id.clone()), steps: vec![] };
-    let cloud_ok = !cfg.privacy.kill_switch && cfg.compute.mode != os_core::ComputeMode::Local;
-    // Slider 2: ≥ 50 % sends the heavy build step to the CLI/cloud engine, ≥ 80 % the design step too.
-    let auto = |stage: &str| -> Option<String> {
-        let heavy = (stage == "build" && sc.offload_pct >= 50) || (stage == "blueprint" && sc.offload_pct >= 80);
-        (cloud_ok && heavy).then(|| sc.offload_engine.clone())
-    };
-    let (title, original) = (st.title.clone(), st.original.clone());
-    for (i, stage) in STAGES.iter().enumerate() {
-        if st.done as usize > i {
-            continue;
-        }
-        save_checkpoint(&st, &format!("{i}-{stage}"));
-        let engine = forced.as_ref().filter(|(s, _)| s == stage).map(|(_, e)| e.clone()).or_else(|| auto(stage));
-        let t0 = Instant::now();
-        let result: Result<(), String> = match *stage {
-            "brief" => {
-                let q = format!("[Prompter] Turn this idea into a design brief for the Designer agent: goal, audience, key screens, content per screen, interactions, tone, constraints. Be specific and short.\n\nIdea: {original}\nSpec: {}", st.spec);
-                ask(state, os, "prompter", &q, 180, engine.as_deref()).await.map(|(b, _)| {
-                    st.brief = b;
-                    run.emit("brief", 15, "designer", super::agents::step("delegate", "prompter", "designer", &st.brief, true, t0.elapsed().as_millis()), None);
-                    run.verify("Prompter → Designer", "designer", &original, &st.brief);
-                })
-            }
-            "blueprint" => {
-                let q = format!("{}\n\nReturn: (1) design tokens JSON, (2) component hierarchy, (3) wireframe per breakpoint, (4) a first visual prototype. {PROTOTYPE_RULES}", st.brief);
-                ask(state, os, "designer", &q, 420, engine.as_deref()).await.map(|(b, by)| {
-                    st.blueprint = b;
-                    st.by_designer = by;
-                    run.emit("blueprint", 45, "designer", super::agents::step("reply", "designer", "prompter", strip_code(&st.blueprint), true, t0.elapsed().as_millis()), None);
-                })
-            }
-            "merge" => {
-                st.build_prompt = format!(
-                    "[Prompter → Coder] Build a clickable prototype of “{title}”.\n\nFUNCTIONAL GOAL:\n{original}\n\nTASKS:\n{}\n\nDESIGNER BLUEPRINT (follow its tokens, hierarchy and layout):\n{}\n\n{PROTOTYPE_RULES}",
-                    st.tasks,
-                    strip_code(&st.blueprint).chars().take(6000).collect::<String>()
-                );
-                run.emit("build", 55, "coder", super::agents::step("delegate", "prompter", if auto("build").is_some() { "offload" } else { "coder" }, &st.build_prompt, true, 0), None);
-                run.verify("Prompter → Coder", "coder", &original, &st.build_prompt);
-                Ok(())
-            }
-            _ => {
-                let r = ask(state, os, "coder", &st.build_prompt, 600, engine.as_deref()).await;
-                r.and_then(|(code, by)| {
-                    if extract_html(&code).or_else(|| extract_html(&st.blueprint)).is_none() {
-                        return Err(format!("no runnable HTML came back from {by}"));
-                    }
-                    st.code = code;
-                    st.by_coder = by;
-                    Ok(())
-                })
-            }
-        };
-        match result {
-            Ok(()) => st.done = i as u8 + 1,
-            Err(e) => {
-                // Roll back to the pre-handoff checkpoint and offer Retry / Offload in Tony's chat.
-                st.failed_stage = Some(stage.to_string());
-                st.error = Some(e.clone());
-                let path = save_checkpoint(&st, &format!("{i}-{stage}-failed"));
-                let _ = app.emit("pipeline-failed", json!({ "pipelineId": st.pipeline_id, "ideaId": st.idea_id, "title": title, "stage": stage, "error": e, "checkpoint": path }));
-                return Err(format!("{stage} step failed: {e}"));
-            }
-        }
-    }
-
-    let html = extract_html(&st.code).or_else(|| extract_html(&st.blueprint));
-    run.emit(
-        "build",
-        85,
-        "coder",
-        super::agents::step("reply", "coder", "prompter", format!("Prototype built by {} ({} KB of HTML).\n{}", st.by_coder, html.as_ref().map(|h| h.len() / 1024).unwrap_or(0), strip_code(&st.code).chars().take(600).collect::<String>()), true, 0),
-        None,
-    );
-    let card = gw(
-        state,
-        &cfg,
-        reqwest::Method::POST,
-        "/api/play-place",
-        Some(json!({
-            "title": title, "idea": original, "ideaId": st.idea_id, "brief": st.brief, "blueprint": strip_code(&st.blueprint),
-            "buildPrompt": st.build_prompt, "html": html.clone().unwrap_or_default(), "source": "coder", "status": "staged",
-            "by": { "designer": st.by_designer, "coder": st.by_coder },
-            "versions": [{ "at": os_core::now_secs(), "by": st.by_coder, "notes": "first build" }],
-            "pipelineId": st.pipeline_id,
-            "chain": run.steps.iter().map(|s| json!({ "from": s.from, "to": s.to, "kind": s.kind, "text": s.text.chars().take(4000).collect::<String>() })).collect::<Vec<_>>(),
-        })),
-    )
-    .await?;
-    let card_id = card["id"].as_str().unwrap_or("").to_string();
-    let _ = gw(state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/ideas/{}", st.idea_id), Some(json!({ "status": "staged", "cardId": card_id }))).await;
-    save_checkpoint(&st, "done");
-    run.emit("done", 100, "coder", super::agents::step("reply", "os", "user", format!("Prototype “{title}” is live in the Play Place and ready for your review."), html.is_some(), 0), Some(card_id.clone()));
-    Ok(json!({ "cardId": card_id, "hasHtml": html.is_some(), "steps": run.steps }))
+/// Shim: a ledger "Run" → `task_create{idea_id}`. Returns at once with `{taskId}`.
+#[tauri::command]
+pub async fn idea_pipeline_run(app: AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, idea_id: String) -> Result<Value, String> {
+    task_from_idea(&app, &state, &os, &idea_id, None).await
 }
+
+/// The task id behind a "Retry step" action, or a clear error for an old checkpoint path.
+pub(crate) fn resume_target(checkpoint: &str) -> Result<&str, String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let c = checkpoint.trim();
+    if RE.get_or_init(|| regex::Regex::new(r"^t-\d{1,16}-[a-z0-9]{6}$").unwrap()).is_match(c) {
+        return Ok(c);
+    }
+    Err("That's a checkpoint from the old pipeline, which the task worker replaced: it can't be resumed. Start the build again from the Ideas Ledger (Run).".into())
+}
+
+/// Shim: Retry / Offload on a failed step → `task_retry` (the checkpoint is the task id).
+#[tauri::command]
+pub fn pipeline_resume(app: AppHandle, checkpoint: String, offload: Option<String>) -> Result<Value, String> {
+    let id = resume_target(&checkpoint)?.to_string();
+    let e = taskworker::task_retry(app, id, offload)?;
+    Ok(json!({ "taskId": e.task_id, "status": e.status, "stage": e.stage, "cardId": e.card_id }))
+}
+
+const PROTOTYPE_RULES: &str = "Output ONE complete, self-contained HTML document in a single ```html fenced block: Tailwind via <script src=\"https://cdn.tailwindcss.com\"></script>, vanilla JS (or React via https://esm.sh if truly needed), realistic sample data, every button wired, dark cinematic glass look unless the brief says otherwise, mobile-first. No external images except https URLs. No explanations outside the code block beyond 3 short lines.";
 
 /// Blueprint text without the big code block (for threads and briefs).
 fn strip_code(s: &str) -> String {
@@ -437,14 +278,14 @@ pub async fn playplace_iterate(app: AppHandle, state: State<'_, DispatchState>, 
         if role == "designer" { "Designer" } else { "Coder" },
         c["html"].as_str().unwrap_or("").chars().take(40_000).collect::<String>()
     );
-    run.emit("tweak", 20, role, super::agents::step("delegate", "os", role, format!("Revise “{}”: {notes}", c["title"].as_str().unwrap_or("")), true, 0), Some(card_id.clone()));
+    run.emit("tweak", 20, role, super::agents::step("delegate", "tony", role, format!("Revise “{}”: {notes}", c["title"].as_str().unwrap_or("")), true, 0), Some(card_id.clone()));
     let t0 = Instant::now();
     let (out, by) = ask(&state, &os, role, &q, 600, None).await?;
     let html = extract_html(&out).ok_or_else(|| format!("{role} returned no HTML: {}", out.chars().take(200).collect::<String>()))?;
     let mut versions = c["versions"].as_array().cloned().unwrap_or_default();
     versions.push(json!({ "at": os_core::now_secs(), "by": role, "notes": notes }));
     let updated = gw(&state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/playplace/{card_id}"), Some(json!({ "html": html, "versions": versions, "status": "staged", "lastBy": by }))).await?;
-    run.emit("tweak", 100, role, super::agents::step("reply", role, "os", format!("Revised ({} KB). {}", html.len() / 1024, strip_code(&out).chars().take(300).collect::<String>()), true, t0.elapsed().as_millis()), Some(card_id));
+    run.emit("tweak", 100, role, super::agents::step("reply", role, "tony", format!("Revised ({} KB). {}", html.len() / 1024, strip_code(&out).chars().take(300).collect::<String>()), true, t0.elapsed().as_millis()), Some(card_id));
     Ok(updated)
 }
 
@@ -452,8 +293,18 @@ pub async fn playplace_iterate(app: AppHandle, state: State<'_, DispatchState>, 
 pub async fn playplace_approve(app: AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, card_id: String) -> Result<Value, String> {
     let cfg = os.snapshot();
     let c = card(&state, &cfg, &card_id).await?;
-    let mut run = Run { app: &app, id: format!("approve-{}", os_core::now_secs()), idea_id: c["ideaId"].as_str().map(String::from), steps: vec![] };
+    let before = c["status"].as_str().filter(|s| !s.is_empty() && *s != "building").unwrap_or("staged").to_string();
     let _ = gw(&state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/playplace/{card_id}"), Some(json!({ "status": "building" }))).await;
+    let r = approve_inner(&app, &state, &os, &cfg, &c, &card_id).await;
+    if r.is_err() {
+        // Never leave the card stuck in "building".
+        let _ = gw(&state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/playplace/{card_id}"), Some(json!({ "status": before }))).await;
+    }
+    r
+}
+
+async fn approve_inner(app: &AppHandle, state: &DispatchState, os: &OsState, cfg: &OsConfig, c: &Value, card_id: &str) -> Result<Value, String> {
+    let mut run = Run { app, id: format!("approve-{}", os_core::now_secs()), idea_id: c["ideaId"].as_str().map(String::from), steps: vec![] };
     let q = format!(
         "[Prompter] The user APPROVED this prototype's look and flow. Write technical build instructions for the Coder to turn it into a production feature: stack, file tree, components, state/data model, API calls, step-by-step tasks, acceptance tests. Don't invent existing file paths — propose new ones.\n\nIdea: {}\nBlueprint: {}\nPrototype HTML (reference):\n{}",
         c["idea"].as_str().unwrap_or(""),
@@ -461,18 +312,37 @@ pub async fn playplace_approve(app: AppHandle, state: State<'_, DispatchState>, 
         c["html"].as_str().unwrap_or("").chars().take(12_000).collect::<String>()
     );
     let t0 = Instant::now();
-    let (plan, _) = ask(&state, &os, "prompter", &q, 300, None).await?;
-    run.emit("approve", 40, "prompter", super::agents::step("reply", "prompter", "coder", &plan, true, t0.elapsed().as_millis()), Some(card_id.clone()));
+    let (plan, _) = ask(state, os, "prompter", &q, 300, None).await?;
+    run.emit("approve", 40, "prompter", super::agents::step("reply", "prompter", "coder", &plan, true, t0.elapsed().as_millis()), Some(card_id.to_string()));
     run.verify("Prompter → Coder (build)", "coder", c["idea"].as_str().unwrap_or(""), &plan);
     let t0 = Instant::now();
-    let offload = { let c = os.snapshot(); (c.scheduler.offload_pct >= 50 && !c.privacy.kill_switch).then(|| c.scheduler.offload_engine.clone()) };
-    let (impl_out, _) = ask(&state, &os, "coder", &format!("[Prompter → Coder] Build instructions for an approved prototype. Start the implementation: list the files you'd create and give the core code for each.\n\n{plan}"), 600, offload.as_deref()).await?;
-    run.emit("approve", 100, "coder", super::agents::step("reply", "coder", "os", impl_out.chars().take(3000).collect::<String>(), true, t0.elapsed().as_millis()), Some(card_id.clone()));
-    let updated = gw(&state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/playplace/{card_id}"), Some(json!({ "status": "approved", "buildPlan": plan, "coderOutput": impl_out }))).await?;
+    let offload = {
+        let c = os.snapshot();
+        (c.scheduler.offload_pct >= 50 && !c.privacy.kill_switch).then(|| c.scheduler.offload_engine.clone())
+    };
+    let (impl_out, _) = ask(state, os, "coder", &format!("[Prompter → Coder] Build instructions for an approved prototype. Start the implementation: list the files you'd create and give the core code for each.\n\n{plan}"), 600, offload.as_deref()).await?;
+    run.emit("approve", 100, "coder", super::agents::step("reply", "coder", "tony", impl_out.chars().take(3000).collect::<String>(), true, t0.elapsed().as_millis()), Some(card_id.to_string()));
+    let updated = gw(state, cfg, reqwest::Method::PATCH, &format!("/api/cc/c/playplace/{card_id}"), Some(json!({ "status": "approved", "buildPlan": plan, "coderOutput": impl_out }))).await?;
     if let Some(i) = c["ideaId"].as_str() {
-        let _ = gw(&state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/ideas/{i}"), Some(json!({ "status": "approved" }))).await;
+        let _ = gw(state, cfg, reqwest::Method::PATCH, &format!("/api/cc/c/ideas/{i}"), Some(json!({ "status": "approved" }))).await;
     }
     Ok(updated)
+}
+
+/// `play-place/<date>-<slug>` under Tony's notes root.
+pub(crate) fn commit_dir_rel(date: &str, title: &str) -> String {
+    let base = slugify(title);
+    let slug = super::staging::slug_for(if base.is_empty() { "prototype" } else { &base }, |_| false);
+    format!("play-place/{date}-{slug}")
+}
+
+fn write_note_file(root: &Path, rel: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let target = super::staging::ensure_parent(root, rel)?;
+    if std::fs::symlink_metadata(&target).is_ok_and(|m| m.is_dir()) {
+        return Err(format!("{rel} is a directory"));
+    }
+    super::staging::atomic_write(&target, bytes)?;
+    Ok(target)
 }
 
 #[tauri::command]
@@ -480,8 +350,10 @@ pub async fn playplace_commit(state: State<'_, DispatchState>, os: State<'_, OsS
     let cfg = os.snapshot();
     let c = card(&state, &cfg, &card_id).await?;
     let title = c["title"].as_str().unwrap_or("prototype").to_string();
-    let dir = PathBuf::from(r"C:\ai-hub\memory\play-place").join(format!("{}-{}", chrono::Local::now().format("%Y-%m-%d"), slugify(&title)));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let workdir = PathBuf::from(state.snapshot().gateway.workdir);
+    let root = super::documenter::notes_root(&cfg, &workdir)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
+    let dir_rel = commit_dir_rel(&chrono::Local::now().format("%Y-%m-%d").to_string(), &title);
     let spec = format!(
         "# {title}\n\n## Idea\n{}\n\n## Design brief\n{}\n\n## Blueprint\n{}\n\n## Build plan\n{}\n",
         c["idea"].as_str().unwrap_or(""),
@@ -489,10 +361,12 @@ pub async fn playplace_commit(state: State<'_, DispatchState>, os: State<'_, OsS
         c["blueprint"].as_str().unwrap_or(""),
         c["buildPlan"].as_str().unwrap_or("(not approved for build yet)")
     );
-    std::fs::write(dir.join("spec.md"), &spec).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("prototype.html"), c["html"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("prompt-chain.json"), serde_json::to_string_pretty(&json!({ "buildPrompt": c["buildPrompt"], "chain": c["chain"], "versions": c["versions"] })).unwrap_or_default()).map_err(|e| e.to_string())?;
-    let indexed = librarian_ingest(&state, &os, &format!("Prototype: {title}"), &spec).await;
+    let spec_path = write_note_file(&root, &format!("{dir_rel}/spec.md"), spec.as_bytes())?;
+    write_note_file(&root, &format!("{dir_rel}/prototype.html"), c["html"].as_str().unwrap_or("").as_bytes())?;
+    write_note_file(&root, &format!("{dir_rel}/prompt-chain.json"), serde_json::to_string_pretty(&json!({ "buildPrompt": c["buildPrompt"], "chain": c["chain"], "versions": c["versions"] })).unwrap_or_default().as_bytes())?;
+    let dir = spec_path.parent().map(Path::to_path_buf).unwrap_or(root);
+    // Tony's documenter indexes his own note (best-effort; a failure is surfaced as an event).
+    let indexed = super::documenter::ingest(&state, &os, super::roles::Role::Tony, &format!("Prototype: {title}"), &spec).await.is_ok();
     bridge.log(json!({ "type": "playplace-commit", "card": card_id, "dir": dir.display().to_string() }));
     gw(&state, &cfg, reqwest::Method::PATCH, &format!("/api/cc/c/playplace/{card_id}"), Some(json!({ "status": "committed", "vaultPath": dir.display().to_string(), "librarianIndexed": indexed }))).await
 }
@@ -552,8 +426,162 @@ pub async fn comms_whatsapp_send(state: State<'_, DispatchState>, os: State<'_, 
 
 // ── Phone → desktop queue ───────────────────────────────────────────────────
 
-/// Every 3 s: run Tony turns, pipeline/Play Place actions and lockdown commands
-/// that the phone HUD queued on the gateway.
+/// What one queued phone item becomes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum InboxAction {
+    /// kind `task`: create a TaskEnvelope (dedupe = the queue id) and answer at once.
+    Task(CreateArgs),
+    /// kind `pipeline`: a ledger idea → a task.
+    Pipeline(String),
+    /// An approved Tier-3 build from the phone (`capture: true`): ledger idea + task.
+    Capture(String),
+    /// An idea-shaped turn from a stale phone build (no tier flags): saved to the ledger only.
+    /// It never starts a build without an approved yes.
+    Park(String),
+    Turn,
+    Command,
+    PlayPlace,
+    /// A Capture that arrived under Solo mode: parked in the Ideas Ledger, not queued.
+    SoloPark(String),
+    Unknown,
+}
+
+/// The raw intent of a `task` payload: a string, or `{text}`.
+fn task_intent(p: &Value) -> String {
+    p["raw_intent"].as_str().or_else(|| p["raw_intent"]["text"].as_str()).or_else(|| p["rawIntent"].as_str()).unwrap_or("").to_string()
+}
+
+/// Route one queue item (pure).
+pub(crate) fn inbox_action(queue_id: &str, kind: Option<&str>, p: &Value) -> InboxAction {
+    let text = || p["text"].as_str().unwrap_or("").to_string();
+    match kind {
+        Some("task") => InboxAction::Task(CreateArgs {
+            raw_intent: task_intent(p),
+            title: p["title"].as_str().map(String::from),
+            thread: p["thread"].as_str().map(String::from),
+            source: "phone".into(),
+            idea_id: p["idea_id"].as_str().or_else(|| p["ideaId"].as_str()).map(String::from),
+            options: p.get("options").cloned().filter(Value::is_object),
+            dedupe_key: Some(queue_id.to_string()),
+        }),
+        Some("pipeline") => InboxAction::Pipeline(p["ideaId"].as_str().unwrap_or("").to_string()),
+        Some("turn") => match inbox_turn_route(p) {
+            InboxTurnRoute::Capture => InboxAction::Capture(text()),
+            InboxTurnRoute::Park => InboxAction::Park(text()),
+            InboxTurnRoute::OsTurn => InboxAction::Turn,
+        },
+        Some("command") => InboxAction::Command,
+        Some("playplace") => InboxAction::PlayPlace,
+        _ => InboxAction::Unknown,
+    }
+}
+
+/// How long the desktop holds an item's claim (the gateway caps it at 900 s).
+fn claim_lease(kind: Option<&str>) -> u64 {
+    match kind {
+        Some("playplace") => 900,
+        Some("turn") | Some("command") => 300,
+        _ => 120,
+    }
+}
+
+/// Save a stale client's idea to the ledger (no task, no model call). `solo`: the phone's
+/// approved Capture arrived while Tony's mode is Solo (surface_only), so it is parked instead.
+async fn park_idea(state: &DispatchState, os: &OsState, text: &str, solo: bool) -> Result<Value, String> {
+    let cfg = os.snapshot();
+    let title = working_title(text);
+    let item = gw(state, &cfg, reqwest::Method::POST, "/api/cc/c/ideas", Some(json!({ "title": title, "idea": text, "summary": "", "tasks": [], "spec": {}, "status": "captured", "by": cfg.os_name }))).await?;
+    let answer = if solo { SOLO_PARK_REPLY.to_string() } else { format!("Saved \"{title}\" to your Ideas Ledger. Tap Run there when you want it built.") };
+    Ok(json!({ "answer": answer, "ideaId": item["id"], "steps": [] }))
+}
+
+/// The phone's Capture under Solo (Phase 2 Part C, D15).
+pub(crate) const SOLO_PARK_REPLY: &str = "Solo mode is on: saved it to your Ideas Ledger; tap Run there once you switch modes.";
+
+/// Tony's mode applied to a routed inbox item (pure): under Solo a Capture is parked instead of
+/// queued. A `task` is gated at creation (`create_task_gated`, with the payload's `auto`) and a
+/// `pipeline` in `task_from_idea`, so a refused build creates zero envelopes.
+pub(crate) fn mode_inbox_action(a: InboxAction, policy: super::modes::DispatchPolicy) -> InboxAction {
+    match a {
+        InboxAction::Capture(text) if policy == super::modes::DispatchPolicy::SurfaceOnly => InboxAction::SoloPark(text),
+        other => other,
+    }
+}
+
+/// Run one claimed item. Build kinds only create a task (the worker runs it), so a slow build
+/// never blocks the queue; Tony turns and commands run inline; Play Place actions run inline
+/// under the claim lease.
+async fn run_inbox_item(app: &AppHandle, id: &str, kind: Option<&str>, p: &Value) -> Result<Value, String> {
+    let st = app.state::<DispatchState>();
+    let os = app.state::<OsState>();
+    let policy = os.modes.effective().dispatch;
+    match mode_inbox_action(inbox_action(id, kind, p), policy) {
+        InboxAction::Task(args) => {
+            let max = os.snapshot().worker.max_iterations;
+            let auto = p["auto"].as_bool().unwrap_or(false);
+            let (e, created) = taskworker::create_task_gated(app.state::<TaskStore>().inner(), &args, max, &super::devqueue::known_secrets(&st, &os), policy, auto)?;
+            taskworker::announce_queued(app, &e);
+            Ok(json!({ "taskId": e.task_id, "created": created, "status": e.status, "title": e.title }))
+        }
+        InboxAction::Pipeline(idea) => task_from_idea(app, &st, &os, &idea, Some(id.to_string())).await,
+        InboxAction::Capture(text) => capture_task(app, &st, &os, &text, "phone", Some(id.to_string())).await.map(|r| json!({ "answer": r.reply, "idea": r.idea, "steps": r.steps, "taskId": r.task_id })),
+        InboxAction::Park(text) => park_idea(&st, &os, &text, false).await,
+        InboxAction::SoloPark(text) => park_idea(&st, &os, &text, true).await,
+        InboxAction::Command => {
+            // Phase 2 Part B: the phone can lock (and unlock) the desktop mic. A lock is a dead
+            // line before the write; an unlock applies only once it is saved.
+            let mic = p["micEnabled"].as_bool();
+            if mic == Some(false) {
+                super::voice::set_mic_enabled(app, false);
+            }
+            os.update(|c| {
+                if let Some(k) = p["killSwitch"].as_bool() {
+                    c.privacy.kill_switch = k;
+                }
+                if let Some(m) = p["computeMode"].as_str() {
+                    c.compute.mode = serde_json::from_value(json!(m)).map_err(|_| "bad compute mode".to_string())?;
+                }
+                if let Some(m) = mic {
+                    c.voice.mic_enabled = m;
+                }
+                Ok(())
+            })
+            .and_then(|c| {
+                if mic == Some(true) {
+                    super::voice::set_mic_enabled(app, true);
+                }
+                // Phase 2 Part C: the phone switches Tony's mode / sets or resets overrides.
+                let mut out = json!({ "killSwitch": c.privacy.kill_switch, "computeMode": c.compute.mode, "micEnabled": c.voice.mic_enabled });
+                if let Some(e) = super::modes::apply_inbox_command(&os, p)? {
+                    super::modes::notify_changed(app);
+                    out["mode"] = json!({ "id": e.mode_id, "name": e.name, "overridden": e.overridden });
+                }
+                Ok(out)
+            })
+        }
+        InboxAction::Turn => {
+            let bridge = app.state::<BridgeState>();
+            let req: Result<super::agents::OsTurnRequest, _> = serde_json::from_value(p.clone());
+            match req {
+                Ok(r) => super::agents::run_os_turn(&st, &os, &bridge, r, Some(app)).await.and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string())),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        InboxAction::PlayPlace => {
+            let card = p["cardId"].as_str().unwrap_or("").to_string();
+            match p["action"].as_str() {
+                Some("approve") => playplace_approve(app.clone(), app.state(), app.state(), card).await,
+                Some("iterate") => playplace_iterate(app.clone(), app.state(), app.state(), card, p["notes"].as_str().unwrap_or("").to_string(), p["target"].as_str().unwrap_or("coder").to_string()).await,
+                Some("commit") => playplace_commit(app.state(), app.state(), app.state(), card).await,
+                _ => Err("playplace action must be approve, iterate or commit".into()),
+            }
+        }
+        InboxAction::Unknown => Err("unknown queue item".into()),
+    }
+}
+
+/// Every 3 s: claim and run what the phone HUD queued on the gateway (Tony turns, builds,
+/// Play Place actions, lockdown commands). An item someone else holds (409) is skipped.
 pub async fn inbox_loop(app: AppHandle) {
     loop {
         tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3))).await.ok();
@@ -573,48 +601,28 @@ pub async fn inbox_loop(app: AppHandle) {
         };
         for item in v["items"].as_array().cloned().unwrap_or_default() {
             let id = item["id"].as_str().unwrap_or("").to_string();
-            let p = &item["payload"];
-            let result: Result<Value, String> = match item["kind"].as_str() {
-                Some("command") => os
-                    .update(|c| {
-                        if let Some(k) = p["killSwitch"].as_bool() {
-                            c.privacy.kill_switch = k;
-                        }
-                        if let Some(m) = p["computeMode"].as_str() {
-                            c.compute.mode = serde_json::from_value(json!(m)).map_err(|_| "bad compute mode".to_string())?;
-                        }
-                        Ok(())
-                    })
-                    .map(|c| json!({ "killSwitch": c.privacy.kill_switch, "computeMode": c.compute.mode })),
-                Some("turn") => {
-                    let text = p["text"].as_str().unwrap_or("").to_string();
-                    if inbox_turn_route(p) == InboxTurnRoute::Capture {
-                        capture(&app, &st, &os, &text).await.map(|r| json!({ "answer": r.reply, "idea": r.idea, "steps": r.steps }))
-                    } else {
-                        let bridge = app.state::<BridgeState>();
-                        let req: Result<super::agents::OsTurnRequest, _> = serde_json::from_value(p.clone());
-                        match req {
-                            Ok(r) => super::agents::run_os_turn(&st, &os, &bridge, r, Some(&app)).await.and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string())),
-                            Err(e) => Err(e.to_string()),
-                        }
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                continue;
+            }
+            let kind = item["kind"].as_str();
+            // Claim first: nothing runs twice, and a crash leaves it re-claimable after the lease.
+            let claim = match gw(&st, &cfg, reqwest::Method::POST, &format!("/api/os/inbox/{id}/claim"), Some(json!({ "lease_secs": claim_lease(kind) }))).await {
+                Ok(c) => c,
+                Err(e) => {
+                    if !e.contains("409") {
+                        eprintln!("[inbox] claim {id}: {e}");
                     }
+                    continue;
                 }
-                Some("pipeline") => run_pipeline(&app, &st, &os, p["ideaId"].as_str().unwrap_or("")).await,
-                Some("playplace") => {
-                    let card = p["cardId"].as_str().unwrap_or("").to_string();
-                    match p["action"].as_str() {
-                        Some("approve") => playplace_approve(app.clone(), app.state(), app.state(), card).await,
-                        Some("iterate") => playplace_iterate(app.clone(), app.state(), app.state(), card, p["notes"].as_str().unwrap_or("").to_string(), p["target"].as_str().unwrap_or("coder").to_string()).await,
-                        Some("commit") => playplace_commit(app.state(), app.state(), app.state(), card).await,
-                        _ => Err("playplace action must be approve, iterate or commit".into()),
-                    }
-                }
-                _ => Err("unknown queue item".into()),
             };
-            let body = match result {
+            let result = run_inbox_item(&app, &id, kind, &item["payload"]).await;
+            let mut body = match result {
                 Ok(v) => json!({ "ok": true, "result": v }),
                 Err(e) => json!({ "ok": false, "error": e }),
             };
+            if let Some(t) = claim["claim_token"].as_str() {
+                body["claim_token"] = json!(t);
+            }
             let _ = gw(&st, &cfg, reqwest::Method::POST, &format!("/api/os/inbox/{id}/result"), Some(body)).await;
         }
     }
@@ -623,16 +631,18 @@ pub async fn inbox_loop(app: AppHandle) {
 /// Where a queued phone turn goes.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum InboxTurnRoute {
-    /// Stage 1 idea capture (Prompter breakdown + ledger).
+    /// An approved build (`capture: true`): ledger idea + task.
     Capture,
+    /// An idea-shaped turn from a stale phone build: saved to the ledger, never built.
+    Park,
     /// A normal Tony turn (`run_os_turn`).
     OsTurn,
 }
 
 /// P3: the phone's own tier classifier decides. `capture: true` is an approved Tier-3 "yes"
 /// on a build-shaped idea; `noDelegate` (a Tier-2 brainstorm) never reaches the Prompter. A
-/// current client always sends `noDelegate`, so the old idea-shaped shortcut only remains for
-/// stale phone builds that don't send it at all.
+/// current client always sends `noDelegate`; a stale build that sends neither only gets its
+/// idea parked in the ledger (an envelope needs an approved yes or a ledger Run).
 pub(crate) fn inbox_turn_route(p: &Value) -> InboxTurnRoute {
     if p["noDelegate"].as_bool() == Some(true) {
         return InboxTurnRoute::OsTurn;
@@ -644,13 +654,13 @@ pub(crate) fn inbox_turn_route(p: &Value) -> InboxTurnRoute {
         return InboxTurnRoute::OsTurn;
     }
     if looks_like_idea(p["text"].as_str().unwrap_or("")) {
-        InboxTurnRoute::Capture
+        InboxTurnRoute::Park
     } else {
         InboxTurnRoute::OsTurn
     }
 }
 
-/// "I've been thinking about building an app that…" → Stage 1.
+/// "I've been thinking about building an app that…" → an idea.
 pub fn looks_like_idea(text: &str) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
@@ -687,13 +697,112 @@ mod tests {
         assert_eq!(inbox_turn_route(&json!({ "text": idea, "noDelegate": false })), InboxTurnRoute::OsTurn);
         // An approved Tier-3 build "yes" from the phone.
         assert_eq!(inbox_turn_route(&json!({ "text": idea, "noDelegate": false, "capture": true })), InboxTurnRoute::Capture);
-        // Stale phone builds keep the old shortcut.
-        assert_eq!(inbox_turn_route(&json!({ "text": idea })), InboxTurnRoute::Capture);
+        // Stale phone builds: the idea is parked, never built without an approved yes.
+        assert_eq!(inbox_turn_route(&json!({ "text": idea })), InboxTurnRoute::Park);
         assert_eq!(inbox_turn_route(&json!({ "text": "what's the weather" })), InboxTurnRoute::OsTurn);
     }
 
     #[test]
     fn slugs() {
         assert_eq!(slugify("Audition Tracker — v2!"), "audition-tracker-v2");
+    }
+
+    #[test]
+    fn inbox_routes_task_kinds_to_the_store_only() {
+        let a = inbox_action("q1", Some("task"), &json!({ "raw_intent": { "text": "a tip calculator" }, "title": "Tip calc", "thread": "general", "ideaId": "i9", "options": { "localOnly": true } }));
+        assert_eq!(
+            a,
+            InboxAction::Task(CreateArgs { raw_intent: "a tip calculator".into(), title: Some("Tip calc".into()), thread: Some("general".into()), source: "phone".into(), idea_id: Some("i9".into()), options: Some(json!({ "localOnly": true })), dedupe_key: Some("q1".into()) })
+        );
+        assert_eq!(inbox_action("q2", Some("task"), &json!({ "raw_intent": "plain string" })), InboxAction::Task(CreateArgs { raw_intent: "plain string".into(), source: "phone".into(), dedupe_key: Some("q2".into()), ..Default::default() }));
+        assert_eq!(inbox_action("q3", Some("pipeline"), &json!({ "ideaId": "abc" })), InboxAction::Pipeline("abc".into()));
+        assert_eq!(inbox_action("q4", Some("turn"), &json!({ "text": "build it", "capture": true, "noDelegate": false })), InboxAction::Capture("build it".into()));
+        assert_eq!(inbox_action("q5", Some("turn"), &json!({ "text": "I have an idea for an app" })), InboxAction::Park("I have an idea for an app".into()));
+        assert_eq!(inbox_action("q6", Some("turn"), &json!({ "text": "hi", "noDelegate": true })), InboxAction::Turn);
+        assert_eq!(inbox_action("q7", Some("playplace"), &json!({})), InboxAction::PlayPlace);
+        assert_eq!(inbox_action("q8", Some("nope"), &json!({})), InboxAction::Unknown);
+        assert_eq!(claim_lease(Some("playplace")), 900);
+        assert_eq!(claim_lease(Some("task")), 120);
+    }
+
+    /// The inbox's task path is a synchronous insert: it returns with the task `queued` and
+    /// never waits on a model; the same queue id twice is the same task.
+    #[test]
+    fn inbox_task_enqueues_without_running_it() {
+        let store = TaskStore::in_memory();
+        let InboxAction::Task(args) = inbox_action("q-123", Some("task"), &json!({ "raw_intent": "a tip calculator" })) else { panic!("task") };
+        let t0 = Instant::now();
+        let (e, created) = taskworker::create_task(&store, &args, 3, &[]).unwrap();
+        assert!(created && e.status == "queued" && e.stage.is_none());
+        assert!(t0.elapsed() < Duration::from_millis(500));
+        let (again, created2) = taskworker::create_task(&store, &args, 3, &[]).unwrap();
+        assert_eq!((again.task_id, created2), (e.task_id.clone(), false));
+        assert_eq!(task_for_dedupe(&store, "q-123"), Some(e.task_id));
+    }
+
+    /// Phase 2 Part C: the phone's builds go through Tony's mode.
+    #[test]
+    fn inbox_builds_follow_tonys_mode() {
+        use super::super::modes::DispatchPolicy::*;
+        let count = |store: &TaskStore| store.with(|c| super::super::envelope::list(c, None, 50, false)).unwrap().len();
+        // Solo: an inbox `task` is refused with MODE_SURFACE_ONLY and creates zero envelopes.
+        let store = TaskStore::in_memory();
+        let InboxAction::Task(args) = inbox_action("q-solo", Some("task"), &json!({ "raw_intent": "a tip calculator" })) else { panic!("task") };
+        let err = taskworker::create_task_gated(&store, &args, 3, &[], SurfaceOnly, false).unwrap_err();
+        assert!(err.starts_with("MODE_SURFACE_ONLY"), "{err}");
+        assert_eq!(count(&store), 0);
+        // …and a phone Capture is parked in the Ideas Ledger instead of queued.
+        let cap = inbox_action("q-cap", Some("turn"), &json!({ "text": "build it", "capture": true }));
+        assert_eq!(mode_inbox_action(cap.clone(), SurfaceOnly), InboxAction::SoloPark("build it".into()));
+        for p in [AskBeforeDispatch, AutoDispatch] {
+            assert_eq!(mode_inbox_action(cap.clone(), p), InboxAction::Capture("build it".into()));
+        }
+        assert!(SOLO_PARK_REPLY.contains("Ideas Ledger") && SOLO_PARK_REPLY.starts_with("Solo mode is on"));
+        // Other kinds pass through untouched.
+        assert_eq!(mode_inbox_action(InboxAction::Turn, SurfaceOnly), InboxAction::Turn);
+        // Ask: a plain approved task is queued; `auto` is refused (MODE_NOT_AUTO), zero envelopes.
+        let err = taskworker::create_task_gated(&store, &args, 3, &[], AskBeforeDispatch, true).unwrap_err();
+        assert!(err.starts_with("MODE_NOT_AUTO"), "{err}");
+        assert_eq!(count(&store), 0);
+        let (e, _) = taskworker::create_task_gated(&store, &args, 3, &[], AskBeforeDispatch, false).unwrap();
+        assert!(e.options.get("autoDispatched").is_none());
+        // Builder: `auto` is honoured and recorded.
+        let store = TaskStore::in_memory();
+        let (e, created) = taskworker::create_task_gated(&store, &args, 3, &[], AutoDispatch, true).unwrap();
+        assert!(created);
+        assert_eq!(e.options["autoDispatched"], json!(true));
+    }
+
+    #[test]
+    fn inbox_command_switches_tonys_mode() {
+        let os = OsState::default();
+        let e = super::super::modes::apply_inbox_command(&os, &json!({ "modeId": "builder" })).unwrap().unwrap();
+        assert_eq!(e.mode_id, "builder");
+        assert_eq!(os.modes.effective().mode_id, "builder");
+        assert_eq!(os.snapshot().feedback.sensitivity, 2);
+        // Overrides and reset ride the same command.
+        let e = super::super::modes::apply_inbox_command(&os, &json!({ "overrides": { "curiosity": "low" } })).unwrap().unwrap();
+        assert_eq!(e.overridden, vec!["curiosity"]);
+        let e = super::super::modes::apply_inbox_command(&os, &json!({ "resetOverrides": true })).unwrap().unwrap();
+        assert!(e.overridden.is_empty());
+        // No mode keys: nothing to do. The novelty overlay never becomes the work mode.
+        assert!(super::super::modes::apply_inbox_command(&os, &json!({ "killSwitch": true })).unwrap().is_none());
+        assert!(super::super::modes::apply_inbox_command(&os, &json!({ "modeId": "gabagool" })).is_err());
+        assert_eq!(os.modes.effective().mode_id, "builder");
+    }
+
+    #[test]
+    fn legacy_checkpoints_get_a_clear_error() {
+        let e = resume_target(r"C:\ai-hub\memory\checkpoints\pipe-1700000000-3-build-failed.json").unwrap_err();
+        assert!(e.contains("old pipeline") && e.contains("Ideas Ledger"), "{e}");
+        assert!(resume_target("../../etc").is_err());
+        assert_eq!(resume_target("t-1763500000000-ab12cd").unwrap(), "t-1763500000000-ab12cd");
+    }
+
+    #[test]
+    fn commit_dir_is_a_safe_relative_path() {
+        assert_eq!(commit_dir_rel("2026-11-19", "Audition Tracker — v2!"), "play-place/2026-11-19-audition-tracker-v2");
+        assert_eq!(commit_dir_rel("2026-11-19", "!!!"), "play-place/2026-11-19-prototype");
+        assert!(super::super::staging::check_rel(&commit_dir_rel("2026-11-19", "..\\..\\x")).is_ok());
     }
 }

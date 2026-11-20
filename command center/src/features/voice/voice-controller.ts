@@ -6,7 +6,7 @@ import { classifyTier, DEFER_LABEL, looksBuildShaped, offerTarget, parseDefer, t
 import { useDialogue } from "@/features/dialogue/dialogue-store";
 import { buildArtifact, conversationSlice, fallbackTitle, rawContextOf, saveArtifact } from "@/features/dialogue/package";
 import { roleLabel } from "@/features/dispatcher/roles";
-import { dispatch, queueDesktopTurn } from "@/features/dispatcher/dispatch";
+import { dispatch, queueDesktopItem } from "@/features/dispatcher/dispatch";
 import { handleLocalIntent } from "@/features/reminders/intents";
 import { gated } from "@/features/bridge/gate";
 import { liveContext } from "@/features/os/context";
@@ -15,12 +15,12 @@ import type { OsIntent } from "@/features/os/os-intent-parse";
 import { cueOwnsVolume, parseSpotifyLine, runPendingSpotify, runSpotifyIntent } from "@/features/os/spotify-intents";
 import type { SpotifyIntent } from "@/lib/platform";
 import { useOs } from "@/features/os/os-store";
-import { runPipeline, usePipelines } from "@/features/os/pipeline-store";
+import { runPipeline, trackTask } from "@/features/os/pipeline-store";
 import { cueFor, fireCue, registerCueIO } from "@/features/cues/cue-runtime";
 import { cueRecentlyActive, registerSpeechCancel, setCueDuck, stopAllAudio } from "@/features/cues/player";
 import { cc } from "@/lib/cc-api";
 import { clientTrace } from "@/features/memmap/client-trace";
-import { cmd, isTauri, onNativeEvent, type ChatMessage, type OsTurnResult, type RoutingConfig, type TtsFallbackEvent } from "@/lib/platform";
+import { cmd, isTauri, onNativeEvent, type AgentEvent, type ChatMessage, type OsTurnResult, type RoutingConfig, type TaskSource, type TtsFallbackEvent } from "@/lib/platform";
 import { useProviders } from "@/sections/settings/use-providers";
 import { useNav } from "@/stores/nav";
 import { useSettings } from "@/stores/settings";
@@ -35,8 +35,13 @@ import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice,
 import { toggleAction, type TurnOrigin } from "./voice-status";
 import { wakeCommand } from "./wake-word";
 import { listenTakesReflex, parseReflex, type Reflex, type ReflexCtx } from "./reflex-parse";
-import { bargeSensitivityOffset, detectRoute, detectedRoute, effectiveRoute } from "./audio-route";
+import { detectRoute, detectedRoute, effectiveRoute } from "./audio-route";
+import { hydrateMic, micEnabled, onMicChange, requestMicEnabled, MIC_LOCKED_MSG } from "./mic-gate";
+import { syncThresholdFromOs } from "./threshold";
 import { cutMedia, holdMedia, releaseMedia, type HeldMedia } from "./media-hold";
+import { startNarrator, type NarratorSnapshot } from "./narrator";
+import { useModes } from "@/features/modes/modes-store";
+import { calmModeError, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
 import { duckOnSpeech, duckOnTrigger, musicPlayingHere, restoreAfterPause, restoreDuck, scheduleRestore, settleCommand, settleNoise } from "./spotify-duck";
 
 /**
@@ -133,7 +138,10 @@ async function say(text: string, opts?: SpeakOpts & { noDuck?: boolean; traceId?
     ttsError = e instanceof Error ? e.message : String(e);
   } finally {
     sayDepth--;
-    if (sayDepth === 0) flushTtsIdle();
+    if (sayDepth === 0) {
+      lastTtsEndAt = Date.now();
+      flushTtsIdle();
+    }
     if (duck && duck === ttsDuck && --duck.depth === 0) setCueDuck("tts", false);
     clientTrace.tts(traceId, tts.name, performance.now() - t0, !ttsError, ttsError);
   }
@@ -188,8 +196,13 @@ function agentAutoSpeak(role: string): boolean {
 const convo = { barged: false, active: false, ducked: false };
 /** say() calls in flight (incl. one paused by a hold) — Tony or an agent has audio queued. */
 let sayDepth = 0;
+/** When the last say() ended and when Nic's VAD last heard speech (the narrator's 1.5 s quiet gap). */
+let lastTtsEndAt = 0;
+let lastUserSpeechAt = 0;
 /** streamIds of `os_turn`s in flight, so "cut it" can stop them server-side (`os_turn_cancel`). */
 const activeStreams = new Set<string>();
+/** Phase 5: delegated turns whose handoff cue is still playing (see `cancelStreams(keep)`). */
+const cueProtected = new Set<string>();
 /** Rust `agents::TURN_CANCELLED`: the error a cancelled os_turn returns. */
 const TURN_CANCELLED = "turn cancelled";
 /** Hold mode ("take it easy" over a busy turn / "whoa" / "madone" / "aspetta") — see the reflex section at the end. */
@@ -233,6 +246,8 @@ function speechHandlers() {
       clientTrace.phase(p);
       if (p === "speech") {
         heardSpeech = true;
+        lastUserSpeechAt = Date.now();
+        cancelNarration();
         setCueDuck("user", true);
         // A barge-in over Tony ducks the music like an explicit listen; the follow-up window after
         // him is gated like a passive one (`onWakeListen`).
@@ -270,7 +285,9 @@ function speechHandlers() {
         // A new command said over Tony (or over a turn still thinking): he stops, the old turn's
         // server stream is dropped and it goes quiet (its bubble stays on screen).
         if (overTony || sayDepth > 0) {
-          cancelStreams();
+          // Phase 5: over a vocal handoff cue, only the cue stops (supersedeTurn cuts its beat and
+          // drops the rest); the delegated agent's job keeps running server-side.
+          cancelStreams(cueProtected);
           supersedeTurn();
         }
         return settleCommand(handleInput(t, { channel: "voice" }), ttsIdle);
@@ -314,7 +331,7 @@ function speechHandlers() {
 /** Start listening for a barge-in while a voice reply plays. */
 function startBargeIn() {
   const c = useSettings.getState().conversation;
-  if (!c.bargeIn || !stt || convo.active || hold.active || store().pending || !conversational()) return;
+  if (!micEnabled() || !c.bargeIn || !stt || convo.active || hold.active || store().pending || !conversational()) return;
   convo.active = true;
   heardSpeech = false;
   passiveListen = false;
@@ -324,7 +341,8 @@ function startBargeIn() {
   // command said over Tony may be split — the follow-up listen catches the rest.
   stt.start(speechHandlers(), {
     maxSilenceStartMs: 120_000,
-    sensitivityOffset: bargeSensitivityOffset(currentRoute()),
+    barge: true,
+    speakers: currentRoute() === "speakers",
     endSilenceMs: c.bargeEndSilenceMs > 0 ? c.bargeEndSilenceMs : undefined,
   });
 }
@@ -348,7 +366,7 @@ function afterVoiceReply(gen: number) {
     convo.active = false;
     stt?.abort();
   }
-  if (c.followUp && stt && !store().pending && conversational()) {
+  if (c.followUp && stt && micEnabled() && !store().pending && conversational()) {
     store().setState("listening");
     heardSpeech = false;
     passiveListen = false;
@@ -362,9 +380,20 @@ const relistenOpts = () => ({ silent: !store().expanded, origin: turnOrigin });
 
 /**
  * Mic off, now: discards the current listen (nothing is transcribed), drops any turn still
- * transcribing/thinking (see `micGen`) and returns to rest. Hands-free, if still armed, re-arms.
+ * transcribing/thinking (see `micGen`) and returns to rest. `rearm` (default): hands-free, if
+ * still armed, re-arms (a "cut it", the thinking/transcribing hard stop). `rearm: false` (Esc,
+ * the HUD close, the mic lock; D8): nothing reopens the mic, and a hold is dropped too.
  */
-function hardStopMic() {
+function hardStopMic(opts: { rearm?: boolean } = {}) {
+  const rearm = opts.rearm ?? true;
+  if (!rearm && hold.active) {
+    releaseHeldMedia();
+    clearHold();
+    // The hold paused the reply (`tts.pause`); with the hold gone nothing can resume it, so drop
+    // it here, or every later say() waits forever in the paused engine (the mic lock path).
+    cancelTts();
+    releaseTtsDuck();
+  }
   micGen++;
   heardSpeech = false;
   passiveListen = false;
@@ -377,7 +406,7 @@ function hardStopMic() {
   restoreDuck(); // a cut's own restore (after the pause lands) is deferred and left alone
   store().setPartial("");
   store().setState(store().pending ? "confirming" : "idle");
-  if (wake.armed) rearmWake();
+  if (wake.armed && rearm) rearmWake();
   else clearTimeout(wake.timer);
 }
 
@@ -389,6 +418,15 @@ function hardStopMic() {
 export function startListening(opts: { forConfirmation?: boolean; silent?: boolean; origin?: TurnOrigin; afterGreeting?: boolean } = {}) {
   const v = store();
   const origin = opts.origin ?? "tap";
+  // Phase 2 Part B: locked off = nothing listens. An explicit tap says why; a passive re-arm or a
+  // yes/no re-listen stays silent (the card is still tappable, its state is left alone).
+  if (!micEnabled()) {
+    if (origin === "tap" && !opts.silent && !opts.forConfirmation) {
+      v.setExpanded(true);
+      v.setError(MIC_LOCKED_MSG);
+    }
+    return;
+  }
   // Captured now, not at onFinal: tapping the mic to submit a hands-free listen disarms
   // hands-free first, and that line still has to pass the wake-word check it was heard under.
   const wakeListen = wake.armed && !opts.forConfirmation && !opts.afterGreeting;
@@ -422,6 +460,10 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
         clientTrace.phase(p);
         if (p === "speech") {
           heardSpeech = true;
+          lastUserSpeechAt = Date.now();
+          // Nic started talking over a narration line (headset: the wake listen stays open under
+          // it): only that line stops; whatever he says is handled as usual.
+          cancelNarration();
           setCueDuck("user", true);
           duckOnSpeech(passiveListen);
         }
@@ -504,10 +546,19 @@ export function finishListening() {
   stt?.stop();
 }
 
-/** Esc / close: stop everything. A pending action is cancelled (fail closed). */
+/**
+ * Esc / close: stop everything. A pending action is cancelled (fail closed). D8: nothing reopens
+ * the mic afterwards, so hands-free is turned off (like a tap on a live hands-free listen) rather
+ * than left armed with no listen behind it.
+ */
 export function stopVoice() {
   if (hold.active) endHold(); // Esc / mic button while holding: drop the paused reply, unpause music
-  hardStopMic();
+  if (wake.armed) {
+    wake.armed = false;
+    clearTimeout(wake.timer);
+    useSettings.getState().set({ wakeMode: false });
+  }
+  hardStopMic({ rearm: false }); // D8: closing / Esc never reopens the mic
   cancelTts();
   releaseTtsDuck();
   if (store().pending) return reject("stopped");
@@ -620,7 +671,8 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
     if (osIntent.reply && opts.channel === "voice" && !osIntent.card) {
       store().setState("speaking");
       startBargeIn();
-      await say(osIntent.reply);
+      // "Hey Prompter, where are we at?" is answered in the Prompter's own roster voice.
+      await say(osIntent.reply, osIntent.agent ? { agent: osIntent.agent } : undefined);
       return afterVoiceReply(gen);
     }
     return;
@@ -637,12 +689,6 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   const defer = tonyTab ? parseDefer(t, osName) : null;
   if (defer) return deferTurn(defer.target, thread, opts.channel, [userTurn.id]);
 
-  // "yeah, build that" right after an idea was offered: the pipeline runs only behind the card.
-  const offered = usePipelines.getState().offered;
-  if (offered && offered.thread === thread && BUILD_YES.test(stripWake(t))) {
-    store().setState("idle");
-    return requestPipeline(offered.ideaId, offered.title, thread, opts.channel, t);
-  }
   v.setState("thinking");
 
   // Local intents (alarms, reminders, countdowns) write only to this machine's
@@ -674,7 +720,19 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
       const slice = conversationSlice(store().turns, thread, { fromTurnId: session.fromTurnId });
       const userText = slice.filter((x) => x.who === "user").map((x) => x.text).join("\n");
       const target = offerTarget({ buildShaped: session.buildShaped, topicRole: session.topicRole, userText, cfg: routingCfg, osName });
-      if (target) return offerDelegation(t, thread, opts.channel, target, slice);
+      if (target) {
+        // Phase 2 Part C: Tony's mode decides what the commit cue does (D15/D16). Builder +
+        // a build-shaped brainstorm queues it at once (staging only); Solo hands nothing off and
+        // offers to park it; everything else is today's spoken offer card.
+        switch (tier3Action(useModes.getState().effective, target)) {
+          case "auto":
+            if (target.kind === "pipeline") return autoDelegateBuild(t, thread, opts.channel, slice);
+            break;
+          case "solo":
+            return offerPark(t, thread, opts.channel, slice);
+        }
+        return offerDelegation(t, thread, opts.channel, target, slice);
+      }
       tier = 2; // nothing to hand off: Tony just keeps talking
     }
     if (tier === 2) {
@@ -750,6 +808,7 @@ async function overseerReview(plan: ActionPlan) {
 
 /** Speak a line outside a conversation turn (alarms firing, brainstorm acks). */
 export async function announce(text: string) {
+  if (!micEnabled()) return; // D6: no unsolicited speech while the mic is locked off (the toast still shows)
   await say(text);
 }
 
@@ -784,7 +843,8 @@ async function controlWhileConfirming(text: string, intent: OsIntent | SpotifyIn
   if (store().pending?.plan.id !== p.plan.id) return;
   store().setState("confirming");
   if (channel !== "voice" || gen !== micGen) return;
-  if (r?.reply) await say(r.reply);
+  // "Hey Coder, where are we at?" while a card waits: still in the Coder's own roster voice.
+  if (r?.reply) await say(r.reply, r.agent ? { agent: r.agent } : undefined);
   if (gen === micGen && store().pending?.plan.id === p.plan.id) startListening({ forConfirmation: true, ...relistenOpts() });
 }
 
@@ -856,7 +916,7 @@ export function reject(reason: string, opts: { silent?: boolean } = {}) {
   }
   store().pushTurn({ who: "system", text: `Cancelled (${reason}) — nothing was sent.`, tone: "warn", thread: p.plan.thread });
   store().setState("idle");
-  if (p.channel === "voice" && !opts.silent) void say("Cancelled.");
+  if (p.channel === "voice" && !opts.silent && micEnabled()) void say("Cancelled.");
 }
 
 async function run(plan: Parameters<typeof execute>[0], channel: Channel) {
@@ -890,6 +950,9 @@ async function run(plan: Parameters<typeof execute>[0], channel: Channel) {
 // to the user. Each maps to one calm, spoken-safe line; the raw text is kept
 // in the turn's `meta` (shown small, never spoken) for anyone debugging.
 const CALM_ERRORS: [RegExp, string][] = [
+  // Phase 2 Part C: a build Tony's mode refused (Rust `modes::refusal_message`).
+  [new RegExp(MODE_SURFACE_ONLY), calmModeError(MODE_SURFACE_ONLY)!],
+  [new RegExp(MODE_NOT_AUTO), calmModeError(MODE_NOT_AUTO)!],
   [/all providers failed/i, "None of my models answered just now — check Settings → Services, or try again in a moment."],
   [/no reachable providers/i, "None of my models are reachable right now — check Settings → Services."],
   [/malformed (completion|gateway reply)/i, "I got back something I couldn't read from that model — try again, or switch models in Settings."],
@@ -916,7 +979,6 @@ function fail(e: unknown, thread?: ThreadId) {
 
 // ── P3 tiered dialogue: Tier 2 brainstorm, Tier 3 offer, Tier 4 park ───────────
 
-const BUILD_YES = /^(yes|yeah|yep|yup|sure|ok(ay)?|do it|go( for it)?|build (it|that)|run (it|the pipeline)|spin (it|one) up|let'?s (do it|go|build))\b/i;
 /** The Tier-3 offer card's spoken read-back (exact). */
 export const OFFER_READBACK = "Want me to go ahead and delegate that, or park it for later?";
 /** The brief a delegate gets: the conversation itself, bounded. */
@@ -956,7 +1018,6 @@ async function deferTurn(target: DeferTarget, thread: ThreadId, channel: Channel
       await saveArtifact(target, a, slice, osName);
       reply = `Saved “${a.title}” to your ${DEFER_LABEL[target]}.`;
       useDialogue.getState().end(thread);
-      usePipelines.getState().setOffered(null);
     } catch (e) {
       reply = `I couldn't save that to your ${DEFER_LABEL[target]} — ${calmMessage(e instanceof Error ? e.message : String(e))}`;
     }
@@ -995,7 +1056,7 @@ async function offerDelegation(t: string, thread: ThreadId, channel: Channel, ta
   plan.verification = { status: "verified", notes: [], by: "your own brainstorm with " + osName };
   plan.plannerNote = "delegation offer (Tier 3)";
   plan.onCancel = () => undefined;
-  if (target.kind === "pipeline") plan.run = () => delegateBuild(brief, title, thread);
+  if (target.kind === "pipeline") plan.run = () => delegateBuild(brief, title, thread, channel === "voice" ? "voice" : "typed");
   else if (isTauri()) plan.delegateTo = target.role;
   else {
     const role = target.role;
@@ -1008,42 +1069,127 @@ async function offerDelegation(t: string, thread: ThreadId, channel: Channel, ta
   await requestConfirmation(plan, channel);
 }
 
-/** An approved build: the Prompter's breakdown (+ ledger), then the full pipeline. Only ever a
- * plan's `run`, so it only ever runs from `approve()`. */
-async function delegateBuild(brief: string, title: string, thread: ThreadId): Promise<{ text: string; meta: string }> {
-  if (isTauri()) {
-    const r = await cmd("idea_capture", { text: brief });
-    for (const s of r.steps) {
-      store().pushTurn({ who: "relay", from: s.from, to: s.to, text: s.text, meta: s.kind, thread: s.to === "librarian" || s.from === "librarian" ? "librarian" : "prompter" });
-    }
-    const name = r.idea.title || title;
-    void runPipeline(r.idea.id, name, thread);
-    return { text: `On it — the Prompter broke “${name}” into ${r.idea.tasks?.length ?? 0} tasks, and the Designer and Coder are building the prototype. It'll land in the Play Place.`, meta: "delegated · pipeline (Tier 3)" };
-  }
-  // Phone: the desktop runs the Prompter's capture, then the pipeline from the queue.
-  const r = await queueDesktopTurn({ text: brief, role: "prompter", capture: true, noDelegate: false, history: [], context: "" });
-  if (!r) throw new Error("The desktop app isn't picking up — nothing was delegated.");
-  const id = r.idea?.id;
-  if (!id) return { text: r.answer ?? "Saved to your Ideas & Tasks Ledger.", meta: "delegated · capture (Tier 3)" };
-  const name = r.idea?.title || title;
-  void runPipeline(id, name, thread);
-  return { text: `On it — “${name}” is with the Prompter, Designer and Coder. The prototype will land in the Play Place.`, meta: "delegated · pipeline (Tier 3)" };
+/** Solo mode's Tier-3 card read-back: nothing is handed off, the brainstorm can be parked. */
+export const SOLO_PARK_READBACK = "Solo mode — want me to park that for later?";
+
+/**
+ * Tier 3 under Solo (`surface_only`, D15): nothing leaves Tony. A park-only card; its yes (still
+ * `approve()`) packages the brainstorm into the Brainstorm list. No task, no agent.
+ */
+async function offerPark(t: string, thread: ThreadId, channel: Channel, slice: VoiceTurn[]) {
+  const osName = useSettings.getState().osName || "Tony";
+  const title = fallbackTitle(slice);
+  const plan = heuristicPlan(stripWake(t), "general");
+  plan.mutating = true;
+  plan.offer = "park";
+  plan.thread = thread;
+  plan.summary = `Park “${title}” in your ${DEFER_LABEL.brainstorm} (Solo mode: nothing gets built now)`;
+  plan.intent = `park “${title}” for later`;
+  plan.readBack = SOLO_PARK_READBACK;
+  plan.target = { kind: "bridge", action: "park", scopes: [] };
+  plan.payload = { title };
+  plan.verification = { status: "verified", notes: [], by: "your own brainstorm with " + osName };
+  plan.plannerNote = "park offer (Solo mode)";
+  plan.onCancel = () => undefined;
+  plan.run = async () => {
+    const a = await buildArtifact(slice, { osName });
+    await saveArtifact("brainstorm", a, slice, osName);
+    return { text: `Saved “${a.title}” to your ${DEFER_LABEL.brainstorm}.`, meta: "parked (Solo mode)" };
+  };
+  store().setState("idle");
+  await requestConfirmation(plan, channel);
 }
+
+/**
+ * Tier 3 under Builder (`auto_dispatch`, D16): Nic's per-mode opt-in to skip the spoken offer for a
+ * build-shaped brainstorm — ONE queued TaskEnvelope (staging only) and the templated line, no card.
+ * Rust re-checks the mode (`task_create{auto}`); a stale webview that hits `MODE_NOT_AUTO` falls
+ * back to today's offer card, and a Solo refusal to the park card.
+ */
+async function autoDelegateBuild(t: string, thread: ThreadId, channel: Channel, slice: VoiceTurn[]) {
+  const gen = micGen;
+  const osName = useSettings.getState().osName || "Tony";
+  const title = fallbackTitle(slice);
+  const brief = rawContextOf(slice, osName).slice(-BRIEF_MAX);
+  useDialogue.getState().end(thread);
+  store().setState("thinking");
+  let r: { text: string; meta: string };
+  try {
+    r = await delegateBuild(brief, title, thread, channel === "voice" ? "voice" : "typed", { auto: true });
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    if (raw.includes(MODE_NOT_AUTO)) return offerDelegation(t, thread, channel, { kind: "pipeline" }, slice);
+    if (raw.includes(MODE_SURFACE_ONLY)) return offerPark(t, thread, channel, slice);
+    return fail(e, thread);
+  }
+  store().pushTurn({ who: "agent", text: r.text, role: "prompter", meta: `${r.meta} · Builder mode`, thread, from: "os" });
+  if (gen !== micGen) return;
+  if (channel === "voice") {
+    store().setState("speaking");
+    startBargeIn();
+    await say(r.text);
+    return afterVoiceReply(gen);
+  }
+  if (store().state === "speaking" || store().state === "thinking") store().setState("idle");
+}
+
+/** What Tony says the moment an approved build is queued (templated: no model, no wait). */
+export const BUILD_QUEUED_LINE = "Queued. The Prompter's on it. Ask me where the build's at anytime.";
+
+/**
+ * An approved build (thin Tony, Part 6): ONE queued TaskEnvelope, then an immediate templated
+ * line. The Rust worker runs Prompter → Librarian → Designer → Coder → staging in the background
+ * and reports through `agent-event` (narration / chat / status on demand). Only ever a plan's
+ * `run`, so it only ever runs from `approve()` (the Tier-3 yes or a Build-prototype card).
+ * Desktop: `task_create`. Phone: an `os_queue` item of kind `task` the desktop claims; the phone
+ * doesn't wait for it.
+ */
+async function delegateBuild(brief: string, title: string, thread: ThreadId, source: TaskSource, opts: { auto?: boolean } = {}): Promise<{ text: string; meta: string }> {
+  const auto = opts.auto === true;
+  if (isTauri()) {
+    const r = await cmd("task_create", { raw_intent: brief, title, thread, source, ...(auto ? { auto: true } : {}) });
+    markAnnounced(r.task_id);
+    trackTask(r.task_id, r.title || title, thread);
+    if (!r.created) return { text: `“${r.title || title}” is already queued. Ask me where the build's at anytime.`, meta: "delegated · task (Tier 3)" };
+    return { text: BUILD_QUEUED_LINE, meta: "delegated · task (Tier 3)" };
+  }
+  // Phone: wait for the desktop's answer (task creation is quick) so a mode-gate refusal
+  // (MODE_SURFACE_ONLY / MODE_NOT_AUTO from a phone whose mode view is stale) throws, never
+  // "Queued". The refusal also refreshes the phone's mode view.
+  let r: Record<string, unknown> | null;
+  try {
+    r = await queueDesktopItem("task", { raw_intent: brief, title, thread, ...(auto ? { auto: true } : {}) }, { capMs: PHONE_TASK_CAP_MS });
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    if (raw.includes(MODE_NOT_AUTO) || raw.includes(MODE_SURFACE_ONLY)) void useModes.getState().load();
+    throw e;
+  }
+  if (!r) return { text: BUILD_SENT_LINE, meta: "sent to the desktop (not picked up yet)" };
+  const name = typeof r.title === "string" && r.title ? r.title : title;
+  if (r.created === false) return { text: `“${name}” is already queued. Ask me where the build's at anytime.`, meta: "delegated · task via the desktop (Tier 3)" };
+  return { text: BUILD_QUEUED_LINE, meta: "delegated · task via the desktop (Tier 3)" };
+}
+
+/** Phone: how long to wait on the desktop's answer to a build `task` once it has claimed it. */
+const PHONE_TASK_CAP_MS = 30_000;
+/** Phone: the desktop hasn't picked the build up yet (app closed / busy) — nothing claimed. */
+export const BUILD_SENT_LINE = "Sent it to the desktop. It gets queued once the app picks it up.";
 
 /** A pipeline run for a ledger idea — always behind the card (the yes is `approve()`). */
 export function requestPipeline(ideaId: string, title: string, thread: ThreadId, channel: Channel = "text", utterance?: string) {
   const plan = heuristicPlan(utterance ?? `Run the pipeline for ${title}`, "prompter");
   plan.mutating = true;
   plan.thread = thread;
-  plan.summary = `Run the Prompter → Designer → Coder pipeline for “${title}”`;
+  plan.summary = `Build “${title}” (Prompter → Librarian → Designer → Coder → staging)`;
   plan.intent = `run the prototype pipeline for “${title}”`;
   plan.readBack = `Run the prototype pipeline for “${title}”? Proceed?`;
   plan.target = { kind: "bridge", action: "pipeline", scopes: ["delegation"] };
   plan.payload = { ideaId };
   plan.verification = { status: "verified", notes: [], by: "built from your own request" };
   plan.run = async () => {
+    // Returns at once: the worker builds it in the background (status on demand / narration).
     void runPipeline(ideaId, title, thread);
-    return { text: `Started — “${title}” will land in the Play Place.`, meta: "pipeline" };
+    return { text: `Queued “${title}”. The Prompter's on it. Ask me where the build's at anytime.`, meta: "pipeline · task" };
   };
   return requestConfirmation(plan, channel);
 }
@@ -1059,25 +1205,20 @@ export function requestBuild(text: string, title: string, thread: ThreadId = ton
   plan.target = { kind: "bridge", action: "pipeline", scopes: ["delegation"] };
   plan.payload = { title };
   plan.verification = { status: "verified", notes: [], by: "built from your own click" };
-  plan.run = () => delegateBuild(text.slice(-BRIEF_MAX), title, thread);
+  plan.run = () => delegateBuild(text.slice(-BRIEF_MAX), title, thread, "playplace");
   return requestConfirmation(plan, "text");
 }
 
-/** One-tap answers rendered under a message. */
+/** One-tap answers rendered under a message: a failed build's Retry / Offload (pipeline-store). */
 export function runTurnAction(run: string, thread: ThreadId) {
-  if (run === "dismiss-offer") {
-    usePipelines.getState().setOffered(null);
-    return;
-  }
-  const m = /^pipeline:([^:]+):(.*)$/.exec(run);
-  if (m) return void requestPipeline(m[1], m[2], thread);
-  // retry:<checkpoint>  ·  offload:<engine>:<checkpoint>
+  // retry:<task_id>  ·  offload:<engine>:<task_id>
   const retry = /^retry:(.+)$/.exec(run);
   const offload = /^offload:([a-z-]+):(.+)$/.exec(run);
   if (retry || offload) {
-    const checkpoint = (retry ?? offload)![retry ? 1 : 2];
-    store().pushTurn({ who: "system", text: offload ? `Re-running the step on ${offload[1]}…` : "Retrying the step from its checkpoint…", tone: "ok", thread });
-    void cmd("pipeline_resume", { checkpoint, offload: offload?.[1] }).catch((e) => store().pushTurn({ who: "system", text: String(e), tone: "error", thread }));
+    const taskId = (retry ?? offload)![retry ? 1 : 2];
+    store().pushTurn({ who: "system", text: offload ? `Re-running the failed step on ${offload[1]}…` : "Retrying the failed step…", tone: "ok", thread });
+    // `pipeline_resume` takes the task id (and explains an old pipeline checkpoint clearly).
+    void cmd("pipeline_resume", { checkpoint: taskId, offload: offload?.[1] }).catch((e) => store().pushTurn({ who: "system", text: String(e), tone: "error", thread }));
   }
 }
 
@@ -1159,11 +1300,18 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   let buffered = "";
   // Voice: start talking at the first complete sentence instead of after the whole answer.
   let spokenUpTo = 0;
-  let speakQ: Promise<void> = Promise.resolve();
+  // Every spoken line of this turn queues behind the vocal handoff exchange (if one is playing),
+  // so the reply and the cue beats never cut each other off (both go through tts.speak()).
+  let speakQ: Promise<void> = handoffCue ? handoffCue.done.then(() => undefined) : Promise.resolve();
   let streamAgent = "general";
   let lastSpokenChunk: string | undefined;
   // Registered for "cut it" (`killTurn` → `os_turn_cancel`); removed when the turn returns.
   activeStreams.add(streamId);
+  // While its handoff cue plays, a new command said over it cancels the cue, not this job.
+  if (handoffCue) {
+    cueProtected.add(streamId);
+    void handoffCue.done.then(() => cueProtected.delete(streamId));
+  }
   // Announcer handoff: who Tony has introduced, which agent replies were queued to speak.
   const introduced = new Set<string>();
   const spokenReplies = new Set<string>();
@@ -1240,6 +1388,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
     off();
     offAgent();
     activeStreams.delete(streamId);
+    cueProtected.delete(streamId);
     // "Cut it" dropped this turn server-side: no error, the partial bubble just stays.
     if (String(e instanceof Error ? e.message : e).includes(TURN_CANCELLED)) {
       if (live) store().updateTurn(live, { meta: "cut" });
@@ -1251,6 +1400,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   off();
   offAgent();
   activeStreams.delete(streamId);
+  cueProtected.delete(streamId);
   if (!r) {
     endIdleBargeIn();
     store().setState("idle");
@@ -1353,6 +1503,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // (Part 3) — a voice turn always speaks (above); a typed one only opts in.
   if (isTauri() && agentAutoSpeak(voiceAgent)) {
     store().setState("speaking");
+    if (handoffCue) await handoffCue.done; // never talk over (or get cut by) the hand-off beats
     await say(r.answer, { agent: voiceAgent, traceId, utteranceId: uttFor(voiceAgent) });
     if (store().state === "speaking") store().setState("idle");
     return;
@@ -1415,9 +1566,11 @@ export function afterWakeWord(text: string): string | null {
 
 function rearmWake() {
   clearTimeout(wake.timer);
-  if (!wake.armed || !stt || wakeHolds > 0) return; // a held re-arm resumes on release
+  if (!wake.armed || !stt || wakeHolds > 0 || !micEnabled()) return; // a held re-arm resumes on release
   wake.timer = setTimeout(() => {
-    if (wakeHolds > 0) return;
+    if (wakeHolds > 0 || !micEnabled()) return;
+    // A passive re-arm's startListening cancels all TTS: wait out the narration line instead.
+    if (narration.active) return rearmWake();
     const s = store().state;
     if (wake.armed && (s === "idle" || s === "error") && !store().pending) startListening({ silent: true, origin: "wake" });
     else if (wake.armed) rearmWake();
@@ -1455,7 +1608,8 @@ export function holdWake(on: boolean) {
 
 /** Turn hands-free listening on/off (Settings → Voice, or the HUD). */
 export function setWakeMode(on: boolean) {
-  wake.armed = on && !!stt;
+  // The preference is kept either way (D7); a locked-off mic only suspends it.
+  wake.armed = on && !!stt && micEnabled();
   useSettings.getState().set({ wakeMode: on });
   // Off = hard stop regardless of state: a barge-in listen opens the mic without ever setting
   // state to "listening", and a turn still in flight must not speak or reopen the mic after.
@@ -1463,7 +1617,40 @@ export function setWakeMode(on: boolean) {
   else hardStopMic();
 }
 
-if (useSettings.getState().wakeMode) setTimeout(() => setWakeMode(true), 1500);
+// ── Hard mic sovereignty (Phase 2 Part B) ────────────────────────────────────
+
+/** The Mic switch (UI only, D5: nothing can hear "mic on" once the line is dead). */
+export function setMicEnabled(on: boolean): Promise<boolean> {
+  return requestMicEnabled(on);
+}
+
+/**
+ * Locked off: everything that could reopen the mic stops. The captures themselves were already
+ * stopped by the gate (before this runs); here hands-free is suspended (its preference kept), a
+ * hold and a narration line end, any listen is dropped without transcribing, and the turn origin
+ * resets so no barge-in / follow-up can follow a reply still in flight.
+ */
+export function lockDown() {
+  wake.armed = false;
+  clearTimeout(wake.timer);
+  cancelNarration();
+  abortConfirmListen();
+  hardStopMic({ rearm: false });
+  turnOrigin = "text";
+}
+
+onMicChange((on) => {
+  if (!on) return lockDown();
+  // Unlocked (or hydrated live at startup): hands-free comes back only if it is the preference.
+  if (useSettings.getState().wakeMode) setWakeMode(true);
+});
+
+// Fail closed: the mic stays locked until the authoritative state is read (D3). Hands-free's
+// startup arm is the listener above, once hydration finds the mic live.
+void hydrateMic();
+void syncThresholdFromOs();
+// Phase 2 Part C: Tony's mode (Rust modes.json) — until it loads, Brainstorming (today's offer card).
+void useModes.getState().load();
 
 // A stop said during a cue's intro also cancels Tony's TTS (no import cycle: player.ts
 // only holds the cancel function, it doesn't import the voice controller).
@@ -1601,7 +1788,7 @@ async function sayAck(line: string, o: { listenAfter: boolean }) {
   const s = store().state;
   const micOpened = seq !== listenSeq || gen !== micGen || s === "listening" || s === "transcribing";
   const extra = maybeFlavour({ now, lastAt: flavourAt, listenAfter: o.listenAfter || wake.armed || micOpened, cueActive: cueRecentlyActive(), rng: Math.random });
-  if (!extra) return;
+  if (!extra || !micEnabled()) return; // D6: no unsolicited flavour line while locked off
   flavourAt = now;
   try {
     localStorage.setItem(FLAVOUR_KEY, String(now));
@@ -1618,10 +1805,14 @@ function supersedeTurn() {
   releaseTtsDuck();
 }
 
-/** Stop every os_turn still generating (its LLM / sub-agent streams) server-side. */
-function cancelStreams() {
-  for (const id of activeStreams) void cmd("os_turn_cancel", { streamId: id }).catch(() => undefined);
-  activeStreams.clear();
+/** Stop every os_turn still generating (its LLM / sub-agent streams) server-side, except `keep`
+ * (delegated turns whose vocal handoff cue is still playing, when a new command barges in). */
+function cancelStreams(keep: ReadonlySet<string> = new Set()) {
+  for (const id of [...activeStreams]) {
+    if (keep.has(id)) continue;
+    void cmd("os_turn_cancel", { streamId: id }).catch(() => undefined);
+    activeStreams.delete(id);
+  }
 }
 
 /**
@@ -1697,7 +1888,7 @@ function bumpHoldDeadline() {
 }
 
 function holdListen() {
-  if (!hold.active || !stt || hold.listening) return;
+  if (!hold.active || !stt || hold.listening || !micEnabled()) return;
   const left = hold.deadline - Date.now();
   if (left <= 0) return holdTimeout();
   hold.listening = true;
@@ -1710,6 +1901,7 @@ function holdListen() {
         clientTrace.phase(p);
         if (p === "speech") {
           heardSpeech = true;
+          lastUserSpeechAt = Date.now();
           bumpHoldDeadline();
         }
       },
@@ -1816,12 +2008,107 @@ function endHold() {
   clearHold();
 }
 
-/** `os-agent-reply` (agents.rs): a delegated agent's answer the moment it lands. Listened to
- * here rather than through `onNativeEvent`'s shared event-name list. */
-async function onAgentReply(h: (e: { streamId: string; agent: string; text: string }) => void): Promise<() => void> {
-  if (!isTauri()) return () => undefined;
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<{ streamId: string; agent: string; text: string }>("os-agent-reply", (e) => h(e.payload));
+/** `os-agent-reply` (agents.rs): a delegated agent's answer the moment it lands. */
+function onAgentReply(h: (e: { streamId: string; agent: string; text: string }) => void): Promise<() => void> {
+  return onNativeEvent<{ streamId: string; agent: string; text: string }>("os-agent-reply", h);
 }
 
 if (isTauri()) void detectRoute();
+
+// ── Part 6 narration: agent progress in each agent's roster voice, never over Nic or Tony ──
+
+/** A narration line is playing; `gen` tells a cancelled line from a later one. */
+const narration = { active: false, gen: 0 };
+
+/** Speech onset (or any listen Nic opens) stops ONLY a narration line. No-op otherwise. */
+function cancelNarration() {
+  if (!narration.active) return;
+  narration.active = false;
+  narration.gen++;
+  cancelTts();
+}
+
+/** Drop hands-free's silent wake listen (its open mic would hear the narration through the
+ * speakers); `rearmWake` brings it back after the line. Same as `holdWake(true)` does. */
+function dropPassiveListen() {
+  passiveListen = false;
+  stt?.abort(); // fires no handlers
+  setCueDuck("user", false);
+  restoreDuck();
+  store().setPartial("");
+  store().setState("idle");
+}
+
+/**
+ * Speak one narration line in `agent`'s roster voice (`localOnly`: the local Kokoro engine, same
+ * per-agent voice). Never through `osRun`'s speakQ and never a voice-state change: the narrator
+ * only calls this when `narratorSnapshot()` says the room is quiet. Over open speakers a passive
+ * wake listen is closed for the line and re-armed after it; on a headset it stays open and Nic's
+ * speech onset cancels the line. Not cached: narration text is mostly one-off (the session pin
+ * cache is unbounded).
+ */
+export async function narrate(text: string, agent: string, opts: { localOnly?: boolean } = {}): Promise<void> {
+  if (!tts.supported || !text.trim() || !micEnabled()) return; // D6: no narration while the mic is locked off
+  const passive = isPassiveWakeListen();
+  const dropMic = passive && currentRoute() !== "headset";
+  if (dropMic) dropPassiveListen();
+  narration.active = true;
+  const gen = ++narration.gen;
+  try {
+    await say(text, { agent, localOnly: opts.localOnly || undefined });
+  } finally {
+    if (narration.gen === gen) narration.active = false;
+    if (dropMic && wake.armed) rearmWake();
+  }
+}
+
+/** What the narrator's `canSpeak` needs from the controller right now. */
+export function narratorSnapshot(): NarratorSnapshot {
+  return {
+    state: store().state,
+    sayDepth,
+    activeStreams: activeStreams.size,
+    heardSpeech,
+    holding: hold.active,
+    pending: !!store().pending,
+    passiveWake: isPassiveWakeListen(),
+    lastUserSpeechAt,
+    lastTtsEndAt,
+  };
+}
+
+/** A narration line is playing now (tests, HUD). */
+export const narrationActive = () => narration.active;
+
+/** Tasks whose queueing Tony said himself (BUILD_QUEUED_LINE): the narrator skips their
+ * `task_queued` row, so "Queued: <title>" isn't said a second time. Capped, oldest out. */
+const announcedTasks = new Set<string>();
+function markAnnounced(taskId: string | undefined) {
+  if (!taskId) return;
+  announcedTasks.add(taskId);
+  if (announcedTasks.size > 100) announcedTasks.delete(announcedTasks.values().next().value as string);
+}
+
+/** Trace ids of the turn in flight: the announcer handoff already speaks its agents. */
+function liveTraceIds(): ReadonlySet<string> {
+  const ids = new Set<string>();
+  if (clientTrace.id) ids.add(clientTrace.id);
+  for (const s of activeStreams) ids.add(`stream:${s}`);
+  return ids;
+}
+
+/** The desktop narrator (the phone gets no agent events; it asks for status instead). */
+export const narrator = isTauri()
+  ? startNarrator({
+      narrate,
+      snapshot: narratorSnapshot,
+      cfg: () => useOs.getState().cfg,
+      liveTraceIds,
+      announcedTasks: () => announcedTasks,
+      wakeWords: () => {
+        const st = useSettings.getState();
+        return [...(st.wakeWords ?? []), st.osName || "Tony", "tony", "jarvis"];
+      },
+      subscribe: (h) => onNativeEvent<AgentEvent>("agent-event", h),
+    })
+  : null;

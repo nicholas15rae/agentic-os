@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { bargeSensitivityOffset, classifyOutputLabel, effectiveRoute } from "./audio-route";
+import { classifyOutputLabel, effectiveRoute } from "./audio-route";
+import { thresholdFor } from "./vad-gate";
 
 describe("classifyOutputLabel", () => {
   for (const label of [
@@ -35,8 +36,10 @@ describe("effectiveRoute / barge offset", () => {
     expect(effectiveRoute("speakers", "headset")).toBe("speakers");
     expect(effectiveRoute("headset", "speakers")).toBe("headset");
   });
-  it("speakers barge-in is stricter", () => {
-    expect(bargeSensitivityOffset("speakers")).toBe(-35);
-    expect(bargeSensitivityOffset("headset")).toBe(-25);
+  it("speakers barge-in is stricter (Part B: an explicit dB margin on the one gate)", () => {
+    const g = { activationDb: -44, bargeMarginDb: 6 };
+    expect(thresholdFor({ ...g, barge: true, speakers: true })).toBe(-38);
+    expect(thresholdFor({ ...g, barge: true, speakers: false })).toBe(-40);
+    expect(thresholdFor({ ...g, barge: true, speakers: true })).toBeGreaterThan(thresholdFor({ ...g, barge: true, speakers: false }));
   });
 });

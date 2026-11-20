@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { audioBusy, hardRefresh, softRefresh, type AudioSnapshot, type RefreshDeps } from "./refresh";
+import { audioBusy, busyProbes, hardRefresh, registerBusyProbe, softRefresh, type AudioSnapshot, type RefreshDeps } from "./refresh";
 
 function deps(audio: () => AudioSnapshot): RefreshDeps & { calls: string[] } {
   const calls: string[] = [];
@@ -57,5 +57,40 @@ describe("refresh", () => {
     expect(await hardRefresh(d, 1000)).toBe("soft-fallback");
     expect(d.reload).not.toHaveBeenCalled();
     expect(d.remount).toHaveBeenCalledOnce();
+  });
+});
+
+describe("review #19 / #11: open mics and playing cues", () => {
+  it("soft refresh re-syncs but keeps the view mounted while a mic under <main> is open", async () => {
+    const d = deps(() => quiet);
+    d.micBusy = () => ["Memory dictation"];
+    expect(await softRefresh(d)).toEqual({ remounted: false, keptOpen: ["Memory dictation"] });
+    expect(d.resync).toHaveBeenCalledOnce();
+    expect(d.remount).not.toHaveBeenCalled();
+    d.micBusy = () => [];
+    expect(await softRefresh(d)).toEqual({ remounted: true });
+  });
+
+  it("hard reload waits for a busy probe (dictation, Brainstorm, a handoff cue) and never cuts it", async () => {
+    const d = deps(() => ({ voiceState: "idle", cueRunning: false, busy: ["vocal handoff"] }));
+    expect(await hardRefresh(d, 1000)).toBe("soft-fallback");
+    expect(d.reload).not.toHaveBeenCalled();
+  });
+
+  it("registered probes report by kind, unregister cleanly, and a throwing probe never blocks", () => {
+    let on = true;
+    const offMic = registerBusyProbe("Memory dictation", "mic", () => on);
+    const offAudio = registerBusyProbe("vocal handoff", "audio", () => true);
+    const offBad = registerBusyProbe("broken", "audio", () => {
+      throw new Error("x");
+    });
+    expect(busyProbes("mic")).toEqual(["Memory dictation"]);
+    expect(busyProbes().sort()).toEqual(["Memory dictation", "vocal handoff"]);
+    on = false;
+    expect(busyProbes("mic")).toEqual([]);
+    offMic();
+    offAudio();
+    offBad();
+    expect(busyProbes()).toEqual([]);
   });
 });

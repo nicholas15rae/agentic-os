@@ -1,8 +1,9 @@
 import { cmd, isTauri, nativeRaw, onNativeEvent, type TtsUnpinEvent } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
-import { voiceLevel } from "./voice-store";
-import { SileroStream, preloadSilero, sileroThresholds } from "./silero";
-import { utteranceShouldEnd } from "./vad-rules";
+import { micLevel, voiceLevel } from "./voice-store";
+import { SileroStream, preloadSilero } from "./silero";
+import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, thresholdFor } from "./vad-gate";
+import { MIC_LOCKED_MSG, MicLockedError, assertMicAllowed, captureClosed, captureOpened, micEnabled, publishMeter, registerCapture, unpublishMeter, type MeterSnapshot } from "./mic-gate";
 import { perSentenceOpts, sentences, stripForSpeech, synthArgs } from "./tts-text";
 import type { SpeakOpts, TtsEngine } from "./tts-types";
 import { FallbackTts } from "./tts-fallback";
@@ -22,7 +23,9 @@ export type { SpeakOpts, TtsEngine };
  *   PWA:      WebSpeechStt (Chrome/Android) + WebSpeechTts
  *             TODO(cline): gateway /api/voice/{stt,tts} proxies so mobile uses Whisper/Kokoro too.
  *
- * Every engine feeds `voiceLevel` so the waveform reacts to real audio.
+ * Mic engines feed `micLevel`, TTS feeds `voiceLevel` (the waveform shows the louder of the two).
+ * Every capture goes through `mic-gate.ts`: while the mic is locked off nothing opens, and a
+ * mute stops whatever is open at once (Phase 2 Part B).
  */
 export interface SttHandlers {
   onPartial: (t: string) => void;
@@ -32,10 +35,20 @@ export interface SttHandlers {
   onPhase?: (p: "waiting" | "speech" | "transcribing") => void;
 }
 
+/** Per-listen options. `barge`: a listen over Tony (the gate adds `vad.bargeMarginDb`; `speakers`
+ * = open speakers, a headset gets 2 dB less). */
+export interface SttStartOpts {
+  maxSilenceStartMs?: number;
+  barge?: boolean;
+  speakers?: boolean;
+  endSilenceMs?: number;
+  maxUtteranceMs?: number;
+}
+
 export interface SttEngine {
   readonly name: string;
   readonly supported: boolean;
-  start(h: SttHandlers, opts?: { maxSilenceStartMs?: number; sensitivityOffset?: number; endSilenceMs?: number; maxUtteranceMs?: number }): void;
+  start(h: SttHandlers, opts?: SttStartOpts): void;
   /** Finish early and deliver what was heard. */
   stop(): void;
   /** Cancel: discard audio, call no handlers. */
@@ -51,13 +64,12 @@ export async function audioContext(): Promise<AudioContext> {
   return ctx;
 }
 
-// ── Mic capture + voice-activity detection ──────────────────────────────────
+// ── Mic capture + the activation gate ───────────────────────────────────────
 //
-// VAD runs on audio-thread frames (~21 ms each), so it keeps working when the
-// window is in the background. Thresholds adapt to the room: a running noise
-// floor is tracked while you're quiet, and "speech" means clearly above it.
-// Settings → Voice & Triggers → Voice detection: sensitivity, end-of-speech
-// pause, max utterance — with a live meter.
+// VAD runs on audio-thread frames (~21 ms each), so it keeps working when the window is in the
+// background. One absolute dBFS gate decides (`vad-gate.ts`, Settings → Voice & Triggers →
+// Activation threshold); Silero, once loaded, must also agree. The running noise floor is
+// display-only. The gate is read per frame, so a slider move applies on the very next frame.
 
 interface CaptureOpts {
   record: boolean;
@@ -66,34 +78,30 @@ interface CaptureOpts {
   onNoSpeech?: () => void;
   onSpeechStart?: () => void;
   maxSilenceStartMs?: number;
-  /** Meter only (Settings test): don't keep audio. */
+  /** Meter only (the Web Speech level): don't keep audio, decide nothing. */
   meterOnly?: boolean;
-  /** Added to the sensitivity (negative = stricter, e.g. while Tony is speaking). */
-  sensitivityOffset?: number;
+  /** A listen over Tony: the gate adds the barge margin. */
+  barge?: boolean;
+  speakers?: boolean;
   /** Pause (ms) that ends an utterance. Overrides `vad.endSilenceMs`; `Infinity` never ends on silence. */
   endSilenceMs?: number;
   /** Hard cap (ms) on one utterance, measured from speech start. Overrides `vad.maxUtteranceMs`; `Infinity` disables the cap. */
   maxUtteranceMs?: number;
 }
 
-/**
- * Live VAD state for the Settings meter (read in a rAF loop while visible).
- * `neural` = Silero is deciding; then `prob`/`probOn`/`probOff` are the live
- * speech probability and its trigger/pause lines (0–1).
- */
-export const vadMeter = { level: 0, floor: 0, on: 0, off: 0, speaking: false, neural: false, prob: 0, probOn: 0, probOff: 0 };
-
 const FRAME_SAMPLES = 1024;
 
-export function vadThresholds(floor: number, sensitivity: number) {
-  const s = Math.max(0, Math.min(100, sensitivity)) / 100;
-  // High sensitivity → trigger closer to the noise floor and at quieter absolute levels.
-  const ratioOn = 4.2 - s * 2.7; // 4.2× (deaf) … 1.5× (hair-trigger) above the floor
-  const absOn = 0.02 - s * 0.017; // 0.02 … 0.003 RMS
-  const on = Math.max(absOn, floor * ratioOn);
-  const off = Math.max(absOn * 0.55, floor * Math.max(1.25, ratioOn * 0.55));
-  return { on, off };
+/** The gate settings, cached (no store read per audio frame) and refreshed on every change. */
+let gateCfg = { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB };
+function readGateCfg() {
+  const v = useSettings.getState().vad;
+  gateCfg = {
+    activationDb: typeof v?.activationDb === "number" ? v.activationDb : DEFAULT_ACTIVATION_DB,
+    bargeMarginDb: typeof v?.bargeMarginDb === "number" ? v.bargeMarginDb : DEFAULT_BARGE_MARGIN_DB,
+  };
 }
+readGateCfg();
+useSettings.subscribe(readGateCfg);
 
 export class MicCapture {
   private stream: MediaStream | null = null;
@@ -104,19 +112,26 @@ export class MicCapture {
   private silero: SileroStream | null = null;
   /** Bumped by every start()/stop(): an older start() still awaiting the mic sees it changed and bails. */
   private session = 0;
+  /** Releases this capture's registration with the mic gate (null while not holding the mic). */
+  private release: (() => void) | null = null;
+  /** This capture's own meter (published while it holds the mic; mutated per frame). */
+  readonly meter: MeterSnapshot = { levelDb: -100, floorDb: -100, thrDb: DEFAULT_ACTIVATION_DB, prob: null, speaking: false, neural: false };
 
   /** start() is still acquiring the mic (nothing captured yet, not stopped). */
   get starting() {
     return !this.done && !this.stream;
   }
 
+  /** Rejects with `MicLockedError` while the mic is locked off (before touching any audio API). */
   async start(opts: CaptureOpts): Promise<void> {
     this.stop();
+    assertMicAllowed();
     const my = ++this.session;
     this.done = false;
     this.chunks = [];
     const ac = await audioContext();
     if (my !== this.session) return;
+    assertMicAllowed();
     const { micDeviceId: deviceId, vad } = useSettings.getState();
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -129,10 +144,19 @@ export class MicCapture {
       },
     });
     if (my !== this.session) return stream.getTracks().forEach((t) => t.stop());
+    // Locked off while the browser was opening the device: release it before anything listens.
+    if (!micEnabled()) {
+      stream.getTracks().forEach((t) => t.stop());
+      this.done = true;
+      throw new MicLockedError();
+    }
     this.stream = stream;
+    this.release = registerCapture({ stop: () => this.stop() });
+    captureOpened();
+    publishMeter(this.meter);
     const src = ac.createMediaStreamSource(stream);
     await ac.audioWorklet.addModule(import.meta.env.BASE_URL + "worklets/pcm-capture.js");
-    // A stop() during addModule already released `stream`; stopping again is a no-op.
+    // A stop() during addModule (a mute included) already released `stream`; stopping again is a no-op.
     if (my !== this.session) return stream.getTracks().forEach((t) => t.stop());
     const worklet = new AudioWorkletNode(ac, "pcm-capture");
     const sink = ac.createGain();
@@ -142,72 +166,59 @@ export class MicCapture {
 
     const frameMs = (FRAME_SAMPLES / ac.sampleRate) * 1000;
     const started = performance.now();
-    let floor = 0;
-    let calibrated = 0; // frames used for the initial floor
-    let above = 0; // consecutive speech frames/windows (debounce)
-    let speechAt = 0;
-    let speechChunk = 0;
-    let quietMs = 0;
-    const sens = vad.sensitivity + (opts.sensitivityOffset ?? 0);
     // A caller (e.g. Brainstorm's per-profile dictation) overrides the global VAD pause/cap;
     // `Infinity` disables either check (continuous mode never ends on silence or a time cap).
     const endMs = opts.endSilenceMs ?? vad.endSilenceMs;
     const maxMs = opts.maxUtteranceMs ?? vad.maxUtteranceMs;
+    const gate = new Gate(frameMs, endMs, maxMs);
+    const meter = this.meter;
+    let floorDb = -100;
+    let frames = 0;
+    let speechAt = 0;
+    let speechChunk = 0;
 
-    /** Shared speech state machine; fed by Silero windows or, as a fallback, energy frames. */
-    const step = (isSpeech: boolean, isQuiet: boolean, ms: number, debounce: number) => {
-      if (this.done || !opts.onUtteranceEnd) return;
-      const now = performance.now();
-      if (!speechAt) {
-        above = isSpeech ? above + 1 : 0;
-        if (above >= debounce) {
-          // Keep ~300 ms of pre-roll before the trigger.
-          speechAt = now;
-          speechChunk = Math.max(0, this.chunks.length - 3 - 14);
-          opts.onSpeechStart?.();
-        }
-        return;
-      }
-      quietMs = isQuiet ? quietMs + ms : 0;
-      if (utteranceShouldEnd(quietMs, endMs, now - speechAt, maxMs)) this.finish(ac.sampleRate, opts, speechChunk);
-    };
-
-    // Neural VAD: decides once its model is loaded; until then (or if it fails) energy decides.
-    const silero = opts.onUtteranceEnd ? new SileroStream(ac.sampleRate, (p) => {
-      const { on, off } = sileroThresholds(sens);
-      Object.assign(vadMeter, { prob: p, probOn: on, probOff: off });
-      step(p >= on, p < off, 32, 2); // 2 windows ≈ 64 ms of speech to start
-    }) : null;
+    // Neural VAD: once its model is loaded, its latest probability is the gate's AND condition.
+    const silero = opts.onUtteranceEnd ? new SileroStream(ac.sampleRate, () => undefined) : null;
     this.silero = silero;
 
     worklet.port.onmessage = (e: MessageEvent<{ pcm: Float32Array; rms: number }>) => {
       if (this.done) return;
+      // A mute that raced this frame: the line is dead, drop the frame and release the mic.
+      if (!micEnabled()) return this.stop();
       const { pcm, rms } = e.data;
       if (!opts.meterOnly) this.chunks.push(pcm);
-      voiceLevel.current += (Math.min(1, rms * 6) - voiceLevel.current) * 0.5;
+      micLevel.current += (Math.min(1, rms * 6) - micLevel.current) * 0.5;
       const neural = !!silero?.ready && !silero.failed;
       if (neural) silero.push(pcm);
+      const levelDb = dbfs(rms);
+      const prob = neural ? silero.prob : null;
+      // Display-only floor: the first ~250 ms averaged, then tracked while nobody is speaking.
+      frames++;
+      if (frames <= 12) floorDb = frames === 1 ? levelDb : floorDb + (levelDb - floorDb) / frames;
+      else if (!gate.speaking) floorDb += (levelDb - floorDb) * (levelDb < floorDb + 6 ? 0.05 : 0.003);
+      // Read per frame from the cached settings: a slider move applies on the very next frame.
+      const thrDb = thresholdFor({ ...gateCfg, barge: opts.barge, speakers: opts.speakers });
+      meter.levelDb = levelDb;
+      meter.floorDb = floorDb;
+      meter.thrDb = thrDb;
+      meter.prob = prob;
+      meter.neural = neural;
+      if (!opts.onUtteranceEnd) return;
 
-      // Noise floor: average of the first ~250 ms, then tracked while not speaking.
-      if (calibrated < 12) {
-        floor = (floor * calibrated + rms) / (calibrated + 1);
-        calibrated++;
-      } else if (!speechAt) {
-        floor = rms < floor * 2 ? floor * 0.95 + rms * 0.05 : floor * 0.997 + rms * 0.003;
-      }
-      floor = Math.min(floor, 0.05);
-      const { on, off } = vadThresholds(floor, sens);
-      Object.assign(vadMeter, { level: rms, floor, on, off, speaking: !!speechAt, neural });
-      if (!opts.onUtteranceEnd || calibrated < 6) return;
-
-      if (!speechAt && performance.now() - started > (opts.maxSilenceStartMs ?? 7000)) {
+      if (!gate.speaking && performance.now() - started > (opts.maxSilenceStartMs ?? 7000)) {
         this.done = true;
         this.stop();
         opts.onNoSpeech?.();
         return;
       }
-      // ~60 ms of clear speech (3 frames) to start.
-      if (!neural) step(rms > on, rms < off, frameMs, 3);
+      const ev = gate.push(levelDb, prob, thrDb);
+      meter.speaking = gate.speaking;
+      if (ev === "start") {
+        speechAt = performance.now();
+        // Keep ~300 ms of pre-roll before the trigger.
+        speechChunk = Math.max(0, this.chunks.length - 3 - 14);
+        opts.onSpeechStart?.();
+      } else if (ev === "end") this.finish(ac.sampleRate, opts, speechChunk);
     };
 
     // Safety net if the audio thread stalls (device unplugged…): give up after the max utterance.
@@ -216,6 +227,7 @@ export class MicCapture {
     // before that, from mic start. Infinity thresholds correctly never trip this (Infinity-safe).
     this.timer = setInterval(() => {
       if (this.done) return;
+      if (!micEnabled()) return this.stop();
       const now = performance.now();
       if (speechAt) {
         if (now - speechAt > maxMs + 2000) {
@@ -230,7 +242,7 @@ export class MicCapture {
 
   /** End now and hand over whatever was captured (used by the stop button). Nothing live → just stop. */
   flush(onUtteranceEnd: CaptureOpts["onUtteranceEnd"]) {
-    if (this.done || !this.stream || !ctx) return this.stop();
+    if (this.done || !this.stream || !ctx || !micEnabled()) return this.stop();
     this.finish(ctx.sampleRate, { record: true, onUtteranceEnd }, 0);
   }
 
@@ -245,23 +257,31 @@ export class MicCapture {
       o += c.length;
     }
     this.stop();
-    opts.onUtteranceEnd?.(pcm, rate);
+    // Never hand audio on once the line is dead (a mute in the same tick as the end of speech).
+    if (micEnabled()) opts.onUtteranceEnd?.(pcm, rate);
   }
 
-  /** Releases the mic (tracks stopped → OS indicator off). The shared AudioContext stays open for TTS. */
+  /** Releases the mic (tracks stopped → OS indicator off). The shared AudioContext stays open for TTS. Idempotent. */
   stop() {
     this.session++;
     this.done = true;
+    this.chunks = [];
     clearInterval(this.timer);
     this.silero?.close();
     this.silero = null;
     for (const n of this.nodes) n.disconnect();
-    if (this.nodes[1] instanceof AudioWorkletNode) this.nodes[1].port.onmessage = null;
+    if (typeof AudioWorkletNode !== "undefined" && this.nodes[1] instanceof AudioWorkletNode) this.nodes[1].port.onmessage = null;
     this.nodes = [];
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
-    voiceLevel.current = 0;
-    vadMeter.speaking = false;
+    if (this.release) {
+      this.release();
+      this.release = null;
+      captureClosed();
+    }
+    unpublishMeter(this.meter);
+    this.meter.speaking = false;
+    micLevel.current = 0;
   }
 }
 
@@ -309,7 +329,9 @@ export class WhisperStt implements SttEngine {
     if (this.supported) void preloadSilero();
   }
 
-  start(h: SttHandlers, opts?: { maxSilenceStartMs?: number; sensitivityOffset?: number; endSilenceMs?: number; maxUtteranceMs?: number }) {
+  start(h: SttHandlers, opts?: SttStartOpts) {
+    // Locked off: never touch the mic (no getUserMedia, no Whisper request).
+    if (!micEnabled()) return h.onError(MIC_LOCKED_MSG);
     this.handlers = h;
     h.onPhase?.("waiting");
     const current = () => this.handlers === h;
@@ -317,14 +339,15 @@ export class WhisperStt implements SttEngine {
       .start({
         record: true,
         maxSilenceStartMs: opts?.maxSilenceStartMs,
-        sensitivityOffset: opts?.sensitivityOffset,
+        barge: opts?.barge,
+        speakers: opts?.speakers,
         endSilenceMs: opts?.endSilenceMs,
         maxUtteranceMs: opts?.maxUtteranceMs,
         onSpeechStart: () => current() && h.onPhase?.("speech"),
         onNoSpeech: () => current() && h.onFinal(""),
         onUtteranceEnd: (pcm, rate) => void this.transcribe(pcm, rate, h),
       })
-      .catch(() => current() && h.onError("Microphone blocked — allow mic access"));
+      .catch((e) => current() && h.onError(e instanceof MicLockedError ? MIC_LOCKED_MSG : "Microphone blocked — allow mic access"));
   }
 
   /** Stop button: transcribe what we have instead of discarding it. */
@@ -346,11 +369,12 @@ export class WhisperStt implements SttEngine {
 
   private async transcribe(pcm: Float32Array, rate: number, h: SttHandlers) {
     if (this.handlers !== h) return;
-    if (pcm.length < rate * 0.3) return h.onFinal("");
+    if (pcm.length < rate * 0.3 || !micEnabled()) return h.onFinal("");
     h.onPhase?.("transcribing");
     try {
       const text = await nativeRaw<string>("stt_transcribe", encodeWav16k(pcm, rate));
-      if (this.handlers === h) h.onFinal(text.trim());
+      // Locked off while Whisper worked: what was heard before the mute is dropped.
+      if (this.handlers === h) h.onFinal(micEnabled() ? text.trim() : "");
     } catch (e) {
       if (this.handlers === h) h.onError(`Whisper: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -365,7 +389,7 @@ type SR = {
   onerror: ((e: { error: string }) => void) | null;
   onend: (() => void) | null;
   onspeechstart: (() => void) | null;
-  start(): void; stop(): void;
+  start(): void; stop(): void; abort(): void;
 };
 
 export class WebSpeechStt implements SttEngine {
@@ -376,13 +400,16 @@ export class WebSpeechStt implements SttEngine {
   private mic = new MicCapture();
 
   constructor() {
-    const w = window as unknown as { SpeechRecognition?: new () => SR; webkitSpeechRecognition?: new () => SR };
+    const w = (typeof window !== "undefined" ? window : {}) as unknown as { SpeechRecognition?: new () => SR; webkitSpeechRecognition?: new () => SR };
     this.Ctor = w.SpeechRecognition ?? w.webkitSpeechRecognition;
     this.supported = !!this.Ctor && !isTauri(); // WebView2 exposes the API but it never returns results
   }
 
-  start(h: SttHandlers, opts?: { maxSilenceStartMs?: number; sensitivityOffset?: number; endSilenceMs?: number; maxUtteranceMs?: number }) {
+  start(h: SttHandlers, opts?: SttStartOpts) {
     if (!this.Ctor) return h.onError("Speech recognition unavailable");
+    // Locked off: the cloud recognizer never starts (Rust can't gate it, so this is the gate).
+    if (!micEnabled()) return h.onError(MIC_LOCKED_MSG);
+    this.abort(); // a previous recognizer never keeps listening under a new one
     void this.mic.start({ record: false, meterOnly: true }).catch(() => undefined); // level meter only
     const rec = new this.Ctor();
     // Chrome's own endpointing has no configurable pause length, so snappy/relaxed just use its
@@ -390,11 +417,16 @@ export class WebSpeechStt implements SttEngine {
     // asks Chrome to keep recognizing across pauses; the session then only ends via stop()/abort().
     rec.continuous = opts?.endSilenceMs === Infinity;
     rec.interimResults = true;
-    rec.lang = navigator.language || "en-US";
+    rec.lang = (typeof navigator !== "undefined" && navigator.language) || "en-US";
     let finalText = "";
+    let aborted = false;
+    const dead = () => aborted || !micEnabled();
     h.onPhase?.("waiting");
-    rec.onspeechstart = () => h.onPhase?.("speech");
+    rec.onspeechstart = () => {
+      if (!dead()) h.onPhase?.("speech");
+    };
     rec.onresult = (e) => {
+      if (dead()) return;
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
@@ -403,18 +435,25 @@ export class WebSpeechStt implements SttEngine {
       }
       h.onPartial((finalText + interim).trim());
     };
-    let aborted = false;
+    // A mute stops this recognizer through the gate (abort: whatever it heard is discarded).
+    const release = registerCapture({ stop: () => this.abort() });
     this.abortCurrent = () => {
       aborted = true;
-      rec.stop();
+      release();
+      try {
+        rec.abort();
+      } catch {
+        /* already ended */
+      }
     };
     rec.onerror = (e) => {
-      if (!aborted && e.error !== "no-speech" && e.error !== "aborted") h.onError(`Mic: ${e.error}`);
+      if (!dead() && e.error !== "no-speech" && e.error !== "aborted") h.onError(`Mic: ${e.error}`);
     };
     rec.onend = () => {
-      this.rec = null;
+      release();
+      if (this.rec === rec) this.rec = null;
       this.mic.stop();
-      if (!aborted) h.onFinal(finalText.trim());
+      if (!dead()) h.onFinal(finalText.trim());
     };
     this.rec = rec;
     rec.start();
@@ -427,7 +466,10 @@ export class WebSpeechStt implements SttEngine {
   }
 
   abort() {
-    this.abortCurrent();
+    const a = this.abortCurrent;
+    this.abortCurrent = () => undefined;
+    a();
+    this.rec = null;
     this.mic.stop();
   }
 }
@@ -456,7 +498,7 @@ export class KokoroTts implements TtsEngine {
   /** Deliberately excludes `utteranceId`: callers pass the same id to a reply's prefetch and
    * speak (osRun), and a speak() that mints its own id still reuses the prefetched audio. */
   private key(s: string, opts?: SpeakOpts) {
-    return `${opts?.agent ?? ""}|${opts?.voice ?? ""}|${opts?.previousText ?? ""}|${s}`;
+    return `${opts?.agent ?? ""}|${opts?.voice ?? ""}|${opts?.localOnly ? "local" : ""}|${opts?.previousText ?? ""}|${s}`;
   }
 
   /** Session cache for `cache: true` lines (intros, acks, the greeting). Holds the raw bytes;

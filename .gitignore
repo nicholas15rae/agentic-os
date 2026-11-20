@@ -39,3 +39,11 @@ data/instagram/
 .agenticos/
 # Live-run worktrees junction node_modules to the main tree; never track the link
 command center/node_modules
+
+# TaskEnvelope pipeline: staged builds and Tony's notes / prompt backups stay local (never `git add -A`)
+staging/
+memory/tony/
+
+# Memory Scrolls (Phase 3): cold archive fallback root and local compaction state / scroll history
+/archive/
+/data/memory-scrolls/

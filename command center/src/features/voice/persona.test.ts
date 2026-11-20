@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { ACKS, ack, FLAVOUR, FLAVOUR_COOLDOWN_MS, GREETING, maybeFlavour, seededRng, STAND_DOWN_LINES, standDownLine, TONY_STYLE } from "./persona";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/features/os/os-store", () => ({ osName: () => "Tony" }));
+
+import { SUB_AGENTS } from "@/features/dispatcher/agents";
+import { ACKS, ack, FLAVOUR, FLAVOUR_COOLDOWN_MS, GREETING, maybeFlavour, seededRng, STAND_DOWN_LINES, standDownLine, TONY_INTRO, TONY_ROLE, TONY_STYLE } from "./persona";
 import { parseReflex } from "./reflex-parse";
 
 const words = (s: string) => s.split(/\s+/).filter(Boolean).length;
@@ -31,6 +37,26 @@ describe("persona lines", () => {
     expect(TONY_STYLE).toContain("My bad.");
     expect(TONY_STYLE.toLowerCase()).not.toContain("json");
     expect(TONY_STYLE.toLowerCase()).not.toContain("gabagool");
+  });
+});
+
+describe("Nic's Tony prompt (Part 7) mirrors Rust agent_prompts.rs", () => {
+  const rs = readFileSync(resolve(__dirname, "../../../src-tauri/src/commands/agent_prompts.rs"), "utf8");
+  it("TONY_INTRO / TONY_ROLE are identical to the Rust constants", () => {
+    expect(rs).toContain(`pub const TONY_INTRO: &str = "${TONY_INTRO}";`);
+    expect(rs).toContain(`pub const TONY_ROLE: &str = r#"${TONY_ROLE}"#;`);
+  });
+  it("never names the structured format (skip_agentic_os) and keeps the confirmation gate", () => {
+    for (const s of [TONY_INTRO, TONY_ROLE]) expect(s.toLowerCase()).not.toContain("json");
+    expect(TONY_ROLE).toContain("once Nic says yes on the hand-off card");
+    expect(TONY_ROLE).not.toContain("/no_think");
+  });
+  it("the TS dispatcher's Tony prompt carries it", () => {
+    const sys = SUB_AGENTS.general.systemPrompt;
+    expect(sys.startsWith("You are Tony, Nic's main AI operating system")).toBe(true);
+    expect(sys).toContain(TONY_ROLE);
+    expect(sys).toContain(TONY_STYLE);
+    expect(sys.toLowerCase()).not.toContain("json");
   });
 });
 

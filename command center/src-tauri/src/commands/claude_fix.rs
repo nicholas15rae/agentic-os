@@ -66,7 +66,9 @@ pub const ALLOWED_TOOLS: [&str; 16] = [
 ];
 
 /// Denied even if something else would allow them.
-pub const DISALLOWED_TOOLS: [&str; 20] = [
+/// `node_modules/**` (both forms): the worktree's `node_modules` is a junction into the MAIN
+/// tree, so an Edit/Write through it would land outside the worktree.
+pub const DISALLOWED_TOOLS: [&str; 24] = [
     "WebFetch",
     "WebSearch",
     "Bash(git commit:*)",
@@ -87,6 +89,10 @@ pub const DISALLOWED_TOOLS: [&str; 20] = [
     "Read(//**/.credentials*)",
     "Bash(git diff --no-index:*)",
     "Bash(git diff --output:*)",
+    "Edit(**/node_modules/**)",
+    "Write(**/node_modules/**)",
+    "Edit(//**/node_modules/**)",
+    "Write(//**/node_modules/**)",
 ];
 
 /// Appended to Claude's system prompt. One line: argv may pass through a .cmd shim.
@@ -543,6 +549,11 @@ pub struct ClaudeFixState {
 }
 
 impl ClaudeFixState {
+    /// A Claude Code fix is running (Phase 3 idle check: never compact under it).
+    pub fn is_busy(&self) -> bool {
+        self.run.lock().unwrap().is_some()
+    }
+
     fn claim(&self, id: &str) -> Result<Arc<AtomicBool>, String> {
         let mut g = self.run.lock().unwrap();
         if let Some(r) = g.as_ref() {
@@ -880,6 +891,11 @@ mod tests {
         assert_eq!(&a[dt + 1..dt + 1 + DISALLOWED_TOOLS.len()], &DISALLOWED_TOOLS);
         for d in ["WebFetch", "WebSearch", "Bash(git push:*)", "Bash(git commit:*)", "Bash(curl:*)", "Read(**/.env*)"] {
             assert!(DISALLOWED_TOOLS.contains(&d), "{d}");
+        }
+        // Part 4: no edits through the worktree's node_modules junction into the main tree.
+        for d in ["Edit(**/node_modules/**)", "Write(**/node_modules/**)", "Edit(//**/node_modules/**)", "Write(//**/node_modules/**)"] {
+            assert!(a[dt + 1..dt + 1 + DISALLOWED_TOOLS.len()].contains(&d), "{d}");
+            assert!(!ALLOWED_TOOLS.contains(&d), "{d}");
         }
         // No broad shell, no commit/push in the allowlist.
         assert!(!ALLOWED_TOOLS.contains(&"Bash") && ALLOWED_TOOLS.iter().all(|t| !t.contains("commit") && !t.contains("push") && !t.contains("WebFetch")));

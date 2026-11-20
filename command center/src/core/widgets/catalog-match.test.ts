@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { matchCatalog, type CatalogEntry } from "./catalog-match";
+import tonyMode from "@/widgets/tony-mode";
 
 const DEFS: CatalogEntry[] = [
   { id: "custom", title: "Custom Widget" },
@@ -9,6 +10,8 @@ const DEFS: CatalogEntry[] = [
   { id: "n8n-pipelines", title: "n8n Pipelines & Drive Sync" },
   { id: "quick-notes", title: "Quick Notes" },
   { id: "system-stats", title: "System" },
+  // The real definition (Phase 2 Part D), so its keywords are what's tested.
+  { id: tonyMode.id, title: tonyMode.title, keywords: tonyMode.keywords },
 ];
 const m = (p: string) => matchCatalog(p, DEFS)?.id ?? null;
 
@@ -43,5 +46,14 @@ describe("matchCatalog", () => {
     expect(m("system uptime checklist")).toBe(null);
     expect(m("put the spotify widget on my dashboard")).toBe("spotify");
     expect(m("show me the music player")).toBe("spotify");
+  });
+
+  it("adds the Tony Mode panel by name, never for the compute switch or the novelty word", () => {
+    expect(m("add the tony mode panel")).toBe("tony-mode");
+    expect(m("tony mode")).toBe("tony-mode");
+    expect(m("modes")).toBe("tony-mode");
+    expect(m("mode panel")).toBe("tony-mode");
+    expect(m("compute mode")).toBe(null);
+    expect(m("gabagool")).toBe(null);
   });
 });

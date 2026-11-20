@@ -5,13 +5,34 @@ import { xcmd } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
 import { healthView } from "./health";
 import { reconnectGateway, startHealth, useHealth } from "./health-store";
-import { hardRefresh, softRefresh, useRefresh } from "./refresh";
+import { hardRefresh, registerBusyProbe, softRefresh, useRefresh, type SoftOutcome } from "./refresh";
+import { useDictation } from "@/features/memmap/dictation";
+import { useBrainstorm } from "@/features/brainstorm/capture";
+import { cueActive } from "@/features/voice/handoff-cues";
 
 const railBtn = "relative grid size-11 place-items-center rounded-[14px] text-ink-2 transition-all duration-200 hover:bg-white/5 hover:text-ink";
 
 /** Bottom of the left rail: gateway heartbeat, Refresh / Hard Reload, Exit (Phase 1). */
+/** Mics under `<main>` (a re-mount would drop them) and audio a hard reload would cut. */
+function useBusyProbes() {
+  useEffect(() => {
+    const off = [
+      registerBusyProbe("Memory dictation", "mic", () => useDictation.getState().phase !== "idle"),
+      registerBusyProbe("Brainstorm Listen Mode", "mic", () => useBrainstorm.getState().listening),
+      registerBusyProbe("vocal handoff", "audio", cueActive),
+    ];
+    return () => off.forEach((f) => f());
+  }, []);
+}
+
+/** Tell Nic when a refresh re-synced but kept the view mounted for an open mic. */
+export function noteSoft(o: SoftOutcome) {
+  if (!o.remounted) useToasts.getState().push({ title: "Re-synced", body: `Views kept as they are while ${o.keptOpen.join(" and ")} is open — nothing you're dictating is lost.`, tone: "info" });
+}
+
 export function LifecycleRail() {
   useEffect(startHealth, []);
+  useBusyProbes();
   return (
     <div className="mt-auto flex flex-col items-center gap-2.5 pt-2">
       <HealthButton />
@@ -36,7 +57,7 @@ function HealthButton() {
   const reset = async () => {
     try {
       const after = await reconnectGateway();
-      await softRefresh();
+      noteSoft(await softRefresh());
       useToasts.getState().push({ title: "Master reset", body: `Gateway ${healthView(after).label}. Views re-synced.`, tone: after.state === "online" || after.state === "slow" ? "info" : "error" });
     } catch (e) {
       useToasts.getState().push({ title: "Reconnect failed", body: e instanceof Error ? e.message : String(e), tone: "error" });
@@ -74,7 +95,7 @@ function HealthButton() {
 function RefreshButton() {
   const busy = useRefresh((s) => s.busy);
   const run = async (hard: boolean) => {
-    if (!hard) return softRefresh();
+    if (!hard) return noteSoft(await softRefresh());
     const out = await hardRefresh();
     if (out === "soft-fallback") useToasts.getState().push({ title: "Soft refresh instead", body: "Audio was still playing, so the full reload was skipped. Views were re-synced.", tone: "info" });
   };

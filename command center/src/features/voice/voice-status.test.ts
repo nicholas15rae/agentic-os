@@ -1,5 +1,19 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { headerSubtitle, toggleAction } from "./voice-status";
+import { headerSubtitle, lockedToggleStops, toggleAction } from "./voice-status";
+
+describe("lockedToggleStops (mic locked off, fix pass)", () => {
+  it("the hotkey / mic button can still stop Tony; from rest it never opens a listen", () => {
+    for (const s of ["speaking", "holding", "thinking", "transcribing", "listening"] as const) expect(lockedToggleStops(s)).toBe(true);
+    for (const s of ["idle", "error", "confirming"] as const) expect(lockedToggleStops(s)).toBe(false);
+  });
+
+  it("the desktop global hotkey's `mic-locked` event goes through the same toggle (not a bare toast)", () => {
+    const src = readFileSync(fileURLToPath(new URL("./VoiceHUD.tsx", import.meta.url)), "utf8");
+    expect(src).toMatch(/onNativeEvent\("mic-locked", launchToggle\)/);
+  });
+});
 
 describe("toggleAction", () => {
   it("submits a listen only after speech was heard", () => {

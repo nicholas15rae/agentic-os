@@ -79,19 +79,37 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…`
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 const answerText = (a: Answer | undefined) => oneLine([a?.choice, a?.text].filter(Boolean).join(" — "));
 
-export function milestonesFor(runtime: TargetRuntime, a: Answers): string[] {
-  const mock = /mock/i.test(pick(a, "scope"));
+/** Questions that set envelope fields directly (never copied into the criteria). */
+const ENVELOPE_QS = new Set(["runtime", "worker"]);
+/** The scope question: the fallback's `scope`, or a Prompter question about scope / the first build. */
+const isScopeQ = (q: IntakeQuestion) => q.id === "scope" || /\bscope\b|first build|how much/i.test(q.question);
+
+export function milestonesFor(runtime: TargetRuntime, a: Answers, questions: readonly IntakeQuestion[] = []): string[] {
+  const scopeIds = new Set(["scope", ...questions.filter(isScopeQ).map((q) => q.id)]);
+  const mock = [...scopeIds].some((id) => /mock/i.test(answerText(a[id])));
   const core = mock ? "Clickable mock of every screen" : runtime === "internal_widget" ? "Core interactions working" : "Core features working";
   return runtime === "internal_widget"
     ? ["Spec locked from the interview", "Layout & components", core, "Smoke test passes", "Promoted to the dashboard"]
     : ["Spec locked from the interview", "App scaffold in external-builds", core, "Smoke test passes", "Ready for merge"];
 }
 
-export function criteriaFor(runtime: TargetRuntime, a: Answers): string[] {
+export function criteriaFor(runtime: TargetRuntime, a: Answers, questions: readonly IntakeQuestion[] = []): string[] {
   const out: string[] = [];
   const s = a.success;
   if (s?.choice && !/own criteria/i.test(s.choice)) out.push(s.choice);
   for (const line of (s?.text ?? "").split(/[\n;]+/)) if (line.trim()) out.push(oneLine(line));
+  // The Prompter's own questions (q1..q3) carry no fixed id: with no `success` question, every
+  // answered one (scope / stack excepted) becomes a checkable requirement, typed lines split out.
+  if (!s) {
+    for (const q of questions) {
+      if (ENVELOPE_QS.has(q.id) || q.id === "stack" || isScopeQ(q)) continue;
+      const ans = a[q.id];
+      if (!ans?.choice && !ans?.text) continue;
+      const head = q.question.replace(/\?\s*$/, "");
+      if (ans.choice && !/own|type/i.test(ans.choice)) out.push(`${head}: ${ans.choice}`);
+      for (const l of (ans.text ?? "").split(/[\n;]+/)) if (l.trim()) out.push(oneLine(l));
+    }
+  }
   out.push("Renders with no console errors");
   out.push("No secrets, no calls to private hosts");
   out.push(runtime === "internal_widget" ? "Runs inside a sandboxed iframe (no parent / top access)" : "Opens on its own from app/index.html");
@@ -138,8 +156,8 @@ export function compileEnvelope(notes: readonly IntakeNote[], questions: readonl
     target_runtime: runtime,
     output_directory: outputDirectory(runtime, slug, ctx),
     spec_summary: summary,
-    milestones: milestonesFor(runtime, answers),
-    acceptance_criteria: criteriaFor(runtime, answers),
+    milestones: milestonesFor(runtime, answers, questions),
+    acceptance_criteria: criteriaFor(runtime, answers, questions),
     assigned_worker: workerFrom(answers),
     preview_url: null,
     status: "queued",

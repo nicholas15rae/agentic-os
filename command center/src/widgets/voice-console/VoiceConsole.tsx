@@ -5,6 +5,8 @@ import { useOsName } from "@/features/os/os-store";
 import { Waveform } from "@/features/voice/Waveform";
 import { CommandInput, MicButton, STATE_DOT, useTonyThread } from "@/features/voice/VoiceParts";
 import { voiceCaps } from "@/features/voice/voice-controller";
+import { MicLockBadge, useMicIndicator } from "@/features/voice/MicLockBadge";
+import { isMicOff } from "@/features/voice/mic-indicator";
 
 /** The docked voice HUD — anchored centre stage on the Command board. */
 export default function VoiceConsole({ size }: WidgetProps) {
@@ -31,6 +33,9 @@ export default function VoiceConsole({ size }: WidgetProps) {
   const lastUser = turns.filter((t) => t.who === "user").at(-1);
   const lastAgent = [...turns].reverse().find((t) => t.who !== "user");
   const tall = size.h >= 3;
+  // Phase 2 Part D: the true mic state — a locked-off mic shows a static red chip and flat line.
+  const micOff = isMicOff(useMicIndicator());
+  const flatLine = micOff && state !== "speaking" && state !== "thinking";
 
   return (
     <div ref={ref} className="flex h-full min-h-44 flex-col">
@@ -38,12 +43,15 @@ export default function VoiceConsole({ size }: WidgetProps) {
         <span className={`size-2 rounded-full ${STATE_DOT[state]}`} />
         <h2 className="label-caps text-ink">{name} voice</h2>
         <span className="label-caps hidden rounded-full border border-amber/30 px-2 py-0.5 text-amber-soft sm:inline">{voiceCaps.sttName}</span>
-        <span className="label-caps ml-auto text-teal">{STATE_LABEL[state]}</span>
+        <span className="ml-auto flex items-center gap-2">
+          <MicLockBadge variant="chip" onlyWhenOff />
+          <span className="label-caps text-teal">{STATE_LABEL[state]}</span>
+        </span>
       </header>
 
       <div className="flex min-h-0 flex-1 items-center gap-4 py-2">
         <MicButton size={tall ? 56 : 44} />
-        <Waveform state={state} height={tall ? 110 : 64} className="flex-1" />
+        <Waveform state={state} height={tall ? 110 : 64} className="flex-1" locked={flatLine} />
       </div>
 
       <div className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">

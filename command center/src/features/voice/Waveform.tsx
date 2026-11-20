@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
-import { voiceLevel, type VoiceState } from "./voice-store";
+import { micLevel, voiceLevel, type VoiceState } from "./voice-store";
 
 /**
  * Bold, opaque, glowing voice waveform. Three phase-shifted sine bands share
@@ -12,8 +12,10 @@ import { voiceLevel, type VoiceState } from "./voice-store";
  *   listening → amplitude follows the mic
  *   thinking  → a travelling pulse sweeps left→right
  *   speaking  → amplitude follows the TTS envelope
+ *   locked    → (Phase 2 Part D) a flat, static alert-red line: the mic is locked off, so
+ *               nothing is animated (no rAF runs) and it can't pass for a live waveform.
  */
-export function Waveform({ state, height = 72, className = "" }: { state: VoiceState; height?: number; className?: string }) {
+export function Waveform({ state, height = 72, className = "", locked = false }: { state: VoiceState; height?: number; className?: string; locked?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const colors = useSettings((s) => s.waveColors);
   const thickness = useSettings((s) => s.waveThickness);
@@ -47,9 +49,34 @@ export function Waveform({ state, height = 72, className = "" }: { state: VoiceS
       { freq: 1.6, speed: 0.6, phase: 3.4, scale: 0.5, width: 0.45, alpha: 0.55 },
     ];
 
+    if (locked) {
+      // One static frame: a flat alert line at 40 %, then no animation loop at all.
+      const flat = () => {
+        ctx.clearRect(0, 0, w, height);
+        const alert = getComputedStyle(document.documentElement).getPropertyValue("--color-alert").trim() || "#ff5a5f";
+        ctx.globalAlpha = 0.4;
+        ctx.strokeStyle = alert;
+        ctx.lineWidth = Math.max(1.5, thickness * 0.6);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(thickness, height / 2);
+        ctx.lineTo(w - thickness, height / 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      };
+      flat();
+      const ro2 = new ResizeObserver(() => (resize(), flat()));
+      ro2.observe(canvas);
+      return () => {
+        ro.disconnect();
+        ro2.disconnect();
+      };
+    }
+
     const draw = () => {
       const s = stateRef.current;
-      const level = voiceLevel.current;
+      // The mic's level while listening, Tony's TTS envelope while speaking.
+      const level = s === "listening" || s === "transcribing" ? micLevel.current : s === "speaking" ? voiceLevel.current : Math.max(voiceLevel.current, micLevel.current);
       const target = s === "listening" || s === "speaking" ? 0.18 + level * 0.82 : s === "thinking" ? 0.35 : s === "error" ? 0.05 : 0.1;
       amp += (target - amp) * 0.12;
       t += reduced ? 0 : s === "thinking" ? 0.05 : 0.03;
@@ -103,7 +130,7 @@ export function Waveform({ state, height = 72, className = "" }: { state: VoiceS
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [colors, thickness, height, reduced]);
+  }, [colors, thickness, height, reduced, locked]);
 
-  return <canvas ref={ref} aria-hidden className={`block w-full ${className}`} style={{ height }} />;
+  return <canvas ref={ref} aria-hidden data-locked={locked || undefined} className={`block w-full ${className}`} style={{ height }} />;
 }

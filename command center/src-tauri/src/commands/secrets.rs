@@ -54,6 +54,39 @@ pub(crate) fn get(state: &DispatchState, provider: &str) -> Option<String> {
     entry(&acct).ok()?.get_password().ok()
 }
 
+/// `host[:port]` of a URL (lower-case host), or None when it doesn't parse.
+pub(crate) fn url_host(u: &str) -> Option<String> {
+    let u = url::Url::parse(u.trim()).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    Some(match u.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    })
+}
+
+/// The AnythingLLM key is bound to the providers.json `anythingllm` host, while every
+/// AnythingLLM call goes to `os.json anythingllm.baseUrl`. When the two differ the key lookup
+/// and the target silently diverge, so say so (hosts only, never the key).
+pub(crate) fn allm_host_mismatch(provider_host: Option<&str>, os_base: &str) -> Option<String> {
+    let provider_host = provider_host?;
+    let os_host = url_host(os_base)?;
+    (provider_host.to_ascii_lowercase() != os_host).then(|| {
+        format!("the AnythingLLM key is stored for {provider_host} (providers.json) but calls go to {os_host} (os.json anythingllm.baseUrl); make the two match in Settings")
+    })
+}
+
+/// `allm_host_mismatch` for the live config; logs each distinct mismatch once.
+pub(crate) fn warn_allm_host_mismatch(state: &DispatchState, os_base: &str) -> Option<String> {
+    let msg = allm_host_mismatch(state.provider_host("anythingllm").as_deref(), os_base)?;
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    if !seen.contains(&msg) {
+        eprintln!("[secrets] warning: {msg}");
+        seen.push(msg.clone());
+    }
+    Some(msg)
+}
+
 /// Longest value Settings accepts. Windows Credential Manager holds at most 2560 bytes
 /// of UTF-16 (about 1280 characters); every real key / token / ID is far shorter.
 pub(crate) const MAX_SECRET_CHARS: usize = 1024;
@@ -109,6 +142,20 @@ mod tests {
         assert!(e.contains("1024") && !e.contains("aaaa"));
         // 700 non-BMP chars = 1400 UTF-16 units = 2800 bytes: over the Credential Manager limit.
         assert!(check_secret_value(&"\u{1F600}".repeat(700)).is_err());
+    }
+
+    #[test]
+    fn allm_host_mismatch_is_reported_without_secrets() {
+        assert_eq!(allm_host_mismatch(Some("127.0.0.1:3001"), "http://127.0.0.1:3001"), None);
+        assert_eq!(allm_host_mismatch(Some("127.0.0.1:3001"), "http://127.0.0.1:3001/"), None);
+        let m = allm_host_mismatch(Some("127.0.0.1:3001"), "http://localhost:3001").unwrap();
+        assert!(m.contains("127.0.0.1:3001") && m.contains("localhost:3001"));
+        assert!(allm_host_mismatch(Some("127.0.0.1:3001"), "http://127.0.0.1:3002").is_some());
+        assert_eq!(allm_host_mismatch(None, "http://x:1"), None);
+        assert_eq!(allm_host_mismatch(Some("a:1"), "not a url"), None);
+        // The live default config agrees with itself.
+        let st = DispatchState::default();
+        assert_eq!(allm_host_mismatch(st.provider_host("anythingllm").as_deref(), &super::super::os_core::OsConfig::default().anythingllm.base_url), None);
     }
 }
 

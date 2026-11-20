@@ -23,8 +23,8 @@ export function effectiveRoute(setting: AudioRoute, detected: EffectiveRoute): E
   return setting === "auto" ? detected : setting;
 }
 
-/** Barge-in VAD offset: stricter through speakers (Tony's voice leaks in). */
-export const bargeSensitivityOffset = (route: EffectiveRoute) => (route === "speakers" ? -35 : -25);
+// The barge-in gate (stricter through speakers, where Tony's voice leaks in) is `thresholdFor`
+// in vad-gate.ts: activation threshold + `vad.bargeMarginDb` (2 dB less on a headset).
 
 // ── Live detection (browser) ────────────────────────────────────────────────
 

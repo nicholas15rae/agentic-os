@@ -131,7 +131,8 @@ fn fifo_one_build_per_lane_in_enqueue_order() {
     h.get_mut("b-a").unwrap().worker_task_id = Some("t-1".into());
     assert_eq!(h.next_for(Lane::Worker), None, "lane busy: nothing else starts");
     // Finished → the next in order.
-    h.record_smoke("b-a", smoke_pass(), 5).unwrap_err(); // not smoke_testing yet: fine either way
+    // Not waiting on a check: the report is kept, nothing else changes (review #2).
+    assert_eq!(h.record_smoke("b-a", smoke_pass(), 5).unwrap(), Status::Queued);
     h.get_mut("b-a").unwrap().envelope.status = Status::ReadyForMerge;
     assert_eq!(h.next_for(Lane::Worker).as_deref(), Some("b-b"));
     let seqs: Vec<u64> = h.builds.iter().map(|b| b.seq).collect();
@@ -425,4 +426,233 @@ fn worker_brief_carries_the_contract() {
     assert!(s.contains("INTERNAL WIDGET"));
     assert!(s.contains("- Renders"));
     assert!(s.chars().count() <= BRIEF_MAX);
+}
+
+// ── Path B scaffolding (against a temp dir — never C:\ai-hub in tests) ──
+
+#[test]
+fn external_scaffold_and_copy_into_a_temp_base() {
+    let base = std::env::temp_dir().join(format!("buildhub-ext-{}-{}", std::process::id(), now_ms()));
+    let mut e = env("b-ext", "tip-calc", Runtime::ExternalOs, AssignedWorker::Coder);
+    e.output_directory = expected_dir(Runtime::ExternalOs, "tip-calc", Path::new(STAGING), &base).display().to_string();
+    assert!(e.output_directory.starts_with(&base.display().to_string()));
+    scaffold_external(&e).unwrap();
+    let out = PathBuf::from(&e.output_directory);
+    assert!(out.join("app").is_dir());
+    assert!(std::fs::read_to_string(out.join("README.md")).unwrap().contains("- [ ] Renders"));
+    let back: TaskEnvelope = serde_json::from_str(&std::fs::read_to_string(out.join("task-envelope.json")).unwrap()).unwrap();
+    assert_eq!(back, e);
+    // The worker's staged output is copied into <slug>\app (dotfiles skipped), then smoke-tested there.
+    let staged = base.join("staged");
+    std::fs::create_dir_all(staged.join("css")).unwrap();
+    std::fs::write(staged.join("index.html"), "<!doctype html><html><head><title>t</title></head><body><h1>Tip calculator app here</h1><p>ok ok ok ok ok ok ok</p></body></html>").unwrap();
+    std::fs::write(staged.join("css").join("a.css"), "p{}").unwrap();
+    std::fs::write(staged.join(".status.json"), "{}").unwrap();
+    assert_eq!(copy_tree(&staged, &served_dir(&e)).unwrap(), 2);
+    assert!(!served_dir(&e).join(".status.json").exists());
+    assert!(smoke::run(&served_dir(&e), Runtime::ExternalOs, 1).passed);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ── Review fixes (play-place-review-findings.md) ──
+
+#[test]
+fn review0_preview_rejects_unc_rooted_and_backslash_paths_before_touching_the_fs() {
+    for bad in [r"\\evil.example@SSL\share\x", r"\Windows\win.ini", r"a\b", "C:/x", "a/../b", "./a", "a/./b", "x\0y", "/abs"] {
+        assert!(!preview::safe_rel(bad), "{bad:?}");
+    }
+    for good in ["", "index.html", "css/a.css", "a//b.js"] {
+        assert!(preview::safe_rel(good), "{good:?}");
+    }
+    let dir = std::env::temp_dir().join(format!("buildhub-unc-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "x").unwrap();
+    for raw in ["/%5C%5Cevil.example%40SSL%5Cshare%5Cx", "/%5C%5C10.0.0.5%5Cs%5Cx", "/%5CWindows%5Cwin.ini", "//%5C%5Chost%5Cs", "/%2e/index.html"] {
+        assert!(preview::resolve(&dir, raw).is_none(), "{raw}");
+    }
+    assert!(preview::resolve(&dir, "/").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn review2_a_late_smoke_result_never_fails_and_clears_the_flags() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    running(&mut h, "b-a");
+    {
+        let b = h.get_mut("b-a").unwrap();
+        b.smoke.running = true;
+        b.committing = true;
+    }
+    // Nic sent it to Repair while the check ran.
+    h.to_repair("b-a", "sent by Nic", "", vec![], false, 30).unwrap();
+    assert_eq!(h.record_smoke("b-a", smoke_fail("body"), 31).unwrap(), Status::RepairQueue);
+    let b = h.get("b-a").unwrap();
+    assert!(!b.smoke.running && !b.committing);
+    assert_eq!(b.smoke.failures, 0, "a stale check doesn't count against the build");
+    assert!(b.smoke.last.is_some());
+    // Requeue also clears committing.
+    h.get_mut("b-a").unwrap().committing = true;
+    h.requeue("b-a", None, 32, &[]).unwrap();
+    assert!(!h.get("b-a").unwrap().committing);
+}
+
+#[test]
+fn review3_24_a_build_stuck_in_smoke_testing_is_recovered_on_load() {
+    let dir = std::env::temp_dir().join(format!("buildhub-recover-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut f = hub_with(&[("b-a", AssignedWorker::Coder), ("b-b", AssignedWorker::Coder)]);
+    running(&mut f, "b-a");
+    {
+        let b = f.get_mut("b-a").unwrap();
+        b.smoke.running = true; // the app exited mid-check
+        b.committing = true;
+    }
+    std::fs::write(dir.join(HUB_FILE), serde_json::to_vec(&f).unwrap()).unwrap();
+    let st = HubState::default();
+    st.init(&dir);
+    let mut snap = st.snapshot();
+    {
+        let b = snap.get("b-a").unwrap();
+        assert!(!b.smoke.running && !b.committing);
+        assert_eq!(b.envelope.status, Status::SmokeTesting);
+    }
+    assert_eq!(snap.needs_smoke(), vec!["b-a".to_string()], "the hub loop re-runs its check");
+    // Once the re-run check lands, the lane moves on.
+    snap.record_smoke("b-a", smoke_pass(), 40).unwrap();
+    assert_eq!(snap.next_for(Lane::Worker).as_deref(), Some("b-b"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn review1_external_target_must_not_exist() {
+    let base = std::env::temp_dir().join(format!("buildhub-target-{}-{}", std::process::id(), now_ms()));
+    let dir = base.join("tip-calc");
+    assert!(external_target_free(&dir).is_ok());
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(external_target_free(&dir).unwrap_err().contains("already exists"));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn review6_23_no_hub_command_runs_on_the_main_thread() {
+    let src = include_str!("../buildhub.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut n = 0;
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim() == "#[tauri::command]" {
+            n += 1;
+            let next = lines[i + 1].trim();
+            assert!(next.starts_with("pub async fn "), "sync command (runs on the UI thread): {next}");
+        }
+    }
+    assert!(n >= 18, "found {n} commands");
+    // build_smoke runs the check through the blocking pool.
+    let smoke_cmd = &src[src.find("pub async fn build_smoke").unwrap()..];
+    let body = &smoke_cmd[..smoke_cmd.find("\n}\n").unwrap()];
+    assert!(body.contains("blocking(move || Ok(smoke::run("), "{body}");
+}
+
+#[test]
+fn review4_release_cancels_a_live_worker_task_and_hold_keeps_repair_paused() {
+    assert!(hold_worker(Status::Paused) && hold_worker(Status::RepairQueue));
+    assert!(!hold_worker(Status::Building) && !hold_worker(Status::Queued));
+    let store = TaskStore::in_memory();
+    let args = super::super::taskworker::CreateArgs { raw_intent: "build x".into(), title: Some("x".into()), thread: None, source: "playplace".into(), idea_id: None, options: None, dedupe_key: Some("k-release".into()) };
+    let (t, _) = super::super::taskworker::create_task(&store, &args, 3, &[]).unwrap();
+    envelope::set_paused(&t.task_id, true);
+    assert!(release_worker_task(&store, &t.task_id, &[]), "a live task is cancelled");
+    let e = store.with(|c| envelope::get_bare(c, &t.task_id)).unwrap().unwrap();
+    assert_eq!(e.status, "failed");
+    assert!(!envelope::is_paused(&t.task_id));
+    assert!(store.with(|c| envelope::claim_next(c, envelope::now_ms(), 60_000)).unwrap().is_none(), "nothing left for the worker to run");
+    assert!(!release_worker_task(&store, &t.task_id, &[]), "a terminal task is left alone");
+}
+
+#[test]
+fn review5_34_claude_pause_never_reopens_finished_work() {
+    assert_eq!(claude_pause_target("Queued").unwrap(), Some("Pending"));
+    assert_eq!(claude_pause_target("Pending").unwrap(), Some("Pending"));
+    assert_eq!(claude_pause_target("Done").unwrap(), None);
+    assert!(claude_pause_target("In Progress").is_err());
+    assert_eq!(claude_resume_target("Pending"), Some("Queued"));
+    assert_eq!(claude_resume_target("Done"), None);
+    // Paused at the smoke checkpoint → resumes there, and the loop re-runs the check.
+    let mut h = hub_with(&[("b-c", AssignedWorker::Claude)]);
+    {
+        let b = h.get_mut("b-c").unwrap();
+        b.dev_task_id = Some("d1".into());
+        b.envelope.status = Status::SmokeTesting;
+    }
+    h.pause("b-c", 1).unwrap();
+    h.resume("b-c", 2).unwrap();
+    assert_eq!(h.get("b-c").unwrap().envelope.status, Status::SmokeTesting);
+    assert_eq!(h.needs_smoke(), vec!["b-c".to_string()]);
+}
+
+#[test]
+fn review16_intake_takes_the_gpu_baton_and_falls_back_when_busy() {
+    tauri::async_runtime::block_on(async {
+        let slot = super::super::scheduler::GpuSlot::default();
+        let held = slot.acquire("Tony", true, 90).await;
+        assert!(intake_slot(&slot, 90, Duration::from_millis(150)).await.is_none(), "busy: standard questions, no queueing");
+        drop(held);
+        let g = intake_slot(&slot, 90, Duration::from_millis(500)).await;
+        assert!(g.is_some());
+        assert!(!slot.is_idle(), "the intake holds the baton while it asks");
+    });
+}
+
+#[test]
+fn review20_30_peek_watches_and_late_output() {
+    let mut w = PeekWatches::default();
+    let tok = w.begin("b-a");
+    w.unwatch("b-a"); // closed while the open call was still probing
+    assert!(!w.commit("b-a", tok, true, 1), "a late open can't re-add a closed peek");
+    assert!(w.ids().is_empty());
+    let tok = w.begin("b-a");
+    assert!(w.commit("b-a", tok, false, 2));
+    w.update("b-a", true, 3);
+    assert_eq!(w.get("b-a"), Some((true, 3)));
+    // A watched peek gets its server as soon as the output folder appears.
+    assert!(!should_start_preview(None, false, false));
+    assert!(should_start_preview(None, false, true));
+    assert!(!should_start_preview(None, true, true));
+    assert!(!should_start_preview(Some("http://127.0.0.1:5173/"), false, true));
+}
+
+#[test]
+fn review7_claude_item_binds_only_to_a_build_still_waiting() {
+    let mut h = hub_with(&[("b-c", AssignedWorker::Claude)]);
+    assert!(h.bind_dev("b-c", "d1", 1).unwrap());
+    assert!(!h.bind_dev("b-c", "d2", 2).unwrap(), "already bound");
+    assert_eq!(h.get("b-c").unwrap().dev_task_id.as_deref(), Some("d1"));
+    assert!(!h.bind_dev("b-gone", "d3", 3).unwrap(), "removed meanwhile: the caller deletes the orphan item");
+    let mut h = hub_with(&[("b-p", AssignedWorker::Claude)]);
+    h.pause("b-p", 1).unwrap();
+    assert!(!h.bind_dev("b-p", "d4", 2).unwrap(), "paused meanwhile");
+}
+
+#[test]
+fn review33_steer_on_a_mid_run_claude_build_says_when_it_applies() {
+    let mut h = hub_with(&[("b-c", AssignedWorker::Claude)]);
+    h.get_mut("b-c").unwrap().envelope.status = Status::Building;
+    h.steer("b-c", "dark mode", 1, &[]).unwrap();
+    assert!(h.get("b-c").unwrap().logs.iter().any(|l| l.text.contains("next hand-off")));
+}
+
+#[test]
+fn review18_promote_drops_the_live_widget_preview() {
+    let dir = std::env::temp_dir().join(format!("buildhub-evict-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "x").unwrap();
+    tauri::async_runtime::block_on(async {
+        let mut map = HashMap::new();
+        map.insert("b-a#widget".to_string(), preview::start(dir.clone()).await.unwrap());
+        map.insert("b-a".to_string(), preview::start(dir.clone()).await.unwrap());
+        assert_eq!(evict_previews(&mut map, "b-a", true), 1, "promote drops only the widget server");
+        assert!(map.contains_key("b-a") && !map.contains_key("b-a#widget"));
+        assert_eq!(evict_previews(&mut map, "b-a", false), 1, "remove drops the rest");
+        assert!(map.is_empty());
+    });
+    let _ = std::fs::remove_dir_all(&dir);
 }

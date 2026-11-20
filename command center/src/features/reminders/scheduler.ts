@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { micEnabled } from "@/features/voice/mic-gate";
 import { collections, useCollection } from "@/lib/cc-api";
 import { cmd, isTauri, platform } from "@/lib/platform";
 import { announce } from "@/features/voice/voice-controller";
@@ -95,7 +96,8 @@ async function fire(r: Reminder & { id: string }) {
       { label: "Dismiss", run: () => useToasts.getState().dismiss(id) },
     ],
   });
-  void announce(`${label}. ${r.title}.`);
+  // D6: the toast and the Windows notification above still fire; Tony stays quiet while the mic is locked off.
+  if (micEnabled()) void announce(`${label}. ${r.title}.`);
 }
 
 interface GcalEvent {

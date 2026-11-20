@@ -27,13 +27,25 @@ pub fn resolve(root: &Path, raw: &str) -> Option<PathBuf> {
     let path = raw.split(['?', '#']).next().unwrap_or("/");
     let decoded = percent_decode(path)?;
     let rel = decoded.trim_start_matches('/');
-    if rel.split(['/', '\\']).any(|seg| seg == ".." || seg.contains(':')) {
+    // Validate BEFORE any filesystem call: on Windows `join` with a UNC / rooted path replaces the
+    // root, and `canonicalize` would open it (an outbound SMB / WebDAV hop that offers NTLM).
+    if !safe_rel(rel) {
         return None;
     }
     let rel = if rel.is_empty() || rel.ends_with('/') { format!("{rel}index.html") } else { rel.to_string() };
     let real_root = std::fs::canonicalize(root).ok()?;
     let real = std::fs::canonicalize(real_root.join(&rel)).ok()?;
     (real.starts_with(&real_root) && real.is_file()).then_some(real)
+}
+
+/// A request path relative to the served root, made only of plain names (pure). URLs use '/', so
+/// a backslash, a drive colon or a NUL is never legitimate; every component must be `Normal` (no
+/// prefix, root, `.` or `..`).
+pub fn safe_rel(rel: &str) -> bool {
+    if rel.contains(['\\', ':', '\0']) || rel.starts_with('/') || rel.split('/').any(|seg| seg == "." || seg == "..") {
+        return false;
+    }
+    Path::new(rel).components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 fn percent_decode(s: &str) -> Option<String> {

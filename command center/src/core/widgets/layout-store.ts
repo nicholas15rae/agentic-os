@@ -8,6 +8,9 @@ import { activeItems, allIds, fits, migrateLayout, moveToPage, nextPageName, pla
 export { GRID_COLS, GRID_ROWS, activeItems, fits, type LayoutPage } from "./pages";
 
 const PIPELINES_SLOT: WidgetInstance = { instanceId: "n8n", widgetId: "n8n-pipelines", col: 4, row: 4, w: 6, h: 2, config: {} };
+/** Browser / phone board only (Phase 2 Part D): the desktop board is full, so desktop switches modes
+ * from the top-bar ModePill (and can add this panel from the Widgets tray). */
+const TONY_MODE_SLOT: WidgetInstance = { instanceId: "tony-mode", widgetId: "tony-mode", col: 4, row: 4, w: 6, h: 2, config: {} };
 
 /**
  * Default board: widgets hug the edges so the centre-bottom of the wallpaper
@@ -26,7 +29,8 @@ const DEFAULT_LAYOUT: WidgetInstance[] = [
   { instanceId: "contracting", widgetId: "contracting", col: 10, row: 4, w: 3, h: 3, config: {} },
   { instanceId: "weather", widgetId: "weather", col: 10, row: 7, w: 3, h: 2, config: {} },
   // Desktop only (needs the Rust side): live n8n sessions + Drive sync, centre band.
-  ...(isTauri() ? [PIPELINES_SLOT] : []),
+  // Browser / phone: Tony's mode panel takes that band instead.
+  ...(isTauri() ? [PIPELINES_SLOT] : [TONY_MODE_SLOT]),
 ];
 
 export interface AddResult {

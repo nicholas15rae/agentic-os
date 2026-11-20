@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CandlestickChart, Cloud, Cpu, FlaskConical, Layers, Lock, MessagesSquare, Network, Phone, ShieldCheck, ShieldOff } from "lucide-react";
+import { CandlestickChart, Cloud, Cpu, FlaskConical, Layers, Lock, MessagesSquare, MicOff, Network, Phone, ShieldCheck, ShieldOff } from "lucide-react";
 import { gateway } from "@/lib/gateway";
 import { cc, type MarketData } from "@/lib/cc-api";
 import { cmd, isTauri, type ComputeMode } from "@/lib/platform";
@@ -14,6 +14,14 @@ import { CommsPanel } from "@/sections/CommsSection";
 import { IdeasLedger, PipelineBars, PlayCards } from "@/sections/PlayPlaceSection";
 import { GabagoolPill } from "@/features/os/OsControls";
 import { usePipelines } from "@/features/os/pipeline-store";
+import { useModes } from "@/features/modes/modes-store";
+import { viewFromMirror, type Curiosity, type TonyMode } from "@/features/modes/modes";
+import { isOverridden } from "@/features/modes/mode-ui";
+import { ModeStripView } from "@/features/modes/ModeStrip";
+import { requestMicEnabled, useMic } from "@/features/voice/mic-gate";
+import { MicLockBadge } from "@/features/voice/MicLockBadge";
+import { hudMicChips } from "@/features/voice/mic-indicator";
+import { applyOptimistic, type HudCommand, type OsStatus } from "./hud-status";
 
 /**
  * Galaxy S22 "Lockdown Command Center" — /mobile-hud (→ /cc/?view=hud).
@@ -29,13 +37,6 @@ const TABS: { id: Tab; label: string; icon: typeof Phone }[] = [
   { id: "play", label: "Play Place", icon: FlaskConical },
 ];
 
-interface OsStatus {
-  computeMode: ComputeMode;
-  privacy: { diffuser: boolean; networkLock: boolean; killSwitch: boolean };
-  osName?: string;
-  scheduler?: { profile: string; tonyPriorityPct: number; offloadPct: number };
-  runtime?: { droplet?: { state: string; detail: string } };
-}
 
 function useStatus() {
   const desktopCfg = useOs((s) => s.cfg);
@@ -48,17 +49,43 @@ function useStatus() {
     return () => clearInterval(iv);
   }, [load]);
   const status: OsStatus | null = desktopCfg ? { computeMode: desktopCfg.compute.mode, privacy: desktopCfg.privacy, scheduler: desktopCfg.scheduler, runtime: remote?.runtime } : remote;
-  const send = async (payload: { killSwitch?: boolean; computeMode?: ComputeMode }) => {
+  // Phone: the voice controller's Tier-3 decision follows the desktop's mode (one poll behind).
+  const mirrorMode = remote?.mode;
+  useEffect(() => {
+    if (isTauri() || !mirrorMode?.id) return;
+    const v = viewFromMirror(mirrorMode);
+    useModes.setState({ modes: v.modes, activeId: v.active_mode_id, effective: v.effective, overrides: v.overrides, builtinIds: v.builtin_ids, loaded: true, error: null });
+  }, [mirrorMode]);
+  const send = async (payload: HudCommand) => {
     if (isTauri()) {
-      await useOs.getState().patch({ ...(payload.killSwitch !== undefined ? { privacy: { killSwitch: payload.killSwitch } } : {}), ...(payload.computeMode ? { compute: { mode: payload.computeMode } } : {}) });
+      const m = useModes.getState();
+      const quiet = (p: Promise<unknown>) => p.catch(() => undefined); // errors surface in the stores
+      if (payload.modeId) await quiet(m.setActive(payload.modeId));
+      if (payload.overrides) await quiet(m.override(payload.overrides));
+      if (payload.resetOverrides) await quiet(m.reset());
+      if (payload.micEnabled !== undefined) await requestMicEnabled(payload.micEnabled);
+      if (payload.killSwitch !== undefined || payload.computeMode)
+        await useOs.getState().patch({ ...(payload.killSwitch !== undefined ? { privacy: { killSwitch: payload.killSwitch } } : {}), ...(payload.computeMode ? { compute: { mode: payload.computeMode } } : {}) });
       return;
     }
     // Optimistic; the desktop applies it within ~3 s and the mirror confirms.
-    setRemote((r) => (r ? { ...r, computeMode: payload.computeMode ?? r.computeMode, privacy: { ...r.privacy, killSwitch: payload.killSwitch ?? r.privacy.killSwitch } } : r));
+    setRemote((r) => (r ? applyOptimistic(r, payload) : r));
     await gateway("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind: "command", payload }) });
     setTimeout(load, 4000);
   };
   return { status, send };
+}
+
+type Hud = ReturnType<typeof useStatus>;
+
+/** Tony's modes for the HUD: the desktop store on desktop, the mirror on the phone. */
+function useHudModes(hud: Hud): { modes: TonyMode[]; activeId: string; name: string; curiosity: Curiosity; overridden: boolean } | null {
+  const desk = useModes();
+  if (isTauri()) return { modes: desk.modes, activeId: desk.activeId, name: desk.effective.name, curiosity: desk.effective.curiosity, overridden: isOverridden(desk.overrides) };
+  const m = hud.status?.mode;
+  if (!m?.id) return null;
+  const v = viewFromMirror(m);
+  return { modes: v.modes, activeId: v.active_mode_id, name: v.effective.name, curiosity: v.effective.curiosity, overridden: v.effective.overridden.length > 0 };
 }
 
 export function MobileHud() {
@@ -66,6 +93,7 @@ export function MobileHud() {
   const lockdown = params.get("mode") === "lockdown";
   const [tab, setTab] = useState<Tab>(() => (["tony", "comms", "markets", "play"].includes(params.get("tab") ?? "") ? (params.get("tab") as Tab) : "tony"));
   const name = useOsName();
+  const hud = useStatus();
 
   // Install as its own portrait app (Samsung Routines can open it directly).
   useEffect(() => {
@@ -85,9 +113,9 @@ export function MobileHud() {
 
   return (
     <div className={`flex h-dvh flex-col ${lockdown ? "bg-black" : "bg-canvas"} text-ink`}>
-      <StatusBar lockdown={lockdown} />
+      <StatusBar lockdown={lockdown} hud={hud} />
       <main className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        {tab === "tony" && <TonyTab />}
+        {tab === "tony" && <TonyTab hud={hud} />}
         {tab === "comms" && <CommsPanel compact />}
         {tab === "markets" && <MarketsTab />}
         {tab === "play" && (
@@ -110,8 +138,11 @@ export function MobileHud() {
   );
 }
 
-function StatusBar({ lockdown }: { lockdown: boolean }) {
-  const { status, send } = useStatus();
+function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
+  const { status, send } = hud;
+  const phoneMic = useMic((s) => s.enabled);
+  const micChips = hudMicChips(phoneMic, status?.voice?.micEnabled, isTauri());
+  const mode = useHudModes(hud);
   const mesh = location.hostname.startsWith("100.") || location.hostname === "127.0.0.1" || location.hostname === "localhost" || isTauri();
   const modes: { id: ComputeMode; icon: typeof Cpu }[] = [
     { id: "local", icon: Cpu },
@@ -126,6 +157,11 @@ function StatusBar({ lockdown }: { lockdown: boolean }) {
           <Lock size={10} /> LOCKDOWN
         </span>
       )}
+      {micChips.map((c) => (
+        <span key={c} role="status" className="flex items-center gap-1 rounded-full bg-alert/20 px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-alert">
+          <MicOff size={10} /> {c}
+        </span>
+      ))}
       <div className="flex rounded-full border border-white/10 p-0.5" role="radiogroup" aria-label="Compute mode">
         {modes.map(({ id, icon: Icon }) => (
           <button key={id} role="radio" aria-checked={status?.computeMode === id} onClick={() => void send({ computeMode: id })} className={`flex h-7 items-center gap-1 rounded-full px-2 font-mono text-[10px] ${status?.computeMode === id ? "bg-white/15 text-ink" : "text-ink-3"}`}>
@@ -160,6 +196,12 @@ function StatusBar({ lockdown }: { lockdown: boolean }) {
           </span>
         )}
         <SlotChip />
+        {mode && (
+          <span className="rounded-full border border-teal/30 px-2 py-1 font-mono text-[10px] text-teal" title="Tony's mode (switch it on the Tony tab)">
+            MODE {mode.name.toUpperCase()}
+            {mode.overridden ? " *" : ""}
+          </span>
+        )}
         <span className="ml-auto">
           <GabagoolPill />
         </span>
@@ -171,7 +213,9 @@ function StatusBar({ lockdown }: { lockdown: boolean }) {
 
 const HUD_THREADS: ThreadId[] = ["general", "prompter", "designer", "coder", "librarian", "booking"];
 
-function TonyTab() {
+function TonyTab({ hud }: { hud: Hud }) {
+  const mode = useHudModes(hud);
+  const deskMicOff = !isTauri() && hud.status?.voice?.micEnabled === false;
   const raw = useVoice((s) => s.activeThread);
   const thread: ThreadId = HUD_THREADS.includes(raw) ? raw : "general";
   const setThread = useVoice((s) => s.setActiveThread);
@@ -189,6 +233,17 @@ function TonyTab() {
           </button>
         ))}
       </div>
+      {mode && (
+        <ModeStripView
+          modes={mode.modes}
+          activeId={mode.activeId}
+          curiosity={mode.curiosity}
+          overridden={mode.overridden}
+          onSelect={(id) => void hud.send({ modeId: id })}
+          onCuriosity={(c) => void hud.send({ overrides: { curiosity: c } })}
+          onReset={() => void hud.send({ resetOverrides: true })}
+        />
+      )}
       <PipelineBars />
       <div className="min-h-[40vh] flex-1 rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3">
         <Transcript thread={thread} max={60} />
@@ -199,6 +254,20 @@ function TonyTab() {
         <div className="flex-1">
           <CommandInput thread={thread} placeholder={`Talk to ${thread === "general" ? name : SUB_AGENTS[thread as AgentRole].label}…`} />
         </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <MicLockBadge variant="button" />
+        {!isTauri() && (
+          <button
+            type="button"
+            disabled={deskMicOff}
+            onClick={() => void hud.send({ micEnabled: false })}
+            title="Lock the desktop's mic off (unlock it on the desktop)"
+            className="flex h-8 items-center gap-1 rounded-full border border-alert/40 px-3 font-mono text-[10px] font-bold tracking-wider text-alert disabled:opacity-50"
+          >
+            <MicOff size={11} /> {deskMicOff ? "DESK MIC OFF" : "LOCK DESKTOP MIC"}
+          </button>
+        )}
       </div>
     </div>
   );

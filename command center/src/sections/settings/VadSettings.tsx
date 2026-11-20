@@ -1,49 +1,57 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square } from "lucide-react";
 import { Card } from "@/components/ui";
-import { MicCapture, encodeWav16k, vadMeter } from "@/features/voice/engines";
+import { MicCapture, encodeWav16k } from "@/features/voice/engines";
+import { MicLockedError, onMicChange, useMic } from "@/features/voice/mic-gate";
+import { ThresholdMeter } from "@/features/voice/ThresholdMeter";
+import { SPEECH_PROB_OFF, SPEECH_PROB_ON } from "@/features/voice/vad-gate";
 import { isTauri, nativeRaw } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 
-/** Map an RMS level onto a 0–100 % bar (log scale so quiet rooms are visible). */
-const bar = (rms: number) => Math.max(0, Math.min(100, ((Math.log10(Math.max(rms, 1e-4)) + 4) / 3.3) * 100));
-
+/**
+ * Settings → Voice & Triggers → Activation threshold (Phase 2 Part B). One absolute dBFS gate
+ * decides what reaches Whisper; the meter under the slider uses the same scale, so you can see
+ * whether your voice clears it. "Test my mic" opens a capture (never while the mic is locked off).
+ */
 export function VoiceDetectionCard() {
   const vad = useSettings((s) => s.vad);
   const set = useSettings((s) => s.set);
   const up = (p: Partial<typeof vad>) => set({ vad: { ...vad, ...p } });
+  const micOn = useMic((s) => s.enabled);
   const [testing, setTesting] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const mic = useRef<MicCapture | null>(null);
-  const level = useRef<HTMLDivElement>(null);
-  const floor = useRef<HTMLDivElement>(null);
-  const on = useRef<HTMLDivElement>(null);
-  const off = useRef<HTMLDivElement>(null);
-  const dot = useRef<HTMLSpanElement>(null);
   const prob = useRef<HTMLDivElement>(null);
-  const probOn = useRef<HTMLDivElement>(null);
-  const probOff = useRef<HTMLDivElement>(null);
   const engine = useRef<HTMLSpanElement>(null);
+  const dot = useRef<HTMLSpanElement>(null);
 
-  // Meter: rAF is fine here (only while this card is on screen).
+  // X-Ray row: the speech probability (Silero), only while testing.
   useEffect(() => {
     if (!testing) return;
     let raf = 0;
     const draw = () => {
-      if (prob.current) prob.current.style.width = `${vadMeter.neural ? vadMeter.prob * 100 : 0}%`;
-      if (probOn.current) probOn.current.style.left = `${vadMeter.probOn * 100}%`;
-      if (probOff.current) probOff.current.style.left = `${vadMeter.probOff * 100}%`;
-      if (engine.current) engine.current.textContent = vadMeter.neural ? "Silero neural VAD" : "energy detector (Silero loading or unavailable)";
-      if (level.current) level.current.style.width = `${bar(vadMeter.level)}%`;
-      if (floor.current) floor.current.style.left = `${bar(vadMeter.floor)}%`;
-      if (on.current) on.current.style.left = `${bar(vadMeter.on)}%`;
-      if (off.current) off.current.style.left = `${bar(vadMeter.off)}%`;
-      if (dot.current) dot.current.style.opacity = vadMeter.speaking ? "1" : "0.15";
+      const m = mic.current?.meter;
+      if (m) {
+        if (prob.current) prob.current.style.width = `${m.prob === null ? 0 : m.prob * 100}%`;
+        if (engine.current) engine.current.textContent = m.neural ? "Silero must agree (AND)" : "level only (Silero loading or unavailable)";
+        if (dot.current) dot.current.style.opacity = m.speaking ? "1" : "0.15";
+      }
       raf = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(raf);
   }, [testing]);
+
+  // Locking the mic ends a test (the gate already stopped its capture).
+  useEffect(
+    () =>
+      onMicChange((on) => {
+        if (on) return;
+        mic.current = null;
+        setTesting(false);
+      }),
+    [],
+  );
 
   const listen = () => {
     const m = (mic.current ??= new MicCapture());
@@ -71,7 +79,13 @@ export function VoiceDetectionCard() {
           if (mic.current === m) listen(); // keep testing
         },
       })
-      .catch((e) => setLog((l) => [`mic error: ${e}`, ...l]));
+      .catch((e) => {
+        if (e instanceof MicLockedError) {
+          mic.current = null;
+          setTesting(false);
+        }
+        setLog((l) => [`mic error: ${e instanceof Error ? e.message : e}`, ...l]);
+      });
   };
 
   const toggle = () => {
@@ -80,6 +94,7 @@ export function VoiceDetectionCard() {
       mic.current = null;
       setTesting(false);
     } else {
+      if (!micOn) return;
       setLog([]);
       setTesting(true);
       listen();
@@ -89,22 +104,36 @@ export function VoiceDetectionCard() {
 
   return (
     <Card
-      title="Voice detection"
-      hint="A local neural model (Silero) scores every 32 ms of audio for speech, so typing, fans and music don't trigger it; Tony sends to Whisper as soon as you pause. If the model can't load, it falls back to measuring loudness above your room's noise. Raise sensitivity if quiet speech is missed; lower it if noise keeps triggering it."
+      title="Activation threshold"
+      hint="One fixed loudness gate decides what reaches Whisper: speech must be louder than the line, and when the local Silero model is loaded it must also sound like speech. Drag the line so your normal voice clears it (the bar turns teal) and the room doesn't. The amber tick is the stricter line for talking over Tony through speakers."
       action={
-        <button onClick={toggle} className={testing ? "pill-glass !h-8 text-xs !border-alert/50 text-alert" : "pill-primary !h-8 text-xs"}>
+        <button
+          onClick={toggle}
+          disabled={!testing && !micOn}
+          title={!micOn ? "Mic is locked off: unlock it to test" : undefined}
+          className={testing ? "pill-glass !h-8 text-xs !border-alert/50 text-alert" : "pill-primary !h-8 text-xs disabled:opacity-50"}
+        >
           {testing ? <Square size={12} /> : <Mic size={12} />} {testing ? "Stop test" : "Test my mic"}
         </button>
       }
     >
       <div className="space-y-4">
+        <div className="text-sm text-ink-2">
+          <div className="mb-1 flex items-center justify-between">
+            <span>Activation threshold</span>
+            <span className="text-[11px] text-ink-3">{micOn ? (testing ? "live" : "press Test my mic to see your level") : "Mic is locked off: unlock it to test"}</span>
+          </div>
+          <ThresholdMeter variant="full" />
+          <div className="mt-1 flex justify-between text-[11px] text-ink-3">
+            <span>hears whispers (-70 dB)</span>
+            <span>ignores the room (-10 dB)</span>
+          </div>
+        </div>
         <label className="block text-sm text-ink-2">
-          Sensitivity
+          Barge-in margin
           <div className="mt-1 flex items-center gap-3">
-            <span className="w-20 text-[11px] text-ink-3">ignores noise</span>
-            <input type="range" min={0} max={100} step={5} value={vad.sensitivity} onChange={(e) => up({ sensitivity: Number(e.target.value) })} className="flex-1 accent-teal" aria-label="Voice detection sensitivity" />
-            <span className="w-24 text-right text-[11px] text-ink-3">hears whispers</span>
-            <span className="w-10 text-right font-mono text-ink">{vad.sensitivity}</span>
+            <input type="range" min={0} max={20} step={1} value={vad.bargeMarginDb} onChange={(e) => up({ bargeMarginDb: Number(e.target.value) })} className="flex-1 accent-amber" aria-label="Barge-in margin (dB)" />
+            <span className="w-16 text-right font-mono text-ink">+{vad.bargeMarginDb} dB</span>
           </div>
         </label>
         <label className="block text-sm text-ink-2">
@@ -124,25 +153,19 @@ export function VoiceDetectionCard() {
 
         {testing && (
           <div>
-            <div className="relative h-6 overflow-hidden rounded-full bg-white/[0.05]">
-              <div ref={level} className="h-full rounded-full bg-gradient-to-r from-teal to-amber transition-[width] duration-75" style={{ width: "0%" }} />
-              <div ref={floor} className="absolute inset-y-0 w-0.5 bg-white/40" title="noise floor" />
-              <div ref={off} className="absolute inset-y-0 w-0.5 bg-amber/60" title="stop threshold" />
-              <div ref={on} className="absolute inset-y-0 w-0.5 bg-teal" title="speech threshold" />
+            <div className="label-caps mb-1 text-[10px] text-ink-3">X-Ray</div>
+            <div className="relative h-3 overflow-hidden rounded-full bg-white/[0.05]" title="speech probability">
+              <div ref={prob} className="h-full rounded-full bg-teal/70 transition-[width] duration-75" style={{ width: "0%" }} />
+              <div className="absolute inset-y-0 w-0.5 bg-amber/60" style={{ left: `${SPEECH_PROB_OFF * 100}%` }} title="quiet below this" />
+              <div className="absolute inset-y-0 w-0.5 bg-teal" style={{ left: `${SPEECH_PROB_ON * 100}%` }} title="speech at or above this" />
             </div>
             <div className="mt-1 flex items-center gap-3 text-[11px] text-ink-3">
               <span className="flex items-center gap-1">
                 <span ref={dot} className="size-2 rounded-full bg-teal" /> speech
               </span>
-              <span>white = room noise · amber = pause line · teal = trigger line</span>
-            </div>
-            <div className="relative mt-2 h-3 overflow-hidden rounded-full bg-white/[0.05]" title="speech probability">
-              <div ref={prob} className="h-full rounded-full bg-teal/70 transition-[width] duration-75" style={{ width: "0%" }} />
-              <div ref={probOff} className="absolute inset-y-0 w-0.5 bg-amber/60" title="pause line" />
-              <div ref={probOn} className="absolute inset-y-0 w-0.5 bg-teal" title="trigger line" />
-            </div>
-            <div className="mt-1 text-[11px] text-ink-3">
-              speech probability · deciding: <span ref={engine} className="text-ink-2" />
+              <span>
+                speech probability · <span ref={engine} className="text-ink-2" />
+              </span>
             </div>
             <ul className="mt-2 space-y-1 font-mono text-[11px] text-ink-2">
               {log.length === 0 && <li className="text-ink-3">Say something…</li>}

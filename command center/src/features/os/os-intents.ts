@@ -10,7 +10,8 @@
  * "turn off gabagool mode" can never reach a gateway agent.
  */
 import { collections } from "@/lib/cc-api";
-import { cmd, isTauri } from "@/lib/platform";
+import { gateway } from "@/lib/gateway";
+import { cmd, isTauri, type FeedbackLevel } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
 import { useSettings } from "@/stores/settings";
 import { fireCue } from "@/features/cues/cue-runtime";
@@ -20,8 +21,10 @@ import { useHealthStore } from "@/features/services/use-health";
 import { useVoice } from "@/features/voice/voice-store";
 import { roleLabel } from "@/features/dispatcher/roles";
 import { useOs } from "./os-store";
+import { usePipelines } from "./pipeline-store";
+import { feedbackLevel } from "@/features/voice/narrator";
 import { notifyDevQueueChanged, uiState } from "@/features/memmap/devqueue-events";
-import { parseOsIntent, resolveModel, type DevNoteKind, type OsIntent, type WorkspaceId } from "./os-intent-parse";
+import { addressedStatusLine, parseOsIntent, resolveModel, slugCandidates, taskStatusText, type DevNoteKind, type OsIntent, type StatusTask, type WorkspaceId } from "./os-intent-parse";
 
 export interface OsIntentResult {
   /** Spoken/shown reply; "" means the action already speaks for itself (a cue's intro). */
@@ -29,6 +32,8 @@ export interface OsIntentResult {
   /** An approval card was raised for this request: on voice the card speaks its own read-back,
    * so `reply` is shown but not spoken (and the HUD stays "confirming"). */
   card?: boolean;
+  /** Speak `reply` in this agent's roster voice ("hey Prompter, where are we at?"); default Tony. */
+  agent?: string;
 }
 
 /** A cue's theme is playing right now (what `parseOsLine` reads as `cuePlaying`). */
@@ -40,8 +45,10 @@ export function parseOsLine(text: string): OsIntent | null {
   return parseOsIntent(text, { osName, cueActive: cueRecentlyActive(), cuePlaying: cuePlayingNow() });
 }
 
-/** `channel` is where the line came from ("voice" or typed); only the dev queue records it. */
-export async function runOsIntent(intent: OsIntent, channel?: string): Promise<OsIntentResult> {
+/** `channel` is where the line came from ("voice" or typed); only the dev queue records it.
+ * Null: the line isn't ours after all (a weak "where's X at" with no build called X) — it goes on
+ * to Tony as a normal turn. */
+export async function runOsIntent(intent: OsIntent, channel?: string): Promise<OsIntentResult | null> {
   switch (intent.kind) {
     case "gabagool-on":
       return gabagoolOnAction();
@@ -59,6 +66,10 @@ export async function runOsIntent(intent: OsIntent, channel?: string): Promise<O
       return killSwitchAction(intent.on);
     case "status":
       return { reply: statusSummary() };
+    case "agent-status":
+      return agentStatusAction(intent);
+    case "narration":
+      return narrationAction(intent);
     case "dev-task":
       if (intent.taskKind === "fix") return queueFixAction(intent.title, channel === "voice" ? "voice" : "typed");
       return devTaskAction(intent.taskKind, intent.title, channel === "voice" ? "voice" : "typed");
@@ -190,14 +201,66 @@ async function killSwitchAction(on: boolean): Promise<OsIntentResult> {
 }
 
 /** A short status line from what's already on screen — no LLM call. */
-function statusSummary(): string {
+export function statusSummary(): string {
   const svc = useHealthStore.getState().services;
   const cfg = useOs.getState().cfg;
-  if (!svc.length) return "No service status yet — check the Services page.";
+  const open = Object.keys(usePipelines.getState().runs).length;
+  const builds = open ? `${open} build${open === 1 ? "" : "s"} in progress` : "";
+  if (!svc.length) return builds ? `${builds}. No service status yet — check the Services page.` : "No service status yet — check the Services page.";
   const up = svc.filter((s) => s.up).length;
   const down = svc.filter((s) => !s.up);
   const parts = [`${up}/${svc.length} services up`];
   if (down.length) parts.push(`down: ${down.map((s) => s.label).join(", ")}`);
   if (cfg) parts.push(`compute ${cfg.compute.mode}${cfg.privacy.killSwitch ? " · kill switch on" : ""}`);
+  if (builds) parts.push(builds);
   return parts.join(" · ");
+}
+
+type AgentStatusIntent = Extract<OsIntent, { kind: "agent-status" }>;
+
+/**
+ * Status on demand (Part 6): "what's the coder doing", "where's the build at", "status of
+ * my-app", "hey Prompter, where are we at?". A template over the task store — never an os_turn,
+ * never a model call. Said TO an agent: that agent's latest voice summary, in its own roster
+ * voice. Desktop: `task_status` (tasks.db). Phone: the gateway's task mirror.
+ */
+export async function agentStatusAction(i: AgentStatusIntent): Promise<OsIntentResult | null> {
+  const voice = i.addressed && i.agent ? i.agent : undefined;
+  try {
+    if (isTauri()) {
+      let r = await cmd("task_status", { agent: i.agent, slug: i.slug });
+      // "status of my audition tracker": try the name without "my" too.
+      for (const alt of i.slug ? slugCandidates(i.slug).slice(1) : []) if (!r.task_id) r = await cmd("task_status", { agent: i.agent, slug: alt });
+      if (i.weak && !r.task_id) return null;
+      // Said TO an agent: the line it speaks itself (its voice summary, or a first-person template).
+      const text = voice ? (r.voice?.text ?? r.text) : r.text;
+      return { reply: text, agent: voice };
+    }
+    const r = await gateway<{ items: StatusTask[] }>("/api/tasks?limit=50");
+    const items = r.items ?? [];
+    const slug = i.slug ? (slugCandidates(i.slug).find((s) => items.some((t) => t.project_slug === s)) ?? i.slug) : undefined;
+    // Weak: a named one needs a build with that name; a general one ("how's the project going") an open build.
+    const hit = slug ? items.some((t) => t.project_slug === slug) : items.some((t) => t.status !== "review_ready" && t.status !== "failed");
+    if (i.weak && !hit) return null;
+    const text = voice ? addressedStatusLine(items, voice) : taskStatusText(items, { agent: i.agent, slug });
+    return { reply: text, agent: voice };
+  } catch (e) {
+    if (i.weak) return null;
+    return { reply: `I couldn't read the build status just now: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+const NARRATION_WORDS: Record<FeedbackLevel, string> = { 0: "off (toasts only)", 1: "milestones only", 2: "milestones and handoffs", 3: "everything" };
+
+/** "Narration off" / "narrate everything" / "quieter narration": os.json `feedback.sensitivity`. */
+async function narrationAction(i: Extract<OsIntent, { kind: "narration" }>): Promise<OsIntentResult> {
+  if (!isTauri()) return { reply: "Narration is set on the desktop app." };
+  const cur = feedbackLevel(useOs.getState().cfg);
+  const next = (i.level ?? Math.max(0, Math.min(3, cur + (i.step ?? 0)))) as FeedbackLevel;
+  try {
+    await useOs.getState().patch({ feedback: { sensitivity: next } });
+    return { reply: `Narration: ${NARRATION_WORDS[next]}.` };
+  } catch (e) {
+    return { reply: `Couldn't change narration: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }

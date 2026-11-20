@@ -89,13 +89,19 @@ export interface CueHandle {
   cancel: () => void;
 }
 
+/** Exchanges playing right now (Hard Reload treats a playing cue as busy audio). */
+let playing = 0;
+export const cueActive = (): boolean => playing > 0;
+export const cuesPlaying = (): number => playing;
+
 /** Play the beats in order (never throws). Starts at once; callers never await it before dispatching. */
 export function playExchange(beats: readonly Beat[], deps: CueDeps, maxSeconds = 5): CueHandle {
   const now = deps.now ?? (() => Date.now());
   const t0 = now();
   let cancelled = false;
   for (const b of beats) deps.prefetch?.(b.text, b.speaker);
-  const done = (async (): Promise<CueOutcome> => {
+  playing++;
+  const run = (async (): Promise<CueOutcome> => {
     for (const b of beats) {
       if (cancelled || !deps.isLive()) return "cancelled";
       const left = maxSeconds * 1000 - (now() - t0);
@@ -108,6 +114,9 @@ export function playExchange(beats: readonly Beat[], deps: CueDeps, maxSeconds =
     }
     return cancelled || !deps.isLive() ? "cancelled" : "completed";
   })();
+  const done = run.finally(() => {
+    playing--;
+  });
   return { beats: [...beats], done, cancel: () => void (cancelled = true) };
 }
 

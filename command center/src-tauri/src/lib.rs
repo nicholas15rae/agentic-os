@@ -3,8 +3,8 @@ mod commands;
 mod exe_resolve;
 mod proc;
 
-use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, instagram, modellab, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
 use commands::{buildhub, handoff_cues, lifecycle};
+use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -18,6 +18,8 @@ pub fn run() {
         .manage(pipelines::PipelineState::default())
         .manage(os_core::OsState::default())
         .manage(devqueue::DevQueueState::default())
+        .manage(envelope::TaskStore::default())
+        .manage(taskworker::WorkerState::default())
         .manage(claude_fix::ClaudeFixState::default())
         .manage(audio::commands::AudioEngineState::default())
         .manage(introspect::IntrospectState::default())
@@ -29,6 +31,10 @@ pub fn run() {
             introspect::mark_started();
             // System Map live routing trace: `os-trace` events from os_turn / mcp::call_tool.
             commands::trace::install(app.handle());
+            // Agent event bus (`agent-event` + phone HUD mirror); events queue until this runs.
+            events::install(app.handle());
+            // AnythingLLM client: Tony's monthly thread map lives in tasks.db (Part 3).
+            allm::install(app.handle());
             // Provider endpoints live in a file the user edits, not in the webview.
             if let Ok(dir) = app.path().app_config_dir() {
                 let state = app.state::<dispatch::DispatchState>();
@@ -46,6 +52,22 @@ pub fn run() {
                 app.state::<devqueue::DevQueueState>().init(&dir);
                 // P6: a run the last session left "running" died with it (its job was killed).
                 claude_fix::recover_interrupted(&app.state::<devqueue::DevQueueState>());
+                // TaskEnvelope store: <config dir>/tasks.db (separate from devqueue.db). A failure
+                // is logged and leaves the worker disabled; the app keeps running.
+                {
+                    let osc = app.state::<os_core::OsState>().snapshot();
+                    events::set_filter(&osc.os_name, &osc.wake_words);
+                    let tasks = app.state::<envelope::TaskStore>();
+                    if tasks.init(&dir).is_ok() {
+                        // In-flight tasks keep their stage and get an `interrupted` row; the
+                        // worker re-runs only that stage.
+                        match tasks.recover_interrupted() {
+                            Ok(ids) if !ids.is_empty() => eprintln!("[tasks] {} interrupted task(s) to resume", ids.len()),
+                            Ok(_) => {}
+                            Err(e) => eprintln!("[tasks] recovery: {e}"),
+                        }
+                    }
+                }
                 // Play Place staging hub: <config dir>/build-hub.json (Thought-to-Product Phases 2–4).
                 app.state::<buildhub::HubState>().init(&dir);
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
@@ -59,8 +81,12 @@ pub fn run() {
             tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
             tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
             tauri::async_runtime::spawn(memory::auto_monthly_loop(app.handle().clone()));
+            // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).
+            tauri::async_runtime::spawn(commands::compaction::compaction_loop(app.handle().clone()));
             // Phone HUD → desktop: Tony turns, pipelines, kill switch / compute mode.
             tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
+            // The sequential TaskEnvelope worker: one stage of one task at a time (Part 5).
+            tauri::async_runtime::spawn(taskworker::worker_loop(app.handle().clone()));
             // Thought-to-Product Phase 1: the gateway heartbeat (`gateway-health`, off the UI thread).
             tauri::async_runtime::spawn(lifecycle::health_loop(app.handle().clone()));
             // Play Place hub orchestration: FIFO hand-off, worker sync, smoke tests, peeks.
@@ -77,6 +103,8 @@ pub fn run() {
                     let _ = h.emit("gpu-slot", v);
                 });
             }
+            // GPU baton → gateway cooperative lease (PUT /api/os/gpu), best-effort, latest-wins.
+            tauri::async_runtime::spawn(commands::scheduler::gpu_mirror_loop(app.handle().clone()));
             tauri::async_runtime::spawn(os_core::droplet_link_loop(app.handle().clone()));
             // Keep the local model sized to fit VRAM even after Bionic auto-reloads it.
             tauri::async_runtime::spawn(services::local_fit_loop(app.handle().clone()));
@@ -113,6 +141,8 @@ pub fn run() {
             services::provider_models,
             services::gateway_ensure,
             voice::stt_transcribe,
+            voice::mic_set_enabled,
+            voice::mic_get,
             voice::stt_configure,
             voice::tts_synthesize,
             voice::tts_voices,
@@ -155,6 +185,7 @@ pub fn run() {
             os_core::network_audit,
             os_core::gateway_token_rotate,
             agents::anythingllm_workspaces,
+            allm_audit::anythingllm_workspace_audit,
             agents::os_turn,
             agents::os_turn_cancel,
             agents::overseer_ask,
@@ -162,6 +193,7 @@ pub fn run() {
             agents::tony_tools_preview,
             mcp::mcp_call,
             mcp::mcp_sync_anythingllm,
+            mcp::librarian_preflight,
             mcp::skills_scan,
             gmail::gmail_status,
             gmail::gmail_import_anythingllm,
@@ -197,6 +229,8 @@ pub fn run() {
             memory::memory_mount,
             memory::memory_unmount,
             memory::memory_export,
+            commands::compaction::memory_compact,
+            commands::compaction::memory_compaction_status,
             market::market_candles,
             pipeline::idea_capture,
             pipeline::idea_pipeline_run,
@@ -210,6 +244,19 @@ pub fn run() {
             modellab::model_bench,
             modellab::model_use,
             pipeline::pipeline_resume,
+            taskworker::task_create,
+            modes::tony_modes_get,
+            modes::tony_mode_set_active,
+            modes::tony_mode_override,
+            modes::tony_mode_reset,
+            modes::tony_mode_upsert,
+            modes::tony_mode_duplicate,
+            modes::tony_mode_delete,
+            taskworker::task_get,
+            taskworker::task_list,
+            taskworker::task_status,
+            taskworker::task_retry,
+            taskworker::task_cancel,
             os_core::droplet_link,
             os_core::gpu_slot_view,
             clihub::cli_install,
@@ -287,7 +334,14 @@ fn register_voice_hotkey(app: &mut tauri::App) -> Result<(), Box<dyn std::error:
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
-                    let _ = app.emit(VOICE_TOGGLE_EVENT, ());
+                    // Phase 2 Part B: a locked-off mic never opens from the hotkey. The webview
+                    // handles `mic-locked` as a stop-only toggle: it can still stop Tony speaking
+                    // or a turn in flight; from rest it toasts and never listens.
+                    if voice::mic_enabled() {
+                        let _ = app.emit(VOICE_TOGGLE_EVENT, ());
+                    } else {
+                        let _ = app.emit(voice::MIC_LOCKED_EVENT, ());
+                    }
                 }
             })
             .build(),

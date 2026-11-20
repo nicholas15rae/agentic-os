@@ -5,11 +5,16 @@ import { VoiceOrb } from "./VoiceOrb";
 import { useNav } from "@/stores/nav";
 import { isTauri, onNativeEvent } from "@/lib/platform";
 import { STATE_LABEL, useVoice } from "./voice-store";
+import { lockedToggleStops } from "./voice-status";
 import { Waveform } from "./Waveform";
 import { resumeHold, startListening, stopVoice, toggleListening, voiceCaps } from "./voice-controller";
 import { CommandInput, MicButton, STATE_DOT, Transcript, useTonyThread } from "./VoiceParts";
 import { ListenControls } from "./ListenControls";
 import { useOsName } from "@/features/os/os-store";
+import { useToasts } from "@/features/reminders/notify";
+import { MIC_LOCKED_MSG, hydrateMic, micEnabled } from "./mic-gate";
+import { MicLockBadge, flashMicLock, useMicIndicator } from "./MicLockBadge";
+import { isMicOff } from "./mic-indicator";
 
 /**
  * Persistent floating voice HUD (Gemini/Claude-style bubble), rendered once at
@@ -24,6 +29,7 @@ export function VoiceHUD() {
   const { state, expanded, partial, error, consoleVisible, setExpanded } = useVoice();
   // Tony's own thread (Auto, or his Agents tab) — where voice writes; never a sub-agent's.
   const tonyThread = useTonyThread();
+  const micOff = isMicOff(useMicIndicator());
   useVoiceLaunchers();
 
   // Minimised: the floating orb. It hides only while the docked Voice Console
@@ -46,6 +52,7 @@ export function VoiceHUD() {
           <span className={`size-2 rounded-full ${STATE_DOT[state]}`} />
           <span className="label-caps text-ink">{osLabel} voice</span>
           <span className="label-caps rounded-full border border-amber/30 px-2 py-0.5 text-amber-soft">{STATE_LABEL[state]}</span>
+          <MicLockBadge variant="chip" onlyWhenOff />
           <div className="ml-auto flex items-center gap-1">
             <IconBtn label={expanded ? "Collapse" : "Expand"} onClick={() => setExpanded(!expanded)}>
               {expanded ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
@@ -64,7 +71,7 @@ export function VoiceHUD() {
 
         <div className="flex items-center gap-3 px-4 py-2">
           <MicButton />
-          <Waveform state={state} height={expanded ? 84 : 52} className="flex-1" />
+          <Waveform state={state} height={expanded ? 84 : 52} className="flex-1" locked={micOff && state !== "speaking" && state !== "thinking"} />
         </div>
 
         <ListenControls />
@@ -125,12 +132,14 @@ function FloatingOrb() {
       )}
       <div className="pointer-events-auto flex items-center">
         <button
-          onClick={toggleListening}
+          onClick={launchToggle}
           aria-label={state === "listening" ? "Finish speaking" : state === "speaking" ? "Stop speaking" : `Talk to ${name} (Ctrl+Shift+Space)`}
           title={`Talk to ${name} · Ctrl+Shift+Space`}
           className="relative grid size-16 place-items-center rounded-full transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] hover:scale-105 active:scale-95"
         >
           <VoiceOrb state={state} size={64} />
+          {/* Phase 2 Part D: the mic is locked off (a static red lock; the orb still opens the panel). */}
+          <MicLockBadge variant="dot" onlyWhenOff className="absolute right-1 top-1" />
         </button>
         <button
           onClick={() => setExpanded(true)}
@@ -186,6 +195,19 @@ function LastReply() {
   );
 }
 
+/** Phase 2 Part B: a launcher pressed while the mic is locked off says so instead of opening it. */
+function micLockedToast() {
+  flashMicLock();
+  useToasts.getState().push({ title: MIC_LOCKED_MSG, body: "Unlock it with the Mic switch to talk to Tony.", tone: "info" });
+}
+
+/** A launcher press: while locked off, one that would OPEN the mic only toasts; stopping Tony
+ * (speaking / thinking) still works, it never opens anything. */
+function launchToggle() {
+  if (!micEnabled() && !lockedToggleStops(useVoice.getState().state)) return micLockedToast();
+  toggleListening();
+}
+
 /** Hotkeys, the desktop global shortcut, and the PWA `?voice=1` launch. */
 function useVoiceLaunchers() {
   useEffect(() => {
@@ -193,12 +215,16 @@ function useVoiceLaunchers() {
       // On desktop the Rust global shortcut owns Ctrl+Shift+Space.
       if (!isTauri() && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "Space") {
         e.preventDefault();
-        toggleListening();
+        launchToggle();
       } else if (e.key === "Escape" && useVoice.getState().state !== "idle" && !useVoice.getState().pending) stopVoice();
     };
     window.addEventListener("keydown", onKey);
     let unlisten: (() => void) | undefined;
-    void onNativeEvent("voice-toggle", toggleListening).then((u) => (unlisten = u));
+    let unlistenLocked: (() => void) | undefined;
+    void onNativeEvent("voice-toggle", launchToggle).then((u) => (unlisten = u));
+    // Rust sends this instead of `voice-toggle` when the hotkey is pressed while locked off. It
+    // still stops Tony speaking / a turn in flight; from rest it only toasts (never listens).
+    void onNativeEvent("mic-locked", launchToggle).then((u) => (unlistenLocked = u));
 
     // Home-screen shortcut / hardware-button launch: /?voice=1
     const url = new URL(location.href);
@@ -206,11 +232,13 @@ function useVoiceLaunchers() {
       url.searchParams.delete("voice");
       history.replaceState(null, "", url.pathname + url.search + url.hash);
       // Mic needs a user gesture on some browsers; if blocked, the HUD shows a tap-to-talk prompt.
-      startListening();
+      // Waits for the mic state (it starts locked until read): a locked mic only toasts.
+      void hydrateMic().then(() => (micEnabled() ? startListening() : micLockedToast()));
     }
     return () => {
       window.removeEventListener("keydown", onKey);
       unlisten?.();
+      unlistenLocked?.();
     };
   }, []);
 }

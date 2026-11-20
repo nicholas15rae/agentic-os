@@ -1,17 +1,22 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { Archive, BookMarked, Code2, Eye, Hammer, Lightbulb, Loader2, Maximize2, Play, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
+import { Archive, BookMarked, Code2, Copy, Eye, Hammer, Lightbulb, Loader2, Maximize2, Play, RotateCcw, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { useCollection } from "@/lib/cc-api";
 import { gateway } from "@/lib/gateway";
 import { cmd, isTauri, type Idea, type PlayCard } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
-import { usePipelines } from "@/features/os/pipeline-store";
+import { ideaAction, runForIdea, stagingPath, usePipelines, type PipelineRun } from "@/features/os/pipeline-store";
 import { requestBuild, requestPipeline } from "@/features/voice/voice-controller";
 import { useFocus } from "@/features/os/focus-store";
 import { useOsName } from "@/features/os/os-store";
 import { useToasts } from "@/features/reminders/notify";
 import { devFixMode } from "@/features/memmap/format";
+import { useModes } from "@/features/modes/modes-store";
 import { StagingHub } from "@/features/buildhub/StagingHub";
+
+/** Phase 2 Part D: Solo (surface_only) builds nothing; the Rust gate stays authoritative. */
+const SOLO_BUILD_HINT = "Solo mode: switch modes to build";
+const useSoloMode = () => useModes((s) => s.effective.dispatch === "surface_only");
 
 /** P6 Dev Fix · Claude Queue: the System Map's dev-queue store, loaded only when the tab opens. */
 const DevFixQueue = lazy(() => import("@/features/memmap/DevFixQueue").then((m) => ({ default: m.DevFixQueue })));
@@ -38,28 +43,87 @@ export function PlayPlaceSection() {
   );
 }
 
-/** Live progress of pipelines in flight. */
-export function PipelineBars() {
-  const runs = Object.values(usePipelines((s) => s.runs));
-  if (!runs.length) return null;
+const OWNER_LABEL: Record<string, string> = { tony: "Tony", prompter: "Prompter", librarian: "Librarian", designer: "Designer", coder: "Coder", staging: "Staging", system: "Checks" };
+const ownerLabel = (o: string) => OWNER_LABEL[o] ?? o;
+
+/** Retry a failed build from its failed stage (desktop: `task_retry`). An explicit click. */
+async function retryTask(taskId: string, title: string) {
+  try {
+    await cmd("task_retry", { task_id: taskId });
+    useToasts.getState().push({ title: "Retrying", body: `“${title}” goes back to the worker.`, tone: "info" });
+  } catch (e) {
+    useToasts.getState().push({ title: "Couldn't retry", body: e instanceof Error ? e.message : String(e), tone: "error" });
+  }
+}
+
+function StagingLink({ slug }: { slug: string | null }) {
+  const path = stagingPath(slug);
+  if (!path) return null;
   return (
-    <Card title="Pipelines running">
+    <button
+      type="button"
+      onClick={() => void navigator.clipboard?.writeText(path).then(() => useToasts.getState().push({ title: "Copied", body: path, tone: "info" }))}
+      className="flex items-center gap-1 font-mono text-[11px] text-teal hover:underline"
+      title="The build's files (in the repo's staging folder). Click to copy the path."
+    >
+      <Copy size={10} /> {path}
+    </button>
+  );
+}
+
+/** Builds in flight (TaskEnvelopes: status, who has it, iteration n/max), plus the latest finished ones. */
+export function PipelineBars() {
+  const runs = Object.values(usePipelines((s) => s.runs)).sort((a, b) => a.at - b.at);
+  const recent = Object.values(usePipelines((s) => s.recent))
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 3);
+  if (!runs.length && !recent.length) return null;
+  return (
+    <Card title={runs.length ? "Builds running" : "Recent builds"}>
       <ul className="space-y-2">
         {runs.map((r) => (
-          <li key={r.id}>
-            <div className="mb-1 flex items-center gap-2 text-xs">
-              <Loader2 size={12} className={r.pct < 100 ? "animate-spin text-amber-soft" : "text-teal"} />
-              <span className="text-ink">{r.title || "Prototype"}</span>
-              <span className="font-mono text-ink-3">{r.stage} · {r.label}</span>
-              <span className="ml-auto font-mono text-ink-2">{r.pct}%</span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-              <div className="h-full rounded-full bg-gradient-to-r from-amber to-teal transition-[width] duration-500" style={{ width: `${r.pct}%` }} />
-            </div>
-          </li>
+          <RunRow key={r.id} r={r} />
+        ))}
+        {recent.map((r) => (
+          <RunRow key={r.id} r={r} />
         ))}
       </ul>
     </Card>
+  );
+}
+
+function RunRow({ r }: { r: PipelineRun }) {
+  const failed = r.status === "failed";
+  const ready = r.status === "review_ready";
+  return (
+    <li>
+      <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+        {ready ? <Sparkles size={12} className="text-teal" /> : failed ? <RotateCcw size={12} className="text-alert" /> : <Loader2 size={12} className="animate-spin text-amber-soft" />}
+        <span className="text-ink">{r.title || "Prototype"}</span>
+        <span className={`label-caps ${failed ? "text-alert" : ready ? "text-teal" : "text-amber-soft"}`}>{r.status.replace("_", " ")}</span>
+        {!ready && !failed && <span className="font-mono text-ink-3">{ownerLabel(r.owner)}</span>}
+        {r.iteration > 0 && (
+          <span className="font-mono text-ink-3" title="Designer/Coder loop: iteration n of max">
+            iter {r.iteration}/{r.maxIterations}
+          </span>
+        )}
+        <span className="ml-auto font-mono text-ink-2">{r.pct}%</span>
+      </div>
+      <p className="mb-1 truncate text-[11px] text-ink-3" title={r.label}>
+        {failed && r.error ? r.error : r.label}
+      </p>
+      {ready && <StagingLink slug={r.slug} />}
+      {failed && isTauri() && (
+        <button onClick={() => void retryTask(r.id, r.title)} className="pill-glass !h-7 !px-3 text-[11px]">
+          <RotateCcw size={11} /> Retry
+        </button>
+      )}
+      {!ready && !failed && (
+        <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+          <div className="h-full rounded-full bg-gradient-to-r from-amber to-teal transition-[width] duration-500" style={{ width: `${r.pct}%` }} />
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -96,6 +160,7 @@ function PlayCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
  * card; nothing runs before its yes.
  */
 function ParkedCardView({ card, compact, focused, onArchive, onDiscard }: { card: PlayCard; compact: boolean; focused: boolean; onArchive: () => void; onDiscard: () => void }) {
+  const solo = useSoloMode();
   return (
     <section className={`glass rounded-[20px] p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -112,7 +177,12 @@ function ParkedCardView({ card, compact, focused, onArchive, onDiscard }: { card
         </details>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
-        <button onClick={() => void requestBuild(card.idea || card.summary || card.brief || card.title, card.title)} className="pill-primary !h-9 text-xs" title="Prompter → Designer → Coder, after you approve the card">
+        <button
+          onClick={() => void requestBuild(card.idea || card.summary || card.brief || card.title, card.title)}
+          disabled={solo}
+          className="pill-primary !h-9 text-xs disabled:opacity-50"
+          title={solo ? SOLO_BUILD_HINT : "Prompter → Designer → Coder, after you approve the card"}
+        >
           <Hammer size={13} /> Build prototype
         </button>
         <button onClick={onArchive} className="pill-glass !h-9 text-xs" title="Hide from the Play Place (kept in the vault)">
@@ -210,7 +280,7 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
           disabled={!!busy}
           onClick={() => void act("Commit to Librarian Vault", () => cmd("playplace_commit", { cardId: card.id }), { action: "commit" })}
           className="pill-glass !h-9 text-xs"
-          title="Spec, prompt chain and code → C:\ai-hub\memory + the Librarian's RAG"
+          title="Spec, prompt chain and code → Tony's notes (memory/tony) + the Librarian's RAG"
         >
           {busy === "Commit to Librarian Vault" ? <Loader2 size={13} className="animate-spin" /> : <BookMarked size={13} />} Commit to Vault
         </button>
@@ -278,7 +348,7 @@ export function IdeasLedger({ compact = false }: { compact?: boolean }) {
   const hint = compact
     ? undefined
     : tab === "ideas"
-      ? `Ideas you park with ${name} (“add it to the ledger”) wait here. When you approve a hand-off, the Prompter breaks the idea into tasks and the Librarian saves it (also in C:\\ai-hub\\memory\\ideas).`
+      ? `Ideas you park with ${name} (“add it to the ledger”) wait here. Run (after you approve the card) queues a build: Prompter → Librarian → Designer → Coder, landing in the repo's staging folder for review. ${name} keeps notes in memory/tony.`
       : "Fixes for Claude Code (devqueue.db, mirrored to .agenticos/claude-fix-queue.json for /fix-queue). “Run with Claude Code” asks first, works in its own worktree, never commits — and only the app's own checks mark a fix Done.";
   return (
     <Card title="Ideas & tasks ledger" action={tabs} hint={hint}>
@@ -312,7 +382,9 @@ function LedgerTabButton({ id, tab, setTab, icon: Icon, label }: { id: LedgerTab
 
 function IdeasList({ compact }: { compact: boolean }) {
   const { items, update } = useCollection<Idea>("ideas");
+  const solo = useSoloMode();
   const running = usePipelines((s) => s.runs);
+  const recent = usePipelines((s) => s.recent);
   const ideas = items.filter((i) => i.status !== "archived").sort((a, b) => (b._updated ?? 0) - (a._updated ?? 0));
   return (
     <>
@@ -320,7 +392,9 @@ function IdeasList({ compact }: { compact: boolean }) {
       <ul className="space-y-2">
         {ideas.map((i) => {
           const done = i.tasks?.filter((t) => t.done).length ?? 0;
-          const live = !!running[i.id];
+          const run = runForIdea(i, running, recent);
+          const live = !!run && run.status !== "failed" && run.status !== "review_ready";
+          const action = ideaAction(i.status, live, !!i.taskId);
           return (
             <li key={i.id} className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-3">
               <div className="flex items-center gap-2">
@@ -345,11 +419,39 @@ function IdeasList({ compact }: { compact: boolean }) {
                 </ul>
               )}
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {(i.status === "captured" || i.status === "staged" || i.status === "parked") && (
-                  <button disabled={live} onClick={() => void requestPipeline(i.id, i.title, "general")} className="pill-primary !h-7 !px-3 text-[11px]" title="Prompter → Designer → Coder, after you approve the card">
-                    {live ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />} {i.status === "staged" ? "Rebuild prototype" : "Run pipeline"}
+                {live && run && (
+                  <span className="flex h-7 items-center gap-1 font-mono text-[11px] text-amber-soft">
+                    <Loader2 size={11} className="animate-spin" /> {ownerLabel(run.owner)}
+                    {run.iteration > 0 ? ` · iter ${run.iteration}/${run.maxIterations}` : ""}
+                  </span>
+                )}
+                {(action === "run" || action === "rebuild") && (
+                  <button
+                    onClick={() => void requestPipeline(i.id, i.title, "general")}
+                    disabled={solo}
+                    className="pill-primary !h-7 !px-3 text-[11px] disabled:opacity-50"
+                    title={solo ? SOLO_BUILD_HINT : "Prompter → Librarian → Designer → Coder, after you approve the card"}
+                  >
+                    <Play size={11} /> {action === "rebuild" ? "Rebuild prototype" : i.status === "prototyping" || i.status === "failed" ? "Retry build" : "Run pipeline"}
                   </button>
                 )}
+                {action === "retry" && i.taskId && isTauri() && (
+                  <button onClick={() => void retryTask(i.taskId!, i.title)} className="pill-primary !h-7 !px-3 text-[11px]" title="Re-run the failed step (the earlier steps' work is kept)">
+                    <RotateCcw size={11} /> Retry
+                  </button>
+                )}
+                {action === "retry" && !isTauri() && (
+                  <button
+                    onClick={() => void requestPipeline(i.id, i.title, "general")}
+                    disabled={solo}
+                    className="pill-primary !h-7 !px-3 text-[11px] disabled:opacity-50"
+                    title={solo ? SOLO_BUILD_HINT : "Queue it again on the desktop, after you approve the card"}
+                  >
+                    <RotateCcw size={11} /> Retry build
+                  </button>
+                )}
+                {!live && run?.status === "review_ready" && <StagingLink slug={run.slug} />}
+                {i.status === "failed" && i.error && !compact && <p className="w-full text-[11px] text-alert">{i.error}</p>}
                 {i.cardId && (
                   <button onClick={() => useFocus.getState().set({ card: i.cardId! })} className="pill-glass !h-7 !px-3 text-[11px]">
                     <Send size={11} /> Prototype

@@ -85,6 +85,7 @@ The only new external path is the build output under `C:\ai-hub\external-builds`
 **The preview server.** Each build gets a tiny static-file server that is part of the app's own process (`buildhub/preview.rs`):
 - it binds `127.0.0.1:0` (loopback, random port);
 - it allows GET/HEAD only;
+- it rejects any request path with a backslash, a drive colon, `.`/`..` or a rooted / UNC form *before* touching the filesystem (no outbound SMB or WebDAV hop);
 - it does no directory listing;
 - it uses canonicalised paths with escape checks;
 - it sends `Cache-Control: no-store`.
@@ -120,6 +121,12 @@ It only *reads* the output folder the agents write. A build with its own dev ser
 - the queue file is written through a unique tmp file with the same retried rename, so an editor or Claude Code holding it open no longer makes a write fail;
 - the priority badge has a one-click bump.
 
+**All hub commands are async** and do their file I/O, state saves and smoke runs on the blocking pool; none runs on Tauri's main thread.
+
+**Recovery:** a build left in `smoke_testing` (an exit or crash mid-check, or a resume at that checkpoint) gets its check re-run by the hub loop, so a lane never stays blocked. A smoke result that arrives after the build moved on is kept for the card and changes nothing else. A crashed check sends the build to the Repair Queue.
+
+**External folders:** an existing `<base>\<slug>` is refused before anything is written; the build is enqueued (duplicate check) before scaffolding, and a failed scaffold takes it back out.
+
 **Smoke tests** (`buildhub/smoke.rs`) run on the blocking pool. They check:
 - the entry file and its size;
 - the HTML structure, with balanced `<script>` and `<style>` tags;
@@ -143,7 +150,9 @@ Remote assets are advisory only.
 - nothing new starts;
 - state and logs are kept.
 
-A paused build frees its lane. On Resume, the worker picks the build up again from its committed stage. A Claude-lane build is paused by moving its queue item to `Pending`, so it drops out of the queue file. Pausing a Claude run that is already live is refused, because it can only be stopped from the Dev Fix Queue.
+A paused build frees its lane. On Resume, the worker picks the build up again from its committed stage; a build paused at the smoke checkpoint resumes there and only its check re-runs. A Claude-lane build is paused by moving a *waiting* queue item to `Pending` (after the hub accepted the pause); a finished (Done) item is left alone, so Resume never re-runs Claude. Pausing a Claude run that is already live is refused, because it can only be stopped from the Dev Fix Queue.
+
+**Remove / Repair** cancel the build's live worker task (its finished stages and log stay in tasks.db), so nothing keeps running for a build the hub no longer owns; while a build is in the Repair Queue its task stays held.
 
 **Steer:**
 - appends a `human_override` to the envelope;
@@ -173,7 +182,11 @@ It is triggered in two places: `osRun`'s routing notice, and an approved Play Pl
 - **On:** the exchange plays and the routing chip ("TONY → CODER", with a speaker icon) shows.
 - **Off:** the same delegation happens silently and only the chip shows. With the toggle on, the exchange also replaces Tony's one-line ack / "Here's X" intro, so there is no double intro.
 
-**Concurrency:** `withHandoff` (Play Place) and `osRun` dispatch first and start the cue next to the dispatch. Neither ever awaits it. The only thing that waits is the playback order of the agent's spoken reply.
+**Concurrency:** `withHandoff` (Play Place) and `osRun` dispatch first and start the cue next to the dispatch. Neither ever awaits it. The only thing that waits is playback order: every spoken line of the turn (streamed chunks, the full answer, a typed auto-speak reply) queues behind the cue, so the beats and the reply never cut each other off.
+
+**Barge-in:** a new command said over the cue cuts the beat in flight and drops the rest, but the delegated agent's job keeps running server-side (its stream is excluded from `cancelStreams`). "Cut it" and a stand-down still stop everything, as specified.
+
+**Intake model call:** takes the GPU baton (background priority) like every other local generation; if it isn't free within 4 s the interview uses the standard questions.
 
 ## AD-8: Audio / media thread isolation guarantee
 

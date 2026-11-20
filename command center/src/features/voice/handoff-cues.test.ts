@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CUE_ROLES, DEFAULT_POOL, estimateSecs, LINE_MAX, pickExchange, playExchange, withHandoff, type Beat, type HandoffPool } from "./handoff-cues";
+import { cueActive, cuesPlaying, CUE_ROLES, DEFAULT_POOL, estimateSecs, LINE_MAX, pickExchange, playExchange, withHandoff, type Beat, type HandoffPool } from "./handoff-cues";
 
 const seq = (...xs: number[]) => {
   let i = 0;
@@ -124,5 +124,19 @@ describe("withHandoff: the job never waits on the cue", () => {
     );
     await expect(result).resolves.toBe(1);
     expect(cue).toBeNull();
+  });
+});
+
+describe("review #11: a playing exchange counts as busy audio", () => {
+  it("cueActive is true while beats play and false after", async () => {
+    const before = cuesPlaying(); // earlier tests leave never-ending exchanges behind on purpose
+    let finish!: () => void;
+    const h = playExchange(beats, { speak: () => new Promise<void>((r) => (finish = r)), isLive: () => true });
+    expect(cueActive()).toBe(true);
+    expect(cuesPlaying()).toBe(before + 1);
+    h.cancel();
+    finish();
+    await h.done;
+    expect(cuesPlaying()).toBe(before);
   });
 });

@@ -12,6 +12,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::ipc::{InvokeBody, Request, Response};
@@ -45,18 +46,89 @@ fn voices_dir(state: &DispatchState, p: &Provider) -> Option<PathBuf> {
     p.voices_dir.as_ref().map(PathBuf::from).or_else(|| state.config_dir().map(|d| d.join("voices")))
 }
 
+// ── Hard mic sovereignty (Phase 2 Part B) ────────────────────────────────────
+//
+// `MIC_ENABLED` is the authoritative mic flag on the desktop (seeded from os.json
+// `voice.micEnabled` at startup). While it is false the line is dead at this layer too:
+// `transcribe_bytes` refuses before any provider lookup or HTTP (this is the only client of
+// the Whisper server on :8178), and the native cpal engine is halted and refuses to start.
+// The webview has its own gate (`mic-gate.ts`); this one holds even if that one is bypassed.
+
+/// False = mic locked off: zero STT requests, no native capture.
+pub static MIC_ENABLED: AtomicBool = AtomicBool::new(true);
+/// `{ enabled: bool }`: the authoritative state changed (UI toggle, phone, os.json patch).
+pub const MIC_STATE_EVENT: &str = "mic-state";
+/// The global hotkey was pressed while the mic is locked off (the webview shows a toast).
+pub const MIC_LOCKED_EVENT: &str = "mic-locked";
+/// The error `transcribe_bytes` returns while the mic is locked off.
+pub const MIC_DISABLED: &str = "mic disabled";
+
+pub fn mic_enabled() -> bool {
+    MIC_ENABLED.load(Ordering::SeqCst)
+}
+
+/// Apply a mic state now: the atomic first (so an in-flight STT request sees it), then the
+/// webview event, then (on mute) halt the native recorder. Persisting is the caller's job.
+pub fn set_mic_enabled(app: &tauri::AppHandle, on: bool) {
+    use tauri::{Emitter, Manager};
+    MIC_ENABLED.store(on, Ordering::SeqCst);
+    let _ = app.emit(MIC_STATE_EVENT, serde_json::json!({ "enabled": on }));
+    if !on {
+        if let Some(engine) = app.try_state::<crate::audio::commands::AudioEngineState>() {
+            crate::audio::commands::stop_now(&engine);
+        }
+    }
+}
+
+/// The Mic switch. Disable applies at once (a failed os.json write is logged, the mute
+/// still holds this session); enable is persisted first, so a failed write leaves it muted.
+#[tauri::command]
+pub fn mic_set_enabled(app: tauri::AppHandle, os: State<'_, super::os_core::OsState>, enabled: bool) -> Result<bool, String> {
+    let persist = |on: bool| {
+        os.update(|c| {
+            c.voice.mic_enabled = on;
+            Ok(())
+        })
+    };
+    if !enabled {
+        set_mic_enabled(&app, false);
+        if let Err(e) = persist(false) {
+            eprintln!("[mic] locked off (not saved: {e})");
+        }
+        return Ok(false);
+    }
+    persist(true)?;
+    set_mic_enabled(&app, true);
+    Ok(true)
+}
+
+/// The webview's hydration read (`mic-gate.ts` `hydrateMic`).
+#[tauri::command]
+pub fn mic_get() -> bool {
+    mic_enabled()
+}
+
 // ── STT ──────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn stt_transcribe(state: State<'_, DispatchState>, request: Request<'_>) -> Result<String, String> {
+    let _touch = super::compaction::Touch::start();
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected raw WAV bytes".into());
     };
-    if bytes.len() < 1024 || bytes.len() > MAX_AUDIO_BYTES {
+    transcribe_bytes(state.inner(), bytes.clone()).await
+}
+
+/// One WAV → text. Refuses while the mic is locked off (before any provider lookup or HTTP),
+/// and drops the transcript of a request that was in flight when the mic was locked.
+pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> Result<String, String> {
+    if !mic_enabled() {
+        return Err(MIC_DISABLED.into());
+    }
+    if audio.len() < 1024 || audio.len() > MAX_AUDIO_BYTES {
         return Err("audio too short or too long".into());
     }
-    let audio = bytes.clone();
-    let p = stt_provider(&state)?;
+    let p = stt_provider(state)?;
     let key = state.key_for(&p)?;
 
     let part = reqwest::multipart::Part::bytes(audio).file_name("speech.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
@@ -87,6 +159,10 @@ pub async fn stt_transcribe(state: State<'_, DispatchState>, request: Request<'_
         rb = rb.bearer_auth(k);
     }
     let body: serde_json::Value = rb.send().await.map_err(short)?.error_for_status().map_err(short)?.json().await.map_err(short)?;
+    // Locked off while Whisper was working: nothing heard before the mute reaches Tony.
+    if !mic_enabled() {
+        return Ok(String::new());
+    }
     let text = body["text"].as_str().unwrap_or_default().trim().to_string();
     // Whisper emits these on silence (the client-side VAD avoids most of it).
     let junk = ["[BLANK_AUDIO]", "(silence)", "[ Silence ]", "[silence]"];
@@ -321,9 +397,10 @@ pub async fn tts_voice_upload(state: State<'_, DispatchState>, request: Request<
     Ok(stem)
 }
 
-/// Built-in Kokoro voice a sub-agent speaks with when the roster has no row for it, so a
-/// handoff ("Here's Ops.") never answers in Tony's own voice. Runtime only: providers.json
-/// is never rewritten. Mirrored by `DEFAULT_AGENT_KOKORO` in VoiceSettings.tsx.
+/// Built-in Kokoro voice a sub-agent (or a worker narrator: verifier, staging, system) speaks
+/// with when the roster has no row for it, so a handoff ("Here's Ops.") or a narration line
+/// never answers in Tony's own voice. Runtime only: providers.json is never rewritten. Tony
+/// ("general") has no default: he keeps the local provider's own voice.
 pub(crate) fn default_agent_voice(role: &str) -> Option<&'static str> {
     match role {
         "booking" => Some("am_michael"),
@@ -332,13 +409,33 @@ pub(crate) fn default_agent_voice(role: &str) -> Option<&'static str> {
         "designer" => Some("af_nicole"),
         "librarian" => Some("bf_emma"),
         "ops" => Some("am_eric"),
+        "verifier" => Some("bm_lewis"),
+        "staging" => Some("af_sarah"),
+        "system" => Some("am_liam"),
         _ => None,
     }
 }
 
-/// The roster entry to speak `agent` with: that agent's own entry; else, once the
-/// roster is in use and Kokoro is configured (`kokoro`), the agent's built-in Kokoro
-/// default (auto-speak off); else Tony's ("general"); else `None`. Only consulted when
+/// The voice a LOCAL engine should speak `role` with (ElevenLabs fallback, kill switch, a
+/// `localOnly` narration line), so per-agent voices survive an ElevenLabs outage: the agent's
+/// own Kokoro roster voice, else its built-in Kokoro default, else the local provider's own
+/// voice (Tony, unknown speakers). A non-Kokoro local engine (XTTS) keeps its own voice:
+/// Kokoro voice names mean nothing to it. Pure.
+pub(crate) fn local_voice_for(role: Option<&str>, roster: &std::collections::BTreeMap<String, AgentVoice>, local_engine: Option<&str>, local_default: Option<&str>) -> Option<String> {
+    let own = || local_default.map(str::to_string);
+    if local_engine != Some("kokoro") {
+        return own();
+    }
+    let Some(role) = role else { return own() };
+    if let Some(v) = roster.get(role).filter(|av| av.engine == "kokoro").and_then(|av| av.voice.clone()).filter(|v| !v.trim().is_empty()) {
+        return Some(v);
+    }
+    default_agent_voice(role).map(str::to_string).or_else(own)
+}
+
+/// The roster entry to speak `agent` with: that agent's own entry; else, when Kokoro is
+/// configured (`kokoro`), the agent's built-in Kokoro default (auto-speak off) — also with
+/// an empty roster, so every agent keeps a distinct voice; else Tony's ("general"); else `None`. Only consulted when
 /// `agent` is actually named — a call that never identifies a speaker (a cue clip's own
 /// voice, a Settings preview) skips the roster entirely and keeps using the single
 /// global `policy.tts` provider, exactly as before Part 3's roster existed.
@@ -348,7 +445,7 @@ fn roster_entry_for(agent_voices: &std::collections::BTreeMap<String, AgentVoice
     if let Some(own) = agent_voices.get(agent) {
         return Some(own.clone());
     }
-    if let Some(voice) = default_agent_voice(agent).filter(|_| kokoro && !agent_voices.is_empty()) {
+    if let Some(voice) = default_agent_voice(agent).filter(|_| kokoro) {
         return Some(AgentVoice { engine: "kokoro".into(), voice: Some(voice.into()), model: None, auto_speak: false });
     }
     agent_voices.get("general").cloned()
@@ -673,8 +770,13 @@ pub async fn tts_synthesize(
     // instead of ElevenLabs (breaker cooldown, failure, kill switch), Rust emits `tts-unpin`
     // so that fallback audio plays once and is not pinned. Same id rules as `utterance_id`.
     pin_id: Option<String>,
+    // Part 6 narration with `feedback.narrationEngine = "kokoro"`: speak on the local engine
+    // (Kokoro) in this agent's local voice, sparing the ElevenLabs quota. Without a local TTS
+    // provider the line takes the normal roster path instead.
+    local_only: Option<bool>,
 ) -> Result<Response, String> {
     use tauri::Emitter;
+    let _touch = super::compaction::Touch::start();
     let utt = valid_utterance_id(utterance_id);
     let pin = valid_utterance_id(pin_id);
     let text = text.trim();
@@ -693,6 +795,14 @@ pub async fn tts_synthesize(
     let role = agent.as_deref().map(canon_role);
     let kokoro = cfg.providers.iter().any(|x| x.kind == Kind::Tts && x.engine.as_deref() == Some("kokoro"));
     let roster = roster_entry_for(&cfg.agent_voices, role.as_deref(), kokoro);
+    // The local voice for this speaker on whichever local engine answers (fallbacks below).
+    let local_voice = |local: &Provider| local_voice_for(role.as_deref(), &cfg.agent_voices, local.engine.as_deref(), local.voice.as_deref());
+    if local_only == Some(true) && explicit.is_none() {
+        if let Some(local) = cfg.providers.iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() != Some("elevenlabs")) {
+            let bytes = synth_local(&state, local, text, local_voice(local)).await?;
+            return Ok(Response::new(bytes));
+        }
+    }
     let (p, roster_voice, roster_model) = match &roster {
         Some(av) => match cfg.providers.iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() == Some(av.engine.as_str())).cloned() {
             Some(b) => (b, av.voice.clone(), av.model.clone()),
@@ -709,7 +819,7 @@ pub async fn tts_synthesize(
     let lockdown = os.snapshot().privacy.kill_switch;
     if p.engine.as_deref() == Some("elevenlabs") && lockdown {
         let local = state.snapshot().providers.into_iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() != Some("elevenlabs")).ok_or("kill switch on and no local TTS configured")?;
-        let bytes = synth_local(&state, &local, text, local.voice.clone()).await?;
+        let bytes = synth_local(&state, &local, text, local_voice(&local)).await?;
         emit_unpin(&app, pin.as_deref());
         return Ok(Response::new(bytes));
     }
@@ -727,7 +837,7 @@ pub async fn tts_synthesize(
             // Live: straight to local, no API call. A cooldown nobody was told about
             // yet (started by a preview) gets its one notice here.
             let local = local_tts().ok_or_else(|| block.preview_error())?;
-            let bytes = synth_local(&state, &local, text, local.voice.clone()).await?;
+            let bytes = synth_local(&state, &local, text, local_voice(&local)).await?;
             emit_unpin(&app, pin.as_deref());
             let reason = block.status.map(|c| format!("HTTP {c}")).unwrap_or_else(|| "unreachable".into());
             if let Some(n) = with_breaker(|b| b.announce(utt.as_deref(), &chosen, block.status, &reason, Instant::now())) {
@@ -745,7 +855,7 @@ pub async fn tts_synthesize(
                 let now = Instant::now();
                 with_breaker(|b| b.record_failure(utt.as_deref(), &chosen, e.status, e.retry_after, now));
                 if let Some(local) = local_tts() {
-                    if let Ok(bytes) = synth_local(&state, &local, text, local.voice.clone()).await {
+                    if let Ok(bytes) = synth_local(&state, &local, text, local_voice(&local)).await {
                         emit_unpin(&app, pin.as_deref());
                         let reason = e.reason();
                         // Reported to the UI (not only stderr) so a silent voice swap is
@@ -893,10 +1003,54 @@ mod part3_tests {
         assert_eq!(roster_entry_for(&m, Some("booking"), true).unwrap().voice.as_deref(), Some("booking-voice"));
         assert_eq!(roster_entry_for(&m, Some("general"), true).unwrap().voice.as_deref(), Some("tony-voice"));
         // Every sub-agent default is distinct.
-        let ids: std::collections::BTreeSet<_> = ["booking", "prompter", "coder", "designer", "librarian", "ops"].iter().filter_map(|r| default_agent_voice(r)).collect();
-        assert_eq!(ids.len(), 6);
-        // An empty roster (per-agent voices never set up) keeps the single policy voice.
-        assert!(roster_entry_for(&BTreeMap::new(), Some("ops"), true).is_none());
+        let ids: std::collections::BTreeSet<_> = ["booking", "prompter", "coder", "designer", "librarian", "ops", "verifier", "staging", "system"].iter().filter_map(|r| default_agent_voice(r)).collect();
+        assert_eq!(ids.len(), 9);
+        // An empty roster (per-agent voices never set up) still gives each agent its own
+        // Kokoro default when Kokoro is configured (Part 6: the old `!is_empty()` guard is gone)…
+        assert_eq!(roster_entry_for(&BTreeMap::new(), Some("ops"), true).unwrap().voice.as_deref(), Some("am_eric"));
+        // …and the single policy voice without Kokoro.
+        assert!(roster_entry_for(&BTreeMap::new(), Some("ops"), false).is_none());
+    }
+
+    #[test]
+    fn local_voice_for_gives_every_narrator_a_distinct_voice_with_an_empty_roster() {
+        // Part 6: the ElevenLabs fallback / kill switch / `localOnly` narration keep a distinct
+        // voice per speaker (they used to collapse to the local provider's one voice).
+        let empty: BTreeMap<String, AgentVoice> = BTreeMap::new();
+        let voices: Vec<Option<String>> = super::super::dispatch::NARRATOR_IDS.iter().map(|r| local_voice_for(Some(r), &empty, Some("kokoro"), Some("af_bella"))).collect();
+        assert!(voices.iter().all(Option::is_some), "{voices:?}");
+        let distinct: std::collections::BTreeSet<_> = voices.iter().flatten().collect();
+        assert_eq!(distinct.len(), super::super::dispatch::NARRATOR_IDS.len(), "{voices:?}");
+        // Tony keeps the local provider's own voice.
+        assert_eq!(local_voice_for(Some("general"), &empty, Some("kokoro"), Some("af_bella")).as_deref(), Some("af_bella"));
+    }
+
+    #[test]
+    fn narrators_get_kokoro_defaults_but_tony_never_does() {
+        for r in ["verifier", "staging", "system"] {
+            assert!(default_agent_voice(r).is_some(), "{r}");
+        }
+        assert!(default_agent_voice("general").is_none());
+        // With Kokoro configured and an empty roster, a worker narrator gets its own voice,
+        // never Tony's (the old fallback made a verifier line sound exactly like him).
+        let v = roster_entry_for(&BTreeMap::new(), Some("verifier"), true).unwrap();
+        assert_eq!((v.engine.as_str(), v.voice.as_deref()), ("kokoro", Some("bm_lewis")));
+    }
+
+    #[test]
+    fn local_voice_for_prefers_the_agents_own_kokoro_row() {
+        let mut m = BTreeMap::new();
+        m.insert("coder".into(), av("kokoro", "my-coder"));
+        m.insert("designer".into(), av("elevenlabs", "eleven-designer"));
+        assert_eq!(local_voice_for(Some("coder"), &m, Some("kokoro"), Some("af_bella")).as_deref(), Some("my-coder"));
+        // An ElevenLabs voice id means nothing to Kokoro: the built-in default instead.
+        assert_eq!(local_voice_for(Some("designer"), &m, Some("kokoro"), Some("af_bella")).as_deref(), Some("af_nicole"));
+        // XTTS (or any non-Kokoro local engine) keeps its own voice.
+        assert_eq!(local_voice_for(Some("coder"), &m, Some("xtts"), Some("speaker.wav")).as_deref(), Some("speaker.wav"));
+        // No speaker named (a preview): the provider's voice.
+        assert_eq!(local_voice_for(None, &m, Some("kokoro"), None), None);
+        // Unknown speakers fall back to the provider's voice.
+        assert_eq!(local_voice_for(Some("overseer"), &m, Some("kokoro"), Some("af_bella")).as_deref(), Some("af_bella"));
     }
 
     #[test]
@@ -1117,5 +1271,95 @@ mod breaker_tests {
         let n = b.announce(Some("u1"), V, Some(400), "HTTP 400", t0 + s(2)).expect("trip notice");
         assert_eq!(n, Notice { scope: "utterance", status: Some(400), cooldown_secs: None });
         assert_eq!(b.announce(Some("u1"), V, Some(400), "HTTP 400", t0 + s(3)), None);
+    }
+}
+
+/// Phase 2 Part B: the hard mic gate at the Rust STT client (the only client of Whisper :8178).
+/// A scripted local server counts every request that reaches it.
+#[cfg(test)]
+pub(crate) mod mic_gate_tests {
+    use super::*;
+    use crate::commands::allm::mock::{start, Resp};
+    use std::sync::Arc;
+
+    /// The tests here and in `audio::commands` share the global `MIC_ENABLED`: run them one at a time.
+    pub(crate) static MIC_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
+        MIC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A DispatchState whose STT provider (the built-in "whisper") points at `base`. No path: nothing is written.
+    fn state_at(base: &str) -> DispatchState {
+        let st = DispatchState::default();
+        st.update(|c| {
+            c.policy.stt = "whisper".into();
+            let p = c.providers.iter_mut().find(|p| p.id == "whisper").expect("built-in whisper provider");
+            p.base_url = format!("{base}/v1");
+            Ok(())
+        })
+        .expect("point whisper at the test server");
+        st
+    }
+
+    fn wav() -> Vec<u8> {
+        vec![0u8; 4096]
+    }
+
+    #[test]
+    fn muted_mic_sends_zero_stt_requests() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            let srv = start(|_| Resp::json(serde_json::json!({ "text": "should never be heard" }))).await;
+            let st = state_at(&srv.base);
+            MIC_ENABLED.store(false, Ordering::SeqCst);
+            let r = transcribe_bytes(&st, wav()).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            assert_eq!(r, Err(MIC_DISABLED.to_string()));
+            assert_eq!(srv.reqs().len(), 0, "a muted mic must never reach the Whisper server");
+            // The refusal comes before validation too: even an empty clip is "mic disabled".
+            MIC_ENABLED.store(false, Ordering::SeqCst);
+            assert_eq!(transcribe_bytes(&st, vec![]).await, Err(MIC_DISABLED.to_string()));
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+        });
+    }
+
+    #[test]
+    fn live_mic_sends_exactly_one_request() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            let srv = start(|_| Resp::json(serde_json::json!({ "text": " hello tony " }))).await;
+            let st = state_at(&srv.base);
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let r = transcribe_bytes(&st, wav()).await;
+            assert_eq!(r, Ok("hello tony".to_string()));
+            assert_eq!(srv.count("POST", "/v1/audio/transcriptions"), 1);
+            assert_eq!(srv.reqs().len(), 1);
+        });
+    }
+
+    #[test]
+    fn muting_mid_request_drops_the_transcript() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            let srv = start(|_| Resp::json(serde_json::json!({ "text": "heard before the mute" })).delayed(500)).await;
+            let st = Arc::new(state_at(&srv.base));
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let st2 = Arc::clone(&st);
+            let job = tauri::async_runtime::spawn(async move { transcribe_bytes(&st2, wav()).await });
+            // Wait until the request is at the server, then lock the mic while it "transcribes".
+            for _ in 0..100 {
+                if !srv.reqs().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(srv.reqs().len(), 1, "the request should be in flight");
+            MIC_ENABLED.store(false, Ordering::SeqCst);
+            let r = job.await.expect("join");
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            assert_eq!(r, Ok(String::new()));
+        });
     }
 }

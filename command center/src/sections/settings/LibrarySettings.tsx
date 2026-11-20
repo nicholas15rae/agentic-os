@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Cloud, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, Wrench, X } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
-import { cmd, type AllmSyncReport, type McpServer, type ServerTools, type SkillInfo } from "@/lib/platform";
+import { cmd, type AllmSyncReport, type LibrarianGuard, type McpServer, type ServerTools, type SkillInfo } from "@/lib/platform";
+import { describeToolError, mcpCall } from "@/lib/mcp-call";
 import { SUB_AGENT_IDS, roleLabel, toggleGrant } from "@/features/dispatcher/roles";
 import { CfgError, SecretRow, useOsCfg } from "./os-ui";
 import { useOnIntegrationsChanged } from "@/features/integrations/changed";
@@ -133,6 +134,21 @@ export function McpRegistryCard() {
   const [testOut, setTestOut] = useState<Record<string, string>>({});
   const [configuring, setConfiguring] = useState<string | null>(null);
   const [sync, setSync] = useState<{ loading: boolean; report: AllmSyncReport | null; err: string | null }>({ loading: false, report: null, err: null });
+  // Read-only Librarian guard (Rust `librarian_preflight`: GETs + reading AnythingLLM's MCP file).
+  const [guard, setGuard] = useState<{ g: LibrarianGuard | null; err: string | null } | null>(null);
+  useEffect(() => {
+    let live = true;
+    void cmd("librarian_preflight")
+      .then((g) => {
+        if (live) setGuard({ g, err: null });
+      })
+      .catch((e) => {
+        if (live) setGuard({ g: null, err: String(e) });
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
   const reloadOnAuth = useCallback(() => load(), []); // eslint-disable-line react-hooks/exhaustive-deps
   const load = (refresh = false) => {
     setLoading(true);
@@ -213,8 +229,28 @@ export function McpRegistryCard() {
                   ; repaired: <span className="font-mono text-ink">{sync.report!.fixed!.join(", ")}</span> (restart AnythingLLM to load them)
                 </>
               )}
+              {(sync.report!.keptWritable?.length ?? 0) > 0 && (
+                <>
+                  ; <span className="text-alert">unrestricted in AnythingLLM</span> (not removed): <span className="font-mono text-ink">{sync.report!.keptWritable!.join(", ")}</span>
+                </>
+              )}
             </>
           )}
+        </p>
+      )}
+      {guard && (
+        <p className="mb-2 text-xs text-ink-3" title={guard.g ? `The Librarian may call only: ${guard.g.allowlist.join(", ")}` : undefined}>
+          Librarian guard:{" "}
+          {guard.err ? (
+            <span className="text-ink-3">couldn't check ({guard.err})</span>
+          ) : guard.g!.ok ? (
+            <span className="text-teal">
+              read-only — workspace <span className="font-mono">{guard.g!.slug}</span> in {guard.g!.chatMode ?? "?"} mode, {guard.g!.allowlist.length} allowlisted tools
+            </span>
+          ) : (
+            <span className="text-alert">{guard.g!.issues[0] ?? "check failed"}</span>
+          )}
+          {guard.g && guard.g.issues.length > (guard.g.ok ? 0 : 1) && <span className="text-ink-3"> · {guard.g.issues.slice(guard.g.ok ? 0 : 1).join(" · ")}</span>}
         </p>
       )}
       <ul className="space-y-1.5">
@@ -280,9 +316,9 @@ export function McpRegistryCard() {
                       title={`${tool.description}${quick[tool.name] ? " — click to test" : ""}`}
                       onClick={() =>
                         quick[tool.name] &&
-                        void cmd("mcp_call", { name: tool.name, args: quick[tool.name] })
+                        void mcpCall(tool.name, quick[tool.name], { agent: "tony" })
                           .then((o) => setTestOut((s) => ({ ...s, [m.id]: o.slice(0, 600) })))
-                          .catch((e) => setTestOut((s) => ({ ...s, [m.id]: `✗ ${e}` })))
+                          .catch((e) => setTestOut((s) => ({ ...s, [m.id]: `✗ ${describeToolError(e)}` })))
                       }
                       className="flex items-center gap-1 rounded-full border border-white/10 px-2 py-0.5 font-mono text-[10px] text-ink-2 hover:text-ink"
                     >

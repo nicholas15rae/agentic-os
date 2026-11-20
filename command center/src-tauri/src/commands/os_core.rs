@@ -338,7 +338,7 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("fetch", "Fetch", true, "Download a web page as plain text."),
         builtin("filesystem", "Filesystem", true, "List and read files under the allowed roots (C:\\ai-hub, this project)."),
         builtin("git", "Git", true, "Status and recent commits of a repository under the allowed roots."),
-        builtin("knowledge-graph", "Knowledge Graph", true, "Search C:\\ai-hub\\memory\\knowledge-graph.json."),
+        builtin("knowledge-graph", "Knowledge Graph", true, "Search D:\\ai-hub-memory\\knowledge-graph.json (shared with Memory Scrolls)."),
         builtin("brave-search", "Brave Search", false, "Web search (needs a Brave API key in Settings)."),
         builtin("gmail", "Gmail", false, "Search and read your inbox via your Google Apps Script deployment (or the read-only n8n workflow \"gmail-recent\")."),
         builtin("spotify", "Spotify", false, "Now playing, playback control, recent tracks and playlists (connect in Settings → Integrations)."),
@@ -440,6 +440,12 @@ pub struct MemoryConfig {
     /// Droplet Qdrant collections treated as disposable cache (flushed after backup).
     pub cache_collections: Vec<String>,
     pub last_auto_month: String,
+    /// Tony's documenter root. Empty = `<gateway.workdir>/memory/tony` (gitignored).
+    pub notes_dir: String,
+    /// Pipeline output root (`<root>/<project slug>/`). Empty = `<gateway.workdir>/staging` (gitignored).
+    pub staging_dir: String,
+    /// Phase 3 tiered memory ("Memory Scrolls"): where scrolls live, auto-compaction knobs.
+    pub scrolls: ScrollsConfig,
 }
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -452,8 +458,267 @@ impl Default for MemoryConfig {
             mount_workspace: "my-workspace".into(),
             cache_collections: vec![],
             last_auto_month: String::new(),
+            notes_dir: String::new(),
+            staging_dir: String::new(),
+            scrolls: ScrollsConfig::default(),
         }
     }
+}
+
+/// The live Phase 3 memory root (Nic's decision): scrolls and the knowledge graph live on D:,
+/// never under the read-only `C:\ai-hub`. Nothing in the app creates it (the host `--apply` does).
+#[cfg(test)]
+pub const DEFAULT_MEMORY_DIR: &str = r"D:\ai-hub-memory";
+/// `D:\ai-hub-memory\scrolls`: the Tier-2 Memory Scrolls (the only layer embedded in RAG).
+pub const DEFAULT_SCROLLS_DIR: &str = r"D:\ai-hub-memory\scrolls";
+/// `D:\ai-hub-memory\knowledge-graph.json`: the one knowledge graph the app's `kg.search` and the
+/// Phase 3 CLI share.
+pub const DEFAULT_KG_PATH: &str = r"D:\ai-hub-memory\knowledge-graph.json";
+/// The read-only hub: no Memory Scrolls write target (scrolls / archive dir) may resolve under it.
+pub const READ_ONLY_HUB_ROOT: &str = r"C:\ai-hub";
+
+/// A comparable, lexical form of a Windows path: backslashes, no `\\?\` / `\\.\` prefix, `.` and
+/// `..` collapsed, trailing dots / spaces of each component dropped (as Win32 does), lower case.
+fn hub_path_key(s: &str) -> String {
+    let mut s = s.trim().replace('/', "\\");
+    for pre in [r"\\?\UNC\", r"\\.\UNC\"] {
+        if s.len() >= pre.len() && s[..pre.len()].eq_ignore_ascii_case(pre) {
+            s = format!(r"\\{}", &s[pre.len()..]);
+        }
+    }
+    for pre in [r"\\?\", r"\\.\"] {
+        if let Some(rest) = s.strip_prefix(pre) {
+            s = rest.to_string();
+        }
+    }
+    // `\\host\C$\...` (an administrative drive share; `canonicalize` of one is `\\?\UNC\host\C$\...`)
+    // maps back to `C:\...` for any host: fail closed, a remote C$\ai-hub is refused too.
+    if let Some(rest) = s.strip_prefix(r"\\") {
+        let mut it = rest.splitn(3, '\\');
+        if let (Some(host), Some(share)) = (it.next(), it.next()) {
+            let b = share.as_bytes();
+            if !host.is_empty() && b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b'$' {
+                s = format!(r"{}:\{}", b[0] as char, it.next().unwrap_or(""));
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (i, part) in s.split('\\').enumerate() {
+        match part {
+            "." => continue,
+            ".." => {
+                if out.len() > 1 {
+                    out.pop();
+                }
+                continue;
+            }
+            "" if i > 0 => continue,
+            _ => {}
+        }
+        let p = part.trim_end_matches(['.', ' ']);
+        out.push(p.to_lowercase());
+    }
+    out.join("\\")
+}
+
+/// `p` with its deepest existing ancestor canonicalized (symlinks / junctions resolved) and the
+/// missing tail re-appended; `None` when no ancestor resolves.
+fn canonical_prefix(p: &Path) -> Option<String> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(c) = std::fs::canonicalize(&cur) {
+            let mut out = c;
+            for t in tail.iter().rev() {
+                out.push(t);
+            }
+            return Some(out.to_string_lossy().into_owned());
+        }
+        tail.push(cur.file_name()?.to_os_string());
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// True when `p` is (or lies under) `root`, compared case-insensitively on both the literal path
+/// and its resolved form, so a junction elsewhere that lands inside `root` is caught too.
+pub fn path_under_root(p: &Path, root: &str) -> bool {
+    let raw = p.to_string_lossy();
+    if raw.trim().is_empty() {
+        return false;
+    }
+    let mut roots = vec![hub_path_key(root)];
+    if let Ok(c) = std::fs::canonicalize(root) {
+        roots.push(hub_path_key(&c.to_string_lossy()));
+    }
+    let mut cands = vec![hub_path_key(&raw)];
+    if let Some(c) = canonical_prefix(p) {
+        cands.push(hub_path_key(&c));
+    }
+    cands.iter().any(|c| roots.iter().any(|r| !r.is_empty() && (c == r || c.starts_with(&format!("{r}\\")))))
+}
+
+/// True when `p` resolves under the read-only `C:\ai-hub`.
+pub fn under_read_only_hub(p: &Path) -> bool {
+    path_under_root(p, READ_ONLY_HUB_ROOT)
+}
+
+/// Phase 3 Memory Scrolls (`memory.scrolls`). Rust only READS scrolls (Librarian) and launches
+/// the host `memory_scrolls` CLI; it never writes `.env` (the archive dir lives here or in env).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScrollsConfig {
+    /// Empty = `D:\ai-hub-memory\scrolls`. A value under the read-only `C:\ai-hub` is refused
+    /// (`sanitized()` falls back to the default).
+    pub scrolls_dir: String,
+    /// Cold archive root. Empty = the CLI's resolution (env, `.env`, `D:\ai-hub-archive`, `./archive/memory`).
+    /// A value under `C:\ai-hub` is refused like `scrolls_dir`.
+    pub archive_dir: String,
+    /// AnythingLLM workspace the changed scrolls sync into (never a Booking workspace).
+    pub workspace: String,
+    /// True = Tony's per-note documenter ingest is skipped (scrolls are the only embedded layer).
+    pub embed_only: bool,
+    /// Idle auto-compaction (off by default; the manual button always works).
+    pub auto_compact: bool,
+    #[serde(deserialize_with = "de_clamped_u32::<_, 8, 1024>")]
+    pub threshold_kb: u32,
+    #[serde(deserialize_with = "de_clamped_u32::<_, 5, 500>")]
+    pub threshold_turns: u32,
+    /// Minutes without a voice / Tony turn before an auto run.
+    #[serde(deserialize_with = "de_clamped_u32::<_, 2, 240>")]
+    pub quiet_mins: u32,
+    #[serde(deserialize_with = "de_clamped_u32::<_, 60, 3600>")]
+    pub check_secs: u32,
+    /// LM calls per auto run (`--max-batches`).
+    #[serde(deserialize_with = "de_clamped_u32::<_, 1, 4>")]
+    pub max_batches_auto: u32,
+}
+impl Default for ScrollsConfig {
+    fn default() -> Self {
+        Self { scrolls_dir: String::new(), archive_dir: String::new(), workspace: "librarian".into(), embed_only: false, auto_compact: false, threshold_kb: 50, threshold_turns: 25, quiet_mins: 10, check_secs: 300, max_batches_auto: 1 }
+    }
+}
+impl ScrollsConfig {
+    /// The workspace, refused (-> `librarian`) when it is a Booking slug or not a valid slug.
+    pub fn sanitized_workspace(&self) -> String {
+        let w = self.workspace.trim();
+        let ok = !w.is_empty() && w.len() <= 64 && w.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !ok || super::agent_prompts::NEVER_TOUCH.contains(&w) {
+            "librarian".into()
+        } else {
+            w.to_string()
+        }
+    }
+
+    /// A copy with every value read-safe (workspace sanitised; a scrolls / archive dir under the
+    /// read-only `C:\ai-hub` dropped, so the default applies; numbers are clamped on load).
+    pub fn sanitized(&self) -> Self {
+        Self { workspace: self.sanitized_workspace(), scrolls_dir: not_under_hub(&self.scrolls_dir), archive_dir: not_under_hub(&self.archive_dir), ..self.clone() }
+    }
+
+    /// The scrolls root (configured or the default; a configured dir under `C:\ai-hub` is refused).
+    pub fn scrolls_root(&self) -> std::path::PathBuf {
+        let d = not_under_hub(&self.scrolls_dir);
+        std::path::PathBuf::from(if d.is_empty() { DEFAULT_SCROLLS_DIR } else { d.as_str() })
+    }
+}
+
+/// `d` trimmed, or empty when it resolves under the read-only `C:\ai-hub`.
+fn not_under_hub(d: &str) -> String {
+    let t = d.trim();
+    if t.is_empty() || under_read_only_hub(Path::new(t)) {
+        String::new()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Clamp-on-read for small integer settings (an out-of-range value in os.json or a patch is
+/// pulled into range instead of failing the whole config).
+fn de_clamped<'de, D: serde::Deserializer<'de>, const LO: u8, const HI: u8>(d: D) -> Result<u8, D::Error> {
+    let v = i64::deserialize(d)?;
+    Ok(v.clamp(LO as i64, HI as i64) as u8)
+}
+
+fn de_clamped_u32<'de, D: serde::Deserializer<'de>, const LO: u32, const HI: u32>(d: D) -> Result<u32, D::Error> {
+    let v = i64::deserialize(d)?;
+    Ok(v.clamp(LO as i64, HI as i64) as u32)
+}
+
+/// Agent narration (the agent event bus → voice).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FeedbackConfig {
+    /// 0 silent (toasts only) · 1 milestones + failures · 2 + handoffs · 3 verbose. Clamped 0–3.
+    #[serde(deserialize_with = "de_clamped::<_, 0, 3>")]
+    pub sensitivity: u8,
+    /// "roster" = each agent's own voice from the roster (providers.json agentVoices, Kokoro
+    /// defaults for gaps); "kokoro" = local Kokoro only (spares the ElevenLabs quota).
+    pub narration_engine: String,
+}
+impl Default for FeedbackConfig {
+    fn default() -> Self {
+        Self { sensitivity: 1, narration_engine: "roster".into() }
+    }
+}
+
+/// The sequential TaskEnvelope worker.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WorkerConfig {
+    pub enabled: bool,
+    /// Designer/Coder loop budget, clamped to 1–3 (`envelope::MAX_LOOP_ITERATIONS` is the hard cap).
+    #[serde(deserialize_with = "de_clamped::<_, 1, 3>")]
+    pub max_iterations: u8,
+    /// Per-handoff verifier (off: its verdict was advisory only).
+    pub verify: bool,
+    /// Honour `scheduler.offloadPct` for the code stage (CLI engines only; never under the
+    /// kill switch or compute = Local).
+    pub offload_code: bool,
+    /// Librarian truth audit after the deterministic gate.
+    pub librarian_audit: bool,
+}
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self { enabled: true, max_iterations: 3, verify: false, offload_code: true, librarian_audit: true }
+    }
+}
+
+/// Hard mic sovereignty + the deterministic activation gate (Phase 2 Part B). `micEnabled`
+/// seeds `voice::MIC_ENABLED` at startup, so a mic locked off stays locked off after a relaunch.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VoiceConfig {
+    pub mic_enabled: bool,
+    /// Absolute speech gate in dBFS (the slider and the meter share this scale). Clamped -70..-10.
+    #[serde(deserialize_with = "de_activation_db")]
+    pub activation_db: f32,
+    /// Extra dB a barge-in over Tony needs (speakers; a headset gets 2 dB less). Clamped 0..20.
+    #[serde(deserialize_with = "de_barge_margin_db")]
+    pub barge_margin_db: f32,
+    /// True once the webview has written `activation_db` (a slider move or the first startup
+    /// sync). An os.json from before Part B gets the serde default -44 dB with this false, so the
+    /// desktop pushes its v7-migrated local gate up instead of adopting that default.
+    pub activation_db_set: bool,
+}
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self { mic_enabled: true, activation_db: -44.0, barge_margin_db: 6.0, activation_db_set: false }
+    }
+}
+pub const ACTIVATION_DB_RANGE: (f32, f32) = (-70.0, -10.0);
+pub const BARGE_MARGIN_DB_RANGE: (f32, f32) = (0.0, 20.0);
+
+fn de_clamped_f32<'de, D: serde::Deserializer<'de>>(d: D, (lo, hi): (f32, f32)) -> Result<f32, D::Error> {
+    let v = f64::deserialize(d)?;
+    Ok(if v.is_finite() { (v as f32).clamp(lo, hi) } else { lo })
+}
+fn de_activation_db<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    de_clamped_f32(d, ACTIVATION_DB_RANGE)
+}
+fn de_barge_margin_db<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    de_clamped_f32(d, BARGE_MARGIN_DB_RANGE)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -475,6 +740,9 @@ pub struct OsConfig {
     pub overseer: OverseerConfig,
     pub memory: MemoryConfig,
     pub scheduler: super::scheduler::SchedulerConfig,
+    pub feedback: FeedbackConfig,
+    pub worker: WorkerConfig,
+    pub voice: VoiceConfig,
     /// One-time config migrations already applied (`apply_migrations`), so a setting the user
     /// changes afterwards is never flipped back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -500,6 +768,9 @@ impl Default for OsConfig {
             overseer: OverseerConfig::default(),
             memory: MemoryConfig::default(),
             scheduler: super::scheduler::SchedulerConfig::default(),
+            feedback: FeedbackConfig::default(),
+            worker: WorkerConfig::default(),
+            voice: VoiceConfig::default(),
             migrations: vec![],
         }
     }
@@ -557,6 +828,8 @@ pub struct OsState {
     pub(crate) slot: super::scheduler::GpuSlot,
     /// Live, non-persisted status merged into the phone mirror (droplet link…).
     pub(crate) runtime: Mutex<serde_json::Map<String, serde_json::Value>>,
+    /// Tony's modes (Phase 2 Part C): `modes.json` beside os.json + in-memory overrides.
+    pub(crate) modes: super::modes::ModeStore,
 }
 
 impl OsState {
@@ -611,7 +884,15 @@ impl OsState {
             }
         }
         self.slot.set_capacity(cfg.scheduler.max_concurrency as usize);
+        // A mic locked off last session stays locked off (Phase 2 Part B, D2).
+        super::voice::MIC_ENABLED.store(cfg.voice.mic_enabled, std::sync::atomic::Ordering::SeqCst);
+        let feedback = cfg.feedback.sensitivity;
         *self.config.write().unwrap() = cfg;
+        // Seeding never rewrites `feedback.sensitivity` (D11): narration keeps Nic's setting
+        // until he first switches mode. A saved level that differs from the mode's own is shown
+        // as an override (so the mode panel tells the truth), cleared by the next switch / reset.
+        self.modes.load_or_init(dir);
+        self.modes.note_feedback(feedback);
         let _ = self.persist();
     }
 
@@ -630,7 +911,7 @@ impl OsState {
         Ok(next)
     }
 
-    fn persist(&self) -> Result<(), String> {
+    pub(crate) fn persist(&self) -> Result<(), String> {
         let cfg = self.snapshot();
         if let Some(p) = self.path.read().unwrap().clone() {
             if let Some(d) = p.parent() {
@@ -642,20 +923,21 @@ impl OsState {
             if let Some(d) = m.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            let mirror = serde_json::json!({
-                "osName": cfg.os_name,
-                "wakeWords": cfg.wake_words,
-                "computeMode": cfg.compute.mode,
-                "droplet": { "enabled": cfg.droplet.enabled, "host": cfg.droplet.host },
-                "privacy": { "diffuser": cfg.privacy.diffuser, "networkLock": cfg.privacy.network_lock, "killSwitch": cfg.privacy.kill_switch, "destructiveGate": cfg.privacy.destructive_gate },
-                "memory": { "storage": cfg.memory.storage, "autoMonthly": cfg.memory.auto_monthly, "autoFlush": cfg.memory.auto_flush },
-                "scheduler": { "profile": cfg.scheduler.profile, "tonyPriorityPct": cfg.scheduler.tony_priority_pct, "offloadPct": cfg.scheduler.offload_pct, "maxConcurrency": cfg.scheduler.max_concurrency },
-                "runtime": serde_json::Value::Object(self.runtime.lock().unwrap().clone()),
-                "updatedAt": now_secs(),
-            });
-            let _ = std::fs::write(m, mirror.to_string());
+            let _ = std::fs::write(m, self.mirror_value(&cfg).to_string());
         }
         Ok(())
+    }
+
+    /// The phone mirror with Tony's current mode (Phase 2 Part C).
+    pub(crate) fn mirror_value(&self, cfg: &OsConfig) -> serde_json::Value {
+        let mut m = mirror_json(cfg, self.runtime.lock().unwrap().clone());
+        m["mode"] = self.modes.mirror();
+        m
+    }
+
+    /// Re-write the phone mirror (a mode override changed; os.json itself didn't).
+    pub(crate) fn refresh_mirror(&self) {
+        let _ = self.persist();
     }
 
     /// Update a live status field (e.g. droplet link) and refresh the phone mirror.
@@ -669,6 +951,23 @@ impl OsState {
     pub fn record_redaction(&self, destination: &str, payload: serde_json::Value, replacements: Vec<Replacement>) {
         *self.last_redaction.lock().unwrap() = Some(RedactionRecord { at: now_secs(), destination: destination.into(), payload, replacements });
     }
+}
+
+/// The phone mirror (`os-state.json`, served as `/api/os/state`): non-secret settings only.
+pub(crate) fn mirror_json(cfg: &OsConfig, runtime: serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "osName": cfg.os_name,
+        "wakeWords": cfg.wake_words,
+        "computeMode": cfg.compute.mode,
+        "droplet": { "enabled": cfg.droplet.enabled, "host": cfg.droplet.host },
+        "privacy": { "diffuser": cfg.privacy.diffuser, "networkLock": cfg.privacy.network_lock, "killSwitch": cfg.privacy.kill_switch, "destructiveGate": cfg.privacy.destructive_gate },
+        "memory": { "storage": cfg.memory.storage, "autoMonthly": cfg.memory.auto_monthly, "autoFlush": cfg.memory.auto_flush },
+        "scheduler": { "profile": cfg.scheduler.profile, "tonyPriorityPct": cfg.scheduler.tony_priority_pct, "offloadPct": cfg.scheduler.offload_pct, "maxConcurrency": cfg.scheduler.max_concurrency },
+        // Phase 2 Part B: the phone locks its own mic when the desktop's is locked off.
+        "voice": { "micEnabled": cfg.voice.mic_enabled, "activationDb": cfg.voice.activation_db },
+        "runtime": serde_json::Value::Object(runtime),
+        "updatedAt": now_secs(),
+    })
 }
 
 pub fn now_secs() -> u64 {
@@ -703,6 +1002,18 @@ fn validate(c: &OsConfig) -> Result<(), String> {
     }
     if !["claude-cli", "claude-api", "gemini-cli", "gemini-api", "droplet", "local"].contains(&c.overseer.engine.as_str()) {
         return Err("unknown overseer engine".into());
+    }
+    if !["roster", "kokoro"].contains(&c.feedback.narration_engine.as_str()) {
+        return Err("narration engine must be roster or kokoro".into());
+    }
+    let v = &c.voice;
+    if !(ACTIVATION_DB_RANGE.0..=ACTIVATION_DB_RANGE.1).contains(&v.activation_db) || !(BARGE_MARGIN_DB_RANGE.0..=BARGE_MARGIN_DB_RANGE.1).contains(&v.barge_margin_db) {
+        return Err("voice: activation threshold -70..-10 dB, barge margin 0..20 dB".into());
+    }
+    for (name, dir) in [("notes", &c.memory.notes_dir), ("staging", &c.memory.staging_dir)] {
+        if !dir.trim().is_empty() && !std::path::Path::new(dir.trim()).is_absolute() {
+            return Err(format!("memory {name} directory must be an absolute path (or empty for the default)"));
+        }
     }
     for (role, slug) in &c.anythingllm.workspaces {
         if !super::dispatch::valid_id(role) || !(slug.is_empty() || slug.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')) {
@@ -975,6 +1286,10 @@ fn merge_json(dst: &mut serde_json::Value, src: &serde_json::Value) {
 #[tauri::command]
 pub fn os_config_update(app: tauri::AppHandle, os: State<'_, OsState>, state: State<'_, DispatchState>, bridge: State<'_, BridgeState>, patch: serde_json::Value) -> Result<OsConfig, String> {
     let before = os.snapshot();
+    // Locking the mic is a dead line before anything else (even if the write below fails).
+    if patch["voice"]["micEnabled"].as_bool() == Some(false) {
+        super::voice::set_mic_enabled(&app, false);
+    }
     let next = os.update(|cfg| {
         let mut cur = serde_json::to_value(&*cfg).map_err(|e| e.to_string())?;
         let (Some(dst), Some(src)) = (cur.as_object_mut(), patch.as_object()) else { return Err("patch must be an object".into()) };
@@ -987,6 +1302,17 @@ pub fn os_config_update(app: tauri::AppHandle, os: State<'_, OsState>, state: St
         *cfg = serde_json::from_value(cur).map_err(|e| format!("invalid settings: {e}"))?;
         Ok(())
     })?;
+    // A manual narration level (NarrationControl / the narration voice intent) overrides the
+    // mode's tts level until the next switch or reset (D17). The mode switch writes through
+    // `os.update`, never this path, so it is never recorded as an override.
+    if note_manual_feedback(&os, &before, &next) {
+        // The override chip / Reset in the Mode Panel and ModePill follow `tony-mode-changed`.
+        super::modes::notify_changed(&app);
+    }
+    // Only an actual change applies: an unrelated patch never re-opens a mic locked off live.
+    if next.voice.mic_enabled != before.voice.mic_enabled {
+        super::voice::set_mic_enabled(&app, next.voice.mic_enabled);
+    }
     // Keep the droplet provider's endpoint in step with the droplet card.
     if next.droplet.model_url != before.droplet.model_url && !next.droplet.model_url.is_empty() {
         let url = next.droplet.model_url.clone();
@@ -1009,6 +1335,18 @@ pub fn os_config_update(app: tauri::AppHandle, os: State<'_, OsState>, state: St
         super::mcp::emit_tools_changed(&app, "mcp-registry-saved");
     }
     Ok(next)
+}
+
+/// `os_config_update` changed `feedback.sensitivity` by hand: record it as a mode override
+/// (cleared when it matches the mode's own level) and refresh the phone mirror. True when the
+/// level changed (the caller then tells the webview the mode view changed).
+pub(crate) fn note_manual_feedback(os: &OsState, before: &OsConfig, next: &OsConfig) -> bool {
+    if next.feedback.sensitivity == before.feedback.sensitivity {
+        return false;
+    }
+    os.modes.note_feedback(next.feedback.sensitivity);
+    os.refresh_mirror();
+    true
 }
 
 /// MASTER_IDENTITY.md (truncated), for the OS system prompt and Settings preview.
@@ -1278,6 +1616,169 @@ pub fn gpu_slot_view(os: State<'_, OsState>) -> super::scheduler::SlotView {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn voice_defaults_clamp_and_mirror() {
+        // An os.json from before Part B (no `voice` key) loads with the mic on and -44 / 6 dB.
+        let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "feedback": { "sensitivity": 2 } })).unwrap();
+        assert!(old.voice.mic_enabled);
+        assert_eq!((old.voice.activation_db, old.voice.barge_margin_db), (-44.0, 6.0));
+        assert!(!old.voice.activation_db_set, "a defaulted gate is not a user value");
+        assert!(validate(&old).is_ok());
+        let set: OsConfig = serde_json::from_value(json!({ "voice": { "activationDb": -56, "activationDbSet": true } })).unwrap();
+        assert!(set.voice.activation_db_set);
+        assert_eq!(serde_json::to_value(&set).unwrap()["voice"]["activationDbSet"], true);
+        // Out-of-range values clamp on load and on the os_config_update path.
+        let hot: OsConfig = serde_json::from_value(json!({ "voice": { "activationDb": 5, "bargeMarginDb": 99 } })).unwrap();
+        assert_eq!((hot.voice.activation_db, hot.voice.barge_margin_db), (-10.0, 20.0));
+        let cold: OsConfig = serde_json::from_value(json!({ "voice": { "activationDb": -90, "bargeMarginDb": -3 } })).unwrap();
+        assert_eq!((cold.voice.activation_db, cold.voice.barge_margin_db), (-70.0, 0.0));
+        assert!(cold.voice.mic_enabled, "a partial voice block keeps the mic default");
+        let mut cur = serde_json::to_value(OsConfig::default()).unwrap();
+        merge_json(&mut cur, &json!({ "voice": { "micEnabled": false, "activationDb": -38.5 } }));
+        let next: OsConfig = serde_json::from_value(cur).unwrap();
+        assert!(!next.voice.mic_enabled);
+        assert_eq!(next.voice.activation_db, -38.5);
+        assert_eq!(next.voice.barge_margin_db, 6.0);
+        let v = serde_json::to_value(&next).unwrap();
+        assert_eq!(v["voice"]["micEnabled"], false);
+        // The phone mirror carries the mic state (and the gate) — nothing else from `voice`.
+        let m = mirror_json(&next, serde_json::Map::new());
+        assert_eq!(m["voice"]["micEnabled"], false);
+        assert_eq!(m["voice"]["activationDb"], -38.5);
+        assert_eq!(m["osName"], "Tony");
+        let mut bad = OsConfig::default();
+        bad.voice.activation_db = 3.0;
+        assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn scrolls_config_defaults_migrate_sanitize_and_clamp() {
+        // An os.json from before Phase 3 (no `memory.scrolls`) loads with the defaults.
+        let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "memory": { "storage": "local", "mountWorkspace": "my-workspace" } })).unwrap();
+        let s = &old.memory.scrolls;
+        assert_eq!(*s, ScrollsConfig::default());
+        assert!(!s.auto_compact && !s.embed_only, "auto-compaction and embed-only default off");
+        assert_eq!((s.threshold_kb, s.threshold_turns, s.quiet_mins, s.check_secs, s.max_batches_auto), (50, 25, 10, 300, 1));
+        assert_eq!(s.workspace, "librarian");
+        assert_eq!(s.scrolls_root(), PathBuf::from(DEFAULT_SCROLLS_DIR));
+        let v = serde_json::to_value(&old).unwrap();
+        assert_eq!(v["memory"]["scrolls"]["thresholdKb"], 50);
+        assert_eq!(v["memory"]["scrolls"]["autoCompact"], false);
+        assert_eq!(v["memory"]["scrolls"]["embedOnly"], false);
+        // Booking / invalid workspaces sanitise to `librarian`.
+        for bad in ["my-workspace", "booking", "bad slug", "", "Upper", "-x"] {
+            let c: OsConfig = serde_json::from_value(json!({ "memory": { "scrolls": { "workspace": bad } } })).unwrap();
+            assert_eq!(c.memory.scrolls.sanitized_workspace(), "librarian", "{bad:?}");
+            assert_eq!(c.memory.scrolls.sanitized().workspace, "librarian", "{bad:?}");
+        }
+        let ok: OsConfig = serde_json::from_value(json!({ "memory": { "scrolls": { "workspace": "memory-2" , "scrollsDir": "D:/scrolls" } } })).unwrap();
+        assert_eq!(ok.memory.scrolls.sanitized_workspace(), "memory-2");
+        assert_eq!(ok.memory.scrolls.scrolls_root(), PathBuf::from("D:/scrolls"));
+        // Clamps on load and on the os_config_update path.
+        let hot: OsConfig = serde_json::from_value(json!({ "memory": { "scrolls": { "thresholdKb": 99999, "thresholdTurns": 9999, "quietMins": 9999, "checkSecs": 1, "maxBatchesAuto": 9 } } })).unwrap();
+        let h = &hot.memory.scrolls;
+        assert_eq!((h.threshold_kb, h.threshold_turns, h.quiet_mins, h.check_secs, h.max_batches_auto), (1024, 500, 240, 60, 4));
+        let mut cur = serde_json::to_value(OsConfig::default()).unwrap();
+        merge_json(&mut cur, &json!({ "memory": { "scrolls": { "thresholdKb": 1, "autoCompact": true } } }));
+        let next: OsConfig = serde_json::from_value(cur).unwrap();
+        assert_eq!(next.memory.scrolls.threshold_kb, 8);
+        assert!(next.memory.scrolls.auto_compact);
+        assert_eq!(next.memory.scrolls.threshold_turns, 25, "a partial patch keeps the other defaults");
+    }
+
+    #[test]
+    fn scrolls_and_graph_default_to_the_d_memory_root() {
+        assert_eq!(DEFAULT_SCROLLS_DIR, r"D:\ai-hub-memory\scrolls");
+        assert_eq!(DEFAULT_KG_PATH, r"D:\ai-hub-memory\knowledge-graph.json");
+        assert!(DEFAULT_SCROLLS_DIR.starts_with(DEFAULT_MEMORY_DIR) && DEFAULT_KG_PATH.starts_with(DEFAULT_MEMORY_DIR));
+        assert_eq!(super::super::mcp::KG_PATH, DEFAULT_KG_PATH, "the app's kg.search and Phase 3 share one graph");
+        assert!(!under_read_only_hub(Path::new(DEFAULT_SCROLLS_DIR)) && !under_read_only_hub(Path::new(DEFAULT_KG_PATH)));
+        assert_eq!(ScrollsConfig::default().scrolls_root(), PathBuf::from(r"D:\ai-hub-memory\scrolls"));
+    }
+
+    #[test]
+    fn scrolls_dir_under_the_read_only_hub_is_refused() {
+        let refused = [
+            r"C:\ai-hub",
+            r"C:\ai-hub\memory\scrolls",
+            "c:/AI-HUB/memory/scrolls/",
+            r"C:\x\..\ai-hub\memory",
+            r"\\?\C:\ai-hub\memory",
+            r"\\.\C:\AI-hub\memory",
+            r"C:\ai-hub.\memory",
+            "  C:\\ai-hub\\memory  ",
+            // The admin share of C: (any host; `net use Z: \\localhost\C$` canonicalizes to this too).
+            r"\\localhost\C$\ai-hub\memory\scrolls",
+            r"\\127.0.0.1\c$\ai-hub\m",
+            "//localhost/c$/ai-hub/m",
+            r"\\?\UNC\localhost\c$\ai-hub\m",
+            r"\\Server\C$\AI-HUB",
+            r"\\localhost\c$\x\..\ai-hub\memory",
+        ];
+        for d in refused {
+            assert!(under_read_only_hub(Path::new(d)), "{d:?}");
+            let c: OsConfig = serde_json::from_value(json!({ "memory": { "scrolls": { "scrollsDir": d, "archiveDir": d } } })).unwrap();
+            let s = c.memory.scrolls.sanitized();
+            assert_eq!((s.scrolls_dir.as_str(), s.archive_dir.as_str()), ("", ""), "{d:?} falls back to the default");
+            assert_eq!(c.memory.scrolls.scrolls_root(), PathBuf::from(DEFAULT_SCROLLS_DIR), "{d:?}");
+        }
+        for d in [r"C:\ai-hub2\scrolls", r"C:\ai-hubx", r"D:\ai-hub-memory\scrolls", r"D:\ai-hub\memory", "D:/scrolls", "", r"\\localhost\c$\ai-hub2", r"\\localhost\d$\ai-hub-memory\scrolls", r"\\localhost\c$", r"\\server\share\ai-hub"] {
+            assert!(!under_read_only_hub(Path::new(d)), "{d:?}");
+        }
+        let ok: OsConfig = serde_json::from_value(json!({ "memory": { "scrolls": { "scrollsDir": "E:/scrolls", "archiveDir": "E:/arch" } } })).unwrap();
+        let s = ok.memory.scrolls.sanitized();
+        assert_eq!((s.scrolls_dir.as_str(), s.archive_dir.as_str()), ("E:/scrolls", "E:/arch"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_into_a_protected_root_is_caught() {
+        let base = std::env::temp_dir().join(format!("aos-hubguard-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let hub = base.join("fake-hub");
+        std::fs::create_dir_all(hub.join("memory")).unwrap();
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&hub).output().map(|o| o.status.success()).unwrap_or(false);
+        let root = hub.to_string_lossy().into_owned();
+        assert!(path_under_root(&hub.join("memory").join("scrolls"), &root));
+        assert!(!path_under_root(&base.join("elsewhere").join("scrolls"), &root));
+        if made {
+            assert!(path_under_root(&link.join("memory").join("scrolls"), &root), "junction resolved");
+            assert!(path_under_root(&PathBuf::from(link.to_string_lossy().to_uppercase()).join("MEMORY"), &root), "case-insensitive through the junction");
+            let _ = std::fs::remove_dir(&link); // the junction only, never its target
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn feedback_and_worker_default_and_clamp() {
+        // An existing os.json (no feedback / worker / new memory keys) loads unchanged.
+        let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "memory": { "storage": "local" } })).unwrap();
+        assert_eq!(old.feedback.sensitivity, 1);
+        assert_eq!(old.feedback.narration_engine, "roster");
+        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && old.worker.librarian_audit);
+        assert_eq!(old.worker.max_iterations, 3);
+        assert_eq!((old.memory.notes_dir.as_str(), old.memory.staging_dir.as_str()), ("", ""));
+        let hot: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": 7 }, "worker": { "maxIterations": 9 } })).unwrap();
+        assert_eq!((hot.feedback.sensitivity, hot.worker.max_iterations), (3, 3));
+        let cold: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": -2 }, "worker": { "maxIterations": 0 } })).unwrap();
+        assert_eq!((cold.feedback.sensitivity, cold.worker.max_iterations), (0, 1));
+        // The os_config_update path (merge_json + from_value) clamps a patch the same way.
+        let mut cur = serde_json::to_value(OsConfig::default()).unwrap();
+        merge_json(&mut cur, &json!({ "feedback": { "sensitivity": 7 } }));
+        let next: OsConfig = serde_json::from_value(cur).unwrap();
+        assert_eq!(next.feedback.sensitivity, 3);
+        assert!(validate(&next).is_ok());
+        let v = serde_json::to_value(&next).unwrap();
+        assert_eq!(v["feedback"]["narrationEngine"], "roster");
+        assert_eq!(v["worker"]["librarianAudit"], true);
+        let mut bad = OsConfig::default();
+        bad.feedback.narration_engine = "elevenlabs".into();
+        assert!(validate(&bad).is_err());
+        let mut rel = OsConfig::default();
+        rel.memory.staging_dir = "staging".into();
+        assert!(validate(&rel).is_err());
+    }
 
     #[test]
     fn merge_json_is_recursive_and_keeps_siblings() {

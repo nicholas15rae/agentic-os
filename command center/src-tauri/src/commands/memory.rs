@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 
-use super::agents::allm;
+use super::allm::{self, AllmConn, AllmReader, AllmWriter, ThreadMap};
 use super::bridge::BridgeState;
 use super::dispatch::{run_chat, short, ChatMessage, DispatchState, Priority};
 use super::os_core::{self, OsConfig, OsState};
@@ -71,8 +71,22 @@ fn sha256_hex(b: &[u8]) -> String {
     Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// The read-only `C:\ai-hub` is never a Memory Vault write target (Nic's decision: the hub stays
+/// read-only). Reading an existing archive there still works; writing fails closed, before anything
+/// is created.
+const VAULT_UNDER_HUB: &str = r"the Memory Vault dir is under the read-only C:\ai-hub; choose another vault dir in Settings (nothing was written)";
+
+fn refuse_hub_vault(dir: &Path) -> Result<(), String> {
+    if os_core::under_read_only_hub(dir) {
+        Err(VAULT_UNDER_HUB.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Write `name` (or `name.enc` when a vault password is set). Returns the file name.
 fn vault_write(dir: &Path, name: &str, data: &[u8], pass: Option<&str>) -> Result<String, String> {
+    refuse_hub_vault(dir)?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let (fname, bytes) = match pass {
         Some(p) => (format!("{name}.enc"), seal(data, p)?),
@@ -136,6 +150,7 @@ fn ledger_path(cfg: &OsConfig, month: &str) -> PathBuf {
 
 fn save_ledger(cfg: &OsConfig, l: &LedgerEntry) -> Result<(), String> {
     let p = ledger_path(cfg, &l.month);
+    refuse_hub_vault(&p)?;
     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(p, serde_json::to_string_pretty(l).unwrap()).map_err(|e| e.to_string())
 }
@@ -204,8 +219,30 @@ struct Record {
     at: i64,
 }
 
+/// Thread slugs to READ for a month (pure): the persisted (OS-created) thread if it is still in
+/// the workspace, plus any thread an older API names exactly `<osName> · YYYY-MM`.
+pub(crate) fn threads_to_pull(persisted: Option<&str>, live: &[(String, Option<String>)], legacy_name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(p) = persisted.filter(|p| live.iter().any(|(s, _)| s == p)) {
+        out.push(p.to_string());
+    }
+    for (s, n) in live {
+        if n.as_deref() == Some(legacy_name) && !out.contains(s) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
+/// Thread slugs to DELETE for a month (pure): ONLY the persisted thread the OS created and
+/// recorded, and only while it is still live. Pre-existing / duplicate threads (whatever their
+/// name) are never selected.
+pub(crate) fn threads_to_flush(persisted: Option<&str>, live: &[(String, Option<String>)]) -> Vec<String> {
+    persisted.filter(|p| live.iter().any(|(s, _)| s == p)).map(|p| vec![p.to_string()]).unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn pull_allm(state: &DispatchState, base: &str, key: &str, slug: &str, thread_name: &str, (from, to): (i64, i64), agent: &str, label: &str, out: &mut Vec<Record>) -> Result<usize, String> {
+async fn pull_allm(reader: &AllmReader, map: &dyn ThreadMap, slug: &str, month: &str, thread_name: &str, (from, to): (i64, i64), agent: &str, label: &str, out: &mut Vec<Record>) -> Result<usize, String> {
     let mut n = 0;
     let mut push = |v: &Value, source: &str, out: &mut Vec<Record>| {
         for h in v["history"].as_array().into_iter().flatten() {
@@ -221,17 +258,13 @@ async fn pull_allm(state: &DispatchState, base: &str, key: &str, slug: &str, thr
             n += 1;
         }
     };
-    let v = allm(state, base, key, reqwest::Method::GET, &format!("/v1/workspace/{slug}/chats?limit=2000&orderBy=asc"), None, 20).await?;
+    let v = reader.workspace_chats(slug, 20).await?;
     push(&v, &format!("{label}:{slug}"), out);
-    let ws = allm(state, base, key, reqwest::Method::GET, &format!("/v1/workspace/{slug}"), None, 10).await.unwrap_or(Value::Null);
-    let ws = if ws["workspace"].is_array() { ws["workspace"][0].clone() } else { ws["workspace"].clone() };
-    for t in ws["threads"].as_array().into_iter().flatten() {
-        if t["name"].as_str() == Some(thread_name) {
-            if let Some(ts) = t["slug"].as_str() {
-                if let Ok(v) = allm(state, base, key, reqwest::Method::GET, &format!("/v1/workspace/{slug}/thread/{ts}/chats"), None, 20).await {
-                    push(&v, &format!("{label}:{slug}/{ts}"), out);
-                }
-            }
+    let live = reader.get_workspace(slug, 10).await.map(|ws| allm::thread_list(&ws)).unwrap_or_default();
+    let persisted = map.get(reader.base(), slug, &allm::tony_key(month));
+    for ts in threads_to_pull(persisted.as_deref(), &live, thread_name) {
+        if let Ok(v) = reader.thread_chats(slug, &ts, 20).await {
+            push(&v, &format!("{label}:{slug}/{ts}"), out);
         }
     }
     Ok(n)
@@ -399,6 +432,40 @@ pub struct HarvestRequest {
     month: Option<String>,
 }
 
+/// D16: Booking workspaces (`agent_prompts::NEVER_TOUCH`) are never read, flushed or mounted into.
+fn never_touch(slug: &str) -> bool {
+    super::agent_prompts::NEVER_TOUCH.contains(&slug.trim())
+}
+
+/// `(slug, role)` pairs a harvest reads, and how many Booking mappings were skipped (pure).
+pub fn harvest_slugs(workspaces: &BTreeMap<String, String>) -> (BTreeSet<(String, String)>, usize) {
+    let mut skipped = 0;
+    let slugs = workspaces
+        .iter()
+        .filter(|(_, s)| !s.is_empty())
+        .filter(|(_, s)| {
+            let keep = !never_touch(s);
+            skipped += usize::from(!keep);
+            keep
+        })
+        .map(|(r, s)| (s.clone(), r.clone()))
+        .collect();
+    (slugs, skipped)
+}
+
+/// Workspaces a flush may delete Tony's month thread from (Booking excluded; pure).
+pub fn flush_slugs(workspaces: &BTreeMap<String, String>) -> BTreeSet<String> {
+    workspaces.values().filter(|s| !s.is_empty() && !never_touch(s)).cloned().collect()
+}
+
+/// A Memory Book may not be mounted into a Booking workspace.
+pub fn check_mount_workspace(ws: &str) -> Result<(), String> {
+    if never_touch(ws) {
+        return Err("Memory Books cannot mount into a Booking workspace; pick another in Settings".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn memory_harvest(app: tauri::AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, req: HarvestRequest) -> Result<LedgerEntry, String> {
     let month = req.month.unwrap_or_else(super::agents::month_tag);
@@ -410,6 +477,8 @@ pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, 
         return Err("month must be YYYY-MM".into());
     }
     let cfg = os.snapshot();
+    // Fail before any pull (harvest only ever writes into the vault dir).
+    refuse_hub_vault(&vault_dir(&cfg).join(month))?;
     let repo = PathBuf::from(state.snapshot().gateway.workdir);
     let bounds = month_bounds(month);
     let thread_name = format!("{} · {month}", cfg.os_name);
@@ -419,11 +488,16 @@ pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, 
 
     // A. Pull
     progress(&app, "pull", "AnythingLLM workspaces");
-    let slugs: BTreeSet<(String, String)> = cfg.anythingllm.workspaces.iter().filter(|(_, s)| !s.is_empty()).map(|(r, s)| (s.clone(), r.clone())).collect();
+    let (slugs, skipped) = harvest_slugs(&cfg.anythingllm.workspaces);
+    if skipped > 0 {
+        notes.push(format!("skipped {skipped} booking workspace mapping(s) (never read)"));
+    }
+    let map = allm::thread_map();
     match super::secrets::get(state, "anythingllm") {
         Some(key) => {
+            let reader = AllmReader::new(AllmConn::from_cfg_key(state, &cfg, key));
             for (slug, role) in &slugs {
-                match pull_allm(state, &cfg.anythingllm.base_url, &key, slug, &thread_name, bounds, role, "local", &mut records).await {
+                match pull_allm(&reader, map, slug, month, &thread_name, bounds, role, "local", &mut records).await {
                     Ok(n) => {
                         sources.insert(format!("anythingllm:{slug}"), n);
                     }
@@ -436,8 +510,9 @@ pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, 
     if cfg.droplet.enabled && cfg.memory.storage != "local" && !cfg.privacy.kill_switch {
         progress(&app, "pull", "droplet");
         if let Some(key) = os_core::os_secret("anythingllm-remote") {
+            let reader = AllmReader::new(AllmConn::with_key(state, &cfg.droplet.anythingllm_url, key));
             for (slug, role) in &slugs {
-                if let Ok(n) = pull_allm(state, &cfg.droplet.anythingllm_url, &key, slug, &thread_name, bounds, role, "droplet", &mut records).await {
+                if let Ok(n) = pull_allm(&reader, map, slug, month, &thread_name, bounds, role, "droplet", &mut records).await {
                     sources.insert(format!("droplet-anythingllm:{slug}"), n);
                 }
             }
@@ -529,6 +604,9 @@ pub async fn memory_flush(state: State<'_, DispatchState>, os: State<'_, OsState
 
 pub async fn flush(state: &DispatchState, os: &OsState, bridge: &BridgeState, month: &str, include_local: bool, approved: bool) -> Result<Vec<String>, String> {
     let cfg = os.snapshot();
+    if !valid_month(month) {
+        return Err("month must be YYYY-MM".into());
+    }
     if cfg.privacy.destructive_gate && !approved {
         return Err("PERMISSION_REQUIRED:destructive".into());
     }
@@ -552,13 +630,18 @@ pub async fn flush(state: &DispatchState, os: &OsState, bridge: &BridgeState, mo
             targets.push(("local AnythingLLM".into(), cfg.anythingllm.base_url.clone(), k));
         }
     }
+    // Only threads the OS created AND recorded in its thread map are deleted; pre-existing or
+    // duplicate threads (e.g. older "Tony · YYYY-MM" copies) are left alone.
+    let map = allm::thread_map();
     for (label, base, key) in &targets {
-        for slug in cfg.anythingllm.workspaces.values().filter(|s| !s.is_empty()).collect::<BTreeSet<_>>() {
-            let ws = allm(state, base, key, reqwest::Method::GET, &format!("/v1/workspace/{slug}"), None, 10).await.unwrap_or(Value::Null);
-            let ws = if ws["workspace"].is_array() { ws["workspace"][0].clone() } else { ws["workspace"].clone() };
-            for t in ws["threads"].as_array().into_iter().flatten().filter(|t| t["name"].as_str() == Some(thread_name.as_str())) {
-                let ts = t["slug"].as_str().unwrap_or("");
-                match allm(state, base, key, reqwest::Method::DELETE, &format!("/v1/workspace/{slug}/thread/{ts}"), None, 10).await {
+        let conn = AllmConn::with_key(state, base, key.clone());
+        let reader = AllmReader::new(conn.clone());
+        let writer = AllmWriter::for_memory(conn);
+        for slug in &flush_slugs(&cfg.anythingllm.workspaces) {
+            let live = reader.get_workspace(slug, 10).await.map(|ws| allm::thread_list(&ws)).unwrap_or_default();
+            let persisted = map.get(base, slug, &allm::tony_key(month));
+            for ts in threads_to_flush(persisted.as_deref(), &live) {
+                match writer.delete_thread(slug, &ts, 10).await {
                     Ok(_) => report.push(format!("{label}: deleted thread “{thread_name}” in {slug}")),
                     Err(e) => report.push(format!("{label}: {slug} thread not deleted ({e})")),
                 }
@@ -599,6 +682,18 @@ pub struct MountRequest {
     approved: bool,
 }
 
+/// Mount / unmount input check (pure): `month` is a real YYYY-MM (it becomes a vault path) and
+/// `target` is local or droplet.
+pub(crate) fn validate_mount_request(month: &str, target: &str) -> Result<(), String> {
+    if !valid_month(month) {
+        return Err("month must be YYYY-MM".into());
+    }
+    if !matches!(target, "local" | "droplet") {
+        return Err("target must be local or droplet".into());
+    }
+    Ok(())
+}
+
 fn mount_endpoint(state: &DispatchState, cfg: &OsConfig, target: &str) -> Result<(String, String), String> {
     match target {
         "local" => Ok((cfg.anythingllm.base_url.clone(), super::secrets::get(state, "anythingllm").ok_or("AnythingLLM key missing")?)),
@@ -617,7 +712,10 @@ fn mount_endpoint(state: &DispatchState, cfg: &OsConfig, target: &str) -> Result
 
 #[tauri::command]
 pub async fn memory_mount(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, req: MountRequest) -> Result<LedgerEntry, String> {
+    validate_mount_request(&req.month, &req.target)?;
     let cfg = os.snapshot();
+    // D16: never ingest into a Booking workspace (checked before any I/O).
+    check_mount_workspace(&cfg.memory.mount_workspace)?;
     if req.target == "droplet" {
         os_core::gate(&bridge, cfg.permissions.cloud, "cloud", req.approved, json!({ "action": "memory-mount", "month": req.month }))?;
     }
@@ -628,16 +726,8 @@ pub async fn memory_mount(state: State<'_, DispatchState>, os: State<'_, OsState
     let (base, key) = mount_endpoint(&state, &cfg, &req.target)?;
     let book = String::from_utf8(vault_read(&vault_dir(&cfg).join(&req.month), l.files.get("summary").ok_or("no summary")?)?).map_err(|e| e.to_string())?;
     let ws = cfg.memory.mount_workspace.clone();
-    let v = allm(
-        &state,
-        &base,
-        &key,
-        reqwest::Method::POST,
-        "/v1/document/raw-text",
-        Some(json!({ "textContent": book, "addToWorkspaces": ws, "metadata": { "title": format!("Memory Book {}", req.month), "docSource": "agentic-os memory vault" } })),
-        120,
-    )
-    .await?;
+    let writer = AllmWriter::for_memory(AllmConn::with_key(&state, &base, key));
+    let v = writer.raw_text_ingest(&book, &ws, &format!("Memory Book {}", req.month), "agentic-os memory vault", 120).await?;
     let location = v["documents"][0]["location"].as_str().ok_or("AnythingLLM did not return the document location")?.to_string();
     l.mounts.push(Mount { target: req.target.clone(), workspace: ws, location, at: os_core::now_secs() });
     save_ledger(&cfg, &l)?;
@@ -647,12 +737,14 @@ pub async fn memory_mount(state: State<'_, DispatchState>, os: State<'_, OsState
 
 #[tauri::command]
 pub async fn memory_unmount(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, req: MountRequest) -> Result<LedgerEntry, String> {
+    validate_mount_request(&req.month, &req.target)?;
     let cfg = os.snapshot();
     let mut l = load_ledger(&cfg, &req.month)?;
     let Some(m) = l.mounts.iter().find(|m| m.target == req.target).cloned() else { return Ok(l) };
     let (base, key) = mount_endpoint(&state, &cfg, &req.target)?;
-    let _ = allm(&state, &base, &key, reqwest::Method::POST, &format!("/v1/workspace/{}/update-embeddings", m.workspace), Some(json!({ "adds": [], "deletes": [m.location] })), 60).await;
-    allm(&state, &base, &key, reqwest::Method::DELETE, "/v1/system/remove-documents", Some(json!({ "names": [m.location] })), 60).await?;
+    let writer = AllmWriter::for_memory(AllmConn::with_key(&state, &base, key));
+    let _ = writer.update_embeddings(&m.workspace, &[], std::slice::from_ref(&m.location), 60).await;
+    writer.remove_documents(std::slice::from_ref(&m.location), 60).await?;
     l.mounts.retain(|x| x.target != req.target);
     save_ledger(&cfg, &l)?;
     bridge.log(json!({ "type": "memory-unmount", "month": req.month, "target": req.target }));
@@ -671,6 +763,7 @@ pub fn memory_export(os: State<'_, OsState>, month: String, kind: String) -> Res
     let dir = vault_dir(&cfg).join(&month);
     let bytes = vault_read(&dir, fname)?;
     let out_dir = dir.join("unlocked");
+    refuse_hub_vault(&out_dir)?;
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let out = out_dir.join(fname.trim_end_matches(".enc"));
     std::fs::write(&out, bytes).map_err(|e| e.to_string())?;
@@ -707,6 +800,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vault_writes_under_the_read_only_hub_are_refused() {
+        // Lexical refusals: nothing is created (the guard runs before create_dir_all / write).
+        for d in [r"C:\ai-hub\vault\locked-archives\2026-11", r"c:/AI-HUB/vault/x", r"\\localhost\C$\ai-hub\vault\2026-11"] {
+            let dir = Path::new(d);
+            assert_eq!(vault_write(dir, "raw_backup_2026_11.json", b"{}", None), Err(VAULT_UNDER_HUB.to_string()), "{d}");
+            assert_eq!(refuse_hub_vault(&dir.join("unlocked")), Err(VAULT_UNDER_HUB.to_string()));
+        }
+        let mut cfg = OsConfig::default();
+        cfg.memory.vault_dir = r"C:\ai-hub\vault\locked-archives".into();
+        let l = LedgerEntry { month: "2026-11".into(), ..Default::default() };
+        assert_eq!(save_ledger(&cfg, &l), Err(VAULT_UNDER_HUB.to_string()));
+        // A vault elsewhere still writes.
+        let base = std::env::temp_dir().join(format!("aos-vault-guard-{}-{}", std::process::id(), os_core::now_secs()));
+        assert_eq!(vault_write(&base.join("2026-11"), "x.json", b"{}", None), Ok("x.json".to_string()));
+        cfg.memory.vault_dir = base.to_string_lossy().into_owned();
+        assert!(save_ledger(&cfg, &l).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn seal_roundtrip() {
         let ct = seal(b"secret memory", "correct horse battery").unwrap();
         assert_eq!(open(&ct, "correct horse battery").unwrap(), b"secret memory");
@@ -719,6 +832,123 @@ mod tests {
         assert!(!valid_month("2026-13"));
         let (a, b) = month_bounds("2026-02");
         assert!(b - a >= 28 * 86400 && b - a <= 29 * 86400 + 3600);
+    }
+
+    #[test]
+    fn mount_rejects_traversal_and_bad_months() {
+        assert!(validate_mount_request("2026-11", "local").is_ok());
+        assert!(validate_mount_request("2026-11", "droplet").is_ok());
+        for m in ["..\\..\\x", "../../x", "2026-13", "2026-00", "2026-1", "26-11", "2026/11", ""] {
+            assert!(validate_mount_request(m, "local").is_err(), "{m}");
+        }
+        assert!(validate_mount_request("2026-11", "remote").is_err());
+    }
+
+    fn live(v: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        v.iter().map(|(s, n)| (s.to_string(), n.map(String::from))).collect()
+    }
+
+    #[test]
+    fn pull_and_flush_use_persisted_threads() {
+        // Live shape: no names; 12 historical duplicates plus the one the OS recorded.
+        let names: Vec<String> = (0..12).map(|i| format!("d{i}")).collect();
+        let mut ws: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
+        ws.push(("mine", None));
+        let ws = live(&ws);
+        assert_eq!(threads_to_pull(Some("mine"), &ws, "Tony · 2026-11"), vec!["mine".to_string()]);
+        assert_eq!(threads_to_flush(Some("mine"), &ws), vec!["mine".to_string()]);
+        // Nothing recorded → nothing pulled from threads, nothing deleted.
+        assert!(threads_to_pull(None, &ws, "Tony · 2026-11").is_empty());
+        assert!(threads_to_flush(None, &ws).is_empty());
+        // A recorded slug that no longer exists is skipped.
+        assert!(threads_to_flush(Some("gone"), &ws).is_empty());
+        // An older API with names: name matches are READ, but never deleted.
+        let named = live(&[("a", Some("Tony · 2026-11")), ("b", Some("Tony · 2026-11")), ("mine", Some("Tony · 2026-11"))]);
+        assert_eq!(threads_to_pull(Some("mine"), &named, "Tony · 2026-11"), vec!["mine", "a", "b"]);
+        assert_eq!(threads_to_flush(Some("mine"), &named), vec!["mine".to_string()]);
+        assert!(threads_to_flush(None, &named).is_empty());
+    }
+
+    #[test]
+    fn flush_deletes_only_the_persisted_thread_over_http() {
+        use super::super::allm::mock::{start, Req, Resp};
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r: &Req| {
+                if r.method == "GET" {
+                    return Resp::json(json!({ "workspace": { "slug": "booking", "threads": [{ "slug": "dup-1" }, { "slug": "dup-2" }, { "slug": "mine" }] } }));
+                }
+                Resp::json(json!({}))
+            })
+            .await;
+            let st = DispatchState::default();
+            let conn = AllmConn::with_key(&st, &srv.base, "k".into());
+            let reader = AllmReader::new(conn.clone());
+            let writer = AllmWriter::for_memory(conn);
+            let map = super::super::allm::MemThreads::default();
+            map.put(&srv.base, "booking", &super::super::allm::tony_key("2026-11"), "mine");
+            let live = reader.get_workspace("booking", 5).await.map(|ws| super::super::allm::thread_list(&ws)).unwrap();
+            for ts in threads_to_flush(map.get(&srv.base, "booking", "tony:2026-11").as_deref(), &live) {
+                writer.delete_thread("booking", &ts, 5).await.unwrap();
+            }
+            let deletes: Vec<String> = srv.reqs().into_iter().filter(|r| r.method == "DELETE").map(|r| r.path).collect();
+            assert_eq!(deletes, vec!["/api/v1/workspace/booking/thread/mine".to_string()]);
+        });
+    }
+
+    fn ws_map() -> BTreeMap<String, String> {
+        [("general", "my-workspace"), ("booking", "booking"), ("librarian", "librarian"), ("coder", "coder"), ("ops", ""), ("dup", "librarian")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn booking_workspaces_are_never_harvested_flushed_or_mounted() {
+        let (slugs, skipped) = harvest_slugs(&ws_map());
+        assert_eq!(skipped, 2);
+        let names: BTreeSet<&str> = slugs.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(names, ["coder", "librarian"].into_iter().collect());
+        assert_eq!(flush_slugs(&ws_map()), ["coder".to_string(), "librarian".to_string()].into_iter().collect());
+        for ws in ["my-workspace", "booking", " booking "] {
+            assert!(check_mount_workspace(ws).unwrap_err().contains("Booking workspace"), "{ws}");
+        }
+        assert!(check_mount_workspace("librarian").is_ok());
+    }
+
+    #[test]
+    fn harvest_and_flush_send_zero_requests_to_booking_slugs() {
+        use super::super::allm::mock::{start, Req, Resp};
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r: &Req| {
+                if r.method == "GET" {
+                    return Resp::json(json!({ "workspace": { "slug": "x", "threads": [{ "slug": "mine" }] }, "history": [] }));
+                }
+                Resp::json(json!({}))
+            })
+            .await;
+            let st = DispatchState::default();
+            let conn = AllmConn::with_key(&st, &srv.base, "k".into());
+            let reader = AllmReader::new(conn.clone());
+            let writer = AllmWriter::for_memory(conn);
+            let map = super::super::allm::MemThreads::default();
+            for slug in ["my-workspace", "booking", "librarian", "coder"] {
+                map.put(&srv.base, slug, &super::super::allm::tony_key("2026-11"), "mine");
+            }
+            // The harvest pull loop over `harvest_slugs`.
+            let (slugs, _) = harvest_slugs(&ws_map());
+            let mut out = Vec::new();
+            for (slug, role) in &slugs {
+                let _ = pull_allm(&reader, &map, slug, "2026-11", "Tony · 2026-11", month_bounds("2026-11"), role, "local", &mut out).await;
+            }
+            // The flush delete loop over `flush_slugs`.
+            for slug in &flush_slugs(&ws_map()) {
+                let live = reader.get_workspace(slug, 5).await.map(|ws| super::super::allm::thread_list(&ws)).unwrap_or_default();
+                for ts in threads_to_flush(map.get(&srv.base, slug, "tony:2026-11").as_deref(), &live) {
+                    writer.delete_thread(slug, &ts, 5).await.unwrap();
+                }
+            }
+            let reqs = srv.reqs();
+            assert!(!reqs.is_empty());
+            assert!(reqs.iter().all(|r| !r.path.contains("my-workspace") && !r.path.contains("/booking")), "{:?}", reqs.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
+            assert!(reqs.iter().any(|r| r.method == "DELETE" && r.path == "/api/v1/workspace/librarian/thread/mine"));
+        });
     }
 
     #[test]

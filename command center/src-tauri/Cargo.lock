@@ -612,6 +612,7 @@ dependencies = [
  "chrono",
  "cpal",
  "crossbeam-queue",
+ "flate2",
  "futures-util",
  "keyring",
  "pbkdf2",

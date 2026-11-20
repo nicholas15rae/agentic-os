@@ -3,6 +3,7 @@ import { cc, collections } from "@/lib/cc-api";
 import { platform } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { WebSpeechStt, WhisperStt, type SttEngine } from "@/features/voice/engines";
+import { MIC_LOCKED_MSG, micEnabled, onMicChange } from "@/features/voice/mic-gate";
 import { LISTEN_PROFILES } from "./listen-profiles";
 
 export { LISTEN_PROFILES };
@@ -44,6 +45,8 @@ interface CaptureState {
   error: string | null;
   start: (noteId?: string) => Promise<void>;
   stop: () => Promise<void>;
+  /** Discard (not flush) the in-flight utterance and stop listening; nothing is appended or organized. */
+  abort: () => void;
   /** Flush the current utterance and restart the loop with the (possibly just-changed) profile. No-op when not listening. */
   restartProfile: () => void;
   organize: (id?: string) => Promise<void>;
@@ -65,6 +68,7 @@ export const useBrainstorm = create<CaptureState>((set, get) => ({
   error: null,
 
   start: async (existing) => {
+    if (!micEnabled()) return set({ error: MIC_LOCKED_MSG });
     const stt = getEngine();
     if (!stt.supported) return set({ error: "No speech-to-text available here (desktop needs Whisper; phones need Chrome)." });
     let id = existing ?? get().noteId;
@@ -88,6 +92,13 @@ export const useBrainstorm = create<CaptureState>((set, get) => ({
     await pendingFinal;
     const id = get().noteId;
     if (id && get().sinceOrganize > 0) await get().organize(id);
+  },
+
+  abort: () => {
+    set({ listening: false, phase: "idle" });
+    engine?.abort(); // calls no handlers: the last phrase is never transcribed
+    resolvePendingFinal?.();
+    resolvePendingFinal = null;
   },
 
   restartProfile: () => {
@@ -114,7 +125,7 @@ export const useBrainstorm = create<CaptureState>((set, get) => ({
 
 function loop(noteId: string) {
   const s = useBrainstorm.getState();
-  if (!s.listening || s.noteId !== noteId) return;
+  if (!s.listening || s.noteId !== noteId || !micEnabled()) return;
   pendingFinal = new Promise<void>((resolve) => (resolvePendingFinal = resolve));
   const settle = () => {
     resolvePendingFinal?.();
@@ -145,6 +156,14 @@ function loop(noteId: string) {
     LISTEN_PROFILES[profile],
   );
 }
+
+// Phase 2 Part B: locking the mic ends Listen Mode at once. The phrase in flight is discarded,
+// not flushed (flushing would send audio heard before the mute to Whisper).
+onMicChange((on) => {
+  if (on || !useBrainstorm.getState().listening) return;
+  useBrainstorm.getState().abort();
+  useBrainstorm.setState({ error: "Mic locked off: Listen Mode stopped (last phrase discarded)" });
+});
 
 async function append(noteId: string, text: string) {
   await collections.sync("notes");

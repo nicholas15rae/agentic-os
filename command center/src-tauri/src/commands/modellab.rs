@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tauri::State;
 
+use super::allm::{AllmConn, AllmWriter};
 use super::dispatch::{short, DispatchState};
+use super::os_core::{OsConfig, OsState};
 
 const VRAM_RESERVED_GB: f64 = 3.3; // Windows compositor + browsers + headroom
 
@@ -118,7 +120,14 @@ async fn unload_all(state: &DispatchState, base: &str) {
     }
 }
 
-pub async fn bench(state: &DispatchState, model: &str, context: Option<u64>) -> BenchResult {
+/// Benchmark one model. Unloading / loading models is GPU maintenance: it runs only once every
+/// in-flight generation has finished, and nothing else generates until it is done.
+pub async fn bench(state: &DispatchState, os: &OsState, model: &str, context: Option<u64>) -> BenchResult {
+    let _slot = os.slot.acquire_maintenance(&format!("bench {}", model.chars().take(40).collect::<String>()), os.snapshot().scheduler.tony_priority_pct).await;
+    bench_unlocked(state, model, context).await
+}
+
+async fn bench_unlocked(state: &DispatchState, model: &str, context: Option<u64>) -> BenchResult {
     let total = tauri::async_runtime::spawn_blocking(vram_total_gb).await.unwrap_or(12.0);
     let mut res = BenchResult { model: model.into(), context: 0, load_ms: 0, first_token_ms: 0, tokens_per_sec: 0.0, vram_used_gb: 0.0, vram_total_gb: (total * 10.0).round() / 10.0, reply: String::new(), error: None };
     let base = match api_base(state) {
@@ -204,17 +213,41 @@ pub async fn bench(state: &DispatchState, model: &str, context: Option<u64>) -> 
 }
 
 #[tauri::command]
-pub async fn model_bench(state: State<'_, DispatchState>, model: String, context: Option<u64>) -> Result<BenchResult, String> {
-    Ok(bench(&state, &model, context).await)
+pub async fn model_bench(state: State<'_, DispatchState>, os: State<'_, OsState>, model: String, context: Option<u64>) -> Result<BenchResult, String> {
+    Ok(bench(&state, &os, &model, context).await)
 }
 
 /// Make `model` Tony's brain everywhere (one model on the GPU).
 #[tauri::command]
-pub async fn model_use(state: State<'_, DispatchState>, model: String) -> Result<Vec<String>, String> {
-    use_model(&state, model).await
+pub async fn model_use(state: State<'_, DispatchState>, os: State<'_, OsState>, model: String) -> Result<Vec<String>, String> {
+    use_model(&state, &os.snapshot(), model).await
 }
 
-pub async fn use_model(state: &DispatchState, model: String) -> Result<Vec<String>, String> {
+/// The AnythingLLM endpoint the Model Lab writes to: `os.json anythingllm.baseUrl` (the same one
+/// every chat uses), never a hard-coded port.
+pub(crate) fn model_lab_allm(state: &DispatchState, cfg: &OsConfig, key: String) -> AllmWriter {
+    AllmWriter::for_model_lab(AllmConn::from_cfg_key(state, cfg, key))
+}
+
+/// Point AnythingLLM's default and every LM Studio workspace at `model` (chat model only; the
+/// agent model, context and parallelism are left alone, decision D9).
+pub(crate) async fn apply_model_to_allm(w: &AllmWriter, model: &str) -> Vec<String> {
+    let mut notes = vec![];
+    if w.update_env(json!({ "LMStudioModelPref": model }), 20).await.is_ok() {
+        notes.push("AnythingLLM default → same model".into());
+    }
+    if let Ok(v) = w.list_workspaces(10).await {
+        for ws in v["workspaces"].as_array().into_iter().flatten().filter(|ws| ws["chatProvider"] == "lmstudio") {
+            let slug = ws["slug"].as_str().unwrap_or("");
+            if w.update_workspace(slug, json!({ "chatModel": model }), 20).await.is_ok() {
+                notes.push(format!("workspace {slug} → same model"));
+            }
+        }
+    }
+    notes
+}
+
+pub async fn use_model(state: &DispatchState, cfg: &OsConfig, model: String) -> Result<Vec<String>, String> {
     if model.is_empty() || model.len() > 200 {
         return Err("bad model id".into());
     }
@@ -227,18 +260,8 @@ pub async fn use_model(state: &DispatchState, model: String) -> Result<Vec<Strin
     })?;
     notes.push(format!("Tony → {model}"));
     if let Some(key) = super::secrets::get(state, "anythingllm") {
-        let base = "http://127.0.0.1:3001";
-        if super::agents::allm(state, base, &key, reqwest::Method::POST, "/v1/system/update-env", Some(json!({ "LMStudioModelPref": model })), 20).await.is_ok() {
-            notes.push("AnythingLLM default → same model".into());
-        }
-        if let Ok(v) = super::agents::allm(state, base, &key, reqwest::Method::GET, "/v1/workspaces", None, 10).await {
-            for w in v["workspaces"].as_array().into_iter().flatten().filter(|w| w["chatProvider"] == "lmstudio") {
-                let slug = w["slug"].as_str().unwrap_or("");
-                if super::agents::allm(state, base, &key, reqwest::Method::POST, &format!("/v1/workspace/{slug}/update"), Some(json!({ "chatModel": model })), 20).await.is_ok() {
-                    notes.push(format!("workspace {slug} → same model"));
-                }
-            }
-        }
+        super::secrets::warn_allm_host_mismatch(state, &cfg.anythingllm.base_url);
+        notes.extend(apply_model_to_allm(&model_lab_allm(state, cfg, key), &model).await);
     }
     Ok(notes)
 }
@@ -246,6 +269,55 @@ pub async fn use_model(state: &DispatchState, model: String) -> Result<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn use_model_uses_the_cfg_base() {
+        use super::super::allm::mock::{start, Req, Resp};
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r: &Req| {
+                if r.method == "GET" {
+                    return Resp::json(json!({ "workspaces": [{ "slug": "coder", "chatProvider": "lmstudio" }, { "slug": "librarian", "chatProvider": null }] }));
+                }
+                Resp::json(json!({}))
+            })
+            .await;
+            let st = DispatchState::default();
+            let mut cfg = OsConfig::default();
+            cfg.anythingllm.base_url = srv.base.clone();
+            let w = model_lab_allm(&st, &cfg, "k".into());
+            assert_eq!(w.base(), srv.base);
+            let notes = apply_model_to_allm(&w, "qwen/qwen3.5-9b").await;
+            assert_eq!(notes.len(), 2, "{notes:?}");
+            let paths: Vec<String> = srv.reqs().into_iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+            assert_eq!(paths, vec!["POST /api/v1/system/update-env", "GET /api/v1/workspaces", "POST /api/v1/workspace/coder/update"]);
+            assert!(srv.reqs().iter().all(|r| r.body.get("agentModel").is_none()), "agentModel is left alone (D9)");
+        });
+    }
+
+    #[test]
+    fn bench_waits_for_the_gpu_slot() {
+        tauri::async_runtime::block_on(async {
+            let st = DispatchState::default();
+            // No LM Studio provider reachable on this port → bench errors fast once it runs.
+            let _ = st.update(|c| {
+                for p in c.providers.iter_mut().filter(|p| p.id == "lmstudio") {
+                    p.base_url = "http://127.0.0.1:9/v1".into();
+                }
+                Ok(())
+            });
+            let os = std::sync::Arc::new(OsState::default());
+            let st = std::sync::Arc::new(st);
+            let holder = os.slot.acquire("tony", true, 90).await;
+            let (o2, s2) = (os.clone(), st.clone());
+            let h = tauri::async_runtime::spawn(async move { bench(&s2, &o2, "m", Some(4096)).await });
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(!h.inner().is_finished(), "bench must not start while a generation holds the slot");
+            assert_eq!(os.slot.view().queued_background, 1);
+            drop(holder);
+            let r = h.await.unwrap();
+            assert!(r.error.is_some());
+        });
+    }
 
     #[test]
     fn fit() {
@@ -262,7 +334,9 @@ mod tests {
             let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
             let state = DispatchState::default();
             state.load_or_init(&dir);
-            println!("USE {:?}", use_model(&state, std::env::var("MODEL").unwrap()).await);
+            let os = OsState::default();
+            os.load_or_init(&dir, std::path::Path::new(&state.snapshot().gateway.workdir));
+            println!("USE {:?}", use_model(&state, &os.snapshot(), std::env::var("MODEL").unwrap()).await);
         });
     }
 
@@ -275,20 +349,22 @@ mod tests {
             let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
             let state = DispatchState::default();
             state.load_or_init(&dir);
+            let os = OsState::default();
+            os.load_or_init(&dir, std::path::Path::new(&state.snapshot().gateway.workdir));
             let tony = state.provider("lmstudio").unwrap().model;
             let base = api_base(&state).unwrap();
             let v: Value = state.http.get(format!("{base}/api/v1/models")).send().await.unwrap().json().await.unwrap();
             let only: Vec<String> = std::env::var("MODELS").map(|m| m.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
             let models: Vec<String> = v["models"].as_array().unwrap().iter().filter(|m| m["type"] == "llm").filter_map(|m| m["key"].as_str().map(String::from)).filter(|k| only.is_empty() || only.contains(k)).collect();
             for m in models {
-                let r = bench(&state, &m, None).await;
+                let r = bench(&state, &os, &m, None).await;
                 println!(
                     "BENCH {:<34} ctx {:>6} | load {:>5} ms | first token {:>5} ms | {:>5.1} tok/s | VRAM {:>4.1}/{:.0} GB | {}",
                     r.model, r.context, r.load_ms, r.first_token_ms, r.tokens_per_sec, r.vram_used_gb, r.vram_total_gb,
                     r.error.unwrap_or_else(|| format!("“{}”", r.reply.replace('\n', " ").chars().take(70).collect::<String>()))
                 );
             }
-            let r = bench(&state, &tony, Some(32_768)).await;
+            let r = bench(&state, &os, &tony, Some(32_768)).await;
             println!("RESTORED {} ({})", r.model, r.error.unwrap_or_else(|| "ok".into()));
         });
     }

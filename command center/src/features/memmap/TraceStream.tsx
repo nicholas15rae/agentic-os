@@ -5,7 +5,7 @@ import { isTauri } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { useToasts } from "@/features/reminders/notify";
 import { ipcSummary, useIpcRing } from "@/lib/ipc-ring";
-import { groupTraces, stepsSince, useTrace, type TraceGroup } from "./trace-store";
+import { agentLanes, groupTraces, stepsSince, useTrace, type TraceGroup } from "./trace-store";
 import { fixTitle, fmtClock, fmtMs, slowestHop } from "./format";
 import { queueFix } from "./dev-queue";
 import { Panel, Tag, useNow } from "./parts";
@@ -27,6 +27,14 @@ const HOP_WORD: Record<TraceStep["hop"], string> = {
   ui: "Screen",
 };
 
+/** Agent-event severity chips. */
+const SEVERITY_TONE: Record<NonNullable<TraceStep["severity"]>, string> = {
+  critical: "border-alert/50 text-alert",
+  milestone: "border-teal/40 text-teal-soft",
+  handoff: "border-holo/40 text-holo",
+  verbose: "border-white/10 text-ink-3",
+};
+
 const stepKey = (s: TraceStep) => `${s.traceId}#${s.seq}#${s.hop}#${s.at}`;
 
 /**
@@ -41,10 +49,13 @@ export function TraceStream({ className = "" }: { className?: string }) {
   const xray = useSettings((s) => s.systemMapMode) === "xray";
   const now = useNow(2000);
   const [frozen, setFrozen] = useState<TraceStep[] | null>(null);
+  /** Part 6 per-agent lane: only that agent's event-bus steps (null = everything). */
+  const [lane, setLane] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   const shown = frozen ?? steps;
-  const groups = useMemo(() => groupTraces(shown).slice(0, SHOWN), [shown]);
+  const lanes = useMemo(() => agentLanes(shown), [shown]);
+  const groups = useMemo(() => groupTraces(lane ? shown.filter((s) => s.agent === lane) : shown).slice(0, SHOWN), [shown, lane]);
   const live = steps.length > 0 && now - steps[steps.length - 1].at < ACTIVE_MS;
   const fresh = frozen ? stepsSince(steps, frozen) : 0;
 
@@ -77,6 +88,22 @@ export function TraceStream({ className = "" }: { className?: string }) {
           </>
         }
       >
+        {lanes.length > 0 && (
+          <div role="radiogroup" aria-label="Agent lane" className="flex flex-wrap gap-1 border-b border-holo/10 px-3 py-1">
+            {[null, ...lanes].map((a) => (
+              <button
+                key={a ?? "all"}
+                type="button"
+                role="radio"
+                aria-checked={lane === a}
+                onClick={() => setLane(a)}
+                className={`rounded-full border px-1.5 py-px font-mono text-[9px] uppercase tracking-wider ${lane === a ? "border-holo/50 text-holo" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
+              >
+                {a ?? "all"}
+              </button>
+            ))}
+          </div>
+        )}
         {frozen && (
           <button type="button" onClick={resume} className="label-caps border-b border-holo/10 bg-holo/[0.06] px-3 py-1 text-left text-holo">
             Paused{fresh > 0 ? ` · ${fresh} new step${fresh === 1 ? "" : "s"}` : ""} — resume
@@ -130,6 +157,7 @@ function StepLine({ s, xray, slowest }: { s: TraceStep; xray: boolean; slowest: 
       <div className="flex min-w-0 items-center gap-2">
         <span className={`size-1.5 shrink-0 rounded-full ${s.ok ? "bg-teal/80" : "bg-alert"}`} />
         <span className={`w-[92px] shrink-0 truncate ${s.ok ? "text-ink-2" : "text-alert"}`}>{xray ? s.hop.toUpperCase() : HOP_WORD[s.hop]}</span>
+        {s.severity && <span className={`shrink-0 rounded-full border px-1 text-[8.5px] uppercase ${SEVERITY_TONE[s.severity]}`}>{s.severity}</span>}
         <span className="min-w-0 flex-1 truncate text-ink" title={s.label}>
           {s.label}
         </span>

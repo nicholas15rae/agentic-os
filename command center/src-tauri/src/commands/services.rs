@@ -325,7 +325,9 @@ async fn tokio_sleep(d: Duration) {
 
 const FIT_CTX: u64 = 32_768;
 
-pub async fn local_fit_once(state: &DispatchState) -> Option<String> {
+/// Reload the primary model at FIT_CTX when it is loaded wider. The unload / reload is GPU
+/// maintenance: it waits for every in-flight generation and blocks new ones until it is done.
+pub async fn local_fit_once(state: &DispatchState, os: &super::os_core::OsState) -> Option<String> {
     let cfg = state.snapshot();
     let p = cfg.providers.iter().find(|p| p.id == cfg.policy.primary_local || p.id == "lmstudio")?.clone();
     let api = format!("{}/api/v1/models", origin(&p.base_url));
@@ -338,6 +340,7 @@ pub async fn local_fit_once(state: &DispatchState) -> Option<String> {
     }
     let id = inst["id"].as_str()?.to_string();
     let base = origin(&p.base_url);
+    let _slot = os.slot.acquire_maintenance("local fit", os.snapshot().scheduler.tony_priority_pct).await;
     state.http.post(format!("{base}/api/v1/models/unload")).json(&serde_json::json!({ "instance_id": id })).timeout(Duration::from_secs(60)).send().await.ok()?;
     let r = state
         .http
@@ -361,7 +364,7 @@ pub async fn local_fit_loop(app: tauri::AppHandle) {
             }
             None => loop_ran("whisper", true, "nothing to do (already up, or STT isn't a local whisper.cpp)"),
         }
-        match local_fit_once(&app.state::<DispatchState>()).await {
+        match local_fit_once(&app.state::<DispatchState>(), &app.state::<super::os_core::OsState>()).await {
             Some(msg) => {
                 eprintln!("[fit] {msg}");
                 loop_ran("local-fit", true, &msg);
@@ -444,5 +447,49 @@ pub async fn tts_warm_loop(app: tauri::AppHandle) {
             }
         }
         tokio_sleep(Duration::from_secs(60)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::allm::mock::{start, Req, Resp};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn local_fit_takes_the_slot_before_unloading() {
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r: &Req| {
+                if r.method == "GET" {
+                    return Resp::json(json!({ "models": [{ "key": "qwen/qwen3.5-9b", "type": "llm", "loaded_instances": [{ "id": "inst-1", "config": { "context_length": 65536 } }] }] }));
+                }
+                Resp::json(json!({}))
+            })
+            .await;
+            let st = DispatchState::default();
+            let base = format!("{}/v1", srv.base);
+            st.update(|c| {
+                for p in c.providers.iter_mut().filter(|p| p.id == "lmstudio") {
+                    p.base_url = base.clone();
+                    p.model = "qwen/qwen3.5-9b".into();
+                }
+                c.policy.primary_local = "lmstudio".into();
+                Ok(())
+            })
+            .unwrap();
+            let (st, os) = (Arc::new(st), Arc::new(os_core::OsState::default()));
+            let holder = os.slot.acquire("tony", true, 90).await;
+            let (s2, o2) = (st.clone(), os.clone());
+            let h = tauri::async_runtime::spawn(async move { local_fit_once(&s2, &o2).await });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(srv.count("POST", "/models/unload"), 0, "no unload while a generation holds the GPU");
+            drop(holder);
+            let msg = h.await.unwrap().unwrap();
+            assert!(msg.contains("65536"), "{msg}");
+            assert_eq!(srv.count("POST", "/models/unload"), 1);
+            assert_eq!(srv.count("POST", "/models/load"), 1);
+            assert!(os.slot.view().active.is_empty(), "maintenance released the slot");
+        });
     }
 }

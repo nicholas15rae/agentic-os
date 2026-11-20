@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { micEnabled, useMic } from "@/features/voice/mic-gate";
 import { Loader2, Play, RefreshCw, Upload } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
 import { cmd, nativeRaw, type AgentVoice, type AgentVoicePatch, type VoicesView } from "@/lib/platform";
@@ -24,6 +25,7 @@ export function SttCard() {
   const set = useSettings((s) => s.set);
   const [variants, setVariants] = useState<string[]>([]);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
+  const micOn = useMic((m) => m.enabled);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const stt = view?.providers.find((p) => p.id === view.policy.stt);
@@ -34,9 +36,12 @@ export function SttCard() {
 
   const loadMics = async () => {
     try {
-      // Labels are only exposed after mic permission has been granted once.
-      const probe = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
-      probe?.getTracks().forEach((t) => t.stop());
+      // Labels are only exposed after mic permission has been granted once. Phase 2 Part B: never
+      // probe (open) the mic while it is locked off; list devices only (names may be hidden).
+      if (micEnabled()) {
+        const probe = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+        probe?.getTracks().forEach((t) => t.stop());
+      }
       setMics((await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput"));
     } catch {
       setMics([]);
@@ -91,6 +96,7 @@ export function SttCard() {
               <RefreshCw size={14} />
             </button>
           </div>
+          {!micOn && mics.some((m) => !m.label) && <p className="mt-1 text-[11px] text-ink-3">Unlock mic to see device names</p>}
         </Field>
         <Field label="Engine">
           <Select value={stt.engine ?? "whispercpp"} onChange={(e) => void patch({ id: stt.id, engine: e.target.value })}>

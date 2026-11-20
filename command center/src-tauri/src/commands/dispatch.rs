@@ -272,6 +272,15 @@ pub(crate) fn valid_role(r: &str) -> bool {
     ROLE_IDS.contains(&r)
 }
 
+/// Part 6: every id that can SPEAK (narration, a roster voice): the routing roles plus the
+/// task worker's non-routing speakers. `ROLE_IDS` stays the routing list.
+pub(crate) const NARRATOR_IDS: [&str; 10] = ["general", "booking", "prompter", "coder", "designer", "librarian", "ops", "verifier", "staging", "system"];
+
+/// A voice-roster key (`agentVoices`, `agent_voice_update`): any `NARRATOR_IDS` entry.
+pub(crate) fn valid_narrator(r: &str) -> bool {
+    valid_role(r) || NARRATOR_IDS[ROLE_IDS.len()..].contains(&r)
+}
+
 /// Part 3: one agent's voice. `engine` is "elevenlabs" or "kokoro" (the two
 /// engines this app drives); `voice`/`model` override the matching
 /// provider's own `voice`/`model` when set, and fall back to them when not.
@@ -520,7 +529,7 @@ fn validate(cfg: &Config) -> Result<(), String> {
         return Err("poll 5–3600 s, auto-sync 0.25–168 h, at most 32 tracked paths".into());
     }
     for (role, v) in &cfg.agent_voices {
-        if !valid_role(role) {
+        if !valid_narrator(role) {
             return Err(format!("agentVoices: unknown role '{role}'"));
         }
         if v.engine != "elevenlabs" && v.engine != "kokoro" {
@@ -674,7 +683,7 @@ pub(crate) fn apply_agent_voice_patch(entry: &mut AgentVoice, patch: AgentVoiceP
 #[tauri::command]
 pub fn agent_voice_update(state: State<'_, DispatchState>, role: String, patch: AgentVoicePatch) -> Result<ProvidersView, String> {
     let role = canon_role(&role);
-    if !valid_role(&role) {
+    if !valid_narrator(&role) {
         return Err(format!("unknown agent role '{role}'"));
     }
     let cfg = state.update(|cfg| {
@@ -1463,6 +1472,18 @@ mod part3_tests {
         assert_eq!(canon_role("  TONY  "), "general");
         assert_eq!(canon_role("booking"), "booking");
         assert_eq!(canon_role("Booking"), "booking");
+    }
+
+    #[test]
+    fn narrator_ids_are_the_roles_plus_the_worker_speakers() {
+        for r in ROLE_IDS {
+            assert!(NARRATOR_IDS.contains(&r) && valid_narrator(r), "{r}");
+        }
+        for r in ["verifier", "staging", "system"] {
+            assert!(valid_narrator(r) && !valid_role(r), "{r} narrates but never routes");
+        }
+        assert_eq!(NARRATOR_IDS.len(), ROLE_IDS.len() + 3);
+        assert!(!valid_narrator("tony") && !valid_narrator("overseer"));
     }
 
     #[test]

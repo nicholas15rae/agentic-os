@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { DASH, type Tone } from "./format";
+import { requestSettingsTab } from "@/sections/settings/settings-tab";
 
 /**
  * System Map primitives: dark glass panels with a thin cyan edge, mono caps labels,
@@ -102,10 +103,6 @@ export function useNow(ms = 1000): number {
 
 /** Open Settings → Integrations (where the MCP registry, Gmail, Spotify and Brave cards live). */
 export function openSettings(go: (s: "settings") => void, tab: "integrations" | "services" | "voice" = "integrations") {
-  try {
-    sessionStorage.setItem("cc.settings.tab", tab);
-  } catch {
-    /* private mode */
-  }
+  requestSettingsTab(tab);
   go("settings");
 }

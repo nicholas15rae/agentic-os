@@ -37,6 +37,18 @@ impl AudioEngineState {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// `(turn_active, playing, in_speech)` while the engine runs, else `None` (Phase 3 idle
+    /// check: never compact while a voice turn is live).
+    pub fn activity(&self) -> Option<(bool, bool, bool)> {
+        match &self.guard().slot {
+            Slot::Running(h) => {
+                let s = h.status();
+                Some((s.turn_active, s.playing, s.in_speech))
+            }
+            _ => None,
+        }
+    }
+
     fn shared(&self) -> Result<Arc<engine::Shared>, String> {
         match &self.guard().slot {
             Slot::Running(h) => Ok(Arc::clone(&h.shared)),
@@ -62,24 +74,57 @@ pub async fn audio_engine_devices() -> Result<AudioDevices, String> {
     blocking(engine::list_devices).await?
 }
 
-#[tauri::command]
-pub async fn audio_engine_start(app: AppHandle, state: State<'_, AudioEngineState>, options: Option<StartOptions>) -> Result<EngineStatus, String> {
-    // Claim the slot under the lock; never hold the guard across an await.
-    let (generation, dead) = {
+/// Phase 2 Part B: the native recorder never opens while the mic is locked off.
+pub(crate) fn start_allowed() -> Result<(), String> {
+    if crate::commands::voice::mic_enabled() {
+        Ok(())
+    } else {
+        Err("mic is locked off".into())
+    }
+}
+
+/// Stop the engine now, from sync code (`voice::set_mic_enabled`): cancels an in-flight start
+/// and releases the devices on a helper thread (dropping a handle joins the audio threads).
+pub(crate) fn stop_now(state: &AudioEngineState) {
+    let handle = {
         let mut inner = state.guard();
-        match &inner.slot {
-            Slot::Running(h) if h.shared.is_healthy() => return Ok(h.status()),
-            Slot::Starting(_) => return Err("audio engine is already starting".into()),
-            _ => {}
-        }
-        inner.generation += 1;
-        let generation = inner.generation;
-        // A Running engine here has a failed stream: replace it.
-        let dead = match std::mem::replace(&mut inner.slot, Slot::Starting(generation)) {
+        inner.generation += 1; // cancels an in-flight start
+        match std::mem::replace(&mut inner.slot, Slot::Idle) {
             Slot::Running(h) => Some(h),
             _ => None,
-        };
-        (generation, dead)
+        }
+    };
+    if let Some(h) = handle {
+        let _ = std::thread::Builder::new().name("audio-engine-stop".into()).spawn(move || drop(h));
+    }
+}
+
+/// Claim the start slot under the lock (never held across an await). Refused while the mic is
+/// locked off, so a muted engine is never started. Returns the claim's generation and a dead
+/// engine to drop, if one was in the slot.
+fn claim_start(state: &AudioEngineState) -> Result<Result<(u64, Option<EngineHandle>), EngineStatus>, String> {
+    start_allowed()?;
+    let mut inner = state.guard();
+    match &inner.slot {
+        Slot::Running(h) if h.shared.is_healthy() => return Ok(Err(h.status())),
+        Slot::Starting(_) => return Err("audio engine is already starting".into()),
+        _ => {}
+    }
+    inner.generation += 1;
+    let generation = inner.generation;
+    // A Running engine here has a failed stream: replace it.
+    let dead = match std::mem::replace(&mut inner.slot, Slot::Starting(generation)) {
+        Slot::Running(h) => Some(h),
+        _ => None,
+    };
+    Ok(Ok((generation, dead)))
+}
+
+#[tauri::command]
+pub async fn audio_engine_start(app: AppHandle, state: State<'_, AudioEngineState>, options: Option<StartOptions>) -> Result<EngineStatus, String> {
+    let (generation, dead) = match claim_start(&state)? {
+        Ok(claim) => claim,
+        Err(running) => return Ok(running),
     };
     if let Some(h) = dead {
         blocking(move || drop(h)).await?;
@@ -91,6 +136,13 @@ pub async fn audio_engine_start(app: AppHandle, state: State<'_, AudioEngineStat
         let mut inner = state.guard();
         let still_ours = matches!(inner.slot, Slot::Starting(g) if g == generation);
         match started {
+            // Locked off while the devices were opening: this engine never runs.
+            Ok(handle) if !crate::commands::voice::mic_enabled() => {
+                if still_ours {
+                    inner.slot = Slot::Idle;
+                }
+                (Err("mic is locked off".to_string()), Some(handle))
+            }
             Ok(handle) if still_ours => {
                 let status = handle.status();
                 inner.slot = Slot::Running(handle);
@@ -215,4 +267,42 @@ pub async fn media_unduck(fade_ms: Option<u32>) -> Result<bool, String> {
 #[tauri::command]
 pub async fn media_duck_status() -> Result<super::ducker::DuckStatus, String> {
     Ok(blocking(|| super::ducker::status(STATUS_WAIT)).await.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod mic_gate_tests {
+    use super::*;
+    use crate::commands::voice::{mic_gate_tests::lock, MIC_ENABLED};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn muted_mic_never_claims_the_engine() {
+        let _g = lock();
+        let state = AudioEngineState::default();
+        MIC_ENABLED.store(false, Ordering::SeqCst);
+        let allowed = start_allowed();
+        let claim = claim_start(&state);
+        MIC_ENABLED.store(true, Ordering::SeqCst);
+        assert!(allowed.is_err());
+        assert!(matches!(claim, Err(ref e) if e.contains("locked off")));
+        let inner = state.guard();
+        assert!(matches!(inner.slot, Slot::Idle), "a refused start leaves the slot idle");
+        assert_eq!(inner.generation, 0, "nothing was claimed");
+    }
+
+    #[test]
+    fn live_mic_claims_and_stop_now_cancels_the_claim() {
+        let _g = lock();
+        let state = AudioEngineState::default();
+        MIC_ENABLED.store(true, Ordering::SeqCst);
+        assert!(start_allowed().is_ok());
+        let claim = claim_start(&state).expect("claim").expect("not already running");
+        assert_eq!(claim.0, 1);
+        assert!(matches!(state.guard().slot, Slot::Starting(1)));
+        // The mute path: an in-flight start loses its slot (generation bumped, slot idle).
+        stop_now(&state);
+        let inner = state.guard();
+        assert!(matches!(inner.slot, Slot::Idle));
+        assert_eq!(inner.generation, 2);
+    }
 }

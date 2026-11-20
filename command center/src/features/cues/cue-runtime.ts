@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { micEnabled } from "@/features/voice/mic-gate";
 import { collections, useCollection } from "@/lib/cc-api";
 import { useNav, SECTIONS, type Section } from "@/stores/nav";
 import { useVoice, THREADS, type ThreadId } from "@/features/voice/voice-store";
@@ -76,6 +77,20 @@ export function toggleGabagool() {
   else useToasts.getState().push({ title: "Gabagool Mode", body: "Set it up in Settings → Voice & Triggers.", tone: "info" });
 }
 
+/**
+ * The Mode Panel / ModePill Gabagool switch (D19). Its state is "Gabagool is playing", so a tap
+ * matches it: Gabagool playing → stop it; anything else playing (a startup / time-of-day cue) →
+ * that one stops and Gabagool starts; nothing playing → Gabagool starts.
+ */
+export function toggleGabagoolMode() {
+  const run = useCueRun.getState();
+  if (run.running && run.builtin === "gabagool") return stopAllAudio();
+  const w = collections.snapshot<CueWidget>("cues").find((c) => c.builtin === "gabagool" && !c._deleted);
+  if (!w) return void useToasts.getState().push({ title: "Gabagool Mode", body: "Set it up in Settings → Voice & Triggers.", tone: "info" });
+  if (run.running) stopAllAudio();
+  fireCue(w);
+}
+
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 
 /** Seeds the built-in widgets, fires startup cues once, and runs the time-of-day schedule. */
@@ -103,6 +118,8 @@ export function useCueScheduler() {
     }
     if (fired) return;
     const t = setTimeout(() => {
+      // Phase 2 Part B (D6): no unsolicited startup cue while the mic is locked off.
+      if (!micEnabled()) return;
       for (const c of collections.snapshot<CueWidget>("cues")) if (c.enabled && c.startup && !c._deleted) fireCue(c);
     }, 2500);
     return () => clearTimeout(t);
@@ -110,6 +127,7 @@ export function useCueScheduler() {
 
   useEffect(() => {
     const tick = () => {
+      if (!micEnabled()) return; // D6: time-of-day cues stay quiet while the mic is locked off
       const now = new Date();
       const slot = `${now.toISOString().slice(0, 10)} ${hhmm(now)}`;
       for (const c of collections.snapshot<CueWidget & { id: string }>("cues")) {

@@ -11,6 +11,8 @@
  */
 
 import { recordIpc } from "./ipc-ring";
+import { MicLockedError, micEnabled } from "@/features/voice/mic-gate";
+import type { Curiosity, DispatchPolicy, ModesView, TonyMode, Verbosity } from "@/features/modes/modes";
 
 export type Platform = "desktop" | "pwa";
 
@@ -68,8 +70,10 @@ export interface NativeCommands {
    * same reply, for ElevenLabs prosody continuity; ignored by local engines.
    * `utteranceId` (P1) names the reply this sentence belongs to — the ElevenLabs circuit
    * breaker's scope: after one failure the rest of that reply goes straight to local TTS
-   * with a single `tts-fallback` event. 1–64 chars of `[A-Za-z0-9-]`, else ignored. */
-  tts_synthesize: { args: { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string }; result: ArrayBuffer };
+   * with a single `tts-fallback` event. 1–64 chars of `[A-Za-z0-9-]`, else ignored.
+   * `localOnly` (Part 6 narration, `feedback.narrationEngine: "kokoro"`): the local engine in
+   * this agent's own local voice, sparing the ElevenLabs quota. */
+  tts_synthesize: { args: { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string; localOnly?: boolean }; result: ArrayBuffer };
   /** `engine` previews an engine's voices even when it isn't the current `policy.tts`. */
   tts_voices: { args: { engine?: string }; result: VoicesView };
   n8n_workflows: { args: undefined; result: WorkflowInfo[] };
@@ -82,6 +86,10 @@ export interface NativeCommands {
   netbird_status: { args: undefined; result: NetbirdStatus };
   // ── Agentic OS core ("Tony") ──
   os_config_get: { args: undefined; result: OsConfig };
+  /** Phase 2 Part B: the hard Mic switch. Returns the resulting state (an unmute is saved first). */
+  mic_set_enabled: { args: { enabled: boolean }; result: boolean };
+  /** The authoritative mic state (`voice::MIC_ENABLED`), for the webview's hydration. */
+  mic_get: { args: undefined; result: boolean };
   os_config_update: { args: { patch: OsConfigPatch }; result: OsConfig };
   os_identity: { args: undefined; result: string };
   os_secret_set: { args: { name: OsSecret; value: string }; result: void };
@@ -95,6 +103,8 @@ export interface NativeCommands {
   network_audit: { args: undefined; result: ListenFinding[] };
   gateway_token_rotate: { args: undefined; result: string };
   anythingllm_workspaces: { args: undefined; result: WorkspaceInfo[] };
+  /** Read-only AnythingLLM audit (GETs only): duplicate names, role/name mismatches, unused slugs, chat modes, models. */
+  anythingllm_workspace_audit: { args: undefined; result: AllmAudit };
   os_turn: { args: { req: OsTurnRequest }; result: OsTurnResult };
   /** Phase 2 "cut it": drop an in-flight os_turn (its LLM / sub-agent streams) by streamId. */
   os_turn_cancel: { args: { streamId: string }; result: void };
@@ -102,8 +112,12 @@ export interface NativeCommands {
   mcp_list_tools: { args: { refresh?: boolean }; result: ServerTools[] };
   /** Tool NAMES Tony's next turn would see (every tool of his servers / those offered to his LLM router). No secrets. */
   tony_tools_preview: { args: undefined; result: TonyToolsPreview };
-  mcp_call: { args: { name: string; args: Record<string, unknown>; approved?: boolean; agent?: string }; result: string };
+  /** `agent` is REQUIRED (Part 4): Rust gates every non-Tony agent by role
+   * (`PERMISSION_ROLE:` / `PERMISSION_READ_ONLY_ROLE:`). Prefer `mcpCall` (lib/mcp-call.ts). */
+  mcp_call: { args: { name: string; args: Record<string, unknown>; approved?: boolean; agent: string }; result: string };
   mcp_sync_anythingllm: { args: undefined; result: AllmSyncReport };
+  /** Read-only check of the Librarian's AnythingLLM side (GETs + reading AnythingLLM's MCP file). */
+  librarian_preflight: { args: undefined; result: LibrarianGuard };
   /** Which Gmail backend `gmail.*` tools use; credentials are set via `os_secret_set` (`gmail-script-id` / `gmail-script-key`). */
   gmail_status: { args: undefined; result: { configured: boolean; source: "script" | "n8n" | "none" } };
   /** Copies AnythingLLM Desktop's Gmail agent deployment into the keychain (values never reach the webview). */
@@ -173,9 +187,38 @@ export interface NativeCommands {
   memory_mount: { args: { req: { month: string; target: "local" | "droplet"; approved?: boolean } }; result: LedgerEntry };
   memory_unmount: { args: { req: { month: string; target: "local" | "droplet" } }; result: LedgerEntry };
   memory_export: { args: { month: string; kind: "raw" | "summary" | "dataset" }; result: string };
+  /** Phase 3 "Compact & Sync Memory": runs the host `memory_scrolls compact` now if the system is idle.
+   * Never throws for a busy system: the outcome carries `deferred` instead. */
+  memory_compact: { args: undefined; result: CompactOutcome };
+  /** Phase 3: the CLI `status --json` (read-only) + auto-compaction settings, last outcome, running / idle. */
+  memory_compaction_status: { args: undefined; result: CompactionStatus };
   market_candles: { args: { symbol: string; interval: string; range: string }; result: import("./cc-api").MarketData };
-  idea_capture: { args: { text: string }; result: { idea: Idea & { id: string }; reply: string; steps: OsStep[] } };
-  idea_pipeline_run: { args: { ideaId: string }; result: { cardId: string; hasHtml: boolean; steps: OsStep[] } };
+  /** Legacy shim: an approved build → a queued task (returns at once). Prefer `task_create`. */
+  idea_capture: { args: { text: string }; result: { idea: Idea & { id: string }; reply: string; steps: OsStep[]; taskId: string } };
+  /** Ledger "Run" (behind the card) → a queued task for that idea (an open one is returned, not duplicated). Returns at once. */
+  idea_pipeline_run: { args: { ideaId: string }; result: { taskId: string; created: boolean; cardId: string | null; hasHtml: boolean; steps: OsStep[] } };
+  /** Queue a build (only after an approved Tier-3 yes / a ledger Run click). Returns at once; the worker does the rest. */
+  /** `auto` (Phase 2 Part C): Builder mode's commit cue, queued without the spoken offer — Rust
+   * refuses it (`MODE_NOT_AUTO`) unless the active mode is `auto_dispatch`, and refuses every build
+   * under Solo (`MODE_SURFACE_ONLY`). */
+  task_create: { args: { raw_intent: string; title?: string; thread?: string; source?: TaskSource; idea_id?: string; options?: Record<string, boolean>; dedupe_key?: string; auto?: boolean }; result: { task_id: string; created: boolean; status: TaskStatus; title: string } };
+  // ── Tony modes (Phase 2 Part C; modes.rs) ──
+  tony_modes_get: { args: undefined; result: ModesView };
+  /** Switch the work mode (clears overrides, sets narration from the mode). The novelty overlay is refused. */
+  tony_mode_set_active: { args: { id: string }; result: ModesView };
+  /** Temporary manual dial changes (in memory until a switch / reset / restart). */
+  tony_mode_override: { args: { patch: { curiosity?: Curiosity; dispatch?: DispatchPolicy; verbosity?: Verbosity } }; result: ModesView };
+  tony_mode_reset: { args: undefined; result: ModesView };
+  /** Create (`isNew`, default true) or edit a custom mode. Presets are read-only. */
+  tony_mode_upsert: { args: { mode: TonyMode; isNew?: boolean }; result: ModesView };
+  tony_mode_duplicate: { args: { id: string; newName?: string }; result: { mode: TonyMode; view: ModesView } };
+  tony_mode_delete: { args: { id: string }; result: ModesView };
+  task_get: { args: { task_id: string }; result: TaskEnvelope };
+  task_list: { args: { status?: TaskStatus; limit?: number; include_log?: boolean }; result: TaskEnvelope[] };
+  /** Status on demand: a templated answer from the store, no model call. */
+  task_status: { args: { agent?: string; slug?: string }; result: TaskStatusAnswer };
+  task_retry: { args: { task_id: string; offload?: string }; result: TaskEnvelope };
+  task_cancel: { args: { task_id: string }; result: TaskEnvelope };
   playplace_iterate: { args: { cardId: string; notes: string; target: "designer" | "coder" }; result: PlayCard };
   playplace_approve: { args: { cardId: string }; result: PlayCard };
   playplace_commit: { args: { cardId: string }; result: PlayCard };
@@ -183,7 +226,8 @@ export interface NativeCommands {
   comms_whatsapp_send: { args: { recipient: string; message: string; approved?: boolean }; result: string };
   cli_status: { args: undefined; result: CliStatus[] };
   cli_install: { args: { name: string; approved?: boolean }; result: string };
-  pipeline_resume: { args: { checkpoint: string; offload?: string }; result: { cardId: string } };
+  /** Retry / Offload a failed task's step (`checkpoint` is the task id; an old checkpoint path errors clearly). */
+  pipeline_resume: { args: { checkpoint: string; offload?: string }; result: { taskId: string; status: TaskStatus; stage: string | null; cardId: string | null } };
   droplet_link: { args: undefined; result: DropletLink };
   gpu_slot_view: { args: undefined; result: SlotView };
   model_lab_list: { args: undefined; result: LabModel[] };
@@ -225,6 +269,8 @@ export interface NativeCommands {
  * (WAV → stt_transcribe, a voice file → tts_voice_upload).
  */
 export async function nativeRaw<T>(cmdName: "stt_transcribe" | "tts_voice_upload", body: Uint8Array, headers?: Record<string, string>): Promise<T> {
+  // Phase 2 Part B: no audio leaves the webview for Whisper while the mic is locked off.
+  if (cmdName === "stt_transcribe" && !micEnabled()) throw new MicLockedError();
   if (!isTauri()) throw new Error(`native command "${cmdName}" is desktop-only`);
   const { invoke } = await import("@tauri-apps/api/core");
   return timed(cmdName, invoke<T>(cmdName, body, headers ? { headers } : undefined));
@@ -264,7 +310,38 @@ export interface TtsUnpinEvent {
 }
 
 /** Subscribe to a Rust → webview event. Returns an unsubscribe function. No-op on the PWA. */
-export async function onNativeEvent<P = unknown>(event: "voice-toggle" | "memory-progress" | "pipeline-step" | "pipeline-failed" | "gpu-slot" | "droplet-status" | "tony-token" | "tts-fallback" | "tts-unpin" | "spotify-auth" | "spotify-session" | "spotify-reauth" | "tools-changed" | "audio-engine" | "os-trace" | "dev-fix-progress" | "devqueue-changed" | "map-route", handler: (payload: P) => void): Promise<() => void> {
+export type NativeEventName =
+  | "voice-toggle"
+  | "memory-progress"
+  | "pipeline-step"
+  | "gpu-slot"
+  | "droplet-status"
+  | "tony-token"
+  | "tts-fallback"
+  | "tts-unpin"
+  | "spotify-auth"
+  | "spotify-session"
+  | "spotify-reauth"
+  | "tools-changed"
+  | "audio-engine"
+  | "os-trace"
+  | "dev-fix-progress"
+  | "devqueue-changed"
+  | "map-route"
+  /** Part 6: the agent event bus (events.rs `AgentEvent`). */
+  | "agent-event"
+  /** A delegated agent's answer the moment it lands (agents.rs; announcer handoff). */
+  | "os-agent-reply"
+  /** Phase 2 Part B: `{ enabled }`, the authoritative mic state changed (voice.rs). */
+  | "mic-state"
+  /** The global hotkey was pressed while the mic is locked off. */
+  | "mic-locked"
+  /** Phase 2 Part C: Tony's mode / overrides changed (payload: `ModesView`). */
+  | "tony-mode-changed"
+  /** Phase 3: a memory compaction finished, was deferred or failed (payload: `CompactOutcome`). */
+  | "memory-compaction";
+
+export async function onNativeEvent<P = unknown>(event: NativeEventName, handler: (payload: P) => void): Promise<() => void> {
   if (!isTauri()) return () => undefined;
   const { listen } = await import("@tauri-apps/api/event");
   return listen<P>(event, (e) => handler(e.payload));
@@ -604,6 +681,115 @@ export interface RoutingConfig {
   agents: Record<string, AgentTriggers>;
 }
 
+/** 0 silent (toasts only) · 1 milestones + failures · 2 + handoffs · 3 verbose. */
+export type FeedbackLevel = 0 | 1 | 2 | 3;
+/** os.json `feedback` (os_core.rs `FeedbackConfig`). */
+export interface FeedbackConfig {
+  sensitivity: FeedbackLevel;
+  /** "roster" = each agent's own roster voice (Kokoro defaults for gaps); "kokoro" = local Kokoro only. */
+  narrationEngine: "roster" | "kokoro";
+}
+/** os.json `voice` (os_core.rs `VoiceConfig`, Phase 2 Part B). */
+export interface VoiceConfig {
+  /** False = locked off: zero capture, zero STT (Rust refuses `stt_transcribe`). */
+  micEnabled: boolean;
+  /** Absolute speech gate, dBFS (-70..-10). */
+  activationDb: number;
+  /** Extra dB for a barge-in over Tony (0..20). */
+  bargeMarginDb: number;
+  /** True once the webview wrote `activationDb`; false = Rust's serde default (-44). */
+  activationDbSet?: boolean;
+}
+/** os.json `worker` (os_core.rs `WorkerConfig`). */
+export interface WorkerConfig {
+  enabled: boolean;
+  maxIterations: number;
+  verify: boolean;
+  offloadCode: boolean;
+  librarianAudit: boolean;
+}
+
+// ── Agent event bus + TaskEnvelope (events.rs / envelope.rs) ──
+
+export type EventSeverity = "critical" | "milestone" | "handoff" | "verbose";
+/** `agent-event` payload (events.rs `AgentEvent`, camelCase). `shortSummary` is templated or the
+ * agent's validated voice summary, scrubbed and stripped of wake words in Rust. */
+export interface AgentEvent {
+  v: number;
+  seq: number;
+  /** Unix ms. */
+  at: number;
+  taskId?: string;
+  traceId?: string;
+  agentId: string;
+  eventType: string;
+  severity: EventSeverity;
+  shortSummary: string;
+  stage?: string;
+  iteration?: number;
+  status?: TaskStatus;
+  owner?: string;
+  /** `shortSummary` is the agent's own voice summary (speak it in its voice). */
+  fromVoiceSummary?: boolean;
+}
+export type TaskStatus = "queued" | "prompting" | "designing" | "coding" | "review_ready" | "failed";
+export type TaskSource = "voice" | "typed" | "phone" | "playplace" | "ledger";
+/** One append-only `handoff_log` row (snake_case on the wire, like the envelope). */
+export interface HandoffEntry {
+  seq: number;
+  task_id: string;
+  timestamp: number;
+  from_agent: string;
+  to_agent: string;
+  event_type: string;
+  severity: EventSeverity;
+  short_summary: string;
+  voice_summary?: string;
+  summary_payload: unknown;
+  detail_ref?: string;
+  stage: string | null;
+  iteration: number | null;
+}
+/** The TaskEnvelope (envelope.rs `Envelope`; field names are the spec's, verbatim). */
+export interface TaskEnvelope {
+  task_id: string;
+  created_at: number;
+  updated_at: number;
+  status: TaskStatus;
+  stage: string | null;
+  current_owner: string;
+  raw_intent: { text: string; timestamp: number; memory_reference: unknown };
+  title: string;
+  project_slug: string | null;
+  iteration_count: number;
+  max_iterations: number;
+  prompt_spec: unknown;
+  design_artifacts: unknown;
+  coder_brief: unknown;
+  code_artifacts: unknown;
+  librarian_notes: unknown;
+  last_eval: unknown;
+  /** Latest validated voice summary per agent: `{agent: {text, at, stage}}`. */
+  voice_summaries: Record<string, { text: string; at: number; stage?: string | null } | undefined> | null;
+  idea_id: string | null;
+  card_id: string | null;
+  dedupe_key: string | null;
+  options: unknown;
+  lease_until: number | null;
+  error: string | null;
+  handoff_log: HandoffEntry[];
+}
+/** `task_status`: the templated answer plus the open tasks (taskworker.rs `status_text`). */
+export interface TaskStatusAnswer {
+  text: string;
+  task_id: string | null;
+  open: number;
+  active: Array<{ task_id: string; title: string; status: TaskStatus; stage: string | null; current_owner: string; iteration_count: number; max_iterations: number; project_slug: string | null; updated_at: number }>;
+  /** With `agent`: the line that agent speaks in its own voice ("Hey Coder, where are we at?"):
+   * its stored voice summary, or a templated first-person line (taskworker.rs `addressed_line`). */
+  voice?: { agent: string; text: string; task_id: string | null; source: "voice_summary" | "templated" } | null;
+}
+
 export interface McpServer {
   id: string;
   name: string;
@@ -632,6 +818,22 @@ export interface AllmSyncReport {
   skipped: string[];
   /** Existing entries whose invalid "streamable-http" type was repaired. */
   fixed?: string[];
+  /** Existing AnythingLLM entries its agents can run with no read-only / role limit (never removed). */
+  keptWritable?: string[];
+}
+
+/** `librarian_preflight` (mcp.rs `LibrarianGuard`). */
+export interface LibrarianGuard {
+  slug: string;
+  chatMode: string | null;
+  /** Read OK and not in an agent-capable chat mode. */
+  ok: boolean;
+  /** chatMode "automatic" / "agent": AnythingLLM agent tools can run in the Librarian's workspace. */
+  agentCapable: boolean;
+  issues: string[];
+  writableMcps: string[];
+  /** The only tools the Librarian may call. */
+  allowlist: string[];
 }
 
 export interface OsConfig {
@@ -650,6 +852,10 @@ export interface OsConfig {
   privacy: { diffuser: boolean; networkLock: boolean; killSwitch: boolean; destructiveGate: boolean; sensitiveTerms: string[] };
   overseer: { engine: OverseerEngine; claudeModel: string; geminiModel: string; autoEscalate: boolean; manualMode: boolean };
   scheduler: SchedulerConfig;
+  /** Part 6 narration / status feedback (Rust always sends it; read it through `feedbackLevel()`). */
+  feedback: FeedbackConfig;
+  worker: WorkerConfig;
+  voice: VoiceConfig;
   memory: {
     storage: "local" | "droplet" | "hybrid";
     autoMonthly: boolean;
@@ -659,7 +865,94 @@ export interface OsConfig {
     mountWorkspace: string;
     cacheCollections: string[];
     lastAutoMonth: string;
+    /** Phase 3 Memory Scrolls (older os.json files get the Rust defaults). */
+    scrolls: MemoryScrollsConfig;
   };
+}
+
+/** `memory.scrolls` (os_core.rs `ScrollsConfig`). Paths only; no secret ever lives here. */
+export interface MemoryScrollsConfig {
+  /** Empty = `D:\ai-hub-memory\scrolls`. A dir under the read-only `C:\ai-hub` is refused (default applies). */
+  scrollsDir: string;
+  /** Empty = the CLI's resolution (env / `.env` / `D:\ai-hub-archive` / `./archive/memory`). */
+  archiveDir: string;
+  /** AnythingLLM workspace changed scrolls sync into (a Booking slug is refused → `librarian`). */
+  workspace: string;
+  /** Skip Tony's per-note documenter ingest (scrolls become the only embedded layer). */
+  embedOnly: boolean;
+  autoCompact: boolean;
+  /** Clamped 8–1024. */
+  thresholdKb: number;
+  /** Clamped 5–500. */
+  thresholdTurns: number;
+  /** Clamped 2–240. */
+  quietMins: number;
+  /** Clamped 60–3600. */
+  checkSecs: number;
+  /** Clamped 1–4. */
+  maxBatchesAuto: number;
+}
+
+/** compaction.rs `CompactOutcome` (scrubbed in Rust). */
+export interface CompactOutcome {
+  /** Why it did not run / stopped early ("voice active", "yielded to foreground", the CLI's own reason). */
+  deferred?: string;
+  error?: string;
+  result?: CompactResult;
+  exit?: number;
+  manual: boolean;
+  at: number;
+}
+
+/** The `memory_scrolls compact --json` result line (snake_case, as the CLI prints it). */
+export interface CompactResult {
+  archive_ids?: string[];
+  scrolls_updated?: { id: string; version: number; bytes: number; rel?: string }[];
+  kg_entities_upserted?: number;
+  /** Scroll ids synced this run (`sync.sync_changed` lists, not counts). */
+  synced?: string[];
+  /** Scroll ids left pending (no AnythingLLM key). */
+  sync_pending?: string[];
+  /** "<scroll_id>: <short error>" per failed sync. */
+  sync_failed?: string[];
+  pending_targets?: number;
+  llm_calls?: number;
+  llm?: "live" | "replay" | "skipped";
+  warnings?: string[];
+}
+
+/** `memory_scrolls status --json` (read-only). */
+export interface ScrollsStatus {
+  pending: { bytes: number; turns: number; records: number; by_source?: Record<string, number> };
+  threshold: { kb: number; turns: number };
+  threshold_hit: boolean;
+  archive_root: string;
+  /** flag | pinned | env | .env | os.json | D: | fallback (the CLI's wording). */
+  archive_root_source: string;
+  pinned: string | null;
+  scrolls_root: string;
+  scrolls: { id: string | null; rel: string; version: number | null; bytes: number; valid: boolean }[];
+  undistilled: string[];
+  unsynced: string[];
+  last_run: { at: string; archive_ids: string[]; scrolls_updated: number; llm: string; pending_targets: number } | null;
+  last_errors?: unknown[];
+  lm: { loaded_model: string | null };
+  warnings: string[];
+}
+
+/** `memory_compaction_status`. */
+export interface CompactionStatus {
+  status: ScrollsStatus | null;
+  statusError: string | null;
+  auto: boolean;
+  embedOnly: boolean;
+  workspace: string;
+  thresholds: { kb: number; turns: number };
+  quietMins: number;
+  lastResult: CompactOutcome | null;
+  running: boolean;
+  /** Why a manual run would be deferred right now (null = idle). */
+  idleReason: string | null;
 }
 
 /** Top-level keys replace; object sections merge one level deep (Rust side). */
@@ -730,6 +1023,9 @@ export type TraceZone = "cockpit" | "engine" | "ecu" | "cargo" | "exhaust";
 export interface TraceStep extends DevTraceStep {
   hop: TraceHop;
   zone: TraceZone;
+  /** Agent-event steps only: who (the per-agent lane) and how loud (the severity chip). */
+  agent?: string;
+  severity?: EventSeverity;
   /** Model hops: tokens/s of the streamed reply, when it could be measured. */
   tps?: number;
 }
@@ -783,6 +1079,44 @@ export interface WorkspaceInfo {
   agentModel: string | null;
 }
 
+/** `anythingllm_workspace_audit`: reports only, never writes. */
+export interface AllmAuditFinding {
+  kind:
+    | "duplicate_name"
+    | "name_mismatch"
+    | "shared_slug"
+    | "dead_slug"
+    | "unused"
+    | "unmapped"
+    | "no_pinned_provider"
+    | "automatic_mode"
+    | "name_whitespace"
+    | "model_mismatch"
+    | "token_limit_mismatch"
+    | "key_host_mismatch";
+  severity: "warn" | "info";
+  slugs: string[];
+  role: string | null;
+  detail: string;
+}
+export interface AllmAudit {
+  workspaces: Array<{
+    slug: string;
+    name: string;
+    threads: number;
+    chatMode: string | null;
+    chatProvider: string | null;
+    chatModel: string | null;
+    agentProvider: string | null;
+    agentModel: string | null;
+    roles: string[];
+  }>;
+  loadedModel: { key: string; context: number | null } | null;
+  llmSettings: { llmProvider: string | null; lmstudioModelPref: string | null; lmstudioTokenLimit: number | null } | null;
+  findings: AllmAuditFinding[];
+  readOnly: true;
+}
+
 // ── System Map snapshot (`system_introspect`) ──
 // Every nullable field means "no live source": show "—" with the matching *Note / error as the tooltip.
 
@@ -829,6 +1163,14 @@ export interface SnapAgent {
   agentModel: string | null;
   /** Holds the GPU slot right now (from the `gpu-slot` labels). */
   active: boolean;
+  /** Audit flags (null / absent = unknown): other slugs with the same display name. */
+  duplicateOf?: string[] | null;
+  /** The workspace has no threads. */
+  unused?: boolean | null;
+  /** The workspace's name belongs to this other role (general → "Booking" gives "booking"). */
+  nameMismatch?: string | null;
+  /** A chat / agent model that isn't Tony's pinned LM Studio model. */
+  modelMismatch?: string | null;
 }
 export interface SnapRules {
   identity: {
@@ -914,9 +1256,9 @@ export interface SnapRoutines {
   n8nNote: string | null;
 }
 export interface SnapStore {
-  id: "devqueue" | "cc" | "memory" | "anythingllm" | "training-logs" | "knowledge-graph";
+  id: "devqueue" | "tasks" | "cc" | "memory" | "anythingllm" | "training-logs" | "knowledge-graph" | "scrolls" | "memory-archive";
   label: string;
-  kind: "sqlite" | "jsonl" | "json";
+  kind: "sqlite" | "jsonl" | "json" | "dir";
   path?: string;
   exists: boolean;
   bytes?: number | null;
@@ -927,8 +1269,11 @@ export interface SnapStore {
   /** rows null = count failed. */
   tables: { name: string; rows: number | null }[];
   tablesTruncated?: boolean;
-  /** cc: ragVectors, vaultItems · training-logs: todayLines, files · knowledge-graph: entities. */
-  metrics: Partial<Record<"ragVectors" | "vaultItems" | "todayLines" | "files" | "entities", number | null>>;
+  /** cc: ragVectors, vaultItems · training-logs: todayLines, files · knowledge-graph: entities ·
+   * scrolls: scrolls · memory-archive: files. */
+  metrics: Partial<Record<"ragVectors" | "vaultItems" | "todayLines" | "files" | "entities" | "scrolls", number | null>>;
+  /** scrolls: the newest `last_updated` among the scrolls. */
+  newest?: string | null;
 }
 /** "starting" = a listing / cold start is running in the background; "needs_token" = muted, no network call is made. */
 export type BusStatus = "ok" | "off" | "needs_token" | "auth_failed" | "starting" | "error" | "unknown";
@@ -1038,6 +1383,8 @@ export interface SlotView {
   queuedForeground: number;
   queuedBackground: number;
   capacity: number;
+  /** Permits held after a timed-out / cancelled call while the server may still be generating. */
+  settling?: number;
 }
 export interface DropletLink {
   state: "connected" | "checking" | "reconnecting" | "offline" | "disabled";
@@ -1054,14 +1401,6 @@ export interface CliStatus {
   error: string | null;
   canInstall: boolean;
   how: string;
-}
-export interface PipelineFailed {
-  pipelineId: string;
-  ideaId: string;
-  title: string;
-  stage: string;
-  error: string;
-  checkpoint: string | null;
 }
 
 export interface OsTurnRequest {
@@ -1100,6 +1439,9 @@ export interface PipelineStepEvent extends OsStep {
   stage: string;
   pct: number;
   thread: string;
+  /** "worker": a TaskEnvelope stage (its chat turn comes from `agent-event`); absent for the
+   * Play Place's inline iterate / approve and verifier notes. */
+  source?: "worker";
 }
 
 export interface Idea {
@@ -1109,8 +1451,12 @@ export interface Idea {
   tasks: { id: string; text: string; done: boolean }[];
   spec?: Record<string, unknown>;
   /** "parked": saved from a Tony brainstorm (P3 Tier 4) — no tasks yet, nothing ran. */
-  status: "captured" | "prototyping" | "staged" | "approved" | "archived" | "parked";
+  status: "captured" | "prototyping" | "staged" | "approved" | "archived" | "parked" | "failed";
   cardId?: string;
+  /** The TaskEnvelope building it (set by the worker's ledger mirror). */
+  taskId?: string;
+  /** Why the last build failed (worker mirror). */
+  error?: string;
   tags?: string[];
   /** When a Tier-4 save parked it (ms). */
   savedAt?: number;

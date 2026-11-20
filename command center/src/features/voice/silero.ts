@@ -134,10 +134,3 @@ export class SileroStream {
     this.queue = [];
   }
 }
-
-/** Sensitivity 0–100 → speech-probability trigger (60 → 0.52; 35 while Tony talks → 0.66). */
-export function sileroThresholds(sensitivity: number) {
-  const s = Math.max(0, Math.min(100, sensitivity)) / 100;
-  const on = 0.85 - s * 0.55;
-  return { on, off: Math.max(0.15, on - 0.17) };
-}

@@ -1,4 +1,4 @@
-import { osName } from "@/features/os/os-store";
+import { osName, useOs } from "@/features/os/os-store";
 import { SELF_ROLE_IDS, isSelfRoleId } from "./router";
 
 /**
@@ -24,16 +24,50 @@ export function toRoleId(s: string): RoleId | null {
   return isRoleId(v) ? v : null;
 }
 
-/** Display label: general → the OS name ("Tony"), booking → "Booking Desk", others capitalised. */
+/** Display label: general → the OS name ("Tony"), booking → "Booking Desk", others capitalised
+ * word by word (`security-patrol` → "Security Patrol", like Rust `agents::role_label`). */
 export function roleLabel(id: string): string {
   if (isSelfRole(id)) return osName();
   if (id === "booking") return "Booking Desk";
-  return id.charAt(0).toUpperCase() + id.slice(1);
+  const words = id.split(/[-_]/).filter(Boolean);
+  if (words.length === 0) return id;
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
 /** Every sub-agent (not Tony), in the order Part 2's drawer pills use: Booking
  * Desk · Coder · Prompter · Designer · Librarian · Ops. */
 export const SUB_AGENT_IDS = ["booking", "coder", "prompter", "designer", "librarian", "ops"] as const;
+
+const REGISTRY_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** Registry ids beyond the static list (os.json `routing.agents` keys), A→Z: valid, not Tony. */
+function registryExtras(agents: Record<string, unknown> | null | undefined, known: readonly string[]): string[] {
+  return Object.keys(agents ?? {})
+    .filter((id) => REGISTRY_ID_RE.test(id) && !known.includes(id) && !isSelfRole(id))
+    .sort();
+}
+
+/**
+ * Every role id at runtime (Phase 2 §4 prep): the static `ROLE_IDS` first, then any id the
+ * routing registry (`routing.agents`) adds later — a future Security Patrol or Finance agent shows
+ * up with no code change. `agents` defaults to the live os.json; the static list is the fallback.
+ */
+export function roleIds(agents: Record<string, unknown> | null | undefined = currentAgents()): string[] {
+  return [...ROLE_IDS, ...registryExtras(agents, ROLE_IDS)];
+}
+
+/** Every sub-agent id at runtime (not Tony): `SUB_AGENT_IDS`, then registry extras A→Z. */
+export function subAgentIds(agents: Record<string, unknown> | null | undefined = currentAgents()): string[] {
+  return [...SUB_AGENT_IDS, ...registryExtras(agents, ROLE_IDS)];
+}
+
+function currentAgents(): Record<string, unknown> | null {
+  try {
+    return useOs.getState().cfg?.routing?.agents ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Toggle `id` in a grant list that treats `"all"` as a wildcard for every

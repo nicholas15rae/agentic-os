@@ -4,6 +4,7 @@ import { toggleAction } from "@/features/voice/voice-status";
 import { useVoice } from "@/features/voice/voice-store";
 import { useBrainstorm } from "@/features/brainstorm/capture";
 import { holdWake, isPassiveWakeListen } from "@/features/voice/voice-controller";
+import { MIC_LOCKED_MSG, micEnabled, onMicChange } from "@/features/voice/mic-gate";
 import { dictVoiceState, tonyMicBusy, type DictPhase } from "./format";
 
 /**
@@ -64,6 +65,7 @@ export const useDictation = create<DictationState>((set, get) => ({
     if (action === "submit") return void engine?.stop(); // flush → onFinal
     if (action === "hard-stop" || action === "stop-voice") return get().hardStop();
 
+    if (!micEnabled()) return set({ error: MIC_LOCKED_MSG });
     if (useBrainstorm.getState().listening) return set({ error: "Brainstorm Listen Mode has the mic — stop it first." });
     const stt = getEngine();
     if (!stt.supported) return set({ error: "No speech-to-text here (desktop needs Whisper; phones need Chrome)." });
@@ -102,3 +104,8 @@ export const useDictation = create<DictationState>((set, get) => ({
     );
   },
 }));
+
+// Phase 2 Part B: locking the mic discards a note being dictated (nothing is transcribed).
+onMicChange((on) => {
+  if (!on) useDictation.getState().hardStop();
+});

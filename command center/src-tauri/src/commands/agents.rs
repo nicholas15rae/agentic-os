@@ -24,39 +24,14 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tauri::State;
 
+use super::allm::{AllmConn, AllmReader, ChatRequest, ChatTarget, Threads};
 use super::bridge::BridgeState;
-use super::dispatch::{extract_json, run_chat, short, ChatMessage, DispatchState, Priority, ThinkFilter};
+use super::dispatch::{extract_json, run_chat, short, ChatMessage, DispatchState, Priority};
 use super::os_core::{self, OsConfig, OsState};
 
 // ── AnythingLLM ─────────────────────────────────────────────────────────────
-
-fn allm_key(state: &DispatchState, remote: bool) -> Result<String, String> {
-    if remote {
-        os_core::os_secret("anythingllm-remote").ok_or_else(|| "add the remote AnythingLLM API key in Settings → Services → Droplet".into())
-    } else {
-        super::secrets::get(state, "anythingllm").ok_or_else(|| "add your AnythingLLM API key in Settings → Services (AnythingLLM RAG → key)".into())
-    }
-}
-
-pub(crate) async fn allm(state: &DispatchState, base: &str, key: &str, method: reqwest::Method, path: &str, body: Option<Value>, secs: u64) -> Result<Value, String> {
-    let url = format!("{}/api{}", base.trim_end_matches('/'), path);
-    let mut rb = state.http.request(method, url).bearer_auth(key).timeout(Duration::from_secs(secs)).header("Accept", "application/json");
-    if let Some(b) = body {
-        rb = rb.json(&b);
-    }
-    let r = rb.send().await.map_err(short)?;
-    let status = r.status();
-    let text = r.text().await.map_err(short)?;
-    if !status.is_success() {
-        let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"].as_str().or(v["message"].as_str()).map(String::from)).unwrap_or_else(|| text.chars().take(160).collect());
-        return Err(match status.as_u16() {
-            401 | 403 => "AnythingLLM rejected the API key".into(),
-            404 => format!("not found ({msg})"),
-            _ => format!("HTTP {} {msg}", status.as_u16()),
-        });
-    }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
-}
+// Raw requests, thread resolution and message hygiene live in `allm.rs`; this is the
+// slot-holding, Tony-facing layer on top of it.
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -92,9 +67,8 @@ pub(crate) fn parse_workspaces(v: &Value) -> Vec<WorkspaceInfo> {
 
 /// Every AnythingLLM workspace, with models. The API key stays in Rust.
 pub(crate) async fn fetch_workspaces(state: &DispatchState, cfg: &OsConfig, secs: u64) -> Result<Vec<WorkspaceInfo>, String> {
-    let key = allm_key(state, false)?;
-    let v = allm(state, &cfg.anythingllm.base_url, &key, reqwest::Method::GET, "/v1/workspaces", None, secs).await?;
-    Ok(parse_workspaces(&v))
+    let reader = AllmReader::new(AllmConn::local(state, cfg)?);
+    Ok(parse_workspaces(&reader.list_workspaces(secs).await?))
 }
 
 #[tauri::command]
@@ -106,60 +80,28 @@ pub fn month_tag() -> String {
     chrono::Local::now().format("%Y-%m").to_string()
 }
 
-/// This month's Tony thread in a workspace (created on first use). Threads make
-/// the OS's own conversations deletable later (memory flush), unlike the
-/// workspace's default chat log.
-async fn tony_thread(state: &DispatchState, os: &OsState, base: &str, key: &str, slug: &str) -> Result<String, String> {
-    let name = format!("{} · {}", os.snapshot().os_name, month_tag());
-    let cache_key = format!("{base}|{slug}|{name}");
-    if let Some(t) = os.allm_threads.lock().unwrap().get(&cache_key) {
-        return Ok(t.clone());
-    }
-    let ws = allm(state, base, key, reqwest::Method::GET, &format!("/v1/workspace/{slug}"), None, 8).await?;
-    let ws = if ws["workspace"].is_array() { ws["workspace"][0].clone() } else { ws["workspace"].clone() };
-    if ws.is_null() {
-        return Err(format!("workspace \"{slug}\" not found — map the role to an existing workspace in Settings"));
-    }
-    let existing = ws["threads"].as_array().into_iter().flatten().find(|t| t["name"].as_str() == Some(name.as_str())).and_then(|t| t["slug"].as_str().map(String::from));
-    let thread = match existing {
-        Some(t) => t,
-        None => {
-            let v = allm(state, base, key, reqwest::Method::POST, &format!("/v1/workspace/{slug}/thread/new"), Some(json!({ "name": name })), 8).await?;
-            v["thread"]["slug"].as_str().ok_or("AnythingLLM did not return a thread")?.to_string()
-        }
-    };
-    os.allm_threads.lock().unwrap().insert(cache_key, thread.clone());
-    Ok(thread)
+/// Thread resolution context for this process: the persisted map (tasks.db) + the session cache.
+fn allm_threads<'a>(os: &'a OsState, cfg: &'a OsConfig) -> Threads<'a> {
+    Threads { map: super::allm::thread_map(), cache: &os.allm_threads, os_name: &cfg.os_name, month: month_tag() }
 }
 
-/// Ask one workspace. Returns (answer, source titles).
-pub(crate) async fn workspace_chat(state: &DispatchState, os: &OsState, slug: &str, message: &str) -> Result<(String, Vec<String>), String> {
-    workspace_chat_t(state, os, slug, message, None, true).await
+/// Ask one workspace in Tony's monthly thread. Returns (answer, source titles).
+pub(crate) async fn workspace_chat(state: &DispatchState, os: &OsState, slug: &str, role: &str, message: &str) -> Result<(String, Vec<String>), String> {
+    workspace_chat_t(state, os, slug, role, message, None, true, ChatTarget::TonyMonthly).await
 }
 
-/// Same, with a longer timeout for generation-heavy pipeline steps.
-pub(crate) async fn workspace_chat_t(state: &DispatchState, os: &OsState, slug: &str, message: &str, secs: Option<u64>, foreground: bool) -> Result<(String, Vec<String>), String> {
+/// Same, with a timeout, slot priority and target of the caller's choosing (the worker uses
+/// `ChatTarget::TaskSession`). The slot is held for the call and, after a timeout, for the
+/// settle window (`scheduler.settleSecs`), since the server may still be generating.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn workspace_chat_t(state: &DispatchState, os: &OsState, slug: &str, role: &str, message: &str, secs: Option<u64>, foreground: bool, target: ChatTarget) -> Result<(String, Vec<String>), String> {
     let cfg = os.snapshot();
     // AnythingLLM generates on the same local GPU → same baton.
-    let _slot = os.slot.acquire(&format!("anythingllm · {slug}"), foreground, cfg.scheduler.tony_priority_pct).await;
-    let base = cfg.anythingllm.base_url.clone();
-    let key = allm_key(state, false)?;
-    let secs = secs.unwrap_or(cfg.anythingllm.timeout_secs).clamp(10, 900);
-    let path = match tony_thread(state, os, &base, &key, slug).await {
-        Ok(thread) => format!("/v1/workspace/{slug}/thread/{thread}/chat"),
-        Err(e) if e.contains("not found") => return Err(e),
-        Err(_) => format!("/v1/workspace/{slug}/chat"),
-    };
-    let v = allm(state, &base, &key, reqwest::Method::POST, &path, Some(json!({ "message": message, "mode": "chat", "sessionId": format!("tony-{}", month_tag()) })), secs).await?;
-    if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty() && *e != "null") {
-        return Err(e.to_string());
-    }
-    let text = v["textResponse"].as_str().unwrap_or("").trim().to_string();
-    if text.is_empty() {
-        return Err("the agent returned an empty answer".into());
-    }
-    let sources = v["sources"].as_array().into_iter().flatten().filter_map(|s| s["title"].as_str().map(String::from)).take(5).collect();
-    Ok((super::dispatch::strip_think(&text), sources))
+    let mut slot = os.slot.acquire(&format!("anythingllm · {slug}"), foreground, cfg.scheduler.tony_priority_pct).await;
+    let reader = AllmReader::new(AllmConn::local(state, &cfg)?);
+    let req = ChatRequest { slug, role, message, target, secs: secs.unwrap_or(cfg.anythingllm.timeout_secs).clamp(10, 900) };
+    let r = super::allm::chat_in_slot(&reader, &allm_threads(os, &cfg), &mut slot, cfg.scheduler.settle(), &req).await?;
+    Ok((r.text, r.sources))
 }
 
 /// Same answer as `workspace_chat_t`, but over AnythingLLM's `stream-chat` SSE
@@ -169,86 +111,20 @@ pub(crate) async fn workspace_chat_t(state: &DispatchState, os: &OsState, slug: 
 /// a sub-agent" turn uses this; a delegated turn still has Tony synthesize a
 /// summary afterwards through his own streamed chain, unchanged).
 ///
-/// AnythingLLM's stream response is a `data: {...}` line per chunk, each
-/// shaped roughly `{textResponse, sources, close, error}` (a delta in
-/// `textResponse`, `close: true` on the last chunk). Falls back to the plain
-/// (non-streamed) call on any transport/HTTP failure, or if nothing useful
-/// ever streamed — never fails the turn over a streaming-specific hiccup.
+/// Falls back to ONE plain (non-streamed) call, inside the slot it already holds, only when no
+/// token ever arrived and the server can't still be generating (refused / error status / a
+/// clean empty stream). Once a token has streamed there is never a second generation.
 pub(crate) async fn workspace_chat_streamed(state: &DispatchState, os: &OsState, slug: &str, message: &str, app: &tauri::AppHandle, stream_id: &str, agent_tag: &str) -> Result<(String, Vec<String>), String> {
-    use futures_util::StreamExt;
     use tauri::Emitter;
     let cfg = os.snapshot();
-    let _slot = os.slot.acquire(&format!("anythingllm · {slug} (streaming)"), true, cfg.scheduler.tony_priority_pct).await;
-    let base = cfg.anythingllm.base_url.clone();
-    let key = match allm_key(state, false) {
-        Ok(k) => k,
-        Err(e) => return Err(e),
+    let mut slot = os.slot.acquire(&format!("anythingllm · {slug} (streaming)"), true, cfg.scheduler.tony_priority_pct).await;
+    let reader = AllmReader::new(AllmConn::local(state, &cfg)?);
+    let req = ChatRequest { slug, role: agent_tag, message, target: ChatTarget::TonyMonthly, secs: cfg.anythingllm.timeout_secs.clamp(10, 900) };
+    let mut on_token = |delta: &str| {
+        let _ = app.emit("tony-token", json!({ "streamId": stream_id, "delta": delta, "agent": agent_tag }));
     };
-    let secs = cfg.anythingllm.timeout_secs.clamp(10, 900);
-    let path = match tony_thread(state, os, &base, &key, slug).await {
-        Ok(thread) => format!("/v1/workspace/{slug}/thread/{thread}/stream-chat"),
-        Err(e) if e.contains("not found") => return Err(e),
-        Err(_) => format!("/v1/workspace/{slug}/stream-chat"),
-    };
-    let url = format!("{}/api{}", base.trim_end_matches('/'), path);
-    let body = json!({ "message": message, "mode": "chat", "sessionId": format!("tony-{}", month_tag()) });
-    let sent = state.http.post(&url).bearer_auth(&key).timeout(Duration::from_secs(secs)).header("Accept", "text/event-stream").json(&body).send().await;
-    let response = match sent.and_then(|r| r.error_for_status()) {
-        Ok(r) => r,
-        Err(_) => {
-            drop(_slot);
-            return workspace_chat_t(state, os, slug, message, Some(secs), true).await;
-        }
-    };
-    let mut stream = response.bytes_stream();
-    let mut buf = String::new();
-    let mut filter = ThinkFilter::new();
-    let mut content = String::new();
-    let mut sources: Vec<String> = Vec::new();
-    let mut saw_error: Option<String> = None;
-    'outer: while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else { break };
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = buf.find('\n') {
-            let line = buf[..nl].trim().to_string();
-            buf.drain(..=nl);
-            let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
-            if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty() && *e != "null") {
-                saw_error = Some(e.to_string());
-                break 'outer;
-            }
-            if let Some(d) = v["textResponse"].as_str().filter(|d| !d.is_empty()) {
-                let shown = filter.feed(d);
-                if !shown.is_empty() {
-                    content.push_str(&shown);
-                    let _ = app.emit("tony-token", json!({ "streamId": stream_id, "delta": shown, "agent": agent_tag }));
-                }
-            }
-            if let Some(arr) = v["sources"].as_array().filter(|a| !a.is_empty()) {
-                sources = arr.iter().filter_map(|s| s["title"].as_str().map(String::from)).take(5).collect();
-            }
-            if v["close"].as_bool() == Some(true) {
-                break 'outer;
-            }
-        }
-    }
-    let tail = filter.finish();
-    if !tail.is_empty() {
-        content.push_str(&tail);
-        let _ = app.emit("tony-token", json!({ "streamId": stream_id, "delta": tail, "agent": agent_tag }));
-    }
-    drop(_slot);
-    if let Some(e) = saw_error {
-        return Err(e);
-    }
-    if content.trim().is_empty() {
-        return workspace_chat_t(state, os, slug, message, Some(secs), true).await;
-    }
-    Ok((content.trim().to_string(), sources))
+    let r = super::allm::stream_in_slot(&reader, &allm_threads(os, &cfg), &mut slot, cfg.scheduler.settle(), &req, &mut on_token).await?;
+    Ok((r.text, r.sources))
 }
 
 // ── Prompt building ─────────────────────────────────────────────────────────
@@ -265,8 +141,37 @@ pub(crate) fn role_label(role: &str, os_name: &str) -> String {
         "ops" => "Ops".into(),
         "prompter" => "Prompter".into(),
         "designer" => "Designer".into(),
-        r => r.to_string(),
+        // Any future registry id (Phase 2 §4 prep): `security-patrol` → "Security Patrol".
+        r => title_case_id(r),
     }
+}
+
+/// `security-patrol` / `finance_2` → "Security Patrol" / "Finance 2".
+fn title_case_id(id: &str) -> String {
+    id.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The sub-agents Tony can hand work to, from the routing registry (`routing.agents` keys, minus
+/// Tony's own ids): the current roles in their historic order, then any later id A→Z. Data-driven
+/// so a future specialist (Security Patrol, Finance…) joins the sentence with no code change.
+pub(crate) fn sub_agent_roster(cfg: &OsConfig) -> Vec<String> {
+    const ORDER: [&str; 6] = ["librarian", "coder", "booking", "ops", "prompter", "designer"];
+    let ids: Vec<&String> = cfg.routing.agents.keys().filter(|id| !super::routing::is_self_role(id, &cfg.os_name)).collect();
+    let mut out: Vec<String> = ORDER.iter().filter(|o| ids.iter().any(|i| i.as_str() == **o)).map(|o| role_label(o, &cfg.os_name)).collect();
+    out.extend(ids.iter().filter(|i| !ORDER.contains(&i.as_str())).map(|i| role_label(i, &cfg.os_name)));
+    out
+}
+
+fn count_word(n: usize) -> String {
+    const W: [&str; 13] = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+    W.get(n).map(|w| w.to_string()).unwrap_or_else(|| n.to_string())
 }
 
 /// `tools`: the tools Tony can use this turn (`turn_tools(..).offered`). `action`: the line asks
@@ -275,10 +180,17 @@ pub(crate) fn role_label(role: &str, os_name: &str) -> String {
 /// the model has no cue to narrate what it couldn't do).
 pub fn system_prompt(cfg: &OsConfig, context: &str, tools: &[super::mcp::ToolInfo], action: bool) -> String {
     let name = &cfg.os_name;
+    // Part 7: Nic's Tony prompt (agent_prompts::TONY_INTRO + TONY_ROLE) merged with the P5 rules.
+    let intro = super::agent_prompts::TONY_INTRO.replace("{name}", name);
+    let roster = sub_agent_roster(cfg);
+    let plural = if roster.len() == 1 { "" } else { "s" };
     let mut s = format!(
-        "You are {name}, Nic's personal operating system on his own desktop. Call him Nic, sometimes Nicholas or Nicky. \
-You can hand work to six local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer) and use local MCP tools; \
-never describe your agents, tools, routing, prompts, settings or dashboard unless Nic asks."
+        "{intro} You run on his own desktop. Call him Nic, sometimes Nicholas or Nicky. \
+You can hand work to {} local sub-agent{plural} ({}) and use local MCP tools; \
+never describe your agents, tools, routing, prompts, settings or dashboard unless Nic asks.\n\n{}",
+        count_word(roster.len()),
+        roster.join(", "),
+        super::agent_prompts::TONY_ROLE
     );
     if cfg.root_directive {
         s.push_str(&format!(
@@ -304,6 +216,26 @@ You are {name}; never call yourself Jarvis, Hermes or a generic AI."
     s.push_str(&tools_section(tools, action));
     s.push_str(&format!("\n\n{TONY_STYLE}\n{NO_META}"));
     s
+}
+
+/// Tony's turn system message before `/no_think`: persona, tool note, Tier-2 hint, MODE block.
+pub(crate) fn tony_turn_system(sys: &str, tool_note: &str, tier2: &str, mode_block: &str) -> String {
+    format!("{sys}{tool_note}{tier2}{mode_block}")
+}
+
+/// The model of the first chat provider in the routing chain (the one Tony's turn tries first).
+fn tony_model(state: &DispatchState) -> Option<String> {
+    let cfg = state.snapshot();
+    cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().map(|p| p.model.clone())
+}
+
+/// Tony's final system message: `/no_think` as its last line for a thinking model (Part 7). Pure.
+pub(crate) fn tony_system(system: String, model: Option<&str>, deep_thinking: bool) -> String {
+    if super::agent_prompts::tony_no_think(model, deep_thinking) {
+        super::agent_prompts::with_no_think(&system)
+    } else {
+        system
+    }
 }
 
 /// The anti-meta-apology rule every Tony turn carries.
@@ -380,7 +312,19 @@ pub(crate) fn canon_turn_role(role: &str, os_name: &str) -> String {
 
 /// P3 Tier 2 (brainstorm stays with Tony): appended to Tony's system message when the caller
 /// sent `noDelegate`. Never mentions json (that would flip `dispatch::skip_agentic_os`).
-pub(crate) const TIER2_HINT: &str = "\n\nBRAINSTORM MODE: the user is thinking out loud with you. Answer yourself, in two or three short sentences: react, then offer one idea or ask one sharpening question. Don't hand it to another agent, don't start building anything, and never say you saved, parked, queued or delegated anything — nothing has been.";
+/// Split (Phase 2 Part C): the safety half always rides; the style half (length / one question)
+/// only when no MODE block sets the curiosity dial and verbosity instead.
+pub(crate) const TIER2_SAFETY: &str = "\n\nBRAINSTORM TURN: the user is thinking out loud with you. Answer yourself. Don't hand it to another agent, don't start building anything, and never say you saved, parked, queued or delegated anything — nothing has been.";
+pub(crate) const TIER2_STYLE: &str = " Keep it to two or three short sentences: react, then offer one idea or ask one sharpening question.";
+
+/// The Tier-2 hint for this turn (`with_mode`: a non-empty MODE block follows).
+pub(crate) fn tier2_hint(with_mode: bool) -> String {
+    if with_mode {
+        TIER2_SAFETY.to_string()
+    } else {
+        format!("{TIER2_SAFETY}{TIER2_STYLE}")
+    }
+}
 
 /// What the routing step of a turn knows.
 pub(crate) struct TurnRouteInput<'a> {
@@ -392,7 +336,16 @@ pub(crate) struct TurnRouteInput<'a> {
     /// P3 Tier 2: the caller decided Tony brainstorms this himself — never re-promoted to a
     /// sub-agent, so the delegation gate and block never run for it.
     pub no_delegate: bool,
+    /// Phase 2 Part C: the mode's dispatch policy is `surface_only` (Solo). A Domain / Default
+    /// promotion to the Prompter, Designer or Coder stays with Tony (D15), and so does a Named
+    /// route the authoritative router doesn't rate high-confidence for that same agent (a bare
+    /// mention like "I think the coder should…"); an explicit tab, a high-confidence Named
+    /// address ("hey Coder, …") and a Direct live-tool read are kept, and so is every other agent.
+    pub solo: bool,
 }
+
+/// The pipeline roles Solo never promotes a turn to (D15).
+pub(crate) const SOLO_HELD_ROLES: [&str; 3] = ["prompter", "designer", "coder"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TurnRoute {
@@ -439,6 +392,11 @@ pub(crate) fn route_for_turn(input: &TurnRouteInput, cfg: &OsConfig) -> TurnRout
             _ => {}
         }
     }
+    if input.solo && !input.explicit && SOLO_HELD_ROLES.contains(&role.as_str()) && (matches!(kind.as_str(), "Domain" | "Default") || (kind == "Named" && !named_high_for(input.text, &role, cfg))) {
+        role = "general".into();
+        kind = "Self".into();
+        reason = "Solo mode: kept with Tony".into();
+    }
     if kind != "Named" {
         if let Some(d) = super::routing::direct_tool(input.text) {
             role = "general".into();
@@ -447,6 +405,14 @@ pub(crate) fn route_for_turn(input: &TurnRouteInput, cfg: &OsConfig) -> TurnRout
         }
     }
     TurnRoute { role, kind, reason }
+}
+
+/// Solo (D15): does the authoritative router read `text` as a high-confidence Named address of
+/// `role` ("hey Coder, …", "ask the coder to …")? A caller's Named kind alone isn't trusted: the
+/// TS router also returns Named (medium) for a bare mention anywhere in the line.
+fn named_high_for(text: &str, role: &str, cfg: &OsConfig) -> bool {
+    let r = super::routing::resolve(text, cfg);
+    r.kind == super::routing::RouteKind::Named && r.confidence == "high" && r.role.as_deref() == Some(role)
 }
 
 /// The System Map Router hop label. A turn Tony answers himself has no arrow ("Tony · direct
@@ -1264,6 +1230,8 @@ mod turn_cancel_tests {
 }
 
 pub async fn run_os_turn(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>) -> Result<OsTurnResult, String> {
+    // Phase 3: a live Tony turn keeps idle memory compaction away (entry and exit).
+    let _touch = super::compaction::Touch::start();
     let id = req.trace_id.clone().filter(|t| super::trace::valid_id(t)).unwrap_or_else(super::trace::new_id);
     super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app)).await
 }
@@ -1295,8 +1263,11 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // custom trigger the user saved), which the phone path can't see.
     // Self aliases ("tony", "dispatcher"…) are canonicalised to general; Tony is never a
     // route target; the direct live-tool backstop covers phone / inbox / stale callers.
+    // Phase 2 Part C: the mode this turn runs under (switching applies from the next turn).
+    let mode = os.modes.effective();
+    let solo = mode.dispatch == super::modes::DispatchPolicy::SurfaceOnly;
     let TurnRoute { role, kind: route_kind, reason: route_reason } = route_for_turn(
-        &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate },
+        &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate, solo },
         &cfg,
     );
     // Route kind + target only (the reason can quote the request).
@@ -1415,7 +1386,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             // Tony's synthesis moments later).
             let chat_result = match (req.explicit, req.stream_id.as_deref(), app) {
                 (true, Some(sid), Some(app)) => workspace_chat_streamed(state, os, &slug, &task, app, sid, &role).await,
-                _ => workspace_chat(state, os, &slug, &task).await,
+                _ => workspace_chat(state, os, &slug, &role, &task).await,
             };
             // A Librarian read is a memory hop (cargo); any other sub-agent is a model call (engine).
             let hop = if role == "librarian" { Hop::Memory } else { Hop::Model };
@@ -1487,9 +1458,13 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             role_label(&role, &cfg.os_name)
         );
     }
+    // Phase 2 Part C: the MODE block (Tony's own turns only — never a sub-agent or Booking).
+    let mode_block = if role == "general" { super::modes::mode_block(&mode) } else { String::new() };
     // P3 Tier 2: appended here, outside `system_prompt`, so the persona text stays as it is.
-    let tier2 = if req.no_delegate && role == "general" { TIER2_HINT } else { "" };
-    let mut msgs = vec![ChatMessage::new("system", format!("{sys}{sys_tool_note}{tier2}"))];
+    let tier2 = if req.no_delegate && role == "general" { tier2_hint(!mode_block.is_empty()) } else { String::new() };
+    // Part 7: `/no_think` on its own last line when Tony's model thinks by default (Qwen3 family)
+    // and Deep thinking is off — after every hint and the MODE block, so it stays the last line.
+    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &tier2, &mode_block), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
     msgs.extend(history);
     msgs.push(ChatMessage::new("user", user_msg));
 
@@ -1683,6 +1658,12 @@ async fn overseer_call(state: &DispatchState, os: &OsState, cfg: &OsConfig, msgs
 /// Claude / Gemini via CLI or API. Kill switch + cloud permission enforced,
 /// prompt diffused and the reply re-hydrated locally.
 pub(crate) async fn external_chat(state: &DispatchState, os: &OsState, engine: &str, messages: &[ChatMessage], max_secs: u64) -> Result<(String, bool), String> {
+    external_chat_in(state, os, engine, messages, max_secs, None).await
+}
+
+/// `external_chat` with the CLI's working directory (the worker's offloaded Coder runs inside
+/// `staging/<slug>`). A CLI that outlives its timeout is killed with its whole process tree.
+pub(crate) async fn external_chat_in(state: &DispatchState, os: &OsState, engine: &str, messages: &[ChatMessage], max_secs: u64, cwd: Option<&std::path::Path>) -> Result<(String, bool), String> {
     let cfg = os.snapshot();
     if cfg.privacy.kill_switch {
         return Err("kill switch is on — external engines are blocked".into());
@@ -1704,9 +1685,9 @@ pub(crate) async fn external_chat(state: &DispatchState, os: &OsState, engine: &
     }
     let secs = max_secs.clamp(10, 600);
     let out = match engine {
-        "claude-cli" => cli(&["claude.cmd", "claude"], &["-p", "--output-format", "text"], flatten(&msgs), secs).await?,
-        "gemini-cli" => cli(&["gemini.cmd", "gemini"], &[], flatten(&msgs), secs).await?,
-        "llm-cli" => cli(&["llm.exe", "llm"], &["prompt"], flatten(&msgs), secs).await?,
+        "claude-cli" => cli(&["claude.cmd", "claude"], &["-p", "--output-format", "text"], flatten(&msgs), secs, cwd).await?,
+        "gemini-cli" => cli(&["gemini.cmd", "gemini"], &[], flatten(&msgs), secs, cwd).await?,
+        "llm-cli" => cli(&["llm.exe", "llm"], &["prompt"], flatten(&msgs), secs, cwd).await?,
         "claude-api" => claude_api(state, &cfg, &msgs, secs).await?,
         "gemini-api" => gemini_api(state, &cfg, &msgs, secs).await?,
         other => return Err(format!("unknown engine {other}")),
@@ -1719,10 +1700,28 @@ fn flatten(msgs: &[ChatMessage]) -> String {
     msgs.iter().map(|m| format!("### {}\n{}", m.role.to_uppercase(), m.content)).collect::<Vec<_>>().join("\n\n")
 }
 
-/// Run a fixed CLI with the prompt on stdin (never on the command line).
-async fn cli(programs: &[&'static str], args: &[&'static str], input: String, secs: u64) -> Result<String, String> {
+/// Kill a process and every descendant (`taskkill /T /F`): an npm-shim CLI (`claude.cmd`)
+/// runs node as a grandchild that `Child::kill` alone would orphan.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run a fixed CLI with the prompt on stdin (never on the command line), optionally inside `cwd`.
+async fn cli(programs: &[&'static str], args: &[&'static str], input: String, secs: u64, cwd: Option<&std::path::Path>) -> Result<String, String> {
     let programs = programs.to_vec();
     let args = args.to_vec();
+    let cwd = cwd.map(std::path::Path::to_path_buf);
+    if let Some(d) = &cwd {
+        if !d.is_dir() {
+            return Err(format!("CLI working directory {} does not exist", d.display()));
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let mut last = String::new();
         for program in programs {
@@ -1733,6 +1732,9 @@ async fn cli(programs: &[&'static str], args: &[&'static str], input: String, se
                 None => Command::new(program),
             };
             c.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            if let Some(d) = &cwd {
+                c.current_dir(d);
+            }
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -1774,7 +1776,7 @@ async fn cli(programs: &[&'static str], args: &[&'static str], input: String, se
                         return Err(format!("{program} failed: {}", if e.trim().is_empty() { o } else { e }.chars().take(300).collect::<String>()));
                     }
                     Ok(None) if Instant::now() > deadline => {
-                        let _ = child.kill();
+                        kill_tree(&mut child);
                         return Err(format!("{program} timed out after {secs}s"));
                     }
                     Ok(None) => std::thread::sleep(Duration::from_millis(150)),
@@ -2042,7 +2044,38 @@ mod tests {
         // skip_agentic_os must not flip, and the persona stays compact.
         assert!(!s.to_ascii_lowercase().contains("json"), "{s}");
         assert!(TONY_STYLE.chars().count() <= 900, "TONY_STYLE is {} chars", TONY_STYLE.chars().count());
-        assert!(s.chars().count() <= 2200, "bare Tony prompt is {} chars", s.chars().count());
+        // Part 7: Nic's Tony prompt is merged in (+1.3k chars at most), still free of the format word.
+        assert!(s.starts_with("You are Tony, Nic's main AI operating system, conversational front-end, and persistent memory anchor."), "{s}");
+        assert!(s.contains(super::super::agent_prompts::TONY_ROLE), "{s}");
+        assert!(!s.contains("dispatch_to_prompter") && !s.contains("/no_think"), "{s}");
+        assert!(s.chars().count() <= 3500, "bare Tony prompt is {} chars", s.chars().count());
+    }
+
+    #[test]
+    fn tony_no_think_is_the_last_line_for_a_thinking_model_only() {
+        let base = format!("{}{}", system_prompt(&OsConfig::default(), "", &[], false), tier2_hint(false));
+        let t = tony_system(base.clone(), Some("qwen/qwen3.5-9b"), false);
+        assert_eq!(t.lines().last(), Some("/no_think"));
+        // Phase 2 Part C: with the MODE block (every preset), `/no_think` is still the last line,
+        // once, and the block sits right before it.
+        for m in super::super::modes::presets() {
+            let f = super::super::modes::ModesFile { active_mode_id: m.id.clone(), ..Default::default() };
+            let block = super::super::modes::mode_block(&super::super::modes::effective(&f, &Default::default()));
+            let sys = tony_turn_system(&system_prompt(&OsConfig::default(), "", &[], false), "", &tier2_hint(!block.is_empty()), &block);
+            let t = tony_system(sys.clone(), Some("qwen/qwen3.5-9b"), false);
+            assert_eq!(t.lines().last(), Some("/no_think"), "{}", m.id);
+            assert_eq!(t.matches("/no_think").count(), 1, "{}", m.id);
+            assert!(t.starts_with(&sys) && sys.ends_with(&block), "{}", m.id);
+            if !block.is_empty() {
+                assert!(t.contains("MODE: ") && t.find("MODE: ").unwrap() < t.find("/no_think").unwrap(), "{}", m.id);
+            }
+            assert!(!super::super::dispatch::skip_agentic_os(&[ChatMessage::new("system", t)], None), "{}", m.id);
+        }
+        assert_eq!(t.matches("/no_think").count(), 1);
+        assert!(t.starts_with(&base) && !super::super::dispatch::skip_agentic_os(&[ChatMessage::new("system", t.clone())], None));
+        assert_eq!(tony_system(base.clone(), Some("qwen/qwen3.5-9b"), true), base, "Deep thinking on");
+        assert_eq!(tony_system(base.clone(), Some("google/gemma-4-e4b"), false), base);
+        assert_eq!(tony_system(base.clone(), None, false), base);
     }
 
     #[test]
@@ -2070,7 +2103,7 @@ mod tests {
     #[test]
     fn route_for_turn_never_routes_to_tony() {
         let cfg = OsConfig::default();
-        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false }, &cfg);
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false }, &cfg);
         // Self address: stays general, kind Self.
         for text in ["thanks tony", "tony what do you think", "system status", "ask the dispatcher to check the build"] {
             let r = rt("general", false, text, None);
@@ -2099,7 +2132,7 @@ mod tests {
     #[test]
     fn route_for_turn_no_delegate_keeps_tony() {
         let cfg = OsConfig::default();
-        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate }, &cfg);
+        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate, solo: false }, &cfg);
         // Without the flag the phone's Default is re-promoted to the Designer (today's net)…
         let r = rt("redo the color palette and layout", Some("Default"), false);
         assert_eq!(r.role, "designer");
@@ -2111,7 +2144,7 @@ mod tests {
             }
         }
         // A stale caller role is still forced back to Tony.
-        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true }, &cfg);
+        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true, solo: false }, &cfg);
         assert_eq!(r.role, "general");
         // A live-tool read stays Tony's Direct path.
         assert_eq!(rt("any whatsapp updates", None, true).kind, "Direct");
@@ -2127,8 +2160,84 @@ mod tests {
 
     #[test]
     fn tier2_hint_is_safe() {
-        assert!(!TIER2_HINT.to_lowercase().contains("json"));
-        assert!(TIER2_HINT.contains("never say you saved"));
+        for h in [tier2_hint(false), tier2_hint(true)] {
+            assert!(!h.to_lowercase().contains("json"), "{h}");
+            assert!(h.contains("never say you saved"), "{h}");
+            assert!(h.contains("Don't hand it to another agent"), "{h}");
+        }
+        // The style half (length / one question) rides only when no MODE block sets it.
+        assert!(tier2_hint(false).contains("two or three short sentences"));
+        assert!(!tier2_hint(true).contains("two or three short sentences"));
+        assert_eq!(tier2_hint(false), format!("{TIER2_SAFETY}{TIER2_STYLE}"));
+    }
+
+    #[test]
+    fn tony_prompt_with_each_mode_block_stays_compact_and_safe() {
+        let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
+        let bare = system_prompt(&cfg, "", &[], false);
+        for m in super::super::modes::presets() {
+            let f = super::super::modes::ModesFile { active_mode_id: m.id.clone(), ..Default::default() };
+            let block = super::super::modes::mode_block(&super::super::modes::effective(&f, &Default::default()));
+            let s = tony_turn_system(&bare, "", "", &block);
+            assert!(s.chars().count() <= 3500 + 700, "{} is {} chars", m.id, s.chars().count());
+            assert!(!s.to_ascii_lowercase().contains("json"), "{}", m.id);
+            assert!(!s.contains("/no_think"), "{}", m.id);
+            // TONY_STYLE stays intact; the MODE block only adds rules after it.
+            assert!(s.contains("1 to 3 short sentences") && s.contains(TONY_STYLE), "{}", m.id);
+            assert_eq!(s.to_ascii_lowercase().matches("gabagool").count(), bare.to_ascii_lowercase().matches("gabagool").count(), "{}", m.id);
+        }
+    }
+
+    #[test]
+    fn roster_sentence_is_built_from_the_registry() {
+        let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
+        // The default registry keeps today's sentence byte for byte.
+        assert!(system_prompt(&cfg, "", &[], false).contains("You can hand work to six local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer) and use local MCP tools;"));
+        // A future specialist joins it with no code change.
+        let mut more = cfg.clone();
+        more.routing.agents.insert("security-patrol".into(), Default::default());
+        let s = system_prompt(&more, "", &[], false);
+        assert!(s.contains("seven local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer, Security Patrol)"), "{s}");
+        assert_eq!(role_label("security-patrol", "Tony"), "Security Patrol");
+        assert_eq!(role_label("finance", "Tony"), "Finance");
+        assert_eq!(role_label("finance_2", "Tony"), "Finance 2");
+        // Self ids never appear as a sub-agent.
+        let mut selfy = cfg.clone();
+        selfy.routing.agents.insert("tony".into(), Default::default());
+        assert!(!sub_agent_roster(&selfy).iter().any(|r| r == "Tony"));
+    }
+
+    #[test]
+    fn route_for_turn_solo_keeps_pipeline_promotions_with_tony() {
+        let cfg = OsConfig::default();
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>, solo: bool| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo }, &cfg);
+        // A Default line the safety net would hand to the Coder stays with Tony under Solo.
+        assert_eq!(rt("general", false, "write code for a timer script", Some("Default"), false).role, "coder");
+        let r = rt("general", false, "write code for a timer script", Some("Default"), true);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"));
+        // A caller-resolved Domain hit on the Designer / Prompter stays with Tony too.
+        for role in ["designer", "prompter", "coder"] {
+            let r = rt(role, false, "redo the color palette and layout", Some("Domain"), true);
+            assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"), "{role}");
+        }
+        // Explicit tab and Named are kept.
+        assert_eq!(rt("coder", true, "fix the build", Some("Tab"), true).role, "coder");
+        let r = rt("general", false, "ask the coder to fix the build", None, true);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("coder", "Named"));
+        let r = rt("coder", false, "tell the coder to write a timer script", Some("Named"), true);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("coder", "Named"), "a high-confidence address survives Solo");
+        // Fix pass: a caller's medium-confidence Named (a bare mention) is held under Solo…
+        let r = rt("coder", false, "I think the coder should write a timer script", Some("Named"), true);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"));
+        // …but not outside Solo.
+        assert_eq!(rt("coder", false, "I think the coder should write a timer script", Some("Named"), false).role, "coder");
+        // Direct live-tool reads still win.
+        assert_eq!(rt("general", false, "any whatsapp updates", None, true).kind, "Direct");
+        // Booking / Librarian / Ops routing is unchanged.
+        let a = rt("booking", false, "check the casting call availability", Some("Domain"), true);
+        let b = rt("booking", false, "check the casting call availability", Some("Domain"), false);
+        assert_eq!(a, b);
+        assert_eq!(a.role, "booking");
     }
 
     #[test]
@@ -2546,18 +2655,16 @@ mod live {
             let cfg = os.snapshot();
 
             // 1. Workspaces
-            match allm_key(&state, false) {
-                Ok(key) => {
-                    let v = allm(&state, &cfg.anythingllm.base_url, &key, reqwest::Method::GET, "/v1/workspaces", None, 8).await;
-                    let slugs: Vec<String> = v.map(|v| v["workspaces"].as_array().into_iter().flatten().filter_map(|w| w["slug"].as_str().map(String::from)).collect()).unwrap_or_default();
+            match fetch_workspaces(&state, &cfg, 8).await.map(|w| w.into_iter().map(|w| w.slug).collect::<Vec<_>>()) {
+                Ok(slugs) => {
                     println!("WORKSPACES: {slugs:?}");
                     if let Some(slug) = ["booking", "librarian"].iter().filter_map(|r| cfg.anythingllm.workspaces.get(*r)).find(|s| slugs.contains(s)) {
                         let t0 = Instant::now();
-                        let r = workspace_chat(&state, &os, slug, "[Tony → Booking agent] Retrieve and summarize the last 5 incoming booking messages.").await;
+                        let r = workspace_chat(&state, &os, slug, "booking", "[Tony → Booking agent] Retrieve and summarize the last 5 incoming booking messages.").await;
                         println!("BOOKING ({}ms): {}", t0.elapsed().as_millis(), r.map(|x| x.0.chars().take(300).collect::<String>()).unwrap_or_else(|e| format!("ERR {e}")));
                     }
                 }
-                Err(e) => println!("ANYTHINGLLM KEY: {e}"),
+                Err(e) => println!("ANYTHINGLLM: {e}"),
             }
 
             // 2. Weather tool
@@ -2602,43 +2709,6 @@ mod live {
     }
 }
 
-/// One-off: create the sub-agent workspaces Tony delegates to, if missing.
-/// `cargo test --lib live_create_workspaces -- --ignored --nocapture`
-#[cfg(test)]
-mod live_setup {
-    use super::*;
-
-    #[test]
-    #[ignore]
-    fn live_create_workspaces() {
-        tauri::async_runtime::block_on(async {
-            let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
-            let state = DispatchState::default();
-            state.load_or_init(&dir);
-            let base = "http://127.0.0.1:3001";
-            let key = allm_key(&state, false).expect("AnythingLLM key");
-            let v = allm(&state, base, &key, reqwest::Method::GET, "/v1/workspaces", None, 8).await.unwrap();
-            let have: Vec<String> = v["workspaces"].as_array().into_iter().flatten().filter_map(|w| w["slug"].as_str().map(String::from)).collect();
-            let want = [
-                ("booking", "Booking", "You are the Booking agent of Tony, the user's personal AI operating system. You handle the user's bookings: auditions, gigs, shoots, client jobs, appointments and reservations. Answer from the documents and messages in this workspace: who, what, when, where, rate and status. Quote dates, times and names exactly; if something isn't in your data, say so plainly. Never confirm, send or book anything yourself — propose it and Tony will ask the user."),
-                ("ops", "Ops", "You are the Ops agent of Tony, the user's personal AI operating system. You cover infrastructure: Docker, n8n workflows, the droplet over NetBird, GPU/VRAM, services and backups. Report status as short telemetry lines, flag anything degraded first, and give exact commands for fixes. Never run or change anything yourself."),
-                ("designer", "Designer", "You are the Designer agent of Tony, the user's personal AI operating system — a senior UI/UX designer. Never give generic advice. Always answer with concrete, buildable specs: (1) design tokens as JSON (color, type scale, spacing, radius, shadow, motion), (2) a component hierarchy, (3) a layout wireframe in ASCII or bullet form per breakpoint, and when asked for a prototype (4) ONE self-contained HTML file using Tailwind via CDN (and React via ESM CDN only if needed) inside a ```html fenced block. Dark, cinematic, glass aesthetic unless told otherwise; accessible contrast; purposeful motion."),
-            ];
-            for (slug, name, prompt) in want {
-                if have.iter().any(|h| h == slug) {
-                    println!("EXISTS {slug}");
-                    continue;
-                }
-                let r = allm(&state, base, &key, reqwest::Method::POST, "/v1/workspace/new", Some(json!({ "name": name, "openAiPrompt": prompt, "openAiTemp": 0.4, "openAiHistory": 20, "chatMode": "chat" })), 20).await;
-                match r {
-                    Ok(v) => println!("CREATED {} -> slug {}", name, v["workspace"]["slug"].as_str().unwrap_or("?")),
-                    Err(e) => println!("FAILED {slug}: {e}"),
-                }
-            }
-        });
-    }
-}
-
 /// `cargo test --lib live_droplet -- --ignored --nocapture` — the app's own path to the droplet.
 #[cfg(test)]
 mod live_droplet {
@@ -2669,73 +2739,6 @@ mod live_droplet {
     }
 }
 
-/// AnythingLLM model settings. Read: `cargo test --lib live_allm_llm -- --ignored --nocapture`.
-/// Write: same with ALLM_SET=1 (points AnythingLLM's LLM at Bionic/LM Studio on :1235).
-#[cfg(test)]
-mod live_allm_llm {
-    use super::*;
-
-    #[test]
-    #[ignore]
-    fn live_allm_llm() {
-        tauri::async_runtime::block_on(async {
-            let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
-            let state = DispatchState::default();
-            state.load_or_init(&dir);
-            let key = allm_key(&state, false).unwrap();
-            let base = "http://127.0.0.1:3001";
-            if std::env::var("ALLM_SET").is_ok() {
-                let r = allm(&state, base, &key, reqwest::Method::POST, "/v1/system/update-env", Some(json!({
-                    "LLMProvider": "lmstudio",
-                    "LMStudioBasePath": "http://127.0.0.1:1235/v1",
-                    "LMStudioModelPref": "qwen/qwen3.5-9b",
-                    "LMStudioTokenLimit": 32768
-                })), 20).await;
-                println!("UPDATE: {r:?}");
-                // Coder ran qwen2.5-coder-14b — a second big model that can't share 12 GB with the 9B.
-                let r = allm(&state, base, &key, reqwest::Method::POST, "/v1/workspace/coder/update", Some(json!({ "chatProvider": "lmstudio", "chatModel": "qwen/qwen3.5-9b" })), 20).await;
-                println!("CODER: {:?}", r.map(|v| v["workspace"]["chatModel"].clone()));
-            }
-            let v = allm(&state, base, &key, reqwest::Method::GET, "/v1/system", None, 10).await.unwrap();
-            let s = &v["settings"];
-            for k in ["LLMProvider", "LMStudioBasePath", "LMStudioModelPref", "LMStudioTokenLimit", "AnythingLLMOllamaModelPref", "EmbeddingEngine", "EmbeddingModelPref"] {
-                println!("SETTING {k} = {}", s[k]);
-            }
-            let w = allm(&state, base, &key, reqwest::Method::GET, "/v1/workspaces", None, 10).await.unwrap();
-            for ws in w["workspaces"].as_array().into_iter().flatten() {
-                println!("WS {} provider={} model={}", ws["slug"], ws["chatProvider"], ws["chatModel"]);
-            }
-        });
-    }
-}
-
-/// `cargo test --lib live_no_think -- --ignored --nocapture` — add Qwen3's /no_think switch
-/// to every AnythingLLM workspace prompt (sub-agents then answer without a thinking pass).
-#[cfg(test)]
-mod live_no_think {
-    use super::*;
-
-    #[test]
-    #[ignore]
-    fn live_no_think() {
-        tauri::async_runtime::block_on(async {
-            let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
-            let state = DispatchState::default();
-            state.load_or_init(&dir);
-            let key = allm_key(&state, false).unwrap();
-            let base = "http://127.0.0.1:3001";
-            const DEFAULT: &str = "Given the following conversation, relevant context, and a follow up question, reply with an answer to the current question the user is asking. Return only your response to the question given the above information following the users instructions as needed.";
-            let v = allm(&state, base, &key, reqwest::Method::GET, "/v1/workspaces", None, 10).await.unwrap();
-            for w in v["workspaces"].as_array().unwrap() {
-                let slug = w["slug"].as_str().unwrap_or("");
-                let prompt = w["openAiPrompt"].as_str().filter(|p| !p.trim().is_empty()).unwrap_or(DEFAULT).to_string();
-                if prompt.contains("/no_think") {
-                    println!("NOTHINK {slug}: already set");
-                    continue;
-                }
-                let r = allm(&state, base, &key, reqwest::Method::POST, &format!("/v1/workspace/{slug}/update"), Some(json!({ "openAiPrompt": format!("{prompt}\n/no_think") })), 20).await;
-                println!("NOTHINK {slug}: {}", if r.is_ok() { "added" } else { "FAILED" });
-            }
-        });
-    }
-}
+// The live AnythingLLM write tests (create workspaces, model settings, /no_think) moved to
+// `allm.rs` (`mod live_writes`) so raw AnythingLLM access stays in one module; they now also
+// require ALLM_LIVE_WRITE=1.

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, migrateSensitivity } from "@/features/voice/vad-gate";
 
 export type WeatherMode = "auto" | "clear" | "rain" | "snow" | "autumn" | "midnight" | "fog";
 
@@ -67,8 +68,12 @@ export interface SettingsState {
    * business sitting in plaintext `localStorage`. Re-enter it each session.
    */
   gatewayToken: string;
-  /** Voice detection: 0–100 sensitivity, pause that ends an utterance, hard cap. */
-  vad: { sensitivity: number; endSilenceMs: number; maxUtteranceMs: number };
+  /**
+   * Voice detection (v7, Phase 2 Part B): `activationDb` is the absolute speech gate in dBFS
+   * (-70..-10; on desktop it mirrors os.json `voice.activationDb`), `bargeMarginDb` the extra a
+   * barge-in over Tony needs, then the pause that ends an utterance and the hard cap.
+   */
+  vad: { activationDb: number; bargeMarginDb: number; endSilenceMs: number; maxUtteranceMs: number };
   /**
    * Conversation: reopen the mic after Tony answers; let you talk over him.
    * `bargeEndSilenceMs`: end-of-speech pause for a listen opened over Tony (Phase 2 reflexes).
@@ -113,7 +118,7 @@ const defaults: Omit<SettingsState, "set"> = {
   wakeRequire: true,
   glassOpacity: 8,
   gatewayToken: "",
-  vad: { sensitivity: 60, endSilenceMs: 700, maxUtteranceMs: 15000 },
+  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true, vocalHandoffs: true },
   reminders: { osFallback: true },
@@ -162,7 +167,7 @@ export function deepMergeDefaults<T>(partial: DeepPartial<T> | null | undefined,
 }
 
 /**
- * Persisted-settings migration (exported for tests). v6 (P4): `conversation.spotifyDuck{level}` —
+ * Persisted-settings migration (exported for tests). v7: see below. v6 (P4): `conversation.spotifyDuck{level}` —
  * an ABSOLUTE "duck TO level%" — becomes `conversation.mediaDuck{reductionPct}`, "duck BY %".
  * `enabled` and `onWakeListen` carry over; `reductionPct` is forced to 15 and the old `level` /
  * `restoreMs` (tuned for the old deep duck) are dropped, so "15" can never be reread as a new meaning.
@@ -180,6 +185,15 @@ export function migrateSettings(persisted: unknown, from: number): SettingsState
       s.conversation = { ...conversation, mediaDuck };
     } else s.conversation = conversation;
   }
+  // v7 (Phase 2 Part B): the 0–100 sensitivity becomes an absolute dBFS gate (60 → -44 dB).
+  // `sensitivity` is dropped so it can never be reread; everything else (wakeMode…) is kept.
+  if (from < 7) {
+    const vad = isPlainObject(s.vad) ? (s.vad as unknown as Record<string, unknown>) : null;
+    if (vad) {
+      const { sensitivity, ...rest } = vad;
+      s.vad = { ...rest, activationDb: migrateSensitivity(typeof sensitivity === "number" ? sensitivity : 60), bargeMarginDb: DEFAULT_BARGE_MARGIN_DB } as SettingsState["vad"];
+    }
+  }
   // `merge` (below) backfills any still-missing fields right after this runs.
   return s as unknown as SettingsState;
 }
@@ -192,7 +206,7 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: "cc.settings",
-      version: 6,
+      version: 7,
       migrate: migrateSettings,
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults

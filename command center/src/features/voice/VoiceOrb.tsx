@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
-import { voiceLevel, type VoiceState } from "./voice-store";
+import { micLevel, voiceLevel, type VoiceState } from "./voice-store";
 
 const ANIMATED: VoiceState[] = ["listening", "transcribing", "speaking", "thinking", "holding"];
 
@@ -45,7 +45,7 @@ export function VoiceOrb({ state, size = 64 }: { state: VoiceState; size?: numbe
     ];
 
     const draw = () => {
-      const level = state === "thinking" ? 0.18 + 0.1 * Math.sin(t * 2) : voiceLevel.current;
+      const level = state === "thinking" ? 0.18 + 0.1 * Math.sin(t * 2) : Math.max(voiceLevel.current, micLevel.current);
       const target = animate ? 0.08 + level * 0.9 : 0;
       amp += (target - amp) * 0.15;
       ctx.clearRect(0, 0, full, full);

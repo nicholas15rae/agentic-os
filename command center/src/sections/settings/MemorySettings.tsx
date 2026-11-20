@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { CloudOff, CloudUpload, Download, HardDrive, Loader2, Lock, LockOpen, Sparkles, Trash2 } from "lucide-react";
+import { Archive, CloudOff, CloudUpload, Download, HardDrive, Loader2, Lock, LockOpen, Sparkles, Trash2 } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
-import { cmd, onNativeEvent, type LedgerEntry } from "@/lib/platform";
+import { cmd, onNativeEvent, type CompactOutcome, type CompactionStatus, type LedgerEntry, type MemoryScrollsConfig } from "@/lib/platform";
 import { gated } from "@/features/bridge/gate";
 import { CfgError, SecretRow, Toggle, useOsCfg } from "./os-ui";
+import { archiveSourceLabel, canCompact, clampInt, effectiveScrollsDir, formatBytes, formatOutcome, formatPending, outcomeTone, SCROLLS_BOUNDS } from "./memory-scrolls-format";
 
 const month = () => new Date().toISOString().slice(0, 7);
 
@@ -206,5 +207,146 @@ function SmallBtn({ children, onClick, title, busy, danger }: { children: React.
     <button onClick={onClick} title={title} disabled={busy} className={`flex h-7 items-center gap-1 rounded-full border px-2 text-[11px] text-ink-2 hover:text-ink ${danger ? "border-alert/30 hover:border-alert/60" : "border-white/10"}`}>
       {busy ? <Loader2 size={11} className="animate-spin" /> : children}
     </button>
+  );
+}
+
+const SCROLLS_DEFAULTS: MemoryScrollsConfig = { scrollsDir: "", archiveDir: "", workspace: "librarian", embedOnly: false, autoCompact: false, thresholdKb: 50, thresholdTurns: 25, quietMins: 10, checkSecs: 300, maxBatchesAuto: 1 };
+
+/**
+ * Phase 3 tiered memory: Tier-1 history is archived losslessly to the cold archive, then
+ * distilled into a few living Memory Scrolls (the only layer embedded in RAG). The button runs
+ * the host `memory_scrolls compact` now; a busy system (voice, a build, the GPU) defers it.
+ */
+export function MemoryScrollsCard() {
+  const { cfg, error, save } = useOsCfg();
+  const [status, setStatus] = useState<CompactionStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState<CompactOutcome | null>(null);
+
+  const refresh = () =>
+    void cmd("memory_compaction_status")
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  useEffect(() => {
+    refresh();
+    let off: (() => void) | undefined;
+    void onNativeEvent<CompactOutcome>("memory-compaction", (o) => {
+      setLast(o);
+      refresh();
+    }).then((u) => (off = u));
+    return () => off?.();
+  }, []);
+  if (!cfg) return null;
+  const sc: MemoryScrollsConfig = { ...SCROLLS_DEFAULTS, ...cfg.memory.scrolls };
+  const set = (p: Partial<MemoryScrollsConfig>) => save({ memory: { scrolls: { ...sc, ...p } } });
+
+  const compact = async () => {
+    setBusy(true);
+    try {
+      setLast(await cmd("memory_compact"));
+    } catch (e) {
+      setLast({ error: String(e), manual: true, at: Date.now() });
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  const st = status?.status ?? null;
+  const shown = last ?? status?.lastResult ?? null;
+  const num = (k: keyof typeof SCROLLS_BOUNDS, label: string, unit: string) => (
+    <Field label={label}>
+      <Input
+        key={`${k}-${sc[k]}`}
+        type="number"
+        min={SCROLLS_BOUNDS[k][0]}
+        max={SCROLLS_BOUNDS[k][1]}
+        defaultValue={sc[k]}
+        onBlur={(e) => {
+          const v = clampInt(e.target.value, SCROLLS_BOUNDS[k][0], SCROLLS_BOUNDS[k][1], sc[k]);
+          if (v !== sc[k]) set({ [k]: v });
+        }}
+        className="font-mono !text-[12px]"
+        aria-label={`${label} (${unit})`}
+      />
+    </Field>
+  );
+
+  return (
+    <Card
+      title="Memory Scrolls"
+      hint="Raw chats, build logs and task history are archived losslessly to the cold archive (never indexed), then condensed into a few living Memory Scrolls: the only memory embedded in RAG and read first by the Librarian."
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <button onClick={() => void compact()} disabled={!canCompact({ busy, status })} className="pill-primary !h-10 text-sm">
+          {busy || status?.running ? <Loader2 size={15} className="animate-spin" /> : <Archive size={15} />} Compact & Sync Memory
+        </button>
+        {status && <span className="text-xs text-ink-3">{formatPending(status)}</span>}
+      </div>
+      {status?.idleReason && !busy && <p className="mt-1.5 text-[11px] text-amber-soft">Would wait right now: {status.idleReason}</p>}
+      {shown && <p className={`mt-2 text-xs ${{ error: "text-alert", warn: "text-amber-soft", ok: "text-teal" }[outcomeTone(shown)]}`}>{formatOutcome(shown)}</p>}
+
+      <div className="mt-3">
+        <Toggle
+          on={sc.autoCompact}
+          onChange={(v) => set({ autoCompact: v })}
+          label="Auto-compact when idle"
+          hint="Only after the pending buffer passes a threshold AND nothing is running: no voice turn, no build, no Claude Code fix, the GPU free and the quiet window over. Off by default."
+        />
+        <Toggle
+          on={sc.embedOnly}
+          onChange={(v) => set({ embedOnly: v })}
+          label="Embed scrolls only"
+          hint="Stop embedding each task note into the Librarian workspace (notes stay on disk and are distilled into scrolls instead). Turn on after the first RAG offload."
+        />
+      </div>
+      <div className="mt-2 grid gap-3 sm:grid-cols-3">
+        {num("thresholdKb", "Threshold (KB)", "kilobytes")}
+        {num("thresholdTurns", "Threshold (turns)", "turns")}
+        {num("quietMins", "Quiet window (min)", "minutes")}
+      </div>
+
+      <dl className="mt-3 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[max-content_1fr]">
+        <dt className="text-ink-3">Scrolls</dt>
+        <dd className="break-all font-mono text-ink-2">{st?.scrolls_root ?? effectiveScrollsDir(sc.scrollsDir)}</dd>
+        <dt className="text-ink-3">Cold archive</dt>
+        <dd className="break-all font-mono text-ink-2">
+          {st ? (
+            <>
+              {st.archive_root} <span className="font-sans text-ink-3">({archiveSourceLabel(st.pinned ? "pinned" : st.archive_root_source)})</span>
+            </>
+          ) : (
+            "—"
+          )}
+        </dd>
+        <dt className="text-ink-3">RAG workspace</dt>
+        <dd className="font-mono text-ink-2">
+          {status?.workspace ?? sc.workspace}
+          {st && st.unsynced.length > 0 && <span className="ml-2 font-sans text-amber-soft">{st.unsynced.length} unsynced</span>}
+        </dd>
+        {st && (
+          <>
+            <dt className="text-ink-3">LM Studio</dt>
+            <dd className="text-ink-2">{st.lm.loaded_model ?? "no model loaded (compaction defers; it never loads one)"}</dd>
+          </>
+        )}
+      </dl>
+
+      {st && st.scrolls.length > 0 && (
+        <ul className="mt-3 space-y-0.5 text-xs">
+          {st.scrolls.map((x) => (
+            <li key={x.rel} className="flex justify-between gap-3 border-t border-white/5 py-1">
+              <span className={`font-mono ${x.valid ? "text-ink" : "text-alert"}`}>{x.rel}</span>
+              <span className="text-ink-3">
+                {x.version != null ? `v${x.version} · ` : "invalid · "}
+                {formatBytes(x.bytes)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {st && st.scrolls.length === 0 && <p className="mt-3 text-xs text-ink-3">No Memory Scrolls yet: the first compaction creates them.</p>}
+      <CfgError error={error} />
+    </Card>
   );
 }

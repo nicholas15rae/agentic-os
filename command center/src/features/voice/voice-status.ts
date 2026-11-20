@@ -25,6 +25,15 @@ export function toggleAction(state: VoiceState, heardSpeech: boolean): ToggleAct
   }
 }
 
+/**
+ * Mic locked off: may the mic button / hotkey still act? Only to STOP something (Tony speaking or
+ * holding, a turn thinking / transcribing). From rest (idle / error / a pending card) a toggle
+ * would open a listen, so it only says why (the "mic locked" toast).
+ */
+export function lockedToggleStops(state: VoiceState): boolean {
+  return toggleAction(state, false) !== "start";
+}
+
 const TRAILING_ACTIVE = /\bACTIVE\s*$/i;
 
 /**

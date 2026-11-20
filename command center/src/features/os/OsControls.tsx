@@ -71,11 +71,7 @@ export function PrivacyPill() {
   return (
     <button
       onClick={() => {
-        try {
-          sessionStorage.setItem("cc.settings.tab", "integrations");
-        } catch {
-          /* private mode */
-        }
+        requestSettingsTab("integrations");
         useNav.getState().go("settings");
       }}
       title={`Diffuser ${p.diffuser ? "on" : "off"} · network lock ${p.networkLock ? "on" : "off"} · destructive gate ${p.destructiveGate ? "on" : "off"}`}
@@ -106,6 +102,7 @@ import { useEffect as useEffect2, useState as useState2 } from "react";
 import { cmd as cmd2, isTauri as isTauri2, onNativeEvent as onNativeEvent2, type DropletLink, type SlotView } from "@/lib/platform";
 import { useCueRun } from "@/features/cues/player";
 import { toggleGabagool } from "@/features/cues/cue-runtime";
+import { requestSettingsTab } from "@/sections/settings/settings-tab";
 
 /** "ACTIVE GPU SLOT" — who holds the local GPU baton, and what's queued. */
 export function ActiveSlotPill() {

@@ -398,26 +398,55 @@ fn secret_patterns() -> &'static [regex::Regex] {
 
 /// A long run that looks like a random token: mixed case and digits (a git SHA is lowercase hex, so it survives).
 fn looks_random(s: &str) -> bool {
-    s.len() >= 32 && s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase()) && s.chars().any(|c| c.is_ascii_digit())
+    looks_random_n(s, 32)
 }
 
-/// Remove secrets from `text`: every `known` value (keychain / .env / header values, at
-/// least 6 chars), well-known key shapes, `key=value` style assignments and random-looking runs.
-pub fn scrub(text: &str, known: &[String]) -> String {
+/// [`looks_random`] with a caller-chosen minimum length (path segments use a shorter one).
+fn looks_random_n(s: &str, min_len: usize) -> bool {
+    s.len() >= min_len && s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase()) && s.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Replace every `known` value (keychain / .env / header values, at least 6 chars; longest
+/// first) with `[redacted]`. No pattern rules, so a path or other structured value keeps its shape.
+pub fn scrub_known(text: &str, known: &[String]) -> String {
     let mut out = text.to_string();
     let mut known: Vec<&String> = known.iter().filter(|k| k.trim().len() >= 6).collect();
     known.sort_by_key(|k| std::cmp::Reverse(k.len()));
     for k in known {
         out = out.replace(k.as_str(), "[redacted]");
     }
+    out
+}
+
+/// One long `[A-Za-z0-9_-+/=]` run (optionally after a drive letter). A forward-slash path
+/// (`C:/Users/...` or `/home/u/a/b`) is redacted per segment, so mixed-case folder names like
+/// `AppData` next to digits don't wipe the whole path; anything else is judged as one run.
+fn scrub_run(c: &regex::Captures) -> String {
+    let drive = c.get(1).map(|d| format!("{}:", d.as_str())).unwrap_or_default();
+    let run = &c[2];
+    let is_path = run.starts_with('/') && (c.get(1).is_some() || run.matches('/').count() >= 2);
+    let body = if is_path {
+        run.split('/').map(|seg| if looks_random_n(seg, 20) { "[redacted]" } else { seg }).collect::<Vec<_>>().join("/")
+    } else if looks_random(run) {
+        "[redacted]".to_string()
+    } else {
+        run.to_string()
+    };
+    format!("{drive}{body}")
+}
+
+/// Remove secrets from `text`: every `known` value (keychain / .env / header values, at
+/// least 6 chars), well-known key shapes, `key=value` style assignments and random-looking runs.
+pub fn scrub(text: &str, known: &[String]) -> String {
+    let mut out = scrub_known(text, known);
     let pats = secret_patterns();
     out = pats[0].replace_all(&out, "[redacted]").into_owned();
     out = pats[1].replace_all(&out, "$1$2[redacted]").into_owned();
     out = pats[2].replace_all(&out, "$1$2[redacted]").into_owned();
     out = pats[3].replace_all(&out, "$1[redacted]@").into_owned();
     static RUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let run = RUN.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9_\-+/=]{32,}").unwrap());
-    run.replace_all(&out, |c: &regex::Captures| if looks_random(&c[0]) { "[redacted]".to_string() } else { c[0].to_string() }).into_owned()
+    let run = RUN.get_or_init(|| regex::Regex::new(r"(?:\b([A-Za-z]):)?([A-Za-z0-9_\-+/=]{32,})").unwrap());
+    run.replace_all(&out, scrub_run).into_owned()
 }
 
 /// Scrub every string inside a JSON value (keys are ours and stay).
@@ -1329,6 +1358,19 @@ pub async fn dev_brief_export(dq: State<'_, DevQueueState>, state: State<'_, Dis
 mod tests {
     use super::*;
 
+    /// The Python `memory_scrolls.scrub` port is checked against the same fixture, so the two
+    /// scrubbers cannot drift apart (archives / scrolls are scrubbed in Python).
+    #[test]
+    fn scrub_matches_python_parity_fixture() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!("../../../../tests/fixtures/scrub_parity.json")).unwrap();
+        assert!(cases.len() >= 10);
+        for c in cases {
+            let input = c["input"].as_str().unwrap();
+            let known: Vec<String> = c["known"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_string()).collect();
+            assert_eq!(scrub(input, &known), c["expected"].as_str().unwrap(), "input: {input}");
+        }
+    }
+
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("devqueue-{tag}-{}-{}", std::process::id(), new_id()));
         std::fs::create_dir_all(&d).unwrap();
@@ -1448,6 +1490,33 @@ mod tests {
         let sha = "d3a2175c0ffee0123456789abcdef0123456789a";
         assert!(scrub(&format!("HEAD {sha}"), &[]).contains(sha));
         assert_eq!(scrub("GitHub: token was rejected (HTTP 401)", &[]), "GitHub: token was rejected (HTTP 401)");
+    }
+
+    #[test]
+    fn scrubbing_keeps_forward_slash_paths() {
+        for p in [
+            r"C:/Users/nicho/AppData/Local/Temp/claude/5c24697b0373cc22/9d6851da-3c2b-4105-8776-21872b819875/scratchpad/smoke-lmstudio-20261119-064010\notes\ideas\2026-11-19-minimal-status-card.md",
+            "/home/u/AppData/Local/Temp/claude/5c24697b0373cc22/x.md",
+            "D:/Art Apps/agentic os/memory/tony/anythingllm-prompt-backups/prompter-dispatcher-20261119-060535.txt",
+        ] {
+            assert_eq!(scrub(p, &[]), p);
+            assert_eq!(scrub(&format!("note at {p} written"), &[]), format!("note at {p} written"));
+        }
+    }
+
+    #[test]
+    fn scrubbing_still_redacts_tokens_in_and_around_paths() {
+        assert_eq!(scrub("C:/x/Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z/y.md", &[]), "C:/x/[redacted]/y.md");
+        assert_eq!(scrub("/x/Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z/y.md", &[]), "/x/[redacted]/y.md");
+        let s = scrub("aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY1 end", &[]);
+        assert_eq!(s, "aws [redacted] end");
+        // One slash is not a path: the whole run (slash included) goes, as before.
+        assert_eq!(scrub("/Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z", &[]), "[redacted]");
+        // A run after a drive letter that is not a path is still judged whole, and the drive survives.
+        assert_eq!(scrub("C:Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z", &[]), "C:[redacted]");
+        let known = vec!["hunter2-secret".to_string()];
+        assert_eq!(scrub("C:/Users/nicho/hunter2-secret/notes/a.md", &known), "C:/Users/nicho/[redacted]/notes/a.md");
+        assert_eq!(scrub_known("C:/Users/nicho/hunter2-secret/AppData/Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z", &known), "C:/Users/nicho/[redacted]/AppData/Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z");
     }
 
     #[test]

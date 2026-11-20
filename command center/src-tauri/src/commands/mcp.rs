@@ -378,6 +378,22 @@ pub fn is_mutating_tool(name: &str) -> bool {
     ]
         .iter()
         .any(|v| tool.starts_with(v) || tool.contains(&format!("_{v}")))
+        || mutating_by_word(&tool)
+}
+
+/// Write verbs matched as a WHOLE word of the tool name (`_` / `-` separated), so
+/// `merge_pull_request`, `git_reset` and `unstar_repository` are writes while reads that merely
+/// start with the letters (`list_assignees`, `list_stores`, `get_stargazers`) are not.
+/// `LEAD_VERBS` count only as the first word (`request_copilot_review` is a write,
+/// `get_pull_request_files` is a read).
+fn mutating_by_word(tool: &str) -> bool {
+    const WORD_VERBS: [&str; 22] = [
+        "merge", "fork", "star", "unstar", "submit", "assign", "dismiss", "approve", "lock", "unlock", "archive", "trash", "save", "store", "sync", "import", "put", "patch", "upsert", "reset", "checkout", "clone",
+    ];
+    const LEAD_VERBS: [&str; 4] = ["request", "mark", "label", "manage"];
+    let mut words = tool.split(['_', '-']).filter(|w| !w.is_empty());
+    let Some(first) = words.next() else { return false };
+    LEAD_VERBS.contains(&first) || WORD_VERBS.contains(&first) || words.any(|w| WORD_VERBS.contains(&w))
 }
 
 /// Spotify tools Tony's LLM router may pick: every listed tool. The one deliberate
@@ -448,8 +464,53 @@ pub(crate) fn router_filter(all: &[ToolInfo], tony: bool) -> Vec<ToolInfo> {
     all.iter().filter(|t| offered_to_router(&t.name, tony)).cloned().collect()
 }
 
+/// Tony: `general`, `tony`, another self alias, or no agent at all (`roles::is_tony_id`).
 pub(crate) fn is_tony(agent: &str) -> bool {
-    agent == "general" || agent == "tony"
+    super::roles::is_tony_id(agent)
+}
+
+/// Error prefix for a sub-agent calling a server it is not granted (or an invalid agent id).
+pub(crate) const ROLE_PREFIX: &str = "PERMISSION_ROLE:";
+/// Error prefix for a sub-agent calling a tool its role may not use (off its allowlist, or a
+/// tool that changes data for a read-only role).
+pub(crate) const READ_ONLY_ROLE_PREFIX: &str = "PERMISSION_READ_ONLY_ROLE:";
+
+/// Part 4 role gate (`roles::policy_for`), run by `call_tool_with` before anything else. Tony
+/// (and a missing agent) is never refused here. Every other agent id must be valid, must be
+/// granted the tool's server (`McpServer.grants`; `skills.read` checks its own grants) and the
+/// tool must pass its role policy: the Librarian's exact allowlist, and no data-changing tool
+/// for any read-only role (everyone but Tony).
+pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> Option<String> {
+    if is_tony(agent) {
+        return None;
+    }
+    let a = agent.trim().to_ascii_lowercase();
+    let Some(policy) = super::roles::policy_for(&a) else {
+        return Some(format!("{ROLE_PREFIX}unknown — {name} was requested for an invalid agent id, so it is blocked"));
+    };
+    let sid = server_of_tool(name);
+    if name != "skills.read" {
+        if let Some(s) = cfg.mcps.iter().find(|m| m.id == sid) {
+            if !s.grants(&a) {
+                return Some(format!("{ROLE_PREFIX}{a} — the {a} agent is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name));
+            }
+        }
+    }
+    if !policy.allows_tool(name, changes_data(name)) {
+        let why = if policy.tool_allowlist.is_some_and(|l| !l.contains(&name)) { "it is not on that agent's read-only tool list" } else { "it changes data and that agent is read-only" };
+        return Some(format!("{READ_ONLY_ROLE_PREFIX}{a} — {name} is blocked for the {a} agent: {why}"));
+    }
+    None
+}
+
+/// Pure part of `tool_set` for a sub-agent: drop every tool its role policy refuses (the
+/// Librarian keeps only its allowlist; read-only roles lose data-changing tools). Order kept.
+pub(crate) fn role_filter(all: Vec<ToolInfo>, agent: &str) -> Vec<ToolInfo> {
+    if is_tony(agent) {
+        return all;
+    }
+    let Some(policy) = super::roles::policy_for(agent) else { return vec![] };
+    all.into_iter().filter(|t| policy.allows_tool(&t.name, changes_data(&t.name))).collect()
 }
 
 /// Every tool of the servers `agent` may use (`all`) and the subset its LLM
@@ -463,12 +524,17 @@ pub struct ToolSet {
 /// Tools `agent` is actually allowed to use: every enabled server it is
 /// granted (`McpServer.grants`); `offered` drops tools the router may not be
 /// offered (`offered_to_router`). Tony (`"general"` or `"tony"`) always gets
-/// every enabled server, regardless of its grant list (Part 2 spec). Servers
+/// every enabled server, regardless of its grant list (Part 2 spec). A sub-agent's
+/// `all` is further cut by its role policy (`role_filter`, the same rule
+/// `role_refusal` enforces at call time). Servers
 /// are queried concurrently with a short per-server timeout so one dead
 /// external server can't stall the whole listing.
 pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolSet {
     let cfg = os.snapshot();
     let is_tony = is_tony(agent);
+    if !is_tony && super::roles::policy_for(agent).is_none() {
+        return ToolSet { all: vec![], offered: vec![] };
+    }
     let servers: Vec<McpServer> = cfg.mcps.iter().filter(|s| s.enabled && (is_tony || s.grants(agent))).cloned().collect();
     // A cold server costs a turn at most `CHAT_LIST_WAIT`: its listing keeps going in the
     // background and lands in the cache for the next turn. The outer timeout is only a
@@ -486,6 +552,7 @@ pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolS
     if cfg.skills.grants.values().any(|a| os_core::agent_matches(a, agent)) {
         all.push(t("skills", "skills.read", "Read the full instructions of one of your attached skills.", &["name"]));
     }
+    let all = role_filter(all, agent);
     let offered = router_filter(&all, is_tony);
     ToolSet { all, offered }
 }
@@ -904,13 +971,14 @@ pub async fn mcp_call(state: State<'_, DispatchState>, os: State<'_, OsState>, b
 // ── Calling ─────────────────────────────────────────────────────────────────
 
 /// `agent` is whichever role is making the call (`"tony"`/`"general"` for the
-/// OS's own calls and Settings → Test). It only gates `skills.read` here —
-/// which tools are *offered* at all is `tool_set`'s job; a caller that
-/// already knows the tool name (the Settings tester, a deterministic plan)
-/// can still call it even if it wasn't in that agent's list, same as before
-/// Part 2 — the real gate against a sub-agent reaching tools it has no
-/// business touching is that the pre-executor in `agents.rs` only ever
-/// builds a plan from `tool_set(..., agent).offered` in the first place.
+/// OS's own calls and Settings → Test; a missing agent means Tony). Tony is not
+/// role-gated. Every other agent is gated at call time by `role_refusal`
+/// (Part 4), before any other check: an ungranted server is refused with
+/// `PERMISSION_ROLE:`, and a tool off the role's allowlist (the Librarian's exact
+/// `roles::LIBRARIAN_TOOLS`) or a data-changing tool for a read-only role (every
+/// sub-agent) with `PERMISSION_READ_ONLY_ROLE:`. So a caller that already knows a
+/// tool name (a deterministic plan, the webview) can no longer reach past the
+/// agent's grants; `tool_set` applies the same rule to what is *offered*.
 pub async fn call_tool(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str) -> Result<String, String> {
     call_tool_with(state, os, bridge, name, args, approved, agent, None).await
 }
@@ -922,6 +990,11 @@ pub async fn call_tool(state: &DispatchState, os: &OsState, bridge: &BridgeState
 #[allow(clippy::too_many_arguments)]
 pub async fn call_tool_with(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str, start_wait: Option<Duration>) -> Result<String, String> {
     let cfg = os.snapshot();
+    // Role gate first (Part 4): a sub-agent's ungranted server / off-allowlist or mutating tool.
+    if let Some(e) = role_refusal(&cfg, name, agent) {
+        trace_tool(state, os, name, 0, Some(&e));
+        return Err(e);
+    }
     // A read-only server's write tools are refused for every caller, before any card asks.
     if let Some(e) = read_only_refusal(&cfg, name) {
         trace_tool(state, os, name, 0, Some(&e));
@@ -950,7 +1023,7 @@ pub async fn call_tool_with(state: &DispatchState, os: &OsState, bridge: &Bridge
                 if cfg.privacy.kill_switch {
                     return Err("kill switch is on — no outbound web requests".into());
                 }
-                fetch_public(state, &arg("url")).await
+                fetch_public(&arg("url")).await
             }
             "fs.list" | "fs.read" if server_on("filesystem") => {
                 os_core::gate(bridge, cfg.permissions.filesystem, "filesystem", approved, json!({ "path": arg("path") }))?;
@@ -1216,24 +1289,80 @@ fn private_host(h: &str) -> bool {
         return true;
     }
     if let Ok(ip) = h.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local() || v.is_unspecified() || (v.octets()[0] == 100 && (64..128).contains(&v.octets()[1])),
-            std::net::IpAddr::V6(v) => v.is_loopback() || v.is_unspecified() || (v.segments()[0] & 0xfe00) == 0xfc00,
-        };
+        return private_ip(ip);
     }
     false
 }
 
-async fn fetch_public(state: &DispatchState, url: &str) -> Result<String, String> {
-    let u = url::Url::parse(url).map_err(|_| "invalid URL")?;
+/// Loopback / private / link-local / CGNAT / unique-local / unspecified (IPv4-mapped IPv6 too).
+fn private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || (v.octets()[0] == 100 && (64..128).contains(&v.octets()[1])),
+        std::net::IpAddr::V6(v) => match v.to_ipv4_mapped() {
+            Some(v4) => private_ip(std::net::IpAddr::V4(v4)),
+            None => v.is_loopback() || v.is_unspecified() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80,
+        },
+    }
+}
+
+/// A URL `fetch.url` may request: http(s) to a host that is not private by name or literal IP.
+fn public_url(u: &url::Url) -> Result<(), String> {
     if !matches!(u.scheme(), "http" | "https") || private_host(u.host_str().unwrap_or("")) {
         return Err("only public http(s) URLs can be fetched".into());
     }
-    let res = state.http.get(u).timeout(Duration::from_secs(15)).header("user-agent", "agentic-os/1.0").send().await.map_err(short)?;
-    let ct = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    let bytes = res.bytes().await.map_err(short)?;
-    let body = String::from_utf8_lossy(&bytes[..bytes.len().min(2_000_000)]).into_owned();
-    Ok(if ct.contains("html") { html_to_text(&body) } else { body }.chars().take(8000).collect())
+    Ok(())
+}
+
+/// Redirect hops `fetch.url` follows itself (each one re-checked; reqwest never follows any).
+const FETCH_MAX_HOPS: usize = 5;
+
+/// Resolve a host name and refuse it when ANY address is private (a public name pointing at
+/// 127.0.0.1 / the LAN). Returns the address to pin the connection to (`None` for an IP literal,
+/// which `public_url` already checked).
+async fn resolve_public(u: &url::Url) -> Result<Option<std::net::SocketAddr>, String> {
+    let Some(url::Host::Domain(host)) = u.host() else { return Ok(None) };
+    let port = u.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port)).await.map_err(|_| format!("couldn't resolve {host}"))?.collect();
+    if addrs.is_empty() {
+        return Err(format!("couldn't resolve {host}"));
+    }
+    if addrs.iter().any(|a| private_ip(a.ip())) {
+        return Err("only public http(s) URLs can be fetched (the name resolves to a private address)".into());
+    }
+    Ok(addrs.first().copied())
+}
+
+async fn fetch_public(url: &str) -> Result<String, String> {
+    fetch_guarded(url, public_url, true).await
+}
+
+/// GET `url` as text, following up to `FETCH_MAX_HOPS` redirects by hand: `guard` runs on the
+/// first URL and on EVERY redirect target, and (with `pin`) each hop's host is resolved, refused
+/// when private, and the connection pinned to the checked address (no DNS-rebinding window).
+/// A redirect from a public page into loopback (the trusted gateway) is therefore refused.
+async fn fetch_guarded(url: &str, guard: impl Fn(&url::Url) -> Result<(), String>, pin: bool) -> Result<String, String> {
+    let mut u = url::Url::parse(url).map_err(|_| "invalid URL")?;
+    for _ in 0..=FETCH_MAX_HOPS {
+        guard(&u)?;
+        let mut b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(15)).user_agent("agentic-os/1.0");
+        if pin {
+            if let (Some(addr), Some(host)) = (resolve_public(&u).await?, u.host_str()) {
+                b = b.resolve(host, addr);
+            }
+        }
+        let client = b.build().map_err(short)?;
+        let res = client.get(u.clone()).send().await.map_err(short)?;
+        if res.status().is_redirection() {
+            let loc = res.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).ok_or("a redirect without a location")?;
+            u = u.join(loc).map_err(|_| "a redirect to an invalid URL")?;
+            continue;
+        }
+        let ct = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let bytes = res.bytes().await.map_err(short)?;
+        let body = String::from_utf8_lossy(&bytes[..bytes.len().min(2_000_000)]).into_owned();
+        return Ok(if ct.contains("html") { html_to_text(&body) } else { body }.chars().take(8000).collect());
+    }
+    Err("too many redirects".into())
 }
 
 fn html_to_text(html: &str) -> String {
@@ -1314,17 +1443,20 @@ async fn git_status(path: PathBuf) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// The personal knowledge graph `kg.search` reads (the System Map reports whether it exists).
-pub(crate) const KG_PATH: &str = r"C:\ai-hub\memory\knowledge-graph.json";
+/// The personal knowledge graph `kg.search` reads (the System Map reports whether it exists): the
+/// same `D:\ai-hub-memory\knowledge-graph.json` the Phase 3 Memory Scrolls CLI upserts into.
+pub(crate) const KG_PATH: &str = super::os_core::DEFAULT_KG_PATH;
 
 fn kg_search(query: &str) -> Result<String, String> {
     let path = Path::new(KG_PATH);
-    let raw = std::fs::read_to_string(path).map_err(|_| "no knowledge graph yet (C:\\ai-hub\\memory\\knowledge-graph.json)".to_string())?;
-    // Accept {entities:[…]} JSON or the MCP memory server's JSONL.
-    let entities: Vec<Value> = match serde_json::from_str::<Value>(&raw) {
-        Ok(v) => v["entities"].as_array().cloned().unwrap_or_default(),
-        Err(_) => raw.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["type"] == "entity").collect(),
-    };
+    let raw = std::fs::read_to_string(path).map_err(|_| format!("no knowledge graph yet ({KG_PATH})"))?;
+    kg_search_in(&raw, query)
+}
+
+/// `kg_search` over the file's text (pure; tests).
+fn kg_search_in(raw: &str, query: &str) -> Result<String, String> {
+    // Accept {entities:[…]} JSON or the MCP memory server's JSONL (one line included).
+    let entities: Vec<Value> = super::introspect::kg_entity_values(raw);
     let terms: Vec<String> = query.to_lowercase().split_whitespace().filter(|w| w.len() > 2).map(String::from).collect();
     let mut hits: Vec<(usize, String)> = entities
         .iter()
@@ -1614,6 +1746,22 @@ pub struct AllmSyncReport {
     pub skipped: Vec<String>,
     /// Existing entries whose invalid `"streamable-http"` type was repaired.
     pub fixed: Vec<String>,
+    /// Existing AnythingLLM entries its agents can run with NO read-only / role limit although
+    /// Tony limits them (read-only or role-scoped here), or that Tony doesn't manage at all
+    /// (unknown ids, ids shadowing a Tony builtin). Never removed; listed so Settings can warn.
+    pub kept_writable: Vec<String>,
+}
+
+/// Tony limits this server (read-only, or granted to specific agents only), so its full tool
+/// set must not be handed to every AnythingLLM agent.
+fn allm_restricted(m: &McpServer) -> Option<&'static str> {
+    if m.read_only {
+        Some("read-only in Tony")
+    } else if m.agents.as_ref().is_some_and(|a| !a.is_empty() && !a.iter().any(|x| x == "all")) {
+        Some("role-scoped in Tony")
+    } else {
+        None
+    }
 }
 
 fn anythingllm_mcp_path() -> Option<PathBuf> {
@@ -1661,6 +1809,12 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer]) -> (Value, AllmSyncR
         }
         report.fixed.push(id);
     }
+    for (id, _) in servers.iter() {
+        let managed = mcps.iter().find(|m| &m.id == id && m.transport != "builtin");
+        if !managed.is_some_and(|m| allm_restricted(m).is_none()) {
+            report.kept_writable.push(id.clone());
+        }
+    }
     for m in mcps {
         if m.transport == "builtin" {
             continue;
@@ -1671,6 +1825,12 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer]) -> (Value, AllmSyncR
         }
         if servers.contains_key(&m.id) {
             report.kept.push(m.id.clone());
+            continue;
+        }
+        // Never ADD a write-capable copy of a server Tony limits: AnythingLLM's agent has no
+        // read-only or per-role scoping, so every workspace (the Librarian's too) would get it.
+        if let Some(why) = allm_restricted(m) {
+            report.skipped.push(format!("{} ({why}: not synced)", m.id));
             continue;
         }
         let entry = match m.transport.as_str() {
@@ -1746,9 +1906,93 @@ pub fn mcp_sync_anythingllm(os: State<'_, OsState>) -> Result<AllmSyncReport, St
     Ok(report)
 }
 
+// ── Librarian guard (Part 4) ────────────────────────────────────────────────
+
+/// What `librarian_preflight` found. Read-only: nothing is changed anywhere.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarianGuard {
+    pub slug: String,
+    pub chat_mode: Option<String>,
+    /// The workspace was read and is not in an agent-capable chat mode.
+    pub ok: bool,
+    /// `chatMode` `automatic` / `agent`: AnythingLLM's global agent skills and MCP servers can
+    /// run in the Librarian's workspace (published once as a critical `discrepancy` event).
+    pub agent_capable: bool,
+    pub issues: Vec<String>,
+    /// AnythingLLM MCP entries its agents can run unrestricted (`AllmSyncReport.kept_writable`).
+    pub writable_mcps: Vec<String>,
+    /// The only tools Tony's side lets the Librarian call.
+    pub allowlist: Vec<String>,
+}
+
+/// Pure: the guard for the Librarian workspace object (`Err` = it couldn't be read).
+pub(crate) fn librarian_guard(slug: &str, ws: Result<&Value, &str>, writable_mcps: Vec<String>) -> LibrarianGuard {
+    let chat_mode = ws.ok().and_then(|w| w["chatMode"].as_str()).map(String::from);
+    let agent_capable = chat_mode.as_deref().is_some_and(|m| matches!(m, "automatic" | "agent"));
+    let mut issues = vec![];
+    if let Err(e) = ws {
+        issues.push(format!("couldn't read the Librarian workspace \"{slug}\": {}", e.chars().take(160).collect::<String>()));
+    }
+    if agent_capable {
+        issues.push(format!("\"{slug}\" is in chatMode \"{}\": AnythingLLM's agent skills and MCP servers (some can write files, git or SQLite) can run there. Set it to Query in AnythingLLM → workspace settings.", chat_mode.as_deref().unwrap_or("")));
+    }
+    if !writable_mcps.is_empty() {
+        issues.push(format!("AnythingLLM's own MCP config gives its agents these servers with no read-only or role limit: {}", writable_mcps.join(", ")));
+    }
+    LibrarianGuard { slug: slug.to_string(), ok: ws.is_ok() && !agent_capable, chat_mode, agent_capable, issues, writable_mcps, allowlist: super::roles::LIBRARIAN_TOOLS.iter().map(|s| s.to_string()).collect() }
+}
+
+/// The last `(slug, chatMode)` a discrepancy was published for (once per change, not per poll).
+static GUARD_ALERTED: Mutex<Option<String>> = Mutex::new(None);
+
+/// Read the Librarian workspace through `AllmReader` (GETs only) and build the guard.
+pub(crate) async fn librarian_guard_with(reader: &super::allm::AllmReader, slug: &str, writable_mcps: Vec<String>) -> LibrarianGuard {
+    let ws = reader.get_workspace(slug, 8).await;
+    let g = librarian_guard(slug, ws.as_ref().map_err(String::as_str), writable_mcps);
+    let key = format!("{slug}:{}", g.chat_mode.as_deref().unwrap_or(""));
+    let mut last = lock(&GUARD_ALERTED);
+    if g.agent_capable && last.as_deref() != Some(key.as_str()) {
+        super::events::publish_note("librarian", "discrepancy", "critical", "The Librarian workspace can run AnythingLLM agent tools. Set it to Query mode.", None);
+        *last = Some(key);
+    } else if !g.agent_capable {
+        *last = None;
+    }
+    g
+}
+
+/// Read-only pre-flight of the Librarian's AnythingLLM side: its workspace chat mode (GET) and
+/// AnythingLLM's own MCP file (read, never written). Also callable by the worker before a
+/// Librarian stage.
+pub(crate) async fn librarian_preflight_run(state: &DispatchState, cfg: &OsConfig) -> Result<LibrarianGuard, String> {
+    let slug = cfg.anythingllm.workspaces.get("librarian").filter(|s| !s.is_empty()).cloned().ok_or("no AnythingLLM workspace is mapped to the Librarian (Settings → Services)")?;
+    let writable = anythingllm_mcp_path().and_then(|p| parse_allm_file(std::fs::read_to_string(p)).ok()).map(|v| merge_allm_servers(&v, &cfg.mcps).1.kept_writable).unwrap_or_default();
+    let reader = super::allm::AllmReader::new(super::allm::AllmConn::local(state, cfg)?);
+    Ok(librarian_guard_with(&reader, &slug, writable).await)
+}
+
+/// Settings → Skills & MCP Library "Librarian guard" line.
+#[tauri::command]
+pub async fn librarian_preflight(state: State<'_, DispatchState>, os: State<'_, OsState>) -> Result<LibrarianGuard, String> {
+    librarian_preflight_run(&state, &os.snapshot()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kg_search_reads_single_line_jsonl_and_legacy_json() {
+        // Phase 3: a one-line JSONL graph (the host's first scroll entity) is searchable.
+        let one = "{\"type\":\"entity\",\"name\":\"proj-agentic-os\",\"entityType\":\"scroll\",\"observations\":[\"path: projects/agentic-os.md\"]}\n";
+        assert!(kg_search_in(one, "agentic").unwrap().contains("proj-agentic-os (scroll): path: projects/agentic-os.md"));
+        let multi = "{\"type\":\"entity\",\"name\":\"whisper\",\"entityType\":\"service\",\"observations\":[\"port 8178\"]}\n{\"type\":\"relation\",\"from\":\"whisper\",\"to\":\"proj-agentic-os\",\"relationType\":\"documented_in\"}\n{\"type\":\"entity\",\"name\":\"lm studio\",\"entityType\":\"service\",\"observations\":[\"port 1235\"]}\n";
+        let r = kg_search_in(multi, "port").unwrap();
+        assert!(r.contains("whisper (service): port 8178") && r.contains("lm studio (service): port 1235"), "{r}");
+        let legacy = "{\"entities\":[{\"name\":\"tony\",\"entityType\":\"person\",\"observations\":[\"prefers short acks\"]}],\"relations\":[]}";
+        assert!(kg_search_in(legacy, "acks").unwrap().contains("tony (person)"));
+        assert!(kg_search_in(one, "kubernetes").unwrap().starts_with("no entries match"));
+    }
 
     #[test]
     fn tool_names_map_to_their_server() {
@@ -2123,6 +2367,53 @@ mod tests {
     }
 
     #[test]
+    fn private_ips_and_redirect_targets_refused() {
+        for h in ["[::ffff:127.0.0.1]", "[::1]", "[fe80::1]", "169.254.169.254", "0.0.0.0"] {
+            assert!(private_host(h), "{h}");
+        }
+        let base = url::Url::parse("https://evil.example/page").unwrap();
+        for loc in ["http://127.0.0.1:8080/api/comms/threads", "http://localhost:8080/api/os/inbox", "http://[::1]/x", "file:///C:/Windows/win.ini", "http://192.168.1.10/"] {
+            assert!(public_url(&base.join(loc).unwrap()).is_err(), "{loc}");
+        }
+        assert!(public_url(&base.join("/docs/next").unwrap()).is_ok());
+    }
+
+    /// Regression (SSRF): a fetched page answering 302 → loopback must not be followed. A local
+    /// server plays the "public" page; the guard allows only its `/start` path, standing in for
+    /// `public_url` refusing the loopback gateway.
+    #[test]
+    fn fetch_never_follows_a_redirect_the_guard_refuses() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(path.clone());
+                let resp = if path == "/start" {
+                    "HTTP/1.1 302 Found\r\nLocation: /secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\nSECRET".to_string()
+                };
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let guard = |u: &url::Url| if u.path() == "/start" { Ok(()) } else { Err("refused".to_string()) };
+        let r = tauri::async_runtime::block_on(fetch_guarded(&format!("http://127.0.0.1:{port}/start"), guard, false));
+        assert_eq!(r, Err("refused".to_string()));
+        assert_eq!(hits.lock().unwrap().clone(), vec!["/start".to_string()], "the redirect target was never requested");
+        // An allowed redirect is followed by hand.
+        let r = tauri::async_runtime::block_on(fetch_guarded(&format!("http://127.0.0.1:{port}/start"), |_: &url::Url| Ok(()), false));
+        assert_eq!(r.as_deref(), Ok("SECRET"));
+    }
+
+    #[test]
     fn html_stripped() {
         assert_eq!(html_to_text("<html><head><title>x</title></head><body><p>Hi&amp;bye</p><script>evil()</script></body></html>"), "Hi&bye");
     }
@@ -2238,6 +2529,190 @@ mod tests {
         // Already repaired: nothing to do the second time.
         let (_, again) = merge_allm_servers(&next, &[]);
         assert!(again.fixed.is_empty());
+    }
+
+    // ── Part 4: role gates ──────────────────────────────────────────────────
+
+    /// The live shape: default builtins (exact grants) plus github / sqlite / serena granted to
+    /// every agent and NOT read-only, and the read-only WhatsApp server.
+    fn role_cfg() -> OsConfig {
+        let mut cfg = OsConfig::default();
+        for id in ["filesystem", "knowledge-graph", "fetch", "brave-search", "git", "time", "weather"] {
+            if let Some(m) = cfg.mcps.iter_mut().find(|m| m.id == id) {
+                m.enabled = true;
+            }
+        }
+        let all = Some(vec!["all".to_string()]);
+        cfg.mcps.push(McpServer { id: "github".into(), name: "GitHub".into(), transport: "http".into(), url: "https://api.githubcopilot.com/mcp/".into(), enabled: true, agents: all.clone(), ..Default::default() });
+        cfg.mcps.push(McpServer { id: "sqlite".into(), name: "SQLite".into(), transport: "stdio".into(), command: "npx".into(), enabled: true, agents: all.clone(), ..Default::default() });
+        cfg.mcps.push(McpServer { id: "serena".into(), name: "Serena".into(), transport: "stdio".into(), command: "serena".into(), enabled: true, agents: all, ..Default::default() });
+        cfg
+    }
+
+    #[test]
+    fn librarian_refuses_mutating_and_unlisted_tools() {
+        let cfg = role_cfg();
+        for (tool, prefix) in [
+            ("github.merge_pull_request", READ_ONLY_ROLE_PREFIX),
+            ("github.get_file_contents", READ_ONLY_ROLE_PREFIX),
+            ("sqlite.write_query", READ_ONLY_ROLE_PREFIX),
+            ("fs.write", READ_ONLY_ROLE_PREFIX),
+            ("serena.replace_symbol_body", READ_ONLY_ROLE_PREFIX),
+            ("serena.find_symbol", READ_ONLY_ROLE_PREFIX),
+            ("unknown.foo", READ_ONLY_ROLE_PREFIX),
+            ("git.status", ROLE_PREFIX),
+            ("time.now", ROLE_PREFIX),
+        ] {
+            let e = role_refusal(&cfg, tool, "librarian").unwrap_or_else(|| panic!("{tool} must be refused"));
+            assert!(e.starts_with(prefix), "{tool}: {e}");
+            assert!(e.contains(tool), "{e}");
+        }
+        for tool in ["fs.read", "fs.list", "kg.search", "sqlite.read_query", "sqlite.list_tables", "sqlite.describe_table", "fetch.url", "web.search", "weather.current", "skills.read"] {
+            assert_eq!(role_refusal(&cfg, tool, "librarian"), None, "{tool}");
+            assert_eq!(role_refusal(&cfg, tool, " Librarian "), None, "{tool} (case / spaces)");
+        }
+    }
+
+    #[test]
+    fn role_gate_spares_tony_and_scopes_every_sub_agent() {
+        let cfg = role_cfg();
+        for agent in ["tony", "general", "", "Tony", "dispatcher"] {
+            for tool in ["github.merge_pull_request", "sqlite.write_query", "git.status", "serena.replace_symbol_body", "whatsapp.send_message", "unknown.foo"] {
+                assert_eq!(role_refusal(&cfg, tool, agent), None, "{agent:?} {tool}");
+            }
+        }
+        // Coder: its granted reads run; no MCP mutation; ungranted servers refused.
+        assert_eq!(role_refusal(&cfg, "git.status", "coder"), None);
+        assert_eq!(role_refusal(&cfg, "serena.find_symbol", "coder"), None);
+        assert!(role_refusal(&cfg, "serena.replace_symbol_body", "coder").unwrap().starts_with(READ_ONLY_ROLE_PREFIX));
+        assert!(role_refusal(&cfg, "github.merge_pull_request", "coder").unwrap().starts_with(READ_ONLY_ROLE_PREFIX));
+        assert!(role_refusal(&cfg, "kg.search", "coder").unwrap().starts_with(ROLE_PREFIX), "knowledge-graph is not granted to the coder");
+        // Prompter / Designer / a future specialist: reads only.
+        for agent in ["prompter", "designer", "security-patrol"] {
+            assert!(role_refusal(&cfg, "github.merge_pull_request", agent).unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "{agent}");
+            assert!(role_refusal(&cfg, "sqlite.write_query", agent).is_some(), "{agent}");
+            assert_eq!(role_refusal(&cfg, "github.get_file_contents", agent), None, "{agent}");
+        }
+        assert!(role_refusal(&cfg, "git.status", "designer").unwrap().starts_with(ROLE_PREFIX));
+        // Spotify: sub-agents read, never control.
+        assert_eq!(role_refusal(&cfg, "spotify.now_playing", "booking"), None);
+        assert!(role_refusal(&cfg, "spotify.pause", "booking").unwrap().starts_with(READ_ONLY_ROLE_PREFIX));
+        // A forged / invalid agent id is refused outright.
+        for bad in ["../x", "a b", "9", "x".repeat(40).as_str()] {
+            assert!(role_refusal(&cfg, "fs.read", bad).unwrap().starts_with(ROLE_PREFIX), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn whatsapp_writes_stay_refused_for_everyone() {
+        let cfg = role_cfg();
+        for agent in ["tony", "general", "booking", "ops", "librarian"] {
+            let refused = role_refusal(&cfg, "whatsapp.send_message", agent).or_else(|| read_only_refusal(&cfg, "whatsapp.send_message"));
+            assert!(refused.is_some_and(|e| e.starts_with("PERMISSION_")), "{agent}");
+        }
+        // Booking / Ops still read WhatsApp; the Librarian is not granted it at all.
+        assert_eq!(role_refusal(&cfg, "whatsapp.list_messages", "booking"), None);
+        assert_eq!(read_only_refusal(&cfg, "whatsapp.list_messages"), None);
+        assert!(role_refusal(&cfg, "whatsapp.list_messages", "librarian").unwrap().starts_with(ROLE_PREFIX));
+    }
+
+    #[test]
+    fn librarian_tool_set_is_the_allowlist() {
+        let tool = |n: &str| ToolInfo { name: n.into(), description: String::new(), server: server_of_tool(n).into(), args: vec![] };
+        let mut names: Vec<&str> = super::super::roles::LIBRARIAN_TOOLS.to_vec();
+        names.extend(["github.merge_pull_request", "github.get_file_contents", "serena.find_symbol", "serena.replace_symbol_body", "fs.write", "git.status", "unknown.foo", "sqlite.write_query", "spotify.now_playing"]);
+        let all: Vec<ToolInfo> = names.iter().map(|n| tool(n)).collect();
+        let lib = role_filter(all.clone(), "librarian");
+        assert_eq!(lib.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), super::super::roles::LIBRARIAN_TOOLS.to_vec());
+        assert_eq!(router_filter(&lib, false).len(), lib.len(), "every allowlisted tool is router-safe");
+        // Read-only roles keep reads, drop writes; Tony keeps everything; a bad id gets nothing.
+        let ro: Vec<String> = role_filter(all.clone(), "prompter").into_iter().map(|t| t.name).collect();
+        assert!(ro.contains(&"github.get_file_contents".to_string()) && ro.contains(&"serena.find_symbol".to_string()));
+        assert!(!ro.iter().any(|n| ["github.merge_pull_request", "serena.replace_symbol_body", "fs.write", "sqlite.write_query"].contains(&n.as_str())));
+        assert_eq!(role_filter(all.clone(), "tony").len(), all.len());
+        assert!(role_filter(all, "bad id").is_empty());
+        // Every allowlisted tool really is a read.
+        for t in super::super::roles::LIBRARIAN_TOOLS {
+            assert!(!changes_data(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn mutating_verbs_cover_github_and_git_writes() {
+        for t in [
+            "github.merge_pull_request", "github.fork_repository", "github.star_repository", "github.unstar_repository", "github.submit_pending_pull_request_review", "github.request_copilot_review", "github.assign_copilot_to_issue", "github.dismiss_notification", "github.mark_all_notifications_read", "github.lock_issue", "github.unlock_issue", "x.approve_request", "x.archive_item", "x.trash_file", "x.save_note", "x.store_value", "x.sync_repo", "x.import_data", "x.put_object", "x.patch_record", "x.upsert_row", "git.git_reset", "git.git_checkout", "x.clone_repo", "x.label_issue", "x.manage_labels",
+        ] {
+            assert!(is_mutating_tool(t), "{t}");
+        }
+        for t in ["github.get_file_contents", "github.list_issues", "github.search_code", "github.get_pull_request", "github.get_pull_request_files", "github.list_pull_requests", "github.list_assignees", "github.get_stargazers", "x.list_stores", "github.get_me", "git.status", "git.git_log", "git.git_diff"] {
+            assert!(!is_mutating_tool(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn allm_sync_skips_read_only_and_role_scoped_servers() {
+        let mut sqlite = mcp_stdio("sqlite", true);
+        sqlite.read_only = true;
+        let mut serena = mcp_stdio("serena", true);
+        serena.agents = Some(vec!["coder".into()]);
+        let mut open = mcp_stdio("open", true);
+        open.agents = Some(vec!["all".into()]);
+        let mut wa = mcp_stdio("whatsapp", true);
+        wa.read_only = true;
+        let existing = json!({ "mcpServers": { "whatsapp": { "command": "uv", "args": [] }, "ai-hub": { "command": "npx", "args": [] }, "git": { "command": "uvx", "args": ["mcp-server-git"] } } });
+        let (next, report) = merge_allm_servers(&existing, &[sqlite, serena, open, wa, mcp_builtin("git", true)]);
+        assert_eq!(report.added, vec!["open".to_string()]);
+        assert!(report.skipped.contains(&"sqlite (read-only in Tony: not synced)".to_string()), "{:?}", report.skipped);
+        assert!(report.skipped.contains(&"serena (role-scoped in Tony: not synced)".to_string()), "{:?}", report.skipped);
+        assert!(next["mcpServers"].get("sqlite").is_none() && next["mcpServers"].get("serena").is_none());
+        // Existing entries are never removed; the write-capable ones are reported.
+        assert_eq!(report.kept, vec!["whatsapp".to_string()]);
+        assert_eq!(next["mcpServers"]["whatsapp"], existing["mcpServers"]["whatsapp"]);
+        let mut kw = report.kept_writable.clone();
+        kw.sort();
+        assert_eq!(kw, ["ai-hub", "git", "whatsapp"], "unknown, builtin-shadowing and read-only-in-Tony entries");
+        assert_eq!(serde_json::to_value(&report).unwrap()["keptWritable"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn librarian_guard_flags_agent_modes() {
+        let ok = librarian_guard("librarian", Ok(&json!({ "chatMode": "query" })), vec![]);
+        assert!(ok.ok && !ok.agent_capable && ok.issues.is_empty());
+        assert_eq!(ok.allowlist.len(), super::super::roles::LIBRARIAN_TOOLS.len());
+        for mode in ["automatic", "agent"] {
+            let g = librarian_guard("librarian", Ok(&json!({ "chatMode": mode })), vec!["ai-hub".into()]);
+            assert!(!g.ok && g.agent_capable, "{mode}");
+            assert!(g.issues[0].contains(mode) && g.issues[1].contains("ai-hub"));
+        }
+        let down = librarian_guard("librarian", Err("timed out"), vec![]);
+        assert!(!down.ok && !down.agent_capable && down.issues[0].contains("timed out"));
+    }
+
+    /// The pre-flight makes GET requests only, and publishes one critical discrepancy.
+    #[test]
+    fn librarian_preflight_is_get_only() {
+        use super::super::allm::{mock, AllmConn, AllmReader};
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let srv = mock::start(|r: &mock::Req| {
+                if r.path.contains("/v1/workspace/librarian") {
+                    mock::Resp::json(json!({ "workspace": [{ "slug": "librarian", "name": "Librarian ", "chatMode": "automatic" }] }))
+                } else {
+                    mock::Resp::status(404, json!({ "error": "nope" }))
+                }
+            })
+            .await;
+            let reader = AllmReader::new(AllmConn::test(&srv.base));
+            let g = librarian_guard_with(&reader, "librarian", vec![]).await;
+            assert!(g.agent_capable && !g.ok);
+            assert_eq!(g.chat_mode.as_deref(), Some("automatic"));
+            let g2 = librarian_guard_with(&reader, "librarian", vec![]).await;
+            assert_eq!(g, g2);
+            let reqs = srv.reqs();
+            assert_eq!(reqs.len(), 2);
+            assert!(reqs.iter().all(|r| r.method == "GET"), "{reqs:?}");
+            assert_eq!(lock(&GUARD_ALERTED).as_deref(), Some("librarian:automatic"));
+        });
     }
 
     #[test]

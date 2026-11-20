@@ -192,6 +192,40 @@
   backface-visibility: hidden;
 }
 
+/* Activation threshold (ThresholdMeter): a transparent range over the level meter; its thumb IS
+   the gate marker (same scale as the meter underneath). */
+.gate-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  cursor: ew-resize;
+}
+.gate-range::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 100%;
+}
+.gate-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 4px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-teal);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+}
+.gate-range::-moz-range-thumb {
+  width: 4px;
+  height: 100%;
+  border: 0;
+  border-radius: 2px;
+  background: var(--color-teal);
+}
+.gate-range:disabled {
+  cursor: not-allowed;
+}
+
 /* Dual-handle audio trimmer: two stacked range inputs, only the thumbs are interactive. */
 .trim-range {
   -webkit-appearance: none;

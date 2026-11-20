@@ -154,4 +154,39 @@ describe("vocal handoff cues (voice controller)", () => {
     expect(useHandoffChip.getState().chip).toMatchObject({ to: "coder", voiced: false });
     expect(voices().filter((v) => v === "coder")).toHaveLength(0);
   });
+
+  it("review #9/#15: the reply queues behind the cue — no beat or reply sentence is cut", async () => {
+    void handleInput("ask the coder to build me a landing page", { channel: "voice", origin: "tap" });
+    await vi.waitFor(() => expect(h.cmd.mock.calls.some((c) => c[0] === "os_turn")).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.speak).toHaveBeenCalledTimes(1); // beat 1 still playing: the answer waits
+    for (let i = 0; i < 3; i++) {
+      await vi.waitFor(() => expect(h.speak.mock.calls.length).toBeGreaterThan(i));
+      await finishBeat();
+    }
+    await vi.waitFor(() => expect(h.speak).toHaveBeenCalledTimes(4));
+    expect(h.speak.mock.calls[3][0]).toBe("On it.");
+    expect(voices().slice(0, 3)).toEqual(["general", "coder", "general"]);
+  });
+
+  it("review #29/#10: a new command over the cue cancels the cue, not the delegated job", async () => {
+    let first = true;
+    h.cmd.mockImplementation(async (name: string) => {
+      if (name !== "os_turn") return undefined;
+      if (first) {
+        first = false;
+        return new Promise(() => undefined); // the Coder is still working
+      }
+      return { answer: "It's noon.", steps: [], providerId: "local", latencyMs: 1, routedRole: "general", routeKind: "Self", routeReason: "", redacted: false, reason: "" };
+    });
+    void handleInput("ask the coder to build me a landing page", { channel: "voice", origin: "tap" });
+    await vi.waitFor(() => expect(h.speak).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(h.sttStart).toHaveBeenCalled());
+    const barge = h.sttStart.mock.calls.at(-1)![0] as { onPhase: (p: string) => void; onFinal: (t: string) => void };
+    barge.onPhase("speech");
+    barge.onFinal("what time is it");
+    await vi.waitFor(() => expect(h.cmd.mock.calls.filter((c) => c[0] === "os_turn")).toHaveLength(2));
+    expect(h.cmd.mock.calls.some((c) => c[0] === "os_turn_cancel")).toBe(false);
+    expect(h.ttsCancel).toHaveBeenCalled(); // the beat in flight was cut
+  });
 });

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Mic, Send, Square } from "lucide-react";
+import { ArrowRight, Send } from "lucide-react";
 import { tonyThreadForView, useThreadTurns, useVoice, type ThreadId, type VoiceState } from "./voice-store";
-import { askOverseer, handleInput, runTurnAction, toggleListening } from "./voice-controller";
+import { askOverseer, handleInput, runTurnAction, setMicEnabled, toggleListening } from "./voice-controller";
+import { useMic } from "./mic-gate";
+import { MicButtonView } from "./MicLockBadge";
 import { isSelfRelay } from "./route-for";
 import { useFocus } from "@/features/os/focus-store";
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
@@ -30,22 +32,16 @@ export function useTonyThread(): ThreadId {
   return tonyThreadForView(section, active);
 }
 
-export function MicButton({ size = 44 }: { size?: number }) {
+/**
+ * The round mic button. `locked` (default: the mic gate is off) shows the locked-off face: a click
+ * asks to unlock (Rust acks first on desktop) and never starts listening. While Tony is thinking or
+ * speaking a reply to a typed turn, the button stays a stop button (it never opens the mic).
+ */
+export function MicButton({ size = 44, locked }: { size?: number; locked?: boolean }) {
   const state = useVoice((s) => s.state);
-  const live = state === "listening" || state === "speaking";
-  return (
-    <button
-      aria-label={state === "listening" ? "Stop listening" : state === "speaking" ? "Stop speaking" : "Start listening"}
-      onClick={toggleListening}
-      style={{ width: size, height: size }}
-      className={`grid shrink-0 place-items-center rounded-full transition-transform duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95 ${
-        live ? "bg-teal text-canvas glow-teal" : "pill-primary !p-0"
-      }`}
-      // pill-primary sets its own height; the inline size wins.
-    >
-      {live ? <Square size={size * 0.34} fill="currentColor" /> : <Mic size={size * 0.4} />}
-    </button>
-  );
+  const gateOff = useMic((s) => !s.enabled);
+  const showLocked = (locked ?? gateOff) && state !== "speaking" && state !== "thinking";
+  return <MicButtonView state={state} locked={showLocked} size={size} onClick={showLocked ? () => void setMicEnabled(true) : toggleListening} />;
 }
 
 export function Transcript({ max = 50, className = "", thread }: { max?: number; className?: string; thread?: ThreadId }) {

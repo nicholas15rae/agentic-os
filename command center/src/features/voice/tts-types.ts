@@ -25,6 +25,9 @@ export interface SpeakOpts {
    * cache key, and never sent for `cache: true` lines (they use Rust's per-call path, so a
    * breaker cooldown can't pin local audio for an intro). `speak()` mints one if missing. */
   utteranceId?: string;
+  /** Part 6 narration with `feedback.narrationEngine: "kokoro"`: synthesize on the local engine in
+   * this agent's own local voice (spares the ElevenLabs quota). Part of the cache key. */
+  localOnly?: boolean;
 }
 
 export interface TtsEngine {

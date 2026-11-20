@@ -21,24 +21,50 @@ export interface DispatchOptions {
 /** The desktop's answer to a queued phone item (`result` of `/api/os/inbox/{id}`). */
 export type DesktopResult = { answer?: string; providerId?: string; idea?: { id?: string; title?: string } } & Record<string, unknown>;
 
+/** Gateway queue item states (`os_queue.status`). `failed` is what gateways before the claim/lease
+ * change wrote for an error, so it is still understood. */
+export type QueueStatus = "pending" | "running" | "done" | "error" | "failed" | "expired";
+
+/** How long an unclaimed item may sit `pending` before the phone assumes the desktop is off. */
+export const DESKTOP_PICKUP_MS = 12_000;
+/** Hard cap on waiting for a claimed (`running`) item. */
+export const DESKTOP_ANSWER_CAP_MS = 240_000;
+export const DESKTOP_POLL_MS = 1500;
+export const DESKTOP_EXPIRED_MESSAGE = "The desktop app didn't pick that up in time, so nothing ran.";
+
 /**
- * Queue a turn payload for the desktop app and wait for its result (null if the desktop isn't
- * picking up within 12 s). Every current caller sends `noDelegate` (true or false), so the
- * desktop's legacy idea-shaped shortcut (`pipeline.rs inbox_turn_route`) never fires for them;
- * `capture: true` is an approved Tier-3 build "yes" (Prompter breakdown + ledger).
+ * Queue a turn payload for the desktop app and wait for its result. Returns null only when the
+ * item is still unclaimed (`pending`) after 12 s (desktop app not running) or the 240 s cap runs
+ * out; once the desktop has claimed it (`running`) the phone keeps waiting, because a Prompter
+ * capture alone can take minutes. `expired` (the gateway gave up on it) throws an explicit message.
+ * Every current caller sends `noDelegate` (true or false), so the desktop's legacy idea-shaped
+ * shortcut (`pipeline.rs inbox_turn_route`) never fires for them; `capture: true` is an approved
+ * Tier-3 build "yes" (Prompter breakdown + ledger).
  */
 export async function queueDesktopTurn(payload: Record<string, unknown> & { noDelegate: boolean }): Promise<DesktopResult | null> {
-  const q = await gateway<{ id: string }>("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind: "turn", payload }) });
+  return queueDesktopItem("turn", payload);
+}
+
+/**
+ * Queue any inbox item for the desktop and wait for its result (same pickup / cap / expired rules
+ * as `queueDesktopTurn`). A desktop refusal (e.g. the mode gate's `MODE_SURFACE_ONLY` /
+ * `MODE_NOT_AUTO` on a `task`) throws its error text, so the caller never claims success.
+ */
+export async function queueDesktopItem(kind: "turn" | "task", payload: Record<string, unknown>, opts: { capMs?: number } = {}): Promise<DesktopResult | null> {
+  const q = await gateway<{ id: string }>("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind, payload }) });
   const t0 = Date.now();
-  while (Date.now() - t0 < 240_000) {
-    await new Promise((r) => setTimeout(r, 1500));
-    const r = await gateway<{ status: string; result: { ok: boolean; result?: DesktopResult; error?: string } | null }>(`/api/os/inbox/${q.id}`);
+  const cap = opts.capMs ?? DESKTOP_ANSWER_CAP_MS;
+  while (Date.now() - t0 < cap) {
+    await new Promise((r) => setTimeout(r, DESKTOP_POLL_MS));
+    const r = await gateway<{ status: QueueStatus; result: { ok: boolean; result?: DesktopResult; error?: string } | null }>(`/api/os/inbox/${q.id}`);
     if (r.status === "pending") {
-      if (Date.now() - t0 > 12_000) return null; // desktop app not running → fall back
+      if (Date.now() - t0 > DESKTOP_PICKUP_MS) return null; // desktop app not running → fall back
       continue;
     }
+    if (r.status === "running") continue; // claimed: the desktop is working on it
+    if (r.status === "expired") throw new Error(DESKTOP_EXPIRED_MESSAGE);
     if (r.result?.ok && r.result.result) return r.result.result;
-    throw new Error(r.result?.error ?? "desktop turn failed");
+    throw new Error(r.result?.error ?? `desktop ${kind} failed`);
   }
   return null;
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSettings } from "@/stores/settings";
 import { Waveform } from "@/features/voice/Waveform";
 import { VoiceOrb } from "@/features/voice/VoiceOrb";
@@ -10,32 +10,44 @@ import { BraveCard, GmailCard, GoogleCard, InstagramCard, LocalLlmCard, MapsCard
 import { BridgeCard, PipelinesCard } from "./settings/PipelineSettings";
 import { ComputeCard, DropletCard, MarketDataCard, OsIdentityCard, OsPermissionsCard, OverseerCard, PrivacyShieldCard, WorkspacesCard } from "./settings/OsSettings";
 import { McpRegistryCard, SkillsLibraryCard } from "./settings/LibrarySettings";
-import { MemoryLifecycleCard } from "./settings/MemorySettings";
+import { MemoryLifecycleCard, MemoryScrollsCard } from "./settings/MemorySettings";
 import { AiProvidersCard, CliHubCard, ComputeRouterCard, ModelLabCard, ModelLibraryCard } from "./settings/HubSettings";
 import { CueStudio } from "./settings/CueStudio";
 import { VoiceDetectionCard } from "./settings/VadSettings";
 import { RoutingSettings } from "./settings/RoutingSettings";
+import { ModesManagerCard } from "./settings/ModesManager";
+import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
 
-type Tab = "services" | "voice" | "integrations" | "business" | "appearance";
+type Tab = "services" | "voice" | "modes" | "integrations" | "business" | "appearance";
 const TABS: { id: Tab; label: string }[] = [
   { id: "services", label: "Services" },
   { id: "voice", label: "Voice & Triggers" },
+  { id: "modes", label: "Tony Modes" },
   { id: "integrations", label: "Integrations" },
   { id: "business", label: "Business" },
   { id: "appearance", label: "Appearance" },
 ];
 
 export function SettingsSection() {
-  const [tab, setTab] = useState<Tab>(() => (sessionStorageGet("cc.settings.tab") as Tab) || "services");
+  const [tab, setTab] = useState<Tab>(() => (sessionStorageGet(SETTINGS_TAB_KEY) as Tab) || "services");
   const go = (t: Tab) => {
     setTab(t);
     try {
-      sessionStorage.setItem("cc.settings.tab", t);
+      sessionStorage.setItem(SETTINGS_TAB_KEY, t);
     } catch {
       /* private mode */
     }
   };
+  // A deep link ("Manage modes…", the shield pill) while Settings is already mounted.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const t = (e as CustomEvent<unknown>).detail;
+      if (TABS.some((x) => x.id === t)) setTab(t as Tab);
+    };
+    window.addEventListener(SETTINGS_TAB_EVENT, on);
+    return () => window.removeEventListener(SETTINGS_TAB_EVENT, on);
+  }, []);
   const desktop = isTauri();
   return (
     <div className="mx-auto h-full w-full max-w-4xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
@@ -53,6 +65,7 @@ export function SettingsSection() {
               <VerifierCard />
               <WorkspacesCard />
               <MemoryLifecycleCard />
+              <MemoryScrollsCard />
             </>
           ) : (
             <DesktopOnly what="Backend, model and verifier switching" />
@@ -77,6 +90,7 @@ export function SettingsSection() {
           <CueStudio />
         </>
       )}
+      {tab === "modes" && (desktop ? <ModesManagerCard onOpenVoice={() => go("voice")} /> : <DesktopOnly what="Creating and editing Tony's modes" />)}
       {tab === "integrations" && (
         <>
           {desktop && (

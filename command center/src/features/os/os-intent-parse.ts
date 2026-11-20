@@ -29,6 +29,13 @@ export type OsIntent =
   | { kind: "compute"; mode: ComputeModeId }
   | { kind: "kill-switch"; on: boolean }
   | { kind: "status" }
+  /** Part 6 status on demand: "what's the coder doing", "where's the build at", "status of my-app",
+   * "hey Prompter, where are we at?". Answered from the task store with a template (no model).
+   * `addressed` = said TO that agent (its own roster voice answers). `weak` = a bare "where's X at":
+   * if no build is called X, the line falls through to Tony. */
+  | { kind: "agent-status"; agent?: StatusAgent; slug?: string; addressed?: boolean; weak?: boolean }
+  /** "narration off" / "narrate everything" / "quieter narration": the feedback level (0–3), or a step. */
+  | { kind: "narration"; level?: 0 | 1 | 2 | 3; step?: -1 | 1 }
   /** System Map dev task queue: "log a dev note …", "queue a fix for …", "add … to the dev queue". `title` keeps the user's casing.
    * `taskKind: "fix"` goes to the Claude Code fix queue (`queueFix`). */
   | { kind: "dev-task"; taskKind: DevNoteKind; title: string }
@@ -36,6 +43,8 @@ export type OsIntent =
   | { kind: "dev-fix-dispatch"; query: string };
 
 export type DevNoteKind = "note" | "fix" | "task";
+/** Agents whose progress status on demand can report (the worker's speakers). */
+export type StatusAgent = "prompter" | "designer" | "coder" | "librarian";
 
 export interface ParseOpts {
   /** The OS name from Settings ("Tony"); stripped as a wake word and accepted as Tony's tab. */
@@ -209,6 +218,176 @@ const STATUS = [
   /^how are (?:the |my |all )?(?:the )?systems(?: doing| looking)?$/,
 ];
 
+// ── Status on demand (Part 6) ─────────────────────────────────────────────────
+//
+// Matched on `commandText` (lower-case, punctuation gone, "what's" → "what s"), BEFORE the router,
+// so "what's the coder doing" is a status read from the store — never a Named delegation to the
+// Coder's workspace (an ungrounded, GPU-heavy guess). "Tell the coder to fix the login" matches
+// nothing here and still routes.
+
+const AGENT_WORDS: Record<string, StatusAgent> = {
+  prompter: "prompter",
+  "prompt builder": "prompter",
+  designer: "designer",
+  coder: "coder",
+  developer: "coder",
+  librarian: "librarian",
+};
+const AGENT_ALT = Object.keys(AGENT_WORDS).sort((a, b) => b.length - a.length).join("|");
+const WHAT = String.raw`(?:what s|whats|what is|what are)`;
+const DOING = String.raw`(?:doing|working on|up to|been doing|been up to|busy with)(?: right now| now| at the moment)?`;
+const STATUS_AGENT = [
+  new RegExp(String.raw`^${WHAT} (?:the |my |our )?(?<a>${AGENT_ALT})(?: agent)? ${DOING}$`),
+  new RegExp(String.raw`^(?:where s|where is|how s|how is) (?:the |my |our )?(?<a>${AGENT_ALT})(?: agent)? (?:at|doing|getting on|coming along)$`),
+  new RegExp(String.raw`^(?:status|progress) (?:of|on|for) (?:the |my |our )?(?<a>${AGENT_ALT})(?: agent)?$`),
+];
+/** Said TO the agent ("hey" is already stripped): "prompter, where are we at", "coder status". */
+const STATUS_ADDRESSED = [
+  new RegExp(String.raw`^(?<a>${AGENT_ALT})(?: agent)? (?:where are we(?: at)?|where are you(?: at)?|where s it at|where is it at|status(?: update| report)?|what s the status|whats the status|how s it going|hows it going|how are we doing|what s happening|what are you (?:doing|working on))$`),
+  new RegExp(String.raw`^(?:where are we(?: at)?|where are you(?: at)?|status(?: update)?|how s it going) (?<a>${AGENT_ALT})$`),
+];
+const BUILD_NOUN = String.raw`(?:build|builds|prototype|prototypes|project|pipeline)`;
+const STATUS_ALL = [
+  new RegExp(String.raw`^${WHAT} (?:the |all the |my |our )?(?:agents|team|crew|workers|everyone|everybody)(?: all)? ${DOING}$`),
+  new RegExp(String.raw`^(?:where s|where is|wheres|how s|how is|hows) (?:the |my |our )?${BUILD_NOUN}(?: at| going| coming along| doing| looking)?$`),
+  new RegExp(String.raw`^where are we (?:at )?(?:with|on) (?:the |my |our )?${BUILD_NOUN}$`),
+  new RegExp(String.raw`^(?:${BUILD_NOUN}|task|tasks) (?:status|progress|update)$`),
+  new RegExp(String.raw`^(?:what s|whats|what is) (?:going on|happening|the status|the latest) (?:with|on) (?:the |my |our )?${BUILD_NOUN}$`),
+  new RegExp(String.raw`^(?:status|progress) (?:of|on|for) (?:the |my |our |all )?${BUILD_NOUN}$`),
+  new RegExp(String.raw`^(?:any|what s the) (?:update|news) on (?:the |my |our )?${BUILD_NOUN}$`),
+];
+/** "status of the audition tracker build" (strong: it says it's a build). "status of audition
+ * tracker" / "where's the audition tracker at" are WEAK: "status of my Amazon order", "progress
+ * on the audition prep", "status on the booking for friday" are not builds — they fall through to
+ * Tony (and the Booking Desk) when no build has that name. */
+// "my"/"our" stay in the slug ("status of my app" → my-app); `slugCandidates` also tries it without.
+const STATUS_SLUG_STRONG = /^(?:status|progress) (?:of|on|for) (?:the )?(?<s>[a-z0-9][a-z0-9 ]{0,46}?) (?:build|prototype)$/;
+const STATUS_SLUG_NAMED = /^(?:status|progress) (?:of|on|for) (?:the )?(?<s>[a-z0-9][a-z0-9 ]{0,46})$/;
+/** "project" / "pipeline" also name other things ("how's the project going" = CloudMart), so a
+ * general status line that only says those is weak (Tony answers when no build is open). */
+const AMBIGUOUS_BUILD = /\b(?:project|projects|pipeline|pipelines)\b/;
+const PLAIN_BUILD = /\b(?:build|builds|prototype|prototypes)\b/;
+const STATUS_SLUG_WEAK = /^(?:where s|where is|how s|how is) (?:the )?(?<s>[a-z0-9][a-z0-9 ]{0,46}?)(?: build| prototype| project)? (?:at|coming along)$/;
+/** Words that are never a project name ("where's my phone at" still reaches Tony, as a weak match). */
+const NOT_A_SLUG = /^(?:(?:my |our )?(?:it|this|that|everything|everyone|things|system|systems|you|we|us|me|phone|keys|stuff))$/;
+
+/** The slugs a spoken name may be: "my-app", then "app" ("status of my audition tracker"). Pure. */
+export function slugCandidates(slug: string): string[] {
+  const bare = slug.replace(/^(?:my|our)-/, "");
+  return bare && bare !== slug ? [slug, bare] : [slug];
+}
+
+/** "my app" → "my-app" (the worker's project slugs). */
+const slugOf = (words: string) => words.trim().replace(/\s+/g, "-");
+
+function agentStatus(t: string): OsIntent | null {
+  for (const re of STATUS_ADDRESSED) {
+    const a = re.exec(t)?.groups?.a;
+    if (a) return { kind: "agent-status", agent: AGENT_WORDS[a], addressed: true };
+  }
+  for (const re of STATUS_AGENT) {
+    const a = re.exec(t)?.groups?.a;
+    if (a) return { kind: "agent-status", agent: AGENT_WORDS[a] };
+  }
+  if (STATUS_ALL.some((re) => re.test(t))) return AMBIGUOUS_BUILD.test(t) && !PLAIN_BUILD.test(t) ? { kind: "agent-status", weak: true } : { kind: "agent-status" };
+  const strong = STATUS_SLUG_STRONG.exec(t)?.groups?.s;
+  if (strong && !NOT_A_SLUG.test(strong.trim())) return { kind: "agent-status", slug: slugOf(strong) };
+  const named = STATUS_SLUG_NAMED.exec(t)?.groups?.s;
+  if (named && !NOT_A_SLUG.test(named.trim()) && !AGENT_WORDS[named.trim()]) return { kind: "agent-status", slug: slugOf(named), weak: true };
+  const weak = STATUS_SLUG_WEAK.exec(t)?.groups?.s;
+  if (weak && !NOT_A_SLUG.test(weak.trim()) && !AGENT_WORDS[weak.trim()]) return { kind: "agent-status", slug: slugOf(weak), weak: true };
+  return null;
+}
+
+const NARRATION_SET: [RegExp, 0 | 1 | 2 | 3][] = [
+  [/^(?:narration|narrations) (?:off|silent|quiet|mute|muted)$|^(?:turn|switch) (?:off )?(?:the )?narration(?: off)?$|^(?:stop|no more|mute) (?:the )?narrat(?:ing|ion|or)$|^silent narration$/, 0],
+  [/^(?:narration|narrate) (?:milestones?|milestones only)$|^only narrate milestones$/, 1],
+  [/^(?:narration|narrate) handoffs?$|^narrate the handoffs$/, 2],
+  [/^narrate everything$|^(?:narration|narrations) (?:verbose|everything|all)$|^verbose narration$/, 3],
+];
+
+function narration(t: string): OsIntent | null {
+  for (const [re, level] of NARRATION_SET) if (re.test(t)) return { kind: "narration", level };
+  if (/^(?:turn|switch) (?:the )?narration on$|^narration on$/.test(t)) return { kind: "narration", level: 1 };
+  if (/^(?:quieter|less) narration$|^narrate less$|^(?:turn|tone) (?:the )?narration down$/.test(t)) return { kind: "narration", step: -1 };
+  if (/^(?:more|louder) narration$|^narrate more$|^(?:turn|bump) (?:the )?narration up$/.test(t)) return { kind: "narration", step: 1 };
+  return null;
+}
+
+/** One open task as status needs it (envelope / gateway mirror snapshot fields). */
+export interface StatusTask {
+  task_id: string;
+  title: string;
+  status: string;
+  stage: string | null;
+  current_owner: string;
+  iteration_count: number;
+  max_iterations: number;
+  project_slug: string | null;
+  updated_at: number;
+  error?: string | null;
+  voice_summaries?: Record<string, { text: string; at: number } | undefined> | null;
+}
+
+const STAGE_AGENT: Record<string, StatusAgent | "system" | "staging"> = { triage: "prompter", spec: "prompter", merge: "prompter", verify: "prompter", preflight: "librarian", audit: "librarian", design: "designer", code: "coder", evaluate: "system", done: "staging" };
+const LABEL: Record<string, string> = { prompter: "the Prompter", designer: "the Designer", coder: "the Coder", librarian: "the Librarian", system: "the build checks", staging: "staging", tony: "Tony" };
+const NAME: Record<string, string> = { prompter: "The Prompter", designer: "The Designer", coder: "The Coder", librarian: "The Librarian" };
+
+function ago(ms: number, now: number): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+}
+
+/**
+ * The phone's status answer from the gateway mirror (the desktop answers from tasks.db with the
+ * same shape of sentence). Templated: no model call. Pure.
+ */
+export function taskStatusText(tasks: readonly StatusTask[], q: { agent?: string; slug?: string }, now = Date.now()): string {
+  const open = tasks.filter((t) => t.status !== "review_ready" && t.status !== "failed").sort((a, b) => a.updated_at - b.updated_at);
+  const who = (t: StatusTask) => (t.stage ? STAGE_AGENT[t.stage] : undefined) ?? t.current_owner;
+  const pick = q.slug ? tasks.find((t) => t.project_slug === q.slug) : q.agent ? open.find((t) => who(t) === q.agent || t.current_owner === q.agent) : open[0];
+  if (!pick) {
+    if (q.slug) return "I don't have a build with that name.";
+    if (q.agent) return `${NAME[q.agent] ?? q.agent} isn't on a task right now.`;
+    return "No builds in progress.";
+  }
+  if (pick.status === "review_ready") return `“${pick.title}” is ready for review in staging/${pick.project_slug ?? ""}.`;
+  if (pick.status === "failed") return `“${pick.title}” failed${pick.error ? `: ${pick.error}` : "."}`;
+  if (pick.status === "queued") return `“${pick.title}” is queued for the Prompter.`;
+  const more = !q.slug && !q.agent && open.length > 1 ? ` ${open.length} builds are open.` : "";
+  return `“${pick.title}” is with ${LABEL[who(pick)] ?? who(pick)}, iteration ${pick.iteration_count} of ${pick.max_iterations}, updated ${ago(pick.updated_at, now)}.${more}`;
+}
+
+/**
+ * "Hey Coder, where are we at?" on the phone: the line the addressed agent speaks in its own voice,
+ * from the gateway mirror. Same rules as the desktop (taskworker.rs `addressed_task` +
+ * `addressed_line`): the open task it is working on (owner / its stage), else the one it last
+ * spoke about, else the newest; its voice summary there, else a first-person line about where that
+ * task is; with no open task, its latest voice summary from any task; else "Nothing from me yet."
+ * Templated. Pure.
+ */
+export function addressedStatusLine(tasks: readonly StatusTask[], agent: string): string {
+  const own = (t: StatusTask) => t.voice_summaries?.[agent]?.text;
+  const open = tasks.filter((t) => t.status !== "review_ready" && t.status !== "failed").sort((a, b) => b.updated_at - a.updated_at);
+  const working = (t: StatusTask) => t.current_owner === agent || (t.stage ? STAGE_AGENT[t.stage] : undefined) === agent;
+  const spoke = open.filter((t) => own(t)).sort((a, b) => (b.voice_summaries?.[agent]?.at ?? 0) - (a.voice_summaries?.[agent]?.at ?? 0))[0];
+  const newest = open.find(working) ?? spoke ?? open[0];
+  if (newest) {
+    const mine = own(newest);
+    if (mine) return mine;
+    const with_ = (newest.stage ? STAGE_AGENT[newest.stage] : undefined) ?? newest.current_owner;
+    if (with_ === agent) return `I'm on "${newest.title}" now; nothing to report yet.`;
+    if (newest.status === "queued") return `Nothing from me on "${newest.title}" yet; it's queued for the Prompter.`;
+    if (with_ === "system") return `Nothing from me on "${newest.title}" yet; it's in the build checks.`;
+    return `Nothing from me on "${newest.title}" yet; it's with ${LABEL[with_] ?? with_}.`;
+  }
+  const latest = tasks
+    .map((t) => t.voice_summaries?.[agent])
+    .filter((v): v is { text: string; at: number } => !!v?.text)
+    .sort((a, b) => b.at - a.at)[0];
+  return latest?.text ?? "Nothing from me yet.";
+}
+
 // ── Dev task queue (System Map) ─────────────────────────────────────────────
 //
 // Anchored at the start of the line (after the wake word and politeness), so a request
@@ -344,6 +523,10 @@ export function parseOsIntent(text: string, opts: ParseOpts = {}): OsIntent | nu
     }
   }
   if (STATUS.some((re) => re.test(t))) return { kind: "status" };
+  const st = agentStatus(t);
+  if (st) return st;
+  const nar = narration(t);
+  if (nar) return nar;
 
   return volume(t, opts) ?? gabagool(t, !!opts.cueActive, !!opts.cuePlaying) ?? workspace(t, osName);
 }

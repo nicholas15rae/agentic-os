@@ -201,6 +201,9 @@ export const useThreadTurns = (thread?: ThreadId) =>
  */
 export const voiceLevel = { current: 0 };
 
+/** The mic's input level 0..1 (Phase 2 Part B: kept apart from TTS so neither clobbers the other). */
+export const micLevel = { current: 0 };
+
 export const STATE_LABEL: Record<VoiceState, string> = {
   idle: "Standby",
   listening: "Listening",

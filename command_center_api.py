@@ -23,6 +23,7 @@ import base64
 import json
 import math
 import mimetypes
+import os
 import queue
 import re
 import shutil
@@ -39,21 +40,37 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).parent.resolve()
-CC_DIR = BASE_DIR / "data" / "command-center"
+# CC_DATA_DIR only exists so a scratch gateway (smoke tests) can run against its own store;
+# the default is unchanged.
+CC_DIR = Path(os.environ["CC_DATA_DIR"]).expanduser().resolve() if os.environ.get("CC_DATA_DIR") else BASE_DIR / "data" / "command-center"
 FILES_DIR = CC_DIR / "files"
 DB_PATH = CC_DIR / "cc.db"
 CONFIG_PATH = CC_DIR / "config.json"
 
+DEFAULT_LLM_BASE_URL = "http://127.0.0.1:1235/v1"  # LM Studio (Bionic) on this machine; :1234 is closed
+
+
+def _valid_http_url(u: str) -> bool:
+    p = urllib.parse.urlparse(u or "")
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+
+def _default_llm_base(env: Optional[dict] = None) -> str:
+    """`CC_LLM_BASE_URL` overrides the built-in default (a saved config.json still wins)."""
+    v = ((env if env is not None else os.environ).get("CC_LLM_BASE_URL") or "").strip()
+    return v if _valid_http_url(v) else DEFAULT_LLM_BASE_URL
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     # Zero-cost local LLM for OCR, organizing, widget generation and embeddings.
     "llm": {
-        "baseUrl": "http://127.0.0.1:1234/v1",
-        "model": "",  # empty = first model the server lists
+        "baseUrl": _default_llm_base(),
+        "model": "",  # empty = the model LM Studio already has loaded (never JIT-loads a second one)
         "visionModel": "",  # e.g. a Qwen2.5-VL / LLaVA build loaded in LM Studio
         "embeddingModel": "text-embedding-nomic-embed-text-v1.5",
         "timeoutSecs": 120,
@@ -130,11 +147,6 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     CC_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
-
-def _valid_http_url(u: str) -> bool:
-    p = urllib.parse.urlparse(u or "")
-    return p.scheme in ("http", "https") and bool(p.netloc)
 
 
 # ── database ─────────────────────────────────────────────────────────────────
@@ -234,9 +246,41 @@ def llm_models() -> list[str]:
     return ids
 
 
+_loaded_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def llm_loaded_models() -> list[dict]:
+    """LM Studio's own model list (`/api/v0/models`, which carries `state` and `type`), filtered
+    to the models that are loaded right now. [] when the server isn't LM Studio or is down."""
+    base = load_config()["llm"]["baseUrl"].rstrip("/")
+    hit = _loaded_cache.get(base)
+    if hit and time.time() - hit[0] < 15:
+        return hit[1]
+    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    try:
+        data = _http_json(f"{root}/api/v0/models", timeout=4).get("data", [])
+        loaded = [m for m in data if isinstance(m, dict) and m.get("state") == "loaded" and m.get("id")]
+    except Exception:
+        loaded = []
+    _loaded_cache[base] = (time.time(), loaded)
+    return loaded
+
+
 def _pick_model(preferred: str, want: str = "chat") -> str:
+    """An explicit model wins. Otherwise prefer what LM Studio already has loaded, so a gateway
+    call never JIT-loads a second large model next to the desktop's; only when nothing usable is
+    loaded (or the server has no /api/v0) fall back to the first listed model."""
     if preferred:
         return preferred
+    loaded = llm_loaded_models()
+    if want == "embed":
+        emb = [m["id"] for m in loaded if m.get("type") == "embeddings" or "embed" in m["id"].lower()]
+        if emb:
+            return emb[0]
+    else:
+        chat = [m["id"] for m in loaded if m.get("type") != "embeddings" and "embed" not in m["id"].lower()]
+        if chat:
+            return chat[0]
     models = llm_models()
     if want == "embed":
         emb = [m for m in models if "embed" in m.lower()]
@@ -248,7 +292,92 @@ def _pick_model(preferred: str, want: str = "chat") -> str:
     return chat[0]
 
 
-def llm_chat(messages: list[dict], *, model: str = "", max_tokens: int = 1200, temperature: float = 0.2) -> str:
+# ── cooperative GPU lease (the desktop's GpuSlot mirrors itself here) ───────
+#
+# The desktop app owns the only real GPU arbiter. While it holds the baton it PUTs
+# /api/os/gpu {busy:true, holder, until}; the gateway's own LM Studio calls then back off:
+# /llm/json answers 503 at once (its caller has a deterministic fallback), the embedding
+# thread defers, and every other llm_chat waits up to 30 s before going ahead anyway.
+# A flag without `until` goes stale 30 s after it was set; `until` is honoured for at most
+# 15 minutes, so a crashed desktop can never wedge the gateway.
+
+GPU_STALE_SECS = 30.0
+GPU_MAX_HOLD_SECS = 900.0
+_gpu_lock = threading.Lock()
+_gpu: dict[str, Any] = {"busy": False, "holder": "", "until": None, "at": 0.0}
+
+
+def _epoch(v: Any) -> Optional[float]:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    return f / 1000.0 if f > 1e11 else f  # ms or s
+
+
+def gpu_set(busy: bool, holder: str = "", until: Any = None, now: Optional[float] = None) -> dict:
+    now = time.time() if now is None else now
+    with _gpu_lock:
+        _gpu.update(busy=bool(busy), holder=str(holder or "")[:60], until=_epoch(until) if busy else None, at=now)
+        return dict(_gpu)
+
+
+def gpu_expires_at(state: Optional[dict] = None) -> float:
+    s = state if state is not None else _gpu
+    at = float(s.get("at") or 0.0)
+    until = s.get("until")
+    if until is None:
+        return at + GPU_STALE_SECS
+    return max(at, min(float(until), at + GPU_MAX_HOLD_SECS))
+
+
+def gpu_busy(now: Optional[float] = None) -> bool:
+    now = time.time() if now is None else now
+    with _gpu_lock:
+        return bool(_gpu["busy"]) and now < gpu_expires_at(_gpu)
+
+
+def gpu_state(now: Optional[float] = None) -> dict:
+    now = time.time() if now is None else now
+    with _gpu_lock:
+        s = dict(_gpu)
+    return {**s, "active": bool(s["busy"]) and now < gpu_expires_at(s), "expiresAt": gpu_expires_at(s) if s["busy"] else None}
+
+
+def wait_gpu(max_wait: Optional[float], poll: float = 0.5) -> bool:
+    """Block while the desktop holds the GPU: True once free, False if `max_wait` ran out
+    (None = until the lease ends, which GPU_MAX_HOLD_SECS always bounds)."""
+    deadline = None if max_wait is None else time.time() + max_wait
+    while gpu_busy():
+        if deadline is not None and time.time() >= deadline:
+            return False
+        time.sleep(poll)
+    return True
+
+
+def is_loopback_request(request: Any) -> bool:
+    """Same rule as server.ZeroTrustMiddleware's trusted path: a loopback peer that did not
+    come through a tunnel (forwarding headers mean the public internet)."""
+    client = getattr(request, "client", None)
+    host = (client.host if client else "") or ""
+    loopback = host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
+    headers = getattr(request, "headers", None) or {}
+    proxied = any(h in headers for h in ("x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"))
+    return loopback and not proxied
+
+
+def require_loopback(request: Any) -> None:
+    if not is_loopback_request(request):
+        raise HTTPException(403, "Only the desktop app on this machine may call this endpoint.")
+
+
+def llm_chat(messages: list[dict], *, model: str = "", max_tokens: int = 1200, temperature: float = 0.2, gpu_wait: Optional[float] = GPU_STALE_SECS) -> str:
+    if gpu_wait:
+        wait_gpu(gpu_wait)  # cooperative: let the desktop's generation finish first, then go ahead anyway
     cfg = load_config()["llm"]
     body = {
         "model": _pick_model(model or cfg["model"]),
@@ -404,6 +533,7 @@ def _index_worker() -> None:
                 r = c.execute("SELECT text FROM vault WHERE item_id=?", (item_id,)).fetchone()
             if not r or not r["text"]:
                 continue
+            wait_gpu(None, poll=2.0)  # defer while the desktop holds the GPU (the lease is bounded)
             (vec,), model = embed([r["text"]])
             blob = array.array("f", vec).tobytes()
             with _db_lock, db() as c:
@@ -491,9 +621,11 @@ def vault_search(q: str, collections: Optional[list[str]] = None, k: int = 8) ->
 def cc_health():
     llm = {"ok": False}
     try:
-        llm = {"ok": True, "models": llm_models()[:20]}
+        llm = {"ok": True, "models": llm_models()[:20], "loaded": [m["id"] for m in llm_loaded_models()][:5]}
     except Exception as e:
         llm = {"ok": False, "error": _why(e)}
+    llm["baseUrl"] = load_config()["llm"]["baseUrl"]
+    llm["gpuBusy"] = gpu_busy()
     with db() as c:
         counts = {r["collection"]: r["n"] for r in c.execute("SELECT collection, COUNT(*) n FROM items WHERE deleted=0 GROUP BY collection")}
         vault = c.execute("SELECT COUNT(*) n, SUM(vector IS NOT NULL) e FROM vault").fetchone()
@@ -649,6 +781,7 @@ def put_config(patch: dict):
     b["keep"] = max(1, min(365, int(b.get("keep", 14))))
     save_config(cfg)
     _models_cache.clear()
+    _loaded_cache.clear()
     return cfg
 
 
@@ -831,17 +964,22 @@ class JsonGenRequest(BaseModel):
 def llm_json(req: JsonGenRequest):
     if len(req.system) > 8000 or len(req.prompt) > 8000:
         raise HTTPException(413, "Too long")
+    if gpu_busy():
+        # The desktop's pipeline holds the GPU: answer at once so the caller takes its
+        # deterministic fallback instead of queueing a second generation on the card.
+        raise HTTPException(503, "Local LLM busy (the desktop holds the GPU); use the fallback")
     try:
-        out = llm_chat([{"role": "system", "content": req.system}, {"role": "user", "content": req.prompt}], max_tokens=1200)
+        out = llm_chat([{"role": "system", "content": req.system}, {"role": "user", "content": req.prompt}], max_tokens=1200, gpu_wait=0)
     except Exception as e:
         raise HTTPException(503, f"Local LLM unavailable: {_why(e)}")
     j = extract_json(out)
-    if j is None:
+    if j is None and not gpu_busy():
         # One retry with a blunt nudge before giving up.
         try:
             out = llm_chat(
                 [{"role": "system", "content": req.system}, {"role": "user", "content": req.prompt}, {"role": "user", "content": "Return ONLY JSON, nothing else."}],
                 max_tokens=1200,
+                gpu_wait=0,
             )
             j = extract_json(out)
         except Exception:
@@ -1033,6 +1171,21 @@ def os_state():
         raise HTTPException(500, f"os-state.json unreadable: {_why(e)}")
     data["available"] = True
     return data
+
+
+@os_router.put("/gpu")
+def os_gpu_put(request: Request, body: dict = Body(...)):
+    """The desktop's GpuSlot mirror: {busy, holder, until (epoch s or ms)}. Localhost only."""
+    require_loopback(request)
+    if not isinstance(body.get("busy"), bool):
+        raise HTTPException(400, "busy must be true or false")
+    gpu_set(body["busy"], str(body.get("holder") or ""), body.get("until"))
+    return gpu_state()
+
+
+@os_router.get("/gpu")
+def os_gpu_get():
+    return gpu_state()
 
 
 @os_router.get("/threads")

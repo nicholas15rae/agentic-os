@@ -113,3 +113,31 @@ describe("TaskEnvelope compiler", () => {
     expect(n).toEqual({ id: "x", title: "Untitled brainstorm", text: "A summary\nUI: big buttons\nActions: ship it\nRaw: raw words", created: 5 });
   });
 });
+
+describe("review #17: the Prompter's answers reach the envelope", () => {
+  const prompterQs: IntakeQuestion[] = [
+    { id: "q1", question: "What must the export do?", options: ["CSV", "PDF"], allow_free_text: true },
+    { id: "q2", question: "What's the scope of the first build?", options: ["Clickable mock", "Working app"], allow_free_text: true },
+    { id: "q3", question: "Anything else?", options: ["No", "Yes (type it)"], allow_free_text: true },
+    ...questions.filter((q) => q.id === "runtime" || q.id === "worker"),
+  ];
+
+  it("answered q1..q3 become acceptance criteria (scope excepted), typed lines split out", () => {
+    const { envelope } = compileEnvelope(notes, prompterQs, { q1: { choice: "CSV", text: "dark mode; works offline" }, q3: { choice: "Yes (type it)", text: "keyboard shortcuts" } }, ctx);
+    expect(envelope.acceptance_criteria.slice(0, 4)).toEqual(["What must the export do: CSV", "dark mode", "works offline", "keyboard shortcuts"]);
+    expect(envelope.acceptance_criteria).toContain("Renders with no console errors");
+    expect(envelope.acceptance_criteria.some((c) => /scope/i.test(c))).toBe(false);
+    expect(envelopeProblems(envelope)).toEqual([]);
+  });
+
+  it("a mock scope answer on a Prompter question switches the milestones", () => {
+    const { envelope } = compileEnvelope(notes, prompterQs, { q2: { choice: "Clickable mock" } }, ctx);
+    expect(envelope.milestones).toContain("Clickable mock of every screen");
+  });
+
+  it("with a `success` question present, only its answer is used (fallback path unchanged)", () => {
+    const { envelope } = compileEnvelope(notes, questions, { q1: { choice: "Friends" }, success: { choice: "It renders and the main action works" } }, ctx);
+    expect(envelope.acceptance_criteria[0]).toBe("It renders and the main action works");
+    expect(envelope.acceptance_criteria.some((c) => c.includes("Friends"))).toBe(false);
+  });
+});

@@ -27,3 +27,13 @@ export function startHub(): void {
 }
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Clear an input only once its command succeeded: `run()` reports a failure with a toast and
+ * resolves `undefined`, and what Nic typed (a Steer directive, a repair note) must survive that.
+ */
+export async function clearOnSuccess<T>(p: Promise<T | undefined>, clear: () => void): Promise<T | undefined> {
+  const r = await p;
+  if (r !== undefined) clear();
+  return r;
+}

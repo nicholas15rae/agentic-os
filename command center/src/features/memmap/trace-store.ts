@@ -1,11 +1,12 @@
 import { create } from "zustand";
-import { isTauri, onNativeEvent, type PipelineStepEvent, type TraceHop, type TraceStep, type TraceZone } from "@/lib/platform";
+import { isTauri, onNativeEvent, type AgentEvent, type EventSeverity, type PipelineStepEvent, type TraceHop, type TraceStep, type TraceZone } from "@/lib/platform";
 
 /**
  * System Map live routing trace (plan §2): the last 500 `TraceStep`s, grouped by `traceId`.
  * Fed by Rust's `os-trace` event (router / rules / memory / model / tool), the webview's own
  * hops (input / vad / stt / tts / ui, recorded by voice-controller through `client-trace.ts`)
- * and the Idea-to-Execution `pipeline-step` events. Drives the stream panel and the 3D pulses.
+ * the Play Place `pipeline-step` events and (Part 6) the agent event bus `agent-event`, whose steps
+ * carry `agent` (the per-agent lane) and `severity` (the chip). Drives the stream panel and the 3D pulses.
  *
  * Steps carry labels, timings and error text only; client labels never include what the user
  * said or what came back, and every error string is pattern-scrubbed and capped here as well.
@@ -35,6 +36,11 @@ const HOP_ZONE: Record<TraceHop, TraceZone> = {
 export const zoneOf = (hop: TraceHop): TraceZone => HOP_ZONE[hop];
 
 export const isHop = (h: unknown): h is TraceHop => typeof h === "string" && (HOPS as readonly string[]).includes(h);
+
+export const SEVERITIES: readonly EventSeverity[] = ["critical", "milestone", "handoff", "verbose"];
+const isSeverity = (s: unknown): s is EventSeverity => typeof s === "string" && (SEVERITIES as readonly string[]).includes(s);
+/** Agent ids are data-driven strings (future specialists need no code change), validated by shape. */
+const AGENT_ID = /^[a-z][a-z0-9_-]{0,31}$/;
 
 const SECRET_PATTERNS: [RegExp, string][] = [
   [/\b(?:sk-ant-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g, "[redacted]"],
@@ -72,6 +78,8 @@ export function normalizeStep(raw: unknown): TraceStep | null {
   };
   if (typeof r.error === "string" && r.error.trim()) step.error = cap(scrubText(r.error), ERROR_MAX);
   if (num(r.tps) > 0) step.tps = Math.round(num(r.tps) * 10) / 10;
+  if (typeof r.agent === "string" && AGENT_ID.test(r.agent)) step.agent = r.agent;
+  if (isSeverity(r.severity)) step.severity = r.severity;
   return step;
 }
 
@@ -215,6 +223,73 @@ export function pipelineToStep(e: PipelineStepEvent, seq: number, at = Date.now(
   return normalizeStep({ traceId: `pipeline:${e.pipelineId}`, seq, hop, label: `${e.stage} · ${label}`, ok: e.ok, ms: e.ms, error, at });
 }
 
+// ── Agent events → trace steps (Part 6) ──────────────────────────────────────
+
+/** Event types that mean "it went wrong" (shown red, with Queue fix). */
+const FAILED_EVENTS = new Set(["failed", "discrepancy"]);
+
+/** One `agent-event` as a trace step: its own per-agent lane and severity chip, keyed by
+ * `task:<task_id>` so a whole build reads as one trace. Text is the event's short summary only
+ * (templated / the agent's voice summary, already scrubbed in Rust — scrubbed again here). Pure. */
+export function agentEventToStep(ev: AgentEvent, seq: number): TraceStep | null {
+  if (!ev || typeof ev !== "object" || typeof ev.agentId !== "string" || typeof ev.eventType !== "string") return null;
+  const librarian = ev.agentId === "librarian";
+  const failed = FAILED_EVENTS.has(ev.eventType);
+  let hop: TraceHop;
+  switch (ev.eventType) {
+    case "task_queued":
+    case "stage_started":
+    case "handoff":
+    case "retry":
+      hop = "router";
+      break;
+    case "loop_iteration":
+    case "discrepancy":
+      hop = "rules";
+      break;
+    case "tool_call":
+      hop = "tool";
+      break;
+    case "review_ready":
+      hop = "ui";
+      break;
+    default:
+      hop = librarian ? "memory" : "model";
+  }
+  const traceId = ev.traceId ?? (ev.taskId ? `task:${ev.taskId}` : `agent:${ev.agentId}`);
+  const summary = typeof ev.shortSummary === "string" ? ev.shortSummary : "";
+  return normalizeStep({
+    traceId,
+    seq,
+    hop,
+    label: `${ev.agentId} · ${ev.eventType.replace(/_/g, " ")}${summary ? ` · ${summary}` : ""}`,
+    ok: !failed,
+    ms: 0,
+    error: failed ? summary || ev.eventType : undefined,
+    at: typeof ev.at === "number" ? ev.at : Date.now(),
+    agent: ev.agentId,
+    severity: ev.severity,
+  });
+}
+
+const agentSeq = new Map<string, number>();
+
+function onAgentEvent(ev: AgentEvent) {
+  const key = ev?.traceId ?? ev?.taskId ?? ev?.agentId ?? "";
+  const seq = agentSeq.get(key) ?? 0;
+  agentSeq.set(key, seq + 1);
+  if (agentSeq.size > 100) agentSeq.delete(agentSeq.keys().next().value as string);
+  const s = agentEventToStep(ev, seq);
+  if (s) useTrace.getState().push(s);
+}
+
+/** Agents present in the ring, in first-seen order (the lane chips). Pure. */
+export function agentLanes(steps: readonly TraceStep[]): string[] {
+  const out: string[] = [];
+  for (const s of steps) if (s.agent && !out.includes(s.agent)) out.push(s.agent);
+  return out;
+}
+
 const pipelineSeq = new Map<string, number>();
 
 function onPipelineStep(e: PipelineStepEvent) {
@@ -228,10 +303,14 @@ function onPipelineStep(e: PipelineStepEvent) {
 
 let feed: Promise<() => void> | null = null;
 
-/** Subscribe once to `os-trace` + `pipeline-step` (desktop only; a no-op on the PWA). Idempotent. */
+/** Subscribe once to `os-trace` + `pipeline-step` + `agent-event` (desktop only; a no-op on the PWA). Idempotent. */
 export function startTraceFeed(): Promise<() => void> {
   if (!isTauri()) return Promise.resolve(() => undefined);
-  feed ??= Promise.all([onNativeEvent<unknown>("os-trace", ingest), onNativeEvent<PipelineStepEvent>("pipeline-step", onPipelineStep)]).then(
+  feed ??= Promise.all([
+    onNativeEvent<unknown>("os-trace", ingest),
+    onNativeEvent<PipelineStepEvent>("pipeline-step", onPipelineStep),
+    onNativeEvent<AgentEvent>("agent-event", onAgentEvent),
+  ]).then(
     (offs) => () => {
       for (const off of offs) off();
       feed = null;

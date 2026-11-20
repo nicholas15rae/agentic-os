@@ -1502,6 +1502,15 @@ pub struct Probe {
     /// Carried over from an earlier verify where it failed (`open_probes`): re-run whatever the
     /// verifier writes this time.
     pub carried: bool,
+    /// Its criterion acts and computes a value (`Need::action && Need::value`): the harness
+    /// records what each read after the first action showed before it, and a probe whose every
+    /// passing read still shows that is a failure, "nothing changed after …" (P1-3 c).
+    pub change: bool,
+}
+
+/// Does this criterion's probe have to show a change (`Probe::change`)? Pure.
+fn must_change(need: Option<&Need>) -> bool {
+    need.is_some_and(|n| n.action && n.value)
 }
 
 fn sel_ok(s: &str) -> bool {
@@ -1797,7 +1806,7 @@ pub fn probes_of(answers: &Answers, needs: &[Need]) -> Vec<Probe> {
             Some(Ok(steps)) => {
                 let need = a.idx.and_then(|x| needs.get(x));
                 let rank = (!need.is_some_and(|n| n.probe), !need.is_some_and(|n| n.check.is_some()));
-                Some((rank, Probe { answer: i, criterion: a.name.clone(), steps: steps.clone(), carried: false }))
+                Some((rank, Probe { answer: i, criterion: a.name.clone(), steps: steps.clone(), carried: false, change: must_change(need) }))
             }
             _ => None,
         })
@@ -2046,9 +2055,9 @@ fn is_expect(st: &Value) -> bool {
     st["op"].as_str().is_some_and(|o| o.starts_with("expect_"))
 }
 
-/// Does the probe act (set / select / click) before its first expectation? Pure.
-fn acts_first(steps: &[Value]) -> bool {
-    steps.iter().take_while(|s| !is_expect(s)).any(is_action)
+/// The index of the probe's first action (set / select / click). Pure.
+fn first_action(steps: &[Value]) -> Option<usize> {
+    steps.iter().position(is_action)
 }
 
 /// Does the probe read a value (text, a value, an order), not only a class or a count? Pure.
@@ -2056,9 +2065,70 @@ fn reads_value(steps: &[Value]) -> bool {
     steps.iter().any(|s| is_read(s) || s["op"] == "expect_order")
 }
 
-/// …from an element of its own, not the whole page (`weak_sel`)? Pure.
-fn reads_value_specifically(steps: &[Value]) -> bool {
-    steps.iter().any(|s| (is_read(s) || s["op"] == "expect_order") && !weak_sel(s["sel"].as_str().unwrap_or("")))
+/// A read of a NUMBER from an element of its own: `approx`, all-of, or a number-aware `contains`
+/// ("40 g"). A text `contains` ("Loading", "kg") is not one. Pure.
+fn numeric_read(st: &Value) -> bool {
+    is_read(st) && !weak_sel(st["sel"].as_str().unwrap_or("")) && (st["approx"].is_number() || st["all"].is_array() || st["num"].is_object())
+}
+
+/// A value criterion (computes / converts) is decided by a number read from the element that
+/// shows it, among its deciding reads (P1-3 a): a text `contains`, a class, a count or an order
+/// cannot prove a computation. Pure.
+fn value_rule(deciding: &[Value]) -> Result<(), String> {
+    if deciding.iter().any(numeric_read) {
+        return Ok(());
+    }
+    let specific_text = deciding.iter().any(|s| is_read(s) && !weak_sel(s["sel"].as_str().unwrap_or("")));
+    Err(if specific_text {
+        "it expects text, not the computed number: expect the number itself (\"approx\": the value you computed) on the element that shows it".to_string()
+    } else if deciding.iter().any(is_read) {
+        "it reads the value from the whole page (body / html / main): expect the element that shows the computed number".to_string()
+    } else if reads_value(deciding) {
+        "it only checks an order: expect the computed value itself (expect_text / expect_value with the number)".to_string()
+    } else {
+        "it only checks a class or a count: expect the computed value itself (expect_text / expect_value with the number)".to_string()
+    })
+}
+
+/// Text a page shows while it has not rendered, or when it computed from missing data: never a
+/// value to expect ("Loading...", "Calculating", "NaN", "undefined", "null", "--", "…",
+/// "[object Object]"). Pure.
+pub fn placeholder_text(s: &str) -> bool {
+    static WAIT: OnceLock<regex::Regex> = OnceLock::new();
+    static BROKEN: OnceLock<regex::Regex> = OnceLock::new();
+    static DASH: OnceLock<regex::Regex> = OnceLock::new();
+    let t = s.trim();
+    rx(&WAIT, r"(?i)^(?:[^:]{0,30}:\s*)?(?:loading|calculating)\b").is_match(t)
+        || rx(&BROKEN, r"(?:^|[^\w])(?:NaN|undefined|null|\[object Object\])(?:[^\w]|$)").is_match(t)
+        || rx(&DASH, r"(?i)^(?:-{2,}|[–—]+|…|\.{3})\s*[a-z%]{0,6}$").is_match(t)
+}
+
+/// The first expectation that expects a placeholder (`placeholder_text`): the reason, or None
+/// (P1-3 b). Pure.
+fn expects_placeholder(steps: &[Value]) -> Option<String> {
+    steps.iter().filter(|s| is_read(s)).find_map(|s| {
+        let said = s["contains"].as_str().or_else(|| s["equals"].as_str())?;
+        placeholder_text(said).then(|| format!("it expects \"{}\" on {}, a placeholder a broken page shows: expect the real value Nic should see", clip_chars(said.trim(), 30), at(s)))
+    })
+}
+
+/// A read after a `set` of a non-zero number that expects only zero ("set grams 30, expect the
+/// total ≈0"): the harness fails it when the element reads the same as before the first action
+/// (P1-3 b; a zero that was already there proves nothing). The step indices. Pure.
+pub fn zero_reads(steps: &[Value]) -> Vec<usize> {
+    let mut seen_set = false;
+    let mut out = Vec::new();
+    for (i, st) in steps.iter().enumerate() {
+        if st["op"] == "set" && st["value"].as_str().and_then(lead_number).is_some_and(|x| x != 0.0) {
+            seen_set = true;
+        } else if seen_set && is_read(st) {
+            let ns = expected_numbers(st);
+            if !ns.is_empty() && ns.iter().all(|x| x.abs() < 1e-9) {
+                out.push(i);
+            }
+        }
+    }
+    out
 }
 
 /// A criterion about switching something: a toggle, a switch, a conversion or a unit. Pure.
@@ -2101,14 +2171,58 @@ fn shows_change(steps: &[Value], initial: &[(String, f64)], home: Option<&str>) 
     Err(why.unwrap_or_else(|| "it expects nothing after the switch: expect the changed result".into()))
 }
 
+/// The rules for a criterion's own probe that is not a pinned intent check (`enforce`): the
+/// steps to run and a note, or why it is rejected. Pure.
+///
+/// - An on-load / default / order criterion (`fresh`) is decided by the reads BEFORE the first
+///   action (an action can trigger the first render and hide a page that never renders on
+///   load, P2-4): it must expect first, and the steps after its first action are dropped (noted).
+/// - A criterion that acts (`action`) needs an action with at least one expectation after it;
+///   reads before the action are allowed (the 9B's "expect 165, click, expect the result"), and
+///   the reads after the first action decide (P1-1).
+/// - A value criterion (computes / converts) is decided by a number read of its own element
+///   among the deciding reads (`value_rule`).
+/// - A toggle / switch / convert / unit one must show a change (`shows_change`).
+fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Option<&str>) -> Result<(Vec<Value>, Option<String>), String> {
+    let fa = first_action(steps);
+    if need.fresh {
+        let cut = fa.unwrap_or(steps.len());
+        if !steps[..cut].iter().any(is_expect) {
+            return Err("it acts before it checks: this is about the page on a fresh load, so expect it FIRST, before any set / select / click".to_string());
+        }
+        let pre = steps[..cut].to_vec();
+        if need.value {
+            value_rule(&pre)?;
+        }
+        let note = (cut < steps.len()).then(|| "on-load check: only its reads before the first action decide (an action can trigger the first render); the steps after it were not run".to_string());
+        return Ok((pre, note));
+    }
+    if need.action {
+        let Some(fa) = fa else { return Err("it only reads the page: do the set / select / click that triggers the behaviour first, then expect the result".to_string()) };
+        if !steps[fa + 1..].iter().any(is_expect) {
+            return Err("it expects nothing after its action: do the set / select / click that triggers the behaviour, then expect the result".to_string());
+        }
+        if need.value {
+            value_rule(&steps[fa + 1..])?;
+        }
+        if need.toggle {
+            shows_change(steps, initial, home)?;
+        }
+        return Ok((steps.to_vec(), None));
+    }
+    if need.value {
+        value_rule(steps)?;
+    }
+    Ok((steps.to_vec(), None))
+}
+
 /// Hold each answer's probe to what its criterion needs: an intent check's probe to the pinned
-/// value (rewritten or substituted, or rejected with "use the pinned value X"); a behavioural
-/// criterion's probe to at least one action before its first expectation, except an on-load /
-/// default / order one, which must expect before any action; a criterion that computes or
-/// converts to a probe that reads a value from an element of its own (a class, a count or the
-/// whole page cannot prove it); and a toggle / switch / convert / unit criterion to a probe that
-/// shows a change (`shows_change`). A probe that breaks a rule becomes `Err(reason)`; a pinned
-/// value put in place of the model's is noted on the answer. Pure.
+/// value (rewritten or substituted, or rejected with "use the pinned value X"); any probe that
+/// expects a placeholder ("Loading", "NaN", "--") is rejected; the criterion's own probe to
+/// `own_rules` (on-load ones decided before any action, acting ones after their first action,
+/// value ones by a number, toggles by a change). A probe that breaks a rule becomes
+/// `Err(reason)`; a pinned value put in place of the model's, or steps dropped, are noted on
+/// the answer. Pure.
 pub fn enforce(answers: &mut Answers, needs: &[Need]) {
     // What is known about the page on load: Nic's default unit, and his pinned default on the
     // element its probe reads.
@@ -2131,26 +2245,16 @@ pub fn enforce(answers: &mut Answers, needs: &[Need]) {
     for a in answers.list.iter_mut() {
         let Some(need) = a.idx.and_then(|i| needs.get(i)) else { continue };
         let Some(Ok(steps)) = &a.probe else { continue };
-        let mut note = None;
-        let checked = if let Some(c) = &need.check {
-            pin(steps, c, &known).map(|(s, n)| {
-                note = n;
-                s
-            })
-        } else if need.fresh && acts_first(steps) {
-            Err("it acts before it checks: this is about the page on a fresh load, so expect it FIRST, before any set / select / click".to_string())
-        } else if need.action && !acts_first(steps) {
-            Err("it only reads the page: do the set / select / click that triggers the behaviour first, then expect the result".to_string())
-        } else if need.value && !reads_value_specifically(steps) {
-            Err(if reads_value(steps) {
-                "it reads the value from the whole page (body / html / main): expect the element that shows the computed number".to_string()
-            } else {
-                "it only checks a class or a count: expect the computed value itself (expect_text / expect_value with the number)".to_string()
-            })
-        } else if need.action && need.toggle {
-            shows_change(steps, &initial, home.as_deref()).map(|_| steps.clone())
-        } else {
-            Ok(steps.clone())
+        let checked = match expects_placeholder(steps) {
+            Some(why) => Err(why),
+            None => match &need.check {
+                Some(c) => pin(steps, c, &known),
+                None => own_rules(steps, need, &initial, home.as_deref()),
+            },
+        };
+        let (checked, note) = match checked {
+            Ok((s, n)) => (Ok(s), n),
+            Err(e) => (Err(e), None),
         };
         a.note = note;
         a.probe = Some(checked);
@@ -2162,7 +2266,7 @@ pub fn enforce(answers: &mut Answers, needs: &[Need]) {
 /// new ones: a bug a probe caught cannot pass the next round on quoted code alone. A criterion
 /// left unanswered is already a verify gap; one whose new probe has the very same steps runs
 /// once. The steps are validated again (stored data is still untrusted). Pure.
-pub fn carried_probes(open: &Value, answers: &Answers, fresh: &[Probe]) -> Vec<Probe> {
+pub fn carried_probes(open: &Value, answers: &Answers, fresh: &[Probe], needs: &[Need]) -> Vec<Probe> {
     let mut out: Vec<Probe> = Vec::new();
     for o in open.as_array().into_iter().flatten().take(MAX_CARRIED) {
         let Ok(steps) = parse_probe(&o["steps"]) else { continue };
@@ -2173,7 +2277,8 @@ pub fn carried_probes(open: &Value, answers: &Answers, fresh: &[Probe]) -> Vec<P
         if fresh.iter().chain(out.iter()).any(|p| p.answer == answer && p.steps == steps) {
             continue;
         }
-        out.push(Probe { answer, criterion: answers.list[answer].name.clone(), steps, carried: true });
+        let change = must_change(answers.list[answer].idx.and_then(|x| needs.get(x)));
+        out.push(Probe { answer, criterion: answers.list[answer].name.clone(), steps, carried: true, change });
     }
     out
 }
@@ -2266,6 +2371,9 @@ pub struct ProbeResult {
     pub specific: bool,
     /// …and one of those reads is of a value (text / value / order / unit).
     pub value_specific: bool,
+    /// The probe's selector matched nothing on the page (`nomatch`): the one probe error the
+    /// PAGE can cause (an element it should have is missing, P1-2).
+    pub missing: bool,
 }
 
 /// A read element with more text than this is a container, not the value (`data-tf-probe` `w`).
@@ -2315,13 +2423,13 @@ pub fn probe_results(probes: &[Probe], raw: &Value) -> Vec<ProbeResult> {
         .enumerate()
         .map(|(i, p)| {
             let Some(r) = arr.get(i) else {
-                return ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: "not run (the page ran out of time)".into(), carried: p.carried, specific: false, value_specific: false };
+                return ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: "not run (the page ran out of time)".into(), carried: p.carried, specific: false, value_specific: false, missing: false };
             };
             if r["ok"] == true {
                 let big: Vec<usize> = r["w"].as_array().map(|a| a.iter().filter_map(Value::as_u64).map(|x| x as usize).collect()).unwrap_or_default();
                 let (specific, value_specific) = specificity(&p.steps, &big);
                 let detail = if big.is_empty() { "passed".to_string() } else { format!("passed, but step {} read a container of more than {BIG_TEXT} characters", big.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(", ")) };
-                return ProbeResult { answer: p.answer, ran: true, passed: true, error: false, detail, carried: p.carried, specific, value_specific };
+                return ProbeResult { answer: p.answer, ran: true, passed: true, error: false, detail, carried: p.carried, specific, value_specific, missing: false };
             }
             let k = r["at"].as_u64().unwrap_or(0) as usize;
             let st = p.steps.get(k).cloned().unwrap_or(Value::Null);
@@ -2335,9 +2443,11 @@ pub fn probe_results(probes: &[Probe], raw: &Value) -> Vec<ProbeResult> {
                 "nooption" => (true, format!("{} has no option \"{}\" (it shows \"{got}\")", at(&st), st["value"].as_str().unwrap_or(""))),
                 "nounit" => (true, format!("{} shows no selected unit (it shows \"{got}\"): point it at the unit select, the radio group or the unit buttons (probe step {})", at(&st), k + 1)),
                 "threw" => (false, format!("the page threw: {got}; after {}", actions_before(p, k + 1).unwrap_or_default())),
+                // A read after the action that still shows what it showed before it (P1-3 c).
+                "same" => (false, format!("nothing changed after {}: {} still shows {got}, as it did before", actions_before(p, k).unwrap_or_else(|| "its action".into()), at(&st))),
                 _ => (false, format!("got {got}; {} {after}", want(&st))),
             };
-            ProbeResult { answer: p.answer, ran: true, passed: false, error, detail: clip_chars(&detail, 220), carried: p.carried, specific: false, value_specific: false }
+            ProbeResult { answer: p.answer, ran: true, passed: false, error, detail: clip_chars(&detail, 220), carried: p.carried, specific: false, value_specific: false, missing: r["k"] == "nomatch" }
         })
         .collect()
 }
@@ -2366,7 +2476,7 @@ pub fn unfinished(p: &Probe, partial: Option<&Value>, why: &str) -> ProbeResult 
         },
     };
     let detail = format!("the page hung or navigated away {doing} ({})", clip_chars(why, 90));
-    ProbeResult { answer: p.answer, ran: true, passed: false, error: false, detail: clip_chars(&detail, 220), carried: p.carried, specific: false, value_specific: false }
+    ProbeResult { answer: p.answer, ran: true, passed: false, error: false, detail: clip_chars(&detail, 220), carried: p.carried, specific: false, value_specific: false, missing: false }
 }
 
 // ── Judging ─────────────────────────────────────────────────────────────────
@@ -2388,6 +2498,32 @@ pub struct Judged {
     pub criteria: Value,
     /// The verifier returned no per-criterion list at all.
     pub absent: bool,
+    /// Criteria that need no probe (layout, offline, responsive …) called met with quoted code
+    /// that is not in the page and nothing else proving them (P1-4): the VERIFIER's to fix (asked
+    /// once more), then a note — never a Coder loop, never "does not work".
+    pub stale: Vec<StaleQuote>,
+}
+
+/// A criterion whose quoted code is not in the page (stale, paraphrased or missing) with nothing
+/// else proving it (`Judged::stale`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaleQuote {
+    /// The requested criterion's number (1-based).
+    pub n: Option<usize>,
+    pub criterion: String,
+}
+
+/// The note a stale quote leaves when the build is staged. Pure.
+pub fn stale_line(q: &StaleQuote) -> String {
+    format!("couldn't confirm in the code: {} (the verifier's quoted code is not in the page)", clip_chars(&q.criterion, 120))
+}
+
+/// How a stale-quote retry reason ends (`prompt_verify` lists these apart from probe gaps).
+pub const STALE_TAIL: &str = "the quoted code is not in the page: copy 1-3 lines that implement it VERBATIM";
+
+/// The retry reason for a stale quote (the verifier copies the code verbatim this time). Pure.
+pub fn stale_feedback(stale: &[StaleQuote]) -> Vec<String> {
+    stale.iter().map(|q| format!("{}{}: {STALE_TAIL}", q.n.map(|n| format!("{n}. ")).unwrap_or_default(), clip_chars(&q.criterion, 120))).collect()
 }
 
 /// A behavioural criterion without a working probe, and why.
@@ -2402,6 +2538,12 @@ pub struct ProbeGap {
     pub fixable: bool,
     /// One of Nic's pinned intent checks (listed first, never dropped silently; AD-13).
     pub pinned: bool,
+    /// The PAGE can cause it: the probe ran and its selector matched nothing (an element the
+    /// criterion needs is missing). The only gap that may send the Coder another pass (P1-2): no
+    /// probe given, a rejected one, a weak read, an unreadable unit control (a control that exists
+    /// but shows no selection the harness can read), a missing option or labels are the
+    /// verifier's or the harness's, which the Coder cannot fix.
+    pub page: bool,
 }
 
 impl ProbeGap {
@@ -2441,7 +2583,7 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
         ProbeRun::Skipped(r) => format!("skipped: {r}"),
         ProbeRun::Ran(_) => format!("skipped: at most {MAX_PROBES} probes run"),
     };
-    let (mut probe_lines, mut other, mut not_judged, mut gaps, mut out) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut probe_lines, mut other, mut not_judged, mut gaps, mut out, mut stale) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, a) in answers.list.iter().enumerate() {
         let name: String = clip_chars(&a.name, 100);
         let found = !a.evidence.is_empty() && evidence_found(&hn, &a.evidence);
@@ -2473,9 +2615,11 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
         let passing: Vec<&ProbeResult> = res.into_iter().chain(again.iter().copied()).filter(|r| r.ran && r.passed).collect();
         let proven = passing.iter().any(|r| counts(r));
         let weak_pass = !proven && !passing.is_empty();
-        // A passing probe that read an element of its own proves a behavioural criterion even when
-        // the quoted code is stale or paraphrased (the evidence is then only noted).
-        let proven_specific = need.is_some_and(|n| n.probe) && passing.iter().any(|r| counts(r) && r.specific);
+        // A passing probe that read an element of its own proves its criterion even when the
+        // quoted code is stale or paraphrased (the evidence is then only noted) — a criterion that
+        // needs no probe too, when the verifier gave one anyway (P1-4).
+        let proven_specific = passing.iter().any(|r| counts(r) && r.specific);
+        let behavioural = need.is_some_and(|n| n.probe);
         let mut evidence_note: Option<&str> = None;
         let probe_note = res.filter(|r| r.error).map(|r| format!("; its probe: {}", r.detail)).or_else(|| match &a.probe {
             Some(Err(why)) => Some(format!("; its probe was rejected: {why}")),
@@ -2498,26 +2642,36 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
                     // `enforce`): passed with a read of its own element, it proves the criterion
                     // whatever the quote says; with no quote at all, it stands in for the evidence;
                     // still unproven where probes run, it is a gap below, not a Coder fix.
-                    let stands_in = proven_specific || (need.is_some_and(|n| n.probe) && a.evidence.trim().is_empty() && (proven || required));
-                    if !found && !stands_in {
-                        other.push(format!("no working code found for: {name} (implement it for real{})", probe_note.unwrap_or_default()));
+                    let stands_in = proven_specific || (behavioural && a.evidence.trim().is_empty() && (proven || required));
+                    // A stale quote with nothing proving the criterion: where its probe is required,
+                    // the gap below stands for it; one that needs no probe is the verifier's to fix
+                    // (`stale`); only a behavioural one where probes cannot run (and one verify
+                    // cannot place) keeps the evidence rule and goes to the Coder.
+                    let unquoted = !found && !stands_in;
+                    if unquoted && !required {
+                        if need.is_some_and(|n| !n.probe) {
+                            stale.push(StaleQuote { n: a.idx.map(|x| x + 1), criterion: a.name.clone() });
+                        } else {
+                            other.push(format!("no working code found for: {name} (implement it for real{})", probe_note.unwrap_or_default()));
+                        }
                     }
                     if !found && proven_specific && !a.evidence.trim().is_empty() {
                         evidence_note = Some("the quoted code is not in the page (stale or paraphrased); its passing probe proves the criterion");
                     }
-                    if required && !proven {
+                    if required && (!proven || unquoted) {
                         let pinned = need.and_then(|n| n.check.as_ref()).map(|c| format!(" (pinned value {})", c.pinned())).unwrap_or_default();
                         // The cap and the time budget are not the verifier's to fix.
-                        let (why, fixable) = match (&a.probe, res) {
-                            _ if weak_pass => (format!("its probe passed, but read the value from the whole page or a container of more than {BIG_TEXT} characters: expect the element that shows it{pinned}"), true),
-                            (Some(Err(why)), _) => (format!("its probe was rejected: {why}"), true),
-                            (Some(Ok(_)), Some(r)) if r.error => (format!("its probe did not run: {}", r.detail), true),
-                            (Some(Ok(_)), Some(r)) => (r.detail.clone(), r.ran),
-                            (Some(Ok(_)), None) => (skipped.clone(), false),
-                            (None, _) => (format!("no probe was given{pinned}"), true),
+                        let (why, fixable, page) = match (&a.probe, res) {
+                            _ if weak_pass => (format!("its probe passed, but read the value from the whole page or a container of more than {BIG_TEXT} characters: expect the element that shows it{pinned}"), true, false),
+                            _ if proven => (format!("its probe passed but read no element of its own, and the quoted code is not in the page: expect the element that shows it{pinned}"), true, false),
+                            (Some(Err(why)), _) => (format!("its probe was rejected: {why}"), true, false),
+                            (Some(Ok(_)), Some(r)) if r.error => (format!("its probe did not run: {}", r.detail), true, r.missing),
+                            (Some(Ok(_)), Some(r)) => (r.detail.clone(), r.ran, false),
+                            (Some(Ok(_)), None) => (skipped.clone(), false, false),
+                            (None, _) => (format!("no probe was given{pinned}"), true, false),
                         };
                         let pinned = need.is_some_and(|n| n.check.is_some());
-                        gaps.push(ProbeGap { n: a.idx.map(|x| x + 1), criterion: a.name.clone(), why: clip_chars(&why, 220), fixable, pinned });
+                        gaps.push(ProbeGap { n: a.idx.map(|x| x + 1), criterion: a.name.clone(), why: clip_chars(&why, 220), fixable, pinned, page });
                     }
                 }
                 None if cut => not_judged.push(format!("not shown to the verifier (code cut for length): {name}")),
@@ -2541,7 +2695,7 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
     }
     not_judged.extend(answers.missing.iter().map(|m| format!("verify did not judge: {}", clip_chars(m, 100))));
     probe_lines.extend(other);
-    Judged { unmet: probe_lines, not_judged, gaps, criteria: Value::Array(out), absent: answers.list.is_empty() }
+    Judged { unmet: probe_lines, not_judged, gaps, criteria: Value::Array(out), absent: answers.list.is_empty(), stale }
 }
 
 // ── Headless Edge (Windows) ─────────────────────────────────────────────────
@@ -2574,7 +2728,10 @@ var AC=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=funct
 /// there is everything to compute from — is only dashes / an ellipsis (an optional unit after
 /// it). A select alone, or an empty bill / grams field, leaves "--" an empty state (a tip total
 /// before the bill, a tally before the first food). Empty-state copy ("No foods yet") never
-/// counts; of nested matches the innermost is kept; at most 4.
+/// counts; of nested matches the innermost is kept; at most 4. NaN, undefined and [object Object]
+/// are never valid UI text: any visible leaf element showing one as a token counts, whatever it
+/// is named ("NaN%" in a progress label, P2-3); "null" / "Infinity" / "Loading" / "--" stay
+/// limited to output-like elements.
 const SMOKE_JS: &str = r#"var H=[];function site(){try{var f=String(new Error().stack||'').split('\n')[3]||'';var m=f.match(/:(\d+):\d+\)?\s*$/);if(m&&H.length<40)H.push(+m[1])}catch(x){}}
 function block(n){try{Object.defineProperty(window,n,{configurable:true,get:function(){site();throw new DOMException(n+' is blocked here (guard storage with try/catch)','SecurityError')}})}catch(x){}}
 block('localStorage');block('sessionStorage');
@@ -2587,6 +2744,8 @@ var n=(el.id||'')+' '+(typeof el.className==='string'?el.className:'');if(el.tag
 if(!el.getClientRects().length)return;var cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none')return;
 var t=txt(el);if(!t||t.length>60)return;
 if(/^([^:]{0,30}:\s*)?(loading|calculating)(\.{1,3}|\u2026)?$/i.test(t)||/(^|[^\w])(NaN|undefined|null|-?Infinity|\[object Object\])(?![\w])/.test(t)||(st&&/^(-{2,}|[\u2013\u2014]+|\u2026|\.{3})\s*[a-z%]{0,6}$/i.test(t)))c.push(el)});
+if(document.body)Array.prototype.forEach.call(document.body.querySelectorAll('*'),function(el){if(c.length>=12||el.children.length||c.indexOf(el)>=0)return;if(/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|TEXTAREA|INPUT|SELECT|OPTION|CODE|PRE|KBD|SAMP)$/.test(el.tagName))return;
+if(!el.getClientRects().length)return;var cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none')return;var t=txt(el);if(t&&t.length<=120&&/(^|[^\w])(NaN|undefined|\[object Object\])(?![\w])/.test(t))c.push(el)});
 c=c.filter(function(e){return !c.some(function(d){return d!==e&&e.contains(d)})});
 return c.slice(0,4).map(function(e){var k=typeof e.className==='string'?e.className.trim():'';return {sel:e.id?'#'+e.id:e.tagName.toLowerCase()+(k?'.'+k.split(/\s+/)[0]:''),text:txt(e).slice(0,40)}})}
 addEventListener('load',function(){setTimeout(function(){var PH=[];try{PH=stuck()}catch(x){}
@@ -2632,17 +2791,27 @@ setTimeout(function(){var again=[];try{again=stuck()}catch(x){}PH=PH.filter(func
 /// other one; a control that shows no selected unit of the pair is a broken probe (`nounit`).
 /// A text read that passed on an element with more than `BIG_TEXT` chars of text is recorded
 /// (`w`, step indices): a container, not the value.
-const PROBE_JS: &str = r#"var P=__PROBES__;var S=null;try{S=JSON.parse(window.name)}catch(x){}
+///
+/// Before / after (P1-3 c): for a probe marked `change` (`C`, an acting value criterion) or with a
+/// zero read after a typed number (`z` steps, `zero_reads`), right before its first action the
+/// harness records what each text / value read after it shows (`S.b`). A marked probe whose every
+/// passing read after the action still shows that fails as `same` ("nothing changed after …"); a
+/// `z` read that still shows it fails on its own. A read whose element did not exist before
+/// counts as changed.
+const PROBE_JS: &str = r#"var P=__PROBES__;var C=__CHANGE__;var S=null;try{S=JSON.parse(window.name)}catch(x){}
 if(!S||S.k!=='__tfp'){S={k:'__tfp',p:0,s:0,R:[]}}
-if(S.s===0){S.w=[];try{localStorage.clear();sessionStorage.clear()}catch(x){}}
+if(S.s===0){S.w=[];S.b=null;S.ch=0;S.sm=[];S.sg='';try{localStorage.clear();sessionStorage.clear()}catch(x){}}
 var WAIT=500,POLL=100,PATIENCE=1200,BIG=__BIG__;
 function mark(){try{document.documentElement.setAttribute('data-tf-probe-partial',JSON.stringify({p:S.p,s:S.s,R:S.R}))}catch(x){}}
 function save(){window.name=JSON.stringify(S);mark()}
 mark();
 try{if(window.navigation){navigation.addEventListener('navigate',function(e){if(e.navigationType==='reload'||e.hashChange||(e.destination&&e.destination.sameDocument)||!e.cancelable)return;e.preventDefault()})}}catch(x){}
 document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a&&!/^#/.test(a.getAttribute('href')||'')&&!(e.defaultPrevented))e.preventDefault()},false);
-function done(r){if(S.w&&S.w.length)r.w=S.w;S.w=[];S.R.push(r);S.p++;S.s=0;if(S.p<P.length){save();location.reload()}else{window.name='';mark();document.documentElement.setAttribute('data-tf-probe',JSON.stringify(S.R))}}
+function done(r){if(r.ok&&C[S.p]&&S.b&&!S.ch&&S.sm&&S.sm.length)r={ok:false,k:'same',at:S.sm[0],got:S.sg};if(S.w&&S.w.length)r.w=S.w;S.w=[];S.R.push(r);S.p++;S.s=0;if(S.p<P.length){save();location.reload()}else{window.name='';mark();document.documentElement.setAttribute('data-tf-probe',JSON.stringify(S.R))}}
 function all(q){try{return Array.prototype.slice.call(document.querySelectorAll(q))}catch(x){return null}}
+function fa(){var q=P[S.p]||[];for(var i=0;i<q.length;i++){if(/^(set|select|click)$/.test(q[i].op))return i}return -1}
+function watch(){return !!C[S.p]||(P[S.p]||[]).some(function(t){return t.z})}
+function snap(i){var q=P[S.p];S.b={};for(var j=i+1;j<q.length;j++){var t=q[j];if(t.op==='expect_text'||t.op==='expect_value'){var m=all(t.sel),e=m?(m[t.nth||0]||null):null;if(e)S.b[String(j)]=reads(e,t.op).join(' / ')}}save()}
 function nm(s){return String(s==null?'':s).replace(/\s+/g,' ').trim()}
 function nums(s){var o=[],re=/-?\d[\d,]*(?:\.\d+)?/g,m,t;s=String(s);while((m=re.exec(s))){t=m[0];if(t.charAt(0)==='-'&&m.index>0&&/[\w)]/.test(s.charAt(m.index-1)))t=t.slice(1);t=t.replace(/,+$/,'');if(/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)){o.push(parseFloat(t.replace(/,/g,'')))}else if(/^-?\d+,\d{1,2}$/.test(t)){o.push(parseFloat(t.replace(',','.')))}else{t.split(',').forEach(function(x){var v=parseFloat(x);if(!isNaN(v))o.push(v)})}}return o}
 function tick(el){var ty=(el.type||'').toLowerCase();return el.tagName==='INPUT'&&(ty==='checkbox'||ty==='radio')}
@@ -2698,7 +2867,9 @@ if(st.op==='expect_order')return order(st,l);
 return {ok:false,got:''}}
 function expect(st,i,t){var l=all(st.sel);var many=st.op==='expect_count'||st.op==='expect_order'||st.op==='expect_unit';var el=l?(l[st.nth||0]||null):null;
 var r=(!l||(!many&&!el)||(st.op==='expect_unit'&&!l.length))?{ok:false,k:'nomatch',got:''}:check(st,el,l);
-if(r.ok){if((st.op==='expect_text'||st.op==='expect_value')&&el&&!/^(INPUT|SELECT|TEXTAREA|OUTPUT)$/.test(el.tagName)&&String(el.innerText||el.textContent||'').length>BIG){S.w=(S.w||[]).concat([i])}setTimeout(step,0);return}
+if(r.ok){var tv=st.op==='expect_text'||st.op==='expect_value';if(tv&&el&&!/^(INPUT|SELECT|TEXTAREA|OUTPUT)$/.test(el.tagName)&&String(el.innerText||el.textContent||'').length>BIG){S.w=(S.w||[]).concat([i])}
+if(tv&&el&&S.b&&i>fa()){var same=Object.prototype.hasOwnProperty.call(S.b,String(i))&&S.b[String(i)]===reads(el,st.op).join(' / ');if(same&&st.z){done({ok:false,k:'same',at:i,got:String(r.got).slice(0,120)});return}if(same){S.sm.push(i);if(!S.sg)S.sg=String(r.got).slice(0,120)}else{S.ch=1}}
+setTimeout(step,0);return}
 if(t<PATIENCE){setTimeout(function(){expect(st,i,t+POLL)},POLL);return}
 done({ok:false,k:r.k||'fail',at:i,got:String(r.got).slice(0,120)})}
 function step(){if(S.p>=P.length)return;var st=P[S.p][S.s];if(!st){done({ok:true});return}
@@ -2706,6 +2877,7 @@ var i=S.s;S.s++;save();var n0=E.length;
 if(st.op==='reload'){location.reload();return}
 if(/^expect_/.test(st.op)){expect(st,i,0);return}
 var l=all(st.sel);var el=l?(l[st.nth||0]||null):null;if(!el){done({ok:false,k:'nomatch',at:i});return}
+if(i===fa()&&!S.b&&watch())snap(i);
 if(st.op==='set'){if(tick(el)){var on=/^(true|1|on|yes|checked)$/i.test(st.value);if(el.checked!==on)el.click()}else{typeIn(el,st.value)}}
 else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}ev(el,'focus',false);el.selectedIndex=o;ev(el,'input',true);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
 else if(st.op==='click'){el.click()}
@@ -2743,10 +2915,15 @@ pub fn with_probes(html: &str, probes: &[Probe]) -> String {
     let steps: Vec<Vec<Value>> = probes
         .iter()
         .map(|p| {
+            let zero = zero_reads(&p.steps);
             p.steps
                 .iter()
-                .map(|st| {
+                .enumerate()
+                .map(|(i, st)| {
                     let mut st = st.clone();
+                    if zero.contains(&i) {
+                        st["z"] = json!(1);
+                    }
                     if let (true, Some(u), Some(o)) = (st["op"] == "expect_unit", st["unit"].as_str().map(String::from), st["other"].as_str().map(String::from)) {
                         st["U"] = json!(unit_pattern(&u));
                         st["O"] = json!(unit_pattern(&o));
@@ -2772,7 +2949,9 @@ pub fn with_probes(html: &str, probes: &[Probe]) -> String {
         }
     }
     // Newlines go first (JSON has none raw), then the data.
-    let js = format!("{GUARDS}{PROBE_JS}").replace(['\r', '\n'], "").replace("__BIG__", &BIG_TEXT.to_string()).replace("__PROBES__", &data);
+    let change: Vec<u8> = probes.iter().map(|p| u8::from(p.change)).collect();
+    let change = serde_json::to_string(&change).unwrap_or_else(|_| "[]".into());
+    let js = format!("{GUARDS}{PROBE_JS}").replace(['\r', '\n'], "").replace("__BIG__", &BIG_TEXT.to_string()).replace("__CHANGE__", &change).replace("__PROBES__", &data);
     with_prelude(html, &js)
 }
 
@@ -2798,10 +2977,22 @@ pub fn parse_stuck(dom: &str) -> Vec<(String, String)> {
 }
 
 /// The gate's fix line for outputs still showing a placeholder: "the page still shows
-/// 'Loading...' in #targetDisplay after it loaded (render on startup)". Pure.
+/// 'Loading...' in #targetDisplay after it loaded (render on startup)"; a broken value (NaN,
+/// undefined, [object Object]) is named as one: "the page shows 'NaN%' in #progressText after it
+/// loaded (a value computed from missing data: compute it from real values on startup)". Pure.
 pub fn stuck_line(stuck: &[(String, String)]) -> String {
-    let parts: Vec<String> = stuck.iter().take(3).map(|(sel, text)| format!("'{text}' in {sel}")).collect();
-    format!("the page still shows {} after it loaded (render on startup)", parts.join(" and "))
+    static BROKEN: OnceLock<regex::Regex> = OnceLock::new();
+    let broken = |t: &str| rx(&BROKEN, r"(?:^|[^\w])(?:NaN|undefined|\[object Object\])(?:[^\w]|$)").is_match(t);
+    let part = |v: Vec<&(String, String)>| v.iter().take(3).map(|(sel, text)| format!("'{text}' in {sel}")).collect::<Vec<_>>().join(" and ");
+    let (bad, waiting): (Vec<&(String, String)>, Vec<&(String, String)>) = stuck.iter().partition(|(_, t)| broken(t));
+    let mut out = Vec::new();
+    if !waiting.is_empty() || bad.is_empty() {
+        out.push(format!("the page still shows {} after it loaded (render on startup)", part(waiting)));
+    }
+    if !bad.is_empty() {
+        out.push(format!("the page shows {} after it loaded (a value computed from missing data: compute it from real values on startup)", part(bad)));
+    }
+    out.join("; ")
 }
 
 /// The smoke result out of a `--dump-dom` print: (errors, how many happened on load, the page
@@ -2997,7 +3188,7 @@ pub fn run_probes(page: &Path, probes: &[Probe], each: Duration, total: Duration
     let mut out: Vec<ProbeResult> = Vec::new();
     for p in probes {
         let left = deadline.saturating_duration_since(Instant::now());
-        let not_run = |why: String| ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: why, carried: p.carried, specific: false, value_specific: false };
+        let not_run = |why: String| ProbeResult { answer: p.answer, ran: false, passed: false, error: false, detail: why, carried: p.carried, specific: false, value_specific: false, missing: false };
         if left < Duration::from_secs(3) {
             out.push(not_run("not run (the probes ran out of time)".into()));
             continue;

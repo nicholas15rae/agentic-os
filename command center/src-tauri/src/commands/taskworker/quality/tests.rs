@@ -153,14 +153,14 @@ fn probe_steps_are_validated_as_untrusted_data() {
     assert!(bad(json!(vec![json!({ "op": "click", "sel": "#a" }); 9])).contains("at most 8"));
     assert!(bad(json!("click the button")).contains("not a list"));
     // Values are inert JSON in the harness: a closing script tag cannot break out.
-    let p = Probe { answer: 0, criterion: "x".into(), carried: false, steps: parse_probe(&json!([{ "op": "set", "sel": "#a", "value": "</script><script>alert(1)</script>" }, { "op": "expect_count", "sel": "#a", "count": 1 }])).unwrap() };
+    let p = Probe { answer: 0, criterion: "x".into(), carried: false, change: false, steps: parse_probe(&json!([{ "op": "set", "sel": "#a", "value": "</script><script>alert(1)</script>" }, { "op": "expect_count", "sel": "#a", "count": 1 }])).unwrap() };
     let page = with_probes("<html><head></head><body></body></html>", &[p]);
     assert_eq!(page.matches("</script>").count(), 1, "only the harness's own closing tag");
     assert!(page.contains("\\u003c/script\\u003e"));
 }
 
 fn probe(answer: usize, steps: Value) -> Probe {
-    Probe { answer, criterion: format!("c{answer}"), steps: parse_probe(&steps).unwrap(), carried: false }
+    Probe { answer, criterion: format!("c{answer}"), steps: parse_probe(&steps).unwrap(), carried: false, change: false }
 }
 
 #[test]
@@ -477,7 +477,7 @@ fn a_failed_probe_is_carried_and_rechecked() {
     assert_eq!(open[0]["idx"], 0);
     // Pass 2: the verifier quotes the code and writes no probe: the carried one still runs.
     let a2 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev }]), &crit_list());
-    let carried = carried_probes(&open, &a2, &probes_of(&a2, &[]));
+    let carried = carried_probes(&open, &a2, &probes_of(&a2, &[]), &[]);
     assert_eq!(carried.len(), 1);
     assert!(carried[0].carried && carried[0].answer == 0);
     let again = ProbeRun::Ran(probe_results(&carried, &json!([{ "ok": false, "k": "fail", "at": 2, "got": "165" }])));
@@ -492,7 +492,7 @@ fn a_failed_probe_is_carried_and_rechecked() {
     // …but a new probe for the same criterion that passes settles it, and closes the old one.
     let a3 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev, "probe": [{ "op": "click", "sel": "#to-kg" }, { "op": "expect_value", "sel": "#w", "approx": 74.8 }] }]), &crit_list());
     let mut all = probes_of(&a3, &[]);
-    let more = carried_probes(&open, &a3, &all);
+    let more = carried_probes(&open, &a3, &all, &[]);
     all.extend(more);
     assert_eq!(all.len(), 2);
     let run3 = ProbeRun::Ran(probe_results(&all, &json!([{ "ok": true }, { "ok": false, "k": "nomatch", "at": 1 }])));
@@ -505,7 +505,7 @@ fn a_failed_probe_is_carried_and_rechecked() {
     assert_eq!(open_probes(&carried, &ProbeRun::Skipped("no Edge".into()), &a2).as_array().unwrap().len(), 1);
     // The same steps written again by the verifier run once.
     let a4 = read_answers(&json!([{ "n": 1, "criterion": "lb/kg toggle", "met": true, "evidence": ev, "probe": steps }]), &crit_list());
-    assert!(carried_probes(&open, &a4, &probes_of(&a4, &[])).is_empty());
+    assert!(carried_probes(&open, &a4, &probes_of(&a4, &[]), &[]).is_empty());
 }
 
 const PROBE_FIX_PAGE: &str = r#"<!doctype html><html><head><title>t</title></head><body>
@@ -751,8 +751,10 @@ fn a_passing_specific_probe_proves_a_behaviour_over_stale_evidence() {
     assert!(stale.gaps.is_empty(), "{:?}", stale.gaps);
     assert_eq!(stale.criteria[0]["evidence_found"], false);
     assert!(stale.criteria[0]["evidence_note"].as_str().unwrap().contains("stale or paraphrased"), "{}", stale.criteria[0]);
-    // A criterion that is not behavioural still needs code that is really in the page.
-    assert!(stale.unmet.iter().any(|u| u.starts_with("no working code found for: Works offline")), "{:?}", stale.unmet);
+    // A criterion that is not behavioural is proven by its passing specific probe too (P1-4): the
+    // stale quote is only noted, never "no working code found".
+    assert!(!stale.unmet.iter().any(|u| u.contains("Works offline")) && stale.stale.is_empty(), "{:?}", stale.unmet);
+    assert!(stale.criteria[1]["evidence_note"].as_str().unwrap().contains("stale or paraphrased"), "{}", stale.criteria[1]);
     // No quote at all: the passing probe stands in, as before.
     let none = judged("", "#per-meal", ok.clone());
     assert!(!none.unmet.iter().any(|u| u.contains("per-meal split")) && none.gaps.is_empty(), "{none:?}");
@@ -763,8 +765,9 @@ fn a_passing_specific_probe_proves_a_behaviour_over_stale_evidence() {
     let big = judged("", "#app", json!([{ "ok": true, "w": [1] }, { "ok": true }]));
     assert!(big.gaps[0].why.contains("more than 200 characters"), "{:?}", big.gaps);
     assert!(big.criteria[0]["probe"]["detail"].as_str().unwrap().contains("read a container"), "{}", big.criteria[0]);
-    // …and a stale quote next to a weak read is still "no working code found".
-    assert!(judged("perMeal = total / meals", "body", ok).unmet.iter().any(|u| u.starts_with("no working code found for: The per-meal split")));
+    // …and a stale quote next to a weak read is a gap for the verifier, never a Coder fix (P1-4).
+    let weak = judged("perMeal = total / meals", "body", ok);
+    assert!(!weak.unmet.iter().any(|u| u.contains("per-meal split")) && weak.gaps[0].why.contains("whole page or a container"), "{weak:?}");
     // The rules reject a whole-page value read up front (enforce), with the reason.
     let mut a = read_answers(&json!([{ "n": 1, "criterion": crits[0], "met": true, "evidence": "", "probe": [{ "op": "click", "sel": ".split-btn" }, { "op": "expect_text", "sel": "main", "approx": 40 }] }]), &crits);
     enforce(&mut a, &needs);
@@ -893,7 +896,7 @@ fn a_behavioural_criterion_needs_a_probe_that_ran_and_passed() {
     let a = read_answers(&json!([{ "n": 1, "criterion": crits[0], "met": true, "evidence": ev }, { "n": 2, "criterion": crits[1], "met": true, "evidence": ev }]), &crits[..2]);
     let j = judge(&a, html, false, &ProbeRun::Skipped("the verifier gave no probes".into()), &needs, true);
     assert!(j.unmet.is_empty(), "{:?}", j.unmet);
-    assert_eq!(j.gaps, vec![ProbeGap { n: Some(1), criterion: crits[0].clone(), why: "no probe was given".into(), fixable: true, pinned: false }]);
+    assert_eq!(j.gaps, vec![ProbeGap { n: Some(1), criterion: crits[0].clone(), why: "no probe was given".into(), fixable: true, pinned: false, page: false }]);
     assert_eq!(j.criteria[0]["needs_probe"], true);
     assert_eq!(probe_feedback(&j.gaps), vec!["1. The lb/kg toggle converts the weight: no probe was given".to_string()]);
     // Probes cannot run here (no Edge / runtime checks off): the evidence-only rule.
@@ -1147,7 +1150,7 @@ fn nics_default_unit_is_checked_on_load() {
     assert!(parse_probe(&json!([{ "op": "expect_unit", "sel": "#u", "unit": "lb", "other": "km" }])).unwrap_err().contains("unit pair"));
     assert!(parse_probe(&json!([{ "op": "expect_unit", "sel": "#u", "unit": ".*", "other": "kg" }])).unwrap_err().contains("unit pair"));
     // The harness gets the spellings from the table, with non-ASCII escaped.
-    let p = Probe { answer: 0, criterion: "u".into(), carried: false, steps: parse_probe(&json!([{ "op": "expect_unit", "sel": "#u", "unit": "°f", "other": "°c" }])).unwrap() };
+    let p = Probe { answer: 0, criterion: "u".into(), carried: false, change: false, steps: parse_probe(&json!([{ "op": "expect_unit", "sel": "#u", "unit": "°f", "other": "°c" }])).unwrap() };
     let page = with_probes("<html><head></head><body></body></html>", &[p]);
     assert!(page.contains("\"U\":\"\\u00b0f|f|fahrenheit|imperial|us|us customary\"") && page.contains("\"O\":\"\\u00b0c|c|celsius|centigrade|metric|si\"") && page.contains("\"UL\":\"\\u00b0f\""), "{}", &page[page.find("var P=").unwrap()..page.find("var P=").unwrap() + 200]);
     let r = probe_results(&[probe(0, json!([{ "op": "expect_unit", "sel": "#u", "unit": "lb", "other": "kg" }]))], &json!([{ "ok": false, "k": "fail", "at": 0, "got": "kg" }]));
@@ -1455,5 +1458,237 @@ fn more_unit_controls_read_right_in_a_real_browser() {
         assert!(!r[i].passed && !r[i].error, "{i}: kg selected is a page failure: {d:?}");
     }
     assert!(r[10].error && d[10].contains("shows no selected unit"), "{d:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── AD-13 critic round 2 (P1-1 … P2-4) ──────────────────────────────────────
+
+/// The run-3 criteria and their needs (the critic's intent).
+fn run3_needs() -> (Vec<String>, Vec<Need>) {
+    let crits: Vec<String> = [
+        "App calculates correct protein target range for default 165 lbs user with 'Active' preset.",
+        "Toggle switch correctly converts weight between lbs and kg without breaking calculation.",
+        "Per-meal split divides the total target into equal portions for selected meal count (3-5).",
+        "UI is responsive on mobile devices and displays clearly without external assets.",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let needs = crits.iter().map(|c| need_of(c, &[])).collect();
+    (crits, needs)
+}
+
+fn enforced_one(crits: &[String], needs: &[Need], n: usize, probe: Value) -> (Result<Vec<Value>, String>, Option<String>) {
+    let mut a = read_answers(&json!([{ "n": n, "criterion": crits[n - 1], "met": true, "evidence": "", "probe": probe }]), crits);
+    enforce(&mut a, needs);
+    let x = a.list.remove(0);
+    (x.probe.unwrap(), x.note)
+}
+
+/// P1-1: a read BEFORE the action no longer invalidates a probe (the 9B's "expect 165, click the
+/// toggle, expect the result" / "expect 3, select 5, expect the per-meal value"): it is accepted
+/// when an expectation follows the first action, and the value rule is held on the reads AFTER
+/// it; a probe that expects nothing after its action, or only reads, is still rejected.
+#[test]
+fn a_read_before_the_action_is_allowed_and_the_reads_after_it_decide() {
+    let (crits, needs) = run3_needs();
+    assert!(needs[1].action && needs[1].value && needs[1].toggle && needs[2].action && needs[2].value);
+    let toggle = json!([{ "op": "expect_value", "sel": "#weightInput", "approx": 165 }, { "op": "click", "sel": "#unitToggle" }, { "op": "expect_value", "sel": "#weightInput", "approx": "74.8 kg", "tol": 0.5 }]);
+    assert!(enforced_one(&crits, &needs, 2, toggle).0.is_ok());
+    let split = json!([{ "op": "expect_value", "sel": "#mealSplitSelect", "approx": 3 }, { "op": "select", "sel": "#mealSplitSelect", "value": "5" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": "30 g", "tol": 0.5 }]);
+    let (r, note) = enforced_one(&crits, &needs, 3, split.clone());
+    assert_eq!(r.unwrap(), parse_probe(&split).unwrap(), "kept as written");
+    assert!(note.is_none());
+    // The value rule looks at the reads after the action: a number read before it does not count.
+    let class_after = json!([{ "op": "expect_text", "sel": "#perMealDisplay", "approx": 49 }, { "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_class", "sel": "#mealSplitSelect", "class": "on" }]);
+    assert!(enforced_one(&crits, &needs, 3, class_after).0.unwrap_err().contains("only checks a class or a count"));
+    // Still rejected: nothing expected after the action; reads only.
+    let nothing_after = json!([{ "op": "expect_text", "sel": "#perMealDisplay", "approx": 49 }, { "op": "select", "sel": "#mealSplitSelect", "value": "4" }]);
+    assert!(enforced_one(&crits, &needs, 3, nothing_after).0.unwrap_err().contains("expects nothing after its action"));
+    assert!(enforced_one(&crits, &needs, 3, json!([{ "op": "expect_text", "sel": "#perMealDisplay", "approx": 49 }])).0.unwrap_err().contains("only reads the page"));
+    // The must-show-a-change rule still holds for a toggle (on the reads after the switch).
+    let same = json!([{ "op": "expect_value", "sel": "#weightInput", "approx": 165 }, { "op": "click", "sel": "#unitToggle" }, { "op": "click", "sel": "#unitToggle" }, { "op": "expect_value", "sel": "#weightInput", "approx": 165 }]);
+    assert!(enforced_one(&crits, &needs, 2, same).0.unwrap_err().contains("round trip"));
+}
+
+/// P1-3 a / b: a value criterion needs a NUMERIC expectation (a text "contains" such as "g" or
+/// "Loading" proves no computation), and no probe may expect a placeholder; a zero expected right
+/// after a non-zero number was typed is marked for the before / after check.
+#[test]
+fn value_criteria_need_a_number_and_placeholders_are_never_expected() {
+    let (crits, needs) = run3_needs();
+    let text = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "contains": "g" }]);
+    assert!(enforced_one(&crits, &needs, 3, text).0.unwrap_err().contains("expects text, not the computed number"));
+    let number_text = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "contains": "37 g" }]);
+    assert!(enforced_one(&crits, &needs, 3, number_text).0.is_ok(), "a number-aware contains is a number");
+    for ph in ["Loading", "Loading...", "Target: Calculating…", "NaN", "NaN%", "undefined g", "null", "--", "-- g", "…", "...", "[object Object]"] {
+        assert!(placeholder_text(ph), "{ph}");
+        let p = json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "expect_text", "sel": "#targetDisplay", "contains": ph }, { "op": "expect_value", "sel": "#weightInput", "approx": 74.8 }]);
+        assert!(enforced_one(&crits, &needs, 2, p).0.unwrap_err().contains("a placeholder a broken page shows"), "{ph}");
+    }
+    // The critic's copied "Loading" for an on-load criterion is rejected too.
+    assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "expect_text", "sel": "#targetDisplay", "contains": "Loading" }])).0.unwrap_err().contains("placeholder"));
+    for ok in ["Carb loading", "No foods yet", "132 - 165 g", "kg", "Nancy", "nullable"] {
+        assert!(!placeholder_text(ok), "{ok}");
+    }
+    assert_eq!(zero_reads(&parse_probe(&json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 0 }, { "op": "expect_text", "sel": "#total", "approx": 30 }])).unwrap()), vec![2]);
+    assert!(zero_reads(&parse_probe(&json!([{ "op": "set", "sel": "#g", "value": "0" }, { "op": "expect_text", "sel": "#total", "approx": 0 }])).unwrap()).is_empty(), "a zero typed in");
+    assert!(zero_reads(&parse_probe(&json!([{ "op": "set", "sel": "#name", "value": "Chicken" }, { "op": "expect_text", "sel": "#total", "approx": 0 }])).unwrap()).is_empty(), "no number typed");
+}
+
+/// P1-3 c: an acting value criterion's probe is marked to show a change (`Probe::change`, carried
+/// probes too), the harness gets the marks, and a "same" record reads "nothing changed after …"
+/// as a page failure (loop-worthy), not a broken probe.
+#[test]
+fn an_acting_value_probe_must_show_a_change() {
+    let (crits, needs) = run3_needs();
+    let a = read_answers(
+        &json!([
+            { "n": 1, "criterion": crits[0], "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }] },
+            { "n": 3, "criterion": crits[2], "met": true, "evidence": "", "probe": [{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 0 }] }
+        ]),
+        &crits,
+    );
+    let p = probes_of(&a, &needs);
+    assert_eq!(p.iter().map(|x| x.change).collect::<Vec<_>>(), vec![false, true]);
+    let open = json!([{ "idx": 2, "criterion": crits[2], "steps": p[1].steps }]);
+    let carried = carried_probes(&open, &a, &[], &needs);
+    assert!(carried[0].change && carried[0].carried);
+    let html = with_probes("<html><head></head><body></body></html>", &p);
+    assert!(html.contains("var C=[0,1];"), "{}", &html[..400]);
+    let zero = probe(0, json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "expect_text", "sel": "#total", "approx": 0 }]));
+    assert!(with_probes("<head></head>", &[zero]).contains("\"z\":1"));
+    let r = probe_results(&p, &json!([{ "ok": true }, { "ok": false, "k": "same", "at": 1, "got": "0g" }]));
+    assert!(!r[1].error && !r[1].passed && r[1].ran, "{:?}", r[1]);
+    assert_eq!(r[1].detail, "nothing changed after select #mealSplitSelect=4: #perMealDisplay still shows 0g, as it did before");
+}
+
+/// P1-3 c in a real browser: a select that changes nothing fails as "nothing changed" even when
+/// the copied expectation (0) matches; a page that updates passes, and a read that legitimately
+/// keeps its value next to one that changes is fine; a zero after a typed number that was already
+/// there fails on its own.
+#[test]
+fn nothing_changed_after_the_action_fails_in_a_real_browser() {
+    let Some(dir) = edge_dir("same") else { return };
+    let page = dir.join("same.html");
+    std::fs::write(&page, r#"<!doctype html><html><head><title>t</title></head><body>
+<select id="meals"><option value="3" selected>3</option><option value="4">4</option></select>
+<p id="per">0g</p><p id="live">49g</p><p id="target">132 - 165 g</p>
+<input id="g" type="number"><button id="add">Add</button><p id="total">0g</p>
+<script>document.getElementById('meals').addEventListener('change',function(e){document.getElementById('live').textContent=Math.round(148.5/+e.target.value)+'g'});</script>
+</body></html>"#).unwrap();
+    let chg = |i: usize, steps: Value| Probe { change: true, ..probe(i, steps) };
+    let probes = vec![
+        chg(0, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
+        chg(1, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#live", "approx": 37 }, { "op": "expect_text", "sel": "#target", "approx": 132 }])),
+        probe(2, json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 0 }])),
+        probe(3, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
+    ];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(200)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert!(!r[0].passed && !r[0].error && d[0].starts_with("nothing changed after select #meals=4: #per still shows 0g"), "{d:?}");
+    assert!(r[1].passed, "{d:?}");
+    assert!(!r[2].passed && d[2].starts_with("nothing changed after set #g=30, click #add: #total still shows 0g"), "{d:?}");
+    assert!(r[3].passed, "no change asked for: {d:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P2-4: an on-load criterion is decided by its reads BEFORE the first action (an action can
+/// trigger the first render); the steps after it are dropped with a note, and a value one needs a
+/// number among those reads.
+#[test]
+fn an_on_load_criterion_is_decided_before_the_first_action() {
+    let (crits, needs) = run3_needs();
+    assert!(needs[0].fresh && needs[0].value && !needs[0].action);
+    let (r, note) = enforced_one(&crits, &needs, 1, json!([{ "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }, { "op": "select", "sel": "#activitySelect", "value": "active" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }]));
+    assert_eq!(r.unwrap().len(), 1, "only the read before the action runs");
+    assert!(note.unwrap().contains("only its reads before the first action decide"));
+    // Its number read only after the select (which could render the page first): rejected.
+    let after = json!([{ "op": "expect_text", "sel": "#targetDisplay", "contains": "g" }, { "op": "select", "sel": "#activitySelect", "value": "active" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }]);
+    assert!(enforced_one(&crits, &needs, 1, after).0.unwrap_err().contains("expects text, not the computed number"));
+    assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "select", "sel": "#activitySelect", "value": "active" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }])).0.unwrap_err().contains("expect it FIRST"));
+    // No action: unchanged, no note.
+    let (r, note) = enforced_one(&crits, &needs, 1, json!([{ "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }]));
+    assert!(r.is_ok() && note.is_none());
+}
+
+/// P1-2: only a gap the PAGE can cause (its probe ran and an element is missing) is marked so;
+/// no probe, a rejected probe and a broken option are the verifier's.
+#[test]
+fn only_a_missing_element_is_a_page_caused_gap() {
+    let (crits, needs) = run3_needs();
+    let a = read_answers(
+        &json!([
+            { "n": 1, "criterion": crits[0], "met": true, "evidence": "" },
+            { "n": 2, "criterion": crits[1], "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#x", "approx": 1 }] },
+            { "n": 3, "criterion": crits[2], "met": true, "evidence": "", "probe": [{ "op": "select", "sel": "#ghost", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 37 }] }
+        ]),
+        &crits,
+    );
+    let mut a = a;
+    enforce(&mut a, &needs);
+    let p = probes_of(&a, &needs);
+    let run = ProbeRun::Ran(probe_results(&p, &json!([{ "ok": false, "k": "nomatch", "at": 0 }])));
+    let j = judge(&a, "<p>x</p>", false, &run, &needs, true);
+    let page: Vec<(Option<usize>, bool)> = j.gaps.iter().map(|g| (g.n, g.page)).collect();
+    assert_eq!(page, vec![(Some(1), false), (Some(2), false), (Some(3), true)], "{:?}", j.gaps);
+    assert!(j.unmet.is_empty(), "{:?}", j.unmet);
+    let r = probe_results(&p, &json!([{ "ok": false, "k": "nooption", "at": 0, "got": "3" }]));
+    assert!(r[0].error && !r[0].missing);
+}
+
+/// P1-4: a criterion that needs no probe (layout, responsive, offline) with a stale quote and
+/// nothing else proving it is the verifier's to fix (`stale`), never "no working code found" for
+/// the Coder; a passing specific probe proves it anyway; a required behaviour with a stale quote
+/// and no probe is a gap only.
+#[test]
+fn a_stale_quote_is_the_verifiers_to_fix_never_a_coder_fix() {
+    let (crits, needs) = run3_needs();
+    let html = "<meta name=\"viewport\" content=\"width=device-width\">";
+    let stale_ev = "function calculateEverything() { return correctValues(state); }";
+    let a = read_answers(&json!([{ "n": 4, "criterion": crits[3], "met": true, "evidence": stale_ev }, { "n": 3, "criterion": crits[2], "met": true, "evidence": stale_ev }]), &crits);
+    for probes_on in [true, false] {
+        let j = judge(&a, html, false, &ProbeRun::Skipped("the verifier gave no probes".into()), &needs, probes_on);
+        assert!(!j.unmet.iter().any(|u| u.contains("UI is responsive")), "{:?}", j.unmet);
+        assert_eq!(j.stale, vec![StaleQuote { n: Some(4), criterion: crits[3].clone() }]);
+    }
+    let j = judge(&a, html, false, &ProbeRun::Skipped("the verifier gave no probes".into()), &needs, true);
+    assert!(j.unmet.is_empty() && j.gaps.len() == 1 && j.gaps[0].n == Some(3), "the required behaviour is a gap only: {j:?}");
+    assert!(stale_feedback(&j.stale)[0].ends_with(STALE_TAIL) && stale_line(&j.stale[0]).starts_with("couldn't confirm in the code: UI is responsive"));
+    // Run 3's real record: the same criterion with a passing probe of its own element.
+    let a = read_answers(&json!([{ "n": 4, "criterion": crits[3], "met": true, "evidence": stale_ev, "probe": [{ "op": "expect_count", "sel": "meta[name=viewport]", "count": 1 }] }]), &crits);
+    let p = probes_of(&a, &needs);
+    let j = judge(&a, html, false, &ProbeRun::Ran(probe_results(&p, &json!([{ "ok": true }]))), &needs, true);
+    assert!(j.unmet.is_empty() && j.stale.is_empty(), "{j:?}");
+    assert!(j.criteria[0]["evidence_note"].as_str().unwrap().contains("its passing probe proves the criterion"));
+}
+
+/// P2-3: NaN / undefined / [object Object] in ANY visible leaf after load is caught (run 3's
+/// "NaN%" in #progressText), "null" is still only flagged on output-like elements, and the gate
+/// line names a broken value as one.
+#[test]
+fn broken_values_in_any_visible_leaf_are_caught_in_a_real_browser() {
+    assert_eq!(stuck_line(&[("#progressText".into(), "NaN%".into())]), "the page shows 'NaN%' in #progressText after it loaded (a value computed from missing data: compute it from real values on startup)");
+    assert_eq!(
+        stuck_line(&[("#targetDisplay".into(), "Loading...".into()), ("#progressText".into(), "NaN%".into())]),
+        "the page still shows 'Loading...' in #targetDisplay after it loaded (render on startup); the page shows 'NaN%' in #progressText after it loaded (a value computed from missing data: compute it from real values on startup)"
+    );
+    let Some(dir) = edge_dir("nanleaf") else { return };
+    let w = |name: &str, html: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, html).unwrap();
+        p
+    };
+    let nan = w("nan.html", r#"<!doctype html><html><head><title>t</title></head><body><div class="bar"><span id="progressText" class="progress-text">0%</span></div><p class="note">Hello <b>x</b></p><span class="hint">null</span><script>document.getElementById('progressText').textContent = Math.round(undefined) + '%';</script></body></html>"#);
+    let obj = w("obj.html", r#"<!doctype html><html><head><title>t</title></head><body><li class="food">[object Object]</li><li class="food">Chicken</li><span hidden>NaN</span></body></html>"#);
+    let fine = w("fine.html", r#"<!doctype html><html><head><title>t</title></head><body><span id="progressText">0%</span><p>Nancy ate a banana; undefinedness is a word.</p></body></html>"#);
+    let t = Duration::from_secs(30);
+    let got = |p: &Path| match runtime_smoke(p, t) {
+        Smoke::Ran { stuck, .. } => stuck,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(got(&nan), vec![("#progressText".to_string(), "NaN%".to_string())], "a leaf of any name; 'null' in a hint is left alone");
+    assert_eq!(got(&obj), vec![("li.food".to_string(), "[object Object]".to_string())], "a hidden NaN is not shown");
+    assert!(got(&fine).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

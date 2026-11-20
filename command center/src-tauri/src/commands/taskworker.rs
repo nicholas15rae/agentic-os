@@ -856,7 +856,7 @@ pub fn verify_plan(e: &Envelope) -> (Vec<String>, Vec<quality::Need>) {
 /// The verifier's behavioural probe DSL, as the prompt states it (`quality::parse_probe`). Its
 /// examples are from another domain on purpose: examples from the page being checked prime a
 /// 9B model to copy them as its answers.
-const PROBE_RULES: &str = "For each criterion about BEHAVIOUR (something that changes, computes, converts, toggles, totals, adds/removes, resets, orders, saves/restores, or shows a default) add a \"probe\": up to 8 steps the system runs in a real browser on a fresh page load, using selectors that exist in the code. Such a criterion counts as met ONLY when its probe runs and passes. Act first (set / select / click), then expect the result; an on-load default, initial state or order check is the opposite: expect FIRST, before any action. A value that is computed or converted is checked by its number (expect_text / expect_value), never by a class or a count alone. Steps: {\"op\":\"set\",\"sel\":\"#bill\",\"value\":\"80\"} (types it: key, input, change and blur events), {\"op\":\"select\",\"sel\":\"#people\",\"value\":\"2\"}, {\"op\":\"click\",\"sel\":\"#tip-15\"} (add \"nth\":1 for the 2nd match), {\"op\":\"reload\"} (storage kept), {\"op\":\"expect_text\" or \"expect_value\",\"sel\":\"#total\",\"approx\":92,\"tol\":0.5} (passes when ANY number shown in the element is within tol; an input/select is read by its value and selected label), or \"contains\":\"46 each\" (a number matches only as a whole number: \"6\" never matches \"46\"; other text is a case-insensitive substring) or \"equals\":\"...\", {\"op\":\"expect_class\",\"sel\":\"#tip-15\",\"class\":\"on\",\"present\":true}, {\"op\":\"expect_count\",\"sel\":\".row\",\"count\":2}, {\"op\":\"expect_order\",\"sel\":\".tip-btn\",\"attr\":\"data-pct\",\"order\":[\"10\",\"15\",\"20\"]} (labels match case-insensitively, by their leading number or contained; without attr the text is used). Expected values come from Nic's request and well-known real-world facts you compute yourself, NEVER from the page's own code or formula; a criterion that states a pinned value must expect exactly that value. If a number the page computes or recommends is implausible in the real world, set met false and say why in fix. Probe the behavioural criteria first; at most 14 probes.";
+const PROBE_RULES: &str = "For each criterion about BEHAVIOUR (something that changes, computes, converts, toggles, totals, adds/removes, resets, orders, saves/restores, or shows a default) add a \"probe\": up to 8 steps the system runs in a real browser on a fresh page load, using selectors that exist in the code. Such a criterion counts as met ONLY when its probe runs and passes. Act first (set / select / click), then expect the result; an on-load default, initial state or order check is the opposite: expect FIRST, before any action. A value that is computed or converted is checked by its number (expect_text / expect_value), never by a class or a count alone; never expect a placeholder (Loading, NaN, undefined, --). Steps: {\"op\":\"set\",\"sel\":\"#bill\",\"value\":\"80\"} (types it: key, input, change and blur events), {\"op\":\"select\",\"sel\":\"#people\",\"value\":\"2\"}, {\"op\":\"click\",\"sel\":\"#tip-15\"} (add \"nth\":1 for the 2nd match), {\"op\":\"reload\"} (storage kept), {\"op\":\"expect_text\" or \"expect_value\",\"sel\":\"#total\",\"approx\":92,\"tol\":0.5} (passes when ANY number shown in the element is within tol; an input/select is read by its value and selected label), or \"contains\":\"46 each\" (a number matches only as a whole number: \"6\" never matches \"46\"; other text is a case-insensitive substring) or \"equals\":\"...\", {\"op\":\"expect_class\",\"sel\":\"#tip-15\",\"class\":\"on\",\"present\":true}, {\"op\":\"expect_count\",\"sel\":\".row\",\"count\":2}, {\"op\":\"expect_order\",\"sel\":\".tip-btn\",\"attr\":\"data-pct\",\"order\":[\"10\",\"15\",\"20\"]} (labels match case-insensitively, by their leading number or contained; without attr the text is used). Expected values come from Nic's request and well-known real-world facts you compute yourself, NEVER from the page's own code or formula; a criterion that states a pinned value must expect exactly that value. If a number the page computes or recommends is implausible in the real world, set met false and say why in fix. Probe the behavioural criteria first; at most 14 probes.";
 
 /// Whole lines (in order) while they fit in `max` chars, then "… and N more" — a clip never cuts a
 /// line (a pinned check's reason) in half or drops lines without saying so. Pure.
@@ -881,7 +881,14 @@ pub fn fit_lines(lines: &[String], max: usize) -> Vec<String> {
 /// retry for it.
 pub fn prompt_verify(e: &Envelope, code: &str, audit: &Value, at_limit: bool, retry: &[String]) -> String {
     let crit: Vec<String> = verify_criteria(e).iter().enumerate().map(|(i, c)| format!("{}. {c}", i + 1)).collect();
-    let retry = if retry.is_empty() { String::new() } else { format!("Your last answer gave no working probe for these behavioural criteria; give each one a probe that runs (selectors that exist in the code; an action before the expectation, except an on-load check, which expects first; the pinned value where one is stated):\n- {}\n", fit_lines(retry, 1500).join("\n- ")) };
+    let (quotes, probes): (Vec<String>, Vec<String>) = retry.iter().cloned().partition(|l| l.ends_with(quality::STALE_TAIL));
+    let mut retry = String::new();
+    if !probes.is_empty() {
+        retry += &format!("Your last answer gave no working probe for these behavioural criteria; give each one a probe that runs (selectors that exist in the code; an action before the expectation, except an on-load check, which expects first; the pinned value where one is stated):\n- {}\n", fit_lines(&probes, 1500).join("\n- "));
+    }
+    if !quotes.is_empty() {
+        retry += &format!("Your last answer quoted code that is not in the page for these criteria (set met false if the page really lacks it):\n- {}\n", fit_lines(&quotes, 700).join("\n- "));
+    }
     let (view, cut) = quality::verify_view(code, VERIFY_CODE_IN);
     let gate = str_list(&e.last_eval["gate_blockers"], 6, 160);
     let checks = if gate.is_empty() { format!("The deterministic checks passed: {}", compact(&e.last_eval["checks"], 400)) } else { format!("The deterministic checks still fail on this last pass (they go to review as known blockers): {}", gate.join("; ")) };
@@ -931,19 +938,33 @@ impl StageErr {
 pub const BLOCKERS_MAX: usize = 16;
 
 /// The review_ready voice line, deterministic whenever blockers exist (the verifier's own line
-/// said "passes all functional criteria" next to two blockers): "Built, but 2 things still don't
-/// work: …". None = no blockers (the model's line is kept). Pure.
-pub fn review_voice(works: bool, blockers: &[String], total: usize) -> Option<String> {
-    if blockers.is_empty() {
-        return None;
-    }
-    let items: Vec<String> = blockers.iter().take(2).map(|b| clip(&one_line(b), 90)).collect();
-    let things = if total == 1 { "1 thing".to_string() } else { format!("{total} things") };
-    Some(if works {
-        format!("Built; {things} still to check: {}.", items.join("; "))
+/// said "passes all functional criteria" next to two blockers). What fails ("Built, but 2 things
+/// still don't work: …") is told apart from what could not be proven ("Built, but 3 things
+/// couldn't be checked: …"; both: "1 thing still doesn't work and 2 couldn't be checked"); notes
+/// alone: "Built; 1 thing still to check: …". One end mark, never "…." (P3). None = nothing to
+/// say (the model's line is kept). Pure.
+pub fn review_voice(failing: &[String], unchecked: &[String], notes: &[String]) -> Option<String> {
+    let things = |n: usize| if n == 1 { "1 thing".to_string() } else { format!("{n} things") };
+    let (head, items): (String, Vec<&String>) = if !failing.is_empty() || !unchecked.is_empty() {
+        let mut parts = Vec::new();
+        if !failing.is_empty() {
+            parts.push(format!("{} still {} work", things(failing.len()), if failing.len() == 1 { "doesn't" } else { "don't" }));
+        }
+        if !unchecked.is_empty() {
+            parts.push(if failing.is_empty() { format!("{} couldn't be checked", things(unchecked.len())) } else { format!("{} couldn't be checked", unchecked.len()) });
+        }
+        (format!("Built, but {}", parts.join(" and ")), failing.iter().chain(unchecked).take(2).collect())
+    } else if !notes.is_empty() {
+        (format!("Built; {} still to check", things(notes.len())), notes.iter().take(2).collect())
     } else {
-        format!("Built, but {things} still {} work: {}.", if total == 1 { "doesn't" } else { "don't" }, items.join("; "))
-    })
+        return None;
+    };
+    let tidy = |s: &str| s.trim_end_matches(['.', ';', ':', ',', ' ']).to_string();
+    // A clip ends in "…": never ";…" or ".…".
+    let items: Vec<String> = items.iter().map(|b| clip(&tidy(&one_line(b)), 90)).map(|c| c.strip_suffix('\u{2026}').map(|h| format!("{}\u{2026}", tidy(h))).unwrap_or(c)).collect();
+    let body = format!("{head}: {}", items.join("; "));
+    let end = if body.ends_with(['.', '\u{2026}', '!', '?']) { "" } else { "." };
+    Some(format!("{body}{end}"))
 }
 
 /// Largest staged page embedded in a Play Place card (the gateway caps a card body at 512 KB).
@@ -1821,7 +1842,7 @@ impl<'a> Worker<'a> {
             // Probes that failed on an earlier pass run again alongside the verifier's new ones.
             // Carried probes (a bug a probe caught before) run FIRST, inside the time budget.
             let fresh = quality::probes_of(&answers, &needs);
-            let mut probes = quality::carried_probes(&e.last_eval["open_probes"], &answers, &fresh);
+            let mut probes = quality::carried_probes(&e.last_eval["open_probes"], &answers, &fresh, &needs);
             probes.extend(fresh);
             let can_probe = s.runtime_smoke && page.is_some() && !html.is_empty() && self.env.probes_available();
             let run = if probes.is_empty() {
@@ -1852,27 +1873,40 @@ impl<'a> Worker<'a> {
             }).collect();
             // Nic's pinned checks first, everywhere they are listed (never cut by a cap first).
             gaps.sort_by_key(|g| !g.pinned);
+            // Quotes not in the page for criteria that need no probe: the verifier's to fix (P1-4).
+            let stale: Vec<quality::StaleQuote> = judged.stale.iter().cloned().map(|mut q| {
+                if let Some(c) = q.n.and_then(|n| expected.get(n - 1)) {
+                    q.criterion = c.clone();
+                }
+                q
+            }).collect();
             // Never when a probe really failed (or a criterion is otherwise unmet): the Coder loops
             // anyway and the next pass asks again, while a fresh answer could drop the failure
             // (its probes are only carried once recorded). Never for gaps the verifier cannot fix
             // (the probe cap, the time budget).
-            let feedback_now = quality::probe_feedback(&gaps);
+            let mut feedback_now = quality::probe_feedback(&gaps);
+            feedback_now.extend(quality::stale_feedback(&stale));
             if !feedback_now.is_empty() && judged.unmet.is_empty() && !last && feedback.is_empty() {
                 let n = feedback_now.len();
                 self.stats.verify_feedback.lock().unwrap().insert(e.task_id.clone(), (e.iteration_count, e.lease_until, feedback_now));
-                return Err(StageErr::retry(format!("the Prompter's verify gave no working probe for {n} behavioural criteri{}", if n == 1 { "on" } else { "a" })));
+                return Err(StageErr::retry(format!("the Prompter's verify could not be checked for {n} criteri{} (no working probe, or code not in the page)", if n == 1 { "on" } else { "a" })));
             }
             // A Play Place hub build is smoke-tested and marked mergeable from review_ready, never
             // reading its blockers: an unproven behaviour there is treated like an unmet one.
             let hub = e.raw_intent.memory_reference["source"] == "playplace";
-            let gap_lines: Vec<String> = gaps.iter().map(|g| format!("no working probe for: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120))).collect();
+            // An unproven criterion is named as one that could not be checked, never as broken (P1-2).
+            let gap_lines: Vec<String> = gaps.iter().map(|g| format!("couldn't be checked in a browser: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120))).collect();
             let pinned_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.pinned).map(|(_, l)| l.clone()).collect();
+            let stale_lines: Vec<String> = stale.iter().map(quality::stale_line).collect();
             // A unit control the harness cannot read (`ProbeGap::unreadable`) is a known note: the
             // Coder cannot change what the harness sees, so it never loops the Coder, never fails a
             // hub build and never makes the build "not working".
             let note_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.unreadable()).map(|(_, l)| l.clone()).collect();
             let open_gap_lines: Vec<String> = gap_lines.iter().filter(|l| !note_lines.contains(l)).cloned().collect();
-            let open_pinned_lines: Vec<String> = pinned_lines.iter().filter(|l| !note_lines.contains(l)).cloned().collect();
+            // Only a gap the PAGE can cause sends the Coder another pass (`ProbeGap::page`: the
+            // probe ran and an element it needs is missing). No probe, a rejected or weak one, a
+            // criterion left out: the verifier's, asked once more, then "couldn't be checked" (P1-2).
+            let page_pinned_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.pinned && g.page && !g.unreadable()).map(|(_, l)| l.clone()).collect();
             // Nic's pinned checks the verifier left out or left undecided: unproven like a pinned gap.
             let pinned_unjudged: Vec<String> = needs
                 .iter()
@@ -1904,10 +1938,10 @@ impl<'a> Worker<'a> {
             // A hub build: an unproven behaviour, a criterion the verifier did not judge, or no
             // per-criterion list at all is treated like an unmet one (AD-13 adds the last two).
             let hub_gaps = hub && (!open_gap_lines.is_empty() || !judged.not_judged.is_empty() || judged.absent);
-            // Nic's pinned checks still unproven after the retry (the verifier was told what to
-            // fix) on a pass that is not the last: the page is the likelier cause, so the Coder
-            // gets another pass instead of a "pass" with an unproven pinned value (AD-13).
-            let pinned_loop = !hub && !at_limit && judged.unmet.is_empty() && (!open_pinned_lines.is_empty() || !pinned_unjudged.is_empty());
+            // Nic's pinned checks whose probe still finds an element missing after the retry (the
+            // verifier was told what to fix) on a pass that is not the last: the page lacks what
+            // the check needs, so the Coder gets another pass (AD-13, narrowed by P1-2).
+            let pinned_loop = !hub && !at_limit && judged.unmet.is_empty() && !page_pinned_lines.is_empty();
             if !judged.unmet.is_empty() || hub_gaps || pinned_loop {
                 verdict = "loop";
             }
@@ -1923,11 +1957,8 @@ impl<'a> Worker<'a> {
                 }
             }
             if pinned_loop {
-                for g in &open_pinned_lines {
-                    fixes.push(format!("Nic's pinned check is still unproven in a browser, {g}: make it work on a fresh load, with clear, stable ids for its controls and for the element that shows the value"));
-                }
-                for g in &pinned_unjudged {
-                    fixes.push(format!("Nic's pinned check was {g}: make it clearly visible and working on a fresh load, with clear, stable ids for its controls and for the element that shows the value"));
+                for g in &page_pinned_lines {
+                    fixes.push(format!("Nic's pinned check finds an element missing in a browser, {g}: add it and make it work on a fresh load, with clear, stable ids for its controls and for the element that shows the value"));
                 }
             }
             for f in kept {
@@ -1945,13 +1976,24 @@ impl<'a> Worker<'a> {
             }
             verify_blockers.extend(judged.not_judged.iter().cloned());
             verify_blockers.extend(gap_lines.iter().filter(|l| !pinned_lines.contains(l)).cloned());
+            verify_blockers.extend(stale_lines.iter().cloned());
+            // For the voice: what fails, and what could not be proven (the rest are notes).
+            let mut unchecked: Vec<String> = pinned_lines.iter().chain(gap_lines.iter().filter(|l| !pinned_lines.contains(l))).filter(|l| !note_lines.contains(l)).cloned().collect();
+            if judged.absent {
+                unchecked.insert(0, "verify could not show code evidence per criterion".into());
+            }
+            unchecked.extend(judged.not_judged.iter().cloned());
             let mut blockers = verify_blockers.clone();
             for b in model_blockers {
                 if !blockers.contains(&b) {
                     blockers.push(b);
                 }
             }
-            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), voice(&j))
+            // The verifier's own line only when it agrees: a "passes" line never rides on a loop
+            // the checks forced (P3).
+            let model_loop = jj["verdict"].as_str().is_some_and(|v| v.trim().eq_ignore_ascii_case("loop"));
+            let spoken = voice(&j).filter(|_| verdict != "loop" || model_loop);
+            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
         };
         let mut last_eval = e.last_eval.clone();
         last_eval["verify"] = decision.clone();
@@ -1968,7 +2010,8 @@ impl<'a> Worker<'a> {
         if wants_loop && (!at_limit || hub_unmet) {
             let to_agent = if decision["loop_to"] == "designer" { "designer" } else { "coder" };
             let fixes = str_list(&decision["fix_instructions"], 10, FIX_LINE);
-            let pre_row = HandoffRow::new("prompter", "prompter", "stage_completed", "verbose", format!("Prompter wants another pass ({} fix{})", fixes.len(), if fixes.len() == 1 { "" } else { "es" })).voice(v.as_deref());
+            let said = v.clone().unwrap_or_else(|| format!("Not done yet: {} fix{} for the {}.", fixes.len(), if fixes.len() == 1 { "" } else { "es" }, label(to_agent)));
+            let pre_row = HandoffRow::new("prompter", "prompter", "stage_completed", "verbose", format!("Prompter wants another pass ({} fix{})", fixes.len(), if fixes.len() == 1 { "" } else { "es" })).voice(Some(said.as_str()));
             let row = HandoffRow::new("prompter", to_agent, "loop_iteration", "handoff", format!("Back to the {} with {} fix{} (iteration {}/{})", label(to_agent), fixes.len(), if fixes.len() == 1 { "" } else { "es" }, e.iteration_count + 1, e.max_iterations)).payload(json!({ "fix_instructions": fixes, "from": "verify" }));
             return Ok(Outcome::Loop { pre_patch: Patch { last_eval: Some(last_eval), ..Default::default() }, pre_row, to: if to_agent == "designer" { "design" } else { "code" }, row });
         }
@@ -2006,7 +2049,18 @@ impl<'a> Worker<'a> {
         last_eval["works"] = json!(works);
         last_eval["verdict"] = json!(verdict);
         last_eval["complete"] = json!(true);
-        let v = review_voice(works, &blockers, total).or(v);
+        // What fails (the gate's items, then failed / unmet criteria), what could not be proven,
+        // and the rest as notes — for the spoken line only (P3).
+        let mut failing = gate_items.clone();
+        failing.extend(str_list(&decision["failing"], 40, 240));
+        let unchecked = str_list(&decision["unchecked"], 40, 240);
+        // A decision stored before these lists existed (a restart across an upgrade): not working
+        // with nothing sorted means its blockers are what fails.
+        if !works && failing.is_empty() && unchecked.is_empty() {
+            failing = blockers.iter().filter(|b| !b.starts_with("… and ")).cloned().collect();
+        }
+        let notes: Vec<String> = blockers.iter().filter(|b| !failing.contains(b) && !unchecked.contains(b) && !b.starts_with("… and ")).cloned().collect();
+        let v = review_voice(&failing, &unchecked, &notes).or(v);
         let slug = e.project_slug.clone().unwrap_or_default();
         let status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "known_blockers": blockers, "known_blockers_total": total, "works": works, "verdict": verdict, "at": envelope::now_ms() });
         // A cancelled task never gets a review_ready .status.json (the Librarian reads it).

@@ -2281,7 +2281,7 @@ fn a_behavioural_criterion_without_a_probe_is_asked_again_then_named() {
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
     assert_eq!((fake.count("verify"), e.iteration_count, fake.count("code")), (STAGE_ATTEMPTS as usize, 0, 1));
     let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
-    assert_eq!(kb, vec!["no working probe for: Shows the per-person total (no probe was given)".to_string()], "{kb:?}");
+    assert_eq!(kb, vec!["couldn't be checked in a browser: Shows the per-person total (no probe was given)".to_string()], "{kb:?}");
     assert_eq!(e.last_eval["verify"]["unmet"], 0);
 }
 
@@ -2485,7 +2485,7 @@ fn a_hub_build_with_an_unproven_behaviour_fails_instead_of_handing_on() {
     assert_eq!(e.status, "failed", "{:?}", e.last_eval);
     assert_eq!(fake.count("verify"), 2 * (1 + MAX_LOOP_ITERATIONS as usize), "each pass asked once more for the probe");
     let codes = fake.calls_for("code");
-    assert!(codes[1].user.contains("no working probe for: Shows the per-person total"), "{}", codes[1].user);
+    assert!(codes[1].user.contains("couldn't be checked in a browser: Shows the per-person total"), "{}", codes[1].user);
     let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
     assert!(!status.contains("review_ready"), "{status}");
     assert_eq!(e.last_eval["verify"]["gaps"], 1);
@@ -2620,11 +2620,11 @@ fn a_hub_build_whose_criteria_go_unjudged_fails_instead_of_handing_on() {
     assert!(!status.contains("review_ready"), "{status}");
 }
 
-/// D / critic 2: Nic's pinned check still unproven after the verifier's retry, on a pass that is
-/// not the last, sends the Coder another pass (not a "pass"); on the last pass the build is staged
-/// with it first among the blockers and `works: false`.
+/// P1-2 (narrowing D / critic 2): Nic's pinned check the verifier gives no probe for is asked
+/// again, then staged as "couldn't be checked" — the Coder cannot fix a missing probe, so it gets
+/// no extra pass; the build is not "working" and the voice says what could not be checked.
 #[test]
-fn a_pinned_check_still_unproven_after_the_retry_loops_the_coder() {
+fn a_pinned_check_without_a_probe_never_loops_the_coder() {
     let root = tmp("pinned-loop");
     let store = leak_store();
     let page = GOOD_HTML.replace("</main>", "<p id=\"w\">165 lb</p>\n</main>");
@@ -2646,14 +2646,49 @@ fn a_pinned_check_still_unproven_after_the_retry_loops_the_coder() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
-    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS, "the unproven pinned check looped the Coder");
-    assert_eq!(fake.count("verify"), 2 * (1 + MAX_LOOP_ITERATIONS as usize), "the verifier was asked again on every pass first");
-    let codes = fake.calls_for("code");
-    assert!(codes[1].user.contains("Nic's pinned check is still unproven in a browser, no working probe for: On a fresh load"), "{}", codes[1].user);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (0, 1, 2), "a verifier retry, never a Coder pass");
     let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
-    assert!(kb[0].starts_with("no working probe for: On a fresh load, before any action, the page shows Nic's default \"165 lb\""), "{kb:?}");
+    assert!(kb[0].starts_with("couldn't be checked in a browser: On a fresh load, before any action, the page shows Nic's default \"165 lb\""), "{kb:?}");
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")));
     assert_eq!(e.last_eval["verify"]["pinned_gaps"], 1);
+    let voice = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap().voice_summary.clone().unwrap();
+    assert!(voice.starts_with("Built, but 1 thing couldn't be checked: couldn't be checked in a browser: On a fresh load") && !voice.contains("work"), "{voice}");
+}
+
+/// P1-2: a pinned probe that runs and finds its element missing after the verifier's retry is the
+/// page's to fix: the Coder gets another pass, and a page that adds the element passes.
+#[test]
+fn a_pinned_probe_whose_element_is_missing_loops_the_coder() {
+    let root = tmp("pinned-missing");
+    let store = leak_store();
+    let without = GOOD_HTML.replace("</main>", "<p id=\"wt\">165 lb</p>\n</main>");
+    let with = GOOD_HTML.replace("</main>", "<p id=\"w\">165 lb</p>\n</main>");
+    let answer = json!({ "criteria": [probed_crit()[0].clone(), { "n": 2, "criterion": "default", "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#w", "approx": 165 }] }], "verdict": "pass" }).to_string();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{without}\n```"),
+                ("code", _) => format!("```html\n{with}\n```"),
+                ("verify", _) => answer.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if p.steps.iter().any(|s| s["sel"] == "#w") && !html.contains("id=\"w\"") { json!({ "ok": false, "k": "nomatch", "at": 0 }) } else { json!({ "ok": true }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a tip calculator that shows my weight too, default 165 lb.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (1, 2, 3), "retry, then one Coder pass, then a passing verify");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("Nic's pinned check finds an element missing in a browser, couldn't be checked in a browser: On a fresh load") && codes[1].user.contains("#w matches nothing"), "{}", codes[1].user);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass")), "{}", e.last_eval);
 }
 
 /// J: carried probes run before the verifier's new ones (inside the time budget); a long list of
@@ -2708,8 +2743,8 @@ fn carried_probes_run_first_and_nothing_is_dropped_silently() {
     assert!(fit.last().unwrap().starts_with("… and ") && fit[..fit.len() - 1].iter().all(|l| lines.contains(l)), "{fit:?}");
     assert!(fit.iter().map(|l| l.chars().count() + 3).sum::<usize>() <= 1500);
     let gaps = vec![
-        quality::ProbeGap { n: Some(1), criterion: "a".into(), why: "no probe was given".into(), fixable: true, pinned: false },
-        quality::ProbeGap { n: Some(11), criterion: "pinned".into(), why: "no probe was given (pinned value 165)".into(), fixable: true, pinned: true },
+        quality::ProbeGap { n: Some(1), criterion: "a".into(), why: "no probe was given".into(), fixable: true, pinned: false, page: false },
+        quality::ProbeGap { n: Some(11), criterion: "pinned".into(), why: "no probe was given (pinned value 165)".into(), fixable: true, pinned: true, page: false },
     ];
     assert!(quality::probe_feedback(&gaps)[0].starts_with("11. pinned"), "{:?}", quality::probe_feedback(&gaps));
 }
@@ -2724,10 +2759,10 @@ fn the_repair_prompt_and_the_review_voice_are_deterministic() {
     assert!(p.contains(GATE_REPAIR_LEAD) && p.contains("#proteinGrams") && !p.contains("an older fix"), "{p}");
     assert!(prompt_code(&e, &["a verify fix".to_string()]).contains("an older fix"), "a normal pass still reads the brief's fixes");
     let two = vec!["the page throws when its controls are used: Cannot read properties of null (reading 'value')".to_string(), "the script looks up ids no element has: #proteinGrams".to_string()];
-    let v = review_voice(false, &two, 2).unwrap();
+    let v = review_voice(&two, &[], &[]).unwrap();
     assert!(v.starts_with("Built, but 2 things still don't work: the page throws when its controls are used: Cannot read") && v.ends_with("; the script looks up ids no element has: #proteinGrams."), "{v}");
-    assert!(review_voice(true, &two[..1], 1).unwrap().starts_with("Built; 1 thing still to check:"));
-    assert_eq!(review_voice(true, &[], 0), None);
+    assert!(review_voice(&[], &[], &two[..1]).unwrap().starts_with("Built; 1 thing still to check:"));
+    assert_eq!(review_voice(&[], &[], &[]), None);
 }
 
 // ── AD-13 review (round 14): repair never makes it worse, honest verdicts, true counts ──
@@ -2740,10 +2775,10 @@ fn staged_page(root: &Path, e: &Envelope) -> String {
     std::fs::read_to_string(root.join("staging").join(e.project_slug.as_deref().unwrap()).join("index.html")).unwrap()
 }
 
-/// Nic's pinned check the verifier leaves out loops the Coder like a pinned gap; at the limit, and
-/// with no per-criterion list at all, the build is staged as not working.
+/// Nic's pinned check the verifier leaves out is the verifier's gap (asked again, then named), never
+/// a Coder pass (P1-2); staged, it and a build with no per-criterion list at all are not working.
 #[test]
-fn an_unjudged_pinned_check_loops_and_an_unjudged_build_is_not_working() {
+fn an_unjudged_pinned_check_never_loops_and_an_unjudged_build_is_not_working() {
     let root = tmp("unjudged");
     let store = leak_store();
     let page = page_165();
@@ -2752,10 +2787,9 @@ fn an_unjudged_pinned_check_loops_and_an_unjudged_build_is_not_working() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
-    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS, "the unjudged pinned check looped the Coder");
-    let codes = fake.calls_for("code");
-    assert!(codes[1].user.contains("Nic's pinned check was not judged by the verifier"), "{}", codes[1].user);
+    assert_eq!((e.iteration_count, fake.count("code")), (0, 1), "the unjudged pinned check is not the Coder's to fix");
     assert_eq!(e.last_eval["verify"]["pinned_unjudged"], 1);
+    assert!(e.last_eval["known_blockers"].to_string().contains("verify did not judge: On a fresh load"), "{}", e.last_eval);
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
     // No per-criterion list at all: staged, but never "works".
     let root = tmp("absent");
@@ -2976,6 +3010,87 @@ fn past_the_blocker_cap_the_true_total_is_stored() {
     assert_eq!((e.last_eval["known_blockers_total"].clone(), e.last_eval["blockers_dropped"].clone()), (json!(18), json!(3)));
     let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
     assert!(row.short_summary.contains("18 known blockers"), "{}", row.short_summary);
+}
+
+// ── AD-13 critic round 2: stale quotes, voice wording ───────────────────────
+
+/// P1-4: a criterion that needs no probe ("Has a dark card layout") quoted with code that is not
+/// in the page is the verifier's to fix: asked once more (told to copy the code verbatim), then
+/// staged as a note — never a Coder pass, and the build still works.
+#[test]
+fn a_stale_quote_for_a_layout_criterion_is_a_verifier_retry_not_a_coder_loop() {
+    let root = tmp("stale-layout");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Has a dark card layout\"]"),
+                "verify" => json!({ "criteria": [crit()[0].clone(), { "n": 2, "criterion": "Has a dark card layout", "met": true, "evidence": "body { background: #0b0b0b; } /* paraphrased */" }], "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (0, 1, 2), "a verifier retry, never a Coder pass");
+    let v = fake.calls_for("verify");
+    assert!(v[1].user.contains("Your last answer quoted code that is not in the page") && v[1].user.contains("- 2. Has a dark card layout: the quoted code is not in the page"), "{}", v[1].user);
+    assert!(!v[1].user.contains("gave no working probe"), "{}", v[1].user);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert_eq!(kb, vec!["couldn't confirm in the code: Has a dark card layout (the verifier's quoted code is not in the page)".to_string()]);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")));
+    assert!(!e.last_eval["verify"]["unmet"].as_u64().is_some_and(|u| u > 0));
+}
+
+/// P3: the voice tells what fails from what could not be checked, never ends in "….", and a loop
+/// the checks forced never carries the verifier's "passes" line.
+#[test]
+fn the_voice_tells_failures_from_unchecked_items_and_never_says_passes_on_a_loop() {
+    let fail = vec!["probe failed for Shows the per-person total: got $0.00".to_string()];
+    let unchecked = vec!["couldn't be checked in a browser: Remembers the bill (no probe was given)".to_string(), "verify did not judge: Has a reset".to_string()];
+    assert_eq!(review_voice(&[], &unchecked, &[]).unwrap(), "Built, but 2 things couldn't be checked: couldn't be checked in a browser: Remembers the bill (no probe was given); verify did not judge: Has a reset.");
+    let both = review_voice(&fail, &unchecked, &["a note".to_string()]).unwrap();
+    assert!(both.starts_with("Built, but 1 thing still doesn't work and 2 couldn't be checked: probe failed for Shows the per-person total"), "{both}");
+    let long = vec![format!("the page throws when its controls are used: {}", "x".repeat(200))];
+    let v = review_voice(&long, &[], &[]).unwrap();
+    assert!(v.ends_with('\u{2026}') && !v.ends_with("\u{2026}."), "{v}");
+    let semi = vec![format!("probe failed for the split: got 30g; expected #per text ≈26 (±0.5) after select #m=5 {}", "y".repeat(40))];
+    let v = review_voice(&semi, &[], &[]).unwrap();
+    assert!(!v.contains(";\u{2026}") && !v.contains(".\u{2026}") && v.ends_with('\u{2026}'), "{v}");
+    let dotted = vec!["Add a reset button.".to_string(), "Show the total.".to_string()];
+    assert_eq!(review_voice(&[], &[], &dotted).unwrap(), "Built; 2 things still to check: Add a reset button; Show the total.");
+    // The pipeline: the verifier says "passes", its probe fails, the checks loop the Coder.
+    let root = tmp("loop-voice");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.iteration_count, 1, "{:?}", e.error);
+    let pre = e.handoff_log.iter().find(|h| h.short_summary.starts_with("Prompter wants another pass")).unwrap();
+    let said = pre.voice_summary.clone().unwrap_or_default();
+    assert!(!said.contains("passes") && said.starts_with("Not done yet: 1 fix for the Coder"), "{said}");
+    // The fixed pass: the verifier's own line is kept when nothing overrides it.
+    let ready = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert_eq!(ready.voice_summary.as_deref(), Some("Build passes all functional criteria."));
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

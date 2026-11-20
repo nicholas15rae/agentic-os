@@ -272,6 +272,27 @@ describe("thoughtform hardening (regressions)", () => {
     expect(readyText({ title: "X", slug: "x", blockers: ["a", "b"], hub: false })).toContain("staged with 2 known blockers");
   });
 
+  it("the ready line reads the honest verdict: 'needs fixes' when works is false, 'ready' when true, neutral when absent", async () => {
+    h.cmd.mockResolvedValue(env({ status: "review_ready", stage: "done", last_eval: { known_blockers: ["couldn't be checked in a browser: Shows the total (no probe was given)"], known_blockers_total: 1, works: false, verdict: "needs_fixes" } }));
+    await onAgentEvent(ev({ eventType: "review_ready", status: "review_ready", stage: "done" }));
+    expect(turns()[0].text).toContain("is staged but needs fixes: 1 known blocker");
+    expect(turns()[0].text).not.toContain("ready for review");
+    expect(turns()[0].tone).toBe("warn");
+    expect(readyText({ title: "X", slug: "x", blockers: ["a note"], hub: false, works: true })).toContain("is ready for review, with 1 note");
+    expect(readyText({ title: "X", slug: "x", blockers: [], hub: false, works: false })).toBe("“X” is staged but needs fixes. It's in staging/x.");
+    expect(readyText({ title: "X", slug: "x", blockers: [], hub: false, works: true })).toBe("“X” is ready for review. It's in staging/x.");
+    expect(readyText({ title: "X", slug: "x", blockers: ["a", "b"], hub: true, works: false })).toContain("needs fixes: 2 known blockers (the Play Place smoke test runs next)");
+    // Older records without `works` keep the neutral wording; `verdict` alone is read too.
+    expect(readyText({ title: "X", slug: "x", blockers: ["a"], hub: false })).toContain("staged with 1 known blocker");
+  });
+
+  it("a verdict without works is read; a passing build with notes is not a warning", async () => {
+    h.cmd.mockResolvedValue(env({ status: "review_ready", stage: "done", last_eval: { known_blockers: ["model note"], verdict: "pass_with_notes" } }));
+    await onAgentEvent(ev({ eventType: "review_ready", status: "review_ready", stage: "done" }));
+    expect(turns()[0].text).toContain("is ready for review, with 1 note");
+    expect(turns()[0].tone).toBeUndefined();
+  });
+
   it("an untracked task's outcome goes to the thread stored in its raw intent, else Tony's main thread", async () => {
     h.cmd.mockResolvedValue(env({ task_id: "t-phone", status: "review_ready", stage: "done", raw_intent: { text: "x", timestamp: 1, memory_reference: { source: "phone", thread: "auto" } } }));
     await onAgentEvent(ev({ taskId: "t-phone", eventType: "review_ready", status: "review_ready", stage: "done" }));

@@ -774,10 +774,12 @@ fn on_load(criterion: &str) -> bool {
     l.is_match(criterion) && !acts(criterion)
 }
 
-/// It computes or converts a value (a class or a count cannot prove it). Pure.
+/// It computes or converts a value (a class or a count cannot prove it) — a sum, a tally, a
+/// (running) total or what "adds up" too, so a running-tally criterion gets the must-change mark
+/// (`must_change`, AD-13 round 4). Pure.
 fn computes(criterion: &str) -> bool {
     static C: OnceLock<regex::Regex> = OnceLock::new();
-    rx(&C, r"(?i)\b(?:comput\w*|calculat\w*|recalculat\w*|convert\w*|conversions?|divid\w*|multipl\w*|averag\w*|per[- ](?:meal|person|day|serving|head|item))\b").is_match(criterion)
+    rx(&C, r"(?i)\b(?:comput\w*|calculat\w*|recalculat\w*|convert\w*|conversions?|divid\w*|multipl\w*|averag\w*|per[- ](?:meal|person|day|serving|head|item)|sums?|summ(?:ed|ing|s)|tall(?:y|ies|ied|ying)|totals?|totall?(?:ed|ing)|(?:adds?|added|adding)\s+up)\b").is_match(criterion)
 }
 
 /// The need of one requested criterion (an intent check's comes from `IntentCheck::need`): a
@@ -788,7 +790,10 @@ pub fn need_of(criterion: &str, lits: &[Literal]) -> Need {
     let probe = behavioural(criterion, lits);
     let fresh = probe && on_load(criterion);
     let action = probe && !fresh && (behaviour_words(criterion) || computes(criterion) || acts(criterion));
-    Need { probe, action, fresh, value: probe && computes(criterion), check: None, toggle: action && toggles(criterion), shows: named_placeholders(criterion) }
+    let shows = named_placeholders(criterion);
+    // A criterion that asks for a placeholder ("the tip and total show a dash (—) on load") is
+    // checked by that text, not by a number.
+    Need { probe, action, fresh, value: probe && computes(criterion) && shows.is_empty(), check: None, toggle: action && toggles(criterion), shows }
 }
 
 // ── Inline scripts ──────────────────────────────────────────────────────────
@@ -2179,15 +2184,27 @@ fn zeroing(st: &Value) -> bool {
     is_action(st) && (z.is_match(st["sel"].as_str().unwrap_or("")) || st["value"].as_str().is_some_and(|v| z.is_match(v.trim())))
 }
 
+/// An action that puts a real, non-zero input in: a `set` of a non-zero number, or a `select` of
+/// an option that is not a zero / "none" one ("4", "4 meals", "active"; AD-13 round 4). Pure.
+fn nonzero_input(st: &Value) -> bool {
+    let v = st["value"].as_str().unwrap_or("").trim();
+    match st["op"].as_str() {
+        Some("set") => lead_number(v).is_some_and(|x| x != 0.0),
+        Some("select") => !v.is_empty() && lead_number(v).is_none_or(|x| x != 0.0),
+        _ => false,
+    }
+}
+
 /// The probe's reads that expect only zero, sorted (`zero_reads`, `asked_zero_reads`): (after a
-/// `set` of a non-zero number with no zeroing action between, after a zeroing action). Pure.
+/// non-zero `set` / `select` (`nonzero_input`) with no zeroing action between, after a zeroing
+/// action). Pure.
 fn zero_marks(steps: &[Value]) -> (Vec<usize>, Vec<usize>) {
     let (mut armed, mut asked) = (false, false);
     let (mut z, mut n0) = (Vec::new(), Vec::new());
     for (i, st) in steps.iter().enumerate() {
         if zeroing(st) {
             (armed, asked) = (false, true);
-        } else if st["op"] == "set" && st["value"].as_str().and_then(lead_number).is_some_and(|x| x != 0.0) {
+        } else if nonzero_input(st) {
             armed = true;
         } else if is_read(st) {
             let ns = expected_numbers(st);
@@ -2203,8 +2220,9 @@ fn zero_marks(steps: &[Value]) -> (Vec<usize>, Vec<usize>) {
     (z, n0)
 }
 
-/// A read after a `set` of a non-zero number that expects only zero ("set grams 30, expect the
-/// total ≈0"), with no reset / clear / remove / zero option between (`zeroing`): a zero that was
+/// A read after a non-zero `set` / `select` (`nonzero_input`) that expects only zero ("set grams
+/// 30, expect the total ≈0", "select 4 meals, expect ≈0 per meal"), with no reset / clear / remove
+/// / zero option between (`zeroing`): a zero that was
 /// already there proves nothing, so when NOTHING the probe reads changed after its action (an
 /// action that really changed a control) and this read still shows what it showed before the
 /// first action, the harness fails the probe as "nothing changed" (P1-3 b). A probe that proves a
@@ -2309,6 +2327,7 @@ fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Opti
         }
         if need.value {
             value_rule(&steps[fa + 1..])?;
+            zero_rule(steps, true)?;
         }
         if need.toggle {
             shows_change(steps, initial, home)?;
@@ -2317,8 +2336,38 @@ fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Opti
     }
     if need.value {
         value_rule(steps)?;
+        zero_rule(steps, false)?;
     }
     Ok((steps.to_vec(), None))
+}
+
+/// A computed value expected to be 0 when nobody asked for a zero (AD-13 round 4, the critic's
+/// fixed3-c: "select 4 meals, expect ≈0 per meal" on a page that correctly shows 37): what a page
+/// that computed nothing shows, so the probe is the verifier's to fix (asked once more), never a
+/// Coder loop that "fixes" a correct page to match. Rejected: a read after a non-zero `set` /
+/// `select` that expects only 0 (`zero_reads`) with no later non-zero read of the same element
+/// (a "0 before, 30 after add" pair is a real change); and, for a criterion that acts and
+/// computes (`acting`), a probe whose every number read after its first action is 0 with no
+/// reset / clear / zero option (`zeroing`) — it never does what produces the value. A zero asked
+/// for (`asked_zero_reads`) is always fine. Pure.
+fn zero_rule(steps: &[Value], acting: bool) -> Result<(), String> {
+    for i in zero_reads(steps) {
+        let key = at(&steps[i]);
+        let later = steps[i + 1..].iter().any(|s| is_read(s) && at(s) == key && expected_numbers(s).iter().any(|x| x.abs() > 1e-9));
+        if !later {
+            let did = steps[..i].iter().filter(|s| nonzero_input(s)).map(action).collect::<Vec<_>>().join(", ");
+            return Err(format!("it expects 0 on {key} after {did}, the value a page that computed nothing shows: expect the number Nic should see after that input (work it out from his request), or reset / clear first when zero is the point"));
+        }
+    }
+    if acting && !steps.iter().any(zeroing) {
+        if let Some(fa) = first_action(steps) {
+            let ns: Vec<f64> = steps[fa + 1..].iter().filter(|s| is_read(s)).flat_map(expected_numbers).collect();
+            if !ns.is_empty() && ns.iter().all(|x| x.abs() < 1e-9) {
+                return Err("it expects only 0 after its actions, what a page that did nothing shows: do the input that produces the value (type the number, pick the option, click add), then expect the computed result".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Hold each answer's probe to what its criterion needs: an intent check's probe to the pinned
@@ -2403,7 +2452,11 @@ pub fn open_probes(probes: &[Probe], run: &ProbeRun, answers: &Answers) -> Value
             Some(r) if r.ran => !r.passed && (!r.error || (p.carried && !fresh_passed(p.answer))),
             _ => p.carried,
         };
-        let entry = json!({ "idx": answers.list.get(p.answer).and_then(|a| a.idx), "criterion": p.criterion, "steps": p.steps });
+        let mut entry = json!({ "idx": answers.list.get(p.answer).and_then(|a| a.idx), "criterion": p.criterion, "steps": p.steps });
+        // What it found, for the wrong-number guard (`wrong_number_suspects`, AD-13 round 4).
+        if let Some(r) = results.get(i).filter(|r| r.ran) {
+            entry["detail"] = json!(r.detail);
+        }
         if keep && !out.iter().any(|o| o["steps"] == entry["steps"] && o["idx"] == entry["idx"]) {
             out.push(entry);
         }
@@ -2592,6 +2645,9 @@ pub struct Judged {
     /// One fix line per criterion that is not met, has no evidence in the code, or whose probe
     /// failed (probe failures first).
     pub unmet: Vec<String>,
+    /// The requested criterion (0-based) each `unmet` line is about, in the same order (None for
+    /// an answer that matched no requested criterion).
+    pub unmet_idx: Vec<Option<usize>>,
     /// Criteria the verifier did not judge, or whose code was cut from its view ("not shown").
     /// Never counted as unmet; named as known blockers when the build is staged.
     pub not_judged: Vec<String>,
@@ -2669,6 +2725,90 @@ pub fn probe_feedback(gaps: &[ProbeGap]) -> Vec<String> {
     v.into_iter().map(|g| clip_chars(&format!("{}{}: {}", g.n.map(|n| format!("{n}. ")).unwrap_or_default(), clip_chars(&g.criterion, 120), g.why), 300)).collect()
 }
 
+// ── The wrong-number guard (AD-13 round 4) ──────────────────────────────────
+
+/// A short, stable signature of a page's live code, whitespace / quote / case normalised: an
+/// unchanged page after a Coder pass has the same one (`wrong_number_guard`). FNV-1a. Pure.
+pub fn page_sig(html: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in norm(&live_code(html)).bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// How a recheck reason starts in the verify retry (`prompt_verify` lists these on their own).
+pub const RECHECK_HEAD: &str = "RECHECK ";
+
+/// What the wrong-number guard decided for this verify's failing probes, by requested criterion
+/// (0-based).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Guard {
+    /// Failed again after a Coder pass with the same value (same steps, same detail), or on a page
+    /// the Coder returned unchanged: the expectation may be wrong, so the verifier is asked to
+    /// confirm or correct it once BEFORE any further Coder pass for it.
+    pub suspects: Vec<usize>,
+    /// Kept by the verifier on its recheck (or already kept on an earlier pass): a known blocker,
+    /// never another Coder loop for that probe.
+    pub held: Vec<usize>,
+}
+
+/// The wrong-number guard (AD-13 round 4: the critic's fixed3-b looped the Coder twice on a
+/// correct page whose probe expected 74.8-93 g after a unit switch — a real Coder would "fix" the
+/// page to match). `prev` = the open probes recorded by the last verify (`idx`, `steps`,
+/// `detail`, `page`, `kept`); `fails` = this verify's probe failures (requested criterion,
+/// steps, detail); `page` = this page's `page_sig`; `rechecked` = the criteria the verifier was
+/// just asked to recheck on this claim (their failures now are its answer: kept). Pure.
+pub fn wrong_number_guard(prev: &Value, fails: &[(usize, Vec<Value>, String)], page: &str, rechecked: &[usize]) -> Guard {
+    let mut g = Guard::default();
+    for (idx, steps, detail) in fails {
+        if g.suspects.contains(idx) || g.held.contains(idx) {
+            continue;
+        }
+        let before: Vec<&Value> = prev.as_array().into_iter().flatten().filter(|o| o["idx"].as_u64() == Some(*idx as u64)).collect();
+        if rechecked.contains(idx) || before.iter().any(|o| o["kept"] == true) {
+            g.held.push(*idx);
+        } else if before.iter().any(|o| (o["steps"] == Value::Array(steps.clone()) && o["detail"].as_str() == Some(detail.as_str())) || o["page"].as_str() == Some(page)) {
+            g.suspects.push(*idx);
+        }
+    }
+    g
+}
+
+/// The lines of the page's live code that name the elements a probe touches (`#id` selectors),
+/// at most 4, joined: the code the verifier rechecks its expectation against. Pure.
+pub fn code_for(html: &str, steps: &[Value], max: usize) -> String {
+    static ID: OnceLock<regex::Regex> = OnceLock::new();
+    let code = live_code(html);
+    let mut ids: Vec<String> = Vec::new();
+    for st in steps {
+        for c in rx(&ID, r"#([A-Za-z_][\w-]*)").captures_iter(st["sel"].as_str().unwrap_or("")) {
+            if !ids.contains(&c[1].to_string()) {
+                ids.push(c[1].to_string());
+            }
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    // The element that shows the value first (the last read), then the controls.
+    for id in ids.iter().rev() {
+        for l in code.lines().map(str::trim).filter(|l| l.contains(id.as_str()) && (l.contains('=') || l.contains('('))) {
+            let l = clip_chars(l, 160);
+            if lines.len() < 4 && !lines.contains(&l) {
+                lines.push(l);
+            }
+        }
+    }
+    clip_chars(&lines.join(" | "), max)
+}
+
+/// The recheck reason for one suspect probe (`prompt_verify` asks the verifier to confirm or
+/// correct the expectation). Pure.
+pub fn recheck_line(n: usize, criterion: &str, detail: &str, code: &str) -> String {
+    let code = if code.is_empty() { String::new() } else { format!(" The page's code for it: {code}") };
+    clip_chars(&format!("{RECHECK_HEAD}{n}. {}: {detail} — the same after the Coder's fix pass.{code}", clip_chars(criterion, 120)), 700)
+}
+
 /// Judge the answers: a criterion counts only when the model says it is met AND quotes code that
 /// is really in the page, and its probe (if it ran) did not fail. A probe whose selector matches
 /// nothing is reported but only counts against a criterion that also has no evidence. Where
@@ -2689,6 +2829,7 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
         ProbeRun::Ran(_) => format!("skipped: at most {MAX_PROBES} probes run"),
     };
     let (mut probe_lines, mut other, mut not_judged, mut gaps, mut out, mut stale) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut probe_idx, mut other_idx): (Vec<Option<usize>>, Vec<Option<usize>>) = (Vec::new(), Vec::new());
     for (i, a) in answers.list.iter().enumerate() {
         let name: String = clip_chars(&a.name, 100);
         let found = !a.evidence.is_empty() && evidence_found(&hn, &a.evidence);
@@ -2731,6 +2872,7 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
             _ => None,
         });
         // ≤ 300 chars a line (`FIX_LINE`): name ≤ 60, detail ≤ 220, the observed value first.
+        let (n_probe, n_other) = (probe_lines.len(), other.len());
         if probe_failed {
             probe_lines.push(format!("probe failed for {}: {}", clip_chars(&a.name, 60), res.map(|r| r.detail.as_str()).unwrap_or("")));
         } else if let Some(r) = failed_again {
@@ -2783,6 +2925,8 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
                 None => not_judged.push(format!("verify did not judge: {name}")),
             }
         }
+        probe_idx.resize(probe_lines.len().max(n_probe), a.idx);
+        other_idx.resize(other.len().max(n_other), a.idx);
         let mut row = json!({ "n": a.idx.map(|x| x + 1), "criterion": a.name, "met": a.met, "evidence_found": found, "evidence": a.evidence.chars().take(160).collect::<String>(), "probe": probe_json });
         if required {
             row["needs_probe"] = json!(true);
@@ -2800,7 +2944,8 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
     }
     not_judged.extend(answers.missing.iter().map(|m| format!("verify did not judge: {}", clip_chars(m, 100))));
     probe_lines.extend(other);
-    Judged { unmet: probe_lines, not_judged, gaps, criteria: Value::Array(out), absent: answers.list.is_empty(), stale }
+    probe_idx.extend(other_idx);
+    Judged { unmet: probe_lines, unmet_idx: probe_idx, not_judged, gaps, criteria: Value::Array(out), absent: answers.list.is_empty(), stale }
 }
 
 // ── Headless Edge (Windows) ─────────────────────────────────────────────────

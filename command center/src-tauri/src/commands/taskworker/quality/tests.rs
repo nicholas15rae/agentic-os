@@ -1565,8 +1565,8 @@ fn an_acting_value_probe_must_show_a_change() {
 
 /// P1-3 c in a real browser: a select that changes nothing fails as "nothing changed" even when
 /// the copied expectation (0) matches; a page that updates passes, and a read that legitimately
-/// keeps its value next to one that changes is fine; a zero after a typed number that was already
-/// there fails on its own.
+/// keeps its value next to one that changes is fine; a zero after a typed number — or, since
+/// round 4, after a non-zero select — that was already there fails on its own.
 #[test]
 fn nothing_changed_after_the_action_fails_in_a_real_browser() {
     let Some(dir) = edge_dir("same") else { return };
@@ -1582,7 +1582,8 @@ fn nothing_changed_after_the_action_fails_in_a_real_browser() {
         chg(0, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
         chg(1, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#live", "approx": 37 }, { "op": "expect_text", "sel": "#target", "approx": 132 }])),
         probe(2, json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 0 }])),
-        probe(3, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
+        probe(3, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#target", "approx": 132 }])),
+        probe(4, json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#per", "approx": 0 }])),
     ];
     let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(200)) else { panic!("edge ran") };
     let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
@@ -1590,6 +1591,7 @@ fn nothing_changed_after_the_action_fails_in_a_real_browser() {
     assert!(r[1].passed, "{d:?}");
     assert!(!r[2].passed && d[2].starts_with("nothing changed after set #g=30, click #add: #total still shows 0g"), "{d:?}");
     assert!(r[3].passed, "no change asked for: {d:?}");
+    assert!(!r[4].passed && d[4].starts_with("nothing changed after select #meals=4: #per still shows 0g"), "a zero after a non-zero select: {d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1837,4 +1839,45 @@ document.getElementById('resetTally').addEventListener('click', function () { ta
     assert!(d[6].starts_with("nothing changed after set #g=30, click #dead: #sum still shows 0 g"), "{d:?}");
     assert!(d[7].starts_with("nothing changed after select #split=5: #tally still shows 0 g"), "{d:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── AD-13 round 4 ───────────────────────────────────────────────────────────
+
+/// F3 b (critic P1, fixed3-c): an unasked zero expected on a computed value after a non-zero set
+/// OR select is rejected (a verifier retry, never a Coder loop); a zero asked for by a reset / a
+/// zero option, or a "0 before, 30 after" pair on the same element, is fine.
+#[test]
+fn an_unasked_zero_on_a_computed_value_after_a_nonzero_input_is_rejected() {
+    let crits: Vec<String> = ["Per-meal split divides the total target into equal portions for selected meal count (3-5).", "Running tally accurately sums added food protein grams against the daily target.", "Reset clears the running tally back to 0 g."].iter().map(|s| s.to_string()).collect();
+    let needs: Vec<Need> = crits.iter().map(|c| need_of(c, &[])).collect();
+    let select_zero = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 0 }]);
+    let why = enforced_one(&crits, &needs, 1, select_zero.clone()).0.unwrap_err();
+    assert!(why.starts_with("it expects 0 on #perMealDisplay after select #mealSplitSelect=4"), "{why}");
+    let steps = parse_probe(&select_zero).unwrap();
+    assert_eq!(zero_reads(&steps), vec![1], "a non-zero select arms the zero read too");
+    assert!(zero_reads(&parse_probe(&json!([{ "op": "select", "sel": "#tip", "value": "0" }, { "op": "expect_text", "sel": "#t", "approx": 0 }])).unwrap()).is_empty(), "a zero option");
+    // A zero before the add, the sum after it: a real change.
+    let before_after = json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "expect_text", "sel": "#total", "approx": 0 }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 30 }]);
+    assert!(enforced_one(&crits, &needs, 2, before_after).0.is_ok());
+    // Never does what produces the value: only zeros after typing a name.
+    let name_only = json!([{ "op": "click", "sel": "#toggleFoodForm" }, { "op": "set", "sel": "#foodName", "value": "Chicken" }, { "op": "expect_text", "sel": "#intakeDisplay", "approx": 0 }]);
+    assert!(enforced_one(&crits, &needs, 2, name_only).0.unwrap_err().starts_with("it expects only 0 after its actions"));
+    // A reset asks for its zero.
+    let reset = json!([{ "op": "set", "sel": "#foodGrams", "value": "30" }, { "op": "click", "sel": "#addFood" }, { "op": "expect_text", "sel": "#tally", "approx": 30 }, { "op": "click", "sel": "#resetTally" }, { "op": "expect_text", "sel": "#tally", "approx": 0 }]);
+    assert!(enforced_one(&crits, &needs, 3, reset).0.is_ok());
+    // The right number after the select is fine.
+    assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "approx": 37, "tol": 1.5 }])).0.is_ok());
+}
+
+/// F6: sums, tallies, totals, running totals and "adds up" compute a value, so a running-tally
+/// criterion gets the must-change mark; a dash empty-state criterion stays a text check.
+#[test]
+fn a_running_tally_computes_and_must_change() {
+    for c in ["Running tally accurately sums added food protein grams against the daily target.", "The running total updates when a food is added.", "Adding foods keeps a tally of protein eaten today.", "The eaten grams add up to the shown total."] {
+        let n = need_of(c, &[]);
+        assert!(n.probe && n.value && n.action && must_change(Some(&n)), "{c}: {n:?}");
+    }
+    let dash = need_of("On page load the tip and total show a dash (—) as their empty state.", &[]);
+    assert!(!dash.value && dash.shows == vec![Placeholder::Dash], "{dash:?}");
+    assert!(!need_of("UI is responsive on mobile devices and works offline.", &[]).value);
 }

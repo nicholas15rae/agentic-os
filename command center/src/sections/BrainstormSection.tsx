@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { BellPlus, Loader2, Mic, Plus, Search, Sparkles, Square, Trash2 } from "lucide-react";
+import { BellPlus, CheckSquare, FlaskConical, Loader2, Mic, Plus, Search, Sparkles, Square, Trash2 } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { collections, useCollection, type Item } from "@/lib/cc-api";
 import { useBrainstorm, type BrainstormNote } from "@/features/brainstorm/capture";
@@ -7,6 +7,10 @@ import { VoiceOrb } from "@/features/voice/VoiceOrb";
 import { parseWhen } from "@/features/reminders/when";
 import type { Reminder } from "@/features/reminders/types";
 import { useSettings, type ListenProfile } from "@/stores/settings";
+import { isTauri } from "@/lib/platform";
+import { IntakeModal } from "@/features/buildhub/IntakeModal";
+import { noteToIntake } from "@/features/buildhub/notes";
+import type { IntakeNote } from "@/features/buildhub/compile";
 
 const LISTEN_PROFILE_OPTIONS: { id: ListenProfile; label: string }[] = [
   { id: "snappy", label: "Snappy 1s" },
@@ -27,6 +31,17 @@ export function BrainstormSection() {
   const brainstorm = useSettings((s) => s.brainstorm);
   const { autoOrganizeEvery: every, listenProfile: profile } = brainstorm;
   const setSettings = useSettings((s) => s.set);
+  // Thought-to-Product Phase 2: pick entries across sessions → Push to Play Place (intake interview).
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [intake, setIntake] = useState<IntakeNote[] | null>(null);
+  const togglePick = (id: string) =>
+    setPicked((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
 
   const notes = useMemo(
     () => items.filter((n) => !q || `${n.title} ${n.rawText} ${(n.organized?.tags ?? []).join(" ")}`.toLowerCase().includes(q.toLowerCase())),
@@ -56,12 +71,38 @@ export function BrainstormSection() {
           </button>
         </div>
         {error && <p className="mb-2 text-[11px] text-alert">Gateway: {error}</p>}
+        <div className="mb-2 flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              setSelecting((v) => !v);
+              setPicked(new Set());
+            }}
+            aria-pressed={selecting}
+            className={`pill-glass !h-8 !px-2.5 text-[11px] ${selecting ? "!border-amber/50 text-amber-soft" : ""}`}
+            title="Pick one or many entries (across sessions) to turn into one build"
+          >
+            <CheckSquare size={12} /> {selecting ? "Done" : "Select"}
+          </button>
+          {selecting && (
+            <button
+              type="button"
+              disabled={!picked.size || !isTauri()}
+              onClick={() => setIntake(items.filter((n) => picked.has(n.id)).map(noteToIntake))}
+              className="pill-primary !h-8 flex-1 !px-2.5 text-[11px] disabled:opacity-50"
+              title={isTauri() ? "The Prompter interviews you first, then the build is staged in the Play Place" : "Staging builds needs the desktop app"}
+            >
+              <FlaskConical size={12} /> Push to Play Place{picked.size ? ` (${picked.size})` : ""}
+            </button>
+          )}
+        </div>
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto">
           {notes.map((n) => (
-            <li key={n.id}>
+            <li key={n.id} className="flex items-center gap-1.5">
+              {selecting && <input type="checkbox" checked={picked.has(n.id)} onChange={() => togglePick(n.id)} className="ml-1 shrink-0 accent-amber" aria-label={`Select ${n.title}`} />}
               <button
-                onClick={() => setSelected(n.id)}
-                className={`w-full rounded-[12px] px-3 py-2 text-left ${n.id === activeId ? "bg-amber/12 border border-amber/40" : "border border-transparent hover:bg-white/5"}`}
+                onClick={() => (selecting ? togglePick(n.id) : setSelected(n.id))}
+                className={`w-full min-w-0 rounded-[12px] px-3 py-2 text-left ${(selecting ? picked.has(n.id) : n.id === activeId) ? "bg-amber/12 border border-amber/40" : "border border-transparent hover:bg-white/5"}`}
               >
                 <p className="truncate text-[13px] text-ink">{n.title}</p>
                 <p className="truncate font-mono text-[10.5px] text-ink-3">
@@ -134,6 +175,16 @@ export function BrainstormSection() {
 
         {note ? <NoteView note={note} onDelete={() => void remove(note.id).then(() => setSelected(null))} onRename={(title) => void update(note.id, { title, titleLocked: true })} /> : null}
       </section>
+      {intake && (
+        <IntakeModal
+          notes={intake}
+          onClose={() => {
+            setIntake(null);
+            setSelecting(false);
+            setPicked(new Set());
+          }}
+        />
+      )}
     </div>
   );
 }

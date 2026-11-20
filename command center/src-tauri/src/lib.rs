@@ -4,7 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, instagram, modellab, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
-use commands::lifecycle;
+use commands::{buildhub, lifecycle};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -22,6 +22,7 @@ pub fn run() {
         .manage(audio::commands::AudioEngineState::default())
         .manage(introspect::IntrospectState::default())
         .manage(lifecycle::LifecycleState::default())
+        .manage(buildhub::HubState::default())
         .setup(|app| {
             use tauri::Manager;
             // System Map: app uptime counts from here.
@@ -45,6 +46,8 @@ pub fn run() {
                 app.state::<devqueue::DevQueueState>().init(&dir);
                 // P6: a run the last session left "running" died with it (its job was killed).
                 claude_fix::recover_interrupted(&app.state::<devqueue::DevQueueState>());
+                // Play Place staging hub: <config dir>/build-hub.json (Thought-to-Product Phases 2–4).
+                app.state::<buildhub::HubState>().init(&dir);
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
                 audio::ducker::recover(&dir);
             }
@@ -60,6 +63,8 @@ pub fn run() {
             tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
             // Thought-to-Product Phase 1: the gateway heartbeat (`gateway-health`, off the UI thread).
             tauri::async_runtime::spawn(lifecycle::health_loop(app.handle().clone()));
+            // Play Place hub orchestration: FIFO hand-off, worker sync, smoke tests, peeks.
+            tauri::async_runtime::spawn(buildhub::hub_loop(app.handle().clone()));
             // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
             tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
             // Renew the Instagram long-lived token before its 60 days run out.
@@ -222,6 +227,24 @@ pub fn run() {
             lifecycle::gateway_reconnect,
             lifecycle::app_exit_check,
             lifecycle::app_exit,
+            buildhub::build_hub_view,
+            buildhub::build_runtime_config,
+            buildhub::build_set_external_base,
+            buildhub::build_enqueue,
+            buildhub::build_reorder,
+            buildhub::build_pause,
+            buildhub::build_resume,
+            buildhub::build_steer,
+            buildhub::build_to_repair,
+            buildhub::build_requeue,
+            buildhub::build_smoke,
+            buildhub::build_promote,
+            buildhub::build_remove,
+            buildhub::build_widget_url,
+            buildhub::build_peek_status,
+            buildhub::build_open_window,
+            buildhub::build_open_browser,
+            buildhub::build_intake_questions,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Jarvis Command Center")

@@ -255,7 +255,7 @@ pub(crate) fn list(conn: &Connection, status: Option<&str>, category: Option<&st
         "SELECT {COLS} FROM dev_task_queue
          WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR category = ?2)
          ORDER BY CASE status WHEN 'In Progress' THEN 0 WHEN 'Pending' THEN 1 WHEN 'Queued' THEN 2 ELSE 3 END,
-                  priority, created_at
+                  priority, created_at, rowid
          LIMIT 500"
     );
     let mut st = conn.prepare(&sql).map_err(sql_err)?;
@@ -983,12 +983,46 @@ pub(crate) fn write_queue_file(conn: &Connection, repo: &Path, known: &[String],
     let doc = queue_doc(&all, rev, now, &git_state(repo), known);
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     let path = dir.join(QUEUE_FILE);
-    let tmp = dir.join(format!("{QUEUE_FILE}.tmp"));
+    // A unique tmp name (never two writers on one tmp) and a retried rename: Claude Code or an
+    // editor holding the file open must not make a write fail (or vanish) on Windows.
+    let tmp = dir.join(format!("{QUEUE_FILE}.{}-{now}.tmp", std::process::id()));
     std::fs::write(&tmp, &text).map_err(|e| format!("couldn't write the fix queue: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("couldn't replace the fix queue: {e}"))?;
+    if let Err(e) = replace_with_retry(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("couldn't replace the fix queue: {e}"));
+    }
     meta_set(conn, "queue_rev", &rev.to_string())?;
     meta_set(conn, "queue_hash", &text_hash(&text))?;
     Ok(path)
+}
+
+/// `rename(tmp, path)` with a short backoff (≈1.5 s total) for transient Windows sharing
+/// violations / access denials while another process has `path` open.
+pub(crate) fn replace_with_retry(tmp: &Path, path: &Path) -> Result<(), String> {
+    replace_with(tmp, path, |a, b| std::fs::rename(a, b), |ms| std::thread::sleep(Duration::from_millis(ms)))
+}
+
+/// The retry policy itself, with the rename and sleep injected (tests).
+pub(crate) fn replace_with(tmp: &Path, path: &Path, mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>, mut sleep: impl FnMut(u64)) -> Result<(), String> {
+    const BACKOFF_MS: [u64; 6] = [25, 50, 100, 200, 400, 700];
+    let mut last = None;
+    for (i, wait) in std::iter::once(0).chain(BACKOFF_MS).enumerate() {
+        if i > 0 {
+            sleep(wait);
+        }
+        match rename(tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // 5 = access denied, 32 = sharing violation, 33 = lock violation (Windows).
+                let transient = matches!(e.raw_os_error(), Some(5 | 32 | 33)) || e.kind() == std::io::ErrorKind::PermissionDenied;
+                last = Some(e);
+                if !transient {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last.map(|e| e.to_string()).unwrap_or_else(|| "rename failed".into()))
 }
 
 /// What a hand-edit of the queue file may change for one task.
@@ -1816,5 +1850,86 @@ mod tests {
         dq.with(|c| meta_set(c, "last_brief_export", "1")).unwrap();
         dq.with(|c| meta_set(c, "last_brief_export", "2")).unwrap();
         assert_eq!(dq.with(|c| meta_get(c, "last_brief_export")).unwrap().as_deref(), Some("2"));
+    }
+
+    // ── Thought-to-Product Phase 3: Dev Fix Queue hardening ──
+
+    #[test]
+    fn same_millisecond_fixes_keep_insertion_order() {
+        let dq = DevQueueState::in_memory();
+        let mut ids = vec![];
+        for i in 0..6 {
+            let mut t = new_task(&format!("fix the thing number {i}"));
+            t.kind = "fix".into();
+            t.status = "Queued".into();
+            t.priority = 1;
+            let task = dq.with(|c| insert(c, &t)).unwrap();
+            ids.push(task.id);
+        }
+        // Force a created_at tie: only insertion order (rowid) can break it.
+        dq.with(|c| c.execute("UPDATE dev_task_queue SET created_at = 42", []).map_err(sql_err)).unwrap();
+        for _ in 0..3 {
+            let all = dq.with(|c| list(c, None, None)).unwrap();
+            let order: Vec<String> = queue_items(&all).iter().map(|t| t.id.clone()).collect();
+            assert_eq!(order, ids, "deterministic FIFO on ties");
+        }
+    }
+
+    #[test]
+    fn replace_retries_a_locked_target_then_succeeds() {
+        let (tmp, path) = (Path::new("q.tmp"), Path::new("q.json"));
+        let mut calls = 0;
+        let mut slept = vec![];
+        let r = replace_with(
+            tmp,
+            path,
+            |_, _| {
+                calls += 1;
+                if calls < 3 { Err(std::io::Error::from_raw_os_error(32)) } else { Ok(()) }
+            },
+            |ms| slept.push(ms),
+        );
+        assert!(r.is_ok());
+        assert_eq!(calls, 3);
+        assert_eq!(slept, vec![25, 50]);
+    }
+
+    #[test]
+    fn replace_gives_up_after_the_backoff_and_reports_the_error() {
+        let mut calls = 0;
+        let r = replace_with(Path::new("a"), Path::new("b"), |_, _| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(32))
+        }, |_| {});
+        assert!(r.is_err(), "never a silent drop");
+        assert_eq!(calls, 7);
+    }
+
+    #[test]
+    fn replace_does_not_retry_a_permanent_error() {
+        let mut calls = 0;
+        let r = replace_with(Path::new("a"), Path::new("b"), |_, _| {
+            calls += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))
+        }, |_| {});
+        assert!(r.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn queue_file_write_uses_a_unique_tmp_and_leaves_none_behind() {
+        let repo = tmp_dir("qf");
+        let dq = DevQueueState::in_memory();
+        let mut t = new_task("fix the queue file write");
+        t.kind = "fix".into();
+        t.status = "Queued".into();
+        dq.with(|c| insert(c, &t)).unwrap();
+        let p = dq.with(|c| write_queue_file(c, &repo, &[], 7)).unwrap();
+        let p2 = dq.with(|c| write_queue_file(c, &repo, &[], 8)).unwrap();
+        assert_eq!(p, p2);
+        let leftovers: Vec<_> = std::fs::read_dir(p.parent().unwrap()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        assert!(leftovers.is_empty());
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(doc["rev"], 2);
     }
 }

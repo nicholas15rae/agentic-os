@@ -182,10 +182,11 @@ pub fn app_exit_check(app: AppHandle) -> ExitCheck {
     }
     let now = chrono::Utc::now().timestamp_millis();
     if let Ok(list) = app.state::<super::envelope::TaskStore>().with(|c| super::envelope::list(c, None, 50, false)) {
-        for e in list.iter().filter(|e| super::envelope::IN_FLIGHT.contains(&e.status.as_str()) && e.lease_until.is_some_and(|l| l > now)) {
+        for e in list.iter().filter(|e| super::envelope::IN_FLIGHT.contains(&e.status.as_str()) && e.lease_until.is_some_and(|l| l > now) && !super::envelope::is_paused(&e.task_id)) {
             busy.push(format!("Build “{}” is mid-stage ({})", e.title, e.stage.as_deref().unwrap_or(&e.status)));
         }
     }
+    busy.extend(super::buildhub::busy_labels(&app));
     ExitCheck { busy }
 }
 
@@ -198,6 +199,7 @@ pub fn app_exit(app: AppHandle, force: Option<bool>) -> Result<(), String> {
             return Err(format!("BUSY:{}", c.busy.join("; ")));
         }
     }
+    super::buildhub::shutdown(&app);
     app.exit(0);
     Ok(())
 }

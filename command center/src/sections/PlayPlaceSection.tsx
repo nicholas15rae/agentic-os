@@ -11,6 +11,7 @@ import { useFocus } from "@/features/os/focus-store";
 import { useOsName } from "@/features/os/os-store";
 import { useToasts } from "@/features/reminders/notify";
 import { devFixMode } from "@/features/memmap/format";
+import { StagingHub } from "@/features/buildhub/StagingHub";
 
 /** P6 Dev Fix · Claude Queue: the System Map's dev-queue store, loaded only when the tab opens. */
 const DevFixQueue = lazy(() => import("@/features/memmap/DevFixQueue").then((m) => ({ default: m.DevFixQueue })));
@@ -26,6 +27,8 @@ export function PlayPlaceSection() {
   useEffect(() => clearUnseen(), [clearUnseen]);
   return (
     <div className="mx-auto h-full w-full max-w-7xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
+      {/* Thought-to-Product Phase 3: the universal staging hub (desktop; renders nothing on the phone). */}
+      <StagingHub />
       <PipelineBars />
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <PlayCards />

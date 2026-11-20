@@ -1,0 +1,21 @@
+import { useEffect, useState } from "react";
+import { xcmd } from "@/lib/native-ext";
+
+/** The dynamically loaded sandbox body: the widget's loopback URL in an opaque-origin iframe. */
+export default function SandboxFrame({ buildId, title, version }: { buildId: string; title: string; version: number }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  useEffect(() => {
+    let live = true;
+    xcmd("build_widget_url", { buildId })
+      .then((u) => live && setUrl(u))
+      .catch((e) => live && setError(e instanceof Error ? e : new Error(String(e))));
+    return () => {
+      live = false;
+    };
+  }, [buildId]);
+  // Surface load failures to the Error Boundary instead of rendering a broken frame.
+  if (error) throw error;
+  if (!url) return <div className="grid h-full place-items-center font-mono text-[11px] text-ink-3">starting the sandbox…</div>;
+  return <iframe key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className="size-full rounded-[12px] border border-white/10 bg-white" />;
+}

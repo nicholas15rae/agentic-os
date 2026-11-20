@@ -131,6 +131,14 @@ function FixRow({ t, anyRunning, compact, canDispatch }: { t: DevTask; anyRunnin
       setBusy(false);
     }
   };
+  const bump = async () => {
+    try {
+      const r = await cmd("dev_task_update", { id: t.id, priority: Math.max(0, t.priority - 1) as typeof t.priority });
+      useDevQueue.setState((s) => ({ tasks: s.tasks.map((x) => (x.id === r.id ? r : x)) }));
+    } catch (e) {
+      useToasts.getState().push({ title: "Couldn't bump it", body: msg(e), tone: "error" });
+    }
+  };
   const queue = async () => {
     try {
       const r = await cmd("dev_task_update", { id: t.id, status: "Queued" });
@@ -147,9 +155,18 @@ function FixRow({ t, anyRunning, compact, canDispatch }: { t: DevTask; anyRunnin
         <span className="min-w-0 flex-1 truncate text-sm text-ink" title={t.title}>
           {t.title}
         </span>
-        <span className="font-mono text-[10px] text-ink-3" title={PRIORITY_LABEL[t.priority]}>
+        {/* Priority bump (Thought-to-Product Phase 3): one click = one step more urgent; the queue
+            stays deterministic FIFO within a priority. Never on a live run. */}
+        <button
+          type="button"
+          disabled={t.priority === 0 || isFixRunning(t) || t.status === "Done"}
+          onClick={() => void bump()}
+          className="rounded font-mono text-[10px] text-ink-3 enabled:hover:text-amber-soft disabled:cursor-default"
+          title={t.priority === 0 ? PRIORITY_LABEL[t.priority] : `${PRIORITY_LABEL[t.priority]} — click to bump to P${t.priority - 1}`}
+        >
           P{t.priority}
-        </span>
+          {t.priority > 0 && !isFixRunning(t) && t.status !== "Done" ? "↑" : ""}
+        </button>
         <span className={`label-caps inline-flex h-5 items-center rounded-full border px-2 !text-[9px] ${CHIP_TONE[chip.tone]}`}>{chip.label}</span>
       </div>
       {!compact && t.body && <p className="mt-1 line-clamp-2 text-xs text-ink-2">{t.body}</p>}

@@ -3383,6 +3383,80 @@ fn open_model_fixes_count_only_when_the_loop_is_the_verifiers_alone() {
     assert!(open_model_fixes(&d, &["probe failed for X: got 0".into()]).is_empty(), "deterministic failures already fail it");
     assert!(open_model_fixes(&json!({ "verdict": "pass", "fix_instructions": [REMOVE_FIX] }), &[]).is_empty());
     assert!(open_model_fixes(&json!({ "verdict": "loop" }), &[]).is_empty());
+    // Round 7: only the verifier's own fixes (`model_open`) count, never the worker's lines.
+    let d = json!({ "verdict": "loop", "fix_instructions": [BARE_LOOP_FIX], "model_open": [] });
+    assert!(open_model_fixes(&d, &[]).is_empty(), "a bare loop names no fix");
+    let d = json!({ "verdict": "loop", "fix_instructions": ["couldn't be checked in a browser: X (no probe): make sure it really works", REMOVE_FIX], "model_open": [REMOVE_FIX] });
+    assert_eq!(open_model_fixes(&d, &[]), vec![REMOVE_FIX.to_string()], "a hub gap's line is not the verifier's fix");
+    assert!(open_model_fixes(&json!({ "verdict": "loop", "fix_instructions": [BARE_LOOP_FIX] }), &[]).is_empty(), "a decision stored before model_open drops the worker's line");
+}
+
+/// Round 7 (r16 review): the verifier says "loop" with no fix on every pass of a correct page
+/// (criterion met, probe passing). The worker's own "address the acceptance criteria…" line
+/// sends the Coder another pass, but at the limit it is no open verifier fix: the build works
+/// (pass with a note), nothing "still doesn't work", and the line is said as a note.
+#[test]
+fn a_bare_verifier_loop_at_the_limit_on_a_correct_page_still_passes() {
+    let root = tmp("bare-loop");
+    let store = leak_store();
+    let looping = json!({ "criteria": probed_crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": [], "voice_summary": "Looks good." }).to_string();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { looping.clone() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, e.max_iterations.min(MAX_LOOP_ITERATIONS), "a bare loop still sends the Coder another pass");
+    assert_eq!(e.last_eval["verify"]["verdict"], "loop");
+    assert_eq!(e.last_eval["verify"]["model_open"], json!([]), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")), "{}", e.last_eval);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert_eq!(kb, vec![BARE_LOOP_NOTE.to_string()], "the worker's line is a note, never a fix");
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert!(!row.short_summary.contains("needs fixes"), "{}", row.short_summary);
+    assert_eq!(row.summary_payload["verdict"], "pass_with_notes");
+    let voice = row.voice_summary.clone().unwrap();
+    assert!(voice.starts_with("Built; 1 thing still to check: ") && !voice.contains("doesn't work") && !voice.contains(BARE_LOOP_FIX), "{voice}");
+    let status: Value = serde_json::from_str(&std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap()).unwrap();
+    assert_eq!((status["works"].clone(), status["verdict"].clone()), (json!(true), json!("pass_with_notes")), "{status}");
+}
+
+/// Round 7: the same bare loop on a hub build is handed on (review_ready), never failed into the
+/// Repair Queue with no defect named.
+#[test]
+fn a_bare_verifier_loop_at_the_limit_on_a_correct_hub_build_hands_on() {
+    let root = tmp("hub-bare-loop");
+    let store = leak_store();
+    let looping = json!({ "criteria": probed_crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": [] }).to_string();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { looping.clone() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")), "{}", e.last_eval);
+}
+
+/// Round 7: a bare loop on a page whose only open item could not be checked (no probe) stays
+/// unverified: the worker's line never turns it into needs-fixes.
+#[test]
+fn a_bare_verifier_loop_on_an_unproven_page_stays_unverified() {
+    let root = tmp("bare-loop-unverified");
+    let store = leak_store();
+    let no_probe = json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"] }], "verdict": "loop", "fix_instructions": [] }).to_string();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { no_probe.clone() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("unverified")), "{}", e.last_eval);
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    let voice = row.voice_summary.clone().unwrap();
+    assert!(!voice.contains("doesn't work") && !voice.contains(BARE_LOOP_FIX), "{voice}");
 }
 
 /// Round 6: a hub build the verifier still loops on at the limit is not handed on to the hub

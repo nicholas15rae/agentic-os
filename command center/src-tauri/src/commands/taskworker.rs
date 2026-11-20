@@ -126,6 +126,12 @@ const CODER_BRIEF_IN: usize = 3000;
 const FIX_IN: usize = 1800;
 /// One fix line as it travels in loop rows (a probe failure names the steps and both values).
 const FIX_LINE: usize = 300;
+/// The worker's own fix when the verifier says "loop" but names none: it sends the Coder another
+/// pass, but it is never the verifier's fix (`open_model_fixes`), and when staged it is the
+/// `BARE_LOOP_NOTE` note (AD-13 round 7).
+pub const BARE_LOOP_FIX: &str = "address the acceptance criteria the build does not meet";
+/// What a staged build says about a bare "loop" (no fix named): a note, never a failing item.
+pub const BARE_LOOP_NOTE: &str = "the verifier still asked for another pass but named no fix";
 const DIGEST_IN: usize = 2500;
 const DESIGN_STORE_MAX: usize = 24 * 1024;
 const RESEARCH_SEARCHES: usize = 3;
@@ -977,12 +983,17 @@ pub const BLOCKERS_MAX: usize = 16;
 /// still fails: the verdict is needs-fixes, never unverified or a pass. With deterministic
 /// failures they stay notes (they mostly restate them, and the verdict is needs-fixes anyway).
 /// A held wrong number never gets here (the guard turns that loop into a pass, its fixes into
-/// notes). Clipped as the blocker list clips them, so a line is never counted twice. Pure.
+/// notes). Clipped as the blocker list clips them, so a line is never counted twice.
+/// Only fixes the verifier itself gave count (round 7): `model_open` records them (its own
+/// non-bookkeeping fixes, when it said "loop" and no unmet criterion or gate item forced the
+/// loop), never the worker's `BARE_LOOP_FIX` for a bare "loop", nor a hub gap's line. A decision
+/// stored before `model_open` existed reads its fix instructions without `BARE_LOOP_FIX`. Pure.
 pub fn open_model_fixes(decision: &Value, failing: &[String]) -> Vec<String> {
     if decision["verdict"] != "loop" || !failing.is_empty() {
         return vec![];
     }
-    str_list(&decision["fix_instructions"], 10, FIX_LINE)
+    let own = if decision.get("model_open").is_some() { &decision["model_open"] } else { &decision["fix_instructions"] };
+    str_list(own, 10, FIX_LINE).into_iter().filter(|f| f != BARE_LOOP_FIX).collect()
 }
 
 /// The review_ready voice line, deterministic whenever blockers exist (the verifier's own line
@@ -2131,7 +2142,7 @@ impl<'a> Worker<'a> {
                         }
                     }
                 } else if model_fixes.is_empty() {
-                    fixes.push("address the acceptance criteria the build does not meet".into());
+                    fixes.push(BARE_LOOP_FIX.into());
                 } else if kept.is_empty() {
                     verdict = "pass";
                 }
@@ -2213,7 +2224,10 @@ impl<'a> Worker<'a> {
             // the checks forced (P3).
             let model_loop = jj["verdict"].as_str().is_some_and(|v| v.trim().eq_ignore_ascii_case("loop"));
             let spoken = voice(&j).filter(|_| verdict != "loop" || model_loop);
-            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "held": held_lines, "rechecked": rechecked.iter().map(|i| i + 1).collect::<Vec<_>>(), "disputed": dispute_lines, "gate_open": open_gate.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
+            // The fixes the verifier itself still asks for (`open_model_fixes`, round 7): its own
+            // loop, not one an unmet criterion or a gate item forced; never the worker's lines.
+            let model_open: Vec<String> = if verdict == "loop" && model_loop && coder_unmet.is_empty() && open_gate.is_empty() { kept.clone() } else { vec![] };
+            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "model_open": model_open, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "held": held_lines, "rechecked": rechecked.iter().map(|i| i + 1).collect::<Vec<_>>(), "disputed": dispute_lines, "gate_open": open_gate.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
         };
         let mut last_eval = e.last_eval.clone();
         last_eval["verify"] = decision.clone();
@@ -2256,7 +2270,8 @@ impl<'a> Worker<'a> {
         gate_items.iter().cloned().for_each(&mut push);
         str_list(&decision["verify_blockers"], 40, 240).into_iter().for_each(&mut push);
         if wants_loop {
-            str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().for_each(&mut push);
+            // The worker's own line for a bare "loop" is no fix the verifier named: a note.
+            str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().map(|f| if f == BARE_LOOP_FIX { BARE_LOOP_NOTE.to_string() } else { f }).for_each(&mut push);
         }
         str_list(&decision["known_blockers"], 40, 240).into_iter().for_each(&mut push);
         // Never a silent cut: past the cap the last line says how many more there are.

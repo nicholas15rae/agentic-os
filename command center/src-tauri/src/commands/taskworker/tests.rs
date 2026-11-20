@@ -92,6 +92,8 @@ pub(super) fn default_reply(call: &ModelCall) -> String {
 }
 
 type Script = Box<dyn Fn(&ModelCall, usize) -> Result<String, String> + Send + Sync>;
+/// A scripted stand-in for headless Edge running the verifier's probes: (staged html, probes).
+type ProbeFn = Box<dyn Fn(&str, &[quality::Probe]) -> quality::ProbeRun + Send + Sync>;
 
 pub(super) struct Fake {
     pub slot: &'static GpuSlot,
@@ -115,6 +117,9 @@ pub(super) struct Fake {
     pub fg_during: Option<&'static str>,
     pub fg_spawned: AtomicBool,
     pub transcript: &'static TranscriptStore,
+    /// None = probes are skipped ("no browser"), as on a machine without Edge.
+    pub probe_runner: Mutex<Option<ProbeFn>>,
+    pub probe_calls: Mutex<Vec<Vec<quality::Probe>>>,
 }
 
 impl Fake {
@@ -141,6 +146,8 @@ impl Fake {
             fg_during: None,
             fg_spawned: AtomicBool::new(false),
             transcript: Box::leak(Box::new(TranscriptStore::in_memory())),
+            probe_runner: Mutex::new(None),
+            probe_calls: Mutex::default(),
         }
     }
 
@@ -235,6 +242,19 @@ impl WorkerEnv for Fake {
     }
     fn transcript(&self) -> Option<&TranscriptStore> {
         Some(self.transcript)
+    }
+    fn runtime_smoke(&self, _page: PathBuf) -> BoxFuture<'_, quality::Smoke> {
+        Box::pin(async move { quality::Smoke::Skipped("fake: no browser".into()) })
+    }
+    fn run_probes(&self, page: PathBuf, probes: Vec<quality::Probe>) -> BoxFuture<'_, quality::ProbeRun> {
+        Box::pin(async move {
+            self.probe_calls.lock().unwrap().push(probes.clone());
+            let html = std::fs::read_to_string(&page).unwrap_or_default();
+            match &*self.probe_runner.lock().unwrap() {
+                Some(f) => f(&html, &probes),
+                None => quality::ProbeRun::Skipped("fake: no browser".into()),
+            }
+        })
     }
 }
 
@@ -1899,22 +1919,221 @@ fn a_usable_page_still_failing_the_gate_at_the_limit_is_staged_with_blockers() {
 
 #[test]
 fn the_gate_flags_missing_ids_and_unguarded_storage_and_reads_runtime_errors() {
+    let skip = quality::Smoke::Skipped("not run".into());
     let spec = json!({ "spec": { "coreFeatures": ["Bill amount input"], "screens": ["Calculator"] } });
     let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "const saved = localStorage.getItem('tip'); document.getElementById('ghost'); $(\"go\").addEventListener");
-    let r = evaluate_build(&bad, &spec, "", None);
+    let r = evaluate_build(&bad, &spec, "", &skip);
     assert_eq!(r["complete"], false);
     let m = r["missing"].to_string();
     assert!(m.contains("#ghost") && m.contains("try/catch"), "{m}");
-    // With the runtime smoke clean, its verdict on storage wins over the scan.
     let fixed = bad.replace("document.getElementById('ghost'); ", "");
-    assert_eq!(evaluate_build(&fixed, &spec, "", Some(vec![]))["complete"], true);
-    let crashed = evaluate_build(GOOD_HTML, &spec, "", Some(vec!["the page throws on load: Uncaught TypeError: x is null".into()]));
+    let line = fixed.lines().position(|l| l.contains("localStorage")).unwrap() + 1;
+    // A clean smoke that never reached the storage line proves nothing: the scan still counts it.
+    let clean = quality::Smoke::Ran { errors: vec![], storage_lines: vec![] };
+    assert_eq!(evaluate_build(&fixed, &spec, "", &clean)["complete"], false);
+    // The smoke reached it with storage blocked and nothing threw: the access was caught.
+    let reached = quality::Smoke::Ran { errors: vec![], storage_lines: vec![line] };
+    assert_eq!(evaluate_build(&fixed, &spec, "", &reached)["complete"], true);
+    // …unless the page then crashed on the blocked storage.
+    let threw = quality::Smoke::Ran { errors: vec!["the page throws on load: Uncaught SecurityError: localStorage is blocked here (guard storage with try/catch)".into()], storage_lines: vec![line] };
+    let t = evaluate_build(&fixed, &spec, "", &threw);
+    assert!(t["complete"] == false && t["missing"].to_string().contains("1 unguarded, line"), "{t}");
+    let crashed = evaluate_build(GOOD_HTML, &spec, "", &quality::Smoke::Ran { errors: vec!["the page throws on load: Uncaught TypeError: x is null".into()], storage_lines: vec![] });
     assert_eq!(crashed["complete"], false);
     assert!(crashed["missing"].to_string().contains("throws on load"));
+    assert_eq!(crashed["checks"]["runtime"]["loadErrors"], 1);
+    // A smoke that ran but never produced a result (hang, reload loop) fails: never a silent pass.
+    let hung = evaluate_build(GOOD_HTML, &spec, "", &quality::Smoke::Failed("no result after 25s: the page hung, kept reloading or never finished".into()));
+    assert_eq!(hung["complete"], false);
+    assert!(hung["missing"].to_string().contains("hung or navigated away"), "{hung}");
+    assert_eq!(hung["checks"]["runtime"]["failed"], true);
+    // Not run at all (no Edge): the static checks decide, and the record says why.
+    let ok = evaluate_build(GOOD_HTML, &spec, "", &quality::Smoke::Skipped("Edge is not installed".into()));
+    assert_eq!(ok["complete"], true, "{ok}");
+    assert_eq!(ok["checks"]["runtime"], json!({ "ran": false, "reason": "Edge is not installed" }));
     // An empty spec sub-object falls back to the requirements for coverage.
     let empty = json!({ "requirements": ["Currency converter with exchange history chart"], "spec": { "coreFeatures": [], "screens": [] } });
-    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", None)["checks"]["items"], 1);
-    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", None)["complete"], false);
+    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", &skip)["checks"]["items"], 1);
+    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", &skip)["complete"], false);
+}
+
+// ── Behavioural probes in verify (AD-11; the protein-tracker-2 re-run passed broken behaviour) ──
+
+/// The tip calculator's per-person total, with a probe that sets the bill and clicks Calculate.
+fn probed_crit() -> Value {
+    json!([{ "n": 1, "criterion": "Shows the per-person total", "met": true,
+        "evidence": "$(\"out\").textContent = \"$\" + (total / Math.max(1, Number($(\"split\").value))).toFixed(2)",
+        "probe": [{ "op": "set", "sel": "#bill", "value": "100" }, { "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "#out", "contains": "$39.33" }] }])
+}
+
+/// A stand-in browser: the probe fails on a page without `data-fixed`, passes on one with it.
+fn scripted_probes() -> ProbeFn {
+    Box::new(|html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|_| if html.contains("data-fixed") { json!({ "ok": true }) } else { json!({ "ok": false, "k": "fail", "at": 2, "got": "$0.00 per person" }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    })
+}
+
+/// The verifier says pass and quotes real code, but its probe shows the behaviour is broken: the
+/// build goes back to the Coder with the exact probe line, and passes once the probe does.
+#[test]
+fn a_failing_probe_overrides_a_pass_with_evidence_and_loops_to_the_coder() {
+    let root = tmp("probe");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass", "voice_summary": "It works." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "the probe failure became one loop");
+    let line = "probe failed for Shows the per-person total: after set #bill=100, click #go expected #out text to contain \"$39.33\", got $0.00 per person";
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains(line), "{}", codes[1].user);
+    let looped = e.handoff_log.iter().find(|h| h.event_type == "loop_iteration" && h.summary_payload["from"] == "verify").expect("a verify loop row");
+    assert_eq!(looped.summary_payload["fix_instructions"][0], line, "the probe line goes first");
+    // The probes the verifier wrote were validated and run (both passes); the final record shows them.
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0][0].steps[0], json!({ "op": "set", "sel": "#bill", "nth": 0, "value": "100" }));
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["probe"]["passed"], true, "{}", e.last_eval["verify"]);
+    assert_eq!(e.last_eval["verify"]["probes"]["ran"], true);
+    assert_eq!(e.last_eval["known_blockers"], json!([]));
+    // The verifier was told how to write probes.
+    assert!(fake.calls_for("verify")[0].user.contains("\"op\":\"expect_order\""));
+}
+
+/// Without a browser (or with runtime checks off) the probes are skipped and recorded; the
+/// evidence-only rule decides.
+#[test]
+fn probes_are_skipped_without_a_browser_and_the_evidence_rule_applies() {
+    let root = tmp("probe-skip");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 0);
+    assert_eq!(e.last_eval["verify"]["probes"], json!({ "ran": false, "skipped": "fake: no browser" }));
+    assert!(e.last_eval["verify"]["criteria"][0]["probe"]["detail"].as_str().unwrap().starts_with("skipped"));
+    // Runtime checks off: the browser is never asked.
+    let root = tmp("probe-off");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert!(fake.probe_calls.lock().unwrap().is_empty());
+    assert_eq!(e.last_eval["verify"]["probes"]["skipped"], "runtime checks are off");
+}
+
+/// A probe that still fails on the last allowed pass is named first among the known blockers.
+#[test]
+fn a_probe_still_failing_at_the_limit_is_a_known_blocker() {
+    let root = tmp("probe-limit");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass", "known_blockers": ["model note"] }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].starts_with("probe failed for Shows the per-person total"), "{kb:?}");
+    assert_eq!(kb.last().map(String::as_str), Some("model note"), "the model's wording comes last");
+}
+
+/// The verifier answering only some of the requested criteria is asked again; on the last
+/// attempt the unjudged ones are named as blockers (never silently passed).
+#[test]
+fn a_verify_that_leaves_criteria_out_is_retried_then_names_them() {
+    let root = tmp("probe-partial");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Remembers the last bill between visits\"]"),
+                "verify" => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.count("verify"), STAGE_ATTEMPTS as usize, "asked again once");
+    assert!(e.last_eval["known_blockers"].to_string().contains("verify did not judge: Remembers the last bill between visits"), "{}", e.last_eval);
+    assert_eq!(e.iteration_count, 0, "a verifier gap never loops the Coder");
+}
+
+/// The Coder reads the latest loop's fixes before the brief's older ones (a verify loop skips
+/// merge), and Nic's own words keep their end: a late "actually default to 4" survives the clip.
+#[test]
+fn the_coder_reads_the_latest_fixes_first_and_nics_latest_words() {
+    let mut e = new_task(&TaskStore::in_memory(), &format!("I want 5 meals a day. {} Actually, default to 4 meals.", "and some more talk about it ".repeat(200)));
+    e.coder_brief = json!({ "build_brief": "Build it.", "fix_instructions": vec!["stale fix from the last merge ".repeat(6); 12] });
+    let probe_line = "probe failed for the meal split: on a fresh load expected .split-btn (data-meals) in the order 3, 4, 5, got 3, 5, 4".to_string();
+    let p = prompt_code(&e, &[probe_line.clone()]);
+    assert!(p.contains("Actually, default to 4 meals.") && p.contains("I want 5 meals a day."), "head and tail of a long brainstorm");
+    assert!(p.find(&probe_line).unwrap() < p.find("stale fix").unwrap(), "the latest fixes first");
+    assert!(!p.contains("source of truth"));
+    let v = prompt_verify(&e, "<p>x</p>", &Value::Null, false);
+    assert!(v.contains("Actually, default to 4 meals."));
+    let h = head_tail(&"a".repeat(5000), 2500);
+    assert!(h.chars().count() <= 2500 && h.contains("middle trimmed"));
+    assert_eq!(head_tail(" short ", 2500), "short");
+}
+
+/// On a last pass that still fails the gate, the verifier is told the checks still fail (never
+/// "passed"), and a script-heavy page stays inside the prompt budget.
+#[test]
+fn the_verify_prompt_names_open_gate_items_and_stays_in_budget() {
+    let mut e = new_task(&TaskStore::in_memory(), &"word ".repeat(1500));
+    e.prompt_spec = json!({ "acceptance_criteria": vec!["a".repeat(300); 40] });
+    e.last_eval = json!({ "checks": { "offline": false }, "gate_blockers": ["no external scripts or stylesheets (cdn.tailwindcss.com): inline all CSS"] });
+    let page = format!("<html><head><style>{}</style></head><body><script>{}</script></body></html>", "a{b:c}".repeat(3000), "let x = 1;\n".repeat(4000));
+    let p = prompt_verify(&e, &page, &json!({ "a": "b".repeat(5000) }), true);
+    assert!(p.contains("still fail on this last pass") && p.contains("cdn.tailwindcss.com") && !p.contains("checks passed"), "{}", &p[..600]);
+    assert!(p.contains("was cut for length"));
+    assert!(p.chars().count() <= 24_000, "{}", p.chars().count());
+}
+
+/// A Play Place hub build still failing the gate on the last pass fails (into the hub's Repair
+/// Queue) instead of being handed on as review_ready, which the hub would smoke and mark mergeable.
+#[test]
+fn a_hub_build_failing_the_gate_at_the_limit_fails_instead_of_handing_on() {
+    let root = tmp("hubgate");
+    let store = leak_store();
+    let cdn = GOOD_HTML.replace("</head>", "<script src=\"https://cdn.tailwindcss.com\"></script></head>");
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{cdn}\n```") } else { default_reply(c) })));
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    assert!(e.last_eval.get("gate_blockers").is_none());
+    assert_eq!(fake.count("verify"), 0);
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

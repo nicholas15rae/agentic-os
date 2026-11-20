@@ -244,3 +244,33 @@ Every build and delegation gets a chat thread you can review: what Tony and the 
   - Live updates come over `agent-transcript`, which carries only the head and the summary. A message body loads when its row is opened.
   - After a restart or reload, the cards are rebuilt from `transcript_conversations` / `transcript_get`, never from bus delivery.
 - **Additive.** The relay and system lines are unchanged. So are the spoken Agent Chatter (`routing.vocalHandoffs`), the narrator and verbosity 0–3. The **Agent Log** switch in the Agents header (`chat.showAgentConversation`, default on) only shows or hides the cards. The approve() / Tier-3 / dispatch gates and the staging-only writes are untouched: the feed only reads and never dispatches.
+
+## AD-11: Behavioural probes in verify (the build gate checks what the page does, not only what it contains)
+
+**Why.** After the first quality gate (offline only, Nic's exact values, quoted-code evidence, a storage-blocked runtime smoke), a protein-tracker re-run with the 9B verifier still passed real behavioural bugs: the lb/kg toggle set the unit before comparing it, so it never converted; the meal split read 3, 5, 4; kg was marked active while the unit was lbs; saved state was merged after the first render and never shown. Quoted code proves an element exists, not that it behaves. The verifier also never saw that code: the excerpt kept the head (CSS and markup) and the tail of the page and cut the middle of the script.
+
+**What the verifier reads.** `quality::verify_view` puts every inline script first, whole when it fits, then the markup with the scripts pulled out and the CSS bodies dropped. The middle of a script is cut only when the scripts alone do not fit; the prompt then says so, and a criterion the model leaves undecided (`met: null`) is recorded as "not shown", never counted as unmet.
+
+**Probes: a tiny DSL, never model JavaScript.** Each criterion in the verify reply may carry a `probe`: up to 8 steps, at most 6 probes per pass.
+
+- Actions: `set` (fills a control, fires input + change), `select`, `click` (first match or `nth`), `reload` (storage kept).
+- Expectations: `expect_text` / `expect_value` with `contains`, `equals` or `approx` + `tol` (the first number in the text), `expect_class` (`present`), `expect_count`, `expect_order` (an attribute or the text, e.g. `data-meals` 3, 4, 5).
+- Rust validates the reply first (`quality::parse_probe`): known ops only, a selector charset with no `<`, `{`, `;`, `/` or backslash, capped strings and numbers, at least one expectation. The steps reach the page as inert JSON (`<`, `>` and `&` escaped), never as code.
+
+**How they run.** The same isolation as the runtime smoke: a temp copy of the page, its own throwaway Edge profile with downloads pointed into the temp folder, the network unreachable, a kill-on-close Job Object (Edge dies with the app), a timeout. One headless Edge run; the runner keeps its place in `window.name` and reloads the page between probes, so every probe starts on a fresh load with storage cleared. Storage works for probes (only the smoke blocks it), so `set → reload → expect` checks that saved state is shown. Dialogs, form submits, `window.open` and downloads are stubbed. The results are written to `data-tf-probe` on `<html>` and read back from `--dump-dom`.
+
+**How they are judged** (`quality::judge`).
+
+- A failing expectation makes its criterion unmet, whatever the model said. The fix line names the steps and both values, e.g. `probe failed for <criterion>: after set #weight-input=165, click #kg-toggle expected #weight-input value ≈74.8 (±0.5), got 165`. Probe failures go first in the Coder's fixes, and first after the gate's own items in the known blockers at the iteration limit.
+- A probe whose selector matches nothing (or whose option does not exist) is a broken probe. It is recorded but counts against the build only when the criterion also has no code evidence.
+- Evidence is still required: every non-trivial quoted line must be in the page (a bare `render();` or a single word proves nothing).
+- A criterion the verifier left out, or left undecided although its code was shown, gets one retry of the stage, then becomes a named blocker. It never loops the Coder, and it is never passed silently.
+- No Edge, runtime checks off, a timeout or no result: the probes are skipped and recorded (`last_eval.verify.probes`, `criteria[].probe`), and the evidence-only rule decides.
+
+**Related gate changes.**
+
+- The runtime smoke now returns three outcomes. *Skipped* (no Edge) falls back to the static checks. *Failed* (the page hung, kept reloading or navigated away) fails the gate. *Ran* records the page lines where a blocked storage access happened. A clean smoke clears only the scanned storage uses it actually reached and saw caught.
+- The smoke skips buttons an earlier click removed or disabled, and ignores the harmless ResizeObserver notice.
+- Nic's values are checked as a number with a unit word near it, with CSS and comments stripped. Ranges ("3-5 meals") and thousands ("10,000 steps") are kept whole.
+- A Play Place hub build that still fails the gate on the last pass fails into its Repair Queue instead of being handed on as review_ready.
+- The Coder reads the latest loop's fixes before the brief's older ones, and Nic's own words with head and tail kept.

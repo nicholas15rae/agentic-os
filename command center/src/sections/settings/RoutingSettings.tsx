@@ -100,7 +100,7 @@ export function RoutingSettings() {
       />
       <Toggle
         on={announcerHandoff}
-        onChange={(v) => setSettings({ routing: { announcerHandoff: v } })}
+        onChange={(v) => setSettings({ routing: { ...useSettings.getState().routing, announcerHandoff: v } })}
         label="Agents speak their own answers"
         hint="Voice: Tony says a short intro (“Here's Booking Desk.”), also when you talk to an agent's own tab, then the agent answers in its own roster voice and Tony doesn't repeat it. Off: Tony speaks his summary of the agent's answer (the old behaviour)."
       />

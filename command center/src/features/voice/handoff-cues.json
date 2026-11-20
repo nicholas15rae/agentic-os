@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "maxSeconds": 5,
+  "nicknames": {
+    "nic": ["Nic", "Nicky", "kid"],
+    "tony": ["Tone", "T", "boss"]
+  },
+  "agentNames": {
+    "coder": "the Coder",
+    "designer": "the Designer",
+    "prompter": "the Prompter",
+    "librarian": "the Librarian",
+    "booking": "Booking Desk",
+    "ops": "Ops"
+  },
+  "tonyOpen": [
+    "All right {nic}, over to {agent}.",
+    "{agent}, you're up.",
+    "This one's for {agent}.",
+    "{agent}. Got one for you.",
+    "Okay {nic}. {agent}'s got it."
+  ],
+  "agentReply": {
+    "default": [
+      "What's goin' on, {tony}? I got it.",
+      "I got it, {tony}.",
+      "Say no more, {tony}.",
+      "Consider it done, {tony}.",
+      "On it, {tony}."
+    ],
+    "coder": ["I'll knock it out, {tony}.", "Yeah, I'll code it up."],
+    "designer": ["I'll make it pretty, {tony}.", "Leave the look to me."],
+    "prompter": ["I'll write it up tight.", "Spec's coming, {tony}."],
+    "librarian": ["I'll dig it up, {tony}.", "It's in the files. On it."],
+    "booking": ["I'll book it, {tony}.", "Booking's on it."],
+    "ops": ["Ops has got it, {tony}.", "I'll handle it, {tony}."]
+  },
+  "tonyClose": ["All right, peace.", "Good. Go.", "Beautiful.", "Attaboy.", "Peace."]
+}

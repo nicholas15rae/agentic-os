@@ -1,5 +1,6 @@
 import { heuristicPlan } from "@/features/orchestrator/plan";
-import { requestConfirmation } from "@/features/voice/voice-controller";
+import { requestConfirmation, startHandoffCue } from "@/features/voice/voice-controller";
+import { noteHandoff, withHandoff } from "@/features/voice/handoff-cues";
 import { tonyThread } from "@/features/voice/voice-store";
 import { xcmd } from "@/lib/native-ext";
 import { useHub } from "./hub-store";
@@ -25,7 +26,16 @@ export function requestHubDispatch(c: Compiled, onQueued?: (buildId: string) => 
   plan.payload = { title: e.title, buildId: e.build_id, runtime: e.target_runtime, worker: e.assigned_worker, notes: c.noteIds.length };
   plan.verification = { status: "verified", notes: [], by: "compiled from your notes and interview" };
   plan.run = async () => {
-    const queued = await xcmd("build_enqueue", { envelope: e, brief: c.brief, noteIds: c.noteIds, approved: true });
+    // Phase 5: the enqueue goes out first; the vocal handoff (Tony → Coder / Designer) starts beside
+    // it and is never awaited. Claude Code isn't one of Tony's voiced crew: chip only.
+    const role = e.assigned_worker === "claude" ? null : e.assigned_worker;
+    const { result, cue } = withHandoff(() => xcmd("build_enqueue", { envelope: e, brief: c.brief, noteIds: c.noteIds, approved: true }), () => (role ? startHandoffCue(role) : null));
+    noteHandoff(role ?? "claude", !!cue);
+    // A refused hand-off (Solo mode, validation) drops the rest of the exchange.
+    const queued = await result.catch((err: unknown) => {
+      cue?.cancel();
+      throw err;
+    });
     void xcmd("build_hub_view").then((v) => useHub.getState().set(v)).catch(() => undefined);
     onQueued?.(queued.build_id);
     const pos = useHub.getState().view?.builds.find((b) => b.envelope.build_id === queued.build_id)?.position;

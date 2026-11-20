@@ -28,6 +28,7 @@ import { audioContext, createEngines, type SpeakOpts } from "./engines";
 import { nextStreamChunk, utteranceIdFor } from "./tts-text";
 import { fallbackNotice } from "./tts-fallback-notice";
 import { introLine } from "./handoff";
+import { currentPool, loadPool, noteHandoff, pickExchange, playExchange, type CueHandle } from "./handoff-cues";
 import { ack, GREETING, maybeFlavour, standDownLine } from "./persona";
 import { setSectionSource, tonyThread, useVoice, type Channel, type ThreadId, type VoiceTurn } from "./voice-store";
 import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice, type RoutedTurn } from "./route-for";
@@ -136,6 +137,34 @@ async function say(text: string, opts?: SpeakOpts & { noDuck?: boolean; traceId?
     if (duck && duck === ttsDuck && --duck.depth === 0) setCueDuck("tts", false);
     clientTrace.tts(traceId, tts.name, performance.now() - t0, !ttsError, ttsError);
   }
+}
+
+/**
+ * Thought-to-Product Phase 5: start the vocal handoff exchange (Tony → `role` → Tony) for a
+ * delegation. Null when "Vocal Handoffs" is off, the mic is locked off, TTS is unavailable or
+ * `role` isn't one of Tony's crew. Fire-and-forget: callers dispatch first and never await it.
+ * Each beat is checked against this mic generation, so a barge-in / stand-down / hard mic stop
+ * (`micGen` moves, `hardStopMic` cancels the line in flight) drops the rest of the exchange and
+ * nothing else; the delegated job is never touched. Beats go through `say()`, so they duck cue
+ * audio exactly like any Tony line and use each agent's roster voice.
+ */
+export function startHandoffCue(role: string): CueHandle | null {
+  if (!useSettings.getState().routing.vocalHandoffs || !micEnabled() || !tts.supported) return null;
+  void loadPool(); // the editable pool, cached after the first read (this cue uses what's loaded)
+  const pool = currentPool();
+  const beats = pickExchange(pool, role);
+  if (!beats) return null;
+  const gen = micGen;
+  const live = () => gen === micGen && micEnabled();
+  return playExchange(
+    beats,
+    {
+      speak: (text, voice) => (live() ? say(text, { agent: voice, cache: true }) : Promise.resolve()),
+      prefetch: (text, voice) => tts.prefetch?.(text, { agent: voice, cache: true }),
+      isLive: live,
+    },
+    pool.maxSeconds,
+  );
 }
 
 /** Does `role`'s roster entry have auto-speak on? Reads whatever `useProviders`
@@ -1095,7 +1124,10 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // An approved Tier-3 hand-off names the brainstorm by its title, not its (long) brief.
   const noticeTask = plan.delegateTo && typeof plan.payload.title === "string" ? `“${plan.payload.title}”` : task;
   const notice = routingNotice({ role, kind: routed.kind, explicit, thread, task: noticeTask, utterance: plan.utterance });
+  // Phase 5 vocal handoff: starts now, in parallel — the turn below dispatches without waiting on it.
+  const handoffCue = notice ? startHandoffCue(role) : null;
   if (notice) {
+    noteHandoff(role, !!handoffCue);
     store().pushTurn({ who: "relay", from: "os", to: role, text: notice, thread, meta: "routing" });
     if (channel === "voice" && isLive() && !handoff) {
       store().setState("speaking");
@@ -1107,7 +1139,8 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
       // getting straight to the point rather than anything breaking.
       // P5: the bubble keeps "Routing … to …"; Tony just says a one-line ack (cached, so no
       // utteranceId — a cached line never pins the reply's TTS breaker scope).
-      void say(ack(), { agent: "general", traceId, cache: true });
+      // With Vocal Handoffs on, the exchange replaces the one-line ack.
+      if (!handoffCue) void say(ack(), { agent: "general", traceId, cache: true });
     }
   }
 
@@ -1162,7 +1195,9 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
     introduced.add(role);
     store().setState("speaking");
     startBargeIn();
-    speakQ = speakQ.then(() => sayLive(introLine([role]), { agent: "general", cache: true }));
+    // The vocal handoff exchange already introduces the agent: its reply waits for the cue's last
+    // beat (playback order only — the agent's job is already running).
+    speakQ = speakQ.then(() => (handoffCue ? handoffCue.done.then(() => undefined) : sayLive(introLine([role]), { agent: "general", cache: true })));
   } else if (channel === "voice" && isLive()) startBargeIn(); // "cut it" / "whoa" work while it thinks
   const offAgent = handoff ? await onAgentReply((e) => e.streamId === streamId && queueAgentReply(e.agent, e.text)) : () => undefined;
   const off = await onNativeEvent<{ streamId: string; delta: string; agent?: string }>("tony-token", (e) => {

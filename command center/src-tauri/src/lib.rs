@@ -4,7 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, instagram, modellab, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
-use commands::{buildhub, lifecycle};
+use commands::{buildhub, handoff_cues, lifecycle};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -245,6 +245,7 @@ pub fn run() {
             buildhub::build_open_window,
             buildhub::build_open_browser,
             buildhub::build_intake_questions,
+            handoff_cues::handoff_pool_get,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Jarvis Command Center")

@@ -9,6 +9,7 @@ pub mod dispatch;
 pub mod elevenlabs;
 pub mod envfile;
 pub mod gmail;
+pub mod handoff_cues;
 pub mod instagram;
 pub mod introspect;
 pub mod lifecycle;

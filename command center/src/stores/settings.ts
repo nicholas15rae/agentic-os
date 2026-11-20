@@ -77,7 +77,11 @@ export interface SettingsState {
    */
   conversation: { followUp: boolean; followUpSecs: number; bargeIn: boolean; bargeEndSilenceMs: number; audioRoute: AudioRoute; mediaDuck: MediaDuckSettings };
   /** Voice routing: `announcerHandoff` = Tony introduces a delegated agent, which then speaks its own answer in its own voice. */
-  routing: { announcerHandoff: boolean };
+  routing: {
+    announcerHandoff: boolean;
+    /** Thought-to-Product Phase 5 "Vocal Handoffs": a 3-beat spoken exchange when Tony delegates (off = routing chip only). */
+    vocalHandoffs: boolean;
+  };
   /** Alarms & reminders: `osFallback` = also register a Windows alarm that rings even when the app is closed. */
   reminders: { osFallback: boolean };
   /** System Map: Streamlined OS (default) or Dev X-Ray. */
@@ -111,7 +115,7 @@ const defaults: Omit<SettingsState, "set"> = {
   gatewayToken: "",
   vad: { sensitivity: 60, endSilenceMs: 700, maxUtteranceMs: 15000 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
-  routing: { announcerHandoff: true },
+  routing: { announcerHandoff: true, vocalHandoffs: true },
   reminders: { osFallback: true },
   systemMapMode: "streamlined",
   systemMapFlowOpen: null,

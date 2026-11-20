@@ -5,6 +5,7 @@ import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { THREADS, useVoice, type ThreadId } from "@/features/voice/voice-store";
 import { CommandInput, MicButton, Transcript } from "@/features/voice/VoiceParts";
 import { useOsName } from "@/features/os/os-store";
+import { HandoffChip, HandoffToggle } from "@/features/voice/HandoffToggle";
 
 /**
  * The Dispatcher. Each tab is its own isolated thread: Auto-route, every
@@ -47,8 +48,13 @@ export function AgentsSection() {
             </button>
           );
         })}
+        {/* Thought-to-Product Phase 5: the routing chip + the Vocal Handoffs switch. */}
+        <div className="ml-auto flex items-center gap-2">
+          <HandoffChip />
+          <HandoffToggle />
+        </div>
         {isTauri() && (
-          <button onClick={() => setDrawer(true)} className="ml-auto flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[13px] text-ink-2 hover:text-ink" title="Skills & MCP library">
+          <button onClick={() => setDrawer(true)} className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[13px] text-ink-2 hover:text-ink" title="Skills & MCP library">
             <Library size={13} /> Skills & MCP
           </button>
         )}

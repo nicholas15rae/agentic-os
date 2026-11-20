@@ -56,7 +56,21 @@ from . import stale_claims as stc
 # Tier-3 gate carries the auto_dispatch exception; KG: the planned marker is only ever an observation
 # prefix, the name probe needs a path-like name, a bare "path" name is a "concept", and an observation that
 # attributes something "for <another tool>" goes unless a source line ties both.
-GUARDS_VERSION = 6
+# v7 (review of 20261120-021616): a line naming a rule / identity / prompt file plus any change or pending
+# word, in any wording ("need review/fix before final lock", "prompts pending write"), is an approval-gated
+# to-do (`rule_file_pending`; KG observations are read with their entity name); a store file the repo code
+# creates on first use is "(created on first use)", never "(planned, not created yet)", and a plan to build
+# one (or an existing repo module) is a fact; the planned marker is never doubled; a deictic ("from here")
+# KG observation of a tool / service the source line does not name goes; a pending to-do under Lessons
+# ## Fixes moves to ## Failure Modes.
+# v8 (review of the v7 detectors, round 11): a rule-file to-do is a PENDING marker next to a LIFECYCLE word in
+# any slot (noun, passive, negated participle, state, order), never a change word anywhere in the sentence (role
+# descriptions, governance and process rules, prohibitions and settled recipes stay); a plan line about a rule
+# file is approval-gated in one pass (`rule_file_plan`); "(created on first use)" only for a bare name or an
+# app-config-dir file the Command Center joins onto its own dir; only the store itself (never a feature of it
+# or of an existing module) turns a plan into a fact; Lessons to-dos need a pending lead verb (not check /
+# verify / try / debug) and are never dropped.
+GUARDS_VERSION = 8
 
 # ── roster (mirror of the Command Center; tests/test_memory_scrolls_guards.py checks it) ─────────
 
@@ -911,14 +925,214 @@ def rule_file_edit(text: str) -> bool:
     return False
 
 
-def imperative_kind(text: str) -> Optional[str]:
+# v7 / v8: the same to-do in ANY grammatical form. The local model rewords one hub to-do differently every run
+# (r7 "Read MASTER_IDENTITY.md ..., fix anything wrong, then lock v1", r8 "... reviewed and locked", r9 "need
+# review/fix before final lock", "prompts pending write"), so a detector of one grammar keeps losing.
+# `rule_file_pending` asks whether a sentence about a rule / identity / prompt file (named in it, in its
+# "Label:" or, for a KG observation, in the entity name) puts a PENDING marker right next to a LIFECYCLE word
+# (review / fix / lock / final / write / draft / edit / update ...) in any slot: a noun ("needs review", "edits
+# queued", "lock still open", "rewrite pending"), a passive ("must be reviewed", "to be updated"), a negated or
+# un- participle ("not locked", "hasn't been reviewed", "not written yet", "unreviewed"), a state ("is a stub",
+# "still marked draft", "prompts are missing", "being reviewed") or an order ("Draft the Dispatcher prompt",
+# "Ratify constitution.md"). v8 (review of the v7 detector): a change word ANYWHERE in the sentence is no
+# longer enough. Role and behaviour descriptions ("The Librarian reviews system prompts", "Agents must check
+# MASTER_IDENTITY.md before writing anything about Nic", "Defines the review workflow"), governance rules
+# about changes ("Rule changes need Nic's sign-off", "Identity file changes must be reviewed by Nic"), process
+# rules ("Config must be updated atomically"), prohibitions ("Agents must not edit AGENTS.md") and compounds
+# ("the rules engine is in progress") are facts, not to-dos.
+_RULE_DOC = re.compile(
+    r"\b(?:master_identity(?:\.md)?|agents_never(?:\.md)?|agents\.md|claude\.md|gemini\.md|system\.md|soul\.md|rules\.md|prompt\.md|constitution(?:\.md)?"
+    r"|identity\s+(?:files?|docs?)|persona\s+files?|(?:system|agent|role)\s+prompts?|prompt(?:\.md)?\s+files?"
+    # v8: an agent's own prompt ("the Dispatcher prompt", "Conceptualizer and Dispatcher prompts")
+    r"|(?:" + _alt(AGENT_NAMES | set(HUB_AGENT_ALIASES)) + r")(?:['’]s)?\s+(?:(?:system|role|agent)\s+)?prompts?)(?![\w-])|\.clinerules\b", re.I)
+# Words that also name roles, behaviour and components: a file only when not the first half of a compound
+# ("rules engine", "prompt builder"): the next word is a file, lifecycle or function word, or there is none.
+_GENERIC_TAIL = (r"(?:files?|docs?|drafts?|text|v\d\w*|changes?|edits?|updates?|rewrites?|reviews?|fix(?:es)?|locks?|revisions?|is|are|was|were"
+                 r"|has|have|had|need|needs|must|should|still|not|pending|outstanding|missing|written|for|and|or|of|in|on|to|before|after|by"
+                 r"|from|with|that|which)")
+_RULE_GENERIC = re.compile(r"\b(?:rules?|configs?|config\s+files?|identity|personas?|prompts?)(?![\w-])(?!\s+(?!" + _GENERIC_TAIL + r"\b)[a-z]{3,}\b)", re.I)
+_LC_NOUN = (r"(?:reviews?|fix(?:es)?|re-?locks?|locks?|finali[sz]ation|revisions?|re-?writes?|writes?|drafts?|edits?|updates?|changes?|amendments?"
+            r"|polish|sign-?off|write-?up|pass(?:es)?)")
+_LC_GERUND = r"(?:reviewing|fixing|re-?locking|locking|finali[sz]ing|revising|re-?writing|writing|drafting|editing|updating|changing|amending|polishing)"
+_LC_PART = (r"(?:reviewed|fixed|re-?locked|locked|finali[sz]ed|revised|re-?written|written|drafted|edited|updated|changed|amended|polished|ratified"
+            r"|finished|completed|done|signed\s+off|approved|final)")
+_LC_FILL = r"(?:(?:a|an|the|its|their|final|full|another|more|some|proper|further|quick|last|v\d+(?:\.\d+)?)\s+)*"
+# need / await + a lifecycle noun: "need review/fix", "awaiting fixes", "pending write", "needs an update".
+_S_NEED = re.compile(r"\b(?:needs?|requires?|awaiting|awaits?|waiting\s+(?:for|on)|pending|due\s+for|ready\s+for|queued\s+for|scheduled\s+for|up\s+for)\s+"
+                     + _LC_FILL + r"(?:" + _LC_NOUN + r"|" + _LC_GERUND + r")\b", re.I)
+# a modal passive: "must be reviewed", "needs to be fixed", "to be updated", "will be written".
+_S_MODAL = re.compile(r"\b(?:must|should|needs?\s+to|has\s+to|have\s+to|ought\s+to|is\s+to|are\s+to|still\s+to|yet\s+to|to|will)\s+be\s+"
+                      r"(?:(?:fully|properly|still|then|also|manually|first)\s+)*" + _LC_PART + r"\b", re.I)
+# "turned out / used / seems ... to be locked" states a fact.
+_S_MODAL_FACT = re.compile(r"\b(?:turned\s+out|used|seems?|seemed|appears?|appeared|found|known|expected|said|proved|happens?|happened|likely|unlikely|going)\s*$", re.I)
+# a lifecycle noun + a pending state: "lock still open", "edits queued", "rewrite pending", "final lock is the next step".
+_S_AFTER = re.compile(r"\b(?:" + _LC_NOUN + r"|" + _LC_GERUND + r")\s+(?:(?:is|are|still|now|currently|also)\s+)*"
+                      r"(?:pending|outstanding|open|todo|to-?do|tbd|queued|planned|in\s+progress|not\s+(?:yet\s+)?(?:done|started|finished|complete|scheduled)"
+                      r"|incomplete|unfinished|wip|waits?|awaiting|overdue|(?:the\s+)?next(?:\s+step)?)\b", re.I)
+# a negated participle: "not locked", "isn't final", "hasn't been reviewed", "not written yet" (never "must
+# not / do not / cannot edit": a prohibition, see _RF_GATE; never "not changed since").
+_S_NEG = re.compile(r"(?:\bnot|n['’]t)\s+(?:(?:yet|been|fully|properly|finally|really|ever)\s+)*" + _LC_PART + r"\b(?!\s+since\b)", re.I)
+_NEG_MODAL_AUX = frozenset("must should do does did can ca could may might shall would will wo".split())
+_S_UN = re.compile(r"\bun(?:reviewed|written|finished|signed|approved|fixed|finali[sz]ed|drafted|locked)\b", re.I)
+# a state: "is a stub", "still marked draft", "being reviewed", "under review"; "missing" only next to the file
+# ("prompts are missing", KG "Prompt missing", "missing the Dispatcher prompt").
+_S_STATE = re.compile(r"\b(?:(?:is|are|still|remains?|stays?|currently)\s+)+(?:(?:only|just|a|an|marked|in|at)\s+)*(?:draft|stub|placeholder|incomplete|unfinished|wip)\b"
+                      r"|\b(?:being|under)\s+(?:review|revision|" + _LC_PART + r")\b", re.I)
+# A pending state right after the file itself: "prompts are missing", "Conceptualizer and Dispatcher prompts
+# pending", "MASTER_IDENTITY v1 not yet done", KG "Prompt missing"; "missing the Dispatcher prompt".
+_S_FILE_STATE = re.compile(r"^[`):\s]*(?:(?:v\d[\w.]*|is|are|still|currently|both|all|now)\s+)*(?:pending|outstanding|todo|to-?do|to\s+do|tbd|missing|incomplete|unfinished"
+                           r"|wip|overdue|in\s+progress|(?:the\s+)?next\s+steps?|not\s+(?:yet\s+)?(?:done|started|written|final|ready|created))\b", re.I)
+_S_MISSING = re.compile(r"\bmissing\s+(?:the\s+)?(?:\w+\s+){0,2}prompts?\b", re.I)
+# A KG observation of a rule-file entity that opens with the state: "Missing; to be written", "Pending".
+_S_CTX_STATE = re.compile(r"^\W*(?:(?:still|currently)\s+)?(?:missing|pending|outstanding|tbd|incomplete|unfinished|a\s+stub|stub|(?:a\s+)?draft|not\s+(?:yet\s+)?(?:done|started|written|final|ready|created))\b", re.I)
+# an order (clause-initial, the file named in the same clause): any edit verb for a named file, the core
+# edit verbs for a generic word ("Rewrite the prompt for X").
+_LC_IMP_LEAD = r"^\W*(?:(?:then|and|also|please|next|now|first|todo|to-?do|pending|we\s+should|you\s+should|let['’]?s|go|try\s+to)\s+)*"
+_S_IMP_DOC = re.compile(_LC_IMP_LEAD + r"(?:review|fix|re-?lock|lock|unlock|finali[sz]e|revise|re-?write|write|draft|edit|update|change|amend|polish|ratify"
+                        r"|finish|complete|fill\s+in|create|sign\s+off|add\s+(?:(?:a|an|the|new|one)\s+)?(?:rules?|sections?|lines?|items?|entr(?:y|ies))\s+to)\b(?![-:])", re.I)
+_S_IMP_GENERIC = re.compile(_LC_IMP_LEAD + r"(?:review|fix|re-?lock|lock|unlock|finali[sz]e|revise|re-?write|write|draft|edit|update|change|amend|correct|patch"
+                            r"|tweak|replace|overwrite)\b(?![-:])", re.I)
+# Clauses split only before a verb, so a list of names stays one clause ("Draft the Dispatcher and Conceptualizer prompts").
+_LC_CLAUSES = re.compile(r"(?:,\s+(?:and\s+|then\s+)?|\s+(?:and then|then|and|but)\s+)(?=(?:review|fix|re-?lock|lock|unlock|finali[sz]e|revise|re-?write|write|draft|edit"
+                         r"|update|change|amend|polish|ratify|finish|complete|fill\s+in|create|sign\s+off|add|correct|patch|tweak|replace|overwrite|keep|check|read"
+                         r"|test|run|use|make)\b)", re.I)
+# "AGENTS_NEVER.md final review: Nic can do it this week" (a to-do heading), unless the rest says it is done.
+_RF_LABEL = re.compile(r"^([^:\n]{1,60}?):\s+")
+# A label that is only a generic file word ("Rules:", "System prompts:") names the file; "Decision Rule:" or
+# "Persona:" (a description) does not.
+_RF_GENERIC_LABEL = re.compile(r"^\s*(?:(?:system|agent|role)\s+)?(?:rules?|prompts?|configs?|config\s+files?|rule\s+files?|prompt\s+files?)\s*$", re.I)
+_LC_ANY_WORD = re.compile(r"\b(?:" + _LC_NOUN + r"|" + _LC_GERUND + r"|final)\b", re.I)
+_RF_LABEL_DONE = re.compile(r"\b(?:done|completed?|finished|was|were|locked|reviewed|written)\b|\d{4}-\d{2}-\d{2}", re.I)
+# Not a to-do: a prohibition, an authority / permission rule, an agent's standing behaviour, a governance
+# rule about changes in general, or (for passives and orders) a process / schedule rule.
+_RF_GATE = re.compile(
+    r"\b(?:never|nobody|no-?one|no\s+agents?|no|without|forbid\w*|refuse\w*|read-?only|must\s+not|mustn['’]t|do\s+not|don['’]t|does\s+not|doesn['’]t"
+    r"|cannot|can['’]t|can\s+not|may\s+not|should\s+not|shouldn['’]t|shall\s+not|not\s+allowed|not\s+permitted)\b"
+    r"|\b(?:sole(?:ly)?|alone|authori[sz]\w*|allowed|permitted|responsible|owns?|owner|(?:can|may)\s+only|only\s+be)\b"
+    r"|\bonly\s+(?:(?:by|through|via|with)\s+)?(?:the\s+)?(?:librarian|nic|user|operator|owner|after|with|when|if|once)\b|\b(?:the|an?)\s+only\b"
+    # a condition states a rule: "If something isn't written here, ASK."
+    r"|\b(?:if|unless|whether)\b", re.I)
+_RF_AGENT_RULE = re.compile(r"^\W*(?:(?:all|every|each|the|an?)\s+)?(?:agents?|" + _alt(AGENT_NAMES | set(HUB_AGENT_ALIASES))
+                            + r"|front\s+agent|model|assistant|claude|gemini|cline|codex)\b[^.;:]{0,30}?\b(?:must|should|shall|always|has\s+to|have\s+to|needs?\s+to)\b(?!\s+be\b)", re.I)
+_RF_CHANGE_SUBJECT = re.compile(r"^\W*(?:[\w.`'’-]+\s+){0,3}?(?:changes|edits|updates|amendments|revisions)\s+(?:to\s+[^.;]{0,40}?\s+)?"
+                                r"(?:must|should|need|needs|require|requires|go|get|have|stay)\b", re.I)
+_PROCESS_GATE = re.compile(r"\b(?:per|each|every|always|whenever|via|through|using|atomically|safely|automatically|in\s+place"
+                           r"|daily|weekly|nightly|hourly|monthly|regularly)\b", re.I)
+
+
+def _rf_names_file(text: str) -> bool:
+    return bool(_RULE_DOC.search(text) or _RULE_GENERIC.search(text))
+
+
+def _rf_neg(sentence: str) -> bool:
+    for m in _S_NEG.finditer(sentence):
+        head = sentence[:m.start()]
+        aux = re.search(r"([A-Za-z]+)\s*$", head)
+        if aux and aux.group(1).lower() in _NEG_MODAL_AUX:
+            continue  # "must not / do not / can't": a prohibition (also caught by _RF_GATE)
+        return True
+    return False
+
+
+def _rf_modal(sentence: str) -> bool:
+    for m in _S_MODAL.finditer(sentence):
+        if not _S_MODAL_FACT.search(sentence[:m.start()]):
+            return True
+    return False
+
+
+def _rf_file_state(sentence: str, ctx_doc: bool) -> bool:
+    if _S_MISSING.search(sentence) or (ctx_doc and _S_CTX_STATE.match(sentence)):
+        return True
+    for rx in (_RULE_DOC, _RULE_GENERIC):
+        if any(_S_FILE_STATE.match(sentence[m.end():]) for m in rx.finditer(sentence)):
+            return True
+    return False
+
+
+def _rf_pending_shape(sentence: str, ctx_doc: bool) -> bool:
+    if _S_NEED.search(sentence) or _S_AFTER.search(sentence) or _rf_neg(sentence) or _S_UN.search(sentence) or _S_STATE.search(sentence):
+        return True
+    if _rf_file_state(sentence, ctx_doc):
+        return True
+    if not _PROCESS_GATE.search(sentence) and _rf_modal(sentence):
+        return True
+    return False
+
+
+def _rf_order(sentence: str, ctx_doc: bool) -> bool:
+    if _PROCESS_GATE.search(sentence):
+        return False
+    for clause in (c for c in _LC_CLAUSES.split(sentence) if c and c.strip()):
+        doc = ctx_doc or bool(_RULE_DOC.search(clause))
+        if doc and _S_IMP_DOC.match(clause):
+            return True
+        if (doc or _RULE_GENERIC.search(clause)) and _S_IMP_GENERIC.match(clause):
+            return True
+    return False
+
+
+def rule_file_pending(text: str, context: str = "") -> bool:
+    """True when `text` (a bullet or a KG observation; marks and a label allowed) is a pending change to a
+    rule / identity / prompt file in any grammatical form: the file is named in a sentence, in its "Label:"
+    or in `context` (the KG entity name), and a pending marker sits next to a lifecycle word (see the
+    `_S_*` shapes above). A prohibition, an authority rule, an agent's standing behaviour, a governance rule
+    about changes and a process rule are not to-dos. A line marked "(needs Nic's approval)" is the caller's
+    fixed point."""
+    _, rest = _marks(_split_bullet(text)[1])
+    flat = rest.replace("**", " ").strip()
+    ctx_doc = bool(_RULE_DOC.search(context or "")) or bool(context and _RULE_GENERIC.search(context))
+    lm = _RF_LABEL.match(flat)
+    if lm and _RULE_DOC.search(lm.group(1)):
+        label = lm.group(1)
+        after = flat[lm.end():]
+        if _LC_ANY_WORD.search(label) and not _RF_GATE.search(flat) and not _RF_LABEL_DONE.search(after):
+            return True  # "AGENTS_NEVER.md final review: <when / who>"
+        ctx_doc = True
+    for sentence in _SENTENCES.split(flat):
+        s = sentence.strip()
+        if not s or _RF_GATE.search(s) or _RF_AGENT_RULE.search(s) or _RF_CHANGE_SUBJECT.search(s):
+            continue
+        body = s
+        sl = _RF_LABEL.match(s)
+        if sl and not _RULE_DOC.search(sl.group(1)) and not _RF_GENERIC_LABEL.match(sl.group(1)):
+            body = s[sl.end():]  # "Next step: finalize the persona file"; a "Decision Rule:" label names no file
+        if _rf_order(body, ctx_doc) or _rf_order(s, ctx_doc):
+            return True
+        if not (ctx_doc or _rf_names_file(body)):
+            continue
+        if _rf_pending_shape(body, ctx_doc):
+            return True
+    return False
+
+
+_LC_PLAN_WORD = re.compile(r"\b(?:" + _LC_NOUN + r"|" + _LC_GERUND + r"|" + _LC_PART + r")\b", re.I)
+
+
+def rule_file_plan(text: str) -> bool:
+    """v8: True when a plan line ("Planned: ..." or a restated roadmap / to-do line) names a rule / identity /
+    prompt file together with any lifecycle word ("MASTER_IDENTITY v1 and AGENTS_NEVER reviewed", "prompts
+    written but not yet tested"): a plan is pending by definition, so the word's form does not matter. A
+    prohibition, authority or agent-behaviour sentence is still a rule."""
+    _, rest = _marks(_split_bullet(text)[1])
+    for sentence in _SENTENCES.split(rest.replace("**", " ").strip()):
+        s = sentence.strip()
+        if not s or _RF_GATE.search(s) or _RF_AGENT_RULE.search(s) or _RF_CHANGE_SUBJECT.search(s):
+            continue
+        if _rf_names_file(s) and _LC_PLAN_WORD.search(s):
+            return True
+    return False
+
+
+def imperative_kind(text: str, context: str = "") -> Optional[str]:
     """"agent_action" / "config_change" / "external" / "rule_file_edit" when `text` (a bullet, label
     allowed) tells an agent to delete / remove / download / upload / export / send / change config, touch
     an outside service or edit a rule / identity / prompt / config file; None for a rule about such
     actions ("Never delete files", "ask before sending"), a state ("Send, reply and trash are OFF") or a
-    noun ("sync ledger", "Send button")."""
+    noun ("sync ledger", "Send button"). v7: "rule_file_edit" also for any wording of a pending change to
+    such a file (`rule_file_pending`; `context`: the KG entity name)."""
     kind = _imperative_kind_v4(text)
-    if kind is None and rule_file_edit(text):
+    if kind is None and (rule_file_edit(text) or rule_file_pending(text, context)):
         return "rule_file_edit"
     return kind
 
@@ -958,13 +1172,15 @@ def _imperative_kind_v4(text: str) -> Optional[str]:
     return None
 
 
-def imperatives_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional["PlanIndex"] = None) -> Tuple[str, Counter]:
+def imperatives_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional["PlanIndex"] = None,
+                     protect: Iterable[str] = ()) -> Tuple[str, Counter]:
     """(body, counts): a NEW bullet that instructs an agent to act on files, config or an outside
     service is never a standing instruction: in a project it moves to ## Open Threads prefixed
     "(needs Nic's approval)"; anywhere else (Lessons, identity, architecture) it is dropped. v6: so does a
     plan line ("Planned:" or a restated plan of `idx`) about curating / pruning / deleting files or testing
-    all MCPs (`plan_needs_approval`)."""
+    all MCPs (`plan_needs_approval`). v7: a settled host guardrail copy (`protect`) is a rule, never a to-do."""
     rows, keep = _new_rows(body, cur_body)
+    keep = keep | {sc.norm(x) for x in protect}
 
     def decide(sec, line):
         if sc.norm(line) in keep:
@@ -972,7 +1188,9 @@ def imperatives_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional[
         found, _ = _marks(_split_bullet(line)[1])
         marked = "approval" in found
         plan = "planned" in found or bool(idx and idx.from_plan(line))
-        if not marked and imperative_kind(line) is None and not (plan and plan_needs_approval(line)):
+        # v8: a plan about a rule / identity / prompt file in any wording (`rule_file_plan`), also before
+        # `plans_body` adds its "Planned:" mark, so one pass is a fixed point.
+        if not marked and imperative_kind(line) is None and not (plan and (plan_needs_approval(line) or rule_file_plan(line))):
             return None
         if t.kind != "project":
             return ("drop", "imperative")
@@ -1071,14 +1289,17 @@ def plans_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional[PlanIn
     """(body, counts): a NEW bullet that restates a plan line (or carries "Planned:") is never an
     achievement: it moves to ## Open Threads prefixed "Planned:" (dropped where there is none)."""
     rows, keep = _new_rows(body, cur_body)
+    probe = getattr(idx, "probe", None) if idx is not None else None
 
     def decide(sec, line):
         if sc.norm(line) in keep:
             return None
-        found, _ = _marks(_split_bullet(line)[1])
+        found, rest = _marks(_split_bullet(line)[1])
         marked = "planned" in found
         if not marked and not (idx and idx.from_plan(line)):
             return None
+        if not marked and _lead_built(rest, probe):
+            return None  # v7: a store file the repo code creates on first use is built, not a plan
         if t.kind != "project":
             return ("drop", "plan")
         if marked and sec == OPEN_THREADS:
@@ -1185,8 +1406,9 @@ def content_entities(entities: Sequence[dict], idx: Optional[PlanIndex] = None) 
             e = {**e, "entityType": "concept"}  # v6: a machine name or a label ("preview-dir") is not a path
             c["path_type_retyped"] += 1
         # v6: the NAME is probed only when it looks like a real path or file ("preview-dir" is a label).
-        planned_path = (bool(probe) and path_like_name(name) and (e.get("entityType") == "path" or bool(_STORE_EXT.search(name.strip("`\\/ "))))
-                        and _probe(probe, name.strip("` ")) is False)
+        name_state = (_probe(probe, name.strip("` ")) if bool(probe) and path_like_name(name)
+                      and (e.get("entityType") == "path" or bool(_STORE_EXT.search(name.strip("`\\/ ")))) else None)
+        planned_path, first_use_name = name_state is False, _is_first_use(name_state)
         tool = e.get("entityType") in ("tool", "service") or any(_tool_key(full) == _tool_key(k) for k in KNOWN_TOOLS)
         kept = []
         for o in obs:
@@ -1194,8 +1416,10 @@ def content_entities(entities: Sequence[dict], idx: Optional[PlanIndex] = None) 
                 kept.append(o)
             elif tool and _foreign_tool(full, o, idx):
                 c["foreign_tool_kg"] += 1
-            elif imperative_kind(o):
-                c["imperative_kg"] += 1
+            elif tool and _deictic_foreign(full, o, idx):
+                c["deictic_kg"] += 1  # v7: "Scene Reader UI pushed from here" on a tool the source does not name
+            elif imperative_kind(o, full):
+                c["imperative_kg"] += 1  # v7: read with the entity name ("MASTER_IDENTITY": "Needs review/fix ...")
             elif "planned" in _marks(o)[0] or (idx and idx.from_plan(o)):
                 c["plan_kg"] += 1
             elif transient_kind(o):
@@ -1216,9 +1440,18 @@ def content_entities(entities: Sequence[dict], idx: Optional[PlanIndex] = None) 
                     o = new
                     c["qualifier_kg_appended"] += 1
                 # v6: the marker is only ever a prefix of the whole observation, never spliced into it.
-                if probe and PLANNED_NOT_CREATED not in o and (planned_path or annotate_paths(o, probe, False) is not None):
-                    o = f"{PLANNED_NOT_CREATED} {o}"
-                    c["path_planned_kg"] += 1
+                # v7: a store file the repo code creates on first use is "(created on first use)".
+                if probe:
+                    states = _path_states(o, probe)
+                    planned = planned_path or any(s is False for s in states)
+                    first = first_use_name or any(_is_first_use(s) for s in states)
+                    if PLANNED_NOT_CREATED not in o and CREATED_ON_FIRST_USE not in o:
+                        if planned or first:
+                            o = f"{PLANNED_NOT_CREATED if planned else CREATED_ON_FIRST_USE} {o}"
+                            c["path_planned_kg" if planned else "path_first_use_kg"] += 1
+                    elif first and not planned and PLANNED_NOT_CREATED in o and CREATED_ON_FIRST_USE not in o:
+                        o = o.replace(PLANNED_NOT_CREATED, CREATED_ON_FIRST_USE, 1)  # an echoed wrong marker
+                        c["path_first_use_kg"] += 1
                 kept.append(o)
         if kept:
             out.append({**e, "observations": kept} if kept != obs else e)
@@ -1271,6 +1504,28 @@ def _foreign_tool(name: str, text: str, idx: Optional["PlanIndex"]) -> Optional[
             if not any(own in x and k in x for x in lines):
                 return tool
     return None
+
+
+# v7: a deictic place word in a tool / service observation ("Scene Reader UI pushed from here", "runs on this
+# machine") has no stable referent in a KG, and when the batch's source line for that fact names another
+# entity ("... pushed from <host>") the model has merged two entities: the observation goes unless a source
+# line names the entity itself together with the fact's words (also when the entity is checked under another
+# target's batch at --apply). With no source lines (chat compaction) it is never judged.
+_DEICTIC = re.compile(r"\b(?:(?:from|on|at|via|over)\s+)?(?:here|this\s+(?:machine|box|pc|computer|laptop|host|server|device|node))\b", re.I)
+
+
+def _deictic_foreign(name: str, text: str, idx: Optional["PlanIndex"]) -> bool:
+    if not _DEICTIC.search(text or ""):
+        return False
+    lines = getattr(idx, "lines", None) or ()
+    own = _tool_key(name)
+    if not lines or not own:
+        return False
+    words = _cwords(_DEICTIC.sub(" ", text))
+    if len(words) < 2:
+        return True  # nothing left but the place word
+    hits = [x for x in lines if len(words & _cwords(x)) >= min(2, len(words))]
+    return not any(own in x for x in hits)
 
 
 # ── v5 fidelity guards ──────────────────────────────────────────────────────
@@ -1948,29 +2203,167 @@ def _path_tokens(text: str) -> List[Tuple[str, int]]:
     return sorted(out, key=lambda x: x[1])
 
 
+# v7: a missing store file whose name the repo code itself creates on first use (a string literal in the
+# Command Center Rust sources or the Python package; offload's probe answers FIRST_USE) is built, not planned.
+FIRST_USE = "first_use"
+CREATED_ON_FIRST_USE = "(created on first use)"
+# The model's own "(planned)" / trailing "planned" right after a path token, and a doubled host marker
+# ("(planned, not created yet) (planned)", "... yet) planned)"): collapsed into one marker.
+_MODEL_PLANNED = re.compile(r"^\s*(?:\(planned\)|planned(?=\s*(?:$|[).,;:])))", re.I)
+_DOUBLE_PLANNED = re.compile(re.escape(PLANNED_NOT_CREATED) + r"(?:\s*\(planned\)|\s+planned(?=\s*(?:$|[).,;:]))|\s*" + re.escape(PLANNED_NOT_CREATED) + r")+", re.I)
+
+
+def _is_first_use(r) -> bool:
+    return isinstance(r, str) and r == FIRST_USE
+
+
 def annotate_paths(text: str, probe, any_path: bool) -> Optional[str]:
-    """`text` with "(planned, not created yet)" after the first mention of each missing path, or None."""
+    """`text` with "(planned, not created yet)" after the first mention of each missing path (v7: "(created
+    on first use)" for a store file the repo code creates), or None when nothing changes. A model "(planned)"
+    right after the token becomes the marker and a doubled marker collapses into one (never two markers)."""
     if not probe or not isinstance(text, str):
         return None
-    inserts: List[int] = []
+    src = _DOUBLE_PLANNED.sub(PLANNED_NOT_CREATED, text)
+    edits: List[Tuple[int, int, str]] = []
     seen: set = set()
-    for tok, end in _path_tokens(text):
+    for tok, end in _path_tokens(src):
         if not tok or tok in seen:
             continue
         seen.add(tok)
         if not any_path and not _STORE_EXT.search(tok.rstrip("\\/")):
             continue
-        if _probe(probe, tok) is not False:
+        r = _probe(probe, tok)
+        if r is False:
+            mark = PLANNED_NOT_CREATED
+        elif _is_first_use(r):
+            mark = CREATED_ON_FIRST_USE
+        else:
             continue
-        if text[end:].lstrip().startswith(PLANNED_NOT_CREATED):
+        after = src[end:]
+        rest = after.lstrip()
+        if rest.startswith(mark) or (r is False and rest.startswith(CREATED_ON_FIRST_USE)):
+            continue  # an existing annotation is never removed
+        ws = len(after) - len(rest)
+        if mark == CREATED_ON_FIRST_USE and rest.startswith(PLANNED_NOT_CREATED):
+            edits.append((end, end + ws + len(PLANNED_NOT_CREATED), f" {mark}"))  # the model echoed a wrong marker
             continue
-        inserts.append(end)
-    if not inserts:
-        return None
-    out = text
-    for pos in sorted(set(inserts), reverse=True):
-        out = f"{out[:pos]} {PLANNED_NOT_CREATED}{out[pos:]}"
-    return out
+        m = _MODEL_PLANNED.match(after)
+        edits.append((end, end + m.end() if m else end, f" {mark}"))
+    out = src
+    for a, b, rep in sorted(edits, reverse=True):
+        out = out[:a] + rep + out[b:]
+    return out if out != text else None
+
+
+def _path_states(text: str, probe) -> List[object]:
+    """The probe answers for every store-file token of `text` (KG observations)."""
+    return [_probe(probe, tok) for tok, _ in _path_tokens(text) if tok and _STORE_EXT.search(tok.rstrip("\\/"))]
+
+
+# v7 (2b): a plan / Open Thread to build something that is already built ("Planned: Implement `modes.json`
+# schema storage ..." while the Command Center code already creates modes.json on first use) is a fact: it
+# moves to ## Active State without the plan mark and the verb. Only when that store is the verb's whole
+# object (v8, `_BUILT_REST`); an approval-marked line is never touched, and without ## Active State it stays.
+ACTIVE_STATE = "Active State"
+_BUILD_VERB = re.compile(r"^\W*(?:implement|build|create|add|write|wire(?:\s+up)?|set\s+up|make|introduce|scaffold)\s+(?:(?:the|a|an|new)\s+)*", re.I)
+_LEAD_TOKEN = re.compile(r"\s*(?:`([^`\n]+)`|([^\s`,;()]+))")
+
+
+# v8 (review of v7): only the store itself is built, never a feature of it or of an existing module ("Add
+# `tasks.db` retry queue column", "Implement `modes.json` schema validation and migration to v2", "Build
+# `memory_scrolls/guards.py` v8 rule-file detector", "Add `server.py` auth middleware" stay plans). After the
+# store token (and its marker) only store words ("schema storage"), a location ("beside `os.json`", "in the
+# app dir") and "with atomic writes" may follow; an existing repo path no longer counts.
+_BUILT_MARK = re.compile(r"^\s*(?:\((?:created on first use|planned, not created yet|planned)\)|planned\b)?\s*", re.I)
+_BUILT_REST = re.compile(
+    r"^(?:(?:schema|storage|store|file|database|db|data)\s*)*"
+    r"(?:(?:(?:beside|next\s+to|alongside|in|inside|under|at)\s+(?:the\s+)?(?:`[^`\n]+`|[\w%\\/.:-]+)(?:\s+(?:app\s+)?(?:dir(?:ectory)?|folder))?"
+    r"(?:\s*\((?:created on first use|planned, not created yet)\))?|with\s+atomic\s+(?:writes?|saves?))\s*)*[.;]?\s*$", re.I)
+
+
+def _lead_built(text: str, probe, existing: bool = False) -> bool:
+    """True when `text` is a path token the repo code creates on first use plus, at most, store words, a
+    location and "with atomic writes" (`_BUILT_REST`). v8: `existing` is ignored (an existing repo path is no
+    proof that the planned work on it is done)."""
+    m = _LEAD_TOKEN.match(text or "")
+    if not m or not probe:
+        return False
+    tok = (m.group(1) or m.group(2) or "").strip().rstrip(".,:;")
+    if not tok or not (_PATHISH.search(tok) or _KNOWN_EXT.search(tok)):
+        return False
+    after = text[m.end():]
+    after = after[_BUILT_MARK.match(after).end():]
+    if not _BUILT_REST.match(after):
+        return False
+    return _is_first_use(_probe(probe, tok))
+
+
+def built_plans_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional[PlanIndex] = None) -> Tuple[str, Counter]:
+    probe = getattr(idx, "probe", None) if idx is not None else None
+    if not probe or t.kind != "project":
+        return body, Counter()
+    rows, keep = _new_rows(body, cur_body)
+    heads = [r[2].split(None, 1)[1].strip() for r in rows if r[1] == 2]
+    out, moves, c = [], {}, Counter()
+    have = {sc.norm(r[2]) for r in rows if r[0] == ACTIVE_STATE and r[1] == 0 and r[2].strip()}
+    for sec, lvl, line in rows:
+        if lvl or not line.strip() or sec in (None, sc.SUPERSEDED) or not sc._BULLET.match(line) or sc.norm(line) in keep:
+            out.append((sec, lvl, line))
+            continue
+        lead, text = _split_bullet(line)
+        found, rest = _marks(text)
+        m = _BUILD_VERB.match(rest)
+        if ("approval" in found or not ("planned" in found or sec == OPEN_THREADS) or not m or not _lead_built(rest[m.end():], probe)
+                or ACTIVE_STATE not in heads):
+            out.append((sec, lvl, line))  # v8: never dropped; without ## Active State the (annotated) plan stays
+            continue
+        fact = rest[m.end():].strip()
+        c["built_plan_moved"] += 1
+        new = f"{lead or '- '}{fact[:1].upper()}{fact[1:]}"
+        if sc.norm(new) not in have:
+            moves.setdefault(ACTIVE_STATE, []).append(new.strip())
+            have.add(sc.norm(new))
+    if not c:
+        return body, c
+    return (_append_to(out, moves) if moves else "\n".join(r[2] for r in out)), c
+
+
+# v7 (4): a Lessons ## Fixes bullet that is still a to-do ("Rebuild X in small stages ...", "Test Y first to
+# verify ...": a leading pending verb and no word saying it worked) is no applied fix: it moves to ## Failure
+# Modes. ## Proven Recipes is never touched. v8 (review of v7): check / verify / confirm / compare / try /
+# debug lead real preventive fixes ("Check that the model is loaded before dispatching; avoids empty replies",
+# "Debug builds stutter; use --release"), so they no longer count; a word saying it helps or prevents something
+# keeps the bullet; without ## Failure Modes the bullet stays where it is (never dropped).
+FIXES, FAILURE_MODES = "Fixes", "Failure Modes"
+_PENDING_FIX = re.compile(r"^\W*(?:re-?build|redo|re-?try|re-?test|test|investigate|diagnose|figure\s+out|look\s+into|research"
+                          r"|revisit|explore|evaluate)\b(?![-:])", re.I)
+_FIX_DONE = re.compile(r"\b(?:fixed|fixes|resolved|resolves|solved|solves|works|worked|working|helped|helps|succeeded|cured|stopped|stops|restored|done|now"
+                       r"|avoids?|avoided|prevents?|prevented|stable|keeps|ensures?|instead)\b", re.I)
+
+
+def pending_fixes_body(t: sc.Target, body: str, cur_body: str = "") -> Tuple[str, Counter]:
+    if t.kind != "pattern":
+        return body, Counter()
+    rows, keep = _new_rows(body, cur_body)
+    heads = [r[2].split(None, 1)[1].strip() for r in rows if r[1] == 2]
+    out, moves, c = [], {}, Counter()
+    for sec, lvl, line in rows:
+        if lvl or sec != FIXES or not line.strip() or not sc._BULLET.match(line) or sc.norm(line) in keep:
+            out.append((sec, lvl, line))
+            continue
+        _, rest = _marks(_split_bullet(line)[1])
+        b = _BOLD_LABEL.match(rest)
+        rest = rest[b.end():] if b else rest
+        lm = _LABEL_PREFIX.match(rest)
+        head = rest[lm.end():] if lm else rest
+        if not _PENDING_FIX.match(head) or _FIX_DONE.search(rest) or FAILURE_MODES not in heads:
+            out.append((sec, lvl, line))
+            continue
+        c["pending_fix_moved"] += 1
+        moves.setdefault(FAILURE_MODES, []).append(line.strip())
+    if not c:
+        return body, c
+    return (_append_to(out, moves) if moves else "\n".join(r[2] for r in out)), c
 
 
 def paths_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional[PlanIndex] = None) -> Tuple[str, Counter]:
@@ -1983,10 +2376,14 @@ def paths_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional[PlanIn
         if sc.norm(line) in keep:
             return None
         new = annotate_paths(line, probe, sec in PATH_SECTIONS)
-        return ("edit", "path_planned", new) if new is not None else None
+        if new is None:
+            return None
+        # v8: a "(created on first use)" relabel is counted as such, not hidden under path_planned.
+        planned = new.count(PLANNED_NOT_CREATED) > line.count(PLANNED_NOT_CREATED)
+        return ("edit", "path_planned" if planned else "path_first_use", new)
 
     body, c = _relocate(t, rows, decide)
-    return body, _renamed(c, "path_planned_edited", "path_planned")
+    return body, _renamed(_renamed(c, "path_planned_edited", "path_planned"), "path_first_use_edited", "path_first_use")
 
 
 # (9) Hygiene: near-duplicate bullets of one section (the later NEW one goes; a settled host bullet
@@ -2186,7 +2583,8 @@ def content_body(t: sc.Target, body: str, cur_body: str = "", idx: Optional[Plan
     body, n = superseded_body(body, cur_body, new_scroll)
     c.update({f"superseded_{k}": v for k, v in n.items()})
     protect = settled_bullets(idx.settled, policy) if idx is not None and idx.settled and t.kind == "architecture" else []
-    for fn in (lambda b: status_paths_body(t, b, cur_body), lambda b: imperatives_body(t, b, cur_body, idx), lambda b: plans_body(t, b, cur_body, idx),
+    for fn in (lambda b: status_paths_body(t, b, cur_body), lambda b: imperatives_body(t, b, cur_body, idx, protect),
+               lambda b: built_plans_body(t, b, cur_body, idx), lambda b: plans_body(t, b, cur_body, idx), lambda b: pending_fixes_body(t, b, cur_body),
                lambda b: approver_body(t, b, cur_body), lambda b: hygiene_body(t, b, cur_body), lambda b: support_body(t, b, cur_body, idx),
                lambda b: qualifier_body(t, b, cur_body), lambda b: settled_body(t, b, cur_body, idx, policy),
                lambda b: settled_restatements_body(t, b, cur_body, idx, policy), lambda b: dedupe_body(t, b, cur_body, protect), lambda b: paths_body(t, b, cur_body, idx)):

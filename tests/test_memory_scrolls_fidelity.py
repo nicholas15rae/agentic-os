@@ -207,14 +207,15 @@ class RuleFileEditTests(unittest.TestCase):
                      "- Planned: MASTER_IDENTITY v1 and AGENTS_NEVER reviewed and locked.",
                      "- Planned: Write Conceptualizer and Dispatcher prompts.",
                      "- Rewrite the system prompt for the front agent.",
-                     "- Update the identity file with the new pillar."):
+                     "- Update the identity file with the new pillar.",
+                     # v7 (round 10, part 2): the status form of the same to-do is approval-gated too.
+                     "- MASTER_IDENTITY v1 and AGENTS_NEVER need final review before lock"):
             self.assertEqual(guards.imperative_kind(line), "rule_file_edit", line)
         for line in ("- Never change rules or identity files.",
                      "- (unconfirmed) Changes only through the Librarian, with Nic's approval.",
                      "- Every approved rule change results in exactly one Git commit.",
                      "- Agents: `agents/<name>/` (prompt.md, rules.md, card.md).",
                      "- MASTER_IDENTITY v1 is locked.",
-                     "- MASTER_IDENTITY v1 and AGENTS_NEVER need final review before lock",
                      "- Planned: Hub backed up twice; MASTER_IDENTITY v1 and AGENTS_NEVER reviewed"):
             self.assertIsNone(guards.imperative_kind(line), line)
         self.assertEqual(guards.imperative_kind("- Change the AnythingLLM config to point at 1235"), "config_change", "the v4 kind wins")
@@ -533,7 +534,7 @@ class R7ShapesV5Tests(CuratedBase):
         self.assertEqual(names["Librarian (Command Center)"]["observations"], CC_LIB["observations"])
         self.assertEqual(names["tasks.db"]["observations"], ["(planned, not created yet) Shared store of task envelopes"])
         report = json.loads((prev / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(report["guards"]["version"], 6)
+        self.assertEqual(report["guards"]["version"], guards.GUARDS_VERSION)
         self.assertEqual(report["guards"]["removed"]["kg_merged"]["conflict_kept_apart"], 1)
         manifest = json.loads((prev / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], "agentic-os.offload-preview.v6")

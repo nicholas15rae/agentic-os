@@ -876,6 +876,23 @@ def path_probe(paths, env, rel: str):
     excluded_names = {Path(paths.kg_path).name.lower(), "state.json"}
     bare_roots = [appdata, repo, repo / "data", Path(paths.threads_json).parent, Path(paths.gateway_chat).parent]
     is_repo = rel == REPO_TARGET
+    literals: List[frozenset] = []
+
+    def first_use(p: Path) -> bool:
+        """v7: a missing store file whose name the repo code creates on first use (a quoted literal). v8: only
+        a bare name or a file directly in the app config dir (where the Command Center keeps its stores),
+        never a repo path with folders ("agents/hermes/config.json" is planned, whatever its base name)."""
+        n = p.name.lower()
+        if not _STORE_NAME.search(n):
+            return False
+        if len(p.parts) > 1 and norm(p.parent) != norm(appdata):
+            return False
+        if not literals:
+            literals.append(repo_store_literals(repo))
+        return n in literals[0]
+
+    def missing(p: Path):
+        return guards.FIRST_USE if first_use(p) else False
 
     def probe(token: str) -> Optional[bool]:
         tok = (token or "").strip().strip("`'\"").rstrip(".,:;")
@@ -903,7 +920,7 @@ def path_probe(paths, env, rel: str):
             name = parts[0]
             if name.lower() in excluded_names or name.lower() in _OWN_OUTPUT_NAMES or _OWN_ARCHIVE_NAME.match(name):
                 return None  # a Memory Scrolls output file (in the staging dir or the archive root)
-            return any((r / name).exists() for r in bare_roots)
+            return any((r / name).exists() for r in bare_roots) or (cut is None and missing(Path(name)))
         else:
             p = repo.joinpath(*parts)
         if any(under(p, x) for x in excluded) or Path(p).name.lower() in excluded_names:
@@ -911,11 +928,46 @@ def path_probe(paths, env, rel: str):
         if not (under(p, repo) or under(p, appdata)):
             return None
         try:
-            return p.exists()
+            return p.exists() or (cut is None and missing(p))
         except OSError:
             return None
 
     return probe
+
+
+_STORE_NAME = re.compile(r"\.(?:db|sqlite3?|json|jsonl)$", re.I)
+# v8: a store file name joined straight onto a directory variable in the repo's own code (`dir.join("tasks.db")`,
+# `config_dir.join("permissions.json")`): a file the code keeps in its own data dir. Not any quoted name: a
+# chained join (`.join("data").join("settings.json")`, another app's `.join("storage").join("x.db")`), a
+# listing label or an own preview output does not count.
+_STORE_LITERAL = re.compile(r"\b[A-Za-z_]\w*\s*\.join\(\s*\"([\w.-]+\.(?:db|sqlite3?|json|jsonl))\"\s*\)", re.I)
+# Where the repo code that creates its runtime stores lives: the Command Center's Rust sources (read-only;
+# tests and docs never count). v8: not the Memory Scrolls package (its literals are its own outputs and reads).
+STORE_SOURCE_DIRS = (("command center/src-tauri/src", "*.rs"),)
+STORE_SOURCE_MAX_BYTES = 2_000_000
+
+
+def repo_store_literals(repo: Path) -> frozenset:
+    """Lower-case store file names quoted in the repo's code (v7 path probe: such a missing file is created on
+    first use, not planned). Read-only; an unreadable or oversized file is skipped."""
+    out = set()
+    for rel, pattern in STORE_SOURCE_DIRS:
+        root = Path(repo) / rel
+        if not root.is_dir():
+            continue
+        for f in sorted(root.rglob(pattern)):
+            if f.stem == "tests" or "tests" in f.relative_to(root).parts[:-1]:
+                continue  # test fixtures are not runtime stores
+            try:
+                if not f.is_file() or f.stat().st_size > STORE_SOURCE_MAX_BYTES:
+                    continue
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if f.suffix == ".rs":
+                text = text.split("#[cfg(test)]", 1)[0]  # the in-file Rust test module
+            out.update(m.group(1).lower() for m in _STORE_LITERAL.finditer(text))
+    return frozenset(out)
 
 
 def curated_allowlist_sha() -> str:

@@ -1795,6 +1795,171 @@ C:\ai-hub fingerprint IDENTICAL. D:\ai-hub-memory, D:\ai-hub-archive, repo `arch
 **Tests:** 7 new tests in `tests/test_memory_scrolls_v6.py` (`R10*`, synthetic), each with a fixed-point or
 `check_preview` assert where it applies. Gate: `python tests/run_all.py`, 479 tests OK.
 
+### Round 10, part 2: review of 20261120-021616, guards v7 (reference)
+
+The 4-lens review of preview `20261120-021616` (token `e13e446ac6c5`) passed the privacy, truth-and-locks and
+quality lenses. The booking-scope lens blocked it: an Active State bullet said "MASTER_IDENTITY.md and
+AGENTS_NEVER.md need review/fix before final lock." with no approval marker, the KG entities MASTER_IDENTITY and
+AGENTS_NEVER said "Needs review/fix before final lock.", and the r8 prompt to-do came back unmarked as
+"Planned: Conceptualizer and Dispatcher prompts pending write." The cause is that the local model rewords the
+same hub to-do every run (r7 imperative, r8 passive, r9 noun phrase), and `imperative_kind` only knew verb-led
+and passive grammar. `GUARDS_VERSION = 7`: `--apply` refuses `20261120-021616` on the version, and the content
+re-check refuses it too (`content_imperative_moved`, `content_imperative_kg x4`, `content_built_plan_moved`,
+`content_pending_fix_moved x2`, `content_deictic_kg`, `content_path_planned x3`). All changes are deterministic
+and touch only NEW lines; `check_preview` runs the same functions.
+
+1. **Rule-file to-dos in any wording** (`rule_file_pending`, used by `imperative_kind`, so `imperatives_body`,
+   `content_entities` and `check_preview` all agree). A sentence is a "(needs Nic's approval)" to-do when it
+   names a rule / identity / prompt file (MASTER_IDENTITY, AGENTS_NEVER, SYSTEM.md, AGENTS.md, CLAUDE.md,
+   GEMINI.md, SOUL.md, rules.md, constitution, identity files, persona files, system / agent prompts) or the
+   bullet's label or the KG entity name does, and it carries:
+   - a pending word (pending, to-do, outstanding, awaiting, TBD, not yet, next step, still open, "before
+     (final) lock / v1"); or
+   - a modal (needs, must, should, to be, will be, planned, queued) with a change word in any form (fix,
+     review, revise, lock, unlock, finalize, write, rewrite, draft, edit, update, change, amend); or
+   - a state word (still, yet, open) with a present-tense change word; or
+   - for a named rule document, a present-tense change word in a sentence with no finished action.
+
+   The generic words "rules", "config", "identity", "persona" and "prompt" count only with a pending or modal
+   word, so role descriptions ("the Prompter rewrites rough ideas into a prompt", "Identity: changes his mind
+   when shown data") are facts. Not to-dos: negated or approval-gated sentences ("Never change rules or
+   identity files", "Agents must not edit AGENTS.md", "only the Librarian", "authorized"), process rules ("one
+   change per rule", "via the Librarian", "atomically", "nightly"), pure completion facts ("MASTER_IDENTITY v1
+   was locked on <date>"), and the settled host guardrail copies (`imperatives_body` now takes them as
+   `protect`). Routing is unchanged: a project line goes to ## Open Threads with the marker (never locked), a
+   non-project line is dropped, a marked line is a fixed point, and a KG observation is dropped
+   (`imperative_kg`), now judged with its entity name ("MASTER_IDENTITY": "Needs review/fix ...").
+2. **Built stores and plans** (`offload.path_probe`, `annotate_paths`, `built_plans_body`).
+   - A missing store file (.db / .sqlite / .json / .jsonl) whose name is a quoted literal in the repo's own
+     code (`command center/src-tauri/src/**/*.rs` minus test modules and `tests.rs`, and `memory_scrolls/*.py`;
+     `repo_store_literals`, read-only) probes as `FIRST_USE`. It is annotated "(created on first use)", never
+     "(planned, not created yet)". `tasks.db` and `modes.json` are such files: the Command Center creates them
+     on first launch.
+   - A "Planned:" / Open Threads bullet that starts with implement / build / create / add / write / wire up /
+     set up / make and whose direct object is such a store file, or an existing repo path, moves to ## Active
+     State as a fact without the plan mark and the verb (dropped when the scroll has no Active State). An
+     approval-marked line and a plan whose object is truly missing stay. `plans_body` no longer moves a fact
+     that starts with a first-use store back into the plans.
+   - The marker is never doubled: a model "(planned)" or trailing "planned" right after the path becomes the
+     marker, an existing "(planned, not created yet) (planned)" collapses into one, and a model-echoed
+     "(planned, not created yet)" after a first-use store becomes "(created on first use)". KG observations get
+     "(created on first use)" as a prefix (`path_first_use_kg`).
+3. **Deictic KG observations** (`_deictic_foreign`, `deictic_kg`). In a tool or service entity, an
+   observation with "here", "from here", "this machine / box / PC / host ..." is dropped unless a batch source
+   line names that entity together with the fact's words. The real case: "Scene Reader UI pushed from here." on
+   the LM Studio tool, whose source line names the host machine instead. With no source lines (chat
+   compaction) it is never judged.
+4. **Lessons ## Fixes to-dos** (`pending_fixes_body`). A NEW Fixes bullet that starts with a pending verb
+   (rebuild, test, retest, try, check, verify, investigate, debug ...) and has no word saying it worked (fixed,
+   works, resolved, now ...) moves to ## Failure Modes (dropped when there is none). ## Proven Recipes is never
+   touched.
+
+**Replay** of the 7 logged replies of `20261120-021616` (LM Studio server log 2026-11-20.1, 02:16-02:18)
+through the per-target FakeLLM. Sources were read-only, AnythingLLM was not called, previews went to
+`<scratch>`, and the app data dir was a names-only snapshot of the 02:16 state (the Command Center was launched
+at 02:43 and created `tasks.db` and `modes.json`). The guards-v6 replay reproduces the preview byte for byte.
+
+| Shape (r9 review) | before (guards v6) | after (guards v7) |
+|---|---|---|
+| ai-hub Active State "MASTER_IDENTITY.md and AGENTS_NEVER.md need review/fix before final lock." (blocker) | unmarked, Active State | Open Threads, `(needs Nic's approval) ...` |
+| ai-hub "Planned: Conceptualizer and Dispatcher prompts pending write." | unmarked | `Planned: (needs Nic's approval) ...` |
+| KG MASTER_IDENTITY / AGENTS_NEVER "Needs review/fix before final lock." | kept | dropped (x2) |
+| KG Conceptualizer / Dispatcher "Prompt pending write (Phase 3 Core agents)." | kept | dropped (x2) |
+| agentic-os Open Threads "Planned: Implement `modes.json` (planned, not created yet) (planned) schema storage ..." | stale to-do, doubled marker | Active State fact "`modes.json` (created on first use) schema storage beside `os.json` with atomic writes." |
+| agentic-os `tasks.db` (3 lines) | "(planned, not created yet) planned" / "(planned, not created yet) (planned)" | "(created on first use)", one marker each |
+| KG `tasks.db` | "(planned, not created yet) ..." | "(created on first use) ..." |
+| KG LM Studio "Scene Reader UI pushed from here." | kept | dropped |
+| lessons Fixes "Rebuild Estimator ..." / "Test Kokoro ... first to verify ..." | under Fixes | under Failure Modes |
+
+The architecture and identity scrolls are unchanged. agentic-os goes from 4098 B to 4035 B, still over its
+3072 B target. The same harness on the r7 (`20261119-233821`) and r8 (`20261120-011216`) replies changes only
+the store markers ("(created on first use)" for `tasks.db` / `modes.json`, scrolls and KG) and moves the Fixes
+to-dos to Failure Modes; their rule-file to-dos were already marked by v6 and stay marked. All three replay
+previews pass the read-only `--apply` replica (`promote_check.py`: PASS, 5 targets). C:\ai-hub was only read.
+D:\ai-hub-memory, D:\ai-hub-archive, repo `archive/` and `data/memory-scrolls/` are still absent.
+
+**Tests:** `tests/test_memory_scrolls_v7.py` (17 tests, synthetic), registered in `tests/run_all.py`. It covers
+the exact r9 lines, the r7 imperative and r8 passive forms and 14 paraphrases, 27 not-a-to-do lines, the KG
+entity-name context, project / non-project routing, settled host copies, the read-only probe in a sandbox
+repo, marker collapse, built plans (moved, dropped, kept), deictic KG and Fixes to-dos, each with a fixed-point
+or `check_preview` assert. `R9ShapesV7Tests` replays the r9 shapes through dry-run and `--apply` (code 0),
+shows that a guards-v6 preview is refused, and shows that a v7-labelled preview made without
+`rule_file_pending` is refused by the content re-check. Three existing asserts changed on purpose: the status
+form "MASTER_IDENTITY v1 and AGENTS_NEVER need final review before lock" is now a rule-file to-do (fidelity and
+curated tests; the curated replay now finds it marked in Open Threads), and the report's guard version is
+compared with `GUARDS_VERSION`. Gate: `python tests/run_all.py`, 496 tests OK.
+
+### Round 11: review of the guards-v7 detectors, guards v8 (reference)
+
+A code review of the v7 changes (no new live run) confirmed that the v7 detectors were both too broad and too
+narrow. Every fix narrows a match or makes it independent of grammar; none loosens a data-protecting check.
+`GUARDS_VERSION = 8`, so `--apply` refuses any v7-labelled preview (none was made live). `apply()` and
+`_promote_plan` are unchanged, so the read-only replica `promote_check.py` needs no change.
+
+1. **Rule-file to-dos: a pending marker next to a lifecycle word** (`rule_file_pending`, rewritten). v7 counted
+   any change word anywhere in a sentence about a rule / identity / prompt file. That dropped settled recipes
+   ("Agents must check MASTER_IDENTITY.md before writing anything about Nic"), role descriptions ("The Librarian
+   reviews system prompts"), governance rules ("Rule changes need Nic's sign-off", "Identity file changes must be
+   reviewed by Nic") and descriptive KG facts. It also missed negated completions ("not reviewed or locked yet",
+   "is not final"), approval-gated pending ("lock waits for Nic's approval") and draft / create orders. v8 asks
+   whether a PENDING marker sits right next to a LIFECYCLE word (review, fix, lock, final, write, draft, edit,
+   update, pass ...), in any slot, so the to-do is caught whatever its grammar and a fact is not:
+   - a need / await word plus a lifecycle noun ("need review/fix", "awaiting fixes", "pending write");
+   - a modal passive ("must be reviewed", "to be updated", "will be written"; not "turned out to be ...");
+   - a lifecycle noun plus a pending state ("lock still open", "edits queued", "final lock is the next step");
+   - a negated or un- participle ("not locked", "hasn't been reviewed", "unreviewed"; never "must not / do not
+     edit", a prohibition);
+   - a state ("is a stub", "still marked draft", "being reviewed", "prompts are missing", "prompts pending");
+   - an order with the file in the same clause ("Draft the Dispatcher and Conceptualizer prompts", "Ratify
+     constitution.md", "Add a rule to AGENTS_NEVER.md");
+   - a to-do heading ("AGENTS_NEVER.md final review: <who / when>").
+
+   An agent's own prompt ("the Dispatcher prompt", "Conceptualizer and Dispatcher prompts") now names a file.
+   A generic word names a file only outside a compound ("the rules engine" does not). A "Decision Rule:" label
+   does not. Not to-dos: prohibitions, authority and permission rules, conditions ("if ..."), an agent's standing
+   behaviour ("Agents must ..."), governance rules about changes in general ("X changes need / must ..."), and
+   process rules for passives and orders ("atomically", "via", "nightly").
+2. **Plans about rule files in one pass** (`rule_file_plan`). In `imperatives_body`, a plan line ("Planned:" or a
+   restated roadmap line of the batch) about such a file with any lifecycle word is approval-gated before
+   `plans_body` adds its "Planned:" mark. Before, a roadmap goal the model wrote under the milestone ("MASTER_IDENTITY
+   v1 and AGENTS_NEVER reviewed") left one pass as an unmarked plan. The second pass (the `--apply` re-check)
+   then marked it, so the preview was refused. The curated replay now finds it as "Planned: (needs Nic's approval)
+   ...".
+3. **"(created on first use)" only for the Command Center's own stores** (`offload.path_probe`,
+   `repo_store_literals`). v7 matched any quoted store name in repo code by base name (27 names live, among them
+   config.json, settings.json, manifest.json and cc.db). v8 takes only a name joined straight onto a directory
+   variable in the Rust sources (`dir.join("tasks.db")`). A chained join (`.join("data").join("settings.json")`),
+   another app's store and a listing label do not count, and the Memory Scrolls package is no longer a source.
+   It also applies only to a bare name or a file directly in the app config dir. A repo path with folders
+   ("agents/hermes/config.json") is planned, whatever its base name. Live, 9 names remain, `tasks.db` and
+   `modes.json` among them. A first-use relabel is now counted as `path_first_use`, not `path_planned`.
+4. **Built plans: the store itself only** (`built_plans_body`, `_lead_built`). An existing repo path no longer
+   proves the planned work done ("Build `memory_scrolls/guards.py` v8 rule-file detector", "Add `server.py` auth
+   middleware" stay plans). A first-use store moves to Active State only when its whole object is the store:
+   store words, a location ("beside `os.json`", "in the app dir") and "with atomic writes". So "Implement
+   `modes.json` schema validation and migration to v2" and "Add `tasks.db` retry queue column" stay plans.
+   Without ## Active State the plan stays; it is never dropped.
+5. **Lessons Fixes** (`pending_fixes_body`). check, verify, confirm, compare, try and debug no longer mark a to-do,
+   because they lead real preventive fixes ("Check that the model is loaded before dispatching; avoids empty
+   replies"). Words saying a fix helps or prevents something (avoids, prevents, stable, keeps, ensures,
+   instead) keep the bullet. Without ## Failure Modes it stays where it is.
+
+**Replay** of the logged replies of `20261119-233821`, `20261120-011216` and `20261120-021616` (the
+names-only app-data snapshot of 02:16, AnythingLLM off, previews in `<scratch>`). It differs from the v7 replay
+in one line per run: the roadmap line about MASTER_IDENTITY and AGENTS_NEVER now reads "Planned: (needs Nic's
+approval) ..." (mark order). Every r9 fix stays: the rule-file to-dos are marked, the KG to-dos are dropped,
+`modes.json` / `tasks.db` are "(created on first use)", and the deictic observation is gone. All three replay
+previews pass `promote_check.py` (PASS, 5 targets). C:\ai-hub was only read. D:\ai-hub-memory,
+D:\ai-hub-archive, repo `archive/` and `data/memory-scrolls/` are still absent.
+
+**Tests:** `tests/test_memory_scrolls_v8.py` (11 tests, synthetic): 21 to-do wordings (most of which v7 missed)
+and 4 KG ones; 28 facts, rules, roles and KG facts v7 dropped or flagged; project and other-scroll routing; the one-pass plan gate; built plans
+on existing paths and store features; the probe in a sandbox repo (direct join only, bare or app-dir only,
+read-only); the `path_first_use` count; and preventive fixes. Ten of the 11 fail on the v7 code. Changed on
+purpose: v7 tests for the existing-module move, the Memory Scrolls package literal and the two "dropped when there
+is no heading" cases (now kept), plus the curated replay's roadmap line (now approval-gated) and its plan count
+(`plan_moved` or `plan_marked`). Gate: `python tests/run_all.py`, 507 tests OK.
+
 ## 9. C:\ai-hub as a read-only source (2026-11-19, tests only; no live run)
 
 The offload now reads the operator's ai-hub repo as a read-only source of truth. Everything below is

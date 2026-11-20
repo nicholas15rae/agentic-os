@@ -31,6 +31,8 @@ import test_memory_scrolls_guards  # noqa: E402
 import test_memory_scrolls_curated  # noqa: E402
 import test_memory_scrolls_fidelity  # noqa: E402
 import test_memory_scrolls_v6  # noqa: E402
+import test_memory_scrolls_v7  # noqa: E402
+import test_memory_scrolls_v8  # noqa: E402
 
 
 def main() -> int:
@@ -41,7 +43,8 @@ def main() -> int:
                    test_spotify_callback, test_os_inbox, test_command_center_llm,
                    test_task_mirror, test_memory_scrolls, test_memory_scrolls_offload,
                    test_memory_scrolls_privacy, test_memory_scrolls_hub, test_memory_scrolls_guards,
-                   test_memory_scrolls_curated, test_memory_scrolls_fidelity, test_memory_scrolls_v6):
+                   test_memory_scrolls_curated, test_memory_scrolls_fidelity, test_memory_scrolls_v6,
+                   test_memory_scrolls_v7, test_memory_scrolls_v8):
         suite.addTests(loader.loadTestsFromModule(module))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

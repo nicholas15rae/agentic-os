@@ -409,11 +409,14 @@ class BlockedShapesV3ReplayTests(CuratedBase):
         hub = scrolls[HUBP.rel]
         self.assertEqual(sc.section_bullets(hub, ["Current Milestone"]), [], "a roadmap goal is never the milestone")
         ot = sc.section_bullets(hub, ["Open Threads"])
-        self.assertIn("- Planned: Hub backed up twice; MASTER_IDENTITY v1 and AGENTS_NEVER reviewed", ot)
+        # v8 (round 11): a roadmap plan about the rule / identity files is approval-gated in any wording.
+        self.assertIn("- Planned: (needs Nic's approval) Hub backed up twice; MASTER_IDENTITY v1 and AGENTS_NEVER reviewed", ot)
         self.assertIn("- Planned: Phase 7: desktop app over the overlay network, later", ot)
         self.assertIn("- (needs Nic's approval) Catalog: Needs export to Google Sheets, fix two rows, delete clutter skills", ot)
         self.assertIn("- (needs Nic's approval) One backup exists; second backup pending (external drive or Google Drive)", ot)
-        self.assertIn("- MASTER_IDENTITY v1 and AGENTS_NEVER need final review before lock", sc.section_bullets(hub, ["Active State"]), "the dated status wins")
+        # v7 (round 10, part 2): the dated status still wins over the plan, but it is a pending rule-file to-do.
+        self.assertNotIn("- MASTER_IDENTITY v1 and AGENTS_NEVER need final review before lock", sc.section_bullets(hub, ["Active State"]))
+        self.assertIn("- (needs Nic's approval) MASTER_IDENTITY v1 and AGENTS_NEVER need final review before lock", ot)
         self.assertEqual(sc.section_bullets(hub, ["Key Paths"]), ["- Root: C:\\ai-hub"])
         for v in ("Online", "2026-11-19T07:43", "ZentrovaLabs", "Scene reader\\scene-reader", "Same (merged", "vanilla JS SPA", "remove it", "re-download"):
             self.assertNotIn(v, "\n".join(scrolls.values()) + kg, v)
@@ -436,8 +439,11 @@ class BlockedShapesV3ReplayTests(CuratedBase):
         self.assertEqual(sc.section_bullets(proj, [sc.SUPERSEDED]), [])
         report = json.loads((prev / "report.json").read_text(encoding="utf-8"))
         content = report["guards"]["removed"]["content"]
-        for k in ("plan_moved", "imperative_moved", "imperative_dropped", "transient_dropped", "path_label_dropped", "superseded_fact_new_scroll"):
+        for k in ("imperative_moved", "imperative_dropped", "transient_dropped", "path_label_dropped", "superseded_fact_new_scroll"):
             self.assertGreaterEqual(content.get(k, 0), 1, (k, content))
+        # v8: the roadmap line about the rule files moves to Open Threads as an approval-gated to-do first, so
+        # plans_body only marks it "Planned:" there.
+        self.assertGreaterEqual(content.get("plan_moved", 0) + content.get("plan_marked", 0), 1, content)
         self.assertIn("hub_denied", json.dumps(report["privacy"]))
         code, lines = self.apply(res["token"])
         self.assertEqual(code, 0, lines[-1])

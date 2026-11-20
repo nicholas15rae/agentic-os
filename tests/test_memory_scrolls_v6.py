@@ -381,7 +381,7 @@ class R8ShapesV6Tests(fid.R7ShapesV5Tests):
         self.assertEqual(kg["Hostbox"]["entityType"], "concept")
         self.assertNotIn("AnythingLLM", kg, "its only observation attributed a tool to another tool")
         report = json.loads((prev / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(report["guards"]["version"], 6)
+        self.assertEqual(report["guards"]["version"], guards.GUARDS_VERSION)
         self.assertEqual(report["guards"]["stale_claims"]["version"], 4)
         code, lines = self.apply(res["token"])
         self.assertEqual(code, 0, lines[-1])

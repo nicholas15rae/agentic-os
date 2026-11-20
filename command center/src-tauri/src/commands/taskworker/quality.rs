@@ -289,7 +289,7 @@ impl IntentCheck {
     }
     pub fn need(&self) -> Need {
         let convert = matches!(self.kind, CheckKind::Convert { .. });
-        Need { probe: true, action: convert, fresh: !convert, value: convert, check: Some(self.clone()), toggle: false }
+        Need { probe: true, action: convert, fresh: !convert, value: convert, check: Some(self.clone()), toggle: false, shows: Vec::new() }
     }
     /// Its probe proves a number (Default / Convert): a read of a big container cannot.
     fn numeric(&self) -> bool {
@@ -698,6 +698,43 @@ pub struct Need {
     pub check: Option<IntentCheck>,
     /// It toggles / switches / converts a unit: its probe must show a change (`shows_change`).
     pub toggle: bool,
+    /// The placeholder kinds the criterion itself asks the page to show ("show a dash (—) until
+    /// a bill is typed": `Placeholder::Dash`): its probe may expect that text
+    /// (`expects_placeholder`); a broken value (NaN, undefined) never.
+    pub shows: Vec<Placeholder>,
+}
+
+/// A kind of placeholder text (`placeholder_kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placeholder {
+    /// "Loading...", "Calculating".
+    Wait,
+    /// "--", "—", "–".
+    Dash,
+    /// "…", "...".
+    Ellipsis,
+    /// NaN, undefined, null, [object Object]: never a value to expect.
+    Broken,
+}
+
+/// The placeholder kinds a criterion names as what the page should show (`Need::shows`). Pure.
+pub fn named_placeholders(criterion: &str) -> Vec<Placeholder> {
+    static WAIT: OnceLock<regex::Regex> = OnceLock::new();
+    static DASH: OnceLock<regex::Regex> = OnceLock::new();
+    static DOTS: OnceLock<regex::Regex> = OnceLock::new();
+    let mut out = Vec::new();
+    if rx(&WAIT, r"(?i)\b(?:loading|calculating)\b").is_match(criterion) {
+        out.push(Placeholder::Wait);
+    }
+    // The mark itself counts only quoted or in brackets ("a dash (—)", "shows '--'"): a dash used
+    // as punctuation in the sentence names nothing.
+    if rx(&DASH, r#"(?i)\b(?:(?:em|en)[- ]?)?dash(?:es)?\b|\bhyphens?\b|[("'“‘]\s*(?:[—–]+|-{2,})\s*[)"'”’]"#).is_match(criterion) {
+        out.push(Placeholder::Dash);
+    }
+    if rx(&DOTS, r#"(?i)\bellipsis\b|[("'“‘]\s*(?:…|\.{3})\s*[)"'”’]"#).is_match(criterion) {
+        out.push(Placeholder::Ellipsis);
+    }
+    out
 }
 
 /// A criterion about behaviour: something that changes, computes, converts, toggles, totals,
@@ -751,7 +788,7 @@ pub fn need_of(criterion: &str, lits: &[Literal]) -> Need {
     let probe = behavioural(criterion, lits);
     let fresh = probe && on_load(criterion);
     let action = probe && !fresh && (behaviour_words(criterion) || computes(criterion) || acts(criterion));
-    Need { probe, action, fresh, value: probe && computes(criterion), check: None, toggle: action && toggles(criterion) }
+    Need { probe, action, fresh, value: probe && computes(criterion), check: None, toggle: action && toggles(criterion), shows: named_placeholders(criterion) }
 }
 
 // ── Inline scripts ──────────────────────────────────────────────────────────
@@ -2071,6 +2108,20 @@ fn numeric_read(st: &Value) -> bool {
     is_read(st) && !weak_sel(st["sel"].as_str().unwrap_or("")) && (st["approx"].is_number() || st["all"].is_array() || st["num"].is_object())
 }
 
+/// A read of a form control rather than of what the page computed: a selector some action of
+/// the probe sets / selects / clicks, or one that names an input / select ("#weightInput",
+/// "#activitySelect", "input[type=number]"; its last compound only). `expect_value` alone says
+/// nothing: the 9B uses it on output elements too. Pure.
+fn control_read(st: &Value, steps: &[Value]) -> bool {
+    static CTRL: OnceLock<regex::Regex> = OnceLock::new();
+    if !is_read(st) {
+        return false;
+    }
+    let sel = st["sel"].as_str().unwrap_or("").trim();
+    let last = sel.rsplit([' ', '>', '+', '~']).next().unwrap_or(sel);
+    steps.iter().any(|a| is_action(a) && a["sel"].as_str().is_some_and(|s| s.trim() == sel)) || rx(&CTRL, r"(?i)^(?:input|select|textarea)\b|input|select(?:or)?$|dropdown|slider|picker").is_match(last)
+}
+
 /// A value criterion (computes / converts) is decided by a number read from the element that
 /// shows it, among its deciding reads (P1-3 a): a text `contains`, a class, a count or an order
 /// cannot prove a computation. Pure.
@@ -2092,43 +2143,82 @@ fn value_rule(deciding: &[Value]) -> Result<(), String> {
 
 /// Text a page shows while it has not rendered, or when it computed from missing data: never a
 /// value to expect ("Loading...", "Calculating", "NaN", "undefined", "null", "--", "…",
-/// "[object Object]"). Pure.
-pub fn placeholder_text(s: &str) -> bool {
+/// "[object Object]") unless its criterion asks for it (`Need::shows`). Which kind, if any. Pure.
+pub fn placeholder_kind(s: &str) -> Option<Placeholder> {
     static WAIT: OnceLock<regex::Regex> = OnceLock::new();
     static BROKEN: OnceLock<regex::Regex> = OnceLock::new();
     static DASH: OnceLock<regex::Regex> = OnceLock::new();
     let t = s.trim();
-    rx(&WAIT, r"(?i)^(?:[^:]{0,30}:\s*)?(?:loading|calculating)\b").is_match(t)
-        || rx(&BROKEN, r"(?:^|[^\w])(?:NaN|undefined|null|\[object Object\])(?:[^\w]|$)").is_match(t)
-        || rx(&DASH, r"(?i)^(?:-{2,}|[–—]+|…|\.{3})\s*[a-z%]{0,6}$").is_match(t)
+    if rx(&BROKEN, r"(?:^|[^\w])(?:NaN|undefined|null|\[object Object\])(?:[^\w]|$)").is_match(t) {
+        Some(Placeholder::Broken)
+    } else if rx(&WAIT, r"(?i)^(?:[^:]{0,30}:\s*)?(?:loading|calculating)\b").is_match(t) {
+        Some(Placeholder::Wait)
+    } else if rx(&DASH, r"(?i)^(?:-{2,}|[–—]+|…|\.{3})\s*[a-z%]{0,6}$").is_match(t) {
+        Some(if t.starts_with(['…', '.']) { Placeholder::Ellipsis } else { Placeholder::Dash })
+    } else {
+        None
+    }
 }
 
-/// The first expectation that expects a placeholder (`placeholder_text`): the reason, or None
-/// (P1-3 b). Pure.
-fn expects_placeholder(steps: &[Value]) -> Option<String> {
+/// The first expectation that expects a placeholder (`placeholder_kind`) its criterion does not
+/// ask for (`Need::shows`: "show a dash (—) until a bill is typed" may expect "—"; NaN or
+/// undefined never): the reason, or None (P1-3 b). Pure.
+fn expects_placeholder(steps: &[Value], shows: &[Placeholder]) -> Option<String> {
     steps.iter().filter(|s| is_read(s)).find_map(|s| {
         let said = s["contains"].as_str().or_else(|| s["equals"].as_str())?;
-        placeholder_text(said).then(|| format!("it expects \"{}\" on {}, a placeholder a broken page shows: expect the real value Nic should see", clip_chars(said.trim(), 30), at(s)))
+        let kind = placeholder_kind(said)?;
+        (kind == Placeholder::Broken || !shows.contains(&kind)).then(|| format!("it expects \"{}\" on {}, a placeholder a broken page shows: expect the real value Nic should see", clip_chars(said.trim(), 30), at(s)))
     })
 }
 
-/// A read after a `set` of a non-zero number that expects only zero ("set grams 30, expect the
-/// total ≈0"): the harness fails it when the element reads the same as before the first action
-/// (P1-3 b; a zero that was already there proves nothing). The step indices. Pure.
-pub fn zero_reads(steps: &[Value]) -> Vec<usize> {
-    let mut seen_set = false;
-    let mut out = Vec::new();
+/// An action that asks for a zero: a reset / clear / remove / undo control, a "none" or 0 option
+/// ("#resetTally", "#tip-0", select "none", set "0"). Pure.
+fn zeroing(st: &Value) -> bool {
+    static Z: OnceLock<regex::Regex> = OnceLock::new();
+    let z = rx(&Z, r"(?i)reset|clear|remov|delet|undo|\bnone\b|zero|no[-_ ]?tip|(?:^|[^0-9.])0$|[-_]0(?:[^0-9.]|$)");
+    is_action(st) && (z.is_match(st["sel"].as_str().unwrap_or("")) || st["value"].as_str().is_some_and(|v| z.is_match(v.trim())))
+}
+
+/// The probe's reads that expect only zero, sorted (`zero_reads`, `asked_zero_reads`): (after a
+/// `set` of a non-zero number with no zeroing action between, after a zeroing action). Pure.
+fn zero_marks(steps: &[Value]) -> (Vec<usize>, Vec<usize>) {
+    let (mut armed, mut asked) = (false, false);
+    let (mut z, mut n0) = (Vec::new(), Vec::new());
     for (i, st) in steps.iter().enumerate() {
-        if st["op"] == "set" && st["value"].as_str().and_then(lead_number).is_some_and(|x| x != 0.0) {
-            seen_set = true;
-        } else if seen_set && is_read(st) {
+        if zeroing(st) {
+            (armed, asked) = (false, true);
+        } else if st["op"] == "set" && st["value"].as_str().and_then(lead_number).is_some_and(|x| x != 0.0) {
+            armed = true;
+        } else if is_read(st) {
             let ns = expected_numbers(st);
             if !ns.is_empty() && ns.iter().all(|x| x.abs() < 1e-9) {
-                out.push(i);
+                if armed {
+                    z.push(i);
+                } else if asked {
+                    n0.push(i);
+                }
             }
         }
     }
-    out
+    (z, n0)
+}
+
+/// A read after a `set` of a non-zero number that expects only zero ("set grams 30, expect the
+/// total ≈0"), with no reset / clear / remove / zero option between (`zeroing`): a zero that was
+/// already there proves nothing, so when NOTHING the probe reads changed after its action (an
+/// action that really changed a control) and this read still shows what it showed before the
+/// first action, the harness fails the probe as "nothing changed" (P1-3 b). A probe that proves a
+/// change elsewhere ("set bill 80, click no tip, expect tip 0, expect total 80") passes. The step
+/// indices. Pure.
+pub fn zero_reads(steps: &[Value]) -> Vec<usize> {
+    zero_marks(steps).0
+}
+
+/// A read that expects only zero after a reset / clear / remove / zero option (`zeroing`): the
+/// zero was asked for, so it neither proves nor disproves a change (the harness leaves it out of
+/// "nothing changed", `n0`). The step indices. Pure.
+pub fn asked_zero_reads(steps: &[Value]) -> Vec<usize> {
+    zero_marks(steps).1
 }
 
 /// A criterion about switching something: a toggle, a switch, a conversion or a unit. Pure.
@@ -2192,9 +2282,24 @@ fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Opti
         }
         let pre = steps[..cut].to_vec();
         if need.value {
-            value_rule(&pre)?;
+            // A read of a control (the weight input's default, a select) is not the computed
+            // value: the truncation must never let it decide (review of P2-4).
+            let shown: Vec<Value> = pre.iter().filter(|s| !control_read(s, steps)).cloned().collect();
+            if let Err(why) = value_rule(&shown) {
+                if !pre.iter().any(numeric_read) {
+                    return Err(why);
+                }
+                // Its reads before the action only read controls: the computed number it reads
+                // after the action (the 9B's "expect the input's 165, select Active, expect the
+                // range") decides, so the whole probe runs.
+                let after: Vec<Value> = steps[cut..].iter().filter(|s| !control_read(s, steps)).cloned().collect();
+                if value_rule(&after).is_ok() {
+                    return Ok((steps.to_vec(), Some("on-load check: its reads before the first action only read a control, so the computed value it reads after the action decides".to_string())));
+                }
+                return Err("it reads only a control (an input or select) before its first action, never the computed value: expect the computed number on the element that shows it".to_string());
+            }
         }
-        let note = (cut < steps.len()).then(|| "on-load check: only its reads before the first action decide (an action can trigger the first render); the steps after it were not run".to_string());
+        let note =(cut < steps.len()).then(|| "on-load check: only its reads before the first action decide (an action can trigger the first render); the steps after it were not run".to_string());
         return Ok((pre, note));
     }
     if need.action {
@@ -2245,7 +2350,7 @@ pub fn enforce(answers: &mut Answers, needs: &[Need]) {
     for a in answers.list.iter_mut() {
         let Some(need) = a.idx.and_then(|i| needs.get(i)) else { continue };
         let Some(Ok(steps)) = &a.probe else { continue };
-        let checked = match expects_placeholder(steps) {
+        let checked = match expects_placeholder(steps, &need.shows) {
             Some(why) => Err(why),
             None => match &need.check {
                 Some(c) => pin(steps, c, &known),
@@ -2730,12 +2835,19 @@ var AC=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=funct
 /// before the bill, a tally before the first food). Empty-state copy ("No foods yet") never
 /// counts; of nested matches the innermost is kept; at most 4. NaN, undefined and [object Object]
 /// are never valid UI text: any visible leaf element showing one as a token counts, whatever it
-/// is named ("NaN%" in a progress label, P2-3); "null" / "Infinity" / "Loading" / "--" stay
-/// limited to output-like elements.
-const SMOKE_JS: &str = r#"var H=[];function site(){try{var f=String(new Error().stack||'').split('\n')[3]||'';var m=f.match(/:(\d+):\d+\)?\s*$/);if(m&&H.length<40)H.push(+m[1])}catch(x){}}
+/// is named ("NaN%" in a progress label, P2-3), unless the page's own markup already holds that
+/// leaf with that text (`ST`, `static_broken`: a typeof quiz's "undefined" answer button, a
+/// cheat-sheet cell "NaN"; an output-like container is read without such leaves, `live`) and no
+/// script replaced its text (`T`, a mutation observer: a script that writes "NaN g" over the same
+/// markup still counts) — only text the scripts put there counts. "null" / "Infinity" /
+/// "Loading" / "--" stay limited to output-like elements.
+const SMOKE_JS: &str = r#"var ST=__STATIC__,T=[];try{new MutationObserver(function(rs){rs.forEach(function(r){var e=r.type==='characterData'?r.target.parentElement:r.target;if(e&&(r.type==='characterData'||r.removedNodes.length)&&T.length<2000&&T.indexOf(e)<0)T.push(e)})}).observe(document,{childList:true,subtree:true,characterData:true})}catch(x){}
+var H=[];function site(){try{var f=String(new Error().stack||'').split('\n')[3]||'';var m=f.match(/:(\d+):\d+\)?\s*$/);if(m&&H.length<40)H.push(+m[1])}catch(x){}}
 function block(n){try{Object.defineProperty(window,n,{configurable:true,get:function(){site();throw new DOMException(n+' is blocked here (guard storage with try/catch)','SecurityError')}})}catch(x){}}
 block('localStorage');block('sessionStorage');
 function txt(e){return String(e.innerText||'').replace(/\s+/g,' ').trim()}
+function fixed(e){return !e.children.length&&T.indexOf(e)<0&&ST.indexOf((e.id?'#'+e.id:e.tagName.toLowerCase())+'|'+txt(e).toLowerCase())>=0}
+function live(el){if(!ST.length)return txt(el);if(!el.children.length)return fixed(el)?'':txt(el);var o=[],w=document.createTreeWalker(el,4),n;while((n=w.nextNode())){var p=n.parentElement;if(p&&p!==el&&fixed(p))continue;o.push(n.nodeValue)}return o.join(' ').replace(/\s+/g,' ').trim()}
 function stuck(){var pat=/(display|result|total|target|output|summary|amount|readout|answer|tally)/i;
 var ins=Array.prototype.filter.call(document.querySelectorAll('input'),function(i){return /^(text|number|search|tel|range|)$/.test((i.type||'').toLowerCase())&&i.getClientRects().length>0});
 var st=ins.length>0&&ins.every(function(i){return String(i.value).trim()!==''});
@@ -2743,9 +2855,9 @@ var c=[];Array.prototype.forEach.call(document.querySelectorAll('output,[id],[cl
 var n=(el.id||'')+' '+(typeof el.className==='string'?el.className:'');if(el.tagName!=='OUTPUT'&&!pat.test(n))return;
 if(!el.getClientRects().length)return;var cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none')return;
 var t=txt(el);if(!t||t.length>60)return;
-if(/^([^:]{0,30}:\s*)?(loading|calculating)(\.{1,3}|\u2026)?$/i.test(t)||/(^|[^\w])(NaN|undefined|null|-?Infinity|\[object Object\])(?![\w])/.test(t)||(st&&/^(-{2,}|[\u2013\u2014]+|\u2026|\.{3})\s*[a-z%]{0,6}$/i.test(t)))c.push(el)});
+if(/^([^:]{0,30}:\s*)?(loading|calculating)(\.{1,3}|\u2026)?$/i.test(t)||/(^|[^\w])(NaN|undefined|null|-?Infinity|\[object Object\])(?![\w])/.test(live(el))||(st&&/^(-{2,}|[\u2013\u2014]+|\u2026|\.{3})\s*[a-z%]{0,6}$/i.test(t)))c.push(el)});
 if(document.body)Array.prototype.forEach.call(document.body.querySelectorAll('*'),function(el){if(c.length>=12||el.children.length||c.indexOf(el)>=0)return;if(/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|TEXTAREA|INPUT|SELECT|OPTION|CODE|PRE|KBD|SAMP)$/.test(el.tagName))return;
-if(!el.getClientRects().length)return;var cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none')return;var t=txt(el);if(t&&t.length<=120&&/(^|[^\w])(NaN|undefined|\[object Object\])(?![\w])/.test(t))c.push(el)});
+if(!el.getClientRects().length)return;var cs=getComputedStyle(el);if(cs.visibility==='hidden'||cs.display==='none')return;var t=txt(el);if(t&&t.length<=120&&/(^|[^\w])(NaN|undefined|\[object Object\])(?![\w])/.test(t)&&!fixed(el))c.push(el)});
 c=c.filter(function(e){return !c.some(function(d){return d!==e&&e.contains(d)})});
 return c.slice(0,4).map(function(e){var k=typeof e.className==='string'?e.className.trim():'';return {sel:e.id?'#'+e.id:e.tagName.toLowerCase()+(k?'.'+k.split(/\s+/)[0]:''),text:txt(e).slice(0,40)}})}
 addEventListener('load',function(){setTimeout(function(){var PH=[];try{PH=stuck()}catch(x){}
@@ -2794,20 +2906,25 @@ setTimeout(function(){var again=[];try{again=stuck()}catch(x){}PH=PH.filter(func
 ///
 /// Before / after (P1-3 c): for a probe marked `change` (`C`, an acting value criterion) or with a
 /// zero read after a typed number (`z` steps, `zero_reads`), right before its first action the
-/// harness records what each text / value read after it shows (`S.b`). A marked probe whose every
-/// passing read after the action still shows that fails as `same` ("nothing changed after …"); a
-/// `z` read that still shows it fails on its own. A read whose element did not exist before
-/// counts as changed.
+/// harness records what each text / value read after it shows (`S.b`). When NO read after the
+/// action changed (`S.ch`), a marked probe whose passing reads still show that, or a probe whose
+/// `z` read still shows it, fails as `same` ("nothing changed after …"); one read that changed
+/// clears the probe. A read whose element did not exist before counts as changed. The rule needs
+/// an action that really changed a control (`S.ac`: a typed value that differs, a select moved to
+/// another option, a checkbox / radio that flipped, any other click): selecting the option
+/// already selected, or typing the value already there, proves nothing either way (review of
+/// P1-3 c). A zero asked for (`n0`, `asked_zero_reads`: after a reset / clear / zero option)
+/// counts neither way.
 const PROBE_JS: &str = r#"var P=__PROBES__;var C=__CHANGE__;var S=null;try{S=JSON.parse(window.name)}catch(x){}
 if(!S||S.k!=='__tfp'){S={k:'__tfp',p:0,s:0,R:[]}}
-if(S.s===0){S.w=[];S.b=null;S.ch=0;S.sm=[];S.sg='';try{localStorage.clear();sessionStorage.clear()}catch(x){}}
+if(S.s===0){S.w=[];S.b=null;S.ch=0;S.sm=[];S.sg='';S.ac=0;S.zs=-1;S.zg='';try{localStorage.clear();sessionStorage.clear()}catch(x){}}
 var WAIT=500,POLL=100,PATIENCE=1200,BIG=__BIG__;
 function mark(){try{document.documentElement.setAttribute('data-tf-probe-partial',JSON.stringify({p:S.p,s:S.s,R:S.R}))}catch(x){}}
 function save(){window.name=JSON.stringify(S);mark()}
 mark();
 try{if(window.navigation){navigation.addEventListener('navigate',function(e){if(e.navigationType==='reload'||e.hashChange||(e.destination&&e.destination.sameDocument)||!e.cancelable)return;e.preventDefault()})}}catch(x){}
 document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a&&!/^#/.test(a.getAttribute('href')||'')&&!(e.defaultPrevented))e.preventDefault()},false);
-function done(r){if(r.ok&&C[S.p]&&S.b&&!S.ch&&S.sm&&S.sm.length)r={ok:false,k:'same',at:S.sm[0],got:S.sg};if(S.w&&S.w.length)r.w=S.w;S.w=[];S.R.push(r);S.p++;S.s=0;if(S.p<P.length){save();location.reload()}else{window.name='';mark();document.documentElement.setAttribute('data-tf-probe',JSON.stringify(S.R))}}
+function done(r){if(r.ok&&S.b&&!S.ch&&S.ac){if(C[S.p]&&S.sm&&S.sm.length)r={ok:false,k:'same',at:S.sm[0],got:S.sg};else if(S.zs>=0)r={ok:false,k:'same',at:S.zs,got:S.zg}}if(S.w&&S.w.length)r.w=S.w;S.w=[];S.R.push(r);S.p++;S.s=0;if(S.p<P.length){save();location.reload()}else{window.name='';mark();document.documentElement.setAttribute('data-tf-probe',JSON.stringify(S.R))}}
 function all(q){try{return Array.prototype.slice.call(document.querySelectorAll(q))}catch(x){return null}}
 function fa(){var q=P[S.p]||[];for(var i=0;i<q.length;i++){if(/^(set|select|click)$/.test(q[i].op))return i}return -1}
 function watch(){return !!C[S.p]||(P[S.p]||[]).some(function(t){return t.z})}
@@ -2868,7 +2985,7 @@ return {ok:false,got:''}}
 function expect(st,i,t){var l=all(st.sel);var many=st.op==='expect_count'||st.op==='expect_order'||st.op==='expect_unit';var el=l?(l[st.nth||0]||null):null;
 var r=(!l||(!many&&!el)||(st.op==='expect_unit'&&!l.length))?{ok:false,k:'nomatch',got:''}:check(st,el,l);
 if(r.ok){var tv=st.op==='expect_text'||st.op==='expect_value';if(tv&&el&&!/^(INPUT|SELECT|TEXTAREA|OUTPUT)$/.test(el.tagName)&&String(el.innerText||el.textContent||'').length>BIG){S.w=(S.w||[]).concat([i])}
-if(tv&&el&&S.b&&i>fa()){var same=Object.prototype.hasOwnProperty.call(S.b,String(i))&&S.b[String(i)]===reads(el,st.op).join(' / ');if(same&&st.z){done({ok:false,k:'same',at:i,got:String(r.got).slice(0,120)});return}if(same){S.sm.push(i);if(!S.sg)S.sg=String(r.got).slice(0,120)}else{S.ch=1}}
+if(tv&&el&&S.b&&i>fa()){var same=Object.prototype.hasOwnProperty.call(S.b,String(i))&&S.b[String(i)]===reads(el,st.op).join(' / '),g=String(r.got).slice(0,120);if(!same){S.ch=1}else if(!st.n0){S.sm.push(i);if(!S.sg)S.sg=g;if(st.z&&S.zs<0){S.zs=i;S.zg=g}}}
 setTimeout(step,0);return}
 if(t<PATIENCE){setTimeout(function(){expect(st,i,t+POLL)},POLL);return}
 done({ok:false,k:r.k||'fail',at:i,got:String(r.got).slice(0,120)})}
@@ -2878,9 +2995,9 @@ if(st.op==='reload'){location.reload();return}
 if(/^expect_/.test(st.op)){expect(st,i,0);return}
 var l=all(st.sel);var el=l?(l[st.nth||0]||null):null;if(!el){done({ok:false,k:'nomatch',at:i});return}
 if(i===fa()&&!S.b&&watch())snap(i);
-if(st.op==='set'){if(tick(el)){var on=/^(true|1|on|yes|checked)$/i.test(st.value);if(el.checked!==on)el.click()}else{typeIn(el,st.value)}}
-else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}ev(el,'focus',false);el.selectedIndex=o;ev(el,'input',true);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
-else if(st.op==='click'){el.click()}
+if(st.op==='set'){if(tick(el)){var on=/^(true|1|on|yes|checked)$/i.test(st.value);if(el.checked!==on){el.click();S.ac=1}}else{var v0=el.value;typeIn(el,st.value);if(el.value!==v0)S.ac=1}}
+else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}if(el.selectedIndex!==o)S.ac=1;ev(el,'focus',false);el.selectedIndex=o;ev(el,'input',true);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
+else if(st.op==='click'){var c0=tick(el)?el.checked:null;el.click();if(c0===null||el.checked!==c0)S.ac=1}
 setTimeout(function(){if(E.length>n0){done({ok:false,k:'threw',at:i,got:E[n0]});return}step()},WAIT)}
 addEventListener('load',function(){setTimeout(step,150)});"#;
 
@@ -2899,7 +3016,60 @@ fn with_prelude(html: &str, js: &str) -> String {
 
 /// The page with the smoke harness injected. Pure.
 pub fn with_harness(html: &str) -> String {
-    with_prelude(html, &format!("{GUARDS}{SMOKE_JS}"))
+    let st = serde_json::to_string(&static_broken(html)).unwrap_or_else(|_| "[]".into());
+    with_prelude(html, &format!("{GUARDS}{SMOKE_JS}").replace(['\r', '\n'], "").replace("__STATIC__", &js_data(&st)))
+}
+
+/// The leaf elements the page's own markup writes with NaN / undefined / null / Infinity /
+/// [object Object] in their text, as the smoke keys them: "#id|text" (an element with an id) or
+/// "tag|text", the text whitespace-collapsed and lowercased (`SMOKE_JS` skips these, also inside
+/// an output-like container such as "#answers": static copy, not a value computed from missing
+/// data). Scripts, styles, templates and comments are left out; at most 200. Pure.
+pub fn static_broken(html: &str) -> Vec<String> {
+    static SKIP: OnceLock<regex::Regex> = OnceLock::new();
+    static LEAF: OnceLock<regex::Regex> = OnceLock::new();
+    static ID: OnceLock<regex::Regex> = OnceLock::new();
+    static BROKEN: OnceLock<regex::Regex> = OnceLock::new();
+    let body = rx(&SKIP, r"(?is)<!--.*?-->|<script\b.*?</script\s*>|<style\b.*?</style\s*>|<template\b.*?</template\s*>").replace_all(html, " ");
+    let mut out: Vec<String> = Vec::new();
+    for c in rx(&LEAF, r"<([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^<>]*)?)>([^<]+)</([a-zA-Z][a-zA-Z0-9-]*)\s*>").captures_iter(&body) {
+        if !c[1].eq_ignore_ascii_case(&c[4]) {
+            continue;
+        }
+        let text = c[3].replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !rx(&BROKEN, r"(?:^|[^\w])(?:NaN|undefined|null|-?Infinity|\[object Object\])(?:[^\w]|$)").is_match(&text) {
+            continue;
+        }
+        let key = match rx(&ID, r#"(?i)(?:^|\s)id\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#).captures(&c[2]) {
+            Some(m) => format!("#{}", m.get(1).or(m.get(2)).or(m.get(3)).map(|x| x.as_str()).unwrap_or("")),
+            None => c[1].to_ascii_lowercase(),
+        };
+        let k = format!("{key}|{}", text.to_lowercase());
+        if !out.contains(&k) && out.len() < 200 {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// JSON made safe inside an inline <script>: '<', '>', '&' and non-ASCII as \u escapes (a page
+/// without a charset still reads the data right). Pure.
+fn js_data(json: &str) -> String {
+    let mut data = String::new();
+    for ch in json.chars() {
+        match ch {
+            '<' | '>' | '&' => data.push_str(&format!("\\u{:04x}", ch as u32)),
+            c if c.is_ascii() => data.push(c),
+            c => {
+                let mut buf = [0u16; 2];
+                for u in c.encode_utf16(&mut buf) {
+                    data.push_str(&format!("\\u{:04x}", u));
+                }
+            }
+        }
+    }
+    data
 }
 
 /// What names a unit on a unit control: its spellings, plus its system ("Imperial" / "US" for
@@ -2915,7 +3085,7 @@ pub fn with_probes(html: &str, probes: &[Probe]) -> String {
     let steps: Vec<Vec<Value>> = probes
         .iter()
         .map(|p| {
-            let zero = zero_reads(&p.steps);
+            let (zero, asked) = (zero_reads(&p.steps), asked_zero_reads(&p.steps));
             p.steps
                 .iter()
                 .enumerate()
@@ -2923,6 +3093,9 @@ pub fn with_probes(html: &str, probes: &[Probe]) -> String {
                     let mut st = st.clone();
                     if zero.contains(&i) {
                         st["z"] = json!(1);
+                    }
+                    if asked.contains(&i) {
+                        st["n0"] = json!(1);
                     }
                     if let (true, Some(u), Some(o)) = (st["op"] == "expect_unit", st["unit"].as_str().map(String::from), st["other"].as_str().map(String::from)) {
                         st["U"] = json!(unit_pattern(&u));
@@ -2935,19 +3108,7 @@ pub fn with_probes(html: &str, probes: &[Probe]) -> String {
                 .collect()
         })
         .collect();
-    let mut data = String::new();
-    for ch in serde_json::to_string(&steps).unwrap_or_else(|_| "[]".into()).chars() {
-        match ch {
-            '<' | '>' | '&' => data.push_str(&format!("\\u{:04x}", ch as u32)),
-            c if c.is_ascii() => data.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for u in c.encode_utf16(&mut buf) {
-                    data.push_str(&format!("\\u{:04x}", u));
-                }
-            }
-        }
-    }
+    let data = js_data(&serde_json::to_string(&steps).unwrap_or_else(|_| "[]".into()));
     // Newlines go first (JSON has none raw), then the data.
     let change: Vec<u8> = probes.iter().map(|p| u8::from(p.change)).collect();
     let change = serde_json::to_string(&change).unwrap_or_else(|_| "[]".into());

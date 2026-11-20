@@ -2652,7 +2652,7 @@ fn a_pinned_check_without_a_probe_never_loops_the_coder() {
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")));
     assert_eq!(e.last_eval["verify"]["pinned_gaps"], 1);
     let voice = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap().voice_summary.clone().unwrap();
-    assert!(voice.starts_with("Built, but 1 thing couldn't be checked: couldn't be checked in a browser: On a fresh load") && !voice.contains("work"), "{voice}");
+    assert!(voice.starts_with("Built, but 1 thing couldn't be checked: On a fresh load") && !voice.contains("work"), "{voice}");
 }
 
 /// P1-2: a pinned probe that runs and finds its element missing after the verifier's retry is the
@@ -3016,7 +3016,8 @@ fn past_the_blocker_cap_the_true_total_is_stored() {
 
 /// P1-4: a criterion that needs no probe ("Has a dark card layout") quoted with code that is not
 /// in the page is the verifier's to fix: asked once more (told to copy the code verbatim), then
-/// staged as a note — never a Coder pass, and the build still works.
+/// staged as unchecked — never a Coder pass. Review round: a page that really lacks it (no viewport
+/// tag, the 9B quotes the standard one) must not stage as working, so it is not a mere note.
 #[test]
 fn a_stale_quote_for_a_layout_criterion_is_a_verifier_retry_not_a_coder_loop() {
     let root = tmp("stale-layout");
@@ -3042,8 +3043,11 @@ fn a_stale_quote_for_a_layout_criterion_is_a_verifier_retry_not_a_coder_loop() {
     assert!(!v[1].user.contains("gave no working probe"), "{}", v[1].user);
     let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
     assert_eq!(kb, vec!["couldn't confirm in the code: Has a dark card layout (the verifier's quoted code is not in the page)".to_string()]);
-    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")));
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "an unconfirmed criterion is never staged as working");
     assert!(!e.last_eval["verify"]["unmet"].as_u64().is_some_and(|u| u > 0));
+    assert_eq!(e.last_eval["verify"]["unchecked"], json!(["couldn't confirm in the code: Has a dark card layout (the verifier's quoted code is not in the page)"]));
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert_eq!(row.voice_summary.as_deref(), Some("Built, but 1 thing couldn't be checked: Has a dark card layout (the verifier's quoted code is not in the page)."), "{row:?}");
 }
 
 /// P3: the voice tells what fails from what could not be checked, never ends in "….", and a loop
@@ -3052,7 +3056,13 @@ fn a_stale_quote_for_a_layout_criterion_is_a_verifier_retry_not_a_coder_loop() {
 fn the_voice_tells_failures_from_unchecked_items_and_never_says_passes_on_a_loop() {
     let fail = vec!["probe failed for Shows the per-person total: got $0.00".to_string()];
     let unchecked = vec!["couldn't be checked in a browser: Remembers the bill (no probe was given)".to_string(), "verify did not judge: Has a reset".to_string()];
-    assert_eq!(review_voice(&[], &unchecked, &[]).unwrap(), "Built, but 2 things couldn't be checked: couldn't be checked in a browser: Remembers the bill (no probe was given); verify did not judge: Has a reset.");
+    assert_eq!(review_voice(&[], &unchecked, &[]).unwrap(), "Built, but 2 things couldn't be checked: Remembers the bill (no probe was given); verify did not judge: Has a reset.");
+    // Never "couldn't be checked: couldn't be checked in a browser: …" (the phrase once).
+    let one = vec!["couldn't be checked in a browser: On page load the tip and total show a dash (its probe failed)".to_string()];
+    let v = review_voice(&[], &one, &[]).unwrap();
+    assert!(v.starts_with("Built, but 1 thing couldn't be checked: On page load the tip") && v.matches("couldn't").count() == 1, "{v}");
+    let stale = vec!["couldn't confirm in the code: UI is responsive (the verifier's quoted code is not in the page)".to_string()];
+    assert_eq!(review_voice(&[], &stale, &[]).unwrap(), "Built, but 1 thing couldn't be checked: UI is responsive (the verifier's quoted code is not in the page).");
     let both = review_voice(&fail, &unchecked, &["a note".to_string()]).unwrap();
     assert!(both.starts_with("Built, but 1 thing still doesn't work and 2 couldn't be checked: probe failed for Shows the per-person total"), "{both}");
     let long = vec![format!("the page throws when its controls are used: {}", "x".repeat(200))];

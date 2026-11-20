@@ -934,6 +934,10 @@ impl StageErr {
     }
 }
 
+/// How an unproven item's blocker line starts (`gap_lines`, `quality::stale_line`): the spoken
+/// line drops it after its own "couldn't be checked" head (`review_voice`).
+const UNCHECKED_PREFIXES: [&str; 2] = ["couldn't be checked in a browser: ", "couldn't confirm in the code: "];
+
 /// At most this many known blockers are listed; past it the last line counts the rest.
 pub const BLOCKERS_MAX: usize = 16;
 
@@ -960,8 +964,11 @@ pub fn review_voice(failing: &[String], unchecked: &[String], notes: &[String]) 
         return None;
     };
     let tidy = |s: &str| s.trim_end_matches(['.', ';', ':', ',', ' ']).to_string();
+    // The head already says what kind of item it is: never "couldn't be checked: couldn't be
+    // checked in a browser: …" (the blocker lines keep their prefix).
+    let bare = |s: &str| UNCHECKED_PREFIXES.iter().find_map(|p| s.strip_prefix(p)).unwrap_or(s).to_string();
     // A clip ends in "…": never ";…" or ".…".
-    let items: Vec<String> = items.iter().map(|b| clip(&tidy(&one_line(b)), 90)).map(|c| c.strip_suffix('\u{2026}').map(|h| format!("{}\u{2026}", tidy(h))).unwrap_or(c)).collect();
+    let items: Vec<String> = items.iter().map(|b| clip(&tidy(&bare(&one_line(b))), 90)).map(|c| c.strip_suffix('\u{2026}').map(|h| format!("{}\u{2026}", tidy(h))).unwrap_or(c)).collect();
     let body = format!("{head}: {}", items.join("; "));
     let end = if body.ends_with(['.', '\u{2026}', '!', '?']) { "" } else { "." };
     Some(format!("{body}{end}"))
@@ -1935,9 +1942,10 @@ impl<'a> Worker<'a> {
                     verdict = "pass";
                 }
             }
-            // A hub build: an unproven behaviour, a criterion the verifier did not judge, or no
-            // per-criterion list at all is treated like an unmet one (AD-13 adds the last two).
-            let hub_gaps = hub && (!open_gap_lines.is_empty() || !judged.not_judged.is_empty() || judged.absent);
+            // A hub build: an unproven behaviour, a criterion the verifier did not judge, no
+            // per-criterion list at all, or one only claimed with code not in the page is treated
+            // like an unmet one (AD-13 adds the last three).
+            let hub_gaps = hub && (!open_gap_lines.is_empty() || !judged.not_judged.is_empty() || judged.absent || !stale_lines.is_empty());
             // Nic's pinned checks whose probe still finds an element missing after the retry (the
             // verifier was told what to fix) on a pass that is not the last: the page lacks what
             // the check needs, so the Coder gets another pass (AD-13, narrowed by P1-2).
@@ -1952,7 +1960,7 @@ impl<'a> Worker<'a> {
                 if judged.absent {
                     fixes.push("the verifier could not judge the build criterion by criterion: keep the page compact, with clear ids and labels for every feature".into());
                 }
-                for n in &judged.not_judged {
+                for n in judged.not_judged.iter().chain(&stale_lines) {
                     fixes.push(format!("{}: make sure it is clearly implemented, with clear ids and labels", clip(n, 200)));
                 }
             }
@@ -1983,6 +1991,9 @@ impl<'a> Worker<'a> {
                 unchecked.insert(0, "verify could not show code evidence per criterion".into());
             }
             unchecked.extend(judged.not_judged.iter().cloned());
+            // A criterion still claimed only with code that is not in the page after the retry
+            // is unproven, not a note: the build is not called working on it (P1-4 review).
+            unchecked.extend(stale_lines.iter().cloned());
             let mut blockers = verify_blockers.clone();
             for b in model_blockers {
                 if !blockers.contains(&b) {
@@ -2005,7 +2016,8 @@ impl<'a> Worker<'a> {
         // smoke-test and mark mergeable without reading its blockers.
         let hub = e.raw_intent.memory_reference["source"] == "playplace";
         let open_gaps = decision["gaps"].as_u64().unwrap_or(0).saturating_sub(decision["note_gaps"].as_u64().unwrap_or(0));
-        let open_items = decision["unmet"].as_u64().unwrap_or(0) + open_gaps + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true);
+        let stale = decision["stale"].as_u64().unwrap_or(0);
+        let open_items = decision["unmet"].as_u64().unwrap_or(0) + open_gaps + decision["not_judged"].as_u64().unwrap_or(0) + u64::from(decision["absent"] == true) + stale;
         let hub_unmet = hub && at_limit && open_items > 0;
         if wants_loop && (!at_limit || hub_unmet) {
             let to_agent = if decision["loop_to"] == "designer" { "designer" } else { "coder" };
@@ -2041,9 +2053,10 @@ impl<'a> Worker<'a> {
         // The true count (the list may end in an "… and N more" line), for the app's ready line.
         last_eval["known_blockers_total"] = json!(total);
         // The honest verdict (AD-13): staged with gate items, a failing probe, an unproven
-        // behaviour, a criterion the verifier did not judge or no per-criterion list at all, the
-        // build does NOT work yet, whatever the verifier said.
-        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true;
+        // behaviour, a criterion the verifier did not judge, no per-criterion list at all, or one
+        // only claimed with code that is not in the page (`stale`), the build does NOT work yet,
+        // whatever the verifier said.
+        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0;
         let verdict = if !works { "needs_fixes" } else if blockers.is_empty() { "pass" } else { "pass_with_notes" };
         last_eval["known_blockers"] = json!(blockers);
         last_eval["works"] = json!(works);

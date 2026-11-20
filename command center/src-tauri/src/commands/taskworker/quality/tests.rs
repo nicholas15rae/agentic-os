@@ -594,7 +594,7 @@ fn intent_checks_pin_nics_own_values() {
     // AD-13: the default's unit is the one selected on load (after the ranges: a cap cuts it first).
     assert_eq!(c[3].kind, CheckKind::Unit { unit: "lb".into(), other: "kg".into() });
     assert!(c[3].criterion.contains("pinned unit: lb;") && c[3].criterion.contains("not kg"), "{}", c[3].criterion);
-    assert_eq!(c[3].need(), Need { probe: true, action: false, fresh: true, value: false, check: Some(c[3].clone()), toggle: false });
+    assert_eq!(c[3].need(), Need { probe: true, action: false, fresh: true, value: false, check: Some(c[3].clone()), toggle: false, shows: vec![] });
     // Another domain, same rules: °F/°C with a stated default.
     let t = intent_checks("A thermostat card. Default to 72°F, with a °F/°C switch.");
     assert_eq!(t.len(), 3, "{t:#?}");
@@ -1522,14 +1522,14 @@ fn value_criteria_need_a_number_and_placeholders_are_never_expected() {
     let number_text = json!([{ "op": "select", "sel": "#mealSplitSelect", "value": "4" }, { "op": "expect_text", "sel": "#perMealDisplay", "contains": "37 g" }]);
     assert!(enforced_one(&crits, &needs, 3, number_text).0.is_ok(), "a number-aware contains is a number");
     for ph in ["Loading", "Loading...", "Target: Calculating…", "NaN", "NaN%", "undefined g", "null", "--", "-- g", "…", "...", "[object Object]"] {
-        assert!(placeholder_text(ph), "{ph}");
+        assert!(placeholder_kind(ph).is_some(), "{ph}");
         let p = json!([{ "op": "click", "sel": "#unitToggle" }, { "op": "expect_text", "sel": "#targetDisplay", "contains": ph }, { "op": "expect_value", "sel": "#weightInput", "approx": 74.8 }]);
         assert!(enforced_one(&crits, &needs, 2, p).0.unwrap_err().contains("a placeholder a broken page shows"), "{ph}");
     }
     // The critic's copied "Loading" for an on-load criterion is rejected too.
     assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "expect_text", "sel": "#targetDisplay", "contains": "Loading" }])).0.unwrap_err().contains("placeholder"));
     for ok in ["Carb loading", "No foods yet", "132 - 165 g", "kg", "Nancy", "nullable"] {
-        assert!(!placeholder_text(ok), "{ok}");
+        assert!(placeholder_kind(ok).is_none(), "{ok}");
     }
     assert_eq!(zero_reads(&parse_probe(&json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "click", "sel": "#add" }, { "op": "expect_text", "sel": "#total", "approx": 0 }, { "op": "expect_text", "sel": "#total", "approx": 30 }])).unwrap()), vec![2]);
     assert!(zero_reads(&parse_probe(&json!([{ "op": "set", "sel": "#g", "value": "0" }, { "op": "expect_text", "sel": "#total", "approx": 0 }])).unwrap()).is_empty(), "a zero typed in");
@@ -1680,7 +1680,7 @@ fn broken_values_in_any_visible_leaf_are_caught_in_a_real_browser() {
         p
     };
     let nan = w("nan.html", r#"<!doctype html><html><head><title>t</title></head><body><div class="bar"><span id="progressText" class="progress-text">0%</span></div><p class="note">Hello <b>x</b></p><span class="hint">null</span><script>document.getElementById('progressText').textContent = Math.round(undefined) + '%';</script></body></html>"#);
-    let obj = w("obj.html", r#"<!doctype html><html><head><title>t</title></head><body><li class="food">[object Object]</li><li class="food">Chicken</li><span hidden>NaN</span></body></html>"#);
+    let obj = w("obj.html", r#"<!doctype html><html><head><title>t</title></head><body><ul id="foods"></ul><span hidden>NaN</span><script>[{ name: 'x' }, 'Chicken'].forEach(function (f) { var li = document.createElement('li'); li.className = 'food'; li.textContent = String(f); document.getElementById('foods').appendChild(li); });</script></body></html>"#);
     let fine = w("fine.html", r#"<!doctype html><html><head><title>t</title></head><body><span id="progressText">0%</span><p>Nancy ate a banana; undefinedness is a word.</p></body></html>"#);
     let t = Duration::from_secs(30);
     let got = |p: &Path| match runtime_smoke(p, t) {
@@ -1690,5 +1690,151 @@ fn broken_values_in_any_visible_leaf_are_caught_in_a_real_browser() {
     assert_eq!(got(&nan), vec![("#progressText".to_string(), "NaN%".to_string())], "a leaf of any name; 'null' in a hint is left alone");
     assert_eq!(got(&obj), vec![("li.food".to_string(), "[object Object]".to_string())], "a hidden NaN is not shown");
     assert!(got(&fine).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── AD-13 review round 3: correct pages that failed, a broken page that passed ──
+
+/// Review: static copy is not a broken value. A typeof quiz's "undefined" answer button and a
+/// cheat-sheet cell "NaN" are the page's own markup (`static_broken`), so the any-leaf scan
+/// leaves them alone; the same words written by a script still count.
+#[test]
+fn static_markup_with_nan_or_undefined_is_not_a_stuck_value() {
+    let quiz = r#"<!doctype html><html><head><title>t</title><style>td{color:red}</style></head><body>
+<div id="answers"><button class="ans" data-a="undefined">undefined</button><button class="ans">object</button></div>
+<table><tr><td>typeof x (never declared)</td><td>undefined</td></tr><tr><td>0 / 0</td><td>NaN</td></tr><tr><td>typeof null</td><td class="result">null</td></tr></table>
+<p><small>Leave   blank if undefined</small></p><span id="pct">0%</span>
+<!-- <td>NaN%</td> --><script>var s = '<b>NaN</b>';</script></body></html>"#;
+    let st = static_broken(quiz);
+    assert_eq!(st, vec!["button|undefined", "td|undefined", "td|nan", "td|typeof null", "td|null", "small|leave blank if undefined"], "{st:?}");
+    assert!(with_harness(quiz).contains(r#"var ST=["button|undefined","td|undefined","td|nan","td|typeof null","td|null","small|leave blank if undefined"],T=[];"#));
+    assert_eq!(static_broken(r#"<p id="out">undefined g</p>"#), vec!["#out|undefined g"]);
+    let Some(dir) = edge_dir("staticnan") else { return };
+    let w = |name: &str, html: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, html).unwrap();
+        p
+    };
+    let ok = w("quiz.html", quiz);
+    let bad = w("quiz-bad.html", r#"<!doctype html><html><head><title>t</title></head><body><table><tr><td>0 / 0</td><td>NaN</td></tr></table><button class="ans" id="b2">two</button><span id="pct">0%</span>
+<script>document.getElementById('b2').textContent = String(undefined); document.getElementById('pct').textContent = Math.round(undefined) + '%';</script></body></html>"#);
+    let t = Duration::from_secs(30);
+    let got = |p: &Path| match runtime_smoke(p, t) {
+        Smoke::Ran { stuck, .. } => stuck,
+        o => panic!("{o:?}"),
+    };
+    assert!(got(&ok).is_empty(), "the quiz's own markup, also inside the output-like #answers and a .result cell");
+    let b = got(&bad);
+    assert!(b.contains(&("#b2".to_string(), "undefined".to_string())) && b.contains(&("#pct".to_string(), "NaN%".to_string())) && b.len() == 2, "{b:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Review: a criterion that asks for a dash empty state ("show a dash (—) until a bill is typed")
+/// may expect the dash; one that does not is still rejected, and a broken value never passes as
+/// asked for. A dash used as punctuation names nothing.
+#[test]
+fn a_placeholder_the_criterion_asks_for_may_be_expected() {
+    let crits: Vec<String> = ["On page load the tip and total show a dash (—) as their empty state.", "On page load the total shows the default — computed from the bill.", "Before any data the list shows \"…\" while it is loading."].iter().map(|s| s.to_string()).collect();
+    let needs: Vec<Need> = crits.iter().map(|c| need_of(c, &[])).collect();
+    assert_eq!(needs[0].shows, vec![Placeholder::Dash]);
+    assert!(needs[1].shows.is_empty(), "an em dash as punctuation");
+    assert_eq!(needs[2].shows, vec![Placeholder::Wait, Placeholder::Ellipsis]);
+    assert_eq!(named_placeholders("Shows '--' until the bill is typed"), vec![Placeholder::Dash]);
+    let dash = json!([{ "op": "expect_text", "sel": "#total", "equals": "—" }, { "op": "expect_text", "sel": "#tipAmount", "contains": "—" }]);
+    let (r, _) = enforced_one(&crits, &needs, 1, dash.clone());
+    assert_eq!(r.unwrap().len(), 2, "the dash it asked for");
+    assert!(enforced_one(&crits, &needs, 2, dash).0.unwrap_err().contains("a placeholder a broken page shows"));
+    assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "expect_text", "sel": "#total", "contains": "NaN" }])).0.unwrap_err().contains("placeholder"), "never a broken value");
+    assert!(enforced_one(&crits, &needs, 1, json!([{ "op": "expect_text", "sel": "#total", "contains": "Loading" }])).0.unwrap_err().contains("placeholder"), "only the kind it names");
+    assert!(enforced_one(&crits, &needs, 3, json!([{ "op": "expect_text", "sel": "#list", "contains": "…" }])).0.is_ok());
+    assert_eq!(placeholder_kind("— g"), Some(Placeholder::Dash));
+    assert_eq!(placeholder_kind("..."), Some(Placeholder::Ellipsis));
+    assert_eq!(placeholder_kind("undefined"), Some(Placeholder::Broken));
+}
+
+/// Review of P2-4: an on-load value criterion whose reads before the first action only read a
+/// control (the weight input's default) is never decided by that read: the computed value it
+/// reads after the action decides (the whole probe runs), and with no such read it is rejected.
+/// A probe that reads the computed value before acting is still cut there.
+#[test]
+fn an_on_load_value_criterion_is_never_decided_by_a_control_read() {
+    let (crits, needs) = run3_needs();
+    assert!(needs[0].fresh && needs[0].value);
+    let b4 = json!([{ "op": "expect_value", "sel": "#weightInput", "approx": 165 }, { "op": "select", "sel": "#activitySelect", "value": "active" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": "132 - 165 g" }]);
+    let (r, note) = enforced_one(&crits, &needs, 1, b4);
+    assert_eq!(r.unwrap().len(), 3, "the computed read after the select runs");
+    assert!(note.unwrap().contains("only read a control"));
+    let only_input = json!([{ "op": "expect_value", "sel": "#weightInput", "approx": 165 }, { "op": "select", "sel": "#activitySelect", "value": "active" }, { "op": "expect_value", "sel": "#activitySelect", "contains": "active" }]);
+    assert!(enforced_one(&crits, &needs, 1, only_input).0.unwrap_err().contains("reads only a control"));
+    // The select's own read before it acts is a control read too (the selector it selects).
+    let own = json!([{ "op": "expect_text", "sel": "#activity", "approx": 1 }, { "op": "select", "sel": "#activity", "value": "active" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }]);
+    assert_eq!(enforced_one(&crits, &needs, 1, own).0.unwrap().len(), 3);
+    let pre = json!([{ "op": "expect_value", "sel": "#weightInput", "approx": 165 }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }, { "op": "select", "sel": "#activitySelect", "value": "active" }, { "op": "expect_text", "sel": "#targetDisplay", "approx": 132 }]);
+    assert_eq!(enforced_one(&crits, &needs, 1, pre).0.unwrap().len(), 2, "a computed read before the action still decides alone");
+}
+
+/// Review of P1-3 b: a zero after a reset / clear / zero option is asked for, and a zero read
+/// is not a failure when another read in the probe changed.
+#[test]
+fn a_zero_after_a_reset_or_a_zero_option_is_asked_for() {
+    let steps = |v: Value| parse_probe(&v).unwrap();
+    let reset = steps(json!([{ "op": "set", "sel": "#foodGrams", "value": "30" }, { "op": "click", "sel": "#addFood" }, { "op": "expect_text", "sel": "#tally", "approx": 30 }, { "op": "click", "sel": "#resetTally" }, { "op": "expect_text", "sel": "#tally", "approx": 0 }]));
+    assert!(zero_reads(&reset).is_empty());
+    assert_eq!(asked_zero_reads(&reset), vec![4]);
+    let no_tip = steps(json!([{ "op": "set", "sel": "#bill", "value": "80" }, { "op": "click", "sel": "#tip-0" }, { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }, { "op": "expect_text", "sel": "#total", "approx": 80 }]));
+    assert!(zero_reads(&no_tip).is_empty());
+    assert_eq!(asked_zero_reads(&no_tip), vec![2]);
+    let none = steps(json!([{ "op": "set", "sel": "#bill", "value": "80" }, { "op": "select", "sel": "#tip", "value": "none" }, { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }]));
+    assert_eq!(asked_zero_reads(&none), vec![2]);
+    let plain = steps(json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "expect_text", "sel": "#total", "approx": 0 }]));
+    assert_eq!((zero_reads(&plain), asked_zero_reads(&plain)), (vec![1], vec![]));
+    let html = with_probes("<head></head>", &[probe(0, json!([{ "op": "set", "sel": "#bill", "value": "80" }, { "op": "click", "sel": "#tip-0" }, { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }]))]);
+    assert!(html.contains("\"n0\":1") && !html.contains("\"z\":1"));
+}
+
+/// Review of P1-3 b / c in a real browser: correct pages pass. A radio already checked (the
+/// default 4 meals) set again, or the select's current option chosen again, changes no control,
+/// so "nothing changed" is not asked of it. "Set bill 80, no tip, expect tip 0 and total 80"
+/// passes (the total changed), as does "add 30 g, expect 30, reset, expect 0". A page that never
+/// reacts still fails.
+#[test]
+fn correct_pages_with_defaults_and_zeros_pass_in_a_real_browser() {
+    let Some(dir) = edge_dir("defaults") else { return };
+    let page = dir.join("p.html");
+    std::fs::write(&page, r#"<!doctype html><html><head><title>t</title></head><body>
+<label><input type="radio" name="meals" id="meals-3" value="3">3</label><label><input type="radio" name="meals" id="meals-4" value="4" checked>4</label><label><input type="radio" name="meals" id="meals-5" value="5">5</label>
+<select id="split"><option value="3">3</option><option value="4" selected>4</option><option value="5">5</option></select>
+<p id="perMeal">37 g</p>
+<input id="bill" type="number"><button id="tip-0">No tip</button><button id="tip-15">15%</button><p id="tipAmount">$0.00</p><p id="total">$0.00</p>
+<input id="foodGrams" type="number"><button id="addFood">Add</button><button id="resetTally">Reset</button><p id="tally">0 g</p>
+<input id="g" type="number"><button id="dead">Add</button><p id="sum">0 g</p>
+<script>
+var pct = 0, tally = 0;
+function per(n) { document.getElementById('perMeal').textContent = Math.round(148.5 / n) + ' g'; }
+document.querySelectorAll('input[name=meals]').forEach(function (r) { r.addEventListener('change', function () { per(+r.value); }); });
+document.getElementById('split').addEventListener('change', function (e) { per(+e.target.value); });
+function tip() { var b = +document.getElementById('bill').value || 0; document.getElementById('tipAmount').textContent = '$' + (b * pct / 100).toFixed(2); document.getElementById('total').textContent = '$' + (b * (1 + pct / 100)).toFixed(2); }
+document.getElementById('bill').addEventListener('input', tip);
+document.getElementById('tip-0').addEventListener('click', function () { pct = 0; tip(); });
+document.getElementById('tip-15').addEventListener('click', function () { pct = 15; tip(); });
+document.getElementById('addFood').addEventListener('click', function () { tally += +document.getElementById('foodGrams').value || 0; document.getElementById('tally').textContent = tally + ' g'; });
+document.getElementById('resetTally').addEventListener('click', function () { tally = 0; document.getElementById('tally').textContent = '0 g'; });
+</script></body></html>"#).unwrap();
+    let chg = |i: usize, steps: Value| Probe { change: true, ..probe(i, steps) };
+    let probes = vec![
+        chg(0, json!([{ "op": "set", "sel": "#meals-4", "value": "true" }, { "op": "expect_text", "sel": "#perMeal", "approx": 37, "tol": 1 }])),
+        chg(1, json!([{ "op": "select", "sel": "#split", "value": "4" }, { "op": "expect_text", "sel": "#perMeal", "approx": 37, "tol": 1 }])),
+        chg(2, json!([{ "op": "set", "sel": "#meals-5", "value": "true" }, { "op": "expect_text", "sel": "#perMeal", "approx": 30, "tol": 1 }])),
+        chg(3, json!([{ "op": "set", "sel": "#bill", "value": "80" }, { "op": "click", "sel": "#tip-0" }, { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }, { "op": "expect_text", "sel": "#total", "approx": 80 }])),
+        probe(4, json!([{ "op": "set", "sel": "#foodGrams", "value": "30" }, { "op": "click", "sel": "#addFood" }, { "op": "expect_text", "sel": "#tally", "approx": 30 }, { "op": "click", "sel": "#resetTally" }, { "op": "expect_text", "sel": "#tally", "approx": 0 }])),
+        chg(5, json!([{ "op": "set", "sel": "#bill", "value": "80" }, { "op": "click", "sel": "#tip-0" }, { "op": "expect_text", "sel": "#tipAmount", "approx": 0 }])),
+        probe(6, json!([{ "op": "set", "sel": "#g", "value": "30" }, { "op": "click", "sel": "#dead" }, { "op": "expect_text", "sel": "#sum", "approx": 0 }])),
+        chg(7, json!([{ "op": "select", "sel": "#split", "value": "5" }, { "op": "expect_text", "sel": "#tally", "approx": 0 }])),
+    ];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(300)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert_eq!(r.iter().map(|x| x.passed).collect::<Vec<_>>(), vec![true, true, true, true, true, true, false, false], "{d:?}");
+    assert!(d[6].starts_with("nothing changed after set #g=30, click #dead: #sum still shows 0 g"), "{d:?}");
+    assert!(d[7].starts_with("nothing changed after select #split=5: #tally still shows 0 g"), "{d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

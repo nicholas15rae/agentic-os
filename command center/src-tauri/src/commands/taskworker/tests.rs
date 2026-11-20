@@ -12,7 +12,7 @@ const SECRET: &str = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789";
 
 pub(super) const GOOD_HTML: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Tip Calculator</title>
-<script src="https://cdn.tailwindcss.com"></script></head>
+<style>body{font-family:system-ui;background:#0b0d11;color:#eee}main{max-width:24rem;margin:auto}</style></head>
 <body class="bg-slate-950 text-slate-100 min-h-screen grid place-items-center">
 <main class="w-full max-w-sm rounded-2xl bg-slate-900 p-6 space-y-4">
 <h1 class="text-2xl font-semibold">Tip calculator</h1>
@@ -54,6 +54,7 @@ pub(super) fn settings_for(root: &Path) -> WorkerSettings {
         sources: Sources { tasks_db: None, notes_root: Some(root.join("notes")), hub_roots: vec![hub], staging_root: Some(root.join("staging")), ..Default::default() },
         known: vec![],
         embed_only: false,
+        runtime_smoke: false,
     }
 }
 
@@ -70,6 +71,11 @@ fn spec_json() -> String {
     .to_string()
 }
 
+/// A verifier's per-criterion list whose evidence really is in GOOD_HTML.
+pub(super) fn crit() -> Value {
+    json!([{ "criterion": "Shows the per-person total", "met": true, "evidence": "$(\"out\").textContent = \"$\" + (total / Math.max(1, Number($(\"split\").value))).toFixed(2)" }])
+}
+
 /// The canned happy-path reply for a stage.
 pub(super) fn default_reply(call: &ModelCall) -> String {
     match call.stage {
@@ -80,7 +86,7 @@ pub(super) fn default_reply(call: &ModelCall) -> String {
         "merge" => json!({ "build_brief": "Build a single card with bill, tip and split inputs and a per-person total.", "must_include": ["Bill", "Tip", "Split"], "fix_instructions": [], "voice_summary": "The brief is with the Coder." }).to_string(),
         "code" => format!("Here it is.\n```html\n{GOOD_HTML}\n```\n```json\n{{\"known_issues\": [], \"voice_summary\": \"Built the calculator in one page.\"}}\n```"),
         "audit" => json!({ "read_only_confirmed": true, "retrieved_context": [], "value_add_brief": "Looks consistent.", "discrepancies_flagged": [], "voice_summary": "The audit is clean." }).to_string(),
-        "verify" => json!({ "verdict": "pass", "voice_summary": "It meets the criteria." }).to_string(),
+        "verify" => json!({ "criteria": crit(), "verdict": "pass", "voice_summary": "It meets the criteria." }).to_string(),
         _ => "{}".into(),
     }
 }
@@ -427,7 +433,7 @@ fn verify_can_send_the_task_back_to_the_coder_with_fix_instructions() {
         Some(store),
         Box::new(|c, n| {
             Ok(match (c.stage, n) {
-                ("verify", 1) => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button"], "voice_summary": "One more pass: it needs a reset." }).to_string(),
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button"], "voice_summary": "One more pass: it needs a reset." }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -448,7 +454,7 @@ fn verify_can_send_the_task_back_to_the_coder_with_fix_instructions() {
 fn verify_wanting_more_at_the_limit_stages_with_known_blockers() {
     let root = tmp("limit");
     let store = leak_store();
-    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "verdict": "loop", "loop_to": "designer", "fix_instructions": ["Tighten the spacing"] }).to_string() } else { default_reply(c) })));
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": crit(), "verdict": "loop", "loop_to": "designer", "fix_instructions": ["Tighten the spacing"] }).to_string() } else { default_reply(c) })));
     let t = create_task(store, &CreateArgs { raw_intent: "tip calculator".into(), source: "typed".into(), ..Default::default() }, 1, &[]).unwrap().0;
     run(store, &fake);
     let e = get(store, &t.task_id);
@@ -1195,9 +1201,10 @@ fn prompts_stay_inside_the_budget() {
     e.prompt_spec = json!({ "goal": "g".repeat(5000), "requirements": vec!["r".repeat(300); 40], "acceptance_criteria": vec!["a".repeat(300); 40], "spec": { "coreFeatures": vec!["f".repeat(300); 40] } });
     e.design_artifacts = json!({ "notes": "d".repeat(30_000), "design_tokens": { "x": "t".repeat(9000) } });
     e.coder_brief = json!({ "build_brief": "b".repeat(9000), "must_include": vec!["m".repeat(300); 40] });
-    for (name, p) in [("spec", prompt_spec(&e)), ("design", prompt_design(&e, &["fix".repeat(500)])), ("merge", prompt_merge(&e, &["fix".repeat(500)])), ("code", prompt_code(&e, &["fix".repeat(500)])), ("verify", prompt_verify(&e, &"x".repeat(9000), &json!({ "a": "b".repeat(5000) }), false))] {
-        // ~4 chars per token: input ≤ ~4k tokens.
-        assert!(p.chars().count() <= 17_000, "{name} prompt is {} chars", p.chars().count());
+    for (name, p) in [("spec", prompt_spec(&e)), ("design", prompt_design(&e, &["fix".repeat(500)])), ("merge", prompt_merge(&e, &["fix".repeat(500)])), ("code", prompt_code(&e, &["fix".repeat(500)])), ("verify", prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), false))] {
+        // ~4 chars per token: input ≤ ~4k tokens; verify also reads the page's code (≤ ~6k tokens).
+        let cap = if name == "verify" { 24_000 } else { 17_000 };
+        assert!(p.chars().count() <= cap, "{name} prompt is {} chars", p.chars().count());
     }
 }
 
@@ -1212,7 +1219,7 @@ fn a_missing_task_note_never_sends_the_coder_back() {
         Some(store),
         Box::new(|c, _| {
             Ok(match c.stage {
-                "verify" => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Restore Tony's task note in memory"], "known_blockers": ["the memoryDoc path is wrong"], "voice_summary": "The note is gone." }).to_string(),
+                "verify" => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Restore Tony's task note in memory"], "known_blockers": ["the memoryDoc path is wrong"], "voice_summary": "The note is gone." }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -1261,7 +1268,7 @@ fn a_mixed_verify_loop_sends_only_the_build_fix_to_the_coder() {
         Some(store),
         Box::new(|c, n| {
             Ok(match (c.stage, n) {
-                ("verify", 1) => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button", "update Tony's task note"], "voice_summary": "One more pass." }).to_string(),
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button", "update Tony's task note"], "voice_summary": "One more pass." }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -1289,7 +1296,7 @@ fn a_real_memory_leak_fix_still_loops_the_coder() {
         Some(store),
         Box::new(|c, n| {
             Ok(match (c.stage, n) {
-                ("verify", 1) => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Fix the memory leak in the timer"] }).to_string(),
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Fix the memory leak in the timer"] }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -1333,20 +1340,20 @@ fn librarian_discrepancies_are_scoped() {
 }
 
 #[test]
-fn external_deps_are_listed_but_never_block() {
+fn external_deps_block_the_gate_the_page_must_work_offline() {
     let spec = json!({ "spec": { "coreFeatures": ["Bill amount input", "Tip percentage selector", "Split between people"], "screens": ["Calculator"] } });
     let ok = evaluate_html(GOOD_HTML, &spec);
     assert_eq!(ok["complete"], true, "{ok}");
     assert_eq!(ok["missing"], json!([]), "{ok}");
-    assert_eq!(ok["checks"]["externalDeps"], json!(["cdn.tailwindcss.com"]), "{ok}");
+    assert_eq!(ok["checks"]["externalDeps"], json!([]), "{ok}");
     let more = GOOD_HTML.replace(
         "</head>",
         r#"<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter"><link href='//unpkg.com/x@1/x.css' rel=stylesheet><script src="https://cdn.tailwindcss.com/3.4"></script><script src="local.js"></script><link rel="icon" href="data:,"></head>"#,
     );
     let r = evaluate_html(&more, &spec);
-    assert_eq!(r["checks"]["externalDeps"], json!(["cdn.tailwindcss.com", "fonts.googleapis.com", "unpkg.com"]), "{r}");
-    assert_eq!(r["complete"], true);
-    assert_eq!(r["missing"], json!([]));
+    assert_eq!(r["checks"]["externalDeps"], json!(["fonts.googleapis.com", "unpkg.com", "cdn.tailwindcss.com"]), "{r}");
+    assert_eq!(r["complete"], false, "a CDN dependency fails the gate");
+    assert!(r["missing"][0].as_str().unwrap().contains("work offline"), "{r}");
     // An <a href> to another site is not a dependency.
     assert_eq!(external_deps(r#"<a href="https://example.com/x">x</a>"#), Vec::<String>::new());
 }
@@ -1788,6 +1795,126 @@ fn a_failed_model_call_is_recorded_as_an_error() {
     let p = fake.transcript.page(&transcript::task_conv(&t.task_id), None, 400).unwrap().unwrap();
     let err = p.messages.iter().find(|m| m.kind == "error" && m.from == "prompter").expect("an error from the Prompter");
     assert!(!err.ok && err.summary.contains("model exploded"), "{}", err.summary);
+}
+
+// ── Quality gate (2026-11-20 protein run: passed every stage, core feature broken) ──
+
+/// A verifier that says "pass" but marks a criterion unmet (or quotes code that isn't in the
+/// page) sends the build back to the Coder with that criterion as the fix.
+#[test]
+fn an_unmet_or_unevidenced_criterion_overrides_a_pass() {
+    let root = tmp("evidence");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("verify", 1) => json!({ "criteria": [
+                    { "criterion": "Shows the per-person total", "met": true, "evidence": "$(\"out\").textContent = \"$\"" },
+                    { "criterion": "Saves the grams of each food", "met": true, "evidence": "slots[i].grams = Number(e.target.value)" },
+                    { "criterion": "Has a reset button", "met": false, "evidence": "", "fix": "add a Reset button that clears the inputs" }
+                ], "verdict": "pass", "voice_summary": "Looks fine." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "the false pass became one loop");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("no working code found for: Saves the grams of each food"), "{}", codes[1].user);
+    assert!(codes[1].user.contains("not met: Has a reset button (add a Reset button"), "{}", codes[1].user);
+    // The verifier read the page's code, Nic's words and the criteria.
+    let v = fake.calls_for("verify");
+    assert!(v[0].user.contains("Number($(\"bill\").value)") && v[0].user.contains("Build me a tip calculator") && v[0].user.contains("1. Shows the per-person total"), "{}", v[0].user);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["evidence_found"], true);
+}
+
+/// No per-criterion list: the stage is retried; on the last attempt it passes with the gap named.
+#[test]
+fn a_verify_without_evidence_is_retried_then_named_as_a_blocker() {
+    let root = tmp("noevidence");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.count("verify"), STAGE_ATTEMPTS as usize);
+    assert!(e.last_eval["known_blockers"].to_string().contains("could not show code evidence"), "{}", e.last_eval);
+}
+
+/// Nic's exact value ("165 lbs") is carried into the spec, brief and code prompts, and a page
+/// without it fails the gate and loops with that value as the fix.
+#[test]
+fn nics_exact_values_are_carried_and_checked() {
+    let root = tmp("literals");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{}\n```", GOOD_HTML.replace("value=\"84.50\"", "value=\"165\"").replace("Bill amount</label>", "Bill amount (lb)</label>")),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator. I'm 165 lbs, use that as the default.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1);
+    for st in ["spec", "merge", "code", "verify"] {
+        assert!(fake.calls_for(st)[0].user.contains("Nic's exact values") && fake.calls_for(st)[0].user.contains("165 lbs"), "{st}");
+    }
+    let merges = fake.calls_for("merge");
+    assert!(merges[1].user.contains("\"165 lbs\""), "{}", merges[1].user);
+    assert_eq!(e.last_eval["checks"]["literals"]["missing"], 0);
+}
+
+/// A page that still breaks a gate rule on the last allowed pass is handed to review with the
+/// open items as known blockers, instead of the whole build failing.
+#[test]
+fn a_usable_page_still_failing_the_gate_at_the_limit_is_staged_with_blockers() {
+    let root = tmp("gatelimit");
+    let store = leak_store();
+    let cdn = GOOD_HTML.replace("</head>", "<script src=\"https://cdn.tailwindcss.com\"></script></head>");
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{cdn}\n```") } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    assert_eq!(fake.count("code"), 1 + MAX_LOOP_ITERATIONS as usize);
+    assert!(e.last_eval["known_blockers"].to_string().contains("work offline"), "{}", e.last_eval);
+    assert!(fake.calls_for("code")[1].user.contains("cdn.tailwindcss.com"), "the loop told the Coder what to remove");
+    // The rules the Coder gets forbid the CDN up front.
+    assert!(fake.calls_for("code")[0].user.contains("no CDN") && !fake.calls_for("code")[0].user.contains("Tailwind via"));
+}
+
+#[test]
+fn the_gate_flags_missing_ids_and_unguarded_storage_and_reads_runtime_errors() {
+    let spec = json!({ "spec": { "coreFeatures": ["Bill amount input"], "screens": ["Calculator"] } });
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "const saved = localStorage.getItem('tip'); document.getElementById('ghost'); $(\"go\").addEventListener");
+    let r = evaluate_build(&bad, &spec, "", None);
+    assert_eq!(r["complete"], false);
+    let m = r["missing"].to_string();
+    assert!(m.contains("#ghost") && m.contains("try/catch"), "{m}");
+    // With the runtime smoke clean, its verdict on storage wins over the scan.
+    let fixed = bad.replace("document.getElementById('ghost'); ", "");
+    assert_eq!(evaluate_build(&fixed, &spec, "", Some(vec![]))["complete"], true);
+    let crashed = evaluate_build(GOOD_HTML, &spec, "", Some(vec!["the page throws on load: Uncaught TypeError: x is null".into()]));
+    assert_eq!(crashed["complete"], false);
+    assert!(crashed["missing"].to_string().contains("throws on load"));
+    // An empty spec sub-object falls back to the requirements for coverage.
+    let empty = json!({ "requirements": ["Currency converter with exchange history chart"], "spec": { "coreFeatures": [], "screens": [] } });
+    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", None)["checks"]["items"], 1);
+    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", None)["complete"], false);
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

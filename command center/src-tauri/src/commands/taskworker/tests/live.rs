@@ -123,6 +123,8 @@ impl SmokeEnv {
     fn new(root: &Path, allm: Option<(super::super::super::allm::AllmReader, BTreeMap<String, String>)>) -> Self {
         let mut settings = settings_for(root);
         settings.librarian_audit = true;
+        // The real gate: headless Edge runtime smoke on the staged page (skipped without Edge).
+        settings.runtime_smoke = true;
         // The Librarian reads the task history through its read-only connection.
         settings.sources.tasks_db = Some(root.join("tasks.db"));
         if let Some(s) = env_opt("TF_SMOKE_STAGING") {

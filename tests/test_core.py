@@ -26,6 +26,13 @@ class CoreEndpointTests(unittest.TestCase):
         self.assertEqual(data.get("status"), "healthy")
         self.assertIn("agents", data)
 
+    def test_ping_is_tiny_and_ok(self):
+        # The Command Center heartbeat (Thought-to-Product Phase 1) probes this every 10 s.
+        status, data = self.h.api("GET", "/api/ping")
+        self.assertEqual(status, 200)
+        self.assertIs(data.get("ok"), True)
+        self.assertIsInstance(data.get("t"), float)
+
     def test_three_agents_present(self):
         _, data = self.h.api("GET", "/api/status")
         names = {a.get("name") for a in data.get("agents", [])}

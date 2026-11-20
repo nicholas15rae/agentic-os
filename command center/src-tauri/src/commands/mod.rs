@@ -10,6 +10,7 @@ pub mod envfile;
 pub mod gmail;
 pub mod instagram;
 pub mod introspect;
+pub mod lifecycle;
 pub mod maps;
 pub mod market;
 pub mod mcp;

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { SECTIONS, useNav } from "@/stores/nav";
 import { usePipelines } from "@/features/os/pipeline-store";
+import { LifecycleRail } from "@/features/lifecycle/LifecycleRail";
 
 /** Slim icon rail on desktop/tablet. */
 export function SideRail() {
@@ -25,6 +26,7 @@ export function SideRail() {
           {id === "playplace" && unseen > 0 && <span className="absolute -right-0.5 -top-0.5 grid size-4 place-items-center rounded-full bg-amber font-mono text-[9px] font-bold text-canvas">{unseen}</span>}
         </button>
       ))}
+      <LifecycleRail />
     </nav>
   );
 }

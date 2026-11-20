@@ -18,6 +18,7 @@ import { useLayout } from "@/core/widgets/layout-store";
 import { cc } from "@/lib/cc-api";
 import { platform } from "@/lib/platform";
 import { CommandSection } from "@/sections/CommandSection";
+import { useRefresh } from "@/features/lifecycle/refresh";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -67,6 +68,8 @@ function HudApp() {
 function MainApp() {
   const section = useNav((s) => s.section);
   const View = SECTION_VIEWS[section];
+  // Phase 1 Refresh: a new epoch re-mounts only the section view (audio lives outside <main>).
+  const epoch = useRefresh((s) => s.epoch);
   useReminderScheduler();
   useOsBoot();
   useCueScheduler();
@@ -80,7 +83,7 @@ function MainApp() {
         <SideRail />
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar />
-          <main className="min-h-0 flex-1">
+          <main key={epoch} className="min-h-0 flex-1">
             <Suspense fallback={<div className="grid h-full place-items-center font-mono text-xs text-ink-3">loading…</div>}>
               <View />
             </Suspense>

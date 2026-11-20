@@ -332,6 +332,12 @@ def check_agent(name: str) -> dict:
 
 # ─── Routes: Status ───────────────────────────────────────────────
 
+@app.get("/api/ping")
+def ping():
+    """Heartbeat for the Command Center's gateway-health indicator: no I/O, constant time."""
+    return {"ok": True, "t": time.time()}
+
+
 @app.get("/api/status")
 def get_status():
     agents = [check_agent(a) for a in AGENT_NAMES]

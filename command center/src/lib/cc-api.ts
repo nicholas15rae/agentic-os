@@ -187,6 +187,23 @@ async function sync(c: Collection) {
   }
 }
 
+/**
+ * Hard Refresh (Phase 1): drop every cached collection and pull it fresh from the gateway
+ * (`since` = 0). Views stay subscribed, so they re-render with the server's state. Returns how
+ * many collections were re-synced. Touches no audio / Spotify / TTS state.
+ */
+export async function resyncCollections(): Promise<number> {
+  const live = [...stores.entries()].filter(([, s]) => s.subscribers.size > 0);
+  for (const [, s] of stores) {
+    s.since = 0;
+    s.items.clear();
+    s.loaded = false;
+  }
+  await Promise.all(live.map(([c]) => sync(c)));
+  for (const [, s] of live) emit(s);
+  return live.length;
+}
+
 function startPolling(c: Collection) {
   const s = storeFor(c);
   if (s.timer) return;

@@ -4,6 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{agents, bridge, claude_fix, clihub, devqueue, introspect, instagram, modellab, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, telemetry, voice};
+use commands::lifecycle;
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -20,6 +21,7 @@ pub fn run() {
         .manage(claude_fix::ClaudeFixState::default())
         .manage(audio::commands::AudioEngineState::default())
         .manage(introspect::IntrospectState::default())
+        .manage(lifecycle::LifecycleState::default())
         .setup(|app| {
             use tauri::Manager;
             // System Map: app uptime counts from here.
@@ -56,6 +58,8 @@ pub fn run() {
             tauri::async_runtime::spawn(memory::auto_monthly_loop(app.handle().clone()));
             // Phone HUD → desktop: Tony turns, pipelines, kill switch / compute mode.
             tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
+            // Thought-to-Product Phase 1: the gateway heartbeat (`gateway-health`, off the UI thread).
+            tauri::async_runtime::spawn(lifecycle::health_loop(app.handle().clone()));
             // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
             tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
             // Renew the Instagram long-lived token before its 60 days run out.
@@ -214,6 +218,10 @@ pub fn run() {
             claude_fix::dev_fix_cancel,
             introspect::system_introspect,
             introspect::app_uptime,
+            lifecycle::gateway_health,
+            lifecycle::gateway_reconnect,
+            lifecycle::app_exit_check,
+            lifecycle::app_exit,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Jarvis Command Center")

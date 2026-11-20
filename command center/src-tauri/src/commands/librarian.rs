@@ -322,7 +322,9 @@ fn history(p: &mut Packet, db: &Path, q: &Query, known: &[String]) {
 /// tolerating their absence and older shapes: `works: false` or verdict `needs_fixes` → "needs
 /// fixes (N known blockers), not reusable"; verdict `unverified` → "unverified (N things couldn't
 /// be checked), not proven"; `works: true` → "ready"; a review_ready record from before the
-/// verdict existed → "staged, never verified"; anything else → its status ("failed", "unknown").
+/// verdict existed → "needs fixes (N known blockers), not reusable" when it lists blockers, else
+/// "staged before verdicts were recorded, not proven to work"; anything else → its status
+/// ("failed", "unknown"). Only "ready" means reusable.
 /// Pure.
 pub fn staged_label(v: &Value) -> String {
     let status = v["status"].as_str().unwrap_or("unknown");
@@ -341,7 +343,11 @@ pub fn staged_label(v: &Value) -> String {
         return "ready".into();
     }
     if status == "review_ready" {
-        return if total > 0 { format!("staged with {}, never verified", plural(total, "known blocker", "known blockers")) } else { "staged, never verified".into() };
+        // A record from before the verdict fields: its blockers were found by the verify pass
+        // (AD-13 round 5: "staged with 7 known blockers, never verified" for a verified, failing
+        // build), so any blocker means it needs fixes. A blocker-free one may or may not have been
+        // verified, so it is not called ready either.
+        return if total > 0 { format!("needs fixes ({}), not reusable", plural(total, "known blocker", "known blockers")) } else { "staged before verdicts were recorded, not proven to work".into() };
     }
     status.to_string()
 }
@@ -367,7 +373,7 @@ fn staging_outputs(p: &mut Packet, root: &Path, q: &Query, known: &[String]) {
     let own = q.slug.unwrap_or("");
     let related: Vec<String> = projects.iter().filter(|(_, n, _)| n != own && (q.keywords.is_empty() || hits(&n.replace('-', " "), q.keywords) > 0)).take(5).map(|(_, n, s)| format!("{n} ({s})")).collect();
     if !related.is_empty() {
-        p.push(&root.display().to_string(), "internal", &format!("Related staged projects (names and status only; their code was not read): {}. Only a project marked \"ready\" may be suggested for reuse; one that needs fixes or is unverified is never ready-to-use or reusable", related.join("; ")), known);
+        p.push(&root.display().to_string(), "internal", &format!("Related staged projects (names and status only; their code was not read): {}. Only a project marked \"ready\" may be suggested for reuse; anything else (needs fixes, unverified, staged before verdicts were recorded, failed, unknown) is never ready-to-use or reusable", related.join("; ")), known);
     }
     if !own.is_empty() {
         if let Ok(dir) = super::staging::resolve(root, own, "x").map(|x| x.parent().map(Path::to_path_buf).unwrap_or_default()) {
@@ -844,7 +850,7 @@ mod tests {
         assert!(all.contains("tip-calculator.md"), "{all}");
         assert!(all.contains("SKILL.md"), "{all}");
         assert!(all.contains("Related earlier tasks"), "{all}");
-        assert!(all.contains("tip-calculator-v1 (staged, never verified)"), "{all}");
+        assert!(all.contains("tip-calculator-v1 (staged before verdicts were recorded, not proven to work)"), "{all}");
         assert!(!all.contains("should-never-be-read") && !all.contains("calculator-token"), "secret-looking files must not be read: {all}");
         assert!(p.chars() <= PACKET_MAX);
         drop(store);
@@ -1085,7 +1091,7 @@ mod tests {
         let kws = keywords(&["memory scrolls widget preview"], 8);
         let p = gather_local(&Sources { staging_root: Some(staging), ..Default::default() }, &Query { task_id: None, keywords: &kws, slug: None }, &[]);
         let all = serde_json::to_string(&p).unwrap();
-        assert!(all.contains("memory-widget (staged, never verified)"), "{all}");
+        assert!(all.contains("memory-widget (staged before verdicts were recorded, not proven to work)"), "{all}");
         assert!(!all.contains(SCROLLS_PREVIEW_DIR), "{all}");
     }
 
@@ -1117,13 +1123,21 @@ mod tests {
         // Five of the seven are listed (the newest first); every label is checked on its own.
         assert!(!line.contains("(review_ready)"), "{line}");
         let label = |body: &str| staged_label(&serde_json::from_str(body).unwrap());
-        assert_eq!(label(fixtures[0].1), "staged, never verified");
+        assert_eq!(label(fixtures[0].1), "staged before verdicts were recorded, not proven to work");
         assert_eq!(label(fixtures[1].1), "needs fixes (6 known blockers), not reusable");
         assert_eq!(label(fixtures[2].1), "needs fixes (3 known blockers), not reusable", "verdict alone, the list counted");
         assert_eq!(label(fixtures[3].1), "unverified (2 things couldn't be checked), not proven to work");
         assert_eq!(label(fixtures[4].1), "ready");
         assert_eq!(label(fixtures[5].1), "failed");
-        assert_eq!(label(r#"{"status":"review_ready","known_blockers":["x"]}"#), "staged with 1 known blocker, never verified");
+        // AD-13 round 5: an older record a verify pass failed (the real protein-intake-tracker
+        // shape: iteration 2, probe failures, no works/verdict) needs fixes; it was verified.
+        assert_eq!(label(r#"{"status":"review_ready","known_blockers":["x"]}"#), "needs fixes (1 known blocker), not reusable");
+        let legacy_failed = r#"{"at":1795176790057,"iteration":2,"known_blockers":["the script looks up ids no element has: #proteinGrams","the page throws when its controls are used: Uncaught TypeError","probe failed again for Toggle switch: got Loading...; expected ≈132","a","b","c","d"],"status":"review_ready","title":"Protein Intake Tracker"}"#;
+        assert_eq!(label(legacy_failed), "needs fixes (7 known blockers), not reusable");
+        assert!(!label(legacy_failed).contains("never verified"));
+        // A blocker-free older record is not "ready" and not "never verified" (it may have passed).
+        assert_eq!(label(r#"{"status":"review_ready","iteration":2,"known_blockers":[]}"#), "staged before verdicts were recorded, not proven to work");
+        assert!(line.contains("anything else") && line.contains("staged before verdicts were recorded"), "{line}");
         assert_eq!(label(r#"{"works":false}"#), "needs fixes (0 known blockers), not reusable");
         assert_eq!(label("{}"), "unknown");
         // The broken file reads "unknown"; nothing in the staging dir was changed.

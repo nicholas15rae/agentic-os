@@ -289,7 +289,7 @@ impl IntentCheck {
     }
     pub fn need(&self) -> Need {
         let convert = matches!(self.kind, CheckKind::Convert { .. });
-        Need { probe: true, action: convert, fresh: !convert, value: convert, check: Some(self.clone()), toggle: false, shows: Vec::new() }
+        Need { probe: true, action: convert, fresh: !convert, value: convert, check: Some(self.clone()), toggle: false, shows: Vec::new(), zero: false }
     }
     /// Its probe proves a number (Default / Convert): a read of a big container cannot.
     fn numeric(&self) -> bool {
@@ -702,6 +702,10 @@ pub struct Need {
     /// a bill is typed": `Placeholder::Dash`): its probe may expect that text
     /// (`expects_placeholder`); a broken value (NaN, undefined) never.
     pub shows: Vec<Placeholder>,
+    /// The criterion itself names a zero outcome ("makes the tip $0.00", "never below 0", "no
+    /// tip"): a zero read is what it asks for, so `zero_rule` lets one through when the probe
+    /// proves a change on another element (AD-13 round 5, `names_zero`).
+    pub zero: bool,
 }
 
 /// A kind of placeholder text (`placeholder_kind`).
@@ -793,7 +797,15 @@ pub fn need_of(criterion: &str, lits: &[Literal]) -> Need {
     let shows = named_placeholders(criterion);
     // A criterion that asks for a placeholder ("the tip and total show a dash (—) on load") is
     // checked by that text, not by a number.
-    Need { probe, action, fresh, value: probe && computes(criterion) && shows.is_empty(), check: None, toggle: action && toggles(criterion), shows }
+    Need { probe, action, fresh, value: probe && computes(criterion) && shows.is_empty(), check: None, toggle: action && toggles(criterion), shows, zero: names_zero(criterion) }
+}
+
+/// A criterion that names a zero outcome: a 0 among its numbers ("$0.00", "never below 0", "back
+/// to 0 g"), or zero / none / nothing / no tip / never negative (AD-13 round 5: "Choosing the No
+/// tip option makes the tip $0.00", "grams left …, never below 0"). Pure.
+fn names_zero(criterion: &str) -> bool {
+    static Z: OnceLock<regex::Regex> = OnceLock::new();
+    numbers_in(criterion).iter().any(|x| x.abs() < 1e-9) || rx(&Z, r"(?i)\b(?:zero|none|nothing|no[- ]tip|never (?:goes )?(?:below|under|less than|negative))\b").is_match(criterion)
 }
 
 // ── Inline scripts ──────────────────────────────────────────────────────────
@@ -2177,11 +2189,20 @@ fn expects_placeholder(steps: &[Value], shows: &[Placeholder]) -> Option<String>
 }
 
 /// An action that asks for a zero: a reset / clear / remove / undo control, a "none" or 0 option
-/// ("#resetTally", "#tip-0", select "none", set "0"). Pure.
+/// ("#resetTally", "#tip-0", "#tipNone", `button[data-pct="0"]`, select "none", "0%" or "0.00",
+/// set "0"). Pure.
 fn zeroing(st: &Value) -> bool {
     static Z: OnceLock<regex::Regex> = OnceLock::new();
+    static CAMEL: OnceLock<regex::Regex> = OnceLock::new();
+    static ATTR: OnceLock<regex::Regex> = OnceLock::new();
     let z = rx(&Z, r"(?i)reset|clear|remov|delet|undo|\bnone\b|zero|no[-_ ]?tip|(?:^|[^0-9.])0$|[-_]0(?:[^0-9.]|$)");
-    is_action(st) && (z.is_match(st["sel"].as_str().unwrap_or("")) || st["value"].as_str().is_some_and(|v| z.is_match(v.trim())))
+    // "#tipNone" (no word boundary before a camel-case None) and an attribute selector whose value
+    // is 0 ("[data-pct='0']", "[value=0]", "[data-tip=\"0.00\"]"): AD-13 round 5.
+    let camel = rx(&CAMEL, r"[a-z0-9]None(?:[^a-z]|$)");
+    let attr = rx(&ATTR, r#"=\s*["']?\s*0(?:\.0+)?\s*%?\s*["']?\s*\]"#);
+    let sel = st["sel"].as_str().unwrap_or("");
+    let value_zero = |v: &str| z.is_match(v.trim()) || lead_number(v).is_some_and(|x| x == 0.0);
+    is_action(st) && (z.is_match(sel) || camel.is_match(sel) || attr.is_match(sel) || st["value"].as_str().is_some_and(value_zero))
 }
 
 /// An action that puts a real, non-zero input in: a `set` of a non-zero number, or a `select` of
@@ -2327,7 +2348,7 @@ fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Opti
         }
         if need.value {
             value_rule(&steps[fa + 1..])?;
-            zero_rule(steps, true)?;
+            zero_rule(steps, true, need.zero)?;
         }
         if need.toggle {
             shows_change(steps, initial, home)?;
@@ -2336,7 +2357,7 @@ fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Opti
     }
     if need.value {
         value_rule(steps)?;
-        zero_rule(steps, false)?;
+        zero_rule(steps, false, need.zero)?;
     }
     Ok((steps.to_vec(), None))
 }
@@ -2349,12 +2370,20 @@ fn own_rules(steps: &[Value], need: &Need, initial: &[(String, f64)], home: Opti
 /// (a "0 before, 30 after add" pair is a real change); and, for a criterion that acts and
 /// computes (`acting`), a probe whose every number read after its first action is 0 with no
 /// reset / clear / zero option (`zeroing`) — it never does what produces the value. A zero asked
-/// for (`asked_zero_reads`) is always fine. Pure.
-fn zero_rule(steps: &[Value], acting: bool) -> Result<(), String> {
+/// for (`asked_zero_reads`) is always fine. A zero the criterion itself names (`zero`: "makes
+/// the tip $0.00", "never below 0") is fine when a read after the first action expects a
+/// non-zero number on another element that is not a control the probe drives (the change is
+/// proven there: "set bill 80, click no tip, expect tip 0, expect total 80"; "add 165 g, expect
+/// left 0, expect tally 165"); the harness still fails it when nothing changed (AD-13 round 5).
+/// Pure.
+fn zero_rule(steps: &[Value], acting: bool, zero: bool) -> Result<(), String> {
+    let elsewhere = |key: &str| {
+        first_action(steps).is_some_and(|fa| steps[fa + 1..].iter().any(|s| is_read(s) && at(s) != key && !control_read(s, steps) && expected_numbers(s).iter().any(|x| x.abs() > 1e-9)))
+    };
     for i in zero_reads(steps) {
         let key = at(&steps[i]);
         let later = steps[i + 1..].iter().any(|s| is_read(s) && at(s) == key && expected_numbers(s).iter().any(|x| x.abs() > 1e-9));
-        if !later {
+        if !later && !(zero && elsewhere(&key)) {
             let did = steps[..i].iter().filter(|s| nonzero_input(s)).map(action).collect::<Vec<_>>().join(", ");
             return Err(format!("it expects 0 on {key} after {did}, the value a page that computed nothing shows: expect the number Nic should see after that input (work it out from his request), or reset / clear first when zero is the point"));
         }
@@ -2807,6 +2836,79 @@ pub fn code_for(html: &str, steps: &[Value], max: usize) -> String {
 pub fn recheck_line(n: usize, criterion: &str, detail: &str, code: &str) -> String {
     let code = if code.is_empty() { String::new() } else { format!(" The page's code for it: {code}") };
     clip_chars(&format!("{RECHECK_HEAD}{n}. {}: {detail} — the same after the Coder's fix pass.{code}", clip_chars(criterion, 120)), 700)
+}
+
+/// A rechecked criterion whose old probe was set aside for the verifier's answer to the recheck
+/// and whose new probe passes only because it no longer expects what the old one did
+/// (`disputed_rechecks`, AD-13 round 5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dispute {
+    /// The requested criterion (0-based).
+    pub idx: usize,
+    /// The unchecked line for the verdict and the voice.
+    pub line: String,
+    /// The old probe's steps and what it found, carried (kept) to the next verify.
+    pub steps: Vec<Value>,
+    pub detail: String,
+}
+
+/// Does `new` still expect everything `old` expected? Each of the old probe's expectations must
+/// be matched by one of the new probe's: a number within either step's tolerance (at least 0.6 %
+/// or 0.01), anything else by the same expectation fields (selector and position aside). Pure.
+fn keeps_expectations(old: &[Value], new: &[Value]) -> bool {
+    let strip = |st: &Value| {
+        let mut v = st.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("sel");
+            o.remove("nth");
+        }
+        v
+    };
+    let reads_new: Vec<&Value> = new.iter().filter(|s| is_expect(s)).collect();
+    old.iter().filter(|s| is_expect(s)).all(|o| {
+        let ons = if is_read(o) { expected_numbers(o) } else { vec![] };
+        if ons.is_empty() {
+            let k = strip(o);
+            return reads_new.iter().any(|n| strip(n) == k);
+        }
+        let ns: Vec<(f64, f64)> = reads_new.iter().filter(|n| is_read(n)).flat_map(|n| expected_numbers(n).into_iter().map(|x| (x, n["tol"].as_f64().unwrap_or(0.0)))).collect();
+        let otol = o["tol"].as_f64().unwrap_or(0.0);
+        ons.iter().all(|x| ns.iter().any(|(y, t)| (x - y).abs() <= otol.max(*t).max(x.abs() * 0.006).max(0.01)))
+    })
+}
+
+/// The wrong-number guard's blind spot (AD-13 round 5, the critic's permeal-bug page): a recheck
+/// answer that copies the value the page showed ("got 41g; expected ≈37" → the verifier, tracing
+/// the buggy code, now expects 41) would turn a failing criterion into a pass on the same
+/// evidence. `dropped` = the carried probes set aside for a rechecked criterion's new probe;
+/// `probes` / `run` = what ran this time; `prev` = the last verify's open probes (their
+/// `detail`). A new probe that passed while no longer expecting what the old one expected
+/// (`keeps_expectations`) is a disputed expectation: the page's value and the copy cannot be
+/// told apart, so the criterion is not counted as met (unverified at most) and never sent to
+/// the Coder. A new probe that keeps the old expectation and passes (a selector fixed), or one
+/// that fails (held by the guard), is not a dispute. Pure.
+pub fn disputed_rechecks(prev: &Value, dropped: &[Probe], probes: &[Probe], run: &ProbeRun, answers: &Answers) -> Vec<Dispute> {
+    let results: &[ProbeResult] = match run {
+        ProbeRun::Ran(v) if v.len() == probes.len() => v,
+        _ => return vec![],
+    };
+    let mut out: Vec<Dispute> = Vec::new();
+    for d in dropped {
+        let Some(idx) = answers.list.get(d.answer).and_then(|a| a.idx) else { continue };
+        if out.iter().any(|x| x.idx == idx) {
+            continue;
+        }
+        let Some((p, _)) = probes.iter().zip(results).find(|(p, r)| !p.carried && p.answer == d.answer && r.ran && r.passed) else { continue };
+        if keeps_expectations(&d.steps, &p.steps) {
+            continue;
+        }
+        let before = prev.as_array().into_iter().flatten().find(|o| o["idx"].as_u64() == Some(idx as u64) && o["steps"] == Value::Array(d.steps.clone())).and_then(|o| o["detail"].as_str()).unwrap_or("").to_string();
+        let now = p.steps.iter().rev().find(|s| is_expect(s)).map(want).unwrap_or_default();
+        let was = if before.is_empty() { String::new() } else { format!("; before: {}", clip_chars(&before, 80)) };
+        let line = clip_chars(&format!("couldn't be checked: the verifier changed its expected value on recheck to what the page shows, for {}{was}; now {}", clip_chars(&d.criterion, 60), clip_chars(&now, 70)), 240);
+        out.push(Dispute { idx, line, steps: d.steps.clone(), detail: before });
+    }
+    out
 }
 
 /// Judge the answers: a criterion counts only when the model says it is met AND quotes code that

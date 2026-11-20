@@ -1237,6 +1237,8 @@ fn the_preflight_prompt_never_lets_the_librarian_call_a_needs_fixes_project_reus
     let e = new_task(&TaskStore::in_memory(), "Build me a protein tracker");
     let p = prompt_preflight(&e, &Packet::default());
     assert!(p.contains(STAGED_RULE) && p.contains("you have NOT seen their code") && p.contains("Never call a project marked \"needs fixes\""), "{p}");
+    // AD-13 round 5: the older-record label is named, and anything not "ready" is not reusable.
+    assert!(p.contains("\"staged before verdicts were recorded\"") && p.contains("any other label means not reusable"), "{p}");
 }
 
 #[test]
@@ -3195,8 +3197,10 @@ fn a_page_failing_the_gate_with_a_behaviour_bug_gets_both_in_the_first_coder_loo
 
 /// F3 a (critic P1, fixed3-b): a probe that expects a wrong number fails on a CORRECT page; the
 /// Coder returns the page unchanged, so the second verify asks the verifier to recheck its
-/// expectation (with the value the page shows and its code) before any further Coder pass. A
-/// verifier that corrects it passes the build; the old probe is not run again.
+/// expectation (with the value the page shows and its code) before any further Coder pass. The
+/// old probe is not run again. A verifier that "corrects" it to the value the page shows cannot be
+/// told from one that copies a broken page's value (AD-13 round 5), so the build is staged
+/// unverified (works false), never a pass and never another Coder pass.
 #[test]
 fn a_wrong_number_is_rechecked_by_the_verifier_before_another_coder_pass() {
     let wrong = || json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"], "probe": [{ "op": "set", "sel": "#bill", "value": "100" }, { "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "#out", "contains": "$12.00" }] }], "verdict": "pass" }).to_string();
@@ -3218,6 +3222,68 @@ fn a_wrong_number_is_rechecked_by_the_verifier_before_another_coder_pass() {
     assert!(recheck.contains("got $39.33 per person") && recheck.contains("the same after the Coder's fix pass") && recheck.contains("The page's code for it:") && recheck.contains("$(\"out\").textContent"), "{recheck}");
     let ran = fake.probe_calls.lock().unwrap().clone();
     assert!(ran[2].iter().all(|p| !p.carried), "the old probe is not run again once the verifier answered the recheck: {ran:?}");
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("unverified")), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["disputed"].as_array().map(Vec::len), Some(1), "{}", e.last_eval);
+}
+
+/// AD-13 round 5 (the critic's permeal-bug page): a BROKEN page shows 41 where 37 is right; the
+/// carried 37 probe fails again on the unchanged page, the recheck shows the verifier the page's
+/// 41 and its buggy code, and the verifier copies 41. The copy never turns the failing criterion
+/// into a pass: works false, verdict unverified, the dispute named first, no further Coder pass,
+/// and the old probe is carried (kept) so a later verify cannot pass it either.
+#[test]
+fn a_recheck_answer_that_copies_the_pages_wrong_value_never_passes_the_build() {
+    let probe = |v: &str| json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": "#perMeal", "approx": v.parse::<f64>().unwrap(), "tol": 1 }]);
+    let ans = move |v: &str| json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"], "probe": probe(v) }], "verdict": "pass" }).to_string();
+    let root = tmp("recheck-copy");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, n| Ok(match (c.stage, n) { ("verify", 3) => ans("41"), ("verify", _) => ans("37"), _ => default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    // The page is wrong and stays wrong: it shows 41g; only a probe expecting 41 passes.
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|_: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if p.steps.iter().any(|s| s["approx"] == json!(41.0)) { json!({ "ok": true }) } else { json!({ "ok": false, "k": "fail", "at": 1, "got": "41g" }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (1, 2, 3), "the recheck, then no further Coder pass");
+    assert_eq!(e.last_eval["verify"]["rechecked"], json!([1]));
+    assert_eq!(e.last_eval["works"], json!(false), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verdict"], json!("unverified"), "{}", e.last_eval);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].contains("the verifier changed its expected value on recheck to what the page shows") && kb[0].contains("got 41g"), "{kb:?}");
+    let unchecked = str_list(&e.last_eval["verify"]["unchecked"], 20, 400);
+    assert_eq!(unchecked.first(), kb.first(), "{unchecked:?}");
+    // The 37 probe stays open, kept: a later verify runs it again and holds it.
+    let open = e.last_eval["open_probes"].as_array().cloned().unwrap_or_default();
+    assert!(open.iter().any(|o| o["kept"] == true && o["steps"][1]["approx"] == json!(37.0)), "{open:?}");
+    let status: Value = serde_json::from_str(&std::fs::read_to_string(root.join("staging").join(e.project_slug.clone().unwrap()).join(".status.json")).unwrap()).unwrap();
+    assert_eq!((status["works"].clone(), status["verdict"].clone()), (json!(false), json!("unverified")), "{status}");
+}
+
+/// AD-13 round 5: a recheck answer that keeps its expected number (it fixes only how the value is
+/// read) and passes is not a dispute: the page shows what the old probe expected.
+#[test]
+fn a_recheck_answer_that_keeps_its_number_and_passes_is_a_pass() {
+    let probe = |sel: &str| json!([{ "op": "select", "sel": "#meals", "value": "4" }, { "op": "expect_text", "sel": sel, "approx": 37, "tol": 1 }]);
+    let ans = move |sel: &str| json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"], "probe": probe(sel) }], "verdict": "pass" }).to_string();
+    let root = tmp("recheck-keep");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, n| Ok(match (c.stage, n) { ("verify", 3) => ans("#out"), ("verify", _) => ans("#perMeal"), _ => default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    // The value is on #out: a read of #perMeal (another element) shows 0.
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|_: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if p.steps.iter().any(|s| s["sel"] == "#out") { json!({ "ok": true }) } else { json!({ "ok": false, "k": "fail", "at": 1, "got": "0" }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.last_eval["verify"]["rechecked"], json!([1]));
+    assert_eq!(e.last_eval["verify"]["disputed"], json!([]));
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass")), "{}", e.last_eval);
 }
 

@@ -2338,6 +2338,128 @@ fn the_verify_prompt_is_de_primed_and_stays_in_budget_with_checks() {
     let p = prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), true, &fb);
     assert!(p.contains("13. The choices for Nic's \"3-5 meals\"") && p.contains("Your last answer gave no working probe"), "{}", &p[..2000]);
     assert!(p.chars().count() <= 24_000, "{}", p.chars().count());
+    // The prompt's cap is the code's cap.
+    assert!(PROBE_RULES.contains(&format!("at most {} probes", quality::MAX_PROBES)));
+}
+
+// ── AD-12 review fixes ───────────────────────────────────────────────────────
+
+/// The verifier is never told "never convert" Nic's values next to a pinned converted value: a
+/// unit toggle may show them converted (the build stages keep their rule).
+#[test]
+fn the_verify_prompt_lets_a_unit_toggle_show_nics_value_converted() {
+    let e = new_task(&TaskStore::in_memory(), "I'm 165 lbs, default 165 lb, with a lb/kg toggle and a per-meal split (3-5 meals).");
+    let p = prompt_verify(&e, "<p>x</p>", &Value::Null, false, &[]);
+    assert!(!p.contains("never convert"), "{p}");
+    assert!(p.contains("after a unit toggle the page may show them converted): 165 lbs; 3-5 meals") && p.contains("pinned value: 74.84;"), "{p}");
+    assert!(prompt_code(&e, &[]).contains("never convert or drop them"), "the Coder's rule is unchanged");
+}
+
+/// A stand-in browser: probes on `#out` fail until the page is fixed; every other probe passes.
+fn out_probes_fail_until_fixed() -> ProbeFn {
+    Box::new(|html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if html.contains("data-fixed") || !p.steps.iter().any(|s| s["sel"] == "#out") { json!({ "ok": true }) } else { json!({ "ok": false, "k": "fail", "at": 2, "got": "$0.00 per person" }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    })
+}
+
+/// A verify pass whose probe really failed AND that has a probe gap goes straight to the Coder
+/// with the failure: the gap retry is never spent there, because the retry's fresh answer (here
+/// a weak probe that passes on the broken page) would throw the failure away.
+#[test]
+fn a_probe_failure_is_never_thrown_away_by_the_gap_retry() {
+    let root = tmp("probe-fail-gap");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let remembers = "Remembers the last bill between visits";
+    let first = json!({ "criteria": [probed_crit()[0].clone(), { "n": 2, "criterion": remembers, "met": true, "evidence": crit()[0]["evidence"] }], "verdict": "pass" }).to_string();
+    let retry = json!({ "criteria": [
+        { "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": crit()[0]["evidence"], "probe": [{ "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "h1", "contains": "Tip" }] },
+        { "n": 2, "criterion": remembers, "met": true, "evidence": crit()[0]["evidence"], "probe": [{ "op": "set", "sel": "#bill", "value": "100" }, { "op": "reload" }, { "op": "expect_value", "sel": "#bill", "approx": 100 }] }
+    ], "verdict": "pass" }).to_string();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("spec", _) => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Remembers the last bill between visits\"]"),
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", _) if c.user.contains("Your last answer gave no working probe") => retry.clone(),
+                ("verify", _) => first.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(out_probes_fail_until_fixed());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "the probe failure looped the Coder");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("probe failed for Shows the per-person total: got $0.00 per person"), "{}", codes[1].user);
+    let v = fake.calls_for("verify");
+    assert_eq!(v.len(), 3, "no retry on the failing pass; the fixed pass gets its gap retry");
+    assert!(!v[0].user.contains("Your last answer") && !v[1].user.contains("Your last answer") && v[2].user.contains("- 2. Remembers the last bill between visits: no probe was given"), "{}", v[2].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+}
+
+/// A gap retry recorded by an earlier claim of the stage that never ran (the task was paused or
+/// retried during the backoff) is ignored by the next claim: it neither feeds stale reasons into
+/// the prompt nor uses up this claim's own retry.
+#[test]
+fn a_gap_retry_from_an_earlier_claim_is_not_inherited() {
+    let root = tmp("probe-stale-feedback");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    let (stats, forced) = (WorkerStats::default(), Mutex::new(HashMap::new()));
+    stats.verify_feedback.lock().unwrap().insert(t.task_id.clone(), (0, Some(1), vec!["stale reason from a lost claim".into()]));
+    let w = worker_with(store, &fake, &stats, &forced, tuning());
+    tauri::async_runtime::block_on(w.run_until_idle(300));
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let v = fake.calls_for("verify");
+    assert_eq!(v.len(), 2, "this claim's own gap retry ran");
+    assert!(!v[0].user.contains("stale reason") && !v[1].user.contains("stale reason"));
+    assert!(v[1].user.contains("- 1. Shows the per-person total: no probe was given"), "{}", v[1].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+}
+
+/// A Play Place hub build whose behaviour the verifier never proves in a browser is not handed
+/// on as review_ready (the hub would smoke it and mark it mergeable without reading its
+/// blockers): the gap goes to the Coder like an unmet criterion, then fails into the Repair Queue.
+#[test]
+fn a_hub_build_with_an_unproven_behaviour_fails_instead_of_handing_on() {
+    let root = tmp("hubgap");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    assert_eq!(fake.count("verify"), 2 * (1 + MAX_LOOP_ITERATIONS as usize), "each pass asked once more for the probe");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("no working probe for: Shows the per-person total"), "{}", codes[1].user);
+    let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
+    assert!(!status.contains("review_ready"), "{status}");
+    assert_eq!(e.last_eval["verify"]["gaps"], 1);
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

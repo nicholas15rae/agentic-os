@@ -280,7 +280,8 @@ impl IntentCheck {
         }
     }
     pub fn need(&self) -> Need {
-        Need { probe: true, action: matches!(self.kind, CheckKind::Convert { .. }), check: Some(self.clone()) }
+        let convert = matches!(self.kind, CheckKind::Convert { .. });
+        Need { probe: true, action: convert, fresh: !convert, value: convert, check: Some(self.clone()) }
     }
 }
 
@@ -377,12 +378,24 @@ fn names_pair(lower: &str, a: &str, b: &str) -> bool {
     [pat(a_all, b_all, words), pat(b_all, a_all, words), pat(a_long, b_long, link), pat(b_long, a_long, link)].iter().any(|p| regex::Regex::new(p).is_ok_and(|r| r.is_match(lower)))
 }
 
+/// How an occurrence of a literal is stated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stated {
+    /// As the page's default: "default 165 lb", "starts at …", "… by default".
+    Default,
+    /// As a fact about Nic: "I'm 165 lbs", "I am …", "my weight is …" — a default only when the
+    /// request also asks for that quantity (`personal_pinned`).
+    Personal,
+}
+
 /// Is this occurrence of a literal (number at byte `p`, unit ending at `end`) stated as Nic's
-/// default — "default 165 lb", "I'm 165 lbs", "I am …", "my weight is …", "… by default"? Pure.
-fn stated_default(lower: &str, p: usize, end: usize) -> bool {
-    static BEFORE: OnceLock<regex::Regex> = OnceLock::new();
+/// default, or as a personal stat? Pure.
+fn stated_default(lower: &str, p: usize, end: usize) -> Option<Stated> {
+    static STRONG: OnceLock<regex::Regex> = OnceLock::new();
+    static PERSONAL: OnceLock<regex::Regex> = OnceLock::new();
     static AFTER: OnceLock<regex::Regex> = OnceLock::new();
-    let before = rx(&BEFORE, r"(?:\bdefaults?\b(?:\s+[a-z]+){0,2}|\bi['’]?m|\bi\s+am|\bmy\s+[a-z]+(?:\s+[a-z]+)?\s+(?:is|=)|\bstarts?\s+(?:at|with|on))[\s:=(]*$");
+    let strong = rx(&STRONG, r"(?:\bdefaults?\b(?:\s+[a-z]+){0,2}|\bstarts?\s+(?:at|with|on))[\s:=(]*$");
+    let personal = rx(&PERSONAL, r"(?:\bi['’]?m|\bi\s+am|\bmy\s+[a-z]+(?:\s+[a-z]+)?\s+(?:is|=))[\s:=(]*$");
     let after = rx(&AFTER, r"^[\s,)]*(?:by\s+default|as\s+(?:the\s+|a\s+|my\s+)?default|\(?\s*default\b)");
     let a = floor_boundary(lower, p.saturating_sub(48));
     let mut win = &lower[a..p];
@@ -390,14 +403,56 @@ fn stated_default(lower: &str, p: usize, end: usize) -> bool {
     if let Some(i) = win.rfind(['\n', '!', '?', ';']).into_iter().chain(win.rfind(". ")).max() {
         win = &win[i + 1..];
     }
-    before.is_match(win) || after.is_match(&lower[end..])
+    if strong.is_match(win) || after.is_match(&lower[end..]) {
+        Some(Stated::Default)
+    } else if personal.is_match(win) {
+        Some(Stated::Personal)
+    } else {
+        None
+    }
 }
 
-/// The checks Nic's request clearly pins, computed here (at most 4; nothing when unclear):
-/// (a) a literal stated as a default → on load the page shows it; (b) a unit pair named in the
-/// request plus such a default in one of its units → after switching, the converted number;
-/// (c) an integer range "N-M <noun>" (1 ≤ M-N ≤ 6) offered as choices → the options read N..M
-/// ascending. Generic: no app-specific paths. Pure.
+/// The request's sentences with their byte offsets (split at ". ", "!", "?", ";", newlines). Pure.
+fn sentences(lower: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let b = lower.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        let end = matches!(c, b'\n' | b'!' | b'?' | b';') || (c == b'.' && b.get(i + 1).map_or(true, |n| n.is_ascii_whitespace()));
+        if end {
+            out.push((start, &lower[start..i]));
+            start = i + 1;
+        }
+    }
+    out.push((start, &lower[start..]));
+    out
+}
+
+/// A personal stat ("I'm 165 lbs", "my run is 5 miles") is pinned as the page's default only when
+/// the request also asks for that quantity: its unit pair is named ("lb/kg"), or a word of its
+/// unit appears in another sentence that asks for a default, an input, a field or a toggle.
+/// "I'm 28 years old" in a protein-calculator request pins nothing. Pure.
+fn personal_pinned(lower: &str, l: &Literal, at: (usize, usize)) -> bool {
+    static ASKS: OnceLock<regex::Regex> = OnceLock::new();
+    if let Some(k) = unit_key(&l.unit) {
+        if UNIT_PAIRS.iter().any(|(a, b)| (k == *a || k == *b) && names_pair(lower, a, b)) {
+            return true;
+        }
+    }
+    let asks = rx(&ASKS, r"\b(?:defaults?|inputs?|fields?|enter|slider|picker|selector|toggle|switch)\b");
+    let words = unit_words(&l.unit);
+    sentences(lower).into_iter().any(|(s, text)| {
+        let holds_it = s <= at.0 && at.1 <= s + text.len();
+        !holds_it && asks.is_match(text) && words.iter().any(|w| has_word(text, w))
+    })
+}
+
+/// The checks Nic's request clearly pins, computed here (at most `MAX_CHECKS`; nothing when
+/// unclear): (a) a literal stated as a default (a personal stat only when the request also asks
+/// for that quantity) → on load the page shows it; (b) a unit pair named in the request plus such
+/// a default in one of its units → after switching, the converted number; (c) an integer range
+/// "N-M <noun>" (1 ≤ M-N ≤ 6) itself offered as choices → the options read N..M ascending.
+/// Generic: no app-specific paths. Pure.
 pub fn intent_checks(text: &str) -> Vec<IntentCheck> {
     static UNIT_AT: OnceLock<regex::Regex> = OnceLock::new();
     let unit_at = UNIT_AT.get_or_init(|| regex::Regex::new(&format!(r"^\s?({UNITS})(?:$|[^\w/])")).unwrap());
@@ -412,7 +467,13 @@ pub fn intent_checks(text: &str) -> Vec<IntentCheck> {
         let stated = forms.iter().any(|f| {
             number_positions(&lower, f).into_iter().any(|p| {
                 let e = p + f.len();
-                unit_at.captures(&lower[e..]).is_some_and(|c| unit_words(&c[1]) == words && stated_default(&lower, p, e + c.get(1).map_or(0, |m| m.end())))
+                let Some(c) = unit_at.captures(&lower[e..]).filter(|c| unit_words(&c[1]) == words) else { return false };
+                let end = e + c.get(1).map_or(0, |m| m.end());
+                match stated_default(&lower, p, end) {
+                    Some(Stated::Default) => true,
+                    Some(Stated::Personal) => personal_pinned(&lower, &l, (p, end)),
+                    None => false,
+                }
             })
         });
         if stated {
@@ -446,19 +507,26 @@ pub fn intent_checks(text: &str) -> Vec<IntentCheck> {
         }
     }
     out.extend(range_checks(text));
-    out.truncate(4);
+    out.truncate(MAX_CHECKS);
     out
 }
 
-/// (c): "3-5 meals" / "3 to 5 meals" (integers, 1 ≤ M-N ≤ 6) next to a word that makes them
-/// choices (split, choose, pick, select, options, buttons, toggle, tabs, dropdown, between);
+/// At most this many intent checks are added to the verifier's criteria.
+pub const MAX_CHECKS: usize = 4;
+
+/// (c): "3-5 meals" / "3 to 5 meals" (integers, 1 ≤ M-N ≤ 6) that are themselves offered as
+/// choices: a choice word right before the range ("split (3-5 meals)", "pick 2 to 4 laps",
+/// "choose from 3-5 plans") or right after its noun ("3-5 meal options", "3-5 meals as buttons").
+/// A "button" or "toggle" elsewhere in the sentence does not make "5-10 questions" a choice;
 /// never a measured range ("20-25 minutes", "8-12 reps"). At most 2. Pure.
 fn range_checks(text: &str) -> Vec<IntentCheck> {
     static RANGE: OnceLock<regex::Regex> = OnceLock::new();
-    static CHOICE: OnceLock<regex::Regex> = OnceLock::new();
+    static BEFORE: OnceLock<regex::Regex> = OnceLock::new();
+    static AFTER: OnceLock<regex::Regex> = OnceLock::new();
     static MEASURE: OnceLock<regex::Regex> = OnceLock::new();
     let range = rx(&RANGE, r"(?i)(?:^|[^\w.,])(\d{1,3})\s?(?:-|–|to)\s?(\d{1,3})\s?([a-z]{2,20})\b");
-    let choice = rx(&CHOICE, r"(?i)\b(?:split|splits|choose|choice|choices|pick|select|selector|option|options|button|buttons|toggle|tabs?|dropdown|between)\b");
+    let before = rx(&BEFORE, r"(?i)\b(?:split|splits|splitting|choose|choosing|choice|choices|pick|picking|select|selecting|selector|option|options|dropdown|tabs?)\b(?:\s+(?:of|from|between|into|in|any|a|an|the|number|count))*\s*[(:]?\s*$");
+    let after = rx(&AFTER, r"(?i)^[\s)]*(?:(?:as|in)\s+)?(?:(?:a|an|the)\s+)?(?:split|splits|options?|choices?|buttons?|tabs?|dropdown|selector|picker|toggle)\b");
     let measure = rx(&MEASURE, r"(?i)^(?:lbs?|pounds?|kgs?|kilos?|kilograms?|grams?|g|oz|ounces?|cups?|ml|liters?|litres?|kcal|calories|cal|minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?|months?|years?|percent|miles?|km|meters?|metres?|feet|ft|inches|dollars?|usd|bpm|reps?|sets?|times|am|pm|of|to|and|or|per|times)$");
     let mut out: Vec<IntentCheck> = Vec::new();
     for c in range.captures_iter(text) {
@@ -466,10 +534,10 @@ fn range_checks(text: &str) -> Vec<IntentCheck> {
         if hi <= lo || hi - lo > 6 || measure.is_match(&c[3]) {
             continue;
         }
-        let m = c.get(0).unwrap();
-        let a = floor_boundary(text, m.start().saturating_sub(80));
-        let z = floor_boundary(text, m.end() + 80);
-        if !choice.is_match(&text[a..z]) {
+        let (n1, noun) = (c.get(1).unwrap(), c.get(3).unwrap());
+        let a = floor_boundary(text, n1.start().saturating_sub(40));
+        let z = floor_boundary(text, noun.end() + 40);
+        if !before.is_match(&text[a..n1.start()]) && !after.is_match(&text[noun.end()..z]) {
             continue;
         }
         let order: Vec<String> = (lo..=hi).map(|x| x.to_string()).collect();
@@ -494,6 +562,12 @@ pub struct Need {
     pub probe: bool,
     /// Its probe must act (set / select / click) before its first expectation.
     pub action: bool,
+    /// An on-load default / initial state / order: its probe must expect BEFORE any action (a
+    /// probe that clicks "lb" and then sees "lb" active proves nothing about the default).
+    pub fresh: bool,
+    /// It computes or converts a value: a probe that only checks a class or a count cannot
+    /// prove it.
+    pub value: bool,
     /// A pinned intent check: the probe's expectation must be the pinned value.
     pub check: Option<IntentCheck>,
 }
@@ -502,28 +576,54 @@ pub struct Need {
 /// adds / removes, resets, orders, saves / restores or shows a default — or one carrying one of
 /// Nic's literal values. Pure.
 pub fn behavioural(criterion: &str, lits: &[Literal]) -> bool {
+    behaviour_words(criterion) || computes(criterion) || carries_literal(criterion, lits)
+}
+
+fn behaviour_words(criterion: &str) -> bool {
     static B: OnceLock<regex::Regex> = OnceLock::new();
-    let b = rx(&B, r"(?i)\b(?:chang(?:e|es|ed|ing)|comput(?:e|es|ed|ing)|calculat(?:e|es|ed|ing|ion|ions)|recalculat\w*|convert(?:s|ed|ing)?|conversions?|toggl(?:e|es|ed|ing)|switch(?:es|ed|ing)?|totals?|totall?ed|totall?ing|sums?|summed|adds?|added|adding|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|resets?|resetting|clears|cleared|clearing|order(?:s|ed|ing)?|sort(?:s|ed|ing)?|sav(?:e|es|ed|ing)|restor(?:e|es|ed|ing)|persist\w*|remember\w*|defaults?|initial(?:ly)?|on (?:page )?load|updat(?:e|es|ed|ing)|increment\w*|decrement\w*)\b");
-    if b.is_match(criterion) {
-        return true;
-    }
+    rx(&B, r"(?i)\b(?:chang(?:e|es|ed|ing)|comput(?:e|es|ed|ing)|calculat(?:e|es|ed|ing|ion|ions)|recalculat\w*|convert(?:s|ed|ing)?|conversions?|toggl(?:e|es|ed|ing)|switch(?:es|ed|ing)?|totals?|totall?ed|totall?ing|sums?|summed|adds?|added|adding|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|resets?|resetting|clears|cleared|clearing|order(?:s|ed|ing)?|sort(?:s|ed|ing)?|sav(?:e|es|ed|ing)|restor(?:e|es|ed|ing)|persist\w*|remember\w*|defaults?|initial(?:ly)?|on (?:page )?load|updat(?:e|es|ed|ing)|increment\w*|decrement\w*)\b").is_match(criterion)
+}
+
+fn carries_literal(criterion: &str, lits: &[Literal]) -> bool {
     let lower = criterion.to_lowercase();
     lits.iter().any(|l| !number_positions(&lower, &l.number).is_empty() || l.low.as_deref().is_some_and(|lo| !number_positions(&lower, lo).is_empty()))
 }
 
-/// An "on load / default / order" criterion: its probe may start with an expectation. Pure.
-fn on_load(criterion: &str) -> bool {
-    static L: OnceLock<regex::Regex> = OnceLock::new();
+/// Does the criterion describe something a person DOES (click, switch to, type, add, save …)?
+/// Only verbs and action phrases count: "selected" / "active" are states, and "the toggle" or
+/// "the switch" are things ("the lb unit is selected by default", "the lb/kg toggle starts on
+/// lb" describe the page on load). Pure.
+fn acts(criterion: &str) -> bool {
     static A: OnceLock<regex::Regex> = OnceLock::new();
-    let l = rx(&L, r"(?i)\b(?:defaults?|initial(?:ly)?|on (?:a |the )?(?:fresh |first |page )?load|at start(?:up)?|pre-?filled|pre-?selected|starts? (?:at|with|on)|in order|ordered|ascending|descending|sorted)\b");
-    let a = rx(&A, r"(?i)\b(?:click\w*|tap\w*|press\w*|switch\w*|toggl\w*|convert\w*|select(?:s|ed|ing)|chang\w*|enter\w*|typ(?:e|es|ed|ing)|adds?|added|adding|remov\w*|delet\w*|reset\w*|reload\w*|sav(?:e|es|ed|ing)|restor\w*)\b");
-    l.is_match(criterion) && !a.is_match(criterion)
+    static AFTER: OnceLock<regex::Regex> = OnceLock::new();
+    let a = rx(&A, r"(?i)\b(?:click\w*|tap(?:s|ped|ping)?|press(?:es|ed|ing)?|switch(?:es|ed|ing)|toggl(?:es|ed|ing)|convert(?:s|ed|ing)?|chang(?:e|es|ed|ing)|enter(?:s|ed|ing)|typ(?:es|ed|ing)|adds?|added|adding|remov\w*|delet\w*|reset(?:s|ting)?|reload\w*|sav(?:e|es|ed|ing)|restor\w*|updat(?:e|es|ed|ing)|recalculat\w*|selecting|picking|choosing|submit\w*|increment\w*|decrement\w*)\b");
+    let after = rx(&AFTER, r"(?i)\b(?:after|when|once|upon|then)\s+(?:\w+\s+){0,3}?(?:switch|toggle|select|pick|choose|type|enter|tap|press)\w*");
+    a.is_match(criterion) || after.is_match(criterion)
 }
 
-/// The need of one requested criterion (an intent check's comes from `IntentCheck::need`). Pure.
+/// An "on load / default / initial / order" criterion with no action in it: its probe expects
+/// first, before any action. Pure.
+fn on_load(criterion: &str) -> bool {
+    static L: OnceLock<regex::Regex> = OnceLock::new();
+    let l = rx(&L, r"(?i)\b(?:defaults?|initial(?:ly)?|on (?:a |the )?(?:fresh |first |page )?(?:load|open)|when the page (?:loads|opens)|at (?:start(?:up)?|first)|pre-?filled|pre-?selected|starts? (?:at|with|on|as|out)|in (?:the )?(?:\w+ )?order|order|ordered|ascending|descending|sorted|listed)\b");
+    l.is_match(criterion) && !acts(criterion)
+}
+
+/// It computes or converts a value (a class or a count cannot prove it). Pure.
+fn computes(criterion: &str) -> bool {
+    static C: OnceLock<regex::Regex> = OnceLock::new();
+    rx(&C, r"(?i)\b(?:comput\w*|calculat\w*|recalculat\w*|convert\w*|conversions?|divid\w*|multipl\w*|averag\w*|per[- ](?:meal|person|day|serving|head|item))\b").is_match(criterion)
+}
+
+/// The need of one requested criterion (an intent check's comes from `IntentCheck::need`): a
+/// behavioural one acts first unless it is an on-load / default / order check, which expects
+/// first; one that is behavioural only because it carries Nic's literal ("Shows 165 lb") needs an
+/// action only when it names one. Pure.
 pub fn need_of(criterion: &str, lits: &[Literal]) -> Need {
     let probe = behavioural(criterion, lits);
-    Need { probe, action: probe && !on_load(criterion), check: None }
+    let fresh = probe && on_load(criterion);
+    let action = probe && !fresh && (behaviour_words(criterion) || computes(criterion) || acts(criterion));
+    Need { probe, action, fresh, value: probe && computes(criterion), check: None }
 }
 
 // ── Inline scripts ──────────────────────────────────────────────────────────
@@ -1250,11 +1350,15 @@ pub fn read_answers(criteria: &Value, expected: &[String]) -> Answers {
 
 // ── Probes: the step DSL ────────────────────────────────────────────────────
 
-/// The verifier's new probes run per verify pass (behavioural criteria first), the failed ones
-/// carried from an earlier pass, and steps per probe. Up to 10 acceptance criteria plus 4 intent
-/// checks can each need one; the whole run stays bounded by its total time cap (`run_probes`),
-/// probes past it are "not run".
-pub const MAX_PROBES: usize = 12;
+/// The acceptance criteria verify reads (`taskworker::verify_plan`); `MAX_CHECKS` intent checks
+/// are added after them.
+pub const MAX_CRITERIA: usize = 10;
+
+/// The verifier's new probes run per verify pass (required ones first, the pinned intent checks
+/// first among them), the failed ones carried from an earlier pass, and steps per probe. Every
+/// criterion verify reads can need one, so the cap never cuts a required probe; the whole run
+/// stays bounded by its total time cap (`run_probes`), probes past it are "not run".
+pub const MAX_PROBES: usize = MAX_CRITERIA + MAX_CHECKS;
 pub const MAX_CARRIED: usize = 6;
 pub const MAX_STEPS: usize = 8;
 
@@ -1328,22 +1432,57 @@ fn op_alias(op: &str) -> String {
     .to_string()
 }
 
+/// A step's op under any key a small model uses for it: the first one holding a string
+/// (`{"step": 1, "type": "click"}` is a click, not op 1). Pure.
+fn op_field(st: &Value) -> &str {
+    ["op", "action", "step", "type"].iter().filter_map(|k| st[*k].as_str()).map(str::trim).find(|s| !s.is_empty()).unwrap_or("")
+}
+
 /// Validate one probe from the model (untrusted): known ops only, a safe selector charset,
 /// capped strings and numbers, at most `MAX_STEPS` steps, and at least one expectation. Common
 /// small-model variations are NORMALISED, not rejected (keys "action" / "type" / "step" → op,
-/// "selector" / "target" / "css" → sel, "text" / "val" → value, op aliases, numeric strings).
+/// "selector" / "target" / "css" → sel, "text" / "val" → value, op aliases, numeric strings, a
+/// single step given as an object, the list given as a JSON string, and wait / sleep / pause
+/// steps, which are dropped: the harness already settles after actions and polls expectations).
 /// Returns the normalised steps the harness runs. Pure.
 pub fn parse_probe(v: &Value) -> Result<Vec<Value>, String> {
-    let steps = v.as_array().or_else(|| v["steps"].as_array()).ok_or("the probe is not a list of steps")?;
-    if steps.is_empty() {
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        if s.len() > 8000 {
+            return Err("the probe is too long".into());
+        }
+        let inner: Value = serde_json::from_str(s).map_err(|_| "the probe is not a list of steps".to_string())?;
+        if inner.is_string() {
+            return Err("the probe is not a list of steps".into());
+        }
+        return parse_probe(&inner);
+    }
+    let single;
+    let steps = match v.as_array().or_else(|| v["steps"].as_array()) {
+        Some(a) => a,
+        None if v.is_object() && !op_field(v).is_empty() => {
+            single = vec![v.clone()];
+            &single
+        }
+        None => return Err("the probe is not a list of steps".into()),
+    };
+    let waits = |st: &Value| matches!(op_alias(op_field(st)).as_str(), "wait" | "sleep" | "pause" | "delay" | "wait_for" | "settle");
+    if steps.len() > MAX_STEPS * 2 {
+        return Err(format!("the probe has {} steps (at most {MAX_STEPS})", steps.len()));
+    }
+    let real = steps.iter().filter(|s| !waits(s)).count();
+    if real == 0 {
         return Err("the probe has no steps".into());
     }
-    if steps.len() > MAX_STEPS {
-        return Err(format!("the probe has {} steps (at most {MAX_STEPS})", steps.len()));
+    if real > MAX_STEPS {
+        return Err(format!("the probe has {real} steps (at most {MAX_STEPS})"));
     }
     let mut out = Vec::new();
     for (i, st) in steps.iter().enumerate() {
-        let op = op_alias(field(st, &["op", "action", "step", "type"]).as_str().unwrap_or(""));
+        if waits(st) {
+            continue;
+        }
+        let op = op_alias(op_field(st));
         let n = i + 1;
         let sel = field(st, &["sel", "selector", "target", "css"]).as_str().unwrap_or("").trim().to_string();
         let need_sel = |s: &str| if sel_ok(s) { Ok(()) } else { Err(format!("step {n}: unusable selector {:?}", clip_chars(s, 40))) };
@@ -1427,19 +1566,24 @@ pub fn parse_probe(v: &Value) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
-/// The valid probes to run (at most `MAX_PROBES`): the behavioural criteria's first (`needs`,
-/// indexed by requested criterion), then the rest, each group in answer order. Pure.
+/// The valid probes to run (at most `MAX_PROBES`): the pinned intent checks' first, then the
+/// other behavioural criteria's (`needs`, indexed by requested criterion), then the rest, each
+/// group in answer order. Pure.
 pub fn probes_of(answers: &Answers, needs: &[Need]) -> Vec<Probe> {
-    let mut v: Vec<(bool, Probe)> = answers
+    let mut v: Vec<((bool, bool), Probe)> = answers
         .list
         .iter()
         .enumerate()
         .filter_map(|(i, a)| match &a.probe {
-            Some(Ok(steps)) => Some((a.idx.and_then(|x| needs.get(x)).is_some_and(|n| n.probe), Probe { answer: i, criterion: a.name.clone(), steps: steps.clone(), carried: false })),
+            Some(Ok(steps)) => {
+                let need = a.idx.and_then(|x| needs.get(x));
+                let rank = (!need.is_some_and(|n| n.probe), !need.is_some_and(|n| n.check.is_some()));
+                Some((rank, Probe { answer: i, criterion: a.name.clone(), steps: steps.clone(), carried: false }))
+            }
             _ => None,
         })
         .collect();
-    v.sort_by_key(|(required, p)| (!required, p.answer));
+    v.sort_by_key(|(rank, p)| (*rank, p.answer));
     v.into_iter().map(|(_, p)| p).take(MAX_PROBES).collect()
 }
 
@@ -1472,34 +1616,51 @@ fn pinned_step(st: &Value, c: &IntentCheck) -> Value {
 }
 
 /// Hold a probe for an intent check to Nic's pinned value; the expectation is rewritten to the
-/// value computed here (the model only supplies selectors and actions). Pure.
+/// value computed here (the model only supplies selectors and actions). The step held is chosen
+/// by its number, not its position: extra reads ("kg" shown as the unit) and a return toggle
+/// after the converted value are kept as the model wrote them. Pure.
 fn pin(steps: &[Value], c: &IntentCheck) -> Result<Vec<Value>, String> {
     let v = c.pinned();
     let mut out = steps.to_vec();
+    let near = |x: f64| (x - c.value).abs() <= c.tol;
+    // (index, number) of every read that expects a number, in order.
+    let numeric = |from: usize, to: usize| -> Vec<(usize, f64)> { (from..to).filter(|&i| is_read(&steps[i])).filter_map(|i| expected_number(&steps[i]).map(|x| (i, x))).collect() };
     match &c.kind {
         CheckKind::Default => {
-            let k = steps.iter().position(is_read).ok_or(format!("expect Nic's default on the element that shows it (expect_value / expect_text, \"approx\": {v})"))?;
-            if steps[..k].iter().any(is_action) {
-                return Err(format!("check Nic's default on a fresh load, before any set / select / click (pinned value {v})"));
+            let first_action = steps.iter().position(is_action).unwrap_or(steps.len());
+            if !steps[..first_action].iter().any(is_read) {
+                return Err(if first_action < steps.len() {
+                    format!("check Nic's default on a fresh load, before any set / select / click (pinned value {v})")
+                } else {
+                    format!("expect Nic's default on the element that shows it (expect_value / expect_text, \"approx\": {v})")
+                });
             }
-            match expected_number(&steps[k]) {
-                Some(x) if (x - c.value).abs() <= c.tol => out[k] = pinned_step(&steps[k], c),
-                Some(x) => return Err(format!("it expects {}, but Nic's value is pinned: use the pinned value {v}", fmt_num(x))),
+            let reads = numeric(0, first_action);
+            match reads.iter().find(|(_, x)| near(*x)).or(reads.first()) {
+                Some(&(k, x)) if near(x) => out[k] = pinned_step(&steps[k], c),
+                Some(&(_, x)) => return Err(format!("it expects {}, but Nic's value is pinned: use the pinned value {v}", fmt_num(x))),
                 None => return Err(format!("expect a number: use the pinned value {v} (\"approx\": {v})")),
             }
         }
         CheckKind::Convert { to, start, .. } => {
-            let k = steps.iter().rposition(is_read).ok_or(format!("after switching to {}, expect the converted value (\"approx\": {v})", unit_label(to)))?;
-            if !steps[..k].iter().any(is_action) {
-                return Err(format!("switch the unit to {} first (click / select its control), then expect the converted value {v}", unit_label(to)));
-            }
-            match expected_number(&steps[k]) {
-                Some(x) if (x - start).abs() <= c.tol && (c.value - start).abs() > c.tol => {
-                    return Err(format!("its last expectation is the starting value {} (a round trip proves nothing): switch to {} and use the pinned value {v}", fmt_num(*start), unit_label(to)))
+            let Some(first_action) = steps.iter().position(is_action).filter(|&a| steps[a..].iter().any(is_read)) else {
+                return Err(if steps.iter().any(is_action) || !steps.iter().any(is_read) {
+                    format!("after switching to {}, expect the converted value (\"approx\": {v})", unit_label(to))
+                } else {
+                    format!("switch the unit to {} first (click / select its control), then expect the converted value {v}", unit_label(to))
+                });
+            };
+            let reads = numeric(first_action + 1, steps.len());
+            let round_trip = (c.value - start).abs() > c.tol && !reads.is_empty() && reads.iter().all(|(_, x)| (x - start).abs() <= c.tol);
+            match reads.iter().find(|(_, x)| near(*x)) {
+                Some(&(k, _)) => out[k] = pinned_step(&steps[k], c),
+                None if round_trip => {
+                    return Err(format!("after switching it only expects the starting value {} (a round trip proves nothing): switch to {} and use the pinned value {v}", fmt_num(*start), unit_label(to)))
                 }
-                Some(x) if (x - c.value).abs() <= c.tol => out[k] = pinned_step(&steps[k], c),
-                Some(x) => return Err(format!("it expects {}, but the converted value is pinned: use the pinned value {v}", fmt_num(x))),
-                None => return Err(format!("expect a number: use the pinned value {v} (\"approx\": {v})")),
+                None => match reads.iter().find(|(_, x)| (x - start).abs() > c.tol) {
+                    Some(&(_, x)) => return Err(format!("it expects {}, but the converted value is pinned: use the pinned value {v}", fmt_num(x))),
+                    None => return Err(format!("expect a number: use the pinned value {v} (\"approx\": {v})")),
+                },
             }
         }
         CheckKind::Order(want) => {
@@ -1515,18 +1676,38 @@ fn pin(steps: &[Value], c: &IntentCheck) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+fn is_expect(st: &Value) -> bool {
+    st["op"].as_str().is_some_and(|o| o.starts_with("expect_"))
+}
+
+/// Does the probe act (set / select / click) before its first expectation? Pure.
+fn acts_first(steps: &[Value]) -> bool {
+    steps.iter().take_while(|s| !is_expect(s)).any(is_action)
+}
+
+/// Does the probe read a value (text, a value, an order), not only a class or a count? Pure.
+fn reads_value(steps: &[Value]) -> bool {
+    steps.iter().any(|s| is_read(s) || s["op"] == "expect_order")
+}
+
 /// Hold each answer's probe to what its criterion needs: an intent check's probe to the pinned
 /// value (rewritten to it, or rejected with "use the pinned value X"); a behavioural criterion's
-/// probe (other than an on-load / default / order one) to at least one action before its first
-/// expectation. A probe that breaks a rule becomes `Err(reason)`. Pure.
+/// probe to at least one action before its first expectation, except an on-load / default /
+/// order one, which must expect before any action; and a criterion that computes or converts to
+/// a probe that reads a value (a class or a count cannot prove it). A probe that breaks a rule
+/// becomes `Err(reason)`. Pure.
 pub fn enforce(answers: &mut Answers, needs: &[Need]) {
     for a in answers.list.iter_mut() {
         let Some(need) = a.idx.and_then(|i| needs.get(i)) else { continue };
         let Some(Ok(steps)) = &a.probe else { continue };
         let checked = if let Some(c) = &need.check {
             pin(steps, c)
-        } else if need.action && !steps.iter().take_while(|s| !s["op"].as_str().unwrap_or("").starts_with("expect_")).any(is_action) {
+        } else if need.fresh && acts_first(steps) {
+            Err("it acts before it checks: this is about the page on a fresh load, so expect it FIRST, before any set / select / click".to_string())
+        } else if need.action && !acts_first(steps) {
             Err("it only reads the page: do the set / select / click that triggers the behaviour first, then expect the result".to_string())
+        } else if need.value && !reads_value(steps) {
+            Err("it only checks a class or a count: expect the computed value itself (expect_text / expect_value with the number)".to_string())
         } else {
             Ok(steps.clone())
         };
@@ -1740,20 +1921,25 @@ pub struct ProbeGap {
     pub n: Option<usize>,
     pub criterion: String,
     pub why: String,
+    /// The verifier can fix it on a retry (no probe, a rejected one, a selector matching
+    /// nothing); `false` for a probe skipped by the cap or the time budget.
+    pub fixable: bool,
 }
 
-/// The reasons fed back to the verifier on its one retry: per criterion, why no probe for it
-/// worked (the parse error, the selector that matched nothing, the pinned value to use). Pure.
+/// The reasons fed back to the verifier on its one retry: per criterion it can fix, why no probe
+/// for it worked (the parse error, the selector that matched nothing, the pinned value to use).
+/// Pure.
 pub fn probe_feedback(gaps: &[ProbeGap]) -> Vec<String> {
-    gaps.iter().map(|g| clip_chars(&format!("{}{}: {}", g.n.map(|n| format!("{n}. ")).unwrap_or_default(), clip_chars(&g.criterion, 120), g.why), 300)).collect()
+    gaps.iter().filter(|g| g.fixable).map(|g| clip_chars(&format!("{}{}: {}", g.n.map(|n| format!("{n}. ")).unwrap_or_default(), clip_chars(&g.criterion, 120), g.why), 300)).collect()
 }
 
 /// Judge the answers: a criterion counts only when the model says it is met AND quotes code that
 /// is really in the page, and its probe (if it ran) did not fail. A probe whose selector matches
 /// nothing is reported but only counts against a criterion that also has no evidence. Where
 /// probes run (`probes_on`), a behavioural criterion (`needs`, by requested criterion) counts as
-/// met only when a probe for it ran and passed (a passing probe also stands in for evidence);
-/// otherwise it is a `ProbeGap`. Pure.
+/// met only when a probe for it ran and passed (a passing probe stands in for evidence only when
+/// the verifier quoted none: quoted code that is not in the page is always reported); otherwise
+/// it is a `ProbeGap`. Pure.
 pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[Need], probes_on: bool) -> Judged {
     let hn = norm(html);
     let results: &[ProbeResult] = match run {
@@ -1808,19 +1994,25 @@ pub fn judge(answers: &Answers, html: &str, cut: bool, run: &ProbeRun, needs: &[
                     other.push(format!("not met: {name}{why}"));
                 }
                 Some(true) => {
-                    if !found && !proven {
+                    // The probe decides a behavioural criterion (its probe held to the rules in
+                    // `enforce`) that quotes no code at all: passed, it stands in for the evidence;
+                    // still unproven where probes run, it is a gap below, not a Coder fix. Quoted
+                    // code that is not in the page is reported whatever a probe did.
+                    let stands_in = need.is_some_and(|n| n.probe) && a.evidence.trim().is_empty() && (proven || required);
+                    if !found && !stands_in {
                         other.push(format!("no working code found for: {name} (implement it for real{})", probe_note.unwrap_or_default()));
                     }
                     if required && !proven {
                         let pinned = need.and_then(|n| n.check.as_ref()).map(|c| format!(" (pinned value {})", c.pinned())).unwrap_or_default();
-                        let why = match (&a.probe, res) {
-                            (Some(Err(why)), _) => format!("its probe was rejected: {why}"),
-                            (Some(Ok(_)), Some(r)) if r.error => format!("its probe did not run: {}", r.detail),
-                            (Some(Ok(_)), Some(r)) => r.detail.clone(),
-                            (Some(Ok(_)), None) => skipped.clone(),
-                            (None, _) => format!("no probe was given{pinned}"),
+                        // The cap and the time budget are not the verifier's to fix.
+                        let (why, fixable) = match (&a.probe, res) {
+                            (Some(Err(why)), _) => (format!("its probe was rejected: {why}"), true),
+                            (Some(Ok(_)), Some(r)) if r.error => (format!("its probe did not run: {}", r.detail), true),
+                            (Some(Ok(_)), Some(r)) => (r.detail.clone(), r.ran),
+                            (Some(Ok(_)), None) => (skipped.clone(), false),
+                            (None, _) => (format!("no probe was given{pinned}"), true),
                         };
-                        gaps.push(ProbeGap { n: a.idx.map(|x| x + 1), criterion: a.name.clone(), why: clip_chars(&why, 220) });
+                        gaps.push(ProbeGap { n: a.idx.map(|x| x + 1), criterion: a.name.clone(), why: clip_chars(&why, 220), fixable });
                     }
                 }
                 None if cut => not_judged.push(format!("not shown to the verifier (code cut for length): {name}")),
@@ -1882,7 +2074,8 @@ setTimeout(function(){document.documentElement.setAttribute('data-tf-smoke',JSON
 /// label, a checkbox's checked state. `approx` passes when ANY number in the text is within tol
 /// (a range "120 - 165 g", "165 lbs (74.8 kg)", a decimal comma). A numeric `contains` (`num`,
 /// set by `parse_probe`: "40 g", "$39.33") matches the number as a whole number token, its unit
-/// after it ("0" never matches "40 g", "40" never "140 g"); other text is a case-insensitive
+/// after it ("0" never matches "40 g", "40" never "140 g"; an all-zero fraction may follow on
+/// either side, so "$92" matches "$92.00" and "92.50" matches "92.5"); other text is a case-insensitive
 /// substring. `expect_order` matches labels
 /// case-insensitively (exact, then by leading number, then contained); `attr` falls back to the
 /// text when no element carries it; values that name fewer than two of the expected labels are a
@@ -1909,7 +2102,7 @@ function ev(el,n,b,key){var e;try{if(key!=null){e=new KeyboardEvent(n,{bubbles:b
 function typeIn(el,v){var key=v?String(v).slice(-1):'Unidentified';ev(el,'focus',false);ev(el,'focusin',true);ev(el,'keydown',true,key);el.value=v;ev(el,'input',true);ev(el,'keyup',true,key);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
 function lead(s){var m=String(s).match(/^\D{0,12}?(-?\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):null}
 function esc(s){return String(s).replace(/[.*+?^${}()|[\]\\\/]/g,'\\$&')}
-function numIn(g,q){try{return new RegExp('(^|[^0-9.,])'+(q.pre?esc(q.pre)+'\\s*':'')+esc(q.n)+'(?![0-9]|[.,][0-9])'+(q.unit?'\\s*'+esc(q.unit):''),'i').test(g)}catch(x){return false}}
+function numIn(g,q){try{var n=String(q.n);if(/^-?\d+\.\d*0$/.test(n))n=n.replace(/0+$/,'').replace(/\.$/,'');return new RegExp('(^|[^0-9.,])'+(q.pre?esc(q.pre)+'\\s*':'')+esc(n)+(/\./.test(n)?'0*':'(?:[.,]0+)?')+'(?![0-9]|[.,][0-9])'+(q.unit?'\\s*'+esc(q.unit):''),'i').test(g)}catch(x){return false}}
 function order(st,l){var hasA=st.attr&&l.some(function(e){return e.hasAttribute(st.attr)});
 var v=l.map(function(e){return nm(hasA?e.getAttribute(st.attr):(e.innerText||e.textContent))});
 var want=st.order.map(function(x){return nm(x).toLowerCase()});

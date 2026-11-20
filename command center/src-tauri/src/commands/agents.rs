@@ -1085,6 +1085,11 @@ pub struct OsTurnRequest {
     pub(crate) context: String,
     #[serde(default)]
     pub(crate) approved: bool,
+    /// An approved Tier-3 delegation card (TS `approve()`, scopes `["delegation"]`): satisfies
+    /// the delegation gate ONLY. Ask-tier tools the turn prefetches stay unapproved (they come
+    /// back blocked), because that card never named them. See `turn_approvals`.
+    #[serde(default)]
+    pub(crate) delegation_approved: bool,
     /// Stream Tony's answer as `tony-token` events under this id.
     #[serde(default)]
     pub(crate) stream_id: Option<String>,
@@ -1104,6 +1109,13 @@ pub struct OsTurnRequest {
     /// the Tier-2 hint rides on his system message. Missing (phone / old webview) = false.
     #[serde(default)]
     pub(crate) no_delegate: bool,
+}
+
+/// `(delegation gate approved, Ask-tier tools approved)` for a turn. `approved` (the turn's own
+/// card said yes) covers both; `delegation_approved` (a Tier-3 delegation card) covers the
+/// delegation gate alone — never a blanket yes for gmail / filesystem / MCP. Pure.
+pub(crate) fn turn_approvals(approved: bool, delegation_approved: bool) -> (bool, bool) {
+    (approved || delegation_approved, approved)
 }
 
 #[derive(Serialize, Clone)]
@@ -1354,12 +1366,13 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // re-run the whole turn with approved=true, so a prefetched action (a Spotify skip)
     // would otherwise run once now and again on the retry — or run although the user said no.
     let slug = cfg.anythingllm.workspaces.get(&role).filter(|s| !s.is_empty()).cloned();
+    let (delegation_ok, tools_ok) = turn_approvals(req.approved, req.delegation_approved);
     if role != "general" && comms_thread.is_none() {
         if let Some(slug) = &slug {
-            os_core::gate(bridge, cfg.permissions.delegation, "delegation", req.approved, json!({ "workspace": slug }))?;
+            os_core::gate(bridge, cfg.permissions.delegation, "delegation", delegation_ok, json!({ "workspace": slug }))?;
         }
     }
-    let pre = if comms_thread.is_none() { prefetch_tools(state, os, bridge, &cfg, prefetch_agent, &text, &req.context, req.approved, req.ask_cards, req.cue_playing).await } else { Prefetch::default() };
+    let pre = if comms_thread.is_none() { prefetch_tools(state, os, bridge, &cfg, prefetch_agent, &text, &req.context, tools_ok, req.ask_cards, req.cue_playing).await } else { Prefetch::default() };
     steps.extend(pre.steps);
     // Steps reach the webview as they happen ("os-step"), so a turn that then fails or is cut
     // ("cut it") still shows what was asked and answered.
@@ -2099,6 +2112,20 @@ mod tests {
         let line = router_tool_line(&gmail_tools()[1]);
         assert!(line.starts_with("- gmail.search(query, limit?): "), "{line}");
         assert!(line.ends_with(r#"e.g. {"args":{"query":"<query>"},"tool":"gmail.search"}"#), "{line}");
+    }
+
+    #[test]
+    fn review_feed4_a_delegation_card_approves_the_delegation_gate_only() {
+        let req = |v: Value| {
+            let r = serde_json::from_value::<OsTurnRequest>(v).unwrap();
+            turn_approvals(r.approved, r.delegation_approved)
+        };
+        // The Tier-3 card: delegation yes, Ask-tier tools (gmail / fs / MCP) still unapproved.
+        assert_eq!(req(json!({ "text": "x", "role": "booking", "delegationApproved": true })), (true, false));
+        // The turn's own card (gated() re-run): both.
+        assert_eq!(req(json!({ "text": "x", "role": "booking", "approved": true })), (true, true));
+        // Missing (phone / old webview): neither.
+        assert_eq!(req(json!({ "text": "x", "role": "booking" })), (false, false));
     }
 
     #[test]

@@ -1422,6 +1422,9 @@ export interface OsTurnRequest {
   history?: ChatMessage[];
   context?: string;
   approved?: boolean;
+  /** An approved Tier-3 delegation card: satisfies the delegation gate only — Ask-tier tools the
+   * turn prefetches stay unapproved (Rust `turn_approvals`). */
+  delegationApproved?: boolean;
   /** System Map trace id the turn's `os-trace` steps join (`[A-Za-z0-9_:-]`, ≤ 64 chars). */
   traceId?: string;
   /** The caller can raise an approval card: a Spotify write held by the Ask tier comes back as

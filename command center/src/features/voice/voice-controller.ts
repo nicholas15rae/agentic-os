@@ -488,7 +488,7 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
           const ctx = reflexCtx();
           const r = parseReflex(t, ctx);
           const bare = wakeListen && useSettings.getState().wakeRequire;
-          if (r && listenTakesReflex(r, { forConfirmation: opts.forConfirmation, bare, busy: ctx.busy, cueActive: cueRecentlyActive(), ttsAudible: ctx.ttsAudible, musicAudible: ctx.musicAudible }) && takeReflex(r, t)) return;
+          if (r && listenTakesReflex(r, { forConfirmation: opts.forConfirmation, bare, busy: ctx.busy, cueActive: cueRecentlyActive(), ttsAudible: ctx.ttsAudible, musicAudible: ctx.musicAudible }) && takeReflex(r, t, { addressed: !bare })) return;
         }
         if (t && wakeListen) {
           // Hands-free: only lines that start with a wake word ("Hey Tony…") count.
@@ -1466,10 +1466,12 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   try {
     const call = (approved: boolean) => cmd("os_turn", { req: { ...req, approved } });
     // An approved Tier-3 hand-off was already approved on its card (`approve()`): no second card.
+    // That card named the `delegation` scope only, so it satisfies the delegation gate alone
+    // (`delegationApproved`); Ask-tier tools the turn prefetches stay unapproved (never `approved`).
     // Otherwise the delegation gate's card lands in this thread, is spoken on a voice turn, and
     // never posts the answer itself (this function does, once, as the right speaker).
     r = plan.delegateTo
-      ? await call(true)
+      ? await cmd("os_turn", { req: { ...req, approved: false, delegationApproved: true } })
       : await gated({ action: "os-turn", summary: `Let ${useSettings.getState().osName} use ${role === "general" ? "its tools" : SUB_AGENTS[role].label}`, detail: { role }, channel, thread, silent: true }, call, (x) => x.answer);
   } catch (e) {
     off();
@@ -1795,13 +1797,17 @@ function cutHasTarget(): boolean {
  * ("Stop motion studio app, I want…", "let's cut that feature") is NOT a cut when nothing is
  * running: it's an ordinary line, and the caller carries on with it (returns false). Over a busy
  * turn it still cuts, and anything said after the cut phrase becomes the next turn (it used to be
- * dropped with no trace in the chat).
+ * dropped with no trace in the chat) — but only when the line was addressed to Tony. A bare
+ * passive hands-free listen (no wake word: room audio, a TV, Tony's own echo) may cut, never start
+ * a turn: the rest is shown, not run, so Nic can say it again to Tony.
  */
-function takeReflex(r: NonNullable<Reflex>, line: string): boolean {
+function takeReflex(r: NonNullable<Reflex>, line: string, o: { addressed?: boolean } = {}): boolean {
   if (r.kind === "cut" && !isBareCut(line)) {
     if (!cutHasTarget()) return false;
     killTurn();
-    if (r.rest.trim()) void handleInput(r.rest, { channel: "voice" });
+    const rest = r.rest.trim();
+    if (rest && o.addressed !== false) void handleInput(rest, { channel: "voice" });
+    else if (rest) store().pushTurn({ who: "system", text: `Cut. Didn't run “${rest}” — it came without the wake word; say it to ${useSettings.getState().osName || "Tony"} if you meant it.` });
     return true;
   }
   applyReflex(r);

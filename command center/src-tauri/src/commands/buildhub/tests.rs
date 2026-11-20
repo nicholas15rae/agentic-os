@@ -860,3 +860,41 @@ fn smoke_outcomes_have_a_chat_line() {
     assert_eq!(smoke_outcome_line("Tip", Status::RepairQueue, &["x".into()]).unwrap().0, "critical");
     assert!(smoke_outcome_line("Tip", Status::Paused, &[]).is_none());
 }
+
+#[test]
+fn review_feed1_a_hub_record_opens_the_hub_card_so_nested_runs_never_vanish() {
+    // A build queued before the feed existed (or dispatched before build_enqueue opened its card):
+    // no hub conversation yet. The hand-off must open it, nest the worker task under it, and land.
+    let s = tr::TranscriptStore::in_memory();
+    let e = env("b-old", "old-slug", Runtime::InternalWidget, AssignedWorker::Coder);
+    let child = OpenConv { conv_id: tr::task_conv("t-1"), kind: "task", title: "pass".into(), thread: Some("auto".into()), ..Default::default() };
+    nest_under_hub_in(&s, &e, child, &[]);
+    hub_record_in(&s, &e, Some(Status::Building), NewMessage::new("staging", "prompter", "handoff", "Pass 1 handed to the agent pipeline").body("brief"), &[]);
+    hub_record_in(&s, &e, None, NewMessage::new("nic", "coder", "override", "Steer: bigger buttons").body("bigger buttons"), &[]);
+    let roots = s.list(50, None, true).unwrap();
+    assert_eq!(roots.len(), 1, "the hub card is a root; the task nests under it");
+    assert_eq!(roots[0].conv_id, tr::hub_conv("b-old"));
+    let page = s.page(&tr::hub_conv("b-old"), None, 50).unwrap().expect("hub conversation exists");
+    assert_eq!(page.messages.len(), 2, "the hand-off and the steer both landed");
+    assert_eq!(page.children.len(), 1);
+    assert_eq!(page.children[0].conv_id, tr::task_conv("t-1"));
+}
+
+#[test]
+fn review_feed3_hub_records_scrub_the_known_values() {
+    let s = tr::TranscriptStore::in_memory();
+    let e = env("b-sec", "sec-slug", Runtime::InternalWidget, AssignedWorker::Claude);
+    let known = vec!["SYNTH-NOTE-VALUE-7731".to_string()];
+    let dev = OpenConv { conv_id: tr::dev_conv("d-1"), kind: "dev", title: "x".into(), thread: Some("auto".into()), ..Default::default() };
+    nest_under_hub_in(&s, &e, dev, &known);
+    hub_record_in(&s, &e, None, NewMessage::new("nic", "claude", "override", "Steer: use SYNTH-NOTE-VALUE-7731").body("token SYNTH-NOTE-VALUE-7731 here"), &known);
+    hub_record_in(&s, &e, Some(Status::RepairQueue), NewMessage::new("staging", "tony", "repair", "repair").body("trace with SYNTH-NOTE-VALUE-7731").failed(), &known);
+    let page = s.page(&tr::hub_conv("b-sec"), None, 50).unwrap().unwrap();
+    assert_eq!(page.messages.len(), 2);
+    assert_eq!(page.children.len(), 1);
+    for h in &page.messages {
+        assert!(!h.summary.contains("SYNTH-NOTE-VALUE-7731"));
+        let full = s.message(h.seq).unwrap().unwrap();
+        assert!(!full.body.contains("SYNTH-NOTE-VALUE-7731"), "known value persisted: {}", full.body);
+    }
+}

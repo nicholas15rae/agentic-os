@@ -17,9 +17,9 @@ vi.mock("@/lib/native-ext", () => ({
 }));
 vi.mock("@/lib/platform", async (orig) => ({ ...(await orig<typeof import("@/lib/platform")>()), isTauri: () => h.tauri }));
 
-import { useVoice } from "@/features/voice/voice-store";
+import { PER_THREAD, useVoice, type VoiceTurn } from "@/features/voice/voice-store";
 import { useSettings } from "@/stores/settings";
-import { applyPage, applyTranscriptEvent, cardsToAdd, cardTurn, hydrateTranscripts, loadBody, loadMore, loadPage, mergeHeads, nestedCardIds, startTranscriptFeed, syncCards, useTranscripts, type TranscriptState } from "./transcript-store";
+import { applyPage, applyTranscriptEvent, capCutoffs, cardsToAdd, cardTurn, ensureConv, hydrateTranscripts, loadBody, loadMore, loadPage, mergeHeads, nestedCardIds, startTranscriptFeed, syncCards, useTranscripts, type TranscriptState } from "./transcript-store";
 import { participantBadge, timeline } from "./AgentConversationCard";
 import type { TranscriptConversation, TranscriptEvent, TranscriptHead, TranscriptPage } from "./types";
 
@@ -89,6 +89,25 @@ describe("ordering and pages", () => {
     expect(s.convs["task:t-1"].updatedAt).toBe(3000);
   });
 
+  it("a live message never lands on a page that has more to load (Load more would skip the middle)", async () => {
+    // Messages 1–2 loaded with more=true; message 9 arrives live.
+    h.xcmd.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === "transcript_get" && args.after_seq === undefined) return { conv: conv("dev:d-1", { kind: "dev" }), messages: [head(1, 100, { convId: "dev:d-1" }), head(2, 200, { convId: "dev:d-1" })], children: [], more: true };
+      if (name === "transcript_get") return { conv: conv("dev:d-1", { kind: "dev" }), messages: [3, 4, 9].map((n) => head(n, n * 100, { convId: "dev:d-1" })), children: [], more: false };
+      throw new Error(name);
+    });
+    await loadPage("dev:d-1");
+    useTranscripts.setState((s) => applyTranscriptEvent(s, { conv: conv("dev:d-1", { kind: "dev", updatedAt: 9000, messageCount: 9 }), message: head(9, 900, { convId: "dev:d-1" }) }));
+    expect(useTranscripts.getState().pages["dev:d-1"].messages.map((m) => m.seq)).toEqual([1, 2]);
+    expect(useTranscripts.getState().convs["dev:d-1"].messageCount).toBe(9); // the summary still updates
+    await loadMore("dev:d-1");
+    expect(h.xcmd).toHaveBeenLastCalledWith("transcript_get", { conv_id: "dev:d-1", after_seq: 2 });
+    expect(useTranscripts.getState().pages["dev:d-1"].messages.map((m) => m.seq)).toEqual([1, 2, 3, 4, 9]);
+    // Complete now: live messages append again.
+    useTranscripts.setState((s) => applyTranscriptEvent(s, { conv: conv("dev:d-1", { kind: "dev", updatedAt: 9100 }), message: head(10, 1000, { convId: "dev:d-1" }) }));
+    expect(useTranscripts.getState().pages["dev:d-1"].messages.map((m) => m.seq)).toEqual([1, 2, 3, 4, 9, 10]);
+  });
+
   it("pages append for load more and nest children under their parent", () => {
     let s = applyPage(empty(), { conv: conv("hub:b-1", { kind: "hub" }), messages: [head(1, 100, { convId: "hub:b-1" })], children: [conv("task:t-9", { parentConvId: "hub:b-1" })], more: true }, false);
     s = applyPage(s, { conv: conv("hub:b-1", { kind: "hub" }), messages: [head(4, 400, { convId: "hub:b-1" })], children: [], more: false }, true);
@@ -120,6 +139,21 @@ describe("chat cards", () => {
     useVoice.getState().pushTurn({ who: "user", text: "hi", thread: "auto" });
     useVoice.getState().clear("auto");
     expect(useVoice.getState().clearedAt.auto).toBeGreaterThan(0);
+  });
+
+  it("a card evicted by the per-thread cap comes back at its latest activity and stays", () => {
+    // A long build (started at t=5) while Nic kept talking: 120 newer turns evict its card.
+    const filler: VoiceTurn[] = Array.from({ length: PER_THREAD }, (_, i) => ({ id: `u${i}`, who: "user", text: `line ${i}`, thread: "auto", at: 100 + i }));
+    expect(capCutoffs(filler).auto).toBe(100);
+    useVoice.setState({ turns: filler });
+    const live = conv("hub:b-9", { kind: "hub", createdAt: 5, updatedAt: 10_000 });
+    useTranscripts.setState({ convs: { "hub:b-9": live } });
+    syncCards([live]);
+    const card = useVoice.getState().turns.find((t) => t.convId === "hub:b-9");
+    expect(card?.at).toBe(10_000); // not at 5, where cap() would drop it at once
+    expect(useVoice.getState().turns.filter((t) => t.thread === "auto")).toHaveLength(PER_THREAD);
+    // A thread with room keeps the card where the conversation started.
+    expect(cardsToAdd([conv("task:t-3", { createdAt: 5, updatedAt: 10_000 })], [])[0].at).toBe(5);
   });
 
   it("drops the card of a conversation that turned out to be nested", () => {
@@ -176,6 +210,21 @@ describe("lazy loading", () => {
     expect(await loadBody(2)).toBe("the full prompt");
     expect(await loadBody(2)).toBe("the full prompt");
     expect(h.xcmd.mock.calls.filter(([n]) => n === "transcript_message")).toHaveLength(1);
+  });
+
+  it("a card older than the newest 50 fetches its own conversation, once", async () => {
+    h.xcmd.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (name === "transcript_get" && args.conv_id === "turn:old") return { conv: conv("turn:old", { kind: "turn" }), messages: [head(1, 100, { convId: "turn:old" })], children: [], more: true };
+      throw new Error("no such conversation");
+    });
+    await ensureConv("turn:old");
+    expect(h.xcmd).toHaveBeenCalledWith("transcript_get", { conv_id: "turn:old", limit: 1 });
+    expect(useTranscripts.getState().convs["turn:old"].kind).toBe("turn");
+    expect(useTranscripts.getState().pages["turn:old"]).toBeUndefined(); // opening the card loads its page
+    await ensureConv("turn:old");
+    await ensureConv("turn:pruned");
+    await ensureConv("turn:pruned"); // pruned from transcripts.db: asked once, then a plain line
+    expect(h.xcmd.mock.calls.filter(([n]) => n === "transcript_get")).toHaveLength(2);
   });
 
   it("a failed load keeps the error on the page", async () => {

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { isTauri } from "@/lib/platform";
 import { onExtEvent, xcmd } from "@/lib/native-ext";
-import { THREADS, useVoice, type ThreadId, type VoiceTurn } from "@/features/voice/voice-store";
+import { PER_THREAD, THREADS, useVoice, type ThreadId, type VoiceTurn } from "@/features/voice/voice-store";
 import type { TranscriptConversation, TranscriptEvent, TranscriptHead, TranscriptPage } from "./types";
 
 /**
@@ -46,7 +46,9 @@ export function mergeHeads(a: readonly TranscriptHead[], b: readonly TranscriptH
 }
 
 /** Fold one live event into the cache: the conversation summary always; the message only into a
- * page that is already loaded (an unopened card loads its page on demand). Pure. */
+ * page that is already loaded AND complete (an unopened card loads its page on demand; a page with
+ * `more` gets the live message through "Load more" — merging it at the end would make the next
+ * page start after it and skip everything in between). Pure. */
 export function applyTranscriptEvent(s: TranscriptState, ev: TranscriptEvent): TranscriptState {
   if (!ev?.conv?.convId || !ev.message) return s;
   const id = ev.conv.convId;
@@ -55,7 +57,7 @@ export function applyTranscriptEvent(s: TranscriptState, ev: TranscriptEvent): T
   const conv = prev && prev.updatedAt > ev.conv.updatedAt ? { ...prev, messageCount: Math.max(prev.messageCount, ev.conv.messageCount) } : ev.conv;
   let pages = s.pages;
   const page = pages[id];
-  if (page?.loaded) pages = { ...pages, [id]: { ...page, messages: mergeHeads(page.messages, [ev.message]) } };
+  if (page?.loaded && !page.more) pages = { ...pages, [id]: { ...page, messages: mergeHeads(page.messages, [ev.message]) } };
   const parent = conv.parentConvId;
   const pp = parent ? pages[parent] : undefined;
   if (parent && pp?.loaded && !pp.children.includes(id)) pages = { ...pages, [parent]: { ...pp, children: [...pp.children, id] } };
@@ -84,16 +86,37 @@ export function cardTurn(c: TranscriptConversation): VoiceTurn {
   return { id: cardTurnId(c.convId), who: "system", text: `Agent conversation · “${c.title || "untitled"}”`, thread: cardThread(c), at: c.createdAt, convId: c.convId };
 }
 
+/** Per thread: the time of the oldest turn the cap still keeps, when the thread is full (a turn
+ * placed at or before it is evicted at once). Pure. */
+export function capCutoffs(turns: readonly Partial<Pick<VoiceTurn, "thread" | "at">>[], perThread = PER_THREAD): Partial<Record<ThreadId, number>> {
+  const by = new Map<ThreadId, number[]>();
+  for (const t of turns) if (t.thread && typeof t.at === "number") by.set(t.thread, [...(by.get(t.thread) ?? []), t.at]);
+  const out: Partial<Record<ThreadId, number>> = {};
+  for (const [th, ats] of by) if (ats.length >= perThread) out[th] = [...ats].sort((a, b) => b - a)[perThread - 1];
+  return out;
+}
+
 /** The card turns to add: root conversations without a card yet, skipping ones whose last
- * activity predates a Clear of their thread (a cleared thread stays clear across restarts). Pure. */
-export function cardsToAdd(convs: readonly TranscriptConversation[], turns: readonly Pick<VoiceTurn, "convId">[], clearedAt: Partial<Record<ThreadId, number>> = {}): VoiceTurn[] {
+ * activity predates a Clear of their thread (a cleared thread stays clear across restarts). A card
+ * normally sits where its conversation started; when that spot is already past the thread's cap
+ * (a long build while Nic kept talking — the card was evicted), it is placed at the conversation's
+ * latest activity instead, so a live build's card comes back and stays. Pure. */
+export function cardsToAdd(
+  convs: readonly TranscriptConversation[],
+  turns: readonly (Pick<VoiceTurn, "convId"> & Partial<Pick<VoiceTurn, "thread" | "at">>)[],
+  clearedAt: Partial<Record<ThreadId, number>> = {},
+): VoiceTurn[] {
   const have = new Set(turns.map((t) => t.convId).filter(Boolean));
+  const cutoff = capCutoffs(turns);
   const out: VoiceTurn[] = [];
   for (const c of convs) {
     if (!c?.convId || c.parentConvId || have.has(c.convId)) continue;
-    if (c.updatedAt <= (clearedAt[cardThread(c)] ?? 0)) continue;
+    const th = cardThread(c);
+    if (c.updatedAt <= (clearedAt[th] ?? 0)) continue;
     have.add(c.convId);
-    out.push(cardTurn(c));
+    const card = cardTurn(c);
+    const cut = cutoff[th];
+    out.push(cut !== undefined && card.at <= cut && c.updatedAt > card.at ? { ...card, at: c.updatedAt } : card);
   }
   return out;
 }
@@ -117,6 +140,24 @@ function onEvent(ev: TranscriptEvent) {
   useTranscripts.setState((s) => applyTranscriptEvent(s, ev));
   const c = useTranscripts.getState().convs[ev?.conv?.convId];
   if (c) syncCards([c]);
+}
+
+const missing = new Set<string>();
+const fetching = new Set<string>();
+
+/** A card whose conversation isn't cached (older than the newest roots `hydrateTranscripts`
+ * loads): fetch just that conversation's summary, once (a pruned one stays a plain line). */
+export async function ensureConv(convId: string): Promise<void> {
+  if (!isTauri() || !convId || useTranscripts.getState().convs[convId] || missing.has(convId) || fetching.has(convId)) return;
+  fetching.add(convId);
+  try {
+    const page = await xcmd("transcript_get", { conv_id: convId, limit: 1 });
+    useTranscripts.setState((s) => (s.convs[convId] ? s : { convs: { ...s.convs, [convId]: page.conv } }));
+  } catch {
+    missing.add(convId);
+  } finally {
+    fetching.delete(convId);
+  }
 }
 
 /** Load (or reload) a conversation's first page. */

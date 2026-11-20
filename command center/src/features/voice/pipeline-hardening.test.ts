@@ -142,6 +142,26 @@ describe("cut reflexes (regressions)", () => {
     expect(turns().some((t) => t.who === "system" && t.text.includes("held thought was not sent") && t.text.includes("Stop button should be red"))).toBe(true);
   });
 
+  it("a passive hands-free listen may cut, but never runs the rest without the wake word", async () => {
+    vi.useFakeTimers();
+    setWakeMode(true);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(h.sttStart).toHaveBeenCalled();
+    useVoice.setState({ state: "thinking" }); // a turn is busy, so the cut has a target
+    lastHandlers().onFinal("cut it, read me my latest messages");
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.cmd.mock.calls.filter((c) => c[0] === "os_turn")).toHaveLength(0);
+    expect(turns().some((t) => t.who === "user" && t.text.includes("read me my latest messages"))).toBe(false);
+    expect(turns().some((t) => t.who === "system" && t.text.includes("Didn't run “read me my latest messages”"))).toBe(true);
+  });
+
+  it("an addressed cut still turns the rest into the next turn", async () => {
+    startListening({ origin: "tap" });
+    useVoice.setState({ state: "thinking" });
+    handlers(0).onFinal("cut it, what's on my calendar");
+    await vi.waitFor(() => expect(h.cmd.mock.calls.some((c) => c[0] === "os_turn" && c[1].req?.text === "what's on my calendar")).toBe(true));
+  });
+
   it("a hold segment lost to a Whisper error is said", async () => {
     startListening({ origin: "tap" });
     handlers(0).onFinal("take it easy, I'm thinking about a bakery site");

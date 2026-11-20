@@ -329,6 +329,9 @@ pub struct StreamEvent {
     pub is_error: Option<bool>,
     pub num_turns: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// An assistant text block's whole text (unclipped, unscrubbed): the transcript records it
+    /// as the message body (scrubbed and capped there); `text` stays the short progress line.
+    pub full: Option<String>,
 }
 
 fn short(s: &str, n: usize) -> String {
@@ -358,7 +361,7 @@ pub fn parse_stream_line(line: &str) -> Vec<StreamEvent> {
                 blocks
                     .iter()
                     .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-                        Some("text") => b.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty()).map(|t| StreamEvent { phase: "text", text: short(t, TEXT_MAX), ..Default::default() }),
+                        Some("text") => b.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty()).map(|t| StreamEvent { phase: "text", text: short(t, TEXT_MAX), full: Some(t.to_string()), ..Default::default() }),
                         Some("tool_use") => b.get("name").and_then(Value::as_str).map(|n| StreamEvent { phase: "tool", text: short(n, 60), ..Default::default() }),
                         _ => None,
                     })
@@ -592,7 +595,7 @@ pub struct FixProgress {
     pub at: i64,
 }
 
-fn emit(app: &AppHandle, id: &str, phase: &str, text: &str, known: &[String], log: Option<&Path>) {
+fn emit(app: &AppHandle, id: &str, phase: &str, text: &str, full: Option<&str>, known: &[String], log: Option<&Path>) {
     let p = FixProgress { id: id.to_string(), phase: phase.to_string(), text: short(&devqueue::scrub(text, known), TEXT_MAX), at: devqueue::now_ms() };
     if let Some(path) = log {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -600,8 +603,19 @@ fn emit(app: &AppHandle, id: &str, phase: &str, text: &str, known: &[String], lo
         }
     }
     // The run's Agent Conversation (best-effort; the conversation was opened at the start).
-    super::transcript::record(&super::transcript::dev_conv(id), progress_message(phase, &p.text), known);
+    super::transcript::record(&super::transcript::dev_conv(id), progress_record(phase, &p.text, full, known), known);
     let _ = app.emit(PROGRESS_EVENT, p);
+}
+
+/// `progress_message` with Claude's whole text block as the body when there is one (scrubbed
+/// here, and again — with the transcript's cap — on write), so "Show full message" is not the
+/// 200-char progress line. Pure.
+pub fn progress_record(phase: &str, text: &str, full: Option<&str>, known: &[String]) -> super::transcript::NewMessage {
+    let m = progress_message(phase, text);
+    match full.filter(|f| !f.trim().is_empty()) {
+        Some(f) => m.body(devqueue::scrub(f, known)),
+        None => m,
+    }
 }
 
 /// The Agent Conversation message for one progress line of a Claude Code run. Pure.
@@ -717,7 +731,7 @@ async fn start_run(app: &AppHandle, dq: &DevQueueState, state: &DispatchState, o
         tr::status(&conv, "running");
         tr::record(&conv, tr::NewMessage::new("tony", "claude", "prompt", format!("Run on {branch} ({} chars)", prompt.chars().count())).body(prompt.clone()), &known);
     }
-    emit(app, &id, "start", &format!("Claude Code started on {branch}"), &known, Some(&log_path));
+    emit(app, &id, "start", &format!("Claude Code started on {branch}"), None, &known, Some(&log_path));
 
     let ctx = RunCtx { app: app.clone(), id, program, repo, wt, branch, base, log_path, prompt, mins, started_at, cancelled, known };
     std::thread::spawn(move || ctx.run());
@@ -752,7 +766,11 @@ impl RunCtx {
     }
 
     fn progress(&self, phase: &str, text: &str) {
-        emit(&self.app, &self.id, phase, text, &self.known, Some(&self.log_path));
+        self.progress_full(phase, text, None);
+    }
+
+    fn progress_full(&self, phase: &str, text: &str, full: Option<&str>) {
+        emit(&self.app, &self.id, phase, text, full, &self.known, Some(&self.log_path));
     }
 
     fn run(self) {
@@ -806,7 +824,7 @@ impl RunCtx {
                 if ev.phase == "result" {
                     result = Some(json!({ "isError": ev.is_error, "numTurns": ev.num_turns, "durationMs": ev.duration_ms }));
                 }
-                self.progress(ev.phase, &ev.text);
+                self.progress_full(ev.phase, &ev.text, ev.full.as_deref());
             }
         })
         .map_err(|e| format!("couldn't start Claude Code: {e}"))?;
@@ -1008,6 +1026,27 @@ mod tests {
         assert!(parse_stream_line(r#"{"type":"system","subtype":"init","session_id":"bad id; rm"}"#)[0].session_id.is_none());
         let long = format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#, "x".repeat(500));
         assert!(parse_stream_line(&long)[0].text.chars().count() <= TEXT_MAX + 1);
+    }
+
+    #[test]
+    fn review9_claude_text_reaches_the_transcript_whole_and_scrubbed() {
+        let said = format!("{} the token was SYNTH-KNOWN-VALUE-42 and then {}", "a".repeat(300), "z".repeat(300));
+        let line = json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": said }] } }).to_string();
+        let ev = &parse_stream_line(&line)[0];
+        // The progress line stays short; the whole block rides along for the transcript.
+        assert!(ev.text.chars().count() <= TEXT_MAX + 1);
+        assert_eq!(ev.full.as_deref(), Some(said.as_str()));
+        let known = vec!["SYNTH-KNOWN-VALUE-42".to_string()];
+        let m = progress_record(ev.phase, &ev.text, ev.full.as_deref(), &known);
+        assert!(m.body.chars().count() > 600, "the body is Claude's whole message, not the 200-char clip");
+        assert!(m.body.ends_with(&"z".repeat(300)));
+        assert!(!m.body.contains("SYNTH-KNOWN-VALUE-42"), "known values are scrubbed from the body");
+        // Lines without a full text (status / tool / done) keep the short text as the body.
+        let s = progress_record("tool", "Edit", None, &known);
+        assert_eq!(s.body, "Edit");
+        // Tool calls never carry a body beyond their name.
+        let t = parse_stream_line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"old_string":"SECRET_INPUT"}}]}}"#);
+        assert!(t[0].full.is_none());
     }
 
     #[test]

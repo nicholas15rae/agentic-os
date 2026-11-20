@@ -127,7 +127,8 @@ interface VoiceStore {
   mergeRemote: (turns: VoiceTurn[]) => void;
 }
 
-const PER_THREAD = 120;
+/** Turns kept per thread (`cap`); transcript-store places cards against it. */
+export const PER_THREAD = 120;
 
 /** Should a mirrored copy of a turn replace the local one? Pure. */
 export function remoteIsNewer(local: VoiceTurn, remote: VoiceTurn): boolean {

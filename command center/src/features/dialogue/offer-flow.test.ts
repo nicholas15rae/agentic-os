@@ -405,6 +405,21 @@ describe("Phase 2 Part C — Tony's mode decides the Tier-3 commit cue", () => {
     expect(taskCreates()).toHaveLength(0);
   });
 
+  it("an approved delegation card satisfies the delegation gate only — never a blanket tool approval", async () => {
+    await handleInput("what if the layout had a sidebar", text);
+    await handleInput("ok let's do it", text);
+    expect(useVoice.getState().pending?.plan.delegateTo).toBe("designer");
+    expect(useVoice.getState().pending?.plan.target).toMatchObject({ scopes: ["delegation"] });
+    h.cmd.mockClear();
+    await handleInput("yes", text);
+    await vi.waitFor(() => expect(osTurns()).toHaveLength(1));
+    const req = osTurns()[0];
+    expect(req.role).toBe("designer");
+    expect(req.delegationApproved).toBe(true);
+    // Ask-tier tools (gmail / filesystem / MCP) the turn prefetches stay unapproved.
+    expect(req.approved).not.toBe(true);
+  });
+
   it("Builder: a mutating request still goes through the confirmation card (approve())", async () => {
     useMode("builder");
     await handleInput("email Sam the notes", text);

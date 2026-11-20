@@ -3,7 +3,7 @@ import { ArrowRight, ChevronDown, ChevronRight, Loader2, MessagesSquare } from "
 import { isTauri } from "@/lib/platform";
 import { agentBadge } from "@/features/os/os-store";
 import { useSettings } from "@/stores/settings";
-import { loadBody, loadMore, loadPage, useTranscripts } from "./transcript-store";
+import { ensureConv, loadBody, loadMore, loadPage, useTranscripts } from "./transcript-store";
 import type { TranscriptConversation, TranscriptHead } from "./types";
 
 /**
@@ -71,6 +71,11 @@ export function AgentConversationCard({ convId, fallback }: { convId: string; fa
   const show = useSettings((s) => s.chat?.showAgentConversation ?? true);
   const conv = useTranscripts((s) => s.convs[convId]);
   const [open, setOpen] = useState(false);
+  // A card older than the newest roots loaded at startup: fetch its conversation on demand, so
+  // every card in the chat stays reviewable while transcripts.db still holds it.
+  useEffect(() => {
+    if (show && !conv) void ensureConv(convId);
+  }, [show, conv, convId]);
   if (!show) return null;
   if (!conv || !isTauri()) return <p className="font-mono text-[11px] text-teal">— {fallback}</p>;
   if (conv.parentConvId) return null;

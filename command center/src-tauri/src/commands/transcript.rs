@@ -801,10 +801,6 @@ pub fn nest_in(s: &TranscriptStore, conv_id: &str, parent: &str) {
     }
 }
 
-pub fn nest(conv_id: &str, parent: &str) {
-    nest_in(store(), conv_id, parent)
-}
-
 pub fn status_in(s: &TranscriptStore, conv_id: &str, status: &str) {
     if !s.ready() {
         return;

@@ -87,7 +87,9 @@ pub fn check_ingest(actor: Role, title: &str, text: &str) -> Result<(), String> 
 }
 
 fn ingest_failed(e: &str) -> String {
-    super::events::publish_note("tony", "mirror_failed", "verbose", INGEST_FAILED_SUMMARY, None);
+    // Milestone, not verbose: an unindexed note is something Nic should hear about at the
+    // default feedback level (the worker also writes it on the task's own log).
+    super::events::publish_note("tony", "mirror_failed", "milestone", INGEST_FAILED_SUMMARY, None);
     format!("Librarian index failed: {}", e.chars().take(200).collect::<String>())
 }
 

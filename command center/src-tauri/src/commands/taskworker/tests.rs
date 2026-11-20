@@ -12,7 +12,7 @@ const SECRET: &str = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789";
 
 pub(super) const GOOD_HTML: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Tip Calculator</title>
-<script src="https://cdn.tailwindcss.com"></script></head>
+<style>body{font-family:system-ui;background:#0b0d11;color:#eee}main{max-width:24rem;margin:auto}</style></head>
 <body class="bg-slate-950 text-slate-100 min-h-screen grid place-items-center">
 <main class="w-full max-w-sm rounded-2xl bg-slate-900 p-6 space-y-4">
 <h1 class="text-2xl font-semibold">Tip calculator</h1>
@@ -54,6 +54,7 @@ pub(super) fn settings_for(root: &Path) -> WorkerSettings {
         sources: Sources { tasks_db: None, notes_root: Some(root.join("notes")), hub_roots: vec![hub], staging_root: Some(root.join("staging")), ..Default::default() },
         known: vec![],
         embed_only: false,
+        runtime_smoke: false,
     }
 }
 
@@ -70,6 +71,11 @@ fn spec_json() -> String {
     .to_string()
 }
 
+/// A verifier's per-criterion list whose evidence really is in GOOD_HTML.
+pub(super) fn crit() -> Value {
+    json!([{ "criterion": "Shows the per-person total", "met": true, "evidence": "$(\"out\").textContent = \"$\" + (total / Math.max(1, Number($(\"split\").value))).toFixed(2)" }])
+}
+
 /// The canned happy-path reply for a stage.
 pub(super) fn default_reply(call: &ModelCall) -> String {
     match call.stage {
@@ -80,12 +86,14 @@ pub(super) fn default_reply(call: &ModelCall) -> String {
         "merge" => json!({ "build_brief": "Build a single card with bill, tip and split inputs and a per-person total.", "must_include": ["Bill", "Tip", "Split"], "fix_instructions": [], "voice_summary": "The brief is with the Coder." }).to_string(),
         "code" => format!("Here it is.\n```html\n{GOOD_HTML}\n```\n```json\n{{\"known_issues\": [], \"voice_summary\": \"Built the calculator in one page.\"}}\n```"),
         "audit" => json!({ "read_only_confirmed": true, "retrieved_context": [], "value_add_brief": "Looks consistent.", "discrepancies_flagged": [], "voice_summary": "The audit is clean." }).to_string(),
-        "verify" => json!({ "verdict": "pass", "voice_summary": "It meets the criteria." }).to_string(),
+        "verify" => json!({ "criteria": crit(), "verdict": "pass", "voice_summary": "It meets the criteria." }).to_string(),
         _ => "{}".into(),
     }
 }
 
 type Script = Box<dyn Fn(&ModelCall, usize) -> Result<String, String> + Send + Sync>;
+/// A scripted stand-in for headless Edge running the verifier's probes: (staged html, probes).
+type ProbeFn = Box<dyn Fn(&str, &[quality::Probe]) -> quality::ProbeRun + Send + Sync>;
 
 pub(super) struct Fake {
     pub slot: &'static GpuSlot,
@@ -104,10 +112,20 @@ pub(super) struct Fake {
     pub fetches: AtomicUsize,
     pub verifier_calls: AtomicUsize,
     pub ingests: AtomicUsize,
+    pub ingest_ok: AtomicBool,
     pub legacy_log: Mutex<Vec<(String, Value)>>,
     pub fg_during: Option<&'static str>,
     pub fg_spawned: AtomicBool,
+    pub transcript: &'static TranscriptStore,
+    /// None = probes are skipped ("no browser"), as on a machine without Edge.
+    pub probe_runner: Mutex<Option<ProbeFn>>,
+    pub probe_calls: Mutex<Vec<Vec<quality::Probe>>>,
+    /// A scripted runtime smoke: (staged html) → result. None = skipped ("no browser").
+    pub smoke: Mutex<Option<SmokeFn>>,
 }
+
+/// A scripted stand-in for the headless-Edge runtime smoke: (staged html) → result.
+type SmokeFn = Box<dyn Fn(&str) -> quality::Smoke + Send + Sync>;
 
 impl Fake {
     pub fn new(root: &Path, store: Option<&'static TaskStore>, script: Script) -> Self {
@@ -128,9 +146,14 @@ impl Fake {
             fetches: AtomicUsize::new(0),
             verifier_calls: AtomicUsize::new(0),
             ingests: AtomicUsize::new(0),
+            ingest_ok: AtomicBool::new(true),
             legacy_log: Mutex::default(),
             fg_during: None,
             fg_spawned: AtomicBool::new(false),
+            transcript: Box::leak(Box::new(TranscriptStore::in_memory())),
+            probe_runner: Mutex::new(None),
+            probe_calls: Mutex::default(),
+            smoke: Mutex::new(None),
         }
     }
 
@@ -214,11 +237,39 @@ impl WorkerEnv for Fake {
     fn ingest(&self, _title: String, _text: String) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
             self.ingests.fetch_add(1, Ordering::SeqCst);
+            if !self.ingest_ok.load(Ordering::SeqCst) {
+                return Err("Librarian index failed: workspace not found".into());
+            }
             Ok(())
         })
     }
     fn legacy(&self, event: &str, payload: Value) {
         self.legacy_log.lock().unwrap().push((event.to_string(), payload));
+    }
+    fn transcript(&self) -> Option<&TranscriptStore> {
+        Some(self.transcript)
+    }
+    fn runtime_smoke(&self, page: PathBuf) -> BoxFuture<'_, quality::Smoke> {
+        Box::pin(async move {
+            let html = std::fs::read_to_string(&page).unwrap_or_default();
+            match &*self.smoke.lock().unwrap() {
+                Some(f) => f(&html),
+                None => quality::Smoke::Skipped("fake: no browser".into()),
+            }
+        })
+    }
+    fn probes_available(&self) -> bool {
+        self.probe_runner.lock().unwrap().is_some()
+    }
+    fn run_probes(&self, page: PathBuf, probes: Vec<quality::Probe>) -> BoxFuture<'_, quality::ProbeRun> {
+        Box::pin(async move {
+            self.probe_calls.lock().unwrap().push(probes.clone());
+            let html = std::fs::read_to_string(&page).unwrap_or_default();
+            match &*self.probe_runner.lock().unwrap() {
+                Some(f) => f(&html, &probes),
+                None => quality::ProbeRun::Skipped("fake: no browser".into()),
+            }
+        })
     }
 }
 
@@ -231,7 +282,7 @@ fn default_script() -> Script {
 }
 
 pub(super) fn tuning() -> Tuning {
-    Tuning { attempts: 2, retry_backoff: Duration::from_millis(1), fg_wait_max: Duration::from_secs(5) }
+    Tuning { attempts: 2, retry_backoff: Duration::from_millis(1), fg_wait_max: Duration::from_secs(5), backend_wait: Duration::from_millis(1), backend_budget: Duration::ZERO }
 }
 
 /// Run the worker over `store` until idle. Returns (stages run, mirror failures).
@@ -417,7 +468,7 @@ fn verify_can_send_the_task_back_to_the_coder_with_fix_instructions() {
         Some(store),
         Box::new(|c, n| {
             Ok(match (c.stage, n) {
-                ("verify", 1) => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button"], "voice_summary": "One more pass: it needs a reset." }).to_string(),
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button"], "voice_summary": "One more pass: it needs a reset." }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -438,7 +489,7 @@ fn verify_can_send_the_task_back_to_the_coder_with_fix_instructions() {
 fn verify_wanting_more_at_the_limit_stages_with_known_blockers() {
     let root = tmp("limit");
     let store = leak_store();
-    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "verdict": "loop", "loop_to": "designer", "fix_instructions": ["Tighten the spacing"] }).to_string() } else { default_reply(c) })));
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": crit(), "verdict": "loop", "loop_to": "designer", "fix_instructions": ["Tighten the spacing"] }).to_string() } else { default_reply(c) })));
     let t = create_task(store, &CreateArgs { raw_intent: "tip calculator".into(), source: "typed".into(), ..Default::default() }, 1, &[]).unwrap().0;
     run(store, &fake);
     let e = get(store, &t.task_id);
@@ -1185,9 +1236,10 @@ fn prompts_stay_inside_the_budget() {
     e.prompt_spec = json!({ "goal": "g".repeat(5000), "requirements": vec!["r".repeat(300); 40], "acceptance_criteria": vec!["a".repeat(300); 40], "spec": { "coreFeatures": vec!["f".repeat(300); 40] } });
     e.design_artifacts = json!({ "notes": "d".repeat(30_000), "design_tokens": { "x": "t".repeat(9000) } });
     e.coder_brief = json!({ "build_brief": "b".repeat(9000), "must_include": vec!["m".repeat(300); 40] });
-    for (name, p) in [("spec", prompt_spec(&e)), ("design", prompt_design(&e, &["fix".repeat(500)])), ("merge", prompt_merge(&e, &["fix".repeat(500)])), ("code", prompt_code(&e, &["fix".repeat(500)])), ("verify", prompt_verify(&e, &"x".repeat(9000), &json!({ "a": "b".repeat(5000) }), false))] {
-        // ~4 chars per token: input ≤ ~4k tokens.
-        assert!(p.chars().count() <= 17_000, "{name} prompt is {} chars", p.chars().count());
+    for (name, p) in [("spec", prompt_spec(&e)), ("design", prompt_design(&e, &["fix".repeat(500)])), ("merge", prompt_merge(&e, &["fix".repeat(500)])), ("code", prompt_code(&e, &["fix".repeat(500)])), ("verify", prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), false, &[]))] {
+        // ~4 chars per token: input ≤ ~4k tokens; verify also reads the page's code (≤ ~6k tokens).
+        let cap = if name == "verify" { 24_000 } else { 17_000 };
+        assert!(p.chars().count() <= cap, "{name} prompt is {} chars", p.chars().count());
     }
 }
 
@@ -1202,7 +1254,7 @@ fn a_missing_task_note_never_sends_the_coder_back() {
         Some(store),
         Box::new(|c, _| {
             Ok(match c.stage {
-                "verify" => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Restore Tony's task note in memory"], "known_blockers": ["the memoryDoc path is wrong"], "voice_summary": "The note is gone." }).to_string(),
+                "verify" => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Restore Tony's task note in memory"], "known_blockers": ["the memoryDoc path is wrong"], "voice_summary": "The note is gone." }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -1251,7 +1303,7 @@ fn a_mixed_verify_loop_sends_only_the_build_fix_to_the_coder() {
         Some(store),
         Box::new(|c, n| {
             Ok(match (c.stage, n) {
-                ("verify", 1) => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button", "update Tony's task note"], "voice_summary": "One more pass." }).to_string(),
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Add a Reset button", "update Tony's task note"], "voice_summary": "One more pass." }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -1279,7 +1331,7 @@ fn a_real_memory_leak_fix_still_loops_the_coder() {
         Some(store),
         Box::new(|c, n| {
             Ok(match (c.stage, n) {
-                ("verify", 1) => json!({ "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Fix the memory leak in the timer"] }).to_string(),
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "loop", "loop_to": "coder", "fix_instructions": ["Fix the memory leak in the timer"] }).to_string(),
                 _ => default_reply(c),
             })
         }),
@@ -1323,20 +1375,20 @@ fn librarian_discrepancies_are_scoped() {
 }
 
 #[test]
-fn external_deps_are_listed_but_never_block() {
+fn external_deps_block_the_gate_the_page_must_work_offline() {
     let spec = json!({ "spec": { "coreFeatures": ["Bill amount input", "Tip percentage selector", "Split between people"], "screens": ["Calculator"] } });
     let ok = evaluate_html(GOOD_HTML, &spec);
     assert_eq!(ok["complete"], true, "{ok}");
     assert_eq!(ok["missing"], json!([]), "{ok}");
-    assert_eq!(ok["checks"]["externalDeps"], json!(["cdn.tailwindcss.com"]), "{ok}");
+    assert_eq!(ok["checks"]["externalDeps"], json!([]), "{ok}");
     let more = GOOD_HTML.replace(
         "</head>",
         r#"<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter"><link href='//unpkg.com/x@1/x.css' rel=stylesheet><script src="https://cdn.tailwindcss.com/3.4"></script><script src="local.js"></script><link rel="icon" href="data:,"></head>"#,
     );
     let r = evaluate_html(&more, &spec);
-    assert_eq!(r["checks"]["externalDeps"], json!(["cdn.tailwindcss.com", "fonts.googleapis.com", "unpkg.com"]), "{r}");
-    assert_eq!(r["complete"], true);
-    assert_eq!(r["missing"], json!([]));
+    assert_eq!(r["checks"]["externalDeps"], json!(["fonts.googleapis.com", "unpkg.com", "cdn.tailwindcss.com"]), "{r}");
+    assert_eq!(r["complete"], false, "a CDN dependency fails the gate");
+    assert!(r["missing"][0].as_str().unwrap().contains("work offline"), "{r}");
     // An <a href> to another site is not a dependency.
     assert_eq!(external_deps(r#"<a href="https://example.com/x">x</a>"#), Vec::<String>::new());
 }
@@ -1505,6 +1557,1550 @@ fn embed_only_skips_the_documenter_ingest_but_keeps_the_note() {
     assert_eq!(fake.ingests.load(Ordering::SeqCst), 0, "embedOnly: no per-note ingest");
     let doc = e.raw_intent.memory_reference["memoryDoc"].as_str().unwrap();
     assert!(Path::new(doc).is_file(), "the note itself is still written");
+}
+
+// ── Thoughtform pipeline hardening (regressions) ────────────────────────────
+
+fn worker_with<'a>(store: &'a TaskStore, env: &'a Fake, stats: &'a WorkerStats, forced: &'a Mutex<HashMap<String, String>>, t: Tuning) -> Worker<'a> {
+    Worker { store, env, tuning: t, stats, forced_offload: forced }
+}
+
+/// Regression: with LM Studio closed / reloading every queued build failed within seconds.
+/// Now an unreachable backend parks the stage (one milestone row) until it answers.
+#[test]
+fn an_unreachable_model_backend_waits_instead_of_failing_the_build() {
+    let root = tmp("backenddown");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, n| if c.stage == "triage" && n <= 4 { Err("error sending request for url (http://127.0.0.1:1235/v1/chat/completions): connection refused".into()) } else { Ok(default_reply(c)) }));
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    let (stats, forced) = (WorkerStats::default(), Mutex::new(HashMap::new()));
+    let t = Tuning { backend_wait: Duration::from_millis(1), backend_budget: Duration::from_secs(60), ..tuning() };
+    let w = worker_with(store, &fake, &stats, &forced, t);
+    for _ in 0..400 {
+        if get(store, &id).status == "review_ready" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = tauri::async_runtime::block_on(w.run_once());
+    }
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert!(!e.handoff_log.iter().any(|h| h.event_type == "failed"));
+    let waits: Vec<_> = e.handoff_log.iter().filter(|h| h.short_summary.starts_with("Waiting for the local model")).collect();
+    assert_eq!(waits.len(), 1, "one visible milestone, not one per attempt");
+    assert_eq!(waits[0].severity, "milestone");
+    // With no budget left the stage fails as before.
+    assert!(backend_unreachable("tcp connect error: No connection could be made because the target machine actively refused it"));
+    assert!(!backend_unreachable("the Coder returned no HTML file"));
+}
+
+/// Regression: Retry on a build stopped by the loop breaker re-ran the deterministic check on the
+/// same page and failed again at once. Now it goes back to the build brief for one more pass.
+#[test]
+fn retry_after_the_loop_limit_gets_one_more_real_pass() {
+    let root = tmp("breakerretry");
+    let store = leak_store();
+    let good = Arc::new(AtomicBool::new(false));
+    let g = good.clone();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" && !g.load(Ordering::SeqCst) { "```html\n<!doctype html><html><body><h1>Tip</h1><p>Bill</p></body>\n```".into() } else { default_reply(c) })));
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    assert!(get(store, &id).error.as_deref().unwrap().contains("max iterations"));
+    let r = retry_task(store, &id, &[]).unwrap();
+    assert_eq!((r.status.as_str(), r.stage.as_deref()), ("prompting", Some("merge")), "back to the build brief");
+    assert_eq!(r.iteration_count, 2, "exactly one more pass under the limit");
+    good.store(true, Ordering::SeqCst);
+    let merges_before = fake.count("merge");
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.count("merge"), merges_before + 1);
+    assert!(e.handoff_log.iter().any(|h| h.event_type == "retry" && h.summary_payload["after_breaker"] == true));
+}
+
+/// Regression: a Play Place hub task retried from the chat ran behind the hub's back.
+#[test]
+fn a_hub_owned_task_is_not_retried_outside_the_hub() {
+    let store = TaskStore::in_memory();
+    let t = create_task(&store, &CreateArgs { raw_intent: "build x".into(), source: "playplace".into(), ..Default::default() }, 3, &[]).unwrap().0;
+    cancel_task(&store, &t.task_id, &[]).unwrap();
+    assert!(retry_task(&store, &t.task_id, &[]).unwrap_err().contains("Play Place"));
+}
+
+/// Regression: a run whose task was cancelled mid-stage still wrote index.html (and archived the
+/// previous page from it) before its stale commit was dropped.
+#[test]
+fn a_cancelled_code_stage_never_writes_into_staging() {
+    let root = tmp("cancelwrite");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, _| {
+            if c.stage == "code" {
+                cancel_task(store, &c.task_id, &[]).unwrap();
+            }
+            Ok(default_reply(c))
+        }),
+    );
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!((e.status.as_str(), e.error.as_deref()), ("failed", Some("cancelled by user")));
+    assert!(!root.join("staging").join("tip-calculator").join("index.html").exists(), "the stale page never landed");
+    assert_eq!(e.handoff_log.iter().filter(|h| h.event_type == "failed").count(), 1);
+}
+
+/// Regression: a stage retry (timeout, bad output) was only an eprintln: the chat sat on
+/// "Coder is building" for up to two call ceilings with no word.
+#[test]
+fn a_stage_retry_is_visible_in_the_log() {
+    let root = tmp("retryrow");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, n| Ok(if c.stage == "code" && n == 1 { "no html here".into() } else { default_reply(c) })));
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready");
+    let r = e.handoff_log.iter().find(|h| h.event_type == "note" && h.short_summary.contains("trying again")).expect("a retry row");
+    assert_eq!((r.from_agent.as_str(), r.severity.as_str()), ("coder", "handoff"));
+}
+
+/// Regression: a task note that couldn't be written was only an eprintln, and with no
+/// memoryDoc the audit never flagged it.
+#[test]
+fn a_task_note_failure_is_logged_and_flagged() {
+    let root = tmp("notefail");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.settings.lock().unwrap().notes_root = None;
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready");
+    assert!(e.handoff_log.iter().any(|h| h.severity == "milestone" && h.short_summary.starts_with("Couldn't write Tony's task note")));
+    assert!(e.raw_intent.memory_reference["memoryDoc"].as_str().unwrap().starts_with("unavailable:"));
+    assert!(e.librarian_notes["read_report"]["memory_discrepancies"].to_string().contains("task note is missing"), "the read-report flags it");
+}
+
+/// Regression: a failed Librarian ingest was a task-less verbose note the chat never showed.
+#[test]
+fn an_ingest_failure_lands_on_the_task() {
+    let root = tmp("ingestfail");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.ingest_ok.store(false, Ordering::SeqCst);
+    let id = new_task(store, "Build me a tip calculator").task_id;
+    run(store, &fake);
+    let e = get(store, &id);
+    assert_eq!(e.status, "review_ready");
+    let r = e.handoff_log.iter().find(|h| h.short_summary.starts_with("Couldn't index the task note")).expect("an ingest row");
+    assert_eq!(r.severity, "milestone");
+}
+
+/// Regression: a failed Play Place card POST was lost for good (and the idea PATCH sent
+/// cardId:null). Now it is announced once, retried by the flush, and never nulls a cardId.
+#[test]
+fn a_failed_card_post_is_retried_when_the_gateway_is_back() {
+    let root = tmp("cardretry");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.gateway_ok.store(false, Ordering::SeqCst);
+    let id = create_task(store, &CreateArgs { raw_intent: "Build me a tip calculator".into(), source: "ledger".into(), idea_id: Some("idea-9".into()), ..Default::default() }, 3, &[]).unwrap().0.task_id;
+    let (stats, forced) = (WorkerStats::default(), Mutex::new(HashMap::new()));
+    let w = worker_with(store, &fake, &stats, &forced, tuning());
+    tauri::async_runtime::block_on(w.run_until_idle(300));
+    let e = get(store, &id);
+    assert_eq!((e.status.as_str(), e.card_id.as_deref()), ("review_ready", None));
+    assert!(stats.card_pending.lock().unwrap().contains(&id));
+    assert!(e.handoff_log.iter().any(|h| h.short_summary.starts_with("Couldn't post the Play Place card")));
+    let gw = fake.gateway_log.lock().unwrap().clone();
+    assert!(gw.iter().filter(|(m, p, _)| m == "PATCH" && p == "/api/cc/c/ideas/idea-9").all(|(_, _, b)| b.get("cardId").is_none()), "never a null cardId");
+    fake.gateway_ok.store(true, Ordering::SeqCst);
+    tauri::async_runtime::block_on(w.flush_mirrors(true));
+    let e = get(store, &id);
+    assert_eq!(e.card_id.as_deref(), Some("card-1"));
+    assert!(stats.card_pending.lock().unwrap().is_empty());
+    let gw = fake.gateway_log.lock().unwrap().clone();
+    assert!(gw.iter().any(|(m, p, b)| m == "PATCH" && p == "/api/cc/c/ideas/idea-9" && b["cardId"] == "card-1"));
+}
+
+/// Regression: every hub repair pass (a new task on the same build folder) posted another
+/// "staged" Play Place card; the first pass's card is updated instead.
+#[test]
+fn a_hub_repair_pass_updates_the_first_passes_card() {
+    let root = tmp("hubcard");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    let mk = |k: &str| create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), dedupe_key: Some(k.into()), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    let a = mk("b-1:1");
+    run(store, &fake);
+    assert_eq!(get(store, &a.task_id).card_id.as_deref(), Some("card-1"));
+    let b = mk("b-1:2");
+    run(store, &fake);
+    assert_eq!(get(store, &b.task_id).card_id.as_deref(), Some("card-1"));
+    let gw = fake.gateway_log.lock().unwrap().clone();
+    assert_eq!(gw.iter().filter(|(m, p, _)| m == "POST" && p == "/api/play-place").count(), 1, "one card per build");
+    assert!(gw.iter().any(|(m, p, _)| m == "PATCH" && p == "/api/cc/c/playplace/card-1"));
+    // The hub's title is kept (Nic named it), the folder is the hub's.
+    let e = get(store, &b.task_id);
+    assert_eq!((e.title.as_str(), e.project_slug.as_deref()), ("Tip Calculator", Some("tip-calculator")));
+}
+
+#[test]
+fn the_hub_title_survives_triage_and_spec() {
+    let store = TaskStore::in_memory();
+    let mut e = create_task(&store, &CreateArgs { raw_intent: "x".into(), title: Some("Focus timer (+2)".into()), source: "playplace".into(), ..Default::default() }, 3, &[]).unwrap().0;
+    assert_eq!(keep_title(&e, Some("Pomodoro Pal".into())), "Focus timer (+2)");
+    e.raw_intent.memory_reference["source"] = json!("voice");
+    assert_eq!(keep_title(&e, Some("Pomodoro Pal".into())), "Pomodoro Pal");
+}
+
+/// Regression: a parked brainstorm over 8000 chars could never be run from the ledger.
+#[test]
+fn an_over_long_raw_intent_is_fitted_not_refused() {
+    let text = format!("OPENING IDEA {}{}", "middle ".repeat(2000), " FINAL DECISION");
+    let store = TaskStore::in_memory();
+    let (e, _) = create_task(&store, &CreateArgs { raw_intent: text, source: "ledger".into(), ..Default::default() }, 3, &[]).unwrap();
+    let t = &e.raw_intent.text;
+    assert!(t.chars().count() <= envelope::RAW_INTENT_MAX);
+    assert!(t.starts_with("OPENING IDEA") && t.ends_with("FINAL DECISION") && t.contains("trimmed to fit"));
+    assert_eq!(fit_raw_intent("short"), "short");
+}
+
+#[test]
+fn a_cancel_patches_the_idea_ledger() {
+    let store = TaskStore::in_memory();
+    let t = create_task(&store, &CreateArgs { raw_intent: "x".into(), source: "ledger".into(), idea_id: Some("idea-3".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    let c = cancel_task(&store, &t.task_id, &[]).unwrap();
+    let (path, body) = cancelled_idea_patch(&c).unwrap();
+    assert_eq!((path.as_str(), body["status"].as_str()), ("/api/cc/c/ideas/idea-3", Some("failed")));
+    let quiet = create_task(&store, &CreateArgs { raw_intent: "y".into(), source: "typed".into(), idea_id: Some("idea-4".into()), options: Some(json!({ "noMirror": true })), ..Default::default() }, 3, &[]).unwrap().0;
+    assert!(cancelled_idea_patch(&quiet).is_none());
+}
+
+// ── Agent Conversation transcript ───────────────────────────────────────────
+
+/// Every model stage leaves what the agent was asked and what it answered in the task's
+/// conversation, in order, secret-scrubbed; tasks.db rows stay compact (no prompts, no HTML).
+#[test]
+fn each_agent_prompt_and_reply_is_recorded_in_the_tasks_conversation() {
+    let root = tmp("transcript");
+    let store = leak_store();
+    let script: Script = Box::new(|c, _| {
+        let r = default_reply(c);
+        // The Designer pastes a key-shaped string into its answer.
+        Ok(if c.stage == "design" { r.replace("single card", &format!("single card {SECRET}")) } else { r })
+    });
+    let fake = Fake::new(&root, Some(store), script);
+    fake.settings.lock().unwrap().known = vec!["synthetic-known-value-123".into()];
+    let t = new_task(store, "Build me a tip calculator synthetic-known-value-123");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let p = fake.transcript.page(&transcript::task_conv(&t.task_id), None, 400).unwrap().expect("the task's conversation exists");
+    let pairs: Vec<(String, String, String, Option<String>)> = p.messages.iter().filter(|m| m.kind == "prompt" || m.kind == "reply").map(|m| (m.kind.clone(), m.from.clone(), m.to.clone(), m.stage.clone())).collect();
+    let mut want = Vec::new();
+    for (stage, agent) in [("triage", "prompter"), ("preflight", "librarian"), ("spec", "prompter"), ("design", "designer"), ("merge", "prompter"), ("code", "coder"), ("audit", "librarian"), ("verify", "prompter")] {
+        want.push(("prompt".to_string(), "tony".to_string(), agent.to_string(), Some(stage.to_string())));
+        want.push(("reply".to_string(), agent.to_string(), "tony".to_string(), Some(stage.to_string())));
+    }
+    assert_eq!(pairs, want);
+    // Ordered by (at, seq); the Coder's reply keeps the page it built (bounded, not dropped).
+    assert!(p.messages.windows(2).all(|w| (w[0].at, w[0].seq) <= (w[1].at, w[1].seq)));
+    let code = p.messages.iter().find(|m| m.kind == "reply" && m.stage.as_deref() == Some("code")).unwrap();
+    assert!(fake.transcript.message(code.seq).unwrap().unwrap().body.contains("Tip calculator"));
+    // The agents' own words reach the summary line.
+    assert!(p.messages.iter().any(|m| m.summary.contains("The blueprint is a single dark card")));
+    // No fake key and no known value anywhere in the transcript.
+    let dump: String = fake.transcript.with(|c| c.query_row("SELECT group_concat(summary || body, '|') FROM message", [], |r| r.get(0)).map_err(|e| e.to_string())).unwrap();
+    assert!(!dump.contains(SECRET) && !dump.contains("synthetic-known-value-123"));
+    // tasks.db stays compact: no prompt text or HTML in its rows.
+    assert!(e.handoff_log.iter().all(|h| !h.summary_payload.to_string().contains("<html") && !h.short_summary.contains("TASK ")));
+}
+
+/// A model that fails is in the conversation as an error from that agent.
+#[test]
+fn a_failed_model_call_is_recorded_as_an_error() {
+    let root = tmp("transcript-err");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| if c.stage == "triage" { Err("model exploded".into()) } else { Ok(default_reply(c)) }));
+    let t = new_task(store, "Build a stopwatch");
+    run(store, &fake);
+    let p = fake.transcript.page(&transcript::task_conv(&t.task_id), None, 400).unwrap().unwrap();
+    let err = p.messages.iter().find(|m| m.kind == "error" && m.from == "prompter").expect("an error from the Prompter");
+    assert!(!err.ok && err.summary.contains("model exploded"), "{}", err.summary);
+}
+
+// ── Quality gate (2026-11-20 protein run: passed every stage, core feature broken) ──
+
+/// A verifier that says "pass" but marks a criterion unmet (or quotes code that isn't in the
+/// page) sends the build back to the Coder with that criterion as the fix.
+#[test]
+fn an_unmet_or_unevidenced_criterion_overrides_a_pass() {
+    let root = tmp("evidence");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("verify", 1) => json!({ "criteria": [
+                    { "criterion": "Shows the per-person total", "met": true, "evidence": "$(\"out\").textContent = \"$\"" },
+                    { "criterion": "Saves the grams of each food", "met": true, "evidence": "slots[i].grams = Number(e.target.value)" },
+                    { "criterion": "Has a reset button", "met": false, "evidence": "", "fix": "add a Reset button that clears the inputs" }
+                ], "verdict": "pass", "voice_summary": "Looks fine." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "the false pass became one loop");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("no working code found for: Saves the grams of each food"), "{}", codes[1].user);
+    assert!(codes[1].user.contains("not met: Has a reset button (add a Reset button"), "{}", codes[1].user);
+    // The verifier read the page's code, Nic's words and the criteria.
+    let v = fake.calls_for("verify");
+    assert!(v[0].user.contains("Number($(\"bill\").value)") && v[0].user.contains("Build me a tip calculator") && v[0].user.contains("1. Shows the per-person total"), "{}", v[0].user);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["evidence_found"], true);
+}
+
+/// No per-criterion list: the stage is retried; on the last attempt it passes with the gap named.
+#[test]
+fn a_verify_without_evidence_is_retried_then_named_as_a_blocker() {
+    let root = tmp("noevidence");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.count("verify"), STAGE_ATTEMPTS as usize);
+    assert!(e.last_eval["known_blockers"].to_string().contains("could not show code evidence"), "{}", e.last_eval);
+}
+
+/// Nic's exact value ("165 lbs") is carried into the spec, brief and code prompts, and a page
+/// without it fails the gate and loops with that value as the fix.
+#[test]
+fn nics_exact_values_are_carried_and_checked() {
+    let root = tmp("literals");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{}\n```", GOOD_HTML.replace("value=\"84.50\"", "value=\"165\"").replace("Bill amount</label>", "Bill amount (lb)</label>")),
+                // The verifier judges Nic's pinned default too (an unjudged pinned check loops).
+                ("verify", _) => {
+                    let mut list = crit().as_array().cloned().unwrap();
+                    list.push(json!({ "n": 2, "criterion": "Nic's default 165 lbs", "met": true, "evidence": "const total = Number($(\"bill\").value)" }));
+                    json!({ "criteria": list, "verdict": "pass", "voice_summary": "It meets the criteria." }).to_string()
+                }
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator. I'm 165 lbs, use that as the default.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "{}", e.last_eval);
+    for st in ["spec", "merge", "code", "verify"] {
+        assert!(fake.calls_for(st)[0].user.contains("Nic's exact values") && fake.calls_for(st)[0].user.contains("165 lbs"), "{st}");
+    }
+    let merges = fake.calls_for("merge");
+    assert!(merges[1].user.contains("\"165 lbs\""), "{}", merges[1].user);
+    assert_eq!(e.last_eval["checks"]["literals"]["missing"], 0);
+}
+
+/// A page that still breaks a gate rule on the last allowed pass is handed to review with the
+/// open items as known blockers, instead of the whole build failing.
+#[test]
+fn a_usable_page_still_failing_the_gate_at_the_limit_is_staged_with_blockers() {
+    let root = tmp("gatelimit");
+    let store = leak_store();
+    let cdn = GOOD_HTML.replace("</head>", "<script src=\"https://cdn.tailwindcss.com\"></script></head>");
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{cdn}\n```") } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "the last pass got its one gate repair (AD-13)");
+    assert!(e.last_eval["known_blockers"].to_string().contains("work offline"), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone(), e.last_eval["gate_repair"].clone()), (json!(false), json!("needs_fixes"), json!(true)));
+    assert!(fake.calls_for("code")[1].user.contains("cdn.tailwindcss.com"), "the loop told the Coder what to remove");
+    // The rules the Coder gets forbid the CDN up front.
+    assert!(fake.calls_for("code")[0].user.contains("no CDN") && !fake.calls_for("code")[0].user.contains("Tailwind via"));
+}
+
+#[test]
+fn the_gate_flags_missing_ids_and_unguarded_storage_and_reads_runtime_errors() {
+    let skip = quality::Smoke::Skipped("not run".into());
+    let spec = json!({ "spec": { "coreFeatures": ["Bill amount input"], "screens": ["Calculator"] } });
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "const saved = localStorage.getItem('tip'); document.getElementById('ghost'); $(\"go\").addEventListener");
+    let r = evaluate_build(&bad, &spec, "", &skip);
+    assert_eq!(r["complete"], false);
+    let m = r["missing"].to_string();
+    assert!(m.contains("#ghost") && m.contains("try/catch"), "{m}");
+    let fixed = bad.replace("document.getElementById('ghost'); ", "");
+    let line = fixed.lines().position(|l| l.contains("localStorage")).unwrap() + 1;
+    // A clean smoke that never reached the storage line proves nothing: the scan still counts it.
+    let clean = quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] };
+    assert_eq!(evaluate_build(&fixed, &spec, "", &clean)["complete"], false);
+    // The smoke reached it with storage blocked and nothing threw: the access was caught.
+    let reached = quality::Smoke::Ran { errors: vec![], storage_lines: vec![line], stuck: vec![] };
+    assert_eq!(evaluate_build(&fixed, &spec, "", &reached)["complete"], true);
+    // …unless the page then crashed on the blocked storage.
+    let threw = quality::Smoke::Ran { errors: vec!["the page throws on load: Uncaught SecurityError: localStorage is blocked here (guard storage with try/catch)".into()], storage_lines: vec![line], stuck: vec![] };
+    let t = evaluate_build(&fixed, &spec, "", &threw);
+    assert!(t["complete"] == false && t["missing"].to_string().contains("1 unguarded, line"), "{t}");
+    let crashed = evaluate_build(GOOD_HTML, &spec, "", &quality::Smoke::Ran { errors: vec!["the page throws on load: Uncaught TypeError: x is null".into()], storage_lines: vec![], stuck: vec![] });
+    assert_eq!(crashed["complete"], false);
+    assert!(crashed["missing"].to_string().contains("throws on load"));
+    assert_eq!(crashed["checks"]["runtime"]["loadErrors"], 1);
+    // A smoke that ran but never produced a result (hang, reload loop) fails: never a silent pass.
+    let hung = evaluate_build(GOOD_HTML, &spec, "", &quality::Smoke::Failed("no result after 25s: the page hung, kept reloading or never finished".into()));
+    assert_eq!(hung["complete"], false);
+    assert!(hung["missing"].to_string().contains("hung or navigated away"), "{hung}");
+    assert_eq!(hung["checks"]["runtime"]["failed"], true);
+    // Not run at all (no Edge): the static checks decide, and the record says why.
+    let ok = evaluate_build(GOOD_HTML, &spec, "", &quality::Smoke::Skipped("Edge is not installed".into()));
+    assert_eq!(ok["complete"], true, "{ok}");
+    assert_eq!(ok["checks"]["runtime"], json!({ "ran": false, "reason": "Edge is not installed" }));
+    // An empty spec sub-object falls back to the requirements for coverage.
+    let empty = json!({ "requirements": ["Currency converter with exchange history chart"], "spec": { "coreFeatures": [], "screens": [] } });
+    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", &skip)["checks"]["items"], 1);
+    assert_eq!(evaluate_build(GOOD_HTML, &empty, "", &skip)["complete"], false);
+}
+
+// ── Behavioural probes in verify (AD-11; the protein-tracker-2 re-run passed broken behaviour) ──
+
+/// The tip calculator's per-person total, with a probe that sets the bill and clicks Calculate.
+fn probed_crit() -> Value {
+    json!([{ "n": 1, "criterion": "Shows the per-person total", "met": true,
+        "evidence": "$(\"out\").textContent = \"$\" + (total / Math.max(1, Number($(\"split\").value))).toFixed(2)",
+        "probe": [{ "op": "set", "sel": "#bill", "value": "100" }, { "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "#out", "contains": "$39.33" }] }])
+}
+
+/// A stand-in browser: the probe fails on a page without `data-fixed`, passes on one with it.
+fn scripted_probes() -> ProbeFn {
+    Box::new(|html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|_| if html.contains("data-fixed") { json!({ "ok": true }) } else { json!({ "ok": false, "k": "fail", "at": 2, "got": "$0.00 per person" }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    })
+}
+
+/// The verifier says pass and quotes real code, but its probe shows the behaviour is broken: the
+/// build goes back to the Coder with the exact probe line, and passes once the probe does.
+#[test]
+fn a_failing_probe_overrides_a_pass_with_evidence_and_loops_to_the_coder() {
+    let root = tmp("probe");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass", "voice_summary": "It works." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "the probe failure became one loop");
+    let line = "probe failed for Shows the per-person total: got $0.00 per person; expected #out text to contain \"$39.33\" after set #bill=100, click #go";
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains(line), "{}", codes[1].user);
+    let looped = e.handoff_log.iter().find(|h| h.event_type == "loop_iteration" && h.summary_payload["from"] == "verify").expect("a verify loop row");
+    assert_eq!(looped.summary_payload["fix_instructions"][0], line, "the probe line goes first");
+    // The probes the verifier wrote were validated and run (both passes); the final record shows them.
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0][0].steps[0], json!({ "op": "set", "sel": "#bill", "nth": 0, "value": "100" }));
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["probe"]["passed"], true, "{}", e.last_eval["verify"]);
+    assert_eq!(e.last_eval["verify"]["probes"]["ran"], true);
+    assert_eq!(e.last_eval["known_blockers"], json!([]));
+    // The verifier was told how to write probes.
+    assert!(fake.calls_for("verify")[0].user.contains("\"op\":\"expect_order\""));
+}
+
+/// Without a browser (or with runtime checks off) the probes are skipped and recorded; the
+/// evidence-only rule decides.
+#[test]
+fn probes_are_skipped_without_a_browser_and_the_evidence_rule_applies() {
+    let root = tmp("probe-skip");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 0);
+    assert_eq!(e.last_eval["verify"]["probes"], json!({ "ran": false, "skipped": "fake: no browser" }));
+    assert!(e.last_eval["verify"]["criteria"][0]["probe"]["detail"].as_str().unwrap().starts_with("skipped"));
+    // Runtime checks off: the browser is never asked.
+    let root = tmp("probe-off");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert!(fake.probe_calls.lock().unwrap().is_empty());
+    assert_eq!(e.last_eval["verify"]["probes"]["skipped"], "runtime checks are off");
+}
+
+/// A probe that still fails on the last allowed pass is named first among the known blockers.
+#[test]
+fn a_probe_still_failing_at_the_limit_is_a_known_blocker() {
+    let root = tmp("probe-limit");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass", "known_blockers": ["model note"] }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].starts_with("probe failed for Shows the per-person total"), "{kb:?}");
+    assert_eq!(kb.last().map(String::as_str), Some("model note"), "the model's wording comes last");
+}
+
+/// The verifier answering only some of the requested criteria is asked again; on the last
+/// attempt the unjudged ones are named as blockers (never silently passed).
+#[test]
+fn a_verify_that_leaves_criteria_out_is_retried_then_names_them() {
+    let root = tmp("probe-partial");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Remembers the last bill between visits\"]"),
+                "verify" => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.count("verify"), STAGE_ATTEMPTS as usize, "asked again once");
+    assert!(e.last_eval["known_blockers"].to_string().contains("verify did not judge: Remembers the last bill between visits"), "{}", e.last_eval);
+    assert_eq!(e.iteration_count, 0, "a verifier gap never loops the Coder");
+}
+
+/// The Coder reads the latest loop's fixes before the brief's older ones (a verify loop skips
+/// merge), and Nic's own words keep their end: a late "actually default to 4" survives the clip.
+#[test]
+fn the_coder_reads_the_latest_fixes_first_and_nics_latest_words() {
+    let mut e = new_task(&TaskStore::in_memory(), &format!("I want 5 meals a day. {} Actually, default to 4 meals.", "and some more talk about it ".repeat(200)));
+    e.coder_brief = json!({ "build_brief": "Build it.", "fix_instructions": vec!["stale fix from the last merge ".repeat(6); 12] });
+    let probe_line = "probe failed for the meal split: got 3, 5, 4; expected .split-btn (data-meals) in the order 3, 4, 5 on a fresh load".to_string();
+    let p = prompt_code(&e, &[probe_line.clone()]);
+    assert!(p.contains("Actually, default to 4 meals.") && p.contains("I want 5 meals a day."), "head and tail of a long brainstorm");
+    assert!(p.find(&probe_line).unwrap() < p.find("stale fix").unwrap(), "the latest fixes first");
+    assert!(!p.contains("source of truth"));
+    let v = prompt_verify(&e, "<p>x</p>", &Value::Null, false, &[]);
+    assert!(v.contains("Actually, default to 4 meals."));
+    let h = head_tail(&"a".repeat(5000), 2500);
+    assert!(h.chars().count() <= 2500 && h.contains("middle trimmed"));
+    assert_eq!(head_tail(" short ", 2500), "short");
+}
+
+/// On a last pass that still fails the gate, the verifier is told the checks still fail (never
+/// "passed"), and a script-heavy page stays inside the prompt budget.
+#[test]
+fn the_verify_prompt_names_open_gate_items_and_stays_in_budget() {
+    let mut e = new_task(&TaskStore::in_memory(), &"word ".repeat(1500));
+    e.prompt_spec = json!({ "acceptance_criteria": vec!["a".repeat(300); 40] });
+    e.last_eval = json!({ "checks": { "offline": false }, "gate_blockers": ["no external scripts or stylesheets (cdn.tailwindcss.com): inline all CSS"] });
+    let page = format!("<html><head><style>{}</style></head><body><script>{}</script></body></html>", "a{b:c}".repeat(3000), "let x = 1;\n".repeat(4000));
+    let p = prompt_verify(&e, &page, &json!({ "a": "b".repeat(5000) }), true, &[]);
+    assert!(p.contains("still fail on this last pass") && p.contains("cdn.tailwindcss.com") && !p.contains("checks passed"), "{}", &p[..600]);
+    assert!(p.contains("was cut for length"));
+    assert!(p.chars().count() <= 24_000, "{}", p.chars().count());
+}
+
+/// A Play Place hub build still failing the gate on the last pass fails (into the hub's Repair
+/// Queue) instead of being handed on as review_ready, which the hub would smoke and mark mergeable.
+#[test]
+fn a_hub_build_failing_the_gate_at_the_limit_fails_instead_of_handing_on() {
+    let root = tmp("hubgate");
+    let store = leak_store();
+    let cdn = GOOD_HTML.replace("</head>", "<script src=\"https://cdn.tailwindcss.com\"></script></head>");
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{cdn}\n```") } else { default_reply(c) })));
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    assert!(e.last_eval.get("gate_blockers").is_none());
+    assert_eq!(fake.count("verify"), 0);
+}
+
+/// A probe that caught a bug runs again on the next verify even when the verifier drops it and
+/// quotes the code: the bug cannot pass on evidence alone (it loops, then is a known blocker at
+/// the limit); once the page is fixed the carried probe passes and nothing stays open.
+#[test]
+fn a_failed_probe_is_rechecked_on_the_next_verify_even_when_the_verifier_drops_it() {
+    let no_probe = || json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"] }], "verdict": "pass" }).to_string();
+    // Fixed on the third Coder pass.
+    let root = tmp("probe-carry");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) | ("code", 2) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", 1) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => no_probe(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 2, "the dropped probe still failed once more, then passed");
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 3);
+    assert!(!calls[0][0].carried && calls[1][0].carried && calls[2][0].carried, "{calls:?}");
+    let codes = fake.calls_for("code");
+    assert!(codes[2].user.contains("probe failed again for Shows the per-person total: got $0.00 per person"), "{}", codes[2].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]));
+    assert_eq!(e.last_eval["open_probes"], json!([]), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["probe"]["rechecked"][0]["passed"], true);
+    // Never fixed: the carried probe is still failing at the limit and is named first.
+    let root = tmp("probe-carry-limit");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, n| Ok(match (c.stage, n) { ("verify", 1) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(), ("verify", _) => no_probe(), _ => default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].starts_with("probe failed again for Shows the per-person total"), "{kb:?}");
+}
+
+/// A Play Place hub build whose probe still fails on the last pass fails (into the Repair Queue)
+/// instead of being staged review_ready, which the hub would smoke-test and mark mergeable.
+#[test]
+fn a_hub_build_whose_probe_still_fails_at_the_limit_fails_instead_of_handing_on() {
+    let root = tmp("hubprobe");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    assert_eq!(fake.count("verify"), 1 + MAX_LOOP_ITERATIONS as usize);
+    let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
+    assert!(!status.contains("review_ready"), "{status}");
+    // A non-hub build in the same state is staged with the probe as a known blocker
+    // (`a_probe_still_failing_at_the_limit_is_a_known_blocker`).
+}
+
+// ── Required probes and pinned intent checks (AD-12) ─────────────────────────
+
+/// A stand-in browser where every probe passes.
+fn passing_probes() -> ProbeFn {
+    Box::new(|_html: &str, probes: &[quality::Probe]| quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(probes.iter().map(|_| json!({ "ok": true })).collect()))))
+}
+
+/// A behavioural criterion the verifier calls met with quoted code but no probe is not met: the
+/// verify is asked once more with the exact reason, and a probe that then runs and passes
+/// settles it. Still none on the last attempt: a known blocker, never a Coder loop.
+#[test]
+fn a_behavioural_criterion_without_a_probe_is_asked_again_then_named() {
+    let root = tmp("probe-required");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((fake.count("verify"), e.iteration_count, fake.count("code")), (2, 0, 1));
+    let v = fake.calls_for("verify");
+    assert!(!v[0].user.contains("no working probe"));
+    assert!(v[1].user.contains("Your last answer gave no working probe") && v[1].user.contains("- 1. Shows the per-person total: no probe was given"), "{}", v[1].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["probe"]["passed"], true);
+    assert_eq!(e.last_eval["verify"]["criteria"][0]["needs_probe"], true);
+    // The verifier never writes one: staged with the gap as a known blocker, the Coder untouched.
+    let root = tmp("probe-required-none");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((fake.count("verify"), e.iteration_count, fake.count("code")), (STAGE_ATTEMPTS as usize, 0, 1));
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert_eq!(kb, vec!["couldn't be checked in a browser: Shows the per-person total (no probe was given)".to_string()], "{kb:?}");
+    assert_eq!(e.last_eval["verify"]["unmet"], 0);
+}
+
+/// Nic's own values are pinned in Rust: the verifier's round-trip toggle probe is rejected with
+/// "use the pinned value", its copy of the page's own order is corrected to the pinned one (AD-13)
+/// and noted, the retry's probes are rewritten to the computed numbers, the unit control is held
+/// to Nic's unit, and they all run.
+#[test]
+fn nics_pinned_values_hold_the_verifiers_probes() {
+    let page = GOOD_HTML.replace("</main>", "<p id=\"w\">165 lb</p><button id=\"kg\">kg</button><select id=\"u\"><option selected>lb</option><option>kg</option></select><div><button class=\"m\">3 meals</button><button class=\"m\">4 meals</button><button class=\"m\">5 meals</button></div>\n</main>");
+    let ask = "Build me a tip calculator that also shows my weight. I'm 165 lbs, default 165 lb, with a lb/kg toggle and a per-meal split (3-5 meals).";
+    let root = tmp("probe-pinned");
+    let store = leak_store();
+    let first = json!({ "criteria": [
+        probed_crit()[0].clone(),
+        { "n": 2, "criterion": "default", "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#w", "approx": 165 }] },
+        { "n": 3, "criterion": "kg", "met": true, "evidence": "", "probe": [{ "op": "click", "sel": "#kg" }, { "op": "click", "sel": "#kg" }, { "op": "expect_text", "sel": "#w", "contains": "165" }] },
+        { "n": 4, "criterion": "split", "met": true, "evidence": "", "probe": [{ "op": "expect_order", "sel": ".m", "order": ["3", "5", "4"] }] },
+        { "n": 5, "criterion": "unit", "met": true, "evidence": "", "probe": [{ "op": "expect_value", "sel": "#u", "contains": "lb" }] }
+    ], "verdict": "pass" });
+    let mut second = first.clone();
+    second["criteria"][2]["probe"] = json!([{ "op": "click", "sel": "#kg" }, { "op": "expect_text", "sel": "#w", "contains": "74.8 kg" }]);
+    let (first, second) = (first.to_string(), second.to_string());
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", _) => format!("```html\n{page}\n```"),
+                ("verify", 1) => first.clone(),
+                ("verify", _) => second.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, ask);
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("verify"), 2);
+    let v = fake.calls_for("verify");
+    assert!(v[0].user.contains("2. On a fresh load, before any action, the page shows Nic's default \"165 lbs\" (pinned value: 165;"), "{}", v[0].user);
+    assert!(v[0].user.contains("3. After switching the unit from lb to kg") && v[0].user.contains("pinned value: 74.84;"));
+    assert!(v[0].user.contains("4. The choices for Nic's \"3-5 meals\" read 3, 4, 5"));
+    assert!(v[0].user.contains("5. On a fresh load, before any action, the unit control has Nic's unit lb selected"), "{}", v[0].user);
+    assert!(v[1].user.contains("round trip") && v[1].user.contains("use the pinned value 74.84"), "{}", v[1].user);
+    assert!(!v[1].user.contains("use the pinned order"), "the order is corrected, not sent back: {}", v[1].user);
+    assert!(v[1].user.contains("- 3. After switching the unit from lb to kg"), "the feedback names the requested criterion, not the model's \"kg\"");
+    // The retry's probes ran with the values computed here, not the model's text.
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    let last = calls.last().unwrap();
+    let kg = last.iter().find(|p| p.steps.iter().any(|s| s["sel"] == "#kg")).unwrap();
+    assert_eq!(kg.steps.last().unwrap(), &json!({ "op": "expect_text", "sel": "#w", "nth": 0, "approx": 74.84, "tol": 0.5 }));
+    let order = last.iter().find(|p| p.steps.iter().any(|s| s["op"] == "expect_order")).unwrap();
+    assert_eq!(order.steps[0]["order"], json!(["3", "4", "5"]));
+    let unit = last.iter().find(|p| p.steps.iter().any(|s| s["sel"] == "#u")).unwrap();
+    assert_eq!(unit.steps[0], json!({ "op": "expect_unit", "sel": "#u", "unit": "lb", "other": "kg" }));
+    assert_eq!(last.len(), 5, "every criterion's probe ran");
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass")));
+    let crit = &e.last_eval["verify"]["criteria"];
+    assert_eq!((crit[2]["pinned"].clone(), crit[4]["pinned"].clone()), (json!("74.84"), json!("lb")));
+    assert!(crit[3]["probe_note"].as_str().unwrap().contains("pinned value substituted"), "{}", crit[3]);
+}
+
+/// The probe examples come from another domain (examples from the page being checked prime the
+/// 9B verifier to copy them), and the prompt says where expected values come from; the verify
+/// prompt with intent checks and retry feedback stays inside its budget.
+#[test]
+fn the_verify_prompt_is_de_primed_and_stays_in_budget_with_checks() {
+    for bad in ["#weight", "#kg", "74.8", ".split-btn", "data-meals", "165", "[\"3\",\"4\",\"5\"]", "meal", "protein", "lb"] {
+        assert!(!PROBE_RULES.contains(bad), "{bad}");
+    }
+    let e = new_task(&TaskStore::in_memory(), "Build me a tip calculator");
+    let p = prompt_verify(&e, "<p>x</p>", &Value::Null, false, &[]);
+    assert!(p.contains("NEVER from the page's own code or formula") && p.contains("implausible in the real world"), "{p}");
+    assert!(p.contains("a number matches only as a whole number") && p.contains("counts as met ONLY when its probe runs and passes"));
+    let mut e = new_task(&TaskStore::in_memory(), &format!("I'm 165 lbs, default 165 lb, lb/kg toggle, per-meal split (3-5 meals). {}", "word ".repeat(1500)));
+    e.prompt_spec = json!({ "acceptance_criteria": vec!["a".repeat(300); 40] });
+    let fb = vec!["f".repeat(300); 20];
+    let p = prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), true, &fb);
+    assert!(p.contains("13. The choices for Nic's \"3-5 meals\"") && p.contains("Your last answer gave no working probe"), "{}", &p[..2000]);
+    assert!(p.chars().count() <= 24_000, "{}", p.chars().count());
+    // The prompt's cap is the code's cap.
+    assert!(PROBE_RULES.contains(&format!("at most {} probes", quality::MAX_PROBES)));
+}
+
+// ── AD-12 review fixes ───────────────────────────────────────────────────────
+
+/// The verifier is never told "never convert" Nic's values next to a pinned converted value: a
+/// unit toggle may show them converted (the build stages keep their rule).
+#[test]
+fn the_verify_prompt_lets_a_unit_toggle_show_nics_value_converted() {
+    let e = new_task(&TaskStore::in_memory(), "I'm 165 lbs, default 165 lb, with a lb/kg toggle and a per-meal split (3-5 meals).");
+    let p = prompt_verify(&e, "<p>x</p>", &Value::Null, false, &[]);
+    assert!(!p.contains("never convert"), "{p}");
+    assert!(p.contains("after a unit toggle the page may show them converted): 165 lbs; 3-5 meals") && p.contains("pinned value: 74.84;"), "{p}");
+    assert!(prompt_code(&e, &[]).contains("never convert or drop them"), "the Coder's rule is unchanged");
+}
+
+/// A stand-in browser: probes on `#out` fail until the page is fixed; every other probe passes.
+fn out_probes_fail_until_fixed() -> ProbeFn {
+    Box::new(|html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if html.contains("data-fixed") || !p.steps.iter().any(|s| s["sel"] == "#out") { json!({ "ok": true }) } else { json!({ "ok": false, "k": "fail", "at": 2, "got": "$0.00 per person" }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    })
+}
+
+/// A verify pass whose probe really failed AND that has a probe gap goes straight to the Coder
+/// with the failure: the gap retry is never spent there, because the retry's fresh answer (here
+/// a weak probe that passes on the broken page) would throw the failure away.
+#[test]
+fn a_probe_failure_is_never_thrown_away_by_the_gap_retry() {
+    let root = tmp("probe-fail-gap");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let remembers = "Remembers the last bill between visits";
+    let first = json!({ "criteria": [probed_crit()[0].clone(), { "n": 2, "criterion": remembers, "met": true, "evidence": crit()[0]["evidence"] }], "verdict": "pass" }).to_string();
+    let retry = json!({ "criteria": [
+        { "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": crit()[0]["evidence"], "probe": [{ "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "h1", "contains": "Tip" }] },
+        { "n": 2, "criterion": remembers, "met": true, "evidence": crit()[0]["evidence"], "probe": [{ "op": "set", "sel": "#bill", "value": "100" }, { "op": "reload" }, { "op": "expect_value", "sel": "#bill", "approx": 100 }] }
+    ], "verdict": "pass" }).to_string();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("spec", _) => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Remembers the last bill between visits\"]"),
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", _) if c.user.contains("Your last answer gave no working probe") => retry.clone(),
+                ("verify", _) => first.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(out_probes_fail_until_fixed());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 1, "the probe failure looped the Coder");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("probe failed for Shows the per-person total: got $0.00 per person"), "{}", codes[1].user);
+    let v = fake.calls_for("verify");
+    assert_eq!(v.len(), 3, "no retry on the failing pass; the fixed pass gets its gap retry");
+    assert!(!v[0].user.contains("Your last answer") && !v[1].user.contains("Your last answer") && v[2].user.contains("- 2. Remembers the last bill between visits: no probe was given"), "{}", v[2].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+}
+
+/// A gap retry recorded by an earlier claim of the stage that never ran (the task was paused or
+/// retried during the backoff) is ignored by the next claim: it neither feeds stale reasons into
+/// the prompt nor uses up this claim's own retry.
+#[test]
+fn a_gap_retry_from_an_earlier_claim_is_not_inherited() {
+    let root = tmp("probe-stale-feedback");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, n| {
+            Ok(match (c.stage, n) {
+                ("verify", 1) => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    let (stats, forced) = (WorkerStats::default(), Mutex::new(HashMap::new()));
+    stats.verify_feedback.lock().unwrap().insert(t.task_id.clone(), (0, Some(1), vec!["stale reason from a lost claim".into()]));
+    let w = worker_with(store, &fake, &stats, &forced, tuning());
+    tauri::async_runtime::block_on(w.run_until_idle(300));
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let v = fake.calls_for("verify");
+    assert_eq!(v.len(), 2, "this claim's own gap retry ran");
+    assert!(!v[0].user.contains("stale reason") && !v[1].user.contains("stale reason"));
+    assert!(v[1].user.contains("- 1. Shows the per-person total: no probe was given"), "{}", v[1].user);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+}
+
+/// A Play Place hub build whose behaviour the verifier never proves in a browser is not handed
+/// on as review_ready (the hub would smoke it and mark it mergeable without reading its
+/// blockers): the gap goes to the Coder like an unmet criterion, then fails into the Repair Queue.
+#[test]
+fn a_hub_build_with_an_unproven_behaviour_fails_instead_of_handing_on() {
+    let root = tmp("hubgap");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), default_script());
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{:?}", e.last_eval);
+    assert_eq!(fake.count("verify"), 2 * (1 + MAX_LOOP_ITERATIONS as usize), "each pass asked once more for the probe");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("couldn't be checked in a browser: Shows the per-person total"), "{}", codes[1].user);
+    let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
+    assert!(!status.contains("review_ready"), "{status}");
+    assert_eq!(e.last_eval["verify"]["gaps"], 1);
+}
+
+// ── AD-13: gate repair, honest verdicts, pinned loops, nothing dropped silently ─
+
+/// C + B: the last pass still failing items one targeted pass can fix (an id the script looks up
+/// that no element has, an output stuck on "Loading..." after load) gets exactly ONE more Coder
+/// pass carrying only those items, then the gate again; fixed, it goes on to verify as usual.
+#[test]
+fn a_last_pass_with_fixable_gate_items_gets_one_repair_pass() {
+    let root = tmp("gate-repair");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let good = GOOD_HTML.replace("<h1 ", "<h1 data-rendered=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => format!("```html\n{good}\n```"),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    // The smoke: a page without its startup render still reads "Loading..." in #targetDisplay.
+    *fake.smoke.lock().unwrap() = Some(Box::new(|html: &str| quality::Smoke::Ran {
+        errors: vec![],
+        storage_lines: vec![],
+        stuck: if html.contains("data-rendered") { vec![] } else { vec![("#targetDisplay".into(), "Loading...".into())] },
+    }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "exactly one repair pass");
+    let repair = fake.calls_for("code").last().unwrap().user.clone();
+    assert!(repair.contains(GATE_REPAIR_LEAD), "{repair}");
+    assert!(repair.contains("the script looks up ids no element has: #proteinGrams"), "{repair}");
+    assert!(repair.contains("the page still shows 'Loading...' in #targetDisplay after it loaded (render on startup)"), "{repair}");
+    let rows: Vec<_> = e.handoff_log.iter().filter(|h| h.summary_payload["gate_repair"] == true).collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].event_type.as_str(), rows[0].to_agent.as_str(), rows[0].iteration), ("loop_iteration", "coder", Some(MAX_LOOP_ITERATIONS)));
+    assert_eq!(e.last_eval["gate_repair"], true);
+    assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass")));
+    assert_eq!(fake.count("verify"), 1, "the gate failed until the repair, then verify ran once");
+}
+
+/// C: never for a page that already fails hard (a crash on load): it fails at the limit as before,
+/// with no repair pass. A hub build gets the repair pass and, still failing, fails into its queue.
+#[test]
+fn no_gate_repair_for_a_page_that_crashes_on_load() {
+    let root = tmp("gate-repair-crash");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{bad}\n```") } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec!["the page throws on load: Uncaught TypeError: x is null".into()], storage_lines: vec![], stuck: vec![] }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{}", e.last_eval);
+    assert_eq!(fake.count("code"), 1 + MAX_LOOP_ITERATIONS as usize, "no repair pass");
+    assert!(!e.handoff_log.iter().any(|h| h.summary_payload["gate_repair"] == true));
+    // A hub build: one repair pass, then the Repair Queue (never review_ready).
+    let root = tmp("gate-repair-hub");
+    let store = leak_store();
+    let cdn = GOOD_HTML.replace("</head>", "<script src=\"https://cdn.tailwindcss.com\"></script></head>");
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{cdn}\n```") } else { default_reply(c) })));
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{}", e.last_eval);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize);
+    assert_eq!(fake.count("verify"), 0);
+}
+
+/// D: a build staged with a probe that still fails is not "working": `works: false`, the verdict
+/// "needs_fixes", and the voice line says so whatever the verifier said ("It works.").
+#[test]
+fn a_build_staged_with_open_items_is_not_called_working() {
+    let root = tmp("honest");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "criteria": probed_crit(), "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")));
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    let voice = row.voice_summary.clone().unwrap();
+    assert!(voice.starts_with("Built, but 1 thing still doesn't work: probe failed again for Shows the per-person total") || voice.starts_with("Built, but 1 thing still doesn't work: probe failed for Shows the per-person total"), "{voice}");
+    assert!(!voice.contains("passes"), "{voice}");
+    assert!(row.short_summary.contains("needs fixes"), "{}", row.short_summary);
+    assert_eq!(row.summary_payload["verdict"], "needs_fixes");
+    let status: Value = serde_json::from_str(&std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap()).unwrap();
+    assert_eq!((status["status"].clone(), status["works"].clone()), (json!("review_ready"), json!(false)));
+}
+
+/// D / critic 1: a hub build whose criteria the verifier leaves out is not handed on: unjudged
+/// criteria count like unmet ones there (the hub never reads blockers) and fail into its queue.
+#[test]
+fn a_hub_build_whose_criteria_go_unjudged_fails_instead_of_handing_on() {
+    let root = tmp("hub-unjudged");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Remembers the last bill between visits\"]"),
+                "verify" => json!({ "criteria": crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = create_task(store, &CreateArgs { raw_intent: "BUILD CONTRACT: tip calculator".into(), title: Some("Tip Calculator".into()), source: "playplace".into(), project_slug: Some("tip-calculator".into()), ..Default::default() }, 3, &[]).unwrap().0;
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{}", e.last_eval);
+    assert_eq!(fake.count("verify"), 2 * MAX_LOOP_ITERATIONS as usize + 1, "each pass but the last asked once more");
+    assert!(fake.calls_for("code")[1].user.contains("verify did not judge: Remembers the last bill between visits: make sure it is clearly implemented"), "{}", fake.calls_for("code")[1].user);
+    assert_eq!(e.last_eval["verify"]["not_judged"], 1);
+    let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
+    assert!(!status.contains("review_ready"), "{status}");
+}
+
+/// P1-2 (narrowing D / critic 2): Nic's pinned check the verifier gives no probe for is asked
+/// again, then staged as "couldn't be checked" — the Coder cannot fix a missing probe, so it gets
+/// no extra pass; the build is not "working" and the voice says what could not be checked.
+#[test]
+fn a_pinned_check_without_a_probe_never_loops_the_coder() {
+    let root = tmp("pinned-loop");
+    let store = leak_store();
+    let page = GOOD_HTML.replace("</main>", "<p id=\"w\">165 lb</p>\n</main>");
+    let answer = json!({ "criteria": [probed_crit()[0].clone(), { "n": 2, "criterion": "default", "met": true, "evidence": "" }], "verdict": "pass", "voice_summary": "All good." }).to_string();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, _| {
+            Ok(match c.stage {
+                "code" => format!("```html\n{page}\n```"),
+                "verify" => answer.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(passing_probes());
+    let t = new_task(store, "Build me a tip calculator that shows my weight too, default 165 lb.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (0, 1, 2), "a verifier retry, never a Coder pass");
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].starts_with("couldn't be checked in a browser: On a fresh load, before any action, the page shows Nic's default \"165 lb\""), "{kb:?}");
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")));
+    assert_eq!(e.last_eval["verify"]["pinned_gaps"], 1);
+    let voice = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap().voice_summary.clone().unwrap();
+    assert!(voice.starts_with("Built, but 1 thing couldn't be checked: On a fresh load") && !voice.contains("work"), "{voice}");
+}
+
+/// P1-2: a pinned probe that runs and finds its element missing after the verifier's retry is the
+/// page's to fix: the Coder gets another pass, and a page that adds the element passes.
+#[test]
+fn a_pinned_probe_whose_element_is_missing_loops_the_coder() {
+    let root = tmp("pinned-missing");
+    let store = leak_store();
+    let without = GOOD_HTML.replace("</main>", "<p id=\"wt\">165 lb</p>\n</main>");
+    let with = GOOD_HTML.replace("</main>", "<p id=\"w\">165 lb</p>\n</main>");
+    let answer = json!({ "criteria": [probed_crit()[0].clone(), { "n": 2, "criterion": "default", "met": true, "evidence": "", "probe": [{ "op": "expect_text", "sel": "#w", "approx": 165 }] }], "verdict": "pass" }).to_string();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{without}\n```"),
+                ("code", _) => format!("```html\n{with}\n```"),
+                ("verify", _) => answer.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if p.steps.iter().any(|s| s["sel"] == "#w") && !html.contains("id=\"w\"") { json!({ "ok": false, "k": "nomatch", "at": 0 }) } else { json!({ "ok": true }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a tip calculator that shows my weight too, default 165 lb.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (1, 2, 3), "retry, then one Coder pass, then a passing verify");
+    let codes = fake.calls_for("code");
+    assert!(codes[1].user.contains("Nic's pinned check finds an element missing in a browser, couldn't be checked in a browser: On a fresh load") && codes[1].user.contains("#w matches nothing"), "{}", codes[1].user);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass")), "{}", e.last_eval);
+}
+
+/// J: carried probes run before the verifier's new ones (inside the time budget); a long list of
+/// blockers ends with "… and N more" instead of a silent cut; retry feedback keeps whole lines,
+/// pinned first.
+#[test]
+fn carried_probes_run_first_and_nothing_is_dropped_silently() {
+    let root = tmp("carried-first");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let other = json!({ "criteria": [{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": probed_crit()[0]["evidence"], "probe": [{ "op": "set", "sel": "#bill", "value": "50" }, { "op": "click", "sel": "#go" }, { "op": "expect_text", "sel": "#out", "contains": "$19.67" }] }], "verdict": "pass" }).to_string();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", 1) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                ("verify", _) => other.clone(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let calls = fake.probe_calls.lock().unwrap().clone();
+    assert_eq!(calls[1].len(), 2);
+    assert!(calls[1][0].carried && !calls[1][1].carried, "the carried probe runs first: {calls:?}");
+    // Many blockers: capped with a count, never silently.
+    let root = tmp("many-blockers");
+    let store = leak_store();
+    let many: Vec<String> = (0..10).map(|i| format!("Feature number {i} is on the page")).collect();
+    let spec = spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", &format!("\"acceptance_criteria\":{}", serde_json::to_string(&many).unwrap()));
+    let notes: Vec<String> = (0..8).map(|i| format!("model note {i}")).collect();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(match c.stage { "spec" => spec.clone(), "verify" => json!({ "criteria": [], "verdict": "pass", "known_blockers": notes }).to_string(), _ => default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let kb = str_list(&e.last_eval["known_blockers"], 40, 400);
+    assert_eq!(kb.len(), BLOCKERS_MAX, "{kb:?}");
+    assert_eq!(kb.last().unwrap(), &format!("… and {} more (see the verify record)", 1 + 10 + 8 - (BLOCKERS_MAX - 1)));
+    assert_eq!(e.last_eval["blockers_dropped"], json!(1 + 10 + 8 - (BLOCKERS_MAX - 1)));
+    // Retry feedback: whole lines, then a count.
+    let lines: Vec<String> = (0..20).map(|i| format!("{i}. {}", "x".repeat(200))).collect();
+    let fit = fit_lines(&lines, 1500);
+    assert!(fit.last().unwrap().starts_with("… and ") && fit[..fit.len() - 1].iter().all(|l| lines.contains(l)), "{fit:?}");
+    assert!(fit.iter().map(|l| l.chars().count() + 3).sum::<usize>() <= 1500);
+    let gaps = vec![
+        quality::ProbeGap { n: Some(1), criterion: "a".into(), why: "no probe was given".into(), fixable: true, pinned: false, page: false },
+        quality::ProbeGap { n: Some(11), criterion: "pinned".into(), why: "no probe was given (pinned value 165)".into(), fixable: true, pinned: true, page: false },
+    ];
+    assert!(quality::probe_feedback(&gaps)[0].starts_with("11. pinned"), "{:?}", quality::probe_feedback(&gaps));
+}
+
+/// C / D: the repair prompt carries only the gate's items (not the brief's older fixes), and the
+/// review voice is deterministic whenever blockers exist.
+#[test]
+fn the_repair_prompt_and_the_review_voice_are_deterministic() {
+    let mut e = new_task(&TaskStore::in_memory(), "Build me a tip calculator");
+    e.coder_brief = json!({ "build_brief": "Build it.", "fix_instructions": ["an older fix from the last merge"] });
+    let p = prompt_code(&e, &[GATE_REPAIR_LEAD.to_string(), "the script looks up ids no element has: #proteinGrams".to_string()]);
+    assert!(p.contains(GATE_REPAIR_LEAD) && p.contains("#proteinGrams") && !p.contains("an older fix"), "{p}");
+    assert!(prompt_code(&e, &["a verify fix".to_string()]).contains("an older fix"), "a normal pass still reads the brief's fixes");
+    let two = vec!["the page throws when its controls are used: Cannot read properties of null (reading 'value')".to_string(), "the script looks up ids no element has: #proteinGrams".to_string()];
+    let v = review_voice(&two, &[], &[]).unwrap();
+    assert!(v.starts_with("Built, but 2 things still don't work: the page throws when its controls are used: Cannot read") && v.ends_with("; the script looks up ids no element has: #proteinGrams."), "{v}");
+    assert!(review_voice(&[], &[], &two[..1]).unwrap().starts_with("Built; 1 thing still to check:"));
+    assert_eq!(review_voice(&[], &[], &[]), None);
+}
+
+// ── AD-13 review (round 14): repair never makes it worse, honest verdicts, true counts ──
+
+fn page_165() -> String {
+    GOOD_HTML.replace("value=\"84.50\"", "value=\"165\"").replace("Bill amount</label>", "Bill amount (lb)</label>")
+}
+
+fn staged_page(root: &Path, e: &Envelope) -> String {
+    std::fs::read_to_string(root.join("staging").join(e.project_slug.as_deref().unwrap()).join("index.html")).unwrap()
+}
+
+/// Nic's pinned check the verifier leaves out is the verifier's gap (asked again, then named), never
+/// a Coder pass (P1-2); staged, it and a build with no per-criterion list at all are not working.
+#[test]
+fn an_unjudged_pinned_check_never_loops_and_an_unjudged_build_is_not_working() {
+    let root = tmp("unjudged");
+    let store = leak_store();
+    let page = page_165();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "code" { format!("```html\n{page}\n```") } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator. I'm 165 lbs, use that as the default.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code")), (0, 1), "the unjudged pinned check is not the Coder's to fix");
+    assert_eq!(e.last_eval["verify"]["pinned_unjudged"], 1);
+    assert!(e.last_eval["known_blockers"].to_string().contains("verify did not judge: On a fresh load"), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
+    // No per-criterion list at all: staged, but never "works".
+    let root = tmp("absent");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, _| Ok(if c.stage == "verify" { json!({ "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string() } else { default_reply(c) })));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.last_eval["verify"]["absent"], true);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert!(row.short_summary.contains("needs fixes"), "{}", row.short_summary);
+}
+
+/// The repair pass makes the page crash on load: the page from before it is put back and staged
+/// with its gate items as known blockers (never a failed build).
+#[test]
+fn a_repair_pass_that_breaks_the_page_restores_the_page_from_before() {
+    let root = tmp("repair-worse");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let broken = GOOD_HTML.replace("<h1 ", "<h1 data-broken=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => format!("```html\n{broken}\n```"),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|html: &str| quality::Smoke::Ran {
+        errors: if html.contains("data-broken") { vec!["the page throws on load: Uncaught TypeError: x is null".into()] } else { vec![] },
+        storage_lines: vec![],
+        stuck: vec![],
+    }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "one repair pass");
+    let staged = staged_page(&root, &e);
+    assert!(staged.contains("proteinGrams") && !staged.contains("data-broken"), "the page from before the repair is staged");
+    assert!(e.last_eval["restored"]["why"].as_str().unwrap_or("").contains("crashed"), "{}", e.last_eval);
+    assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")));
+    assert!(e.code_artifacts.as_array().unwrap().iter().any(|a| a["by"].as_str().is_some_and(|b| b.starts_with("restored"))));
+}
+
+/// The repair pass's Coder returns no HTML on every attempt: the page from before it is checked
+/// again and staged with its blockers, never a failed build.
+#[test]
+fn a_repair_pass_whose_coder_fails_stages_the_page_from_before() {
+    let root = tmp("repair-nohtml");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => "Sorry, I could not finish the page.".to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] }));
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("code"), 1 + MAX_LOOP_ITERATIONS as usize + tuning().attempts as usize, "the repair pass tried, then gave up");
+    assert!(e.handoff_log.iter().any(|h| h.short_summary.starts_with("The repair pass failed")), "{:?}", flow(&e));
+    assert!(staged_page(&root, &e).contains("proteinGrams"));
+    assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
+    assert_eq!(e.last_eval["works"], json!(false));
+}
+
+/// The one-repair bound holds with a handoff log already at its row cap (handoff rows are dropped
+/// there): the stored evaluation says the repair ran, and the repair row is a milestone.
+#[test]
+fn the_gate_repair_bound_survives_a_full_handoff_log() {
+    let root = tmp("repair-cap");
+    let store = leak_store();
+    let bad = GOOD_HTML.replace("$(\"go\").addEventListener", "document.getElementById('proteinGrams'); $(\"go\").addEventListener");
+    let good = GOOD_HTML.replace("<h1 ", "<h1 data-rendered=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                // Never fixed: without a bound the repair would repeat until the run gives up.
+                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => format!("```html\n{}\n```", if n > 2 + MAX_LOOP_ITERATIONS as usize { &good } else { &bad }),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] }));
+    let t = new_task(store, "Build me a tip calculator");
+    let id = t.task_id.clone();
+    store
+        .with(|c| {
+            for _ in 0..envelope::LOG_ROWS_PER_TASK_MAX {
+                c.execute("INSERT INTO handoff_log (task_id, timestamp, from_agent, to_agent, event_type, severity, short_summary, summary_payload, stage, iteration) VALUES (?1, ?2, 'system', 'system', 'note', 'verbose', 'filler', '{}', NULL, 0)", rusqlite::params![id, envelope::now_ms()]).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "exactly one repair pass");
+    assert!(fake.calls_for("code").last().unwrap().user.contains(GATE_REPAIR_LEAD), "the repair row was written (a milestone)");
+    assert_eq!(e.handoff_log.iter().filter(|h| h.summary_payload["gate_repair"] == true).count(), 1);
+    assert_eq!(e.last_eval["gate_repair"], true);
+    assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
+}
+
+/// A retried build reuses its iteration number: the old run's repair row and stored state do not
+/// count for it, so its "one more pass" gets its own repair.
+#[test]
+fn a_retried_build_gets_its_own_gate_repair() {
+    let store = leak_store();
+    let t = new_task(store, "Build me a tip calculator");
+    let id = t.task_id.clone();
+    store
+        .with(|c| {
+            c.execute("INSERT INTO handoff_log (task_id, timestamp, from_agent, to_agent, event_type, severity, short_summary, summary_payload, stage, iteration) VALUES (?1, ?2, 'system', 'coder', 'loop_iteration', 'milestone', 'repair', '{\"gate_repair\":true}', 'evaluate', 3)", rusqlite::params![id, envelope::now_ms()]).map_err(|e| e.to_string())?;
+            c.execute("UPDATE task_envelope SET iteration_count = 3, status = 'failed', stage = 'evaluate', error = 'max iterations (3) reached', last_eval = '{\"gate_repair\":true,\"iteration\":3}' WHERE task_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert!(gate_repair_done(&get(store, &id)));
+    retry_task(store, &id, &[]).unwrap();
+    let e = get(store, &id);
+    assert!(e.last_eval.get("gate_repair").is_none(), "{}", e.last_eval);
+    // The retried run's loop brings it back to iteration 3.
+    store.with(|c| c.execute("UPDATE task_envelope SET iteration_count = 3 WHERE task_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())).unwrap();
+    assert!(!gate_repair_done(&get(store, &id)), "the old run's repair row is before the retry");
+}
+
+/// A unit control the harness cannot read is a known note: no Coder loop, and the build still
+/// "works" when everything else is proven.
+#[test]
+fn an_unreadable_unit_control_is_a_note_not_a_coder_loop() {
+    let root = tmp("nounit");
+    let store = leak_store();
+    let page = page_165();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, _| {
+            Ok(match c.stage {
+                "code" => format!("```html\n{page}\n```"),
+                "verify" => {
+                    let mut list = probed_crit().as_array().cloned().unwrap();
+                    list.push(json!({ "n": 2, "criterion": "default", "met": true, "evidence": "", "probe": [{ "op": "expect_value", "sel": "#bill", "approx": 165 }] }));
+                    list.push(json!({ "n": 3, "criterion": "convert", "met": true, "evidence": "", "probe": [{ "op": "click", "sel": "#kg" }, { "op": "expect_value", "sel": "#bill", "approx": 74.84 }] }));
+                    list.push(json!({ "n": 4, "criterion": "unit", "met": true, "evidence": "", "probe": [{ "op": "expect_class", "sel": "#lbBtn", "class": "active" }] }));
+                    json!({ "criteria": list, "verdict": "pass" }).to_string()
+                }
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(Box::new(|_html: &str, probes: &[quality::Probe]| {
+        let raw: Vec<Value> = probes.iter().map(|p| if p.steps.iter().any(|s| s["op"] == "expect_unit") { json!({ "ok": false, "k": "nounit", "at": 0, "got": "lb" }) } else { json!({ "ok": true }) }).collect();
+        quality::ProbeRun::Ran(quality::probe_results(probes, &Value::Array(raw)))
+    }));
+    let t = new_task(store, "Build me a protein calculator. Default 165 lb, with a lb/kg toggle.");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(e.iteration_count, 0, "no Coder loop for what the harness cannot read: {}", e.last_eval);
+    assert_eq!((e.last_eval["verify"]["gaps"].clone(), e.last_eval["verify"]["note_gaps"].clone()), (json!(1), json!(1)), "{}", e.last_eval);
+    assert!(e.last_eval["known_blockers"].to_string().contains("shows no selected unit"), "{}", e.last_eval);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")));
+}
+
+/// Past the blocker cap the stored list ends in "… and N more"; the true total is stored for the app.
+#[test]
+fn past_the_blocker_cap_the_true_total_is_stored() {
+    let root = tmp("blocker-total");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => {
+                    let mut s: Value = serde_json::from_str(&default_reply(c)).unwrap();
+                    s["prompt_spec"]["acceptance_criteria"] = json!((1..=10).map(|i| format!("Card layout detail number {i} is styled")).collect::<Vec<_>>());
+                    s.to_string()
+                }
+                "verify" => {
+                    let list: Vec<Value> = (1..=10).map(|i| json!({ "n": i, "criterion": format!("Card layout detail number {i} is styled"), "met": null })).collect();
+                    json!({ "criteria": list, "verdict": "pass", "known_blockers": (1..=8).map(|i| format!("model note {i}")).collect::<Vec<_>>() }).to_string()
+                }
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    let kb = e.last_eval["known_blockers"].as_array().unwrap();
+    assert_eq!(kb.len(), BLOCKERS_MAX);
+    assert!(kb.last().unwrap().as_str().unwrap().starts_with("… and 3 more"), "{kb:?}");
+    assert_eq!((e.last_eval["known_blockers_total"].clone(), e.last_eval["blockers_dropped"].clone()), (json!(18), json!(3)));
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert!(row.short_summary.contains("18 known blockers"), "{}", row.short_summary);
+}
+
+// ── AD-13 critic round 2: stale quotes, voice wording ───────────────────────
+
+/// P1-4: a criterion that needs no probe ("Has a dark card layout") quoted with code that is not
+/// in the page is the verifier's to fix: asked once more (told to copy the code verbatim), then
+/// staged as unchecked — never a Coder pass. Review round: a page that really lacks it (no viewport
+/// tag, the 9B quotes the standard one) must not stage as working, so it is not a mere note.
+#[test]
+fn a_stale_quote_for_a_layout_criterion_is_a_verifier_retry_not_a_coder_loop() {
+    let root = tmp("stale-layout");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(|c, _| {
+            Ok(match c.stage {
+                "spec" => spec_json().replace("\"acceptance_criteria\":[\"Shows the per-person total\"]", "\"acceptance_criteria\":[\"Shows the per-person total\",\"Has a dark card layout\"]"),
+                "verify" => json!({ "criteria": [crit()[0].clone(), { "n": 2, "criterion": "Has a dark card layout", "met": true, "evidence": "body { background: #0b0b0b; } /* paraphrased */" }], "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!((e.iteration_count, fake.count("code"), fake.count("verify")), (0, 1, 2), "a verifier retry, never a Coder pass");
+    let v = fake.calls_for("verify");
+    assert!(v[1].user.contains("Your last answer quoted code that is not in the page") && v[1].user.contains("- 2. Has a dark card layout: the quoted code is not in the page"), "{}", v[1].user);
+    assert!(!v[1].user.contains("gave no working probe"), "{}", v[1].user);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert_eq!(kb, vec!["couldn't confirm in the code: Has a dark card layout (the verifier's quoted code is not in the page)".to_string()]);
+    assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "an unconfirmed criterion is never staged as working");
+    assert!(!e.last_eval["verify"]["unmet"].as_u64().is_some_and(|u| u > 0));
+    assert_eq!(e.last_eval["verify"]["unchecked"], json!(["couldn't confirm in the code: Has a dark card layout (the verifier's quoted code is not in the page)"]));
+    let row = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert_eq!(row.voice_summary.as_deref(), Some("Built, but 1 thing couldn't be checked: Has a dark card layout (the verifier's quoted code is not in the page)."), "{row:?}");
+}
+
+/// P3: the voice tells what fails from what could not be checked, never ends in "….", and a loop
+/// the checks forced never carries the verifier's "passes" line.
+#[test]
+fn the_voice_tells_failures_from_unchecked_items_and_never_says_passes_on_a_loop() {
+    let fail = vec!["probe failed for Shows the per-person total: got $0.00".to_string()];
+    let unchecked = vec!["couldn't be checked in a browser: Remembers the bill (no probe was given)".to_string(), "verify did not judge: Has a reset".to_string()];
+    assert_eq!(review_voice(&[], &unchecked, &[]).unwrap(), "Built, but 2 things couldn't be checked: Remembers the bill (no probe was given); verify did not judge: Has a reset.");
+    // Never "couldn't be checked: couldn't be checked in a browser: …" (the phrase once).
+    let one = vec!["couldn't be checked in a browser: On page load the tip and total show a dash (its probe failed)".to_string()];
+    let v = review_voice(&[], &one, &[]).unwrap();
+    assert!(v.starts_with("Built, but 1 thing couldn't be checked: On page load the tip") && v.matches("couldn't").count() == 1, "{v}");
+    let stale = vec!["couldn't confirm in the code: UI is responsive (the verifier's quoted code is not in the page)".to_string()];
+    assert_eq!(review_voice(&[], &stale, &[]).unwrap(), "Built, but 1 thing couldn't be checked: UI is responsive (the verifier's quoted code is not in the page).");
+    let both = review_voice(&fail, &unchecked, &["a note".to_string()]).unwrap();
+    assert!(both.starts_with("Built, but 1 thing still doesn't work and 2 couldn't be checked: probe failed for Shows the per-person total"), "{both}");
+    let long = vec![format!("the page throws when its controls are used: {}", "x".repeat(200))];
+    let v = review_voice(&long, &[], &[]).unwrap();
+    assert!(v.ends_with('\u{2026}') && !v.ends_with("\u{2026}."), "{v}");
+    let semi = vec![format!("probe failed for the split: got 30g; expected #per text ≈26 (±0.5) after select #m=5 {}", "y".repeat(40))];
+    let v = review_voice(&semi, &[], &[]).unwrap();
+    assert!(!v.contains(";\u{2026}") && !v.contains(".\u{2026}") && v.ends_with('\u{2026}'), "{v}");
+    let dotted = vec!["Add a reset button.".to_string(), "Show the total.".to_string()];
+    assert_eq!(review_voice(&[], &[], &dotted).unwrap(), "Built; 2 things still to check: Add a reset button; Show the total.");
+    // The pipeline: the verifier says "passes", its probe fails, the checks loop the Coder.
+    let root = tmp("loop-voice");
+    let store = leak_store();
+    let fixed = GOOD_HTML.replace("<h1 ", "<h1 data-fixed=\"1\" ");
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => format!("```html\n{fixed}\n```"),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass", "voice_summary": "Build passes all functional criteria." }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = new_task(store, "Build me a tip calculator");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.iteration_count, 1, "{:?}", e.error);
+    let pre = e.handoff_log.iter().find(|h| h.short_summary.starts_with("Prompter wants another pass")).unwrap();
+    let said = pre.voice_summary.clone().unwrap_or_default();
+    assert!(!said.contains("passes") && said.starts_with("Not done yet: 1 fix for the Coder"), "{said}");
+    // The fixed pass: the verifier's own line is kept when nothing overrides it.
+    let ready = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").unwrap();
+    assert_eq!(ready.voice_summary.as_deref(), Some("Build passes all functional criteria."));
 }
 
 // ── Live smoke (tf-plan §4; run only with --exact, never in the default suite) ─

@@ -99,7 +99,7 @@ fn agent_field(field: &str, v: &str, registry: &[&str]) -> Result<(), String> {
 }
 
 /// The SQL CHECK for an agent-id column: the id PATTERN only (never a closed role list).
-fn agent_id_check(c: &str) -> String {
+pub(crate) fn agent_id_check(c: &str) -> String {
     format!("length({c}) BETWEEN 1 AND 32 AND {c} GLOB '[a-z]*' AND {c} NOT GLOB '*[^a-z0-9_-]*'")
 }
 
@@ -1185,6 +1185,7 @@ impl TaskStore {
         let (env, created, entry) = self.with(|c| create(c, n, known))?;
         if let Some(h) = entry {
             super::events::publish_entry(&h, &env);
+            super::transcript::mirror_entry(&h, &env, known);
         }
         Ok((env, created))
     }
@@ -1193,6 +1194,7 @@ impl TaskStore {
         let (env, entry) = self.with(|c| transition(c, task_id, expect, next, patch, row, known))?;
         if let Some(h) = entry {
             super::events::publish_entry(&h, &env);
+            super::transcript::mirror_entry(&h, &env, known);
         }
         Ok(env)
     }
@@ -1201,6 +1203,7 @@ impl TaskStore {
         let b = self.with(|c| bump_iteration(c, task_id, expect, next, row, known))?;
         if let Bump::Looped(env, Some(h)) | Bump::Failed(env, Some(h)) = &b {
             super::events::publish_entry(h, env);
+            super::transcript::mirror_entry(h, env, known);
         }
         Ok(b)
     }
@@ -1209,6 +1212,7 @@ impl TaskStore {
         let (env, entry) = self.with(|c| fail(c, task_id, expect, agent, reason, known))?;
         if let Some(h) = entry {
             super::events::publish_entry(&h, &env);
+            super::transcript::mirror_entry(&h, &env, known);
         }
         Ok(env)
     }
@@ -1219,6 +1223,8 @@ impl TaskStore {
         for (env, entry) in &rec {
             if let Some(h) = entry {
                 super::events::publish_entry(h, env);
+                // Its rows were scrubbed when they were written.
+                super::transcript::mirror_entry(h, env, &[]);
             }
         }
         Ok(rec.into_iter().map(|(e, _)| e.task_id).collect())

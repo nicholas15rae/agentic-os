@@ -42,8 +42,32 @@ fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
 }
 
-/// Inline `<script>` bodies (no `src=`, not JSON / templates). Pure.
+/// Inline `<script>` bodies the browser runs as JavaScript (no `src`). Pure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn inline_scripts(html: &str) -> Vec<String> {
+    inline_scripts_typed(html).into_iter().map(|(b, _)| b).collect()
+}
+
+/// Is a `<script type=…>` value JavaScript? (No type / empty = classic JS.) Pure.
+fn js_type(t: &str) -> Option<bool> {
+    let t = t.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+    let t = t.split(';').next().unwrap_or("").trim().to_string();
+    match t.as_str() {
+        "module" => Some(true),
+        "" | "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "application/x-javascript" | "text/x-javascript" | "javascript" => Some(false),
+        // Shaders, JSON(-LD), templates, import maps, babel, markdown…: not run as JS, never checked.
+        _ => None,
+    }
+}
+
+/// Inline `<script>` bodies with `true` for an ES module (`type="module"`). Only real JavaScript
+/// is returned: a GLSL `x-shader`, JSON-LD or a template is not a script the browser runs, and
+/// `data-src=` is not `src=`. Pure.
+pub fn inline_scripts_typed(html: &str) -> Vec<(String, bool)> {
+    static SRC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static TYPE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let src = SRC.get_or_init(|| regex::Regex::new(r#"(?i)[\s"']src\s*="#).unwrap());
+    let ty = TYPE.get_or_init(|| regex::Regex::new(r#"(?i)[\s"']type\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#).unwrap());
     let lower = html.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut from = 0;
@@ -52,11 +76,14 @@ pub fn inline_scripts(html: &str) -> Vec<String> {
         let Some(tag_end) = lower[start..].find('>').map(|j| start + j + 1) else { break };
         let tag = &lower[start..tag_end];
         let Some(close) = lower[tag_end..].find("</script").map(|j| tag_end + j) else { break };
-        let skip = tag.contains("src=") || tag.contains("application/json") || tag.contains("text/template") || tag.contains("importmap") || tag.contains("text/babel");
-        if !skip {
+        let module = match ty.captures(tag) {
+            Some(c) => js_type(&c[1]),
+            None => Some(false),
+        };
+        if let (false, Some(module)) = (src.is_match(tag), module) {
             let body = html[tag_end..close].trim();
             if !body.is_empty() {
-                out.push(body.to_string());
+                out.push((body.to_string(), module));
             }
         }
         from = close + 8;
@@ -92,8 +119,9 @@ pub fn lint_html(html: &str, runtime: Runtime) -> Vec<Check> {
 }
 
 /// `node --check` one script (`None` when Node isn't available). 10 s cap.
-fn node_check(code: &str, dir: &Path, i: usize) -> Option<Result<(), String>> {
-    let path = dir.join(format!(".smoke-inline-{i}.mjs"));
+fn node_check(code: &str, dir: &Path, i: usize, module: bool) -> Option<Result<(), String>> {
+    // A classic script is parsed as one (`.cjs`: sloppy mode, Annex B), only a module as a module.
+    let path = dir.join(format!(".smoke-inline-{i}.{}", if module { "mjs" } else { "cjs" }));
     std::fs::write(&path, code).ok()?;
     let mut cmd = std::process::Command::new("node");
     cmd.arg("--check").arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
@@ -143,10 +171,10 @@ pub fn run(dir: &Path, runtime: Runtime, now_ms: i64) -> SmokeReport {
         if let Ok(bytes) = std::fs::read(&entry) {
             let html = String::from_utf8_lossy(&bytes).into_owned();
             checks.extend(lint_html(&html, runtime));
-            let scripts = inline_scripts(&html);
+            let scripts = inline_scripts_typed(&html);
             let mut ran = false;
-            for (i, s) in scripts.iter().enumerate().take(8) {
-                match node_check(s, dir, i) {
+            for (i, (s, module)) in scripts.iter().enumerate().take(8) {
+                match node_check(s, dir, i, *module) {
                     Some(Ok(())) => ran = true,
                     Some(Err(e)) => {
                         ran = true;

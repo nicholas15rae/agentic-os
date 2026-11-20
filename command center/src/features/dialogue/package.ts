@@ -3,6 +3,7 @@ import type { VoiceTurn } from "@/features/voice/voice-store";
 import { cc, collections } from "@/lib/cc-api";
 import { platform, type Idea, type PlayCard } from "@/lib/platform";
 import type { DeferTarget } from "./tier";
+import { sameConversation } from "./dialogue-store";
 
 /**
  * P3 Tier 4: package the brainstorm you just had with Tony and park it (Brainstorm list, Ideas &
@@ -38,7 +39,7 @@ const NOT_TALK = new Set(["os-control", "parked", "routing", "streaming…", "cu
  */
 export function conversationSlice(turns: VoiceTurn[], thread: string, o: { fromTurnId?: string; excludeIds?: string[]; now?: number } = {}): VoiceTurn[] {
   const now = o.now ?? Date.now();
-  const mine = turns.filter((t) => t.thread === thread && (t.who === "user" || t.who === "agent") && !(t.who === "agent" && t.meta && NOT_TALK.has(t.meta)) && !o.excludeIds?.includes(t.id) && t.text.trim());
+  const mine = turns.filter((t) => sameConversation(t.thread ?? "", thread) && (t.who === "user" || t.who === "agent") && !(t.who === "agent" && t.meta && NOT_TALK.has(t.meta)) && !o.excludeIds?.includes(t.id) && t.text.trim());
   if (o.fromTurnId) {
     const i = mine.findIndex((t) => t.id === o.fromTurnId);
     if (i >= 0) return mine.slice(i);
@@ -48,6 +49,64 @@ export function conversationSlice(turns: VoiceTurn[], thread: string, o: { fromT
 
 export function rawContextOf(slice: VoiceTurn[], osName = "Tony"): string {
   return slice.map((t) => `${t.who === "user" ? "You" : osName}: ${t.text.trim()}`).join("\n");
+}
+
+/** A build brief's budget (the task store takes 8000; a little headroom for its secret scrub). */
+export const BUILD_BRIEF_MAX = 7500;
+const TRIM_MARK = "[…trimmed to fit…]";
+
+/**
+ * The brief a build gets from a brainstorm: Nic's OWN lines first (the opening idea always
+ * whole, then every later line — the latest refinements included), then Tony's side as context,
+ * trimmed first. The commit cue itself ("ok let's do it") is dropped. It used to be the last
+ * 4000 characters of the raw transcript, which lost the opening idea, and the worker then read
+ * only the head of THAT (mostly Tony's filler). Pure.
+ */
+export function briefOf(slice: VoiceTurn[], osName = "Tony", o: { dropText?: string; max?: number } = {}): string {
+  const max = o.max ?? BUILD_BRIEF_MAX;
+  let turns = slice.filter((t) => t.text.trim());
+  const last = turns[turns.length - 1];
+  if (o.dropText && last?.who === "user" && last.text.trim() === o.dropText.trim()) turns = turns.slice(0, -1);
+  const mine = turns.filter((t) => t.who === "user").map((t) => `- ${t.text.trim()}`);
+  const theirs = turns.filter((t) => t.who !== "user").map((t) => `${osName}: ${t.text.trim()}`);
+  let head = mine.length ? `What Nic said (in order):\n${mine.join("\n")}` : "";
+  if (head.length > max) {
+    // Keep the opening idea whole and as many of the latest lines as fit.
+    const first = mine[0];
+    const tail: string[] = [];
+    let room = max - first.length - TRIM_MARK.length - 40;
+    for (let i = mine.length - 1; i > 0 && room > 0; i--) {
+      if (mine[i].length + 1 > room) break;
+      tail.unshift(mine[i]);
+      room -= mine[i].length + 1;
+    }
+    head = `What Nic said (in order):\n${first.slice(0, max - 60)}\n${TRIM_MARK}\n${tail.join("\n")}`.slice(0, max);
+    return head;
+  }
+  if (!theirs.length) return head;
+  const label = `\n\n${osName}'s side of the conversation (context only):\n`;
+  let room = max - head.length - label.length;
+  if (room <= TRIM_MARK.length + 20) return head;
+  // Tony's latest lines matter most (where it landed); his earliest are trimmed first.
+  const kept: string[] = [];
+  for (let i = theirs.length - 1; i >= 0; i--) {
+    const line = theirs[i].length > room ? `${theirs[i].slice(0, Math.max(0, room - TRIM_MARK.length - 4))}… ${TRIM_MARK}` : theirs[i];
+    if (line.length + 1 > room) break;
+    kept.unshift(line);
+    room -= line.length + 1;
+    if (line !== theirs[i]) break;
+  }
+  if (kept.length < theirs.length && kept[0] !== undefined && !kept[0].includes(TRIM_MARK)) kept.unshift(TRIM_MARK);
+  return kept.length ? `${head}${label}${kept.join("\n")}` : head;
+}
+
+/** A free-text brief (a parked card's whole context) cut to fit: head and tail kept, marked. Pure. */
+export function fitBrief(text: string, max = BUILD_BRIEF_MAX): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  const keep = max - TRIM_MARK.length - 4;
+  const head = Math.floor(keep * 0.6);
+  return `${t.slice(0, head)}\n\n${TRIM_MARK}\n\n${t.slice(t.length - (keep - head))}`;
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);

@@ -10,7 +10,7 @@ const h = vi.hoisted(() => ({
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, platform: "desktop" }));
 vi.mock("@/lib/cc-api", () => ({ cc: { llmJson: h.llmJson }, collections: { create: h.create } }));
 
-import { buildArtifact, conversationSlice, fallbackTitle, rawContextOf, saveArtifact } from "./package";
+import { BUILD_BRIEF_MAX, briefOf, buildArtifact, conversationSlice, fallbackTitle, fitBrief, rawContextOf, saveArtifact } from "./package";
 
 let n = 0;
 const turn = (who: VoiceTurn["who"], text: string, o: Partial<VoiceTurn> = {}): VoiceTurn => ({ id: `t${++n}`, who, text, thread: "auto", at: 1_000_000 + n, ...o });
@@ -115,5 +115,36 @@ describe("saveArtifact", () => {
     expect(h.cmd).not.toHaveBeenCalledWith("idea_capture", expect.anything());
     expect(h.cmd).not.toHaveBeenCalledWith("os_turn", expect.anything());
     expect(h.cmd).not.toHaveBeenCalledWith("idea_pipeline_run", expect.anything());
+  });
+});
+
+describe("thoughtform hardening: the build brief (regressions)", () => {
+  it("keeps the opening idea and every line Nic said, ahead of Tony's long replies, and drops the commit cue", () => {
+    const slice = [
+      turn("user", "I've been thinking about an audition tracker with a calendar view and agent contacts"),
+      ...Array.from({ length: 6 }, (_, i) => [turn("agent", `Tony reply ${i}: ${"x".repeat(1400)}`), turn("user", `what if it also did thing ${i}`)]).flat(),
+      turn("user", "ok let's do it"),
+    ];
+    const b = briefOf(slice, "Tony", { dropText: "ok let's do it" });
+    expect(b.length).toBeLessThanOrEqual(BUILD_BRIEF_MAX);
+    expect(b.startsWith("What Nic said (in order):\n- I've been thinking about an audition tracker")).toBe(true);
+    expect(b).toContain("what if it also did thing 5");
+    expect(b).not.toContain("ok let's do it");
+    // The worker's Prompter reads the head (3000 chars): the idea AND the latest refinement are in it.
+    expect(b.slice(0, 3000)).toContain("audition tracker");
+    expect(b.slice(0, 3000)).toContain("thing 5");
+    expect(b).toContain("[…trimmed to fit…]");
+  });
+  it("fitBrief keeps head and tail of an over-long parked context", () => {
+    const t = `START ${"m".repeat(20_000)} END`;
+    const f = fitBrief(t);
+    expect(f.length).toBeLessThanOrEqual(BUILD_BRIEF_MAX);
+    expect(f.startsWith("START") && f.endsWith("END")).toBe(true);
+  });
+  it("Tony's conversation is one slice across his two threads (auto / general)", () => {
+    const a = turn("user", "idea on the command view", { thread: "auto" });
+    const b = turn("user", "more on the Tony tab", { thread: "general" });
+    const c = turn("user", "coder tab talk", { thread: "coder" });
+    expect(conversationSlice([a, b, c], "general", { fromTurnId: a.id }).map((t) => t.id)).toEqual([a.id, b.id]);
   });
 });

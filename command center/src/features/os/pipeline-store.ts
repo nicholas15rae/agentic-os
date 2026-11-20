@@ -139,13 +139,52 @@ export function applyEvent(s: Pick<PipelineStore, "runs" | "recent">, ev: AgentE
 }
 
 /** The chat turn an event earns at feedback `level`, or null. Failures and review_ready always
- * show (the chat is visual; level 0 only silences speech); the rest follow the narration gate. Pure. */
+ * show (the chat is visual; level 0 only silences speech). Relays: the agent-to-agent hand-offs
+ * are the record Nic reviews, so the chat shows them from level 1 (speech still narrates them at
+ * 2+ only); verbose rows (stage claims) stay at level 3. Pure. */
 export function chatKind(ev: AgentEvent, level: number): "failed" | "ready" | "alert" | "relay" | null {
   if (!ev?.taskId) return null;
   if (ev.eventType === "failed" || ev.status === "failed") return "failed";
   if (ev.eventType === "review_ready") return "ready";
   if (ev.severity === "critical") return "alert";
-  return narrates(ev.severity, level) ? "relay" : null;
+  return narrates(ev.severity, ev.severity === "handoff" && level >= 1 ? Math.max(level, 2) : level) ? "relay" : null;
+}
+
+/** A cancel ("cancelled by user": a remove / repair in the hub, or the task's Cancel) is not a
+ * build failure: no "failed", no Retry / Offload. Pure. */
+export const isCancelled = (error: string | null | undefined, summary = ""): boolean => /cancelled by user/i.test(`${error ?? ""} ${summary}`);
+
+/** The relay line: the app's templated facts first, the agent's own words after them. Pure. */
+export function relayText(ev: Pick<AgentEvent, "shortSummary" | "templateSummary">): string {
+  const t = ev.templateSummary?.trim();
+  if (!t || t === ev.shortSummary.trim()) return ev.shortSummary;
+  return `${t} — “${ev.shortSummary}”`;
+}
+
+/** The "ready" line: blockers named when the Prompter shipped with known blockers; a Play Place
+ * hub build is only "output ready" — the hub's smoke test still decides. `total` is the true
+ * blocker count (`last_eval.known_blockers_total`): past the cap the stored list ends in an
+ * "… and N more" line, which is not a blocker itself. `works` is the worker's honest verdict
+ * (`last_eval.works`, AD-13): `false` reads "needs fixes" (never "ready"), `true` with blockers
+ * reads "ready, with N notes"; an older record without it keeps the neutral wording. Pure. */
+export function readyText(o: { title: string; slug: string | null | undefined; blockers: readonly string[]; hub: boolean; summary?: string; total?: number; works?: boolean }): string {
+  const where = o.slug ? ` It's in staging/${o.slug}.` : "";
+  const hubNext = o.hub ? " (the Play Place smoke test runs next)" : "";
+  if (!o.blockers.length) {
+    if (o.works === false) return `“${o.title}” is staged but needs fixes${hubNext}.${where}`;
+    const head = o.hub ? `“${o.title}”: the agents finished; the Play Place smoke test runs next.` : `“${o.title}” is ready for review.`;
+    return `${head}${where}`;
+  }
+  const n = typeof o.total === "number" && o.total > 0 ? o.total : o.blockers.length;
+  const list = o.blockers.slice(0, 5).map((b) => `• ${b}`).join("\n");
+  const s = n === 1 ? "" : "s";
+  const lead =
+    o.works === false
+      ? `“${o.title}” is staged but needs fixes: ${n} known blocker${s}`
+      : o.works === true
+        ? `“${o.title}” is ready for review, with ${n} note${s}`
+        : `“${o.title}” is staged with ${n} known blocker${s}`;
+  return `${lead}${hubNext}.${where}\n${list}`;
 }
 
 const SPECIALIST_TABS: readonly ThreadId[] = ["prompter", "designer", "coder", "librarian"];
@@ -170,87 +209,208 @@ export function trackTask(taskId: string, title: string, thread: ThreadId, ideaI
   });
 }
 
-/** The tab a task's outcome goes to: where it was asked, else the thread stored in its raw intent. */
+/** The thread stored in an envelope's raw intent (where it was asked), if it's a real thread. Pure. */
+export function storedThread(t: Pick<TaskEnvelope, "raw_intent"> | null | undefined): ThreadId | null {
+  const th = (t?.raw_intent?.memory_reference as { thread?: unknown } | null | undefined)?.thread;
+  return typeof th === "string" && THREADS.includes(th as ThreadId) ? (th as ThreadId) : null;
+}
+
+/** The tab a task's outcome goes to: where it was asked (tracked, else the thread stored in its
+ * raw intent — a phone / hub build created while the app ran), else Tony's main thread ("auto",
+ * what VoiceHUD / the Command view show — never the hidden "general" fallback). */
 function threadOf(taskId: string): ThreadId {
-  return origin.get(taskId) ?? "general";
+  return origin.get(taskId) ?? "auto";
 }
 
 const level = () => feedbackLevel(useOs.getState().cfg);
 
-/** Desktop: re-read one task (title, slug, card) before its outcome is announced. Best-effort. */
-async function refreshTask(taskId: string) {
-  if (!isTauri()) return;
+/** What an outcome turn needs beyond the event: where it came from and the Prompter's verdict. */
+interface TaskExtras {
+  source: string | null;
+  blockers: string[];
+  /** The true blocker count (the list may end in an "… and N more" line). */
+  total?: number;
+  /** The worker's honest verdict (`last_eval.works`); absent on older records. */
+  works?: boolean;
+}
+
+/** Desktop: re-read one task (title, slug, card, origin thread, verdict) before its outcome is
+ * announced. Best-effort. */
+async function refreshTask(taskId: string): Promise<TaskExtras> {
+  const none: TaskExtras = { source: null, blockers: [] };
+  if (!isTauri()) return none;
   try {
     const t = await cmd("task_get", { task_id: taskId });
     const fresh = runFromTask(t);
     const patch = { title: fresh.title, slug: fresh.slug, cardId: fresh.cardId, ideaId: fresh.ideaId, error: fresh.error, maxIterations: fresh.maxIterations };
     usePipelines.setState((s) => (s.runs[taskId] ? { runs: { ...s.runs, [taskId]: { ...s.runs[taskId], ...patch } } } : s.recent[taskId] ? { recent: { ...s.recent, [taskId]: { ...s.recent[taskId], ...patch } } } : s));
+    // Remember where it goes (the stored thread, else Tony's main thread): looked up once per task.
+    if (!origin.has(taskId)) origin.set(taskId, storedThread(t) ?? "auto");
+    const mref = t.raw_intent?.memory_reference as { source?: unknown } | null | undefined;
+    const le = t.last_eval as { known_blockers?: unknown; known_blockers_total?: unknown; works?: unknown; verdict?: unknown } | null | undefined;
+    const kb = le?.known_blockers;
+    const total = typeof le?.known_blockers_total === "number" ? le.known_blockers_total : undefined;
+    // The honest verdict: `works`, else read from `verdict` ("needs_fixes" / "pass…"); absent → unknown.
+    const works = typeof le?.works === "boolean" ? le.works : le?.verdict === "needs_fixes" ? false : typeof le?.verdict === "string" && le.verdict.startsWith("pass") ? true : undefined;
+    return { source: typeof mref?.source === "string" ? mref.source : null, blockers: Array.isArray(kb) ? kb.filter((b): b is string => typeof b === "string") : [], total, works };
   } catch {
-    /* the event's own fields are enough */
+    return none; // the event's own fields are enough
   }
+}
+
+/** The "ready" turn of each task (its "Open in Play Place" pill is filled in when the card lands). */
+const readyTurn = new Map<string, string>();
+
+/** A Play Place hub outcome (smoke test, Repair Queue, a steer): a bus note traced `hub:<id>`. */
+const isHubNote = (ev: AgentEvent) => typeof ev.traceId === "string" && ev.traceId.startsWith("hub:");
+
+/** Live events handled this process boot (by `seq`): a replayed one is never a second turn. */
+const seenSeq = new Set<number>();
+let seenBoot: number | null = null;
+function markSeen(ev: AgentEvent) {
+  if (typeof ev?.seq !== "number") return;
+  seenSeq.add(ev.seq);
+  if (seenSeq.size > 2000) seenSeq.delete(seenSeq.values().next().value as number);
+  rememberSeq(ev);
+}
+
+/** The native listener: every live event is marked seen, then handled. */
+function onLiveEvent(ev: AgentEvent) {
+  markSeen(ev);
+  return onAgentEvent(ev);
 }
 
 export async function onAgentEvent(ev: AgentEvent): Promise<void> {
   if (!ev || typeof ev !== "object") return;
   if (!ev.taskId) {
+    if (isHubNote(ev)) {
+      // The hub's half of the conversation: smoke verdicts, repair passes, Repair Queue, steers.
+      const tone = ev.severity === "critical" ? "error" : undefined;
+      useVoice.getState().pushTurn({ who: "agent", from: "staging", thread: "auto", text: ev.shortSummary, meta: `Play Place · ${ev.eventType.replace(/^hub_/, "")}`, tone });
+      if (ev.severity === "critical") useToasts.getState().push({ title: `${osName()} · Play Place`, body: ev.shortSummary, tone: "error" });
+      if (ev.eventType === "hub_smoke" && /ready for merge/.test(ev.shortSummary)) usePipelines.setState((s) => ({ unseen: s.unseen + 1 }));
+      return;
+    }
     // Bus-only notes: a critical one (a Librarian discrepancy, …) is worth a toast.
     if (ev.severity === "critical") useToasts.getState().push({ title: `${osName()} · ${ev.agentId}`, body: ev.shortSummary, tone: "error" });
     return;
   }
   usePipelines.setState((s) => applyEvent(s, ev));
+  // "Play Place card created" (after review_ready): give the ready turn its "Open in Play Place".
+  if (ev.agentId === "staging" && (ev.templateSummary ?? ev.shortSummary).startsWith("Play Place card created")) void attachCard(ev.taskId);
   const kind = chatKind(ev, level());
   if (!kind) return;
-  if (kind === "failed" || kind === "ready") await refreshTask(ev.taskId);
+  // Every outcome / relay knows its origin thread, source and the Prompter's verdict.
+  const extras = kind === "failed" || kind === "ready" || !origin.has(ev.taskId) ? await refreshTask(ev.taskId) : { source: null, blockers: [] };
   const row = usePipelines.getState().runs[ev.taskId] ?? usePipelines.getState().recent[ev.taskId];
   const title = row?.title || "the build";
   const back = threadOf(ev.taskId);
   const push = useVoice.getState().pushTurn;
+  const taskId = ev.taskId;
   if (kind === "failed") {
+    if (isCancelled(row?.error, ev.shortSummary)) {
+      push({ who: "system", thread: back, text: `Stopped “${title}” (cancelled) — nothing more runs for it.`, taskId });
+      return;
+    }
+    const hub = extras.source === "playplace";
     push({
       who: "agent",
       from: "os",
       thread: back,
-      text: `The build for “${title}” failed${ev.stage ? ` at the ${ev.stage} step` : ""}: ${ev.shortSummary}. Retry it, or hand that step to a CLI agent?`,
-      actions: [
-        { label: "Retry step", run: `retry:${ev.taskId}` },
-        { label: "Offload to Claude CLI", run: `offload:claude-cli:${ev.taskId}` },
-        { label: "Offload to Gemini CLI", run: `offload:gemini-cli:${ev.taskId}` },
-      ],
+      taskId,
+      // A Play Place build is retried through the hub (its Repair Queue), never behind its back.
+      text: hub
+        ? `The build for “${title}” failed${ev.stage ? ` at the ${ev.stage} step` : ""}: ${ev.shortSummary}. It's in the Play Place Repair Queue — re-queue it there.`
+        : `The build for “${title}” failed${ev.stage ? ` at the ${ev.stage} step` : ""}: ${ev.shortSummary}. Retry it, or hand that step to a CLI agent?`,
+      actions: hub
+        ? undefined
+        : [
+            { label: "Retry step", run: `retry:${ev.taskId}` },
+            { label: "Offload to Claude CLI", run: `offload:claude-cli:${ev.taskId}` },
+            { label: "Offload to Gemini CLI", run: `offload:gemini-cli:${ev.taskId}` },
+          ],
     });
     useToasts.getState().push({ title: `${osName()} · build failed`, body: `${title}: ${ev.shortSummary}`, tone: "error" });
     return;
   }
   if (kind === "ready") {
-    const where = row?.slug ? ` It's in staging/${row.slug}.` : "";
-    const text = `“${title}” is ready for review.${where}`;
-    push({ who: "agent", from: "os", thread: back, text, cardId: row?.cardId });
-    useToasts.getState().push({ title: `${osName()} · ready for review`, body: text, tone: "info" });
-    usePipelines.setState((s) => ({ unseen: s.unseen + 1 }));
+    const hub = extras.source === "playplace";
+    const text = readyText({ title, slug: row?.slug, blockers: extras.blockers, hub, total: extras.total, works: extras.works });
+    const needsFixes = extras.works === false || (extras.works === undefined && extras.blockers.length > 0);
+    const turn = push({ who: "agent", from: "os", thread: back, text, cardId: row?.cardId, taskId, tone: needsFixes ? "warn" : undefined });
+    if (!row?.cardId) readyTurn.set(taskId, turn.id);
+    useToasts.getState().push({ title: `${osName()} · ${hub ? "output ready" : extras.works === false ? "needs fixes" : "ready for review"}`, body: text, tone: needsFixes ? "error" : "info" });
+    // A hub build counts as new only once its smoke test passes (the hub's own note).
+    if (!hub) usePipelines.setState((s) => ({ unseen: s.unseen + 1 }));
     return;
   }
   if (kind === "alert") {
-    push({ who: "system", thread: back, text: `${title}: ${ev.shortSummary}`, tone: "warn" });
+    push({ who: "system", thread: back, text: `${title}: ${relayText(ev)}`, tone: "warn", taskId });
     return;
   }
   const iter = ev.iteration ? ` · iteration ${ev.iteration}${row?.maxIterations ? `/${row.maxIterations}` : ""}` : "";
-  push({ who: "relay", from: ev.agentId, to: ev.owner ?? ev.agentId, text: ev.shortSummary, meta: `${ev.stage ?? ev.eventType}${iter}`, thread: relayThread(ev.agentId) });
+  // The row's own recipient (the post-commit owner is often someone else), the build it belongs
+  // to, and the facts before the agent's words.
+  push({ who: "relay", from: ev.agentId, to: ev.toAgent ?? ev.owner ?? ev.agentId, text: relayText(ev), meta: `“${title}” · ${ev.stage ?? ev.eventType}${iter}`, thread: relayThread(ev.agentId), taskId, cardId: row?.cardId });
 }
 
-/** An approved ledger "Run" (only ever from approve()): the idea → a queued task. Returns at once. */
-export async function runPipeline(ideaId: string, title: string, thread: ThreadId) {
-  if (!isTauri()) {
-    // Phone: the desktop claims it from the queue (one task per idea, deduped there).
-    await gateway("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind: "pipeline", payload: { ideaId } }) });
-    useVoice.getState().pushTurn({ who: "system", text: `Sent “${title}” to the desktop: the Prompter picks it up there.`, tone: "ok", thread });
-    return;
+/** The card id landed after the ready turn: fill in its "Open in Play Place" pill. */
+async function attachCard(taskId: string) {
+  await refreshTask(taskId);
+  const row = usePipelines.getState().recent[taskId] ?? usePipelines.getState().runs[taskId];
+  const turnId = readyTurn.get(taskId);
+  if (row?.cardId && turnId) {
+    useVoice.getState().updateTurn(turnId, { cardId: row.cardId });
+    readyTurn.delete(taskId);
   }
+}
+
+/** Desktop + phone: replay the agent events emitted before this webview listened (app startup,
+ * a reload): the "Interrupted by a restart; resuming…" rows and anything else from that gap. */
+export async function replayMissed() {
+  if (!isTauri()) return;
+  let after = 0;
   try {
-    const r = await cmd("idea_pipeline_run", { ideaId });
-    trackTask(r.taskId, title, thread, ideaId);
-    useVoice.getState().pushTurn({ who: "system", text: r.created ? `Queued “${title}” for the Prompter.` : `“${title}” is already in progress.`, tone: "ok", thread });
-  } catch (e) {
-    useVoice.getState().pushTurn({ who: "system", text: `Couldn't start “${title}”: ${e instanceof Error ? e.message : String(e)}`, tone: "error", thread });
+    const saved = JSON.parse(sessionStorage.getItem("cc.events.seen") ?? "null") as { boot: number; seq: number } | null;
+    const r = await cmd("agent_events_replay", { afterSeq: 0 });
+    seenBoot = r.boot;
+    if (saved && saved.boot === r.boot) after = saved.seq;
+    for (const ev of r.events) {
+      if (ev.seq <= after || seenSeq.has(ev.seq)) continue;
+      markSeen(ev);
+      await onAgentEvent(ev);
+    }
+  } catch {
+    /* an older build has no replay */
   }
+}
+
+/** Remember the newest handled event per boot (a webview reload replays only what's newer). */
+function rememberSeq(ev: AgentEvent) {
+  if (seenBoot === null || typeof ev.seq !== "number") return;
+  try {
+    sessionStorage.setItem("cc.events.seen", JSON.stringify({ boot: seenBoot, seq: ev.seq }));
+  } catch {
+    /* private mode */
+  }
+}
+
+const PIPELINE_QUEUED = (title: string) => `Queued “${title}”. The Prompter's on it. Ask me where the build's at anytime.`;
+
+/** An approved ledger "Run" (only ever from approve()'s plan.run): the idea → a queued task.
+ * Resolves with the real outcome line and THROWS on a refusal / failure (so the card's run fails
+ * through the calm-error path): it never says "Queued" before the task exists. Phone: waits for
+ * the desktop's answer like a build `task` does. */
+export async function runPipeline(ideaId: string, title: string, thread: ThreadId): Promise<string> {
+  if (!isTauri()) {
+    const { queueDesktopItem } = await import("@/features/dispatcher/dispatch");
+    const r = await queueDesktopItem("pipeline", { ideaId }, { capMs: 30_000 });
+    if (!r) return `Sent “${title}” to the desktop. It gets queued once the app picks it up.`;
+    return r.created === false ? `“${title}” is already in progress.` : PIPELINE_QUEUED(title);
+  }
+  const r = await cmd("idea_pipeline_run", { ideaId });
+  trackTask(r.taskId, title, thread, ideaId);
+  return r.created ? PIPELINE_QUEUED(title) : `“${title}” is already in progress.`;
 }
 
 /**
@@ -298,10 +458,30 @@ export function mergeRuns(base: Pick<PipelineStore, "runs" | "recent">, live: Pi
   return { runs, recent };
 }
 
-/** Phone: the gateway's mirror of the desktop's envelopes. */
+/** Phone: the gateway's mirror of the desktop's envelopes. A build that left the active list since
+ * the last poll is looked up once and its outcome posted to the phone's Tony thread (the phone has
+ * no agent-event feed: a phone-started build used to finish without a word there). */
 export async function pollMirror() {
   const r = await gateway<{ items: TaskLike[] }>("/api/tasks?active=1");
-  usePipelines.setState((s) => ({ runs: hydrateRuns(r.items ?? []).runs, recent: s.recent }));
+  const before = usePipelines.getState().runs;
+  const next = hydrateRuns(r.items ?? []).runs;
+  usePipelines.setState((s) => ({ runs: next, recent: s.recent }));
+  for (const id of Object.keys(before).filter((id) => !next[id])) {
+    const t = await gateway<TaskLike>(`/api/tasks/${encodeURIComponent(id)}`).catch(() => null);
+    const line = t ? mirrorOutcomeLine(t) : null;
+    if (line) {
+      useVoice.getState().pushTurn({ who: "agent", from: "os", thread: "general", text: line, taskId: id, tone: t?.status === "failed" ? "warn" : undefined });
+      usePipelines.setState((s) => ({ recent: { ...s.recent, [id]: runFromTask(t!) } }));
+    }
+  }
+}
+
+/** The phone's line for a build that finished on the desktop (null while it's still open). Pure. */
+export function mirrorOutcomeLine(t: Pick<TaskLike, "title" | "status" | "project_slug" | "error">): string | null {
+  const title = t.title || "the build";
+  if (t.status === "review_ready") return `“${title}” is ready for review.${t.project_slug ? ` It's in staging/${t.project_slug}.` : ""}`;
+  if (t.status === "failed") return isCancelled(t.error) ? `Stopped “${title}” (cancelled).` : `The build for “${title}” failed: ${t.error ?? "unknown error"}. Retry it from the desktop.`;
+  return null;
 }
 
 /** Where a review-ready build's files are, relative to the repo (D2: `<workdir>/staging/<slug>`). */
@@ -330,7 +510,8 @@ export function startPipelineFeed() {
   started = true;
   if (isTauri()) {
     void hydrateFromStore().catch(() => undefined);
-    void onNativeEvent<AgentEvent>("agent-event", onAgentEvent);
+    // Listen first, then replay what was emitted before the listener existed (deduped by seq).
+    void onNativeEvent<AgentEvent>("agent-event", onLiveEvent).then(() => replayMissed());
     void onNativeEvent<PipelineStepEvent>("pipeline-step", onStep);
     return;
   }

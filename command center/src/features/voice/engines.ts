@@ -114,6 +114,10 @@ export class MicCapture {
   private session = 0;
   /** Releases this capture's registration with the mic gate (null while not holding the mic). */
   private release: (() => void) | null = null;
+  /** The VAD heard speech in this capture, and the chunk it started at (with pre-roll): a flush
+   * hands Whisper only that, never the silence before it (Whisper invents "Thank you." from it). */
+  private speechStarted = false;
+  private speechChunkAt = 0;
   /** This capture's own meter (published while it holds the mic; mutated per frame). */
   readonly meter: MeterSnapshot = { levelDb: -100, floorDb: -100, thrDb: DEFAULT_ACTIVATION_DB, prob: null, speaking: false, neural: false };
 
@@ -129,20 +133,13 @@ export class MicCapture {
     const my = ++this.session;
     this.done = false;
     this.chunks = [];
+    this.speechStarted = false;
+    this.speechChunkAt = 0;
     const ac = await audioContext();
     if (my !== this.session) return;
     assertMicAllowed();
     const { micDeviceId: deviceId, vad } = useSettings.getState();
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        // AGC pumps room noise up between words, which kept the old VAD "hearing speech" forever.
-        autoGainControl: false,
-        channelCount: 1,
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      },
-    });
+    const stream = await openMic(deviceId);
     if (my !== this.session) return stream.getTracks().forEach((t) => t.stop());
     // Locked off while the browser was opening the device: release it before anything listens.
     if (!micEnabled()) {
@@ -217,6 +214,10 @@ export class MicCapture {
         speechAt = performance.now();
         // Keep ~300 ms of pre-roll before the trigger.
         speechChunk = Math.max(0, this.chunks.length - 3 - 14);
+        if (!this.speechStarted) {
+          this.speechStarted = true;
+          this.speechChunkAt = speechChunk;
+        }
         opts.onSpeechStart?.();
       } else if (ev === "end") this.finish(ac.sampleRate, opts, speechChunk);
     };
@@ -240,10 +241,17 @@ export class MicCapture {
     }, 1000);
   }
 
-  /** End now and hand over whatever was captured (used by the stop button). Nothing live → just stop. */
+  /** End now and hand over what was SAID (used by the stop button): from the VAD's speech onset,
+   * never the wait before it. No speech heard: an empty clip (nothing goes to Whisper). Nothing
+   * live: just stop. */
   flush(onUtteranceEnd: CaptureOpts["onUtteranceEnd"]) {
     if (this.done || !this.stream || !ctx || !micEnabled()) return this.stop();
-    this.finish(ctx.sampleRate, { record: true, onUtteranceEnd }, 0);
+    if (!this.speechStarted) {
+      const rate = ctx.sampleRate;
+      this.stop();
+      return onUtteranceEnd?.(new Float32Array(0), rate);
+    }
+    this.finish(ctx.sampleRate, { record: true, onUtteranceEnd }, this.speechChunkAt);
   }
 
   private finish(rate: number, opts: CaptureOpts, fromChunk: number) {
@@ -316,6 +324,60 @@ export function encodeWav16k(pcm: Float32Array, inRate: number): Uint8Array {
   return new Uint8Array(out.buffer);
 }
 
+// ── Mic open / errors ────────────────────────────────────────────────────────
+
+const MIC_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  // AGC pumps room noise up between words, which kept the old VAD "hearing speech" forever.
+  autoGainControl: false,
+  channelCount: 1,
+};
+
+/** A remembered mic that is gone (unplugged, its id rotated): the browser's error names. Pure. */
+export const isMissingDeviceError = (e: unknown): boolean => {
+  const n = (e as { name?: string } | null)?.name ?? "";
+  return n === "OverconstrainedError" || n === "NotFoundError" || n === "DevicesNotFoundError";
+};
+
+let micFallbackNoticed = false;
+
+/** Open the chosen mic; when that exact device is gone, the default one (with a once-per-session
+ * notice) instead of failing every listen. */
+export async function openMic(deviceId: string | undefined | null): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: { ...MIC_CONSTRAINTS, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) } });
+  } catch (e) {
+    if (!deviceId || !isMissingDeviceError(e)) throw e;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+    if (!micFallbackNoticed) {
+      micFallbackNoticed = true;
+      void import("@/features/reminders/notify")
+        .then((m) => m.useToasts.getState().push({ title: "Selected microphone not found", body: "Using the default microphone instead — pick one again in Settings → Voice.", tone: "error" }))
+        .catch(() => undefined);
+    }
+    return stream;
+  }
+}
+
+/** What a failed mic open means, in words that point at the real cause. Pure. */
+export function micErrorMessage(e: unknown): string {
+  const n = (e as { name?: string } | null)?.name ?? "";
+  if (n === "NotAllowedError" || n === "SecurityError" || n === "PermissionDeniedError") return "Microphone blocked — allow mic access";
+  if (isMissingDeviceError(e)) return "No microphone found — check it's plugged in (Settings → Voice)";
+  if (n === "NotReadableError" || n === "TrackStartError" || n === "AbortError") return "The microphone is busy or failed to start — another app may be using it";
+  return `Microphone unavailable${n ? ` (${n})` : ""}`;
+}
+
+/** Whisper attempts per utterance, and the pause before the retry. */
+export const STT_ATTEMPTS = 2;
+const STT_RETRY_MS = 1500;
+
+/** A Whisper failure worth one retry (the server reloading / slow / a 5xx), not a bad request. Pure. */
+export function isTransientSttError(msg: string): boolean {
+  return /timed? ?out|timeout|error sending request|connect|connection|refused|unreachable|reset|\b50[0-9]\b|service unavailable|bad gateway/i.test(msg) && !/too short or too long/i.test(msg);
+}
+
 // ── Whisper STT (desktop) ────────────────────────────────────────────────────
 
 export class WhisperStt implements SttEngine {
@@ -347,7 +409,7 @@ export class WhisperStt implements SttEngine {
         onNoSpeech: () => current() && h.onFinal(""),
         onUtteranceEnd: (pcm, rate) => void this.transcribe(pcm, rate, h),
       })
-      .catch((e) => current() && h.onError(e instanceof MicLockedError ? MIC_LOCKED_MSG : "Microphone blocked — allow mic access"));
+      .catch((e) => current() && h.onError(e instanceof MicLockedError ? MIC_LOCKED_MSG : micErrorMessage(e)));
   }
 
   /** Stop button: transcribe what we have instead of discarding it. */
@@ -371,12 +433,25 @@ export class WhisperStt implements SttEngine {
     if (this.handlers !== h) return;
     if (pcm.length < rate * 0.3 || !micEnabled()) return h.onFinal("");
     h.onPhase?.("transcribing");
-    try {
-      const text = await nativeRaw<string>("stt_transcribe", encodeWav16k(pcm, rate));
-      // Locked off while Whisper worked: what was heard before the mute is dropped.
-      if (this.handlers === h) h.onFinal(micEnabled() ? text.trim() : "");
-    } catch (e) {
-      if (this.handlers === h) h.onError(`Whisper: ${e instanceof Error ? e.message : String(e)}`);
+    const wav = encodeWav16k(pcm, rate);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const text = await nativeRaw<string>("stt_transcribe", wav);
+        // Locked off while Whisper worked: what was heard before the mute is dropped.
+        if (this.handlers === h) h.onFinal(micEnabled() ? text.trim() : "");
+        return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Whisper reloading / a timeout / a 5xx: the captured words are worth one more try
+        // (they're gone once this returns) before the listen reports the error.
+        if (attempt < STT_ATTEMPTS && isTransientSttError(msg) && micEnabled()) {
+          await new Promise((r) => setTimeout(r, STT_RETRY_MS));
+          if (this.handlers !== h) return;
+          continue;
+        }
+        if (this.handlers === h) h.onError(`Whisper: ${msg}`);
+        return;
+      }
     }
   }
 }

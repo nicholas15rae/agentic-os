@@ -95,15 +95,39 @@ const CUE_LEAD = /^(?:(?:ok(?:ay)?|alright|all right|yeah|yep|yes|cool|great|per
 const COMMIT =
   /^(?:let'?s (?:do (?:it|this|that)|go(?: with (?:it|that|this))?|run with (?:it|that|this)|make it happen|build (?:it|that|this)|get (?:it|this) going)|that'?s the plan|lock it in|go|build (?:it|that|this)|get (?:it|this) going|run with (?:it|that|this)|make it happen|(?:sounds good|that works|works for me)(?:[\s,]+(?:go|do it|go for it|let'?s do it))?|do it|go for it|make it happen|ship it|i'?m sold|run with (?:it|that))$/i;
 
-/** "ok let's do it", "that's the plan", "lock it in", "sounds good, go". Deterministic (no model flag). */
-export function isCommitCue(text: string, osName = "Tony"): boolean {
+function cueCore(text: string, osName: string): string {
   let t = strip(text, osName);
   for (let i = 0; i < 3; i++) {
     const before = t;
     t = t.replace(CUE_LEAD, "").trim();
     if (t === before) break;
   }
-  return COMMIT.test(t.replace(/[.!?]+$/, ""));
+  return t.replace(/[.!?]+$/, "");
+}
+
+/** "ok let's do it", "that's the plan", "lock it in", "sounds good, go". Deterministic (no model flag). */
+export function isCommitCue(text: string, osName = "Tony"): boolean {
+  return COMMIT.test(cueCore(text, osName));
+}
+
+/** Bare agreement — "sounds good", "yeah that works", "Go.", "so do it" — said mid-brainstorm is
+ * usually a yes to Tony's last sub-point, not "build it now". Matched on the line with only
+ * address / filler words removed (`strip` would also drop "let's", making "let's do it" bare). */
+const WEAK_COMMIT = /^(?:go|do it|sounds good|that works|works for me)$/;
+const COMMIT_FILLER = new Set(["hey", "hi", "ok", "okay", "yeah", "yep", "yes", "so", "um", "uh", "alright", "cool", "great", "perfect", "right", "nice", "please", "then", "just", "tony", "jarvis"]);
+
+/** How strongly a commit cue commits: "strong" ("let's do it", "lock it in", "ship it") may run
+ * Builder's auto-dispatch; "weak" bare agreement only ever raises the offer card. Null: no cue. */
+export function commitStrength(text: string, osName = "Tony"): "strong" | "weak" | null {
+  if (!isCommitCue(text, osName)) return null;
+  const name = osName.trim().toLowerCase();
+  const core = text
+    .toLowerCase()
+    .replace(/[.!?…,;:]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w && !COMMIT_FILLER.has(w) && w !== name)
+    .join(" ");
+  return WEAK_COMMIT.test(core) ? "weak" : "strong";
 }
 
 // ── Tier 2: brainstorm-shaped ───────────────────────────────────────────────
@@ -127,7 +151,15 @@ export function leadsBrainstorm(text: string, osName = "Tony"): boolean {
 
 /** A build-shaped topic: the Tier-3 yes runs the Prompter → Designer → Coder pipeline (U5). */
 const BUILD = /\b(build|make|create|prototype|design|mock ?up|spin up)\b[\s\S]*\b(app|tool|site|website|web ?app|prototype|dashboard|widget|plugin|extension|game|landing page|page|screen|tracker|platform|mvp|ui)\b/i;
-export const looksBuildShaped = (t: string) => IDEA.test(t) || BUILD.test(t);
+/** The IDEA openers that NAME an artifact. A bare "I've been thinking about…" / "I have an idea"
+ * is Tier-2 talk only: "I've been thinking about emailing Sam" is not a build (it used to queue a
+ * prototype in Builder mode with no card). */
+const ARTIFACT = "(?:app|tool|site|website|web ?app|product|game|platform|service|plugin|widget|dashboard|tracker|extension|landing page|prototype|mvp)";
+const BUILD_IDEA = new RegExp(
+  `\\b(?:i (?:want|wanna|would like) to (?:build|make|create)|idea for (?:an?|my)? ?${ARTIFACT}|what if (?:i|we) (?:built|made|created)|new idea:|app idea|(?:i'?ve been thinking|i'?m thinking) (?:about|of) (?:(?:building|making|creating|designing|prototyping|coding)\\b|(?:an?|my|a new|this) (?:\\w+ ){0,2}${ARTIFACT})|i have an idea for (?:an?|my)? ?(?:\\w+ ){0,2}${ARTIFACT})\\b`,
+  "i",
+);
+export const looksBuildShaped = (t: string) => BUILD_IDEA.test(t) || BUILD.test(t);
 
 export interface TierCtx {
   /** A Tier-2 brainstorm session is live on this thread (dialogue-store). */

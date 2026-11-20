@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 pub struct Preview {
+    /// The folder this server serves (a build whose output folder moved needs a new server).
+    pub root: PathBuf,
     pub port: u16,
     task: tauri::async_runtime::JoinHandle<()>,
 }
@@ -120,7 +122,7 @@ async fn serve_one(mut sock: tokio::net::TcpStream, root: PathBuf) {
 pub async fn start(root: PathBuf) -> Result<Preview, String> {
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("preview server: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let r = root;
+    let r = root.clone();
     let task = tauri::async_runtime::spawn(async move {
         loop {
             let Ok((sock, _)) = listener.accept().await else { continue };
@@ -128,7 +130,7 @@ pub async fn start(root: PathBuf) -> Result<Preview, String> {
             tauri::async_runtime::spawn(serve_one(sock, r));
         }
     });
-    Ok(Preview { port, task })
+    Ok(Preview { root, port, task })
 }
 
 /// Is a preview URL answering? (2 s; any HTTP answer below 500 counts.) Loopback only.

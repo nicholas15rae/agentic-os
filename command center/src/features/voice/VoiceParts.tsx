@@ -10,6 +10,7 @@ import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { agentBadge, useOsName } from "@/features/os/os-store";
 import { isTauri } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
+import { AgentConversationCard } from "@/features/transcript/AgentConversationCard";
 
 /** Shared building blocks for the floating HUD, the Voice Console widget and the Agents section. */
 
@@ -62,21 +63,30 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
   return (
     <div className={`space-y-3 overflow-y-auto ${className}`} aria-live="polite">
       {turns.map((t) => {
+        // An Agent Conversation card (the setting hides it; on the phone it's a plain line).
+        if (t.convId) return <AgentConversationCard key={t.id} convId={t.convId} fallback={t.text} />;
         if (t.who === "system")
           return (
             <p key={t.id} className={`font-mono text-[11px] ${t.tone === "error" ? "text-alert" : t.tone === "warn" ? "text-amber-soft" : "text-teal"}`}>
               — {t.text}
             </p>
           );
-        // Never "TONY → TONY": a relay from Tony to himself (any alias, or one saved before P2).
-        if (t.who === "relay" && (isSelfRelay(t, name) || agentBadge(t.from ?? "os") === agentBadge(t.to ?? "user"))) return null;
+        // Never "TONY → TONY": a relay from Tony to himself (any alias, or one saved before P2). A
+        // build's own single-agent row (a retry, a skipped Designer, a wait) is a status line with
+        // one badge — part of the record, never dropped.
+        const selfRow = t.who === "relay" && (isSelfRelay(t, name) || agentBadge(t.from ?? "os") === agentBadge(t.to ?? "user"));
+        if (selfRow && !t.taskId) return null;
         if (t.who === "relay")
           return (
             <div key={t.id} className={`rounded-[12px] border px-3 py-2 text-[13px] ${t.tone === "warn" ? "border-amber/30 bg-amber/[0.05]" : "border-volt/20 bg-volt/[0.04]"}`}>
               <div className="mb-1 flex flex-wrap items-center gap-1.5">
                 <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-ink">{agentBadge(t.from ?? "os")}</span>
-                <ArrowRight size={11} className="text-ink-3" />
-                <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-ink">{agentBadge(t.to ?? "user")}</span>
+                {!selfRow && (
+                  <>
+                    <ArrowRight size={11} className="text-ink-3" />
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-ink">{agentBadge(t.to ?? "user")}</span>
+                  </>
+                )}
                 {t.meta && <span className="font-mono text-[10px] text-ink-3">{t.meta}</span>}
               </div>
               <p className="whitespace-pre-wrap break-words text-ink-2">{t.text}</p>

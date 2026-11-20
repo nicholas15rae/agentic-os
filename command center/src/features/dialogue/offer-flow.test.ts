@@ -405,6 +405,21 @@ describe("Phase 2 Part C — Tony's mode decides the Tier-3 commit cue", () => {
     expect(taskCreates()).toHaveLength(0);
   });
 
+  it("an approved delegation card satisfies the delegation gate only — never a blanket tool approval", async () => {
+    await handleInput("what if the layout had a sidebar", text);
+    await handleInput("ok let's do it", text);
+    expect(useVoice.getState().pending?.plan.delegateTo).toBe("designer");
+    expect(useVoice.getState().pending?.plan.target).toMatchObject({ scopes: ["delegation"] });
+    h.cmd.mockClear();
+    await handleInput("yes", text);
+    await vi.waitFor(() => expect(osTurns()).toHaveLength(1));
+    const req = osTurns()[0];
+    expect(req.role).toBe("designer");
+    expect(req.delegationApproved).toBe(true);
+    // Ask-tier tools (gmail / filesystem / MCP) the turn prefetches stay unapproved.
+    expect(req.approved).not.toBe(true);
+  });
+
   it("Builder: a mutating request still goes through the confirmation card (approve())", async () => {
     useMode("builder");
     await handleInput("email Sam the notes", text);
@@ -463,5 +478,57 @@ describe("Phase 2 Part C — Tony's mode decides the Tier-3 commit cue", () => {
     await handleInput("no", text);
     expect(h.saveArtifact).not.toHaveBeenCalled();
     expect(osTurns().some((r) => r.role !== "general")).toBe(false);
+  });
+});
+
+describe("thoughtform hardening: the brainstorm survives a refused hand-off (regressions)", () => {
+  it("Builder's MODE_NOT_AUTO fallback keeps the brainstorm, so the card's Park packages it whole", async () => {
+    useMode("builder");
+    h.cmd.mockImplementation(async (name: string, args: { req?: { text: string } }) => {
+      if (name === "os_turn") return { answer: `Tony: ${args.req?.text}`, steps: [], providerId: "local", latencyMs: 1, routedRole: "general", routeKind: "Self", routeReason: "", redacted: false, reason: "" };
+      if (name === "task_create") throw new Error("MODE_NOT_AUTO: only Builder mode queues a build without your yes; nothing was queued.");
+      throw new Error(`unexpected cmd ${name}`);
+    });
+    await brainstorm();
+    await handleInput("ok let's do it", text);
+    expect(useVoice.getState().pending?.plan.offer).toBe("delegate");
+    expect(useDialogue.getState().active("auto")).not.toBeNull(); // it used to be ended already
+  });
+
+  it("an approved build that fails keeps the brainstorm (a second commit cue still offers)", async () => {
+    h.cmd.mockImplementation(async (name: string, args: { req?: { text: string } }) => {
+      if (name === "os_turn") return { answer: `Tony: ${args.req?.text}`, steps: [], providerId: "local", latencyMs: 1, routedRole: "general", routeKind: "Self", routeReason: "", redacted: false, reason: "" };
+      if (name === "task_create") throw new Error("MODE_SURFACE_ONLY: Solo mode is on; nothing was queued.");
+      throw new Error(`unexpected cmd ${name}`);
+    });
+    await brainstorm();
+    await handleInput("ok let's do it", text);
+    await approve("tap");
+    expect(useDialogue.getState().active("auto")).not.toBeNull();
+    await handleInput("ok let's do it", text);
+    expect(useVoice.getState().pending?.plan.offer).toBe("delegate");
+  });
+
+  it("in Builder, bare agreement ('sounds good') raises the card instead of queueing a build", async () => {
+    useMode("builder");
+    await brainstorm();
+    await handleInput("sounds good", text);
+    expect(taskCreates()).toHaveLength(0);
+    expect(useVoice.getState().pending?.plan.offer).toBe("delegate");
+  });
+
+  it("a non-build 'I've been thinking about…' never queues a prototype in Builder", async () => {
+    useMode("builder");
+    await handleInput("I've been thinking about emailing Sam about the contract renewal", text);
+    await handleInput("ok let's do it", text);
+    expect(taskCreates()).toHaveLength(0);
+  });
+
+  it("a ledger Run that's refused never says 'Queued'", async () => {
+    h.runPipeline.mockRejectedValue(new Error("idea not found in the ledger"));
+    await requestPipeline("idea-9", "Budget App", "general");
+    await approve("tap");
+    expect(texts().some((t) => /^Queued/.test(t))).toBe(false);
+    expect(useVoice.getState().turns.some((t) => t.who === "system" && t.tone === "error")).toBe(true);
   });
 });

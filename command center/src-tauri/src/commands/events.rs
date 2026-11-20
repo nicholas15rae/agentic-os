@@ -54,6 +54,17 @@ pub struct AgentEvent {
     /// True when `short_summary` is the agent's own voice summary (speak it in its voice).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub from_voice_summary: bool,
+    /// Task events: who the committed row was addressed to (`handoff_log.to_agent`) — the
+    /// envelope `owner` after the commit is often someone else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_agent: Option<String>,
+    /// Task events: the durable `handoff_log.seq` of the row (dedupe / backfill key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_seq: Option<i64>,
+    /// Task events whose `short_summary` is a voice summary: the app's templated summary too
+    /// (counts, sizes, who it went to), so the chat never loses the facts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_summary: Option<String>,
 }
 
 // ── Summary hygiene ─────────────────────────────────────────────────────────
@@ -138,6 +149,9 @@ pub fn from_entry(h: &HandoffEntry, env: &Envelope, f: &SummaryFilter) -> AgentE
         status: Some(env.status.clone()),
         owner: Some(env.current_owner.clone()),
         from_voice_summary: voiced,
+        to_agent: Some(h.to_agent.clone()),
+        row_seq: Some(h.seq),
+        template_summary: voiced.then(|| clean_summary(&h.short_summary, SUMMARY_MAX, f, &fallback)),
     }
 }
 
@@ -159,7 +173,17 @@ pub fn note(agent_id: &str, event_type: &str, severity: &str, summary: &str, tra
         status: None,
         owner: None,
         from_voice_summary: false,
+        to_agent: None,
+        row_seq: None,
+        template_summary: None,
     }
+}
+
+/// A bus-only template note that belongs to a task (`taskId` set, so the chat attributes it).
+pub fn task_note(task_id: &str, agent_id: &str, event_type: &str, severity: &str, summary: &str, f: &SummaryFilter) -> AgentEvent {
+    let mut ev = note(agent_id, event_type, severity, summary, Some(&format!("task:{task_id}")), f);
+    ev.task_id = Some(clip(&one_line(task_id), 64));
+    ev
 }
 
 /// Does an event of `severity` get spoken at feedback `level` (0 silent … 3 verbose)?
@@ -234,6 +258,57 @@ impl Bus {
     }
 }
 
+/// The last `REPLAY_CAP` non-verbose events, for a webview that was not listening yet (app
+/// startup, a webview reload): `agent_events_replay` hands them back so nothing emitted before
+/// the listener existed is lost (the webview dedupes by `seq` within this process `boot`).
+pub const REPLAY_CAP: usize = 64;
+
+pub struct Replay {
+    cap: usize,
+    q: Mutex<VecDeque<AgentEvent>>,
+}
+
+impl Replay {
+    pub fn new(cap: usize) -> Self {
+        Self { cap: cap.max(1), q: Mutex::new(VecDeque::new()) }
+    }
+    pub fn record(&self, ev: &AgentEvent) {
+        let mut q = self.q.lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() >= self.cap {
+            q.pop_front();
+        }
+        q.push_back(ev.clone());
+    }
+    /// Events with `seq > after`, oldest first.
+    pub fn since(&self, after: u64) -> Vec<AgentEvent> {
+        self.q.lock().unwrap_or_else(|p| p.into_inner()).iter().filter(|e| e.seq > after).cloned().collect()
+    }
+}
+
+fn replay() -> &'static Replay {
+    static R: OnceLock<Replay> = OnceLock::new();
+    R.get_or_init(|| Replay::new(REPLAY_CAP))
+}
+
+/// This process's boot stamp (the webview keys its replay dedupe on it: `seq` restarts per boot).
+pub fn boot_id() -> i64 {
+    static B: OnceLock<i64> = OnceLock::new();
+    *B.get_or_init(super::envelope::now_ms)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayView {
+    pub boot: i64,
+    pub events: Vec<AgentEvent>,
+}
+
+/// Recent agent events the webview may have missed (emitted before its listener existed).
+#[tauri::command]
+pub fn agent_events_replay(after_seq: Option<u64>) -> ReplayView {
+    ReplayView { boot: boot_id(), events: replay().since(after_seq.unwrap_or(0)) }
+}
+
 fn bus() -> &'static Bus {
     static B: OnceLock<Bus> = OnceLock::new();
     B.get_or_init(|| Bus::new(BUS_CAP))
@@ -243,7 +318,20 @@ static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 /// Queue an event for the webview / gateway. Never blocks.
 pub fn publish(ev: AgentEvent) -> bool {
+    let _ = boot_id();
+    if ev.severity != "verbose" {
+        replay().record(&ev);
+    }
     bus().push(ev)
+}
+
+/// `publish_note` with a longer summary cap (hub outcomes carrying a check name or Nic's own
+/// steer text). Still scrubbed and wake-word safe.
+pub fn publish_note_capped(agent_id: &str, event_type: &str, severity: &str, summary: &str, trace_id: Option<&str>, cap: usize) -> bool {
+    let f = filter().read().unwrap().clone();
+    let mut ev = note(agent_id, event_type, severity, summary, trace_id, &f);
+    ev.short_summary = clean_summary(summary, cap.min(600), &f, &event_type.replace('_', " "));
+    publish(ev)
 }
 
 /// Publish the event for a committed handoff row.
@@ -256,6 +344,15 @@ pub fn publish_entry(h: &HandoffEntry, env: &Envelope) -> bool {
 pub fn publish_note(agent_id: &str, event_type: &str, severity: &str, summary: &str, trace_id: Option<&str>) -> bool {
     let f = filter().read().unwrap().clone();
     publish(note(agent_id, event_type, severity, summary, trace_id, &f))
+}
+
+/// Emit any other Rust → webview event through the installed app handle (no-op before
+/// `install`, e.g. in unit tests). For payloads that are already scrubbed and capped.
+pub fn emit_raw<T: Serialize + Clone>(name: &str, payload: &T) {
+    if let Some(app) = APP.get() {
+        use tauri::Emitter;
+        let _ = app.emit(name, payload.clone());
+    }
 }
 
 /// Called once from `lib.rs` setup: start the consumer (webview emit + gateway mirror).
@@ -405,6 +502,44 @@ mod tests {
         let avg = t.elapsed() / 2000;
         assert!(avg < Duration::from_millis(1), "publish averaged {avg:?}");
         assert_eq!(b.len(), BUS_CAP);
+    }
+
+    #[test]
+    fn task_events_carry_the_rows_recipient_seq_and_template() {
+        // Regression: the event carried only the post-commit owner, so a prompter→librarian
+        // handoff into the prompter-owned preflight stage looked like a prompter→prompter
+        // self-relay (hidden in chat), and the voice summary replaced the facts.
+        let (mut h, env) = entry(Some("Looks solid, passing it on"), "Coder staged index.html (14.2 KB)");
+        h.from_agent = "prompter".into();
+        h.to_agent = "librarian".into();
+        let e = from_entry(&h, &env, &SummaryFilter::default());
+        assert_eq!(e.to_agent.as_deref(), Some("librarian"));
+        assert_eq!(e.row_seq, Some(h.seq));
+        assert_eq!(e.template_summary.as_deref(), Some("Coder staged index.html (14.2 KB)"));
+        let v: Value = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["toAgent"], "librarian");
+        assert!(v.get("rowSeq").is_some() && v.get("templateSummary").is_some());
+        let (h, env) = entry(None, "Spec ready");
+        assert!(from_entry(&h, &env, &SummaryFilter::default()).template_summary.is_none());
+    }
+
+    #[test]
+    fn task_notes_are_attributed_and_replayed_for_a_late_listener() {
+        let n = task_note("t-1", "librarian", "mirror_failed", "milestone", "Couldn't index it", &SummaryFilter::default());
+        assert_eq!(n.task_id.as_deref(), Some("t-1"));
+        assert_eq!(n.trace_id.as_deref(), Some("task:t-1"));
+        // Regression: events emitted before the webview listened (startup 'interrupted' rows) were lost.
+        let r = Replay::new(3);
+        for i in 0..5 {
+            let mut e = ev("milestone");
+            e.seq = 100 + i;
+            r.record(&e);
+        }
+        let got: Vec<u64> = r.since(0).iter().map(|e| e.seq).collect();
+        assert_eq!(got, [102, 103, 104]);
+        assert_eq!(r.since(103).len(), 1);
+        assert!(publish(ev("milestone")));
+        assert!(!agent_events_replay(None).events.is_empty());
     }
 
     #[test]

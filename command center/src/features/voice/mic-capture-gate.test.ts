@@ -73,7 +73,7 @@ vi.stubGlobal("AudioContext", FakeAudioContext);
 vi.stubGlobal("AudioWorkletNode", FakeWorklet);
 vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: fake.gum }, language: "en-US" });
 
-import { WebSpeechStt, WhisperStt, type SttHandlers } from "./engines";
+import { WebSpeechStt, WhisperStt, isTransientSttError, micErrorMessage, type SttHandlers } from "./engines";
 import { resetMicGateForTests, setMicEnabledLocal, useMic } from "./mic-gate";
 import { useSettings } from "@/stores/settings";
 
@@ -255,5 +255,80 @@ describe("the activation threshold is read per frame", () => {
     expect(hh.onPhase).toHaveBeenCalledWith("speech");
     stt.abort();
     expect(useMic.getState().live).toBe(0);
+  });
+});
+
+describe("thoughtform hardening: capture → Whisper (regressions)", () => {
+  it("a Stop before any speech sends nothing to Whisper (it invents “Thank you.” from silence)", async () => {
+    setMicEnabledLocal(true);
+    const hh = handlers();
+    const stt = new WhisperStt();
+    stt.start(hh, { maxSilenceStartMs: 30_000 });
+    await flush();
+    const push = fake.worklets[0].port.onmessage!;
+    for (let i = 0; i < 60; i++) push(frame(QUIET)); // ~1.3 s of room, no speech
+    stt.stop();
+    await flush();
+    expect(h.nativeRaw).not.toHaveBeenCalled();
+    expect(hh.onFinal).toHaveBeenCalledWith("");
+  });
+
+  it("a Stop after speech sends only what was said (from the speech onset), not the wait before it", async () => {
+    setMicEnabledLocal(true);
+    const hh = handlers();
+    const stt = new WhisperStt();
+    stt.start(hh, { maxSilenceStartMs: 30_000, endSilenceMs: 60_000 });
+    await flush();
+    const push = fake.worklets[0].port.onmessage!;
+    for (let i = 0; i < 200; i++) push(frame(QUIET)); // ~4 s waiting
+    for (let i = 0; i < 40; i++) push(frame(LOUD));
+    stt.stop();
+    await flush();
+    expect(h.nativeRaw).toHaveBeenCalledTimes(1);
+    const wav = h.nativeRaw.mock.calls[0][1] as Uint8Array;
+    // 240 frames would be ~164 KB of 16 kHz WAV; from the onset (+ pre-roll) it's well under half.
+    expect(wav.length).toBeLessThan(60_000);
+    expect(hh.onFinal).toHaveBeenCalledWith("hello tony");
+  });
+
+  it("a transient Whisper failure is retried once with the same audio before the words are lost", async () => {
+    vi.useFakeTimers();
+    setMicEnabledLocal(true);
+    h.nativeRaw.mockReset();
+    h.nativeRaw.mockRejectedValueOnce(new Error("error sending request for url (http://127.0.0.1:8178/inference)")).mockResolvedValueOnce("the idea survived");
+    const hh = handlers();
+    const stt = new WhisperStt();
+    stt.start(hh, { maxSilenceStartMs: 30_000, endSilenceMs: 60_000 });
+    await flush();
+    const push = fake.worklets[0].port.onmessage!;
+    for (let i = 0; i < 40; i++) push(frame(LOUD));
+    stt.stop();
+    await flush();
+    await vi.advanceTimersByTimeAsync(1600);
+    await flush();
+    expect(h.nativeRaw).toHaveBeenCalledTimes(2);
+    expect(hh.onError).not.toHaveBeenCalled();
+    expect(hh.onFinal).toHaveBeenCalledWith("the idea survived");
+    expect(isTransientSttError("Whisper: audio too short or too long")).toBe(false);
+    expect(isTransientSttError("HTTP status server error (503 Service Unavailable)")).toBe(true);
+  });
+
+  it("a remembered mic that's gone falls back to the default one; errors name the real cause", async () => {
+    setMicEnabledLocal(true);
+    useSettings.getState().set({ micDeviceId: "usb-headset-123" });
+    fake.gum.mockReset();
+    fake.gum.mockRejectedValueOnce(Object.assign(new Error("gone"), { name: "OverconstrainedError" })).mockImplementation(async () => stream());
+    const hh = handlers();
+    const stt = new WhisperStt();
+    stt.start(hh);
+    await flush();
+    expect(fake.gum).toHaveBeenCalledTimes(2);
+    expect(fake.gum.mock.calls[1][0].audio.deviceId).toBeUndefined();
+    expect(hh.onError).not.toHaveBeenCalled();
+    stt.abort();
+    useSettings.getState().set({ micDeviceId: "" });
+    expect(micErrorMessage({ name: "NotAllowedError" })).toBe("Microphone blocked — allow mic access");
+    expect(micErrorMessage({ name: "NotFoundError" })).toMatch(/No microphone found/);
+    expect(micErrorMessage({ name: "NotReadableError" })).toMatch(/busy/);
   });
 });

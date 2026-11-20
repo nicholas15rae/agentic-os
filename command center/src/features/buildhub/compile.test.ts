@@ -110,7 +110,9 @@ describe("TaskEnvelope compiler", () => {
       _created: 5,
       _updated: 6,
     } as never);
-    expect(n).toEqual({ id: "x", title: "Untitled brainstorm", text: "A summary\nUI: big buttons\nActions: ship it\nRaw: raw words", created: 5 });
+    // Nic's raw words come right after a short summary (the organized extras last): the raw
+    // transcript used to be the part a long note lost.
+    expect(n).toEqual({ id: "x", title: "Untitled brainstorm", text: "Summary: A summary\nRaw: raw words\nUI: big buttons\nActions: ship it", created: 5 });
   });
 });
 
@@ -139,5 +141,36 @@ describe("review #17: the Prompter's answers reach the envelope", () => {
     const { envelope } = compileEnvelope(notes, questions, { q1: { choice: "Friends" }, success: { choice: "It renders and the main action works" } }, ctx);
     expect(envelope.acceptance_criteria[0]).toBe("It renders and the main action works");
     expect(envelope.acceptance_criteria.some((c) => c.includes("Friends"))).toBe(false);
+  });
+});
+
+describe("thoughtform hardening: what reaches the worker (regressions)", () => {
+  const big = (id: string, created: number): IntakeNote => ({ id, title: `Note ${id}`, text: `start of ${id} ${"words ".repeat(800)} end of ${id}`, created });
+  it("the interview answers lead the brief and survive six long notes; cut notes are marked", () => {
+    const six = [1, 2, 3, 4, 5, 6].map((i) => big(`n${i}`, i));
+    const { brief } = compileEnvelope(six, questions, { success: { text: "MUST work offline" }, runtime: { choice: questions[2].options[0] } }, ctx);
+    expect(brief.length).toBeLessThanOrEqual(8000);
+    expect(brief.startsWith("Intake interview:")).toBe(true);
+    expect(brief).toContain("MUST work offline");
+    for (const i of [1, 2, 3, 4, 5, 6]) expect(brief).toContain(`start of n${i}`);
+    expect(brief).toContain("more chars not included");
+  });
+  it("a Prompter answer containing 'own' / 'type' is still a criterion (Dropdown, Prototype…)", () => {
+    const prompterQs: IntakeQuestion[] = [
+      { id: "q1", question: "How should the filter work?", options: ["Dropdown menu", "Chips"], allow_free_text: true },
+      { id: "q2", question: "What kind of view?", options: ["Prototype layout", "Full app"], allow_free_text: true },
+    ];
+    const c = criteriaFor("internal_widget", { q1: { choice: "Dropdown menu" }, q2: { choice: "Prototype layout" } }, prompterQs);
+    expect(c).toContain("How should the filter work: Dropdown menu");
+    expect(c).toContain("What kind of view: Prototype layout");
+    expect(criteriaFor("internal_widget", { q1: { choice: "My own criteria (type them)" } }, prompterQs).some((x) => /my own/i.test(x))).toBe(false);
+  });
+  it("noteToIntake keeps Nic's raw words ahead of the organized extras, with a visible cut marker", () => {
+    const raw = Array.from({ length: 30 }, (_, i) => `thought number ${i}: ${"detail ".repeat(20)}`).join("\n");
+    const n = noteToIntake({ id: "x", title: "Long dump", rawText: raw, segments: [], organized: { summary: "A summary.", categories: [{ name: "UI", bullets: ["big buttons"] }] }, _created: 1 } as never);
+    expect(n.text).toContain("Summary: A summary.");
+    expect(n.text).toContain("Raw: thought number 0");
+    expect(n.text).toContain("more chars not included");
+    expect(n.text.length).toBeLessThanOrEqual(3000);
   });
 });

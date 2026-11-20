@@ -45,6 +45,22 @@ export function routeFor({ utterance, thread, channel, cfg, osName = "" }: Route
   return { ...det, role: "general" };
 }
 
+/** The roles Solo (`surface_only`) keeps with Tony unless addressed by name (Rust `SOLO_HELD_ROLES`). */
+const SOLO_HELD_ROLES: readonly string[] = ["prompter", "designer", "coder"];
+
+/**
+ * Rust's Solo hold (agents.rs `route_for_turn`), mirrored so the webview never announces a
+ * delegation Rust is about to keep with Tony ("Routing … to Coder…" + the handoff cue, then
+ * Tony answers himself): under `surface_only`, a non-explicit Domain / Default hit or a
+ * low-confidence mention of the Prompter / Designer / Coder stays Tony's. Pure.
+ */
+export function soloHold(r: RoutedTurn, o: { explicit: boolean; dispatch: string | undefined }): RoutedTurn {
+  if (o.dispatch !== "surface_only" || o.explicit || !SOLO_HELD_ROLES.includes(r.role)) return r;
+  const named = r.kind === "Named";
+  if (r.kind === "Domain" || r.kind === "Default" || (named && r.confidence !== "high")) return { ...r, role: "general", kind: "Self", reason: "Solo mode: kept with Tony" };
+  return r;
+}
+
 /**
  * The one-line "Routing … to <agent>…" notice in Tony's thread, or null. Only a real delegation
  * gets one: never Tony himself (any self alias), never Self / Direct / Tab kinds, never an

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { listenTakesReflex, parseReflex } from "./reflex-parse";
+import { isBareCut, listenTakesReflex, parseReflex } from "./reflex-parse";
 
 const BUSY = { busy: true, holding: false };
 const IDLE = { busy: false, holding: false };
@@ -259,5 +259,14 @@ describe("listenTakesReflex — which listens act on a reflex", () => {
   it("while a cue plays a bare 'stop' is the cue's own stop, not a cut", () => {
     expect(listenTakesReflex(stop, { bare: false, busy: false, cueActive: true })).toBe(false);
     expect(listenTakesReflex(cutIt, { bare: false, busy: false, cueActive: true })).toBe(true);
+  });
+});
+
+describe("isBareCut (regression)", () => {
+  // A line that merely starts with / contains a cut phrase used to be a cut even with nothing
+  // running: "Stop motion studio app, I want…" was swallowed (and paused Spotify).
+  it("only the cut phrase plus address / politeness words is bare", () => {
+    for (const l of ["Cut it.", "cut it out", "Tony, stop", "no no, cut it please", "Stop.", "stop talking", "yo tony cut it"]) expect(isBareCut(l), l).toBe(true);
+    for (const l of ["Stop motion studio app, I want an app that turns sketches into clips", "Let's cut that feature", "Stop button should be red", "and cut that intro", "cut it into three pages and build me a portfolio"]) expect(isBareCut(l), l).toBe(false);
   });
 });

@@ -58,6 +58,10 @@ pub fn run() {
                     let osc = app.state::<os_core::OsState>().snapshot();
                     events::set_filter(&osc.os_name, &osc.wake_words);
                     let tasks = app.state::<envelope::TaskStore>();
+                    // Agent Conversation transcripts: <config dir>/transcripts.db (its own file; the
+                    // Librarian never reads it). Opened before recovery so the "interrupted" rows
+                    // are recorded too; a failure only turns the feed off (hooks become no-ops).
+                    let _ = commands::transcript::store().init(&dir);
                     if tasks.init(&dir).is_ok() {
                         // In-flight tasks keep their stage and get an `interrupted` row; the
                         // worker re-runs only that stage.
@@ -257,6 +261,10 @@ pub fn run() {
             taskworker::task_status,
             taskworker::task_retry,
             taskworker::task_cancel,
+            events::agent_events_replay,
+            commands::transcript::transcript_conversations,
+            commands::transcript::transcript_get,
+            commands::transcript::transcript_message,
             os_core::droplet_link,
             os_core::gpu_slot_view,
             clihub::cli_install,

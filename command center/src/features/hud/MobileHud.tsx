@@ -211,7 +211,9 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
   );
 }
 
-const HUD_THREADS: ThreadId[] = ["general", "prompter", "designer", "coder", "librarian", "booking"];
+/** Every mirrored thread: Tony's desktop conversation ("auto": the Command view / VoiceHUD) and
+ * Ops included, so nothing Nic said to Tony or an agent said back is unreachable on the phone. */
+export const HUD_THREADS: ThreadId[] = ["general", "auto", "prompter", "designer", "coder", "librarian", "booking", "ops"];
 
 function TonyTab({ hud }: { hud: Hud }) {
   const mode = useHudModes(hud);
@@ -229,7 +231,7 @@ function TonyTab({ hud }: { hud: Hud }) {
       <div className="-mx-3 flex gap-1.5 overflow-x-auto px-3 pb-1">
         {HUD_THREADS.map((t) => (
           <button key={t} onClick={() => setThread(t)} className={`h-8 shrink-0 rounded-full border px-3 text-xs ${thread === t ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 text-ink-2"}`}>
-            {t === "general" ? name : SUB_AGENTS[t as AgentRole].label}
+            {t === "general" ? name : t === "auto" ? `${name} · desk` : SUB_AGENTS[t as AgentRole].label}
           </button>
         ))}
       </div>

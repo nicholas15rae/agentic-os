@@ -218,3 +218,243 @@ The Exit button sits at the bottom of the left rail.
 **Quitting.** `app_exit` stops the preview servers and calls `AppHandle::exit`, which runs the usual RunEvent::Exit cleanup: the Spotify duck restore and the Drive sync. MCP servers and Claude fix runs live in kill-on-close Job Objects, so nothing is orphaned.
 
 **The gateway is left running on purpose:** it is the phone's sync hub.
+
+## AD-10: The Agent Conversation feed (a reviewable Tony ↔ agent record)
+
+Every build and delegation gets a chat thread you can review: what Tony and the agents actually said to each other. That covers the brief, each agent's prompt and full reply, hand-offs, the intake interview, steers, smoke verdicts, repairs and Claude Code's run.
+
+- **Where it lives.** A separate Rust-owned SQLite file, `<app config dir>/transcripts.db` (`transcript.rs`). It uses the tasks.db pattern: a `user_version` ladder, WAL, `busy_timeout 3000`, a lazy reopen and `in_memory()` for tests. It is not a tasks.db table, for two reasons: the Librarian reads tasks.db as compact rows, never raw logs, and a migration there would lock an older binary out. The Librarian never opens transcripts.db, and nothing in it is fed back into a prompt.
+- **Who writes.** Only Rust:
+  - every handoff_log row is mirrored right after `publish_entry`, and backfilled from tasks.db on read (keyed by `handoff_seq`, so it is idempotent);
+  - the worker records each model call's prompt and reply (`WorkerEnv::transcript`);
+  - the hub records the interview, Tony's hand-off, steers, smoke tests and repairs;
+  - Claude Code's runs record their progress;
+  - a delegated Tony turn records its steps.
+
+  The only webview input is the intake interview, passed with the approved `build_enqueue`. Rust scrubs it again.
+- **Hygiene.**
+  - Every summary and body goes through `devqueue::scrub` (known values and key patterns).
+  - Summaries are one line of up to 160 chars. Bodies keep up to 16 K chars; for a longer one, the first 12 K and the last 4 K are kept, with a marker between them.
+  - `message` is append-only (an UPDATE aborts).
+  - A conversation keeps 800 messages. After that it keeps only hand-offs, errors, smoke tests, repairs and overrides, and counts the rest as dropped.
+  - Past 400 conversations, the oldest finished or 30-day-idle ones are pruned.
+- **Best-effort.** A recording error is logged once. It never fails or delays a stage, a turn or an enqueue. If the file can't be opened, the feed is off and the app runs normally.
+- **The chat.**
+  - Each root conversation (`task:`, `hub:`, `turn:`, `dev:`) gets one card, in the thread that started it. A hub build's worker task and Claude item nest inside its card.
+  - Live updates come over `agent-transcript`, which carries only the head and the summary. A message body loads when its row is opened.
+  - After a restart or reload, the cards are rebuilt from `transcript_conversations` / `transcript_get`, never from bus delivery.
+- **Additive.** The relay and system lines are unchanged. So are the spoken Agent Chatter (`routing.vocalHandoffs`), the narrator and verbosity 0–3. The **Agent Log** switch in the Agents header (`chat.showAgentConversation`, default on) only shows or hides the cards. The approve() / Tier-3 / dispatch gates and the staging-only writes are untouched: the feed only reads and never dispatches.
+
+## AD-11: Behavioural probes in verify (the build gate checks what the page does, not only what it contains)
+
+**Why.** After the first quality gate (offline only, Nic's exact values, quoted-code evidence, a storage-blocked runtime smoke), a protein-tracker re-run with the 9B verifier still passed real behavioural bugs: the lb/kg toggle set the unit before comparing it, so it never converted; the meal split read 3, 5, 4; kg was marked active while the unit was lbs; saved state was merged after the first render and never shown. Quoted code proves an element exists, not that it behaves. The verifier also never saw that code: the excerpt kept the head (CSS and markup) and the tail of the page and cut the middle of the script.
+
+**What the verifier reads.** `quality::verify_view` puts every inline script first, whole when it fits, then the markup with the scripts pulled out and the CSS bodies dropped. The markup's middle is cut first and the middle of a script only when the scripts alone do not fit; either cut is reported, the prompt then says so, and a criterion the model leaves undecided (`met: null`) is recorded as "not shown", never counted as unmet.
+
+**Probes: a tiny DSL, never model JavaScript.** Each criterion in the verify reply may carry a `probe`: up to 8 steps, at most 6 probes per pass (14 since AD-12: `MAX_PROBES` = 10 acceptance criteria + 4 intent checks, where a behavioural criterion needs one that ran and passed).
+
+- Actions: `set` (types like a person: focus, keydown, the value, input, keyup, change, blur; a checkbox or radio is clicked when its state must change), `select`, `click` (first match or `nth`), `reload` (storage kept). Each action is followed by a 500 ms settle wait (virtual time), and each expectation is polled for about a second before it fails, so debounced and keyup / blur handlers count.
+- Expectations: `expect_text` / `expect_value` with `contains`, `equals` or `approx` + `tol` (ANY number in the text: a range "120 - 165 g", "165 lbs (74.8 kg)", a decimal comma), `expect_class` (`present`), `expect_count`, `expect_order` (an attribute, or the text when no element carries it, e.g. `data-meals` 3, 4, 5; labels match case-insensitively, by leading number or contained; values naming fewer than two expected labels are a broken probe). Form controls are read by state: an input's value, a select's value and its selected label, a checkbox's checked state.
+- Rust validates the reply first (`quality::parse_probe`): known ops only, a selector charset with no `<`, `{`, `;`, `/` or backslash, capped strings and numbers, at least one expectation. The steps reach the page as inert JSON (`<`, `>` and `&` escaped), never as code.
+
+**How they run.** The same isolation as the runtime smoke: a temp copy of the page, its own throwaway Edge profile with downloads pointed into the temp folder, the network unreachable, a kill-on-close Job Object (Edge dies with the app), a timeout. One headless Edge run per probe (20 s each, 120 s in all), so every probe starts on a fresh load with storage cleared, and a probe that hangs the page fails alone: it is that probe's failure (naming the step in flight when Edge still printed the page), never a reason to drop the other probes' results. Leaving the page (a link, `location.href = …`) is cancelled through the Navigation API; reloads still work, and the runner keeps its place in `window.name` across them, mirrored onto `<html>` as `data-tf-probe-partial`. Storage works for probes (only the smoke blocks it), so `set → reload → expect` checks that saved state is shown. Dialogs, form submits, `window.open` and downloads are stubbed. The results are written to `data-tf-probe` on `<html>` and read back from `--dump-dom`.
+
+**How they are judged** (`quality::judge`).
+
+- A failing expectation makes its criterion unmet, whatever the model said. The fix line names the steps and both values, what the page produced first (a line is clipped from its end), e.g. `probe failed for <criterion>: got 165; expected #weight-input value ≈74.8 (±0.5) after set #weight-input=165, click #kg-toggle`. Probe failures go first in the Coder's fixes, and first after the gate's own items in the known blockers at the iteration limit.
+- A probe whose selector matches nothing (or whose option does not exist) is a broken probe. It is recorded but counts against the build only when the criterion also has no code evidence.
+- Evidence is still required: every non-trivial quoted line must be in the page (a bare `render();` or a single word proves nothing).
+- A criterion the verifier left out, or left undecided although its code was shown, gets one retry of the stage, then becomes a named blocker. It never loops the Coder, and it is never passed silently.
+- No Edge or runtime checks off: the probes are skipped and recorded (`last_eval.verify.probes`, `criteria[].probe`), and the evidence-only rule decides.
+- A probe that failed is kept in `last_eval.open_probes` (the evaluate pass carries it over) and runs again on the next verify alongside whatever the verifier writes then (`criteria[].probe.rechecked`). Failing again, or now matching nothing while no new probe for that criterion passed, keeps the criterion unmet; it closes only when it passes.
+- A Play Place hub build whose criteria are still unmet on the last pass fails into its Repair Queue, as for the gate.
+
+**Related gate changes.**
+
+- The runtime smoke now returns three outcomes. *Skipped* (no Edge) falls back to the static checks. *Failed* (the page hung, kept reloading or navigated away) fails the gate. *Ran* records the page lines where a blocked storage access happened. A clean smoke clears only the scanned storage uses it actually reached and saw caught.
+- The smoke skips buttons an earlier click removed or disabled, and ignores the harmless ResizeObserver notice.
+- Nic's values are checked as a number with a unit word near it, with CSS and comments stripped. Ranges ("3-5 meals") and thousands ("10,000 steps") are kept whole.
+- A Play Place hub build that still fails the gate on the last pass fails into its Repair Queue instead of being handed on as review_ready.
+- The Coder reads the latest loop's fixes before the brief's older ones, and Nic's own words with head and tail kept.
+
+## AD-12: Required probes and pinned intent checks (the verifier cannot pass behaviour it did not run)
+
+**Why.** A review of AD-11 on the protein-calculator run ("I'm 165 lbs … default 165 lb, with lb/kg toggle … per-meal split (3-5 meals)") found the probes optional: a criterion that was met with real quoted code still passed when its probe was missing, rejected, matched nothing, or was past the 6-probe cap. The same 9B model also wrote expectations it copied from the page's own code (a kg → lb round trip back to 165, the page's own formula output), and the prompt's examples were literally the protein answers (`#weight`, `#kg`, 74.8, `.split-btn` / `data-meals`, 3, 4, 5). A numeric `contains` was a substring match ("0" matched "40 g"). The page that shipped had a kg toggle that never converted, splits ordered 3, 5, 4, and implausible targets.
+
+**Required probes.**
+
+- A criterion is *behavioural* when it describes something that changes, computes, converts, toggles, totals, adds / removes, resets, orders, saves / restores, or shows a default or initial value, or when it carries one of Nic's literal values (`quality::need_of`).
+- Where probes can run (runtime checks on, a staged page, a local Edge), a behavioural criterion counts as met only when a probe for it ran and passed. A passing probe also stands in for quoted evidence; a failing one is a Coder fix as in AD-11.
+- No working probe (missing, rejected by `parse_probe` or the rules below, matching nothing, or skipped by the cap or the time budget) is a *probe gap*, not an unmet criterion. The verify stage is retried once with the exact reasons fed back into its prompt: which criteria, the parse error text, the selector that matched nothing, the pinned value to use. If the last attempt still has gaps, each becomes a known blocker `no working probe for: <criterion> (<why>)`. It never loops the Coder, because the page may be fine.
+- Where probes cannot run, the evidence-only rule of AD-11 still decides.
+- The cap is now 14 new probes per pass (plus up to 6 carried), with the behavioural criteria's probes first. That covers 10 acceptance criteria plus up to 4 intent checks. Edge time stays bounded by the existing caps: 20 s per probe and 120 s for the whole run, and probes past the budget are "not run" (a gap).
+- A behavioural probe must act (`set` / `select` / `click`) before its first expectation, unless the criterion is an on-load default or order check. A probe that only reads the page is rejected with that reason.
+- `parse_probe` normalises the usual small-model variations instead of rejecting them. Keys `action` / `type` / `step` become `op`, `selector` / `target` / `css` become `sel`, and `text` / `val` become `value`. The op aliases are `fill` / `type` / `input` → `set`, `choose` → `select`, `press` / `tap` → `click`, and `assert_text` / `expect` → `expect_text`. Numeric strings are accepted. The selector charset, caps and inert JSON are unchanged.
+
+**Pinned intent checks** (`quality::intent_checks`; the model supplies selectors and actions only).
+
+- (a) A literal stated as a default ("default 165 lb", "I'm …", "I am …", "my … is …") means that number shows on a fresh load, before any action.
+- (b) A unit pair named in the request ("lb/kg", "miles or km"; also mi/km, °F/°C, oz/g, in/cm and ft/m) plus such a default in one of its units means that, after switching, the value reads the converted number. Rust computes it (165 lb → 74.84 kg), with a tolerance of 0.6 % or 0.5, whichever is larger. The probe must act before its final expectation, and that expectation must not be the starting value (a round trip is rejected).
+- (c) An integer range offered as choices ("3-5 meals" near split / choose / pick / options / buttons …, with 1 ≤ M-N ≤ 6, and never a measured range such as minutes or reps) means the options read N..M ascending (`expect_order`).
+- The checks are added to the verifier's numbered criteria with the pinned value stated. A probe for a check passes only with the pinned expectation, and Rust rewrites the step to that value. A probe expecting another number is rejected with "use the pinned value X". The checks stay generic and conservative: when the request does not clearly yield one (no stated default, two conflicting defaults, no choice word), none is derived.
+
+**Prompt.** The probe examples come from another domain (a tip calculator: `#bill`, `#tip-15`, `.row`) so the model is not primed with the answers. The prompt also says that expected values come from Nic's request and well-known real-world facts the model computes itself, never from the page's own code or formula. A computed recommendation that is implausible in the real world is marked unmet, with the reason.
+
+**Numbers in `contains`.** A numeric `contains` (optionally with a currency sign and a unit word: "40 g", "$39.33 per person") matches its number as a whole number token followed by the unit, so "0" does not match "40 g" and "40" does not match "140 g". Other text stays a case-insensitive substring.
+
+**Review fixes (after e16cdea).** A skeptic review of AD-12 found ways a broken page could still pass or a correct one be blocked:
+
+- *The gap retry never discards a probe failure.* The verify stage is retried for probe gaps only when nothing else is unmet: a pass where a probe really failed goes to the Coder (its probe is recorded in `open_probes` and carried), because the retry's fresh answer could swap in a weaker probe that passes. The retry is spent only on gaps the verifier can fix (no probe, a rejected one, a selector matching nothing), never on probes skipped by the cap or the time budget. The retry's reasons are keyed by the claim (iteration and lease), so a later claim never inherits a retry that never ran.
+- *The cap covers every criterion.* `MAX_PROBES` = `MAX_CRITERIA` (10) + `MAX_CHECKS` (4) = 14, with the pinned intent checks' probes first.
+- *On-load checks expect first.* A default / initial-state / order criterion stays an on-load check even when it names a state ("selected") or a thing ("the toggle"); only an action verb or phrase ("switching to", "after clicking", "converts") makes it need an action. Its probe must expect BEFORE any action: one that clicks "lb" and then sees "lb" active proves nothing about the default. A criterion that is behavioural only through Nic's literal needs an action only when it names one.
+- *Computed values are read.* A criterion that computes or converts (calculate, convert, divide, per-meal …) is not proven by a probe that only checks a class or a count.
+- *Evidence.* A passing probe stands in only for evidence the verifier did not give. Quoted code that is not in the page is reported whatever a probe did, and a criterion that is not behavioural still needs real evidence. A behavioural criterion with no quote and no working probe is a gap, not a Coder fix.
+- *Pinned steps by number.* `pin` holds the read whose number matches (Default: before any action; Convert: after the switch), so extra reads ("kg" shown as the unit) and a return toggle are kept. A Convert probe is a round trip only when every number it expects after the switch is the starting value.
+- *Personal stats and ranges.* "I'm …" / "my … is …" is pinned as a default only when the request also asks for that quantity (its unit pair is named, or another sentence asks for a field / default / toggle in its unit): "I'm 28 years old" in a protein-calculator request pins nothing. A range is a choice only when a choice word governs it ("split (3-5 meals)", "pick 2 to 4 laps", "3-5 meal options"); a "button" or "toggle" elsewhere no longer makes "5-10 questions" a pinned order.
+- *Numbers in `contains`.* An all-zero fraction may follow either side ("$92" matches "$92.00", "92.50" matches "92.5"); any other fraction still may not.
+- *Small-model shapes.* `parse_probe` also reads one step given as an object, the list given as a JSON string, a numeric `"step"` next to the `"type"` op, and drops wait / sleep / pause steps (the harness already settles and polls).
+- *Prompt.* The verifier's line for Nic's values says a unit toggle may show them converted (the build stages keep "never convert"), on-load checks expect first, and the cap it states is the code's.
+- *Play Place hub builds.* A hub build with a probe gap after the retry loops to the Coder like an unmet criterion and fails into the Repair Queue at the limit, instead of reaching review_ready, which the hub smoke-tests and marks mergeable without reading its blockers (`last_eval.verify.gaps`).
+
+## AD-13: Honest staging (numbers as text, stuck pages, one gate repair, verdicts that say what is still broken)
+
+**Why.** Live run 3 (qwen3.5-9b, commit 225247b, the protein calculator: "I'm 165 lbs … default 165 lb, with lb/kg toggle … grams-per-pound ranges … a per-meal split (3-5 meals) … a running tally") reached review_ready with a page that never rendered on startup ("Loading..." in `#targetDisplay`, "0g" per meal until a control changed) and an add-food form missing its `#proteinGrams` input, so adding food threw. The gate caught both, but only on the last pass, so they were handed on as known blockers, and the verifier's voice line still said "Build passes all functional criteria". The 9B also wrote `approx` as text ("132 - 165 g", "26 g"), and 4 of 5 probes were rejected. A critic review of AD-12 (HEAD 3722b28) found nine more gaps; each is closed below.
+
+**Numbers written as text** (`quality::parse_probe`, `numbers_in`).
+
+- An `approx`, `equals` or `contains` string with numbers in it is read as numbers. One number becomes `approx` that number (the given `tol`, else 1 % of it and at least 0.5 for `approx`, or two decimals for `equals`).
+- Several numbers ("132 - 165 g") become an all-of check, `all: [132, 165]`: it passes only when every listed number appears in the element. The check is number-aware, so "132-165g" on the page passes.
+- A dash after a digit or a letter is a range dash, not a minus sign. A single number in `contains` keeps its whole-number token match with its unit ("40 g", "$39.33"), and plain text is still a substring.
+- A stored all-of step validates again when it is carried to the next verify.
+
+**Stuck placeholders** (the runtime smoke, `SMOKE_JS`; `quality::stuck_line`).
+
+- After load and 800 ms of virtual time, and before any interaction, the smoke records output-like elements that still show a placeholder. An element counts as output-like when it is an `<output>`, or when its id or class names a display, result, total, target, output, summary, amount, readout, answer or tally. Form controls never count.
+- A placeholder is visible text of up to 60 chars that does one of these:
+  - ends in "Loading" or "Calculating";
+  - holds NaN, undefined, null, Infinity or [object Object] as a token;
+  - is only dashes or an ellipsis (an optional unit may follow). This one counts only when the page has a filled-in input or a select, so there is something to compute from.
+- Empty-state copy ("No foods yet"), hidden elements and an empty calculator's "--" are not flagged. Of nested matches, the innermost is kept.
+- The gate then fails with `the page still shows 'Loading...' in #targetDisplay after it loaded (render on startup)` (`checks.runtime.stuck`). It is skipped when the page crashes on load, because the crash is the cause.
+
+**One gate repair pass** (`h_evaluate`, `gate_repair_done`, `GATE_REPAIR_LEAD`).
+
+- When the last allowed pass of a usable page still fails gate items that one targeted pass can fix, the Coder gets exactly ONE more code pass, at the same iteration, carrying only those items. They are listed in `last_eval.fixable`: ids the script looks up that no element has, throws when the controls are used, stuck placeholders, external scripts or stylesheets, Nic's lost values and unguarded storage.
+- The repair pass starts with "LAST-PASS REPAIR: fix ONLY the build-check items below", and the brief's older fixes are left out. The gate then runs again. Only after that is the build handed on with blockers, or for a hub build failed into its Repair Queue.
+- It is recorded as a `loop_iteration` row to the Coder with `gate_repair: true`, and as `last_eval.gate_repair`.
+- There is never a second repair in one iteration. It is never given for a page that crashes on load or hangs: that page fails as before.
+
+**Honest verdicts** (`h_verify`, `review_voice`).
+
+- A build staged review_ready with gate items, a failing probe or a probe gap records `last_eval.works = false` and `last_eval.verdict = "needs_fixes"`. A build with only notes from the model records `pass_with_notes`, and a clean one records `pass`. The status stays review_ready (the frontend reads `known_blockers` and shows the ready turn in its warning tone). `.status.json` and the review_ready row carry `works` and `verdict` too.
+- Whenever blockers exist, the voice line is deterministic, e.g. "Built, but 2 things still don't work: …". It never says "passes" then.
+- A Play Place hub build now also counts criteria the verifier did not judge, and a missing per-criterion list, as unmet: at the limit it fails into the Repair Queue (`last_eval.verify.not_judged` / `absent`).
+- Nic's pinned checks still unproven after the verifier's retry, on a pass that is not the last, send the Coder another pass ("Nic's pinned check is still unproven in a browser …") instead of a "pass". On the last pass the build is staged with `works: false`.
+
+**Correct, don't reject** (`quality::pin`).
+
+- An Order probe always gets the pinned list; a probe that expected 3, 5, 4 already looked at the right buttons.
+- A Convert probe whose one-number read follows the switch gets the pinned number in its place when it expected the starting value or a plausible wrong factor (within 25 %). Example: "click kg, expect 165" runs as "click kg, expect 74.84".
+- Both record `criteria[].probe_note: "pinned value substituted: …"`.
+- These are still rejected: a round trip, a read that expects a range (another element), a Default read of another number, and a read of the whole page.
+
+**A switch must change something** (`quality::shows_change`, `round_trip`).
+
+- A criterion that mentions a toggle, switch, conversion or unit (`Need::toggle`) needs a probe with at least one read after an action that does both of these:
+  - it does not follow a round trip: one control clicked an even number of times, or a switch to a unit and back (by the unit words in the selectors and values, against Nic's home unit when it is known);
+  - it does not expect only the value the probe itself typed into that element, or the element's value on load (Nic's pinned default, on the element its default probe reads).
+- A reversible probe (switch, read the converted value, switch back, read the start) passes on its first read.
+
+**Nic's unit on load** (`CheckKind::Unit`, `expect_unit`).
+
+- A default stated in one unit of a named pair adds a pinned on-load check: the unit control has that unit selected, not the other one. It comes after the order checks, so the 4-check cap cuts it first.
+- The verifier's first read on the unit control becomes `expect_unit` with unit keys only. Stored steps are validated against the unit table, and the harness gets the spellings from Rust, with non-ASCII escaped.
+- The harness looks for the selected unit in this order:
+  - a select's selected option;
+  - the checked radio, or a checked checkbox;
+  - an unchecked checkbox labelled with the other unit (it means this unit);
+  - elements marked active, selected or on, or with aria-pressed, aria-checked, aria-selected or aria-current. It searches the matched elements first, then inside the first match, then that element's siblings of the same tag.
+- A label that names both units decides nothing. A control that shows no selected unit is a broken probe (`nounit`), so it is a gap, never a failure.
+
+**Intent recall** (`quality::stated_default`, `range_checks`).
+
+- These now pin Nic's values:
+  - "I weigh 165 lbs";
+  - "my weight (165 pounds)" and "my weight is about …";
+  - a back-reference right after the value with no other number between: "use that as the default", "that's the default";
+  - "pounds/kilograms";
+  - "3 to 5 meals per day" / "a day";
+  - "split it across 3-5 meals" ("it", "across", "over", "among" and similar words may sit between the choice word and the range).
+- Ages, kids' ages, "3-5 business days", price ranges, dates and times of day still pin nothing.
+
+**Evidence and weak reads** (`quality::judge`, `ProbeResult::specific` / `value_specific`, `weak_sel`).
+
+- A passing probe that read an element of its own proves a behavioural criterion even when the quoted code is stale or paraphrased. The row records `evidence_found: false` with an `evidence_note`, and the Coder is not looped.
+- A read of `body`, `html`, `main`, `:root` or `*` (static), or of an element with more than 200 chars of text, does not prove a value criterion or a pinned number. The harness reports such reads as `w`. The rules reject the static case up front with a reason, and the runtime case becomes a gap the verifier is asked to fix.
+
+**Nothing dropped silently.**
+
+- Probe gaps are sorted with Nic's pinned checks first: in the retry feedback, the verifier's blockers and `known_blockers`.
+- The retry feedback keeps whole lines, then "… and N more" (`fit_lines`).
+- Gap and not-judged lines are no longer capped at 8. `known_blockers` keeps 16, and past that its last line says "… and N more (see the verify record)" (`last_eval.blockers_dropped`).
+- Probes carried from an earlier failure run BEFORE the verifier's new ones, so the 120 s budget never skips a bug that was already caught.
+
+**AD-13 review fixes.** Twenty review findings on the commit above are fixed:
+
+- **The repair never makes it worse.**
+  - Before the repair pass, `h_evaluate` keeps the page as `.iterations/<n>-pre-repair.html`, with its gate result in `last_eval.gate_repair_pre`.
+  - If the repaired page crashes on load, hangs, or misses more items than before, the old page is put back and staged with its own gate items as blockers (`last_eval.restored`).
+  - If the repair Coder fails for good (no HTML, a timeout), the gate runs again on the old page instead of failing the build (`gate_repair_fallback`). This applies to non-hub builds only.
+- **The one-repair bound uses state that cannot be dropped.**
+  - `gate_repair_done` reads `last_eval.gate_repair` ("pending" / true) for this iteration first.
+  - The repair row is a milestone, which a full handoff log always writes.
+  - Rows count only after the latest `retry`. `retry_task` clears the stored repair state, so a retried build gets its own repair.
+- **Verdicts.**
+  - `works` is false when the verifier did not judge a criterion or gave no list.
+  - A pinned check the verifier left out or left undecided loops the Coder like a pinned gap (`verify.pinned_unjudged`).
+  - A unit control the harness cannot read (`ProbeGap::unreadable`) is a known note (`verify.note_gaps`): no Coder loop, no hub failure, and the build can still "work".
+- **The true blocker count.** `last_eval.known_blockers_total` (also in `.status.json`) holds the true count. The app's ready line uses it, not the length of a list that ends in "… and N more".
+- **Recall.**
+  - A back-reference must sit in the value's own clause, or be the whole next clause. It must end at "default" (or "default value / weight …" or a preposition). "This is the default page", "make it the default tab" and "It's the default tool" pin nothing.
+  - "my <adjective> 10 lbs" is not a personal stat. Only "my (current) weight …" and "my … is …" are.
+  - "N-M <noun> a/per day" is a choice only when a choice word is in its sentence, or for meals in a request that asks for a per-meal split. "I drink 6-8 glasses a day" pins nothing.
+  - When Nic names the other unit as the default ("default unit kg", "default to kg", "kg / metric by default", "start in kg"), no Unit check is pinned.
+- **Pinning.**
+  - The Unit pin rewrites the step on the unit control: one naming a unit or "unit", else one that does not read a number. It never rewrites the weight read before it.
+  - A Convert value is substituted only on the weight element: one named for weight, mass or a unit, an input read not named as an output, or the element the Default probe read. A read of the target (its upper bound is 165 g with Nic's numbers) stays a gap.
+- **Round trips.**
+  - Only a toggle-like control (one that names a toggle, switch, unit, mode or a unit of a pair) clicked an even number of times counts.
+  - A `set` between the two switches makes it a real conversion. A "+" stepper or "Add" clicked twice is fine.
+- **Stuck placeholders.**
+  - A dash or ellipsis counts only when every visible text or number input is filled. A select alone, or an empty bill or grams field, leaves "--" as an empty state.
+  - "Loading" / "Calculating" counts only as the whole text, with an optional "Label:" before it. "Carb loading" is a value.
+  - The page is sampled again 1.5 s later, and only a placeholder still showing then counts.
+- **Reading the unit control (`expect_unit`).** These designs are read:
+  - any class token such as "unit-active" or "btn-selected" ("inactive" never counts);
+  - a checkbox slider with the unit texts beside it (unchecked means the one before it);
+  - a lone toggle button showing its unit as text ("Switch to kg" means lb);
+  - colour-only buttons (the one coloured button among grey ones);
+  - Imperial / US / Metric / SI labels.
+
+  A control naming no unit of the pair is `nounit`, never a failure.
+
+**AD-13 critic fixes (round 2).** The run-3 critic harness (real Edge, the run-3 intent) found a correct page staged as broken and a broken one hidden behind copied numbers:
+
+- **Reads before the action are fine (P1-1).** An acting criterion's probe needs an action with at least one expectation after it ("expect 165, click the toggle, expect the result" is accepted); the value and must-show-a-change rules are held on the reads after the first action (`own_rules`).
+- **On-load criteria are decided before any action (P2-4).** Only the reads before the first action run (the rest are dropped, noted on the criterion): an action can trigger the first render and hide a page that never renders on load.
+- **Values need numbers (P1-3).** A value criterion needs a numeric read (approx, all-of, or a number-aware contains); a text contains such as "Loading" proves nothing. A probe that expects a placeholder (Loading, Calculating, NaN, undefined, null, --, …, [object Object]) is rejected.
+- **Something must change (P1-3).** An acting value criterion's probe is marked `Probe::change`: the harness records each later read's text before the first action, and a probe whose every passing read still shows it fails as "nothing changed after …", a page failure. A zero expected after a typed non-zero number fails on its own when it was already there (`zero_reads`). A read that keeps its value next to one that changes is fine (the protein target after a unit switch).
+- **The Coder loops only for what the page can cause (P1-2).** A pinned gap loops the Coder only when its probe ran and an element is missing (`ProbeGap::page`). No probe, a rejected or weak one, or a criterion left out is the verifier's: one retry, then a blocker that reads "couldn't be checked in a browser: …".
+- **Stale quotes are the verifier's (P1-4).** A passing probe that reads an element of its own proves any criterion over a stale quote. A criterion that needs no probe, quoted with code that is not in the page, gets one verifier retry ("copy it verbatim"), then a note (`Judged::stale`, "couldn't confirm in the code"). It never loops the Coder and never blocks `works`.
+- **Broken values anywhere (P2-3).** The smoke flags NaN, undefined and [object Object] in any visible leaf element, not only output-like names ("NaN%" in a progress label). The gate line names it as a broken value.
+- **Wording (P3, P2-1).** The voice tells "N things still don't work" (gate items, failed or unmet criteria) from "N things couldn't be checked" (gaps, not judged). It never ends in "….". A loop the checks forced never carries the verifier's "passes" line. The app's ready line reads `last_eval.works` / `verdict`: "staged but needs fixes", "ready for review, with N notes", or the old neutral line when neither is there.
+
+**AD-13 critic fixes (round 3).** Seven review findings on round 2, each checked in real Edge with the critic harness:
+
+- **The voice says it once.** "Built, but 1 thing couldn't be checked: …" drops the item's own "couldn't be checked in a browser: " / "couldn't confirm in the code: " prefix (`review_voice`); the blocker lines keep it.
+- **Static copy is not a broken value.** The any-leaf NaN / undefined scan skips a leaf the page's own markup writes with that text (`static_broken`, keyed "#id|text" or "tag|text") unless a script replaced its text (a mutation observer in the smoke). An output-like container ("#answers") is read without such leaves. A typeof quiz's "undefined" button and a cheat-sheet "NaN" cell pass; "NaN%" a script writes still fails.
+- **A placeholder the criterion asks for may be expected.** "Show a dash (—) until a bill is typed" names a dash (`Need::shows`, `named_placeholders`: the words dash / hyphen / ellipsis / loading, or the mark quoted or in brackets), so its probe may expect "—". NaN, undefined, null and [object Object] are never expected; a dash used as punctuation names nothing.
+- **Nothing changed needs an action that changed something.** The "nothing changed" rule applies only when an action really changed a control (`S.ac`: a typed value that differs, another option, a checkbox / radio that flipped, any other click). Setting the radio already checked (Nic's default 4 meals) and expecting its value is no longer a page failure.
+- **A stale quote is unchecked, not a note.** A criterion that needs no probe and is still claimed only with code that is not in the page after the retry counts against `works` (`decision.stale`), is listed as couldn't be checked, and counts as a gap for a hub build. A page without a viewport tag no longer stages as working because the 9B quoted the standard one.
+- **A control's default never decides an on-load value.** For an on-load value criterion, reads of a control (a selector the probe acts on, or one named like an input / select) do not count as the computed number. When they are the only reads before the first action, the whole probe runs and its computed read after the action decides; with no such read it is rejected. "132 - 132 g" for the default 165 lb user fails again.
+- **A zero is judged with the rest of the probe.** A zero expected after a typed number fails only when no read in the probe changed (`zero_reads`, checked at the end of the probe). A zero after a reset, clear, remove, none or 0 option is asked for (`asked_zero_reads`, `n0`) and counts neither way. "Set bill 80, no tip, expect tip 0, total 80" and "add 30 g, expect 30, reset, expect 0" pass.

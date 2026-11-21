@@ -37,7 +37,8 @@ export function VaultSection() {
     setBusy(true);
     setErr(null);
     try {
-      setRes(await cc.search(q, [...filters], 20));
+      // Nic's own search: an unfiltered search still covers receipts, invoices and cheques.
+      setRes(await cc.search(q, [...filters], 20, { includeFinance: true }));
     } catch (e) {
       setErr(String(e));
     } finally {

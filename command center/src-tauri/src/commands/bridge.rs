@@ -150,8 +150,12 @@ impl BridgeState {
     }
 
     /// Append one training record. Best-effort: logging must never break an action.
-    pub fn log(&self, mut record: serde_json::Value) {
+    /// Every string goes through the secret scrub (key shapes, assignments, random runs):
+    /// `training_logs/` is read by memory harvest and uploaded by Drive sync. Callers that
+    /// hold the keychain values scrub those first (`agents::log_turn`).
+    pub fn log(&self, record: serde_json::Value) {
         let Some(dir) = self.log_dir() else { return };
+        let mut record = super::devqueue::scrub_value(&record, &[]);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         if let Some(obj) = record.as_object_mut() {
             obj.insert("ts".into(), serde_json::json!(now.as_millis() as u64));
@@ -238,5 +242,17 @@ mod tests {
         assert!(b.check("t", &[Scope::Execute], true, Actor::User, false, none.clone()).is_ok());
         b.policy.write().unwrap().network = Tier::Deny;
         assert_eq!(b.check("t", &[Scope::Network], true, Actor::Scheduler, true, none).unwrap_err(), "PERMISSION_DENIED:network");
+    }
+
+    #[test]
+    fn every_logged_record_is_secret_scrubbed() {
+        let dir = std::env::temp_dir().join(format!("bridge-log-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let b = BridgeState::default();
+        *b.log_dir.write().unwrap() = Some(dir.clone());
+        b.log(serde_json::json!({ "type": "os-tool", "detail": { "args": "api_key=abcdef1234567890 for C:/Users/nicho/notes/a.md" }, "token": "Bearer abcdefghijklmnopqrstu" }));
+        let text: String = std::fs::read_dir(&dir).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!text.contains("abcdef1234567890") && !text.contains("abcdefghijklmnopqrstu"), "{text}");
+        assert!(text.contains("C:/Users/nicho/notes/a.md") && text.contains("\"schema\":\"jarvis.synapse.v1\""), "{text}");
     }
 }

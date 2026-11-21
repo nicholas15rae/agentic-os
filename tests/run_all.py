@@ -21,6 +21,7 @@ import test_v40  # noqa: E402
 import test_command_center_extract_json  # noqa: E402
 import test_spotify_callback  # noqa: E402
 import test_os_inbox  # noqa: E402
+import test_vault_finance_scope  # noqa: E402
 import test_command_center_llm  # noqa: E402
 import test_task_mirror  # noqa: E402
 import test_memory_scrolls  # noqa: E402
@@ -40,7 +41,7 @@ def main() -> int:
     suite = unittest.TestSuite()
     for module in (test_core, test_security, test_kanban_journal,
                    test_memory_scheduler, test_v40, test_command_center_extract_json,
-                   test_spotify_callback, test_os_inbox, test_command_center_llm,
+                   test_spotify_callback, test_os_inbox, test_vault_finance_scope, test_command_center_llm,
                    test_task_mirror, test_memory_scrolls, test_memory_scrolls_offload,
                    test_memory_scrolls_privacy, test_memory_scrolls_hub, test_memory_scrolls_guards,
                    test_memory_scrolls_curated, test_memory_scrolls_fidelity, test_memory_scrolls_v6,

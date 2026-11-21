@@ -25,6 +25,10 @@ export type Collection =
   | "documents"
   | "widgets";
 
+/** Finance records: Nic's screens only, never an agent's context. Mirrors FINANCE_COLLECTIONS in command_center_api.py. */
+export const FINANCE_COLLECTIONS: readonly Collection[] = ["receipts", "invoices", "checks", "income"];
+export const isFinanceCollection = (c: string): boolean => (FINANCE_COLLECTIONS as readonly string[]).includes(c);
+
 export interface Meta {
   id: string;
   _created: number;
@@ -57,8 +61,17 @@ export const cc = {
     gateway<OcrResult>("/api/cc/ocr", { method: "POST", ...json({ fileId, kind }), timeoutMs: 180_000 }),
   organize: (id: string) => gateway<Item<unknown>>("/api/cc/brainstorm/organize", { method: "POST", ...json({ id }), timeoutMs: 180_000 }),
   llmJson: <T>(system: string, prompt: string) => gateway<T>("/api/cc/llm/json", { method: "POST", ...json({ system, prompt }), timeoutMs: 120_000 }),
-  search: (q: string, collections: Collection[] = [], k = 8) =>
-    gateway<VaultResults>(`/api/cc/vault/search?q=${encodeURIComponent(q)}&collections=${collections.join(",")}&k=${k}`),
+  /** Nic's own vault search. With no collections, finance is included only when `includeFinance` is set. */
+  search: (q: string, collections: Collection[] = [], k = 8, opts: { includeFinance?: boolean } = {}) =>
+    gateway<VaultResults>(
+      `/api/cc/vault/search?q=${encodeURIComponent(q)}&collections=${collections.join(",")}&k=${k}${opts.includeFinance ? "&include_finance=true" : ""}`,
+    ),
+  /** Vault matches for an agent's context: never finance records (receipts, invoices, cheques, income). */
+  agentSearch: async (q: string, k = 5) => {
+    const res = await cc.search(q, [], k);
+    // The gateway already leaves finance out of an unscoped search; filter again so an older gateway can't leak it.
+    return { ...res, results: res.results.filter((r) => !isFinanceCollection(r.collection)) };
+  },
   reindex: () => gateway<{ queued: number }>("/api/cc/vault/reindex", { method: "POST" }),
   backupNow: () => gateway<BackupInfo>("/api/cc/backup", { method: "POST", timeoutMs: 120_000 }),
   backups: () => gateway<{ dir: string; last: BackupInfo | null; backups: { name: string; size: number; at: number }[] }>("/api/cc/backups"),

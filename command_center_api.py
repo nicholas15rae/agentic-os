@@ -100,6 +100,9 @@ COLLECTIONS = {
     "cues",  # Voice & Triggers widgets (Gabagool Mode, startup welcome, timed cues)
 }
 
+# Finance records: never part of an unscoped vault search (agent context reads those).
+FINANCE_COLLECTIONS = frozenset({"receipts", "invoices", "checks", "income"})
+
 # Which fields get embedded into the vault, per collection.
 VAULT_FIELDS: dict[str, list[str]] = {
     "notes": ["title", "rawText", "organized"],
@@ -551,11 +554,17 @@ def _cosine(a: array.array, b: array.array) -> float:
     return dot / (na * nb)
 
 
-def vault_search(q: str, collections: Optional[list[str]] = None, k: int = 8) -> dict:
+def vault_search(q: str, collections: Optional[list[str]] = None, k: int = 8, include_finance: bool = False) -> dict:
+    """Search the vault. With no `collections`, finance records are left out unless
+    `include_finance` is set: only Nic's own screens ask for them (the Vault page's
+    unfiltered search, the Finance tables naming their collection). Agent context
+    (the Librarian's vault matches) never gets receipts, invoices, cheques or income."""
     with db() as c:
         rows = c.execute("SELECT item_id, collection, text, vector FROM vault").fetchall()
     if collections:
         rows = [r for r in rows if r["collection"] in collections]
+    elif not include_finance:
+        rows = [r for r in rows if r["collection"] not in FINANCE_COLLECTIONS]
     if not rows:
         return {"results": [], "mode": "empty"}
 
@@ -992,9 +1001,9 @@ def llm_json(req: JsonGenRequest):
 # ── vault endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/vault/search")
-def search(q: str = Query(..., min_length=1, max_length=500), collections: str = "", k: int = Query(8, ge=1, le=50)):
+def search(q: str = Query(..., min_length=1, max_length=500), collections: str = "", k: int = Query(8, ge=1, le=50), include_finance: bool = False):
     cols = [c for c in collections.split(",") if c in VAULT_FIELDS] or None
-    return vault_search(q, cols, k)
+    return vault_search(q, cols, k, include_finance)
 
 
 @router.post("/vault/reindex")

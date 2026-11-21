@@ -1333,7 +1333,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   }
 
   // Independent I/O — run concurrently instead of one after the other.
-  const [context0, librarianHits] = await Promise.all([liveContext(), role === "librarian" ? cc.search(plan.utterance, [], 5).catch(() => null) : Promise.resolve(null)]);
+  const [context0, librarianHits] = await Promise.all([liveContext(), role === "librarian" ? cc.agentSearch(plan.utterance, 5).catch(() => null) : Promise.resolve(null)]);
   let context = context0;
   if (librarianHits?.results.length) context += `\nLocal vault matches (cite them):\n${librarianHits.results.map((r, i) => `[${i + 1}] (${r.collection}) ${r.snippet.replace(/\s+/g, " ")}`).join("\n")}`;
   const finalFromFor = (agent: string) => (agent === "general" ? "os" : agent);

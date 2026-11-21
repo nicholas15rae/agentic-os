@@ -1402,7 +1402,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         };
         if let Some(p) = pre.pending_spotify {
             let res = spotify_turn(String::new(), Some(p.name.clone()), "spotify approval card", Some(p), steps);
-            log_turn(bridge, &role, &text, &res);
+            log_turn(bridge, &role, &text, &res, &known);
             return Ok(res);
         }
         if let Some(reply) = pre.verbatim {
@@ -1412,7 +1412,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                 let _ = app.emit("tony-token", json!({ "streamId": sid, "delta": reply }));
             }
             let res = spotify_turn(reply, tool_used.clone(), "spotify reply (verbatim)", None, steps);
-            log_turn(bridge, &role, &text, &res);
+            log_turn(bridge, &role, &text, &res, &known);
             return Ok(res);
         }
     }
@@ -1504,7 +1504,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             pending_spotify: None,
             answered_by: "agent".into(),
         };
-        log_turn(bridge, &role, &text, &res);
+        log_turn(bridge, &role, &text, &res, &known);
         return Ok(res);
     }
 
@@ -1578,7 +1578,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                             pending_spotify: None,
                             answered_by: "overseer".into(),
                         };
-                        log_turn(bridge, &role, &text, &out);
+                        log_turn(bridge, &role, &text, &out, &known);
                         return Ok(out);
                     }
                     // The overseer failed too: never drop an agent reply that DID arrive — fall
@@ -1607,14 +1607,14 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     pending_spotify: None,
                     answered_by: "agent".into(),
                 };
-                log_turn(bridge, &role, &text, &out);
+                log_turn(bridge, &role, &text, &out, &known);
                 return Ok(out);
             }
             // Nothing answered. What Tony DID send and hear (the delegate prompt, the agent's
             // error, tool results) still reaches the chat and the audit log.
             let known = super::devqueue::known_secrets(state, os);
             emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &known);
-            log_failed_turn(bridge, &role, &text, &steps, &e);
+            log_failed_turn(bridge, &role, &text, &steps, &e, &known);
             if !req.explicit {
                 let mut shown = steps.clone();
                 scrub_steps(&mut shown, &known);
@@ -1643,7 +1643,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         pending_spotify: None,
         answered_by: "os".into(),
     };
-    log_turn(bridge, &role, &text, &out);
+    log_turn(bridge, &role, &text, &out, &known);
     Ok(out)
 }
 
@@ -1682,16 +1682,56 @@ pub(crate) fn scrub_steps(steps: &mut [OsStep], known: &[String]) {
     }
 }
 
+/// Roles whose turns never reach `training_logs/` as text: the folder is read by memory harvest
+/// (fine-tune pairs) and uploaded by Drive sync. Finance phrases route to `ops` until a Finance
+/// agent exists.
+const PRIVATE_LOG_ROLES: [&str; 3] = ["booking", "ops", "finance"];
+
+/// Why a turn's text stays out of the training log, if it does: a private role, a comms-history
+/// recall (other people's messages), or a request about money / bookkeeping on any route. Pure.
+pub(crate) fn private_turn(role: &str, text: &str, delegated_to: Option<&str>) -> Option<&'static str> {
+    static FINANCE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let finance = FINANCE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)\b(?:receipts?|invoices?|invoic(?:e|ed|ing)|cheques?|hst|gst|income|salary|salaries|wages?|paycheck|paycheque|bank(?:ing)?|expenses?|bookkeeping|taxe?s|budget(?:s|ing)?|refunds?|reimburse\w*|owe[sd]?|debts?|loans?|mortgage|rent payment|credit card|debit card)\b|[$£€]\s?\d",
+        )
+        .unwrap()
+    });
+    match role {
+        "booking" => Some("booking"),
+        "ops" | "finance" => Some("finance"),
+        _ if delegated_to == Some("comms-history") => Some("comms"),
+        _ if finance.is_match(text) => Some("finance"),
+        _ => None,
+    }
+}
+
+/// The text fields of a turn record: scrubbed of known secrets, or replaced by a length marker
+/// for a private turn (which is also flagged so memory harvest never turns it into a pair).
+fn turn_text(private: Option<&str>, text: &str, known: &[String]) -> Value {
+    match private {
+        Some(kind) => json!(format!("[private {kind} turn: {} chars]", text.chars().count())),
+        None => json!(super::devqueue::scrub(text, known)),
+    }
+}
+
 /// The audit-log record of a turn that produced no answer (its steps still count).
-fn log_failed_turn(bridge: &BridgeState, role: &str, text: &str, steps: &[OsStep], err: &str) {
-    bridge.log(json!({
+fn log_failed_turn(bridge: &BridgeState, role: &str, text: &str, steps: &[OsStep], err: &str, known: &[String]) {
+    let private = private_turn(role, text, None);
+    let mut rec = json!({
         "type": "os-turn",
         "role": role,
-        "upstream": text,
-        "error": err.chars().take(300).collect::<String>(),
+        "upstream": turn_text(private, text, known),
+        "error": super::devqueue::scrub(&err.chars().take(300).collect::<String>(), known),
         "steps": steps.len(),
         "stepKinds": steps.iter().map(|s| format!("{}:{}→{}", s.kind, s.from, s.to)).collect::<Vec<_>>(),
-    }));
+    });
+    if let Some(kind) = private {
+        rec["private"] = json!(kind);
+        // The error can quote the request (or the agent's reply to it).
+        rec["error"] = json!("[private]");
+    }
+    bridge.log(rec);
 }
 
 /// The whole trimmed reply is itself a JSON object / fenced JSON / tool-call
@@ -1720,18 +1760,28 @@ async fn ensure_prose(state: &DispatchState, os: &OsState, msgs: &[ChatMessage],
     }
 }
 
-fn log_turn(bridge: &BridgeState, role: &str, text: &str, r: &OsTurnResult) {
-    bridge.log(json!({
+fn log_turn(bridge: &BridgeState, role: &str, text: &str, r: &OsTurnResult, known: &[String]) {
+    bridge.log(turn_record(role, text, r, known));
+}
+
+/// The `os-turn` training-log record. Pure (tests read it).
+fn turn_record(role: &str, text: &str, r: &OsTurnResult, known: &[String]) -> Value {
+    let private = private_turn(role, text, r.delegated_to.as_deref());
+    let mut rec = json!({
         "type": "os-turn",
         "role": role,
-        "upstream": text,
-        "downstream": r.answer,
+        "upstream": turn_text(private, text, known),
+        "downstream": turn_text(private, &r.answer, known),
         "provider": r.provider_id,
         "delegatedTo": r.delegated_to,
         "tool": r.tool,
         "steps": r.steps.len(),
         "latencyMs": r.latency_ms as u64,
-    }));
+    });
+    if let Some(kind) = private {
+        rec["private"] = json!(kind);
+    }
+    rec
 }
 
 // ── Overseer / external engines ─────────────────────────────────────────────
@@ -2022,6 +2072,59 @@ async fn gemini_api(state: &DispatchState, cfg: &OsConfig, msgs: &[ChatMessage],
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turn(answer: &str, delegated_to: Option<&str>) -> OsTurnResult {
+        OsTurnResult {
+            answer: answer.into(),
+            steps: vec![],
+            provider_id: "lmstudio".into(),
+            delegated_to: delegated_to.map(String::from),
+            tool: None,
+            latency_ms: 12,
+            reason: String::new(),
+            redacted: false,
+            comms_thread: None,
+            routed_role: "general".into(),
+            route_reason: String::new(),
+            route_kind: "Default".into(),
+            pending_spotify: None,
+            answered_by: "os".into(),
+        }
+    }
+
+    #[test]
+    fn private_turns_never_reach_the_training_log_as_text() {
+        // Booking and finance (ops) routes, a comms recall, and money talk on Tony's own route.
+        for (role, text, deleg, kind) in [
+            ("booking", "book the Thursday callback with Sam", None, "booking"),
+            ("ops", "log the deck job hours", None, "finance"),
+            ("finance", "categorise last week", None, "finance"),
+            ("general", "what did Maria say about the shoot", Some("comms-history"), "comms"),
+            ("general", "how much HST did I pay on the Home Depot receipt", None, "finance"),
+            ("general", "add $42.10 to the gear budget", None, "finance"),
+        ] {
+            let rec = turn_record(role, text, &turn("The receipt total was $118.40 with HST 13.62", deleg), &[]);
+            assert_eq!(rec["private"], kind, "{role}: {text}");
+            let line = rec.to_string();
+            assert!(!line.contains(text) && !line.contains("118.40"), "text leaked: {line}");
+            assert_eq!(rec["upstream"], format!("[private {kind} turn: {} chars]", text.chars().count()));
+            assert_eq!(rec["latencyMs"], 12);
+        }
+    }
+
+    #[test]
+    fn ordinary_turns_keep_their_text_scrubbed_of_secrets() {
+        let known = vec!["hunter2-secret-value".to_string()];
+        let rec = turn_record("general", "what's the weather in Toronto", &turn("Sunny; key hunter2-secret-value and api_key=abcdef1234567890", None), &known);
+        assert!(rec["private"].is_null());
+        assert_eq!(rec["upstream"], "what's the weather in Toronto");
+        let down = rec["downstream"].as_str().unwrap();
+        assert!(!down.contains("hunter2-secret-value") && !down.contains("abcdef1234567890") && down.starts_with("Sunny"), "{down}");
+        // Everyday words that are not money talk stay logged.
+        for t in ["check the weather", "play some jazz", "build me a protein calculator"] {
+            assert_eq!(private_turn("general", t, None), None, "{t}");
+        }
+    }
 
     #[test]
     fn recall_intent() {

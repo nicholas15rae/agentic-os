@@ -43,11 +43,12 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
   }
 
   if (!plan.mutating) {
-    // Librarian answers from your own vault (receipts, notes, scripts…) when it can.
+    // Librarian answers from your own vault (notes, scripts, jobs…) when it can. Never finance records:
+    // the Librarian has web access, so receipts / invoices / cheques / income stay out of its context.
     let utterance = plan.utterance;
     let vaultNote = "";
     if (plan.role === "librarian") {
-      const hits = await cc.search(plan.utterance, [], 5).catch(() => null);
+      const hits = await cc.agentSearch(plan.utterance, 5).catch(() => null);
       if (hits?.results.length) {
         utterance = `${plan.utterance}\n\nRelevant entries from my local vault (cite them; say if they don't answer it):\n${hits.results
           .map((r, i) => `[${i + 1}] (${r.collection}) ${r.snippet.replace(/\s+/g, " ")}`)

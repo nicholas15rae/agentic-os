@@ -282,7 +282,10 @@ fn pull_training_logs(repo: &Path, month: &str, out: &mut Vec<Record>) -> usize 
         for line in std::fs::read_to_string(e.path()).unwrap_or_default().lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
             let at = v["ts"].as_i64().map(|t| t / 1000).unwrap_or(0);
-            if v["type"] == "os-turn" {
+            if v["type"] == "os-turn" && !v["private"].is_null() {
+                // A private (booking / finance / comms) turn kept only its length: never a pair.
+                continue;
+            } else if v["type"] == "os-turn" {
                 let agent = v["role"].as_str().unwrap_or("general").to_string();
                 out.push(Record { source: format!("training_logs/{name}"), agent: agent.clone(), role: "user".into(), content: v["upstream"].as_str().unwrap_or("").into(), at });
                 out.push(Record { source: format!("training_logs/{name}"), agent, role: "assistant".into(), content: v["downstream"].as_str().unwrap_or("").into(), at });

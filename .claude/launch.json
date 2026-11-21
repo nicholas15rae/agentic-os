@@ -4,8 +4,27 @@
     {
       "name": "command-center-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "command center", "run", "dev"],
+      "runtimeArgs": [
+        "--prefix",
+        "command center",
+        "run",
+        "dev"
+      ],
       "port": 1420
+    },
+    {
+      "name": "staging-static",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8766",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "D:/Art Apps/agentic os/staging"
+      ],
+      "port": 8766
     }
   ]
 }

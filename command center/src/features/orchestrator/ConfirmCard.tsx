@@ -44,7 +44,7 @@ export function ConfirmCard() {
   const offer = plan.offer === "delegate";
 
   return createPortal(
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px] animate-[fade-in_180ms_ease-out]">
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px] animate-[fade-in_180ms_ease-out]">
       <style>{`@keyframes fade-in{from{opacity:0}to{opacity:1}}@keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}@keyframes drain{from{transform:scaleX(1)}to{transform:scaleX(0)}}`}</style>
       <div
         ref={cardRef}

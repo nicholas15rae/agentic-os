@@ -569,6 +569,44 @@ fn gate_repair_fallback(e: &Envelope, why: &str) -> Option<Outcome> {
     Some(Outcome::Next { stage: "evaluate", patch: Patch::default(), row, extra: vec![] })
 }
 
+/// The hex sha256 of a page: tells the recorded usable pass's page apart from any later one (W2).
+fn page_sha(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A gate result whose page is whole (structure, size, no placeholders) and does not hang, but
+/// throws on load: the one last-pass gate repair may still save it (W2 a). Pure.
+pub fn throws_on_load_only(ev: &Value) -> bool {
+    let (c, rt) = (&ev["checks"], &ev["checks"]["runtime"]);
+    c["structure"] == true && c["size"].as_u64().unwrap_or(0) > 500 && c["placeholders"] == false && rt["failed"] != true && rt["loadErrors"].as_u64().unwrap_or(0) > 0
+}
+
+/// The gate's "throws on load" lines (the repair pass's first items, W2 a). Pure.
+pub fn load_error_lines(ev: &Value) -> Vec<String> {
+    str_list(&ev["checks"]["runtime"]["errors"], 3, 240).into_iter().filter(|l| l.contains("throws on load")).collect()
+}
+
+/// Why a page is unusable, for "the last pass broke the page (...)": its first throw on load, a
+/// hang, or no complete page (W2 b). Pure.
+pub fn broken_why(ev: &Value) -> String {
+    if let Some(l) = load_error_lines(ev).first() {
+        return clip(&one_line(l.split_once("throws on load: ").map_or(l.as_str(), |(_, r)| r)), 120);
+    }
+    if ev["checks"]["runtime"]["failed"] == true {
+        return "it hung or navigated away when it was loaded".into();
+    }
+    if ev["checks"]["structure"] != true || ev["checks"]["size"].as_u64().unwrap_or(0) <= 500 {
+        return "no complete page".into();
+    }
+    "it was left with placeholders".into()
+}
+
+/// The first known blocker of a build staged from an earlier pass (W2 b). Pure.
+pub fn earlier_pass_line(n: u32, why: &str) -> String {
+    format!("the last pass broke the page ({why}), so pass {n} is staged instead")
+}
+
 /// Hosts the page loads code or styles from (`<script src>` / `<link href>` over http(s) or
 /// `//`). Enforced by `evaluate_build`: PROTOTYPE_RULES forbid them (the page must work offline).
 pub fn external_deps(html: &str) -> Vec<String> {
@@ -970,7 +1008,7 @@ impl StageErr {
 
 /// How an unproven item's blocker line starts (`gap_lines`, `quality::stale_line`): the spoken
 /// line drops it after its own "couldn't be checked" head (`review_voice`).
-const UNCHECKED_PREFIXES: [&str; 2] = ["couldn't be checked in a browser: ", "couldn't confirm in the code: "];
+const UNCHECKED_PREFIXES: [&str; 3] = ["couldn't be checked in a browser: ", "couldn't confirm in the code: ", "couldn't be checked: "];
 
 /// At most this many known blockers are listed; past it the last line counts the rest.
 pub const BLOCKERS_MAX: usize = 16;
@@ -1309,7 +1347,7 @@ impl<'a> Worker<'a> {
             Err(err) if err.backend_down && self.wait_for_backend(&cur, agent, &err.msg, &s.known) => {}
             Err(err) => {
                 self.stats.backend_down_since.lock().unwrap().remove(&cur.task_id);
-                match gate_repair_fallback(&cur, &err.msg).filter(|_| stage == "code") {
+                match gate_repair_fallback(&cur, &err.msg).filter(|_| stage == "code").or_else(|| if stage == "code" { self.no_page_fallback(&cur, &s, &err.msg) } else { None }) {
                     Some(o) => self.commit(stage, &cur, o, &s).await,
                     None => self.fail_task(&cur, agent, &err.msg, &s.known).await,
                 }
@@ -1806,7 +1844,9 @@ impl<'a> Worker<'a> {
         let mut restored_arts: Option<Value> = None;
         let pre = &e.last_eval["gate_repair_pre"];
         let (mut missing, mut usable) = (missing, usable);
-        if repaired && !complete && !hub && pre["iteration"].as_u64() == Some(u64::from(e.iteration_count)) {
+        // A page from before the repair that was itself unusable (a throw on load, W2 a) is never
+        // put back: the repaired page is no worse, and an earlier usable pass is staged instead.
+        if repaired && !complete && !hub && pre["iteration"].as_u64() == Some(u64::from(e.iteration_count)) && pre["usable"] != false {
             let pre_missing = str_list(&pre["missing"], 10, 240);
             if !usable || missing.len() > pre_missing.len() {
                 let old = staging::resolve(&s.staging_root, &slug, &pre_repair_rel(e.iteration_count)).ok().and_then(|p| std::fs::read(p).ok());
@@ -1835,18 +1875,39 @@ impl<'a> Worker<'a> {
             }
         }
         let fixable = str_list(&ev["fixable"], 10, 240);
-        if !complete && at_limit && usable && !repaired && !fixable.is_empty() {
+        // W2 (live run 5b): the latest pass of this task whose page was usable, with its page's hash
+        // (`restore_last_usable` puts it back if the last pass breaks the page). Carried through
+        // every evaluate; `h_verify` adds what was still open on it when it loops.
+        if usable {
+            match staging::resolve(&s.staging_root, &slug, "index.html").ok().and_then(|p| std::fs::read(p).ok()) {
+                Some(b) => ev["last_usable"] = json!({ "iteration": e.iteration_count, "sha256": page_sha(&b), "gate": missing }),
+                None => ev["last_usable"] = e.last_eval["last_usable"].clone(),
+            }
+        } else if e.last_eval["last_usable"].is_object() {
+            ev["last_usable"] = e.last_eval["last_usable"].clone();
+        }
+        // W2 (a): a whole page that throws on load (live run 5b: "Unexpected token 'var'") gets the
+        // one last-pass repair too, its load errors first; "never worse" still holds (a usable
+        // page from before is put back; an unusable one is not, see above).
+        let throws = !usable && throws_on_load_only(&ev);
+        let mut repair_items: Vec<String> = if throws { load_error_lines(&ev) } else { vec![] };
+        for f in &fixable {
+            if !repair_items.contains(f) {
+                repair_items.push(f.clone());
+            }
+        }
+        if !complete && at_limit && (usable || throws) && !repaired && !repair_items.is_empty() {
             ev["gate_repair"] = json!("pending");
             // Keep the page and its gate result from before the repair (restored if it gets worse).
             if let Some(h) = &html {
                 match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, &slug, &pre_repair_rel(e.iteration_count), h.as_bytes()) {
-                    Ok(_) => ev["gate_repair_pre"] = json!({ "iteration": e.iteration_count, "missing": missing, "fixable": fixable, "checks": ev["checks"].clone() }),
+                    Ok(_) => ev["gate_repair_pre"] = json!({ "iteration": e.iteration_count, "missing": missing, "fixable": fixable, "checks": ev["checks"].clone(), "usable": usable }),
                     Err(err) => eprintln!("[worker] keep the page from before the repair: {err}"),
                 }
             }
             let mut fixes = vec![GATE_REPAIR_LEAD.to_string()];
-            fixes.extend(fixable.iter().cloned());
-            let n = fixable.len();
+            fixes.extend(repair_items.iter().cloned());
+            let n = repair_items.len();
             // A milestone: never dropped by a full handoff log (`pending_fixes` reads it).
             let row = HandoffRow::new("system", "coder", "loop_iteration", "milestone", format!("Last pass: one repair pass for the Coder ({n} build-check item{}), then the checks again", if n == 1 { "" } else { "s" }))
                 .payload(json!({ "fix_instructions": fixes, "from": "evaluate", "gate_repair": true, "missing": missing }));
@@ -1854,6 +1915,25 @@ impl<'a> Worker<'a> {
         }
         if !complete && at_limit && usable && !hub {
             ev["gate_blockers"] = json!(missing);
+        }
+        // W2 (b): the last pass is still unusable (throws on load, hangs, no page) but an earlier pass
+        // of this task was usable: that pass's page goes back in staging. Staged for review as not
+        // working, with its open items; a hub build still fails into its Repair Queue as designed,
+        // only with the usable page left in place instead of the broken one (the hub previews and
+        // repairs from staging/<slug>/index.html). No usable pass: today's failure.
+        let mut restored_pass: Option<(u32, String)> = None;
+        if !complete && at_limit && !usable {
+            if let Some((n, arts)) = self.restore_last_usable(e, s, &slug) {
+                let why = broken_why(&ev);
+                if !hub {
+                    return self.stage_earlier_pass(e, s, &slug, ev, n, arts, &why);
+                }
+                if arts.is_some() {
+                    restored_arts = arts;
+                }
+                ev["restored_pass"] = json!({ "iteration": n, "why": why });
+                restored_pass = Some((n, why));
+            }
         }
         // Early behavioural feedback (AD-13 round 4, live run 4): a usable page (HTML present, no
         // throw on load, no hang) that fails the gate on a pass that is not the last still gets
@@ -1881,8 +1961,13 @@ impl<'a> Worker<'a> {
             Ok(Outcome::Next { stage: if audit { "audit" } else { "verify" }, patch: Patch { last_eval: Some(ev), code_artifacts: restored_arts, ..Default::default() }, row, extra: vec![] })
         } else {
             let pre_row = HandoffRow::new("system", "system", "stage_completed", "verbose", format!("Build checks failed: {} item{} missing", missing.len(), if missing.len() == 1 { "" } else { "s" })).payload(json!({ "missing": missing }));
+            let pre_row = match &restored_pass {
+                Some((n, why)) if *n == e.iteration_count => HandoffRow::new("system", "system", "stage_completed", "milestone", format!("The repair pass broke the page ({why}); pass {n}'s page from before it is left in staging")).payload(json!({ "missing": missing, "restored_pass": n })),
+                Some((n, why)) => HandoffRow::new("system", "system", "stage_completed", "milestone", format!("The last pass broke the page ({why}); pass {n}'s page is left in staging")).payload(json!({ "missing": missing, "restored_pass": n })),
+                None => pre_row,
+            };
             let row = HandoffRow::new("system", "prompter", "loop_iteration", "handoff", format!("Back to the Prompter to fix {} item{} (iteration {}/{})", missing.len(), if missing.len() == 1 { "" } else { "s" }, e.iteration_count + 1, e.max_iterations)).payload(json!({ "fix_instructions": missing, "from": "evaluate" }));
-            Ok(Outcome::Loop { pre_patch: Patch { last_eval: Some(ev), ..Default::default() }, pre_row, to: "merge", row })
+            Ok(Outcome::Loop { pre_patch: Patch { last_eval: Some(ev), code_artifacts: restored_arts, ..Default::default() }, pre_row, to: "merge", row })
         }
     }
 
@@ -1997,13 +2082,23 @@ impl<'a> Worker<'a> {
                     None => quality::ProbeRun::Skipped("no staged page".into()),
                 }
             };
+            // W1 (live run 5): Edge is installed and runtime checks are on, yet the browser could not
+            // run the probes at all ("Edge printed no page"): an environment problem, not the page's.
+            // Said once as a known item; probe-needing criteria are then unchecked (a probe is still
+            // required, so a stale quote never reads as "implement it for real"), never a verifier
+            // retry for a probe and never a Coder loop. Edge simply not installed (`can_probe`
+            // false) or runtime checks off keep the evidence-only rule, as before.
+            let browser_down: Option<String> = match &run {
+                quality::ProbeRun::Skipped(r) if can_probe && !probes.is_empty() => Some(r.clone()),
+                _ => None,
+            };
             let mut open = quality::open_probes(&probes, &run, &answers);
             // The wrong-number guard's blind spot (AD-13 round 5): a recheck answer that copies the
             // page's value. Not met, not a Coder loop: unchecked, so the build is not called working.
             let disputes = quality::disputed_rechecks(&e.last_eval["open_probes"], &dropped, &probes, &run, &answers);
             // Where probes run, a behavioural criterion needs one that ran and passed (AD-12); a
             // run that could not start (no Edge after all) keeps the evidence-only rule.
-            let probes_on = can_probe && (probes.is_empty() || matches!(run, quality::ProbeRun::Ran(_)));
+            let probes_on = (can_probe && (probes.is_empty() || matches!(run, quality::ProbeRun::Ran(_)))) || browser_down.is_some();
             // A criterion counts only when it is met, its quoted code is in the page, and its probe
             // (if it ran) did not fail.
             let judged = quality::judge(&answers, &html, cut, &run, &needs, probes_on);
@@ -2018,6 +2113,13 @@ impl<'a> Worker<'a> {
             }).collect();
             // Nic's pinned checks first, everywhere they are listed (never cut by a cap first).
             gaps.sort_by_key(|g| !g.pinned);
+            // A browser that could not run settles nothing: neither the verifier nor the page can fix it.
+            if browser_down.is_some() {
+                for g in &mut gaps {
+                    g.fixable = false;
+                    g.page = false;
+                }
+            }
             // Quotes not in the page for criteria that need no probe: the verifier's to fix (P1-4).
             let stale: Vec<quality::StaleQuote> = judged.stale.iter().cloned().map(|mut q| {
                 if let Some(c) = q.n.and_then(|n| expected.get(n - 1)) {
@@ -2097,7 +2199,15 @@ impl<'a> Worker<'a> {
             // A Play Place hub build is smoke-tested and marked mergeable from review_ready, never
             // reading its blockers: an unproven behaviour there is treated like an unmet one.
             // An unproven criterion is named as one that could not be checked, never as broken (P1-2).
-            let gap_lines: Vec<String> = gaps.iter().map(|g| format!("couldn't be checked in a browser: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120))).collect();
+            let gap_lines: Vec<String> = gaps
+                .iter()
+                .map(|g| match &browser_down {
+                    // The reason is said once (`down_line`), not on every criterion.
+                    Some(_) => format!("couldn't be checked in a browser: {}", clip(&g.criterion, 100)),
+                    None => format!("couldn't be checked in a browser: {} ({})", clip(&g.criterion, 100), clip(&g.why, 120)),
+                })
+                .collect();
+            let down_line: Option<String> = browser_down.as_ref().map(|r| format!("couldn't be checked: the browser checks couldn't run ({})", clip(&one_line(r), 120)));
             let pinned_lines: Vec<String> = gaps.iter().zip(&gap_lines).filter(|(g, _)| g.pinned).map(|(_, l)| l.clone()).collect();
             let stale_lines: Vec<String> = stale.iter().map(quality::stale_line).collect();
             // A unit control the harness cannot read (`ProbeGap::unreadable`) is a known note: the
@@ -2196,7 +2306,8 @@ impl<'a> Worker<'a> {
             // The verifier's own gaps come before its wording: Nic's pinned checks first, then no
             // list / not judged / not shown, then the other unproven behaviours. Nothing is cut here.
             // A probe failure the guard holds back from the Coder still fails: listed first.
-            let mut verify_blockers: Vec<String> = held_lines.clone();
+            let mut verify_blockers: Vec<String> = down_line.iter().cloned().collect();
+            verify_blockers.extend(held_lines.iter().cloned());
             verify_blockers.extend(dispute_lines.iter().cloned());
             verify_blockers.extend(pinned_lines.iter().cloned());
             if judged.absent {
@@ -2209,6 +2320,9 @@ impl<'a> Worker<'a> {
             let mut unchecked: Vec<String> = dispute_lines.iter().chain(&pinned_lines).chain(gap_lines.iter().filter(|l| !pinned_lines.contains(l))).filter(|l| !note_lines.contains(l)).cloned().collect();
             if judged.absent {
                 unchecked.insert(0, "verify could not show code evidence per criterion".into());
+            }
+            if let Some(l) = &down_line {
+                unchecked.insert(0, l.clone());
             }
             unchecked.extend(judged.not_judged.iter().cloned());
             // A criterion still claimed only with code that is not in the page after the retry
@@ -2227,12 +2341,35 @@ impl<'a> Worker<'a> {
             // The fixes the verifier itself still asks for (`open_model_fixes`, round 7): its own
             // loop, not one an unmet criterion or a gate item forced; never the worker's lines.
             let model_open: Vec<String> = if verdict == "loop" && model_loop && coder_unmet.is_empty() && open_gate.is_empty() { kept.clone() } else { vec![] };
-            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "model_open": model_open, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "held": held_lines, "rechecked": rechecked.iter().map(|i| i + 1).collect::<Vec<_>>(), "disputed": dispute_lines, "gate_open": open_gate.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
+            (json!({ "verdict": verdict, "loop_to": loop_to, "fix_instructions": fixes, "model_open": model_open, "known_blockers": blockers, "verify_blockers": verify_blockers, "failing": judged.unmet, "unchecked": unchecked, "dropped_fixes": dropped, "criteria": judged.criteria, "probes": run.summary(), "open_probes": open, "unmet": judged.unmet.len(), "gaps": gaps.len(), "note_gaps": note_lines.len(), "pinned_gaps": pinned_lines.len(), "pinned_unjudged": pinned_unjudged.len(), "not_judged": judged.not_judged.len(), "absent": judged.absent, "stale": stale_lines.len(), "held": held_lines, "rechecked": rechecked.iter().map(|i| i + 1).collect::<Vec<_>>(), "disputed": dispute_lines, "browser_down": browser_down, "gate_open": open_gate.len(), "iteration": e.iteration_count, "parsed": j.is_some(), "by": r.by }), spoken)
         };
         let mut last_eval = e.last_eval.clone();
         last_eval["verify"] = decision.clone();
         last_eval["open_probes"] = if decision["open_probes"].is_array() { decision["open_probes"].clone() } else { json!([]) };
         let wants_loop = decision["verdict"] == "loop";
+        // W2: what is still open on this (usable) pass, should a later pass break the page and this
+        // one be staged instead. The same list the Done path below would stage it with (r17 review:
+        // the verifier's own fix that drove the loop was lost next to any unproven line): its gate
+        // items, the verifier's gaps, what fails, the loop's fixes (a bare loop as a note), then the
+        // model's blockers. What fails and what could not be proven are kept apart for the voice, so
+        // an unproven criterion is never spoken as broken (P1-2).
+        if wants_loop && last_eval["last_usable"]["iteration"].as_u64() == Some(u64::from(e.iteration_count)) {
+            let gate: Vec<String> = str_list(&last_eval["last_usable"]["gate"], 10, 240);
+            let mut open: Vec<String> = Vec::new();
+            let fixes = str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().map(|f| if f == BARE_LOOP_FIX { BARE_LOOP_NOTE.to_string() } else { f });
+            for l in gate.iter().cloned().chain(str_list(&decision["verify_blockers"], 40, 240)).chain(str_list(&decision["failing"], 40, 240)).chain(fixes).chain(str_list(&decision["known_blockers"], 40, 240)) {
+                if !open.contains(&l) {
+                    open.push(l);
+                }
+            }
+            let mut failing = gate;
+            failing.extend(str_list(&decision["failing"], 40, 240));
+            let model_open = open_model_fixes(&decision, &failing);
+            failing.extend(model_open);
+            last_eval["last_usable"]["open"] = json!(open);
+            last_eval["last_usable"]["failing"] = json!(failing);
+            last_eval["last_usable"]["unchecked"] = json!(str_list(&decision["unchecked"], 40, 240));
+        }
         // A Play Place hub build whose criteria are still unmet (a failed probe, unmet or
         // unevidenced) or unproven (a probe gap) on the last pass fails into the hub's Repair
         // Queue (the loop breaker fails it) instead of review_ready, which the hub would
@@ -2287,7 +2424,8 @@ impl<'a> Worker<'a> {
         // behaviour, a criterion the verifier did not judge, no per-criterion list at all, or one
         // only claimed with code that is not in the page (`stale`), the build does NOT work yet,
         // whatever the verifier said; nor with a fix the verifier itself still asks for (round 6).
-        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0 && disputed == 0 && model_open.is_empty();
+        // Nor when the browser checks could not run at all (W1): nothing behavioural was seen.
+        let works = gate_items.is_empty() && decision["unmet"].as_u64().unwrap_or(0) == 0 && open_gaps == 0 && decision["not_judged"].as_u64().unwrap_or(0) == 0 && decision["absent"] != true && stale == 0 && disputed == 0 && model_open.is_empty() && decision["browser_down"].is_null();
         // What fails (above), what could not be proven, and the rest as notes — for the verdict
         // and the spoken line (P3).
         failing.extend(model_open);
@@ -2579,6 +2717,135 @@ impl<'a> Worker<'a> {
             }
             Err(err) => eprintln!("[worker] fail {}: {err}", cur.task_id),
         }
+    }
+
+    /// W2: put the task's last usable pass's page back as staging/<slug>/index.html (the page the
+    /// last pass broke is kept at .iterations/<n>.html). Only a pass before this one, and only the
+    /// exact page recorded then (its sha256): the archived copy, or index.html when it still is that
+    /// page. THIS pass counts too once its gate repair ran on a usable page (r17 review: a hub
+    /// build's repair pass that broke a usable last page left it broken): its page from before the
+    /// repair is put back (`pre_repair_rel`), and the repaired one kept at .iterations/<n>-repaired.html.
+    /// Returns the pass and the new artifact list (None: index.html already was that page).
+    fn restore_last_usable(&self, e: &Envelope, s: &WorkerSettings, slug: &str) -> Option<(u32, Option<Value>)> {
+        let lu = &e.last_eval["last_usable"];
+        let n = u32::try_from(lu["iteration"].as_u64()?).ok()?;
+        let want = lu["sha256"].as_str()?;
+        let this_pass = n == e.iteration_count && gate_repair_done(e) && e.last_eval["gate_repair_pre"]["iteration"].as_u64() == Some(u64::from(n)) && e.last_eval["gate_repair_pre"]["usable"] == true;
+        if n > e.iteration_count || (n == e.iteration_count && !this_pass) {
+            return None;
+        }
+        let read = |rel: &str| staging::resolve(&s.staging_root, slug, rel).ok().and_then(|p| std::fs::read(p).ok());
+        let current = read("index.html");
+        if current.as_deref().is_some_and(|b| page_sha(b) == want) {
+            return Some((n, None));
+        }
+        let old = read(&if this_pass { pre_repair_rel(n) } else { format!(".iterations/{n}.html") }).filter(|b| page_sha(b) == want)?;
+        let mut arts: Vec<Value> = e.code_artifacts.as_array().cloned().unwrap_or_default();
+        if let Some(broken) = current {
+            let rel = if this_pass { format!(".iterations/{n}-repaired.html") } else { format!(".iterations/{}.html", e.iteration_count) };
+            match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, slug, &rel, &broken) {
+                Ok(a) => arts.push(json!({ "path": a.path, "rel": a.rel, "sha256": a.sha256, "bytes": a.bytes, "iteration": e.iteration_count })),
+                Err(err) => eprintln!("[worker] keep the broken last page: {err}"),
+            }
+        }
+        match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, slug, "index.html", &old) {
+            Ok(a) => {
+                let by = if this_pass { format!("restored pass {n}'s page from before its repair pass (the repair broke the page)") } else { format!("restored pass {n} (the last pass broke the page)") };
+                arts.push(json!({ "path": a.path, "rel": a.rel, "sha256": a.sha256, "bytes": a.bytes, "iteration": e.iteration_count, "by": by }));
+                Some((n, Some(Value::Array(arts))))
+            }
+            Err(err) => {
+                eprintln!("[worker] restore pass {n}'s page: {err}");
+                None
+            }
+        }
+    }
+
+    /// W2 (b), the "no HTML" case: the last pass's Coder failed for good (no page at all) while an
+    /// earlier pass of this task was usable: that pass is staged instead (a hub build still fails,
+    /// with the usable page left in place). A non-hub gate repair pass is `gate_repair_fallback`'s
+    /// (the gate runs again on the page from before it); a hub build's repair pass that fails this
+    /// way still gets the usable page put back here (r17 review: a last pass that threw on load
+    /// stayed in staging when its repair pass's Coder failed), then fails into the Repair Queue.
+    fn no_page_fallback(&self, e: &Envelope, s: &WorkerSettings, msg: &str) -> Option<Outcome> {
+        let hub = e.raw_intent.memory_reference["source"] == "playplace";
+        if e.iteration_count < e.max_iterations.min(MAX_LOOP_ITERATIONS) || (gate_repair_pending(e) && !hub) {
+            return None;
+        }
+        let slug = e.project_slug.clone()?;
+        let (n, arts) = self.restore_last_usable(e, s, &slug)?;
+        if hub {
+            if let Some(a) = arts {
+                let why = format!("the Coder returned no page: {}", clip(&one_line(msg), 100));
+                let mut ev = e.last_eval.clone();
+                ev["restored_pass"] = json!({ "iteration": n, "why": why });
+                let text = if gate_repair_pending(e) { format!("The repair pass returned no page; pass {n}'s page is left in staging") } else { format!("The last pass returned no page; pass {n}'s page is left in staging") };
+                let _ = self.store.transition(&e.task_id, expect_of(e), Next { status: &e.status, stage: e.stage.as_deref(), owner: &e.current_owner }, &Patch { code_artifacts: Some(a), last_eval: Some(ev), ..Default::default() }, &HandoffRow::new("system", "system", "note", "milestone", text).payload(json!({ "restored_pass": n })), &s.known);
+            }
+            return None;
+        }
+        let why = format!("the Coder returned no page: {}", clip(&one_line(msg), 100));
+        self.stage_earlier_pass(e, s, &slug, e.last_eval.clone(), n, arts, &why).ok()
+    }
+
+    /// W2 (b): the build is staged from pass `n` (its page already back in staging): review_ready,
+    /// never called working, with "the last pass broke the page (...)" first and then what was
+    /// still open on that pass. `ev`: the last gate result (kept for the record).
+    #[allow(clippy::too_many_arguments)]
+    fn stage_earlier_pass(&self, e: &Envelope, s: &WorkerSettings, slug: &str, mut ev: Value, n: u32, arts: Option<Value>, why: &str) -> Result<Outcome, StageErr> {
+        let lu = e.last_eval["last_usable"].clone();
+        let mut open = str_list(&lu["open"], 40, 240);
+        if open.is_empty() {
+            open = str_list(&lu["gate"], 10, 240);
+        }
+        let first = earlier_pass_line(n, why);
+        let mut blockers: Vec<String> = vec![first.clone()];
+        for b in &open {
+            if !blockers.contains(b) {
+                blockers.push(b.clone());
+            }
+        }
+        let total = blockers.len();
+        if total > BLOCKERS_MAX {
+            blockers.truncate(BLOCKERS_MAX - 1);
+            blockers.push(format!("… and {} more (see the verify record)", total - (BLOCKERS_MAX - 1)));
+            ev["blockers_dropped"] = json!(total - (BLOCKERS_MAX - 1));
+        }
+        ev["last_usable"] = lu.clone();
+        ev["staged_pass"] = json!({ "iteration": n, "why": why });
+        ev["known_blockers"] = json!(blockers);
+        ev["known_blockers_total"] = json!(total);
+        ev["works"] = json!(false);
+        ev["verdict"] = json!("needs_fixes");
+        ev["complete"] = json!(true);
+        if !self.owns(e) {
+            return Err(StageErr::stale());
+        }
+        let status = json!({ "status": "review_ready", "task_id": e.task_id, "title": e.title, "iteration": e.iteration_count, "staged_pass": n, "known_blockers": blockers, "known_blockers_total": total, "works": false, "verdict": "needs_fixes", "at": envelope::now_ms() });
+        if let Err(err) = staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, slug, ".status.json", serde_json::to_string_pretty(&status).unwrap_or_default().as_bytes()) {
+            eprintln!("[worker] .status.json: {err}");
+        }
+        let code = arts.clone().unwrap_or_else(|| e.code_artifacts.clone());
+        let report = librarian::read_report(&s.staging_root, slug, &code, e.iteration_count, e.raw_intent.memory_reference["memoryDoc"].as_str());
+        let mut notes = if e.librarian_notes.is_object() { e.librarian_notes.clone() } else { json!({}) };
+        notes["read_report"] = report.clone();
+        let mut extra = vec![];
+        for d in report["discrepancies"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).take(3) {
+            extra.push(HandoffRow::new("librarian", "tony", "discrepancy", "milestone", format!("Read-report: {d}")));
+        }
+        // What fails and what could not be proven on that pass, as `h_verify` sorted them (r17
+        // review: every open item was spoken as broken). A record from before they were kept: its
+        // open items are what fails, as before.
+        let (failing, unchecked) = if lu.get("failing").is_some() || lu.get("unchecked").is_some() { (str_list(&lu["failing"], 40, 240), str_list(&lu["unchecked"], 40, 240)) } else { (open.clone(), vec![]) };
+        let open_notes: Vec<String> = open.iter().filter(|b| !failing.contains(b) && !unchecked.contains(b)).cloned().collect();
+        let rest = review_voice(&failing, &unchecked, &open_notes).map(|v| v.strip_prefix("Built, but ").or_else(|| v.strip_prefix("Built; ")).map(String::from).unwrap_or(v));
+        let said = match rest {
+            Some(r) => format!("The last pass broke the page, so pass {n} is staged instead; {r}"),
+            None => format!("The last pass broke the page, so pass {n} is staged instead."),
+        };
+        let summary = format!("\"{}\" is staged from pass {n} (the last pass broke the page) and needs fixes: {total} known blocker{} (staging/{slug})", clip(&e.title, 50), if total == 1 { "" } else { "s" });
+        let row = HandoffRow::new("system", "tony", "review_ready", "milestone", summary).voice(Some(said.as_str())).payload(json!({ "staging": format!("staging/{slug}"), "iteration": e.iteration_count, "staged_pass": n, "known_blockers": total, "works": false, "verdict": "needs_fixes" }));
+        Ok(Outcome::Done { patch: Patch { last_eval: Some(ev), librarian_notes: Some(notes), code_artifacts: arts, ..Default::default() }, row, extra })
     }
 
     async fn after_failed(&self, e: &Envelope, s: &WorkerSettings) {

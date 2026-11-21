@@ -39,7 +39,12 @@ const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.E
 /**
  * Layer stack (back → front):
  *   WallpaperSlideshow (-z-10) → WeatherCanvas (-z-5) → shell + section →
- *   VoiceHUD / orb (z-50) → ConfirmCard (z-60) → Toasts (z-70)
+ *   VoiceHUD / orb (z-50) → drawers and modals (z-75…z-85: Agents drawer,
+ *   Intake / settings modals z-80, Play Place full screen z-85) →
+ *   ConfirmCard (z-90) → Toasts (z-95)
+ * The ConfirmCard sits above every modal because a modal can raise one (the
+ * Brainstorm intake's "Dispatch to Play Place" does): a card under its own
+ * modal can't be clicked and times out. src/lib/layers.test.ts pins this.
  * The HUD, scheduler and confirmation gate live outside the section switch,
  * so voice sessions and alarms survive navigation.
  */

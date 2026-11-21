@@ -162,3 +162,33 @@ Rounds 4–7 of AD-13 (`32aacbe` → `3848522`) fixed the problems that run 4 an
 - Worker builds may no longer use CDNs (Tailwind and others).
 - Everything is inline, so the app works offline and in a sandboxed preview.
 - The older `pipeline.rs` prototype path still allows the CDN. Tell me if you want CDN builds back for online-only projects.
+
+## Evening update: live run 5 and the Brainstorm staging bug
+
+**Live run 5** (same protein request, merged code, local 9B):
+- The first attempt ran from my bash shell. That shell's process sandbox stops headless Edge from printing pages, so every browser check was skipped. The pipeline then wrongly told the Coder "no working code found". This is not an app problem: from PowerShell, all 9 real-browser tests pass.
+- The re-run from PowerShell finished in 446 s with no crash:
+  - **Pass 1:** the build checks passed, and a behaviour test caught the real kg bug early ("got 363.8, expected 74.84"). The Coder got the fix while it still had a pass left.
+  - **Pass 2 (the last one):** the Coder's change broke the page with a syntax error, and the pipeline threw away the whole build, including pass 1's usable page.
+- During the run, someone made a git commit in `C:\ai-hub` (commit "g", 237 skill files, at 20:48). The Librarian's read-only guard flagged it. Only git internals changed; the pipeline wrote nothing there.
+
+**Your Brainstorm staging failure.** There was no 405 anywhere in the logs. What actually happened:
+1. The "Approve?" card opened *underneath* the intake window, so it couldn't be seen or clicked, and it expired after 30 s. Your thread shows 3 "Cancelled (timed out)" lines, at 20:19, 20:20 and 20:21. Every worker would have failed the same way, Claude Code included.
+2. The app was in **Coach** mode, which builds nothing. Even an approved card would have been refused.
+
+**Fixed and merged** (`c147c6c`, `026de48`, `40ada8d`; reviewed with 2 skeptics per finding, 6 more review findings fixed):
+- The confirm card now sits above every window, and a source-scanning test fails if any overlay ever covers it again.
+- The intake window says up front when your mode can't build: "Coach mode builds nothing — switch to Brainstorming or Builder to stage this". It disables Dispatch, and a refusal reads calmly instead of as a timeout.
+- When the browser checks can't run, the build is marked "couldn't be checked" (unverified). The Coder is never sent after phantom bugs.
+- If the last pass breaks the page, the last usable pass is staged instead, marked *needs fixes*, with a first line saying why. A page that throws on load also gets the one repair attempt.
+
+Gates on the merged tree:
+- Rust: 965 passed (from PowerShell, so the real-browser tests count).
+- tsc: clean.
+- vitest: 1633 passed.
+
+**For you:**
+- **Switch out of Coach mode** before staging from Brainstorm.
+- **Gateway local AI address:** it is set to `http://127.0.0.1:1234/v1`, but LM Studio runs on 1235. This breaks Brainstorm "Organize". Fix it in Settings.
+- **The gateway is running yesterday's code.** Phone-to-desktop pickup fails until it is restarted. I haven't restarted it; that's your call.
+- **Another session's work is uncommitted in the main checkout:** `buildhub.rs`, `voice-controller.ts`, `StagingHub.tsx`, `lifecycle.rs` and `ARCHITECTURE_DECISIONS.md`. I didn't touch or commit those files.

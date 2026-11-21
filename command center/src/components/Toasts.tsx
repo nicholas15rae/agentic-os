@@ -6,7 +6,7 @@ export function Toasts() {
   const { toasts, dismiss } = useToasts();
   if (!toasts.length) return null;
   return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-[calc(env(safe-area-inset-top)+4.5rem)] z-[70] flex flex-col items-center gap-2 px-4" aria-live="assertive">
+    <div className="pointer-events-none fixed inset-x-0 top-[calc(env(safe-area-inset-top)+4.5rem)] z-[95] flex flex-col items-center gap-2 px-4" aria-live="assertive">
       <style>{`@keyframes toast-in{from{opacity:0;transform:translateY(-8px) scale(.98)}to{opacity:1;transform:none}}`}</style>
       {toasts.map((t) => {
         const Icon = t.tone === "alarm" ? AlarmClock : t.tone === "error" || t.tone === "warn" ? TriangleAlert : Info;

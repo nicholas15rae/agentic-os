@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Braces, Hammer, Loader2, Timer, X } from "lucide-react";
+import { Braces, Hammer, Info, Loader2, Timer, X } from "lucide-react";
 import { xcmd } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
 import { useNav } from "@/stores/nav";
+import { useModes } from "@/features/modes/modes-store";
 import { compileEnvelope, deriveTitle, envelopeProblems, type Answers, type IntakeNote } from "./compile";
 import { HubDispatchCancelled, requestHubDispatch } from "./dispatch";
 import { errText } from "./hub-store";
+import { hubRefusalText, stageBlocker } from "./gate";
 import type { IntakeQuestion, RuntimeConfig } from "./types";
 
 export const INTERVIEW_SECS = 60;
@@ -30,6 +32,12 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
   const [error, setError] = useState<string | null>(null);
   const [now] = useState(() => Date.now());
   const [r] = useState(rand);
+  // The Tony-mode gate, before any card: a surface_only mode (Solo / Coach / Gabagool) stages
+  // nothing, so Dispatch is disabled with a calm line (Rust still refuses on its own).
+  const modeDispatch = useModes((s) => s.effective.dispatch);
+  const modeName = useModes((s) => s.effective.name);
+  const modesLoaded = useModes((s) => s.loaded);
+  const blocker = stageBlocker({ dispatch: modeDispatch, name: modeName }, modesLoaded);
 
   useEffect(() => {
     let live = true;
@@ -79,7 +87,7 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
   const problems = compiled ? envelopeProblems(compiled.envelope) : ["not ready"];
 
   const dispatch = async () => {
-    if (!compiled || problems.length) return;
+    if (!compiled || problems.length || blocker) return;
     setBusy(true);
     setError(null);
     try {
@@ -95,7 +103,8 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
       );
       onClose();
     } catch (e) {
-      setError(e instanceof HubDispatchCancelled ? "Not staged (the card was declined, timed out or replaced) — your answers are still here." : errText(e));
+      // A Rust MODE_* refusal reads as Tony's calm line, never as a raw code or a "timed out".
+      setError(e instanceof HubDispatchCancelled ? "Not staged (the card was declined, timed out or replaced) — your answers are still here." : hubRefusalText(e));
     } finally {
       setBusy(false);
     }
@@ -173,6 +182,11 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
               <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 font-mono text-[10.5px] text-ink-2">{JSON.stringify(compiled.envelope, null, 2)}</pre>
             </details>
           )}
+          {blocker && (
+            <p role="status" className="flex items-start gap-2 rounded-[12px] border border-amber/30 bg-amber/10 p-2.5 text-xs text-ink">
+              <Info size={13} className="mt-0.5 shrink-0 text-amber-soft" /> {blocker}
+            </p>
+          )}
           {error && <p className="text-xs text-alert">{error}</p>}
         </div>
 
@@ -180,7 +194,7 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
           <span className="text-[11px] text-ink-3">
             {answered}/{questions?.length ?? 0} answered{problems.length && compiled ? ` · fix: ${problems.join(", ")}` : ""}
           </span>
-          <button onClick={() => void dispatch()} disabled={!compiled || problems.length > 0 || busy} className="pill-primary ml-auto !h-9 text-xs disabled:opacity-50" title="Raises the confirmation card; nothing is queued before its yes">
+          <button onClick={() => void dispatch()} disabled={!compiled || problems.length > 0 || busy || !!blocker} className="pill-primary ml-auto !h-9 text-xs disabled:opacity-50" title={blocker ?? "Raises the confirmation card; nothing is queued before its yes"}>
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Hammer size={13} />} Dispatch to Play Place
           </button>
         </div>

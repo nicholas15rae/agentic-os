@@ -13,7 +13,7 @@ import { useCueRun } from "@/features/cues/player";
  * Mode Panel in a popover, (b) the one-tap novelty switch (it replaces the old standalone
  * GabagoolPill in the top bar and still never changes the work mode).
  *
- * The popover is portaled to <body> at z-40 (below the VoiceHUD z-50 and the ConfirmCard z-60),
+ * The popover is portaled to <body> at z-40 (below the VoiceHUD z-50, the modals z-75…z-85, the ConfirmCard z-90 and the Toasts z-95),
  * position:fixed under the trigger, with an opaque panel and no backdrop filter: it sits over
  * the System Map's WebGL canvas, where a backdrop filter breaks compositing.
  */

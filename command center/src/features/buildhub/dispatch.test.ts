@@ -24,6 +24,8 @@ import { useVoice } from "@/features/voice/voice-store";
 import { compileEnvelope, type IntakeNote } from "./compile";
 import { HubDispatchCancelled, interviewOf, requestHubDispatch } from "./dispatch";
 import type { IntakeQuestion } from "./types";
+import { hubRefusalText } from "./gate";
+import { SOLO_REFUSAL_LINE } from "@/features/modes/modes";
 
 const notes: IntakeNote[] = [{ id: "n1", title: "Tip calculator", text: "split the bill", created: 1 }];
 const qs: IntakeQuestion[] = [
@@ -57,6 +59,24 @@ describe("the intake dispatch waits for the card (regressions)", () => {
     await vi.waitFor(() => expect(h.plans).toHaveLength(1));
     await expect(h.plans[0].run!()).rejects.toThrow(/already staged/);
     await expect(p).rejects.toThrow(/already staged/);
+  });
+  // Nic's coach mode (surface_only): Rust refuses the approved enqueue. That refusal must reach the
+  // modal as itself (mapped to the calm Solo line there), never as a cancelled / timed-out card.
+  it("a MODE_SURFACE_ONLY enqueue refusal surfaces that error, not HubDispatchCancelled", async () => {
+    h.xcmd.mockImplementation(async (name: string) => {
+      if (name === "build_enqueue") throw "MODE_SURFACE_ONLY: Solo mode builds nothing — switch modes to dispatch";
+      return null;
+    });
+    const p = requestHubDispatch(compiled());
+    await vi.waitFor(() => expect(h.plans).toHaveLength(1));
+    await expect(h.plans[0].run!()).rejects.toMatch(/MODE_SURFACE_ONLY/);
+    // A later onCancel (the card closing) can't re-settle it as a cancel.
+    h.plans[0].onCancel?.();
+    const err = await p.catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(HubDispatchCancelled);
+    expect(String(err)).toContain("MODE_SURFACE_ONLY");
+    expect(hubRefusalText(err)).toBe(SOLO_REFUSAL_LINE);
+    expect(hubRefusalText(err)).not.toMatch(/MODE_|timed out/);
   });
   it("resolves once staged, and records the interview (from the stored, scrubbed brief) in the chat", async () => {
     const c = compiled();

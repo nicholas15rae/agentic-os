@@ -1962,6 +1962,7 @@ impl<'a> Worker<'a> {
         } else {
             let pre_row = HandoffRow::new("system", "system", "stage_completed", "verbose", format!("Build checks failed: {} item{} missing", missing.len(), if missing.len() == 1 { "" } else { "s" })).payload(json!({ "missing": missing }));
             let pre_row = match &restored_pass {
+                Some((n, why)) if *n == e.iteration_count => HandoffRow::new("system", "system", "stage_completed", "milestone", format!("The repair pass broke the page ({why}); pass {n}'s page from before it is left in staging")).payload(json!({ "missing": missing, "restored_pass": n })),
                 Some((n, why)) => HandoffRow::new("system", "system", "stage_completed", "milestone", format!("The last pass broke the page ({why}); pass {n}'s page is left in staging")).payload(json!({ "missing": missing, "restored_pass": n })),
                 None => pre_row,
             };
@@ -2347,18 +2348,27 @@ impl<'a> Worker<'a> {
         last_eval["open_probes"] = if decision["open_probes"].is_array() { decision["open_probes"].clone() } else { json!([]) };
         let wants_loop = decision["verdict"] == "loop";
         // W2: what is still open on this (usable) pass, should a later pass break the page and this
-        // one be staged instead: its gate items, then what fails, then what could not be proven.
+        // one be staged instead. The same list the Done path below would stage it with (r17 review:
+        // the verifier's own fix that drove the loop was lost next to any unproven line): its gate
+        // items, the verifier's gaps, what fails, the loop's fixes (a bare loop as a note), then the
+        // model's blockers. What fails and what could not be proven are kept apart for the voice, so
+        // an unproven criterion is never spoken as broken (P1-2).
         if wants_loop && last_eval["last_usable"]["iteration"].as_u64() == Some(u64::from(e.iteration_count)) {
-            let mut open: Vec<String> = str_list(&last_eval["last_usable"]["gate"], 10, 240);
-            for l in str_list(&decision["failing"], 40, 240).into_iter().chain(str_list(&decision["verify_blockers"], 40, 240)) {
+            let gate: Vec<String> = str_list(&last_eval["last_usable"]["gate"], 10, 240);
+            let mut open: Vec<String> = Vec::new();
+            let fixes = str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().map(|f| if f == BARE_LOOP_FIX { BARE_LOOP_NOTE.to_string() } else { f });
+            for l in gate.iter().cloned().chain(str_list(&decision["verify_blockers"], 40, 240)).chain(str_list(&decision["failing"], 40, 240)).chain(fixes).chain(str_list(&decision["known_blockers"], 40, 240)) {
                 if !open.contains(&l) {
                     open.push(l);
                 }
             }
-            if open.is_empty() {
-                open = str_list(&decision["fix_instructions"], 10, FIX_LINE).into_iter().map(|f| if f == BARE_LOOP_FIX { BARE_LOOP_NOTE.to_string() } else { f }).collect();
-            }
+            let mut failing = gate;
+            failing.extend(str_list(&decision["failing"], 40, 240));
+            let model_open = open_model_fixes(&decision, &failing);
+            failing.extend(model_open);
             last_eval["last_usable"]["open"] = json!(open);
+            last_eval["last_usable"]["failing"] = json!(failing);
+            last_eval["last_usable"]["unchecked"] = json!(str_list(&decision["unchecked"], 40, 240));
         }
         // A Play Place hub build whose criteria are still unmet (a failed probe, unmet or
         // unevidenced) or unproven (a probe gap) on the last pass fails into the hub's Repair
@@ -2712,12 +2722,16 @@ impl<'a> Worker<'a> {
     /// W2: put the task's last usable pass's page back as staging/<slug>/index.html (the page the
     /// last pass broke is kept at .iterations/<n>.html). Only a pass before this one, and only the
     /// exact page recorded then (its sha256): the archived copy, or index.html when it still is that
-    /// page. Returns the pass and the new artifact list (None: index.html already was that page).
+    /// page. THIS pass counts too once its gate repair ran on a usable page (r17 review: a hub
+    /// build's repair pass that broke a usable last page left it broken): its page from before the
+    /// repair is put back (`pre_repair_rel`), and the repaired one kept at .iterations/<n>-repaired.html.
+    /// Returns the pass and the new artifact list (None: index.html already was that page).
     fn restore_last_usable(&self, e: &Envelope, s: &WorkerSettings, slug: &str) -> Option<(u32, Option<Value>)> {
         let lu = &e.last_eval["last_usable"];
         let n = u32::try_from(lu["iteration"].as_u64()?).ok()?;
         let want = lu["sha256"].as_str()?;
-        if n >= e.iteration_count {
+        let this_pass = n == e.iteration_count && gate_repair_done(e) && e.last_eval["gate_repair_pre"]["iteration"].as_u64() == Some(u64::from(n)) && e.last_eval["gate_repair_pre"]["usable"] == true;
+        if n > e.iteration_count || (n == e.iteration_count && !this_pass) {
             return None;
         }
         let read = |rel: &str| staging::resolve(&s.staging_root, slug, rel).ok().and_then(|p| std::fs::read(p).ok());
@@ -2725,10 +2739,10 @@ impl<'a> Worker<'a> {
         if current.as_deref().is_some_and(|b| page_sha(b) == want) {
             return Some((n, None));
         }
-        let old = read(&format!(".iterations/{n}.html")).filter(|b| page_sha(b) == want)?;
+        let old = read(&if this_pass { pre_repair_rel(n) } else { format!(".iterations/{n}.html") }).filter(|b| page_sha(b) == want)?;
         let mut arts: Vec<Value> = e.code_artifacts.as_array().cloned().unwrap_or_default();
         if let Some(broken) = current {
-            let rel = format!(".iterations/{}.html", e.iteration_count);
+            let rel = if this_pass { format!(".iterations/{n}-repaired.html") } else { format!(".iterations/{}.html", e.iteration_count) };
             match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, slug, &rel, &broken) {
                 Ok(a) => arts.push(json!({ "path": a.path, "rel": a.rel, "sha256": a.sha256, "bytes": a.bytes, "iteration": e.iteration_count })),
                 Err(err) => eprintln!("[worker] keep the broken last page: {err}"),
@@ -2736,7 +2750,8 @@ impl<'a> Worker<'a> {
         }
         match staging::write_artifact(self.env.bridge(), Role::Coder, &s.staging_root, slug, "index.html", &old) {
             Ok(a) => {
-                arts.push(json!({ "path": a.path, "rel": a.rel, "sha256": a.sha256, "bytes": a.bytes, "iteration": e.iteration_count, "by": format!("restored pass {n} (the last pass broke the page)") }));
+                let by = if this_pass { format!("restored pass {n}'s page from before its repair pass (the repair broke the page)") } else { format!("restored pass {n} (the last pass broke the page)") };
+                arts.push(json!({ "path": a.path, "rel": a.rel, "sha256": a.sha256, "bytes": a.bytes, "iteration": e.iteration_count, "by": by }));
                 Some((n, Some(Value::Array(arts))))
             }
             Err(err) => {
@@ -2748,16 +2763,24 @@ impl<'a> Worker<'a> {
 
     /// W2 (b), the "no HTML" case: the last pass's Coder failed for good (no page at all) while an
     /// earlier pass of this task was usable: that pass is staged instead (a hub build still fails,
-    /// with the usable page left in place). Not for the gate repair pass (`gate_repair_fallback`).
+    /// with the usable page left in place). A non-hub gate repair pass is `gate_repair_fallback`'s
+    /// (the gate runs again on the page from before it); a hub build's repair pass that fails this
+    /// way still gets the usable page put back here (r17 review: a last pass that threw on load
+    /// stayed in staging when its repair pass's Coder failed), then fails into the Repair Queue.
     fn no_page_fallback(&self, e: &Envelope, s: &WorkerSettings, msg: &str) -> Option<Outcome> {
-        if e.iteration_count < e.max_iterations.min(MAX_LOOP_ITERATIONS) || gate_repair_pending(e) {
+        let hub = e.raw_intent.memory_reference["source"] == "playplace";
+        if e.iteration_count < e.max_iterations.min(MAX_LOOP_ITERATIONS) || (gate_repair_pending(e) && !hub) {
             return None;
         }
         let slug = e.project_slug.clone()?;
         let (n, arts) = self.restore_last_usable(e, s, &slug)?;
-        if e.raw_intent.memory_reference["source"] == "playplace" {
+        if hub {
             if let Some(a) = arts {
-                let _ = self.store.transition(&e.task_id, expect_of(e), Next { status: &e.status, stage: e.stage.as_deref(), owner: &e.current_owner }, &Patch { code_artifacts: Some(a), ..Default::default() }, &HandoffRow::new("system", "system", "note", "milestone", format!("The last pass returned no page; pass {n}'s page is left in staging")), &s.known);
+                let why = format!("the Coder returned no page: {}", clip(&one_line(msg), 100));
+                let mut ev = e.last_eval.clone();
+                ev["restored_pass"] = json!({ "iteration": n, "why": why });
+                let text = if gate_repair_pending(e) { format!("The repair pass returned no page; pass {n}'s page is left in staging") } else { format!("The last pass returned no page; pass {n}'s page is left in staging") };
+                let _ = self.store.transition(&e.task_id, expect_of(e), Next { status: &e.status, stage: e.stage.as_deref(), owner: &e.current_owner }, &Patch { code_artifacts: Some(a), last_eval: Some(ev), ..Default::default() }, &HandoffRow::new("system", "system", "note", "milestone", text).payload(json!({ "restored_pass": n })), &s.known);
             }
             return None;
         }
@@ -2788,7 +2811,7 @@ impl<'a> Worker<'a> {
             blockers.push(format!("… and {} more (see the verify record)", total - (BLOCKERS_MAX - 1)));
             ev["blockers_dropped"] = json!(total - (BLOCKERS_MAX - 1));
         }
-        ev["last_usable"] = lu;
+        ev["last_usable"] = lu.clone();
         ev["staged_pass"] = json!({ "iteration": n, "why": why });
         ev["known_blockers"] = json!(blockers);
         ev["known_blockers_total"] = json!(total);
@@ -2810,7 +2833,12 @@ impl<'a> Worker<'a> {
         for d in report["discrepancies"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).take(3) {
             extra.push(HandoffRow::new("librarian", "tony", "discrepancy", "milestone", format!("Read-report: {d}")));
         }
-        let rest = review_voice(&open, &[], &[]).map(|v| v.strip_prefix("Built, but ").map(String::from).unwrap_or(v));
+        // What fails and what could not be proven on that pass, as `h_verify` sorted them (r17
+        // review: every open item was spoken as broken). A record from before they were kept: its
+        // open items are what fails, as before.
+        let (failing, unchecked) = if lu.get("failing").is_some() || lu.get("unchecked").is_some() { (str_list(&lu["failing"], 40, 240), str_list(&lu["unchecked"], 40, 240)) } else { (open.clone(), vec![]) };
+        let open_notes: Vec<String> = open.iter().filter(|b| !failing.contains(b) && !unchecked.contains(b)).cloned().collect();
+        let rest = review_voice(&failing, &unchecked, &open_notes).map(|v| v.strip_prefix("Built, but ").or_else(|| v.strip_prefix("Built; ")).map(String::from).unwrap_or(v));
         let said = match rest {
             Some(r) => format!("The last pass broke the page, so pass {n} is staged instead; {r}"),
             None => format!("The last pass broke the page, so pass {n} is staged instead."),

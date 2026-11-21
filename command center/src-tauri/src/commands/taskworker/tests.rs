@@ -3718,3 +3718,144 @@ fn a_last_pass_with_no_page_after_a_usable_pass_stages_the_usable_pass() {
     assert!(kb.iter().any(|b| b.starts_with("probe failed for Shows the per-person total")), "{kb:?}");
     assert_eq!(e.last_eval["works"], json!(false));
 }
+
+/// r17 review: a hub build whose last pass throws on load gets the one repair pass (W2 a); when
+/// that repair pass's Coder returns no page at all, the usable pass 1 is still put back in staging
+/// (the hub previews and repairs from staging/<slug>/index.html) and the build fails into the
+/// Repair Queue as designed. Before, the broken last page was left there.
+#[test]
+fn a_hub_repair_pass_with_no_page_still_puts_the_usable_pass_back() {
+    let broken = GOOD_HTML.replace("<h1 ", "<h1 data-broken=\"1\" ");
+    let usable = GOOD_HTML.replace("<h1 ", "<h1 data-v1=\"1\" ");
+    let root = tmp("hub-repair-nopage");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 2) => format!("```html\n{usable}\n```"),
+                ("code", 1) | ("code", 3) => format!("```html\n{broken}\n```"),
+                ("code", _) => "Sorry, I could not finish the page.".to_string(),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(syntax_error_smoke());
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = task_with_limit(store, true, 2);
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{}", e.last_eval);
+    assert!(fake.count("code") > 3, "the repair pass ran (and its Coder failed)");
+    assert!(fake.calls_for("code").get(3).is_some_and(|c| c.user.contains(GATE_REPAIR_LEAD)), "the 4th code call is the repair pass");
+    let staged = staged_page(&root, &e);
+    assert!(staged.contains("data-v1") && !staged.contains("data-broken"), "the usable pass 1 is back in staging, not the broken last page");
+    let kept = std::fs::read_to_string(root.join("staging").join(e.project_slug.as_deref().unwrap()).join(".iterations").join("2.html")).unwrap();
+    assert!(kept.contains("data-broken"), "the broken last page is kept beside it");
+    assert_eq!(e.last_eval["restored_pass"]["iteration"], 1, "{}", e.last_eval);
+    assert!(e.handoff_log.iter().any(|h| h.short_summary == "The repair pass returned no page; pass 1's page is left in staging"), "{:?}", flow(&e));
+    assert!(e.code_artifacts.as_array().unwrap().iter().any(|a| a["by"].as_str().is_some_and(|b| b.starts_with("restored pass 1"))));
+}
+
+/// r17 review: a hub build's last pass is usable with a fixable gate item; its repair pass throws
+/// on load. The page from before the repair (usable) goes back in staging, the repaired one is
+/// kept beside it, and the build still fails into the Repair Queue.
+#[test]
+fn a_hub_repair_pass_that_breaks_a_usable_last_page_puts_it_back() {
+    let stuck = GOOD_HTML.replace("<h1 ", "<h1 data-v1=\"1\" ");
+    let broken = GOOD_HTML.replace("<h1 ", "<h1 data-broken=\"1\" ");
+    let root = tmp("hub-repair-breaks");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) | ("code", 2) => format!("```html\n{stuck}\n```"),
+                ("code", _) => format!("```html\n{broken}\n```"),
+                ("verify", _) => json!({ "criteria": probed_crit(), "verdict": "pass" }).to_string(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|html: &str| quality::Smoke::Ran {
+        errors: if html.contains("data-broken") { vec!["the page throws on load: Uncaught SyntaxError: Unexpected token 'var'".into()] } else { vec![] },
+        storage_lines: vec![],
+        stuck: if html.contains("data-rendered") { vec![] } else { vec![("#targetDisplay".into(), "Loading...".into())] },
+    }));
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = task_with_limit(store, true, 1);
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "failed", "{}", e.last_eval);
+    assert_eq!(fake.count("code"), 3, "two passes and the last pass's repair pass");
+    assert!(fake.calls_for("code").last().unwrap().user.contains(GATE_REPAIR_LEAD));
+    let staged = staged_page(&root, &e);
+    assert!(staged.contains("data-v1") && !staged.contains("data-broken"), "the page from before the repair is back in staging");
+    let dir = root.join("staging").join(e.project_slug.as_deref().unwrap()).join(".iterations");
+    assert!(std::fs::read_to_string(dir.join("1-repaired.html")).unwrap().contains("data-broken"), "the repaired page is kept beside it");
+    assert_eq!(e.last_eval["restored_pass"]["iteration"], 1, "{}", e.last_eval);
+    assert!(e.handoff_log.iter().any(|h| h.short_summary.starts_with("The repair pass broke the page (") && h.short_summary.ends_with("pass 1's page from before it is left in staging")), "{:?}", flow(&e));
+    assert!(e.code_artifacts.as_array().unwrap().iter().any(|a| a["by"].as_str().is_some_and(|b| b.starts_with("restored pass 1's page from before its repair pass"))));
+}
+
+/// r17 review: pass 0 is usable; the verifier loops with its own fix while a criterion has no
+/// probe (unproven after the retry); the last pass returns no page, so pass 0 is staged. Its
+/// blockers keep the verifier's fix, and the voice says the unproven criterion couldn't be
+/// checked, never that it doesn't work (P1-2), exactly as the same pass staged normally would.
+#[test]
+fn a_staged_earlier_pass_keeps_the_verifiers_fix_and_never_calls_unproven_broken() {
+    let noprobe = json!([{ "n": 1, "criterion": "Shows the per-person total", "met": true, "evidence": "$(\"out\").textContent = \"$\" + (total / Math.max(1, Number($(\"split\").value))).toFixed(2)" }]);
+    let verify = move || json!({ "criteria": noprobe, "verdict": "loop", "fix_instructions": ["Make the Calculate button full width"] }).to_string();
+    // The control: the same pass 0 staged normally (limit 0).
+    let root = tmp("earlier-pass-voice-ctl");
+    let store = leak_store();
+    let v0 = verify.clone();
+    let fake = Fake::new(&root, Some(store), Box::new(move |c, _| Ok(if c.stage == "verify" { v0() } else { default_reply(c) })));
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] }));
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = task_with_limit(store, false, 0);
+    run(store, &fake);
+    let ctl = get(store, &t.task_id);
+    assert_eq!(ctl.status, "review_ready", "{:?} {}", ctl.error, ctl.last_eval);
+    let ctl_kb = str_list(&ctl.last_eval["known_blockers"], 20, 400);
+    let ctl_said = ctl.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").and_then(|r| r.voice_summary.clone()).unwrap_or_default();
+    assert!(ctl_said.starts_with("Built, but 1 thing still doesn't work and 1 couldn't be checked"), "{ctl_said}");
+    // The same pass staged after a last pass with no page.
+    let root = tmp("earlier-pass-voice");
+    let store = leak_store();
+    let fake = Fake::new(
+        &root,
+        Some(store),
+        Box::new(move |c, n| {
+            Ok(match (c.stage, n) {
+                ("code", 1) => format!("```html\n{GOOD_HTML}\n```"),
+                ("code", _) => "Sorry, I could not finish the page.".to_string(),
+                ("verify", _) => verify(),
+                _ => default_reply(c),
+            })
+        }),
+    );
+    fake.settings.lock().unwrap().runtime_smoke = true;
+    *fake.smoke.lock().unwrap() = Some(Box::new(|_: &str| quality::Smoke::Ran { errors: vec![], storage_lines: vec![], stuck: vec![] }));
+    *fake.probe_runner.lock().unwrap() = Some(scripted_probes());
+    let t = task_with_limit(store, false, 1);
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
+    assert_eq!(e.last_eval["staged_pass"]["iteration"], 0, "{}", e.last_eval);
+    let kb = str_list(&e.last_eval["known_blockers"], 20, 400);
+    assert!(kb[0].starts_with("the last pass broke the page (the Coder returned no page: "), "{kb:?}");
+    assert_eq!(kb[1..].to_vec(), ctl_kb, "the same open items as the pass staged normally");
+    assert!(kb.iter().any(|b| b == "Make the Calculate button full width"), "the verifier's own fix is kept: {kb:?}");
+    assert!(kb.iter().any(|b| b.starts_with("couldn't be checked in a browser: Shows the per-person total")), "{kb:?}");
+    let said = e.handoff_log.iter().rev().find(|h| h.event_type == "review_ready").and_then(|r| r.voice_summary.clone()).unwrap_or_default();
+    assert_eq!(said, format!("The last pass broke the page, so pass 0 is staged instead; {}", ctl_said.strip_prefix("Built, but ").unwrap()), "{said}");
+    assert!(!said.contains("doesn't work: Shows the per-person total"), "an unproven criterion is never said as broken: {said}");
+    assert_eq!(e.last_eval["works"], json!(false));
+}

@@ -36,8 +36,9 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
   // nothing, so Dispatch is disabled with a calm line (Rust still refuses on its own).
   const modeDispatch = useModes((s) => s.effective.dispatch);
   const modeName = useModes((s) => s.effective.name);
+  const modeOverridden = useModes((s) => s.effective.overridden);
   const modesLoaded = useModes((s) => s.loaded);
-  const blocker = stageBlocker({ dispatch: modeDispatch, name: modeName }, modesLoaded);
+  const blocker = stageBlocker({ dispatch: modeDispatch, name: modeName, overridden: modeOverridden }, modesLoaded);
 
   useEffect(() => {
     let live = true;
@@ -103,8 +104,10 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
       );
       onClose();
     } catch (e) {
-      // A Rust MODE_* refusal reads as Tony's calm line, never as a raw code or a "timed out".
-      setError(e instanceof HubDispatchCancelled ? "Not staged (the card was declined, timed out or replaced) — your answers are still here." : hubRefusalText(e));
+      // A Rust MODE_* refusal reads calmly, never as a raw code or a "timed out", and names the
+      // mode in force when it lands (read now: it may have changed while the card was up).
+      const m = useModes.getState();
+      setError(e instanceof HubDispatchCancelled ? "Not staged (the card was declined, timed out or replaced) — your answers are still here." : hubRefusalText(e, m.effective, m.loaded));
     } finally {
       setBusy(false);
     }
@@ -187,7 +190,8 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
               <Info size={13} className="mt-0.5 shrink-0 text-amber-soft" /> {blocker}
             </p>
           )}
-          {error && <p className="text-xs text-alert">{error}</p>}
+          {/* The amber banner already says why a mode refusal happened: never both lines at once. */}
+          {error && !(blocker && /mode builds nothing|Dispatch is set to Solo/.test(error)) && <p className="text-xs text-alert">{error}</p>}
         </div>
 
         <div className="mt-3 flex items-center gap-2">

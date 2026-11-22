@@ -32,6 +32,7 @@ export interface ExtCommands {
   build_resume: { args: { buildId: string }; result: BuildEnvelope };
   build_steer: { args: { buildId: string; directive: string }; result: BuildEnvelope };
   build_to_repair: { args: { buildId: string; reason?: string }; result: BuildEnvelope };
+  build_set_max_iterations: { args: { buildId: string; max: number }; result: number };
   build_requeue: { args: { buildId: string; note?: string }; result: BuildEnvelope };
   build_smoke: { args: { buildId: string }; result: SmokeReport };
   build_promote: { args: { buildId: string }; result: BuildEnvelope };

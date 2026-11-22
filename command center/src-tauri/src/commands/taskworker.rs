@@ -13,7 +13,7 @@
 //! - Every stage is two transactions in `tasks.db`: a claim (`stage_started` row + lease) and a
 //!   commit (stage output + next status/stage/owner + a handoff row carrying the agent's
 //!   validated `voice_summary`). A restart re-runs only the current stage.
-//! - CODE owns `iteration_count`, status transitions and the `MAX_LOOP_ITERATIONS = 3` breaker
+//! - CODE owns `iteration_count`, status transitions and the `MAX_LOOP_ITERATIONS` breaker (15; default budget 3)
 //!   (`envelope::bump_iteration`); every model JSON is advisory and validated.
 //! - Every local model call takes the GPU baton as BACKGROUND work, and the worker waits for
 //!   Tony's queued foreground turns to drain before each stage.

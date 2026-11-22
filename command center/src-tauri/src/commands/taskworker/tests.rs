@@ -798,7 +798,7 @@ fn duplicate_create_returns_the_same_task() {
     let (t4, c4) = create_task(&store, &CreateArgs { dedupe_key: Some("q-2".into()), ..b.clone() }, 3, &[]).unwrap();
     assert_eq!((t3.task_id.clone(), c4), (t4.task_id, false), "an open task for the same idea is reused");
     assert_eq!(t3.max_iterations, 3);
-    assert_eq!(create_task(&store, &CreateArgs { raw_intent: "x".into(), ..Default::default() }, 9, &[]).unwrap().0.max_iterations, MAX_LOOP_ITERATIONS);
+    assert_eq!(create_task(&store, &CreateArgs { raw_intent: "x".into(), ..Default::default() }, 99, &[]).unwrap().0.max_iterations, MAX_LOOP_ITERATIONS);
 }
 
 #[test]
@@ -1767,10 +1767,10 @@ fn the_hub_title_survives_triage_and_spec() {
     assert_eq!(keep_title(&e, Some("Pomodoro Pal".into())), "Pomodoro Pal");
 }
 
-/// Regression: a parked brainstorm over 8000 chars could never be run from the ledger.
+/// Regression: a parked brainstorm over the raw-intent cap could never be run from the ledger.
 #[test]
 fn an_over_long_raw_intent_is_fitted_not_refused() {
-    let text = format!("OPENING IDEA {}{}", "middle ".repeat(2000), " FINAL DECISION");
+    let text = format!("OPENING IDEA {}{}", "middle ".repeat(envelope::RAW_INTENT_MAX / 6), " FINAL DECISION");
     let store = TaskStore::in_memory();
     let (e, _) = create_task(&store, &CreateArgs { raw_intent: text, source: "ledger".into(), ..Default::default() }, 3, &[]).unwrap();
     let t = &e.raw_intent.text;
@@ -1942,8 +1942,8 @@ fn a_usable_page_still_failing_the_gate_at_the_limit_is_staged_with_blockers() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
-    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
-    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "the last pass got its one gate repair (AD-13)");
+    assert_eq!(e.iteration_count, envelope::DEFAULT_LOOP_ITERATIONS);
+    assert_eq!(fake.count("code"), 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize, "the last pass got its one gate repair (AD-13)");
     assert!(e.last_eval["known_blockers"].to_string().contains("work offline"), "{}", e.last_eval);
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone(), e.last_eval["gate_repair"].clone()), (json!(false), json!("needs_fixes"), json!(true)));
     assert!(fake.calls_for("code")[1].user.contains("cdn.tailwindcss.com"), "the loop told the Coder what to remove");
@@ -2179,7 +2179,7 @@ fn a_hub_build_failing_the_gate_at_the_limit_fails_instead_of_handing_on() {
     assert!(e.last_eval.get("gate_blockers").is_none());
     // The page loads, so verify ran on each pass before the last (early behavioural feedback);
     // never on the last, whose gate items fail it into the Repair Queue.
-    assert_eq!(fake.count("verify"), MAX_LOOP_ITERATIONS as usize);
+    assert_eq!(fake.count("verify"), envelope::DEFAULT_LOOP_ITERATIONS as usize);
 }
 
 /// A probe that caught a bug runs again on the next verify even when the verifier drops it and
@@ -2252,7 +2252,7 @@ fn a_hub_build_whose_probe_still_fails_at_the_limit_fails_instead_of_handing_on(
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "failed", "{:?}", e.last_eval);
-    assert_eq!(fake.count("verify"), 1 + MAX_LOOP_ITERATIONS as usize);
+    assert_eq!(fake.count("verify"), 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize);
     let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
     assert!(!status.contains("review_ready"), "{status}");
     // A non-hub build in the same state is staged with the probe as a known blocker
@@ -2511,7 +2511,7 @@ fn a_hub_build_with_an_unproven_behaviour_fails_instead_of_handing_on() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "failed", "{:?}", e.last_eval);
-    assert_eq!(fake.count("verify"), 2 * (1 + MAX_LOOP_ITERATIONS as usize), "each pass asked once more for the probe");
+    assert_eq!(fake.count("verify"), 2 * (1 + envelope::DEFAULT_LOOP_ITERATIONS as usize), "each pass asked once more for the probe");
     let codes = fake.calls_for("code");
     assert!(codes[1].user.contains("couldn't be checked in a browser: Shows the per-person total"), "{}", codes[1].user);
     let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
@@ -2535,7 +2535,7 @@ fn a_last_pass_with_fixable_gate_items_gets_one_repair_pass() {
         Some(store),
         Box::new(move |c, n| {
             Ok(match (c.stage, n) {
-                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", n) if n <= 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
                 ("code", _) => format!("```html\n{good}\n```"),
                 _ => default_reply(c),
             })
@@ -2552,19 +2552,19 @@ fn a_last_pass_with_fixable_gate_items_gets_one_repair_pass() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
-    assert_eq!(e.iteration_count, MAX_LOOP_ITERATIONS);
-    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "exactly one repair pass");
+    assert_eq!(e.iteration_count, envelope::DEFAULT_LOOP_ITERATIONS);
+    assert_eq!(fake.count("code"), 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize, "exactly one repair pass");
     let repair = fake.calls_for("code").last().unwrap().user.clone();
     assert!(repair.contains(GATE_REPAIR_LEAD), "{repair}");
     assert!(repair.contains("the script looks up ids no element has: #proteinGrams"), "{repair}");
     assert!(repair.contains("the page still shows 'Loading...' in #targetDisplay after it loaded (render on startup)"), "{repair}");
     let rows: Vec<_> = e.handoff_log.iter().filter(|h| h.summary_payload["gate_repair"] == true).collect();
     assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0].event_type.as_str(), rows[0].to_agent.as_str(), rows[0].iteration), ("loop_iteration", "coder", Some(MAX_LOOP_ITERATIONS)));
+    assert_eq!((rows[0].event_type.as_str(), rows[0].to_agent.as_str(), rows[0].iteration), ("loop_iteration", "coder", Some(envelope::DEFAULT_LOOP_ITERATIONS)));
     assert_eq!(e.last_eval["gate_repair"], true);
     assert_eq!(e.last_eval["known_blockers"], json!([]), "{}", e.last_eval);
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass")));
-    assert_eq!(fake.count("verify"), 1 + MAX_LOOP_ITERATIONS as usize, "the page loads: verify ran on each failing pass too (early behavioural feedback), then once after the repair");
+    assert_eq!(fake.count("verify"), 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize, "the page loads: verify ran on each failing pass too (early behavioural feedback), then once after the repair");
 }
 
 /// C, narrowed by W2 (a): a page that crashes on load gets the one repair pass too (a load-time
@@ -2584,7 +2584,7 @@ fn a_page_that_always_crashes_on_load_gets_one_repair_then_still_fails() {
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "failed", "{}", e.last_eval);
     assert!(e.error.as_deref().unwrap_or("").contains("max iterations"), "{:?}", e.error);
-    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "one repair pass, still crashing");
+    assert_eq!(fake.count("code"), 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize, "one repair pass, still crashing");
     assert_eq!(e.handoff_log.iter().filter(|h| h.summary_payload["gate_repair"] == true).count(), 1);
     let repair = fake.calls_for("code").last().unwrap().user.clone();
     assert!(repair.contains("the page throws on load: Uncaught TypeError: x is null") && repair.contains("#proteinGrams"), "{repair}");
@@ -2598,8 +2598,8 @@ fn a_page_that_always_crashes_on_load_gets_one_repair_then_still_fails() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "failed", "{}", e.last_eval);
-    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize);
-    assert_eq!(fake.count("verify"), MAX_LOOP_ITERATIONS as usize, "early verify on the passes before the last");
+    assert_eq!(fake.count("code"), 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize);
+    assert_eq!(fake.count("verify"), envelope::DEFAULT_LOOP_ITERATIONS as usize, "early verify on the passes before the last");
     // The page that crashes on load never reached verify (unusable).
 }
 
@@ -2649,7 +2649,7 @@ fn a_hub_build_whose_criteria_go_unjudged_fails_instead_of_handing_on() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "failed", "{}", e.last_eval);
-    assert_eq!(fake.count("verify"), 2 * MAX_LOOP_ITERATIONS as usize + 1, "each pass but the last asked once more");
+    assert_eq!(fake.count("verify"), 2 * envelope::DEFAULT_LOOP_ITERATIONS as usize + 1, "each pass but the last asked once more");
     assert!(fake.calls_for("code")[1].user.contains("verify did not judge: Remembers the last bill between visits: make sure it is clearly implemented"), "{}", fake.calls_for("code")[1].user);
     assert_eq!(e.last_eval["verify"]["not_judged"], 1);
     let status = std::fs::read_to_string(root.join("staging").join("tip-calculator").join(".status.json")).unwrap_or_default();
@@ -2855,7 +2855,7 @@ fn a_repair_pass_that_breaks_the_page_restores_the_page_from_before() {
         Some(store),
         Box::new(move |c, n| {
             Ok(match (c.stage, n) {
-                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", n) if n <= 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
                 ("code", _) => format!("```html\n{broken}\n```"),
                 _ => default_reply(c),
             })
@@ -2871,7 +2871,7 @@ fn a_repair_pass_that_breaks_the_page_restores_the_page_from_before() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
-    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "one repair pass");
+    assert_eq!(fake.count("code"), 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize, "one repair pass");
     let staged = staged_page(&root, &e);
     assert!(staged.contains("proteinGrams") && !staged.contains("data-broken"), "the page from before the repair is staged");
     assert!(e.last_eval["restored"]["why"].as_str().unwrap_or("").contains("crashed"), "{}", e.last_eval);
@@ -2892,7 +2892,7 @@ fn a_repair_pass_whose_coder_fails_stages_the_page_from_before() {
         Some(store),
         Box::new(move |c, n| {
             Ok(match (c.stage, n) {
-                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", n) if n <= 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
                 ("code", _) => "Sorry, I could not finish the page.".to_string(),
                 _ => default_reply(c),
             })
@@ -2904,7 +2904,7 @@ fn a_repair_pass_whose_coder_fails_stages_the_page_from_before() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
-    assert_eq!(fake.count("code"), 1 + MAX_LOOP_ITERATIONS as usize + tuning().attempts as usize, "the repair pass tried, then gave up");
+    assert_eq!(fake.count("code"), 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize + tuning().attempts as usize, "the repair pass tried, then gave up");
     assert!(e.handoff_log.iter().any(|h| h.short_summary.starts_with("The repair pass failed")), "{:?}", flow(&e));
     assert!(staged_page(&root, &e).contains("proteinGrams"));
     assert!(e.last_eval["known_blockers"].to_string().contains("#proteinGrams"), "{}", e.last_eval);
@@ -2925,8 +2925,8 @@ fn the_gate_repair_bound_survives_a_full_handoff_log() {
         Box::new(move |c, n| {
             Ok(match (c.stage, n) {
                 // Never fixed: without a bound the repair would repeat until the run gives up.
-                ("code", n) if n <= 1 + MAX_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
-                ("code", _) => format!("```html\n{}\n```", if n > 2 + MAX_LOOP_ITERATIONS as usize { &good } else { &bad }),
+                ("code", n) if n <= 1 + envelope::DEFAULT_LOOP_ITERATIONS as usize => format!("```html\n{bad}\n```"),
+                ("code", _) => format!("```html\n{}\n```", if n > 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize { &good } else { &bad }),
                 _ => default_reply(c),
             })
         }),
@@ -2946,7 +2946,7 @@ fn the_gate_repair_bound_survives_a_full_handoff_log() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?} {}", e.error, e.last_eval);
-    assert_eq!(fake.count("code"), 2 + MAX_LOOP_ITERATIONS as usize, "exactly one repair pass");
+    assert_eq!(fake.count("code"), 2 + envelope::DEFAULT_LOOP_ITERATIONS as usize, "exactly one repair pass");
     assert!(fake.calls_for("code").last().unwrap().user.contains(GATE_REPAIR_LEAD), "the repair row was written (a milestone)");
     assert_eq!(e.handoff_log.iter().filter(|h| h.summary_payload["gate_repair"] == true).count(), 1);
     assert_eq!(e.last_eval["gate_repair"], true);
@@ -3361,7 +3361,7 @@ fn a_fix_the_verifier_still_asks_for_at_the_limit_fails_the_build() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
-    assert_eq!(e.iteration_count, e.max_iterations.min(MAX_LOOP_ITERATIONS), "looped to the limit");
+    assert_eq!(e.iteration_count, e.max_iterations.min(envelope::DEFAULT_LOOP_ITERATIONS), "looped to the limit");
     assert_eq!(e.last_eval["verify"]["verdict"], "loop");
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(false), json!("needs_fixes")), "{}", e.last_eval);
     assert!(e.last_eval["unchecked_total"].is_null(), "{}", e.last_eval);
@@ -3413,7 +3413,7 @@ fn a_bare_verifier_loop_at_the_limit_on_a_correct_page_still_passes() {
     run(store, &fake);
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
-    assert_eq!(e.iteration_count, e.max_iterations.min(MAX_LOOP_ITERATIONS), "a bare loop still sends the Coder another pass");
+    assert_eq!(e.iteration_count, e.max_iterations.min(envelope::DEFAULT_LOOP_ITERATIONS), "a bare loop still sends the Coder another pass");
     assert_eq!(e.last_eval["verify"]["verdict"], "loop");
     assert_eq!(e.last_eval["verify"]["model_open"], json!([]), "{}", e.last_eval);
     assert_eq!((e.last_eval["works"].clone(), e.last_eval["verdict"].clone()), (json!(true), json!("pass_with_notes")), "{}", e.last_eval);

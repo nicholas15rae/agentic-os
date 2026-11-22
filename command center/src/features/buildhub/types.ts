@@ -78,6 +78,8 @@ export interface BuildView {
   note_ids: string[];
   promoted_at: number | null;
   preview_version: number;
+  /** Max Iterations picked for this build (null: the Settings budget). */
+  max_iter_override?: number | null;
   committing: boolean;
   /** 1-based place among the builds still waiting (null once handed to an agent). */
   position: number | null;

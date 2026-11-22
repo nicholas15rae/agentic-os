@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowRight, BookMarked, Send } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { ArrowRight, BookMarked } from "lucide-react";
+import { PromptBox } from "@/components/PromptBox";
+import { useDraft } from "@/lib/prompt-drafts";
 import { tonyThreadForView, useThreadTurns, useVoice, type ThreadId, type VoiceState } from "./voice-store";
 import { askOverseer, handleInput, runTurnAction, setMicEnabled, toggleListening } from "./voice-controller";
 import { useMic } from "./mic-gate";
@@ -154,33 +156,26 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
 }
 
 export function CommandInput({ thread, placeholder = "Type a command for the dispatcher…", autoFocus }: { thread?: ThreadId; placeholder?: string; autoFocus?: boolean }) {
-  const [text, setText] = useState("");
+  // One draft per thread: a long message survives closing the panel or switching views.
+  const [text, setText] = useDraft(`chat.${thread ?? "general"}`);
   const state = useVoice((s) => s.state);
   const pending = useVoice((s) => !!s.pending);
   const busy = state === "thinking" || state === "transcribing";
   return (
-    <form
-      className="flex items-center gap-2"
-      onSubmit={(e) => {
-        e.preventDefault();
-        const t = text.trim();
-        if (!t || busy) return;
+    <PromptBox
+      label="Command"
+      value={text}
+      onChange={setText}
+      autoFocus={autoFocus}
+      busy={busy}
+      historyKey="chat"
+      size="md"
+      placeholder={pending ? "Type yes or no…" : `${placeholder} (Enter = new line)`}
+      onSubmit={(t) => {
+        if (busy) return;
         setText("");
         void handleInput(t, { channel: "text", thread });
       }}
-    >
-      <input
-        className="field h-10 !rounded-full"
-        autoFocus={autoFocus}
-        aria-label="Command"
-        placeholder={pending ? "Type yes or no…" : placeholder}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        disabled={busy}
-      />
-      <button type="submit" aria-label="Send" className="pill-glass !h-10 !w-10 shrink-0 !p-0" disabled={busy || !text.trim()}>
-        <Send size={16} />
-      </button>
-    </form>
+    />
   );
 }

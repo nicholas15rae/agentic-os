@@ -15,6 +15,7 @@ import { PageSwitcher } from "@/shell/PageSwitcher";
 import { useNav, type Section } from "@/stores/nav";
 import { useSettings } from "@/stores/settings";
 import { useLayout } from "@/core/widgets/layout-store";
+import { useMyApps } from "@/features/myapps/store";
 import { cc } from "@/lib/cc-api";
 import { platform } from "@/lib/platform";
 import { CommandSection } from "@/sections/CommandSection";
@@ -34,6 +35,8 @@ const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.E
   // System Map: the only chunk that loads three.js (Part 5's HoloViewport).
   memorymap: lazy(() => import("@/sections/MemoryMapSection").then((m) => ({ default: m.MemoryMapSection }))),
   settings: lazy(() => import("@/sections/SettingsSection").then((m) => ({ default: m.SettingsSection }))),
+  // MY APPS: a Play Place build mounted as a page (sandboxed, error-bounded).
+  app: lazy(() => import("@/features/myapps/MountedAppView").then((m) => ({ default: m.MountedAppView }))),
 };
 
 /**
@@ -119,15 +122,18 @@ function useConfigSnapshot() {
         const { set: _set, ...settings } = useSettings.getState();
         const { pages, activePage } = useLayout.getState();
         const layout = { pages, activePage };
-        void cc.kvSet(`ui.${platform}`, { settings, layout, at: Date.now() }).catch(() => undefined);
+        const myApps = useMyApps.getState().apps;
+        void cc.kvSet(`ui.${platform}`, { settings, layout, myApps, at: Date.now() }).catch(() => undefined);
       }, 5000);
     };
     push();
     const a = useSettings.subscribe(push);
     const b = useLayout.subscribe(push);
+    const c = useMyApps.subscribe(push);
     return () => {
       a();
       b();
+      c();
       clearTimeout(t);
     };
   }, []);

@@ -48,11 +48,16 @@ pub const EVENT_TYPES: [&str; 13] = [
 pub const SOURCES: [&str; 5] = ["voice", "typed", "phone", "playplace", "ledger"];
 pub const OPTION_KEYS: [&str; 5] = ["localOnly", "noIngest", "noVerify", "noMirror", "autoDispatched"];
 
-/// Hard breaker for Designer/Coder loops. Code owns iteration_count, never a model.
-pub const MAX_LOOP_ITERATIONS: u32 = 3;
+/// Hard breaker for Designer/Coder loops. Code owns iteration_count, never a model. The
+/// per-build budget (Settings, or a build's Max Iterations picker) is clamped to this.
+pub const MAX_LOOP_ITERATIONS: u32 = 15;
+/// The loop budget a task gets when nothing chose one.
+pub const DEFAULT_LOOP_ITERATIONS: u32 = 3;
 
 pub const JSON_MAX: usize = 64 * 1024;
-pub const RAW_INTENT_MAX: usize = 8000;
+/// Nic's own request (a pasted master prompt can be long). Schema v1 capped it at 8000; v2 lifts it.
+pub const RAW_INTENT_MAX: usize = 100_000;
+const V1_RAW_INTENT_MAX: usize = 8000;
 pub const TITLE_MAX: usize = 120;
 pub const SHORT_SUMMARY_MAX: usize = 140;
 pub const VOICE_SUMMARY_MAX: usize = 240;
@@ -123,7 +128,7 @@ fn migrations() -> &'static [String] {
                status           TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ({statuses})),
                stage            TEXT CHECK (stage IS NULL OR stage IN ({stages})),
                current_owner    TEXT NOT NULL DEFAULT 'tony' CHECK ({owner_check}),
-               raw_intent       TEXT NOT NULL CHECK (length(raw_intent) BETWEEN 1 AND {RAW_INTENT_MAX}),
+               raw_intent       TEXT NOT NULL CHECK (length(raw_intent) BETWEEN 1 AND {V1_RAW_INTENT_MAX}),
                raw_intent_at    INTEGER NOT NULL,
                raw_intent_ref   TEXT NOT NULL DEFAULT '{{}}' CHECK (length(raw_intent_ref) <= {REF_MAX}),
                title            TEXT NOT NULL DEFAULT '' CHECK (length(title) <= {TITLE_MAX}),
@@ -190,6 +195,55 @@ fn migrations() -> &'static [String] {
             code_artifacts = json_col("code_artifacts"),
             librarian_notes = json_col("librarian_notes"),
             last_eval = json_col("last_eval"),
+        ),
+        // v2: long master prompts (raw_intent up to RAW_INTENT_MAX) and loop budgets up to
+        // MAX_LOOP_ITERATIONS. SQLite can't alter a CHECK, so the table is rebuilt (the documented
+        // procedure: `migrate` turns foreign keys off around it, then checks them).
+        format!(
+            "CREATE TABLE task_envelope_v2 (
+               task_id          TEXT PRIMARY KEY CHECK (length(task_id) BETWEEN 1 AND {ID_MAX}),
+               created_at       INTEGER NOT NULL,
+               updated_at       INTEGER NOT NULL,
+               status           TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ({statuses})),
+               stage            TEXT CHECK (stage IS NULL OR stage IN ({stages})),
+               current_owner    TEXT NOT NULL DEFAULT 'tony' CHECK ({owner_check}),
+               raw_intent       TEXT NOT NULL CHECK (length(raw_intent) BETWEEN 1 AND {RAW_INTENT_MAX}),
+               raw_intent_at    INTEGER NOT NULL,
+               raw_intent_ref   TEXT NOT NULL DEFAULT '{{}}' CHECK (length(raw_intent_ref) <= {REF_MAX}),
+               title            TEXT NOT NULL DEFAULT '' CHECK (length(title) <= {TITLE_MAX}),
+               project_slug     TEXT CHECK (project_slug IS NULL OR length(project_slug) <= 64),
+               iteration_count  INTEGER NOT NULL DEFAULT 0 CHECK (iteration_count >= 0),
+               max_iterations   INTEGER NOT NULL DEFAULT 3 CHECK (max_iterations BETWEEN 1 AND {MAX_LOOP_ITERATIONS}),
+               {prompt_spec},
+               {design_artifacts},
+               {coder_brief},
+               {code_artifacts},
+               {librarian_notes},
+               {last_eval},
+               voice_summaries  TEXT NOT NULL DEFAULT '{{}}' CHECK (length(voice_summaries) <= {REF_MAX}),
+               idea_id          TEXT,
+               card_id          TEXT,
+               dedupe_key       TEXT UNIQUE,
+               options          TEXT NOT NULL DEFAULT '{{}}' CHECK (length(options) <= 1024),
+               lease_until      INTEGER,
+               error            TEXT CHECK (error IS NULL OR length(error) <= {ERROR_MAX}),
+               CHECK (iteration_count <= max_iterations)
+             );
+             INSERT INTO task_envelope_v2 SELECT * FROM task_envelope;
+             DROP TABLE task_envelope;
+             ALTER TABLE task_envelope_v2 RENAME TO task_envelope;
+             CREATE INDEX te_open ON task_envelope(status, updated_at);
+             CREATE UNIQUE INDEX te_idea_open ON task_envelope(idea_id)
+               WHERE idea_id IS NOT NULL AND status NOT IN ('review_ready','failed');",
+            statuses = sql_list(&STATUSES),
+            stages = sql_list(&STAGES),
+            owner_check = agent_id_check("current_owner"),
+            prompt_spec = json_col("prompt_spec"),
+            design_artifacts = json_col("design_artifacts"),
+            coder_brief = json_col("coder_brief"),
+            code_artifacts = json_col("code_artifacts"),
+            librarian_notes = json_col("librarian_notes"),
+            last_eval = json_col("last_eval"),
         )]
     })
 }
@@ -206,12 +260,31 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<u32, String> {
     if v as usize > steps.len() {
         return Err(format!("task store: tasks.db is schema v{v}, newer than this app (v{})", steps.len()));
     }
-    for (i, step) in steps.iter().enumerate().skip(v as usize) {
-        let tx = conn.transaction().map_err(sql_err)?;
-        tx.execute_batch(step).map_err(sql_err)?;
-        tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1)).map_err(sql_err)?;
-        tx.commit().map_err(sql_err)?;
+    if v as usize == steps.len() {
+        return Ok(v);
     }
+    // A step may rebuild a table other tables reference (v2): foreign keys go off for the ladder
+    // (the pragma is a no-op inside a transaction) and are checked before each step commits.
+    let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).map_err(sql_err)?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF").map_err(sql_err)?;
+    let mut ran = || -> Result<(), String> {
+        for (i, step) in steps.iter().enumerate().skip(v as usize) {
+            let tx = conn.transaction().map_err(sql_err)?;
+            tx.execute_batch(step).map_err(sql_err)?;
+            let broken: i64 = tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).map_err(sql_err)?;
+            if broken > 0 {
+                return Err(format!("task store: migration to v{} broke {broken} foreign key(s)", i + 1));
+            }
+            tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1)).map_err(sql_err)?;
+            tx.commit().map_err(sql_err)?;
+        }
+        Ok(())
+    };
+    let out = ran();
+    if fk != 0 {
+        conn.execute_batch("PRAGMA foreign_keys = ON").map_err(sql_err)?;
+    }
+    out?;
     Ok(steps.len() as u32)
 }
 
@@ -645,7 +718,7 @@ pub(crate) fn create(conn: &mut Connection, n: &NewEnvelope, known: &[String]) -
         let t = n.title.as_deref().map(one_line).filter(|t| !t.is_empty()).unwrap_or_else(|| one_line(&raw).split(' ').take(10).collect::<Vec<_>>().join(" "));
         clip(&one_line(&scrub(&t, known)), TITLE_MAX)
     };
-    let max_iter = n.max_iterations.unwrap_or(MAX_LOOP_ITERATIONS).clamp(1, MAX_LOOP_ITERATIONS);
+    let max_iter = n.max_iterations.unwrap_or(DEFAULT_LOOP_ITERATIONS).clamp(1, MAX_LOOP_ITERATIONS);
     let turn_ids: Vec<String> = n.turn_ids.iter().take(20).map(|t| clip(&one_line(t), 80)).filter(|t| !t.is_empty()).collect();
     let mref = json!({
         "source": source,
@@ -1239,6 +1312,23 @@ impl TaskStore {
     }
 }
 
+/// Change an open task's loop budget (Play Place's Max Iterations picker). Clamped to
+/// 1..=MAX_LOOP_ITERATIONS and never below the loops already run. Returns the budget set, or
+/// None when the task is finished (nothing left to budget).
+pub(crate) fn set_max_iterations(conn: &Connection, task_id: &str, max: u32) -> Result<Option<u32>, String> {
+    let max = max.clamp(1, MAX_LOOP_ITERATIONS);
+    let n = conn
+        .execute(
+            &format!("UPDATE task_envelope SET max_iterations = max(?1, iteration_count), updated_at = ?2 WHERE task_id = ?3 AND status NOT IN ({})", sql_list(&TERMINAL)),
+            params![max, now_ms(), task_id],
+        )
+        .map_err(sql_err)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    conn.query_row("SELECT max_iterations FROM task_envelope WHERE task_id = ?1", params![task_id], |r| r.get(0)).map(Some).map_err(sql_err)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1274,13 +1364,54 @@ mod tests {
     fn migration_fresh_and_idempotent() {
         let mut c = mem();
         assert_eq!(migrate(&mut c).unwrap(), migrations().len() as u32);
-        assert_eq!(migrate(&mut c).unwrap(), 1);
+        assert_eq!(migrate(&mut c).unwrap(), migrations().len() as u32);
         let v: u32 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, migrations().len() as u32);
         for t in ["task_envelope", "handoff_log", "allm_thread", "envelope_meta"] {
             let n: i64 = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", params![t], |r| r.get(0)).unwrap();
             assert_eq!(n, 1, "{t}");
         }
+    }
+
+    #[test]
+    fn v1_database_migrates_to_long_prompts_and_bigger_budgets() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        c.execute_batch(&migrations()[0]).unwrap();
+        c.execute_batch("PRAGMA user_version = 1").unwrap();
+        c.execute("INSERT INTO task_envelope (task_id, created_at, updated_at, raw_intent, raw_intent_at, title) VALUES ('t-old', 1, 2, 'old request', 1, 'Old')", []).unwrap();
+        c.execute("INSERT INTO handoff_log (task_id, timestamp, from_agent, to_agent, event_type, severity, short_summary) VALUES ('t-old', 1, 'tony', 'prompter', 'task_queued', 'handoff', 'queued')", []).unwrap();
+        // v1 refuses what v2 allows.
+        let long = "x".repeat(50_000);
+        assert!(c.execute("INSERT INTO task_envelope (task_id, created_at, updated_at, raw_intent, raw_intent_at) VALUES ('t-long', 1, 1, ?1, 1)", params![long]).is_err());
+
+        assert_eq!(migrate(&mut c).unwrap(), 2);
+        let fk: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "foreign keys are back on");
+        let (raw, title): (String, String) = c.query_row("SELECT raw_intent, title FROM task_envelope WHERE task_id = 't-old'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((raw.as_str(), title.as_str()), ("old request", "Old"));
+        let rows: i64 = c.query_row("SELECT COUNT(*) FROM handoff_log WHERE task_id = 't-old'", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "the log survives the rebuild");
+        c.execute("INSERT INTO task_envelope (task_id, created_at, updated_at, raw_intent, raw_intent_at, max_iterations) VALUES ('t-long', 1, 1, ?1, 1, 15)", params![long]).unwrap();
+        // The FK still points at the rebuilt table, and the indexes came back.
+        assert!(c.execute("INSERT INTO handoff_log (task_id, timestamp, from_agent, to_agent, event_type, severity, short_summary) VALUES ('t-missing', 1, 'tony', 'prompter', 'note', 'verbose', 'x')", []).is_err());
+        for i in ["te_open", "te_idea_open"] {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1", params![i], |r| r.get(0)).unwrap();
+            assert_eq!(n, 1, "{i}");
+        }
+    }
+
+    #[test]
+    fn max_iterations_can_change_on_an_open_task_only() {
+        let mut c = mem();
+        let e = mk(&mut c, "Build a minimal status card component");
+        assert_eq!(set_max_iterations(&c, &e.task_id, 10).unwrap(), Some(10));
+        assert_eq!(set_max_iterations(&c, &e.task_id, 99).unwrap(), Some(MAX_LOOP_ITERATIONS));
+        assert_eq!(set_max_iterations(&c, &e.task_id, 0).unwrap(), Some(1));
+        c.execute("UPDATE task_envelope SET max_iterations = 5, iteration_count = 4 WHERE task_id = ?1", params![e.task_id]).unwrap();
+        assert_eq!(set_max_iterations(&c, &e.task_id, 2).unwrap(), Some(4), "never below the loops already run");
+        c.execute("UPDATE task_envelope SET status = 'failed' WHERE task_id = ?1", params![e.task_id]).unwrap();
+        assert_eq!(set_max_iterations(&c, &e.task_id, 8).unwrap(), None);
     }
 
     #[test]
@@ -1329,7 +1460,7 @@ mod tests {
         assert!(c.execute("UPDATE task_envelope SET status = 'done' WHERE task_id = ?1", params![id]).is_err());
         assert!(c.execute("UPDATE task_envelope SET current_owner = 'Not An Id' WHERE task_id = ?1", params![id]).is_err());
         assert!(c.execute("UPDATE task_envelope SET iteration_count = 4 WHERE task_id = ?1", params![id]).is_err());
-        assert!(c.execute("UPDATE task_envelope SET max_iterations = 11 WHERE task_id = ?1", params![id]).is_err());
+        assert!(c.execute("UPDATE task_envelope SET max_iterations = 16 WHERE task_id = ?1", params![id]).is_err());
         assert!(c.execute("UPDATE task_envelope SET stage = 'deploy' WHERE task_id = ?1", params![id]).is_err());
         assert!(c.execute("UPDATE task_envelope SET prompt_spec = ?1 WHERE task_id = ?2", params!["x".repeat(JSON_MAX + 1), id]).is_err());
         // …and the Rust side refuses them before SQL.
@@ -1415,8 +1546,8 @@ mod tests {
             }
             Bump::Looped(..) => panic!("looped past 3"),
         }
-        // A configured max of 10 is still capped by MAX_LOOP_ITERATIONS.
-        let (e2, ..) = create(&mut c, &NewEnvelope { max_iterations: Some(10), ..new("cap") }, &[]).unwrap();
+        // A configured max above the breaker is still capped by MAX_LOOP_ITERATIONS.
+        let (e2, ..) = create(&mut c, &NewEnvelope { max_iterations: Some(99), ..new("cap") }, &[]).unwrap();
         assert_eq!(e2.max_iterations, MAX_LOOP_ITERATIONS);
     }
 

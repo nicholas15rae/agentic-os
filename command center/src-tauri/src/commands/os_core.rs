@@ -668,8 +668,8 @@ impl Default for FeedbackConfig {
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkerConfig {
     pub enabled: bool,
-    /// Designer/Coder loop budget, clamped to 1–3 (`envelope::MAX_LOOP_ITERATIONS` is the hard cap).
-    #[serde(deserialize_with = "de_clamped::<_, 1, 3>")]
+    /// Designer/Coder loop budget, clamped to 1–15 (`envelope::MAX_LOOP_ITERATIONS` is the hard cap).
+    #[serde(deserialize_with = "de_clamped::<_, 1, 15>")]
     pub max_iterations: u8,
     /// Per-handoff verifier (off: its verdict was advisory only).
     pub verify: bool,
@@ -1759,8 +1759,8 @@ mod tests {
         assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && old.worker.librarian_audit);
         assert_eq!(old.worker.max_iterations, 3);
         assert_eq!((old.memory.notes_dir.as_str(), old.memory.staging_dir.as_str()), ("", ""));
-        let hot: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": 7 }, "worker": { "maxIterations": 9 } })).unwrap();
-        assert_eq!((hot.feedback.sensitivity, hot.worker.max_iterations), (3, 3));
+        let hot: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": 7 }, "worker": { "maxIterations": 99 } })).unwrap();
+        assert_eq!((hot.feedback.sensitivity, hot.worker.max_iterations), (3, 15));
         let cold: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": -2 }, "worker": { "maxIterations": 0 } })).unwrap();
         assert_eq!((cold.feedback.sensitivity, cold.worker.max_iterations), (0, 1));
         // The os_config_update path (merge_json + from_value) clamps a patch the same way.

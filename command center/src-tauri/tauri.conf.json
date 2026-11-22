@@ -19,6 +19,7 @@
         "minHeight": 600,
         "backgroundColor": "#0b0d11",
         "decorations": true,
+        "dragDropEnabled": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --enable-features=CanvasOopRasterization --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
       }
     ],

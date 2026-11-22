@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Braces, Hammer, Info, Loader2, Timer, X } from "lucide-react";
+import { Braces, Hammer, Info, Loader2, PanelLeft, Timer, X } from "lucide-react";
 import { xcmd } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
 import { useNav } from "@/stores/nav";
@@ -9,6 +9,8 @@ import { HubDispatchCancelled, requestHubDispatch } from "./dispatch";
 import { errText } from "./hub-store";
 import { hubRefusalText, stageBlocker } from "./gate";
 import type { IntakeQuestion, RuntimeConfig } from "./types";
+import { MountFields } from "@/features/myapps/PinButton";
+import { useMyApps, type AppIcon } from "@/features/myapps/store";
 
 export const INTERVIEW_SECS = 60;
 
@@ -31,6 +33,10 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
   const [showJson, setShowJson] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now] = useState(() => Date.now());
+  // "Add as Command Center Page": mounted in MY APPS once the hub shows the build.
+  const [mount, setMount] = useState(false);
+  const [mountLabel, setMountLabel] = useState("");
+  const [mountIcon, setMountIcon] = useState<AppIcon>("app");
   const [r] = useState(rand);
   // The Tony-mode gate, before any card: a surface_only mode (Solo / Coach / Gabagool) stages
   // nothing, so Dispatch is disabled with a calm line (Rust still refuses on its own).
@@ -97,7 +103,8 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
       await requestHubDispatch(
         compiled,
         () => {
-          useToasts.getState().push({ title: "Staged", body: `“${compiled.envelope.title}” is in the Play Place queue.`, tone: "info" });
+          if (mount) useMyApps.getState().addPending({ slug: compiled.envelope.project_slug, label: mountLabel.trim() || compiled.envelope.title, icon: mountIcon });
+          useToasts.getState().push({ title: "Staged", body: `“${compiled.envelope.title}” is in the Play Place queue.${mount ? " It will appear under My Apps in the left rail." : ""}`, tone: "info" });
           useNav.getState().go("playplace");
         },
         source,
@@ -172,11 +179,22 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
                   onChange={(e) => set(q.id, { text: e.target.value })}
                   placeholder="Or say it your way (overrides / adds to the choice)"
                   className="field mt-2 !h-8 w-full !py-1 text-xs"
-                  maxLength={400}
                 />
               )}
             </fieldset>
           ))}
+          <fieldset className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-3">
+            <label className="flex cursor-pointer items-center gap-2 text-[13px] text-ink">
+              <input type="checkbox" checked={mount} onChange={(e) => setMount(e.target.checked)} className="accent-amber" />
+              <PanelLeft size={13} className="text-amber-soft" /> Add as Command Center page
+              <span className="text-[11px] text-ink-3">(mount in the left sidebar under My Apps)</span>
+            </label>
+            {mount && (
+              <div className="mt-2">
+                <MountFields label={mountLabel} icon={mountIcon} onLabel={setMountLabel} onIcon={setMountIcon} placeholder={title || "App name"} />
+              </div>
+            )}
+          </fieldset>
           {compiled && (
             <details open={showJson} onToggle={(e) => setShowJson((e.target as HTMLDetailsElement).open)}>
               <summary className="flex cursor-pointer items-center gap-1 text-xs text-teal">

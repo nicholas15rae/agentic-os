@@ -3,13 +3,14 @@ import { MoreHorizontal } from "lucide-react";
 import { SECTIONS, useNav } from "@/stores/nav";
 import { usePipelines } from "@/features/os/pipeline-store";
 import { LifecycleRail } from "@/features/lifecycle/LifecycleRail";
+import { MyAppsRail, MyAppsSheet } from "@/features/myapps/MyAppsRail";
 
 /** Slim icon rail on desktop/tablet. */
 export function SideRail() {
   const { section, go } = useNav();
   const unseen = usePipelines((s) => s.unseen);
   return (
-    <nav aria-label="Sections" className="hidden w-[72px] shrink-0 flex-col items-center gap-2.5 border-r border-white/[0.06] bg-[rgba(11,13,17,0.35)] py-4 backdrop-blur-md md:flex">
+    <nav aria-label="Sections" className="hidden w-[72px] shrink-0 flex-col items-center gap-2.5 overflow-y-auto border-r border-white/[0.06] bg-[rgba(11,13,17,0.35)] py-4 backdrop-blur-md [scrollbar-width:none] md:flex">
       <img src={import.meta.env.BASE_URL + "icon.svg"} alt="" className="mb-3 size-9 rounded-[10px]" />
       {SECTIONS.map(({ id, label, icon: Icon }) => (
         <button
@@ -26,6 +27,7 @@ export function SideRail() {
           {id === "playplace" && unseen > 0 && <span className="absolute -right-0.5 -top-0.5 grid size-4 place-items-center rounded-full bg-amber font-mono text-[9px] font-bold text-canvas">{unseen}</span>}
         </button>
       ))}
+      <MyAppsRail />
       <LifecycleRail />
     </nav>
   );
@@ -37,7 +39,7 @@ export function MobileTabs() {
   const [more, setMore] = useState(false);
   const primary = SECTIONS.filter((s) => s.mobile);
   const rest = SECTIONS.filter((s) => !s.mobile);
-  const inRest = rest.some((s) => s.id === section);
+  const inRest = section === "app" || rest.some((s) => s.id === section);
   return (
     <>
       {more && (
@@ -61,6 +63,7 @@ export function MobileTabs() {
                 <span className="text-[11px]">{label}</span>
               </button>
             ))}
+            <MyAppsSheet onPick={() => setMore(false)} />
           </div>
         </div>
       )}

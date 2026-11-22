@@ -26,7 +26,7 @@ pub const KINDS: [&str; 3] = ["task", "note", "fix"];
 pub const SOURCES: [&str; 4] = ["typed", "voice", "trace", "phone"];
 
 const TITLE_MAX: usize = 200;
-const BODY_MAX: usize = 8000;
+const BODY_MAX: usize = 100_000;
 const ERR_MAX: usize = 300;
 /// An introspection snapshot older than this is ignored by `context_snapshot`.
 const INTROSPECTION_TTL: u64 = 120;

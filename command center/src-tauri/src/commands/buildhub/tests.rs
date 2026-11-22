@@ -246,10 +246,11 @@ fn manual_repair_and_requeue_reenter_at_the_tail_with_a_fresh_budget() {
 fn steer_appends_a_high_priority_override_and_marks_it_applied_at_the_next_step() {
     let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
     h.get_mut("b-a").unwrap().worker_task_id = Some("t".into());
-    h.steer("b-a", "  make   the CTA bigger ", 100, &[]).unwrap();
+    // A pasted master prompt keeps its shape: line breaks survive, CRLF and runs of blank lines are tidied.
+    h.steer("b-a", "  make the CTA bigger  \r\n\r\n\r\n\r\n  - and darker ", 100, &[]).unwrap();
     let o = &h.get("b-a").unwrap().envelope.human_override[0];
-    assert_eq!((o.directive.as_str(), o.priority.as_str(), o.applied_at), ("make the CTA bigger", "high", None));
-    assert_eq!(override_lines(&h.get("b-a").unwrap().envelope), vec!["make the CTA bigger".to_string()]);
+    assert_eq!((o.directive.as_str(), o.priority.as_str(), o.applied_at), ("make the CTA bigger\n\n  - and darker", "high", None));
+    assert_eq!(override_lines(&h.get("b-a").unwrap().envelope), vec!["make the CTA bigger\n\n  - and darker".to_string()]);
     // A row from a step that was already running doesn't count; the next stage start does.
     let row = |seq, at, ev: &str| WorkerRow { seq, at, event_type: ev.into(), severity: "handoff".into(), from: "prompter".into(), to: "coder".into(), text: "x".into(), stage: Some("code".into()) };
     let w = WorkerSnap { status: "coding".into(), stage: Some("code".into()), rows: vec![row(1, 90, "stage_started"), row(2, 120, "stage_completed")], ..Default::default() };
@@ -267,10 +268,22 @@ fn steer_appends_a_high_priority_override_and_marks_it_applied_at_the_next_step(
 #[test]
 fn steer_text_is_scrubbed_and_capped() {
     let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
-    let long = format!("use token sk-abcdefghijklmnopqrstuv0123 {}", "x".repeat(900));
+    let long = format!("use token sk-abcdefghijklmnopqrstuv0123 {}", "x".repeat(OVERRIDE_MAX + 900));
     h.steer("b-a", &long, 1, &[]).unwrap();
-    let d = &h.get("b-a").unwrap().envelope.human_override[0].directive;
+    let d = h.get("b-a").unwrap().envelope.human_override[0].directive.clone();
     assert!(d.chars().count() <= OVERRIDE_MAX);
+    // A long master prompt (well past the old 500-char cap) goes through whole.
+    let prompt = (1..=120).map(|i| format!("## Section {i}\nKeep the layout from section {i} and add the details below.")).collect::<Vec<_>>().join("\n\n");
+    assert!(prompt.chars().count() > 5000);
+    h.steer("b-a", &prompt, 2, &[]).unwrap();
+    assert_eq!(h.get("b-a").unwrap().envelope.human_override[1].directive, prompt);
+    let n = prompt.chars().count();
+    assert!(h.get("b-a").unwrap().logs.iter().any(|l| l.text.starts_with("Steer received") && l.text.contains(&format!("{} chars", super::group(n)))), "the log states the exact size");
+    // The next agent step logs the injection with the same count.
+    let row = WorkerRow { seq: 9, at: 50, event_type: "stage_started".into(), severity: "handoff".into(), from: "prompter".into(), to: "coder".into(), text: "x".into(), stage: Some("code".into()) };
+    h.get_mut("b-a").unwrap().worker_task_id = Some("t".into());
+    h.apply_worker("b-a", &WorkerSnap { status: "coding".into(), stage: Some("code".into()), rows: vec![row], ..Default::default() }, 51).unwrap();
+    assert!(h.get("b-a").unwrap().logs.iter().any(|l| l.text == format!("✓ Steer injected into the code step: all {n} chars")));
     assert!(!d.contains("sk-abcdefghijklmnopqrstuv0123"));
 }
 
@@ -676,7 +689,7 @@ fn a_hub_hand_off_creates_its_worker_task_in_the_hubs_folder() {
 #[test]
 fn the_contract_leads_the_worker_brief_even_with_a_full_brief() {
     let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
-    h.get_mut("b-a").unwrap().brief = format!("Intake interview:\n- What does done look like? → MUST work offline\n\n{}", "note text ".repeat(900));
+    h.get_mut("b-a").unwrap().brief = format!("Intake interview:\n- What does done look like? → MUST work offline\n\n{}", "note text ".repeat(BRIEF_MAX / 9));
     let s = worker_brief(h.get("b-a").unwrap());
     assert!(s.chars().count() <= BRIEF_MAX);
     assert!(s.starts_with("BUILD CONTRACT"), "{}", &s[..60]);

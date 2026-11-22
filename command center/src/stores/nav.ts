@@ -2,9 +2,11 @@ import { create } from "zustand";
 import type { LucideIcon } from "lucide-react";
 import { CandlestickChart, Cpu, FlaskConical, Gauge, Image, Lightbulb, MessagesSquare, Phone, Receipt, Search, Settings2 } from "lucide-react";
 
-export type Section = "command" | "agents" | "playplace" | "comms" | "brainstorm" | "finance" | "trading" | "vault" | "wallpapers" | "memorymap" | "settings";
+/** "app" is a mounted MY APPS page (`#/app/<id>`), not one of the fixed SECTIONS. */
+export type Section = "command" | "agents" | "playplace" | "comms" | "brainstorm" | "finance" | "trading" | "vault" | "wallpapers" | "memorymap" | "settings" | "app";
+export type FixedSection = Exclude<Section, "app">;
 
-export const SECTIONS: { id: Section; label: string; icon: LucideIcon; mobile: boolean }[] = [
+export const SECTIONS: { id: FixedSection; label: string; icon: LucideIcon; mobile: boolean }[] = [
   { id: "command", label: "Command", icon: Gauge, mobile: true },
   { id: "agents", label: "Agents", icon: MessagesSquare, mobile: true },
   { id: "playplace", label: "Play Place", icon: FlaskConical, mobile: false },
@@ -18,17 +20,31 @@ export const SECTIONS: { id: Section; label: string; icon: LucideIcon; mobile: b
   { id: "settings", label: "Settings", icon: Settings2, mobile: false },
 ];
 
-const fromHash = (): Section => {
-  const h = location.hash.replace("#/", "").split("/")[0] as Section;
-  return SECTIONS.some((s) => s.id === h) ? h : "command";
-};
+/** Section (and mounted app id) from a hash like `#/playplace` or `#/app/build-b-123`. Pure. */
+export function parseHash(hash: string): { section: Section; appId: string | null } {
+  const [head, ...rest] = hash.replace(/^#\/?/, "").split("/");
+  if (head === "app" && rest[0]) return { section: "app", appId: decodeURIComponent(rest.join("/")) };
+  return { section: SECTIONS.some((s) => s.id === head) ? (head as FixedSection) : "command", appId: null };
+}
 
-export const useNav = create<{ section: Section; go: (s: Section) => void }>((set) => ({
-  section: fromHash(),
+interface NavState {
+  section: Section;
+  /** The mounted app shown when `section` is "app". */
+  appId: string | null;
+  go: (s: FixedSection) => void;
+  openApp: (id: string) => void;
+}
+
+export const useNav = create<NavState>((set) => ({
+  ...parseHash(location.hash),
   go: (section) => {
     history.replaceState(null, "", `#/${section}`);
-    set({ section });
+    set({ section, appId: null });
+  },
+  openApp: (id) => {
+    history.replaceState(null, "", `#/app/${encodeURIComponent(id)}`);
+    set({ section: "app", appId: id });
   },
 }));
 
-window.addEventListener("hashchange", () => useNav.setState({ section: fromHash() }));
+window.addEventListener("hashchange", () => useNav.setState(parseHash(location.hash)));

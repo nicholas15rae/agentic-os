@@ -291,6 +291,7 @@ pub fn run() {
             buildhub::build_resume,
             buildhub::build_steer,
             buildhub::build_to_repair,
+            buildhub::build_set_max_iterations,
             buildhub::build_requeue,
             buildhub::build_smoke,
             buildhub::build_promote,

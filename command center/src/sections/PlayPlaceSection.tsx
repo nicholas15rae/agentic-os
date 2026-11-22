@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Archive, BookMarked, Code2, Copy, Eye, Hammer, Lightbulb, Loader2, Maximize2, Play, RotateCcw, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { useCollection } from "@/lib/cc-api";
@@ -13,6 +13,9 @@ import { useToasts } from "@/features/reminders/notify";
 import { devFixMode } from "@/features/memmap/format";
 import { useModes } from "@/features/modes/modes-store";
 import { StagingHub } from "@/features/buildhub/StagingHub";
+import { PromptBox } from "@/components/PromptBox";
+import { useDraft } from "@/lib/prompt-drafts";
+import { PinButton } from "@/features/myapps/PinButton";
 
 /** Phase 2 Part D: Solo (surface_only) builds nothing; the Rust gate stays authoritative. */
 const SOLO_BUILD_HINT = "Solo mode: switch modes to build";
@@ -212,7 +215,14 @@ function Tags({ tags }: { tags?: string[] }) {
 function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: PlayCard; compact: boolean; focused: boolean; onArchive: () => void; onDiscard: () => void }) {
   const gw = useSettings((s) => s.gatewayUrl).replace(/\/+$/, "");
   const [code, setCode] = useState(false);
-  const [tweak, setTweak] = useState("");
+  const [tweak, setTweak] = useDraft(`tweak.${card.id}`);
+  const boxRef = useRef<HTMLElement>(null);
+  // "Edit in Play Place" from a mounted page: bring this card into view with its Tweak box focused.
+  useEffect(() => {
+    if (!focused) return;
+    boxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    boxRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+  }, [focused]);
   const [target, setTarget] = useState<"designer" | "coder">("coder");
   const [busy, setBusy] = useState<string | null>(null);
   const [full, setFull] = useState(false);
@@ -236,13 +246,14 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
 
   const statusTone = card.status === "approved" ? "text-teal" : card.status === "committed" ? "text-volt" : card.status === "building" ? "text-amber-soft" : "text-ink-2";
   return (
-    <section className={`glass rounded-[20px] p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
+    <section ref={boxRef} className={`glass rounded-[20px] p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <Sparkles size={15} className="text-amber-soft" />
         <h2 className="text-[15px] font-semibold text-ink">{card.title}</h2>
         <span className={`label-caps ${statusTone}`}>{card.status}</span>
         {card.versions && <span className="font-mono text-[11px] text-ink-3">v{card.versions.length}</span>}
         <div className="ml-auto flex gap-1">
+          {(card.hasHtml || !!card.html) && <PinButton target={{ kind: "card", ref: card.id, title: card.title }} size="md" />}
           <button onClick={() => setCode((v) => !v)} className="pill-glass !h-8 !px-2.5 text-xs" aria-pressed={code} title="Code inspector">
             {code ? <Eye size={13} /> : <Code2 size={13} />} {code ? "Preview" : "Code"}
           </button>
@@ -292,25 +303,29 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
         </button>
       </div>
 
-      <form
-        className="mt-2 flex gap-1.5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const notes = tweak.trim();
-          if (!notes) return;
-          setTweak("");
-          void act("Iterate", () => cmd("playplace_iterate", { cardId: card.id, notes, target }), { action: "iterate", notes, target });
-        }}
-      >
-        <select value={target} onChange={(e) => setTarget(e.target.value as "designer" | "coder")} className="field !h-9 !w-auto !py-1 text-xs" aria-label="Send tweak to">
-          <option value="coder">Coder</option>
-          <option value="designer">Designer</option>
-        </select>
-        <input value={tweak} onChange={(e) => setTweak(e.target.value)} placeholder="Iterate / tweak — e.g. “bigger CTA, add a dark calendar view”" className="field !h-9 min-w-0 flex-1 !py-1 text-xs" />
-        <button className="pill-glass !h-9 text-xs" disabled={!tweak.trim() || !!busy}>
-          {busy === "Iterate" ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />} Tweak
-        </button>
-      </form>
+      <div className="mt-2">
+        <PromptBox
+          label={`Tweak “${card.title}”`}
+          value={tweak}
+          onChange={setTweak}
+          busy={busy === "Iterate"}
+          disabled={!!busy && busy !== "Iterate"}
+          historyKey="tweak"
+          submitLabel="Tweak"
+          submitIcon={<Wand2 size={11} />}
+          placeholder="Iterate / tweak — e.g. “bigger CTA, add a dark calendar view”. Enter is a new line."
+          adornment={
+            <select value={target} onChange={(e) => setTarget(e.target.value as "designer" | "coder")} className="h-6 rounded-full border border-white/10 bg-transparent px-1.5 font-mono text-[10px] text-ink-2 outline-none" aria-label="Send tweak to">
+              <option value="coder" className="bg-canvas">Coder</option>
+              <option value="designer" className="bg-canvas">Designer</option>
+            </select>
+          }
+          onSubmit={(notes) => {
+            setTweak("");
+            return act("Iterate", () => cmd("playplace_iterate", { cardId: card.id, notes, target }), { action: "iterate", notes, target });
+          }}
+        />
+      </div>
 
       {card.buildPlan && !compact && (
         <details className="mt-3">

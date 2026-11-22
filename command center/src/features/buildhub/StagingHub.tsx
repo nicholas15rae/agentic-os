@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronsUp, Copy, Eye, EyeOff, FlaskConical, Loader2, Pause, Play, Rocket, RotateCcw, Send, ShieldAlert, ShieldCheck, Terminal, Trash2, Wrench } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUp, Copy, Eye, EyeOff, FlaskConical, Loader2, Pause, Play, Rocket, RotateCcw, ShieldAlert, ShieldCheck, Square, Terminal, Trash2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
+import { PromptBox } from "@/components/PromptBox";
+import { useDraft } from "@/lib/prompt-drafts";
+import { PinButton } from "@/features/myapps/PinButton";
+import { useMyApps } from "@/features/myapps/store";
 import { isTauri } from "@/lib/platform";
 import { xcmd, type ExtCommands } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
@@ -103,8 +107,16 @@ function BuildCard({ b }: { b: BuildView }) {
   const live = e.status === "building" || e.status === "smoke_testing";
   const now = useNow(live);
   const [peek, setPeek] = useState(false);
-  const [steer, setSteer] = useState("");
+  const [steer, setSteer] = useDraft(`steer.${id}`);
   const [busy, setBusy] = useState<string | null>(null);
+  const boxRef = useRef<HTMLElement>(null);
+  const focusReq = useMyApps((s) => s.focusBuild);
+  useEffect(() => {
+    if (focusReq?.id !== id) return;
+    boxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    boxRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+    useMyApps.getState().clearFocus();
+  }, [focusReq, id]);
   const w = workerIndicator(b);
   const smoke = smokeBadge(b);
   const ready = e.status === "ready_for_merge";
@@ -125,7 +137,7 @@ function BuildCard({ b }: { b: BuildView }) {
   };
 
   return (
-    <section className={`rounded-[16px] border p-3 ${e.status === "paused" ? "border-amber/40 bg-amber/[0.04]" : "border-white/[0.08] bg-white/[0.02]"}`}>
+    <section ref={boxRef} className={`rounded-[16px] border p-3 ${e.status === "paused" ? "border-amber/40 bg-amber/[0.04]" : "border-white/[0.08] bg-white/[0.02]"}`}>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11px] text-ink-3">{waiting ? `#${b.position}` : `Build ${b.seq}`}</span>
         <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink" title={e.title}>
@@ -166,6 +178,16 @@ function BuildCard({ b }: { b: BuildView }) {
             </button>
           )
         )}
+        {["queued", "building", "smoke_testing", "paused"].includes(e.status) && (
+          <button
+            disabled={!!busy}
+            onClick={() => confirm(`Stop “${e.title}”? The worker stops now; the build and its files are kept in the Repair Queue, where Re-queue runs it again.`) && void act("Stop", "build_to_repair", { buildId: id, reason: "Stopped by Nic (Stop button)" })}
+            className="pill-glass !h-7 !px-2.5 text-[11px] !text-alert hover:!border-alert/60"
+            title="Stop / abort: end the worker loop now (files and logs are kept; re-queue from the Repair Queue)"
+          >
+            {busy === "Stop" ? <Loader2 size={11} className="animate-spin" /> : <Square size={10} fill="currentColor" />} Stop
+          </button>
+        )}
         <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 text-[11px]" aria-pressed={peek} title="Live Read-In / Peek View">
           {peek ? <EyeOff size={11} /> : <Eye size={11} />} Peek
         </button>
@@ -195,6 +217,7 @@ function BuildCard({ b }: { b: BuildView }) {
         <button onClick={() => copyPath(e.output_directory)} className="pill-glass !h-7 !w-7 !p-0" title={`Copy the output folder: ${e.output_directory}`} aria-label="Copy output folder">
           <Copy size={11} />
         </button>
+        <PinButton target={{ kind: "build", ref: id, title: e.title }} />
         {!live && (
           <button onClick={() => confirm(`Remove “${e.title}” from the hub? Its files stay where they are.`) && void act("Remove", "build_remove", { buildId: id })} className="pill-glass !h-7 !w-7 !p-0 hover:!border-alert/50" aria-label="Remove from hub" title="Remove from the hub (files are kept)">
             <Trash2 size={11} />
@@ -203,28 +226,32 @@ function BuildCard({ b }: { b: BuildView }) {
       </div>
 
       {e.status !== "deployed" && (
-        <form
-          className="mt-2 flex gap-1.5"
-          onSubmit={(ev) => {
-            ev.preventDefault();
-            const d = steer.trim();
-            if (!d || busy) return; // one steer at a time: never sent twice
-            // Cleared only on success, and only if Nic hasn't typed something new meanwhile.
-            void clearOnSuccess(act("Steer", "build_steer", { buildId: id, directive: d }), () => setSteer((cur) => (cur.trim() === d ? "" : cur)));
-          }}
-        >
-          <input value={steer} onChange={(ev) => setSteer(ev.target.value)} maxLength={500} placeholder="Steer — e.g. “dark theme, bigger buttons” (next agent step, no restart)" className="field !h-8 min-w-0 flex-1 !py-1 text-[11px]" />
-          <button className="pill-glass !h-8 !px-2.5 text-[11px]" disabled={!steer.trim() || !!busy}>
-            {busy === "Steer" ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />} Steer
-          </button>
-        </form>
+        <div className="mt-2">
+          <PromptBox
+            label={`Steer “${e.title}”`}
+            value={steer}
+            onChange={setSteer}
+            busy={busy === "Steer"}
+            disabled={!!busy && busy !== "Steer"}
+            historyKey="steer"
+            maxHeight={120}
+            submitLabel="Steer"
+            placeholder="Steer — e.g. “dark theme, bigger buttons” (next agent step, no restart). Paste a whole master prompt if you like; Enter is a new line."
+            adornment={e.assigned_worker !== "claude" && <MaxIterations b={b} busy={!!busy} onPick={(max) => void act("Max iterations", "build_set_max_iterations", { buildId: id, max })} />}
+            onSubmit={(d) => {
+              if (busy) return; // one steer at a time: never sent twice
+              // Cleared only on success, and only if Nic hasn't typed something new meanwhile.
+              return clearOnSuccess(act("Steer", "build_steer", { buildId: id, directive: d }), () => setSteer((cur) => (cur.trim() === d ? "" : cur)));
+            }}
+          />
+        </div>
       )}
       {e.human_override.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">
           {e.human_override.map((o, i) => (
-            <li key={i} className="truncate font-mono text-[10px] text-ink-3" title={o.directive}>
+            <li key={i} className="truncate font-mono text-[10px] text-ink-3" title={o.directive.length > 2000 ? `${o.directive.slice(0, 2000)}… (${o.directive.length.toLocaleString()} chars in all)` : o.directive}>
               <span className={o.applied_at ? "text-teal-soft" : "text-amber-soft"}>{o.applied_at ? `✓ injected${o.applied_stage ? ` at ${o.applied_stage}` : ""}` : "⏳ next step"}</span> {o.auto ? "(auto) " : ""}
-              {o.directive}
+              {o.directive.length > 160 ? `${o.directive.split("\n")[0].slice(0, 160)}… (${o.directive.length.toLocaleString()} chars)` : o.directive}
             </li>
           ))}
         </ul>
@@ -239,6 +266,26 @@ function BuildCard({ b }: { b: BuildView }) {
       {!peek && e.target_runtime === "internal_widget" && (ready || e.status === "deployed") && <SandboxView key={e.status} buildId={id} title={e.title} version={b.preview_version} height={260} />}
       <LogPanel b={b} />
     </section>
+  );
+}
+
+const ITERATION_CHOICES = [3, 5, 10, 15] as const;
+
+/** Max Iterations for one build: the worker's Designer/Coder loop budget (applies at once to a live run). */
+function MaxIterations({ b, busy, onPick }: { b: BuildView; busy: boolean; onPick: (max: number) => void }) {
+  const current = b.max_iter_override ?? (b.max_iterations || 3);
+  const choices = ITERATION_CHOICES.includes(current as (typeof ITERATION_CHOICES)[number]) ? ITERATION_CHOICES : [...ITERATION_CHOICES, current].sort((x, y) => x - y);
+  return (
+    <label className="flex h-6 items-center gap-1 rounded-full border border-white/10 px-2 font-mono text-[10px] text-ink-3" title="Max iterations: how many Designer/Coder fix loops this build may run before it stops (applies to the running pass too)">
+      max iter
+      <select value={current} disabled={busy || b.envelope.status === "deployed"} onChange={(ev) => onPick(Number(ev.target.value))} className="bg-transparent text-ink-2 outline-none" aria-label="Max iterations">
+        {choices.map((n) => (
+          <option key={n} value={n} className="bg-canvas">
+            {n}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -270,7 +317,7 @@ function LogPanel({ b }: { b: BuildView }) {
 function RepairCard({ b }: { b: BuildView }) {
   const e = b.envelope;
   const id = e.build_id;
-  const [note, setNote] = useState("");
+  const [note, setNote] = useDraft(`requeue.${id}`);
   const [busy, setBusy] = useState<string | null>(null);
   const [peek, setPeek] = useState(false);
   const r = b.repair;
@@ -315,19 +362,23 @@ function RepairCard({ b }: { b: BuildView }) {
           {peek ? <EyeOff size={11} /> : <Eye size={11} />} Peek
         </button>
       </div>
-      <form
-        className="mt-2 flex gap-1.5"
-        onSubmit={(ev) => {
-          ev.preventDefault();
-          const sent = note.trim();
-          void clearOnSuccess(act("Re-queue", "build_requeue", { buildId: id, note: sent || undefined }), () => setNote((cur) => (cur.trim() === sent ? "" : cur)));
-        }}
-      >
-        <input value={note} onChange={(ev) => setNote(ev.target.value)} maxLength={500} placeholder="Fix note for the agents (optional) — e.g. “inline the CSS, no CDN”" className="field !h-8 min-w-0 flex-1 !py-1 text-[11px]" />
-        <button disabled={!!busy} className="pill-glass !h-8 !px-2.5 text-[11px]" title="Back into staging (tail of the queue) with the failure and your note as overrides">
-          <RotateCcw size={11} /> Re-queue
-        </button>
-      </form>
+      <div className="mt-2">
+        <PromptBox
+          label={`Fix note for “${e.title}”`}
+          value={note}
+          onChange={setNote}
+          allowEmpty
+          busy={busy === "Re-queue"}
+          disabled={!!busy && busy !== "Re-queue"}
+          historyKey="steer"
+          submitLabel="Re-queue"
+          submitIcon={<RotateCcw size={11} />}
+          submitTitle="Back into staging (tail of the queue) with the failure and your note as overrides"
+          placeholder="Fix note for the agents (optional) — e.g. “inline the CSS, no CDN”"
+          adornment={e.assigned_worker !== "claude" && <MaxIterations b={b} busy={!!busy} onPick={(max) => void act("Max iterations", "build_set_max_iterations", { buildId: id, max })} />}
+          onSubmit={(sent) => clearOnSuccess(act("Re-queue", "build_requeue", { buildId: id, note: sent || undefined }), () => setNote((cur) => (cur.trim() === sent ? "" : cur)))}
+        />
+      </div>
       {peek && <PeekView b={b} height={300} />}
       <LogPanel b={b} />
     </section>

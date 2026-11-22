@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { micEnabled } from "@/features/voice/mic-gate";
 import { collections, useCollection } from "@/lib/cc-api";
-import { useNav, SECTIONS, type Section } from "@/stores/nav";
+import { useNav, SECTIONS, type FixedSection } from "@/stores/nav";
 import { useVoice, THREADS, type ThreadId } from "@/features/voice/voice-store";
 import { useToasts } from "@/features/reminders/notify";
 import { hasOnVerb, type OsIntent } from "@/features/os/os-intent-parse";
@@ -58,7 +58,7 @@ export function cueFor(text: string, intent: OsIntent | null, spotify: SpotifyIn
 
 function runAction(w: CueWidget) {
   const { kind, value } = w.action;
-  if (kind === "tab" && SECTIONS.some((s) => s.id === value)) useNav.getState().go(value as Section);
+  if (kind === "tab" && SECTIONS.some((s) => s.id === value)) useNav.getState().go(value as FixedSection);
   else if (kind === "thread" && THREADS.includes(value as ThreadId)) {
     useVoice.getState().setActiveThread(value as ThreadId);
     useNav.getState().go("agents");

@@ -44,13 +44,14 @@ pub const LOG_CAP: usize = 400;
 pub const VIEW_LOG_LINES: usize = 120;
 /// A build that fails its smoke test this many times goes to the Repair Queue on its own.
 pub const AUTO_REPAIR_AFTER: u32 = 2;
-pub const OVERRIDE_MAX: usize = 500;
+/// A steer / repair note: a pasted master prompt, kept whole (line breaks included).
+pub const OVERRIDE_MAX: usize = 100_000;
 pub const OVERRIDES_MAX: usize = 12;
 pub const TITLE_MAX: usize = 120;
 pub const SUMMARY_MAX: usize = 2000;
 pub const LIST_MAX: usize = 12;
 pub const ITEM_MAX: usize = 240;
-pub const BRIEF_MAX: usize = 8000;
+pub const BRIEF_MAX: usize = envelope::RAW_INTENT_MAX;
 
 // ── The spec's TaskEnvelope ─────────────────────────────────────────────────
 
@@ -181,6 +182,9 @@ pub struct Build {
     /// A short-lived file operation is running (scaffold / copy / promote): Exit asks first.
     #[serde(default)]
     pub committing: bool,
+    /// Nic's Max Iterations pick for this build (None: Settings → worker budget).
+    #[serde(default)]
+    pub max_iter_override: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -218,6 +222,49 @@ pub fn valid_build_id(s: &str) -> bool {
 fn clean(s: &str, max: usize) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
     one.chars().take(max).collect()
+}
+
+/// "5,123 chars, 42 lines — <first line…>": what a log line says about a long steer (pure).
+pub fn steer_summary(d: &str) -> String {
+    let n = d.chars().count();
+    let lines = d.lines().count();
+    let first: String = d.lines().next().unwrap_or("").chars().take(120).collect();
+    let more = if lines > 1 || first.chars().count() < n { "…" } else { "" };
+    format!("{} chars, {lines} line{} — {first}{more}", group(n), if lines == 1 { "" } else { "s" })
+}
+
+fn group(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Like `clean`, but keeps the text's shape: line breaks and indentation survive (a multi-section
+/// master prompt stays readable for the agents). CRLF → LF, trailing spaces and 3+ blank lines
+/// trimmed. Pure.
+pub fn clean_block(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut blank = 0;
+    for line in s.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            blank += 1;
+            if blank > 1 {
+                continue;
+            }
+        } else {
+            blank = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim().chars().take(max).collect()
 }
 
 /// Validate and normalise an envelope arriving from the webview for `enqueue` (pure).
@@ -378,6 +425,7 @@ impl HubFile {
             note_ids: note_ids.into_iter().take(64).collect(),
             promoted_at: None,
             preview_version: 0,
+            max_iter_override: None,
             committing: false,
         };
         let line = format!("Queued #{} ({} · {:?})", b.seq, match b.envelope.target_runtime { Runtime::InternalWidget => "internal widget", Runtime::ExternalOs => "external app" }, b.envelope.assigned_worker);
@@ -516,7 +564,7 @@ impl HubFile {
             let what = if b.envelope.status == Status::Paused { format!("paused {}", status_str(at).replace('_', " ")) } else { status_str(at).replace('_', " ") };
             return Err(format!("no agent step runs again on a {what} build — send it to Repair with this as the note to rebuild with it"));
         }
-        let d = devqueue::scrub(&clean(directive, OVERRIDE_MAX), known);
+        let d = devqueue::scrub(&clean_block(directive, OVERRIDE_MAX), known);
         if d.is_empty() {
             return Err("the steer directive is empty".into());
         }
@@ -524,7 +572,7 @@ impl HubFile {
             return Err(format!("at most {OVERRIDES_MAX} overrides per build"));
         }
         b.envelope.human_override.push(HumanOverride { directive: d.clone(), priority: "high".into(), at: now, applied_at: None, applied_stage: None, auto: false });
-        push_log(b, now, "event", format!("Steer (high priority): {d}"));
+        push_log(b, now, "event", format!("Steer received (high priority): {}", steer_summary(&d)));
         if b.envelope.assigned_worker == AssignedWorker::Claude && b.envelope.status == Status::Building {
             // A live Claude Code run can't take new input: say so instead of dropping it silently.
             push_log(b, now, "event", "Claude Code is mid-run: this steer goes with its next hand-off (a repair pass or a re-queue)".into());
@@ -553,9 +601,17 @@ impl HubFile {
 
     /// Mark pending overrides applied when a later agent step started (pure).
     pub fn mark_applied(b: &mut Build, step_at: i64, stage: Option<&str>) {
+        let mut injected = Vec::new();
         for o in b.envelope.human_override.iter_mut().filter(|o| o.applied_at.is_none() && o.at <= step_at) {
             o.applied_at = Some(step_at);
             o.applied_stage = stage.map(String::from);
+            if !o.auto {
+                injected.push(o.directive.chars().count());
+            }
+        }
+        // Proof in the card's log that the whole steer reached the agents (the log line itself is short).
+        for n in injected {
+            push_log(b, step_at, "event", format!("✓ Steer injected into the {} step: all {n} chars", stage.unwrap_or("next")));
         }
     }
 
@@ -579,7 +635,7 @@ impl HubFile {
             return Err("only a build in the Repair Queue can re-enter staging".into());
         }
         let mut b = self.builds.remove(i);
-        if let Some(n) = note.map(|n| devqueue::scrub(&clean(n, OVERRIDE_MAX), known)).filter(|n| !n.is_empty()) {
+        if let Some(n) = note.map(|n| devqueue::scrub(&clean_block(n, OVERRIDE_MAX), known)).filter(|n| !n.is_empty()) {
             b.envelope.human_override.push(HumanOverride { directive: n, priority: "high".into(), at: now, applied_at: None, applied_stage: None, auto: false });
         }
         if let Some(r) = &b.repair {
@@ -910,7 +966,7 @@ pub fn claude_brief(b: &Build) -> String {
 }
 
 /// The Dev Fix Queue's body cap (`devqueue::BODY_MAX`).
-pub const CLAUDE_BODY_MAX: usize = 8000;
+pub const CLAUDE_BODY_MAX: usize = 100_000;
 
 /// One worker task per hand-off (an automatic repair pass is a new hand-off). Only characters
 /// the task store accepts in a dedupe key (`[A-Za-z0-9-_.:]`). Pure.
@@ -935,7 +991,7 @@ pub struct IntakeLine {
 
 /// Intake lines kept per build (and chars per side).
 pub const INTAKE_LINES_MAX: usize = 30;
-pub const INTAKE_TEXT_MAX: usize = 2000;
+pub const INTAKE_TEXT_MAX: usize = 16_000;
 
 /// The agent id of an assigned worker.
 pub fn worker_id(w: AssignedWorker) -> &'static str {
@@ -1232,7 +1288,7 @@ async fn dispatch_worker(app: &AppHandle, id: &str) -> Result<(), String> {
     let hub = app.state::<HubState>();
     let b = hub.snapshot().get(id).cloned().ok_or("build vanished")?;
     let os = app.state::<OsState>();
-    let max = os.snapshot().worker.max_iterations;
+    let max = b.max_iter_override.map(|n| n.clamp(1, envelope::MAX_LOOP_ITERATIONS) as u8).unwrap_or(os.snapshot().worker.max_iterations);
     let policy = os.modes.effective().dispatch;
     let args = super::taskworker::CreateArgs {
         raw_intent: worker_brief(&b),
@@ -1957,6 +2013,22 @@ pub async fn build_steer(app: AppHandle, build_id: String, directive: String) ->
     let id = build_id.clone();
     mutate_bg(&app, move |f, now, known| f.steer(&id, &directive, now, known)).await?;
     let b = app.state::<HubState>().snapshot().get(&build_id).cloned().ok_or("build vanished")?;
+    // The full steer, verbatim, as a file in the run's workspace: a durable copy to check against
+    // (the agents get the same text in every step's prompt, never through a command line).
+    if let Some(o) = b.envelope.human_override.last() {
+        match save_steer_file(&app, &build_id, &o.directive, o.at) {
+            Ok(path) => {
+                let id = build_id.clone();
+                let line = format!("Steer saved: {} chars → {}", group(o.directive.chars().count()), path.display());
+                let _ = mutate_bg(&app, move |f, now, _| {
+                    push_log(f.get_mut(&id)?, now, "event", line);
+                    Ok(())
+                })
+                .await;
+            }
+            Err(e) => eprintln!("[hub] steer file for {build_id}: {e}"),
+        }
+    }
     // Steer is part of the conversation with the agents: it is recorded in the chat too.
     if let Some(o) = b.envelope.human_override.last() {
         hub_note(&build_id, "hub_steer", "handoff", &format!("Steer for “{}” (next agent step): {}", b.envelope.title, o.directive));
@@ -1978,6 +2050,49 @@ pub async fn build_steer(app: AppHandle, build_id: String, directive: String) ->
         }
     }
     build_of(&app, &build_id)
+}
+
+/// Max Iterations for one build: kept on the build (its next hand-off uses it) and applied to
+/// the live worker task at once, so a long visual pass doesn't stop at the default 3.
+#[tauri::command]
+pub async fn build_set_max_iterations(app: AppHandle, build_id: String, max: u32) -> Result<u32, String> {
+    let max = max.clamp(1, envelope::MAX_LOOP_ITERATIONS);
+    let id = build_id.clone();
+    mutate_bg(&app, move |f, now, _| {
+        let b = f.get_mut(&id)?;
+        b.max_iter_override = Some(max);
+        push_log(b, now, "event", format!("Max iterations set to {max}"));
+        Ok(())
+    })
+    .await?;
+    let worker = app.state::<HubState>().snapshot().get(&build_id).and_then(|b| b.worker_task_id.clone());
+    if let Some(t) = worker {
+        let a = app.clone();
+        let set = blocking(move || a.state::<TaskStore>().with(|c| envelope::set_max_iterations(c, &t, max))).await?;
+        if let Some(n) = set {
+            let id = build_id.clone();
+            let _ = app.state::<HubState>().with(|f| {
+                if let Ok(b) = f.get_mut(&id) {
+                    b.max_iterations = n;
+                }
+                Ok(())
+            });
+            changed(&app);
+        }
+    }
+    Ok(max)
+}
+
+/// `<app data>/steer/<build_id>/steer_prompt_<at>.md`: the steer exactly as the agents receive it.
+fn save_steer_file(app: &AppHandle, build_id: &str, directive: &str, at: i64) -> Result<PathBuf, String> {
+    if !valid_build_id(build_id) {
+        return Err("bad build id".into());
+    }
+    let dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("steer").join(build_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("steer_prompt_{at}.md"));
+    std::fs::write(&path, directive).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 /// Send to the Repair Queue. A live worker task is cancelled (its finished stages and log stay in

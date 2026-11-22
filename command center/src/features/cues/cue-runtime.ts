@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { micEnabled } from "@/features/voice/mic-gate";
+import { hydrateMic, micEnabled } from "@/features/voice/mic-gate";
 import { collections, useCollection } from "@/lib/cc-api";
 import { useNav, SECTIONS, type FixedSection } from "@/stores/nav";
 import { useVoice, THREADS, type ThreadId } from "@/features/voice/voice-store";
@@ -8,7 +8,7 @@ import { hasOnVerb, type OsIntent } from "@/features/os/os-intent-parse";
 import type { SpotifyIntent } from "@/lib/platform";
 import { cueIntroMigration, DEFAULT_CUES, type CueWidget } from "./types";
 import { norm } from "./gaba";
-import { runCue, stopAllAudio, useCueRun } from "./player";
+import { cueGeneration, runCue, stopAllAudio, useCueRun } from "./player";
 
 /**
  * Cue triggers: voice/text phrase, time of day, app startup. The voice
@@ -65,8 +65,31 @@ function runAction(w: CueWidget) {
   } else if (kind === "prompt" && value.trim()) prompt(value.trim());
 }
 
+const cueFailed = (w: CueWidget, e: unknown) => useToasts.getState().push({ title: `${w.name} couldn't play`, body: String(e), tone: "error" });
+
 export function fireCue(w: CueWidget) {
-  void runCue(w, speak, runAction).catch((e) => useToasts.getState().push({ title: `${w.name} couldn't play`, body: String(e), tone: "error" }));
+  void runCue(w, speak, runAction).catch((e) => cueFailed(w, e));
+}
+
+/**
+ * Play every enabled startup cue ONE AFTER ANOTHER (the built-in welcome first). Firing them
+ * together made each `runCue` stop the one before it, so only the last survived. A cue the
+ * user stops (or that anything else supersedes) ends the chain.
+ */
+export async function runStartupCues(cues: (CueWidget & { _deleted?: boolean })[]) {
+  const queue = cues
+    .filter((c) => c.enabled && c.startup && !c._deleted)
+    .sort((a, b) => Number(b.builtin === "startup") - Number(a.builtin === "startup"));
+  for (const c of queue) {
+    const run = runCue(c, speak, runAction);
+    const gen = cueGeneration(); // runCue bumps it synchronously before its first await
+    try {
+      await run;
+    } catch (e) {
+      cueFailed(c, e);
+    }
+    if (cueGeneration() !== gen) return;
+  }
 }
 
 /** Toggle from the top-bar pill: stop if running, else start Gabagool Mode. */
@@ -109,18 +132,21 @@ export function useCueScheduler() {
 
   useEffect(() => {
     if (!loaded) return;
-    let fired = false;
-    try {
-      fired = sessionStorage.getItem("cc.cues.startup") === "1";
-      sessionStorage.setItem("cc.cues.startup", "1");
-    } catch {
-      /* private mode */
-    }
-    if (fired) return;
+    // The once-per-session flag is claimed only when the timer actually fires: React StrictMode
+    // (dev) mounts → cleans up → mounts again, and a flag set up front made the second mount bail
+    // while the first mount's timer had been cleared, so startup cues never played in dev.
     const t = setTimeout(() => {
-      // Phase 2 Part B (D6): no unsolicited startup cue while the mic is locked off.
-      if (!micEnabled()) return;
-      for (const c of collections.snapshot<CueWidget>("cues")) if (c.enabled && c.startup && !c._deleted) fireCue(c);
+      try {
+        if (sessionStorage.getItem("cc.cues.startup") === "1") return;
+        sessionStorage.setItem("cc.cues.startup", "1");
+      } catch {
+        /* private mode */
+      }
+      // Phase 2 Part B (D6): no unsolicited startup cue while the mic is locked off. Wait for
+      // the authoritative read, so a slow hydration isn't mistaken for a locked mic.
+      void hydrateMic().then(() => {
+        if (micEnabled()) void runStartupCues(collections.snapshot<CueWidget>("cues"));
+      });
     }, 2500);
     return () => clearTimeout(t);
   }, [loaded]);

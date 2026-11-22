@@ -223,6 +223,8 @@ interface CueRun {
 }
 let current: Playing[] = [];
 let generation = 0;
+/** Bumped by every cue start and every stop: a caller can tell whether its cue was superseded. */
+export const cueGeneration = () => generation;
 
 /** The running cue's theme, for live volume changes. `introDuck`: still held at its duck level under the intro. */
 const live: { cueId: string | null; theme: Playing | null; base: number; introDuck: boolean } = { cueId: null, theme: null, base: 1, introDuck: false };

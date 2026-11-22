@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Power, RotateCw, Activity } from "lucide-react";
+import { GatewayPopover } from "./GatewayPopover";
 import { isTauri } from "@/lib/platform";
 import { xcmd } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
@@ -46,13 +47,7 @@ function HealthButton() {
   const h = useHealth((s) => s.health);
   const v = healthView(h);
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [open]);
+  const btn = useRef<HTMLButtonElement>(null);
 
   const reset = async () => {
     try {
@@ -64,31 +59,25 @@ function HealthButton() {
     }
   };
 
+  // The popover lives in a body portal (the rail is overflow-clipped and blurred, which hid the
+  // old in-rail panel): the button only toggles; outside clicks / Esc close from the popover.
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={btn}
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-label={v.title}
         title={v.title}
         aria-expanded={open}
-        className={`${railBtn} ${v.alarm ? "border border-alert/60 bg-alert/10 text-alert" : ""}`}
+        aria-haspopup="dialog"
+        className={`${railBtn} ${v.alarm ? "border border-alert/60 bg-alert/10 text-alert" : ""} ${open ? "bg-white/10 text-ink" : ""}`}
       >
         <Activity size={17} />
         <span className={`absolute right-2 top-2 size-2 rounded-full ${v.dot} ${v.alarm ? "animate-pulse" : ""}`} />
       </button>
-      {open && (
-        <div role="dialog" aria-label="Gateway health" className="glass absolute bottom-0 left-[calc(100%+10px)] z-50 w-60 rounded-[14px] p-3 text-xs">
-          <p className="label-caps text-ink-3">Gateway</p>
-          <p className={`mt-1 font-mono text-[13px] ${v.tone === "ok" ? "text-teal" : v.tone === "warn" ? "text-amber-soft" : v.tone === "bad" ? "text-alert" : "text-ink-2"}`}>{v.label}</p>
-          {h.detail && <p className="mt-0.5 text-ink-3">{h.detail}</p>}
-          {h.checkedAt > 0 && <p className="mt-0.5 font-mono text-[10px] text-ink-3">checked {new Date(h.checkedAt).toLocaleTimeString()}</p>}
-          <button onClick={() => void reset()} disabled={h.reconnecting} className={`${v.alarm ? "pill-primary" : "pill-glass"} mt-2 !h-8 w-full justify-center text-[11px]`}>
-            {h.reconnecting ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />} Trigger Master Reset / Reconnect
-          </button>
-        </div>
-      )}
-    </div>
+      {open && <GatewayPopover anchor={btn} health={h} onClose={() => setOpen(false)} onReset={() => void reset()} />}
+    </>
   );
 }
 

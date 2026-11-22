@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { matchingWallpapers, useWallpapers } from "./wallpaper-store";
+import { surfacePool } from "./backdrop-model";
+import { useSurfaceConfig } from "./backdrop-store";
 import { useAtmosphere, useTimePhase } from "@/features/weather/weather-store";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
@@ -13,16 +15,19 @@ import { usePrefersReducedMotion } from "@/lib/use-media-query";
 export function WallpaperSlideshow() {
   const { items, currentId, playing, hydrated, hydrate, next } = useWallpapers();
   const { wallpaperIntervalSec, wallpaperShuffle, wallpaperSync } = useSettings();
+  const home = useSurfaceConfig("home");
   const reduced = usePrefersReducedMotion();
   const [layers, setLayers] = useState<{ key: string; src: string }[]>([]);
   const atmosphere = useAtmosphere();
   const phase = useTimePhase();
 
-  // Weather + time-of-day sync: rotate only through scenes tagged for now.
-  const allowed = useMemo(
-    () => (wallpaperSync ? matchingWallpapers(items, atmosphere, phase).map((w) => w.id) : undefined),
-    [wallpaperSync, items, atmosphere, phase],
-  );
+  // Home's pool (wallpapers assigned to Home; a pin wins), narrowed to now when sync is on. An
+  // empty Home pool falls back to every enabled wallpaper so Home never goes black.
+  const allowed = useMemo(() => {
+    const pool = surfacePool(items, "home", { syncWeatherTime: wallpaperSync, pinnedWallpaperId: home.pinnedWallpaperId }, atmosphere, phase);
+    if (pool.length) return pool.map((w) => w.id);
+    return wallpaperSync ? matchingWallpapers(items, atmosphere, phase).map((w) => w.id) : undefined;
+  }, [wallpaperSync, items, atmosphere, phase, home.pinnedWallpaperId]);
   const allowedKey = allowed?.join(",");
 
   useEffect(() => {
@@ -37,13 +42,13 @@ export function WallpaperSlideshow() {
 
   // Auto-advance (paused when hidden or when the user pauses the reel).
   useEffect(() => {
-    if (!playing || !hydrated) return;
+    if (!playing || !hydrated || home.pinnedWallpaperId) return;
     const t = setInterval(() => {
       if (!document.hidden) next(1, wallpaperShuffle, allowed);
     }, Math.max(5, wallpaperIntervalSec) * 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, hydrated, wallpaperIntervalSec, wallpaperShuffle, next, allowedKey]);
+  }, [playing, hydrated, wallpaperIntervalSec, wallpaperShuffle, next, allowedKey, home.pinnedWallpaperId]);
 
   // Preload + decode the next image before swapping it in.
   const src = items.find((i) => i.id === currentId)?.src;
@@ -66,7 +71,7 @@ export function WallpaperSlideshow() {
 
   return (
     <div aria-hidden className="fixed inset-0 -z-10 overflow-hidden bg-canvas">
-      {layers.map((layer, i) => (
+      {home.enabled && layers.map((layer, i) => (
         <div
           key={layer.key}
           className="absolute inset-0 transition-opacity duration-[1600ms] ease-out starting:opacity-0"

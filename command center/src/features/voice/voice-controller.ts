@@ -11,6 +11,7 @@ import { handleLocalIntent } from "@/features/reminders/intents";
 import { gated } from "@/features/bridge/gate";
 import { liveContext } from "@/features/os/context";
 import { cuePlayingNow, parseOsLine, runOsIntent } from "@/features/os/os-intents";
+import { parseModeSwitch } from "@/features/modes/mode-intent";
 import type { OsIntent } from "@/features/os/os-intent-parse";
 import { cueOwnsVolume, parseSpotifyLine, runPendingSpotify, runSpotifyIntent } from "@/features/os/spotify-intents";
 import type { SpotifyIntent } from "@/lib/platform";
@@ -617,6 +618,42 @@ export function toggleListening() {
   }
 }
 
+// ── Mode switch fast path ──────────────────────────────────────────────────────
+
+/**
+ * Switch Tony's work mode (the exact `useModes.setActive` the top-bar menu uses, so the pill,
+ * dropdown, persisted mode and Rust's system prompt all follow), log `→ Switched mode: X`, then:
+ * a pure switch answers at once (spoken on voice) with no model call; a compound line re-enters
+ * `handleInput` with the rest, which now runs under the new mode's prompt.
+ */
+async function switchModeTurn(line: string, mode: string, rest: string, opts: { channel: Channel; thread?: ThreadId; origin?: TurnOrigin }, gen: number): Promise<void> {
+  const thread: ThreadId = opts.channel === "voice" ? tonyThread() : (opts.thread ?? (useNav.getState().section === "agents" ? store().activeThread : "auto"));
+  const modes = useModes.getState();
+  const name = modes.modes.find((m) => m.id === mode)?.name ?? mode;
+  let ok = true;
+  try {
+    if (modes.activeId !== mode) await modes.setActive(mode);
+  } catch (e) {
+    ok = false;
+    if (!rest) store().pushTurn({ who: "user", text: line, thread });
+    store().pushTurn({ who: "system", text: `Couldn't switch to ${name}: ${e instanceof Error ? e.message : String(e)}`, tone: "warn", thread });
+  }
+  if (ok) {
+    if (!rest) store().pushTurn({ who: "user", text: line, thread });
+    store().pushTurn({ who: "system", text: `→ Switched mode: ${name}`, tone: "ok", thread });
+  }
+  if (rest) return handleInput(rest, { ...opts, shown: line });
+  if (gen !== micGen) return;
+  const reply = ok ? `Switched to ${name} mode.` : `I couldn't switch to ${name} mode.`;
+  if (opts.channel === "voice") {
+    store().setState("speaking");
+    startBargeIn();
+    await say(reply);
+    return afterVoiceReply(gen);
+  }
+  store().setState("idle");
+}
+
 // ── Routing (Part 1 / P2) ────────────────────────────────────────────────────
 //
 // One resolver for the planner (mutating plans → a gateway agent) and the OS turn (read-only →
@@ -628,7 +665,9 @@ const routeOpts = (utterance: string, thread: ThreadId, channel: Channel, cfg: R
 // ── Input handling ──────────────────────────────────────────────────────────
 
 /** `origin`: who opened the mic for a voice line; omitted = the current turn's (follow-up / barge-in). */
-export async function handleInput(text: string, opts: { channel: Channel; thread?: ThreadId; origin?: TurnOrigin }): Promise<void> {
+/** `shown`: the line to show in the chat when it differs from `text` (a compound mode switch
+ * re-enters with only the instruction after the switch). */
+export async function handleInput(text: string, opts: { channel: Channel; thread?: ThreadId; origin?: TurnOrigin; shown?: string }): Promise<void> {
   const v = store();
   const t = text.trim();
   if (!t) return;
@@ -642,6 +681,12 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   const live = () => gen === micGen;
   if (opts.channel === "text") turnOrigin = "text";
   else if (opts.origin) turnOrigin = opts.origin;
+  // Tony's work mode by voice or text ("go into builder mode", "coaching mode", "exec mode and …"):
+  // the same setter as the top-bar MODE menu, before any card, cue, grammar or model call.
+  if (!opts.shown) {
+    const ms = parseModeSwitch(t, useSettings.getState().osName || "Tony");
+    if (ms) return switchModeTurn(t, ms.mode, ms.rest, opts, gen);
+  }
   // One parse decides stops, cue volume and whether a cue may fire; a line it leaves alone asks
   // Rust's Spotify grammar (`spotify_parse`, the only Spotify grammar).
   const intent = parseOsLine(t);
@@ -667,7 +712,7 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
         ? opts.thread
         : tonyThread()
       : (opts.thread ?? (useNav.getState().section === "agents" ? v.activeThread : "auto"));
-  const userTurn = v.pushTurn({ who: "user", text: t, thread });
+  const userTurn = v.pushTurn({ who: "user", text: opts.shown ?? t, thread });
 
   // "Stop gabagool mode" (any spelling Whisper produces) — checked BEFORE starting cues,
   // since the phrase itself contains "gabagool mode". Stops the cue clips AND Tony's

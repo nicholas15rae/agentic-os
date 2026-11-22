@@ -729,6 +729,43 @@ pub fn apply_inbox_command(os: &OsState, p: &Value) -> Result<Option<Effective>,
     Ok(out)
 }
 
+static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// lib.rs setup: lets a tool-driven switch (`tony.set_mode`) tell the webview, like the menu does.
+pub fn install(app: &tauri::AppHandle) {
+    let _ = APP.set(app.clone());
+}
+
+/// A work mode from what Tony (or a person) calls it: the id, the display name, or an alias
+/// ("coach", "motivation", "exec", "solo", "study", "brainstorming"…). Never Gabagool (a toggle,
+/// not a work mode). Pure.
+pub fn resolve_work_mode(q: &str) -> Option<&'static str> {
+    let q = q.trim().to_ascii_lowercase().replace(['/', '-', '_'], " ");
+    let q = q.trim_end_matches(" mode").split_whitespace().collect::<Vec<_>>().join(" ");
+    const ALIASES: [(&str, &[&str]); 6] = [
+        ("surface", &["surface", "solo", "surface solo"]),
+        ("builder", &["builder", "build", "building"]),
+        ("coach", &["coach", "coaching", "motivation", "motivational", "motivation coach", "motivational coach"]),
+        ("brainstorm", &["brainstorm", "brainstorming"]),
+        ("executive", &["executive", "exec", "strategy", "high level strategy"]),
+        ("learning", &["learning", "learn", "study", "training"]),
+    ];
+    ALIASES.iter().find(|(_, a)| a.contains(&q.as_str())).map(|(id, _)| *id)
+}
+
+/// `tony.set_mode`: Tony switches its own work mode when the user asks in natural words ("act
+/// like my coach right now"). The same `switch_mode` + change event as the top-bar menu.
+pub fn set_mode_by_tool(os: &OsState, mode: &str) -> Result<String, String> {
+    let id = resolve_work_mode(mode).ok_or_else(|| format!("unknown mode \"{mode}\" — use surface, builder, coach, brainstorm, executive or learning"))?;
+    let e = switch_mode(os, id)?;
+    if let Some(app) = APP.get() {
+        emit_changed(app, os);
+    }
+    let name = os.modes.view()["modes"].as_array().and_then(|a| a.iter().find(|m| m["id"] == id)).and_then(|m| m["name"].as_str().map(String::from)).unwrap_or_else(|| id.to_string());
+    let _ = e;
+    Ok(format!("Switched mode: {name}. From your next reply on you follow that mode's rules."))
+}
+
 fn emit_changed(app: &tauri::AppHandle, os: &OsState) {
     use tauri::Emitter;
     let _ = app.emit(MODE_CHANGED_EVENT, os.modes.view());

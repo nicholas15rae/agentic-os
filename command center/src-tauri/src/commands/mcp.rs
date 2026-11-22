@@ -429,6 +429,9 @@ const BROWSER_READ_TOOLS: [&str; 14] = [
 
 /// Whether the model's router may be offered `name`. `tony`: Tony's own turn.
 pub(crate) fn offered_to_router(name: &str, tony: bool) -> bool {
+    if name == TONY_SET_MODE {
+        return tony;
+    }
     if name.starts_with("spotify.") {
         return if tony { SPOTIFY_ROUTER_TOOLS.contains(&name) } else { SPOTIFY_READ_TOOLS.contains(&name) };
     }
@@ -480,9 +483,15 @@ pub(crate) const READ_ONLY_ROLE_PREFIX: &str = "PERMISSION_READ_ONLY_ROLE:";
 /// granted the tool's server (`McpServer.grants`; `skills.read` checks its own grants) and the
 /// tool must pass its role policy: the Librarian's exact allowlist, and no data-changing tool
 /// for any read-only role (everyone but Tony).
+/// Tony's own mode switch (local, reversible, Tony only): never an MCP permission card.
+pub(crate) const TONY_SET_MODE: &str = "tony.set_mode";
+
 pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> Option<String> {
     if is_tony(agent) {
         return None;
+    }
+    if name == TONY_SET_MODE {
+        return Some(format!("{ROLE_PREFIX}{agent} — only Tony switches Tony's mode"));
     }
     let a = agent.trim().to_ascii_lowercase();
     let Some(policy) = super::roles::policy_for(&a) else {
@@ -551,6 +560,9 @@ pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolS
     let mut all: Vec<ToolInfo> = results.into_iter().flatten().collect();
     if cfg.skills.grants.values().any(|a| os_core::agent_matches(a, agent)) {
         all.push(t("skills", "skills.read", "Read the full instructions of one of your attached skills.", &["name"]));
+    }
+    if is_tony {
+        all.push(t("tony", TONY_SET_MODE, "Switch your own work mode when the user asks for a different way of working (\"act like my coach\" → coach, \"high-level strategy\" → executive, \"let's just chat\" → surface). mode: surface|builder|coach|brainstorm|executive|learning.", &["mode"]));
     }
     let all = role_filter(all, agent);
     let offered = router_filter(&all, is_tony);
@@ -994,6 +1006,13 @@ pub async fn call_tool_with(state: &DispatchState, os: &OsState, bridge: &Bridge
     if let Some(e) = role_refusal(&cfg, name, agent) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
+    }
+    // Tony's own work mode: a local, reversible setting (the same as the top-bar menu), so no MCP card.
+    if name == TONY_SET_MODE {
+        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        let r = super::modes::set_mode_by_tool(os, mode);
+        trace_tool(state, os, name, 0, r.as_ref().err().map(String::as_str));
+        return r;
     }
     // A read-only server's write tools are refused for every caller, before any card asks.
     if let Some(e) = read_only_refusal(&cfg, name) {
@@ -2870,5 +2889,19 @@ mod tests {
             println!("LIVE sqlite   call list_tables over the warm session: {} in {} ms", if r.is_ok() { "ok" } else { "ERR" }, t0.elapsed().as_millis());
             assert!(r.is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod tony_mode_tool_tests {
+    use super::*;
+
+    #[test]
+    fn set_mode_is_offered_to_tony_only_and_refused_for_sub_agents() {
+        assert!(offered_to_router(TONY_SET_MODE, true));
+        assert!(!offered_to_router(TONY_SET_MODE, false));
+        let cfg = os_core::OsConfig::default();
+        assert!(role_refusal(&cfg, TONY_SET_MODE, "general").is_none());
+        assert!(role_refusal(&cfg, TONY_SET_MODE, "coder").is_some_and(|e| e.starts_with(ROLE_PREFIX)));
     }
 }

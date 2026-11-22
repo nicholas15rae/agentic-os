@@ -11,6 +11,8 @@ import { pulseEdge } from "@/features/arbiter/agent-graph";
 import type { ArbiterNode, Handoff, MemoryRow } from "@/features/arbiter/api";
 import { useMemmapData } from "@/features/memmap/use-memmap-data";
 import { useSysMap } from "./sysmap-store";
+import { SurfaceBackdropLayer, useBackdropActive } from "@/features/wallpaper/SurfaceBackdropLayer";
+import { BackdropHudToggle } from "@/features/wallpaper/BackdropHudToggle";
 import { agentFor, BUSES, hookupsFor, isRoster, modelName, moonSize, NODE_BUS, NODE_LABEL, orbitPos, ORBITS, ROSTER, surfaceState, SURFACE_TONE, type Orbit, type RosterId } from "./model";
 import { ARC_FRAG, ARC_VERT, ATMO_FRAG, BODY_VERT, NEBULA_FRAG, NEBULA_VERT, PLANET_FRAG, RING_FRAG, RING_VERT, STAR_FRAG, STARS_FRAG, STARS_VERT } from "./orbital-shaders";
 
@@ -521,9 +523,22 @@ function CameraRig({ focus, positions, controls, homeReq }: { focus: string | nu
   return null;
 }
 
+/** Transparent clear while a custom backdrop shows; the scene background is null then. */
+function ClearAlpha({ backdrop }: { backdrop: boolean }) {
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const invalidate = useThree((s) => s.invalidate);
+  useEffect(() => {
+    gl.setClearColor(0x020308, backdrop ? 0 : 1);
+    if (backdrop) scene.background = null;
+    invalidate();
+  }, [backdrop, gl, scene, invalidate]);
+  return null;
+}
+
 // ── Scene ────────────────────────────────────────────────────────────────────
 
-function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positions, els }: { live: Live; running: boolean; reduced: boolean; pulses: (Handoff & { key: number })[]; focus: string | null; onPick: (id: RosterId) => void; homeReq: number; positions: Positions; els: MutableRefObject<Map<string, HTMLDivElement>> }) {
+function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positions, els, backdrop }: { live: Live; running: boolean; reduced: boolean; pulses: (Handoff & { key: number })[]; focus: string | null; onPick: (id: RosterId) => void; homeReq: number; positions: Positions; els: MutableRefObject<Map<string, HTMLDivElement>>; backdrop: boolean }) {
   const time = useRef(0);
   const flashes = useRef(new Map<string, number>());
   const controls = useRef<OrbitControlsImpl | null>(null);
@@ -550,9 +565,12 @@ function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positio
 
   return (
     <>
-      <color attach="background" args={["#020308"]} />
+      {/* Clean Minimal: the opaque obsidian scene + nebula. Custom backdrop: no scene background,
+          a transparent clear, so the DOM backdrop shows through at zero texture VRAM. */}
+      {!backdrop && <color attach="background" args={["#020308"]} />}
+      <ClearAlpha backdrop={backdrop} />
       <ambientLight intensity={0.12} />
-      <Nebula />
+      {!backdrop && <Nebula />}
       <Starfield time={time} />
       <GalacticDust time={time} />
       {ROSTER.filter((r) => ORBITS[r].radius > 0).map((r, i, all) => {
@@ -597,6 +615,7 @@ export function OrbitalEcosystem() {
   const hud = useSysMap((s) => s.hud);
   const setHud = useSysMap((s) => s.setHud);
   const [homeReq, setHomeReq] = useState(0);
+  const backdrop = useBackdropActive("orbital");
   const positions = useMemo<Positions>(() => new Map(ROSTER.map((r) => [r, new THREE.Vector3(...orbitPos(ORBITS[r], 0))])), []);
   const els = useRef(new Map<string, HTMLDivElement>());
   useEffect(() => void useArbiter.getState().start(), []);
@@ -622,19 +641,23 @@ export function OrbitalEcosystem() {
   const running = visible;
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#020308]" role="img" aria-label="Orbital ecosystem: the agent roster as a planetary system. Drag to orbit, scroll to zoom, click a planet to inspect it.">
+      <SurfaceBackdropLayer surface="orbital" />
       <Canvas
         frameloop="demand"
         dpr={[1, 1.5]}
         camera={{ position: [HOME_POS.x, HOME_POS.y, HOME_POS.z], fov: 45, near: 0.1, far: 600 }}
-        gl={{ antialias: true, powerPreference: "low-power", alpha: false }}
+        gl={{ antialias: true, powerPreference: "default", alpha: true }}
+        style={{ position: "absolute", inset: 0, zIndex: 10 }}
         onPointerMissed={() => close()}
       >
         <Ticker running={running} />
-        <Scene live={live} running={running} reduced={reduced} pulses={pulses} focus={inspect && isRoster(inspect) ? inspect : null} onPick={(id) => open(id)} homeReq={homeReq} positions={positions} els={els} />
+        <Scene live={live} running={running} reduced={reduced} pulses={pulses} focus={inspect && isRoster(inspect) ? inspect : null} onPick={(id) => open(id)} homeReq={homeReq} positions={positions} els={els} backdrop={backdrop} />
       </Canvas>
-      <Callouts live={live} hud={hud} els={els} onPick={(id) => open(id)} />
+      <div className="absolute inset-0 z-20 pointer-events-none">
+        <Callouts live={live} hud={hud} els={els} onPick={(id) => open(id)} />
+      </div>
 
-      <div className="pointer-events-none absolute left-4 top-4 space-y-1 font-mono">
+      <div className="pointer-events-none absolute left-4 top-4 z-20 space-y-1 font-mono">
         <p className="text-[12px] tracking-[0.3em] text-[#fde6d0]">ORBITAL ECOSYSTEM</p>
         <p className="text-[10px] tracking-[0.12em] text-ink-3">token {snap?.holder ?? "free"} · {snap?.away ? "AWAY MODE" : "foreground"} · vault {snap ? (snap.vaultOpen ? "open" : "sealed") : "—"}</p>
         <div className="flex gap-3 pt-1 text-[9.5px] text-ink-3">
@@ -646,7 +669,7 @@ export function OrbitalEcosystem() {
         </div>
         {!snap && <p className="text-[10px] text-amber-light">{isTauri() ? "Waiting for the engine…" : "Live states need the desktop engine."}</p>}
       </div>
-      <div className="absolute bottom-3 left-3 flex gap-1">
+      <div className="absolute bottom-3 left-3 z-20 flex gap-1">
         <button
           type="button"
           className="sysmap-ctl"
@@ -660,6 +683,7 @@ export function OrbitalEcosystem() {
         <button type="button" className="sysmap-ctl" aria-pressed={hud === "full"} onClick={() => setHud(hud === "full" ? "minimal" : "full")} title="HUD label density">
           HUD Labels: {hud === "full" ? "Full" : "Minimal"}
         </button>
+        <BackdropHudToggle surface="orbital" />
       </div>
     </div>
   );

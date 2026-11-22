@@ -34,6 +34,8 @@ import {
   type RosterId,
 } from "./model";
 import { EDGES } from "@/features/arbiter/agent-graph";
+import { SurfaceBackdropLayer, useBackdropActive } from "@/features/wallpaper/SurfaceBackdropLayer";
+import { BackdropHudToggle } from "@/features/wallpaper/BackdropHudToggle";
 
 /** How long a hand-off keeps its trace lit (CSS dash animation only; no rAF loop). */
 const LIT_MS = 1600;
@@ -98,7 +100,7 @@ function AgentCard({
   return (
     <g className="sysmap-hit" onClick={() => open("rag")} role="button" aria-label={`${NODE_LABEL[id]}: ${s}`}>
       {hot && <rect x={x - 4} y={y - 4} width={CARD_W + 8} height={CARD_H + 8} rx={12} fill="none" stroke={bus.color} strokeOpacity={0.35} className="sysmap-breathe" />}
-      <rect x={x} y={y} width={CARD_W} height={CARD_H} rx={9} fill="rgba(6,9,15,0.96)" stroke={hot ? bus.color : "rgba(255,255,255,0.10)"} strokeWidth={hot ? 1.5 : 1} />
+      <rect x={x} y={y} width={CARD_W} height={CARD_H} rx={9} fill="rgba(6,9,15,0.94)" stroke={hot ? bus.color : `rgba(${bus.rgb},0.28)`} strokeWidth={hot ? 1.5 : 1} style={{ filter: `drop-shadow(0 0 10px rgba(${bus.rgb},0.12))` }} />
       <rect x={x} y={y + 10} width={3} height={30} fill={bus.color} />
       <text x={x + 14} y={y + 24} fontSize={15} fontWeight={600} fill="#f1f5f9">
         {NODE_LABEL[id]}
@@ -136,6 +138,7 @@ export function SchematicFlowchart() {
   const open = useSysMap((s) => s.open);
   const inspecting = useSysMap((s) => s.inspect);
   const { snap: sys } = useMemmapData();
+  const backdrop = useBackdropActive("flowchart");
   useEffect(() => void useArbiter.getState().start(), []);
   usePoll(() => (isTauri() ? useArbiter.getState().refresh() : Promise.resolve()), POLL_MS);
 
@@ -205,11 +208,13 @@ export function SchematicFlowchart() {
 
   return (
     <div className="sysmap-schematic relative h-full w-full overflow-hidden" data-inspecting={inspecting ? "" : undefined}>
+      {/* Custom rolling backdrop (z-0, no pointer events); absent = Clean Minimal. */}
+      <SurfaceBackdropLayer surface="flowchart" />
       <svg
         ref={svg}
         viewBox={`0 0 ${FLOW_W} ${FLOW_H}`}
         preserveAspectRatio="xMidYMid meet"
-        className="h-full w-full cursor-grab touch-none select-none active:cursor-grabbing"
+        className="relative z-10 h-full w-full cursor-grab touch-none select-none active:cursor-grabbing"
         onWheel={onWheel}
         onPointerDown={onDown}
         onPointerMove={onMove}
@@ -234,7 +239,7 @@ export function SchematicFlowchart() {
         </defs>
         <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
           <rect x={-FLOW_W} y={-FLOW_H} width={FLOW_W * 3} height={FLOW_H * 3} fill="url(#sm-grid)" />
-          <rect width={FLOW_W} height={FLOW_H} fill="url(#sm-glow)" />
+          {!backdrop && <rect width={FLOW_W} height={FLOW_H} fill="url(#sm-glow)" />}
 
           {/* Legend */}
           <g transform="translate(40 40)" className="sysmap-mono">
@@ -336,11 +341,11 @@ export function SchematicFlowchart() {
       </svg>
 
       {!snap && (
-        <p className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[11px] text-ink-3">
+        <p className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[11px] text-ink-3">
           {isTauri() ? "Waiting for the engine's first arbiter snapshot…" : "Live states need the desktop engine — showing the wiring only."}
         </p>
       )}
-      <div className="absolute bottom-3 left-3 flex gap-1">
+      <div className="absolute bottom-3 left-3 z-20 flex gap-1">
         <button type="button" onClick={() => zoom(1.25)} className="sysmap-ctl" aria-label="Zoom in">
           <Plus size={13} />
         </button>
@@ -350,6 +355,7 @@ export function SchematicFlowchart() {
         <button type="button" onClick={() => setView(FIT)} className="sysmap-ctl" aria-label="Fit to screen" title="Fit">
           <Maximize size={13} />
         </button>
+        <BackdropHudToggle surface="flowchart" />
       </div>
     </div>
   );

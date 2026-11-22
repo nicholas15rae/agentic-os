@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { del, get as idbGet, set as idbSet } from "idb-keyval";
 import type { Atmosphere, TimePhase } from "@/features/weather/weather-store";
+import { surfacesOf, toggleSurface, type Surface } from "./backdrop-model";
 
 /**
  * Wallpapers = built-in files in /public/wallpapers + user uploads.
@@ -18,6 +19,8 @@ export interface Wallpaper {
   src?: string;
   /** Conditions this scene suits. Empty = generic (used when nothing matches). */
   tags: WallpaperTags;
+  /** Surfaces whose rolling pool it joins (v1 records: Home only). */
+  surfaces: Surface[];
 }
 
 export interface WallpaperTags {
@@ -31,12 +34,12 @@ const asset = (p: string) => import.meta.env.BASE_URL + p;
 const tag = (atmospheres: Atmosphere[], phases: TimePhase[]): WallpaperTags => ({ atmospheres, phases });
 
 const BUILTINS: Wallpaper[] = [
-  { id: "drift-fog", name: "Drift Fog", builtin: true, enabled: true, src: asset("wallpapers/01-drift-fog.jpg"), tags: tag(["fog", "rain"], ["night"]) },
-  { id: "skyline", name: "Skyline", builtin: true, enabled: true, src: asset("wallpapers/02-skyline.jpg"), tags: tag(["midnight", "clear", "autumn"], ["night"]) },
-  { id: "pine-mist", name: "Pine Mist", builtin: true, enabled: true, src: asset("wallpapers/03-pine-mist.jpg"), tags: tag(["fog", "rain"], ["day"]) },
-  { id: "milky-way", name: "Milky Way", builtin: true, enabled: true, src: asset("wallpapers/04-milky-way.jpg"), tags: tag(["midnight", "clear"], ["night"]) },
-  { id: "golden-pch", name: "Golden PCH", builtin: true, enabled: true, src: asset("wallpapers/05-golden-pch.jpg"), tags: tag(["clear", "autumn"], ["golden", "day"]) },
-  { id: "rain-district", name: "Rain District", builtin: true, enabled: true, src: asset("wallpapers/06-rain-district.jpg"), tags: tag(["rain"], ["night"]) },
+  { id: "drift-fog", name: "Drift Fog", builtin: true, enabled: true, surfaces: ["home"], src: asset("wallpapers/01-drift-fog.jpg"), tags: tag(["fog", "rain"], ["night"]) },
+  { id: "skyline", name: "Skyline", builtin: true, enabled: true, surfaces: ["home"], src: asset("wallpapers/02-skyline.jpg"), tags: tag(["midnight", "clear", "autumn"], ["night"]) },
+  { id: "pine-mist", name: "Pine Mist", builtin: true, enabled: true, surfaces: ["home"], src: asset("wallpapers/03-pine-mist.jpg"), tags: tag(["fog", "rain"], ["day"]) },
+  { id: "milky-way", name: "Milky Way", builtin: true, enabled: true, surfaces: ["home"], src: asset("wallpapers/04-milky-way.jpg"), tags: tag(["midnight", "clear"], ["night"]) },
+  { id: "golden-pch", name: "Golden PCH", builtin: true, enabled: true, surfaces: ["home"], src: asset("wallpapers/05-golden-pch.jpg"), tags: tag(["clear", "autumn"], ["golden", "day"]) },
+  { id: "rain-district", name: "Rain District", builtin: true, enabled: true, surfaces: ["home"], src: asset("wallpapers/06-rain-district.jpg"), tags: tag(["rain"], ["night"]) },
 ];
 
 /**
@@ -47,6 +50,7 @@ const BUILTINS: Wallpaper[] = [
  */
 export function matchingWallpapers(items: Wallpaper[], atmosphere: Atmosphere, phase: TimePhase): Wallpaper[] {
   const pool = items.filter((i) => i.enabled && i.src);
+  if (!pool.length) return [];
   const score = (w: Wallpaper) => (w.tags.atmospheres.includes(atmosphere) ? 2 : 0) + (w.tags.phases.includes(phase) ? 1 : 0);
   const best = Math.max(0, ...pool.map(score));
   return best > 0 ? pool.filter((w) => score(w) === best) : pool;
@@ -67,7 +71,10 @@ interface WallpaperState {
   select: (id: string) => void;
   setPlaying: (v: boolean) => void;
   toggleEnabled: (id: string) => void;
-  upload: (files: FileList | File[]) => Promise<{ added: number; rejected: string[] }>;
+  /** Add / remove a wallpaper from one surface's rolling pool. */
+  toggleSurface: (id: string, surface: Surface) => void;
+  /** New uploads join `surfaces` (default: Home). */
+  upload: (files: FileList | File[], surfaces?: Surface[]) => Promise<{ added: number; rejected: string[]; ids: string[] }>;
   remove: (id: string) => Promise<void>;
 }
 
@@ -85,11 +92,13 @@ export const useWallpapers = create<WallpaperState>()(
         const persisted = get().items;
         const merged: Wallpaper[] = BUILTINS.map((b) => {
           const p = persisted.find((x) => x.id === b.id);
-          return { ...b, enabled: p?.enabled ?? true, tags: p?.tags ?? b.tags };
+          return { ...b, enabled: p?.enabled ?? true, tags: p?.tags ?? b.tags, surfaces: p ? surfacesOf(p) : b.surfaces };
         });
         for (const p of persisted.filter((x) => !x.builtin)) {
+          // A re-hydrate (StrictMode, HMR) must not leak the previous object URL.
+          if (p.src?.startsWith("blob:")) URL.revokeObjectURL(p.src);
           const blob = await idbGet<Blob>(idbKey(p.id)).catch(() => undefined);
-          if (blob) merged.push({ ...p, tags: p.tags ?? tag([], []), src: URL.createObjectURL(blob) });
+          if (blob) merged.push({ ...p, tags: p.tags ?? tag([], []), surfaces: surfacesOf(p), src: URL.createObjectURL(blob) });
         }
         const currentId = merged.some((m) => m.id === get().currentId) ? get().currentId : merged[0].id;
         set({ items: merged, currentId, hydrated: true });
@@ -114,8 +123,9 @@ export const useWallpapers = create<WallpaperState>()(
       setTags: (id, tags) => set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, tags } : i)) })),
       setPlaying: (playing) => set({ playing }),
       toggleEnabled: (id) => set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, enabled: !i.enabled } : i)) })),
+      toggleSurface: (id, surface) => set((s) => ({ items: s.items.map((i) => (i.id === id ? { ...i, surfaces: toggleSurface(surfacesOf(i), surface) } : i)) })),
 
-      upload: async (files) => {
+      upload: async (files, surfaces = ["home"]) => {
         const rejected: string[] = [];
         const added: Wallpaper[] = [];
         for (const file of Array.from(files)) {
@@ -136,10 +146,12 @@ export const useWallpapers = create<WallpaperState>()(
             enabled: true,
             src: URL.createObjectURL(file),
             tags: tag([], []),
+            surfaces: [...surfaces],
           });
         }
-        if (added.length) set((s) => ({ items: [...s.items, ...added], currentId: added[0].id }));
-        return { added: added.length, rejected };
+        // Only a Home upload jumps the Home slideshow to it.
+        if (added.length) set((s) => ({ items: [...s.items, ...added], currentId: surfaces.includes("home") ? added[0].id : s.currentId }));
+        return { added: added.length, rejected, ids: added.map((a) => a.id) };
       },
 
       remove: async (id) => {
@@ -155,7 +167,13 @@ export const useWallpapers = create<WallpaperState>()(
     }),
     {
       name: "cc.wallpapers",
-      version: 1,
+      version: 2,
+      // v1 → v2: every existing wallpaper (built-in or uploaded) stays on Home only.
+      migrate: (persisted, from) => {
+        const p = (persisted ?? {}) as { items?: Partial<Wallpaper>[] };
+        if (from < 2 && Array.isArray(p.items)) p.items = p.items.map((i) => ({ ...i, surfaces: surfacesOf(i) }));
+        return p as never;
+      },
       // Never persist object URLs â€” they die with the page.
       partialize: (s) => ({
         items: s.items.map(({ src: _src, ...rest }) => rest),

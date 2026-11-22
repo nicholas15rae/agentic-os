@@ -427,3 +427,30 @@ fn learning_locks_dispatch_to_solo_and_carries_the_protocol() {
     s.set_active("brainstorm").unwrap();
     assert_eq!(s.apply_override(&OverridePatch { dispatch: Some(DispatchPolicy::AutoDispatch), ..Default::default() }).dispatch, DispatchPolicy::AutoDispatch);
 }
+
+#[test]
+fn tool_mode_names_resolve_to_work_modes_only() {
+    for (q, id) in [
+        ("builder", "builder"),
+        ("Build mode", "builder"),
+        ("coach", "coach"),
+        ("Motivation / Coach", "coach"),
+        ("motivational", "coach"),
+        ("exec", "executive"),
+        ("Executive", "executive"),
+        ("solo", "surface"),
+        ("Surface / Solo", "surface"),
+        ("brainstorming", "brainstorm"),
+        ("study", "learning"),
+        ("learning mode", "learning"),
+    ] {
+        assert_eq!(resolve_work_mode(q), Some(id), "{q}");
+    }
+    for q in ["gabagool", "Gabagool Mode", "", "turbo", "local"] {
+        assert_eq!(resolve_work_mode(q), None, "{q}");
+    }
+    // Every id it can return is a real preset.
+    for id in ["surface", "builder", "coach", "brainstorm", "executive", "learning"] {
+        assert!(presets().iter().any(|p| p.id == id), "{id}");
+    }
+}

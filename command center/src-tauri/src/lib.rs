@@ -110,6 +110,7 @@ pub fn run() {
             events::install(app.handle());
             // Compute arbiter: `arbiter-state` / `arbiter-handoff` for the System Map.
             arbiter::get().install(app.handle());
+            modes::install(app.handle());
             // AnythingLLM client: Tony's monthly thread map lives in tasks.db (Part 3).
             allm::install(app.handle());
             // Provider endpoints live in a file the user edits, not in the webview.
@@ -419,6 +420,9 @@ pub fn run() {
             buildhub::build_promote,
             buildhub::build_remove,
             buildhub::cancel_build_job,
+            commands::net_telemetry::get_network_telemetry,
+            commands::net_telemetry::network_telemetry_stop,
+            commands::net_telemetry::run_speed_test,
             arbiter::agent_inspect,
             buildhub::delete_build_job,
             buildhub::clear_failed_jobs,

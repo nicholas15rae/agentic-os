@@ -3455,12 +3455,19 @@ impl WorkerEnv for AppEnv {
 
     fn model(&self, call: ModelCall) -> BoxFuture<'_, Result<ModelReply, String>> {
         Box::pin(async move {
-            if let Some(engine) = call.offload.clone() {
-                // Offload (code stage, CLI engines only): the worker stays sequential meanwhile.
-                let msgs = vec![super::dispatch::ChatMessage::new("system", call.system.clone()), super::dispatch::ChatMessage::new("user", call.user.clone())];
-                return super::agents::external_chat_in(self.st(), self.os(), &engine, &msgs, call.secs, call.cwd.as_deref()).await.map(|(text, _)| ModelReply { text, by: format!("ext:{engine}") });
-            }
-            self.live().ask(self.slot(), &call).await
+            // Play Place Cancel / Delete: an abort drops the call at once (HTTP request, GPU slot
+            // guard, offloaded CLI tree) instead of waiting for the next checkpoint.
+            let task_id = call.task_id.clone();
+            super::job_abort::race(&task_id, async {
+                if let Some(engine) = call.offload.clone() {
+                    // Offload (code stage, CLI engines only): the worker stays sequential meanwhile.
+                    let msgs = vec![super::dispatch::ChatMessage::new("system", call.system.clone()), super::dispatch::ChatMessage::new("user", call.user.clone())];
+                    let abort = Some(super::job_abort::token(&call.task_id));
+                    return super::agents::external_chat_abortable(self.st(), self.os(), &engine, &msgs, call.secs, call.cwd.as_deref(), abort).await.map(|(text, _)| ModelReply { text, by: format!("ext:{engine}") });
+                }
+                self.live().ask(self.slot(), &call).await
+            })
+            .await
         })
     }
 
@@ -3589,7 +3596,11 @@ pub fn task_get(store: tauri::State<'_, TaskStore>, task_id: String) -> Result<E
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn task_list(store: tauri::State<'_, TaskStore>, status: Option<String>, limit: Option<usize>, include_log: Option<bool>) -> Result<Vec<Envelope>, String> {
-    store.with(|c| envelope::list(c, status.as_deref(), limit.unwrap_or(50), include_log.unwrap_or(false)))
+    // Build Runners rows Nic deleted (`buildhub::runner_dismiss`) stay in tasks.db (audit) but not on the list.
+    store.with(|c| {
+        let hidden = envelope::dismissed_ids(c)?;
+        Ok(envelope::list(c, status.as_deref(), limit.unwrap_or(50) + hidden.len().min(200), include_log.unwrap_or(false))?.into_iter().filter(|e| !hidden.contains(&e.task_id)).take(limit.unwrap_or(50)).collect())
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -3612,6 +3623,7 @@ pub fn task_retry(app: tauri::AppHandle, task_id: String, offload: Option<String
     // A retry re-runs a build: Solo (surface_only) builds nothing, from any button.
     super::modes::check_dispatch(app.state::<super::os_core::OsState>().modes.effective().dispatch, super::modes::DispatchKind::BuildPipeline { auto: false })?;
     let e = retry_task(app.state::<TaskStore>().inner(), &task_id, &known_of(&app))?;
+    super::job_abort::clear(&task_id);
     let ws = app.state::<WorkerState>();
     if let Some(o) = offload {
         ws.forced_offload.lock().unwrap().insert(task_id, o);
@@ -3624,6 +3636,8 @@ pub fn task_retry(app: tauri::AppHandle, task_id: String, offload: Option<String
 pub fn task_cancel(app: tauri::AppHandle, task_id: String) -> Result<Envelope, String> {
     use tauri::Manager;
     let e = cancel_task(app.state::<TaskStore>().inner(), &task_id, &known_of(&app))?;
+    // Hard stop: the step in flight is dropped now (GPU slot released), not at its next checkpoint.
+    super::job_abort::abort(&task_id);
     announce_cancelled(&app, &e);
     Ok(e)
 }

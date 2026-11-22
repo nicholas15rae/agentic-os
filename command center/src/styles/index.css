@@ -257,3 +257,30 @@
   background: var(--color-amber);
   cursor: ew-resize;
 }
+
+/* ── System Map pages 2 + 3 (sysmap) ───────────────────────────────────────
+ * Lit traces are CSS dash animations that exist only while a real hand-off is
+ * live; nothing here animates while the system is idle. */
+.sysmap-mono { font-family: "JetBrains Mono Variable", ui-monospace, monospace; }
+.sysmap-hit { cursor: pointer; }
+.sysmap-hit:hover > rect:first-of-type { stroke-opacity: 1; }
+.sysmap-flow { stroke-dasharray: 10 8; animation: sysmap-dash 0.9s linear infinite; }
+.sysmap-flow-rev { stroke-dasharray: 10 8; animation: sysmap-dash 0.9s linear infinite reverse; }
+@keyframes sysmap-dash { to { stroke-dashoffset: -36; } }
+.sysmap-breathe { animation: sysmap-breathe 2.4s ease-in-out infinite; }
+@keyframes sysmap-breathe { 50% { stroke-opacity: 0.08; } }
+.sysmap-blink { animation: sysmap-blink 1.2s ease-in-out infinite; }
+@keyframes sysmap-blink { 50% { opacity: 0.35; } }
+.sysmap-ctl {
+  display: grid; place-items: center; height: 30px; min-width: 30px; padding: 0 8px;
+  border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(4, 7, 12, 0.82); color: var(--color-ink-2);
+  font-size: 11px; transition: border-color 140ms, color 140ms;
+}
+.sysmap-ctl:hover { border-color: rgba(0, 210, 255, 0.5); color: var(--color-ink); }
+.sysmap-ctl[aria-pressed="true"] { border-color: rgba(251, 146, 60, 0.7); color: #fdba74; }
+.sysmap-drawer { animation: sysmap-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1); transform: translateZ(0); }
+@keyframes sysmap-in { from { transform: translateX(24px); opacity: 0; } }
+.sysmap-callout { pointer-events: none; transform: translate(-0.5px, -100%); white-space: nowrap; }
+.sysmap-callout .stem { width: 1px; margin: 0; background: linear-gradient(to top, rgba(251, 146, 60, 0.85), rgba(251, 146, 60, 0.15)); }
+.sysmap-callout .tag { pointer-events: auto; cursor: pointer; border-left: 1px solid rgba(251, 146, 60, 0.9); padding: 1px 0 1px 7px; font-family: "JetBrains Mono Variable", ui-monospace, monospace; }

@@ -1108,3 +1108,93 @@ fn round2_peek_watches_are_ref_counted_in_any_order() {
     w.forget("b-a"); // the build was removed
     assert!(w.ids().is_empty());
 }
+
+// ── Cancel / Delete ──
+
+#[test]
+fn cancel_stops_for_good_and_hands_back_the_bound_work() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder), ("b-b", AssignedWorker::Claude)]);
+    assert!(h.bind_worker("b-a", "t-1", 5).unwrap());
+    h.get_mut("b-a").unwrap().envelope.status = Status::Building;
+    h.get_mut("b-a").unwrap().smoke.running = true;
+    let bound = h.cancel("b-a", "cancelled by Nic", 9).unwrap();
+    assert_eq!(bound, (Some("t-1".into()), None));
+    let b = h.get("b-a").unwrap();
+    assert_eq!(b.envelope.status, Status::Cancelled);
+    assert!(b.worker_task_id.is_none() && !b.smoke.running && b.paused_from.is_none());
+    assert_eq!(b.finished_at, Some(9));
+    assert!(b.logs.last().unwrap().text.contains("Cancelled"));
+    // Not in flight any more: the lane hands the next build out.
+    assert!(!HubFile::in_flight(b));
+    assert_eq!(status_str(Status::Cancelled), "cancelled");
+    assert!(hold_worker(Status::Cancelled));
+    // Twice is an error; so is a deployed build.
+    assert!(h.cancel("b-a", "again", 10).is_err());
+    h.get_mut("b-b").unwrap().envelope.status = Status::Deployed;
+    assert!(h.cancel("b-b", "x", 10).is_err());
+}
+
+#[test]
+fn a_cancelled_build_is_removable_requeueable_and_swept_by_clear_failed() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder), ("b-b", AssignedWorker::Coder), ("b-c", AssignedWorker::Coder)]);
+    assert!(h.bind_worker("b-a", "t-1", 5).unwrap());
+    h.get_mut("b-a").unwrap().envelope.status = Status::Building;
+    // Running: Remove alone refuses (Delete cancels first).
+    assert!(h.remove("b-a").is_err());
+    h.cancel("b-a", "x", 6).unwrap();
+    h.to_repair("b-b", "sent by Nic", "", vec![], false, 7).unwrap();
+    let mut failed = h.failed_ids();
+    failed.sort();
+    assert_eq!(failed, vec!["b-a".to_string(), "b-b".to_string()]);
+    // Re-queue works from Cancelled (fresh pass, unbound) …
+    h.requeue("b-a", Some("try again"), 8, &[]).unwrap();
+    let b = h.get("b-a").unwrap();
+    assert_eq!(b.envelope.status, Status::Queued);
+    assert!(b.logs.last().unwrap().text.contains("after a cancel"));
+    // … and a cancelled build can be removed.
+    h.cancel("b-c", "x", 9).unwrap();
+    assert!(h.remove("b-c").is_ok());
+    assert!(h.get("b-c").is_none());
+}
+
+#[test]
+fn delete_purges_only_the_hubs_own_folder() {
+    let staging = Path::new(STAGING);
+    let ext = Path::new(EXT);
+    let e = env("b-1", "tip-calc", Runtime::InternalWidget, AssignedWorker::Coder);
+    assert_eq!(purgeable_dir(&e, staging, ext), Some(staging.join("tip-calc")));
+    let x = env("b-2", "tip-calc", Runtime::ExternalOs, AssignedWorker::Claude);
+    assert_eq!(purgeable_dir(&x, staging, ext), Some(ext.join("tip-calc")));
+    // Pointing anywhere else (edited by hand, or a root): never deleted.
+    let mut moved = e.clone();
+    moved.output_directory = r"C:\Users\nic\Documents".into();
+    assert_eq!(purgeable_dir(&moved, staging, ext), None);
+    for bad in ["", ".", "..", r"..\..\Windows", "a/b", "C:"] {
+        let mut b = e.clone();
+        b.project_slug = bad.into();
+        b.output_directory = staging.join(bad).display().to_string();
+        assert_eq!(purgeable_dir(&b, staging, ext), None, "slug {bad:?}");
+    }
+    assert_eq!(purgeable_dir(&e, Path::new(""), ext), None);
+}
+
+#[test]
+fn orphan_reaper_targets_only_unbound_live_hub_tasks() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    assert!(h.bind_worker("b-a", "t-bound", 1).unwrap());
+    assert!(is_orphan("t-lost", "queued", Some("b-gone:1700000000000"), &h));
+    assert!(!is_orphan("t-bound", "queued", Some("b-a:1700000000000"), &h), "bound to a build");
+    assert!(!is_orphan("t-done", "failed", Some("b-gone:1"), &h), "already terminal");
+    assert!(!is_orphan("t-chat", "queued", Some("idea-42"), &h), "not a hub task");
+    assert!(!is_orphan("t-none", "queued", None, &h));
+    assert!(!is_orphan("t-odd", "queued", Some("b-x:"), &h));
+}
+
+#[test]
+fn cancelled_status_round_trips_on_the_wire() {
+    let mut e = env("b-1", "x", Runtime::InternalWidget, AssignedWorker::Coder);
+    e.status = Status::Cancelled;
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v["status"], "cancelled");
+    assert_eq!(serde_json::from_value::<TaskEnvelope>(v).unwrap().status, Status::Cancelled);
+}

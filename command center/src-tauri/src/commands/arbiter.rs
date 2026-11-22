@@ -516,6 +516,45 @@ pub fn arbiter_snapshot(os: tauri::State<'_, super::os_core::OsState>, sys: taur
     v
 }
 
+/// Deep Inspector (System Map pages 2 and 3): one roster node in full — its live state, its
+/// memory namespace in depth (`memtier::detail`; Finance reports only sealed counts, never its
+/// contents), the memory lifecycle (graduation TTL, the Garbage Daemon's last purge), its valid
+/// upstream / downstream hand-off contracts, and the recent hand-offs it took part in.
+#[tauri::command]
+pub fn agent_inspect(os: tauri::State<'_, super::os_core::OsState>, node: String) -> Result<Value, String> {
+    let def = node_def(&node).ok_or_else(|| format!("unknown node {node}"))?;
+    let snap = get().snapshot();
+    let live = snap["nodes"].as_array().and_then(|a| a.iter().find(|n| n["id"] == node).cloned()).unwrap_or(Value::Null);
+    let roster = os.snapshot().roster;
+    let memory = match def.namespace {
+        Some("finance") => {
+            let v = super::finance_vault::finance_vault_status();
+            json!({ "namespace": "finance", "sealed": !v["open"].as_bool().unwrap_or(false), "entries": v["entries"], "hasLedger": v["hasLedger"], "hasKey": v["hasKey"], "idleSecs": v["idleSecs"] })
+        }
+        Some(ns) => super::memtier::detail(ns, 6).unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    let feed: Vec<Value> = snap["feed"].as_array().map(|a| a.iter().filter(|h| h["from"] == node || h["to"] == node || h["to"].as_str().is_some_and(|t| def.namespace.is_some_and(|ns| t == format!("mem:{ns}")))).cloned().collect()).unwrap_or_default();
+    let g = super::garbage::snapshot();
+    Ok(json!({
+        "node": def,
+        "live": live,
+        "memory": memory,
+        "lifecycle": {
+            "graduateAfterDays": roster.graduate_after_days,
+            "dumpKeepDays": roster.dump_keep_days,
+            "garbageEveryMinutes": roster.garbage_minutes,
+            "lastPurgeAt": g.last_purge_at,
+            "vaultIdleMinutes": roster.vault_idle_minutes,
+        },
+        "upstream": EDGES.iter().filter(|(_, b)| *b == node).map(|(a, _)| *a).collect::<Vec<_>>(),
+        "downstream": EDGES.iter().filter(|(a, _)| *a == node).map(|(_, b)| *b).collect::<Vec<_>>(),
+        "feed": feed,
+        "holder": snap["holder"],
+        "away": snap["away"],
+    }))
+}
+
 #[tauri::command]
 pub fn arbiter_set_away(os: tauri::State<'_, super::os_core::OsState>, on: bool) -> Result<Value, String> {
     set_away(&os, on)?;

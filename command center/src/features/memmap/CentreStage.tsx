@@ -4,8 +4,6 @@ import { ZoneCallouts } from "./ZoneCallouts";
 import { GabagoolBlueprint } from "./GabagoolBlueprint";
 import { GabagoulBadge, type GabagoulBadgeState } from "./GabagoulBadge";
 import { RoutingFlowchart } from "./RoutingFlowchart";
-import { AgentTopology } from "@/features/arbiter/AgentTopology";
-import { ArbiterHud } from "@/features/arbiter/ArbiterHud";
 
 /** Below this stage height the exhaust callout goes compact (no node pills, bottom row).
  * At 420 the tall exhaust card (with pills, ~90 px from max(31%, 8.5rem)) already touched
@@ -68,8 +66,6 @@ export function CentreStage({ narrow, className = "", badgeState }: { narrow: bo
   if (narrow) {
     return (
       <div className={`space-y-2 ${className}`}>
-        <AgentTopology />
-        <ArbiterHud />
         <RoutingFlowchart orient="v" />
         <div data-slot="viewport" className="rounded-[14px] border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2">
           <div className="mb-2 flex justify-center">
@@ -84,10 +80,6 @@ export function CentreStage({ narrow, className = "", badgeState }: { narrow: bo
   }
   return (
     <div className={`flex min-h-0 flex-col gap-2 ${className}`}>
-      <div className="grid gap-2 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <AgentTopology />
-        <ArbiterHud />
-      </div>
       <RoutingFlowchart />
       <div
         ref={stage}

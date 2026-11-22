@@ -5,11 +5,11 @@
 
 export type TargetRuntime = "internal_widget" | "external_os";
 export type AssignedWorker = "claude" | "coder" | "designer";
-export type BuildStatus = "queued" | "building" | "paused" | "repair_queue" | "smoke_testing" | "ready_for_merge" | "deployed";
+export type BuildStatus = "queued" | "building" | "paused" | "repair_queue" | "smoke_testing" | "ready_for_merge" | "deployed" | "cancelled";
 
 export const RUNTIMES: readonly TargetRuntime[] = ["internal_widget", "external_os"];
 export const WORKERS: readonly AssignedWorker[] = ["claude", "coder", "designer"];
-export const STATUSES: readonly BuildStatus[] = ["queued", "building", "paused", "repair_queue", "smoke_testing", "ready_for_merge", "deployed"];
+export const STATUSES: readonly BuildStatus[] = ["queued", "building", "paused", "repair_queue", "smoke_testing", "ready_for_merge", "deployed", "cancelled"];
 
 export interface HumanOverride {
   directive: string;
@@ -112,4 +112,15 @@ export interface RuntimeConfig {
   staging_root: string;
   external_base: string;
   default_external_base: string;
+}
+
+/** What `delete_build_job` / `clear_failed_jobs` / `runner_dismiss` did (Rust `DeleteReport`). */
+export interface DeleteReport {
+  buildId: string;
+  /** A running job was aborted first. */
+  aborted: boolean;
+  /** Folders removed from disk. */
+  purged: string[];
+  /** A folder deliberately left alone (and why). */
+  kept: string | null;
 }

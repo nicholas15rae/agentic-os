@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronsUp, Copy, Eye, EyeOff, FlaskConical, Loader2, Pause, Play, Rocket, RotateCcw, ShieldAlert, ShieldCheck, Square, Terminal, Trash2, Wrench } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUp, Copy, Eye, EyeOff, FlaskConical, Loader2, OctagonX, Pause, Play, Rocket, RotateCcw, ShieldAlert, ShieldCheck, Terminal, Trash2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
@@ -13,7 +13,7 @@ import { clearOnSuccess, errText, startHub, useHub } from "./hub-store";
 import { currentMilestone, elapsedEta, hubCounts, RUNTIME_BADGE, smokeBadge, STATUS_LABEL, workerIndicator } from "./format";
 import { PeekView } from "./PeekView";
 import { SandboxView } from "./SandboxView";
-import type { BuildView } from "./types";
+import type { BuildView, DeleteReport } from "./types";
 
 type Tab = "staging" | "repair";
 
@@ -31,8 +31,9 @@ export function StagingHub() {
   const builds = view?.builds ?? [];
   const counts = hubCounts(builds);
   const shown = builds.filter((b) => (tab === "repair") === (b.envelope.status === "repair_queue"));
+  const failed = builds.filter((b) => b.envelope.status === "repair_queue" || b.envelope.status === "cancelled").length;
   const tabs = (
-    <div role="tablist" aria-label="Staging hub view" className="flex gap-1">
+    <div role="tablist" aria-label="Staging hub view" className="flex flex-wrap gap-1">
       {(
         [
           ["staging", `Staging (${counts.staging})`, FlaskConical],
@@ -49,6 +50,7 @@ export function StagingHub() {
           <Icon size={10} /> {label}
         </button>
       ))}
+      {failed > 0 && <ClearFailed count={failed} />}
     </div>
   );
   return (
@@ -137,7 +139,7 @@ function BuildCard({ b }: { b: BuildView }) {
   };
 
   return (
-    <section ref={boxRef} className={`rounded-[16px] border p-3 ${e.status === "paused" ? "border-amber/40 bg-amber/[0.04]" : "border-white/[0.08] bg-white/[0.02]"}`}>
+    <section ref={boxRef} className={`rounded-[16px] border p-3 ${e.status === "paused" ? "border-amber/40 bg-amber/[0.04]" : e.status === "cancelled" ? "border-alert/25 bg-alert/[0.02] opacity-80" : "border-white/[0.08] bg-white/[0.02]"}`}>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11px] text-ink-3">{waiting ? `#${b.position}` : `Build ${b.seq}`}</span>
         <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink" title={e.title}>
@@ -178,14 +180,19 @@ function BuildCard({ b }: { b: BuildView }) {
             </button>
           )
         )}
-        {["queued", "building", "smoke_testing", "paused"].includes(e.status) && (
+        {ACTIVE.includes(e.status) && (
           <button
             disabled={!!busy}
-            onClick={() => confirm(`Stop “${e.title}”? The worker stops now; the build and its files are kept in the Repair Queue, where Re-queue runs it again.`) && void act("Stop", "build_to_repair", { buildId: id, reason: "Stopped by Nic (Stop button)" })}
+            onClick={() => confirm(`Cancel “${e.title}”? The step in flight is aborted now (its GPU slot is released and any Claude run is killed). The card, files and logs stay — Re-queue runs it again, Delete purges it.`) && void act("Cancel", "cancel_build_job", { jobId: id })}
             className="pill-glass !h-7 !px-2.5 text-[11px] !text-alert hover:!border-alert/60"
-            title="Stop / abort: end the worker loop now (files and logs are kept; re-queue from the Repair Queue)"
+            title="Cancel / abort (not Pause): hard-stop the build now"
           >
-            {busy === "Stop" ? <Loader2 size={11} className="animate-spin" /> : <Square size={10} fill="currentColor" />} Stop
+            {busy === "Cancel" ? <Loader2 size={11} className="animate-spin" /> : <OctagonX size={11} />} Cancel
+          </button>
+        )}
+        {e.status === "cancelled" && (
+          <button disabled={!!busy} onClick={() => void act("Re-queue", "build_requeue", { buildId: id })} className="pill-primary !h-7 !px-2.5 text-[11px]" title="Back into staging (tail of the queue) for a fresh pass">
+            <RotateCcw size={11} /> Re-queue
           </button>
         )}
         <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 text-[11px]" aria-pressed={peek} title="Live Read-In / Peek View">
@@ -209,7 +216,7 @@ function BuildCard({ b }: { b: BuildView }) {
             <Rocket size={11} /> {e.target_runtime === "internal_widget" ? "Promote to Live Dashboard" : "Mark deployed"}
           </button>
         )}
-        {e.status !== "deployed" && (
+        {e.status !== "deployed" && e.status !== "cancelled" && (
           <button disabled={!!busy} onClick={() => void act("Repair", "build_to_repair", { buildId: id })} className="pill-glass !h-7 !px-2.5 text-[11px] hover:!border-alert/50" title="Send to Repair Queue">
             <Wrench size={11} /> Repair
           </button>
@@ -218,14 +225,10 @@ function BuildCard({ b }: { b: BuildView }) {
           <Copy size={11} />
         </button>
         <PinButton target={{ kind: "build", ref: id, title: e.title }} />
-        {!live && (
-          <button onClick={() => confirm(`Remove “${e.title}” from the hub? Its files stay where they are.`) && void act("Remove", "build_remove", { buildId: id })} className="pill-glass !h-7 !w-7 !p-0 hover:!border-alert/50" aria-label="Remove from hub" title="Remove from the hub (files are kept)">
-            <Trash2 size={11} />
-          </button>
-        )}
+        <DeleteButton b={b} busy={busy} setBusy={setBusy} />
       </div>
 
-      {e.status !== "deployed" && (
+      {e.status !== "deployed" && e.status !== "cancelled" && (
         <div className="mt-2">
           <PromptBox
             label={`Steer “${e.title}”`}
@@ -266,6 +269,66 @@ function BuildCard({ b }: { b: BuildView }) {
       {!peek && e.target_runtime === "internal_widget" && (ready || e.status === "deployed") && <SandboxView key={e.status} buildId={id} title={e.title} version={b.preview_version} height={260} />}
       <LogPanel b={b} />
     </section>
+  );
+}
+
+/** Statuses a Cancel can hard-stop (a bound worker / Claude run, or about to get one). */
+const ACTIVE: readonly string[] = ["queued", "building", "smoke_testing", "paused"];
+
+/** Take a deleted build off the screen now (the `build-hub` event confirms it), plus its
+ * promoted dashboard widget and its My Apps pin. */
+function forgetBuild(id: string) {
+  useHub.setState((s) => (s.view ? { view: { ...s.view, builds: s.view.builds.filter((b) => b.envelope.build_id !== id) } } : s));
+  useLayout.setState((s) => ({ pages: s.pages.map((p) => ({ ...p, items: p.items.filter((i) => (i.config as { buildId?: unknown } | undefined)?.buildId !== id) })) }));
+  const pin = useMyApps.getState().apps.find((a) => a.kind === "build" && a.ref === id);
+  if (pin) useMyApps.getState().unmount(pin.id);
+}
+
+function deleteSummary(r: DeleteReport): string {
+  const parts = [r.aborted ? "aborted, then deleted" : "deleted", r.purged.length ? `${r.purged.length} folder(s) removed from disk` : "no folders on disk"];
+  if (r.kept) parts.push(`kept ${r.kept}`);
+  return parts.join(" · ");
+}
+
+/** Delete (trash): on every card. A running build gets a fast confirm, is aborted, then purged. */
+function DeleteButton({ b, busy, setBusy }: { b: BuildView; busy: string | null; setBusy: (v: string | null) => void }) {
+  const e = b.envelope;
+  const running = ACTIVE.includes(e.status);
+  const onClick = async () => {
+    const ask = running
+      ? `“${e.title}” is ${STATUS_LABEL[e.status].toLowerCase()}. Abort it and delete it permanently (card, logs and its output folder)?`
+      : `Delete “${e.title}” permanently? The card, its logs and its output folder are removed.`;
+    if (!confirm(ask)) return;
+    setBusy("Delete");
+    const r = await run("Delete", "delete_build_job", { jobId: e.build_id, purgeFiles: true });
+    setBusy(null);
+    if (!r) return;
+    forgetBuild(e.build_id);
+    useToasts.getState().push({ title: `Deleted “${e.title}”`, body: deleteSummary(r), tone: "info" });
+  };
+  return (
+    <button disabled={!!busy} onClick={() => void onClick()} className="pill-glass !h-7 !w-7 !p-0 hover:!border-alert/50 hover:!text-alert" aria-label={`Delete ${e.title}`} title={running ? "Abort and delete permanently" : "Delete permanently (card, logs, output folder)"}>
+      {busy === "Delete" ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+    </button>
+  );
+}
+
+/** Sweep every Repair Queue and cancelled build. */
+function ClearFailed({ count }: { count: number }) {
+  const [busy, setBusy] = useState(false);
+  const onClick = async () => {
+    if (!confirm(`Delete all ${count} failed / cancelled build(s) permanently, with their output folders?`)) return;
+    setBusy(true);
+    const r = await run("Clear failed", "clear_failed_jobs", { purgeFiles: true });
+    setBusy(false);
+    if (!r) return;
+    r.forEach((x) => forgetBuild(x.buildId));
+    useToasts.getState().push({ title: "Cleared", body: `${r.length} build(s) deleted · ${r.reduce((n, x) => n + x.purged.length, 0)} folder(s) removed`, tone: "info" });
+  };
+  return (
+    <button disabled={busy} onClick={() => void onClick()} className="label-caps flex h-6 items-center gap-1 rounded-full border border-alert/30 px-2 !text-[9px] text-alert hover:border-alert/60" title="Delete every Repair Queue and cancelled build">
+      {busy ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />} Clear failed ({count})
+    </button>
   );
 }
 
@@ -361,6 +424,7 @@ function RepairCard({ b }: { b: BuildView }) {
         <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 text-[11px]">
           {peek ? <EyeOff size={11} /> : <Eye size={11} />} Peek
         </button>
+        <DeleteButton b={b} busy={busy} setBusy={setBusy} />
       </div>
       <div className="mt-2">
         <PromptBox

@@ -1968,6 +1968,12 @@ pub(crate) async fn external_chat(state: &DispatchState, os: &OsState, engine: &
 /// `external_chat` with the CLI's working directory (the worker's offloaded Coder runs inside
 /// `staging/<slug>`). A CLI that outlives its timeout is killed with its whole process tree.
 pub(crate) async fn external_chat_in(state: &DispatchState, os: &OsState, engine: &str, messages: &[ChatMessage], max_secs: u64, cwd: Option<&std::path::Path>) -> Result<(String, bool), String> {
+    external_chat_abortable(state, os, engine, messages, max_secs, cwd, None).await
+}
+
+/// `external_chat_in` with an abort token: a CLI engine's whole process tree is killed as soon
+/// as the token fires (an API engine is cancelled by dropping the future).
+pub(crate) async fn external_chat_abortable(state: &DispatchState, os: &OsState, engine: &str, messages: &[ChatMessage], max_secs: u64, cwd: Option<&std::path::Path>, abort: Option<std::sync::Arc<super::job_abort::Token>>) -> Result<(String, bool), String> {
     let cfg = os.snapshot();
     if cfg.privacy.kill_switch {
         return Err("kill switch is on — external engines are blocked".into());
@@ -1989,9 +1995,9 @@ pub(crate) async fn external_chat_in(state: &DispatchState, os: &OsState, engine
     }
     let secs = max_secs.clamp(10, 600);
     let out = match engine {
-        "claude-cli" => cli(&["claude.cmd", "claude"], &["-p", "--output-format", "text"], flatten(&msgs), secs, cwd).await?,
-        "gemini-cli" => cli(&["gemini.cmd", "gemini"], &[], flatten(&msgs), secs, cwd).await?,
-        "llm-cli" => cli(&["llm.exe", "llm"], &["prompt"], flatten(&msgs), secs, cwd).await?,
+        "claude-cli" => cli(&["claude.cmd", "claude"], &["-p", "--output-format", "text"], flatten(&msgs), secs, cwd, abort.clone()).await?,
+        "gemini-cli" => cli(&["gemini.cmd", "gemini"], &[], flatten(&msgs), secs, cwd, abort.clone()).await?,
+        "llm-cli" => cli(&["llm.exe", "llm"], &["prompt"], flatten(&msgs), secs, cwd, abort.clone()).await?,
         "claude-api" => claude_api(state, &cfg, &msgs, secs).await?,
         "gemini-api" => gemini_api(state, &cfg, &msgs, secs).await?,
         other => return Err(format!("unknown engine {other}")),
@@ -2017,7 +2023,7 @@ fn kill_tree(child: &mut std::process::Child) {
 }
 
 /// Run a fixed CLI with the prompt on stdin (never on the command line), optionally inside `cwd`.
-async fn cli(programs: &[&'static str], args: &[&'static str], input: String, secs: u64, cwd: Option<&std::path::Path>) -> Result<String, String> {
+async fn cli(programs: &[&'static str], args: &[&'static str], input: String, secs: u64, cwd: Option<&std::path::Path>, abort: Option<std::sync::Arc<super::job_abort::Token>>) -> Result<String, String> {
     let programs = programs.to_vec();
     let args = args.to_vec();
     let cwd = cwd.map(std::path::Path::to_path_buf);
@@ -2082,6 +2088,10 @@ async fn cli(programs: &[&'static str], args: &[&'static str], input: String, se
                     Ok(None) if Instant::now() > deadline => {
                         kill_tree(&mut child);
                         return Err(format!("{program} timed out after {secs}s"));
+                    }
+                    Ok(None) if abort.as_ref().is_some_and(|a| a.is_aborted()) => {
+                        kill_tree(&mut child);
+                        return Err(super::job_abort::CANCELLED.into());
                     }
                     Ok(None) => std::thread::sleep(Duration::from_millis(150)),
                     Err(e) => return Err(e.to_string()),

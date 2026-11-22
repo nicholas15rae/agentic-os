@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Archive, BookMarked, Code2, Copy, Eye, Hammer, Lightbulb, Loader2, Maximize2, Play, RotateCcw, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
+import { Archive, BookMarked, Code2, Copy, Eye, Hammer, Lightbulb, Loader2, Maximize2, OctagonX, Play, RotateCcw, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { useCollection } from "@/lib/cc-api";
 import { gateway } from "@/lib/gateway";
 import { cmd, isTauri, type Idea, type PlayCard } from "@/lib/platform";
+import { xcmd } from "@/lib/native-ext";
 import { useSettings } from "@/stores/settings";
 import { ideaAction, runForIdea, stagingPath, usePipelines, type PipelineRun } from "@/features/os/pipeline-store";
 import { requestBuild, requestPipeline } from "@/features/voice/voice-controller";
@@ -82,7 +83,7 @@ export function PipelineBars() {
     .slice(0, 3);
   if (!runs.length && !recent.length) return null;
   return (
-    <Card title={runs.length ? "Builds running" : "Recent builds"}>
+    <Card title="Build runners" hint={runs.length ? `${runs.length} running` : "Recent runs"}>
       <ul className="space-y-2">
         {runs.map((r) => (
           <RunRow key={r.id} r={r} />
@@ -121,12 +122,65 @@ function RunRow({ r }: { r: PipelineRun }) {
           <RotateCcw size={11} /> Retry
         </button>
       )}
+      {isTauri() && <RunnerControls r={r} live={!ready && !failed} />}
       {!ready && !failed && (
         <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
           <div className="h-full rounded-full bg-gradient-to-r from-amber to-teal transition-[width] duration-500" style={{ width: `${r.pct}%` }} />
         </div>
       )}
     </li>
+  );
+}
+
+/** Drop a runner row from the store now (the backend hides it from `task_list` for good). */
+function forgetRun(id: string) {
+  usePipelines.setState((s) => {
+    const runs = { ...s.runs };
+    const recent = { ...s.recent };
+    delete runs[id];
+    delete recent[id];
+    return { runs, recent };
+  });
+}
+
+/** Build Runners row: Cancel (hard abort, distinct from Pause) while live; Delete on every row. */
+function RunnerControls({ r, live }: { r: PipelineRun; live: boolean }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const toast = useToasts.getState().push;
+  const cancel = async () => {
+    if (!confirm(`Cancel “${r.title || "Prototype"}”? The step in flight is aborted now and its GPU slot released.`)) return;
+    setBusy("cancel");
+    try {
+      await cmd("task_cancel", { task_id: r.id });
+    } catch (e) {
+      toast({ title: "Cancel", body: e instanceof Error ? e.message : String(e), tone: "error" });
+    }
+    setBusy(null);
+  };
+  const del = async () => {
+    const ask = live ? `“${r.title || "Prototype"}” is still running. Abort it and delete it from the runner list (and its staging folder)?` : `Delete “${r.title || "Prototype"}” from the runner list, with its staging folder?`;
+    if (!confirm(ask)) return;
+    setBusy("delete");
+    try {
+      const rep = await xcmd("runner_dismiss", { taskId: r.id, purgeFiles: true });
+      forgetRun(r.id);
+      toast({ title: "Runner deleted", body: [rep.aborted ? "aborted first" : null, rep.purged.length ? `${rep.purged.length} folder(s) removed` : null, rep.kept ? `kept ${rep.kept}` : null].filter(Boolean).join(" · ") || "removed", tone: "info" });
+    } catch (e) {
+      toast({ title: "Delete", body: e instanceof Error ? e.message : String(e), tone: "error" });
+    }
+    setBusy(null);
+  };
+  return (
+    <div className="mb-1 flex gap-1.5">
+      {live && (
+        <button disabled={!!busy} onClick={() => void cancel()} className="pill-glass !h-7 !px-2.5 text-[11px] !text-alert hover:!border-alert/60" title="Cancel / abort this run now">
+          {busy === "cancel" ? <Loader2 size={11} className="animate-spin" /> : <OctagonX size={11} />} Cancel
+        </button>
+      )}
+      <button disabled={!!busy} onClick={() => void del()} className="pill-glass !h-7 !w-7 !p-0 hover:!border-alert/50 hover:!text-alert" aria-label="Delete run" title={live ? "Abort and delete" : "Delete from the runner list"}>
+        {busy === "delete" ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+      </button>
+    </div>
   );
 }
 

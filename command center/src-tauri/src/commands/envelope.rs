@@ -1193,6 +1193,13 @@ pub(crate) fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, S
     conn.query_row("SELECT value FROM envelope_meta WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(sql_err)
 }
 
+/// Task ids hidden from the Build Runners list (`dismissed:<id>` meta rows).
+pub(crate) fn dismissed_ids(conn: &Connection) -> Result<std::collections::HashSet<String>, String> {
+    let mut st = conn.prepare("SELECT key FROM envelope_meta WHERE key LIKE 'dismissed:%'").map_err(sql_err)?;
+    let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(sql_err)?;
+    Ok(rows.filter_map(Result::ok).filter_map(|k| k.strip_prefix("dismissed:").map(String::from)).collect())
+}
+
 pub(crate) fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute("INSERT INTO envelope_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value]).map_err(sql_err)?;
     Ok(())

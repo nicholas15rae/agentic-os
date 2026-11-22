@@ -5,7 +5,7 @@
  */
 import { isTauri, native } from "@/lib/platform";
 import type { HealthSnapshot } from "@/features/lifecycle/health";
-import type { BuildEnvelope, BuildHubView, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport } from "@/features/buildhub/types";
+import type { BuildEnvelope, BuildHubView, DeleteReport, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport } from "@/features/buildhub/types";
 import type { TranscriptConversation, TranscriptMessage, TranscriptPage } from "@/features/transcript/types";
 
 export interface ExtCommands {
@@ -37,6 +37,14 @@ export interface ExtCommands {
   build_smoke: { args: { buildId: string }; result: SmokeReport };
   build_promote: { args: { buildId: string }; result: BuildEnvelope };
   build_remove: { args: { buildId: string }; result: BuildHubView };
+  /** Hard stop (distinct from Pause): abort the in-flight step, release the GPU slot, kill a Claude run. */
+  cancel_build_job: { args: { jobId: string }; result: BuildEnvelope };
+  /** Permanently delete a build (aborting it first): hub record, previews, steer copies and its output folder. */
+  delete_build_job: { args: { jobId: string; purgeFiles?: boolean }; result: DeleteReport };
+  /** Delete every Repair Queue and cancelled build. */
+  clear_failed_jobs: { args: { purgeFiles?: boolean }; result: DeleteReport[] };
+  /** Build Runners row: cancel if live, hide from the runner list (audit log kept), optionally purge staging/<slug>. */
+  runner_dismiss: { args: { taskId: string; purgeFiles?: boolean }; result: DeleteReport };
   /** Loopback URL of a promoted (frozen) internal widget, served for its sandbox iframe. */
   build_widget_url: { args: { buildId: string }; result: string };
   /** Starts the loopback preview server once; `watch: false` when the Peek View closes. */

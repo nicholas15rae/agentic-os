@@ -7,6 +7,7 @@ import { agentTag, busHeaderFix, busNeedsFix, busText, busTone, busWhy, daemonSt
 import { useMemmapData } from "./use-memmap-data";
 import { Bar, Dash, Dot, loadTone, openSettings, Panel, Tag, useNow, Val } from "./parts";
 import { OsStatePanel } from "./OsStatePanel";
+import { ArbiterHud } from "@/features/arbiter/ArbiterHud";
 
 const CARDS_KEY = "cc.memmap.cardsOpen";
 
@@ -38,6 +39,8 @@ export function LeftColumn({ className = "" }: { className?: string }) {
   return (
     <div className={`flex min-h-0 flex-col gap-3 ${className}`}>
       <OsStatePanel />
+      {/* Live telemetry, Finance vault seal and the hand-off stream (Page 1 keeps the car uncluttered). */}
+      <ArbiterHud />
       <button
         type="button"
         onClick={toggle}

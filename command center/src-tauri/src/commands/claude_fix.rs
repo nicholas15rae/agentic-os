@@ -574,7 +574,7 @@ impl ClaudeFixState {
         }
     }
 
-    fn cancel(&self, id: &str) -> bool {
+    pub fn cancel(&self, id: &str) -> bool {
         let g = self.run.lock().unwrap();
         match g.as_ref() {
             Some(r) if r.id == id => {

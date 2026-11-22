@@ -277,6 +277,51 @@ pub fn stats() -> Value {
     json!(rows)
 }
 
+/// One namespace in depth, for the System Map's Deep Inspector: tier counts, the tag
+/// "collections" it holds, the newest entries (one-line previews, already scrubbed by the writers),
+/// and when it was last written / hit. `None` for an unknown namespace.
+pub fn detail(ns: &str, previews: usize) -> Option<Value> {
+    if !valid_ns(ns) {
+        return None;
+    }
+    let mut s = svc().lock().unwrap();
+    ensure(&mut s, ns);
+    let sp = &s.spaces[ns];
+    let mut tags: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in &sp.active {
+        for t in &e.tags {
+            *tags.entry(t.as_str()).or_default() += 1;
+        }
+    }
+    let mut collections: Vec<(&str, usize)> = tags.into_iter().collect();
+    collections.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let mut newest: Vec<&Entry> = sp.active.iter().collect();
+    newest.sort_by(|a, b| b.at.max(b.last_hit).cmp(&a.at.max(a.last_hit)));
+    let chars: usize = sp.active.iter().map(|e| e.text.len()).sum();
+    Some(json!({
+        "namespace": ns,
+        "active": sp.active.len(),
+        "activeMax": ACTIVE_MAX,
+        "archived": sp.archived,
+        "activeKb": chars / 1024,
+        "done": sp.active.iter().filter(|e| e.done).count(),
+        "hits": sp.active.iter().map(|e| e.hits as u64).sum::<u64>(),
+        "lastWriteAt": sp.active.iter().map(|e| e.at).max(),
+        "lastHitAt": sp.active.iter().map(|e| e.last_hit).filter(|&t| t > 0).max(),
+        "oldestActiveAt": sp.active.iter().map(|e| e.last_hit.max(e.at)).min(),
+        "collections": collections.iter().take(10).map(|(t, n)| json!({ "tag": t, "count": n })).collect::<Vec<_>>(),
+        "recent": newest.iter().take(previews).map(|e| json!({
+            "id": e.id,
+            "at": e.at,
+            "lastHit": e.last_hit,
+            "hits": e.hits,
+            "done": e.done,
+            "tags": e.tags,
+            "preview": super::envelope::one_line(&e.text).chars().take(140).collect::<String>(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 /// A compact block for a prompt ("" when nothing matched).
 pub fn recall_block(title: &str, hits: &[Entry]) -> String {
     if hits.is_empty() {
@@ -332,5 +377,21 @@ mod tests {
         assert!(recall_block("SHARED BUILD MEMORY", &query("coder", "build_circle", "weather", 3, 1000, false)).contains("hourly strip"));
         reset_for_test(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detail_reports_tiers_collections_and_previews() {
+        let _g = test_lock();
+        reset_for_test(None);
+        put("librarian", "librarian", "indexed the CloudMart runbook", &["docs", "cloudmart"]);
+        put("librarian", "librarian", "indexed the GCP free tier notes", &["docs"]);
+        let d = detail("librarian", 1).unwrap();
+        assert_eq!(d["active"], 2);
+        assert_eq!(d["collections"][0]["tag"], "docs");
+        assert_eq!(d["collections"][0]["count"], 2);
+        assert_eq!(d["recent"].as_array().unwrap().len(), 1, "preview cap");
+        assert!(d["lastWriteAt"].as_u64().is_some());
+        assert!(detail("finance", 3).is_none(), "the vault's index is never exposed here");
+        reset_for_test(None);
     }
 }

@@ -80,6 +80,9 @@ pub enum Status {
     SmokeTesting,
     ReadyForMerge,
     Deployed,
+    /// Hard-stopped by Nic (Cancel / Abort): its worker task is cancelled, any in-flight model
+    /// call aborted, its Claude run killed. Files and logs stay until Delete; Re-queue runs it again.
+    Cancelled,
 }
 
 /// A Steer directive (Phase 4): appended to the envelope, injected into every following agent step.
@@ -631,8 +634,8 @@ impl HubFile {
     /// note (Nic's fix instructions) becomes a high-priority override for the next run.
     pub fn requeue(&mut self, id: &str, note: Option<&str>, now: i64, known: &[String]) -> Result<(), String> {
         let i = self.builds.iter().position(|b| b.envelope.build_id == id).ok_or_else(|| format!("no build {id}"))?;
-        if self.builds[i].envelope.status != Status::RepairQueue {
-            return Err("only a build in the Repair Queue can re-enter staging".into());
+        if !matches!(self.builds[i].envelope.status, Status::RepairQueue | Status::Cancelled) {
+            return Err("only a build in the Repair Queue (or a cancelled one) can re-enter staging".into());
         }
         let mut b = self.builds.remove(i);
         if let Some(n) = note.map(|n| devqueue::scrub(&clean_block(n, OVERRIDE_MAX), known)).filter(|n| !n.is_empty()) {
@@ -642,7 +645,6 @@ impl HubFile {
             let fix = format!("Fix before anything else — the last check failed: {}", r.failed_assertions.join("; ").chars().take(400).collect::<String>());
             b.envelope.human_override.push(HumanOverride { directive: fix, priority: "high".into(), at: now, applied_at: None, applied_stage: None, auto: true });
         }
-        b.envelope.status = Status::Queued;
         b.worker_task_id = None;
         b.dev_task_id = None;
         // Fresh budget, same token counter: a check still running from before the requeue is
@@ -653,7 +655,9 @@ impl HubFile {
         b.progress = 0;
         b.stage = None;
         b.last_log_seq = 0;
-        push_log(&mut b, now, "event", "Re-entered staging from the Repair Queue".into());
+        let from = if b.envelope.status == Status::Cancelled { "after a cancel" } else { "from the Repair Queue" };
+        b.envelope.status = Status::Queued;
+        push_log(&mut b, now, "event", format!("Re-entered staging {from}"));
         self.builds.push(b);
         Ok(())
     }
@@ -720,6 +724,32 @@ impl HubFile {
             Runtime::ExternalOs => format!("Marked deployed ({})", b.envelope.output_directory),
         });
         Ok(())
+    }
+
+    /// Cancel / Abort (pure): the build stops for good — `Cancelled`, unbound, its smoke state
+    /// cleared so a check still running lands as a report only. Returns the work that was bound
+    /// to it (worker task, Dev Fix item) for the caller to abort and release.
+    pub fn cancel(&mut self, id: &str, reason: &str, now: i64) -> Result<(Option<String>, Option<String>), String> {
+        let b = self.get_mut(id)?;
+        match b.envelope.status {
+            Status::Deployed => return Err("a deployed build can't be cancelled — delete it instead".into()),
+            Status::Cancelled => return Err("this build is already cancelled".into()),
+            _ => {}
+        }
+        let bound = (b.worker_task_id.take(), b.dev_task_id.take());
+        b.envelope.status = Status::Cancelled;
+        b.paused_from = None;
+        b.smoke.running = false;
+        b.smoke.bg = None;
+        b.stage = None;
+        b.finished_at = Some(now);
+        push_log(b, now, "stderr", format!("✕ Cancelled: {reason}"));
+        Ok(bound)
+    }
+
+    /// Builds a "clear failed" sweep removes: the Repair Queue and cancelled builds.
+    pub fn failed_ids(&self) -> Vec<String> {
+        self.builds.iter().filter(|b| matches!(b.envelope.status, Status::RepairQueue | Status::Cancelled)).map(|b| b.envelope.build_id.clone()).collect()
     }
 
     pub fn remove(&mut self, id: &str) -> Result<Build, String> {
@@ -834,13 +864,14 @@ pub fn status_str(s: Status) -> &'static str {
         Status::SmokeTesting => "smoke_testing",
         Status::ReadyForMerge => "ready_for_merge",
         Status::Deployed => "deployed",
+        Status::Cancelled => "cancelled",
     }
 }
 
 /// Keep the bound worker task paused in the worker? Only while the hub holds the build back
 /// (Paused) or has taken it out of staging (Repair Queue) — never let it run unowned.
 pub fn hold_worker(s: Status) -> bool {
-    matches!(s, Status::Paused | Status::RepairQueue)
+    matches!(s, Status::Paused | Status::RepairQueue | Status::Cancelled)
 }
 
 /// Pausing a Claude-lane build: what to set its Dev Fix item to. `Ok(None)` = leave it (Claude
@@ -1155,6 +1186,11 @@ impl HubState {
         f.version = 1;
         // A smoke test or file operation in flight died with the last session.
         for b in &mut f.builds {
+            // A cancelled build owns nothing (its release ran, or `reap_orphans` finishes it).
+            if b.envelope.status == Status::Cancelled {
+                b.worker_task_id = None;
+                b.dev_task_id = None;
+            }
             b.committing = false;
             if b.smoke.running {
                 b.smoke.running = false;
@@ -1498,6 +1534,7 @@ pub fn hub_status_line(b: &Build) -> Option<String> {
         Status::ReadyForMerge => format!("“{t}” passed its smoke test and is ready for merge in the Play Place."),
         Status::RepairQueue => format!("“{t}” is in the Repair Queue: {}.", b.repair.as_ref().map(|r| r.reason.as_str()).unwrap_or("needs a fix")),
         Status::Deployed => format!("“{t}” is deployed."),
+        Status::Cancelled => format!("“{t}” was cancelled in the Play Place."),
     })
 }
 
@@ -1767,6 +1804,7 @@ pub async fn hub_loop(app: AppHandle) {
     }
     sync_worker_hooks(&app);
     tokio::time::sleep(Duration::from_secs(4)).await;
+    reap_orphans(&app).await;
     loop {
         pass(&app).await;
         let _ = tokio::time::timeout(Duration::from_secs(2), app.state::<HubState>().notify.notified()).await;
@@ -2201,6 +2239,251 @@ pub async fn build_remove(app: AppHandle, build_id: String) -> Result<HubView, S
     release_bound_work(&app, &build_id, removed.worker_task_id, removed.dev_task_id).await;
     changed(&app);
     Ok(view(&app))
+}
+
+// ── Cancel / Delete (hard stop + purge) ─────────────────────────────────────
+
+/// The folder Delete may remove for a build: its expected output folder, and only when the
+/// envelope still points exactly there and it is a direct child of the staging root / external
+/// base (never a root, never a path outside them). Pure.
+pub fn purgeable_dir(e: &TaskEnvelope, staging_root: &Path, external_base: &Path) -> Option<PathBuf> {
+    let slug = e.project_slug.as_str();
+    if slug.is_empty() || slug == "." || slug == ".." || slug.contains(['/', '\\', ':']) {
+        return None;
+    }
+    let root = match e.target_runtime {
+        Runtime::InternalWidget => staging_root,
+        Runtime::ExternalOs => external_base,
+    };
+    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    if norm(root).is_empty() {
+        return None;
+    }
+    let expected = expected_dir(e.target_runtime, slug, staging_root, external_base);
+    if norm(&expected) != norm(Path::new(&e.output_directory)) || expected.parent().map(norm) != Some(norm(root)) {
+        return None;
+    }
+    Some(expected)
+}
+
+/// Is this a live worker task the hub created (dedupe key `<build_id>:<ms>`) that no build binds
+/// any more — what a crash between Cancel's save and its release would leave behind? Pure.
+pub fn is_orphan(task_id: &str, status: &str, dedupe_key: Option<&str>, hub: &HubFile) -> bool {
+    !envelope::TERMINAL.contains(&status)
+        && dedupe_key.and_then(|k| k.split_once(':')).is_some_and(|(b, ms)| valid_build_id(b) && !ms.is_empty() && ms.bytes().all(|c| c.is_ascii_digit()))
+        && !hub.builds.iter().any(|b| b.worker_task_id.as_deref() == Some(task_id))
+}
+
+/// Startup guard: cancel hub-created worker tasks nothing owns (never left running unowned).
+async fn reap_orphans(app: &AppHandle) {
+    let a = app.clone();
+    let known = known_of(app);
+    let reaped = blocking(move || {
+        let store = a.state::<TaskStore>();
+        let tasks = store.with(|c| envelope::list(c, None, 200, false))?;
+        let hub = a.state::<HubState>().snapshot();
+        let ids: Vec<String> = tasks.iter().filter(|t| is_orphan(&t.task_id, &t.status, t.dedupe_key.as_deref(), &hub)).map(|t| t.task_id.clone()).collect();
+        Ok(ids.iter().filter_map(|id| release_worker_task_env(store.inner(), id, &known)).collect::<Vec<_>>())
+    })
+    .await
+    .unwrap_or_default();
+    for e in &reaped {
+        eprintln!("[hub] reaped orphan worker task {} (no build owns it)", e.task_id);
+        super::taskworker::announce_cancelled(app, e);
+    }
+}
+
+/// Wait out a Claude hand-off being queued for this build (it binds right after), up to ~5 s.
+async fn settle_dispatch(app: &AppHandle, id: &str) -> Result<(), String> {
+    for _ in 0..50 {
+        if not_dispatching(app, id).is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    not_dispatching(app, id)
+}
+
+/// The hard stop shared by Cancel and Delete: mark the build Cancelled, abort its in-flight model
+/// call (GPU slot released, offloaded CLI killed), cancel its worker task, kill a running Claude
+/// Code run and delete its waiting Dev Fix item. `Ok(false)`: nothing was bound to stop.
+async fn hard_stop(app: &AppHandle, build_id: &str, reason: &str) -> Result<bool, String> {
+    settle_dispatch(app, build_id).await?;
+    let id = build_id.to_string();
+    let reason = reason.to_string();
+    let a = app.clone();
+    let (worker, dev) = blocking(move || a.state::<HubState>().with(|f| f.cancel(&id, &reason, now_ms()))).await?;
+    if let Some(t) = &worker {
+        super::job_abort::abort(t);
+    }
+    if let Some(d) = &dev {
+        if app.state::<super::claude_fix::ClaudeFixState>().cancel(d) {
+            // The run unwinds on its own thread; once it lets go, its item (back to Queued with a
+            // note) is deleted so Claude never builds a cancelled build.
+            let (a, d) = (app.clone(), d.clone());
+            tauri::async_runtime::spawn(async move {
+                for _ in 0..120 {
+                    if !a.state::<super::claude_fix::ClaudeFixState>().is_busy() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                let _ = release_dev_item(&a, &d).await;
+            });
+        }
+    }
+    let stopped = worker.is_some() || dev.is_some();
+    release_bound_work(app, build_id, worker, dev).await;
+    changed(app);
+    Ok(stopped)
+}
+
+/// Cancel / Abort (distinct from Pause): stop the build now and for good. The card stays (status
+/// Cancelled) with its files and logs; Re-queue runs it again, Delete purges it.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn cancel_build_job(app: AppHandle, job_id: String) -> Result<TaskEnvelope, String> {
+    if !valid_build_id(&job_id) {
+        return Err("bad build id".into());
+    }
+    hard_stop(&app, &job_id, "cancelled by Nic").await?;
+    build_of(&app, &job_id)
+}
+
+#[derive(Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteReport {
+    pub build_id: String,
+    pub aborted: bool,
+    pub purged: Vec<String>,
+    pub kept: Option<String>,
+}
+
+/// Remove a folder, retrying briefly (Windows: a preview server or Explorer may hold a handle).
+fn remove_dir_retry(t: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..5 {
+        match std::fs::remove_dir_all(t) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last = e.to_string();
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Delete one build for good: abort it first if it runs, take it out of `build-hub.json`, stop
+/// its preview servers, and remove its artifacts from disk (output folder when it is safely the
+/// hub's own, the steer copies, the frozen promoted copy). `purge_files: false` keeps the folder.
+async fn delete_one(app: &AppHandle, build_id: &str, purge_files: bool) -> Result<DeleteReport, String> {
+    if !valid_build_id(build_id) {
+        return Err("bad build id".into());
+    }
+    let b = app.state::<HubState>().snapshot().get(build_id).cloned().ok_or_else(|| format!("no build {build_id}"))?;
+    let mut report = DeleteReport { build_id: build_id.to_string(), ..Default::default() };
+    if !matches!(b.envelope.status, Status::Cancelled | Status::Deployed) {
+        report.aborted = hard_stop(app, build_id, "deleted by Nic").await?;
+    }
+    let (a, id) = (app.clone(), build_id.to_string());
+    let removed = blocking(move || a.state::<HubState>().with(|f| f.remove(&id))).await?;
+    {
+        let hub = app.state::<HubState>();
+        evict_previews(&mut hub.previews.lock().unwrap(), build_id, false);
+        hub.peeks.lock().unwrap().forget(build_id);
+    }
+    // Defensive: anything still bound (a Deployed build never is) is released too.
+    release_bound_work(app, build_id, removed.worker_task_id.clone(), removed.dev_task_id.clone()).await;
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if let Ok(d) = app.path().app_local_data_dir() {
+        targets.push(d.join("steer").join(build_id));
+    }
+    if let Ok(d) = app.path().app_config_dir() {
+        targets.push(d.join("promoted").join(build_id));
+    }
+    if purge_files {
+        match staging_root_of(app).ok().and_then(|root| purgeable_dir(&removed.envelope, &root, &external_base_of(app))) {
+            Some(dir) => targets.push(dir),
+            None => report.kept = Some(format!("{} (not inside the hub's own folders — left alone)", removed.envelope.output_directory)),
+        }
+    } else {
+        report.kept = Some(removed.envelope.output_directory.clone());
+    }
+    report.purged = blocking(move || {
+        let mut out = Vec::new();
+        for t in targets.into_iter().filter(|t| t.exists()) {
+            match remove_dir_retry(&t) {
+                Ok(()) => out.push(t.display().to_string()),
+                Err(e) => eprintln!("[hub] delete: couldn't remove {}: {e}", t.display()),
+            }
+        }
+        Ok(out)
+    })
+    .await?;
+    changed(app);
+    Ok(report)
+}
+
+/// Delete a build permanently (aborting it first if it is running).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn delete_build_job(app: AppHandle, job_id: String, purge_files: Option<bool>) -> Result<DeleteReport, String> {
+    delete_one(&app, &job_id, purge_files.unwrap_or(true)).await
+}
+
+/// Delete every Repair Queue and cancelled build.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn clear_failed_jobs(app: AppHandle, purge_files: Option<bool>) -> Result<Vec<DeleteReport>, String> {
+    let ids = app.state::<HubState>().snapshot().failed_ids();
+    let mut out = Vec::new();
+    for id in ids {
+        match delete_one(&app, &id, purge_files.unwrap_or(true)).await {
+            Ok(r) => out.push(r),
+            Err(e) => eprintln!("[hub] clear failed: {id}: {e}"),
+        }
+    }
+    Ok(out)
+}
+
+/// Build Runners row: Cancel it if it still runs (abort + cancel), then take it off the runner
+/// list for good. `handoff_log` is append-only by design (audit trail), so the task's rows are
+/// hidden (`dismissed:<id>` in `envelope_meta`, skipped by `task_list`), not erased. With
+/// `purge_files`, its `staging/<slug>` folder goes too — unless a hub build still uses that slug.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn runner_dismiss(app: AppHandle, task_id: String, purge_files: Option<bool>) -> Result<DeleteReport, String> {
+    if task_id.is_empty() || task_id.len() > 64 || !task_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+        return Err("bad task id".into());
+    }
+    let known = known_of(&app);
+    let (a, t) = (app.clone(), task_id.clone());
+    let e = blocking(move || a.state::<TaskStore>().with(|c| envelope::get_bare(c, &t))).await?.ok_or_else(|| format!("task {task_id} not found"))?;
+    let mut report = DeleteReport { build_id: task_id.clone(), ..Default::default() };
+    if !envelope::TERMINAL.contains(&e.status.as_str()) {
+        super::job_abort::abort(&task_id);
+        let (a, t, k) = (app.clone(), task_id.clone(), known.clone());
+        if let Ok(Some(c)) = blocking(move || Ok(release_worker_task_env(a.state::<TaskStore>().inner(), &t, &k))).await {
+            super::taskworker::announce_cancelled(&app, &c);
+        }
+        report.aborted = true;
+    }
+    let (a, t) = (app.clone(), task_id.clone());
+    blocking(move || a.state::<TaskStore>().with(|c| envelope::meta_set(c, &format!("dismissed:{t}"), &now_ms().to_string()))).await?;
+    if purge_files.unwrap_or(false) {
+        if let Some(slug) = e.project_slug.as_deref().filter(|s| !s.is_empty() && !s.contains(['/', '\\', ':', '.'])) {
+            let used = app.state::<HubState>().snapshot().builds.iter().any(|b| b.envelope.project_slug == slug);
+            if used {
+                report.kept = Some(format!("staging/{slug} (a Staging Hub build still uses it)"));
+            } else if let Ok(root) = staging_root_of(&app) {
+                let dir = root.join(slug);
+                let shown = dir.display().to_string();
+                if blocking(move || remove_dir_retry(&dir)).await.is_ok() {
+                    report.purged.push(shown);
+                }
+            }
+        }
+    }
+    let _ = app.emit("runner-dismissed", &task_id);
+    Ok(report)
 }
 
 /// The loopback URL a promoted internal widget renders from: a preview server over the frozen

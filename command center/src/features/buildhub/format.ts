@@ -10,6 +10,7 @@ export const STATUS_LABEL: Record<BuildStatus, string> = {
   smoke_testing: "Smoke testing",
   ready_for_merge: "Ready for merge",
   deployed: "Deployed",
+  cancelled: "Cancelled",
 };
 
 export const RUNTIME_BADGE = { internal_widget: "INTERNAL WIDGET", external_os: "EXTERNAL OS" } as const;

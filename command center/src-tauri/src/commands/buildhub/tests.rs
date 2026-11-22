@@ -478,14 +478,11 @@ fn review0_preview_rejects_unc_rooted_and_backslash_paths_before_touching_the_fs
 fn review2_a_late_smoke_result_never_fails_and_clears_the_flags() {
     let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
     running(&mut h, "b-a");
-    {
-        let b = h.get_mut("b-a").unwrap();
-        b.smoke.running = true;
-        b.committing = true;
-    }
+    let token = h.begin_smoke("b-a", true).unwrap();
+    h.get_mut("b-a").unwrap().committing = true;
     // Nic sent it to Repair while the check ran.
     h.to_repair("b-a", "sent by Nic", "", vec![], false, 30).unwrap();
-    assert_eq!(h.record_smoke("b-a", smoke_fail("body"), 31).unwrap(), Status::RepairQueue);
+    assert_eq!(h.fold_smoke("b-a", token, smoke_fail("body"), 31).unwrap(), Some(Status::RepairQueue));
     let b = h.get("b-a").unwrap();
     assert!(!b.smoke.running && !b.committing);
     assert_eq!(b.smoke.failures, 0, "a stale check doesn't count against the build");
@@ -523,15 +520,6 @@ fn review3_24_a_build_stuck_in_smoke_testing_is_recovered_on_load() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn review1_external_target_must_not_exist() {
-    let base = std::env::temp_dir().join(format!("buildhub-target-{}-{}", std::process::id(), now_ms()));
-    let dir = base.join("tip-calc");
-    assert!(external_target_free(&dir).is_ok());
-    std::fs::create_dir_all(&dir).unwrap();
-    assert!(external_target_free(&dir).unwrap_err().contains("already exists"));
-    let _ = std::fs::remove_dir_all(&base);
-}
 
 #[test]
 fn review6_23_no_hub_command_runs_on_the_main_thread() {
@@ -606,12 +594,12 @@ fn review16_intake_takes_the_gpu_baton_and_falls_back_when_busy() {
 #[test]
 fn review20_30_peek_watches_and_late_output() {
     let mut w = PeekWatches::default();
-    let tok = w.begin("b-a");
+    w.watch("b-a");
     w.unwatch("b-a"); // closed while the open call was still probing
-    assert!(!w.commit("b-a", tok, true, 1), "a late open can't re-add a closed peek");
+    assert!(!w.commit("b-a", true, 1), "a late open can't re-add a closed peek");
     assert!(w.ids().is_empty());
-    let tok = w.begin("b-a");
-    assert!(w.commit("b-a", tok, false, 2));
+    w.watch("b-a");
+    assert!(w.commit("b-a", false, 2));
     w.update("b-a", true, 3);
     assert_eq!(w.get("b-a"), Some((true, 3)));
     // A watched peek gets its server as soon as the output folder appears.
@@ -898,4 +886,212 @@ fn review_feed3_hub_records_scrub_the_known_values() {
         let full = s.message(h.seq).unwrap().unwrap();
         assert!(!full.body.contains("SYNTH-NOTE-VALUE-7731"), "known value persisted: {}", full.body);
     }
+}
+
+// ── Review round 2 ──
+
+#[test]
+fn round2_smoke_tokens_a_stale_check_never_overwrites_a_newer_one() {
+    let mut h = hub_with(&[("b-x", AssignedWorker::Coder)]);
+    {
+        let b = h.get_mut("b-x").unwrap();
+        b.envelope.target_runtime = Runtime::ExternalOs;
+        b.worker_task_id = Some("t".into());
+        b.envelope.status = Status::SmokeTesting;
+    }
+    let bg = h.begin_smoke("b-x", true).unwrap(); // background check, still copying files
+    assert!(h.get("b-x").unwrap().committing);
+    let manual = h.begin_smoke("b-x", false).unwrap(); // Nic's "Re-run check" while it runs
+    assert_eq!(h.fold_smoke("b-x", manual, smoke_pass(), 10).unwrap(), Some(Status::ReadyForMerge));
+    {
+        let b = h.get("b-x").unwrap();
+        assert!(b.committing && b.smoke.running, "the manual check never clears the background copy's flags");
+    }
+    // The older background check lands late with a failure: discarded, nothing regresses.
+    assert_eq!(h.fold_smoke("b-x", bg, smoke_fail("body"), 11).unwrap(), None);
+    let b = h.get("b-x").unwrap();
+    assert_eq!(b.envelope.status, Status::ReadyForMerge);
+    assert!(b.smoke.last.as_ref().unwrap().passed, "Ready for merge never sits on a failed report");
+    assert!(!b.committing && !b.smoke.running, "its owner cleared the flags");
+    assert!(h.clone().promote("b-x", 12).is_ok());
+}
+
+#[test]
+fn round2_a_check_from_before_a_requeue_can_not_land_as_the_new_runs_result() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    running(&mut h, "b-a");
+    let old = h.begin_smoke("b-a", true).unwrap();
+    h.to_repair("b-a", "sent by Nic", "", vec![], false, 1).unwrap();
+    h.requeue("b-a", None, 2, &[]).unwrap();
+    running(&mut h, "b-a");
+    let new = h.begin_smoke("b-a", true).unwrap();
+    assert!(new > old);
+    assert_eq!(h.fold_smoke("b-a", old, smoke_pass(), 3).unwrap(), None);
+    let b = h.get("b-a").unwrap();
+    assert_eq!(b.envelope.status, Status::SmokeTesting);
+    assert!(b.smoke.running, "the new run still owns its flags");
+    assert_eq!(h.fold_smoke("b-a", new, smoke_pass(), 4).unwrap(), Some(Status::ReadyForMerge));
+}
+
+#[test]
+fn round2_steer_on_a_build_paused_at_a_checkpoint_is_refused_with_a_reason() {
+    let mut h = hub_with(&[("b-c", AssignedWorker::Claude)]);
+    {
+        let b = h.get_mut("b-c").unwrap();
+        b.dev_task_id = Some("d1".into());
+        b.envelope.status = Status::SmokeTesting;
+    }
+    h.pause("b-c", 1).unwrap();
+    let err = h.steer("b-c", "dark mode", 2, &[]).unwrap_err();
+    assert!(err.contains("paused smoke testing") && err.contains("Repair"), "{err}");
+    assert!(h.get("b-c").unwrap().envelope.human_override.is_empty());
+    // Paused mid-build is still steerable: the next step will run.
+    let mut h = hub_with(&[("b-w", AssignedWorker::Coder)]);
+    h.get_mut("b-w").unwrap().envelope.status = Status::Building;
+    h.pause("b-w", 1).unwrap();
+    assert!(h.steer("b-w", "bigger buttons", 2, &[]).is_ok());
+}
+
+#[test]
+fn round2_claude_lane_overrides_are_marked_delivered_and_midrun_is_said_once() {
+    let mut h = hub_with(&[("b-c", AssignedWorker::Claude)]);
+    h.steer("b-c", "dark mode", 5, &[]).unwrap();
+    assert_eq!(h.get("b-c").unwrap().envelope.human_override[0].applied_at, None);
+    h.mark_delivered("b-c", 9, "claude hand-off").unwrap();
+    let o = &h.get("b-c").unwrap().envelope.human_override[0];
+    assert_eq!((o.applied_at, o.applied_stage.as_deref()), (Some(9), Some("claude hand-off")));
+    // Item In Progress while the hub still says Queued: the steer is logged, once.
+    h.steer("b-c", "and a footer", 10, &[]).unwrap();
+    h.note_claude_midrun("b-c", 11).unwrap();
+    h.note_claude_midrun("b-c", 12).unwrap();
+    let n = h.get("b-c").unwrap().logs.iter().filter(|l| l.text.starts_with("Claude Code is mid-run")).count();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn round2_external_slug_picks_a_free_suffix_instead_of_refusing() {
+    let base = std::env::temp_dir().join(format!("buildhub-slug-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(base.join("tip-calc")).unwrap(); // a removed build's folder stays
+    let mut h = HubFile::default();
+    assert_eq!(free_external_slug("tip-calc", &base, &h, path_taken).unwrap(), "tip-calc-2");
+    // A slug a hub build still holds (even deployed, whose folder may be gone) is never reused.
+    h.enqueue(env("b-d", "tip-calc-2", Runtime::ExternalOs, AssignedWorker::Coder), "".into(), vec![], 1).unwrap();
+    assert_eq!(free_external_slug("tip-calc", &base, &h, path_taken).unwrap(), "tip-calc-3");
+    assert!(path_taken(&base.join("tip-calc")));
+    assert!(!path_taken(&base.join("nope")));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+fn temp_hub(tag: &str) -> (HubState, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("buildhub-{tag}-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let st = HubState::default();
+    st.init(&dir);
+    (st, dir)
+}
+
+#[test]
+fn round2_enqueue_staged_real_ordering_and_rollback() {
+    let (st, dir) = temp_hub("enq");
+    let base = dir.join("ext");
+    let mk = |id: &str| {
+        let mut e = env(id, "tip-calc", Runtime::ExternalOs, AssignedWorker::Coder);
+        e.output_directory = base.join("tip-calc").display().to_string();
+        e
+    };
+    // 1. Success: the scaffold runs INSIDE the hub transaction (the pass loop can't dispatch the
+    //    build before its folder exists), and the enqueue is persisted.
+    let got = enqueue_staged(&st, mk("b-1"), "brief".into(), vec![], &base, 1, |e| {
+        assert!(st.file.try_lock().is_err(), "scaffold runs under the hub lock");
+        scaffold_external(e)
+    })
+    .unwrap();
+    assert_eq!(got.project_slug, "tip-calc");
+    assert!(base.join("tip-calc").join("README.md").is_file());
+    let saved: HubFile = serde_json::from_str(&std::fs::read_to_string(dir.join(HUB_FILE)).unwrap()).unwrap();
+    assert!(saved.get("b-1").is_some());
+    // 2. The same title while that build is in flight: refused with the "already staged"
+    //    message, before any scaffold.
+    let err = enqueue_staged(&st, mk("b-2"), "".into(), vec![], &base, 2, |_| panic!("must not scaffold")).unwrap_err();
+    assert!(err.contains("already staged"), "{err}");
+    // 3. Once that build is removed, its folder stays: the re-push gets a free suffixed slug.
+    st.with(|f| f.remove("b-1").map(|_| ())).unwrap();
+    let again = enqueue_staged(&st, mk("b-3"), "".into(), vec![], &base, 3, scaffold_external).unwrap();
+    assert_eq!(again.project_slug, "tip-calc-2");
+    assert_eq!(PathBuf::from(&again.output_directory), base.join("tip-calc-2"));
+    assert_eq!(st.snapshot().get("b-3").unwrap().envelope.project_slug, "tip-calc-2");
+    // 4. A failing scaffold rolls everything back: no build, no folder, nothing persisted.
+    let err = enqueue_staged(&st, mk("b-4"), "".into(), vec![], &base, 4, |e| {
+        std::fs::create_dir_all(&e.output_directory).unwrap();
+        Err("disk full".into())
+    })
+    .unwrap_err();
+    assert_eq!(err, "disk full");
+    assert!(st.snapshot().get("b-4").is_none());
+    assert!(!base.join("tip-calc-3").exists());
+    let saved: HubFile = serde_json::from_str(&std::fs::read_to_string(dir.join(HUB_FILE)).unwrap()).unwrap();
+    assert!(saved.get("b-4").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn round2_intake_call_holds_the_baton_and_a_timeout_keeps_it_settling() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    tauri::async_runtime::block_on(async {
+        let slot = super::super::scheduler::GpuSlot::default();
+        // Busy: the call never runs.
+        let held = slot.acquire("Tony", true, 90).await;
+        let ran = AtomicBool::new(false);
+        let r = ask_in_slot(&slot, 90, Duration::from_millis(120), Duration::from_millis(400), || async {
+            ran.store(true, Ordering::SeqCst);
+            Ok("x".to_string())
+        })
+        .await;
+        assert!(r.is_none() && !ran.load(Ordering::SeqCst));
+        drop(held);
+        // A clean answer releases the baton at once.
+        let r = ask_in_slot(&slot, 90, Duration::from_millis(500), Duration::from_millis(400), || async {
+            assert!(!slot.is_idle(), "the call runs inside the baton");
+            Ok("q".to_string())
+        })
+        .await;
+        assert_eq!(r.as_deref(), Some("q"));
+        assert!(slot.is_idle());
+        // A timeout: the baton settles before the next holder (LM Studio may still be generating).
+        let r = ask_in_slot(&slot, 90, Duration::from_millis(500), Duration::from_millis(400), || async { Err(true) }).await;
+        assert!(r.is_none());
+        assert!(!slot.is_idle(), "still settling right after the timeout");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(slot.is_idle());
+        // Any other failure: released at once.
+        let r = ask_in_slot(&slot, 90, Duration::from_millis(500), Duration::from_millis(400), || async { Err(false) }).await;
+        assert!(r.is_none() && slot.is_idle());
+    });
+    // build_intake_questions goes through it, and checks the provider before taking the baton.
+    let src = include_str!("../buildhub.rs");
+    let body = &src[src.find("pub async fn build_intake_questions").unwrap()..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let (prov, ask) = (body.find("provider(\"lmstudio\")").unwrap(), body.find("ask_in_slot(").unwrap());
+    assert!(prov < ask, "provider check first");
+    assert!(!body.contains("intake_slot("), "no un-armed baton path left");
+}
+
+#[test]
+fn round2_peek_watches_are_ref_counted_in_any_order() {
+    // React StrictMode: open, close, open — the close may land first or last.
+    for order in [["w", "u", "w"], ["u", "w", "w"], ["w", "w", "u"]] {
+        let mut w = PeekWatches::default();
+        for op in order {
+            if op == "w" { w.watch("b-a") } else { w.unwatch("b-a") }
+        }
+        assert!(w.watched("b-a"), "{order:?}: one Peek is really open");
+        assert!(w.commit("b-a", true, 1));
+        w.unwatch("b-a");
+        assert!(!w.watched("b-a") && w.get("b-a").is_none(), "{order:?}: closed for good");
+    }
+    let mut w = PeekWatches::default();
+    w.watch("b-a");
+    w.watch("b-a");
+    w.forget("b-a"); // the build was removed
+    assert!(w.ids().is_empty());
 }

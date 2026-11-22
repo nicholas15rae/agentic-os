@@ -152,9 +152,11 @@ async function say(text: string, opts?: SpeakOpts & { noDuck?: boolean; traceId?
  * delegation. Null when "Vocal Handoffs" is off, the mic is locked off, TTS is unavailable or
  * `role` isn't one of Tony's crew. Fire-and-forget: callers dispatch first and never await it.
  * Each beat is checked against this mic generation, so a barge-in / stand-down / hard mic stop
- * (`micGen` moves, `hardStopMic` cancels the line in flight) drops the rest of the exchange and
- * nothing else; the delegated job is never touched. Beats go through `say()`, so they duck cue
- * audio exactly like any Tony line and use each agent's roster voice.
+ * (`micGen` moves, `hardStopMic` cancels the line in flight) drops the rest of the exchange. The
+ * cue itself never touches the delegated job, but those same reflexes treat the delegated turn
+ * like any turn in flight: a new command said over it, "cut it" or a stand-down also cancel it
+ * (`cancelStreams`), exactly as before Phase 5. Beats go through `say()`, so they duck cue audio
+ * exactly like any Tony line and use each agent's roster voice.
  */
 export function startHandoffCue(role: string): CueHandle | null {
   if (!useSettings.getState().routing.vocalHandoffs || !micEnabled() || !tts.supported) return null;
@@ -201,8 +203,6 @@ let lastTtsEndAt = 0;
 let lastUserSpeechAt = 0;
 /** streamIds of `os_turn`s in flight, so "cut it" can stop them server-side (`os_turn_cancel`). */
 const activeStreams = new Set<string>();
-/** Phase 5: delegated turns whose handoff cue is still playing (see `cancelStreams(keep)`). */
-const cueProtected = new Set<string>();
 /** Rust `agents::TURN_CANCELLED`: the error a cancelled os_turn returns. */
 const TURN_CANCELLED = "turn cancelled";
 /** Hold mode ("take it easy" over a busy turn / "whoa" / "madone" / "aspetta") — see the reflex section at the end. */
@@ -285,9 +285,9 @@ function speechHandlers() {
         // A new command said over Tony (or over a turn still thinking): he stops, the old turn's
         // server stream is dropped and it goes quiet (its bubble stays on screen).
         if (overTony || sayDepth > 0) {
-          // Phase 5: over a vocal handoff cue, only the cue stops (supersedeTurn cuts its beat and
-          // drops the rest); the delegated agent's job keeps running server-side.
-          cancelStreams(cueProtected);
+          // Over a vocal handoff cue too: a surviving delegated turn would outlive its mic
+          // generation and wedge the voice state (review #29, left for Nic to decide).
+          cancelStreams();
           supersedeTurn();
         }
         return settleCommand(handleInput(t, { channel: "voice" }), ttsIdle);
@@ -1354,11 +1354,6 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   let lastSpokenChunk: string | undefined;
   // Registered for "cut it" (`killTurn` → `os_turn_cancel`); removed when the turn returns.
   activeStreams.add(streamId);
-  // While its handoff cue plays, a new command said over it cancels the cue, not this job.
-  if (handoffCue) {
-    cueProtected.add(streamId);
-    void handoffCue.done.then(() => cueProtected.delete(streamId));
-  }
   // Announcer handoff: who Tony has introduced, which agent replies were queued to speak.
   const introduced = new Set<string>();
   const spokenReplies = new Set<string>();
@@ -1478,7 +1473,6 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
     offAgent();
     offSteps();
     activeStreams.delete(streamId);
-    cueProtected.delete(streamId);
     // Whatever was asked / answered before it failed or was cut is part of the record.
     renderSteps(liveSteps, role, explicit);
     // "Cut it" dropped this turn server-side: no error, the partial bubble just stays.
@@ -1494,7 +1488,6 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   offAgent();
   offSteps();
   activeStreams.delete(streamId);
-  cueProtected.delete(streamId);
   if (!r) {
     endIdleBargeIn();
     store().setState("idle");
@@ -1903,14 +1896,10 @@ function supersedeTurn() {
   releaseTtsDuck();
 }
 
-/** Stop every os_turn still generating (its LLM / sub-agent streams) server-side, except `keep`
- * (delegated turns whose vocal handoff cue is still playing, when a new command barges in). */
-function cancelStreams(keep: ReadonlySet<string> = new Set()) {
-  for (const id of [...activeStreams]) {
-    if (keep.has(id)) continue;
-    void cmd("os_turn_cancel", { streamId: id }).catch(() => undefined);
-    activeStreams.delete(id);
-  }
+/** Stop every os_turn still generating (its LLM / sub-agent streams) server-side. */
+function cancelStreams() {
+  for (const id of activeStreams) void cmd("os_turn_cancel", { streamId: id }).catch(() => undefined);
+  activeStreams.clear();
 }
 
 /**

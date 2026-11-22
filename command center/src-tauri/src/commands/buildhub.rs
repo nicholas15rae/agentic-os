@@ -129,6 +129,15 @@ pub struct SmokeState {
     pub failures: u32,
     pub running: bool,
     pub last: Option<SmokeReport>,
+    /// Smoke runs started for this build (background and manual); each run's token.
+    #[serde(default)]
+    pub run: u64,
+    /// Token of the newest run whose result was folded: an older run landing later is discarded.
+    #[serde(default)]
+    pub folded: u64,
+    /// Token of the background run that owns `running` / `committing` (None = none in flight).
+    #[serde(default)]
+    pub bg: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -398,6 +407,39 @@ impl HubFile {
         Ok(())
     }
 
+    /// Start a smoke run: returns its token. A background run (`spawn_smoke`) also owns the
+    /// `running` / `committing` flags until its own result is folded.
+    pub fn begin_smoke(&mut self, id: &str, background: bool) -> Result<u64, String> {
+        let b = self.get_mut(id)?;
+        b.smoke.run += 1;
+        let token = b.smoke.run;
+        if background {
+            b.smoke.running = true;
+            b.smoke.bg = Some(token);
+            b.committing = b.envelope.target_runtime == Runtime::ExternalOs;
+        }
+        Ok(token)
+    }
+
+    /// Fold run `token`'s result. The run that owns the flags clears them (and only it: a manual
+    /// re-check never clears a background copy still in flight). A result older than the newest
+    /// one already folded is discarded (logged), so a stale check can never overwrite a newer
+    /// result or move the status. `Ok(None)` = discarded.
+    pub fn fold_smoke(&mut self, id: &str, token: u64, r: SmokeReport, now: i64) -> Result<Option<Status>, String> {
+        let b = self.get_mut(id)?;
+        if b.smoke.bg == Some(token) {
+            b.smoke.bg = None;
+            b.smoke.running = false;
+            b.committing = false;
+        }
+        if token <= b.smoke.folded {
+            push_log(b, now, "event", format!("An older smoke check (run {token}) finished late; its result was discarded"));
+            return Ok(None);
+        }
+        b.smoke.folded = token;
+        self.record_smoke(id, r, now).map(Some)
+    }
+
     /// Builds sitting at the smoke checkpoint with no check running: after an exit / crash, a
     /// crashed check or a resume. The hub loop (re)runs their smoke test, so a lane never wedges.
     pub fn needs_smoke(&self) -> Vec<String> {
@@ -467,9 +509,12 @@ impl HubFile {
             return Err("this build is already deployed".into());
         }
         // No agent step runs again for these: a steer would sit "pending" forever. Rebuilding
-        // with it is an explicit Repair (the note becomes the override).
-        if matches!(b.envelope.status, Status::ReadyForMerge | Status::SmokeTesting | Status::RepairQueue) {
-            return Err(format!("no agent step runs again on a {} build — send it to Repair with this as the note to rebuild with it", status_str(b.envelope.status).replace('_', " ")));
+        // with it is an explicit Repair (the note becomes the override). A build PAUSED at one of
+        // those checkpoints resumes there, so it is refused the same way.
+        let at = if b.envelope.status == Status::Paused { b.paused_from.unwrap_or(Status::Paused) } else { b.envelope.status };
+        if matches!(at, Status::ReadyForMerge | Status::SmokeTesting | Status::RepairQueue) {
+            let what = if b.envelope.status == Status::Paused { format!("paused {}", status_str(at).replace('_', " ")) } else { status_str(at).replace('_', " ") };
+            return Err(format!("no agent step runs again on a {what} build — send it to Repair with this as the note to rebuild with it"));
         }
         let d = devqueue::scrub(&clean(directive, OVERRIDE_MAX), known);
         if d.is_empty() {
@@ -484,6 +529,25 @@ impl HubFile {
             // A live Claude Code run can't take new input: say so instead of dropping it silently.
             push_log(b, now, "event", "Claude Code is mid-run: this steer goes with its next hand-off (a repair pass or a re-queue)".into());
         }
+        Ok(())
+    }
+
+    /// Claude lane: the overrides went out with a hand-off (the Dev Fix item's body) — mark them
+    /// applied, so the card stops showing "next step" for them.
+    pub fn mark_delivered(&mut self, id: &str, at: i64, stage: &str) -> Result<(), String> {
+        let b = self.get_mut(id)?;
+        Self::mark_applied(b, at, Some(stage));
+        Ok(())
+    }
+
+    /// Claude Code is running this build's item although the hub hasn't seen it yet (the next
+    /// pass moves it to Building): a steer can't reach a live run — say when it will.
+    pub fn note_claude_midrun(&mut self, id: &str, now: i64) -> Result<(), String> {
+        let b = self.get_mut(id)?;
+        if b.logs.last().is_some_and(|l| l.text.starts_with("Claude Code is mid-run")) {
+            return Ok(());
+        }
+        push_log(b, now, "event", "Claude Code is mid-run: this steer goes with its next hand-off (a repair pass or a re-queue)".into());
         Ok(())
     }
 
@@ -525,7 +589,10 @@ impl HubFile {
         b.envelope.status = Status::Queued;
         b.worker_task_id = None;
         b.dev_task_id = None;
-        b.smoke = SmokeState::default();
+        // Fresh budget, same token counter: a check still running from before the requeue is
+        // older than everything this run folds, so it can never land as the new run's result.
+        let run = b.smoke.run;
+        b.smoke = SmokeState { run, folded: run, ..SmokeState::default() };
         b.committing = false;
         b.progress = 0;
         b.stage = None;
@@ -539,8 +606,6 @@ impl HubFile {
     /// failure as an override (back to the head of its lane); a second failure → Repair Queue.
     pub fn record_smoke(&mut self, id: &str, r: SmokeReport, now: i64) -> Result<Status, String> {
         let b = self.get_mut(id)?;
-        b.smoke.running = false;
-        b.committing = false;
         if !matches!(b.envelope.status, Status::SmokeTesting | Status::Paused) {
             // The build moved on while the check ran (sent to Repair, removed from smoke): keep
             // the report for the card, change nothing else, and never fail — a failure here would
@@ -737,13 +802,49 @@ pub fn claude_resume_target(dev_status: &str) -> Option<&'static str> {
     (dev_status == "Pending").then_some("Queued")
 }
 
-/// Path B never writes into a folder it doesn't own: an existing `<base>\<slug>` (another
-/// build's app, a deployed one, or Nic's own folder) is refused before anything is scaffolded.
-pub fn external_target_free(dir: &Path) -> Result<(), String> {
-    if dir.exists() {
-        return Err(format!("{} already exists — rename the build (its title) or move that folder first", dir.display()));
+/// Is `p` taken on disk? Strict: an existing entry, a dangling link / junction, or an entry we
+/// can't inspect (access denied) all count as taken.
+pub fn path_taken(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok() || !matches!(p.try_exists(), Ok(false))
+}
+
+/// The slug an external build gets: its own slug when that folder is free, else the first free
+/// `<slug>-2`, `<slug>-3`, … (a removed build's folder stays on disk, so re-pushing the same title
+/// must not be refused forever). A slug a staged hub build still holds is never reused. Pure
+/// apart from `taken`.
+pub fn free_external_slug(slug: &str, base: &Path, hub: &HubFile, taken: impl Fn(&Path) -> bool) -> Result<String, String> {
+    let held = |s: &str| hub.builds.iter().any(|b| b.envelope.project_slug == s);
+    for n in 1..=50u32 {
+        let cand = if n == 1 { slug.to_string() } else { format!("{}-{n}", slug.chars().take(44).collect::<String>().trim_end_matches('-')) };
+        if !held(&cand) && !taken(&base.join(&cand)) {
+            return Ok(cand);
+        }
     }
-    Ok(())
+    Err(format!("no free folder name for “{slug}” under {}", base.display()))
+}
+
+/// The enqueue itself (validated envelope in): the in-flight duplicate check, then — for an
+/// external build — a free folder (suffixed slug), and the scaffold INSIDE the same hub
+/// transaction, so the pass loop can't hand the build to an agent before its folder exists and a
+/// failed scaffold rolls the enqueue back with nothing bound to it. Returns the staged envelope.
+pub fn enqueue_staged(hub: &HubState, mut e: TaskEnvelope, brief: String, note_ids: Vec<String>, base: &Path, now: i64, scaffold: impl FnOnce(&TaskEnvelope) -> Result<(), String>) -> Result<TaskEnvelope, String> {
+    hub.with(move |f| {
+        if f.builds.iter().any(|b| b.envelope.project_slug == e.project_slug && b.envelope.status != Status::Deployed) {
+            return Err(format!("“{}” is already staged — finish or remove it first", e.project_slug));
+        }
+        if e.target_runtime == Runtime::ExternalOs {
+            let slug = free_external_slug(&e.project_slug, base, f, path_taken)?;
+            e.output_directory = base.join(&slug).display().to_string();
+            e.project_slug = slug;
+            if let Err(err) = scaffold(&e) {
+                // The folder was free a moment ago: whatever the scaffold left is ours to remove.
+                let _ = std::fs::remove_dir_all(&e.output_directory);
+                return Err(err);
+            }
+        }
+        f.enqueue(e.clone(), brief, note_ids, now)?;
+        Ok(e)
+    })
 }
 
 fn push_log(b: &mut Build, at: i64, stream: &str, text: String) {
@@ -900,39 +1001,56 @@ pub struct HubView {
 
 // ── Runtime state ───────────────────────────────────────────────────────────
 
-/// Which builds have a Peek View open, with their last reachability. An unwatch bumps the build's
-/// epoch, so a watch call that started before it (still probing) can't re-add the peek (pure).
+/// Which builds have a Peek View open, with their last reachability. Watches are REF-COUNTED
+/// (each open +1, each close -1, applied the moment the call arrives, before any probing), so
+/// opens and closes in any order — React StrictMode's open/close/open, or a close that lands while
+/// the open is still probing — always end with exactly the number of Peeks really open. A late
+/// open's probe result only lands while the count is still positive (pure).
 #[derive(Default, Debug)]
 pub struct PeekWatches {
     open: HashMap<String, (bool, i64)>,
-    epoch: HashMap<String, u64>,
+    count: HashMap<String, i64>,
 }
 
 impl PeekWatches {
-    pub fn begin(&self, id: &str) -> u64 {
-        self.epoch.get(id).copied().unwrap_or(0)
+    pub fn watch(&mut self, id: &str) {
+        *self.count.entry(id.to_string()).or_default() += 1;
     }
-    /// Record the watch unless it was closed since `token` was taken. Returns whether it stuck.
-    pub fn commit(&mut self, id: &str, token: u64, reachable: bool, now: i64) -> bool {
-        if self.begin(id) != token {
+    pub fn unwatch(&mut self, id: &str) {
+        let c = self.count.entry(id.to_string()).or_default();
+        *c -= 1;
+        if *c <= 0 {
+            self.open.remove(id);
+        }
+        if *c == 0 {
+            self.count.remove(id);
+        }
+    }
+    pub fn watched(&self, id: &str) -> bool {
+        self.count.get(id).is_some_and(|c| *c > 0)
+    }
+    /// Record a probe result for a watched peek. Returns whether it landed.
+    pub fn commit(&mut self, id: &str, reachable: bool, now: i64) -> bool {
+        if !self.watched(id) {
             return false;
         }
         self.open.insert(id.to_string(), (reachable, now));
         true
     }
-    pub fn unwatch(&mut self, id: &str) {
+    /// The build is gone: drop every watch on it.
+    pub fn forget(&mut self, id: &str) {
         self.open.remove(id);
-        *self.epoch.entry(id.to_string()).or_default() += 1;
+        self.count.remove(id);
     }
     pub fn ids(&self) -> Vec<String> {
-        self.open.keys().cloned().collect()
+        self.count.iter().filter(|(_, c)| **c > 0).map(|(k, _)| k.clone()).collect()
     }
     pub fn get(&self, id: &str) -> Option<(bool, i64)> {
         self.open.get(id).copied()
     }
     pub fn update(&mut self, id: &str, reachable: bool, now: i64) {
-        if let Some(v) = self.open.get_mut(id) {
-            *v = (reachable, now);
+        if self.watched(id) {
+            self.open.insert(id.to_string(), (reachable, now));
         }
     }
 }
@@ -985,6 +1103,7 @@ impl HubState {
             if b.smoke.running {
                 b.smoke.running = false;
             }
+            b.smoke.bg = None;
         }
         *self.file.lock().unwrap() = f;
         *self.path.lock().unwrap() = Some(path);
@@ -1164,6 +1283,8 @@ async fn dispatch_claude(app: &AppHandle, id: &str) -> Result<(), String> {
     if !bound? {
         let _ = devqueue::dev_task_delete(app.state(), app.state(), app.state(), t.id.clone()).await;
     } else {
+        // Every override in the brief went out with this hand-off.
+        let _ = hub.with(|f| f.mark_delivered(id, now_ms(), "claude hand-off"));
         // Agent Conversation: Claude Code's run nests inside the build's card (opened first);
         // Nic's brief / notes are free text, so the known values are scrubbed too.
         let known = known_of(app);
@@ -1404,11 +1525,9 @@ pub(crate) fn nest_under_hub_in(s: &tr::TranscriptStore, e: &TaskEnvelope, child
 /// Run the smoke test for `id` on the blocking pool and fold the result.
 fn spawn_smoke(app: &AppHandle, id: String) {
     let hub = app.state::<HubState>();
-    let Ok(b) = hub.with(|f| {
-        let b = f.get_mut(&id)?;
-        b.smoke.running = true;
-        b.committing = b.envelope.target_runtime == Runtime::ExternalOs;
-        Ok(b.clone())
+    let Ok((token, b)) = hub.with(|f| {
+        let token = f.begin_smoke(&id, true)?;
+        Ok((token, f.get(&id).cloned().ok_or("build vanished")?))
     }) else {
         return;
     };
@@ -1436,7 +1555,6 @@ fn spawn_smoke(app: &AppHandle, id: String) {
                 let failed = report.failed_assertions.clone();
                 let outcome = hub.with(|f| {
                     let b = f.get_mut(&id)?;
-                    b.committing = false;
                     match copied {
                         Some(Ok(n)) => push_log(b, now, "stdout", format!("Copied {n} file(s) into {}", served_dir(&b.envelope).display())),
                         Some(Err(e)) => push_log(b, now, "stderr", format!("copy to the external folder failed: {e}")),
@@ -1445,9 +1563,9 @@ fn spawn_smoke(app: &AppHandle, id: String) {
                     for c in &report.checks {
                         push_log(b, now, if c.ok || !c.required { "stdout" } else { "stderr" }, format!("smoke {} {}: {}", if c.ok { "✓" } else { "✗" }, c.name, c.detail));
                     }
-                    f.record_smoke(&id, report, now)
+                    f.fold_smoke(&id, token, report, now)
                 });
-                if let Ok(s) = outcome {
+                if let Ok(Some(s)) = outcome {
                     if let Some((sev, line)) = smoke_outcome_line(&b.envelope.title, s, &failed) {
                         hub_note(&id, "hub_smoke", sev, &line);
                     }
@@ -1460,10 +1578,13 @@ fn spawn_smoke(app: &AppHandle, id: String) {
                 hub_record(&app, &b.envelope, Some(Status::RepairQueue), NewMessage::new("staging", "tony", "smoke", format!("“{}”'s smoke test crashed", b.envelope.title)).body(e.to_string()).failed());
                 let _ = hub.with(|f| {
                     let b = f.get_mut(&id)?;
-                    b.committing = false;
-                    b.smoke.running = false;
+                    if b.smoke.bg == Some(token) {
+                        b.smoke.bg = None;
+                        b.committing = false;
+                        b.smoke.running = false;
+                    }
                     push_log(b, now, "stderr", format!("smoke test crashed: {e}"));
-                    if b.envelope.status == Status::SmokeTesting {
+                    if b.envelope.status == Status::SmokeTesting && b.smoke.folded < token {
                         f.to_repair(&id, "the smoke test crashed", &e.to_string(), vec![format!("smoke: {e}")], true, now)?;
                     }
                     Ok(())
@@ -1766,23 +1887,8 @@ pub async fn build_enqueue(app: AppHandle, envelope: TaskEnvelope, brief: String
     let brief = devqueue::scrub(&brief, &known);
     let id = e.build_id.clone();
     let a = app.clone();
-    blocking(move || {
-        let hub = a.state::<HubState>();
-        let external = e.target_runtime == Runtime::ExternalOs;
-        if external {
-            external_target_free(Path::new(&e.output_directory))?;
-        }
-        hub.with(|f| f.enqueue(e.clone(), brief, note_ids, now_ms()).map(|_| ()))?;
-        if external {
-            if let Err(err) = scaffold_external(&e) {
-                let _ = std::fs::remove_dir_all(&e.output_directory); // it didn't exist a moment ago
-                let _ = hub.with(|f| f.remove(&e.build_id).map(|_| ()));
-                return Err(err);
-            }
-        }
-        Ok(())
-    })
-    .await?;
+    let base = external_base_of(&app);
+    blocking(move || enqueue_staged(&a.state::<HubState>(), e, brief, note_ids, &base, now_ms(), scaffold_external)).await?;
     // Agent Conversation: the build's card opens with the interview and Tony's hand-off — only
     // once the enqueue succeeded, and BEFORE the pass loop is woken (so its first hand-off lands
     // after the interview, under an existing card); scrubbed again with the known values.
@@ -1846,6 +1952,8 @@ pub async fn build_resume(app: AppHandle, build_id: String) -> Result<TaskEnvelo
 /// next hand-off, and the card log says so). Never restarts the pipeline.
 #[tauri::command]
 pub async fn build_steer(app: AppHandle, build_id: String, directive: String) -> Result<TaskEnvelope, String> {
+    // Mid hand-off to Claude the item's text is already written: wait for it to bind.
+    not_dispatching(&app, &build_id)?;
     let id = build_id.clone();
     mutate_bg(&app, move |f, now, known| f.steer(&id, &directive, now, known)).await?;
     let b = app.state::<HubState>().snapshot().get(&build_id).cloned().ok_or("build vanished")?;
@@ -1860,10 +1968,16 @@ pub async fn build_steer(app: AppHandle, build_id: String, directive: String) ->
             if matches!(t.status.as_str(), "Queued" | "Pending") {
                 let body = format!("{}\n\nHUMAN OVERRIDE (highest priority): {}", t.body, b.envelope.human_override.last().map(|o| o.directive.as_str()).unwrap_or(""));
                 devqueue::dev_task_update(app.state(), app.state(), app.state(), d.clone(), None, None, None, None, Some(body)).await?;
+                // Delivered: it is in the text Claude Code will read.
+                let id = build_id.clone();
+                let _ = mutate_bg(&app, move |f, now, _| f.mark_delivered(&id, now, "queued Claude item")).await;
+            } else if t.status == "In Progress" {
+                let id = build_id.clone();
+                let _ = mutate_bg(&app, move |f, now, _| f.note_claude_midrun(&id, now)).await;
             }
         }
     }
-    Ok(b.envelope)
+    build_of(&app, &build_id)
 }
 
 /// Send to the Repair Queue. A live worker task is cancelled (its finished stages and log stay in
@@ -1916,22 +2030,19 @@ pub async fn build_requeue(app: AppHandle, build_id: String, note: Option<String
 #[tauri::command]
 pub async fn build_smoke(app: AppHandle, build_id: String) -> Result<SmokeReport, String> {
     let e = build_of(&app, &build_id)?;
+    // A token first, so a background check that started earlier can't land over this result.
+    let (a, id) = (app.clone(), build_id.clone());
+    let token = blocking(move || a.state::<HubState>().with(|f| f.begin_smoke(&id, false))).await?;
     let report = blocking(move || Ok(smoke::run(&served_dir(&e), e.target_runtime, now_ms()))).await?;
     let r = report.clone();
     mutate_bg(&app, move |f, now, _| {
         let b = f.get_mut(&build_id)?;
-        b.smoke.running = false;
-        b.committing = false;
+        // running / committing belong to a background run, if one is still copying: untouched.
         if b.envelope.status == Status::RepairQueue && r.passed {
             b.envelope.status = Status::SmokeTesting;
         }
-        b.smoke.last = Some(r.clone());
         b.preview_version += 1;
-        if b.envelope.status == Status::SmokeTesting {
-            f.record_smoke(&build_id, r, now).map(|_| ())
-        } else {
-            Ok(())
-        }
+        f.fold_smoke(&build_id, token, r, now).map(|_| ())
     })
     .await?;
     Ok(report)
@@ -1970,7 +2081,7 @@ pub async fn build_remove(app: AppHandle, build_id: String) -> Result<HubView, S
     {
         let hub = app.state::<HubState>();
         evict_previews(&mut hub.previews.lock().unwrap(), &build_id, false);
-        hub.peeks.lock().unwrap().unwatch(&build_id);
+        hub.peeks.lock().unwrap().forget(&build_id);
     }
     release_bound_work(&app, &build_id, removed.worker_task_id, removed.dev_task_id).await;
     changed(&app);
@@ -2071,14 +2182,16 @@ pub async fn build_peek_status(app: AppHandle, build_id: String, watch: Option<b
         hub.peeks.lock().unwrap().unwatch(&build_id);
         return Ok(PeekStatus { url: None, reachable: false, status: b.envelope.status, version: b.preview_version });
     }
-    let token = hub.peeks.lock().unwrap().begin(&build_id);
+    if watch == Some(true) {
+        hub.peeks.lock().unwrap().watch(&build_id);
+    }
     let url = ensure_preview(&app, &build_id).await?;
     let reachable = match &url {
         Some(u) => preview::reachable(&app.state::<DispatchState>().http, u).await,
         None => false,
     };
     if watch == Some(true) {
-        hub.peeks.lock().unwrap().commit(&build_id, token, reachable, now_ms());
+        hub.peeks.lock().unwrap().commit(&build_id, reachable, now_ms());
     }
     Ok(PeekStatus { url, reachable, status: b.envelope.status, version: b.preview_version })
 }
@@ -2165,6 +2278,31 @@ pub async fn intake_slot(slot: &super::scheduler::GpuSlot, tony_priority_pct: u8
     tokio::time::timeout(wait, slot.acquire("Play Place intake: Prompter", false, tony_priority_pct)).await.ok()
 }
 
+/// One model call inside the GPU baton (background priority, `wait` at most), the same way every
+/// local generation does it: the guard is armed for the settle window while the call runs and
+/// disarmed on a clean answer, so a TIMEOUT keeps the baton while LM Studio may still be
+/// generating. `call` returns `Err(true)` for a timeout, `Err(false)` for any other failure.
+/// None when the baton isn't free in time (the call never runs) or the call failed.
+pub async fn ask_in_slot<F, Fut>(slot: &super::scheduler::GpuSlot, tony_priority_pct: u8, wait: Duration, settle: Duration, call: F) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String, bool>>,
+{
+    let mut guard = intake_slot(slot, tony_priority_pct, wait).await?;
+    guard.arm_settle(settle);
+    match call().await {
+        Ok(t) => {
+            guard.disarm();
+            Some(t)
+        }
+        Err(true) => None, // timed out: stays armed, the baton settles before the next holder
+        Err(false) => {
+            guard.disarm();
+            None
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct IntakeResult {
     pub questions: Vec<IntakeQuestion>,
@@ -2190,8 +2328,9 @@ pub async fn build_intake_questions(app: AppHandle, notes: Vec<IntakeNote>) -> R
     // takes (background priority, so Tony goes first). If it doesn't free up quickly, ask the
     // standard questions instead: the interview never waits on the model.
     let os = app.state::<OsState>();
-    let slot = intake_slot(&os.slot, os.snapshot().scheduler.tony_priority_pct, INTAKE_SLOT_WAIT).await;
-    let reply = match st.provider("lmstudio").filter(|_| slot.is_some()) {
+    let cfg = os.snapshot();
+    // Provider first: with no local model configured there is nothing to wait for.
+    let reply = match st.provider("lmstudio") {
         Some(p) if !p.model.is_empty() => {
             let mut system = super::agent_prompts::role_prompt("prompter", false);
             if super::agent_prompts::is_thinking_model(&p.model) {
@@ -2205,10 +2344,14 @@ pub async fn build_intake_questions(app: AppHandle, notes: Vec<IntakeNote>) -> R
             if let Ok(Some(k)) = st.key_for(&p) {
                 rb = rb.bearer_auth(k);
             }
-            match rb.send().await {
-                Ok(r) if r.status().is_success() => r.json::<Value>().await.ok().and_then(|v| super::dispatch::usable_text_from_message(&v["choices"][0]["message"])).map(|t| super::dispatch::strip_think(&t)),
-                _ => None,
-            }
+            ask_in_slot(&os.slot, cfg.scheduler.tony_priority_pct, INTAKE_SLOT_WAIT, cfg.scheduler.settle(), || async move {
+                match rb.send().await {
+                    Ok(r) if r.status().is_success() => r.json::<Value>().await.ok().and_then(|v| super::dispatch::usable_text_from_message(&v["choices"][0]["message"])).map(|t| super::dispatch::strip_think(&t)).ok_or(false),
+                    Ok(_) => Err(false),
+                    Err(e) => Err(e.is_timeout()),
+                }
+            })
+            .await
         }
         _ => None,
     };

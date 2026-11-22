@@ -1,0 +1,165 @@
+# config/agent_topology.yaml — PROPOSED revision (review copy, not live)
+# Nic's draft of 2026-11-21 with the audit's corrections applied. Every change from the draft
+# carries a "# CHANGED:" or "# ADDED:" note. Default-deny: anything not listed here is refused.
+
+schema_version: 1                     # ADDED: the loader refuses unknown versions / unknown keys
+default_policy: deny                  # ADDED: unlisted edges, stores, tools and hosts are refused
+
+hardware_envelope:
+  vram_gb: 12
+  system_ram_gb: 64
+  reserved_vram_gb: 1.5               # ADDED: desktop + whisper/kokoro headroom (Model Lab uses 3.3 today)
+  max_concurrent_vram_models: 1       # chat/coder models only; the embedding model is counted separately
+  single_model_fallback: false        # ADDED (Phase 1 req.): true = every tier resolves to fallback_model
+  fallback_model: "qwen/qwen3.5-9b"   # ADDED: today's measured baseline (7.5 GB @16k, ~41 tok/s)
+  prewarm_page_cache: true            # ADDED: models live on D: (HDD): cold load 50-60 s vs 9-10 s warm
+  swap_hysteresis_secs: 60            # ADDED: a freshly loaded tier is not evicted for this long
+
+model_gateway:
+  implementation: "native_rust"       # CHANGED: resolved (see proposal §2): extend dispatch.rs, no LiteLLM
+  backends:
+    lm_studio:
+      base_url: "http://127.0.0.1:1235/v1"   # CHANGED: the live install is :1235, not :1234
+      lifecycle: "lmstudio_native"           # /api/v1/models/load|unload, /api/v0/models
+    ollama:
+      base_url: "http://127.0.0.1:11434"
+      lifecycle: "ollama_keep_alive"         # /api/ps, keep_alive; adapter only (no models installed today)
+  tiers:
+    router_uncensored:
+      owners: ["tony"]
+      backend: "lm_studio"
+      model_id: "qwen3.5-9b-the-defiant-fable-uncensored"   # candidate; must be imported into LM Studio
+      context: 16384
+      residency: { mode: "ttl", ttl: "10m" }   # CHANGED: keep_alive -> residency (backend-neutral)
+    coder_verifier:
+      owners: ["coder", "auditor"]
+      backend: "lm_studio"
+      model_id: "qwen2.5-coder-14b-instruct"   # candidate; Phase 1 bake-off decides (proposal §3)
+      context: 12288                           # CHANGED: 16k measured 12.0 GB = the whole card
+      kv_cache_quant: "q8_0"
+      residency: { mode: "phase", phase: "build" }   # CHANGED: was keep_alive "0" (reload per call)
+    support_json:
+      owners: ["prompter", "librarian", "designer", "booking", "finance", "finance_librarian"]
+      backend: "lm_studio"
+      model_id: "qwen/qwen3.5-9b"              # vlm: also serves finance OCR
+      context: 16384
+      vision: true                             # ADDED: finance_librarian needs OCR
+      residency: { mode: "ttl", ttl: "5m" }
+      build_phase_substitute: "coder_verifier" # ADDED: inside a build, support stages ride the hot coder model
+    embedding:                                 # ADDED: RAG needs one; was missing
+      owners: ["*rag_indexer"]
+      backend: "lm_studio"
+      model_id: "text-embedding-nomic-embed-text-v1.5"
+      residency: { mode: "pinned" }            # ~0.15 GB, outside max_concurrent_vram_models
+
+hybrid_escalation_gate:
+  enabled: true
+  max_local_repair_passes: 2          # Coder passes AFTER the first; 1 + 2 = 3 local passes, then escalate once
+  scope: "build_loop_only"            # ADDED: never for tony/booking/finance tasks
+  escalate_payload: "diff_and_errors_only"
+  payload_cap_kb: 24                  # ADDED
+  engine: "claude-cli"                # CHANGED: Nic's decision; existing approval-gated lane, no API billing
+  model: "claude-opus-5-5"            # CHANGED: "claude-sonnet" is not a model id; os.json overseer.claudeModel
+  require_approval: true              # ADDED: false only for unattended runs
+  max_escalations_per_build: 1        # ADDED: the escalated result is gated locally; a failure is final
+
+storage_and_rag:
+  data_root: "D:\\ai-hub-memory\\rag" # CHANGED: absolute and outside the repo (./data is not gitignored)
+  cold_storage_vault:
+    path: "D:\\ai-hub-archive\\cold"  # CHANGED: outside every live root; D:\ai-hub-archive already exists
+    live_agent_access: "none"
+    writer: "archive_job"             # one-way; restore is a human-only command
+    encryption: "aes-256-gcm"         # key in the OS keychain (secrets.rs), never in the repo
+  rag_stores:
+    tony_rag:              { path: "${data_root}\\tony",              readers: [tony],                        writers: [tony] }
+    build_loop_rag:        { path: "${data_root}\\build_loop",        readers: [prompter, coder, designer],   writers: [prompter, coder, designer] }
+    librarian_rag:         { path: "${data_root}\\librarian",         readers: [librarian],                   writers: [librarian] }
+    booking_rag:           { path: "${data_root}\\booking",           readers: [booking],                     writers: [booking] }
+    finance_rag:           { path: "${data_root}\\finance",           readers: [finance],                     writers: [finance], encrypted: true }
+    finance_librarian_rag: { path: "${data_root}\\finance_librarian", readers: [finance_librarian],           writers: [finance_librarian], encrypted: true }
+  # ADDED: stores that exist today and must be assigned (proposal §4, finding T7)
+  shared_stores:
+    tasks_db:        { path: "${app_config}\\tasks.db",       readers: [prompter, coder, designer, auditor, librarian_compact_rows], writers: [build_broker] }
+    staging:         { path: "${repo}\\staging",              readers: [auditor, coder, designer, prompter], writers: [coder] }
+    transcripts_db:  { path: "${app_config}\\transcripts.db", readers: [ui], writers: [broker] }
+    telemetry:       { path: "D:\\ai-hub-memory\\ops\\telemetry", readers: [observer, security_garbage], writers: [gateway, broker] }
+    training_logs:   { scrub: true, exclude_agents_from_drive_sync: [booking, finance, finance_librarian] }
+
+agents:
+  tony:
+    tier: "router_uncensored"
+    rag: "tony_rag"
+    egress: []                                     # CHANGED: internet_access -> per-host/per-tool egress
+    tools: ["weather", "maps", "spotify", "time", "kg.search:tony"]
+    allowed_targets: ["prompter", "librarian", "booking", "finance", "coder", "designer", "auditor"]  # CHANGED: + coder, designer (delegation exists: AD-7), + auditor (verdicts)
+  prompter:
+    tier: "support_json"
+    rag: "build_loop_rag"
+    egress: []
+    allowed_targets: ["tony", "librarian", "coder", "designer", "auditor"]  # CHANGED: + librarian (preflight), + auditor
+  coder:
+    tier: "coder_verifier"
+    rag: "build_loop_rag"
+    egress: []
+    writes: ["staging"]
+    allowed_targets: ["prompter", "designer", "auditor"]
+  designer:
+    tier: "support_json"
+    rag: "build_loop_rag"
+    egress: []
+    allowed_targets: ["prompter", "coder"]
+  librarian:
+    tier: "support_json"
+    rag: "librarian_rag"
+    egress: ["web.search", "fetch.url"]
+    reads: ["tasks_db:compact_rows", "staging:status_only"]
+    allowed_targets: ["tony", "prompter"]
+  auditor:
+    tier: "coder_verifier"
+    rag: null
+    egress: []                                     # enforced: no http client handle, Edge runs with network off
+    reads: ["staging", "tasks_db"]
+    allowed_targets: ["coder", "tony", "prompter"] # CHANGED: + prompter (verify hands back to the brief)
+  booking:
+    tier: "support_json"
+    rag: "booking_rag"
+    egress: []
+    tools: ["mcp:gmail", "mcp:whatsapp", "mcp:time"]   # ADDED: scoped tool egress replaces internet_access
+    allowed_targets: ["tony"]
+  finance:
+    tier: "support_json"
+    rag: "finance_rag"
+    egress: []
+    allowed_targets: ["tony", "finance_librarian"]
+  finance_librarian:
+    tier: "support_json"
+    rag: "finance_librarian_rag"
+    egress: []
+    allowed_targets: ["finance"]
+  ops:                                             # ADDED: exists in code; finance phrases route here today
+    tier: "support_json"
+    rag: null
+    egress: []
+    allowed_targets: ["tony"]
+  # ADDED: non-LLM principals (they appear in the denial log and the allowlist)
+  build_broker:     { kind: "deterministic", allowed_targets: ["prompter", "librarian", "designer", "coder", "auditor", "escalation"] }
+  escalation:       { kind: "cloud_lane", engine: "claude-cli", allowed_targets: ["build_broker"], reads: ["escalation_bundle"] }
+  archive_job:      { kind: "deterministic", writes: ["cold_storage_vault"] }
+  observer:         { kind: "sidecar", reads: ["telemetry"], writes: ["ops/observer_proposals"] }
+  security_garbage: { kind: "sidecar", reads: ["telemetry"], gc_volumes: ["staging_iterations", "tmp_probe_profiles", "runs_jsonl"] }
+
+background_ops:
+  inter_agent_integrity: "hmac_principal_tokens"   # CHANGED: see proposal §4 (AEAD between in-process modules adds nothing)
+  at_rest_encryption: ["finance_rag", "finance_librarian_rag", "booking_rag", "cold_storage_vault"]
+  cross_process_auth: "bearer_token_loopback"      # gateway :8080 and the ops sidecars
+  observer:
+    mode: "containerized_deterministic"
+    log_source: "jsonl_stream"                     # CHANGED: Docker Desktop (WSL2) cannot read host shared memory
+    autonomous_code_mutation: false
+    proposals_dir: "D:\\Art Apps\\agentic os\\ops\\observer_proposals"
+  security_and_garbage:
+    mode: "containerized_deterministic"
+    enforce_allowlist: "audit"                     # CHANGED: enforcement is in-process (broker); the sidecar audits
+    cache_quota_mb: 2048
+    expected_heartbeat_seconds: 300
+    host_watchdog: true                            # ADDED: the app flags the sidecar itself going silent

@@ -208,13 +208,14 @@ function BuildCard({ b }: { b: BuildView }) {
           onSubmit={(ev) => {
             ev.preventDefault();
             const d = steer.trim();
-            if (!d) return;
-            void clearOnSuccess(act("Steer", "build_steer", { buildId: id, directive: d }), () => setSteer(""));
+            if (!d || busy) return; // one steer at a time: never sent twice
+            // Cleared only on success, and only if Nic hasn't typed something new meanwhile.
+            void clearOnSuccess(act("Steer", "build_steer", { buildId: id, directive: d }), () => setSteer((cur) => (cur.trim() === d ? "" : cur)));
           }}
         >
           <input value={steer} onChange={(ev) => setSteer(ev.target.value)} maxLength={500} placeholder="Steer — e.g. “dark theme, bigger buttons” (next agent step, no restart)" className="field !h-8 min-w-0 flex-1 !py-1 text-[11px]" />
-          <button className="pill-glass !h-8 !px-2.5 text-[11px]" disabled={!steer.trim()}>
-            <Send size={11} /> Steer
+          <button className="pill-glass !h-8 !px-2.5 text-[11px]" disabled={!steer.trim() || !!busy}>
+            {busy === "Steer" ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />} Steer
           </button>
         </form>
       )}
@@ -235,7 +236,7 @@ function BuildCard({ b }: { b: BuildView }) {
         </p>
       )}
       {peek && <PeekView b={b} />}
-      {!peek && e.target_runtime === "internal_widget" && (ready || e.status === "deployed") && <SandboxView buildId={id} title={e.title} version={b.preview_version} height={260} />}
+      {!peek && e.target_runtime === "internal_widget" && (ready || e.status === "deployed") && <SandboxView key={e.status} buildId={id} title={e.title} version={b.preview_version} height={260} />}
       <LogPanel b={b} />
     </section>
   );
@@ -318,7 +319,8 @@ function RepairCard({ b }: { b: BuildView }) {
         className="mt-2 flex gap-1.5"
         onSubmit={(ev) => {
           ev.preventDefault();
-          void clearOnSuccess(act("Re-queue", "build_requeue", { buildId: id, note: note.trim() || undefined }), () => setNote(""));
+          const sent = note.trim();
+          void clearOnSuccess(act("Re-queue", "build_requeue", { buildId: id, note: sent || undefined }), () => setNote((cur) => (cur.trim() === sent ? "" : cur)));
         }}
       >
         <input value={note} onChange={(ev) => setNote(ev.target.value)} maxLength={500} placeholder="Fix note for the agents (optional) — e.g. “inline the CSS, no CDN”" className="field !h-8 min-w-0 flex-1 !py-1 text-[11px]" />

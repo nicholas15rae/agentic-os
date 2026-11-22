@@ -169,13 +169,17 @@ describe("vocal handoff cues (voice controller)", () => {
     expect(voices().slice(0, 3)).toEqual(["general", "coder", "general"]);
   });
 
-  it("review #29/#10: a new command over the cue cancels the cue, not the delegated job", async () => {
+  it("review #29/#10 (reverted): a new command over the cue cancels cue and job, and nothing is left wedged", async () => {
+    // The verification probe's sequence: delegate → speak over the cue → new reply → follow-up
+    // silence → the old delegated turn finishes. Keeping the delegated job alive left the orb at
+    // "thinking" with a 120 s barge mic open; it is cancelled with the cue again (decision for Nic).
     let first = true;
+    let finishCoder!: (v: unknown) => void;
     h.cmd.mockImplementation(async (name: string) => {
       if (name !== "os_turn") return undefined;
       if (first) {
         first = false;
-        return new Promise(() => undefined); // the Coder is still working
+        return new Promise((r) => (finishCoder = r));
       }
       return { answer: "It's noon.", steps: [], providerId: "local", latencyMs: 1, routedRole: "general", routeKind: "Self", routeReason: "", redacted: false, reason: "" };
     });
@@ -186,7 +190,20 @@ describe("vocal handoff cues (voice controller)", () => {
     barge.onPhase("speech");
     barge.onFinal("what time is it");
     await vi.waitFor(() => expect(h.cmd.mock.calls.filter((c) => c[0] === "os_turn")).toHaveLength(2));
-    expect(h.cmd.mock.calls.some((c) => c[0] === "os_turn_cancel")).toBe(false);
+    expect(h.cmd.mock.calls.some((c) => c[0] === "os_turn_cancel")).toBe(true); // the delegated job too
     expect(h.ttsCancel).toHaveBeenCalled(); // the beat in flight was cut
+    await vi.waitFor(() => expect(h.speak.mock.calls.some((c) => c[0] === "It's noon.")).toBe(true));
+    const nStart = h.sttStart.mock.calls.length;
+    for (const r of pending.splice(0)) r();
+    await vi.waitFor(() => expect(h.sttStart.mock.calls.length).toBeGreaterThan(nStart));
+    const follow = h.sttStart.mock.calls.at(-1)![0] as { onFinal: (t: string) => void };
+    const startsBefore = h.sttStart.mock.calls.length;
+    follow.onFinal(""); // silence in the follow-up window
+    expect(useVoice.getState().state).not.toBe("thinking");
+    expect(h.sttStart.mock.calls.length).toBe(startsBefore); // no 120 s barge mic for an orphan
+    finishCoder({ answer: "Built it.", steps: [], providerId: "local", latencyMs: 1, routedRole: "coder", routeKind: "Named", routeReason: "", redacted: false, reason: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(useVoice.getState().state).not.toBe("thinking");
+    expect(h.speak.mock.calls.some((c) => c[0] === "Built it.")).toBe(false); // a cancelled turn stays quiet
   });
 });

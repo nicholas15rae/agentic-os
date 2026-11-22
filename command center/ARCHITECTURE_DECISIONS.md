@@ -123,9 +123,9 @@ It only *reads* the output folder the agents write. A build with its own dev ser
 
 **All hub commands are async** and do their file I/O, state saves and smoke runs on the blocking pool; none runs on Tauri's main thread.
 
-**Recovery:** a build left in `smoke_testing` (an exit or crash mid-check, or a resume at that checkpoint) gets its check re-run by the hub loop, so a lane never stays blocked. A smoke result that arrives after the build moved on is kept for the card and changes nothing else. A crashed check sends the build to the Repair Queue.
+**Recovery:** a build left in `smoke_testing` (an exit or crash mid-check, or a resume at that checkpoint) gets its check re-run by the hub loop, so a lane never stays blocked. Every smoke run gets a token: a result older than the newest one already folded is discarded (logged), so a stale background check can never overwrite a newer result or move the status, and only the run that set `running` / `committing` clears them. A crashed check sends the build to the Repair Queue.
 
-**External folders:** an existing `<base>\<slug>` is refused before anything is written; the build is enqueued (duplicate check) before scaffolding, and a failed scaffold takes it back out.
+**External folders:** a same-slug build still staged is refused ("already staged — finish or remove it first"). An existing `<base>\<slug>` folder (a removed build's, or Nic's own) is never written into: the build gets the first free `<slug>-2`, `<slug>-3`, …. The duplicate check, the folder choice and the scaffold run inside one hub transaction, so the pass loop can't hand the build to an agent before its folder exists, and a failed scaffold rolls the enqueue back with nothing bound to it.
 
 **Smoke tests** (`buildhub/smoke.rs`) run on the blocking pool. They check:
 - the entry file and its size;
@@ -184,7 +184,7 @@ It is triggered in two places: `osRun`'s routing notice, and an approved Play Pl
 
 **Concurrency:** `withHandoff` (Play Place) and `osRun` dispatch first and start the cue next to the dispatch. Neither ever awaits it. The only thing that waits is playback order: every spoken line of the turn (streamed chunks, the full answer, a typed auto-speak reply) queues behind the cue, so the beats and the reply never cut each other off.
 
-**Barge-in:** a new command said over the cue cuts the beat in flight and drops the rest, but the delegated agent's job keeps running server-side (its stream is excluded from `cancelStreams`). "Cut it" and a stand-down still stop everything, as specified.
+**Barge-in:** a new command said over the cue cuts the beat in flight and drops the rest, and — like any turn still in flight — also cancels the delegated agent's job. Keeping that job alive was tried and reverted: the surviving turn outlived its mic generation and left the voice state stuck at "thinking" with a barge mic open. Whether to revisit it is Nic's call. "Cut it" and a stand-down stop everything, as specified.
 
 **Intake model call:** takes the GPU baton (background priority) like every other local generation; if it isn't free within 4 s the interview uses the standard questions.
 

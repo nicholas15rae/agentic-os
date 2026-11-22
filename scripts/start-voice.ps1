@@ -1,7 +1,7 @@
 ﻿<#
   Start the Jarvis voice stack (and the gateway) if they aren't already running.
 
-    powershell -ExecutionPolicy Bypass -File "D:\Art Apps\agentic os\scripts\start-voice.ps1"
+    powershell -ExecutionPolicy Bypass -File "G:\agentic os\scripts\start-voice.ps1"
 
   - Whisper STT  : C:\whisper\bin\whisper-server.exe  -> http://127.0.0.1:8178/v1/audio/transcriptions
   - Kokoro TTS   : Docker container "kokoro"           -> http://127.0.0.1:8880/v1/audio/speech

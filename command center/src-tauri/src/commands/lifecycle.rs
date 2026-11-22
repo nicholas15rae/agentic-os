@@ -173,9 +173,9 @@ pub struct ExitCheck {
     pub busy: Vec<String>,
 }
 
-/// What would a quit interrupt mid-commit? Read-only.
-#[tauri::command]
-pub fn app_exit_check(app: AppHandle) -> ExitCheck {
+/// What would a quit interrupt mid-commit? Read-only. Takes the task store and hub locks: callers run it on the
+/// blocking pool, never on the main thread.
+fn exit_busy(app: &AppHandle) -> ExitCheck {
     let mut busy = Vec::new();
     if app.state::<super::claude_fix::ClaudeFixState>().is_busy() {
         busy.push("A Claude Code fix is running in its worktree".to_string());
@@ -186,15 +186,27 @@ pub fn app_exit_check(app: AppHandle) -> ExitCheck {
             busy.push(format!("Build “{}” is mid-stage ({})", e.title, e.stage.as_deref().unwrap_or(&e.status)));
         }
     }
-    busy.extend(super::buildhub::busy_labels(&app));
+    busy.extend(super::buildhub::busy_labels(app));
     ExitCheck { busy }
+}
+
+async fn exit_busy_bg(app: &AppHandle) -> Result<ExitCheck, String> {
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || exit_busy(&a)).await.map_err(|e| e.to_string())
+}
+
+/// What would a quit interrupt mid-commit? Read-only; off the main thread (it waits on the same
+/// locks a contended hub write holds).
+#[tauri::command]
+pub async fn app_exit_check(app: AppHandle) -> Result<ExitCheck, String> {
+    exit_busy_bg(&app).await
 }
 
 /// Quit the app. Refuses with `BUSY:` when something is mid-commit, unless `force`.
 #[tauri::command]
-pub fn app_exit(app: AppHandle, force: Option<bool>) -> Result<(), String> {
+pub async fn app_exit(app: AppHandle, force: Option<bool>) -> Result<(), String> {
     if !force.unwrap_or(false) {
-        let c = app_exit_check(app.clone());
+        let c = exit_busy_bg(&app).await?;
         if !c.busy.is_empty() {
             return Err(format!("BUSY:{}", c.busy.join("; ")));
         }
@@ -256,5 +268,14 @@ mod tests {
         // Port 9 (discard) is closed on a dev box; either a refusal or a timeout is fine.
         let p = tauri::async_runtime::block_on(probe(&http, "http://127.0.0.1:9"));
         assert!(matches!(p, Probe::Down(_) | Probe::Timeout), "{p:?}");
+    }
+
+    #[test]
+    fn exit_commands_never_run_on_the_main_thread() {
+        // Both wait on the task store / hub locks a contended write may hold for ~1.5 s.
+        let src = include_str!("lifecycle.rs");
+        for name in ["app_exit_check", "app_exit"] {
+            assert!(src.contains(&format!("pub async fn {name}(")), "{name} must be async");
+        }
     }
 }

@@ -43,6 +43,8 @@ import { startNarrator, type NarratorSnapshot } from "./narrator";
 import { useModes } from "@/features/modes/modes-store";
 import { calmModeError, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
 import { pillPathways, stripLearnTags } from "@/features/modes/learning";
+import { spokenSoFar } from "@/features/dispatcher/tony-dispatch";
+import { onArbiterEvent, type PacketResult } from "@/features/arbiter/api";
 import { duckOnSpeech, duckOnTrigger, musicPlayingHere, restoreAfterPause, restoreDuck, scheduleRestore, settleCommand, settleNoise } from "./spotify-duck";
 
 /**
@@ -1437,7 +1439,9 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
     streamAgent = agent;
     buffered += e.delta;
     // Learning mode's `[[LEARN …]]` lines are never shown or spoken (Rust strips the final answer).
-    const shown = stripLearnTags(buffered);
+    // Tony's dispatch packet streams as an object: show and speak only its spoken_reply, as far
+    // as it has arrived. Prose (and Learning mode's tags) as before.
+    const shown = spokenSoFar(buffered) ?? stripLearnTags(buffered);
     if (!shown.trim()) return;
     if (!live) live = store().pushTurn({ who: "agent", from: finalFromFor(streamAgent), text: shown, thread, meta: "streaming…" }).id;
     else store().updateTurn(live, { text: shown });
@@ -1541,7 +1545,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // The answer is the agent's only when the agent itself produced it: on an explicit tab where
   // the agent failed (or has no workspace) Tony answers, and it is labelled — and voiced — as Tony.
   const learned = pillPathways(r.learned);
-  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}) };
+  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}), ...(r.dispatch ? { dispatch: r.dispatch } : {}) };
   // Who the answer is spoken as: the sub-agent itself only for an explicit-tab
   // direct answer (`final.from` is the agent, not "os"); every Tony-synthesized
   // reply — delegated or his own — speaks as "general", matching `final.from`.
@@ -1750,6 +1754,10 @@ void hydrateMic();
 void syncThresholdFromOs();
 // Phase 2 Part C: Tony's mode (Rust modes.json) — until it loads, Brainstorming (today's offer card).
 void useModes.getState().load();
+// A dispatched packet closed (packet_queue.rs): its outcome lands in Tony's thread, shown, not spoken.
+void onArbiterEvent<PacketResult>("packet-result", (p) => {
+  store().pushTurn({ who: "agent", from: "os", thread: tonyThread(), text: p.summary, meta: "packet result", packet: p, tone: p.results.every((r) => r.status === "done") ? "ok" : "warn" });
+});
 
 // A stop said during a cue's intro also cancels Tony's TTS (no import cycle: player.ts
 // only holds the cancel function, it doesn't import the voice controller).

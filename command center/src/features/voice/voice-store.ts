@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { LearnedPathway } from "@/features/modes/learning";
+import type { DispatchView, PacketResult } from "@/features/arbiter/api";
 import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 import type { AgentRole } from "@/features/dispatcher/agents";
@@ -76,6 +77,10 @@ export interface VoiceTurn {
   cardId?: string;
   /** Learning mode: the pathways Tony saved on this reply ("Memory saved: …" pills). */
   learned?: LearnedPathway[];
+  /** Tony's dispatch packet under his reply (held / pending approval / queued). */
+  dispatch?: DispatchView;
+  /** A dispatched packet's outcome (per task: status, attempts, output). */
+  packet?: PacketResult;
   /** One-tap answers under the message ("Yes, run the pipeline"). */
   actions?: { label: string; run: string }[];
   /** The build (worker task) an agent / pipeline turn belongs to (grouping, review). */

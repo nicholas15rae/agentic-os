@@ -123,11 +123,20 @@ export function Waveform({ state, height = 72, className = "", locked = false }:
       }
       ctx.globalAlpha = 1;
       ctx.shadowBlur = 0;
-      raf = requestAnimationFrame(draw);
+      schedule(Math.abs(target - amp) < 0.002 && (s === "idle" || s === "error"));
+    };
+    // Bloat guard: full frame rate only while something moves. A settled idle wave redraws at
+    // ~10 fps, and a hidden window (tray, minimised) checks back twice a second without drawing.
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = (settled: boolean) => {
+      if (typeof document !== "undefined" && document.hidden) idleTimer = setTimeout(() => schedule(settled), 500);
+      else if (settled) idleTimer = setTimeout(() => (raf = requestAnimationFrame(draw)), 100);
+      else raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => {
       cancelAnimationFrame(raf);
+      clearTimeout(idleTimer);
       ro.disconnect();
     };
   }, [colors, thickness, height, reduced, locked]);

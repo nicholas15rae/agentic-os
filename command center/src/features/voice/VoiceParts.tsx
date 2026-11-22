@@ -14,6 +14,7 @@ import { isTauri } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
 import { AgentConversationCard } from "@/features/transcript/AgentConversationCard";
 import { learnedPillText } from "@/features/modes/learning";
+import { DispatchCard, PacketOutcome } from "@/features/arbiter/DispatchCard";
 
 /** Shared building blocks for the floating HUD, the Voice Console widget and the Agents section. */
 
@@ -118,6 +119,8 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
                     Jump to Thread in Comms →
                   </button>
                 )}
+                {t.dispatch && <DispatchCard turnId={t.id} view={t.dispatch} />}
+                {t.packet && <PacketOutcome result={t.packet} />}
                 {t.learned?.map((p) => (
                   <span key={p.id} title={`${p.category} · ${p.confidence}`} className="inline-flex items-center gap-1 rounded-full border border-teal/30 bg-teal/[0.06] px-2 py-0.5 text-[10.5px] text-teal/90">
                     <BookMarked size={10} aria-hidden /> {learnedPillText(p)}

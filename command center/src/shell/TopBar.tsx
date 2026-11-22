@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { AwayButton } from "@/features/arbiter/AwayButton";
 import { Command, LayoutGrid, Check } from "lucide-react";
 import { useSettings } from "@/stores/settings";
 import { useNav } from "@/stores/nav";
@@ -59,6 +60,7 @@ export function TopBar() {
       </button>
 
       <div className="ml-auto hidden md:flex md:items-center md:gap-2">
+        <AwayButton />
         <ActiveSlotPill />
         <ComputeModeSwitch compact />
         <DropletBadge />

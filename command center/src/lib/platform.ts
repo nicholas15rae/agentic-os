@@ -1518,6 +1518,8 @@ export interface OsTurnResult {
   answeredBy?: "agent" | "os" | "overseer" | "tool";
   /** Learning mode: the pathways this turn saved / updated (Rust `learning::Saved`). */
   learned?: { id: string; title: string; category: string; confidence: string; outcome: string }[];
+  /** Tony's dispatch packet (tony_dispatch.rs `DispatchView`): held / pending / queued / invalid. */
+  dispatch?: import("@/features/arbiter/api").DispatchView;
 }
 
 export interface ToolInfo {

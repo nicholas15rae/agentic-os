@@ -42,7 +42,7 @@ describe("mode-ui", () => {
       ["auto_dispatch", "Auto", "alert"],
     ]);
     expect(DISPATCH_OPTS[2].hint).toContain("emails/messages/calendar still ask");
-    expect(MODE_ICON_NAMES).toEqual(["message-circle", "lightbulb", "hammer", "briefcase", "flame", "sparkles"]);
+    expect(MODE_ICON_NAMES).toEqual(["message-circle", "lightbulb", "hammer", "briefcase", "flame", "graduation-cap", "sparkles"]);
   });
 
   it("effectiveMode applies the dial overrides and leaves the mode's identity and rules alone", () => {
@@ -67,7 +67,7 @@ describe("mode-ui", () => {
 
   it("switcherModes never puts the novelty in the work group", () => {
     const { work, novelty } = switcherModes([...PRESET_MODES, custom()]);
-    expect(work.map((m) => m.id)).toEqual(["surface", "brainstorm", "builder", "executive", "coach", "focus"]);
+    expect(work.map((m) => m.id)).toEqual(["surface", "brainstorm", "builder", "executive", "coach", "learning", "focus"]);
     expect(novelty.map((m) => m.id)).toEqual(["gabagool"]);
     expect(work.some((m) => m.is_novelty)).toBe(false);
   });

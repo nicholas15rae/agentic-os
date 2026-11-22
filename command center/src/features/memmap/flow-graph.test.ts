@@ -387,3 +387,18 @@ describe("travel/static switch", () => {
     expect(flashes.get("b")!.at).toBe(1000);
   });
 });
+
+describe("Learning mode on the System Map", () => {
+  it("recall reads memory into Tony; a save or index pulses Tony → Mem DB", () => {
+    expect(edgesForStep(step({ hop: "memory", zone: "cargo", label: "learning · 2 pathway(s) recalled" })).edges).toEqual(["memory-tony"]);
+    expect(edgesForStep(step({ hop: "memory", zone: "cargo", label: "learning · 1 pathway(s) saved" })).edges).toEqual(["tony-memwrite"]);
+    expect(edgesForStep(step({ hop: "memory", zone: "cargo", label: "learning · pathways indexed (librarian storage)", ok: false })).edges).toEqual(["tony-memwrite"]);
+  });
+
+  it("shows the sub-agents and media nodes as isolated", () => {
+    const s = flowNodeStatus(null, { learning: true });
+    expect([s.subagents.text, s.media.text]).toEqual(["Isolated", "Isolated"]);
+    expect(s.subagents.why).toContain("Booking Desk");
+    expect(flowNodeStatus(null, {}).subagents.text).not.toBe("Isolated");
+  });
+});

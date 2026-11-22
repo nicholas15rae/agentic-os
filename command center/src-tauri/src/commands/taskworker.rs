@@ -3482,8 +3482,12 @@ pub async fn worker_loop(app: tauri::AppHandle) {
     loop {
         let ws = app.state::<WorkerState>();
         let store = app.state::<TaskStore>();
-        let enabled = app.state::<super::os_core::OsState>().snapshot().worker.enabled;
-        if !enabled || store.unavailable().is_some() {
+        let os = app.state::<super::os_core::OsState>();
+        let enabled = os.snapshot().worker.enabled;
+        // Learning mode keeps the GPU for Tony: no queued build starts while Nic is training him
+        // (a pass already running finishes; the queue resumes when he switches modes).
+        let learning = super::modes::is_learning(&os.modes.effective());
+        if !enabled || learning || store.unavailable().is_some() {
             let _ = tokio::time::timeout(Duration::from_secs(15), ws.notify.notified()).await;
             continue;
         }

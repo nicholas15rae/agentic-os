@@ -10,7 +10,7 @@ import { MODIFIER_MAX, NOVELTY_MODE_ID, PRESET_MODES, effectiveOf, feedbackFor, 
 import type { SegmentOption } from "@/components/segmented";
 
 /** The icon names the pickers offer (lucide). Anything else (an emoji) renders as text. */
-export const MODE_ICON_NAMES = ["message-circle", "lightbulb", "hammer", "briefcase", "flame", "sparkles"] as const;
+export const MODE_ICON_NAMES = ["message-circle", "lightbulb", "hammer", "briefcase", "flame", "graduation-cap", "sparkles"] as const;
 export type ModeIconName = (typeof MODE_ICON_NAMES)[number];
 export const isModeIconName = (s: string): s is ModeIconName => (MODE_ICON_NAMES as readonly string[]).includes(s);
 
@@ -40,6 +40,9 @@ export const TTS_OPTS: readonly SegmentOption<TtsInterrupt>[] = [
   { id: "milestones_only", label: "Milestones", hint: "Queued, ready for review and failures are spoken." },
   { id: "full", label: "Full", hint: "Also every handoff between agents." },
 ];
+
+/** Why the dispatch dial is locked in Learning mode (its tooltip). */
+export const LEARNING_DISPATCH_LOCK = "Learning mode: sub-agent dispatch is off while you train Tony (Solo only).";
 
 export const DISPATCH_SHORT: Record<DispatchPolicy, string> = { surface_only: "Solo", ask_before_dispatch: "Ask", auto_dispatch: "Auto" };
 

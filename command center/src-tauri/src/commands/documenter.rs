@@ -113,6 +113,30 @@ pub async fn ingest(state: &DispatchState, os: &OsState, actor: Role, title: &st
     ingest_with(&AllmWriter::for_documenter(conn), &ws, actor, title, text, &known).await
 }
 
+/// Tony-only: index `text` as one document in the Librarian's workspace and drop the copy at
+/// `old` (a location an earlier call returned). Returns the new document's location. Used by
+/// Learning mode's pathway store, which re-indexes as a whole so RAG never holds stale rules.
+pub async fn ingest_replacing(state: &DispatchState, os: &OsState, title: &str, text: &str, old: Option<&str>) -> Result<Option<String>, String> {
+    check_ingest(Role::Tony, title, text)?;
+    let cfg = os.snapshot();
+    let Some(ws) = cfg.anythingllm.workspaces.get("librarian").filter(|s| !s.is_empty()).cloned() else {
+        return Err(ingest_failed("no AnythingLLM workspace is mapped to the Librarian"));
+    };
+    let conn = AllmConn::local(state, &cfg).map_err(|e| ingest_failed(&e))?;
+    let known = super::devqueue::known_secrets(state, os);
+    let writer = AllmWriter::for_documenter(conn);
+    let title = clip(&super::devqueue::scrub(&one_line(title), &known), INGEST_TITLE_MAX);
+    let text = super::devqueue::scrub(text, &known);
+    let v = writer.raw_text_ingest(&text, &ws, &title, INGEST_SOURCE, 60).await.map_err(|e| ingest_failed(&e))?;
+    let loc = v["documents"][0]["location"].as_str().map(str::to_string);
+    if let Some(old) = old.filter(|o| Some(*o) != loc.as_deref()) {
+        let old = vec![old.to_string()];
+        let _ = writer.update_embeddings(&ws, &[], &old, 60).await;
+        let _ = writer.remove_documents(&old, 60).await;
+    }
+    Ok(loc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

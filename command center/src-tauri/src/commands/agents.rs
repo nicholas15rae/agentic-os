@@ -342,6 +342,9 @@ pub(crate) struct TurnRouteInput<'a> {
     /// mention like "I think the coder should…"); an explicit tab, a high-confidence Named
     /// address ("hey Coder, …") and a Direct live-tool read are kept, and so is every other agent.
     pub solo: bool,
+    /// Learning mode: one-on-one training. Every turn is Tony's own: no route, no tab, no live
+    /// tool, whatever the caller resolved.
+    pub learning: bool,
 }
 
 /// The pipeline roles Solo never promotes a turn to (D15).
@@ -362,6 +365,9 @@ pub(crate) struct TurnRoute {
 /// a route target: a self role stays `general` with kind "Self" (never "Named → Tony"). A
 /// live-tool read question is Tony's own path on any tab; only a Named delegation keeps its agent.
 pub(crate) fn route_for_turn(input: &TurnRouteInput, cfg: &OsConfig) -> TurnRoute {
+    if input.learning {
+        return TurnRoute { role: "general".into(), kind: "Self".into(), reason: "Learning mode: Tony only".into() };
+    }
     let mut role = canon_turn_role(input.role, &cfg.os_name);
     let mut kind = input.route_kind.map(str::to_string).unwrap_or_else(|| if input.explicit { "Tab".into() } else { "Default".into() });
     let mut reason = input.route_reason.map(str::to_string).unwrap_or_else(|| if input.explicit { "current tab".into() } else { "caller-resolved".into() });
@@ -1155,6 +1161,9 @@ pub struct OsTurnResult {
     /// Who produced `answer`: "agent" (the sub-agent itself), "os" (Tony's synthesis — also
     /// when he stepped in for a failed agent), "overseer", or "tool".
     pub(crate) answered_by: String,
+    /// Learning mode: the pathways this turn saved / updated (the "Memory saved" pill).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) learned: Vec<super::learning::Saved>,
 }
 
 pub(crate) fn step(kind: &str, from: &str, to: &str, text: impl Into<String>, ok: bool, ms: u128) -> OsStep {
@@ -1325,8 +1334,11 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // Phase 2 Part C: the mode this turn runs under (switching applies from the next turn).
     let mode = os.modes.effective();
     let solo = mode.dispatch == super::modes::DispatchPolicy::SurfaceOnly;
+    // Learning mode: Tony only. No routing, comms recall, live tools, Spotify or delegation run;
+    // the only side effect is a pathway write (below).
+    let learning = super::modes::is_learning(&mode);
     let TurnRoute { role, kind: route_kind, reason: route_reason } = route_for_turn(
-        &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate, solo },
+        &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate, solo, learning },
         &cfg,
     );
     // Route kind + target only (the reason can quote the request).
@@ -1338,7 +1350,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     let mut comms_thread: Option<String> = None;
 
     // ── Conversational recall: "look at my conversation with Sam — what did they say about X?" ──
-    if let Some((who, topic)) = comms_recall_intent(&text) {
+    if let Some((who, topic)) = (!learning).then(|| comms_recall_intent(&text)).flatten() {
         let t0 = Instant::now();
         steps.push(step("delegate", "os", "librarian", format!("Search the {who} conversation (SMS / WhatsApp / calls) for: {}", if topic.is_empty() { "anything recent" } else { &topic }), true, 0));
         match super::pipeline::comms_search(state, &cfg, &who, &topic).await {
@@ -1372,7 +1384,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             os_core::gate(bridge, cfg.permissions.delegation, "delegation", delegation_ok, json!({ "workspace": slug }))?;
         }
     }
-    let pre = if comms_thread.is_none() { prefetch_tools(state, os, bridge, &cfg, prefetch_agent, &text, &req.context, tools_ok, req.ask_cards, req.cue_playing).await } else { Prefetch::default() };
+    let pre = if comms_thread.is_none() && !learning { prefetch_tools(state, os, bridge, &cfg, prefetch_agent, &text, &req.context, tools_ok, req.ask_cards, req.cue_playing).await } else { Prefetch::default() };
     steps.extend(pre.steps);
     // Steps reach the webview as they happen ("os-step"), so a turn that then fails or is cut
     // ("cut it") still shows what was asked and answered.
@@ -1399,6 +1411,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             route_kind: route_kind.clone(),
             pending_spotify: pending,
             answered_by: "tool".into(),
+            learned: vec![],
         };
         if let Some(p) = pre.pending_spotify {
             let res = spotify_turn(String::new(), Some(p.name.clone()), "spotify approval card", Some(p), steps);
@@ -1503,6 +1516,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             route_kind: route_kind.clone(),
             pending_spotify: None,
             answered_by: "agent".into(),
+            learned: vec![],
         };
         log_turn(bridge, &role, &text, &res, &known);
         return Ok(res);
@@ -1534,7 +1548,22 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     let tier2 = if req.no_delegate && role == "general" { tier2_hint(!mode_block.is_empty()) } else { String::new() };
     // Part 7: `/no_think` on its own last line when Tony's model thinks by default (Qwen3 family)
     // and Deep thinking is off — after every hint and the MODE block, so it stays the last line.
-    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &tier2, &mode_block), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
+    // Learning: what Nic already taught that bears on this turn (every mode: confirmed only;
+    // Learning: provisional too, so a clash is caught before saving). Tony's own turns only.
+    let pathways = super::learning::live_path(&cfg, &state.snapshot().gateway.workdir);
+    let learned_block = match (&pathways, role == "general") {
+        (Some(p), true) => {
+            let t0 = Instant::now();
+            let f = super::learning::load(p);
+            let hits = super::learning::relevant(&f, &text, if learning { 6 } else { 4 }, !learning);
+            if !hits.is_empty() {
+                emit(Hop::Memory, &format!("learning · {} pathway(s) recalled", hits.len()), true, t0.elapsed().as_millis(), None);
+            }
+            super::learning::learned_block(&hits, learning)
+        }
+        _ => String::new(),
+    };
+    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &tier2, &format!("{mode_block}{learned_block}")), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
     msgs.extend(history);
     msgs.push(ChatMessage::new("user", user_msg));
 
@@ -1577,6 +1606,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                             route_kind: route_kind.clone(),
                             pending_spotify: None,
                             answered_by: "overseer".into(),
+                            learned: vec![],
                         };
                         log_turn(bridge, &role, &text, &out, &known);
                         return Ok(out);
@@ -1606,6 +1636,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     route_kind: route_kind.clone(),
                     pending_spotify: None,
                     answered_by: "agent".into(),
+                    learned: vec![],
                 };
                 log_turn(bridge, &role, &text, &out, &known);
                 return Ok(out);
@@ -1626,7 +1657,14 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // If the model's final answer is itself bare JSON or a tool-call (it
     // decided to "answer" with the router shape instead of prose), ask it
     // once more for plain sentences rather than showing/speaking raw JSON.
-    let answer_text = ensure_prose(state, os, &msgs, res.content).await;
+    // `[[LEARN …]]` lines never reach the chat, TTS or logs; they are saved only in Learning mode.
+    let (content, drafts) = if role == "general" { super::learning::parse_tags(&res.content) } else { (res.content, vec![]) };
+    let content = if content.trim().is_empty() && !drafts.is_empty() { "Got it, saved.".to_string() } else { content };
+    let answer_text = ensure_prose(state, os, &msgs, content).await;
+    let learned = match (&pathways, learning && !drafts.is_empty()) {
+        (Some(p), true) => commit_lessons(app, p, &drafts, &known),
+        _ => vec![],
+    };
     let out = OsTurnResult {
         answer: answer_text,
         steps,
@@ -1642,9 +1680,38 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         route_kind,
         pending_spotify: None,
         answered_by: "os".into(),
+        learned,
     };
     log_turn(bridge, &role, &text, &out, &known);
     Ok(out)
+}
+
+/// Learning mode: save the reply's lessons (memory trace hop for the System Map), then re-index
+/// the store in the Librarian's workspace in the background (never delays the reply).
+fn commit_lessons(app: Option<&tauri::AppHandle>, path: &std::path::Path, drafts: &[super::learning::Draft], known: &[String]) -> Vec<super::learning::Saved> {
+    use super::trace::{emit, Hop};
+    let t0 = Instant::now();
+    match super::learning::commit(path, drafts, super::compaction::now_ms(), known) {
+        Ok(saved) => {
+            let changed = saved.iter().filter(|s| s.outcome != "unchanged").count();
+            emit(Hop::Memory, &format!("learning · {changed} pathway(s) saved"), true, t0.elapsed().as_millis(), None);
+            if let (true, Some(app)) = (changed > 0, app) {
+                let (app, path) = (app.clone(), path.to_path_buf());
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Manager;
+                    let t0 = Instant::now();
+                    let r = super::learning::index(app.state::<DispatchState>().inner(), app.state::<OsState>().inner(), path).await;
+                    emit(Hop::Memory, "learning · pathways indexed (librarian storage)", r.is_ok(), t0.elapsed().as_millis(), r.as_ref().err().map(|_| "Librarian index failed"));
+                });
+            }
+            saved
+        }
+        Err(e) => {
+            eprintln!("[learning] save failed: {e}");
+            emit(Hop::Memory, "learning · pathway save", false, t0.elapsed().as_millis(), Some("couldn't write the pathway store"));
+            vec![]
+        }
+    }
 }
 
 /// The delegate step as the chat shows it: the request as sent, with the attached identity file
@@ -2089,6 +2156,7 @@ mod tests {
             route_kind: "Default".into(),
             pending_spotify: None,
             answered_by: "os".into(),
+            learned: vec![],
         }
     }
 
@@ -2360,7 +2428,7 @@ mod tests {
     #[test]
     fn route_for_turn_never_routes_to_tony() {
         let cfg = OsConfig::default();
-        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false }, &cfg);
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false, learning: false }, &cfg);
         // Self address: stays general, kind Self.
         for text in ["thanks tony", "tony what do you think", "system status", "ask the dispatcher to check the build"] {
             let r = rt("general", false, text, None);
@@ -2389,7 +2457,7 @@ mod tests {
     #[test]
     fn route_for_turn_no_delegate_keeps_tony() {
         let cfg = OsConfig::default();
-        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate, solo: false }, &cfg);
+        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate, solo: false, learning: false }, &cfg);
         // Without the flag the phone's Default is re-promoted to the Designer (today's net)…
         let r = rt("redo the color palette and layout", Some("Default"), false);
         assert_eq!(r.role, "designer");
@@ -2401,7 +2469,7 @@ mod tests {
             }
         }
         // A stale caller role is still forced back to Tony.
-        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true, solo: false }, &cfg);
+        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true, solo: false, learning: false }, &cfg);
         assert_eq!(r.role, "general");
         // A live-tool read stays Tony's Direct path.
         assert_eq!(rt("any whatsapp updates", None, true).kind, "Direct");
@@ -2465,9 +2533,27 @@ mod tests {
     }
 
     #[test]
+    fn route_for_turn_learning_keeps_every_turn_with_tony() {
+        let cfg = OsConfig::default();
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: true, learning: true }, &cfg);
+        // A high-confidence Named address, an explicit tab, a Booking line and a live-tool read
+        // all stay Tony's own turn in Learning mode.
+        for (role, explicit, text, kind) in [
+            ("coder", false, "hey Coder, write a timer script", Some("Named")),
+            ("booking", true, "book a table for two", Some("Tab")),
+            ("general", false, "book me a table at 7", Some("Default")),
+            ("general", false, "what's on my calendar today", None),
+        ] {
+            let r = rt(role, explicit, text, kind);
+            assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"), "{text}");
+            assert_eq!(r.reason, "Learning mode: Tony only");
+        }
+    }
+
+    #[test]
     fn route_for_turn_solo_keeps_pipeline_promotions_with_tony() {
         let cfg = OsConfig::default();
-        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>, solo: bool| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo }, &cfg);
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>, solo: bool| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo, learning: false }, &cfg);
         // A Default line the safety net would hand to the Coder stays with Tony under Solo.
         assert_eq!(rt("general", false, "write code for a timer script", Some("Default"), false).role, "coder");
         let r = rt("general", false, "write code for a timer script", Some("Default"), true);

@@ -35,11 +35,11 @@ const group = (html: string) => {
 };
 
 describe("ModePanelView", () => {
-  it("{3,2}: one Tony mode radiogroup of 5 work radios, one checked, the novelty as a switch outside it, no dials", () => {
+  it("{3,2}: one Tony mode radiogroup of 6 work radios, one checked, the novelty as a switch outside it, no dials", () => {
     const html = render(props());
     expect(count(html, /aria-label="Tony mode"/g)).toBe(1);
     const g = group(html);
-    expect(count(g, /role="radio"/g)).toBe(5);
+    expect(count(g, /role="radio"/g)).toBe(6);
     expect(count(g, /aria-checked="true"/g)).toBe(1);
     expect(g).toContain('aria-label="Brainstorming"');
     expect(g).not.toContain("Gabagool");
@@ -69,7 +69,7 @@ describe("ModePanelView", () => {
   it("w=2: icons only, every button still has an accessible name", () => {
     const html = render(props({ size: { w: 2, h: 2 } }));
     const buttons = html.match(/<button[^>]*>/g) ?? [];
-    expect(buttons.length).toBe(6);
+    expect(buttons.length).toBe(7);
     for (const b of buttons) expect(b).toMatch(/aria-label="[^"]+"/);
     expect(group(html)).not.toMatch(/<span class="truncate">/);
   });
@@ -107,5 +107,16 @@ describe("ModePanelView", () => {
   it("source guard: ModePanel.tsx carries no backdrop or pill-glass", () => {
     const src = readFileSync(fileURLToPath(new URL("./ModePanel.tsx", import.meta.url)), "utf8");
     expect(src).not.toMatch(/backdrop-|pill-glass|glass-thin|className="[^"]*\bglass\b/);
+  });
+});
+
+describe("ModePanelView in Learning mode", () => {
+  it("locks the dispatch dial on Solo with a tooltip; curiosity stays adjustable", () => {
+    const html = render(props({ activeId: "learning", overrides: { dispatch: "auto_dispatch" }, size: { w: 3, h: 4 } }));
+    const dispatch = html.slice(html.indexOf('aria-label="Tony mode dispatch"') - 200);
+    expect(dispatch).toContain("sub-agent dispatch is off while you train Tony");
+    expect(dispatch).toMatch(/aria-label="Tony mode dispatch" aria-disabled="true"/);
+    expect(html).toMatch(/aria-label="Tony mode curiosity"(?! aria-disabled)/);
+    expect(html).toContain('aria-label="Learning"');
   });
 });

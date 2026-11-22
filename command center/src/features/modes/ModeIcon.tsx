@@ -1,4 +1,4 @@
-import { Briefcase, Flame, Hammer, Lightbulb, MessageCircle, Sparkles, type LucideIcon } from "lucide-react";
+import { Briefcase, Flame, GraduationCap, Hammer, Lightbulb, MessageCircle, Sparkles, type LucideIcon } from "lucide-react";
 import type { ModeIconName } from "./mode-ui";
 
 const ICONS: Record<ModeIconName, LucideIcon> = {
@@ -7,10 +7,11 @@ const ICONS: Record<ModeIconName, LucideIcon> = {
   hammer: Hammer,
   briefcase: Briefcase,
   flame: Flame,
+  "graduation-cap": GraduationCap,
   sparkles: Sparkles,
 };
 
-/** A mode's icon: one of the six lucide names, otherwise the text itself (an emoji). */
+/** A mode's icon: one of the lucide names, otherwise the text itself (an emoji). */
 export function ModeIcon({ icon, size = 14, className = "" }: { icon: string; size?: number; className?: string }) {
   const Icon = ICONS[icon as ModeIconName];
   if (Icon) return <Icon size={size} aria-hidden className={className} />;

@@ -149,6 +149,10 @@ const SERVER_EDGE: Record<string, FlowEdgeId> = {
 };
 
 const SUBAGENT_MARK = "anythingllm/";
+/** Rust's Learning-mode memory hops all start with this (`learning · …`). */
+export const LEARNING_HOP = "learning ·";
+/** The Sub-agents / Media nodes while Learning mode isolates Tony. */
+export const LEARNING_ISOLATED = "Isolated: Learning mode. Coder, Designer, Booking Desk and Ops are dormant; only Tony and memory are linked.";
 
 /** Which edges one trace step lights. See docs/memory-map-plan.md §8 for the table. */
 export function edgesForStep(s: TraceStep): FlowHit {
@@ -163,6 +167,9 @@ export function edgesForStep(s: TraceStep): FlowHit {
       return e ? { edges: [e, "hub-tony"], ok: s.ok } : { edges: ["hub-tony"], flash: "hub", ok: s.ok };
     }
     case "memory": {
+      // Learning mode (agents.rs): recalling pathways reads memory into Tony; saving / indexing
+      // one (pathway store → Librarian storage) is Tony writing to the memory database.
+      if (bare.startsWith(LEARNING_HOP)) return { edges: bare.includes("recalled") ? ["memory-tony"] : ["tony-memwrite"], ok: s.ok };
       // The capture pipeline's ledger stage: the Librarian writing the Ideas & Tasks Ledger.
       if (pipeline && stage === "ledger" && bare.startsWith("librarian")) return { edges: ["tony-memwrite"], ok: s.ok };
       const edges: FlowEdgeId[] = ["memory-tony"];
@@ -277,7 +284,14 @@ function busStatus(bus: readonly SnapBus[], ids: string[], missing: string): Nod
  * Status LED per node, from the live snapshot (and the voice state). A node with no source
  * reads idle with a "why" saying what is missing.
  */
-export function flowNodeStatus(snap: SystemSnapshot | null, o: { voice?: VoiceState; why?: string } = {}): Record<FlowNodeId, NodeStatus> {
+export function flowNodeStatus(snap: SystemSnapshot | null, o: { voice?: VoiceState; why?: string; learning?: boolean } = {}): Record<FlowNodeId, NodeStatus> {
+  const all = flowNodeStatusRaw(snap, o);
+  if (!o.learning) return all;
+  const isolated: NodeStatus = { tone: "idle", text: "Isolated", why: LEARNING_ISOLATED };
+  return { ...all, subagents: isolated, media: { ...isolated, why: "Isolated: Learning mode. External tools (Spotify, Gmail, WhatsApp) are off." } };
+}
+
+function flowNodeStatusRaw(snap: SystemSnapshot | null, o: { voice?: VoiceState; why?: string }): Record<FlowNodeId, NodeStatus> {
   const none = o.why ?? "Waiting for the first system snapshot";
   const idle = (why: string): NodeStatus => ({ tone: "idle", text: DASH_TEXT, why });
   if (!snap) {

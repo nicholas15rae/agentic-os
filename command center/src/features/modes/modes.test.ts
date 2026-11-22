@@ -11,7 +11,7 @@ const rustConst = (name: string): string => {
   return m[1];
 };
 
-const PROMPT_CONSTS = ["CURIOSITY_LOW", "CURIOSITY_MEDIUM", "CURIOSITY_HIGH", "VERBOSITY_TERSE", "VERBOSITY_CONVERSATIONAL", "DISPATCH_SOLO", "DISPATCH_AUTO", "BRAINSTORM_NOTES", "COACH_NOTES"] as const;
+const PROMPT_CONSTS = ["CURIOSITY_LOW", "CURIOSITY_MEDIUM", "CURIOSITY_HIGH", "VERBOSITY_TERSE", "VERBOSITY_CONVERSATIONAL", "DISPATCH_SOLO", "DISPATCH_AUTO", "BRAINSTORM_NOTES", "COACH_NOTES", "LEARNING_PROTOCOL"] as const;
 
 describe("prompt constants mirror modes.rs", () => {
   it.each(PROMPT_CONSTS)("%s is identical to the Rust constant", (name) => {
@@ -35,7 +35,7 @@ describe("prompt constants mirror modes.rs", () => {
   });
 
   it("the preset ids, order and dials match BUILTIN_IDS / presets() in Rust", () => {
-    expect(rs).toContain(`pub const BUILTIN_IDS: [&str; 6] = [${M.BUILTIN_MODE_IDS.map((i) => `"${i}"`).join(", ")}];`);
+    expect(rs).toContain(`pub const BUILTIN_IDS: [&str; 7] = [${M.BUILTIN_MODE_IDS.map((i) => `"${i}"`).join(", ")}];`);
     expect(M.PRESET_MODES.map((m) => m.id)).toEqual([...M.BUILTIN_MODE_IDS]);
     const row = (id: string) => M.PRESET_MODES.find((m) => m.id === id)!;
     expect(row("surface")).toMatchObject({ curiosity_level: "medium", verbosity: "balanced", agent_dispatch_policy: "surface_only", tts_interrupt_level: "silent", icon: "message-circle" });
@@ -44,6 +44,7 @@ describe("prompt constants mirror modes.rs", () => {
     expect(row("executive")).toMatchObject({ curiosity_level: "low", verbosity: "terse", agent_dispatch_policy: "ask_before_dispatch" });
     expect(row("coach")).toMatchObject({ curiosity_level: "medium", agent_dispatch_policy: "surface_only", prompt_modifier: M.COACH_NOTES });
     expect(row("gabagool")).toMatchObject({ is_novelty: true, agent_dispatch_policy: "surface_only" });
+    expect(row("learning")).toMatchObject({ curiosity_level: "high", verbosity: "balanced", agent_dispatch_policy: "surface_only", tts_interrupt_level: "silent", icon: "graduation-cap" });
     for (const m of M.PRESET_MODES) {
       if (m.id === M.NOVELTY_MODE_ID) expect(rs).toContain('preset(NOVELTY_ID, "Gabagool Mode", "\\u{1F35D}"');
       else expect(rs, m.id).toContain(`preset("${m.id}", "${m.name}", "${m.icon}"`);
@@ -141,7 +142,24 @@ describe("viewFromMirror (phone)", () => {
     expect(v.active_mode_id).toBe("executive");
     expect(v.effective.curiosity).toBe("high");
     expect(v.overrides).toEqual({ curiosity: "high" });
-    expect(v.modes).toHaveLength(6);
+    expect(v.modes).toHaveLength(7);
     expect(v.modes[3]).toEqual(M.PRESET_MODES[3]);
+  });
+});
+
+describe("Learning mode", () => {
+  it("locks dispatch to Solo under any override and swaps in the protocol", () => {
+    const e = M.effectiveOf(M.PRESET_MODES, "learning", { dispatch: "auto_dispatch", curiosity: "low" });
+    expect(M.isLearningMode(e)).toBe(true);
+    expect(e.dispatch).toBe("surface_only");
+    expect(e.overridden).toEqual(["curiosity"]);
+    const b = M.modeBlock(e);
+    expect(b).toContain(M.LEARNING_PROTOCOL);
+    expect(b).toContain(M.CURIOSITY_LOW);
+    expect(b).not.toContain(M.DISPATCH_SOLO);
+    expect(M.tier3Action(e, { kind: "pipeline" })).toBe("solo");
+    for (const verbosity of ["terse", "balanced", "conversational"] as const)
+      for (const curiosity of ["low", "medium", "high"] as const) expect(Array.from(M.modeBlock(M.effectiveOf(M.PRESET_MODES, "learning", { verbosity, curiosity }))).length).toBeLessThanOrEqual(M.MODE_BLOCK_MAX);
+    expect(M.effectiveOf(M.PRESET_MODES, "brainstorm", { dispatch: "auto_dispatch" }).dispatch).toBe("auto_dispatch");
   });
 });

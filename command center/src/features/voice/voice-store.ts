@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { LearnedPathway } from "@/features/modes/learning";
 import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 import type { AgentRole } from "@/features/dispatcher/agents";
@@ -73,6 +74,8 @@ export interface VoiceTurn {
   commsThread?: string;
   /** "Open in Play Place →" pill. */
   cardId?: string;
+  /** Learning mode: the pathways Tony saved on this reply ("Memory saved: …" pills). */
+  learned?: LearnedPathway[];
   /** One-tap answers under the message ("Yes, run the pipeline"). */
   actions?: { label: string; run: string }[];
   /** The build (worker task) an agent / pipeline turn belongs to (grouping, review). */

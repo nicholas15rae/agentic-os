@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Send } from "lucide-react";
+import { ArrowRight, BookMarked, Send } from "lucide-react";
 import { tonyThreadForView, useThreadTurns, useVoice, type ThreadId, type VoiceState } from "./voice-store";
 import { askOverseer, handleInput, runTurnAction, setMicEnabled, toggleListening } from "./voice-controller";
 import { useMic } from "./mic-gate";
@@ -11,6 +11,7 @@ import { agentBadge, useOsName } from "@/features/os/os-store";
 import { isTauri } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
 import { AgentConversationCard } from "@/features/transcript/AgentConversationCard";
+import { learnedPillText } from "@/features/modes/learning";
 
 /** Shared building blocks for the floating HUD, the Voice Console widget and the Agents section. */
 
@@ -115,6 +116,11 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
                     Jump to Thread in Comms →
                   </button>
                 )}
+                {t.learned?.map((p) => (
+                  <span key={p.id} title={`${p.category} · ${p.confidence}`} className="inline-flex items-center gap-1 rounded-full border border-teal/30 bg-teal/[0.06] px-2 py-0.5 text-[10.5px] text-teal/90">
+                    <BookMarked size={10} aria-hidden /> {learnedPillText(p)}
+                  </span>
+                ))}
                 {t.cardId && (
                   <button
                     onClick={() => (useFocus.getState().set({ card: t.cardId }), useNav.getState().go("playplace"))}

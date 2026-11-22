@@ -19,6 +19,7 @@ pub mod gmail;
 pub mod handoff_cues;
 pub mod instagram;
 pub mod introspect;
+pub mod learning;
 pub mod librarian;
 pub mod lifecycle;
 pub mod maps;

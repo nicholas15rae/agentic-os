@@ -41,6 +41,7 @@ fn presets_are_the_spec_table_in_order() {
         ("builder", "Builder", C::Medium, V::Balanced, D::AutoDispatch, T::Full, "hammer"),
         ("executive", "Executive", C::Low, V::Terse, D::AskBeforeDispatch, T::MilestonesOnly, "briefcase"),
         ("coach", "Motivation / Coach", C::Medium, V::Balanced, D::SurfaceOnly, T::MilestonesOnly, "flame"),
+        ("learning", "Learning", C::High, V::Balanced, D::SurfaceOnly, T::Silent, "graduation-cap"),
         ("gabagool", "Gabagool Mode", C::Medium, V::Balanced, D::SurfaceOnly, T::Silent, "\u{1F35D}"),
     ];
     for (m, w) in p.iter().zip(want) {
@@ -50,12 +51,13 @@ fn presets_are_the_spec_table_in_order() {
     }
     assert_eq!(p[1].prompt_modifier, BRAINSTORM_NOTES);
     assert_eq!(p[4].prompt_modifier, COACH_NOTES);
-    for i in [0, 2, 3, 5] {
+    for i in [0, 2, 3, 5, 6] {
         assert!(p[i].prompt_modifier.is_empty());
     }
     assert_eq!(ModesFile::default().active_mode_id, "brainstorm");
     assert!(BUILTIN_IDS.iter().all(|id| is_builtin(id)) && !is_builtin("deep-focus"));
-    assert_eq!(NOVELTY_ID, BUILTIN_IDS[5]);
+    assert_eq!(NOVELTY_ID, BUILTIN_IDS[6]);
+    assert_eq!(LEARNING_ID, BUILTIN_IDS[5]);
 }
 
 #[test]
@@ -185,7 +187,7 @@ fn duplicate_makes_a_unique_custom_copy() {
     let c = f.duplicate("builder", "Builder").unwrap();
     assert_eq!(c.id, "builder-2", "a preset id is never reused");
     assert_eq!(f.modes.iter().filter(|m| m.id == "executive").count(), 1);
-    assert_eq!(f.modes.len(), 9);
+    assert_eq!(f.modes.len(), 10);
 }
 
 #[test]
@@ -238,11 +240,11 @@ fn dispatch_gate_truth_table() {
 
 #[test]
 fn load_or_init_seeds_restores_and_survives_corruption() {
-    // Missing file: six presets, active brainstorm, written to disk.
+    // Missing file: seven presets, active brainstorm, written to disk.
     let d = tmp_dir("seed");
     let s = ModeStore::default();
     assert_eq!(s.load_or_init(&d), LoadOutcome::Seeded);
-    assert_eq!(s.file().modes.len(), 6);
+    assert_eq!(s.file().modes.len(), 7);
     assert_eq!(s.file().active_mode_id, "brainstorm");
     let on_disk: ModesFile = serde_json::from_str(&std::fs::read_to_string(d.join("modes.json")).unwrap()).unwrap();
     assert_eq!(on_disk, ModesFile::default());
@@ -258,8 +260,8 @@ fn load_or_init_seeds_restores_and_survives_corruption() {
     let s = ModeStore::default();
     assert_eq!(s.load_or_init(&d), LoadOutcome::Loaded);
     let got = s.file();
-    assert_eq!(&got.modes[..6], &presets()[..]);
-    assert_eq!(got.modes[6], custom("deep-focus"));
+    assert_eq!(&got.modes[..7], &presets()[..]);
+    assert_eq!(got.modes[7], custom("deep-focus"));
     assert_eq!(got.active_mode_id, "deep-focus");
     assert!(std::fs::metadata(d.join("modes.json")).unwrap().len() < 4096);
 
@@ -386,12 +388,42 @@ fn mirror_and_view_carry_the_mode() {
     assert_eq!(m["mode"]["dispatch"], "ask_before_dispatch");
     assert_eq!(m["mode"]["feedbackLevel"], 1);
     assert_eq!(m["mode"]["overridden"], json!(["curiosity"]));
-    assert_eq!(m["mode"]["list"].as_array().unwrap().len(), 6);
-    assert_eq!(m["mode"]["list"][5], json!({ "id": "gabagool", "name": "Gabagool Mode", "icon": "\u{1F35D}", "isNovelty": true }));
+    assert_eq!(m["mode"]["list"].as_array().unwrap().len(), 7);
+    assert_eq!(m["mode"]["list"][6], json!({ "id": "gabagool", "name": "Gabagool Mode", "icon": "\u{1F35D}", "isNovelty": true }));
     assert!(m["voice"].is_object(), "Part B's mirror keys are kept");
     let v = os.modes.view();
     assert_eq!(v["active_mode_id"], "executive");
     assert_eq!(v["builtin_ids"], json!(BUILTIN_IDS));
     assert_eq!(v["overrides"], json!({ "curiosity": "high" }));
     assert_eq!(v["effective"]["curiosity"], "high");
+}
+
+#[test]
+fn learning_locks_dispatch_to_solo_and_carries_the_protocol() {
+    let s = ModeStore::default();
+    s.set_active(LEARNING_ID).unwrap();
+    let e = s.effective();
+    assert!(is_learning(&e));
+    assert_eq!((e.curiosity, e.dispatch, e.feedback_level), (Curiosity::High, DispatchPolicy::SurfaceOnly, 0));
+    // A dispatch override (the phone, a stale webview) never lifts the lock, nor shows as one.
+    let e = s.apply_override(&OverridePatch { dispatch: Some(DispatchPolicy::AutoDispatch), ..Default::default() });
+    assert_eq!(e.dispatch, DispatchPolicy::SurfaceOnly);
+    assert!(e.overridden.is_empty());
+    // Curiosity stays adjustable.
+    let e = s.apply_override(&OverridePatch { curiosity: Some(Curiosity::Low), ..Default::default() });
+    assert_eq!((e.curiosity, e.overridden.clone()), (Curiosity::Low, vec!["curiosity"]));
+    let b = mode_block(&e);
+    assert!(b.contains(LEARNING_PROTOCOL) && b.contains(CURIOSITY_LOW));
+    assert!(!b.contains(DISPATCH_SOLO), "the protocol replaces the Solo line");
+    assert!(dispatch_allowed(e.dispatch, DispatchKind::BuildPipeline { auto: false }).is_err());
+    // Every dial combination stays inside the block cap.
+    for c in [Curiosity::Low, Curiosity::Medium, Curiosity::High] {
+        for v in [Verbosity::Terse, Verbosity::Balanced, Verbosity::Conversational] {
+            let e = Effective { curiosity: c, verbosity: v, ..eff(LEARNING_ID) };
+            assert!(mode_block(&e).chars().count() <= MODE_BLOCK_MAX, "{c:?} {v:?}");
+        }
+    }
+    // Leaving Learning: an override set elsewhere works again.
+    s.set_active("brainstorm").unwrap();
+    assert_eq!(s.apply_override(&OverridePatch { dispatch: Some(DispatchPolicy::AutoDispatch), ..Default::default() }).dispatch, DispatchPolicy::AutoDispatch);
 }

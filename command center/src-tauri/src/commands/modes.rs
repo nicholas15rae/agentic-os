@@ -12,6 +12,10 @@
 //! - `tts_interrupt_level` maps onto `feedback.sensitivity` (silent 0 · milestones_only 1 ·
 //!   full 2); a manual narration change is a temporary override (cleared by a switch or reset).
 //! - Overrides (curiosity / dispatch / verbosity / feedback) live in memory only (D18).
+//! - Learning (`LEARNING_ID`): Nic trains Tony one-on-one. Dispatch is hard-locked to
+//!   `surface_only` (an override can't lift it), the MODE block carries `LEARNING_PROTOCOL`
+//!   instead of the Solo line, and `agents.rs` / the worker / the webview isolate the turn
+//!   (no routing, live tools, sub-agent calls, background builds or other voices).
 //!
 //! No prompt text here may contain the format word that flips `dispatch::skip_agentic_os`, the
 //! thinking switch, or the novelty mode's name (enforced by `validate_mode` and the tests).
@@ -91,11 +95,13 @@ impl Default for ModesFile {
 }
 
 /// The presets, in switcher order. Read-only (D12); `is_preset` is derived from this list.
-pub const BUILTIN_IDS: [&str; 6] = ["surface", "brainstorm", "builder", "executive", "coach", "gabagool"];
+pub const BUILTIN_IDS: [&str; 7] = ["surface", "brainstorm", "builder", "executive", "coach", "learning", "gabagool"];
 /// The first-launch mode: `ask_before_dispatch` is today's Tier-3 behaviour (D11).
 pub const DEFAULT_MODE_ID: &str = "brainstorm";
 /// The novelty overlay (D19): toggled by the cue system, never the active work mode.
 pub const NOVELTY_ID: &str = "gabagool";
+/// One-on-one training with Tony: Tony only, dispatch locked to Solo, lessons saved as pathways.
+pub const LEARNING_ID: &str = "learning";
 
 pub fn is_builtin(id: &str) -> bool {
     BUILTIN_IDS.contains(&id)
@@ -119,7 +125,7 @@ fn preset(id: &str, name: &str, icon: &str, c: Curiosity, v: Verbosity, d: Dispa
 pub const BRAINSTORM_NOTES: &str = "Refine raw ideas with sharp follow-ups; when one firms up, offer to park it in the Brainstorm list or hand it off.";
 pub const COACH_NOTES: &str = "Be a grounded, high-energy accountability partner: name the next concrete step and push Nic to take it.";
 
-/// The six presets (spec §2), in `BUILTIN_IDS` order.
+/// The seven presets (spec §2 + Learning), in `BUILTIN_IDS` order.
 pub fn presets() -> Vec<TonyMode> {
     use Curiosity::*;
     use DispatchPolicy::*;
@@ -131,6 +137,7 @@ pub fn presets() -> Vec<TonyMode> {
         preset("builder", "Builder", "hammer", Medium, Balanced, AutoDispatch, Full, "", false),
         preset("executive", "Executive", "briefcase", Low, Terse, AskBeforeDispatch, MilestonesOnly, "", false),
         preset("coach", "Motivation / Coach", "flame", Medium, Balanced, SurfaceOnly, MilestonesOnly, COACH_NOTES, false),
+        preset("learning", "Learning", "graduation-cap", High, Balanced, SurfaceOnly, Silent, "", false),
         preset(NOVELTY_ID, "Gabagool Mode", "\u{1F35D}", Medium, Balanced, SurfaceOnly, Silent, "", true),
     ]
 }
@@ -144,6 +151,9 @@ pub const VERBOSITY_TERSE: &str = "VERBOSITY TERSE: shortest useful answer; shor
 pub const VERBOSITY_CONVERSATIONAL: &str = "VERBOSITY CONVERSATIONAL: up to 4 short sentences when it helps the conversation.";
 pub const DISPATCH_SOLO: &str = "SOLO MODE: nothing is handed to the Prompter, Designer or Coder now. If Nic wants something built, offer to park it, or say it can be queued once he switches modes.";
 pub const DISPATCH_AUTO: &str = "BUILDER MODE: the app queues a clear build for the Prompter as soon as Nic commits; never say it was queued unless the app confirms it.";
+/// Learning mode's rules (in place of the Solo line). The `[[LEARN …]]` lines are pulled out of
+/// the reply by `learning::parse_tags` before anything is shown, spoken or logged.
+pub const LEARNING_PROTOCOL: &str = "LEARNING MODE: Nic is training you; offer no builds or hand-offs. Distill each lesson into a rule; ask one sharp question on edge cases or clashes with LEARNED; echo it back (So when X, you want Y?) before saving unless he says save now. To save, add a line per lesson: [[LEARN category | when | rule or fact | confirmed or provisional]], category one of preference, workflow, rule, persona, domain_knowledge, correction. Confirm briefly.";
 /// The whole block's cap (the mode's own notes are clipped to fit).
 pub const MODE_BLOCK_MAX: usize = 700;
 pub const MODIFIER_MAX: usize = 280;
@@ -236,7 +246,9 @@ pub fn effective(f: &ModesFile, o: &Overrides) -> Effective {
     if o.curiosity.is_some() {
         overridden.push("curiosity");
     }
-    if o.dispatch.is_some() {
+    // Learning locks dispatch to Solo: a dispatch override never applies (nor counts) there.
+    let learning = m.id == LEARNING_ID;
+    if o.dispatch.is_some() && !learning {
         overridden.push("dispatch");
     }
     if o.verbosity.is_some() {
@@ -251,12 +263,17 @@ pub fn effective(f: &ModesFile, o: &Overrides) -> Effective {
         icon: m.icon,
         curiosity: o.curiosity.unwrap_or(m.curiosity_level),
         verbosity: o.verbosity.unwrap_or(m.verbosity),
-        dispatch: o.dispatch.unwrap_or(m.agent_dispatch_policy),
+        dispatch: if learning { DispatchPolicy::SurfaceOnly } else { o.dispatch.unwrap_or(m.agent_dispatch_policy) },
         feedback_level: o.feedback.map(|f| f.min(3)).unwrap_or_else(|| feedback_for(m.tts_interrupt_level)),
         prompt_modifier: m.prompt_modifier,
         is_novelty: m.is_novelty,
         overridden,
     }
+}
+
+/// Is this turn running under Learning mode (Tony-only training)?
+pub fn is_learning(e: &Effective) -> bool {
+    e.mode_id == LEARNING_ID
 }
 
 /// Tony's MODE block (appended after the persona, before `/no_think`). Deterministic: the same
@@ -267,7 +284,8 @@ pub fn mode_block(e: &Effective) -> String {
         return String::new();
     }
     let mut s = format!("\n\nMODE: {}. These MODE rules override the STYLE length rule.", one_line(&e.name));
-    for line in [curiosity_line(e.curiosity), verbosity_line(e.verbosity), dispatch_line(e.dispatch)] {
+    let dispatch = if is_learning(e) { LEARNING_PROTOCOL } else { dispatch_line(e.dispatch) };
+    for line in [curiosity_line(e.curiosity), verbosity_line(e.verbosity), dispatch] {
         if !line.is_empty() {
             s.push('\n');
             s.push_str(line);
@@ -596,7 +614,8 @@ impl ModeStore {
             if p.curiosity.is_some() {
                 o.curiosity = p.curiosity;
             }
-            if p.dispatch.is_some() {
+            // Learning locks dispatch to Solo (the webview disables the dial; a phone patch is ignored).
+            if p.dispatch.is_some() && active_mode(&self.file.read().unwrap()).id != LEARNING_ID {
                 o.dispatch = p.dispatch;
             }
             if p.verbosity.is_some() {

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useModes } from "@/features/modes/modes-store";
+import { isLearningMode } from "@/features/modes/modes";
 import { ChevronDown, ChevronUp, Workflow } from "lucide-react";
 import { useMediaQuery, usePrefersReducedMotion } from "@/lib/use-media-query";
 import { useIpcRing } from "@/lib/ipc-ring";
@@ -215,7 +217,8 @@ export function RoutingFlowchart({ orient: forced, className = "" }: { orient?: 
   const body = useRef<HTMLDivElement>(null);
   const width = useWidth(body, open);
   const { now, pulses, flashes, life, flashLife } = useFlowActivity(open && !reduced, root);
-  const status = useMemo(() => flowNodeStatus(snap, { voice, why: error ?? undefined }), [snap, voice, error]);
+  const learning = useModes((m) => isLearningMode(m.effective));
+  const status = useMemo(() => flowNodeStatus(snap, { voice, why: error ?? undefined, learning }), [snap, voice, error, learning]);
 
   const nodeOf = (n: FlowNode): FlowNode => (n.id === "tony" && osName !== "Tony" ? { ...n, label: `${osName} Dispatcher`, short: osName } : n);
   const flashOf = (id: FlowNodeId) => {

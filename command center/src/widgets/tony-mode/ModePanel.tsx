@@ -5,7 +5,8 @@ import { WidgetHeader } from "@/components/WidgetHeader";
 import { Segmented } from "@/components/segmented";
 import { useModes, type OverridePatch } from "@/features/modes/modes-store";
 import { ModeIcon } from "@/features/modes/ModeIcon";
-import { CURIOSITY_OPTS, DISPATCH_OPTS, isOverridden, panelLayout, switcherModes } from "@/features/modes/mode-ui";
+import { CURIOSITY_OPTS, DISPATCH_OPTS, LEARNING_DISPATCH_LOCK, isOverridden, panelLayout, switcherModes } from "@/features/modes/mode-ui";
+import { isLearningMode } from "@/features/modes/modes";
 import type { EffectiveMode, ModeOverrides, TonyMode } from "@/features/modes/modes";
 import { useCueRun } from "@/features/cues/player";
 import { requestSettingsTab } from "@/sections/settings/settings-tab";
@@ -112,9 +113,9 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
             <span className="label-caps w-16 text-ink-3">Curiosity</span>
             <Segmented size="sm" label="Tony mode curiosity" value={curiosity} options={CURIOSITY_OPTS} onChange={(v) => onOverride({ curiosity: v })} />
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2" title={isLearningMode(effective) ? LEARNING_DISPATCH_LOCK : undefined}>
             <span className="label-caps w-16 text-ink-3">Dispatch</span>
-            <Segmented size="sm" label="Tony mode dispatch" value={dispatch} options={DISPATCH_OPTS} onChange={(v) => onOverride({ dispatch: v })} />
+            <Segmented size="sm" label="Tony mode dispatch" value={isLearningMode(effective) ? "surface_only" : dispatch} options={DISPATCH_OPTS} onChange={(v) => onOverride({ dispatch: v })} disabled={isLearningMode(effective)} />
           </div>
           {overridden && (
             <button type="button" onClick={onReset} className="flex h-7 items-center gap-1.5 rounded-full border border-amber/40 px-2.5 text-[11px] text-amber-light hover:bg-amber/10">

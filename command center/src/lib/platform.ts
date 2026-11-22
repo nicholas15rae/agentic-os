@@ -1516,6 +1516,8 @@ export interface OsTurnResult {
   /** Who produced `answer`: the sub-agent itself ("agent"), Tony's synthesis ("os" — also when he
    * stepped in for a failed agent), the overseer, or a tool. Older builds omit it. */
   answeredBy?: "agent" | "os" | "overseer" | "tool";
+  /** Learning mode: the pathways this turn saved / updated (Rust `learning::Saved`). */
+  learned?: { id: string; title: string; category: string; confidence: string; outcome: string }[];
 }
 
 export interface ToolInfo {

@@ -41,7 +41,8 @@ import { syncThresholdFromOs } from "./threshold";
 import { cutMedia, holdMedia, releaseMedia, type HeldMedia } from "./media-hold";
 import { startNarrator, type NarratorSnapshot } from "./narrator";
 import { useModes } from "@/features/modes/modes-store";
-import { calmModeError, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
+import { calmModeError, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
+import { pillPathways, stripLearnTags } from "@/features/modes/learning";
 import { duckOnSpeech, duckOnTrigger, musicPlayingHere, restoreAfterPause, restoreDuck, scheduleRestore, settleCommand, settleNoise } from "./spotify-duck";
 
 /**
@@ -124,6 +125,10 @@ async function say(text: string, opts?: SpeakOpts & { noDuck?: boolean; traceId?
   // decision; a superseded turn is silenced by `micGen`, which `sayLive` checks.)
   if (!tts.supported || !text) return;
   const { noDuck, traceId, ...speakOpts } = opts ?? {};
+  // Learning mode's voice roster lock: only Tony speaks (sub-agent / Booking Desk lines, handoff
+  // beats and build narration in another roster voice are muted). Cue clips (a `voice`, no
+  // `agent`) are Tony's own novelty audio and still play.
+  if (speakOpts.agent && speakOpts.agent !== "general" && isLearningMode(useModes.getState().effective)) return;
   const effective: SpeakOpts = speakOpts.voice || speakOpts.agent ? speakOpts : { ...speakOpts, agent: "general" };
   const duck = noDuck ? null : ttsDuck;
   if (duck && duck.depth++ === 0) setCueDuck("tts", true);
@@ -640,6 +645,9 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   const intent = parseOsLine(t);
   let sp: SpotifyIntent | null = intent ? null : await parseSpotifyLine(t);
   if (sp && cueOwnsVolume(sp, cuePlayingNow(), t)) sp = null; // "volume 30" during Gabagool ⇒ Tony, as before
+  // Learning mode: no Spotify actions (external tools are off while Nic trains Tony).
+  const learning = isLearningMode(useModes.getState().effective);
+  if (learning) sp = null;
   if (store().pending) {
     if (intent && worksWhileConfirming(intent)) return controlWhileConfirming(t, intent, opts.channel);
     if (sp?.tool === "spotify.pause") return controlWhileConfirming(t, sp, opts.channel);
@@ -703,6 +711,10 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
     return;
   }
   if (!live()) return;
+
+  // Learning mode: straight to Tony — no parking, reminders, brainstorm tiers or planner call
+  // (a second model call). Mode switches, cues and stops were handled above.
+  if (learning) return learningTurn(t, thread, opts.channel);
 
   const osName = useSettings.getState().osName || "Tony";
   // Tony's own conversation (not a typed sub-agent tab): the P3 tiers apply.
@@ -1035,6 +1047,20 @@ function brainstormTurn(t: string, thread: ThreadId, channel: Channel) {
   return run(plan, channel);
 }
 
+/** Learning mode: a plain Tony turn (osRun keeps it his; Rust isolates it and saves lessons). */
+function learningTurn(t: string, thread: ThreadId, channel: Channel) {
+  const plan = heuristicPlan(stripWake(t), "general");
+  plan.mutating = false;
+  plan.target = { kind: "agent" };
+  plan.payload = {};
+  plan.run = undefined;
+  plan.thread = thread;
+  plan.routeKind = "Self";
+  plan.explicitRole = false;
+  plan.plannerNote = "Learning mode: Tony only";
+  return run(plan, channel);
+}
+
 /**
  * Tier 4: package this thread's brainstorm and park it (Brainstorm list / Ideas & Tasks Ledger /
  * Play Place). One spoken line. Storage only: never idea_capture, a pipeline or an os_turn.
@@ -1290,7 +1316,12 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // Solo (surface_only) keeps a Domain / low-confidence hit with Tony exactly as Rust will, so
   // the chat never announces "Routing … to Coder…" (and plays the handoff cue) for a delegation
   // that doesn't happen. An approved Tier-3 hand-off is never held.
-  const routed: RoutedTurn = plan.delegateTo ? routed0 : soloHold(routed0, { explicit: thread !== "auto" && routed0.role === thread, dispatch: useModes.getState().effective?.dispatch });
+  // Learning mode: every turn is Tony's own (no hand-off notice, cue or agent voice), as in Rust.
+  const routed: RoutedTurn = isLearningMode(useModes.getState().effective)
+    ? { ...routed0, role: "general", kind: "Self", confidence: "high", reason: "Learning mode: Tony only", task: plan.utterance }
+    : plan.delegateTo
+      ? routed0
+      : soloHold(routed0, { explicit: thread !== "auto" && routed0.role === thread, dispatch: useModes.getState().effective?.dispatch });
   const role = routed.role;
   const task = routed.task;
   const explicit = thread !== "auto" && role === thread;
@@ -1405,11 +1436,14 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
     }
     streamAgent = agent;
     buffered += e.delta;
-    if (!live) live = store().pushTurn({ who: "agent", from: finalFromFor(streamAgent), text: buffered, thread, meta: "streaming…" }).id;
-    else store().updateTurn(live, { text: buffered });
+    // Learning mode's `[[LEARN …]]` lines are never shown or spoken (Rust strips the final answer).
+    const shown = stripLearnTags(buffered);
+    if (!shown.trim()) return;
+    if (!live) live = store().pushTurn({ who: "agent", from: finalFromFor(streamAgent), text: shown, thread, meta: "streaming…" }).id;
+    else store().updateTurn(live, { text: shown });
     // Handoff: Tony's synthesis of a delegated answer is shown, never spoken (no re-summary).
     if (channel === "voice" && isLive() && !(handoff && streamAgent === "general")) {
-      const next = nextStreamChunk(buffered, spokenUpTo);
+      const next = nextStreamChunk(shown, spokenUpTo);
       if (next) {
         const { chunk } = next;
         spokenUpTo = next.end;
@@ -1506,7 +1540,8 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   const meta = [r.providerId, r.tool && `tool ${r.tool}`, r.redacted && "privacy-diffused", `${r.latencyMs}ms`].filter(Boolean).join(" · ");
   // The answer is the agent's only when the agent itself produced it: on an explicit tab where
   // the agent failed (or has no workspace) Tony answers, and it is labelled — and voiced — as Tony.
-  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread };
+  const learned = pillPathways(r.learned);
+  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}) };
   // Who the answer is spoken as: the sub-agent itself only for an explicit-tab
   // direct answer (`final.from` is the agent, not "os"); every Tony-synthesized
   // reply — delegated or his own — speaks as "general", matching `final.from`.

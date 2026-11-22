@@ -181,7 +181,7 @@ export interface NativeCommands {
   /** Remove every OS alarm whose reminder id isn't in `liveIds` (startup cleanup). */
   alarm_os_prune: { args: { liveIds: string[] }; result: void };
   skills_scan: { args: undefined; result: SkillInfo[] };
-  memory_harvest: { args: { req: { month?: string } }; result: LedgerEntry };
+  memory_harvest: { args: { req: { month?: string; period?: HarvestPeriodName } }; result: LedgerEntry };
   memory_flush: { args: { req: { month: string; includeLocal?: boolean; approved?: boolean } }; result: string[] };
   memory_ledger: { args: undefined; result: LedgerEntry[] };
   memory_mount: { args: { req: { month: string; target: "local" | "droplet"; approved?: boolean } }; result: LedgerEntry };
@@ -192,6 +192,15 @@ export interface NativeCommands {
   memory_compact: { args: undefined; result: CompactOutcome };
   /** Phase 3: the CLI `status --json` (read-only) + auto-compaction settings, last outcome, running / idle. */
   memory_compaction_status: { args: undefined; result: CompactionStatus };
+  /** The inline badge next to "Auto-compact when idle" (cheap; no CLI). */
+  memory_idle_state: { args: undefined; result: IdleBadge };
+  /** Distill pending notes, Embed-scrolls-only on, un-embed raw `Idea:` notes + duplicate scrolls. */
+  memory_purge_raw_vectors: { args: { approved?: boolean }; result: { compaction: string; rawNotesRemoved: number; scrollDuplicatesRemoved: number; scrollsKept: number; embedOnly: boolean } };
+  /** The "Hygiene & Buffer Pressure" bar. */
+  hygiene_status: { args: undefined; result: HygieneStatus };
+  /** "Quick Hygiene Sweep": Garbage pass + pending check (+ background compaction when over threshold). */
+  hygiene_sweep: { args: undefined; result: { garbage: Record<string, number>; compaction: string; status: HygieneStatus } };
+  memory_scrolls_preset: { args: { name: ScrollsPreset }; result: OsConfig };
   market_candles: { args: { symbol: string; interval: string; range: string }; result: import("./cc-api").MarketData };
   /** Legacy shim: an approved build → a queued task (returns at once). Prefer `task_create`. */
   idea_capture: { args: { text: string }; result: { idea: Idea & { id: string }; reply: string; steps: OsStep[]; taskId: string } };
@@ -341,7 +350,9 @@ export type NativeEventName =
   /** Phase 2 Part C: Tony's mode / overrides changed (payload: `ModesView`). */
   | "tony-mode-changed"
   /** Phase 3: a memory compaction finished, was deferred or failed (payload: `CompactOutcome`). */
-  | "memory-compaction";
+  | "memory-compaction"
+  /** The memory hygiene bar changed (payload: `HygieneStatus`; hygiene.rs). */
+  | "hygiene-status";
 
 export async function onNativeEvent<P = unknown>(event: NativeEventName, handler: (payload: P) => void): Promise<() => void> {
   if (!isTauri()) return () => undefined;
@@ -866,7 +877,17 @@ export interface OsConfig {
   voice: VoiceConfig;
   memory: {
     storage: "local" | "droplet" | "hybrid";
-    autoMonthly: boolean;
+    /** "Auto-regulate Vault & Lifecycle": standing consent for scheduled harvests. */
+    autoRunEnabled: boolean;
+    cadence: LifecycleCadence;
+    /** Local hour of the slot (0–23, default 3). */
+    targetHour: number;
+    /** Weekly quiet-window weekday, 0 = Sunday. */
+    weeklyDay: number;
+    /** Unix secs of the last harvest whose vault files passed their SHA-256 re-read (0 = never). */
+    lastVerifiedHarvestAt: number;
+    /** After a verified harvest, delete Tony's OS-created local threads (a summary seeds the next one). */
+    pruneThreads: boolean;
     autoFlush: boolean;
     vaultDir: string;
     datasetFormat: "chatml" | "alpaca" | "sharegpt";
@@ -875,8 +896,58 @@ export interface OsConfig {
     lastAutoMonth: string;
     /** Phase 3 Memory Scrolls (older os.json files get the Rust defaults). */
     scrolls: MemoryScrollsConfig;
+    /** Tony's hot path caps (rolling history, RAG lookups). */
+    hotPath: HotPathConfig;
   };
 }
+
+export type LifecycleCadence = "daily" | "weekly" | "monthly";
+export type HarvestPeriodName = "previous_day" | "previous_week" | "previous_month" | "since_last_harvest";
+
+/** `memory.hotPath` (os_core.rs `HotPathConfig`; Rust clamps every value). */
+export interface HotPathConfig {
+  historyChars: number;
+  historyMsgChars: number;
+  /** 1500–2500 ms; past it Tony answers directly without memory. */
+  ragTimeoutMs: number;
+  ragTopK: number;
+  ragChunkChars: number;
+  scrollSummaryChars: number;
+}
+
+/** compaction.rs `IdleBadge`. */
+export interface IdleBadge {
+  state: "ready" | "waiting" | "compacting" | "off";
+  label: string;
+  secsLeft?: number;
+}
+
+export type BufferPressure = "green" | "amber" | "red";
+
+/** hygiene.rs `HygieneStatus`. */
+export interface HygieneStatus {
+  daemonRunning: boolean;
+  heartbeatAt: number | null;
+  lastSweepAt: number | null;
+  pressure: BufferPressure | null;
+  pressureRatio: number | null;
+  pendingBytes: number | null;
+  pendingTurns: number | null;
+  thresholdKb: number;
+  thresholdTurns: number;
+  preset: ScrollsPreset | null;
+  autoRun: boolean;
+  cadence: LifecycleCadence;
+  nextHarvestAt: number | null;
+  catchUpQueued: boolean;
+  waiting: string | null;
+  harvesting: boolean;
+  lastVerifiedHarvestAt: number | null;
+  lastRun: { at: number; period: string; ok: boolean; catchUp: boolean; detail: string } | null;
+  recent: { at: number; stage: string; step: string; ok: boolean; detail: string }[];
+}
+
+export type ScrollsPreset = "tight" | "balanced" | "relaxed";
 
 /** `memory.scrolls` (os_core.rs `ScrollsConfig`). Paths only; no secret ever lives here. */
 export interface MemoryScrollsConfig {
@@ -961,6 +1032,10 @@ export interface CompactionStatus {
   running: boolean;
   /** Why a manual run would be deferred right now (null = idle). */
   idleReason: string | null;
+  badge?: IdleBadge;
+  /** Pending buffer at / over 2× the threshold (compacts between turns). */
+  highWater?: boolean;
+  preset?: ScrollsPreset | null;
 }
 
 /** Top-level keys replace; object sections merge one level deep (Rust side). */
@@ -1666,6 +1741,10 @@ export interface LedgerEntry {
   condensedBy: string;
   notes: string[];
   topics: string[];
+  /** Period-aware harvests (older ledgers: "" / empty). */
+  periodKind?: string;
+  months?: string[];
+  checksums?: Record<string, string>;
 }
 
 export interface LabModel {

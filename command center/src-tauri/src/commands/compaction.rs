@@ -6,9 +6,17 @@
 //! progress, yields to Tony's queued foreground turns while the child is distilling (D19), and
 //! reports a scrubbed outcome (`memory-compaction` event + one bridge log line).
 //!
-//! Idle = no GPU holder / queue / settle window, no open task (a Coder build), no Claude Code
-//! fix, no live voice turn and, for automatic runs only, no Tony / voice activity inside the
-//! quiet window. Auto-compaction is OFF by default (`memory.scrolls.autoCompact`).
+//! Idle = no GPU holder / queue / settle window (no LLM generation), no open task (a Coder
+//! build), no Claude Code fix, no live voice turn / TTS playback and, for automatic runs only,
+//! no Tony turn inside the quiet window. An ARMED wake-word mic is idle: VAD energy outside an
+//! assistant turn (room noise, a wake-word candidate) and wake-word STT never count as busy —
+//! they used to keep the quiet window from ever elapsing, so the pending buffer grew far past
+//! its threshold. Auto-compaction is OFF by default (`memory.scrolls.autoCompact`).
+//!
+//! High-water mark: at 2× the threshold a low-priority compaction runs BETWEEN turns (the quiet
+//! window is skipped, everything else still has to be idle, and Tony queueing kills it while it
+//! distills). After a clean auto run that leaves the buffer over its threshold, the next check
+//! runs again (backlog drain) instead of waiting for new material.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -37,7 +45,7 @@ const STATUS_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Longest wait for the (already idle) GPU slot before deferring.
 const SLOT_WAIT: Duration = Duration::from_secs(30);
 
-/// Last Tony turn / STT / TTS activity (epoch ms).
+/// Last Tony turn / TTS activity (epoch ms). Wake-word STT does not touch it.
 pub static LAST_INTERACTIVE_MS: AtomicU64 = AtomicU64::new(0);
 /// New Tier-1 material since the last status check (starts true: check once after launch).
 static DIRTY: AtomicBool = AtomicBool::new(true);
@@ -65,7 +73,14 @@ impl Touch {
 impl Drop for Touch {
     fn drop(&mut self) {
         touch();
+        // Between turns: the loop checks the high-water mark (cheap; it ignores the kick below it).
+        kick().notify_one();
     }
+}
+
+fn kick() -> &'static tokio::sync::Notify {
+    static K: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    K.get_or_init(tokio::sync::Notify::new)
 }
 
 /// A task finished (new Tier-1 material); cheap.
@@ -77,37 +92,140 @@ pub fn is_running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
-/// Why compaction must wait right now (`None` = idle). Pure. The compaction's own slot label is
-/// ignored, so the re-check after acquiring the slot sees only other holders.
-#[allow(clippy::too_many_arguments)]
-pub fn idle_reason(view: &SlotView, open_tasks: usize, claude_fix_busy: bool, audio: Option<(bool, bool, bool)>, last_ms: u64, now_ms: u64, quiet_ms: u64, manual: bool) -> Option<String> {
-    if view.active.iter().any(|a| a != SLOT_LABEL) {
-        return Some("gpu busy".into());
-    }
-    if view.queued_foreground > 0 {
-        return Some("foreground queued".into());
-    }
-    if view.queued_background > 0 {
-        return Some("background queued".into());
-    }
-    if view.settling > 0 {
-        return Some("gpu settling".into());
-    }
-    if open_tasks > 0 {
-        return Some("coder build running".into());
-    }
-    if claude_fix_busy {
-        return Some("claude fix running".into());
-    }
-    if let Some((turn, playing, speech)) = audio {
-        if turn || playing || speech {
-            return Some("voice active".into());
+/// Why compaction must wait (structured, for the Settings badge).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IdleWait {
+    Gpu,
+    ForegroundQueued,
+    BackgroundQueued,
+    Settling,
+    Build,
+    ClaudeFix,
+    Voice,
+    Quiet { secs_left: u64 },
+}
+
+impl IdleWait {
+    /// The short reason (event / log text; stable strings).
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Gpu => "gpu busy".into(),
+            Self::ForegroundQueued => "foreground queued".into(),
+            Self::BackgroundQueued => "background queued".into(),
+            Self::Settling => "gpu settling".into(),
+            Self::Build => "coder build running".into(),
+            Self::ClaudeFix => "claude fix running".into(),
+            Self::Voice => "voice active".into(),
+            Self::Quiet { .. } => "recent activity".into(),
         }
     }
-    if !manual && last_ms > 0 && now_ms.saturating_sub(last_ms) < quiet_ms {
-        return Some("recent activity".into());
+}
+
+/// Why compaction must wait right now (`None` = idle). Pure. The compaction's own slot label is
+/// ignored, so the re-check after acquiring the slot sees only other holders. `audio` is
+/// `(turn_active, playing, in_speech)`: only an assistant turn (generating / speaking) or TTS
+/// playback is busy — speech energy while the wake-word mic is merely armed is not.
+#[allow(clippy::too_many_arguments)]
+pub fn idle_wait(view: &SlotView, open_tasks: usize, claude_fix_busy: bool, audio: Option<(bool, bool, bool)>, last_ms: u64, now_ms: u64, quiet_ms: u64, manual: bool) -> Option<IdleWait> {
+    if view.active.iter().any(|a| a != SLOT_LABEL) {
+        return Some(IdleWait::Gpu);
+    }
+    if view.queued_foreground > 0 {
+        return Some(IdleWait::ForegroundQueued);
+    }
+    if view.queued_background > 0 {
+        return Some(IdleWait::BackgroundQueued);
+    }
+    if view.settling > 0 {
+        return Some(IdleWait::Settling);
+    }
+    if open_tasks > 0 {
+        return Some(IdleWait::Build);
+    }
+    if claude_fix_busy {
+        return Some(IdleWait::ClaudeFix);
+    }
+    if let Some((turn, playing, _speech)) = audio {
+        if turn || playing {
+            return Some(IdleWait::Voice);
+        }
+    }
+    if !manual && last_ms > 0 {
+        let since = now_ms.saturating_sub(last_ms);
+        if since < quiet_ms {
+            return Some(IdleWait::Quiet { secs_left: (quiet_ms - since).div_ceil(1000) });
+        }
     }
     None
+}
+
+/// `idle_wait` as its short reason text (`None` = idle).
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn idle_reason(view: &SlotView, open_tasks: usize, claude_fix_busy: bool, audio: Option<(bool, bool, bool)>, last_ms: u64, now_ms: u64, quiet_ms: u64, manual: bool) -> Option<String> {
+    idle_wait(view, open_tasks, claude_fix_busy, audio, last_ms, now_ms, quiet_ms, manual).map(|w| w.reason())
+}
+
+/// The inline status badge next to "Auto-compact when idle".
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IdleBadge {
+    /// "ready" | "waiting" | "compacting" | "off"
+    pub state: &'static str,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secs_left: Option<u64>,
+}
+
+/// Badge text (pure): `Idle — Ready`, `Waiting: Voice active`, `Waiting: Quiet window 45s`,
+/// `Compacting…`.
+pub fn badge(auto: bool, running: bool, wait: Option<&IdleWait>) -> IdleBadge {
+    if running {
+        return IdleBadge { state: "compacting", label: "Compacting…".into(), secs_left: None };
+    }
+    let (label, secs) = match wait {
+        None => ("Idle — Ready".to_string(), None),
+        Some(IdleWait::Quiet { secs_left }) => (
+            if *secs_left >= 120 { format!("Waiting: Quiet window {}m", secs_left.div_ceil(60)) } else { format!("Waiting: Quiet window {secs_left}s") },
+            Some(*secs_left),
+        ),
+        Some(IdleWait::Voice) => ("Waiting: Voice active".into(), None),
+        Some(IdleWait::Gpu) => ("Waiting: LLM generating".into(), None),
+        Some(IdleWait::ForegroundQueued) => ("Waiting: Tony's turn queued".into(), None),
+        Some(IdleWait::BackgroundQueued) => ("Waiting: GPU queue".into(), None),
+        Some(IdleWait::Settling) => ("Waiting: GPU settling".into(), None),
+        Some(IdleWait::Build) => ("Waiting: Build running".into(), None),
+        Some(IdleWait::ClaudeFix) => ("Waiting: Claude fix running".into(), None),
+    };
+    if !auto {
+        return IdleBadge { state: "off", label: if wait.is_none() { "Off — Idle (manual only)".into() } else { format!("Off — {}", label.trim_start_matches("Waiting: ")) }, secs_left: None };
+    }
+    IdleBadge { state: if wait.is_none() { "ready" } else { "waiting" }, label, secs_left: secs }
+}
+
+/// Which kind of run (quiet window, LM batches, log label).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// The Settings button (and purge / sweep): ignores the threshold and the quiet window.
+    Manual,
+    /// The idle loop over the threshold.
+    Auto,
+    /// At / over the 2× high-water mark, between turns: quiet window skipped, more batches.
+    HighWater,
+}
+
+impl Mode {
+    fn skips_quiet(self) -> bool {
+        self != Mode::Auto
+    }
+    fn batches(self, auto_batches: u32) -> u32 {
+        if self == Mode::Auto {
+            auto_batches
+        } else {
+            MANUAL_MAX_BATCHES
+        }
+    }
 }
 
 /// The CLI `status --json` says the raw buffer crossed a threshold (bytes OR turns).
@@ -294,15 +412,20 @@ fn open_tasks(store: &super::envelope::TaskStore) -> usize {
     conn.query_row(&format!("SELECT COUNT(*) FROM task_envelope WHERE status NOT IN ({terminal})"), [], |r| r.get::<_, i64>(0)).map(|n| n.max(0) as usize).unwrap_or(0)
 }
 
-/// `idle_reason` over the running app's live signals.
-pub fn current_idle_reason(app: &tauri::AppHandle, quiet_mins: u32, manual: bool) -> Option<String> {
+/// `idle_wait` over the running app's live signals.
+pub fn current_idle_wait(app: &tauri::AppHandle, quiet_mins: u32, manual: bool) -> Option<IdleWait> {
     use tauri::Manager;
     let os = app.state::<super::os_core::OsState>();
     let view = os.slot.view();
     let open = open_tasks(app.state::<super::envelope::TaskStore>().inner());
     let fix = app.state::<super::claude_fix::ClaudeFixState>().is_busy();
     let audio = app.state::<crate::audio::commands::AudioEngineState>().activity();
-    idle_reason(&view, open, fix, audio, LAST_INTERACTIVE_MS.load(Ordering::Relaxed), now_ms(), quiet_mins as u64 * 60_000, manual)
+    idle_wait(&view, open, fix, audio, LAST_INTERACTIVE_MS.load(Ordering::Relaxed), now_ms(), quiet_mins as u64 * 60_000, manual)
+}
+
+/// `idle_reason` over the running app's live signals.
+pub fn current_idle_reason(app: &tauri::AppHandle, quiet_mins: u32, manual: bool) -> Option<String> {
+    current_idle_wait(app, quiet_mins, manual).map(|w| w.reason())
 }
 
 struct Launch {
@@ -368,12 +491,17 @@ impl Drop for RunningGuard {
 /// One compaction run (manual button or the idle loop). Never throws: busy / yielded / CLI
 /// deferrals come back as `deferred`.
 pub async fn run_compact(app: &tauri::AppHandle, manual: bool) -> CompactOutcome {
+    run_compact_mode(app, if manual { Mode::Manual } else { Mode::Auto }).await
+}
+
+pub async fn run_compact_mode(app: &tauri::AppHandle, mode: Mode) -> CompactOutcome {
     use tauri::{Emitter, Manager};
+    let manual = mode == Mode::Manual;
     let out = if RUNNING.swap(true, Ordering::SeqCst) {
         CompactOutcome::deferred("a compaction is already running", manual)
     } else {
         let _g = RunningGuard;
-        compact_inner(app, manual).await
+        compact_inner(app, mode).await
     };
     *LAST_RESULT.lock().unwrap() = serde_json::to_value(&out).ok();
     let _ = app.emit(EVENT, &out);
@@ -387,30 +515,39 @@ pub async fn run_compact(app: &tauri::AppHandle, manual: bool) -> CompactOutcome
             "archives": r.and_then(|r| r["archive_ids"].as_array().map(|a| a.len())).unwrap_or(0),
             "scrollsUpdated": r.and_then(|r| r["scrolls_updated"].as_array().map(|a| a.len())).unwrap_or(0),
             "llm": r.and_then(|r| r["llm"].as_str()).unwrap_or(""),
+            "highWater": mode == Mode::HighWater,
         }));
+    }
+    if out.deferred.is_none() {
+        super::hygiene::audit("compaction", if mode == Mode::HighWater { "high-water" } else if manual { "manual" } else { "auto" }, out.error.is_none(), out.error.as_deref().unwrap_or("compacted + synced"));
+        // The newest scroll becomes the thread seed / hot-path summary (blocking pool).
+        let root = app.state::<super::os_core::OsState>().snapshot().memory.scrolls.scrolls_root();
+        tauri::async_runtime::spawn(super::hygiene::refresh_seed(root));
     }
     eprintln!("[memory] compaction ({}): {}", if manual { "manual" } else { "auto" }, out.deferred.as_deref().or(out.error.as_deref()).unwrap_or("done"));
     out
 }
 
-async fn compact_inner(app: &tauri::AppHandle, manual: bool) -> CompactOutcome {
+async fn compact_inner(app: &tauri::AppHandle, mode: Mode) -> CompactOutcome {
     use tauri::Manager;
+    let manual = mode == Mode::Manual;
+    let quiet_skip = mode.skips_quiet();
     let os = app.state::<super::os_core::OsState>();
     let cfg = os.snapshot();
     let sc = cfg.memory.scrolls.sanitized();
-    if let Some(r) = current_idle_reason(app, sc.quiet_mins, manual) {
+    if let Some(r) = current_idle_reason(app, sc.quiet_mins, quiet_skip) {
         return CompactOutcome::deferred(&r, manual);
     }
     let Ok(mut guard) = tokio::time::timeout(SLOT_WAIT, os.slot.acquire(SLOT_LABEL, false, cfg.scheduler.tony_priority_pct)).await else {
         return CompactOutcome::deferred("gpu busy", manual);
     };
     // Something may have started while the slot was being taken.
-    if let Some(r) = current_idle_reason(app, sc.quiet_mins, manual) {
+    if let Some(r) = current_idle_reason(app, sc.quiet_mins, quiet_skip) {
         return CompactOutcome::deferred(&r, manual);
     }
     guard.arm_settle(cfg.scheduler.settle());
     let l = launch_inputs(app, true);
-    let batches = if manual { MANUAL_MAX_BATCHES } else { sc.max_batches_auto };
+    let batches = mode.batches(sc.max_batches_auto);
     let spec = build_command(&l.python, &l.workdir, &["compact".into(), "--json".into(), "--max-batches".into(), batches.to_string()], &sc, l.lm_base.as_deref(), l.key.as_deref(), true);
     let cancel = Arc::new(AtomicBool::new(false));
     let phase: Arc<Mutex<String>> = Arc::default();
@@ -447,32 +584,69 @@ async fn compact_inner(app: &tauri::AppHandle, manual: bool) -> CompactOutcome {
 }
 
 /// Idle auto-compaction (spawned once in lib.rs). Off unless `memory.scrolls.autoCompact`;
-/// never queues behind voice; never re-checks faster than `checkSecs`.
+/// never queues behind voice; the regular check runs every `checkSecs`, and the end of a turn
+/// wakes it early only when the buffer is at the 2× high-water mark.
 pub async fn compaction_loop(app: tauri::AppHandle) {
     use tauri::Manager;
     tokio::time::sleep(Duration::from_secs(90)).await;
     let mut last_status: Option<Instant> = None;
+    let mut next_check = tokio::time::Instant::now();
     loop {
-        let check = app.state::<super::os_core::OsState>().snapshot().memory.scrolls.check_secs.max(60);
-        tokio::time::sleep(Duration::from_secs(check as u64)).await;
+        let kicked = tokio::select! {
+            _ = tokio::time::sleep_until(next_check) => false,
+            _ = kick().notified() => true,
+        };
         let sc = app.state::<super::os_core::OsState>().snapshot().memory.scrolls.sanitized();
-        if !sc.auto_compact || is_running() || !app.state::<super::os_core::OsState>().slot.is_idle() {
+        if !kicked {
+            next_check = tokio::time::Instant::now() + Duration::from_secs(sc.check_secs.max(60) as u64);
+        }
+        if !sc.auto_compact || is_running() || super::hygiene::is_harvesting() {
             continue;
         }
-        let due = last_status.map_or(true, |t| t.elapsed() >= STATUS_EVERY);
-        if !DIRTY.load(Ordering::Relaxed) && !due {
+        let hw = super::hygiene::last_pending().is_some_and(|(b, t)| super::hygiene::high_water(b, t, sc.threshold_kb, sc.threshold_turns));
+        if kicked {
+            if !hw {
+                continue;
+            }
+            // Between turns: let the reply's TTS finish, then run at low priority.
+            let mut clear = false;
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if current_idle_reason(&app, sc.quiet_mins, true).is_none() {
+                    clear = true;
+                    break;
+                }
+            }
+            if !clear {
+                continue;
+            }
+        } else if !hw && !app.state::<super::os_core::OsState>().slot.is_idle() {
             continue;
         }
-        if current_idle_reason(&app, sc.quiet_mins, false).is_some() {
+        let due = last_status.is_none_or(|t: Instant| t.elapsed() >= STATUS_EVERY);
+        if !hw && !DIRTY.load(Ordering::Relaxed) && !due {
+            continue;
+        }
+        if current_idle_reason(&app, sc.quiet_mins, hw).is_some() {
             continue;
         }
         DIRTY.store(false, Ordering::Relaxed);
         last_status = Some(Instant::now());
         match run_status(&app).await {
-            Ok(st) if threshold_hit(&st, sc.threshold_kb, sc.threshold_turns) => {
-                run_compact(&app, false).await;
+            Ok(st) => {
+                super::hygiene::note_pending(&st);
+                if threshold_hit(&st, sc.threshold_kb, sc.threshold_turns) {
+                    let p = &st["pending"];
+                    let high = super::hygiene::high_water(p["bytes"].as_u64().unwrap_or(0), p["turns"].as_u64().unwrap_or(0), sc.threshold_kb, sc.threshold_turns);
+                    let out = run_compact_mode(&app, if high { Mode::HighWater } else { Mode::Auto }).await;
+                    // Backlog drain: a clean run may leave the buffer over its threshold (one
+                    // batch per auto run) — re-check on the next tick instead of waiting for new
+                    // material or the 30-minute status timer.
+                    if out.deferred.is_none() && out.error.is_none() {
+                        DIRTY.store(true, Ordering::Relaxed);
+                    }
+                }
             }
-            Ok(_) => {}
             Err(e) => eprintln!("[memory] compaction status: {}", clip(&e, 200)),
         }
     }
@@ -493,7 +667,12 @@ pub async fn memory_compaction_status(app: tauri::AppHandle) -> Result<Value, St
     use tauri::Manager;
     let sc = app.state::<super::os_core::OsState>().snapshot().memory.scrolls.sanitized();
     let status = if is_running() { Err("a compaction is running".to_string()) } else { run_status(&app).await };
+    if let Ok(st) = &status {
+        super::hygiene::note_pending(st);
+    }
     let known = launch_inputs(&app, false).known;
+    let wait = idle_state_wait(&app, sc.quiet_mins).await;
+    let pending = super::hygiene::last_pending();
     let v = json!({
         "status": status.as_ref().ok(),
         "statusError": status.as_ref().err(),
@@ -505,8 +684,27 @@ pub async fn memory_compaction_status(app: tauri::AppHandle) -> Result<Value, St
         "lastResult": LAST_RESULT.lock().unwrap().clone(),
         "running": is_running(),
         "idleReason": current_idle_reason(&app, sc.quiet_mins, true),
+        "badge": badge(sc.auto_compact, is_running(), wait.as_ref()),
+        "highWater": pending.is_some_and(|(b, t)| super::hygiene::high_water(b, t, sc.threshold_kb, sc.threshold_turns)),
+        "preset": super::hygiene::preset_name(sc.threshold_kb, sc.threshold_turns),
     });
     Ok(scrub_value(&v, &known))
+}
+
+/// The live idle wait for the badge (auto rules: quiet window included), off the main thread
+/// (it opens tasks.db read-only).
+async fn idle_state_wait(app: &tauri::AppHandle, quiet_mins: u32) -> Option<IdleWait> {
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || current_idle_wait(&a, quiet_mins, false)).await.ok().flatten()
+}
+
+/// The inline badge next to "Auto-compact when idle" (cheap: no CLI; polled by Settings).
+#[tauri::command]
+pub async fn memory_idle_state(app: tauri::AppHandle) -> Result<IdleBadge, String> {
+    use tauri::Manager;
+    let sc = app.state::<super::os_core::OsState>().snapshot().memory.scrolls.sanitized();
+    let wait = idle_state_wait(&app, sc.quiet_mins).await;
+    Ok(badge(sc.auto_compact, is_running(), wait.as_ref()))
 }
 
 #[cfg(test)]
@@ -529,9 +727,12 @@ mod tests {
         assert_eq!(r(&view(&[], 0, 0, 1), 0, false, None, 0, true).as_deref(), Some("gpu settling"));
         assert_eq!(r(&idle, 2, false, None, 0, true).as_deref(), Some("coder build running"));
         assert_eq!(r(&idle, 0, true, None, 0, true).as_deref(), Some("claude fix running"));
-        for a in [(true, false, false), (false, true, false), (false, false, true)] {
+        for a in [(true, false, false), (false, true, false), (true, false, true)] {
             assert_eq!(r(&idle, 0, false, Some(a), 0, true).as_deref(), Some("voice active"), "{a:?}");
         }
+        // An armed wake-word mic hearing room noise (speech energy, no assistant turn) is idle.
+        assert_eq!(r(&idle, 0, false, Some((false, false, true)), 0, true), None);
+        assert_eq!(r(&idle, 0, false, Some((false, false, true)), 0, false), None);
         // The quiet window: auto runs wait, the manual button ignores it.
         assert_eq!(r(&idle, 0, false, Some((false, false, false)), now - 60_000, false).as_deref(), Some("recent activity"));
         assert_eq!(r(&idle, 0, false, Some((false, false, false)), now - 60_000, true), None);
@@ -664,5 +865,39 @@ mod tests {
         for w in ["AllmWriter", "AllmConn", concat!("remove", "_documents"), concat!("remove", "-documents"), concat!("for", "_scrolls"), "fs::write", "File::create", "OpenOptions", "remove_file", "rename(", "kg_upsert", "envfile::", "set_var"] {
             assert!(!body.contains(w), "compaction.rs must not contain {w}");
         }
+    }
+
+    #[test]
+    fn idle_wait_and_badges() {
+        let idle = view(&[], 0, 0, 0);
+        let now = 10_000_000;
+        let quiet = 10 * 60_000;
+        // Quiet window: seconds left, rounded up.
+        let w = idle_wait(&idle, 0, false, Some((false, false, false)), now - (quiet - 45_000), now, quiet, false);
+        assert_eq!(w, Some(IdleWait::Quiet { secs_left: 45 }));
+        assert_eq!(badge(true, false, w.as_ref()), IdleBadge { state: "waiting", label: "Waiting: Quiet window 45s".into(), secs_left: Some(45) });
+        let w = idle_wait(&idle, 0, false, None, now - 1_000, now, quiet, false);
+        assert_eq!(badge(true, false, w.as_ref()).label, "Waiting: Quiet window 10m");
+        // High-water / manual runs skip the quiet window.
+        assert_eq!(idle_wait(&idle, 0, false, None, now - 1_000, now, quiet, true), None);
+        assert_eq!(badge(true, false, None), IdleBadge { state: "ready", label: "Idle — Ready".into(), secs_left: None });
+        assert_eq!(badge(true, false, Some(&IdleWait::Voice)).label, "Waiting: Voice active");
+        assert_eq!(badge(true, true, Some(&IdleWait::Voice)).label, "Compacting…");
+        assert_eq!(badge(false, false, None).state, "off");
+        assert_eq!(badge(false, false, Some(&IdleWait::Build)).label, "Off — Build running");
+        // Every wait keeps its stable reason string.
+        assert_eq!(IdleWait::Quiet { secs_left: 3 }.reason(), "recent activity");
+        assert_eq!(IdleWait::ClaudeFix.reason(), "claude fix running");
+        // Serialized for the webview.
+        let v = serde_json::to_value(badge(true, false, Some(&IdleWait::Quiet { secs_left: 45 }))).unwrap();
+        assert_eq!((v["state"].as_str(), v["secsLeft"].as_u64()), (Some("waiting"), Some(45)));
+    }
+
+    #[test]
+    fn modes_pick_quiet_window_and_batches() {
+        assert!(!Mode::Auto.skips_quiet() && Mode::HighWater.skips_quiet() && Mode::Manual.skips_quiet());
+        assert_eq!(Mode::Auto.batches(1), 1);
+        assert_eq!(Mode::HighWater.batches(1), MANUAL_MAX_BATCHES);
+        assert_eq!(Mode::Manual.batches(2), MANUAL_MAX_BATCHES);
     }
 }

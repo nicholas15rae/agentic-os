@@ -1233,6 +1233,29 @@ pub fn os_turn_cancel(stream_id: String) {
 mod turn_steps_tests {
     use super::*;
 
+    #[test]
+    fn hot_path_history_is_capped_by_turns_chars_and_total() {
+        let h: Vec<ChatMessage> = (0..20).map(|i| ChatMessage::new(if i % 2 == 0 { "user" } else { "assistant" }, format!("{i}:{}", "x".repeat(900)))).collect();
+        let c = cap_history(h.clone(), 6, 100_000, 100_000);
+        assert_eq!(c.len(), 6);
+        assert!(c[0].content.starts_with("14:") && c[5].content.starts_with("19:"), "the newest six, in order");
+        // Per-message clip.
+        let c = cap_history(h.clone(), 6, 100_000, 300);
+        assert!(c.iter().all(|m| m.content.chars().count() <= 301));
+        // Total cap: oldest go first; the newest always stays.
+        let c = cap_history(h.clone(), 6, 2000, 100_000);
+        assert_eq!(c.len(), 2);
+        assert!(c[1].content.starts_with("19:"));
+        let c = cap_history(h, 6, 10, 100_000);
+        assert_eq!(c.len(), 1);
+        assert!(cap_history(vec![], 6, 10, 10).is_empty());
+        // Scroll summary block.
+        assert_eq!(scroll_summary_block(None, 900), "");
+        assert_eq!(scroll_summary_block(Some("facts"), 0), "");
+        let b = scroll_summary_block(Some(&"y".repeat(5000)), 900);
+        assert!(b.contains("LATEST MEMORY SCROLL") && b.len() < 1100, "{}", b.len());
+    }
+
     /// Regression: tool output and the delegate prompt (with raw live tool data and the identity
     /// file) reached chat / localStorage / the phone mirror unscrubbed and verbatim.
     #[test]
@@ -1320,6 +1343,32 @@ fn model_label(state: &DispatchState, provider_id: &str) -> String {
 }
 
 /// `run_os_turn`'s body, inside its trace scope: emits router / rules / memory / model steps.
+/// Rolling history for one turn (pure): the last `keep` messages, each clipped to `msg_chars`,
+/// then the oldest dropped until the total fits `total_chars` (the newest always stays).
+pub(crate) fn cap_history(history: Vec<ChatMessage>, keep: usize, total_chars: usize, msg_chars: usize) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = history
+        .into_iter()
+        .rev()
+        .take(keep)
+        .map(|m| ChatMessage { content: super::envelope::clip(&m.content, msg_chars), role: m.role })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    while out.len() > 1 && out.iter().map(|m| m.content.len()).sum::<usize>() > total_chars {
+        out.remove(0);
+    }
+    out
+}
+
+/// The newest Memory Scroll summary as a prompt block (pure; empty when off / unknown).
+pub(crate) fn scroll_summary_block(seed: Option<&str>, max: usize) -> String {
+    match seed.map(str::trim).filter(|s| !s.is_empty() && max > 0) {
+        Some(s) => super::learning::neutral(&format!("\nLATEST MEMORY SCROLL (your condensed long-term memory; use only if relevant):\n{}\n", super::envelope::clip(s, max))),
+        None => String::new(),
+    }
+}
+
 async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>, conv: &str) -> Result<OsTurnResult, String> {
     use super::trace::{emit, emit_with, Hop};
     let (state, os, bridge) = (state, os, bridge);
@@ -1360,7 +1409,14 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     if let Some((who, topic)) = (!learning).then(|| comms_recall_intent(&text)).flatten() {
         let t0 = Instant::now();
         steps.push(step("delegate", "os", "librarian", format!("Search the {who} conversation (SMS / WhatsApp / calls) for: {}", if topic.is_empty() { "anything recent" } else { &topic }), true, 0));
-        match super::pipeline::comms_search(state, &cfg, &who, &topic).await {
+        // Hot path: capped hits and a hard lookup budget; a slow search falls back to a direct answer.
+        let hp = &cfg.memory.hot_path;
+        let limit = (hp.rag_top_k as usize * 3).clamp(3, 10);
+        let found = match tokio::time::timeout(Duration::from_millis(hp.rag_timeout_ms as u64), super::pipeline::comms_search(state, &cfg, &who, &topic, limit)).await {
+            Ok(r) => r,
+            Err(_) => Err(format!("lookup timed out after {} ms — answering directly", hp.rag_timeout_ms)),
+        };
+        match found {
             Ok((quotes, thread)) if !quotes.is_empty() => {
                 steps.push(step("reply", "librarian", "os", quotes.clone(), true, t0.elapsed().as_millis()));
                 agent_answer = Some(format!("Exact quotes from the conversation with {who}:\n{quotes}"));
@@ -1375,7 +1431,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         emit(Hop::Memory, "comms history search", ok, t0.elapsed().as_millis(), failed.then_some("comms history unavailable"));
     }
     let keep = cfg.scheduler.history_turns.max(2) as usize;
-    let history: Vec<ChatMessage> = req.history.into_iter().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
+    let hp = cfg.memory.hot_path.clone();
+    let history: Vec<ChatMessage> = cap_history(req.history, keep, hp.history_chars as usize, hp.history_msg_chars as usize);
     let history_chars: usize = history.iter().map(|m| m.content.len()).sum::<usize>() + text.len();
 
     // ── Tool pre-executor (Part 2) — runs BEFORE delegation, using only the
@@ -1575,9 +1632,21 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     };
     // Two-tier memory (Tier 1, `tony` namespace): up to 3 earlier exchanges that share words with
     // this one, ≤ 450 chars, prompt-safe. Private turns are never stored, so never recalled.
+    // Hot path: capped hits / chars, looked up on the blocking pool under a hard budget; on a
+    // timeout Tony answers directly without it. The newest Memory Scroll summary rides along
+    // (cached; no disk read here).
     let tony_recall = if role == "general" && private_turn(&role, &text, None).is_none() {
-        let hits = super::memtier::query("tony", "tony", &text, 3, 450, false);
-        super::learning::neutral(&super::memtier::recall_block("EARLIER WITH NIC (your memory; use only if relevant)", &hits))
+        let t0 = Instant::now();
+        let (q, k, chars) = (text.clone(), hp.rag_top_k as usize, hp.rag_chunk_chars as usize);
+        let looked = tokio::time::timeout(Duration::from_millis(hp.rag_timeout_ms as u64), tauri::async_runtime::spawn_blocking(move || super::memtier::query("tony", "tony", &q, k, chars, false))).await;
+        let recall = match looked {
+            Ok(Ok(hits)) => super::learning::neutral(&super::memtier::recall_block("EARLIER WITH NIC (your memory; use only if relevant)", &hits)),
+            _ => {
+                emit(Hop::Memory, "memory recall skipped (lookup budget) — answering directly", false, t0.elapsed().as_millis(), Some("recall timed out"));
+                String::new()
+            }
+        };
+        format!("{recall}{}", scroll_summary_block(super::hygiene::seed_text().as_deref(), hp.scroll_summary_chars as usize))
     } else {
         String::new()
     };

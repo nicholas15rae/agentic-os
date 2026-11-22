@@ -393,8 +393,8 @@ pub async fn playplace_commit(state: State<'_, DispatchState>, os: State<'_, OsS
 
 /// Exact quotes with timestamps from the gateway's comms history (and WhatsApp
 /// MCP, if enabled). Returns (formatted quotes, comms thread key).
-pub async fn comms_search(state: &DispatchState, cfg: &OsConfig, who: &str, topic: &str) -> Result<(String, Option<String>), String> {
-    let q = format!("/api/comms/search?contact={}&q={}&limit=10", urlenc(who), urlenc(topic));
+pub async fn comms_search(state: &DispatchState, cfg: &OsConfig, who: &str, topic: &str, limit: usize) -> Result<(String, Option<String>), String> {
+    let q = format!("/api/comms/search?contact={}&q={}&limit={}", urlenc(who), urlenc(topic), limit.clamp(1, 10));
     let v = gw(state, cfg, reqwest::Method::GET, &q, None).await?;
     let results = v["results"].as_array().cloned().unwrap_or_default();
     let thread = results.last().and_then(|r| r["thread"].as_str().map(String::from));

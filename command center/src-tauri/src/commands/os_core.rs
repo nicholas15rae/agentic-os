@@ -430,7 +430,25 @@ impl Default for OverseerConfig {
 pub struct MemoryConfig {
     /// "local" | "droplet" | "hybrid" — where Memory Books get mounted for RAG.
     pub storage: String,
+    /// Legacy "Auto-run monthly" (read once by the `vault-cadence` migration, never written back).
+    #[serde(skip_serializing)]
     pub auto_monthly: bool,
+    /// "Auto-regulate Vault & Lifecycle": the standing consent for scheduled harvests (and, with
+    /// `auto_flush` / `prune_threads`, the destructive steps after a verified backup).
+    pub auto_run_enabled: bool,
+    /// "daily" | "weekly" | "monthly" (`hygiene::Cadence`; anything else reads as monthly).
+    pub cadence: String,
+    /// Local hour of the daily / weekly / monthly slot (default 03:00).
+    #[serde(deserialize_with = "de_clamped::<_, 0, 23>")]
+    pub target_hour: u8,
+    /// Weekly quiet window weekday, 0 = Sunday … 6 = Saturday.
+    #[serde(deserialize_with = "de_clamped::<_, 0, 6>")]
+    pub weekly_day: u8,
+    /// Unix secs of the last harvest whose vault files passed their SHA-256 re-read (0 = never).
+    pub last_verified_harvest_at: u64,
+    /// After a verified harvest, also delete Tony's OS-created local AnythingLLM threads for the
+    /// period (the next turn opens a fresh thread seeded with the newest summary). Off by default.
+    pub prune_threads: bool,
     pub auto_flush: bool,
     pub vault_dir: String,
     /// "chatml" | "alpaca" | "sharegpt".
@@ -446,12 +464,20 @@ pub struct MemoryConfig {
     pub staging_dir: String,
     /// Phase 3 tiered memory ("Memory Scrolls"): where scrolls live, auto-compaction knobs.
     pub scrolls: ScrollsConfig,
+    /// Tony's hot path: rolling-history and RAG lookup caps.
+    pub hot_path: HotPathConfig,
 }
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             storage: "local".into(),
             auto_monthly: false,
+            auto_run_enabled: false,
+            cadence: "monthly".into(),
+            target_hour: 3,
+            weekly_day: 0,
+            last_verified_harvest_at: 0,
+            prune_threads: false,
             auto_flush: false,
             vault_dir: r"C:\ai-hub\vault\locked-archives".into(),
             dataset_format: "chatml".into(),
@@ -461,7 +487,37 @@ impl Default for MemoryConfig {
             notes_dir: String::new(),
             staging_dir: String::new(),
             scrolls: ScrollsConfig::default(),
+            hot_path: HotPathConfig::default(),
         }
+    }
+}
+
+/// Caps on what one Tony turn carries and how long its memory lookups may take (`memory.hotPath`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HotPathConfig {
+    /// Total characters of rolling history sent with a turn (oldest dropped first).
+    #[serde(deserialize_with = "de_clamped_u32::<_, 1000, 32000>")]
+    pub history_chars: u32,
+    /// Any single history message is clipped to this many characters.
+    #[serde(deserialize_with = "de_clamped_u32::<_, 200, 8000>")]
+    pub history_msg_chars: u32,
+    /// Memory / RAG lookup budget before Tony answers directly without it.
+    #[serde(deserialize_with = "de_clamped_u32::<_, 1500, 2500>")]
+    pub rag_timeout_ms: u32,
+    /// Recall hits per lookup.
+    #[serde(deserialize_with = "de_clamped_u32::<_, 1, 8>")]
+    pub rag_top_k: u32,
+    /// Characters of recalled memory per lookup.
+    #[serde(deserialize_with = "de_clamped_u32::<_, 200, 2000>")]
+    pub rag_chunk_chars: u32,
+    /// Characters of the newest Memory Scroll summary added to a turn (0 = off).
+    #[serde(deserialize_with = "de_clamped_u32::<_, 0, 4000>")]
+    pub scroll_summary_chars: u32,
+}
+impl Default for HotPathConfig {
+    fn default() -> Self {
+        Self { history_chars: 6000, history_msg_chars: 1500, rag_timeout_ms: 2000, rag_top_k: 3, rag_chunk_chars: 450, scroll_summary_chars: 900 }
     }
 }
 
@@ -784,6 +840,8 @@ impl Default for OsConfig {
 const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
 /// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
+/// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
+pub(crate) const MIGRATE_VAULT_CADENCE: &str = "vault-cadence";
 
 /// One-time upgrades of a saved config. `read_only: false` is never written to disk, so an
 /// older os.json can't say whether WhatsApp was left writable on purpose: mark it read-only
@@ -802,6 +860,19 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
             g.names.retain(|n| super::routing::normalize(n) != "tony");
         }
         cfg.migrations.push(MIGRATE_SELF_ROUTING.into());
+    }
+    // `autoMonthly: true` → `{ autoRunEnabled: true, cadence: "monthly" }` (the month already
+    // harvested stays recorded, so the first slot after the upgrade doesn't repeat it).
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_CADENCE) {
+        if cfg.memory.auto_monthly {
+            cfg.memory.auto_run_enabled = true;
+            cfg.memory.cadence = "monthly".into();
+            if cfg.memory.last_verified_harvest_at == 0 {
+                cfg.memory.last_verified_harvest_at = super::hygiene::month_end_secs(&cfg.memory.last_auto_month).unwrap_or(0);
+            }
+        }
+        cfg.memory.auto_monthly = false;
+        cfg.migrations.push(MIGRATE_VAULT_CADENCE.into());
     }
 }
 
@@ -965,7 +1036,7 @@ pub(crate) fn mirror_json(cfg: &OsConfig, runtime: serde_json::Map<String, serde
         "computeMode": cfg.compute.mode,
         "droplet": { "enabled": cfg.droplet.enabled, "host": cfg.droplet.host },
         "privacy": { "diffuser": cfg.privacy.diffuser, "networkLock": cfg.privacy.network_lock, "killSwitch": cfg.privacy.kill_switch, "destructiveGate": cfg.privacy.destructive_gate },
-        "memory": { "storage": cfg.memory.storage, "autoMonthly": cfg.memory.auto_monthly, "autoFlush": cfg.memory.auto_flush },
+        "memory": { "storage": cfg.memory.storage, "autoRun": cfg.memory.auto_run_enabled, "cadence": cfg.memory.cadence, "autoFlush": cfg.memory.auto_flush },
         "scheduler": { "profile": cfg.scheduler.profile, "tonyPriorityPct": cfg.scheduler.tony_priority_pct, "offloadPct": cfg.scheduler.offload_pct, "maxConcurrency": cfg.scheduler.max_concurrency },
         // Phase 2 Part B: the phone locks its own mic when the desktop's is locked off.
         "voice": { "micEnabled": cfg.voice.mic_enabled, "activationDb": cfg.voice.activation_db },
@@ -1932,7 +2003,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string()]);
     }
 
     #[test]
@@ -2021,5 +2092,37 @@ mod tests {
         assert!(agent_matches(&["all".to_string()], "coder"));
         assert!(agent_matches(&["coder".to_string()], "coder"));
         assert!(!agent_matches(&["coder".to_string()], "booking"));
+    }
+
+    #[test]
+    fn auto_monthly_migrates_to_the_lifecycle_cadence_once() {
+        // An os.json from before the cadence: auto-run monthly on, October already harvested.
+        let mut cfg: OsConfig = serde_json::from_value(json!({ "memory": { "autoMonthly": true, "autoFlush": true, "lastAutoMonth": "2026-10" } })).unwrap();
+        assert!(cfg.memory.auto_monthly && !cfg.memory.auto_run_enabled);
+        apply_migrations(&mut cfg);
+        assert!(cfg.memory.auto_run_enabled && !cfg.memory.auto_monthly);
+        assert_eq!(cfg.memory.cadence, "monthly");
+        assert!(cfg.memory.auto_flush, "the flush consent is kept");
+        assert_eq!(cfg.memory.last_verified_harvest_at, super::super::hygiene::month_end_secs("2026-10").unwrap(), "October counts as harvested");
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_CADENCE));
+        // The legacy key is never written back; the new ones are.
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert!(v["memory"].get("autoMonthly").is_none());
+        assert_eq!((v["memory"]["autoRunEnabled"].as_bool(), v["memory"]["cadence"].as_str(), v["memory"]["targetHour"].as_u64()), (Some(true), Some("monthly"), Some(3)));
+        // Applied once: turning it off afterwards sticks across a reload.
+        cfg.memory.auto_run_enabled = false;
+        let mut reloaded: OsConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut reloaded);
+        assert!(!reloaded.memory.auto_run_enabled);
+        // auto_monthly off: nothing switches on, defaults stay.
+        let mut off: OsConfig = serde_json::from_value(json!({ "memory": { "autoMonthly": false } })).unwrap();
+        apply_migrations(&mut off);
+        assert!(!off.memory.auto_run_enabled);
+        assert_eq!((off.memory.cadence.as_str(), off.memory.target_hour, off.memory.weekly_day, off.memory.last_verified_harvest_at), ("monthly", 3, 0, 0));
+        // Out-of-range hour / weekday clamp instead of failing the whole config.
+        let c: OsConfig = serde_json::from_value(json!({ "memory": { "targetHour": 99, "weeklyDay": -3, "hotPath": { "ragTimeoutMs": 9000, "ragTopK": 0 } } })).unwrap();
+        assert_eq!((c.memory.target_hour, c.memory.weekly_day), (23, 0));
+        assert_eq!((c.memory.hot_path.rag_timeout_ms, c.memory.hot_path.rag_top_k), (2500, 1));
+        assert_eq!(MemoryConfig::default().hot_path.rag_timeout_ms, 2000);
     }
 }

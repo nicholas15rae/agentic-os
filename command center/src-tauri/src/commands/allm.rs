@@ -277,6 +277,35 @@ pub(crate) fn pick_thread(persisted: Option<&str>, threads: &[(String, Option<St
     threads.iter().find(|(_, n)| n.as_deref() == Some(name)).map(|(s, _)| s.clone())
 }
 
+// ── Thread rotation seed ────────────────────────────────────────────────────
+
+/// Characters of the carried-over summary in a fresh thread's first message.
+pub(crate) const SEED_CHARS: usize = 1200;
+
+fn fresh_threads() -> &'static Mutex<std::collections::HashSet<String>> {
+    static F: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+fn thread_path(slug: &str, thread: &str) -> String {
+    format!("/v1/workspace/{slug}/thread/{thread}/")
+}
+
+/// The message, prefixed with the newest Memory Scroll summary when `path` is the first chat of
+/// a thread this session just created (consumed once).
+pub(crate) fn seed_if_fresh(path: &str, message: &str) -> String {
+    let hit = {
+        let mut f = fresh_threads().lock().unwrap();
+        let k = f.iter().find(|k| path.starts_with(k.as_str())).cloned();
+        k.map(|k| f.remove(&k)).unwrap_or(false)
+    };
+    if hit {
+        super::hygiene::seeded_message(super::hygiene::seed_text().as_deref(), message, SEED_CHARS)
+    } else {
+        message.to_string()
+    }
+}
+
 // ── Reader ──────────────────────────────────────────────────────────────────
 
 /// Read and chat only. Has no ingest, embedding, document or thread-delete method.
@@ -380,6 +409,8 @@ impl AllmReader {
                 let v = self.0.call(reqwest::Method::POST, &format!("/v1/workspace/{slug}/thread/new"), Some(json!({ "name": name })), 8).await?;
                 let t = v["thread"]["slug"].as_str().ok_or("AnythingLLM did not return a thread")?.to_string();
                 check_slug(&t)?;
+                // Thread rotation: the first message of the new thread carries the newest summary.
+                fresh_threads().lock().unwrap().insert(thread_path(slug, &t));
                 t
             }
         };
@@ -421,7 +452,8 @@ impl AllmReader {
     /// One blocking chat call. No slot handling here (see `chat_in_slot`).
     pub(crate) async fn chat(&self, threads: &Threads<'_>, req: &ChatRequest<'_>) -> Result<ChatReply, String> {
         let (path, session) = self.chat_route(threads, req, false).await?;
-        let body = chat_body(req.role, req.message, session.as_deref())?;
+        let message = seed_if_fresh(&path, req.message);
+        let body = chat_body(req.role, &message, session.as_deref())?;
         let v = self.0.call(reqwest::Method::POST, &path, Some(body), req.secs.clamp(10, 900)).await?;
         if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty() && *e != "null") {
             return Err(e.to_string());
@@ -439,7 +471,8 @@ impl AllmReader {
     pub(crate) async fn stream_chat(&self, threads: &Threads<'_>, req: &ChatRequest<'_>, on_token: &mut (dyn FnMut(&str) + Send)) -> Result<StreamOutcome, StreamStartError> {
         use futures_util::StreamExt;
         let (path, session) = self.chat_route(threads, req, true).await.map_err(|msg| StreamStartError { retry_safe: false, msg })?;
-        let body = chat_body(req.role, req.message, session.as_deref()).map_err(|msg| StreamStartError { retry_safe: false, msg })?;
+        let message = seed_if_fresh(&path, req.message);
+        let body = chat_body(req.role, &message, session.as_deref()).map_err(|msg| StreamStartError { retry_safe: false, msg })?;
         let url = format!("{}/api{}", self.0.base.trim_end_matches('/'), path);
         let sent = self.0.http.post(&url).bearer_auth(&self.0.key).timeout(Duration::from_secs(req.secs.clamp(10, 900))).header("Accept", "text/event-stream").json(&body).send().await;
         let response = match sent {
@@ -1193,3 +1226,18 @@ mod live_writes {
     }
 }
 
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_thread_opens_with_the_newest_summary_once() {
+        fresh_threads().lock().unwrap().insert(thread_path("seedws", "t1"));
+        super::super::hygiene::set_seed(Some("Nic prefers tea over coffee".into()));
+        let first = seed_if_fresh("/v1/workspace/seedws/thread/t1/stream-chat", "hello");
+        assert!(first.contains("Nic prefers tea over coffee") && first.ends_with("hello"), "{first}");
+        assert_eq!(seed_if_fresh("/v1/workspace/seedws/thread/t1/stream-chat", "again"), "again", "consumed once");
+        assert_eq!(seed_if_fresh("/v1/workspace/seedws/chat", "plain"), "plain", "the workspace chat is never seeded");
+    }
+}

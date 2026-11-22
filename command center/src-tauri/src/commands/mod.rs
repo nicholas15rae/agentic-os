@@ -21,6 +21,7 @@ pub mod events;
 pub mod garbage;
 pub mod gmail;
 pub mod handoff_cues;
+pub mod hygiene;
 pub mod instagram;
 pub mod introspect;
 pub mod job_abort;

@@ -1,10 +1,95 @@
 import { useEffect, useState } from "react";
-import { Archive, CloudOff, CloudUpload, Download, HardDrive, Loader2, Lock, LockOpen, Sparkles, Trash2 } from "lucide-react";
+import { Archive, CloudOff, CloudUpload, Download, Eraser, HardDrive, Loader2, Lock, LockOpen, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
-import { cmd, onNativeEvent, type CompactOutcome, type CompactionStatus, type LedgerEntry, type MemoryScrollsConfig } from "@/lib/platform";
+import { cmd, onNativeEvent, type CompactOutcome, type CompactionStatus, type HarvestPeriodName, type HygieneStatus, type IdleBadge, type LedgerEntry, type LifecycleCadence, type MemoryScrollsConfig } from "@/lib/platform";
 import { gated } from "@/features/bridge/gate";
 import { CfgError, SecretRow, Toggle, useOsCfg } from "./os-ui";
 import { archiveSourceLabel, canCompact, clampInt, effectiveScrollsDir, formatBytes, formatOutcome, formatPending, outcomeTone, SCROLLS_BOUNDS } from "./memory-scrolls-format";
+import { badgeTone, cadenceLabel, cadencePeriod, presetOf, pressureFill, pressureLabel, pressureTone, relTime, SCROLLS_PRESETS, WEEKDAYS } from "./hygiene-format";
+
+/**
+ * "Hygiene & Buffer Pressure": the Security/Garbage daemon, the Memory Scrolls buffer against
+ * its threshold (Green / Amber / Red at the 2× high-water mark), the last sweep, the next
+ * scheduled harvest, and a one-click Quick Hygiene Sweep. Cheap: no CLI call on the poll.
+ */
+function HygieneBar() {
+  const [st, setSt] = useState<HygieneStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => void cmd("hygiene_status").then((s) => alive && setSt(s)).catch(() => {});
+    load();
+    const t = window.setInterval(load, 15_000);
+    let off: (() => void) | undefined;
+    void onNativeEvent<HygieneStatus>("hygiene-status", (s) => setSt(s)).then((u) => (off = u));
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+      off?.();
+    };
+  }, []);
+  const sweep = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await cmd("hygiene_sweep");
+      setSt(r.status);
+      const g = r.garbage ?? {};
+      setNote(`Swept: ${g.scratchPurged ?? 0} scratch · ${g.dumpsPurged ?? 0} dumps · ${g.archivesCompressed ?? 0} archives compressed · compaction ${r.compaction}`);
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const next = st?.autoRun ? (st.catchUpQueued ? `catch-up queued${st.waiting ? ` (waiting: ${st.waiting})` : ""}` : relTime(st.nextHarvestAt)) : "auto-regulate off";
+  return (
+    <div className="mb-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+        <span className="label-caps flex items-center gap-1.5 text-ink-2">
+          <ShieldCheck size={13} className={st?.daemonRunning ? "text-teal" : "text-ink-3"} /> Hygiene & buffer pressure
+        </span>
+        <span className="text-ink-3">
+          Daemon <span className={st?.daemonRunning ? "text-teal" : "text-alert"}>{st ? (st.daemonRunning ? "running" : "stopped") : "—"}</span>
+        </span>
+        <span className="text-ink-3">
+          Last sweep <span className="text-ink-2">{relTime(st?.lastSweepAt)}</span>
+        </span>
+        <span className="text-ink-3">
+          Next harvest <span className="text-ink-2">{st?.harvesting ? "running now…" : next}</span>
+        </span>
+        <button onClick={() => void sweep()} disabled={busy} className="ml-auto flex h-8 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[11px] text-ink-2 hover:text-ink">
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Eraser size={12} />} Quick Hygiene Sweep
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10" role="meter" aria-label="Memory buffer pressure" aria-valuemin={0} aria-valuemax={200} aria-valuenow={Math.round((st?.pressureRatio ?? 0) * 100)}>
+          <div className={`h-full rounded-full transition-[width] duration-500 ${pressureTone(st?.pressure)}`} style={{ width: `${pressureFill(st?.pressureRatio)}%` }} />
+        </div>
+        <span className="shrink-0 text-[11px] text-ink-3">
+          {pressureLabel(st?.pressure)}
+          {st?.pendingBytes != null && ` · ${formatBytes(st.pendingBytes)} / ${st.thresholdKb} KB · ${st.pendingTurns ?? 0} / ${st.thresholdTurns} turns`}
+        </span>
+      </div>
+      {st?.lastRun && (
+        <p className={`mt-1.5 text-[11px] ${st.lastRun.ok ? "text-ink-3" : "text-alert"}`}>
+          Last lifecycle run {relTime(st.lastRun.at)} · {st.lastRun.period}
+          {st.lastRun.catchUp ? " (catch-up)" : ""} · {st.lastRun.detail}
+        </p>
+      )}
+      {note && <p className="mt-1.5 text-[11px] text-ink-2">{note}</p>}
+    </div>
+  );
+}
+
+const PERIODS: { id: "month" | HarvestPeriodName; label: string }[] = [
+  { id: "month", label: "A month…" },
+  { id: "previous_day", label: "Previous day" },
+  { id: "previous_week", label: "Previous week" },
+  { id: "previous_month", label: "Previous month" },
+  { id: "since_last_harvest", label: "Since last verified harvest" },
+];
 
 const month = () => new Date().toISOString().slice(0, 7);
 
@@ -20,6 +105,7 @@ export function MemoryLifecycleCard() {
   const [progress, setProgress] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [target, setTarget] = useState(month());
+  const [period, setPeriod] = useState<"month" | HarvestPeriodName>("month");
   const [includeLocal, setIncludeLocal] = useState(false);
 
   const refresh = () => void cmd("memory_ledger").then(setLedger).catch(() => setLedger([]));
@@ -48,7 +134,7 @@ export function MemoryLifecycleCard() {
 
   const harvest = () =>
     run("harvest", async () => {
-      const l = await cmd("memory_harvest", { req: { month: target } });
+      const l = await cmd("memory_harvest", { req: period === "month" ? { month: target } : { period } });
       setMsg({ tone: "ok", text: `Memory Book ${l.month}: ${l.records} records → ${l.pairs} training pairs · sha256 ${l.sha256.slice(0, 12)}… ${l.encrypted ? "· AES-256 locked" : "· NOT encrypted (set a vault password)"}` });
     });
 
@@ -78,6 +164,7 @@ export function MemoryLifecycleCard() {
       title="RAG memory & vault lifecycle"
       hint="Harvest pulls every agent's conversations + training logs (and droplet cache), checksums them, condenses a Memory Book, builds a de-duplicated fine-tuning dataset, and locks it all in your local vault. Then the cloud copy can be wiped and selected books re-mounted whenever you need them."
     >
+      <HygieneBar />
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="RAG storage">
           <Select value={m.storage} onChange={(e) => save({ memory: { storage: e.target.value as typeof m.storage } })}>
@@ -111,12 +198,61 @@ export function MemoryLifecycleCard() {
       </div>
       <SecretRow name="vault" label="Vault password (AES-256-GCM)" placeholder="10+ characters" hint="Stored in the Windows Credential Manager. Without it archives are written unencrypted. Lose it and locked archives can't be opened." />
       <div className="mt-1">
-        <Toggle on={m.autoMonthly} onChange={(v) => save({ memory: { autoMonthly: v } })} label="Auto-run monthly (1st of the month)" hint="Harvests the previous month in the background — turning this on is your standing consent." />
-        <Toggle on={m.autoFlush} onChange={(v) => save({ memory: { autoFlush: v } })} label="Auto-flush cloud after a verified local backup" disabled={!m.autoMonthly} />
+        <Toggle
+          on={m.autoRunEnabled}
+          onChange={(v) => save({ memory: { autoRunEnabled: v } })}
+          label="Auto-regulate Vault & Lifecycle"
+          hint={`${cadenceLabel(m.cadence, m.targetHour, m.weeklyDay)}: harvests ${cadencePeriod(m.cadence)} on the next idle window (never during start-up warm-up or while you talk to ${cfg.osName}). A missed slot runs once as a catch-up covering everything since the last verified harvest. Turning this on is your standing consent.`}
+        />
+        <div className={`grid gap-3 pl-12 sm:grid-cols-3 ${m.autoRunEnabled ? "" : "opacity-50"}`}>
+          <Field label="Cadence">
+            <Select value={m.cadence} disabled={!m.autoRunEnabled} onChange={(e) => save({ memory: { cadence: e.target.value as LifecycleCadence } })}>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </Select>
+          </Field>
+          <Field label="Target hour">
+            <Select value={String(m.targetHour)} disabled={!m.autoRunEnabled} onChange={(e) => save({ memory: { targetHour: Number(e.target.value) } })}>
+              {Array.from({ length: 24 }, (_, h) => (
+                <option key={h} value={h}>
+                  {String(h).padStart(2, "0")}:00
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {m.cadence === "weekly" && (
+            <Field label="Quiet window day">
+              <Select value={String(m.weeklyDay)} disabled={!m.autoRunEnabled} onChange={(e) => save({ memory: { weeklyDay: Number(e.target.value) } })}>
+                {WEEKDAYS.map((d, i) => (
+                  <option key={d} value={i}>
+                    {d}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
+        </div>
+        <p className="pl-12 text-[11px] text-ink-3">Last verified harvest: {m.lastVerifiedHarvestAt ? new Date(m.lastVerifiedHarvestAt * 1000).toLocaleString() : "never"}</p>
+        <Toggle on={m.autoFlush} onChange={(v) => save({ memory: { autoFlush: v } })} label="Auto-flush cloud after a verified local backup" hint="Runs only after every vault file passed its SHA-256 re-read; any failed write or checksum aborts it." disabled={!m.autoRunEnabled} />
+        <Toggle
+          on={m.pruneThreads}
+          onChange={(v) => save({ memory: { pruneThreads: v } })}
+          label={`Prune ${cfg.osName}'s local AnythingLLM threads after a verified harvest`}
+          hint="Only threads the OS created and recorded. The next turn opens a fresh thread seeded with the newest memory summary."
+          disabled={!m.autoRunEnabled}
+        />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Input type="month" value={target} onChange={(e) => setTarget(e.target.value)} className="!h-10 !w-40 font-mono" aria-label="Month to harvest" />
+        <Select value={period} onChange={(e) => setPeriod(e.target.value as typeof period)} className="!h-10 !w-52" aria-label="Period to harvest">
+          {PERIODS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </Select>
+        {period === "month" && <Input type="month" value={target} onChange={(e) => setTarget(e.target.value)} className="!h-10 !w-40 font-mono" aria-label="Month to harvest" />}
         <button onClick={() => void harvest()} disabled={!!busy} className="pill-primary !h-10 text-sm">
           {busy === "harvest" ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />} Harvest & condense memory now
         </button>
@@ -222,19 +358,34 @@ export function MemoryScrollsCard() {
   const [status, setStatus] = useState<CompactionStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState<CompactOutcome | null>(null);
+  const [idle, setIdle] = useState<IdleBadge | null>(null);
+  const [purging, setPurging] = useState(false);
+  const [purgeMsg, setPurgeMsg] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
 
   const refresh = () =>
     void cmd("memory_compaction_status")
-      .then(setStatus)
+      .then((s) => {
+        setStatus(s);
+        if (s.badge) setIdle(s.badge);
+      })
       .catch(() => setStatus(null));
   useEffect(() => {
     refresh();
+    let alive = true;
+    // The badge is cheap (no CLI): poll it so the quiet-window countdown stays live.
+    const poll = () => void cmd("memory_idle_state").then((b) => alive && setIdle(b)).catch(() => {});
+    poll();
+    const t = window.setInterval(poll, 3_000);
     let off: (() => void) | undefined;
     void onNativeEvent<CompactOutcome>("memory-compaction", (o) => {
       setLast(o);
       refresh();
     }).then((u) => (off = u));
-    return () => off?.();
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+      off?.();
+    };
   }, []);
   if (!cfg) return null;
   const sc: MemoryScrollsConfig = { ...SCROLLS_DEFAULTS, ...cfg.memory.scrolls };
@@ -252,6 +403,25 @@ export function MemoryScrollsCard() {
     }
   };
 
+  const purge = async () => {
+    setPurging(true);
+    setPurgeMsg(null);
+    try {
+      const r = await gated(
+        { action: "memory-purge-raw", summary: "Purge raw task-note vectors from the Librarian workspace and re-sync Memory Scrolls", detail: { workspace: sc.workspace } },
+        (approved) => cmd("memory_purge_raw_vectors", { approved }),
+        (x) => `${x.rawNotesRemoved} raw notes removed`,
+      );
+      if (r) setPurgeMsg({ tone: "ok", text: `${r.compaction} · ${r.rawNotesRemoved} raw note vector(s) removed · ${r.scrollDuplicatesRemoved} duplicate scroll embedding(s) removed · ${r.scrollsKept} scroll(s) kept · Embed scrolls only on` });
+    } catch (e) {
+      setPurgeMsg({ tone: "err", text: String(e) });
+    } finally {
+      setPurging(false);
+      refresh();
+    }
+  };
+
+  const activePreset = presetOf(sc.thresholdKb, sc.thresholdTurns);
   const st = status?.status ?? null;
   const shown = last ?? status?.lastResult ?? null;
   const num = (k: keyof typeof SCROLLS_BOUNDS, label: string, unit: string) => (
@@ -290,8 +460,18 @@ export function MemoryScrollsCard() {
         <Toggle
           on={sc.autoCompact}
           onChange={(v) => set({ autoCompact: v })}
-          label="Auto-compact when idle"
-          hint="Only after the pending buffer passes a threshold AND nothing is running: no voice turn, no build, no Claude Code fix, the GPU free and the quiet window over. Off by default."
+          label={
+            <span className="inline-flex flex-wrap items-center gap-2">
+              Auto-compact when idle
+              {idle && (
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${badgeTone(idle)}`} aria-live="polite">
+                  {idle.label}
+                </span>
+              )}
+              {status?.highWater && <span className="rounded-full border border-alert/40 px-2 py-0.5 text-[10px] text-alert">High-water: compacting between turns</span>}
+            </span>
+          }
+          hint="Only after the pending buffer passes a threshold AND nothing is running: no voice turn or TTS, no LLM generation, no build, no Claude Code fix, and the quiet window over. An armed wake-word mic counts as idle. At 2× the threshold it compacts between turns. Off by default."
         />
         <Toggle
           on={sc.embedOnly}
@@ -299,6 +479,28 @@ export function MemoryScrollsCard() {
           label="Embed scrolls only"
           hint="Stop embedding each task note into the Librarian workspace (notes stay on disk and are distilled into scrolls instead). Turn on after the first RAG offload."
         />
+        <div className="mt-1 flex flex-wrap items-center gap-2 pl-12">
+          <button onClick={() => void purge()} disabled={purging} className="flex h-8 items-center gap-1.5 rounded-full border border-alert/30 px-3 text-[11px] text-ink-2 hover:border-alert/60 hover:text-ink">
+            {purging ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Purge Raw Vectors & Re-sync Scrolls
+          </button>
+          <span className="text-[11px] text-ink-3">Distills pending notes, removes raw “Idea:” task-note vectors, dedupes scroll embeddings by content hash.</span>
+        </div>
+        {purgeMsg && <p className={`mt-1 pl-12 text-xs ${purgeMsg.tone === "ok" ? "text-teal" : "text-alert"}`}>{purgeMsg.text}</p>}
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="label-caps text-ink-3">Threshold preset</span>
+        {SCROLLS_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => set({ thresholdKb: p.kb, thresholdTurns: p.turns })}
+            aria-pressed={activePreset === p.id}
+            className={`flex h-7 items-center rounded-full border px-3 text-[11px] ${activePreset === p.id ? "border-teal/50 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`}
+            title={`${p.kb} KB / ${p.turns} turns`}
+          >
+            {p.label} · {p.kb} KB / {p.turns}
+          </button>
+        ))}
+        {!activePreset && <span className="text-[11px] text-ink-3">Custom</span>}
       </div>
       <div className="mt-2 grid gap-3 sm:grid-cols-3">
         {num("thresholdKb", "Threshold (KB)", "kilobytes")}

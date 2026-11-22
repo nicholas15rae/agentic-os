@@ -29,6 +29,7 @@ use tauri::{Emitter, Manager, State};
 use super::allm::{self, AllmConn, AllmReader, AllmWriter, ThreadMap};
 use super::bridge::BridgeState;
 use super::dispatch::{run_chat, short, ChatMessage, DispatchState, Priority};
+use super::hygiene;
 use super::os_core::{self, OsConfig, OsState};
 
 // ── Crypto ──────────────────────────────────────────────────────────────────
@@ -138,6 +139,15 @@ pub struct LedgerEntry {
     pub notes: Vec<String>,
     /// Section headings of the Memory Book — the searchable index.
     pub topics: Vec<String>,
+    /// `previous_day` | `previous_week` | `previous_month` | `since_last_harvest` | `month` (older ledgers: empty).
+    pub period_kind: String,
+    /// `YYYY-MM` months the period touches (Tony's monthly threads).
+    pub months: Vec<String>,
+    /// Unix secs `[from, to)` of the harvested window.
+    pub from: i64,
+    pub to: i64,
+    /// kind → SHA-256 of each vault file's plaintext, re-verified on disk before the ledger.
+    pub checksums: BTreeMap<String, String>,
 }
 
 fn vault_dir(cfg: &OsConfig) -> PathBuf {
@@ -177,22 +187,10 @@ fn valid_month(m: &str) -> bool {
     m.len() == 7 && m.as_bytes()[4] == b'-' && m[..4].chars().all(|c| c.is_ascii_digit()) && m[5..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n))
 }
 
+/// `[start, end)` of a calendar month as unix secs (the month `Period`'s bounds).
+#[cfg(test)]
 fn month_bounds(month: &str) -> (i64, i64) {
-    use chrono::{Datelike, Local, NaiveDate, TimeZone};
-    let y: i32 = month[..4].parse().unwrap_or(1970);
-    let m: u32 = month[5..].parse().unwrap_or(1);
-    let start = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
-    let end = if m == 12 { NaiveDate::from_ymd_opt(y + 1, 1, 1) } else { NaiveDate::from_ymd_opt(y, m + 1, 1) }.unwrap();
-    let ts = |d: NaiveDate| Local.from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap()).single().map(|t| t.timestamp()).unwrap_or(0);
-    let _ = start.year();
-    (ts(start), ts(end))
-}
-
-pub fn previous_month() -> String {
-    use chrono::{Datelike, Local};
-    let now = Local::now();
-    let (y, m) = if now.month() == 1 { (now.year() - 1, 12) } else { (now.year(), now.month() - 1) };
-    format!("{y:04}-{m:02}")
+    hygiene::month_period(month).map(|p| p.bounds()).unwrap_or((0, 0))
 }
 
 // ── Harvest ─────────────────────────────────────────────────────────────────
@@ -270,7 +268,7 @@ async fn pull_allm(reader: &AllmReader, map: &dyn ThreadMap, slug: &str, month: 
     Ok(n)
 }
 
-fn pull_training_logs(repo: &Path, month: &str, out: &mut Vec<Record>) -> usize {
+fn pull_training_logs(repo: &Path, month: &str, (from, to): (i64, i64), out: &mut Vec<Record>) -> usize {
     let mut n = 0;
     let dir = repo.join("training_logs");
     let Ok(rd) = std::fs::read_dir(&dir) else { return 0 };
@@ -282,6 +280,9 @@ fn pull_training_logs(repo: &Path, month: &str, out: &mut Vec<Record>) -> usize 
         for line in std::fs::read_to_string(e.path()).unwrap_or_default().lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
             let at = v["ts"].as_i64().map(|t| t / 1000).unwrap_or(0);
+            if at != 0 && (at < from || at >= to) {
+                continue;
+            }
             if v["type"] == "os-turn" && !v["private"].is_null() {
                 // A private (booking / finance / comms) turn kept only its length: never a pair.
                 continue;
@@ -433,6 +434,9 @@ async fn condense(state: &DispatchState, os: &OsState, month: &str, prs: &[(Stri
 #[serde(rename_all = "camelCase")]
 pub struct HarvestRequest {
     month: Option<String>,
+    /// `previous_day` | `previous_week` | `previous_month` | `since_last_harvest` (wins over `month`).
+    #[serde(default)]
+    period: Option<String>,
 }
 
 /// D16: Booking workspaces (`agent_prompts::NEVER_TOUCH`) are never read, flushed or mounted into.
@@ -471,25 +475,63 @@ pub fn check_mount_workspace(ws: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn memory_harvest(app: tauri::AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, req: HarvestRequest) -> Result<LedgerEntry, String> {
-    let month = req.month.unwrap_or_else(super::agents::month_tag);
-    harvest(&state, &os, &bridge, &month, Some(app)).await
+    let period = match (&req.period, &req.month) {
+        (Some(name), _) => {
+            let last = hygiene::from_ts(os.snapshot().memory.last_verified_harvest_at);
+            hygiene::named_period(name, chrono::Local::now().naive_local(), last).ok_or("period must be previous_day, previous_week, previous_month or since_last_harvest (after a first verified harvest)")?
+        }
+        (None, m) => {
+            let month = m.clone().unwrap_or_else(super::agents::month_tag);
+            hygiene::month_period(&month).ok_or("month must be YYYY-MM")?
+        }
+    };
+    let _g = hygiene::begin_harvest()?;
+    harvest_period(&state, &os, &bridge, &period, Some(app)).await.map(|(l, _)| l)
 }
 
-pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, month: &str, app: Option<tauri::AppHandle>) -> Result<LedgerEntry, String> {
-    if !valid_month(month) {
-        return Err("month must be YYYY-MM".into());
+/// The real vault behind the handshake (blocking pool only: PBKDF2 + AES per file).
+struct DiskVault {
+    dir: PathBuf,
+    pass: Option<String>,
+}
+
+impl hygiene::VaultIo for DiskVault {
+    fn write(&mut self, name: &str, data: &[u8]) -> Result<String, String> {
+        vault_write(&self.dir, name, data, self.pass.as_deref())
+    }
+    fn read(&mut self, fname: &str) -> Result<Vec<u8>, String> {
+        let raw = std::fs::read(self.dir.join(fname)).map_err(|e| format!("{fname}: {e}"))?;
+        match (&self.pass, fname.ends_with(".enc")) {
+            (Some(p), true) => open(&raw, p),
+            (None, true) => Err("sealed file but no vault key".into()),
+            _ => Ok(raw),
+        }
+    }
+}
+
+fn lc_audit(step: &str, ok: bool, detail: &str) {
+    hygiene::audit("lifecycle", step, ok, detail);
+}
+
+/// Period-aware harvest with the strict handshake: snapshot → condense → seal every file into
+/// the locked vault → SHA-256 re-read of every file → ledger. Returns the ledger and the sealed
+/// checksums; ANY failed write / checksum is an `Err` and nothing destructive may follow.
+pub async fn harvest_period(state: &DispatchState, os: &OsState, bridge: &BridgeState, period: &hygiene::Period, app: Option<tauri::AppHandle>) -> Result<(LedgerEntry, hygiene::Sealed), String> {
+    let id = period.id.as_str();
+    if !hygiene::valid_period_id(id) {
+        return Err("bad harvest period".into());
     }
     let cfg = os.snapshot();
     // Fail before any pull (harvest only ever writes into the vault dir).
-    refuse_hub_vault(&vault_dir(&cfg).join(month))?;
+    refuse_hub_vault(&vault_dir(&cfg).join(id))?;
     let repo = PathBuf::from(state.snapshot().gateway.workdir);
-    let bounds = month_bounds(month);
-    let thread_name = format!("{} · {month}", cfg.os_name);
+    let bounds = period.bounds();
     let mut records = Vec::new();
     let mut sources = BTreeMap::new();
     let mut notes = Vec::new();
+    lc_audit("snapshot", true, &format!("{id} ({:?}) pull started", period.kind));
 
-    // A. Pull
+    // A. Snapshot
     progress(&app, "pull", "AnythingLLM workspaces");
     let (slugs, skipped) = harvest_slugs(&cfg.anythingllm.workspaces);
     if skipped > 0 {
@@ -500,12 +542,15 @@ pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, 
         Some(key) => {
             let reader = AllmReader::new(AllmConn::from_cfg_key(state, &cfg, key));
             for (slug, role) in &slugs {
-                match pull_allm(&reader, map, slug, month, &thread_name, bounds, role, "local", &mut records).await {
-                    Ok(n) => {
-                        sources.insert(format!("anythingllm:{slug}"), n);
+                let mut n_total = 0;
+                for month in &period.months {
+                    let thread_name = format!("{} · {month}", cfg.os_name);
+                    match pull_allm(&reader, map, slug, month, &thread_name, bounds, role, "local", &mut records).await {
+                        Ok(n) => n_total += n,
+                        Err(e) => notes.push(format!("{slug}: {e}")),
                     }
-                    Err(e) => notes.push(format!("{slug}: {e}")),
                 }
+                sources.insert(format!("anythingllm:{slug}"), n_total);
             }
         }
         None => notes.push("AnythingLLM key missing — workspaces skipped".into()),
@@ -515,8 +560,11 @@ pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, 
         if let Some(key) = os_core::os_secret("anythingllm-remote") {
             let reader = AllmReader::new(AllmConn::with_key(state, &cfg.droplet.anythingllm_url, key));
             for (slug, role) in &slugs {
-                if let Ok(n) = pull_allm(&reader, map, slug, month, &thread_name, bounds, role, "droplet", &mut records).await {
-                    sources.insert(format!("droplet-anythingllm:{slug}"), n);
+                for month in &period.months {
+                    let thread_name = format!("{} · {month}", cfg.os_name);
+                    if let Ok(n) = pull_allm(&reader, map, slug, month, &thread_name, bounds, role, "droplet", &mut records).await {
+                        *sources.entry(format!("droplet-anythingllm:{slug}")).or_insert(0) += n;
+                    }
                 }
             }
         }
@@ -530,61 +578,141 @@ pub async fn harvest(state: &DispatchState, os: &OsState, bridge: &BridgeState, 
         }
     }
     progress(&app, "pull", "training logs");
-    sources.insert("training_logs".into(), pull_training_logs(&repo, month, &mut records));
-
-    let bundle = json!({ "schema": "agentic-os.memory.v1", "month": month, "harvestedAt": os_core::now_secs(), "osName": cfg.os_name, "sources": sources, "records": records });
-    let raw = serde_json::to_vec_pretty(&bundle).map_err(|e| e.to_string())?;
-    let sha = sha256_hex(&raw);
-    let pass = os_core::os_secret("vault");
-    let dir = vault_dir(&cfg).join(month);
-    let m_ = month.replace('-', "_");
-    progress(&app, "verify", "writing + checksumming raw backup");
-    let raw_file = vault_write(&dir, &format!("raw_backup_{m_}.json"), &raw, pass.as_deref())?;
-    let verified = vault_read(&dir, &raw_file).map(|b| sha256_hex(&b) == sha).unwrap_or(false);
-    if !verified {
-        return Err("raw backup failed its checksum re-read — nothing else was written".into());
+    let mut tl = 0;
+    for month in &period.months {
+        tl += pull_training_logs(&repo, month, bounds, &mut records);
     }
+    sources.insert("training_logs".into(), tl);
+    lc_audit("snapshot", true, &format!("{id}: {} records from {} source(s)", records.len(), sources.len()));
 
-    // B. Condense
+    let bundle = json!({ "schema": "agentic-os.memory.v1", "month": id, "period": period, "harvestedAt": os_core::now_secs(), "osName": cfg.os_name, "sources": sources, "records": records });
+    let raw = serde_json::to_vec_pretty(&bundle).map_err(|e| e.to_string())?;
+
+    // B. Condense (Memory Book) + C. Dataset (ChatML / Alpaca / ShareGPT)
     let prs = pairs(&records);
-    let (book, by) = condense(state, os, month, &prs, &app).await;
+    let (book, by) = condense(state, os, id, &prs, &app).await;
     let topics: Vec<String> = book.lines().filter(|l| l.starts_with("## ")).map(|l| l[3..].trim().to_string()).collect();
-    let summary_file = vault_write(&dir, &format!("summary_{m_}.md"), book.as_bytes(), pass.as_deref())?;
-
-    // C. Dataset
     progress(&app, "dataset", format!("{} candidate pairs", prs.len()));
     let (jsonl, n_pairs) = dataset(&cfg, &prs);
-    let ds_file = vault_write(&dir, &format!("finetune_dataset_{m_}.jsonl"), jsonl.as_bytes(), pass.as_deref())?;
+    lc_audit("condense", true, &format!("{id}: book {} chars by {}, {n_pairs} pairs", book.len(), if by.is_empty() { "fallback" } else { &by }));
 
-    // D. Ledger (keeps mounts from an earlier harvest of the same month)
-    let prev = load_ledger(&cfg, month).ok();
+    // D. Seal + verify on disk (blocking pool: PBKDF2 + AES-256-GCM per file, SHA-256 re-reads).
+    let pass = os_core::os_secret("vault");
+    let encrypted = pass.is_some();
+    let dir = vault_dir(&cfg).join(id);
+    let m_ = id.replace('-', "_");
+    let artifacts = vec![
+        hygiene::Artifact { kind: "raw".into(), name: format!("raw_backup_{m_}.json"), data: raw },
+        hygiene::Artifact { kind: "summary".into(), name: format!("summary_{m_}.md"), data: book.clone().into_bytes() },
+        hygiene::Artifact { kind: "dataset".into(), name: format!("finetune_dataset_{m_}.jsonl"), data: jsonl.into_bytes() },
+    ];
+    progress(&app, "verify", "sealing + checksumming the vault files");
+    let seal_dir = dir.clone();
+    let sealed = tauri::async_runtime::spawn_blocking(move || {
+        let mut io = DiskVault { dir: seal_dir, pass };
+        hygiene::seal_and_verify(&mut io, &artifacts, &mut |step, ok, detail| lc_audit(step, ok, &detail))
+    })
+    .await
+    .map_err(|e| format!("vault task failed: {e}"))?;
+    let sealed = match sealed {
+        Ok(s) => s,
+        Err(e) => {
+            progress(&app, "abort", e.clone());
+            bridge.log(json!({ "type": "memory-harvest", "period": id, "aborted": e }));
+            return Err(format!("harvest aborted, nothing destructive ran: {e}"));
+        }
+    };
+
+    // E. Ledger (keeps mounts from an earlier harvest of the same period)
+    let prev = load_ledger(&cfg, id).ok();
     let agents: BTreeSet<String> = records.iter().map(|r| r.agent.clone()).filter(|a| a != "system").collect();
-    if pass.is_none() {
+    if !encrypted {
         notes.push("no vault password set — files are NOT encrypted".into());
     }
     let entry = LedgerEntry {
-        id: month.to_string(),
-        month: month.to_string(),
+        id: id.to_string(),
+        month: id.to_string(),
         created_at: os_core::now_secs(),
-        sha256: sha,
-        verified,
-        encrypted: pass.is_some(),
+        sha256: sealed.sha256.get("raw").cloned().unwrap_or_default(),
+        verified: true,
+        encrypted,
         records: records.len(),
         pairs: n_pairs,
         summary_tokens: book.len() / 4,
         agents: agents.into_iter().collect(),
         sources,
-        files: BTreeMap::from([("raw".into(), raw_file), ("summary".into(), summary_file), ("dataset".into(), ds_file)]),
+        files: sealed.files.clone(),
         mounts: prev.as_ref().map(|p| p.mounts.clone()).unwrap_or_default(),
         flushed_at: None,
         condensed_by: by,
         notes,
         topics,
+        period_kind: serde_json::to_value(period.kind).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+        months: period.months.clone(),
+        from: bounds.0,
+        to: bounds.1,
+        checksums: sealed.sha256.clone(),
     };
     save_ledger(&cfg, &entry)?;
-    bridge.log(json!({ "type": "memory-harvest", "month": month, "records": entry.records, "pairs": entry.pairs, "encrypted": entry.encrypted, "sha256": entry.sha256 }));
+    bridge.log(json!({ "type": "memory-harvest", "month": id, "records": entry.records, "pairs": entry.pairs, "encrypted": entry.encrypted, "sha256": entry.sha256 }));
+    lc_audit("done", true, &format!("{id}: {} records sealed + verified ({})", entry.records, if encrypted { "AES-256-GCM" } else { "unencrypted" }));
     progress(&app, "done", format!("{} records → {}", entry.records, dir.display()));
-    Ok(entry)
+    Ok((entry, sealed))
+}
+
+/// One scheduled (or forced) lifecycle run: harvest with the handshake, persist
+/// `lastVerifiedHarvestAt`, then — only after every file verified, and only with the consent
+/// toggles on — flush the cloud and / or prune Tony's local threads (the next turn opens a fresh
+/// thread seeded with the newest summary).
+pub async fn lifecycle_run(app: &tauri::AppHandle, period: &hygiene::Period, scheduled: bool) -> Result<String, String> {
+    let state = app.state::<DispatchState>();
+    let os = app.state::<OsState>();
+    let bridge = app.state::<BridgeState>();
+    let _g = hygiene::begin_harvest()?;
+    let res = harvest_period(&state, &os, &bridge, period, Some(app.clone())).await;
+    let plan = {
+        let cfg = os.snapshot();
+        hygiene::destructive_plan(&res.as_ref().map(|(_, s)| s.clone()).map_err(|e| e.clone()), cfg.memory.auto_flush, cfg.memory.prune_threads)
+    };
+    let (entry, _) = res?;
+    if scheduled {
+        let kind = period.kind;
+        let id = period.id.clone();
+        os.update(|c| {
+            c.memory.last_verified_harvest_at = os_core::now_secs();
+            if kind == hygiene::PeriodKind::PreviousMonth {
+                c.memory.last_auto_month = id.clone();
+            }
+            Ok(())
+        })?;
+    }
+    let mut report = vec![format!("{}: {} records sealed + verified", entry.month, entry.records)];
+    if plan.cloud_flush || plan.prune_threads {
+        lc_audit("flush", true, &format!("{}: cloud flush {} · thread prune {}", entry.month, plan.cloud_flush, plan.prune_threads));
+        match flush(&state, &os, &bridge, &entry.month, plan.prune_threads, plan.cloud_flush, true).await {
+            Ok(r) => {
+                for line in &r {
+                    lc_audit("flush", true, line);
+                }
+                report.extend(r);
+                if plan.prune_threads {
+                    // The summary seed: the next Tony thread opens with the newest summary.
+                    let dir = vault_dir(&os.snapshot()).join(&entry.month);
+                    let fname = entry.files.get("summary").cloned().unwrap_or_default();
+                    let book = tauri::async_runtime::spawn_blocking(move || vault_read(&dir, &fname).ok().and_then(|b| String::from_utf8(b).ok())).await.ok().flatten();
+                    hygiene::set_seed(hygiene::seed_text().or(book));
+                    lc_audit("prune", true, "summary seed armed for the next thread");
+                }
+            }
+            Err(e) => {
+                lc_audit("flush", false, &e);
+                report.push(format!("flush failed: {e}"));
+            }
+        }
+    } else {
+        lc_audit("flush", true, "skipped (consent off) — vault copy kept, cloud untouched");
+    }
+    Ok(report.join(" · "))
 }
 
 // ── Flush ───────────────────────────────────────────────────────────────────
@@ -602,28 +730,39 @@ pub struct FlushRequest {
 
 #[tauri::command]
 pub async fn memory_flush(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, req: FlushRequest) -> Result<Vec<String>, String> {
-    flush(&state, &os, &bridge, &req.month, req.include_local, req.approved).await
+    flush(&state, &os, &bridge, &req.month, req.include_local, true, req.approved).await
 }
 
-pub async fn flush(state: &DispatchState, os: &OsState, bridge: &BridgeState, month: &str, include_local: bool, approved: bool) -> Result<Vec<String>, String> {
+/// Flush the period's remote cache (`include_remote`) and / or Tony's local threads
+/// (`include_local`). `month` is any vault period id. The backup re-verifies first.
+pub async fn flush(state: &DispatchState, os: &OsState, bridge: &BridgeState, month: &str, include_local: bool, include_remote: bool, approved: bool) -> Result<Vec<String>, String> {
     let cfg = os.snapshot();
-    if !valid_month(month) {
-        return Err("month must be YYYY-MM".into());
+    if !hygiene::valid_period_id(month) {
+        return Err("bad period id".into());
     }
     if cfg.privacy.destructive_gate && !approved {
         return Err("PERMISSION_REQUIRED:destructive".into());
     }
     let mut l = load_ledger(&cfg, month)?;
-    // Re-verify the local backup before anything remote is wiped.
+    // Re-verify the local backup before anything remote is wiped (blocking pool: decrypt + hash).
     let dir = vault_dir(&cfg).join(month);
-    let raw = vault_read(&dir, l.files.get("raw").ok_or("ledger has no raw backup")?)?;
-    if sha256_hex(&raw) != l.sha256 {
+    let raw_name = l.files.get("raw").cloned().ok_or("ledger has no raw backup")?;
+    let want = l.sha256.clone();
+    let ok = tauri::async_runtime::spawn_blocking(move || vault_read(&dir, &raw_name).map(|raw| sha256_hex(&raw) == want)).await.map_err(|e| e.to_string())??;
+    if !ok {
+        hygiene::audit("lifecycle", "abort", false, &format!("{month}: raw backup checksum mismatch at flush time"));
         return Err("local backup checksum mismatch — refusing to flush".into());
     }
-    let mut report = vec![format!("backup verified · sha256 {}…", &l.sha256[..12])];
-    let thread_name = format!("{} · {month}", cfg.os_name);
+    let mut report = vec![format!("backup verified · sha256 {}…", &l.sha256[..12.min(l.sha256.len())])];
+    let months: Vec<String> = if !l.months.is_empty() {
+        l.months.clone()
+    } else if valid_month(month) {
+        vec![month.to_string()]
+    } else {
+        vec![]
+    };
     let mut targets: Vec<(String, String, String)> = Vec::new(); // (label, base, key)
-    if cfg.droplet.enabled && !cfg.privacy.kill_switch {
+    if include_remote && cfg.droplet.enabled && !cfg.privacy.kill_switch {
         if let Some(k) = os_core::os_secret("anythingllm-remote") {
             targets.push(("droplet AnythingLLM".into(), cfg.droplet.anythingllm_url.clone(), k));
         }
@@ -642,17 +781,20 @@ pub async fn flush(state: &DispatchState, os: &OsState, bridge: &BridgeState, mo
         let writer = AllmWriter::for_memory(conn);
         for slug in &flush_slugs(&cfg.anythingllm.workspaces) {
             let live = reader.get_workspace(slug, 10).await.map(|ws| allm::thread_list(&ws)).unwrap_or_default();
-            let persisted = map.get(base, slug, &allm::tony_key(month));
-            for ts in threads_to_flush(persisted.as_deref(), &live) {
-                match writer.delete_thread(slug, &ts, 10).await {
-                    Ok(_) => report.push(format!("{label}: deleted thread “{thread_name}” in {slug}")),
-                    Err(e) => report.push(format!("{label}: {slug} thread not deleted ({e})")),
+            for mo in &months {
+                let thread_name = format!("{} · {mo}", cfg.os_name);
+                let persisted = map.get(base, slug, &allm::tony_key(mo));
+                for ts in threads_to_flush(persisted.as_deref(), &live) {
+                    match writer.delete_thread(slug, &ts, 10).await {
+                        Ok(_) => report.push(format!("{label}: deleted thread “{thread_name}” in {slug}")),
+                        Err(e) => report.push(format!("{label}: {slug} thread not deleted ({e})")),
+                    }
                 }
             }
         }
     }
     os.allm_threads.lock().unwrap().clear();
-    if cfg.droplet.enabled && !cfg.privacy.kill_switch {
+    if include_remote && cfg.droplet.enabled && !cfg.privacy.kill_switch {
         for c in &cfg.memory.cache_collections {
             let r = state.http.delete(format!("{}/collections/{c}", cfg.droplet.qdrant_url.trim_end_matches('/'))).timeout(Duration::from_secs(15)).send().await;
             report.push(match r {
@@ -661,16 +803,93 @@ pub async fn flush(state: &DispatchState, os: &OsState, bridge: &BridgeState, mo
                 Err(e) => format!("droplet Qdrant: {c} → {}", short(e)),
             });
         }
-    } else if !cfg.memory.cache_collections.is_empty() {
+    } else if include_remote && !cfg.memory.cache_collections.is_empty() {
         report.push("droplet off — Qdrant cache untouched".into());
     }
-    if targets.is_empty() && cfg.memory.cache_collections.is_empty() {
-        report.push("nothing remote configured to flush (droplet off, no cache collections)".into());
+    if targets.is_empty() && (cfg.memory.cache_collections.is_empty() || !include_remote) {
+        report.push("nothing to flush (droplet off / no cache collections / no local prune)".into());
     }
     l.flushed_at = Some(os_core::now_secs());
     save_ledger(&cfg, &l)?;
     bridge.log(json!({ "type": "memory-flush", "month": month, "report": report }));
     Ok(report)
+}
+
+// ── Purge raw vectors & re-sync scrolls ─────────────────────────────────────
+
+/// "Purge Raw Vectors & Re-sync Scrolls": distill pending raw notes (a compaction, deferred
+/// when busy), turn on Embed-scrolls-only, un-embed + remove Tony's raw `Idea:` task-note
+/// documents from the Librarian workspace (the notes stay on disk), and un-embed duplicate scroll
+/// copies (same content hash per the CLI's sync ledger; the ledger's current copy always stays).
+#[tauri::command]
+pub async fn memory_purge_raw_vectors(app: tauri::AppHandle, approved: Option<bool>) -> Result<Value, String> {
+    let os = app.state::<OsState>();
+    let state = app.state::<DispatchState>();
+    let bridge = app.state::<BridgeState>();
+    let cfg = os.snapshot();
+    if cfg.privacy.destructive_gate && !approved.unwrap_or(false) {
+        return Err("PERMISSION_REQUIRED:destructive".into());
+    }
+    let pa = |step: &str, ok: bool, d: &str| hygiene::audit("purge", step, ok, d);
+    pa("start", true, "purge raw vectors & re-sync scrolls");
+    // 1. Distill what's pending first, so nothing only lives in a raw note's embedding.
+    let compact = super::compaction::run_compact(&app, true).await;
+    let compact_line = compact.deferred.clone().map(|d| format!("compaction deferred: {d}")).or(compact.error.clone().map(|e| format!("compaction error: {e}"))).unwrap_or_else(|| "pending notes distilled".into());
+    pa("distill", compact.error.is_none(), &compact_line);
+    // 2. New notes stop embedding from now on.
+    if !cfg.memory.scrolls.embed_only {
+        os.update(|c| {
+            c.memory.scrolls.embed_only = true;
+            Ok(())
+        })?;
+        pa("embed-only", true, "Embed scrolls only switched on");
+    }
+    // 3. Plan from the live workspaces + the CLI sync ledger (read-only).
+    let conn = AllmConn::local(&state, &cfg)?;
+    let reader = AllmReader::new(conn.clone());
+    let writer = AllmWriter::for_memory(conn);
+    let note_ws = cfg.anythingllm.workspaces.get("librarian").filter(|s| !s.is_empty()).cloned();
+    let scroll_ws = cfg.memory.scrolls.sanitized_workspace();
+    let state_json = PathBuf::from(state.snapshot().gateway.workdir).join("data").join("memory-scrolls").join("state.json");
+    let ledger = tauri::async_runtime::spawn_blocking(move || hygiene::read_sync_ledger(&state_json)).await.unwrap_or_default();
+    let mut slugs: Vec<String> = note_ws.into_iter().collect();
+    if !slugs.contains(&scroll_ws) {
+        slugs.push(scroll_ws);
+    }
+    let mut removed_notes = 0;
+    let mut removed_dupes = 0;
+    let mut kept = 0;
+    for slug in slugs.iter().filter(|s| !never_touch(s)) {
+        let ws = reader.get_workspace(slug, 15).await?;
+        let plan = hygiene::plan_purge(&hygiene::ws_docs(&ws), &ledger);
+        kept += plan.kept_scrolls;
+        let mut un_embed: Vec<String> = plan.raw_notes.clone();
+        un_embed.extend(plan.scroll_dupes.iter().cloned());
+        if un_embed.is_empty() {
+            pa("plan", true, &format!("{slug}: nothing to purge ({} scroll group(s) kept)", plan.kept_scrolls));
+            continue;
+        }
+        match writer.update_embeddings(slug, &[], &un_embed, 120).await {
+            Ok(_) => {
+                removed_notes += plan.raw_notes.len();
+                removed_dupes += plan.scroll_dupes.len();
+                pa("un-embed", true, &format!("{slug}: {} raw note(s), {} duplicate scroll(s)", plan.raw_notes.len(), plan.scroll_dupes.len()));
+            }
+            Err(e) => {
+                pa("un-embed", false, &format!("{slug}: {e}"));
+                return Err(format!("{slug}: un-embed failed ({e}); nothing was removed"));
+            }
+        }
+        if !plan.raw_notes.is_empty() {
+            if let Err(e) = writer.remove_documents(&plan.raw_notes, 120).await {
+                pa("remove", false, &format!("{slug}: {e} (already un-embedded)"));
+            }
+        }
+    }
+    let out = json!({ "compaction": compact_line, "rawNotesRemoved": removed_notes, "scrollDuplicatesRemoved": removed_dupes, "scrollsKept": kept, "embedOnly": true });
+    pa("done", true, &out.to_string());
+    bridge.log(json!({ "type": "memory-purge-raw", "result": out }));
+    Ok(out)
 }
 
 // ── Mount / unmount ─────────────────────────────────────────────────────────
@@ -688,7 +907,7 @@ pub struct MountRequest {
 /// Mount / unmount input check (pure): `month` is a real YYYY-MM (it becomes a vault path) and
 /// `target` is local or droplet.
 pub(crate) fn validate_mount_request(month: &str, target: &str) -> Result<(), String> {
-    if !valid_month(month) {
+    if !hygiene::valid_period_id(month) {
         return Err("month must be YYYY-MM".into());
     }
     if !matches!(target, "local" | "droplet") {
@@ -758,8 +977,8 @@ pub async fn memory_unmount(state: State<'_, DispatchState>, os: State<'_, OsSta
 #[tauri::command]
 pub fn memory_export(os: State<'_, OsState>, month: String, kind: String) -> Result<String, String> {
     let cfg = os.snapshot();
-    if !valid_month(&month) {
-        return Err("bad month".into());
+    if !hygiene::valid_period_id(&month) {
+        return Err("bad period id".into());
     }
     let l = load_ledger(&cfg, &month)?;
     let fname = l.files.get(&kind).ok_or("kind must be raw, summary or dataset")?;
@@ -771,31 +990,6 @@ pub fn memory_export(os: State<'_, OsState>, month: String, kind: String) -> Res
     let out = out_dir.join(fname.trim_end_matches(".enc"));
     std::fs::write(&out, bytes).map_err(|e| e.to_string())?;
     Ok(out.display().to_string())
-}
-
-/// Hourly: on the 1st of the month, harvest last month (and flush if enabled).
-/// Turning "Auto-run monthly" on is the standing consent for both.
-pub async fn auto_monthly_loop(app: tauri::AppHandle) {
-    use chrono::Datelike;
-    loop {
-        tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3600))).await.ok();
-        let os = app.state::<OsState>();
-        let cfg = os.snapshot();
-        let prev = previous_month();
-        if !cfg.memory.auto_monthly || chrono::Local::now().day() != 1 || cfg.memory.last_auto_month == prev {
-            continue;
-        }
-        let state = app.state::<DispatchState>();
-        let bridge = app.state::<BridgeState>();
-        let ok = harvest(&state, &os, &bridge, &prev, Some(app.clone())).await.is_ok();
-        if ok && cfg.memory.auto_flush {
-            let _ = flush(&state, &os, &bridge, &prev, false, true).await;
-        }
-        let _ = os.update(|c| {
-            c.memory.last_auto_month = prev.clone();
-            Ok(())
-        });
-    }
 }
 
 #[cfg(test)]

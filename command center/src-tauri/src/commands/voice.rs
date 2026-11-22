@@ -112,7 +112,9 @@ pub fn mic_get() -> bool {
 
 #[tauri::command]
 pub async fn stt_transcribe(state: State<'_, DispatchState>, request: Request<'_>) -> Result<String, String> {
-    let _touch = super::compaction::Touch::start();
+    // No compaction `Touch` here: with the wake-word mic armed, every VAD utterance (room noise,
+    // wake-word candidates) is transcribed, and touching on each one kept the idle compactor's
+    // quiet window from ever elapsing. A real command reaches Tony's turn, which touches.
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected raw WAV bytes".into());
     };

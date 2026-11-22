@@ -172,7 +172,7 @@ pub fn run() {
             // the background). No HTTP / token-gated server is contacted.
             tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
             tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
-            tauri::async_runtime::spawn(memory::auto_monthly_loop(app.handle().clone()));
+            tauri::async_runtime::spawn(commands::hygiene::lifecycle_loop(app.handle().clone()));
             // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).
             tauri::async_runtime::spawn(commands::compaction::compaction_loop(app.handle().clone()));
             // Phone HUD → desktop: Tony turns, pipelines, kill switch / compute mode.
@@ -352,6 +352,11 @@ pub fn run() {
             memory::memory_export,
             commands::compaction::memory_compact,
             commands::compaction::memory_compaction_status,
+            commands::compaction::memory_idle_state,
+            memory::memory_purge_raw_vectors,
+            commands::hygiene::hygiene_status,
+            commands::hygiene::hygiene_sweep,
+            commands::hygiene::memory_scrolls_preset,
             market::market_candles,
             pipeline::idea_capture,
             pipeline::idea_pipeline_run,

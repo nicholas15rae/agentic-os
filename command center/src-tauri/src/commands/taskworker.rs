@@ -271,6 +271,8 @@ impl Default for Tuning {
 #[derive(Default, Debug)]
 pub struct WorkerStats {
     pub stages_run: AtomicU64,
+    /// Stages parked because Tony preempted their model call (hot potato).
+    pub preempted: AtomicU64,
     pub mirror_failed: AtomicU64,
     pub retries: AtomicU64,
     /// Task ids whose last mirror PUT failed (or that a restart must resync): re-sent by
@@ -979,6 +981,11 @@ pub fn prompt_verify(e: &Envelope, code: &str, audit: &Value, at_limit: bool, re
 
 // ── The worker ──────────────────────────────────────────────────────────────
 
+/// A preempted AnythingLLM call keeps the token this long (its upstream may still be finishing).
+const PREEMPT_SETTLE: Duration = Duration::from_millis(1500);
+/// A preempted stage is re-claimable this soon (the claim then waits while Tony is queued).
+const PREEMPT_PARK_MS: i64 = 1500;
+
 /// A stage error: `retry` = worth another attempt.
 #[derive(Debug, Clone)]
 pub struct StageErr {
@@ -989,20 +996,25 @@ pub struct StageErr {
     /// The local model backend is unreachable (connection refused, 503): wait for it instead of
     /// failing the build.
     pub backend_down: bool,
+    /// Tony took the GPU token mid-call (hot potato): park the stage and re-run it, no attempt used.
+    pub preempted: bool,
 }
 
 impl StageErr {
     fn retry(m: impl Into<String>) -> Self {
-        Self { msg: m.into(), retry: true, stale: false, backend_down: false }
+        Self { msg: m.into(), retry: true, stale: false, backend_down: false, preempted: false }
     }
     fn fatal(m: impl Into<String>) -> Self {
-        Self { msg: m.into(), retry: false, stale: false, backend_down: false }
+        Self { msg: m.into(), retry: false, stale: false, backend_down: false, preempted: false }
     }
     fn stale() -> Self {
-        Self { msg: "the task changed while this stage ran".into(), retry: false, stale: true, backend_down: false }
+        Self { msg: "the task changed while this stage ran".into(), retry: false, stale: true, backend_down: false, preempted: false }
     }
     fn down(m: impl Into<String>) -> Self {
-        Self { msg: m.into(), retry: true, stale: false, backend_down: true }
+        Self { msg: m.into(), retry: true, stale: false, backend_down: true, preempted: false }
+    }
+    fn preempted() -> Self {
+        Self { msg: "paused: Tony took the GPU; this step resumes when he's done".into(), retry: false, stale: false, backend_down: false, preempted: true }
     }
 }
 
@@ -1268,7 +1280,8 @@ impl<'a> Worker<'a> {
 
     async fn wait_foreground(&self) {
         let t0 = Instant::now();
-        while self.env.slot().view().queued_foreground > 0 && t0.elapsed() < self.tuning.fg_wait_max {
+        // Away Mode: no foreground reservation (`queued_foreground` stays 0 there anyway).
+        while !self.env.slot().view().away && self.env.slot().view().queued_foreground > 0 && t0.elapsed() < self.tuning.fg_wait_max {
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
     }
@@ -1344,6 +1357,7 @@ impl<'a> Worker<'a> {
                 self.commit(stage, &cur, o, &s).await
             }
             Err(err) if err.stale => eprintln!("[worker] {} {stage}: dropped ({})", cur.task_id, err.msg),
+            Err(err) if err.preempted => self.park_preempted(&cur, agent, &s.known),
             Err(err) if err.backend_down && self.wait_for_backend(&cur, agent, &err.msg, &s.known) => {}
             Err(err) => {
                 self.stats.backend_down_since.lock().unwrap().remove(&cur.task_id);
@@ -1391,6 +1405,19 @@ impl<'a> Worker<'a> {
         }
     }
 
+    /// Hot potato: Tony preempted this stage's model call. Push the lease out a moment (the
+    /// stage is re-claimed and re-run from the start once Tony is done; `wait_foreground` holds
+    /// the claim while he is still queued), with one verbose row. No attempt and no failure.
+    fn park_preempted(&self, cur: &Envelope, agent: &str, known: &[String]) {
+        self.stats.preempted.fetch_add(1, Ordering::Relaxed);
+        let n = Next { status: &cur.status, stage: cur.stage.as_deref(), owner: &cur.current_owner };
+        let row = HandoffRow::new(agent, "tony", "progress", "verbose", format!("Paused the {} step: Tony took the GPU; it resumes when he's done", cur.stage.as_deref().unwrap_or("current")));
+        let patch = Patch { lease_until: Some(Some(envelope::now_ms() + PREEMPT_PARK_MS)), ..Default::default() };
+        if let Err(err) = self.store.transition(&cur.task_id, expect_of(cur), n, &patch, &row, known) {
+            eprintln!("[worker] park {}: {err}", cur.task_id);
+        }
+    }
+
     async fn handle(&self, stage: &'static str, e: &Envelope, s: &WorkerSettings, last: bool) -> Result<Outcome, StageErr> {
         match stage {
             "triage" => self.h_triage(e, s).await,
@@ -1426,6 +1453,7 @@ impl<'a> Worker<'a> {
         let r = match tokio::time::timeout(call_ceiling(secs), self.env.model(call)).await {
             Ok(Ok(r)) if !r.text.trim().is_empty() => Ok(r),
             Ok(Ok(_)) => Err(StageErr::retry(format!("the {} returned an empty answer", label(agent)))),
+            Ok(Err(err)) if super::scheduler::is_preempted(&err) => Err(StageErr::preempted()),
             Ok(Err(err)) if backend_unreachable(&err) => Err(StageErr::down(format!("{} unavailable: {}", label(agent), clip(&one_line(&err), 200)))),
             Ok(Err(err)) => Err(StageErr::retry(format!("{} unavailable: {}", label(agent), clip(&one_line(&err), 200)))),
             Err(_) => Err(StageErr::retry(format!("{} timed out after {}s", label(agent), call_ceiling(secs).as_secs()))),
@@ -1436,6 +1464,7 @@ impl<'a> Worker<'a> {
                 let summary = format!("{} answered ({} chars via {}){said}", label(agent), rep.text.chars().count(), rep.by);
                 self.tlog(e, NewMessage::new(agent, "tony", "reply", summary).body(rep.text.clone()).stage(Some(stage), it), &s.known);
             }
+            Err(err) if err.preempted => self.tlog(e, NewMessage::new(agent, "tony", "note", err.msg.clone()).stage(Some(stage), it), &s.known),
             Err(err) => self.tlog(e, NewMessage::new(agent, "tony", "error", err.msg.clone()).body(err.msg.clone()).stage(Some(stage), it).failed(), &s.known),
         }
         r
@@ -3258,9 +3287,22 @@ impl LiveModel<'_> {
                         let mut guard = slot.acquire(&format!("worker · {} {} · {slug}", call.agent, call.stage), false, self.tony_priority_pct).await;
                         let threads = super::allm::Threads { map: super::allm::thread_map(), cache: &self.caches.threads, os_name: &self.os_name, month: chrono::Local::now().format("%Y-%m").to_string() };
                         let req = super::allm::ChatRequest { slug, role: call.agent, message: &call.user, target: super::allm::ChatTarget::TaskSession(call.task_id.clone()), secs: call.secs };
-                        match super::allm::chat_in_slot(reader, &threads, &mut guard, self.settle, &req).await {
-                            Ok(r) => return Ok(ModelReply { text: r.text, by: format!("anythingllm:{slug}") }),
-                            Err(e) => note = format!(" (anythingllm: {})", clip(&one_line(&e), 80)),
+                        // Hot potato: Tony queues → drop this call and hand the token over. AnythingLLM
+                        // may finish its upstream generation, so a short settle (not the full window).
+                        let r = {
+                            let preempt = slot.background_preempted();
+                            tokio::select! {
+                                r = super::allm::chat_in_slot(reader, &threads, &mut guard, self.settle, &req) => Some(r),
+                                _ = preempt => None,
+                            }
+                        };
+                        match r {
+                            None => {
+                                guard.arm_settle(PREEMPT_SETTLE);
+                                return Err(format!("{}: Tony took the GPU", super::scheduler::PREEMPTED));
+                            }
+                            Some(Ok(r)) => return Ok(ModelReply { text: r.text, by: format!("anythingllm:{slug}") }),
+                            Some(Err(e)) => note = format!(" (anythingllm: {})", clip(&one_line(&e), 80)),
                         }
                         // Dropping the guard keeps the slot for the settle window after a timeout.
                     } else {
@@ -3271,7 +3313,16 @@ impl LiveModel<'_> {
         }
         let mut guard = slot.acquire(&format!("worker · {} {} · lmstudio", call.agent, call.stage), false, self.tony_priority_pct).await;
         guard.arm_settle(self.settle);
-        let r = self.lm_direct(call).await;
+        // Hot potato: dropping the HTTP request makes LM Studio stop generating, so a preempted
+        // call releases the token at once (no settle window).
+        let preempted = slot.background_preempted();
+        let r = tokio::select! {
+            r = self.lm_direct(call) => r,
+            _ = preempted => {
+                guard.disarm();
+                return Err(format!("{}: Tony took the GPU", super::scheduler::PREEMPTED));
+            }
+        };
         match &r {
             Ok(_) => guard.disarm(),
             Err(e) if !super::allm::is_timeout(e) => guard.disarm(),

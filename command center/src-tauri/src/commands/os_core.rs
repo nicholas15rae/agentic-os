@@ -743,6 +743,9 @@ pub struct OsConfig {
     pub feedback: FeedbackConfig,
     pub worker: WorkerConfig,
     pub voice: VoiceConfig,
+    /// The whiteboard roster's scripts (Booking scan, Security / Garbage / Observer cadence,
+    /// Finance vault re-seal): see `arbiter::RosterConfig`.
+    pub roster: super::arbiter::RosterConfig,
     /// One-time config migrations already applied (`apply_migrations`), so a setting the user
     /// changes afterwards is never flipped back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -771,6 +774,7 @@ impl Default for OsConfig {
             feedback: FeedbackConfig::default(),
             worker: WorkerConfig::default(),
             voice: VoiceConfig::default(),
+            roster: super::arbiter::RosterConfig::default(),
             migrations: vec![],
         }
     }
@@ -1140,7 +1144,7 @@ pub fn shape_chain(os: &OsConfig, mut chain: Vec<Provider>, vram_pct: Option<f32
 
 /// Current VRAM %, if an NVIDIA GPU is visible.
 pub async fn vram_pct() -> Option<f32> {
-    let gpu = tauri::async_runtime::spawn_blocking(super::system::query_gpu).await.ok().flatten()?;
+    let gpu = tauri::async_runtime::spawn_blocking(super::system::gpu_now).await.ok().flatten()?;
     Some(gpu.vram_used_mb as f32 / gpu.vram_total_mb.max(1) as f32 * 100.0)
 }
 
@@ -1555,14 +1559,27 @@ fn netbird_up() -> String {
 pub async fn droplet_link_loop(app: tauri::AppHandle) {
     use tauri::{Emitter, Manager};
     let mut misses = 0u32;
+    let mut was_disabled = false;
     loop {
         let os = app.state::<OsState>();
         let st = app.state::<DispatchState>();
         let cfg = os.snapshot();
-        let link = if !cfg.droplet.enabled {
+        // Bloat guard: a switched-off droplet is announced once, then checked every 60 s for a
+        // config change (it used to emit + log every 15 s forever).
+        if !cfg.droplet.enabled {
             misses = 0;
-            DropletLink { state: "disabled".into(), detail: "switched off".into(), latency_ms: 0, at: now_secs() }
-        } else {
+            if !was_disabled {
+                was_disabled = true;
+                let link = DropletLink { state: "disabled".into(), detail: "switched off".into(), latency_ms: 0, at: now_secs() };
+                let _ = app.emit("droplet-status", link.clone());
+                super::introspect::loop_ran("droplet", true, "disabled: switched off");
+                os.set_runtime("droplet", serde_json::to_value(&link).unwrap_or_default());
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            continue;
+        }
+        was_disabled = false;
+        let link = {
             match droplet_probe(&st, &cfg.droplet.model_url).await {
                 Ok(ms) => {
                     misses = 0;

@@ -255,7 +255,7 @@ pub fn relevant<'a>(f: &'a PathwayFile, text: &str, max: usize, confirmed_only: 
 
 /// Words that must never reach Tony's system prompt (the format word flips the provider chain,
 /// the thinking switch must stay last, the novelty word is never the model's): neutralised.
-fn neutral(s: &str) -> String {
+pub(crate) fn neutral(s: &str) -> String {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"(?i)json|/no_think|gabagool").unwrap());
     re.replace_all(s, |c: &regex::Captures| match c[0].to_lowercase().as_str() {

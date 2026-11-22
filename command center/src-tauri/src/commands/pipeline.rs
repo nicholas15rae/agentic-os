@@ -599,11 +599,17 @@ async fn run_inbox_item(app: &AppHandle, id: &str, kind: Option<&str>, p: &Value
     }
 }
 
-/// Every 3 s: claim and run what the phone HUD queued on the gateway (Tony turns, builds,
-/// Play Place actions, lockdown commands). An item someone else holds (409) is skipped.
+/// Claim and run what the phone HUD queued on the gateway (Tony turns, builds, Play Place
+/// actions, lockdown commands). An item someone else holds (409) is skipped.
+///
+/// Cadence (bloat guard): 3 s while the phone is in use (an item in the last minute), backing
+/// off to 10 s when the inbox stays empty and 15 s while the gateway is down. It used to poll
+/// every 3 s forever, on a blocking-pool thread, even with no phone at all.
 pub async fn inbox_loop(app: AppHandle) {
+    let mut wait = INBOX_FAST;
+    let mut empty_rounds = 0u32;
     loop {
-        tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3))).await.ok();
+        tokio::time::sleep(wait).await;
         let st = app.state::<DispatchState>();
         let os = app.state::<OsState>();
         let cfg = os.snapshot();
@@ -611,10 +617,13 @@ pub async fn inbox_loop(app: AppHandle) {
             Ok(v) => {
                 let n = v["items"].as_array().map_or(0, |a| a.len());
                 super::introspect::loop_ran("inbox", true, &format!("{n} queued item(s)"));
+                empty_rounds = if n == 0 { empty_rounds.saturating_add(1) } else { 0 };
+                wait = inbox_wait(empty_rounds, true);
                 v
             }
             Err(e) => {
                 super::introspect::loop_ran("inbox", false, &e);
+                wait = inbox_wait(empty_rounds, false);
                 continue;
             }
         };
@@ -644,6 +653,19 @@ pub async fn inbox_loop(app: AppHandle) {
             }
             let _ = gw(&st, &cfg, reqwest::Method::POST, &format!("/api/os/inbox/{id}/result"), Some(body)).await;
         }
+    }
+}
+
+const INBOX_FAST: Duration = Duration::from_secs(3);
+
+/// The inbox poll interval after `empty_rounds` empty polls (`up`: the gateway answered). Pure.
+pub fn inbox_wait(empty_rounds: u32, up: bool) -> Duration {
+    if !up {
+        Duration::from_secs(15)
+    } else if empty_rounds < 20 {
+        INBOX_FAST
+    } else {
+        Duration::from_secs(10)
     }
 }
 
@@ -691,6 +713,14 @@ pub fn looks_like_idea(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_backs_off_when_idle_or_down() {
+        assert_eq!(inbox_wait(0, true), Duration::from_secs(3));
+        assert_eq!(inbox_wait(19, true), Duration::from_secs(3), "a minute of fast polling after activity");
+        assert_eq!(inbox_wait(20, true), Duration::from_secs(10));
+        assert_eq!(inbox_wait(0, false), Duration::from_secs(15), "gateway down");
+    }
 
     #[test]
     fn html_extracted() {

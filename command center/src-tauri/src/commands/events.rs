@@ -375,10 +375,30 @@ async fn consume(app: tauri::AppHandle) {
         set_filter(&os.os_name, &os.wake_words);
         for ev in batch {
             let _ = app.emit(EVENT_NAME, &ev);
+            note_roster(&ev);
             if ev.task_id.is_some() {
                 tauri::async_runtime::spawn(mirror(app.clone(), ev));
             }
         }
+    }
+}
+
+/// The compute arbiter and the Build Circle's shared memory see every task event: an addressed
+/// row is a hand-off on the map; a build agent's milestone / hand-off row lands in the shared
+/// `build_circle` namespace (tagged by task), and a finished task's entries graduate later.
+fn note_roster(ev: &AgentEvent) {
+    if let Some(to) = ev.to_agent.as_deref() {
+        super::arbiter::get().handoff(&ev.agent_id, to, &ev.short_summary);
+    }
+    let Some(task) = ev.task_id.as_deref() else { return };
+    let tag = format!("task:{task}");
+    let build_agent = matches!(ev.agent_id.as_str(), "prompter" | "coder" | "designer" | "librarian");
+    if build_agent && matches!(ev.severity.as_str(), "milestone" | "handoff") {
+        let stage = ev.stage.as_deref().unwrap_or("-");
+        super::memtier::put(&ev.agent_id, "build_circle", &format!("[{task} · {stage}] {}: {}", ev.agent_id, ev.short_summary), &[&tag]);
+    }
+    if matches!(ev.status.as_deref(), Some("review_ready" | "failed" | "cancelled")) {
+        super::memtier::mark_done("build_circle", &tag);
     }
 }
 

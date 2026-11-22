@@ -1164,6 +1164,9 @@ pub struct OsTurnResult {
     /// Learning mode: the pathways this turn saved / updated (the "Memory saved" pill).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) learned: Vec<super::learning::Saved>,
+    /// Tony's dispatch packet, when his reply was one with tasks (held / pending / queued).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dispatch: Option<super::tony_dispatch::DispatchView>,
 }
 
 pub(crate) fn step(kind: &str, from: &str, to: &str, text: impl Into<String>, ok: bool, ms: u128) -> OsStep {
@@ -1275,10 +1278,14 @@ pub async fn run_os_turn(state: &DispatchState, os: &OsState, bridge: &BridgeSta
     // Phase 3: a live Tony turn keeps idle memory compaction away (entry and exit).
     let _touch = super::compaction::Touch::start();
     let id = req.trace_id.clone().filter(|t| super::trace::valid_id(t)).unwrap_or_else(super::trace::new_id);
+    // Compute arbiter: the user is here (idle timer reset) and the turn's end-to-end latency.
+    let t_turn = Instant::now();
+    super::arbiter::get().touch_foreground();
     // Agent Conversation of a delegated turn: `turn:<stream id|trace id>`.
     let conv = super::transcript::turn_conv(req.stream_id.as_deref().filter(|s| !s.is_empty()).unwrap_or(&id));
     let (explicit, request) = (req.explicit, req.text.trim().to_string());
     let mut r = super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app, &conv)).await?;
+    super::arbiter::get().record_tony_turn(t_turn.elapsed().as_millis() as u64);
     // Steps are shown in chat, persisted in localStorage and mirrored to the phone: scrub them.
     let known = super::devqueue::known_secrets(state, os);
     scrub_steps(&mut r.steps, &known);
@@ -1369,6 +1376,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     }
     let keep = cfg.scheduler.history_turns.max(2) as usize;
     let history: Vec<ChatMessage> = req.history.into_iter().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
+    let history_chars: usize = history.iter().map(|m| m.content.len()).sum::<usize>() + text.len();
 
     // ── Tool pre-executor (Part 2) — runs BEFORE delegation, using only the
     // target agent's own granted tools, and regardless of whether a
@@ -1412,6 +1420,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             pending_spotify: pending,
             answered_by: "tool".into(),
             learned: vec![],
+            dispatch: None,
         };
         if let Some(p) = pre.pending_spotify {
             let res = spotify_turn(String::new(), Some(p.name.clone()), "spotify approval card", Some(p), steps);
@@ -1517,6 +1526,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             pending_spotify: None,
             answered_by: "agent".into(),
             learned: vec![],
+            dispatch: None,
         };
         log_turn(bridge, &role, &text, &res, &known);
         return Ok(res);
@@ -1563,7 +1573,20 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         }
         _ => String::new(),
     };
-    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &tier2, &format!("{mode_block}{learned_block}")), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
+    // Two-tier memory (Tier 1, `tony` namespace): up to 3 earlier exchanges that share words with
+    // this one, ≤ 450 chars, prompt-safe. Private turns are never stored, so never recalled.
+    let tony_recall = if role == "general" && private_turn(&role, &text, None).is_none() {
+        let hits = super::memtier::query("tony", "tony", &text, 3, 450, false);
+        super::learning::neutral(&super::memtier::recall_block("EARLIER WITH NIC (your memory; use only if relevant)", &hits))
+    } else {
+        String::new()
+    };
+    // Phase 3b: Tony's dispatch packet (spoken_reply + tasks), on his own turns outside Learning
+    // and the novelty overlay. Off in os.json (`roster.tonyPackets`) → plain prose as before.
+    let packets = role == "general" && !learning && !mode.is_novelty && cfg.roster.tony_packets;
+    let contract = if packets { super::tony_dispatch::CONTRACT } else { "" };
+    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &tier2, &format!("{mode_block}{learned_block}{tony_recall}{contract}")), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
+    super::arbiter::get().note_context(msgs.iter().map(|m| m.content.len()).sum::<usize>() + history_chars);
     msgs.extend(history);
     msgs.push(ChatMessage::new("user", user_msg));
 
@@ -1607,6 +1630,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                             pending_spotify: None,
                             answered_by: "overseer".into(),
                             learned: vec![],
+                            dispatch: None,
                         };
                         log_turn(bridge, &role, &text, &out, &known);
                         return Ok(out);
@@ -1637,6 +1661,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     pending_spotify: None,
                     answered_by: "agent".into(),
                     learned: vec![],
+                    dispatch: None,
                 };
                 log_turn(bridge, &role, &text, &out, &known);
                 return Ok(out);
@@ -1660,11 +1685,32 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // `[[LEARN …]]` lines never reach the chat, TTS or logs; they are saved only in Learning mode.
     let (content, drafts) = if role == "general" { super::learning::parse_tags(&res.content) } else { (res.content, vec![]) };
     let content = if content.trim().is_empty() && !drafts.is_empty() { "Got it, saved.".to_string() } else { content };
-    let answer_text = ensure_prose(state, os, &msgs, content).await;
+    // The packet: its spoken_reply is the answer; its tasks go through the mode gate.
+    let mut dispatch_view = None;
+    let packet = if packets { super::tony_dispatch::parse(&content) } else { None };
+    let answer_text = match packet {
+        Some(Ok(d)) => {
+            dispatch_view = super::tony_dispatch::route(app, os, &d);
+            d.spoken_reply
+        }
+        Some(Err(e)) => {
+            eprintln!("[tony] dispatch packet refused: {e}");
+            dispatch_view = Some(super::tony_dispatch::DispatchView { id: format!("pkt-{}", super::arbiter::now_ms()), state: "invalid".into(), priority: "normal".into(), reason: super::envelope::clip(&e, 200), tasks: vec![] });
+            match super::tony_dispatch::spoken_of(&content) {
+                Some(sp) => sp,
+                None => ensure_prose(state, os, &msgs, content).await,
+            }
+        }
+        None => ensure_prose(state, os, &msgs, content).await,
+    };
     let learned = match (&pathways, learning && !drafts.is_empty()) {
         (Some(p), true) => commit_lessons(app, p, &drafts, &known),
         _ => vec![],
     };
+    if role == "general" && private_turn(&role, &text, None).is_none() && !answer_text.trim().is_empty() {
+        let digest = format!("Nic: {} | Tony: {}", super::envelope::clip(&super::envelope::one_line(&text), 180), super::envelope::clip(&super::envelope::one_line(&answer_text), 220));
+        super::memtier::put("tony", "tony", &super::devqueue::scrub(&digest, &known), &["turn"]);
+    }
     let out = OsTurnResult {
         answer: answer_text,
         steps,
@@ -1681,6 +1727,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         pending_spotify: None,
         answered_by: "os".into(),
         learned,
+        dispatch: dispatch_view,
     };
     log_turn(bridge, &role, &text, &out, &known);
     Ok(out)
@@ -2157,6 +2204,7 @@ mod tests {
             pending_spotify: None,
             answered_by: "os".into(),
             learned: vec![],
+            dispatch: None,
         }
     }
 

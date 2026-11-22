@@ -3859,3 +3859,24 @@ fn a_staged_earlier_pass_keeps_the_verifiers_fix_and_never_calls_unproven_broken
     assert!(!said.contains("doesn't work: Shows the per-person total"), "an unproven criterion is never said as broken: {said}");
     assert_eq!(e.last_eval["works"], json!(false));
 }
+
+// ── Hot potato (compute arbiter) ────────────────────────────────────────────
+
+/// Tony preempting a stage's model call parks the stage (no failure, no attempt spent); it
+/// re-runs once the short park lease lapses and the task completes as usual.
+#[test]
+fn a_preempted_stage_parks_and_resumes_without_failing() {
+    let root = tmp("preempt");
+    let store = leak_store();
+    let fake = Fake::new(&root, Some(store), Box::new(|c, n| if c.stage == "triage" && n == 1 { Err(format!("{}: Tony took the GPU", super::super::scheduler::PREEMPTED)) } else { Ok(default_reply(c)) }));
+    let t = new_task(store, "Build a stopwatch");
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_ne!(e.status, "failed", "{:?}", e.error);
+    assert!(e.handoff_log.iter().any(|h| h.short_summary.contains("Tony took the GPU")), "a park row");
+    std::thread::sleep(std::time::Duration::from_millis(super::PREEMPT_PARK_MS as u64 + 200));
+    run(store, &fake);
+    let e = get(store, &t.task_id);
+    assert_eq!(e.status, "review_ready", "{:?}", e.error);
+    assert_eq!(fake.calls_for("triage").len(), 2, "re-run once, from the start of the stage");
+}

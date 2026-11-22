@@ -4,13 +4,88 @@ mod exe_resolve;
 mod proc;
 
 use commands::{buildhub, handoff_cues, lifecycle};
+use commands::{arbiter, finance_vault, memtier};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
 
+/// Tray menu ids.
+const TRAY_SHOW: &str = "tray-show";
+const TRAY_AWAY: &str = "tray-away";
+const TRAY_QUIT: &str = "tray-quit";
+
+/// Keeps the tray's Away Mode check item in step with the UI toggle.
+static TRAY_AWAY_ITEM: std::sync::OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+
+/// The tray check mark follows Away Mode (called from `arbiter_set_away`).
+pub fn tray_set_away(_app: &tauri::AppHandle, on: bool) {
+    if let Some(item) = TRAY_AWAY_ITEM.get() {
+        let _ = item.set_checked(on);
+    }
+}
+
+fn show_main(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// System tray: closing the window hides it here and the engine keeps running (scheduled
+/// workers, Booking, Garbage, Observer). "Quit Engine Completely" is the only real exit.
+#[cfg(desktop)]
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
+    let away_on = app.state::<os_core::OsState>().snapshot().scheduler.away_mode;
+    let show = MenuItem::with_id(app, TRAY_SHOW, "Show Command Center", true, None::<&str>)?;
+    let away = CheckMenuItem::with_id(app, TRAY_AWAY, "Away Mode (background gets the GPU)", true, away_on, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit Engine Completely", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &away, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let _ = TRAY_AWAY_ITEM.set(away);
+    let mut b = TrayIconBuilder::with_id("engine").tooltip("Tony · Agentic OS engine").menu(&menu).show_menu_on_left_click(false);
+    if let Some(icon) = app.default_window_icon() {
+        b = b.icon(icon.clone());
+    }
+    b.on_menu_event(|app, ev| match ev.id().as_ref() {
+        TRAY_SHOW => show_main(app),
+        TRAY_AWAY => {
+            use tauri::Emitter;
+            let os = app.state::<os_core::OsState>();
+            let on = !os.snapshot().scheduler.away_mode;
+            if arbiter::set_away(&os, on).is_ok() {
+                tray_set_away(app, on);
+                let _ = app.emit(arbiter::STATE_EVENT, arbiter::get().snapshot());
+            }
+        }
+        TRAY_QUIT => {
+            QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+            app.exit(0);
+        }
+        _ => {}
+    })
+    .on_tray_icon_event(|tray, ev| {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
+            show_main(tray.app_handle());
+        }
+    })
+    .build(app)?;
+    Ok(())
+}
+
+/// Set by "Quit Engine Completely": the next close really exits.
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First: a second launch hands over to this engine (one GPU arbiter per machine).
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)));
+    builder
         .plugin(tauri_plugin_notification::init())
         .manage(system::SysState::default())
         .manage(dispatch::DispatchState::default())
@@ -33,6 +108,8 @@ pub fn run() {
             commands::trace::install(app.handle());
             // Agent event bus (`agent-event` + phone HUD mirror); events queue until this runs.
             events::install(app.handle());
+            // Compute arbiter: `arbiter-state` / `arbiter-handoff` for the System Map.
+            arbiter::get().install(app.handle());
             // AnythingLLM client: Tony's monthly thread map lives in tasks.db (Part 3).
             allm::install(app.handle());
             // Provider endpoints live in a file the user edits, not in the webview.
@@ -44,6 +121,17 @@ pub fn run() {
                 app.state::<bridge::BridgeState>().init(&dir, repo.join("training_logs"));
                 // OS identity, compute mode, skills/MCP registry, privacy shield, memory lifecycle.
                 app.state::<os_core::OsState>().load_or_init(&dir, &repo);
+                // Two-tier agent memory (<config dir>/memory-tiers) and the sealed Finance vault
+                // (<config dir>/vault/finance, sealed at start).
+                memtier::init(&dir);
+                finance_vault::init(&dir);
+                // Away Mode survives a restart (an overnight run keeps going).
+                {
+                    let os = app.state::<os_core::OsState>();
+                    let away = os.snapshot().scheduler.away_mode;
+                    os.slot.set_away(away);
+                    arbiter::get().set_away_flag(away);
+                }
                 if app.state::<os_core::OsState>().snapshot().privacy.network_lock {
                     os_core::ensure_gateway_token(&state);
                 }
@@ -104,6 +192,7 @@ pub fn run() {
                 use tauri::Emitter;
                 let h = app.handle().clone();
                 app.state::<os_core::OsState>().slot.set_notify(move |v| {
+                    arbiter::get().on_slot(&v);
                     let _ = h.emit("gpu-slot", v);
                 });
             }
@@ -113,6 +202,14 @@ pub fn run() {
             // Keep the local model sized to fit VRAM even after Bionic auto-reloads it.
             tauri::async_runtime::spawn(services::local_fit_loop(app.handle().clone()));
             tauri::async_runtime::spawn(services::tts_warm_loop(app.handle().clone()));
+            // Zero-VRAM roster scripts (Security, Garbage, Observer, Booking) on idle / Away Mode.
+            tauri::async_runtime::spawn(commands::downtime::downtime_loop(app.handle().clone()));
+            // Garbage daemon: deterministic purge on schedule / quota / Security's handshake (0 VRAM).
+            tauri::async_runtime::spawn(commands::garbage::daemon(app.handle().clone()));
+            #[cfg(desktop)]
+            if let Err(e) = build_tray(app) {
+                eprintln!("[tray] {e}");
+            }
             // Bring up the gateway (sync hub for the phone) and bind n8n to its
             // Docker container in the background, so the window opens instantly.
             let handle = app.handle().clone();
@@ -128,9 +225,29 @@ pub fn run() {
             register_voice_hotkey(app)?;
             Ok(())
         })
+        // Close → hide to the tray (the engine keeps running); "Quit Engine Completely" exits.
+        .on_window_event(|w, ev| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
+                if w.label() == "main" && !QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = w.hide();
+                }
+            }
+        })
         // Keep this list in sync with `NativeCommands` in src/lib/platform.ts.
         .invoke_handler(tauri::generate_handler![
             system::system_stats,
+            arbiter::arbiter_snapshot,
+            arbiter::arbiter_set_away,
+            arbiter::system_health,
+            finance_vault::finance_vault_status,
+            finance_vault::finance_vault_unlock,
+            finance_vault::finance_vault_lock,
+            finance_vault::finance_ledger_list,
+            finance_vault::finance_ledger_write,
+            finance_vault::finance_search,
+            commands::tony_dispatch::tony_dispatch_approve,
+            commands::tony_dispatch::tony_dispatch_discard,
             secrets::secret_set,
             secrets::secret_status,
             secrets::secret_delete,
@@ -330,7 +447,7 @@ pub fn run() {
 /// even when the window is minimised or another app has focus.
 #[cfg(desktop)]
 fn register_voice_hotkey(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::{Emitter, Manager};
+    use tauri::Emitter;
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
     let hotkey = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
@@ -338,11 +455,7 @@ fn register_voice_hotkey(app: &mut tauri::App) -> Result<(), Box<dyn std::error:
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
                 if shortcut == &hotkey && event.state() == ShortcutState::Pressed {
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.unminimize();
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
+                    show_main(app);
                     // Phase 2 Part B: a locked-off mic never opens from the hotkey. The webview
                     // handles `mic-locked` as a stop-only toggle: it can still stop Tony speaking
                     // or a turn in flight; from rest it toasts and never listens.

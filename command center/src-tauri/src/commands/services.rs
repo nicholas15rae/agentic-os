@@ -356,7 +356,11 @@ pub async fn local_fit_once(state: &DispatchState, os: &super::os_core::OsState)
 pub async fn local_fit_loop(app: tauri::AppHandle) {
     use tauri::Manager;
     use super::introspect::loop_ran;
+    // Bloat guard: whisper keep-alive every 5 min; the LM Studio fit check (which can unload and
+    // reload the model) only at start and every 30 min, not every 5.
+    let mut round = 0u32;
     loop {
+        round = round.wrapping_add(1);
         match whisper_ensure(&app.state::<DispatchState>()).await {
             Some(msg) => {
                 eprintln!("[whisper] {msg}");
@@ -364,7 +368,8 @@ pub async fn local_fit_loop(app: tauri::AppHandle) {
             }
             None => loop_ran("whisper", true, "nothing to do (already up, or STT isn't a local whisper.cpp)"),
         }
-        match local_fit_once(&app.state::<DispatchState>(), &app.state::<super::os_core::OsState>()).await {
+        let fit = if round % 6 == 1 { local_fit_once(&app.state::<DispatchState>(), &app.state::<super::os_core::OsState>()).await } else { None };
+        match fit {
             Some(msg) => {
                 eprintln!("[fit] {msg}");
                 loop_ran("local-fit", true, &msg);

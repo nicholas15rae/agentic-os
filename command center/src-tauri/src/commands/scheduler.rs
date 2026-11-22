@@ -11,9 +11,17 @@
 //!
 //! `max_concurrency` = slots (1 on the 3060; raise it on a bigger server).
 //! The live state is emitted as `gpu-slot` for the top-bar pill.
+//!
+//! Hot-potato additions (the compute arbiter, `arbiter.rs`):
+//! - **Preemption**: a background holder races its call against [`SlotGuard::preempted`], which
+//!   fires the moment Tony queues. The worker parks that stage and resumes it later, so Tony never
+//!   waits behind a long Coder generation.
+//! - **Away Mode** (`set_away`): Tony gives up his foreground reservation. Every caller queues
+//!   first-come-first-served; background never yields and is never preempted.
+//! - The view names who is waiting (`waiting`), so the System Map can show `QUEUED` nodes.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -36,11 +44,14 @@ pub struct SchedulerConfig {
     /// Part 3: after a holder times out or is cancelled the server may still be generating, so
     /// the permit is kept this long before the next holder runs (capped at 120 s).
     pub settle_secs: u16,
+    /// Away Mode ("red button"): Tony yields his foreground reservation and background work gets
+    /// the GPU (see `arbiter::set_away`). Persisted so an overnight run survives a restart.
+    pub away_mode: bool,
 }
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
-        Self { profile: "sequential".into(), tony_priority_pct: 90, max_concurrency: 1, offload_pct: 0, offload_engine: "claude-cli".into(), history_turns: 6, settle_secs: DEFAULT_SETTLE_SECS }
+        Self { profile: "sequential".into(), tony_priority_pct: 90, max_concurrency: 1, offload_pct: 0, offload_engine: "claude-cli".into(), history_turns: 6, settle_secs: DEFAULT_SETTLE_SECS, away_mode: false }
     }
 }
 
@@ -62,6 +73,10 @@ pub struct SlotView {
     pub capacity: usize,
     /// Permits held back after a timed-out / cancelled holder (the server may still be busy).
     pub settling: usize,
+    /// Labels of the callers queued for a permit, oldest first.
+    pub waiting: Vec<String>,
+    /// Away Mode: no foreground reservation (Tony queues like everyone else).
+    pub away: bool,
 }
 
 /// What the gateway's cooperative lease (`PUT /api/os/gpu`) mirrors.
@@ -85,7 +100,11 @@ struct Inner {
     bg_waiting: AtomicUsize,
     settling: AtomicUsize,
     active: Mutex<Vec<(u64, String)>>,
+    waiting: Mutex<Vec<(u64, String)>>,
     next_id: AtomicUsize,
+    away: AtomicBool,
+    /// Woken when a foreground caller queues: background holders racing `preempted()` stop.
+    preempt: tokio::sync::Notify,
     /// Publishes slot changes (wired to the `gpu-slot` event in lib.rs). A plain callback
     /// keeps the window runtime out of this module (and its unit tests).
     notify: Mutex<Option<Notify>>,
@@ -108,7 +127,10 @@ impl Default for GpuSlot {
                 bg_waiting: AtomicUsize::new(0),
                 settling: AtomicUsize::new(0),
                 active: Mutex::new(vec![]),
+                waiting: Mutex::new(vec![]),
                 next_id: AtomicUsize::new(1),
+                away: AtomicBool::new(false),
+                preempt: tokio::sync::Notify::new(),
                 notify: Mutex::new(None),
                 lease: tokio::sync::watch::channel(GpuLease::default()).0,
             }),
@@ -125,9 +147,30 @@ pub struct SlotGuard {
     id: u64,
     permit: Option<OwnedSemaphorePermit>,
     settle: Option<Duration>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    foreground: bool,
+}
+
+/// The error text a preempted background call returns (the worker parks the stage on it).
+pub const PREEMPTED: &str = "PREEMPTED";
+
+/// Does this error mean "a foreground turn took the GPU; run it again later"?
+pub fn is_preempted(err: &str) -> bool {
+    err.contains(PREEMPTED)
 }
 
 impl SlotGuard {
+    /// Resolves when Tony queues for the GPU while this BACKGROUND holder runs (never for a
+    /// foreground holder, never in Away Mode). Race the model call against it with `select!`;
+    /// dropping the request makes LM Studio stop generating.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn preempted(&self) {
+        if self.foreground {
+            return std::future::pending().await;
+        }
+        wait_preempt(self.inner.clone()).await
+    }
+
     /// Keep the permit for `settle` if this guard is dropped before `disarm`.
     pub fn arm_settle(&mut self, settle: Duration) {
         self.settle = (!settle.is_zero()).then_some(settle);
@@ -176,13 +219,19 @@ struct WaitTicket {
     inner: Arc<Inner>,
     foreground: bool,
     armed: bool,
+    id: u64,
 }
 
 impl WaitTicket {
-    fn new(inner: &Arc<Inner>, foreground: bool) -> Self {
+    fn new(inner: &Arc<Inner>, foreground: bool, label: &str) -> Self {
+        let id = inner.next_id.fetch_add(1, Ordering::SeqCst) as u64;
+        inner.waiting.lock().unwrap().push((id, label.to_string()));
         Self::counter(inner, foreground).fetch_add(1, Ordering::SeqCst);
         Inner::emit(inner);
-        Self { inner: inner.clone(), foreground, armed: true }
+        if foreground {
+            inner.preempt.notify_waiters();
+        }
+        Self { inner: inner.clone(), foreground, armed: true, id }
     }
 
     fn counter(inner: &Inner, foreground: bool) -> &AtomicUsize {
@@ -196,6 +245,7 @@ impl WaitTicket {
     /// Got the permit: count down without an emit (the guard that follows emits the new holder).
     fn done(mut self) {
         self.armed = false;
+        self.inner.waiting.lock().unwrap().retain(|(i, _)| *i != self.id);
         Self::counter(&self.inner, self.foreground).fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -203,6 +253,7 @@ impl WaitTicket {
 impl Drop for WaitTicket {
     fn drop(&mut self) {
         if self.armed {
+            self.inner.waiting.lock().unwrap().retain(|(i, _)| *i != self.id);
             Self::counter(&self.inner, self.foreground).fetch_sub(1, Ordering::SeqCst);
             Inner::emit(&self.inner);
         }
@@ -217,6 +268,8 @@ impl Inner {
             queued_background: self.bg_waiting.load(Ordering::SeqCst),
             capacity: self.capacity.load(Ordering::SeqCst),
             settling: self.settling.load(Ordering::SeqCst),
+            waiting: self.waiting.lock().unwrap().iter().map(|(_, l)| l.clone()).collect(),
+            away: self.away.load(Ordering::SeqCst),
         }
     }
 
@@ -235,6 +288,18 @@ impl Inner {
         if let Some(f) = this.notify.lock().unwrap().as_ref() {
             f(view);
         }
+    }
+}
+
+/// Resolves once a foreground caller is queued (and Away Mode is off).
+async fn wait_preempt(inner: Arc<Inner>) {
+    loop {
+        let mut n = std::pin::pin!(inner.preempt.notified());
+        n.as_mut().enable();
+        if inner.fg_waiting.load(Ordering::SeqCst) > 0 && !inner.away.load(Ordering::SeqCst) {
+            return;
+        }
+        n.await;
     }
 }
 
@@ -273,6 +338,24 @@ impl GpuSlot {
         self.inner.view()
     }
 
+    /// The same signal as `SlotGuard::preempted` for a background holder, without borrowing the
+    /// guard (so the guarded call can hold it `&mut` inside a `select!`).
+    pub fn background_preempted(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        wait_preempt(self.inner.clone())
+    }
+
+    /// Away Mode on / off (the compute arbiter calls this; see the module doc).
+    pub fn set_away(&self, on: bool) {
+        if self.inner.away.swap(on, Ordering::SeqCst) != on {
+            Inner::emit(&self.inner);
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_away(&self) -> bool {
+        self.inner.away.load(Ordering::SeqCst)
+    }
+
     /// Nothing holds, waits for, or settles the GPU (Phase 3 idle compaction gate).
     pub fn is_idle(&self) -> bool {
         let v = self.view();
@@ -294,25 +377,28 @@ impl GpuSlot {
         }
     }
 
-    fn guard(&self, label: &str, permit: OwnedSemaphorePermit) -> SlotGuard {
+    fn guard(&self, label: &str, permit: OwnedSemaphorePermit, foreground: bool) -> SlotGuard {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst) as u64;
         self.inner.active.lock().unwrap().push((id, label.to_string()));
         Inner::emit(&self.inner);
-        SlotGuard { inner: self.inner.clone(), id, permit: Some(permit), settle: None }
+        SlotGuard { inner: self.inner.clone(), id, permit: Some(permit), settle: None, foreground }
     }
 
     /// Take a GPU slot. Foreground jumps the queue; background yields to it
     /// (up to `bg_max_wait`, derived from the Tony-priority slider).
     /// Cancel-safe: dropping the future while it waits leaves no queued count behind.
     pub async fn acquire(&self, label: &str, foreground: bool, tony_priority_pct: u8) -> SlotGuard {
-        let ticket = WaitTicket::new(&self.inner, foreground);
-        if !foreground {
+        // Away Mode: no foreground reservation; everyone queues first-come-first-served.
+        let away = self.inner.away.load(Ordering::SeqCst);
+        let foreground = foreground && !away;
+        let ticket = WaitTicket::new(&self.inner, foreground, label);
+        if !foreground && !away {
             self.yield_to_foreground(tony_priority_pct).await;
         }
         let permit = loop {
             let p = self.inner.sem.clone().acquire_owned().await.expect("gpu slot semaphore");
             // A background step that won the race while Tony is now waiting hands the baton back.
-            if !foreground && self.inner.fg_waiting.load(Ordering::SeqCst) > 0 && tony_priority_pct >= 90 {
+            if !foreground && !self.inner.away.load(Ordering::SeqCst) && self.inner.fg_waiting.load(Ordering::SeqCst) > 0 && tony_priority_pct >= 90 {
                 drop(p);
                 tokio::time::sleep(Duration::from_millis(80)).await;
                 continue;
@@ -320,18 +406,19 @@ impl GpuSlot {
             break p;
         };
         ticket.done();
-        self.guard(label, permit)
+        self.guard(label, permit, foreground)
     }
 
     /// Model maintenance (unload / reload / bench): background priority and EXCLUSIVE — it
     /// takes every permit, so nothing generates while a model is being swapped.
     pub async fn acquire_maintenance(&self, label: &str, tony_priority_pct: u8) -> SlotGuard {
-        let ticket = WaitTicket::new(&self.inner, false);
+        let label = format!("maintenance · {label}");
+        let ticket = WaitTicket::new(&self.inner, false, &label);
         self.yield_to_foreground(tony_priority_pct).await;
         let n = self.inner.capacity.load(Ordering::SeqCst).max(1) as u32;
         let permit = self.inner.sem.clone().acquire_many_owned(n).await.expect("gpu slot semaphore");
         ticket.done();
-        self.guard(&format!("maintenance · {label}"), permit)
+        self.guard(&label, permit, false)
     }
 }
 
@@ -552,6 +639,41 @@ mod tests {
             drop(g);
             assert!(rx.has_changed().unwrap());
             assert_eq!(*rx.borrow_and_update(), GpuLease::default());
+        });
+    }
+
+    #[test]
+    fn foreground_preempts_a_background_holder_but_not_in_away_mode() {
+        tauri::async_runtime::block_on(async {
+            let slot = Arc::new(GpuSlot::default());
+            let bg = slot.acquire("worker · coder code", false, 90).await;
+            // Nothing queued: not preempted.
+            assert!(tokio::time::timeout(Duration::from_millis(60), bg.preempted()).await.is_err());
+            let s = slot.clone();
+            let tony = tauri::async_runtime::spawn(async move {
+                let _g = s.acquire("lmstudio · Tony", true, 90).await;
+            });
+            tokio::time::timeout(Duration::from_millis(500), bg.preempted()).await.expect("preempted when Tony queues");
+            assert_eq!(slot.view().waiting, vec!["lmstudio · Tony".to_string()]);
+            drop(bg);
+            let _ = tony.await;
+            assert!(slot.view().waiting.is_empty());
+            // A foreground holder is never preempted.
+            let fg = slot.acquire("tony", true, 90).await;
+            assert!(tokio::time::timeout(Duration::from_millis(60), fg.preempted()).await.is_err());
+            drop(fg);
+            // Away Mode: Tony queues FIFO and the background holder keeps the token.
+            slot.set_away(true);
+            assert!(slot.is_away() && slot.view().away);
+            let bg = slot.acquire("worker · coder code", false, 90).await;
+            let s = slot.clone();
+            let tony = tauri::async_runtime::spawn(async move {
+                let _g = s.acquire("lmstudio · Tony", true, 90).await;
+            });
+            assert!(tokio::time::timeout(Duration::from_millis(150), bg.preempted()).await.is_err());
+            assert_eq!(slot.view().queued_foreground, 0, "away: no foreground reservation");
+            drop(bg);
+            let _ = tony.await;
         });
     }
 

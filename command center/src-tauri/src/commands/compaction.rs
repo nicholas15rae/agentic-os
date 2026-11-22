@@ -514,7 +514,7 @@ mod tests {
     use super::*;
 
     fn view(active: &[&str], fg: usize, bg: usize, settling: usize) -> SlotView {
-        SlotView { active: active.iter().map(|s| s.to_string()).collect(), queued_foreground: fg, queued_background: bg, capacity: 1, settling }
+        SlotView { active: active.iter().map(|s| s.to_string()).collect(), queued_foreground: fg, queued_background: bg, capacity: 1, settling, waiting: vec![], away: false }
     }
 
     #[test]

@@ -918,7 +918,18 @@ pub(crate) async fn run_chat(
         } else {
             None
         };
-        match call(state, &osc, &cfg.policy, p, &outbound, max_secs).await {
+        // Hot potato: a background generation on the local GPU stops the moment Tony queues; the
+        // caller (the worker) parks and re-runs it. Never falls through to the next provider.
+        let result = if _slot.is_some() && priority == Priority::Background {
+            let preempted = os.slot.background_preempted();
+            tokio::select! {
+                r = call(state, &osc, &cfg.policy, p, &outbound, max_secs) => r,
+                _ = preempted => return Err(format!("{}: Tony took the GPU", super::scheduler::PREEMPTED)),
+            }
+        } else {
+            call(state, &osc, &cfg.policy, p, &outbound, max_secs).await
+        };
+        match result {
             Ok(content) => {
                 if i > 0 {
                     reason = format!("{} → {}", errors.join("; "), p.id);
@@ -940,7 +951,7 @@ pub(crate) async fn run_chat(
 }
 
 async fn gpu_busy(policy: &Policy) -> Option<String> {
-    let gpu = tauri::async_runtime::spawn_blocking(system::query_gpu).await.ok().flatten()?;
+    let gpu = tauri::async_runtime::spawn_blocking(system::gpu_now).await.ok().flatten()?;
     let vram_pct = gpu.vram_used_mb as f32 / gpu.vram_total_mb.max(1) as f32 * 100.0;
     if gpu.util_pct > policy.gpu_util_max {
         Some(format!("GPU {:.0}%", gpu.util_pct))

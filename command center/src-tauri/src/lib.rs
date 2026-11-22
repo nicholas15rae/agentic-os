@@ -201,6 +201,7 @@ pub fn run() {
             tauri::async_runtime::spawn(commands::scheduler::gpu_mirror_loop(app.handle().clone()));
             tauri::async_runtime::spawn(os_core::droplet_link_loop(app.handle().clone()));
             // Keep the local model sized to fit VRAM even after Bionic auto-reloads it.
+            tauri::async_runtime::spawn(services::whisper_keepalive_loop(app.handle().clone()));
             tauri::async_runtime::spawn(services::local_fit_loop(app.handle().clone()));
             tauri::async_runtime::spawn(services::tts_warm_loop(app.handle().clone()));
             // Zero-VRAM roster scripts (Security, Garbage, Observer, Booking) on idle / Away Mode.

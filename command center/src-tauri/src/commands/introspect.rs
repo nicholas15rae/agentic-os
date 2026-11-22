@@ -79,7 +79,7 @@ pub struct LoopDef {
 /// The Rust background loops that report here (each calls `loop_ran` once per pass).
 pub const LOOPS: [LoopDef; 4] = [
     LoopDef { id: "inbox", label: "Phone inbox drain", interval_secs: 3, source: "pipeline::inbox_loop" },
-    LoopDef { id: "whisper", label: "Whisper keep-alive", interval_secs: 300, source: "services::whisper_ensure" },
+    LoopDef { id: "whisper", label: "Whisper keep-alive", interval_secs: 60, source: "services::whisper_keepalive_loop" },
     LoopDef { id: "local-fit", label: "Local model fit guard", interval_secs: 300, source: "services::local_fit_loop" },
     LoopDef { id: "droplet", label: "Droplet link monitor", interval_secs: 15, source: "os_core::droplet_link_loop" },
 ];

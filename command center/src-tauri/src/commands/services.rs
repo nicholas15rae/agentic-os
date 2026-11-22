@@ -353,14 +353,13 @@ pub async fn local_fit_once(state: &DispatchState, os: &super::os_core::OsState)
     Some(format!("reloaded {} from {ctx} to {FIT_CTX} context (HTTP {})", p.model, r.status().as_u16()))
 }
 
-pub async fn local_fit_loop(app: tauri::AppHandle) {
+/// Whisper keep-alive, every 60 s, in its OWN loop: it used to share `local_fit_loop`, where the
+/// LM Studio fit check can wait minutes (a model reload, the maintenance GPU slot), and while it
+/// waited a Whisper that had died stayed down — Tony was deaf until the app restarted.
+pub async fn whisper_keepalive_loop(app: tauri::AppHandle) {
     use tauri::Manager;
     use super::introspect::loop_ran;
-    // Bloat guard: whisper keep-alive every 5 min; the LM Studio fit check (which can unload and
-    // reload the model) only at start and every 30 min, not every 5.
-    let mut round = 0u32;
     loop {
-        round = round.wrapping_add(1);
         match whisper_ensure(&app.state::<DispatchState>()).await {
             Some(msg) => {
                 eprintln!("[whisper] {msg}");
@@ -368,6 +367,18 @@ pub async fn local_fit_loop(app: tauri::AppHandle) {
             }
             None => loop_ran("whisper", true, "nothing to do (already up, or STT isn't a local whisper.cpp)"),
         }
+        tokio_sleep(Duration::from_secs(60)).await;
+    }
+}
+
+pub async fn local_fit_loop(app: tauri::AppHandle) {
+    use tauri::Manager;
+    use super::introspect::loop_ran;
+    // Bloat guard: the LM Studio fit check (which can unload and reload the model) runs at start
+    // and every 30 min. (Whisper's keep-alive is `whisper_keepalive_loop`, so this can't block it.)
+    let mut round = 0u32;
+    loop {
+        round = round.wrapping_add(1);
         let fit = if round % 6 == 1 { local_fit_once(&app.state::<DispatchState>(), &app.state::<super::os_core::OsState>()).await } else { None };
         match fit {
             Some(msg) => {

@@ -6,10 +6,10 @@ import { useBackdrops, useSurfaceConfig } from "@/features/wallpaper/backdrop-st
 import { nextInPool, surfacePool } from "@/features/wallpaper/backdrop-model";
 import { useBackdropActive } from "@/features/wallpaper/SurfaceBackdropLayer";
 import { SPACE_MODES, useSpace } from "./space-store";
-import type { TriggerKind } from "./space-engine";
+import type { TriggerKind } from "./fleet/sim";
 
 const PREVIEWS: readonly { kind: TriggerKind; label: string; hint: string }[] = [
-  { kind: "solo", label: "Cruise", hint: "The E46 cruises past (sometimes banking away: rear plate view)" },
+  { kind: "solo", label: "Cruise", hint: "The E46 flies a courier run between two agent planets" },
   { kind: "chased", label: "Chased", hint: "Dogfight sortie opening with the E46 on the run, shooting back; passes then alternate" },
   { kind: "pursuit", label: "Pursuit", hint: "Dogfight sortie opening with the E46 on the attack; passes then alternate" },
   { kind: "station", label: "Station", hint: "The distant battle station drifts into view" },

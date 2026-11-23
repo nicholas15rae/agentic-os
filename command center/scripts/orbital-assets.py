@@ -1,5 +1,5 @@
 """
-Orbital Ecosystem asset prep: fake-transparency removal, photoreal mattes, wallpaper copy.
+Orbital Ecosystem asset prep: wallpaper copy and the station sprite's checkerboard removal.
 
     python -I "command center/scripts/orbital-assets.py"            (from the repo root)
 
@@ -8,9 +8,7 @@ Reads the untouched originals in `command center/assets-src/orbital/` and writes
   src/assets/orbital-sprites/     true-alpha PNG sprites (trimmed, edge-decontaminated)
   assets-src/orbital/_review.png  every sprite over magenta and over a nebula, for eyeballing
 
-Photoreal ships and rocks are matted out of the scene renders (`e46-rear-scene`,
-`dogfight-scene`) with GrabCut plus hand hints; the old cartoon sheet fighters and rocks are
-retired. Needs Pillow, numpy, scipy, opencv-python. Re-runnable: outputs are overwritten.
+Needs Pillow, numpy, scipy. Re-runnable: outputs are overwritten.
 """
 from pathlib import Path
 import shutil
@@ -18,7 +16,6 @@ import shutil
 import numpy as np
 from PIL import Image
 from scipy import ndimage as ndi
-import cv2
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "assets-src" / "orbital"
@@ -149,81 +146,6 @@ def strip_checker(path: Path, sphere: bool = False, glass: bool = False) -> Imag
     return finish(im, alpha, bgc)
 
 
-# Photoreal rocks in the dogfight render (x0, y0, x1, y1), found as grey low-chroma blobs:
-# whole, unlit by laser hits, away from the frame edge.
-DOGFIGHT_ROCKS = [
-    (921, 131, 963, 175), (945, 176, 996, 211), (945, 216, 986, 248),
-    (671, 302, 710, 343), (748, 336, 802, 407), (24, 428, 55, 459),
-]
-FIGHTER_BOX = (770, 186, 915, 305)
-
-
-def grabcut(path: Path, rect, hints=None, iters: int = 8) -> Image.Image:
-    """Matte one object off a painted background: GrabCut, optional hints, soft edge, decontaminate."""
-    bgr = cv2.imread(str(path))
-    x0, y0, x1, y1 = rect
-    pad = 14
-    X0, Y0 = max(x0 - pad, 0), max(y0 - pad, 0)
-    X1, Y1 = min(x1 + pad, bgr.shape[1]), min(y1 + pad, bgr.shape[0])
-    c = np.ascontiguousarray(bgr[Y0:Y1, X0:X1])
-    mask = np.zeros(c.shape[:2], np.uint8)
-    bgd, fgd = np.zeros((1, 65)), np.zeros((1, 65))
-    cv2.grabCut(c, mask, (x0 - X0, y0 - Y0, x1 - x0, y1 - y0), bgd, fgd, 6, cv2.GC_INIT_WITH_RECT)
-    if hints:
-        hints(c, mask, (X0, Y0))
-        cv2.grabCut(c, mask, None, bgd, fgd, iters, cv2.GC_INIT_WITH_MASK)
-    fg = np.isin(mask, [1, 3]).astype(np.uint8)
-    n, lab, st, _ = cv2.connectedComponentsWithStats(fg)
-    if n > 1:
-        big = st[1:, 4].max()
-        fg = np.isin(lab, 1 + np.where(st[1:, 4] > max(300, big * 0.02))[0]) if hints else lab == 1 + st[1:, 4].argmax()
-    fg = fg.astype(bool)
-    # Local background behind the edge: inpaint the object away, then unmix edge pixels from it.
-    bg = cv2.inpaint(c, ndi.binary_dilation(fg, iterations=2).astype(np.uint8), 5, cv2.INPAINT_TELEA)
-    alpha = ndi.gaussian_filter(fg.astype(np.float32), 0.8)
-    alpha = np.where(ndi.binary_erosion(fg, iterations=2), 1.0, alpha).astype(np.float32)
-    rgbc = c[..., ::-1].astype(np.float32)
-    return finish(rgbc, alpha, bg[..., ::-1].astype(np.float32))
-
-
-def rock_cut(path: Path, rect) -> Image.Image:
-    """Grey rock on a saturated nebula: low chroma is the matte."""
-    im = rgb(path)
-    x0, y0, x1, y1 = rect
-    pad = 8
-    X0, Y0, X1, Y1 = max(x0 - pad, 0), max(y0 - pad, 0), min(x1 + pad, im.shape[1]), min(y1 + pad, im.shape[0])
-    c = im[Y0:Y1, X0:X1]
-    chroma, lum = c.max(-1) - c.min(-1), c.mean(-1)
-    m = ndi.binary_fill_holes(ndi.binary_opening(ndi.binary_closing((chroma < 38) & (lum > 22) & (lum < 170), iterations=2)))
-    lab, n = ndi.label(m)
-    fg = lab == (np.bincount(lab.ravel())[1:].argmax() + 1)
-    bg = cv2.inpaint(np.ascontiguousarray(c.astype(np.uint8)), ndi.binary_dilation(fg, iterations=2).astype(np.uint8), 5, cv2.INPAINT_TELEA)
-    alpha = ndi.gaussian_filter(fg.astype(np.float32), 0.8)
-    alpha = np.where(ndi.binary_erosion(fg, iterations=2), 1.0, alpha).astype(np.float32)
-    return finish(c, alpha, bg.astype(np.float32))
-
-
-def e46_hints(c: np.ndarray, mask: np.ndarray, off) -> None:
-    """Rear-scene E46: drop the nebula glow and ion plume, keep the thin lower-left wing and guns."""
-    X0, Y0 = off
-    b, g, r = (c[..., i].astype(int) for i in range(3))
-    yy, xx = np.mgrid[: c.shape[0], : c.shape[1]]
-    xx, yy = xx + X0, yy + Y0
-    fg0 = np.isin(mask, [1, 3])
-    magenta = (r > g + 35) & (b > g + 35)
-    plume = (b > r + 50) & (g > r + 30) & ((xx < 222) | (yy > 420))
-    mask[:] = np.where(fg0, cv2.GC_PR_FGD, cv2.GC_BGD)
-    mask[(magenta | plume) & fg0] = cv2.GC_BGD
-    mask[(yy >= 398) & (yy < 440) & (xx >= 280) & (xx < 420)] = cv2.GC_BGD
-    sl = lambda x0, y0, x1, y1: (slice(y0 - Y0, y1 - Y0), slice(x0 - X0, x1 - X0))
-    mask[sl(260, 150, 560, 330)] = cv2.GC_FGD
-    mask[sl(560, 200, 760, 330)] = cv2.GC_FGD
-    poly = np.array([(126, 368), (129, 384), (148, 384), (236, 352), (234, 318), (224, 318)]) - (X0, Y0)
-    cv2.fillPoly(mask, [poly.astype(np.int32)], int(cv2.GC_FGD))
-    cv2.line(mask, (250 - X0, 98 - Y0), (326 - X0, 98 - Y0), int(cv2.GC_FGD), 3)
-    cv2.line(mask, (840 - X0, 98 - Y0), (878 - X0, 96 - Y0), int(cv2.GC_FGD), 3)
-
-
 def review(sprites: dict) -> None:
     neb = Image.open(SRC / "nebula-violet.webp").convert("RGBA")
     cell = 220
@@ -245,16 +167,9 @@ def main() -> None:
     SPR.mkdir(parents=True, exist_ok=True)
     for src, dst in WALLPAPERS.items():
         shutil.copyfile(SRC / src, WALL / dst)
-    sprites = {
-        "death_star": strip_checker(SRC / "death-star-checker.webp", sphere=True),
-        "e46_rear": grabcut(SRC / "e46-rear-scene.webp", (115, 78, 925, 493), e46_hints),
-        "enemy_fighter_1": grabcut(SRC / "dogfight-scene.webp", FIGHTER_BOX),
-        **{f"asteroid_{i + 1}": rock_cut(SRC / "dogfight-scene.webp", box) for i, box in enumerate(DOGFIGHT_ROCKS)},
-    }
-    # Optional: the capital ship that orbits in the far background.
-    capital = next(iter(sorted(SRC.glob("capital-ship-checker.*"))), None)
-    if capital:
-        sprites["capital_ship"] = strip_checker(capital)
+    # Ships, rocks and the capital ship are procedural 3D (src/features/sysmap/space/fleet/models.ts);
+    # only the far station is still a sprite.
+    sprites = {"death_star": strip_checker(SRC / "death-star-checker.webp", sphere=True)}
     for name, sp in sprites.items():
         sp.save(SPR / f"{name}.png", optimize=True)
         print(f"{name:18s} {sp.width}x{sp.height}")

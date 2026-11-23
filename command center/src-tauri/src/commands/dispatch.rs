@@ -456,7 +456,9 @@ impl DispatchState {
             let _ = std::fs::create_dir_all(dir);
         }
         let json = serde_json::to_string_pretty(&*self.config.read().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::write(&path, json).map_err(|e| format!("could not write {}: {e}", path.display()))
+        // Atomic (temp + fsync + rename): a plain write truncates first, so a crash or a second
+        // app instance mid-write left a 0-byte providers.json and every launch fell back to defaults.
+        super::staging::atomic_write(&path, json.as_bytes()).map_err(|e| format!("could not write {}: {e}", path.display()))
     }
 
     pub(crate) fn config_dir(&self) -> Option<PathBuf> {
@@ -1775,5 +1777,36 @@ mod part6_tests {
     fn usable_text_none_when_nothing_is_usable() {
         let msg = json!({ "content": Value::Null });
         assert!(usable_text_from_message(&msg).is_none());
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+
+    fn dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("aos-providers-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn persist_writes_whole_file_and_leaves_no_temp() {
+        let d = dir();
+        DispatchState::default().load_or_init(&d);
+        let text = std::fs::read_to_string(d.join("providers.json")).unwrap();
+        assert!(serde_json::from_str::<Config>(&text).is_ok());
+        let stray: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name() != "providers.json").collect();
+        assert!(stray.is_empty(), "temp files left: {stray:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn empty_providers_file_is_not_overwritten_with_defaults() {
+        let d = dir();
+        std::fs::write(d.join("providers.json"), "").unwrap();
+        DispatchState::default().load_or_init(&d);
+        assert_eq!(std::fs::metadata(d.join("providers.json")).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

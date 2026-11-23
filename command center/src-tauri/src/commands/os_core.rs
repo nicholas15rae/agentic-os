@@ -1092,7 +1092,8 @@ impl OsState {
             if let Some(d) = p.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            std::fs::write(&p, serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            // Atomic, like providers.json: never leave a truncated os.json behind.
+            super::staging::atomic_write(&p, serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?.as_bytes())?;
         }
         if let Some(m) = self.mirror.read().unwrap().clone() {
             if let Some(d) = m.parent() {

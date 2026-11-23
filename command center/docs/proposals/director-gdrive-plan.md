@@ -149,3 +149,17 @@ export interface DriveWidgetConfig {
 1. **Scopes:** `drive.readonly` + `drive.file`. `drive.readonly` is a "restricted" scope. For a personal app in Testing mode it works for your own account (you're the test user), but Google shows an "unverified app" screen at consent and **refresh tokens expire after 7 days in Testing mode**. Publishing the consent screen to "In production" (unverified, personal use) avoids the 7-day expiry. Alternative: `drive.file` only, so pulls would come through Google's Picker instead of a folder browser. Simpler consent, but much more UI work.
 2. **Push only verified renders.** Staged raw files, stills and voiceovers can't be uploaded, which keeps it clear what leaves the machine. Thumbnail and stills export can come later.
 3. **One app-wide inbox and outbox.** Not per project. Each push lets you pick another folder.
+
+## 7. Live smoke (2026-11-22, real Google account, app from this branch)
+
+| Step | Result |
+|---|---|
+| Client from the keychain | ✅ `clientConfigured: true` after Settings → Integrations → Google |
+| Connect | ✅ Connected (consent done in the browser by Nic); account shown on the chip |
+| List | ✅ My Drive: folders + media with size / W×H / duration; Google Docs hidden; pagination token present |
+| Pull | ✅ A 58.1 MB phone clip (720×1280, 39.9 s) in 4.2 s; SHA-256 matched Drive's checksum; landed in `raw/` read-only; shown in the staging bin; `drive_sync` pull row |
+| Push (after Nic's OK, via the confirm card) | ✅ A 3.35 MB verified render in 1.6 s; Drive checksum matched; push row with `webViewLink: null` until shared |
+| Share (separate confirm card) | ✅ Link recorded; **Copy link / Open in Drive** shown; the link opens without sign-in (HTTP 200 on drive.google.com, file name shown) |
+| Hardening after the smoke | The gate re-reads status on mount and on window focus (Settings saves emit no event); `cloud_connect` is a no-op when already connected, so it never opens a second consent tab |
+
+The test file `smoke-self-tape_v001.mp4` stays in My Drive (anyone-with-link) until Nic deletes it.

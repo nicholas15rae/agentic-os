@@ -127,6 +127,14 @@ function AccountChip({ account, onDisconnect }: { account: string | null; onDisc
 /** Store-wired gate: subscribes for its lifetime and draws the right state around `children`. */
 export function DriveGate({ compact, children }: { compact?: boolean; children?: ReactNode }) {
   useCloudSession();
+  // Credentials saved in Settings, or a connect finished elsewhere, emit no event here:
+  // re-read the status whenever a gate appears and whenever the window regains focus.
+  useEffect(() => {
+    void refreshStatus();
+    const onFocus = () => void refreshStatus();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
   const status = useCloud((s) => s.status);
   const error = useCloud((s) => s.statusError);
   const connecting = useCloud((s) => s.connecting);

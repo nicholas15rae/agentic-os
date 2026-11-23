@@ -1358,6 +1358,12 @@ pub async fn cloud_status(app: tauri::AppHandle, provider: String) -> Result<Clo
 pub async fn cloud_connect(app: tauri::AppHandle, provider: String) -> Result<CloudStatus, String> {
     check_provider(&provider)?;
     online(&app)?;
+    // Already connected with a working token: never open a second consent tab (to switch
+    // accounts, Disconnect first).
+    let current = emit_status(&app).await;
+    if current.connected {
+        return Ok(current);
+    }
     let drive = drive_for(&app)?;
     {
         let st = app.state::<GdriveState>();

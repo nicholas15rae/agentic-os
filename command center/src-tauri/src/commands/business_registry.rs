@@ -569,6 +569,53 @@ pub fn business_set_archived(business_id: String, archived: bool, approved: Opti
     Ok(view(&s.set_status(&business_id, to)?))
 }
 
+/// Live provisioning against the user's real config dir and AnythingLLM. Writes: it needs
+/// `--ignored` AND `ALLM_LIVE_WRITE=1`. Run with the desktop app closed (it holds the registry
+/// in memory).
+/// `ALLM_LIVE_WRITE=1 cargo test --lib live_provision_seed_businesses -- --ignored --nocapture`
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_provision_seed_businesses() {
+        if !std::env::var("ALLM_LIVE_WRITE").is_ok_and(|v| v == "1") {
+            println!("SKIPPED: set ALLM_LIVE_WRITE=1 to let this test write to AnythingLLM");
+            return;
+        }
+        let dir = PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
+        let state = super::super::dispatch::DispatchState::default();
+        state.load_or_init(&dir);
+        let key = super::super::secrets::get(&state, "anythingllm").expect("AnythingLLM key in the keychain");
+        let mut os = super::super::os_core::OsConfig::default();
+        if let Ok(s) = std::fs::read_to_string(dir.join("os.json")) {
+            if let Ok(c) = serde_json::from_str(&s) {
+                os = c;
+            }
+        }
+        let model = state.snapshot().providers.iter().find(|p| p.id == "lmstudio").map(|p| p.model.clone()).filter(|m| !m.is_empty() && m != "local-model");
+        println!("ALLM {} · model {:?}", os.anythingllm.base_url, model);
+        let w = super::super::allm::AllmWriter::for_ops_provision(super::super::allm::AllmConn::with_key(&state, &os.anythingllm.base_url, key));
+        let store = Store::open(&dir);
+        tauri::async_runtime::block_on(async {
+            for b in store.snapshot().businesses {
+                if b.status == BusinessStatus::Archived {
+                    continue;
+                }
+                let id = b.business_id.clone();
+                if !b.provision.memory_dir {
+                    store.provision_memory(&id).unwrap();
+                }
+                match store.provision_workspace_for(&id, &w, model.as_deref()).await {
+                    Ok(nb) => println!("OK {id}: {:?} workspace {} memory {}", nb.status, nb.workspace_slug, nb.memory_path),
+                    Err(e) => println!("FAILED {id}: {e}"),
+                }
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

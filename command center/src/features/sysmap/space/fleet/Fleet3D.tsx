@@ -3,6 +3,8 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { DROP_IN_BACKDROPS, SPRITE_URLS } from "../space-assets";
 import { useSpace } from "../space-store";
+import { useSysMap } from "../../sysmap-store";
+import { FOLLOW, followTarget, type FollowTarget } from "./follow";
 import { buildCapital, buildE46, buildFighter, buildRockGeometry, glowTexture, rockMaterial, type ShipModel } from "./models";
 import { B_MAX, FleetSim, P_MAX, type Particle } from "./sim";
 
@@ -214,7 +216,7 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
   useEffect(() => {
     sim.nozzles = { e46: kit.e46.nozzles, fighter: kit.fighters[0].nozzles };
     // Courier runs visit the agent planets (the vectors update in place as they orbit).
-    sim.planets = new Map([...positions].filter(([id, v]) => id !== "tony" && v.lengthSq() > 1));
+    sim.planets = new Map([...positions].filter(([id, v]) => id !== "tony" && !id.includes(":") && v.lengthSq() > 1));
   }, [sim, kit, positions]);
   useEffect(() => {
     sim.auto = auto;
@@ -257,6 +259,21 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
     [kit, rockMeshes],
   );
 
+  // Follow-cam targets, and click handlers that start following (planet inspector closes).
+  const follow = useMemo(() => {
+    const e46 = followTarget("ship:e46", 7, "E46 · GABAGOUL");
+    const fighters = kit.fighters.map((_, i) => followTarget(`ship:fighter${i}`, 5, "Interceptor"));
+    const capital = followTarget("ship:capital", 62, "Gabagoul capital ship");
+    return { e46, fighters, capital };
+  }, [kit]);
+  const pick = (key: string) => (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    useSysMap.getState().close();
+    useSpace.getState().setFollow(key);
+  };
+  const hover = (on: boolean) => () => void (document.body.style.cursor = on ? "pointer" : "");
+  useEffect(() => () => void (document.body.style.cursor = ""), []);
+
   const capPos = useMemo(() => new THREE.Vector3(), []);
   const capFwd = useMemo(() => new THREE.Vector3(), []);
   const scratch = useMemo(() => ({ a: new THREE.Vector3(), b: new THREE.Vector3(), q: new THREE.Quaternion(), m: new THREE.Matrix4() }), []);
@@ -271,12 +288,20 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
     const f = sim.flight;
     const models: ShipModel[] = [kit.e46, ...kit.fighters];
     for (const m of models) m.root.visible = false;
+    follow.e46.visible = false;
+    for (const t of follow.fighters) t.visible = false;
     if (f) {
       let fi = 0;
       for (const s of f.ships) {
+        const t: FollowTarget | undefined = s.player ? follow.e46 : follow.fighters[fi];
         const m = s.player ? kit.e46 : kit.fighters[fi++];
         if (!m) continue;
         m.root.visible = true;
+        if (t) {
+          t.pos.copy(s.pos);
+          t.fwd.copy(s.fwd);
+          t.visible = s.live;
+        }
         m.root.position.copy(s.pos);
         m.root.quaternion.copy(s.quat);
         const speedK = THREE.MathUtils.clamp(s.speed / 9, 0.5, 1.5);
@@ -358,6 +383,19 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
     const y = scratch.a.crossVectors(capFwd, x);
     scratch.m.makeBasis(x, y, capFwd);
     kit.capital.root.quaternion.setFromRotationMatrix(scratch.m);
+    follow.capital.pos.copy(capPos);
+    follow.capital.fwd.copy(capFwd);
+    follow.capital.visible = true;
+    // A followed ship that stays off stage (flight over) releases the camera.
+    const fk = useSpace.getState().follow;
+    const ft = fk ? FOLLOW.get(fk) : undefined;
+    if (fk && ft) {
+      ft.hiddenFor = ft.visible ? 0 : ft.hiddenFor + dt;
+      if (ft.hiddenFor > 6) {
+        ft.hiddenFor = 0;
+        useSpace.getState().setFollow(null);
+      }
+    }
     for (const [i, gl] of kit.capital.glows.entries()) gl.scale.setScalar((gl.userData.base as number) * (0.9 + 0.08 * Math.sin(now * 3 + i)));
 
     // Far station: a billboard far beyond the system, fading in and out.
@@ -375,11 +413,11 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
     <group>
       <NebulaEnvironment />
       <FleetLights />
-      <primitive object={kit.e46.root} />
+      <primitive object={kit.e46.root} onClick={pick("ship:e46")} onPointerOver={hover(true)} onPointerOut={hover(false)} />
       {kit.fighters.map((m, i) => (
-        <primitive key={i} object={m.root} />
+        <primitive key={i} object={m.root} onClick={pick(`ship:fighter${i}`)} onPointerOver={hover(true)} onPointerOut={hover(false)} />
       ))}
-      <primitive object={kit.capital.root} />
+      <primitive object={kit.capital.root} onClick={pick("ship:capital")} onPointerOver={hover(true)} onPointerOut={hover(false)} />
       {rockMeshes.map((m, i) => (
         <primitive key={i} object={m} />
       ))}

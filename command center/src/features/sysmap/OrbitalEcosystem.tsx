@@ -17,6 +17,7 @@ import { DeepSpaceBackdrop, type CameraView } from "./space/DeepSpaceBackdrop";
 import { SpaceControls } from "./space/SpaceControls";
 import { useSpace } from "./space/space-store";
 import { Fleet3D } from "./space/fleet/Fleet3D";
+import { chaseOffset, FOLLOW, isShipKey } from "./space/fleet/follow";
 import { agentFor, BUSES, hookupsFor, isRoster, modelName, moonSize, NODE_BUS, NODE_LABEL, orbitPos, ORBITS, ROSTER, surfaceState, SURFACE_TONE, type Orbit, type RosterId } from "./model";
 import { ARC_FRAG, ARC_VERT, ATMO_FRAG, BODY_VERT, NEBULA_FRAG, NEBULA_VERT, PLANET_FRAG, RING_FRAG, RING_VERT, STAR_FRAG, STARS_FRAG, STARS_VERT } from "./orbital-shaders";
 
@@ -472,9 +473,21 @@ function Arc({ h, positions }: { h: Handoff & { key: number }; positions: Positi
 
 function CameraRig({ focus, positions, controls, homeReq }: { focus: string | null; positions: Positions; controls: MutableRefObject<OrbitControlsImpl | null>; homeReq: number }) {
   const camera = useThree((s) => s.camera);
-  const fly = useRef<{ id: string | null; t0: number; offset: THREE.Vector3; prev: THREE.Vector3 } | null>(null);
+  // `el`: seconds of rendered flight (frame time, so a throttled / hidden window still flies in).
+  const fly = useRef<{ id: string | null; el: number; offset: THREE.Vector3; prev: THREE.Vector3 } | null>(null);
+  // Planets come from `positions`; followed ships from the fleet's follow registry.
+  const targetOf = (id: string) => (isShipKey(id) ? FOLLOW.get(id)?.pos : positions.get(id));
   useEffect(() => {
-    if (!focus) return;
+    if (!focus) {
+      // Released a followed ship: stop riding along (the camera stays where it is).
+      if (isShipKey(fly.current?.id)) fly.current = null;
+      return;
+    }
+    if (isShipKey(focus)) {
+      const t = FOLLOW.get(focus);
+      if (t) fly.current = { id: focus, el: 0, offset: chaseOffset(t), prev: t.pos.clone() };
+      return;
+    }
     const p = positions.get(focus);
     if (!p) return;
     const o = isRoster(focus) ? ORBITS[focus] : null;
@@ -482,7 +495,7 @@ function CameraRig({ focus, positions, controls, homeReq }: { focus: string | nu
     const dir = camera.position.clone().sub(p).normalize();
     dir.y = Math.max(dir.y, 0.35);
     dir.normalize();
-    fly.current = { id: focus, t0: performance.now(), offset: dir.multiplyScalar(dist), prev: p.clone() };
+    fly.current = { id: focus, el: 0, offset: dir.multiplyScalar(dist), prev: p.clone() };
   }, [focus, positions, camera]);
   // The Deep Inspector covers the right side: shift the projection centre left by half its width
   // so the focused body lands in the visible part of the canvas.
@@ -490,26 +503,36 @@ function CameraRig({ focus, positions, controls, homeReq }: { focus: string | nu
   const invalidate = useThree((s) => s.invalidate);
   useEffect(() => {
     const cam = camera as THREE.PerspectiveCamera;
-    const shift = focus && size.width > 700 ? Math.min(420, size.width) / 2 : 0;
+    const shift = focus && !isShipKey(focus) && size.width > 700 ? Math.min(420, size.width) / 2 : 0;
     if (shift) cam.setViewOffset(size.width, size.height, shift, 0, size.width, size.height);
     else cam.clearViewOffset();
     invalidate();
   }, [focus, size.width, size.height, camera, invalidate]);
   useEffect(() => {
     if (homeReq === 0) return;
-    fly.current = { id: null, t0: performance.now(), offset: HOME_POS.clone(), prev: HOME_TARGET.clone() };
+    fly.current = { id: null, el: 0, offset: HOME_POS.clone(), prev: HOME_TARGET.clone() };
   }, [homeReq]);
   useFrame((_, dt) => {
     const f = fly.current;
     const ctl = controls.current;
     if (!f || !ctl) return;
-    const target = f.id ? positions.get(f.id) : HOME_TARGET;
+    const target = f.id ? targetOf(f.id) : HOME_TARGET;
     if (!target) return;
-    // Frame-rate independent ease, but never slower than 8 % a frame (a throttled window still lands).
-    const k = Math.max(0.08, 1 - Math.exp(-Math.min(dt, 0.1) * 3.2));
+    const ship = f.id && isShipKey(f.id) ? FOLLOW.get(f.id) : undefined;
+    // A followed ship between passes: hold position until it's back on stage.
+    if (ship && !ship.visible) return;
+    // It came back somewhere else (next pass of a sortie): fly to it again rather than jump.
+    if (ship && target.distanceTo(f.prev) > 8) {
+      f.el = 0;
+      chaseOffset(ship, f.offset);
+    }
+    // Frame-rate independent ease, but never slower than 8 % a frame (a throttled window still
+    // lands). Ships move fast: chase harder.
+    const k = Math.max(0.08, 1 - Math.exp(-Math.min(dt, 0.1) * (ship ? 6 : 3.2)));
     const dest = f.id ? target.clone().add(f.offset) : f.offset;
-    // Fly until it lands (or 5 s at worst), then follow.
-    const flying = (camera.position.distanceTo(dest) > 0.05 || ctl.target.distanceTo(target) > 0.05) && performance.now() - f.t0 < 5000;
+    // Fly until it lands (or 5 s of frames at worst), then follow.
+    f.el += Math.min(dt, 0.1);
+    const flying = (camera.position.distanceTo(dest) > 0.05 || ctl.target.distanceTo(target) > 0.05) && f.el < 5;
     if (flying) {
       ctl.target.lerp(target, k);
       camera.position.lerp(dest, k);
@@ -636,6 +659,23 @@ export function OrbitalEcosystem() {
   const [homeReq, setHomeReq] = useState(0);
   const customBackdrop = useBackdropActive("orbital");
   const spaceMode = useSpace((s) => s.mode);
+  const follow = useSpace((s) => s.follow);
+  const setFollow = useSpace((s) => s.setFollow);
+  const following = follow && isShipKey(follow) ? FOLLOW.get(follow) : undefined;
+  // Esc releases the follow cam; leaving the space modes does too.
+  useEffect(() => {
+    if (!follow) return;
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setFollow(null);
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [follow, setFollow]);
+  useEffect(() => {
+    if (spaceMode === "minimal") setFollow(null);
+  }, [spaceMode, setFollow]);
+  const pickBody = (id: RosterId) => {
+    setFollow(null);
+    open(id);
+  };
   const engine = spaceMode !== "minimal";
   // Any DOM backdrop behind the canvas (imported wallpaper or the deep-space engine) → transparent clear.
   const backdrop = customBackdrop || engine;
@@ -673,13 +713,16 @@ export function OrbitalEcosystem() {
         camera={{ position: [HOME_POS.x, HOME_POS.y, HOME_POS.z], fov: 45, near: 0.1, far: 600 }}
         gl={{ antialias: true, powerPreference: "default", alpha: true }}
         style={{ position: "absolute", inset: 0, zIndex: 10 }}
-        onPointerMissed={() => close()}
+        onPointerMissed={() => {
+          close();
+          setFollow(null);
+        }}
       >
         <Ticker running={running} />
-        <Scene live={live} running={running} reduced={reduced} pulses={pulses} focus={inspect && isRoster(inspect) ? inspect : null} onPick={(id) => open(id)} homeReq={homeReq} positions={positions} els={els} backdrop={backdrop} stars3d={!engine} view={view} />
+        <Scene live={live} running={running} reduced={reduced} pulses={pulses} focus={inspect && isRoster(inspect) ? inspect : isShipKey(follow) ? follow : null} onPick={pickBody} homeReq={homeReq} positions={positions} els={els} backdrop={backdrop} stars3d={!engine} view={view} />
       </Canvas>
       <div className="absolute inset-0 z-20 pointer-events-none">
-        <Callouts live={live} hud={hud} els={els} onPick={(id) => open(id)} />
+        <Callouts live={live} hud={hud} els={els} onPick={pickBody} />
       </div>
 
       <div className="pointer-events-none absolute left-4 top-4 z-20 space-y-1 font-mono">
@@ -692,6 +735,15 @@ export function OrbitalEcosystem() {
             </span>
           ))}
         </div>
+        {following && (
+          <p className="pointer-events-auto flex items-center gap-2 pt-1 text-[10px] tracking-[0.12em] text-sky-200">
+            <span className="size-1.5 animate-pulse rounded-full bg-sky-300" />
+            FOLLOWING {following.label.toUpperCase()} · drag to orbit · Esc to release
+            <button type="button" className="sysmap-ctl !px-1.5 !py-0 text-[10px]" onClick={() => setFollow(null)}>
+              Release
+            </button>
+          </p>
+        )}
         {!snap && <p className="text-[10px] text-amber-light">{isTauri() ? "Waiting for the engine…" : "Live states need the desktop engine."}</p>}
       </div>
       <div className="absolute bottom-3 left-3 z-20 flex gap-1">
@@ -700,6 +752,7 @@ export function OrbitalEcosystem() {
           className="sysmap-ctl"
           onClick={() => {
             close();
+            setFollow(null);
             setHomeReq((n) => n + 1);
           }}
         >

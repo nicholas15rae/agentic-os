@@ -24,6 +24,9 @@ interface SpaceStore {
   /** Bumped by the preview buttons; `flybyKind` says which event. */
   flybyReq: number;
   flybyKind: TriggerKind;
+  /** Follow-cam target (`ship:e46`, `ship:fighter0`, `ship:capital`…); null = free camera. Not persisted. */
+  follow: string | null;
+  setFollow: (k: string | null) => void;
   /** The showing nebula's colour grade (lights the 3D fleet). Not persisted. */
   grade: Grade | null;
   setGrade: (g: Grade) => void;
@@ -46,6 +49,8 @@ export const useSpace = create<SpaceStore>()(
       flybyKind: "random",
       nextReq: 0,
       grade: null,
+      follow: null,
+      setFollow: (follow) => set({ follow }),
       setGrade: (grade) => set({ grade }),
       setMode: (mode) => set({ mode }),
       setFlybys: (flybys) => set({ flybys }),

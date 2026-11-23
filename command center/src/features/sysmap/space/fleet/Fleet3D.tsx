@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { DROP_IN_BACKDROPS, SPRITE_URLS } from "../space-assets";
@@ -129,23 +129,62 @@ function NebulaEnvironment() {
   return null;
 }
 
-/** Sun, key, camera fill and sky — key and sky follow the nebula's colour grade. */
-function FleetLights() {
+/**
+ * Cinematic three-point lighting that travels with the camera, so every angle you orbit to is
+ * lit like a render: a hard key from above-left (casting soft shadows across the hero ship), a
+ * strong nebula-coloured rim from behind, a faint fill, and the sun as a warm practical.
+ */
+function FleetLights({ focus }: { focus: MutableRefObject<THREE.Vector3 | null> }) {
   const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const key = useRef<THREE.DirectionalLight>(null);
+  const rim = useRef<THREE.DirectionalLight>(null);
   const fill = useRef<THREE.DirectionalLight>(null);
-  // A soft fill from the viewer's side, so whatever you orbit to is readable (the sun is the key).
-  useFrame(() => fill.current?.position.copy(camera.position));
   const grade = useSpace((s) => s.grade);
-  // Sky fill takes only a hint of the nebula's colour (full strength paints the hulls purple).
-  const tint = (grade ? new THREE.Color(`rgb(${grade.tint.map((v) => v | 0).join(",")})`) : new THREE.Color("#8fa0ff")).lerp(new THREE.Color("#ffffff"), 0.55);
-  const light = grade ? new THREE.Color(`rgb(${grade.light.map((v) => v | 0).join(",")})`) : new THREE.Color("#e8ecff");
-  const dir = grade?.dir ?? { x: 0.4, y: -0.5 };
+  const rimColor = (grade ? new THREE.Color(`rgb(${grade.light.map((v) => v | 0).join(",")})`) : new THREE.Color("#c9a8ff")).lerp(new THREE.Color("#ffffff"), 0.25);
+  const sky = (grade ? new THREE.Color(`rgb(${grade.tint.map((v) => v | 0).join(",")})`) : new THREE.Color("#8fa0ff")).lerp(new THREE.Color("#ffffff"), 0.4);
+  useEffect(() => {
+    gl.shadowMap.enabled = true;
+    gl.shadowMap.type = THREE.PCFSoftShadowMap;
+  }, [gl]);
+  const v = useMemo(() => ({ right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3(), at: new THREE.Vector3() }), []);
+  useFrame(() => {
+    // Camera basis: +Z points back towards the viewer.
+    camera.matrixWorld.extractBasis(v.right, v.up, v.back);
+    // Light around the hero ship when one is on stage, else around the middle of the view.
+    const at = focus.current ?? v.at.copy(camera.position).addScaledVector(v.back, -30);
+    const place = (l: THREE.DirectionalLight | null, r: number, u: number, b: number) => {
+      if (!l) return;
+      l.position.copy(at).addScaledVector(v.right, r * 20).addScaledVector(v.up, u * 20).addScaledVector(v.back, b * 20);
+      l.target.position.copy(at);
+      l.target.updateMatrixWorld();
+    };
+    place(key.current, -0.55, 0.75, 0.35);
+    place(rim.current, 0.35, 0.45, -1);
+    place(fill.current, 0.7, -0.1, 0.7);
+  });
   return (
     <>
-      <pointLight position={[0, 0, 0]} color="#ffc38a" intensity={3.2} distance={0} decay={0} />
-      <directionalLight position={[dir.x * 60, -dir.y * 50 + 20, 40]} color={light} intensity={1.1} />
-      <directionalLight ref={fill} color="#f3f1ec" intensity={0.9} />
-      <hemisphereLight args={[tint, "#1a1020", 0.4]} />
+      <pointLight position={[0, 0, 0]} color="#ffc38a" intensity={2.2} distance={0} decay={0} />
+      <directionalLight
+        ref={key}
+        color="#fff4e6"
+        intensity={2.6}
+        castShadow
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-camera-left={-5}
+        shadow-camera-right={5}
+        shadow-camera-top={5}
+        shadow-camera-bottom={-5}
+        shadow-camera-near={1}
+        shadow-camera-far={45}
+        shadow-bias={-0.0004}
+        shadow-normalBias={0.02}
+      />
+      <directionalLight ref={rim} color={rimColor} intensity={3.2} />
+      <directionalLight ref={fill} color="#bcd0ff" intensity={0.28} />
+      <hemisphereLight args={[sky, "#120a18", 0.18]} />
     </>
   );
 }
@@ -173,6 +212,46 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.setColorAt(0, C.set("#ffffff"));
     }
+    // Exhaust plume: an open cone, bright at the nozzle and fading along its length.
+    const plumeTex = (() => {
+      const c = document.createElement("canvas");
+      c.width = 4;
+      c.height = 128;
+      const g = c.getContext("2d")!;
+      const grd = g.createLinearGradient(0, 0, 0, 128);
+      grd.addColorStop(0, "rgba(255,255,255,0)");
+      grd.addColorStop(0.5, "rgba(255,255,255,0.12)");
+      grd.addColorStop(0.9, "rgba(255,255,255,0.55)");
+      grd.addColorStop(1, "rgba(255,255,255,0.8)");
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 4, 128);
+      return new THREE.CanvasTexture(c);
+    })();
+    const plumeGeo = new THREE.ConeGeometry(1, 1, 20, 1, true);
+    plumeGeo.translate(0, 0.5, 0); // wide base (nozzle end) at y = 0, apex at y = 1
+    plumeGeo.rotateX(-Math.PI / 2); // apex trails back along -Z, tapering away from the nozzle
+    const plumes = (m: ShipModel, color: string, radius: number) =>
+      m.nozzles.map((n) => {
+        const mat = new THREE.MeshBasicMaterial({ color, alphaMap: plumeTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+        const p = new THREE.Mesh(plumeGeo, mat);
+        // Nozzles are stored post-scale; the plume is a child of the scaled root.
+        p.position.copy(n).divideScalar(m.root.scale.x);
+        p.scale.set(radius, radius, 1);
+        p.userData.radius = radius;
+        m.root.add(p);
+        return p;
+      });
+    const e46Plumes = plumes(e46, "#5fe2ff", 0.2);
+    const fighterPlumes = fighters.map((f) => plumes(f, "#ff5a3a", 0.16));
+    // Hulls cast and catch the key light's soft shadow.
+    for (const m of [e46, ...fighters])
+      m.root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh && !(mesh.material as THREE.Material).transparent) {
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+        }
+      });
     const pGeo = new THREE.BufferGeometry();
     pGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(P_MAX * 3), 3).setUsage(THREE.DynamicDrawUsage));
     pGeo.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(P_MAX * 3), 3).setUsage(THREE.DynamicDrawUsage));
@@ -190,7 +269,7 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
         station.material.needsUpdate = true;
       });
     station.visible = false;
-    return { glow, e46, fighters, capital, rockGeos, rockMat, boltCore, boltGlow, points, station };
+    return { glow, e46, fighters, capital, rockGeos, rockMat, boltCore, boltGlow, points, station, e46Plumes, fighterPlumes };
   }, []);
 
   const sim = useMemo(() => new FleetSim(), []);
@@ -274,6 +353,8 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
   const hover = (on: boolean) => () => void (document.body.style.cursor = on ? "pointer" : "");
   useEffect(() => () => void (document.body.style.cursor = ""), []);
 
+  /** Where the key light (and its shadow) centres: the followed ship, else the E46 in flight. */
+  const hero = useRef<THREE.Vector3 | null>(null);
   const capPos = useMemo(() => new THREE.Vector3(), []);
   const capFwd = useMemo(() => new THREE.Vector3(), []);
   const scratch = useMemo(() => ({ a: new THREE.Vector3(), b: new THREE.Vector3(), q: new THREE.Quaternion(), m: new THREE.Matrix4() }), []);
@@ -305,6 +386,14 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
         m.root.position.copy(s.pos);
         m.root.quaternion.copy(s.quat);
         const speedK = THREE.MathUtils.clamp(s.speed / 9, 0.5, 1.5);
+        const pl = s.player ? kit.e46Plumes : kit.fighterPlumes[fi - 1];
+        for (const [i, p] of (pl ?? []).entries()) {
+          const flick = 0.9 + 0.1 * Math.sin(now * 23 + i * 5) + 0.06 * Math.random();
+          // Plume length (model metres): longer the harder it's pushing.
+          p.scale.z = (s.player ? 3.6 : 2.4) * speedK * flick;
+          const r = (p.userData.radius as number) * (0.92 + 0.12 * flick);
+          p.scale.x = p.scale.y = r;
+        }
         for (const [i, g] of m.glows.entries()) {
           const flick = 0.85 + 0.1 * Math.sin(now * 31 + i * 7) + 0.08 * Math.random();
           g.scale.setScalar((g.userData.base as number) * flick * (0.75 + speedK * 0.35));
@@ -386,6 +475,9 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
     follow.capital.pos.copy(capPos);
     follow.capital.fwd.copy(capFwd);
     follow.capital.visible = true;
+    const fkNow = useSpace.getState().follow;
+    const ftNow = fkNow ? FOLLOW.get(fkNow) : undefined;
+    hero.current = ftNow?.visible ? ftNow.pos : follow.e46.visible ? follow.e46.pos : null;
     // A followed ship that stays off stage (flight over) releases the camera.
     const fk = useSpace.getState().follow;
     const ft = fk ? FOLLOW.get(fk) : undefined;
@@ -412,7 +504,7 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
   return (
     <group>
       <NebulaEnvironment />
-      <FleetLights />
+      <FleetLights focus={hero} />
       <primitive object={kit.e46.root} onClick={pick("ship:e46")} onPointerOver={hover(true)} onPointerOut={hover(false)} />
       {kit.fighters.map((m, i) => (
         <primitive key={i} object={m.root} onClick={pick(`ship:fighter${i}`)} onPointerOver={hover(true)} onPointerOut={hover(false)} />

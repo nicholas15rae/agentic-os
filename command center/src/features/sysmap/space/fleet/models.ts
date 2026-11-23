@@ -82,6 +82,43 @@ function texture(c: HTMLCanvasElement, srgb = true, repeat?: [number, number]) {
   return t;
 }
 
+/**
+ * Tangent-space normal map from a canvas texture's luminance (bright = raised), wrapping at the
+ * edges so tiled textures stay seamless. Same repeat as the source.
+ */
+function normalFrom(src: THREE.CanvasTexture, strength: number, invert = false): THREE.Texture {
+  const c = src.image as HTMLCanvasElement;
+  const W = c.width;
+  const H = c.height;
+  const d = c.getContext("2d")!.getImageData(0, 0, W, H).data;
+  const h = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    const l = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) / 255;
+    h[i] = invert ? 1 - l : l;
+  }
+  const [out, g] = canvas(W, H);
+  const img = g.createImageData(W, H);
+  const at = (x: number, y: number) => h[((y + H) % H) * W + ((x + W) % W)];
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const dx = (at(x + 1, y) - at(x - 1, y)) * strength;
+      const dy = (at(x, y + 1) - at(x, y - 1)) * strength;
+      const len = Math.hypot(dx, dy, 1);
+      const i = (y * W + x) * 4;
+      img.data[i] = (-dx / len) * 127.5 + 127.5;
+      img.data[i + 1] = (dy / len) * 127.5 + 127.5;
+      img.data[i + 2] = (1 / len) * 127.5 + 127.5;
+      img.data[i + 3] = 255;
+    }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(out);
+  t.wrapS = src.wrapS;
+  t.wrapT = src.wrapT;
+  t.repeat.copy(src.repeat);
+  t.anisotropy = 4;
+  return t;
+}
+
 /** Weathered paint: soft grime, faint rust freckles, a few scuffs (colour map, multiplies). */
 function grimeTexture(seed: number) {
   const W = 256;
@@ -110,6 +147,19 @@ function grimeTexture(seed: number) {
       img.data[i + 3] = 255;
     }
   g.putImageData(img, 0, 0);
+  // Rust run-off: thin streaks dripping down (canvas y is down the panel on the body sides).
+  let s = seed * 7919;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  for (let i = 0; i < 26; i++) {
+    const x = rnd() * W;
+    const y = rnd() * W * 0.8;
+    const len = 20 + rnd() * 70;
+    const grd = g.createLinearGradient(x, y, x, y + len);
+    grd.addColorStop(0, "rgba(120,62,30,0.55)");
+    grd.addColorStop(1, "rgba(120,62,30,0)");
+    g.fillStyle = grd;
+    g.fillRect(x, y, 1 + rnd() * 2.2, len);
+  }
   return texture(c, true, [2, 2]);
 }
 
@@ -342,11 +392,13 @@ function addGlow(model: ShipModel, at: THREE.Vector3, color: string, size: numbe
 
 /** Built in metres (4.5 m long), scaled to world units by `scale`. */
 export function buildE46(glowTex: THREE.Texture, scale = 0.65): ShipModel {
-  const paint = new THREE.MeshPhysicalMaterial({ color: "#c3cbd4", map: grimeTexture(4), roughnessMap: roughTexture(9), metalness: 0.5, roughness: 0.34, clearcoat: 0.8, clearcoatRoughness: 0.18, envMapIntensity: 1.3 });
+  // Real car paint: a softer metallic base coat under a near-mirror clear coat.
+  const paint = new THREE.MeshPhysicalMaterial({ color: "#c0c8d1", map: grimeTexture(4), roughnessMap: roughTexture(9), metalness: 0.42, roughness: 0.48, clearcoat: 1, clearcoatRoughness: 0.05, envMapIntensity: 1.5 });
   const blue = new THREE.MeshPhysicalMaterial({ color: "#6a7d96", map: grimeTexture(8), metalness: 0.45, roughness: 0.42, clearcoat: 0.5 });
   const glass = new THREE.MeshPhysicalMaterial({ color: "#0b0f14", metalness: 0.3, roughness: 0.04, clearcoat: 1, clearcoatRoughness: 0.03, envMapIntensity: 1.6 });
   const trim = new THREE.MeshStandardMaterial({ color: "#26292e", metalness: 0.4, roughness: 0.62 });
-  const steel = new THREE.MeshStandardMaterial({ color: "#a7aeb7", map: panelTexture(3, "#b0b7c0", "rgba(40,44,50,0.55)"), metalness: 0.6, roughness: 0.36, envMapIntensity: 1.2 });
+  const steelMap = panelTexture(3, "#b0b7c0", "rgba(40,44,50,0.28)");
+  const steel = new THREE.MeshStandardMaterial({ color: "#a7aeb7", map: steelMap, normalMap: normalFrom(steelMap, 2.2), metalness: 0.6, roughness: 0.36, envMapIntensity: 1.2 });
   const red = new THREE.MeshStandardMaterial({ color: "#5a0806", emissive: "#ff2a14", emissiveIntensity: 1.6, roughness: 0.3 });
   const lamp = new THREE.MeshStandardMaterial({ color: "#dfe8ff", emissive: "#cfe0ff", emissiveIntensity: 0.9, roughness: 0.15 });
   const rubber = new THREE.MeshStandardMaterial({ color: "#121315", roughness: 0.9 });
@@ -364,7 +416,7 @@ export function buildE46(glowTex: THREE.Texture, scale = 0.65): ShipModel {
       [0.95, 0.95], [-1.95, 0.98], [-2.16, 0.95], [-2.24, 0.78], [-2.25, 0.4],
     ],
     W,
-    0.1,
+    0.17,
   );
   car.add(mesh(lower, paint));
   // Dark lower cladding and the side rub strip.
@@ -393,6 +445,87 @@ export function buildE46(glowTex: THREE.Texture, scale = 0.65): ShipModel {
     pillar(x, -2.02, 0.98, -1.9, 1.38);
   }
 
+  // Shut-lines (door and hatch seams), slightly proud of the panels so they always read.
+  const seam = new THREE.MeshStandardMaterial({ color: "#14161a", roughness: 0.8 });
+  for (const side of [-1, 1]) {
+    for (const z of [0.98, -0.36, -1.42]) car.add(mesh(new THREE.BoxGeometry(0.01, 0.6, 0.012), seam, [side * 0.876, 0.66, z]));
+    car.add(mesh(new THREE.BoxGeometry(0.01, 0.012, 2.4), seam, [side * 0.876, 0.94, -0.2]));
+    // Door handles and mirrors.
+    for (const z of [0.55, -0.85]) car.add(mesh(new THREE.BoxGeometry(0.03, 0.03, 0.14), steel, [side * 0.885, 0.82, z]));
+    const mirror = new THREE.Group();
+    mirror.position.set(side * 0.93, 1.0, 0.9);
+    mirror.add(mesh(new THREE.BoxGeometry(0.16, 0.1, 0.06), paint));
+    mirror.add(mesh(new THREE.BoxGeometry(0.06, 0.03, 0.08), trim, [-side * 0.08, -0.03, 0]));
+    car.add(mirror);
+  }
+  // Hatch: roundel, wiper, handle bar.
+  const roundel = (() => {
+    const [c, g] = canvas(64, 64);
+    g.fillStyle = "#111";
+    g.beginPath();
+    g.arc(32, 32, 31, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = "#e8e8e8";
+    g.beginPath();
+    g.arc(32, 32, 20, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = "#1c69d4";
+    for (const [a0, a1] of [[-Math.PI / 2, 0], [Math.PI / 2, Math.PI]]) {
+      g.beginPath();
+      g.moveTo(32, 32);
+      g.arc(32, 32, 20, a0, a1);
+      g.fill();
+    }
+    return texture(c);
+  })();
+  car.add(mesh(new THREE.CircleGeometry(0.06, 24), new THREE.MeshStandardMaterial({ map: roundel, metalness: 0.4, roughness: 0.3 }), [0, 0.9, -2.272], [0, Math.PI, 0]));
+  const wiper = mesh(new THREE.BoxGeometry(0.55, 0.018, 0.02), trim, [0.05, 1.07, -2.1]);
+  wiper.rotation.set(-0.32, 0, 0.18);
+  car.add(wiper);
+  car.add(mesh(new THREE.BoxGeometry(0.3, 0.035, 0.03), steel, [0, 0.74, -2.27]));
+  // Two steel straps over the hatch, roof to plate.
+  const strut = (x0: number, x1: number, z0: number, y0: number, z1: number, y1: number) => {
+    const len = Math.hypot(z1 - z0, y1 - y0, x1 - x0);
+    const m = mesh(new THREE.BoxGeometry(0.05, len, 0.035), steel, [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2]);
+    m.rotation.x = Math.atan2(z1 - z0, y1 - y0);
+    car.add(m);
+  };
+  for (const sx of [-1, 1]) {
+    strut(sx * 0.2, sx * 0.16, -1.9, 1.47, -2.15, 1.0);
+    strut(sx * 0.16, sx * 0.13, -2.19, 0.98, -2.3, 0.62);
+  }
+
+  const livery = (() => {
+    const [c, g] = canvas(512, 160);
+    g.clearRect(0, 0, 512, 160);
+    // Diagonal hazard band (rear quarter).
+    g.save();
+    g.beginPath();
+    g.rect(300, 20, 150, 26);
+    g.clip();
+    g.fillStyle = "#2b3442";
+    g.fillRect(300, 20, 150, 26);
+    g.fillStyle = "#d9dde2";
+    for (let x = 280; x < 470; x += 18) {
+      g.beginPath();
+      g.moveTo(x, 46);
+      g.lineTo(x + 9, 46);
+      g.lineTo(x + 35, 20);
+      g.lineTo(x + 26, 20);
+      g.fill();
+    }
+    g.restore();
+    g.fillStyle = "rgba(30,36,46,0.85)";
+    g.font = "bold 20px 'Arial Narrow', Arial, sans-serif";
+    g.fillText("GAB SQUADRON · 001", 60, 70);
+    // Blue-grey lower stripe.
+    g.fillStyle = "rgba(78,98,124,0.9)";
+    g.fillRect(0, 112, 512, 26);
+    return texture(c);
+  })();
+  const liveryMat = new THREE.MeshStandardMaterial({ map: livery, transparent: true, roughness: 0.4, metalness: 0.3, polygonOffset: true, polygonOffsetFactor: -2 });
+  for (const side of [-1, 1]) car.add(mesh(new THREE.PlaneGeometry(2.6, 0.81), liveryMat, [side * 0.873, 0.62, -0.7], [0, side * Math.PI / 2, 0]));
+
   // Front: kidney grille, headlights. Rear: tail-lights, plate, hatch handle.
   for (const x of [-0.14, 0.14]) car.add(mesh(new THREE.BoxGeometry(0.2, 0.16, 0.06), trim, [x, 0.66, 2.24]));
   for (const x of [-0.58, 0.58]) car.add(mesh(new THREE.BoxGeometry(0.44, 0.13, 0.06), lamp, [x, 0.67, 2.2]));
@@ -415,40 +548,56 @@ export function buildE46(glowTex: THREE.Texture, scale = 0.65): ShipModel {
     }
 
   // Tail engines under the plate: four nozzles with cyan cores.
-  const bell = new THREE.CylinderGeometry(0.15, 0.18, 0.3, 24, 1, true);
+  const bell = new THREE.CylinderGeometry(0.2, 0.22, 0.42, 32, 1, true);
   bell.rotateX(Math.PI / 2);
-  const core = new THREE.CircleGeometry(0.13, 24);
-  for (const x of [-0.62, -0.22, 0.22, 0.62]) {
-    car.add(mesh(bell, steel, [x, 0.42, -2.42]));
-    car.add(mesh(core, cyan, [x, 0.42, -2.5], [0, Math.PI, 0]));
-    addGlow(model, new THREE.Vector3(x, 0.42, -2.62), "#55d8ff", 0.9, glowTex);
+  const lip = new THREE.TorusGeometry(0.205, 0.03, 10, 32);
+  const core = new THREE.CircleGeometry(0.17, 32);
+  car.add(mesh(new THREE.BoxGeometry(1.75, 0.5, 0.36), trim, [0, 0.4, -2.3]));
+  for (const x of [-0.66, -0.23, 0.23, 0.66]) {
+    car.add(mesh(bell, steel, [x, 0.38, -2.5]));
+    car.add(mesh(lip, steel, [x, 0.38, -2.71]));
+    car.add(mesh(core, cyan, [x, 0.38, -2.55], [0, Math.PI, 0]));
+    addGlow(model, new THREE.Vector3(x, 0.38, -2.78), "#55d8ff", 1.25, glowTex);
   }
+  // Tow ladder under the plate.
+  for (const y of [0.3, 0.4, 0.5]) car.add(mesh(new THREE.BoxGeometry(0.16, 0.025, 0.03), steel, [0, y, -2.5]));
 
-  // X-wings off the rear quarters, with tip cannons.
-  const wingGeo = taperPanel(2.0, 1.1, 0.45, -0.25, 0.07);
-  const cannon = new THREE.CylinderGeometry(0.1, 0.1, 1.15, 16);
-  cannon.rotateX(Math.PI / 2);
-  const barrel = new THREE.CylinderGeometry(0.035, 0.035, 1.0, 10);
+  // X-wings as in the renders: uppers spring from the roof line, lowers from the sills, both
+  // rooted behind the B-pillar and splayed wide; fat cannon pods with a cyan aft ring.
+  const wingGeo = taperPanel(2.45, 1.35, 0.5, -0.45, 0.07);
+  const pod = new THREE.CylinderGeometry(0.13, 0.13, 1.0, 20);
+  pod.rotateX(Math.PI / 2);
+  const podRing = new THREE.TorusGeometry(0.13, 0.025, 8, 20);
+  const barrel = new THREE.CylinderGeometry(0.032, 0.032, 1.35, 10);
   barrel.rotateX(Math.PI / 2);
-  const intake = new THREE.CircleGeometry(0.085, 16);
+  const hider = new THREE.CylinderGeometry(0.05, 0.05, 0.16, 10);
+  hider.rotateX(Math.PI / 2);
+  const aft = new THREE.CircleGeometry(0.11, 20);
+  const drum = new THREE.CylinderGeometry(0.24, 0.24, 0.42, 24);
+  drum.rotateZ(Math.PI / 2);
   for (const side of [-1, 1])
     for (const up of [-1, 1]) {
       const wing = new THREE.Group();
-      wing.position.set(side * 0.82, 0.72, -1.0);
+      wing.position.set(side * (up > 0 ? 0.74 : 0.86), up > 0 ? 1.3 : 0.32, -0.75);
       // Mirror (not rotate) the left pair so the cannons still point forwards.
       wing.scale.x = side;
-      wing.rotation.z = up * 0.36 * side;
+      wing.rotation.z = up * (up > 0 ? 0.62 : 0.5) * side;
       wing.add(mesh(wingGeo, steel));
-      // Stripe and root fairing.
-      wing.add(mesh(new THREE.BoxGeometry(0.6, 0.08, 0.16), blue, [0.5, 0, 0.1]));
+      // Blue-grey stripe along the span, and the root fairing.
+      wing.add(mesh(new THREE.BoxGeometry(1.5, 0.08, 0.2), blue, [1.0, 0, 0.25]));
+      wing.add(mesh(new THREE.BoxGeometry(0.35, 0.18, 1.2), steel, [0.12, 0, 0]));
       const tip = new THREE.Group();
-      tip.position.set(2.02, 0, -0.2);
-      tip.add(mesh(cannon, steel));
-      tip.add(mesh(barrel, trim, [0, 0, 1.0]));
-      tip.add(mesh(intake, cyan, [0, 0, -0.58], [0, Math.PI, 0]));
+      tip.position.set(2.48, 0, -0.35);
+      tip.add(mesh(pod, steel));
+      for (const z of [-0.25, 0.25]) tip.add(mesh(podRing, trim, [0, 0, z]));
+      tip.add(mesh(barrel, steel, [0, 0, 1.15]));
+      tip.add(mesh(hider, trim, [0, 0, 1.85]));
+      tip.add(mesh(aft, cyan, [0, 0, -0.51], [0, Math.PI, 0]));
       wing.add(tip);
       car.add(wing);
     }
+  // Wing hinge drums at the upper roots (by the rear side windows).
+  for (const side of [-1, 1]) car.add(mesh(drum, steel, [side * 0.78, 1.18, -0.6]));
 
   for (const o of car.children) {
     o.castShadow = false;
@@ -462,7 +611,8 @@ export function buildE46(glowTex: THREE.Texture, scale = 0.65): ShipModel {
 // ── Interceptor ──────────────────────────────────────────────────────────────
 
 export function buildFighter(glowTex: THREE.Texture, scale = 0.55): ShipModel {
-  const gun = new THREE.MeshStandardMaterial({ color: "#5d626c", map: panelTexture(12, "#686d77", "rgba(10,12,16,0.6)"), metalness: 0.6, roughness: 0.4, envMapIntensity: 1.2 });
+  const gunMap = panelTexture(12, "#686d77", "rgba(10,12,16,0.6)");
+  const gun = new THREE.MeshStandardMaterial({ color: "#5d626c", map: gunMap, normalMap: normalFrom(gunMap, 3), metalness: 0.6, roughness: 0.4, envMapIntensity: 1.2 });
   const dark = new THREE.MeshStandardMaterial({ color: "#1b1d22", metalness: 0.6, roughness: 0.5 });
   const solar = new THREE.MeshStandardMaterial({ map: solarTexture(), metalness: 0.5, roughness: 0.32 });
   const frame = new THREE.MeshStandardMaterial({ color: "#5a5f69", metalness: 0.85, roughness: 0.35 });
@@ -507,6 +657,8 @@ export function buildFighter(glowTex: THREE.Texture, scale = 0.55): ShipModel {
       const h = mesh(halfGeo, solar);
       h.scale.y = up;
       h.rotation.z = side * up * 0.32;
+      // Red gun tip at the dagger point.
+      h.add(mesh(new THREE.SphereGeometry(0.06, 10, 8), red, [0, 1.72, 0.92]));
       wing.add(h);
     }
     wing.add(mesh(new THREE.BoxGeometry(0.16, 0.3, 1.1), frame));
@@ -524,8 +676,11 @@ export function buildFighter(glowTex: THREE.Texture, scale = 0.55): ShipModel {
 
 /** ~30 units long before `scale` (default ≈ 48). */
 export function buildCapital(glowTex: THREE.Texture, scale = 1.6): ShipModel {
-  const meat = new THREE.MeshStandardMaterial({ map: capicolaTexture(), roughness: 0.62, metalness: 0.05 });
-  const steel = new THREE.MeshStandardMaterial({ color: "#7d838c", map: panelTexture(21, "#868c95", "rgba(30,34,40,0.6)"), metalness: 0.85, roughness: 0.42 });
+  // Cured-meat hull: fat veins stand slightly proud, with a waxy sheen.
+  const meatMap = capicolaTexture();
+  const meat = new THREE.MeshPhysicalMaterial({ map: meatMap, normalMap: normalFrom(meatMap, 2.2), roughness: 0.5, metalness: 0.02, sheen: 0.4, sheenRoughness: 0.5, sheenColor: new THREE.Color("#ffd9d2"), clearcoat: 0.25, clearcoatRoughness: 0.4 });
+  const capSteelMap = panelTexture(21, "#868c95", "rgba(30,34,40,0.6)");
+  const steel = new THREE.MeshStandardMaterial({ color: "#7d838c", map: capSteelMap, normalMap: normalFrom(capSteelMap, 3), metalness: 0.75, roughness: 0.42 });
   const dark = new THREE.MeshStandardMaterial({ color: "#16181c", metalness: 0.5, roughness: 0.7 });
   const bay = new THREE.MeshStandardMaterial({ color: "#2a2620", emissive: "#ffb070", emissiveIntensity: 0.55 });
   const nozzleCore = new THREE.MeshStandardMaterial({ color: "#0b1622", emissive: "#5fb8ff", emissiveIntensity: 0.9, toneMapped: false });
@@ -637,5 +792,5 @@ export function rockMaterial(): THREE.MeshStandardMaterial {
     }
   g.putImageData(img, 0, 0);
   const t = texture(c, true, [2, 2]);
-  return new THREE.MeshStandardMaterial({ map: t, roughness: 0.95, metalness: 0.02 });
+  return new THREE.MeshStandardMaterial({ map: t, normalMap: normalFrom(t, 4), roughness: 0.95, metalness: 0.02 });
 }

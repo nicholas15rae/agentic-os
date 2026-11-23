@@ -8,6 +8,7 @@
 #   appdata\<date>\                    %APPDATA%\os.agentic.commandcenter (settings JSON, voices) with each
 #                                      SQLite database copied through SQLite's backup API, so a running
 #                                      Command Center can't leave a half-written copy; last 14 kept
+#   stack-mirror\{ai-hub,ai-hub-memory,ai-startup}\   exact mirrors of the rest of the stack on G:
 #   backup.log                         one block per run
 #
 # Run by the "Agentic OS nightly backup" scheduled task. Safe to run by hand any time:
@@ -87,6 +88,20 @@ try {
     Write-Log "ok  app data snapshot ($($dbs.Count) databases)"
     Remove-OldItems (Join-Path $Dest 'appdata') '2*' $Keep
 } catch { $failed = $true; Write-Log "FAILED app data: $_" }
+
+# 4. The rest of the stack that lives on G: next to the repo (G: is a VHDX on C:, so without this
+#    it would all sit on one physical disk). ai-hub keeps its own .git, so the mirror carries its
+#    history too; the live memory is tiny; Whisper is reinstallable and is left out.
+foreach ($src in 'G:\ai-hub', 'G:\ai-hub-memory', 'G:\ai-startup') {
+    try {
+        if (-not (Test-Path $src)) { Write-Log "skip $src (not there)"; continue }
+        $to = Join-Path (Join-Path $Dest 'stack-mirror') (Split-Path $src -Leaf)
+        robocopy $src $to /MIR /XJ /MT:8 /R:1 /W:1 /NFL /NDL /NP /NJH /NJS `
+            /XD node_modules .venv __pycache__ .pytest_cache | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "robocopy exit $LASTEXITCODE" }
+        Write-Log "ok  mirror $src (robocopy $LASTEXITCODE)"
+    } catch { $failed = $true; Write-Log "FAILED mirror $src : $_" }
+}
 
 if ($failed) { Write-Log '=== backup finished WITH ERRORS'; exit 1 }
 Write-Log '=== backup ok'

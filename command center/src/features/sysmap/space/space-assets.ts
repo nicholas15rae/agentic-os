@@ -9,8 +9,8 @@
  *
  *   Sprites: command center/src/assets/orbital-sprites/
  *     True-alpha PNG, trimmed. Produced from the originals in `assets-src/orbital/` by
- *     `scripts/orbital-assets.py` (checkerboard removal, sprite-sheet slicing). Roles come
- *     from the filename: `e46_side`, `e46_rear`, `death_star`, `capital_ship`, `enemy_fighter_*`,
+ *     `scripts/orbital-assets.py` (checkerboard removal, photoreal mattes). Roles come
+ *     from the filename: `e46_rear` (optional `e46_side`), `death_star`, `capital_ship`, `enemy_fighter_*`,
  *     `asteroid_*`.
  *     Orientation and engine positions for each role live in SPRITE_META below.
  *
@@ -28,7 +28,7 @@ export const DROP_IN_BACKDROPS: readonly string[] = Object.keys(backdropUrls)
   .sort()
   .map((k) => backdropUrls[k]);
 
-/** Sprite URL by basename (`e46_side`, `asteroid_3`, …). */
+/** Sprite URL by basename (`e46_rear`, `asteroid_3`, …). */
 export const SPRITE_URLS: ReadonlyMap<string, string> = new Map(Object.entries(spriteUrls).map(([k, url]) => [baseName(k), url] as const));
 
 export interface SpriteMeta {
@@ -42,15 +42,13 @@ export interface SpriteMeta {
 
 /** Per-role art facts, measured on the processed PNGs. */
 export const SPRITE_META: Readonly<Record<string, SpriteMeta>> = {
-  // Side profile: nose left; main nacelle exhaust at the right end, upper wing pod above it.
-  e46_side: { nose: Math.PI, thrusters: [[0.95, 0.64], [0.65, 0.06]], bakeWidth: 320 },
-  // Rear 3/4 (GABAGOUL plate side): travelling away towards the upper left; four tail engines.
-  e46_rear: { nose: Math.PI + 0.42, thrusters: [[0.754, 0.767], [0.817, 0.767], [0.903, 0.741], [0.955, 0.719]], bakeWidth: 320 },
-  // Sheet fighters: nose lower-left, flames upper-right.
-  enemy_fighter_1: { nose: 2.76, thrusters: [[0.44, 0.25], [0.79, 0.43]], bakeWidth: 150 },
-  enemy_fighter_2: { nose: 2.76, thrusters: [[0.46, 0.26], [0.71, 0.46]], bakeWidth: 150 },
+  // Photoreal rear 3/4 (from the rear-scene render): travelling away towards the right, four
+  // tail engines under the GABAGOUL plate.
+  e46_rear: { nose: -0.3, thrusters: [[0.163, 0.704], [0.23, 0.709], [0.35, 0.735], [0.424, 0.742]], bakeWidth: 420 },
+  // Photoreal fighter (from the dogfight render): cockpit towards the viewer, heading lower left.
+  enemy_fighter_1: { nose: 2.7, thrusters: [], bakeWidth: 150 },
   death_star: { nose: 0, thrusters: [], bakeWidth: 340 },
-  // Capital ship 3/4 render: rounded bow upper-left, engine cluster lower-right.
+  // Gabagoul capital ship 3/4 render: rounded bow upper-left, engine cluster lower-right.
   capital_ship: { nose: Math.PI + 0.32, thrusters: [[0.8, 0.66], [0.87, 0.53], [0.94, 0.6], [0.9, 0.78]], bakeWidth: 300 },
 };
 export const ASTEROID_BAKE_WIDTH = 96;

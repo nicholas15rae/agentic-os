@@ -49,12 +49,12 @@ export const BACKDROP_CONFIG = {
   returnFireRate: 1.7,
   shipOpacity: 0.78,
   /** E46 drawn width at depth 1 (fighters sized to match it, not dwarfed by it). */
-  e46Size: 0.17,
-  enemySize: 0.11,
+  e46Size: 0.2,
+  enemySize: 0.085,
   /** The capital ship's slow elliptical orbit in the far background. */
-  capitalShipSize: 0.17,
-  capitalShipOpacity: 0.34,
-  capitalOrbitPeriod: 420,
+  capitalShipSize: 0.46,
+  capitalShipOpacity: 0.42,
+  capitalOrbitPeriod: 960,
   debrisCount: 8,
   debrisOpacity: 0.5,
   /** Additive glow strength for bolts, trails and thrusters (0–1.5). */
@@ -486,7 +486,9 @@ export class SpaceEngine {
   }
 
   private newShip(player: boolean, role: Ship["role"], cruise: number): Ship | null {
-    const side = player ? this.sprites.get("e46_side") : this.sprites.get(pick(["enemy_fighter_1", "enemy_fighter_2"].filter((n) => this.sprites.has(n))) ?? "");
+    // Photoreal E46: the rear 3/4 render alone unless a side render is also present.
+    const e46Side = this.sprites.get("e46_side");
+    const side = player ? (e46Side ?? this.sprites.get("e46_rear")) : this.sprites.get(pick(["enemy_fighter_1", "enemy_fighter_2"].filter((n) => this.sprites.has(n))) ?? "");
     if (!side) return null;
     const width = (player ? BACKDROP_CONFIG.e46Size : BACKDROP_CONFIG.enemySize) * this.minSide;
     // Fighters are lighter and more agile than the E46; both bleed speed in hard turns.
@@ -494,7 +496,7 @@ export class SpaceEngine {
     return {
       player,
       side,
-      rear: player ? (this.sprites.get("e46_rear") ?? null) : null,
+      rear: player && e46Side ? (this.sprites.get("e46_rear") ?? null) : null,
       width,
       x: -9999,
       y: -9999,
@@ -1037,20 +1039,18 @@ export class SpaceEngine {
     let anchor: Ship["draw"] = null;
     for (const [sp, mixA] of layers) {
       if (!sp.v || mixA < 0.02) continue;
-      const enemy = !s.player;
       // Mirror so the art always faces the direction of travel, then rotate the remainder.
       const facesLeft = Math.cos(sp.meta.nose) < 0;
       const goingLeft = Math.cos(s.heading) < 0;
       const mirror = facesLeft !== goingLeft;
       const nose = mirror ? Math.PI - sp.meta.nose : sp.meta.nose;
-      const lim = enemy ? Math.PI : 0.5;
-      const rot = clamp(wrapAngle(s.heading - nose), -lim, lim) + (enemy ? 0 : bank * 0.5);
+      // Photographic renders are lit and shot from one camera angle: they lean into the turn but
+      // never spin like flat cards. Depth comes from scale, haze and the far-plane grade.
+      const rot = clamp(wrapAngle(s.heading - nose), -0.32, 0.32) + bank * 0.5;
       const sy = 1 - Math.min(0.28, Math.abs(bank) * 0.6);
       const w = s.width * s.z * (sp === s.rear ? 0.9 : 1);
       const h = w * sp.aspect;
-      // Sheet-art fighters lean on the soft far-plane bake so they sit in the photographic
-      // space with the E46 instead of reading as crisp cartoons.
-      const nearK = smooth(0.45, 0.75, s.z) * (enemy ? 0.45 : 1);
+      const nearK = smooth(0.45, 0.75, s.z);
       const m = mirror ? 1 : 0;
       const nearImg = sp.v[0][m] ?? sp.v[0][0];
       const farImg = sp.v[1][m] ?? sp.v[1][0];

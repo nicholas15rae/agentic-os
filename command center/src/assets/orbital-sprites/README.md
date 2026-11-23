@@ -7,15 +7,18 @@ originals in `assets-src/orbital/`. Don't hand-edit these. Re-run the script ins
 
 | File | Source | Notes |
 |------|--------|-------|
-| `e46_side.png` | `e46-side-checker.webp` | hero, side profile; checkerboard removed, see-through glass smoothed |
-| `e46_rear.png` | `e46-rear34-checker.webp` | hero, rear 3/4; shown when the ship banks away into the distance |
+| `e46_rear.png` | `e46-rear-scene.webp` | photoreal hero, rear 3/4; GrabCut matte with hand hints, ion plume and nebula glow dropped |
+| `enemy_fighter_1.png` | `dogfight-scene.webp` | photoreal fighter, GrabCut matte |
+| `asteroid_1.png` … `asteroid_6.png` | `dogfight-scene.webp` | photoreal rocks, matted by low chroma against the nebula |
 | `death_star.png` | `death-star-checker.webp` | circle-masked with an anti-aliased edge |
-| `enemy_fighter_1.png`, `enemy_fighter_2.png` | `sprite-sheet.webp` | sliced from the sheet |
-| `asteroid_1.png` … `asteroid_9.png` | `sprite-sheet.webp` | sliced; flaming meteor and burning rock skipped |
+| `capital_ship.png` | `capital-ship-checker.*` | optional; the Gabagoul capital ship, checkerboard removed. Drop the original in to enable it |
 
-Not used: `e46-rear-scene.webp` (the GABAGOUL plate render has a nebula, ships and a station baked
-into it, so it can't be cut cleanly) and `dogfight-scene.webp` (a full scene). The sheet's lasers,
-flares and shards are skipped too: the engine draws those procedurally.
+Retired for looking like cartoons next to the photoreal art: `e46-side-checker.webp`,
+`e46-rear34-checker.webp` and `sprite-sheet.webp` (kept in `assets-src/` but unused). Lasers,
+flares, trails and sparks are drawn procedurally by the engine.
+
+Edges are unmixed from the local background (inpainted behind the object), so no nebula fringe
+rides along. A new `e46_side.png` would be picked up again as the side view.
 
 Roles come from the filename. Each role's facing direction and engine positions are in
 `src/features/sysmap/space/space-assets.ts` → `SPRITE_META`. Update them if you replace a sprite

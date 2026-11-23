@@ -184,7 +184,7 @@ impl Default for SkillsConfig {
 }
 
 fn default_skills_dir() -> String {
-    let hub = PathBuf::from(r"C:\ai-hub\skills");
+    let hub = PathBuf::from(r"G:\ai-hub\skills");
     if hub.is_dir() {
         return hub.display().to_string();
     }
@@ -360,7 +360,7 @@ pub fn default_mcps() -> Vec<McpServer> {
             name: "WhatsApp Bridge".into(),
             transport: "stdio".into(),
             command: "uv".into(),
-            args: vec!["--directory".into(), r"C:\ai-hub\whatsapp-mcp\whatsapp-mcp-server".into(), "run".into(), "main.py".into()],
+            args: vec!["--directory".into(), r"G:\ai-hub\whatsapp-mcp\whatsapp-mcp-server".into(), "run".into(), "main.py".into()],
             env: BTreeMap::new(),
             url: String::new(),
             enabled: false,
@@ -375,7 +375,7 @@ pub fn default_mcps() -> Vec<McpServer> {
             "shotcut",
             "Shotcut (MLT)",
             "python",
-            &[r"C:\ai-hub\mcp\shotcut-mcp\scripts\shotcut_mcp_server.py"],
+            &[r"G:\ai-hub\mcp\shotcut-mcp\scripts\shotcut_mcp_server.py"],
             &[
                 // The LADSPA module's plugin scan hangs melt on this machine.
                 ("MLT_REPOSITORY_DENY", "libmltladspa"),
@@ -383,7 +383,7 @@ pub fn default_mcps() -> Vec<McpServer> {
                 ("SHOTCUT_MCP_REQUIRE_ABSOLUTE_PATHS", "1"),
                 ("SHOTCUT_MCP_MAX_ACTIVE_RENDERS", "1"),
             ],
-            "matrodrigs/shotcut-mcp — multi-track MLT timelines, QC, previews and job-based renders inside C:\\ai-hub\\media. Needs Shotcut installed.",
+            "matrodrigs/shotcut-mcp — multi-track MLT timelines, QC, previews and job-based renders inside G:\\ai-hub\\media. Needs Shotcut installed.",
         ),
         media_mcp(
             "media-forge",
@@ -401,7 +401,7 @@ pub fn default_mcps() -> Vec<McpServer> {
 }
 
 /// The Director's media root: every media MCP is confined to it.
-pub const MEDIA_ROOT: &str = r"C:\ai-hub\media";
+pub const MEDIA_ROOT: &str = r"G:\ai-hub\media";
 /// media-forge's uv project (in this repo, outside the Tauri bundle).
 const MEDIA_FORGE_DIR: &str = r"G:\agentic os\command center\mcp\media-forge";
 
@@ -537,7 +537,7 @@ impl Default for MemoryConfig {
             last_verified_harvest_at: 0,
             prune_threads: false,
             auto_flush: false,
-            vault_dir: r"C:\ai-hub\vault\locked-archives".into(),
+            vault_dir: r"G:\ai-hub\vault\locked-archives".into(),
             dataset_format: "chatml".into(),
             mount_workspace: "my-workspace".into(),
             cache_collections: vec![],
@@ -579,17 +579,20 @@ impl Default for HotPathConfig {
     }
 }
 
-/// The live Phase 3 memory root (Nic's decision): scrolls and the knowledge graph live on D:,
-/// never under the read-only `C:\ai-hub`. Nothing in the app creates it (the host `--apply` does).
+/// The live Phase 3 memory root (Nic's decision): scrolls and the knowledge graph live on G: (the
+/// project drive), never under the read-only hub. Nothing in the app creates it (the host `--apply` does).
 #[cfg(test)]
-pub const DEFAULT_MEMORY_DIR: &str = r"D:\ai-hub-memory";
-/// `D:\ai-hub-memory\scrolls`: the Tier-2 Memory Scrolls (the only layer embedded in RAG).
-pub const DEFAULT_SCROLLS_DIR: &str = r"D:\ai-hub-memory\scrolls";
-/// `D:\ai-hub-memory\knowledge-graph.json`: the one knowledge graph the app's `kg.search` and the
+pub const DEFAULT_MEMORY_DIR: &str = r"G:\ai-hub-memory";
+/// `G:\ai-hub-memory\scrolls`: the Tier-2 Memory Scrolls (the only layer embedded in RAG).
+pub const DEFAULT_SCROLLS_DIR: &str = r"G:\ai-hub-memory\scrolls";
+/// `G:\ai-hub-memory\knowledge-graph.json`: the one knowledge graph the app's `kg.search` and the
 /// Phase 3 CLI share.
-pub const DEFAULT_KG_PATH: &str = r"D:\ai-hub-memory\knowledge-graph.json";
+pub const DEFAULT_KG_PATH: &str = r"G:\ai-hub-memory\knowledge-graph.json";
 /// The read-only hub: no Memory Scrolls write target (scrolls / archive dir) may resolve under it.
-pub const READ_ONLY_HUB_ROOT: &str = r"C:\ai-hub";
+pub const READ_ONLY_HUB_ROOT: &str = r"G:\ai-hub";
+/// Where the hub lived before the move to G: (now a junction to it). Still refused, so a write
+/// through the old path can never slip past the guard.
+pub const LEGACY_HUB_ROOT: &str = r"C:\ai-hub";
 
 /// A comparable, lexical form of a Windows path: backslashes, no `\\?\` / `\\.\` prefix, `.` and
 /// `..` collapsed, trailing dots / spaces of each component dropped (as Win32 does), lower case.
@@ -673,9 +676,9 @@ pub fn path_under_root(p: &Path, root: &str) -> bool {
     cands.iter().any(|c| roots.iter().any(|r| !r.is_empty() && (c == r || c.starts_with(&format!("{r}\\")))))
 }
 
-/// True when `p` resolves under the read-only `C:\ai-hub`.
+/// True when `p` resolves under the read-only hub (`G:\ai-hub`, or its old `C:\ai-hub` path).
 pub fn under_read_only_hub(p: &Path) -> bool {
-    path_under_root(p, READ_ONLY_HUB_ROOT)
+    [READ_ONLY_HUB_ROOT, LEGACY_HUB_ROOT].iter().any(|r| path_under_root(p, r))
 }
 
 /// Phase 3 Memory Scrolls (`memory.scrolls`). Rust only READS scrolls (Librarian) and launches
@@ -683,7 +686,7 @@ pub fn under_read_only_hub(p: &Path) -> bool {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScrollsConfig {
-    /// Empty = `D:\ai-hub-memory\scrolls`. A value under the read-only `C:\ai-hub` is refused
+    /// Empty = `G:\ai-hub-memory\scrolls`. A value under the read-only hub is refused
     /// (`sanitized()` falls back to the default).
     pub scrolls_dir: String,
     /// Cold archive root. Empty = the CLI's resolution (env, `.env`, `D:\ai-hub-archive`, `./archive/memory`).
@@ -874,7 +877,7 @@ impl Default for OsConfig {
         Self {
             os_name: "Tony".into(),
             wake_words: vec!["hey tony".into(), "yo tony".into(), "tony".into()],
-            identity_path: r"C:\ai-hub\master\MASTER_IDENTITY.md".into(),
+            identity_path: r"G:\ai-hub\master\MASTER_IDENTITY.md".into(),
             root_directive: true,
             compute: ComputeConfig::default(),
             droplet: DropletConfig::default(),
@@ -882,7 +885,7 @@ impl Default for OsConfig {
             skills: SkillsConfig::default(),
             mcps: default_mcps(),
             routing: RoutingConfig::default(),
-            fs_roots: vec![r"C:\ai-hub".into()],
+            fs_roots: vec![r"G:\ai-hub".into()],
             permissions: OsPermissions::default(),
             privacy: PrivacyConfig::default(),
             overseer: OverseerConfig::default(),
@@ -1877,13 +1880,13 @@ mod tests {
     }
 
     #[test]
-    fn scrolls_and_graph_default_to_the_d_memory_root() {
-        assert_eq!(DEFAULT_SCROLLS_DIR, r"D:\ai-hub-memory\scrolls");
-        assert_eq!(DEFAULT_KG_PATH, r"D:\ai-hub-memory\knowledge-graph.json");
+    fn scrolls_and_graph_default_to_the_g_memory_root() {
+        assert_eq!(DEFAULT_SCROLLS_DIR, r"G:\ai-hub-memory\scrolls");
+        assert_eq!(DEFAULT_KG_PATH, r"G:\ai-hub-memory\knowledge-graph.json");
         assert!(DEFAULT_SCROLLS_DIR.starts_with(DEFAULT_MEMORY_DIR) && DEFAULT_KG_PATH.starts_with(DEFAULT_MEMORY_DIR));
         assert_eq!(super::super::mcp::KG_PATH, DEFAULT_KG_PATH, "the app's kg.search and Phase 3 share one graph");
         assert!(!under_read_only_hub(Path::new(DEFAULT_SCROLLS_DIR)) && !under_read_only_hub(Path::new(DEFAULT_KG_PATH)));
-        assert_eq!(ScrollsConfig::default().scrolls_root(), PathBuf::from(r"D:\ai-hub-memory\scrolls"));
+        assert_eq!(ScrollsConfig::default().scrolls_root(), PathBuf::from(r"G:\ai-hub-memory\scrolls"));
     }
 
     #[test]
@@ -1904,6 +1907,10 @@ mod tests {
             r"\\?\UNC\localhost\c$\ai-hub\m",
             r"\\Server\C$\AI-HUB",
             r"\\localhost\c$\x\..\ai-hub\memory",
+            // The hub's home since the move to G:.
+            r"G:\ai-hub",
+            "g:/AI-HUB/memory/scrolls",
+            r"\\localhost\G$\ai-hub\m",
         ];
         for d in refused {
             assert!(under_read_only_hub(Path::new(d)), "{d:?}");
@@ -1912,7 +1919,7 @@ mod tests {
             assert_eq!((s.scrolls_dir.as_str(), s.archive_dir.as_str()), ("", ""), "{d:?} falls back to the default");
             assert_eq!(c.memory.scrolls.scrolls_root(), PathBuf::from(DEFAULT_SCROLLS_DIR), "{d:?}");
         }
-        for d in [r"C:\ai-hub2\scrolls", r"C:\ai-hubx", r"D:\ai-hub-memory\scrolls", r"D:\ai-hub\memory", "D:/scrolls", "", r"\\localhost\c$\ai-hub2", r"\\localhost\d$\ai-hub-memory\scrolls", r"\\localhost\c$", r"\\server\share\ai-hub"] {
+        for d in [r"C:\ai-hub2\scrolls", r"C:\ai-hubx", r"D:\ai-hub-memory\scrolls", r"D:\ai-hub\memory", "D:/scrolls", "", r"\\localhost\c$\ai-hub2", r"\\localhost\d$\ai-hub-memory\scrolls", r"\\localhost\c$", r"\\server\share\ai-hub", r"G:\ai-hub-memory\scrolls", r"G:\ai-hub2"] {
             assert!(!under_read_only_hub(Path::new(d)), "{d:?}");
         }
         let ok: OsConfig = serde_json::from_value(json!({ "memory": { "scrolls": { "scrollsDir": "E:/scrolls", "archiveDir": "E:/arch" } } })).unwrap();

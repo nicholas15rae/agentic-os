@@ -5,10 +5,13 @@
 import type { CompactOutcome, CompactionStatus, MemoryScrollsConfig } from "@/lib/platform";
 
 /** os_core.rs `DEFAULT_SCROLLS_DIR` (shown when `memory.scrolls.scrollsDir` is empty). */
-export const DEFAULT_SCROLLS_DIR = "D:\\ai-hub-memory\\scrolls";
+export const DEFAULT_SCROLLS_DIR = "G:\\ai-hub-memory\\scrolls";
 
 /** os_core.rs `READ_ONLY_HUB_ROOT`: no scrolls dir may live under it. */
-export const READ_ONLY_HUB_ROOT = "C:\\ai-hub";
+export const READ_ONLY_HUB_ROOT = "G:\\ai-hub";
+
+/** os_core.rs `LEGACY_HUB_ROOT`: the hub's old path (now a junction to G:), refused too. */
+export const LEGACY_HUB_ROOT = "C:\\ai-hub";
 
 /**
  * Lexical mirror of os_core.rs `under_read_only_hub` (case-insensitive; `/`, `\\?\`, `.` / `..`,
@@ -31,8 +34,10 @@ export function underReadOnlyHub(dir: string | null | undefined): boolean {
     out.push(part.replace(/[. ]+$/, "").toLowerCase());
   });
   const key = out.join("\\");
-  const root = READ_ONLY_HUB_ROOT.toLowerCase();
-  return key === root || key.startsWith(`${root}\\`);
+  return [READ_ONLY_HUB_ROOT, LEGACY_HUB_ROOT].some((r) => {
+    const root = r.toLowerCase();
+    return key === root || key.startsWith(`${root}\\`);
+  });
 }
 
 /** The scrolls dir the app uses: the configured one, or the default when empty or under `C:\ai-hub`. */

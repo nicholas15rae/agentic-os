@@ -61,7 +61,7 @@ def _which(env: str, name: str) -> str:
 
 
 def load() -> Settings:
-    root = Path(os.environ.get("MEDIA_ROOT", r"C:\ai-hub\media")).resolve()
+    root = Path(os.environ.get("MEDIA_ROOT", r"G:\ai-hub\media")).resolve()
     root.mkdir(parents=True, exist_ok=True)
     pct = int(os.environ.get("MEDIA_CPU_PCT", "70"))
     return Settings(

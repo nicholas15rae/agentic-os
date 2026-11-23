@@ -3397,7 +3397,7 @@ impl AppEnv {
 /// The Librarian's sources for the running app.
 pub fn app_sources(cfg: &super::os_core::OsConfig, workdir: &Path, store: &TaskStore, staging_root: &Path) -> Sources {
     let hub: Vec<PathBuf> = cfg.fs_roots.iter().map(PathBuf::from).filter(|p| p.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("ai-hub")).unwrap_or(false)).collect();
-    let hub = if hub.is_empty() { vec![PathBuf::from(r"C:\ai-hub")] } else { hub };
+    let hub = if hub.is_empty() { vec![PathBuf::from(r"G:\ai-hub")] } else { hub };
     let (scrolls_root, archive_root) = memory_roots(cfg, workdir);
     Sources { tasks_db: store.path(), notes_root: super::documenter::notes_root(cfg, workdir).ok(), hub_roots: hub, staging_root: Some(staging_root.to_path_buf()), scrolls_root, archive_root }
 }

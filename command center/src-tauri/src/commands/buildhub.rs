@@ -39,7 +39,7 @@ use smoke::SmokeReport;
 
 pub const HUB_EVENT: &str = "build-hub";
 pub const HUB_FILE: &str = "build-hub.json";
-pub const DEFAULT_EXTERNAL_BASE: &str = r"C:\ai-hub\external-builds";
+pub const DEFAULT_EXTERNAL_BASE: &str = r"G:\ai-hub\external-builds";
 pub const LOG_CAP: usize = 400;
 pub const VIEW_LOG_LINES: usize = 120;
 /// A build that fails its smoke test this many times goes to the Repair Queue on its own.

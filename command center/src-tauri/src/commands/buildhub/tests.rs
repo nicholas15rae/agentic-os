@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 const STAGING: &str = r"D:\Art Apps\agentic os\staging";
-const EXT: &str = r"C:\ai-hub\external-builds";
+const EXT: &str = r"G:\ai-hub\external-builds";
 
 fn env(id: &str, slug: &str, runtime: Runtime, worker: AssignedWorker) -> TaskEnvelope {
     let dir = expected_dir(runtime, slug, Path::new(STAGING), Path::new(EXT));
@@ -51,7 +51,7 @@ fn envelope_wire_format_is_the_spec_contract() {
     assert_eq!(v["assigned_worker"], "claude");
     assert_eq!(v["status"], "queued");
     assert_eq!(v["preview_url"], Value::Null);
-    assert_eq!(v["output_directory"], r"C:\ai-hub\external-builds\tip-calc");
+    assert_eq!(v["output_directory"], r"G:\ai-hub\external-builds\tip-calc");
     let back: TaskEnvelope = serde_json::from_value(v).unwrap();
     assert_eq!(back, e);
 }

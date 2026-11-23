@@ -254,7 +254,7 @@ def _md_files(root: Path, recursive: bool, skip_dirs=()) -> List[Path]:
 
 
 def hub_master(env) -> Path:
-    return Path(env.get("AOS_HUB_MASTER") or r"C:\ai-hub\master")
+    return Path(env.get("AOS_HUB_MASTER") or r"G:\ai-hub\master")
 
 
 # ── C:\ai-hub: a READ-ONLY source of truth ──────────────────────────────────
@@ -868,7 +868,7 @@ def path_probe(paths, env, rel: str):
         return a == b or a.startswith(b.rstrip("\\/") + os.sep)
 
     excluded = [Path(p) for p in config.write_targets(paths).values()]
-    # The memory root holding the scrolls and the graph (D:\ai-hub-memory), unless it also holds a
+    # The memory root holding the scrolls and the graph (G:\ai-hub-memory), unless it also holds a
     # known root (a scrolls dir configured inside the repo never hides the whole repo).
     for mem in {Path(paths.scrolls_root).parent, Path(paths.kg_path).parent}:
         if not (under(repo, mem) or under(appdata, mem)):

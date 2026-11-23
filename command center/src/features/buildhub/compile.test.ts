@@ -16,7 +16,7 @@ const questions: IntakeQuestion[] = [
   { id: "worker", question: "Who builds it?", options: ["Coder (local pipeline)", "Designer-led (look first)", "Claude Code (queued; asks before running)"], allow_free_text: false },
 ];
 
-const ctx = { now: 1_800_000_000_000, rand: "ab12", stagingRoot: "D:\\Art Apps\\agentic os\\staging\\", externalBase: "C:\\ai-hub\\external-builds" };
+const ctx = { now: 1_800_000_000_000, rand: "ab12", stagingRoot: "D:\\Art Apps\\agentic os\\staging\\", externalBase: "G:\\ai-hub\\external-builds" };
 
 const SPEC_KEYS = ["build_id", "project_slug", "title", "target_runtime", "output_directory", "spec_summary", "milestones", "acceptance_criteria", "assigned_worker", "preview_url", "status"];
 
@@ -43,11 +43,11 @@ describe("TaskEnvelope compiler", () => {
     expect(a.brief.indexOf("Tip calculator")).toBeLessThan(a.brief.indexOf("Later thought"));
   });
 
-  it("maps the interview onto runtime, worker and output directory (C:\\ai-hub baseline for external)", () => {
+  it("maps the interview onto runtime, worker and output directory (G:\\ai-hub baseline for external)", () => {
     const ext = compileEnvelope(notes, questions, { runtime: { choice: "Standalone app (external-builds folder)" }, worker: { choice: "Claude Code (queued; asks before running)" } }, ctx).envelope;
     expect(ext.target_runtime).toBe("external_os");
     expect(ext.assigned_worker).toBe("claude");
-    expect(ext.output_directory).toBe("C:\\ai-hub\\external-builds\\tip-calculator-2");
+    expect(ext.output_directory).toBe("G:\\ai-hub\\external-builds\\tip-calculator-2");
     const int = compileEnvelope(notes, questions, { worker: { choice: "Designer-led (look first)" } }, ctx).envelope;
     expect(int.target_runtime).toBe("internal_widget");
     expect(int.assigned_worker).toBe("designer");

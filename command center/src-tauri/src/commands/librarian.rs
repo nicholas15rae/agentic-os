@@ -6,7 +6,7 @@
 //!
 //! - `tasks.db` through `envelope::open_read_only` (SQLite READ_ONLY open + `query_only`),
 //!   SELECT statements only;
-//! - Tony's notes (`memory.notesDir`, default `<workdir>/memory/tony`), `C:\ai-hub` docs and
+//! - Tony's notes (`memory.notesDir`, default `<workdir>/memory/tony`), `G:\ai-hub` docs and
 //!   skills, and `staging/` outputs: text files only, size-capped, every path canonicalised
 //!   inside its root, links / junctions and secret-looking files skipped.
 //!
@@ -50,7 +50,7 @@ pub struct Sources {
     pub notes_root: Option<PathBuf>,
     pub hub_roots: Vec<PathBuf>,
     pub staging_root: Option<PathBuf>,
-    /// Phase 3 Tier-2 Memory Scrolls (`D:\ai-hub-memory\scrolls` by default): read FIRST, never walked twice.
+    /// Phase 3 Tier-2 Memory Scrolls (`G:\ai-hub-memory\scrolls` by default): read FIRST, never walked twice.
     pub scrolls_root: Option<PathBuf>,
     /// Phase 3 Tier-3 cold archive: never walked; opened only by `archive_lookup` (forensic).
     pub archive_root: Option<PathBuf>,

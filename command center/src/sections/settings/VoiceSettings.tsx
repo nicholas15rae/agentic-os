@@ -108,7 +108,7 @@ export function SttCard() {
           <Input defaultValue={stt.baseUrl} onBlur={(e) => e.target.value !== stt.baseUrl && void patch({ id: stt.id, baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
         </Field>
         <Field label="Models folder (ggml-*.bin)">
-          <Input defaultValue={stt.modelsDir ?? ""} placeholder="C:\\whisper\\models" onBlur={(e) => e.target.value !== (stt.modelsDir ?? "") && void patch({ id: stt.id, modelsDir: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+          <Input defaultValue={stt.modelsDir ?? ""} placeholder="G:\\whisper\\models" onBlur={(e) => e.target.value !== (stt.modelsDir ?? "") && void patch({ id: stt.id, modelsDir: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
         </Field>
       </div>
       <Field label="Vocabulary prompt" className="mt-2">

@@ -953,7 +953,7 @@ export type ScrollsPreset = "tight" | "balanced" | "relaxed";
 
 /** `memory.scrolls` (os_core.rs `ScrollsConfig`). Paths only; no secret ever lives here. */
 export interface MemoryScrollsConfig {
-  /** Empty = `D:\ai-hub-memory\scrolls`. A dir under the read-only `C:\ai-hub` is refused (default applies). */
+  /** Empty = `G:\ai-hub-memory\scrolls`. A dir under the read-only hub (`G:\ai-hub`) is refused (default applies). */
   scrollsDir: string;
   /** Empty = the CLI's resolution (env / `.env` / `D:\ai-hub-archive` / `./archive/memory`). */
   archiveDir: string;

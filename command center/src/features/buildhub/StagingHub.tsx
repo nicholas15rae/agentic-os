@@ -60,7 +60,7 @@ export function StagingHub() {
       action={tabs}
       hint={
         tab === "staging"
-          ? `Builds pushed from Brainstorming run one at a time per lane, in this order (Coder/Designer → the local pipeline; Claude → the Dev Fix Queue, which asks before running). Internal widgets land in ${view?.staging_root || "staging"}; external apps in ${view?.external_base || "C:\\ai-hub\\external-builds"}.`
+          ? `Builds pushed from Brainstorming run one at a time per lane, in this order (Coder/Designer → the local pipeline; Claude → the Dev Fix Queue, which asks before running). Internal widgets land in ${view?.staging_root || "staging"}; external apps in ${view?.external_base || "G:\\ai-hub\\external-builds"}.`
           : "Builds that failed their smoke test twice (or that you sent here). Fix by hand in the output folder and re-run the check, or re-queue with a fix note."
       }
     >

@@ -75,7 +75,7 @@ fn sha256_hex(b: &[u8]) -> String {
 /// The read-only `C:\ai-hub` is never a Memory Vault write target (Nic's decision: the hub stays
 /// read-only). Reading an existing archive there still works; writing fails closed, before anything
 /// is created.
-const VAULT_UNDER_HUB: &str = r"the Memory Vault dir is under the read-only C:\ai-hub; choose another vault dir in Settings (nothing was written)";
+const VAULT_UNDER_HUB: &str = r"the Memory Vault dir is under the read-only ai-hub (G:\ai-hub); choose another vault dir in Settings (nothing was written)";
 
 fn refuse_hub_vault(dir: &Path) -> Result<(), String> {
     if os_core::under_read_only_hub(dir) {
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn vault_writes_under_the_read_only_hub_are_refused() {
         // Lexical refusals: nothing is created (the guard runs before create_dir_all / write).
-        for d in [r"C:\ai-hub\vault\locked-archives\2026-11", r"c:/AI-HUB/vault/x", r"\\localhost\C$\ai-hub\vault\2026-11"] {
+        for d in [r"C:\ai-hub\vault\locked-archives\2026-11", r"c:/AI-HUB/vault/x", r"\\localhost\C$\ai-hub\vault\2026-11", r"G:\ai-hub\vault\locked-archives\2026-11"] {
             let dir = Path::new(d);
             assert_eq!(vault_write(dir, "raw_backup_2026_11.json", b"{}", None), Err(VAULT_UNDER_HUB.to_string()), "{d}");
             assert_eq!(refuse_hub_vault(&dir.join("unlocked")), Err(VAULT_UNDER_HUB.to_string()));

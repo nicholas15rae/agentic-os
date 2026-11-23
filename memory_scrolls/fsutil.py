@@ -24,7 +24,7 @@ FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 # back to its drive letter, and any other alias (a plain share, SUBST, a volume GUID path) is caught by
 # file identity: the target or an existing ancestor that IS the hub. Tests may extend this tuple
 # (never shrink it).
-PROTECTED_WRITE_ROOTS: tuple = (r"C:\ai-hub",)
+PROTECTED_WRITE_ROOTS: tuple = (r"G:\ai-hub", r"C:\ai-hub")  # G: is home; C: is the old path (a junction)
 
 
 # `\\host\C$\...`: an administrative drive share, mapped back to `C:\...` for any host (fail closed:

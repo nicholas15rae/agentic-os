@@ -2284,17 +2284,23 @@ def _no_fs_writes():
 class HubWriteGuardTests(unittest.TestCase):
     HUB = r"C:\ai-hub"
 
-    def test_defaults_point_at_d_memory(self):
-        self.assertEqual(config.DEFAULT_SCROLLS_ROOT, r"D:\ai-hub-memory\scrolls")
-        self.assertEqual(config.DEFAULT_KG_PATH, r"D:\ai-hub-memory\knowledge-graph.json")
+    def test_hub_on_g_and_its_old_c_path_are_both_protected(self):
+        for p in (r"G:\ai-hub", "g:/AI-HUB/memory/scrolls", r"\\localhost\G$\ai-hub\m", r"C:\ai-hub\memory"):
+            self.assertIsNotNone(_fsutil.protected_root(p), p)
+        for p in (r"G:\ai-hub-memory\scrolls", r"G:\ai-hub2", r"G:\agentic os\memory"):
+            self.assertIsNone(_fsutil.protected_root(p), p)
+
+    def test_defaults_point_at_g_memory(self):
+        self.assertEqual(config.DEFAULT_SCROLLS_ROOT, r"G:\ai-hub-memory\scrolls")
+        self.assertEqual(config.DEFAULT_KG_PATH, r"G:\ai-hub-memory\knowledge-graph.json")
         self.assertIsNone(_fsutil.protected_root(config.DEFAULT_SCROLLS_ROOT))
         self.assertIsNone(_fsutil.protected_root(config.DEFAULT_KG_PATH))
         sb = Sandbox()
         try:
             env = {k: v for k, v in sb.env.items() if k not in ("MEMORY_SCROLLS_DIR", "MEMORY_KG_PATH")}
             p = config.resolve({}, env, probes=config.DriveProbes(lambda r: False, lambda r: 0))
-            self.assertEqual(p.scrolls_root, Path(r"D:\ai-hub-memory\scrolls"))
-            self.assertEqual(p.kg_path, Path(r"D:\ai-hub-memory\knowledge-graph.json"))
+            self.assertEqual(p.scrolls_root, Path(r"G:\ai-hub-memory\scrolls"))
+            self.assertEqual(p.kg_path, Path(r"G:\ai-hub-memory\knowledge-graph.json"))
         finally:
             sb.close()
         # Resolving never creates the live root (the module guard also checks this).

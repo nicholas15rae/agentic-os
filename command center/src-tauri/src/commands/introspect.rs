@@ -28,7 +28,7 @@ const DEEP_MCP_TIMEOUT: Duration = Duration::from_secs(10);
 const N8N_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Extra skill roots scanned besides os.json `skills.dir` and `<repo>/skills`.
-const EXTRA_SKILL_ROOTS: [&str; 1] = [r"C:\ai-hub\.claude\skills"];
+const EXTRA_SKILL_ROOTS: [&str; 1] = [r"G:\ai-hub\.claude\skills"];
 const SKILL_DEPTH: usize = 4;
 const SKILL_LIMIT: usize = 600;
 const SKILL_DESC_MAX: usize = 200;

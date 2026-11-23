@@ -35,7 +35,7 @@ uv --directory "<this folder>" run server.py   # what the gateway launches
 
 | Env | Default |
 |---|---|
-| `MEDIA_ROOT` | `C:\ai-hub\media` |
+| `MEDIA_ROOT` | `G:\ai-hub\media` |
 | `MEDIA_FFMPEG` / `MEDIA_FFPROBE` | PATH, then Shotcut's bundled copy. Use the full build (winget `Gyan.FFmpeg`) for caption burn-in. |
 | `MEDIA_CPU_PCT` | `70` |
 | `MEDIA_ALLOW_GPU` | `0` |

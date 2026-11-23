@@ -396,10 +396,10 @@ pub async fn local_fit_loop(app: tauri::AppHandle) {
 // whisper.cpp runs as a plain process (not a service), so it was gone after
 // every reboot ("cannot connect to whisper"). At launch and every 5 minutes:
 // if the STT provider is a local whisper.cpp server and its port is closed,
-// start it from C:\whisper\bin with ggml-<model>.bin from the provider's
+// start it from G:\whisper\bin with ggml-<model>.bin from the provider's
 // modelsDir. Paths come only from providers.json / these constants.
 
-const WHISPER_EXE: &str = r"C:\whisper\bin\whisper-server.exe";
+const WHISPER_EXE: &str = r"G:\whisper\bin\whisper-server.exe";
 
 pub async fn whisper_ensure(state: &DispatchState) -> Option<String> {
     let cfg = state.snapshot();
@@ -414,7 +414,7 @@ pub async fn whisper_ensure(state: &DispatchState) -> Option<String> {
         return None; // already up
     }
     let exe = std::path::PathBuf::from(WHISPER_EXE);
-    let dir = std::path::PathBuf::from(p.models_dir.clone().unwrap_or_else(|| r"C:\whisper\models".into()));
+    let dir = std::path::PathBuf::from(p.models_dir.clone().unwrap_or_else(|| r"G:\whisper\models".into()));
     let mut model = dir.join(format!("ggml-{}.bin", p.model));
     if !model.exists() {
         // Fall back to any ggml model in the folder.
@@ -424,10 +424,10 @@ pub async fn whisper_ensure(state: &DispatchState) -> Option<String> {
         return Some(format!("whisper not installed ({WHISPER_EXE} missing)"));
     }
     let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).clamp(2, 8)).unwrap_or(4).to_string();
-    let log = std::fs::File::create(r"C:\whisper\server.log").ok();
+    let log = std::fs::File::create(r"G:\whisper\server.log").ok();
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(["-m", &model.display().to_string(), "--host", "127.0.0.1", "--port", &port.to_string(), "--inference-path", "/v1/audio/transcriptions", "-t", &threads])
-        .current_dir(r"C:\whisper")
+        .current_dir(r"G:\whisper")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
     match log {

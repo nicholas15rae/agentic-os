@@ -21,8 +21,8 @@ from .errors import EXIT_CONFIG, EXIT_DEFERRED, EXIT_OK, EXIT_UNEXPECTED, Archiv
 
 def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json", action="store_true", help="NDJSON events + result on stdout")
-    p.add_argument("--scrolls-root", help="scrolls root (default env MEMORY_SCROLLS_DIR, os.json, or D:\\ai-hub-memory\\scrolls; never under C:\\ai-hub)")
-    p.add_argument("--kg-path", help="knowledge graph file (default env MEMORY_KG_PATH or D:\\ai-hub-memory\\knowledge-graph.json; never under C:\\ai-hub)")
+    p.add_argument("--scrolls-root", help="scrolls root (default env MEMORY_SCROLLS_DIR, os.json, or G:\\ai-hub-memory\\scrolls; never under the read-only ai-hub)")
+    p.add_argument("--kg-path", help="knowledge graph file (default env MEMORY_KG_PATH or G:\\ai-hub-memory\\knowledge-graph.json; never under the read-only ai-hub)")
     p.add_argument("--archive-root", help="cold archive root (default: pinned root, env/.env MEMORY_ARCHIVE_DIR, D:\\ai-hub-archive, ./archive/memory)")
     p.add_argument("--state-dir", help="state dir (default env MEMORY_STATE_DIR or ./data/memory-scrolls)")
     p.add_argument("--show-privacy-policy", action="store_true", help="print the effective Tier-2 privacy policy (defaults + <state-dir>/privacy-policy.json) and exit")

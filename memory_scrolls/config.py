@@ -17,9 +17,9 @@ from .errors import ConfigError
 
 NEVER_TOUCH = frozenset({"my-workspace", "booking"})
 
-# Nic's decision: the live scrolls and knowledge graph live on D: (C:\ai-hub stays read-only).
-# Nothing here creates D:\ai-hub-memory; only an explicit `offload --apply` / compaction run does.
-DEFAULT_MEMORY_ROOT = r"D:\ai-hub-memory"
+# Nic's decision: the live scrolls and knowledge graph live on G:, the project drive (the hub stays
+# read-only). Nothing here creates G:\ai-hub-memory; only an explicit `offload --apply` / compaction run does.
+DEFAULT_MEMORY_ROOT = r"G:\ai-hub-memory"
 DEFAULT_SCROLLS_ROOT = DEFAULT_MEMORY_ROOT + r"\scrolls"
 DEFAULT_KG_PATH = DEFAULT_MEMORY_ROOT + r"\knowledge-graph.json"
 D_ARCHIVE = r"D:\ai-hub-archive"

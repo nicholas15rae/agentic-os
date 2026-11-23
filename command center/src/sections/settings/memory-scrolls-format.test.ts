@@ -138,9 +138,9 @@ describe("types carry no secrets", () => {
   });
 });
 
-describe("scrolls dir (D:\\ai-hub-memory default, C:\\ai-hub refused)", () => {
-  it("defaults to the D: memory root", () => {
-    expect(DEFAULT_SCROLLS_DIR).toBe("D:\\ai-hub-memory\\scrolls");
+describe("scrolls dir (G:\\ai-hub-memory default, the hub refused on G: and its old C: path)", () => {
+  it("defaults to the G: memory root", () => {
+    expect(DEFAULT_SCROLLS_DIR).toBe("G:\\ai-hub-memory\\scrolls");
     expect(effectiveScrollsDir("")).toBe(DEFAULT_SCROLLS_DIR);
     expect(effectiveScrollsDir(undefined)).toBe(DEFAULT_SCROLLS_DIR);
     expect(effectiveScrollsDir("  E:/scrolls  ")).toBe("E:/scrolls");
@@ -162,6 +162,10 @@ describe("scrolls dir (D:\\ai-hub-memory default, C:\\ai-hub refused)", () => {
       "\\\\?\\UNC\\localhost\\c$\\ai-hub\\m",
       "\\\\Server\\C$\\AI-HUB",
       "\\\\localhost\\c$\\x\\..\\ai-hub\\memory",
+      // The hub's home since the move to G:.
+      "G:\\ai-hub",
+      "g:/AI-HUB/memory/scrolls",
+      "\\\\localhost\\G$\\ai-hub\\m",
     ];
     for (const d of refused) {
       expect(underReadOnlyHub(d), d).toBe(true);
@@ -177,6 +181,8 @@ describe("scrolls dir (D:\\ai-hub-memory default, C:\\ai-hub refused)", () => {
       "\\\\localhost\\d$\\ai-hub-memory\\scrolls",
       "\\\\localhost\\c$",
       "\\\\server\\share\\ai-hub",
+      "G:\\ai-hub-memory\\scrolls",
+      "G:\\ai-hub2",
     ]) {
       expect(underReadOnlyHub(d), d).toBe(false);
     }

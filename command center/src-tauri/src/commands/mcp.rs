@@ -1493,7 +1493,7 @@ async fn git_status(path: PathBuf) -> Result<String, String> {
 }
 
 /// The personal knowledge graph `kg.search` reads (the System Map reports whether it exists): the
-/// same `D:\ai-hub-memory\knowledge-graph.json` the Phase 3 Memory Scrolls CLI upserts into.
+/// same `G:\ai-hub-memory\knowledge-graph.json` the Phase 3 Memory Scrolls CLI upserts into.
 pub(crate) const KG_PATH: &str = super::os_core::DEFAULT_KG_PATH;
 
 fn kg_search(query: &str) -> Result<String, String> {

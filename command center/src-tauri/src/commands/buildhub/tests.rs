@@ -1198,3 +1198,53 @@ fn cancelled_status_round_trips_on_the_wire() {
     assert_eq!(v["status"], "cancelled");
     assert_eq!(serde_json::from_value::<TaskEnvelope>(v).unwrap().status, Status::Cancelled);
 }
+
+// ── Rework from the dashboard ──
+
+fn promoted(h: &mut HubFile, id: &str) {
+    running(h, id);
+    h.record_smoke(id, smoke_pass(), 30).unwrap();
+    h.promote(id, 31).unwrap();
+}
+
+#[test]
+fn rework_reopens_a_promoted_widget_at_the_tail_and_keeps_it_promoted() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder), ("b-b", AssignedWorker::Coder)]);
+    promoted(&mut h, "b-a");
+    h.rework("b-a", "  make the seconds hand thinner  ", 40, &[]).unwrap();
+    let b = h.builds.last().unwrap();
+    assert_eq!(b.envelope.build_id, "b-a");
+    assert_eq!(b.envelope.status, Status::Queued);
+    assert_eq!(b.promoted_at, Some(31), "the live tile keeps its promoted copy");
+    assert_eq!(b.smoke.attempts, 0);
+    assert_eq!(b.smoke.failures, 0);
+    assert!(b.smoke.last.is_none());
+    let o = &b.envelope.human_override;
+    assert_eq!(o.last().unwrap().directive, "make the seconds hand thinner");
+    assert!(!o.last().unwrap().auto);
+    assert!(o.iter().any(|x| x.auto && x.directive.contains("current files")));
+    // b-b was waiting first: the reworked build goes behind it.
+    assert_eq!(h.next_for(Lane::Worker).as_deref(), Some("b-b"));
+    // Passing again re-enables promote, which keeps it a promoted widget.
+    running(&mut h, "b-a");
+    h.record_smoke("b-a", smoke_pass(), 50).unwrap();
+    h.promote("b-a", 51).unwrap();
+    assert_eq!(h.get("b-a").unwrap().envelope.status, Status::Deployed);
+    assert_eq!(h.get("b-a").unwrap().promoted_at, Some(51));
+}
+
+#[test]
+fn rework_refuses_unpromoted_builds_external_apps_and_empty_text() {
+    let mut h = hub_with(&[("b-a", AssignedWorker::Coder)]);
+    assert!(h.rework("b-a", "anything", 1, &[]).is_err(), "not promoted yet");
+    promoted(&mut h, "b-a");
+    assert!(h.rework("b-a", "   
+ ", 40, &[]).is_err(), "empty directive");
+    assert_eq!(h.get("b-a").unwrap().envelope.status, Status::Deployed, "a refused rework changes nothing");
+    let mut x = HubFile::default();
+    x.enqueue(env("b-x", "ext", Runtime::ExternalOs, AssignedWorker::Coder), "brief".into(), vec![], 0).unwrap();
+    running(&mut x, "b-x");
+    x.record_smoke("b-x", smoke_pass(), 30).unwrap();
+    x.promote("b-x", 31).unwrap();
+    assert!(x.rework("b-x", "change it", 40, &[]).is_err(), "external apps aren't dashboard tiles");
+}

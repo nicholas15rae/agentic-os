@@ -44,12 +44,12 @@ export class SandboxBoundary extends Component<{ children: ReactNode; label: str
   }
 }
 
-export function SandboxView({ buildId, title, version, height = 320 }: { buildId: string; title: string; version: number; height?: number | string }) {
+export function SandboxView({ buildId, title, version, height = 320, bare = false }: { buildId: string; title: string; version: number; height?: number | string; bare?: boolean }) {
   return (
-    <div style={{ height }} className="mt-2">
+    <div style={{ height }} className={bare ? "" : "mt-2"}>
       <SandboxBoundary label={title}>
         <Suspense fallback={<div className="grid h-full place-items-center font-mono text-[11px] text-ink-3">loading sandbox…</div>}>
-          <SandboxFrame buildId={buildId} title={title} version={version} />
+          <SandboxFrame buildId={buildId} title={title} version={version} bare={bare} />
         </Suspense>
       </SandboxBoundary>
     </div>

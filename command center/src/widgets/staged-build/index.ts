@@ -17,5 +17,6 @@ export default defineWidget<{ buildId: string; title: string }>({
   platforms: ["desktop"],
   keywords: ["promoted build", "play place widget"],
   defaultConfig: { buildId: "", title: "Promoted build" },
+  chromeless: true,
   component: lazy(() => import("./StagedBuildWidget")),
 });

@@ -662,6 +662,43 @@ impl HubFile {
         Ok(())
     }
 
+    /// Fix from the dashboard: a promoted internal widget goes back into staging at the tail, with
+    /// Nic's text as a high-priority override and a fresh smoke budget. `promoted_at` and the frozen
+    /// copy are untouched, so the live tile keeps the current version until the update is promoted.
+    pub fn rework(&mut self, id: &str, directive: &str, now: i64, known: &[String]) -> Result<(), String> {
+        let i = self.builds.iter().position(|b| b.envelope.build_id == id).ok_or_else(|| format!("no build {id}"))?;
+        let cur = &self.builds[i];
+        if cur.envelope.status != Status::Deployed || cur.envelope.target_runtime != Runtime::InternalWidget {
+            return Err("only a promoted dashboard widget can be reworked from its tile".into());
+        }
+        let d = devqueue::scrub(&clean_block(directive, OVERRIDE_MAX), known);
+        if d.is_empty() {
+            return Err("say what should change".into());
+        }
+        if cur.envelope.human_override.len() + 2 > OVERRIDES_MAX {
+            return Err(format!("at most {OVERRIDES_MAX} overrides per build"));
+        }
+        let mut b = self.builds.remove(i);
+        let base = "Rework of a promoted widget: start from the current files in the output folder and keep everything that already works; change only what the next override asks.";
+        b.envelope.human_override.push(HumanOverride { directive: base.into(), priority: "high".into(), at: now, applied_at: None, applied_stage: None, auto: true });
+        b.envelope.human_override.push(HumanOverride { directive: d.clone(), priority: "high".into(), at: now, applied_at: None, applied_stage: None, auto: false });
+        b.worker_task_id = None;
+        b.dev_task_id = None;
+        let run = b.smoke.run;
+        b.smoke = SmokeState { run, folded: run, ..SmokeState::default() };
+        b.repair = None;
+        b.paused_from = None;
+        b.committing = false;
+        b.progress = 0;
+        b.stage = None;
+        b.finished_at = None;
+        b.last_log_seq = 0;
+        b.envelope.status = Status::Queued;
+        push_log(&mut b, now, "event", format!("Reopened from the dashboard for rework: {}", steer_summary(&d)));
+        self.builds.push(b);
+        Ok(())
+    }
+
     /// Fold a smoke report: pass → ready_for_merge; fail → one automatic repair pass with the
     /// failure as an override (back to the head of its lane); a second failure → Repair Queue.
     pub fn record_smoke(&mut self, id: &str, r: SmokeReport, now: i64) -> Result<Status, String> {
@@ -2175,6 +2212,24 @@ async fn release_bound_work(app: &AppHandle, build_id: &str, worker: Option<Stri
 pub async fn build_requeue(app: AppHandle, build_id: String, note: Option<String>) -> Result<TaskEnvelope, String> {
     let id = build_id.clone();
     mutate_bg(&app, move |f, now, known| f.requeue(&id, note.as_deref(), now, known)).await?;
+    build_of(&app, &build_id)
+}
+
+/// Fix a promoted widget from its dashboard tile: back into Play Place staging with the directive.
+#[tauri::command]
+pub async fn build_rework(app: AppHandle, build_id: String, directive: String) -> Result<TaskEnvelope, String> {
+    not_dispatching(&app, &build_id)?;
+    let id = build_id.clone();
+    mutate_bg(&app, move |f, now, known| f.rework(&id, &directive, now, known)).await?;
+    let b = app.state::<HubState>().snapshot().get(&build_id).cloned().ok_or("build vanished")?;
+    if let Some(o) = b.envelope.human_override.last() {
+        if let Err(e) = save_steer_file(&app, &build_id, &o.directive, o.at) {
+            eprintln!("[hub] rework file for {build_id}: {e}");
+        }
+        hub_note(&build_id, "hub_steer", "handoff", &format!("Rework for “{}” (from the dashboard): {}", b.envelope.title, o.directive));
+        let to = worker_id(b.envelope.assigned_worker);
+        hub_record(&app, &b.envelope, None, NewMessage::new("nic", to, "override", format!("Rework: {}", o.directive)).body(o.directive.clone()));
+    }
     build_of(&app, &build_id)
 }
 

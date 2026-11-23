@@ -453,6 +453,7 @@ pub fn run() {
             buildhub::build_to_repair,
             buildhub::build_set_max_iterations,
             buildhub::build_requeue,
+            buildhub::build_rework,
             buildhub::build_smoke,
             buildhub::build_promote,
             buildhub::build_remove,

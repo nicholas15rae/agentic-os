@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { xcmd } from "@/lib/native-ext";
 
 /** The dynamically loaded sandbox body: the widget's loopback URL in an opaque-origin iframe. */
-export default function SandboxFrame({ buildId, title, version }: { buildId: string; title: string; version: number }) {
+/** `bare`: no white backing or border, so a transparent widget shows the wallpaper through it. */
+export default function SandboxFrame({ buildId, title, version, bare = false }: { buildId: string; title: string; version: number; bare?: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
   useEffect(() => {
@@ -17,5 +18,5 @@ export default function SandboxFrame({ buildId, title, version }: { buildId: str
   // Surface load failures to the Error Boundary instead of rendering a broken frame.
   if (error) throw error;
   if (!url) return <div className="grid h-full place-items-center font-mono text-[11px] text-ink-3">starting the sandbox…</div>;
-  return <iframe key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className="size-full rounded-[12px] border border-white/10 bg-white" />;
+  return <iframe key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className={bare ? "size-full border-0 bg-transparent" : "size-full rounded-[12px] border border-white/10 bg-white"} />;
 }

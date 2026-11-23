@@ -1,11 +1,13 @@
-import { useState } from "react";
-import { Loader2, Plus, RotateCcw, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { FlaskConical, Loader2, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { WidgetGrid } from "@/core/widgets/WidgetGrid";
 import { availableWidgets } from "@/core/widgets/registry";
 import { activeItems, useLayout, type AddResult } from "@/core/widgets/layout-store";
 import { matchCatalog } from "@/core/widgets/catalog-match";
 import { cc } from "@/lib/cc-api";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
+import { startHub, useHub } from "@/features/buildhub/hub-store";
+import { promotedWidgets } from "@/features/buildhub/promoted";
 import { GENERATOR_SYSTEM, validateSpec, type CustomSpec } from "@/widgets/custom/spec";
 
 export function CommandSection() {
@@ -56,6 +58,9 @@ function WidgetTray() {
   const [msg, setMsg] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  // Promoted Play Place builds stay addable after their tile is removed (desktop; the hub is Tauri-only).
+  useEffect(startHub, []);
+  const promoted = promotedWidgets(useHub((s) => s.view));
 
   /** Add, then say where it went when it didn't land on the page you were looking at. */
   const addAndReport = (widgetId: string, title: string, config?: Record<string, unknown>) => {
@@ -73,7 +78,7 @@ function WidgetTray() {
     if (!p) return;
     setMsg(null);
     // A built-in widget named in the prompt ("spotify") is added directly — no LLM round trip.
-    const builtIn = matchCatalog(p, availableWidgets());
+    const builtIn = matchCatalog(p, availableWidgets().filter((w) => w.id !== "staged-build"));
     if (builtIn) {
       addAndReport(builtIn.id, builtIn.title);
       setPrompt("");
@@ -98,7 +103,7 @@ function WidgetTray() {
       <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2">
         <span className="label-caps shrink-0 px-2 text-amber-soft">Add</span>
         {availableWidgets()
-          .filter((w) => w.id !== "custom")
+          .filter((w) => w.id !== "custom" && w.id !== "staged-build")
           .map((w) => {
             const Icon = w.icon;
             return (
@@ -114,6 +119,18 @@ function WidgetTray() {
               </button>
             );
           })}
+        {promoted.map((b) => (
+          <button
+            key={b.buildId}
+            title="A widget you built in the Play Place and promoted"
+            onClick={() => addAndReport("staged-build", b.title, { buildId: b.buildId, title: b.title })}
+            className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
+          >
+            <Plus size={13} />
+            <FlaskConical size={14} className="text-violet" />
+            {b.title}
+          </button>
+        ))}
         <GlassAllSwitch />
         <GlassOpacitySlider />
         <button onClick={reset} className="pill-glass !h-9 shrink-0 !px-3 text-[13px]" title="Restores the default layout on the first page, or clears any other page. Other pages are untouched.">

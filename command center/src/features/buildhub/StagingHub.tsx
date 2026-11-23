@@ -10,6 +10,7 @@ import { xcmd, type ExtCommands } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
 import { useLayout } from "@/core/widgets/layout-store";
 import { clearOnSuccess, errText, startHub, useHub } from "./hub-store";
+import { placePromotedTile } from "./promote-tile";
 import { currentMilestone, elapsedEta, hubCounts, RUNTIME_BADGE, smokeBadge, STATUS_LABEL, workerIndicator } from "./format";
 import { PeekView } from "./PeekView";
 import { SandboxView } from "./SandboxView";
@@ -133,8 +134,7 @@ function BuildCard({ b }: { b: BuildView }) {
   const promote = async () => {
     const r = await act("Promote", "build_promote", { buildId: id });
     if (r && e.target_runtime === "internal_widget") {
-      const added = useLayout.getState().add("staged-build", { buildId: id, title: e.title });
-      useToasts.getState().push({ title: "Promoted", body: added.ok ? `“${e.title}” is on the live dashboard.` : `Promoted, but the dashboard had no room: ${added.reason ?? "add it from Widgets"}.`, tone: added.ok ? "info" : "error" });
+      placePromotedTile(id, e.title);
     }
   };
 

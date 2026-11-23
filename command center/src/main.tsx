@@ -3,12 +3,15 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./styles/index.css";
 import { installEditingKeyGuard } from "./lib/editing-keys";
+import { RootErrorBoundary } from "./core/RootErrorBoundary";
 
 // Before any component adds its own keydown listener: text-editing shortcuts belong to the field.
 installEditingKeyGuard();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <RootErrorBoundary>
+      <App />
+    </RootErrorBoundary>
   </StrictMode>,
 );

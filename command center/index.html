@@ -6,9 +6,41 @@
     <meta name="theme-color" content="#0b0d11" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>Jarvis Command Center</title>
+    <style>
+      html, body { margin: 0; background: #0b0d11; }
+      #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+              font: 12px/1.5 ui-sans-serif, system-ui, sans-serif; color: #6b7280; letter-spacing: 0.18em; text-align: center; }
+      #boot .dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; animation: boot-pulse 1.2s ease-in-out infinite; }
+      #boot .hint { max-width: 520px; letter-spacing: 0.02em; color: #9ca3af; font-size: 13px; }
+      #boot.err .dot { background: #f87171; animation: none; }
+      @keyframes boot-pulse { 50% { opacity: 0.25; } }
+      @media (prefers-reduced-motion: reduce) { #boot .dot { animation: none; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Boot splash: replaced as soon as React renders. Without it the window is solid dark
+         until the whole module graph loads, which looks exactly like a broken black screen. -->
+    <div id="root"><div id="boot" role="status"><div class="dot"></div><div>STARTING COMMAND CENTER</div><div class="hint" id="boot-hint"></div></div></div>
+    <script>
+      (function () {
+        var hint = function (text, isError) {
+          var el = document.getElementById("boot-hint");
+          if (!el) return; // React has rendered: nothing to do
+          el.textContent = text;
+          if (isError) document.getElementById("boot").className = "err";
+        };
+        setTimeout(function () {
+          hint("Still loading. In tauri dev the first start after the dev server launches can take a while; check its terminal if this stays up.");
+        }, 20000);
+        window.addEventListener("error", function (e) {
+          var msg = e && (e.message || (e.target && e.target.src && "Could not load " + e.target.src));
+          if (msg) hint("Startup failed: " + msg, true);
+        }, true);
+        window.addEventListener("unhandledrejection", function (e) {
+          hint("Startup failed: " + ((e.reason && e.reason.message) || e.reason), true);
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

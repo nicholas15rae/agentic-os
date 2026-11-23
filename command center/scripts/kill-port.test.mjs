@@ -1,7 +1,64 @@
 // Run: node --test scripts/   (or: npm run test:scripts)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePorts, parseNetstatListeners, parseLsofPids, killablePids } from "./kill-port.mjs";
+import {
+  parsePorts,
+  parseNetstatListeners,
+  parseLsofPids,
+  killablePids,
+  classifyListener,
+  parseProcessTable,
+} from "./kill-port.mjs";
+
+// pid -> { ppid, name, created }
+const table = (rows) => new Map(rows.map(([pid, ppid, name, created]) => [pid, { ppid, name, created }]));
+
+test("live dev server: vite -> cmd -> node(npm) -> powershell is owned, not an orphan", () => {
+  const procs = table([
+    [900, 1, "powershell.exe", 10],
+    [901, 900, "node.exe", 20], // npx tauri dev
+    [902, 901, "cmd.exe", 21],
+    [903, 902, "node.exe", 22], // vite
+  ]);
+  assert.deepEqual(classifyListener(903, procs), { orphan: false, owner: "powershell.exe (pid 900)" });
+});
+
+test("orphan: the tauri dev / npm launcher died, leaving cmd -> vite", () => {
+  const procs = table([
+    [902, 901, "cmd.exe", 21], // 901 (npm) is gone
+    [903, 902, "node.exe", 22],
+  ]);
+  assert.equal(classifyListener(903, procs).orphan, true);
+});
+
+test("orphan: parent pid reused by a newer process counts as broken", () => {
+  const procs = table([
+    [901, 1, "explorer.exe", 99], // started after its "child": pid reuse
+    [903, 901, "node.exe", 22],
+  ]);
+  assert.equal(classifyListener(903, procs).orphan, true);
+});
+
+test("unknown listener pid is never treated as an orphan", () => {
+  assert.equal(classifyListener(12345, table([])).orphan, false);
+});
+
+test("agent-launched dev server is owned by the agent's shell", () => {
+  const procs = table([
+    [500, 1, "claude.exe", 1],
+    [501, 500, "bash.exe", 2],
+    [502, 501, "node.exe", 3],
+  ]);
+  assert.deepEqual(classifyListener(502, procs), { orphan: false, owner: "bash.exe (pid 501)" });
+});
+
+test("process table JSON parsing (array and single object)", () => {
+  const one = parseProcessTable('{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","C":5}');
+  assert.deepEqual(one.get(7), { ppid: 1, name: "node.exe", created: 5 });
+  const many = parseProcessTable('[{"ProcessId":7,"ParentProcessId":1,"Name":"a","C":null},{"ProcessId":8,"ParentProcessId":7,"Name":"b"}]');
+  assert.equal(many.size, 2);
+  assert.equal(parseProcessTable("not json").size, 0);
+});
 
 const NETSTAT = `
 Active Connections

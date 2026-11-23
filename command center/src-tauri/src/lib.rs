@@ -34,6 +34,36 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+/// A second launch handed over to this engine. In `tauri dev` the window loads its UI from
+/// the Vite dev server; if that server died (or was killed) while the engine kept running
+/// hidden in the tray, the page is a blank error page and every relaunch just re-showed a
+/// black window. So in dev builds, when the dev server is answering again, reload from it.
+/// Release builds load the bundled UI and only show the window.
+fn on_second_launch(app: &tauri::AppHandle) {
+    #[cfg(dev)]
+    {
+        use tauri::Manager;
+        if let (Some(w), Some(url)) = (app.get_webview_window("main"), app.config().build.dev_url.clone()) {
+            if dev_server_up(&url) {
+                eprintln!("[dev] second launch: reloading the window from {url}");
+                let _ = w.navigate(url);
+            } else {
+                eprintln!("[dev] second launch: dev server {url} is not answering; run `npx tauri dev` again");
+            }
+        }
+    }
+    show_main(app);
+}
+
+/// Can we open a TCP connection to the dev server's host:port within half a second?
+#[cfg(dev)]
+fn dev_server_up(url: &url::Url) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else { return false };
+    let Ok(addrs) = (host, port).to_socket_addrs() else { return false };
+    addrs.into_iter().any(|a| TcpStream::connect_timeout(&a, std::time::Duration::from_millis(500)).is_ok())
+}
+
 /// System tray: closing the window hides it here and the engine keeps running (scheduled
 /// workers, Booking, Garbage, Observer). "Quit Engine Completely" is the only real exit.
 #[cfg(desktop)]
@@ -84,7 +114,7 @@ pub fn run() {
     let builder = tauri::Builder::default();
     // First: a second launch hands over to this engine (one GPU arbiter per machine).
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)));
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| on_second_launch(app)));
     builder
         .plugin(tauri_plugin_notification::init())
         .manage(system::SysState::default())

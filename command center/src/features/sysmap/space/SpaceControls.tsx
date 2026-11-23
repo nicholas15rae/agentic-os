@@ -10,8 +10,8 @@ import type { TriggerKind } from "./space-engine";
 
 const PREVIEWS: readonly { kind: TriggerKind; label: string; hint: string }[] = [
   { kind: "solo", label: "Cruise", hint: "The E46 cruises past (sometimes banking away: rear plate view)" },
-  { kind: "chased", label: "Chased", hint: "The E46 weaves through debris with fighters on its tail" },
-  { kind: "pursuit", label: "Pursuit", hint: "The E46 hunts two fighters" },
+  { kind: "chased", label: "Chased", hint: "Dogfight sortie opening with the E46 on the run, shooting back; passes then alternate" },
+  { kind: "pursuit", label: "Pursuit", hint: "Dogfight sortie opening with the E46 on the attack; passes then alternate" },
   { kind: "station", label: "Station", hint: "The distant battle station drifts into view" },
 ];
 

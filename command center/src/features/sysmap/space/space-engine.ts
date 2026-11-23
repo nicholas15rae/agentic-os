@@ -4,7 +4,9 @@
  *
  *   Layer 1  Death Star easter egg: rare, small, far-plane graded, slow parallax drift.
  *   Layer 2  Debris field (multi-depth tumbling asteroids) + E46 flight events along Bézier
- *            curves: solo cruise, being chased, pursuit — banking, Z-depth scaling, and a
+ *            curves: solo cruises, and dogfight sorties of 2–4 back-to-back passes that
+ *            alternate the E46 being chased (shooting back) and chasing (under return fire),
+ *            each re-entering from the side the last left — banking, Z-depth scaling, and a
  *            side ↔ rear (GABAGOUL plate) swap when the ship recedes.
  *   Layer 3  Procedural FX, additive (`lighter`): blue / red bolts with hot cores, ion and
  *            engine trails scaled by speed, shield flashes and impact sparks, thruster bloom.
@@ -39,6 +41,12 @@ export const BACKDROP_CONFIG = {
   /** Seconds between flight events (randomised), and the share that are dogfights. */
   flybyFrequency: [55, 130] as const,
   dogfightProbability: 0.6,
+  /** A dogfight is a sortie of back-to-back passes that alternate chased ↔ chasing. */
+  sortiePasses: [2, 4] as const,
+  /** Seconds between passes of a sortie (they re-enter from the side the last one left). */
+  sortieGap: [1.5, 4] as const,
+  /** Cooldown multiplier for the side being chased when it shoots back (higher = fewer shots). */
+  returnFireRate: 1.7,
   shipOpacity: 0.78,
   /** E46 drawn width at depth 1. */
   e46Size: 0.2,
@@ -236,7 +244,10 @@ interface Ship {
   visible: boolean;
   u: number;
   fireCd: number;
-  target: Ship | null;
+  /** Ships this one shoots at (nearest visible in range); empty = holds fire. */
+  foes: Ship[];
+  /** Cooldown multiplier: 1 attacking, `returnFireRate` when shooting back while chased. */
+  fireRate: number;
   /** Draw-state cache for FX anchoring. */
   draw: { sprite: Sprite; mirror: boolean; rot: number; sy: number; w: number; h: number } | null;
 }
@@ -291,6 +302,8 @@ export class SpaceEngine {
   private station: Station | null = null;
   /** First appearances come early so the page visibly comes alive; then the normal cadence. */
   private nextFlight = rand(8, 20);
+  /** Passes still to fly in the current sortie, the gap timer, and where the last pass left. */
+  private sortie = { left: 0, gap: 0, kind: "chased" as FlightKind, exit: null as { x: number; y: number } | null };
   private nextStation = rand(60, 150);
   private glow: Record<"blue" | "red" | "hot", HTMLCanvasElement>;
   private par = { x: 0, y: 0 };
@@ -356,7 +369,7 @@ export class SpaceEngine {
     if (kind === "station") return void this.spawnStation();
     const k: FlightKind = kind === "random" ? this.pickFlight() : kind;
     this.flight = null;
-    this.spawnFlight(k);
+    this.startEvent(k);
   }
 
   dispose() {
@@ -455,12 +468,28 @@ export class SpaceEngine {
     const side = player ? this.sprites.get("e46_side") : this.sprites.get(pick(["enemy_fighter_1", "enemy_fighter_2"].filter((n) => this.sprites.has(n))) ?? "");
     if (!side) return null;
     const width = (player ? BACKDROP_CONFIG.e46Size : BACKDROP_CONFIG.enemySize) * this.minSide;
-    return { player, side, rear: player ? (this.sprites.get("e46_rear") ?? null) : null, lag, lateral, weaveAmp: 0, weaveF: rand(0.6, 1.1), weaveP: rand(0, TAU), width, x: -9999, y: -9999, z: 1, vx: 0, vy: 0, speed: 0, heading: 0, turn: 0, rearMix: 0, visible: false, u: 0, fireCd: rand(0.6, 1.6), target: null, draw: null };
+    return { player, side, rear: player ? (this.sprites.get("e46_rear") ?? null) : null, lag, lateral, weaveAmp: 0, weaveF: rand(0.6, 1.1), weaveP: rand(0, TAU), width, x: -9999, y: -9999, z: 1, vx: 0, vy: 0, speed: 0, heading: 0, turn: 0, rearMix: 0, visible: false, u: 0, fireCd: rand(0.6, 1.6), foes: [], fireRate: 1, draw: null };
+  }
+
+  /** A fresh event: dogfights open a sortie of alternating passes. */
+  private startEvent(kind: FlightKind) {
+    const dogfight = kind !== "solo";
+    const [a, b] = BACKDROP_CONFIG.sortiePasses;
+    this.sortie = { left: dogfight ? Math.floor(rand(a, b + 1)) - 1 : 0, gap: 0, kind, exit: null };
+    this.spawnFlight(kind);
   }
 
   private spawnFlight(kind: FlightKind) {
     if (!this.loaded || !this.w) return;
     const curve = planCurve(this.w, this.h, this.minSide * 0.35, BACKDROP_CONFIG.centreClearance);
+    // Next pass of a sortie: fly back in from the side the last pass left by.
+    const exit = this.sortie.exit;
+    if (exit && Math.hypot(curve.p0.x - exit.x, curve.p0.y - exit.y) > Math.hypot(curve.p3.x - exit.x, curve.p3.y - exit.y)) {
+      [curve.p0, curve.p3] = [curve.p3, curve.p0];
+      [curve.p1, curve.p2] = [curve.p2, curve.p1];
+    }
+    this.sortie.kind = kind;
+    this.sortie.exit = curve.p3;
     const len = Math.hypot(curve.p3.x - curve.p0.x, curve.p3.y - curve.p0.y) * 1.15;
     // Solo cruises sometimes bank away into the distance (rear plate view).
     const recede = kind === "solo" && Math.random() < 0.5;
@@ -472,7 +501,8 @@ export class SpaceEngine {
     const ships: Ship[] = [];
     const player = this.newShip(true, kind === "pursuit" ? rand(1.6, 2.2) : 0, 0);
     if (!player) return;
-    if (kind === "chased") player.weaveAmp = this.minSide * rand(0.03, 0.05);
+    // The E46 jinks hard when chased and still weaves when hunting.
+    player.weaveAmp = this.minSide * (kind === "chased" ? rand(0.03, 0.05) : kind === "pursuit" ? rand(0.015, 0.03) : 0);
     ships.push(player);
     if (kind !== "solo") {
       const n = kind === "chased" ? (Math.random() < 0.5 ? 2 : 3) : 2;
@@ -483,9 +513,14 @@ export class SpaceEngine {
         e.weaveAmp = this.minSide * rand(0.01, 0.025);
         ships.push(e);
       }
+      // Both sides shoot in every dogfight: the hunters at full rate, the hunted shooting back.
       const enemies = ships.filter((s) => !s.player);
-      if (kind === "chased") enemies.forEach((e) => (e.target = player));
-      else if (enemies.length) player.target = enemies[0];
+      player.foes = enemies;
+      player.fireRate = kind === "chased" ? BACKDROP_CONFIG.returnFireRate : 1;
+      for (const e of enemies) {
+        e.foes = [player];
+        e.fireRate = kind === "pursuit" ? BACKDROP_CONFIG.returnFireRate : 1;
+      }
     }
     const maxLag = Math.max(...ships.map((s) => s.lag));
     this.flight = { curve, z0, z1, dur, t: 0, ships };
@@ -534,15 +569,26 @@ export class SpaceEngine {
   }
 
   private fire(s: Ship) {
-    const t = s.target;
-    if (!t || !t.visible || !s.visible) return;
-    const dist = Math.hypot(t.x - s.x, t.y - s.y);
-    if (dist > this.w * 0.7) return;
+    if (!s.visible) return;
+    // Nearest visible foe in range (ahead or, when shooting back, behind).
+    let t: Ship | null = null;
+    let dist = this.w * 0.7;
+    for (const f of s.foes) {
+      if (!f.visible) continue;
+      const d = Math.hypot(f.x - s.x, f.y - s.y);
+      if (d < dist) {
+        t = f;
+        dist = d;
+      }
+    }
+    if (!t) return;
     const b = this.bolts.find((x) => !x.on);
     if (!b) return;
-    const nose = s.width * s.z * 0.45;
-    const ox = s.x + Math.cos(s.heading) * nose;
-    const oy = s.y + Math.sin(s.heading) * nose;
+    // Muzzle on the hull edge facing the target (nose guns forward, tail guns back).
+    const aim = Math.atan2(t.y - s.y, t.x - s.x);
+    const edge = s.width * s.z * 0.4;
+    const ox = s.x + Math.cos(aim) * edge;
+    const oy = s.y + Math.sin(aim) * edge;
     // Aim at where the target will be, with enough jitter that some shots graze.
     const sp = 900 * s.z;
     const lead = dist / sp;
@@ -571,7 +617,7 @@ export class SpaceEngine {
     if (this.auto && !this.reduced) {
       this.nextFlight -= dt;
       this.nextStation -= dt;
-      if (this.nextFlight <= 0 && !this.flight) this.spawnFlight(this.pickFlight());
+      if (this.nextFlight <= 0 && !this.flight && !this.sortie.left) this.startEvent(this.pickFlight());
       if (this.nextStation <= 0 && !this.station) this.spawnStation();
     }
 
@@ -601,6 +647,14 @@ export class SpaceEngine {
     }
 
     this.updateFlight(dt);
+    // Sortie: once a pass clears, the next one comes back the other way with roles swapped.
+    if (!this.flight && this.sortie.left > 0) {
+      this.sortie.gap -= dt;
+      if (this.sortie.gap <= 0) {
+        this.sortie.left--;
+        this.spawnFlight(this.sortie.kind === "chased" ? "pursuit" : "chased");
+      }
+    }
 
     // Bolts.
     for (const b of this.bolts) {
@@ -696,15 +750,18 @@ export class SpaceEngine {
       s.z = z;
       s.visible = true;
       // Firing.
-      if (s.target && dt > 0) {
+      if (s.foes.length && dt > 0) {
         s.fireCd -= dt;
         if (s.fireCd <= 0) {
           this.fire(s);
-          s.fireCd = Math.random() < 0.35 ? 0.12 : rand(0.45, 1.3);
+          s.fireCd = (Math.random() < 0.35 ? 0.12 : rand(0.45, 1.3)) * s.fireRate;
         }
       }
     }
-    if (!alive) this.flight = null;
+    if (!alive) {
+      this.flight = null;
+      this.sortie.gap = rand(...BACKDROP_CONFIG.sortieGap);
+    }
   }
 
   // ── rendering ──

@@ -13,6 +13,9 @@ import { useMemmapData } from "@/features/memmap/use-memmap-data";
 import { useSysMap } from "./sysmap-store";
 import { SurfaceBackdropLayer, useBackdropActive } from "@/features/wallpaper/SurfaceBackdropLayer";
 import { BackdropHudToggle } from "@/features/wallpaper/BackdropHudToggle";
+import { DeepSpaceBackdrop, type CameraView } from "./space/DeepSpaceBackdrop";
+import { SpaceControls } from "./space/SpaceControls";
+import { useSpace } from "./space/space-store";
 import { agentFor, BUSES, hookupsFor, isRoster, modelName, moonSize, NODE_BUS, NODE_LABEL, orbitPos, ORBITS, ROSTER, surfaceState, SURFACE_TONE, type Orbit, type RosterId } from "./model";
 import { ARC_FRAG, ARC_VERT, ATMO_FRAG, BODY_VERT, NEBULA_FRAG, NEBULA_VERT, PLANET_FRAG, RING_FRAG, RING_VERT, STAR_FRAG, STARS_FRAG, STARS_VERT } from "./orbital-shaders";
 
@@ -523,6 +526,17 @@ function CameraRig({ focus, positions, controls, homeReq }: { focus: string | nu
   return null;
 }
 
+/** Feeds the orbit camera's angles to the DOM starfield's parallax (a ref write per frame, no renders). */
+function CameraProbe({ controls, view }: { controls: MutableRefObject<OrbitControlsImpl | null>; view: MutableRefObject<CameraView> }) {
+  useFrame(() => {
+    const c = controls.current;
+    if (!c) return;
+    view.current.az = c.getAzimuthalAngle();
+    view.current.pol = c.getPolarAngle();
+  });
+  return null;
+}
+
 /** Transparent clear while a custom backdrop shows; the scene background is null then. */
 function ClearAlpha({ backdrop }: { backdrop: boolean }) {
   const gl = useThree((s) => s.gl);
@@ -538,7 +552,7 @@ function ClearAlpha({ backdrop }: { backdrop: boolean }) {
 
 // ── Scene ────────────────────────────────────────────────────────────────────
 
-function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positions, els, backdrop }: { live: Live; running: boolean; reduced: boolean; pulses: (Handoff & { key: number })[]; focus: string | null; onPick: (id: RosterId) => void; homeReq: number; positions: Positions; els: MutableRefObject<Map<string, HTMLDivElement>>; backdrop: boolean }) {
+function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positions, els, backdrop, stars3d, view }: { live: Live; running: boolean; reduced: boolean; pulses: (Handoff & { key: number })[]; focus: string | null; onPick: (id: RosterId) => void; homeReq: number; positions: Positions; els: MutableRefObject<Map<string, HTMLDivElement>>; backdrop: boolean; stars3d: boolean; view: MutableRefObject<CameraView> }) {
   const time = useRef(0);
   const flashes = useRef(new Map<string, number>());
   const controls = useRef<OrbitControlsImpl | null>(null);
@@ -571,7 +585,8 @@ function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positio
       <ClearAlpha backdrop={backdrop} />
       <ambientLight intensity={0.12} />
       {!backdrop && <Nebula />}
-      <Starfield time={time} />
+      {/* Deep Space / Full Cinema: the DOM parallax starfield replaces the GL one (no doubled stars). */}
+      {stars3d && <Starfield time={time} />}
       <GalacticDust time={time} />
       {ROSTER.filter((r) => ORBITS[r].radius > 0).map((r, i, all) => {
         const o = ORBITS[r];
@@ -587,6 +602,7 @@ function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positio
         <Arc key={p.key} h={p} positions={positions} />
       ))}
       <CalloutSync positions={positions} els={els} />
+      <CameraProbe controls={controls} view={view} />
       <CameraRig focus={focus} positions={positions} controls={controls} homeReq={homeReq} />
       <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.08} minDistance={4} maxDistance={110} maxPolarAngle={Math.PI * 0.92} />
     </>
@@ -615,7 +631,12 @@ export function OrbitalEcosystem() {
   const hud = useSysMap((s) => s.hud);
   const setHud = useSysMap((s) => s.setHud);
   const [homeReq, setHomeReq] = useState(0);
-  const backdrop = useBackdropActive("orbital");
+  const customBackdrop = useBackdropActive("orbital");
+  const spaceMode = useSpace((s) => s.mode);
+  const engine = spaceMode !== "minimal";
+  // Any DOM backdrop behind the canvas (imported wallpaper or the deep-space engine) → transparent clear.
+  const backdrop = customBackdrop || engine;
+  const view = useRef<CameraView>({ az: 0, pol: 0 });
   const positions = useMemo<Positions>(() => new Map(ROSTER.map((r) => [r, new THREE.Vector3(...orbitPos(ORBITS[r], 0))])), []);
   const els = useRef(new Map<string, HTMLDivElement>());
   useEffect(() => void useArbiter.getState().start(), []);
@@ -642,6 +663,7 @@ export function OrbitalEcosystem() {
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#020308]" role="img" aria-label="Orbital ecosystem: the agent roster as a planetary system. Drag to orbit, scroll to zoom, click a planet to inspect it.">
       <SurfaceBackdropLayer surface="orbital" />
+      {spaceMode !== "minimal" && <DeepSpaceBackdrop mode={spaceMode} active={visible} reduced={reduced} view={view} wallpapers={!customBackdrop} />}
       <Canvas
         frameloop="demand"
         dpr={[1, 1.5]}
@@ -651,7 +673,7 @@ export function OrbitalEcosystem() {
         onPointerMissed={() => close()}
       >
         <Ticker running={running} />
-        <Scene live={live} running={running} reduced={reduced} pulses={pulses} focus={inspect && isRoster(inspect) ? inspect : null} onPick={(id) => open(id)} homeReq={homeReq} positions={positions} els={els} backdrop={backdrop} />
+        <Scene live={live} running={running} reduced={reduced} pulses={pulses} focus={inspect && isRoster(inspect) ? inspect : null} onPick={(id) => open(id)} homeReq={homeReq} positions={positions} els={els} backdrop={backdrop} stars3d={!engine} view={view} />
       </Canvas>
       <div className="absolute inset-0 z-20 pointer-events-none">
         <Callouts live={live} hud={hud} els={els} onPick={(id) => open(id)} />
@@ -684,6 +706,7 @@ export function OrbitalEcosystem() {
           HUD Labels: {hud === "full" ? "Full" : "Minimal"}
         </button>
         <BackdropHudToggle surface="orbital" />
+        <SpaceControls />
       </div>
     </div>
   );

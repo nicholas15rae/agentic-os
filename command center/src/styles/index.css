@@ -278,6 +278,7 @@
   font-size: 11px; transition: border-color 140ms, color 140ms;
 }
 .sysmap-ctl:hover { border-color: rgba(0, 210, 255, 0.5); color: var(--color-ink); }
+.sysmap-ctl:disabled { opacity: 0.45; cursor: not-allowed; border-color: rgba(255, 255, 255, 0.12); color: var(--color-ink-2); }
 .sysmap-ctl[aria-pressed="true"] { border-color: rgba(251, 146, 60, 0.7); color: #fdba74; }
 .sysmap-drawer { animation: sysmap-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1); transform: translateZ(0); }
 @keyframes sysmap-in { from { transform: translateX(24px); opacity: 0; } }

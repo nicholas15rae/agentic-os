@@ -181,6 +181,8 @@ def slice_sheet(path: Path) -> dict:
             fg = np.isin(lab, 1 + np.where(sizes >= sizes.max() * 0.08)[0])
         alpha = ndi.gaussian_filter(fg.astype(np.float32), 0.6)
         alpha = np.where(ndi.binary_erosion(fg, iterations=1), 1.0, alpha).astype(np.float32)
+        # The fighters' baked flame cones stay: their dark outlines share the hull's tones, so
+        # cutting them leaves holes. The engine's far-plane grade and thrust bloom cover them.
         bgc = np.median(c[bg], 0) if bg.any() else np.array([14, 26, 46], np.float32)
         out[name] = finish(c, alpha, bgc)
     return out
@@ -213,6 +215,10 @@ def main() -> None:
         "e46_rear": strip_checker(SRC / "e46-rear34-checker.webp"),
         **slice_sheet(SRC / "sprite-sheet.webp"),
     }
+    # Optional: the capital ship that orbits in the far background.
+    capital = next(iter(sorted(SRC.glob("capital-ship-checker.*"))), None)
+    if capital:
+        sprites["capital_ship"] = strip_checker(capital)
     for name, sp in sprites.items():
         sp.save(SPR / f"{name}.png", optimize=True)
         print(f"{name:18s} {sp.width}x{sp.height}")

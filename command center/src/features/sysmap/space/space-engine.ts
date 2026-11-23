@@ -289,8 +289,9 @@ export class SpaceEngine {
   private rocks: Rock[] = [];
   private flight: Flight | null = null;
   private station: Station | null = null;
-  private nextFlight = rand(...BACKDROP_CONFIG.flybyFrequency) * 0.5;
-  private nextStation = rand(...BACKDROP_CONFIG.deathStarRarity);
+  /** First appearances come early so the page visibly comes alive; then the normal cadence. */
+  private nextFlight = rand(8, 20);
+  private nextStation = rand(60, 150);
   private glow: Record<"blue" | "red" | "hot", HTMLCanvasElement>;
   private par = { x: 0, y: 0 };
   private disposed = false;

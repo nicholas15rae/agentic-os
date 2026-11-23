@@ -10,7 +10,8 @@
  *   Sprites: command center/src/assets/orbital-sprites/
  *     True-alpha PNG, trimmed. Produced from the originals in `assets-src/orbital/` by
  *     `scripts/orbital-assets.py` (checkerboard removal, sprite-sheet slicing). Roles come
- *     from the filename: `e46_side`, `e46_rear`, `death_star`, `enemy_fighter_*`, `asteroid_*`.
+ *     from the filename: `e46_side`, `e46_rear`, `death_star`, `capital_ship`, `enemy_fighter_*`,
+ *     `asteroid_*`.
  *     Orientation and engine positions for each role live in SPRITE_META below.
  *
  * Both folders are read with Vite's glob import: a new file needs a dev-server reload (or a
@@ -49,5 +50,7 @@ export const SPRITE_META: Readonly<Record<string, SpriteMeta>> = {
   enemy_fighter_1: { nose: 2.76, thrusters: [[0.44, 0.25], [0.79, 0.43]], bakeWidth: 150 },
   enemy_fighter_2: { nose: 2.76, thrusters: [[0.46, 0.26], [0.71, 0.46]], bakeWidth: 150 },
   death_star: { nose: 0, thrusters: [], bakeWidth: 340 },
+  // Capital ship 3/4 render: rounded bow upper-left, engine cluster lower-right.
+  capital_ship: { nose: Math.PI + 0.32, thrusters: [[0.8, 0.66], [0.87, 0.53], [0.94, 0.6], [0.9, 0.78]], bakeWidth: 300 },
 };
 export const ASTEROID_BAKE_WIDTH = 96;

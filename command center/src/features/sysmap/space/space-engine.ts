@@ -48,9 +48,13 @@ export const BACKDROP_CONFIG = {
   /** Cooldown multiplier for the side being chased when it shoots back (higher = fewer shots). */
   returnFireRate: 1.7,
   shipOpacity: 0.78,
-  /** E46 drawn width at depth 1. */
-  e46Size: 0.2,
-  enemySize: 0.085,
+  /** E46 drawn width at depth 1 (fighters sized to match it, not dwarfed by it). */
+  e46Size: 0.17,
+  enemySize: 0.11,
+  /** The capital ship's slow elliptical orbit in the far background. */
+  capitalShipSize: 0.17,
+  capitalShipOpacity: 0.34,
+  capitalOrbitPeriod: 420,
   debrisCount: 8,
   debrisOpacity: 0.5,
   /** Additive glow strength for bolts, trails and thrusters (0–1.5). */
@@ -192,8 +196,8 @@ interface Particle {
   life: number;
   max: number;
   size: number;
-  /** 0 blue · 1 red · 2 spark · 3 shield ring */
-  kind: 0 | 1 | 2 | 3;
+  /** 0 blue trail · 1 red trail · 2 spark · 3 shield ring · 4 blue / 5 red muzzle flash */
+  kind: 0 | 1 | 2 | 3 | 4 | 5;
 }
 
 interface Bolt {
@@ -225,29 +229,43 @@ interface Ship {
   player: boolean;
   side: Sprite;
   rear: Sprite | null;
-  /** Seconds behind the event clock. */
-  lag: number;
-  lateral: number;
-  weaveAmp: number;
-  weaveF: number;
-  weaveP: number;
   width: number;
   x: number;
   y: number;
   z: number;
+  /** Per-ship depth offset from the pass's depth curve. */
+  zBias: number;
   vx: number;
   vy: number;
   speed: number;
   heading: number;
+  /** Smoothed turn rate, rad/s (drives banking). */
   turn: number;
   rearMix: number;
   visible: boolean;
-  u: number;
+  // Flight model: thrust-limited speed, turn-rate-limited heading.
+  role: "lead" | "chase";
+  cruise: number;
+  maxSpeed: number;
+  accel: number;
+  maxTurn: number;
+  /** Lead: progress along the pass curve (pure pursuit with a lookahead). */
+  trackU: number;
+  /** Lead: evasive jink amplitude (px), current offset, target and timer. */
+  jinkAmp: number;
+  jink: number;
+  jinkTarget: number;
+  jinkT: number;
+  /** Chase: the ship it hunts or escorts, and its formation slot behind / beside it (px). */
+  quarry: Ship | null;
+  slot: { back: number; side: number };
   fireCd: number;
-  /** Ships this one shoots at (nearest visible in range); empty = holds fire. */
+  /** Ships this one shoots at (nearest visible in a gun arc); empty = holds fire. */
   foes: Ship[];
   /** Cooldown multiplier: 1 attacking, `returnFireRate` when shooting back while chased. */
   fireRate: number;
+  /** Has a tail gun (the hunted side); everyone has nose guns. */
+  rearGun: boolean;
   /** Draw-state cache for FX anchoring. */
   draw: { sprite: Sprite; mirror: boolean; rot: number; sy: number; w: number; h: number } | null;
 }
@@ -256,8 +274,9 @@ interface Flight {
   curve: Curve;
   z0: number;
   z1: number;
-  dur: number;
   t: number;
+  /** Safety cap: a pass never outlives this. */
+  maxT: number;
   ships: Ship[];
 }
 
@@ -300,6 +319,8 @@ export class SpaceEngine {
   private rocks: Rock[] = [];
   private flight: Flight | null = null;
   private station: Station | null = null;
+  /** Capital ship orbit phase (radians); it orbits whenever its sprite exists. */
+  private orbit = Math.random() * TAU;
   /** First appearances come early so the page visibly comes alive; then the normal cadence. */
   private nextFlight = rand(8, 20);
   /** Passes still to fly in the current sortie, the gap timer, and where the last pass left. */
@@ -415,7 +436,7 @@ export class SpaceEngine {
       const rock = s.name.startsWith("asteroid_");
       const rim = rock ? 0 : BACKDROP_CONFIG.rimLightStrength;
       const ds = s.name === "death_star";
-      const mirrors = !rock && !ds;
+      const mirrors = !rock && !ds; // ships (incl. the capital ship) get mirrored variants
       const far = bake(s.base, this.grade, true, false, rim);
       s.v = [
         [ds ? far : bake(s.base, this.grade, false, false, rim), mirrors ? bake(s.base, this.grade, false, true, rim) : null],
@@ -464,11 +485,46 @@ export class SpaceEngine {
     return Math.random() < BACKDROP_CONFIG.dogfightProbability ? (Math.random() < 0.5 ? "chased" : "pursuit") : "solo";
   }
 
-  private newShip(player: boolean, lag: number, lateral: number): Ship | null {
+  private newShip(player: boolean, role: Ship["role"], cruise: number): Ship | null {
     const side = player ? this.sprites.get("e46_side") : this.sprites.get(pick(["enemy_fighter_1", "enemy_fighter_2"].filter((n) => this.sprites.has(n))) ?? "");
     if (!side) return null;
     const width = (player ? BACKDROP_CONFIG.e46Size : BACKDROP_CONFIG.enemySize) * this.minSide;
-    return { player, side, rear: player ? (this.sprites.get("e46_rear") ?? null) : null, lag, lateral, weaveAmp: 0, weaveF: rand(0.6, 1.1), weaveP: rand(0, TAU), width, x: -9999, y: -9999, z: 1, vx: 0, vy: 0, speed: 0, heading: 0, turn: 0, rearMix: 0, visible: false, u: 0, fireCd: rand(0.6, 1.6), foes: [], fireRate: 1, draw: null };
+    // Fighters are lighter and more agile than the E46; both bleed speed in hard turns.
+    const agile = player ? 1 : 1.3;
+    return {
+      player,
+      side,
+      rear: player ? (this.sprites.get("e46_rear") ?? null) : null,
+      width,
+      x: -9999,
+      y: -9999,
+      z: 1,
+      zBias: player ? 0 : rand(-0.06, 0.04),
+      vx: 0,
+      vy: 0,
+      speed: cruise,
+      heading: 0,
+      turn: 0,
+      rearMix: 0,
+      visible: false,
+      role,
+      cruise,
+      maxSpeed: cruise * (player ? 1.3 : 1.4),
+      accel: 150 * agile,
+      maxTurn: 1.35 * agile,
+      trackU: 0,
+      jinkAmp: 0,
+      jink: 0,
+      jinkTarget: 0,
+      jinkT: 0,
+      quarry: null,
+      slot: { back: 0, side: 0 },
+      fireCd: rand(0.8, 1.8),
+      foes: [],
+      fireRate: 1,
+      rearGun: false,
+      draw: null,
+    };
   }
 
   /** A fresh event: dogfights open a sortie of alternating passes. */
@@ -490,41 +546,76 @@ export class SpaceEngine {
     }
     this.sortie.kind = kind;
     this.sortie.exit = curve.p3;
-    const len = Math.hypot(curve.p3.x - curve.p0.x, curve.p3.y - curve.p0.y) * 1.15;
     // Solo cruises sometimes bank away into the distance (rear plate view).
     const recede = kind === "solo" && Math.random() < 0.5;
     const z0 = recede ? rand(0.85, 1) : rand(0.6, 0.95);
     // Dogfights hold roughly level depth, so only a real bank-away flips to the rear view.
     const z1 = recede ? rand(0.32, 0.45) : clamp(z0 + rand(-0.1, 0.15), 0.5, 1);
-    const speed = rand(170, 240) * ((z0 + z1) / 2) * (kind === "solo" ? 0.85 : 1.15);
-    const dur = len / speed;
+    const cruise = rand(170, 230) * ((z0 + z1) / 2) * (kind === "solo" ? 0.85 : 1.1);
+    const tg = bezierTangent(curve, 0);
+    const h0 = Math.atan2(tg.y, tg.x);
     const ships: Ship[] = [];
-    const player = this.newShip(true, kind === "pursuit" ? rand(1.6, 2.2) : 0, 0);
+    const place = (s: Ship, behind: number, beside: number) => {
+      s.heading = h0;
+      s.x = curve.p0.x - Math.cos(h0) * behind - Math.sin(h0) * beside;
+      s.y = curve.p0.y - Math.sin(h0) * behind + Math.cos(h0) * beside;
+      s.vx = Math.cos(h0) * s.speed;
+      s.vy = Math.sin(h0) * s.speed;
+    };
+
+    const player = this.newShip(true, kind === "pursuit" ? "chase" : "lead", cruise);
     if (!player) return;
-    // The E46 jinks hard when chased and still weaves when hunting.
-    player.weaveAmp = this.minSide * (kind === "chased" ? rand(0.03, 0.05) : kind === "pursuit" ? rand(0.015, 0.03) : 0);
     ships.push(player);
-    if (kind !== "solo") {
+    if (kind === "solo") {
+      player.jinkAmp = this.minSide * 0.01;
+      place(player, 0, 0);
+    } else {
       const n = kind === "chased" ? (Math.random() < 0.5 ? 2 : 3) : 2;
+      const enemies: Ship[] = [];
       for (let i = 0; i < n; i++) {
-        const lag = kind === "chased" ? rand(1.0, 1.6) + i * rand(0.45, 0.8) : i * rand(0.35, 0.6);
-        const e = this.newShip(false, lag, (i % 2 ? 1 : -1) * this.minSide * rand(0.02, 0.06));
-        if (!e) continue;
-        e.weaveAmp = this.minSide * rand(0.01, 0.025);
-        ships.push(e);
+        const e = this.newShip(false, kind === "pursuit" && i === 0 ? "lead" : "chase", cruise * (kind === "pursuit" ? 1.02 : 1.06));
+        if (e) enemies.push(e);
       }
-      // Both sides shoot in every dogfight: the hunters at full rate, the hunted shooting back.
-      const enemies = ships.filter((s) => !s.player);
+      if (!enemies.length) return;
+      ships.push(...enemies);
+      const pw = player.width;
+      if (kind === "chased") {
+        // The E46 runs the course jinking hard; fighters lead it and hold staggered slots.
+        player.jinkAmp = this.minSide * rand(0.05, 0.08);
+        place(player, 0, 0);
+        enemies.forEach((e, i) => {
+          e.quarry = player;
+          e.slot = { back: pw * (1.4 + i * 0.8), side: (i % 2 ? 1 : -1) * pw * rand(0.3, 0.8) };
+          place(e, pw * (2.5 + i * 1.2) + cruise * rand(0.6, 1.1), e.slot.side);
+        });
+      } else {
+        // Two fighters break for the edge in a loose pair; the E46 runs them down.
+        const lead = enemies[0];
+        lead.jinkAmp = this.minSide * rand(0.04, 0.07);
+        place(lead, 0, 0);
+        enemies.slice(1).forEach((e, i) => {
+          e.quarry = lead;
+          e.slot = { back: lead.width * (1.6 + i), side: (i % 2 ? -1 : 1) * lead.width * rand(1.2, 2) };
+          place(e, e.slot.back, e.slot.side);
+        });
+        player.quarry = lead;
+        player.slot = { back: pw * 1.8, side: 0 };
+        place(player, pw * 3 + cruise * rand(0.8, 1.3), 0);
+      }
+      // Both sides shoot: hunters through nose guns, the hunted over the shoulder too.
       player.foes = enemies;
       player.fireRate = kind === "chased" ? BACKDROP_CONFIG.returnFireRate : 1;
+      player.rearGun = kind === "chased";
       for (const e of enemies) {
         e.foes = [player];
         e.fireRate = kind === "pursuit" ? BACKDROP_CONFIG.returnFireRate : 1;
+        e.rearGun = kind === "pursuit";
       }
     }
-    const maxLag = Math.max(...ships.map((s) => s.lag));
-    this.flight = { curve, z0, z1, dur, t: 0, ships };
-    this.nextFlight = rand(...BACKDROP_CONFIG.flybyFrequency) + dur + maxLag;
+    const len = Math.hypot(curve.p3.x - curve.p0.x, curve.p3.y - curve.p0.y);
+    const maxT = (len / cruise) * 2.2 + 8;
+    this.flight = { curve, z0, z1, t: 0, maxT, ships };
+    this.nextFlight = rand(...BACKDROP_CONFIG.flybyFrequency) + maxT * 0.6;
   }
 
   private spawnStation() {
@@ -568,32 +659,36 @@ export class SpaceEngine {
     }
   }
 
-  private fire(s: Ship) {
-    if (!s.visible) return;
-    // Nearest visible foe in range (ahead or, when shooting back, behind).
+  /** Fire at the nearest foe inside a gun arc. Returns false when nothing is in arc. */
+  private fire(s: Ship): boolean {
+    if (!s.visible) return false;
     let t: Ship | null = null;
-    let dist = this.w * 0.7;
+    let dist = this.w * 0.75;
     for (const f of s.foes) {
       if (!f.visible) continue;
       const d = Math.hypot(f.x - s.x, f.y - s.y);
-      if (d < dist) {
+      if (d >= dist) continue;
+      const off = Math.abs(wrapAngle(Math.atan2(f.y - s.y, f.x - s.x) - s.heading));
+      // Nose guns cover ±17°, a tail gun the rear ±30°.
+      if (off < 0.3 || (s.rearGun && off > Math.PI - 0.52)) {
         t = f;
         dist = d;
       }
     }
-    if (!t) return;
+    if (!t) return false;
     const b = this.bolts.find((x) => !x.on);
-    if (!b) return;
-    // Muzzle on the hull edge facing the target (nose guns forward, tail guns back).
+    if (!b) return false;
     const aim = Math.atan2(t.y - s.y, t.x - s.x);
-    const edge = s.width * s.z * 0.4;
+    const edge = s.width * s.z * 0.42;
     const ox = s.x + Math.cos(aim) * edge;
     const oy = s.y + Math.sin(aim) * edge;
-    // Aim at where the target will be, with enough jitter that some shots graze.
-    const sp = 900 * s.z;
+    // Lead the target, with enough jitter that some shots graze.
+    const sp = 950 * s.z;
     const lead = dist / sp;
-    const a = Math.atan2(t.y + t.vy * lead - oy, t.x + t.vx * lead - ox) + rand(-0.07, 0.07);
+    const a = Math.atan2(t.y + t.vy * lead - oy, t.x + t.vx * lead - ox) + rand(-0.06, 0.06);
     Object.assign(b, { on: true, x: ox, y: oy, z: s.z, vx: Math.cos(a) * sp + s.vx, vy: Math.sin(a) * sp + s.vy, life: 1.1, blue: s.player, target: t, grazed: false });
+    this.emit(ox, oy, s.z, s.vx, s.vy, 0.07, 15 * s.z, s.player ? 4 : 5);
+    return true;
   }
 
   // ── simulation ──
@@ -634,6 +729,9 @@ export class SpaceEngine {
       if (r.y < -m) r.y = this.h + m;
       if (r.y > this.h + m) r.y = -m;
     }
+
+    // Capital ship: one slow orbit every capitalOrbitPeriod seconds.
+    if (!still) this.orbit = (this.orbit + (dt * TAU) / Math.max(30, BACKDROP_CONFIG.capitalOrbitPeriod)) % TAU;
 
     // Station.
     const st = this.station;
@@ -712,53 +810,97 @@ export class SpaceEngine {
     const f = this.flight;
     if (!f) return;
     f.t += dt;
-    let alive = false;
+    const c = { x: this.w / 2, y: this.h / 2 };
+    const keepOut = BACKDROP_CONFIG.centreClearance * this.minSide * 1.15;
+    const lead = f.ships.find((s) => s.role === "lead") ?? f.ships[0];
+    let anyOn = false;
     for (const s of f.ships) {
-      const u = (f.t - s.lag) / f.dur;
-      s.u = u;
-      if (u < 0 || u > 1) {
-        s.visible = false;
-        if (u < 0) alive = true;
-        continue;
-      }
-      alive = true;
-      const p = bezier(f.curve, u);
-      const tg = bezierTangent(f.curve, u);
-      const tl = Math.hypot(tg.x, tg.y) || 1;
-      const nx = -tg.y / tl;
-      const ny = tg.x / tl;
-      const off = s.lateral + s.weaveAmp * Math.sin(s.weaveF * f.t * TAU * 0.35 + s.weaveP);
-      const x = p.x + nx * off;
-      const y = p.y + ny * off;
-      const z = f.z0 + (f.z1 - f.z0) * smooth(0, 1, u);
-      if (s.visible && dt > 0) {
-        s.vx = (x - s.x) / dt;
-        s.vy = (y - s.y) / dt;
-        s.speed = Math.hypot(s.vx, s.vy);
-        const hd = Math.atan2(s.vy, s.vx);
-        const dh = wrapAngle(hd - s.heading);
-        s.turn += (dh / Math.max(dt, 1e-3) - s.turn) * Math.min(1, dt * 4);
-        s.heading = wrapAngle(s.heading + dh * Math.min(1, dt * 6));
-        // Receding (depth falling) shows the rear GABAGOUL view.
-        const dz = (z - s.z) / dt;
-        s.rearMix += ((dz < -0.07 ? 1 : 0) - s.rearMix) * Math.min(1, dt * 2.5);
+      if (dt <= 0) break;
+      let tx: number;
+      let ty: number;
+      let want: number;
+      if (s.role === "lead" || !s.quarry) {
+        // Pure pursuit along the pass curve with a speed-scaled lookahead, plus evasive jinks.
+        const look = Math.max(110, s.speed * 0.9);
+        while (s.trackU < 1) {
+          const q = bezier(f.curve, s.trackU);
+          if (Math.hypot(q.x - s.x, q.y - s.y) > look) break;
+          s.trackU = Math.min(1, s.trackU + 0.008);
+        }
+        const p = bezier(f.curve, s.trackU);
+        const tg = bezierTangent(f.curve, s.trackU);
+        const tl = Math.hypot(tg.x, tg.y) || 1;
+        if (s.jinkAmp) {
+          s.jinkT -= dt;
+          if (s.jinkT <= 0) {
+            s.jinkTarget = rand(-1, 1) * s.jinkAmp;
+            s.jinkT = rand(0.6, 1.5);
+          }
+          s.jink += (s.jinkTarget - s.jink) * Math.min(1, dt * 1.8);
+        }
+        const run = s.trackU >= 1 ? look : 0;
+        tx = p.x + (tg.x / tl) * run - (tg.y / tl) * s.jink;
+        ty = p.y + (tg.y / tl) * run + (tg.x / tl) * s.jink;
+        // The hunted opens the throttle while a hunter is close on its tail.
+        const pressed = f.ships.some((o) => o.quarry === s && o.foes.includes(s) && Math.hypot(o.x - s.x, o.y - s.y) < s.width * 4);
+        want = s.cruise * (pressed ? 1.18 : 1);
       } else {
-        s.heading = Math.atan2(tg.y, tg.x);
+        // Lead the quarry and hold a formation slot behind / beside it; throttle to close.
+        const q = s.quarry;
+        const d = Math.hypot(q.x - s.x, q.y - s.y);
+        const tau = clamp(d / Math.max(80, s.speed), 0, 1.2) * 0.6;
+        const ch = Math.cos(q.heading);
+        const sh = Math.sin(q.heading);
+        tx = q.x + q.vx * tau - ch * s.slot.back - sh * s.slot.side;
+        ty = q.y + q.vy * tau - sh * s.slot.back + ch * s.slot.side;
+        const ahead = (tx - s.x) * Math.cos(s.heading) + (ty - s.y) * Math.sin(s.heading);
+        want = clamp(q.speed + ahead * 0.9, s.cruise * 0.55, s.maxSpeed);
       }
-      s.x = x;
-      s.y = y;
-      s.z = z;
-      s.visible = true;
-      // Firing.
-      if (s.foes.length && dt > 0) {
-        s.fireCd -= dt;
-        if (s.fireCd <= 0) {
-          this.fire(s);
-          s.fireCd = (Math.random() < 0.35 ? 0.12 : rand(0.45, 1.3)) * s.fireRate;
+      // Separation from wingmates, and keep out of the sun.
+      for (const o of f.ships) {
+        if (o === s) continue;
+        const dx = s.x - o.x;
+        const dy = s.y - o.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const min = (s.width + o.width) * 0.45;
+        if (d < min) {
+          tx += (dx / d) * (min - d) * 3;
+          ty += (dy / d) * (min - d) * 3;
         }
       }
+      const dc = Math.hypot(s.x - c.x, s.y - c.y) || 1;
+      if (dc < keepOut) {
+        tx += ((s.x - c.x) / dc) * (keepOut - dc) * 4;
+        ty += ((s.y - c.y) / dc) * (keepOut - dc) * 4;
+      }
+      // Turn-rate-limited heading, thrust-limited speed; hard turns bleed speed.
+      const dh = wrapAngle(Math.atan2(ty - s.y, tx - s.x) - s.heading);
+      const step = clamp(dh, -s.maxTurn * dt, s.maxTurn * dt);
+      s.heading = wrapAngle(s.heading + step);
+      const rate = step / dt;
+      s.turn += (rate - s.turn) * Math.min(1, dt * 5);
+      const bleed = 1 - Math.min(0.22, (Math.abs(rate) / s.maxTurn) * 0.15);
+      s.speed += clamp(want * bleed - s.speed, -s.accel * dt, s.accel * dt);
+      s.vx = Math.cos(s.heading) * s.speed;
+      s.vy = Math.sin(s.heading) * s.speed;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      // Depth follows the pass; receding (depth falling) shows the rear GABAGOUL view.
+      const z = clamp(f.z0 + (f.z1 - f.z0) * smooth(0, 1, lead.trackU) + s.zBias, 0.25, 1);
+      const dz = (z - s.z) / dt;
+      s.z = z;
+      s.rearMix += ((dz < -0.07 ? 1 : 0) - s.rearMix) * Math.min(1, dt * 2.5);
+      const m = s.width * 1.2 + 40;
+      s.visible = s.x > -m && s.y > -m && s.x < this.w + m && s.y < this.h + m;
+      if (s.visible) anyOn = true;
+      // Firing: bursts of 2–4 when a target sits in a gun arc; re-check quickly when none does.
+      if (s.foes.length) {
+        s.fireCd -= dt;
+        if (s.fireCd <= 0) s.fireCd = this.fire(s) ? (Math.random() < 0.55 ? rand(0.09, 0.14) : rand(0.5, 1.3)) * s.fireRate : 0.15;
+      }
     }
-    if (!alive) {
+    // Over once the course is run and everyone has left the screen (or the safety cap hits).
+    if ((lead.trackU >= 1 && !anyOn) || f.t > f.maxT) {
       this.flight = null;
       this.sortie.gap = rand(...BACKDROP_CONFIG.sortieGap);
     }
@@ -788,6 +930,9 @@ export class SpaceEngine {
       const img = ds.v[1][0];
       g.drawImage(img, st.x + P.x * 0.06 - st.d / 2, st.y + P.y * 0.06 - st.d / 2, st.d, st.d);
     }
+
+    // Layer 1b — capital ship on its far-background orbit.
+    this.drawCapital();
 
     // Layer 2a — debris (back to front).
     for (const r of this.rocks) {
@@ -861,6 +1006,11 @@ export class SpaceEngine {
       if (p.kind === 2) {
         g.globalAlpha = t * 0.9 * k;
         g.drawImage(this.glow.hot, x - p.size * 2, y - p.size * 2, p.size * 4, p.size * 4);
+      } else if (p.kind >= 4) {
+        // Muzzle flash: a bright core inside a coloured bloom, gone in ~70 ms.
+        g.globalAlpha = t * bloom * k;
+        g.drawImage(p.kind === 4 ? this.glow.blue : this.glow.red, x - p.size, y - p.size, p.size * 2, p.size * 2);
+        g.drawImage(this.glow.hot, x - p.size * 0.4, y - p.size * 0.4, p.size * 0.8, p.size * 0.8);
       } else {
         g.globalAlpha = t * 0.55 * bloom * k;
         g.strokeStyle = "rgba(160,220,255,1)";
@@ -878,8 +1028,7 @@ export class SpaceEngine {
     const g = this.ctx;
     const P = this.par;
     const k = this.intensity;
-    const edge = smooth(0, 0.06, s.u) * (1 - smooth(0.94, 1, s.u));
-    const base = BACKDROP_CONFIG.shipOpacity * k * (0.45 + 0.55 * s.z) * this.centreFade(s.x, s.y) * edge;
+    const base = BACKDROP_CONFIG.shipOpacity * k * (0.45 + 0.55 * s.z) * this.centreFade(s.x, s.y);
     if (base < 0.01) return;
     const x = s.x + P.x * s.z * 0.5;
     const y = s.y + P.y * s.z * 0.5;
@@ -894,30 +1043,84 @@ export class SpaceEngine {
       const goingLeft = Math.cos(s.heading) < 0;
       const mirror = facesLeft !== goingLeft;
       const nose = mirror ? Math.PI - sp.meta.nose : sp.meta.nose;
-      const lim = enemy ? Math.PI : 0.55;
+      const lim = enemy ? Math.PI : 0.5;
       const rot = clamp(wrapAngle(s.heading - nose), -lim, lim) + (enemy ? 0 : bank * 0.5);
       const sy = 1 - Math.min(0.28, Math.abs(bank) * 0.6);
       const w = s.width * s.z * (sp === s.rear ? 0.9 : 1);
       const h = w * sp.aspect;
-      const nearK = smooth(0.45, 0.75, s.z);
-      g.save();
-      g.translate(x, y);
-      g.rotate(rot);
-      g.scale(1, sy);
+      // Sheet-art fighters lean on the soft far-plane bake so they sit in the photographic
+      // space with the E46 instead of reading as crisp cartoons.
+      const nearK = smooth(0.45, 0.75, s.z) * (enemy ? 0.45 : 1);
       const m = mirror ? 1 : 0;
-      if (nearK < 0.98) {
-        g.globalAlpha = base * mixA * (1 - nearK);
-        g.drawImage(sp.v[1][m] ?? sp.v[1][0], -w / 2, -h / 2, w, h);
-      }
-      if (nearK > 0.02) {
-        g.globalAlpha = base * mixA * nearK;
-        g.drawImage(sp.v[0][m] ?? sp.v[0][0], -w / 2, -h / 2, w, h);
-      }
-      g.restore();
+      const nearImg = sp.v[0][m] ?? sp.v[0][0];
+      const farImg = sp.v[1][m] ?? sp.v[1][0];
+      const stamp = (dx: number, dy: number, a: number) => {
+        g.save();
+        g.translate(x + dx, y + dy);
+        g.rotate(rot);
+        g.scale(1, sy);
+        if (nearK < 0.98) {
+          g.globalAlpha = a * (1 - nearK);
+          g.drawImage(farImg, -w / 2, -h / 2, w, h);
+        }
+        if (nearK > 0.02) {
+          g.globalAlpha = a * nearK;
+          g.drawImage(nearImg, -w / 2, -h / 2, w, h);
+        }
+        g.restore();
+      };
+      // Motion blur: two faint ghosts trailing along the velocity, scaled by speed.
+      const blur = clamp(s.speed / 260, 0, 1) * 0.022;
+      stamp(-s.vx * blur * 2, -s.vy * blur * 2, base * mixA * 0.12);
+      stamp(-s.vx * blur, -s.vy * blur, base * mixA * 0.22);
+      stamp(0, 0, base * mixA);
       if (!anchor || mixA >= 0.5) anchor = { sprite: sp, mirror, rot, sy, w, h };
     }
     s.draw = anchor;
     if (anchor) this.thrusters(s, anchor, x, y, base);
+  }
+
+  /** The capital ship's slow orbit: a tilted far-plane ellipse, larger and clearer on the near side. */
+  private drawCapital() {
+    const cs = this.sprites.get("capital_ship");
+    if (!cs?.v || !this.w) return;
+    const g = this.ctx;
+    const a = this.orbit;
+    const rx = this.w * 0.44;
+    const ry = this.h * 0.34;
+    const tilt = -0.18;
+    const ex = Math.cos(a) * rx;
+    const ey = Math.sin(a) * ry;
+    const x = this.w / 2 + ex * Math.cos(tilt) - ey * Math.sin(tilt) + this.par.x * 0.08;
+    const y = this.h / 2 + ex * Math.sin(tilt) + ey * Math.cos(tilt) + this.par.y * 0.08;
+    // Near side of the orbit is the lower half (sin > 0).
+    const near = 0.5 + 0.5 * Math.sin(a);
+    const alpha = BACKDROP_CONFIG.capitalShipOpacity * this.intensity * (0.4 + 0.6 * near) * this.centreFade(x, y);
+    if (alpha < 0.01) return;
+    const vx = -Math.sin(a) * rx * Math.cos(tilt) - Math.cos(a) * ry * Math.sin(tilt);
+    const vy = -Math.sin(a) * rx * Math.sin(tilt) + Math.cos(a) * ry * Math.cos(tilt);
+    const heading = Math.atan2(vy, vx);
+    const mirror = Math.cos(cs.meta.nose) < 0 !== Math.cos(heading) < 0;
+    const nose = mirror ? Math.PI - cs.meta.nose : cs.meta.nose;
+    const rot = clamp(wrapAngle(heading - nose), -0.35, 0.35);
+    const w = BACKDROP_CONFIG.capitalShipSize * this.minSide * (0.55 + 0.45 * near);
+    const h = w * cs.aspect;
+    g.save();
+    g.translate(x, y);
+    g.rotate(rot);
+    g.globalAlpha = alpha;
+    g.drawImage(cs.v[1][mirror ? 1 : 0] ?? cs.v[1][0], -w / 2, -h / 2, w, h);
+    // Faint engine glow at the nozzles.
+    g.globalCompositeOperation = "lighter";
+    g.globalAlpha = alpha * 0.7 * BACKDROP_CONFIG.fxBloomIntensity;
+    for (const [tx, ty] of cs.meta.thrusters) {
+      const lx = ((mirror ? 1 - tx : tx) - 0.5) * w;
+      const ly = (ty - 0.5) * h;
+      const r = w * 0.05;
+      g.drawImage(this.glow.hot, lx - r, ly - r, r * 2, r * 2);
+    }
+    g.restore();
+    g.globalCompositeOperation = "source-over";
   }
 
   /** Thruster bloom (drawn now) and trail emission (drawn next frame, behind the hull). */
@@ -936,7 +1139,9 @@ export class SpaceEngine {
       const ly = (ty - 0.5) * d.h * d.sy;
       const wx = x + lx * cos - ly * sin;
       const wy = y + lx * sin + ly * cos;
-      const r = (s.player ? 11 : 8) * s.z * (0.8 + speedK * 0.3);
+      // Thrust flicker: a fast shimmer on top of the speed-scaled plume.
+      const flick = 0.88 + 0.08 * Math.sin(performance.now() * 0.031 + tx * 40) + 0.06 * Math.random();
+      const r = (s.player ? 11 : 8) * s.z * (0.8 + speedK * 0.3) * flick;
       g.globalAlpha = Math.min(1, alpha * 1.3) * bloom;
       g.drawImage(s.player ? this.glow.blue : this.glow.red, wx - r, wy - r, r * 2, r * 2);
       // Emit in simulation space (undo the parallax the draw added).

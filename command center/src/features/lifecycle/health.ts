@@ -39,7 +39,27 @@ export interface HealthView {
 }
 
 /** Compact indicator text: Online · 12 ms / Slow · 1.9 s / Timed out / Offline / Checking. */
-export function healthView(h: HealthSnapshot): HealthView {
+/** What THIS window's own requests to the gateway last did (lib/gateway.ts). Rust's heartbeat
+ * isn't subject to the webview's CORS / CSP, so it can say "online" while every view is blocked. */
+export interface WebviewReach {
+  ok: boolean;
+  at: number;
+  /** The page origin the gateway saw (the usual suspect when it's blocked). */
+  origin: string;
+  detail?: string;
+}
+
+/** The heartbeat as the user experiences it: Rust's probe, overruled by the window's own reach. Pure. */
+export function healthView(h: HealthSnapshot, webview?: WebviewReach | null): HealthView {
+  if (webview && !webview.ok && !h.reconnecting && (h.state === "online" || h.state === "slow")) {
+    return {
+      label: "Blocked here",
+      dot: "bg-alert",
+      tone: "bad",
+      alarm: false,
+      title: `Gateway is up, but this window can't reach it: its requests from ${webview.origin} fail${webview.detail ? ` (${webview.detail})` : ""}. Usually the gateway's CORS list doesn't allow this origin (server.py).`,
+    };
+  }
   const ms = h.latencyMs == null ? "" : h.latencyMs >= 1000 ? ` · ${(h.latencyMs / 1000).toFixed(1)} s` : ` · ${h.latencyMs} ms`;
   const base = (label: string, dot: string, tone: HealthView["tone"]): HealthView => ({
     label,

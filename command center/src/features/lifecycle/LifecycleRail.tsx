@@ -45,7 +45,8 @@ export function LifecycleRail() {
 
 function HealthButton() {
   const h = useHealth((s) => s.health);
-  const v = healthView(h);
+  const webview = useHealth((s) => s.webview);
+  const v = healthView(h, webview);
   const [open, setOpen] = useState(false);
   const btn = useRef<HTMLButtonElement>(null);
 

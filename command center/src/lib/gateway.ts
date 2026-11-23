@@ -3,6 +3,7 @@
  * On desktop it runs next to the app; on mobile the PWA reaches it over NetBird.
  */
 import { useSettings } from "@/stores/settings";
+import { gatewayUpPerHeartbeat, noteWebviewReach } from "@/features/lifecycle/health-store";
 
 export class GatewayError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -21,11 +22,15 @@ export async function gateway<T>(path: string, init?: RequestInit & { timeoutMs?
       signal: ctrl.signal,
       headers: { "Content-Type": "application/json", ...authHeader(gatewayToken), ...(init?.headers ?? {}) },
     });
+    noteWebviewReach(true);
     if (!res.ok) throw new GatewayError(`${res.status} ${res.statusText}`, res.status);
     return (await res.json()) as T;
   } catch (err) {
     if (err instanceof GatewayError) throw err;
-    throw new GatewayError(err instanceof Error && err.name === "AbortError" ? "Gateway timed out" : "Gateway unreachable");
+    if (err instanceof Error && err.name === "AbortError") throw new GatewayError("Gateway timed out");
+    noteWebviewReach(false, "network error");
+    // The heartbeat (Rust, no CORS) reaching it while this window can't means a block, not an outage.
+    throw new GatewayError(gatewayUpPerHeartbeat() ? `Gateway blocked for this window (origin ${location.origin} isn't allowed)` : "Gateway unreachable");
   } finally {
     clearTimeout(timer);
   }

@@ -5,6 +5,7 @@ import { create } from "zustand";
 import { isTauri, native } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { healthView, type HealthSnapshot } from "./health";
+import { useHealth } from "./health-store";
 
 /** Live poll cadence while the popover is open (never polled while closed). */
 export const NET_POLL_MS = 2000;
@@ -129,7 +130,8 @@ const Row = ({ k, v, tone }: { k: string; v: React.ReactNode; tone?: string }) =
 export function GatewayPopover({ anchor, health, onClose, onReset }: { anchor: RefObject<HTMLElement | null>; health: HealthSnapshot; onClose: () => void; onReset: () => void }) {
   const panel = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
-  const v = healthView(health);
+  const webview = useHealth((s) => s.webview);
+  const v = healthView(health, webview);
   const gatewayUrl = useSettings((s) => s.gatewayUrl);
   const { net, error, down, up } = useNetTelemetry();
   const speed = useSpeed();

@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { isTauri } from "@/lib/platform";
 import { onExtEvent, xcmd } from "@/lib/native-ext";
 import { useSettings } from "@/stores/settings";
-import { foldProbe, UNKNOWN_HEALTH, type HealthSnapshot, type Probe } from "./health";
+import { foldProbe, UNKNOWN_HEALTH, type HealthSnapshot, type Probe, type WebviewReach } from "./health";
 
 /**
  * Gateway heartbeat state. Desktop: Rust probes (`lifecycle::health_loop`) and pushes
@@ -11,10 +11,25 @@ import { foldProbe, UNKNOWN_HEALTH, type HealthSnapshot, type Probe } from "./he
  */
 interface HealthStore {
   health: HealthSnapshot;
+  /** The window's own last gateway request (null until a view has called it). */
+  webview: WebviewReach | null;
   set: (h: HealthSnapshot) => void;
 }
 
-export const useHealth = create<HealthStore>((set) => ({ health: UNKNOWN_HEALTH, set: (health) => set({ health }) }));
+export const useHealth = create<HealthStore>((set) => ({ health: UNKNOWN_HEALTH, webview: null, set: (health) => set({ health }) }));
+
+/** Record a gateway request's network outcome (`ok` = an HTTP response came back, whatever its
+ * status). Writes only on a change or every 5 s, so busy views don't re-render the rail. */
+export function noteWebviewReach(ok: boolean, detail?: string): void {
+  const prev = useHealth.getState().webview;
+  const now = Date.now();
+  if (prev && prev.ok === ok && now - prev.at < 5000) return;
+  const origin = typeof location !== "undefined" ? location.origin : "?";
+  useHealth.setState({ webview: { ok, at: now, origin, detail } });
+}
+
+/** Rust says the gateway is up: a network failure in this window is then a block, not an outage. */
+export const gatewayUpPerHeartbeat = (): boolean => ["online", "slow"].includes(useHealth.getState().health.state);
 
 let started = false;
 let worker: Worker | null = null;

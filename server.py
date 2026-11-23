@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Agentic OS", version="4.0", lifespan=lifespan)
 
 # CORS for local dev
+DEV_ORIGIN_RE = r"^http://(localhost|127\.0\.0\.1):14[23][0-9]$"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -54,6 +55,10 @@ app.add_middleware(
         # The phone loads the PWA from this server at /cc/ (same origin), so it needs no entry here.
         "http://localhost:1420", "http://tauri.localhost", "tauri://localhost", "http://localhost:4173",
     ],
+    # Extra Vite dev ports on loopback (1420-1439): a second checkout or worktree runs its dev
+    # server on 1422, 1430… and its window was silently cut off from every view while the Rust
+    # heartbeat (no CORS) still said "Connected". Loopback only, this port band only.
+    allow_origin_regex=DEV_ORIGIN_RE,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

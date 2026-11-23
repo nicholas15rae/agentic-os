@@ -1,6 +1,11 @@
 # Plan: Multi-Business Operations Manager + Zero-Trust Hardening
 
-Status: **decisions taken 2026-11-22, awaiting go-ahead**. No code changed yet.
+Status: **implemented 2026-11-22** on `feat/ops-multi-business`: Phase 2 `1d73ac4`, Phase 3 `89d9424`, Phase 4 (UI) after it.
+Still open:
+- Live provisioning of the two seed workspaces (writes to the running AnythingLLM; run "Finish setup" per business).
+- Quarantining RAG documents (needs AnythingLLM's document-read endpoint verified live). Only notes and blocked writes go through quarantine today.
+- `bizops` as a Tony packet target (`tony_dispatch::AGENTS` / `packet_queue`) still needs a business lock on packets. Normal routing reaches it.
+- The audit chain can't detect its tail being truncated; edits and gaps are detected.
 Base: new branch `feat/ops-multi-business` off `feat/thoughtform-pipeline` @ 0b67b03, **with `feat/director-media-mcp` merged in first**. Paths below are relative to `command center/src-tauri/src/commands/` unless rooted.
 
 ## Decisions (these override the sections below where they conflict)

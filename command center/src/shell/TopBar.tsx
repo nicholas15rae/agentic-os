@@ -12,6 +12,7 @@ import { ActiveSlotPill, ComputeModeSwitch, DropletBadge, KillSwitch, PrivacyPil
 import { ModePill } from "@/features/modes/ModePill";
 import { MicLockBadge, useMicIndicator } from "@/features/voice/MicLockBadge";
 import { isMicOff } from "@/features/voice/mic-indicator";
+import { BusinessSwitcher } from "@/features/ops/BusinessSwitcher";
 
 export function TopBar() {
   const identity = useSettings((s) => s.identity);
@@ -60,6 +61,7 @@ export function TopBar() {
       </button>
 
       <div className="ml-auto hidden md:flex md:items-center md:gap-2">
+        <BusinessSwitcher />
         <AwayButton />
         <ActiveSlotPill />
         <ComputeModeSwitch compact />

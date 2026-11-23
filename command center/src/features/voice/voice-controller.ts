@@ -46,6 +46,7 @@ import { calmModeError, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3A
 import { pillPathways, stripLearnTags } from "@/features/modes/learning";
 import { spokenSoFar } from "@/features/dispatcher/tony-dispatch";
 import { onArbiterEvent, type PacketResult } from "@/features/arbiter/api";
+import { activeBusinessForTurn } from "@/features/ops/ops-store";
 import { duckOnSpeech, duckOnTrigger, musicPlayingHere, restoreAfterPause, restoreDuck, scheduleRestore, settleCommand, settleNoise } from "./spotify-duck";
 
 /**
@@ -1512,7 +1513,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   });
   // askCards: a Spotify write held by the Ask tier comes back as `pendingSpotify` (card below), not a failure note.
   // cuePlaying: Rust keeps "volume 30" during a Gabagool cue away from Spotify (same rule as cueOwnsVolume).
-  const req = { text: task, role, explicit, routeKind: routed.kind, routeReason: routed.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate };
+  const req = { text: task, role, explicit, routeKind: routed.kind, routeReason: routed.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn() };
   // The steps Rust reports as they happen (`os-step`): what Tony sent an agent and what came back
   // still reach the chat when the turn then fails or is cut.
   const liveSteps: OsTurnResult["steps"] = [];

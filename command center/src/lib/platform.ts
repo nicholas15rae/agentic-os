@@ -352,7 +352,9 @@ export type NativeEventName =
   /** Phase 3: a memory compaction finished, was deferred or failed (payload: `CompactOutcome`). */
   | "memory-compaction"
   /** The memory hygiene bar changed (payload: `HygieneStatus`; hygiene.rs). */
-  | "hygiene-status";
+  | "hygiene-status"
+  /** The review queue's batched digest (review_queue.rs; payload: `ReviewDigestEvent`). */
+  | "review-digest";
 
 export async function onNativeEvent<P = unknown>(event: NativeEventName, handler: (payload: P) => void): Promise<() => void> {
   if (!isTauri()) return () => undefined;
@@ -1509,6 +1511,9 @@ export interface OsTurnRequest {
   cuePlaying?: boolean;
   /** P3 Tier 2: Tony brainstorms this himself — Rust never re-routes or delegates it. */
   noDelegate?: boolean;
+  /** The Business Switcher's selection: Operations-Manager / Finance turns lock to it (Rust
+   * `business_lock`); missing = resolve from the text, and Tony asks when that isn't one. */
+  activeBusinessId?: string;
 }
 export interface OsStep {
   kind: "delegate" | "reply" | "tool" | "step-in" | "error" | "overseer" | "verify";

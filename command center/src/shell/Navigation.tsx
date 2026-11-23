@@ -2,6 +2,7 @@ import { useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { SECTIONS, useNav } from "@/stores/nav";
 import { usePipelines } from "@/features/os/pipeline-store";
+import { useOps } from "@/features/ops/ops-store";
 import { LifecycleRail } from "@/features/lifecycle/LifecycleRail";
 import { MyAppsRail, MyAppsSheet } from "@/features/myapps/MyAppsRail";
 
@@ -9,6 +10,8 @@ import { MyAppsRail, MyAppsSheet } from "@/features/myapps/MyAppsRail";
 export function SideRail() {
   const { section, go } = useNav();
   const unseen = usePipelines((s) => s.unseen);
+  const review = useOps((s) => s.review?.pending ?? 0);
+  const digest = useOps((s) => s.digestUnseen);
   return (
     <nav aria-label="Sections" className="hidden w-[72px] shrink-0 flex-col items-center gap-2.5 overflow-y-auto border-r border-white/[0.06] bg-[rgba(11,13,17,0.35)] py-4 backdrop-blur-md [scrollbar-width:none] md:flex">
       <img src={import.meta.env.BASE_URL + "icon.svg"} alt="" className="mb-3 size-9 rounded-[10px]" />
@@ -25,6 +28,11 @@ export function SideRail() {
         >
           <Icon size={19} />
           {id === "playplace" && unseen > 0 && <span className="absolute -right-0.5 -top-0.5 grid size-4 place-items-center rounded-full bg-amber font-mono text-[9px] font-bold text-canvas">{unseen}</span>}
+          {id === "operations" && review > 0 && (
+            <span aria-label={`${review} waiting for review`} className={`absolute -right-0.5 -top-0.5 grid size-4 place-items-center rounded-full font-mono text-[9px] font-bold text-canvas ${digest ? "bg-amber" : "bg-ink-3"}`}>
+              {review > 9 ? "9+" : review}
+            </span>
+          )}
         </button>
       ))}
       <MyAppsRail />

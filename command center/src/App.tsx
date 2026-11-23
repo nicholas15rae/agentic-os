@@ -20,6 +20,7 @@ import { cc } from "@/lib/cc-api";
 import { platform } from "@/lib/platform";
 import { CommandSection } from "@/sections/CommandSection";
 import { useRefresh } from "@/features/lifecycle/refresh";
+import { bootOps } from "@/features/ops/ops-store";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -29,6 +30,8 @@ const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.E
   comms: lazy(() => import("@/sections/CommsSection").then((m) => ({ default: m.CommsSection }))),
   brainstorm: lazy(() => import("@/sections/BrainstormSection").then((m) => ({ default: m.BrainstormSection }))),
   finance: lazy(() => import("@/sections/FinanceSection").then((m) => ({ default: m.FinanceSection }))),
+  // Operations Manager: business registry, Review Queue (HITL digest), audit trail.
+  operations: lazy(() => import("@/sections/OperationsSection").then((m) => ({ default: m.OperationsSection }))),
   trading: lazy(() => import("@/sections/TradingSection").then((m) => ({ default: m.TradingSection }))),
   vault: lazy(() => import("@/sections/VaultSection").then((m) => ({ default: m.VaultSection }))),
   wallpapers: lazy(() => import("@/sections/WallpapersSection").then((m) => ({ default: m.WallpapersSection }))),
@@ -83,6 +86,7 @@ function MainApp() {
   useCueScheduler();
   useConfigSnapshot();
   useEffect(installSpotifyReauthNotice, []); // toast when Rust opens a Spotify consent tab by itself
+  useEffect(bootOps, []); // business registry + review-digest badge
   return (
     <>
       <WallpaperSlideshow />

@@ -78,6 +78,8 @@ export function agentBadge(id: string): string {
       return "PROMPTER";
     case "designer":
       return "DESIGNER";
+    case "director":
+      return "DIRECTOR";
     case "general":
       return osName().toUpperCase();
     case "user":

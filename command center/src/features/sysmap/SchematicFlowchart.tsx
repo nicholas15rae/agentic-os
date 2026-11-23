@@ -45,7 +45,7 @@ const POLL_MS = 3000;
 type View = { x: number; y: number; k: number };
 const FIT: View = { x: 0, y: 0, k: 1 };
 
-const NS_OF: Partial<Record<RosterId, string>> = { tony: "tony", prompter: "build_circle", coder: "build_circle", designer: "build_circle", librarian: "librarian", booking: "booking", security: "security", observer: "observer" };
+const NS_OF: Partial<Record<RosterId, string>> = { tony: "tony", prompter: "build_circle", coder: "build_circle", designer: "build_circle", director: "director", librarian: "librarian", booking: "booking", security: "security", observer: "observer" };
 
 function Port({ x, y, color }: { x: number; y: number; color: string }) {
   return <circle cx={x} cy={y} r={4} fill="#05080d" stroke={color} strokeWidth={1.5} />;
@@ -254,7 +254,7 @@ export function SchematicFlowchart() {
                 </text>
               </g>
             ))}
-            <text y={24 + 6 * 17 + 6} fontSize={9.5} fill="#475569">
+            <text y={24 + Object.keys(BUSES).length * 17 + 6} fontSize={9.5} fill="#475569">
               traces light only on real hand-offs
             </text>
           </g>

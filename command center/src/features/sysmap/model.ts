@@ -12,7 +12,7 @@ import type { SnapAgent, SnapBus, SnapSkill } from "@/lib/platform";
 
 // ── Buses ─────────────────────────────────────────────────────────────────────
 
-export type BusId = "core" | "build" | "memory" | "vault" | "ops" | "security";
+export type BusId = "core" | "build" | "media" | "memory" | "vault" | "ops" | "security";
 
 export interface BusLook {
   label: string;
@@ -25,6 +25,7 @@ export interface BusLook {
 export const BUSES: Readonly<Record<BusId, BusLook>> = {
   core: { label: "Core routing", color: "#22d3ee", rgb: "34,211,238" },
   build: { label: "Coding / build", color: "#f59e0b", rgb: "245,158,11" },
+  media: { label: "Media / edit", color: "#e879f9", rgb: "232,121,249" },
   memory: { label: "RAG / memory", color: "#34d399", rgb: "52,211,153" },
   vault: { label: "Finance vault", color: "#a78bfa", rgb: "167,139,250" },
   ops: { label: "Ops / booking", color: "#60a5fa", rgb: "96,165,250" },
@@ -32,7 +33,7 @@ export const BUSES: Readonly<Record<BusId, BusLook>> = {
 };
 
 /** The roster (arbiter node ids), Tony first. */
-export const ROSTER = ["tony", "prompter", "coder", "designer", "librarian", "finance", "booking", "ops", "observer", "security", "garbage"] as const;
+export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "observer", "security", "garbage"] as const;
 export type RosterId = (typeof ROSTER)[number];
 
 export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
@@ -40,6 +41,7 @@ export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
   prompter: "build",
   coder: "build",
   designer: "build",
+  director: "media",
   librarian: "memory",
   finance: "vault",
   booking: "ops",
@@ -54,6 +56,7 @@ export const NODE_LABEL: Readonly<Record<RosterId, string>> = {
   prompter: "Prompter",
   coder: "Coder",
   designer: "Designer",
+  director: "Director",
   librarian: "Librarian",
   finance: "Financer",
   booking: "Booking Agent",
@@ -100,7 +103,7 @@ export const SURFACE_TONE: Readonly<Record<Surface, string>> = {
 // ── Introspect joins ───────────────────────────────────────────────────────
 
 /** AnythingLLM role behind a roster node (`SnapAgent.role`; "general" = Tony). */
-const INTROSPECT_ROLE: Partial<Record<RosterId, string>> = { tony: "general", prompter: "prompter", coder: "coder", designer: "designer", librarian: "librarian", ops: "ops", booking: "booking", finance: "finance" };
+const INTROSPECT_ROLE: Partial<Record<RosterId, string>> = { tony: "general", prompter: "prompter", coder: "coder", designer: "designer", director: "director", librarian: "librarian", ops: "ops", booking: "booking", finance: "finance" };
 
 export function agentFor(id: RosterId, agents: readonly SnapAgent[] | undefined): SnapAgent | undefined {
   const role = INTROSPECT_ROLE[id];
@@ -125,6 +128,7 @@ export const HOOKUP_HINTS: Readonly<Record<RosterId, readonly string[]>> = {
   prompter: ["sequential", "thinking"],
   coder: ["filesystem", "git", "github", "playwright"],
   designer: ["stitch", "figma", "playwright"],
+  director: ["media-forge", "media", "ffmpeg"],
   librarian: ["memory", "knowledge", "anythingllm", "filesystem", "documenter"],
   finance: ["market", "trading", "finance"],
   booking: ["n8n", "gmail", "calendar", "instagram"],
@@ -149,6 +153,7 @@ export const BOUNDARY: Readonly<Record<RosterId, string>> = {
   prompter: "Build circle: read/write `build_circle`; no filesystem writes",
   coder: "Write: staging/<slug> only (sandboxed output folder); read `build_circle`",
   designer: "Write: staging/<slug> assets only; read `build_circle`",
+  director: "Media projects: writes new renders / exports only; never modifies original raw footage or photos",
   librarian: "Read-only over every non-vault namespace + cold archives; writes `librarian`",
   finance: "SEALED vault: AES-GCM ledger, opens only on your explicit unlock; never in shared memory",
   booking: "Outbound via the n8n webhook only; writes `booking`",
@@ -213,9 +218,10 @@ export interface FlowNode {
 }
 
 export const FLOW_NODES: Readonly<Record<Exclude<RosterId, "tony">, FlowNode>> = {
-  prompter: { x: 290, y: 430, col: "left" },
-  coder: { x: 290, y: 620, col: "left" },
-  designer: { x: 290, y: 810, col: "left" },
+  prompter: { x: 290, y: 400, col: "left" },
+  coder: { x: 290, y: 570, col: "left" },
+  designer: { x: 290, y: 740, col: "left" },
+  director: { x: 290, y: 910, col: "left" },
   librarian: { x: 1310, y: 400, col: "right" },
   finance: { x: 1310, y: 570, col: "right" },
   booking: { x: 1310, y: 740, col: "right" },
@@ -226,7 +232,7 @@ export const FLOW_NODES: Readonly<Record<Exclude<RosterId, "tony">, FlowNode>> =
 };
 
 /** Each bus drops off the spine on its own lane, so parallel traces never overlap. */
-export const BUS_LANE: Readonly<Record<BusId, number>> = { core: 0, build: -36, memory: 30, vault: 54, ops: 78, security: 0 };
+export const BUS_LANE: Readonly<Record<BusId, number>> = { core: 0, build: -36, media: -18, memory: 30, vault: 54, ops: 78, security: 0 };
 
 /** The 90°-routed trace from Tony's spine to a node's card (SVG path). Pure. */
 export function busPath(id: Exclude<RosterId, "tony">): string {
@@ -294,6 +300,7 @@ export const ORBITS: Readonly<Record<RosterId, Orbit>> = {
   prompter: { radius: 7, speed: 0.07, phase: 0.4, tilt: 0.05, size: 0.62, palette: ["#4a2a08", "#c27a2c", "#f5d29a"], atmosphere: "#fbbf24", kind: "planet" },
   coder: { radius: 9.5, speed: 0.055, phase: 2.2, tilt: -0.04, size: 0.78, palette: ["#2b1a0c", "#a0522d", "#f4a261"], atmosphere: "#f59e0b", kind: "planet" },
   designer: { radius: 12, speed: 0.045, phase: 4.1, tilt: 0.06, size: 0.7, palette: ["#3b0d2e", "#c2417d", "#ffb4d2"], atmosphere: "#f472b6", kind: "planet" },
+  director: { radius: 13.5, speed: 0.04, phase: 0.2, tilt: -0.03, size: 0.64, palette: ["#2a0a2e", "#a3389a", "#f5c2ec"], atmosphere: "#e879f9", kind: "planet" },
   librarian: { radius: 15, speed: 0.036, phase: 1.1, tilt: -0.07, size: 0.95, palette: ["#062b22", "#1f8a6b", "#a7f3d0"], atmosphere: "#34d399", kind: "planet" },
   ops: { radius: 18, speed: 0.03, phase: 5.3, tilt: 0.05, size: 0.74, palette: ["#0b1f3a", "#2f6fb4", "#bfdbfe"], atmosphere: "#60a5fa", kind: "planet" },
   booking: { radius: 21, speed: 0.025, phase: 3.0, tilt: -0.05, size: 0.66, palette: ["#2a2410", "#8f7a3a", "#e9dca2"], atmosphere: "#facc15", kind: "planet" },

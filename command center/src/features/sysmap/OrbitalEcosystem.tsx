@@ -22,7 +22,7 @@ const ARC_MS = 1600;
 const POLL_MS = 3000;
 const HOME_POS = new THREE.Vector3(0, 30, 46);
 const HOME_TARGET = new THREE.Vector3(0, 0, 0);
-const NS_OF: Partial<Record<RosterId, string>> = { tony: "tony", prompter: "build_circle", coder: "build_circle", designer: "build_circle", librarian: "librarian", booking: "booking", security: "security", observer: "observer" };
+const NS_OF: Partial<Record<RosterId, string>> = { tony: "tony", prompter: "build_circle", coder: "build_circle", designer: "build_circle", director: "director", librarian: "librarian", booking: "booking", security: "security", observer: "observer" };
 const MOONS = [
   { key: "rag", color: "#34d399", label: "RAG" },
   { key: "mem", color: "#38bdf8", label: "MEM" },

@@ -11,7 +11,7 @@ const rs = readFileSync(resolve(__dirname, "../../../src-tauri/src/commands/arbi
 describe("agent topology", () => {
   it("lays out every Rust roster node and mirrors arbiter::EDGES", () => {
     const ids = [...rs.matchAll(/node\("([a-z_]+)", "/g)].map((m) => m[1]);
-    expect(ids.length).toBe(11);
+    expect(ids.length).toBe(Object.keys(LAYOUT).length);
     for (const id of ids) expect(LAYOUT[id], id).toBeDefined();
     for (const [a, b] of EDGES) expect(rs).toContain(`("${a}", "${b}")`);
     expect(rs).toContain(`pub const EDGES: [(&str, &str); ${EDGES.length}]`);

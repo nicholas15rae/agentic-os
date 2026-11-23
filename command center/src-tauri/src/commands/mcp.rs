@@ -506,10 +506,34 @@ pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> 
         }
     }
     if !policy.allows_tool(name, changes_data(name)) {
-        let why = if policy.tool_allowlist.is_some_and(|l| !l.contains(&name)) { "it is not on that agent's read-only tool list" } else { "it changes data and that agent is read-only" };
+        let why = if policy.tool_allowlist.is_some_and(|l| !l.contains(&name)) {
+            "it is not on that agent's read-only tool list"
+        } else if policy.may_mutate && policy.mutate_servers.is_some() {
+            "it changes data outside that agent's own media servers"
+        } else {
+            "it changes data and that agent is read-only"
+        };
         return Some(format!("{READ_ONLY_ROLE_PREFIX}{a} — {name} is blocked for the {a} agent: {why}"));
     }
     None
+}
+
+/// Prefix of a refused GPU request on a media server (shown to the agent, which retries on CPU).
+pub(crate) const GPU_BUSY_PREFIX: &str = "GPU_BUSY: ";
+
+/// Hardware-video / CUDA spellings in a tool call's arguments (lowercased JSON).
+const GPU_ARG_MARKERS: [&str; 7] = ["nvenc", "cuda", "cuvid", "_qsv", "h264_amf", "hevc_amf", "hwaccel"];
+
+/// A call to a local media server (`roles::MEDIA_SERVERS`) that asks for a GPU encoder or
+/// CUDA while the GPU slot is busy. media-forge refuses GPU work by itself (MEDIA_ALLOW_GPU is
+/// never set); this mainly stops shotcut-mcp picking NVENC under Tony. Other servers: `None`.
+pub(crate) fn gpu_refusal(name: &str, args: &Value, slot_idle: bool) -> Option<String> {
+    if slot_idle || !super::roles::MEDIA_SERVERS.contains(&server_of_tool(name)) {
+        return None;
+    }
+    let text = args.to_string().to_ascii_lowercase();
+    let hit = GPU_ARG_MARKERS.iter().find(|m| text.contains(*m))?;
+    Some(format!("{GPU_BUSY_PREFIX}{name} asked for {hit}, but the GPU is busy with the local model — use the CPU encoder (libx264 / encoder \"x264\")"))
 }
 
 /// Pure part of `tool_set` for a sub-agent: drop every tool its role policy refuses (the
@@ -1004,6 +1028,12 @@ pub async fn call_tool_with(state: &DispatchState, os: &OsState, bridge: &Bridge
     let cfg = os.snapshot();
     // Role gate first (Part 4): a sub-agent's ungranted server / off-allowlist or mutating tool.
     if let Some(e) = role_refusal(&cfg, name, agent) {
+        trace_tool(state, os, name, 0, Some(&e));
+        return Err(e);
+    }
+    // The 12 GB GPU is Tony's: a media render may ask for a hardware encoder only while the
+    // GPU slot is idle (every caller, Tony included — the render would outlive his turn).
+    if let Some(e) = gpu_refusal(name, args, os.slot.is_idle()) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
     }
@@ -2566,6 +2596,36 @@ mod tests {
         cfg.mcps.push(McpServer { id: "sqlite".into(), name: "SQLite".into(), transport: "stdio".into(), command: "npx".into(), enabled: true, agents: all.clone(), ..Default::default() });
         cfg.mcps.push(McpServer { id: "serena".into(), name: "Serena".into(), transport: "stdio".into(), command: "serena".into(), enabled: true, agents: all, ..Default::default() });
         cfg
+    }
+
+    #[test]
+    fn director_writes_only_through_its_media_servers() {
+        let cfg = role_cfg();
+        // Granted by default, and allowed to change data there (edits, renders).
+        for tool in ["shotcut.create_project", "shotcut.edit_project", "shotcut.start_render", "media-forge.quick_assemble", "media-forge.probe_media"] {
+            assert_eq!(role_refusal(&cfg, tool, "director"), None, "{tool}");
+        }
+        // Reads elsewhere are fine; writes elsewhere stay refused.
+        assert_eq!(role_refusal(&cfg, "github.get_file_contents", "director"), None);
+        for tool in ["github.merge_pull_request", "sqlite.write_query", "serena.replace_symbol_body"] {
+            assert!(role_refusal(&cfg, tool, "director").unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "{tool}");
+        }
+        // Nobody else is granted the media servers by default.
+        for agent in ["designer", "coder", "booking"] {
+            assert!(role_refusal(&cfg, "media-forge.quick_assemble", agent).unwrap().starts_with(ROLE_PREFIX), "{agent}");
+        }
+    }
+
+    #[test]
+    fn gpu_options_on_media_servers_wait_for_an_idle_slot() {
+        let nvenc = json!({ "encoder": "nvenc" });
+        let preset = json!({ "settings": { "vcodec": "H264_NVENC", "hwaccel": "cuda" } });
+        assert!(gpu_refusal("media-forge.quick_assemble", &nvenc, false).unwrap().starts_with(GPU_BUSY_PREFIX));
+        assert!(gpu_refusal("shotcut.start_render", &preset, false).unwrap().starts_with(GPU_BUSY_PREFIX));
+        // Idle GPU, CPU encoders, or a server that is not a media server: no refusal.
+        assert_eq!(gpu_refusal("shotcut.start_render", &preset, true), None);
+        assert_eq!(gpu_refusal("media-forge.quick_assemble", &json!({ "encoder": "x264" }), false), None);
+        assert_eq!(gpu_refusal("fetch.url", &json!({ "url": "https://example.com/cuda" }), false), None);
     }
 
     #[test]

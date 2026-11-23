@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { BookOpen, Bot, CalendarCheck, Code2, ListTree, Palette, Radar, Sparkles } from "lucide-react";
+import { BookOpen, Bot, CalendarCheck, Clapperboard, Code2, ListTree, Palette, Radar, Sparkles } from "lucide-react";
 import type { Priority } from "@/lib/platform";
 import { osName } from "@/features/os/os-store";
 import { TONY_INTRO, TONY_ROLE, TONY_STYLE } from "@/features/voice/persona";
@@ -16,7 +16,7 @@ import { useModes } from "@/features/modes/modes-store";
  * Security Patrol or Finance (Phase 2 §4, prep only) — still resolves: `agentFor` / `SUB_AGENTS[id]`
  * give it a generic read-only agent that reports to Tony, labelled from its id.
  */
-export type KnownRole = "librarian" | "coder" | "booking" | "ops" | "prompter" | "designer" | "general";
+export type KnownRole = "librarian" | "coder" | "booking" | "ops" | "prompter" | "designer" | "director" | "general";
 /** A known role, or any later registry id (validated `^[a-z][a-z0-9_-]{0,31}$` in Rust). */
 export type AgentRole = KnownRole | (string & {});
 
@@ -56,6 +56,17 @@ const AGENT_DEFS: SubAgent[] = [
     keywords: ["design", "ui", "ux", "mockup", "wireframe", "layout", "palette", "typography", "landing page", "screen", "component", "brand", "logo", "aesthetic"],
     get systemPrompt() {
       return `You are Designer, the UI/UX agent of ${osName()}. Answer with design tokens, component hierarchies, wireframes and self-contained HTML/Tailwind prototypes — never generic advice. ${GUARDRAIL}`;
+    },
+  },
+  {
+    role: "director",
+    label: "Director",
+    icon: Clapperboard,
+    gatewayAgent: "opencode",
+    priority: "interactive",
+    keywords: ["edit video", "self-tape edit", "self tape edit", "slate", "reel", "short-form", "youtube edit", "render", "trim", "captions", "subtitles", "headshot", "photo edit", "thumbnail", "b-roll", "media project"],
+    get systemPrompt() {
+      return `You are Director, the media editor of ${osName()}: a senior film/video editor, sound finisher and photo retoucher. Ask only for the exact missing shots or specs, show a short edit plan before multi-clip renders, never modify original raw files, and verify every render. ${GUARDRAIL}`;
     },
   },
   {

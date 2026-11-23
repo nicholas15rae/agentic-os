@@ -17,7 +17,7 @@ const example = {
 
 describe("schema mirrors tony_dispatch.rs", () => {
   it("agents and priorities match the Rust constants", () => {
-    expect(rs).toContain(`pub const AGENTS: [&str; 7] = [${AGENT_ROLES.map((a) => `"${a}"`).join(", ")}];`);
+    expect(rs).toContain(`pub const AGENTS: [&str; ${AGENT_ROLES.length}] = [${AGENT_ROLES.map((a) => `"${a}"`).join(", ")}];`);
     expect(rs).toContain(`pub const PRIORITIES: [&str; 3] = [${PRIORITIES.map((a) => `"${a}"`).join(", ")}];`);
   });
 

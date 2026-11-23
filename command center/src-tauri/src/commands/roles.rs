@@ -12,6 +12,7 @@
 //! - Librarian: an EXACT tool allowlist ([`LIBRARIAN_TOOLS`]), no file writes, AnythingLLM
 //!   read-only. Never extended by a verb heuristic.
 //! - Coder: no MCP mutation; files only through `staging::write_artifact`.
+//! - Director: data-changing tools only on its local media servers ([`MEDIA_SERVERS`]).
 //! - Prompter, Designer and every other id: no mutation at all.
 //!
 //! Enforced in `mcp::call_tool_with` (`role_refusal`) and `mcp::tool_set`, in
@@ -35,6 +36,9 @@ pub const LIBRARIAN_TOOLS: [&str; 11] = [
     "sqlite.list_tables",
     "sqlite.describe_table",
 ];
+
+/// The local media MCP servers (os.json ids) the Director may change data through.
+pub const MEDIA_SERVERS: [&str; 2] = ["shotcut", "media-forge"];
 
 /// Where an agent may write files.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,16 +67,22 @@ pub struct RolePolicy {
     pub may_mutate: bool,
     /// `Some`: ONLY these exact tool names (checked before anything else).
     pub tool_allowlist: Option<&'static [&'static str]>,
+    /// `Some`: `may_mutate` covers ONLY tools on these MCP server ids (`<server>.<tool>`);
+    /// a data-changing tool on any other server is refused as for a read-only role.
+    pub mutate_servers: Option<&'static [&'static str]>,
     pub fs_write: FsWrite,
     pub allm: AllmAccess,
 }
 
 impl RolePolicy {
-    pub const TONY: RolePolicy = RolePolicy { may_mutate: true, tool_allowlist: None, fs_write: FsWrite::None, allm: AllmAccess::Write };
-    pub const LIBRARIAN: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: Some(&LIBRARIAN_TOOLS), fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
-    pub const CODER: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: None, fs_write: FsWrite::Staging, allm: AllmAccess::ReadOnly };
+    pub const TONY: RolePolicy = RolePolicy { may_mutate: true, tool_allowlist: None, mutate_servers: None, fs_write: FsWrite::None, allm: AllmAccess::Write };
+    pub const LIBRARIAN: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: Some(&LIBRARIAN_TOOLS), mutate_servers: None, fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
+    pub const CODER: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: None, mutate_servers: None, fs_write: FsWrite::Staging, allm: AllmAccess::ReadOnly };
+    /// The media Director: may change data only through its local media servers (edit,
+    /// render, transcribe inside the media root); every other server stays read-only for it.
+    pub const DIRECTOR: RolePolicy = RolePolicy { may_mutate: true, tool_allowlist: None, mutate_servers: Some(&MEDIA_SERVERS), fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
     /// Prompter, Designer, Booking, Ops and any future agent id.
-    pub const READ_ONLY: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: None, fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
+    pub const READ_ONLY: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: None, mutate_servers: None, fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
 
     /// May this agent call `tool` (`mutating` = the tool changes data)?
     pub fn allows_tool(&self, tool: &str, mutating: bool) -> bool {
@@ -81,7 +91,11 @@ impl RolePolicy {
                 return false;
             }
         }
-        self.may_mutate || !mutating
+        if !mutating {
+            return true;
+        }
+        let server = tool.split_once('.').map_or(tool, |(sid, _)| sid);
+        self.may_mutate && self.mutate_servers.map_or(true, |l| l.contains(&server))
     }
 }
 
@@ -110,6 +124,7 @@ pub fn policy_for(agent: &str) -> Option<RolePolicy> {
     Some(match a.as_str() {
         "librarian" => RolePolicy::LIBRARIAN,
         "coder" => RolePolicy::CODER,
+        "director" => RolePolicy::DIRECTOR,
         _ => RolePolicy::READ_ONLY,
     })
 }
@@ -224,6 +239,23 @@ mod tests {
             assert_eq!(p.allm == AllmAccess::Write, r == Role::Tony, "{r}");
             assert_eq!(p.may_mutate, r == Role::Tony, "{r}");
         }
+    }
+
+    #[test]
+    fn director_mutates_only_through_media_servers() {
+        let d = policy_for("Director").unwrap();
+        assert_eq!(d, RolePolicy::DIRECTOR);
+        assert_eq!((d.fs_write, d.allm), (FsWrite::None, AllmAccess::ReadOnly));
+        // Edits / renders on its own media servers…
+        assert!(d.allows_tool("media-forge.quick_assemble", true));
+        assert!(d.allows_tool("shotcut.start_render", true));
+        // …reads anywhere, but never a write on any other server.
+        assert!(d.allows_tool("fs.read", false));
+        for t in ["gmail.send", "whatsapp.send_message", "git.commit", "fs.write", "instagram.post", "media-forge-evil.write"] {
+            assert!(!d.allows_tool(t, true), "{t}");
+        }
+        // Nobody else gains media writes from the new field.
+        assert!(!RolePolicy::READ_ONLY.allows_tool("media-forge.quick_assemble", true));
     }
 
     #[test]

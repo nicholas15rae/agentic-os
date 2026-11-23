@@ -171,7 +171,7 @@ export interface EventContext {
   wakeWords: readonly string[];
 }
 
-const RELAY_NAME: Record<string, string> = { prompter: "The Prompter", designer: "The Designer", coder: "The Coder", librarian: "The Librarian", verifier: "The verifier", staging: "Staging", system: "The build checks" };
+const RELAY_NAME: Record<string, string> = { prompter: "The Prompter", designer: "The Designer", director: "The Director", coder: "The Coder", librarian: "The Librarian", verifier: "The verifier", staging: "Staging", system: "The build checks" };
 
 /**
  * An `agent-event` → a narration line, or null (not narrated at this level, the live turn's own,

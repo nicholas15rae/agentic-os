@@ -141,6 +141,7 @@ pub(crate) fn role_label(role: &str, os_name: &str) -> String {
         "ops" => "Ops".into(),
         "prompter" => "Prompter".into(),
         "designer" => "Designer".into(),
+        "director" => "Director".into(),
         // Any future registry id (Phase 2 §4 prep): `security-patrol` → "Security Patrol".
         r => title_case_id(r),
     }
@@ -162,7 +163,7 @@ fn title_case_id(id: &str) -> String {
 /// Tony's own ids): the current roles in their historic order, then any later id A→Z. Data-driven
 /// so a future specialist (Security Patrol, Finance…) joins the sentence with no code change.
 pub(crate) fn sub_agent_roster(cfg: &OsConfig) -> Vec<String> {
-    const ORDER: [&str; 6] = ["librarian", "coder", "booking", "ops", "prompter", "designer"];
+    const ORDER: [&str; 7] = ["librarian", "coder", "booking", "ops", "prompter", "designer", "director"];
     let ids: Vec<&String> = cfg.routing.agents.keys().filter(|id| !super::routing::is_self_role(id, &cfg.os_name)).collect();
     let mut out: Vec<String> = ORDER.iter().filter(|o| ids.iter().any(|i| i.as_str() == **o)).map(|o| role_label(o, &cfg.os_name)).collect();
     out.extend(ids.iter().filter(|i| !ORDER.contains(&i.as_str())).map(|i| role_label(i, &cfg.os_name)));
@@ -348,7 +349,7 @@ pub(crate) struct TurnRouteInput<'a> {
 }
 
 /// The pipeline roles Solo never promotes a turn to (D15).
-pub(crate) const SOLO_HELD_ROLES: [&str; 3] = ["prompter", "designer", "coder"];
+pub(crate) const SOLO_HELD_ROLES: [&str; 4] = ["prompter", "designer", "coder", "director"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TurnRoute {
@@ -1501,8 +1502,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         if let Some(slug) = slug {
             let label = role_label(&role, &cfg.os_name);
             let skills = super::mcp::skill_digest(&cfg, &role);
-            // Designer / Prompter also get the user's identity file (taste, brand, goals).
-            let identity = if matches!(role.as_str(), "designer" | "prompter") {
+            // Designer / Prompter / Director also get the user's identity file (taste, brand, goals).
+            let identity = if matches!(role.as_str(), "designer" | "prompter" | "director") {
                 let r = os_core::read_identity(&cfg);
                 emit(Hop::Rules, &format!("MASTER_IDENTITY.md → {label}"), r.is_ok(), 0, r.as_ref().err().map(|_| "identity file not readable"));
                 r.map(|i| format!("\n\nABOUT THE USER (MASTER_IDENTITY.md):\n{}", i.chars().take(2000).collect::<String>())).unwrap_or_default()
@@ -2644,12 +2645,12 @@ mod tests {
     fn roster_sentence_is_built_from_the_registry() {
         let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
         // The default registry keeps today's sentence byte for byte.
-        assert!(system_prompt(&cfg, "", &[], false).contains("You can hand work to six local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer) and use local MCP tools;"));
+        assert!(system_prompt(&cfg, "", &[], false).contains("You can hand work to seven local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer, Director) and use local MCP tools;"));
         // A future specialist joins it with no code change.
         let mut more = cfg.clone();
         more.routing.agents.insert("security-patrol".into(), Default::default());
         let s = system_prompt(&more, "", &[], false);
-        assert!(s.contains("seven local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer, Security Patrol)"), "{s}");
+        assert!(s.contains("eight local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer, Director, Security Patrol)"), "{s}");
         assert_eq!(role_label("security-patrol", "Tony"), "Security Patrol");
         assert_eq!(role_label("finance", "Tony"), "Finance");
         assert_eq!(role_label("finance_2", "Tony"), "Finance 2");

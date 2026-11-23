@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
-pub const AGENTS: [&str; 7] = ["librarian", "prompter", "coder", "designer", "financer", "observer", "security"];
+pub const AGENTS: [&str; 8] = ["librarian", "prompter", "coder", "designer", "director", "financer", "observer", "security"];
 pub const PRIORITIES: [&str; 3] = ["low", "normal", "urgent"];
 pub const TASKS_MAX: usize = 12;
 const FIELD_MAX: usize = 600;
@@ -34,9 +34,9 @@ pub const CONTRACT: &str = "\n\nOUTPUT CONTRACT (overrides the STYLE format rule
 - Chat, a question, or a missing critical detail: requires_dispatch false, tasks empty; ask one direct question if something is missing.
 - Never do heavy coding, file analysis or multi-step builds in spoken_reply: dispatch them. Never say a task is finished; say it is queued or staged.
 - priority: low, normal or urgent.
-- Each task: {\"task_id\": \"short_snake_case\", \"target_agent\": \"librarian|prompter|coder|designer|financer|observer|security\", \"action\": \"imperative verb + exact deliverable\", \"inputs\": [\"exact paths, keys or output:task_id\"], \"constraints\": [\"hard limits\"], \"acceptance_criteria\": [\"at least one objective pass/fail check\"], \"depends_on\": [\"earlier task_id\"]}. Blunt and specific, no chatter.
+- Each task: {\"task_id\": \"short_snake_case\", \"target_agent\": \"librarian|prompter|coder|designer|director|financer|observer|security\", \"action\": \"imperative verb + exact deliverable\", \"inputs\": [\"exact paths, keys or output:task_id\"], \"constraints\": [\"hard limits\"], \"acceptance_criteria\": [\"at least one objective pass/fail check\"], \"depends_on\": [\"earlier task_id\"]}. Blunt and specific, no chatter.
 - Chain with depends_on: librarian stages context, prompter locks the spec, coder or designer builds, observer verifies, security audits and purges.
-- librarian finds and stages files, docs and memory; prompter writes specs and acceptance tests; coder writes and runs code; designer does UI/UX; financer tracks budgets and spend; observer checks outputs against acceptance_criteria; security enforces boundaries and purges scratch data.";
+- librarian finds and stages files, docs and memory; prompter writes specs and acceptance tests; coder writes and runs code; designer does UI/UX; director plans video and photo edits (self-tapes, YouTube, shorts, headshots): shot lists and edit plans; financer tracks budgets and spend; observer checks outputs against acceptance_criteria; security enforces boundaries and purges scratch data.";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TaskPacket {

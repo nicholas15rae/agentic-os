@@ -9,12 +9,13 @@ export interface Pos {
   y: number;
 }
 
-/** Tony centre-left; the Build Circle as a triangle; Librarian between; scripts and vault around. */
+/** Tony centre-left; the Build Circle as a triangle; Director below Tony; Librarian between; scripts and vault around. */
 export const LAYOUT: Readonly<Record<string, Pos>> = {
   tony: { x: 14, y: 30 },
   prompter: { x: 44, y: 12 },
   coder: { x: 62, y: 30 },
   designer: { x: 44, y: 48 },
+  director: { x: 28, y: 42 },
   librarian: { x: 82, y: 14 },
   ops: { x: 82, y: 46 },
   booking: { x: 14, y: 6 },
@@ -36,6 +37,9 @@ export const EDGES: readonly [string, string][] = [
   ["designer", "librarian"],
   ["tony", "booking"],
   ["booking", "tony"],
+  ["tony", "director"],
+  ["director", "tony"],
+  ["director", "librarian"],
   ["security", "garbage"],
   ["observer", "security"],
   ["tony", "finance"],

@@ -34,7 +34,7 @@ pub const RETRY_CAP: u32 = 2;
 const PREEMPT_MAX: u32 = 30;
 pub const CONTEXT_MAX: usize = 6000;
 pub const OUTPUT_MAX: usize = 12_000;
-pub const GPU_AGENTS: [&str; 3] = ["prompter", "coder", "designer"];
+pub const GPU_AGENTS: [&str; 4] = ["prompter", "coder", "designer", "director"];
 
 pub fn is_gpu(agent: &str) -> bool {
     GPU_AGENTS.contains(&agent)
@@ -260,6 +260,7 @@ pub fn step_prompt(t: &TaskPacket, context: &str, feedback: Option<&str>) -> (St
     let role = match t.target_agent.as_str() {
         "prompter" => "You are the Prompter: turn the request into a strict technical spec with acceptance tests.",
         "coder" => "You are the Coder: write the exact code or script asked for (complete, runnable), with a one-line run note.",
+        "director" => "You are the Director: turn the media request into a shot / asset checklist and an edit plan (clip order, trims, captions, loudness target, output spec). Never claim a render ran.",
         _ => "You are the Designer: lay out the UI/UX: component hierarchy, styling and the visual flow.",
     };
     let system = format!("{role} Stay strictly inside the constraints. Never print secrets, keys or tokens. End with one line per acceptance criterion: `[PASS] <criterion>: <evidence>` or `[FAIL] <criterion>: <why>`.");
@@ -335,7 +336,7 @@ impl Exec for LiveExec {
         Box::pin(async move {
             use tauri::Manager;
             match t.target_agent.as_str() {
-                "prompter" | "coder" | "designer" => {
+                "prompter" | "coder" | "designer" | "director" => {
                     let (system, user) = step_prompt(t, context, feedback);
                     let st = self.app.state::<super::dispatch::DispatchState>();
                     let os = self.app.state::<super::os_core::OsState>();

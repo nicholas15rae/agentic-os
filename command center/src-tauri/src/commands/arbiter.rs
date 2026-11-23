@@ -63,7 +63,7 @@ const fn node(id: &'static str, label: &'static str, group: &'static str, comput
 }
 
 /// The roster, in topology order.
-pub const NODES: [NodeDef; 11] = [
+pub const NODES: [NodeDef; 12] = [
     node("tony", "Tony", "foreground", "gpu", Some("tony"), "foreground: preempts background work; yields in Away Mode"),
     node("prompter", "Prompter", "build_circle", "gpu", Some("build_circle"), "build circle: Prompter → Coder → Designer, one token at a time"),
     node("coder", "Coder", "build_circle", "gpu", Some("build_circle"), "build circle"),
@@ -75,6 +75,7 @@ pub const NODES: [NodeDef; 11] = [
     node("finance", "Finance [Vault]", "vault", "cpu", Some("finance"), "sealed; wakes only when you unlock it or on a validated ledger write"),
     node("observer", "Observer", "auditor", "cpu", Some("observer"), "jittered idle / Away audit of hand-off integrity"),
     node("ops", "Ops", "mesh", "gpu", None, "on demand (AnythingLLM workspace)"),
+    node("director", "Director", "mesh", "gpu", Some("director"), "on demand: edit plans on the GPU slot; renders run on the CPU (libx264)"),
 ];
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -465,7 +466,7 @@ impl Arbiter {
 }
 
 /// Edges the topology draws (valid hand-off paths), `from → to`.
-pub const EDGES: [(&str, &str); 16] = [
+pub const EDGES: [(&str, &str); 19] = [
     ("tony", "prompter"),
     ("prompter", "coder"),
     ("coder", "designer"),
@@ -476,6 +477,9 @@ pub const EDGES: [(&str, &str); 16] = [
     ("designer", "librarian"),
     ("tony", "booking"),
     ("booking", "tony"),
+    ("tony", "director"),
+    ("director", "tony"),
+    ("director", "librarian"),
     ("security", "garbage"),
     ("observer", "security"),
     ("tony", "finance"),
@@ -613,7 +617,7 @@ mod tests {
         assert_eq!(node_for_label("lmstudio · background"), None);
         assert_eq!(node_id("general"), Some("tony"));
         assert_eq!(node_id("financer"), Some("finance"));
-        assert_eq!(NODES.len(), 11);
+        assert_eq!(NODES.len(), 12);
         for (a, b) in EDGES {
             assert!(node_def(a).is_some() && node_def(b).is_some(), "{a} → {b}");
         }

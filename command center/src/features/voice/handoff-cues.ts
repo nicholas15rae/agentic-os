@@ -37,7 +37,7 @@ export const DEFAULT_POOL = defaultPool as HandoffPool;
 /** Lines longer than this are ignored (they could never fit the budget). */
 export const LINE_MAX = 90;
 /** Sub-agents that get a cue: Tony's crew. */
-export const CUE_ROLES: readonly string[] = ["coder", "designer", "prompter", "librarian", "booking", "ops"];
+export const CUE_ROLES: readonly string[] = ["coder", "designer", "director", "prompter", "librarian", "booking", "ops"];
 
 /** Speech-time estimate: ~2.8 words/s (conversational TTS) plus a short gap per beat (pure). */
 export function estimateSecs(beats: readonly Beat[]): number {

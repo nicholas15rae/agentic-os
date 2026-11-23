@@ -197,7 +197,7 @@ export function readyText(o: { title: string; slug: string | null | undefined; b
   return `${lead}${hubNext}.${where}\n${list}`;
 }
 
-const SPECIALIST_TABS: readonly ThreadId[] = ["prompter", "designer", "coder", "librarian"];
+const SPECIALIST_TABS: readonly ThreadId[] = ["prompter", "designer", "director", "coder", "librarian"];
 /** Which tab an agent's relay line goes to (Tony's tab stays a clean Nic↔Tony transcript). */
 export function relayThread(agentId: string): ThreadId {
   return (SPECIALIST_TABS as readonly string[]).includes(agentId) ? (agentId as ThreadId) : "prompter";

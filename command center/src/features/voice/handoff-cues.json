@@ -8,6 +8,7 @@
   "agentNames": {
     "coder": "the Coder",
     "designer": "the Designer",
+    "director": "the Director",
     "prompter": "the Prompter",
     "librarian": "the Librarian",
     "booking": "Booking Desk",
@@ -30,6 +31,7 @@
     ],
     "coder": ["I'll knock it out, {tony}.", "Yeah, I'll code it up."],
     "designer": ["I'll make it pretty, {tony}.", "Leave the look to me."],
+    "director": ["I'll cut it together, {tony}.", "On it. Back in the edit."],
     "prompter": ["I'll write it up tight.", "Spec's coming, {tony}."],
     "librarian": ["I'll dig it up, {tony}.", "It's in the files. On it."],
     "booking": ["I'll book it, {tony}.", "Booking's on it."],

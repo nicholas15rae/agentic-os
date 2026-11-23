@@ -255,7 +255,7 @@ pub struct Config {
 /// file) can key on. Kept local here rather than importing `roles.ts`'s
 /// list from the TS side: the roster lives in providers.json, not OsConfig,
 /// so it has no Rust-side shared list of its own yet.
-pub(crate) const ROLE_IDS: [&str; 7] = ["general", "booking", "prompter", "coder", "designer", "librarian", "ops"];
+pub(crate) const ROLE_IDS: [&str; 8] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops"];
 
 /// `"tony"` is accepted as an alias of `"general"` (ground rule) wherever a
 /// role id arrives from the outside (Settings UI, `tts_synthesize`'s `agent`).
@@ -274,7 +274,7 @@ pub(crate) fn valid_role(r: &str) -> bool {
 
 /// Part 6: every id that can SPEAK (narration, a roster voice): the routing roles plus the
 /// task worker's non-routing speakers. `ROLE_IDS` stays the routing list.
-pub(crate) const NARRATOR_IDS: [&str; 10] = ["general", "booking", "prompter", "coder", "designer", "librarian", "ops", "verifier", "staging", "system"];
+pub(crate) const NARRATOR_IDS: [&str; 11] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "verifier", "staging", "system"];
 
 /// A voice-roster key (`agentVoices`, `agent_voice_update`): any `NARRATOR_IDS` entry.
 pub(crate) fn valid_narrator(r: &str) -> bool {

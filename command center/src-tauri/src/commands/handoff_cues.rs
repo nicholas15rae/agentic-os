@@ -85,7 +85,7 @@ mod tests {
         let p = parse_pool(DEFAULT_POOL).unwrap();
         assert!(p.max_seconds <= 5.0);
         assert!(p.tony_open.iter().chain(&p.tony_close).all(|l| l.chars().count() <= LINE_MAX));
-        for role in ["coder", "designer", "prompter", "librarian", "booking", "ops"] {
+        for role in ["coder", "designer", "director", "prompter", "librarian", "booking", "ops"] {
             assert!(p.agent_names.contains_key(role), "{role}");
         }
     }

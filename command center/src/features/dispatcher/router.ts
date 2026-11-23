@@ -27,7 +27,7 @@ export interface Route {
 
 /** Tie-break order for domain scoring. `general` sits last (its own topic
  * triggers are mostly intercepted earlier by the OS-control intent layer). */
-export const DOMAIN_TIEBREAK = ["booking", "ops", "coder", "designer", "librarian", "prompter", "general"] as const;
+export const DOMAIN_TIEBREAK = ["booking", "ops", "coder", "designer", "director", "librarian", "prompter", "general"] as const;
 
 /** Role ids that ARE Tony (the OS itself): never a delegation target. The OS name (lower-cased)
  * counts too (`isSelfRoleId(id, osName)`). Mirrors `SELF_ROLE_IDS` in routing.rs. */
@@ -66,6 +66,10 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
     designer: {
       names: ["designer", "ui agent", "ux agent"],
       domains: ["ui", "ux", "layout", "css", "color palette", "prototype", "play place", "mockup", "animation"],
+    },
+    director: {
+      names: ["director", "editor", "media agent", "video editor"],
+      domains: ["edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll"],
     },
     librarian: {
       names: ["librarian", "memory", "vault", "researcher"],

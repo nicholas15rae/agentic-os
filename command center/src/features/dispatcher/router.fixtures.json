@@ -291,5 +291,29 @@
     "role": "booking",
     "kind": "Domain",
     "direct": "whatsapp"
+  },
+  {
+    "desc": "director vocative address (non-VERBS_B verb falls to a bare name mention)",
+    "text": "director, cut the pause before line 3",
+    "role": "director",
+    "kind": "Named"
+  },
+  {
+    "desc": "director domain trigger: captions + reel",
+    "text": "add captions to this reel",
+    "role": "director",
+    "kind": "Domain"
+  },
+  {
+    "desc": "director domain trigger: thumbnail",
+    "text": "make a youtube thumbnail for the vlog",
+    "role": "director",
+    "kind": "Domain"
+  },
+  {
+    "desc": "plain self-tape stays a booking (casting logistics) trigger, not the director",
+    "text": "check my self-tape availability for friday",
+    "role": "booking",
+    "kind": "Domain"
   }
 ]

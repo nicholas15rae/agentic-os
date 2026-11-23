@@ -83,7 +83,7 @@ pub struct AnythingLlmConfig {
 }
 impl Default for AnythingLlmConfig {
     fn default() -> Self {
-        let ws = [("librarian", "librarian"), ("coder", "coder"), ("booking", "booking"), ("ops", "ops"), ("general", "my-workspace"), ("prompter", "prompter-dispatcher"), ("designer", "designer")];
+        let ws = [("librarian", "librarian"), ("coder", "coder"), ("booking", "booking"), ("ops", "ops"), ("general", "my-workspace"), ("prompter", "prompter-dispatcher"), ("designer", "designer"), ("director", "director")];
         Self {
             base_url: "http://127.0.0.1:3001".into(),
             workspaces: ws.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
@@ -132,6 +132,14 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
     m.insert(
         "designer".to_string(),
         trig(&["designer", "ui agent", "ux agent"], &["ui", "ux", "layout", "css", "color palette", "prototype", "play place", "mockup", "animation"]),
+    );
+    // Plain "self-tape" stays with Booking (casting logistics); editing one is the Director's.
+    m.insert(
+        "director".to_string(),
+        trig(
+            &["director", "editor", "media agent", "video editor"],
+            &["edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll"],
+        ),
     );
     m.insert(
         "librarian".to_string(),
@@ -304,11 +312,13 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         "whatsapp" => &["booking", "ops"],
         "gmail" => &["booking", "ops"],
         "time" => &["booking", "coder", "ops"],
-        "filesystem" => &["booking", "coder", "librarian", "prompter", "designer", "ops"],
+        "filesystem" => &["booking", "coder", "librarian", "prompter", "designer", "director", "ops"],
         "knowledge-graph" => &["booking", "librarian", "prompter", "ops"],
         "git" => &["coder"],
         "fetch" => &["coder", "librarian", "prompter", "designer"],
         "brave-search" => &["coder", "librarian"],
+        // Local media servers: only the Director edits and renders through them.
+        "shotcut" | "media-forge" => &["director"],
         _ => &["all"],
     };
     list.iter().map(|s| s.to_string()).collect()
@@ -360,11 +370,58 @@ pub fn default_mcps() -> Vec<McpServer> {
             read_only: true,
             ..Default::default()
         },
+        media_mcp(
+            "shotcut",
+            "Shotcut (MLT)",
+            "python",
+            &[r"C:\ai-hub\mcp\shotcut-mcp\scripts\shotcut_mcp_server.py"],
+            &[
+                // The LADSPA module's plugin scan hangs melt on this machine.
+                ("MLT_REPOSITORY_DENY", "libmltladspa"),
+                ("SHOTCUT_MCP_ALLOWED_ROOTS", MEDIA_ROOT),
+                ("SHOTCUT_MCP_REQUIRE_ABSOLUTE_PATHS", "1"),
+                ("SHOTCUT_MCP_MAX_ACTIVE_RENDERS", "1"),
+            ],
+            "matrodrigs/shotcut-mcp — multi-track MLT timelines, QC, previews and job-based renders inside C:\\ai-hub\\media. Needs Shotcut installed.",
+        ),
+        media_mcp(
+            "media-forge",
+            "Media Forge",
+            "uv",
+            &["--directory", MEDIA_FORGE_DIR, "run", "server.py"],
+            &[("MEDIA_ROOT", MEDIA_ROOT), ("MEDIA_CPU_PCT", "70"), ("WHISPER_DEVICE", "cpu"), ("WHISPER_COMPUTE", "int8")],
+            "Local trim / loudness / assemble / reframe + captions, CPU Whisper transcripts, scene detection and photo batches (command center/mcp/media-forge). Never writes into raw/.",
+        ),
     ];
     for m in &mut v {
         m.agents = Some(default_mcp_grants(&m.id));
     }
     v
+}
+
+/// The Director's media root: every media MCP is confined to it.
+pub const MEDIA_ROOT: &str = r"C:\ai-hub\media";
+/// media-forge's uv project (in this repo, outside the Tauri bundle).
+const MEDIA_FORGE_DIR: &str = r"G:\agentic os\command center\mcp\media-forge";
+
+/// A local media MCP: off until Nic turns it on in Settings, granted to the Director only,
+/// the longest per-call budget (renders past it run as background jobs). `MEDIA_ALLOW_GPU`
+/// is never set here: GPU encodes stay refused and `mcp::gpu_refusal` guards the rest.
+fn media_mcp(id: &str, name: &str, command: &str, args: &[&str], env: &[(&str, &str)], description: &str) -> McpServer {
+    McpServer {
+        id: id.into(),
+        name: name.into(),
+        transport: "stdio".into(),
+        command: command.into(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+        env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        enabled: false,
+        builtin: true,
+        description: description.into(),
+        timeout_secs: Some(600),
+        read_only: false,
+        ..Default::default()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -927,7 +984,7 @@ impl OsState {
                 cfg.mcps.push(d);
             }
         }
-        // …and new role → workspace mappings (Phase 2: designer).
+        // …and new role → workspace mappings (Phase 2: designer; then director).
         for (role, slug) in AnythingLlmConfig::default().workspaces {
             cfg.anythingllm.workspaces.entry(role).or_insert(slug);
         }
@@ -1900,12 +1957,15 @@ mod tests {
     #[test]
     fn routing_defaults_cover_every_role() {
         let agents = default_routing_agents();
-        for role in ["booking", "prompter", "coder", "designer", "librarian", "ops", "general"] {
+        for role in ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "general"] {
             let t = agents.get(role).unwrap_or_else(|| panic!("missing default routing role {role}"));
             // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self).
             assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
         }
         assert!(agents["booking"].domains.contains(&"whatsapp".to_string()));
+        // Casting logistics stay with Booking; editing a tape is the Director's.
+        assert!(agents["booking"].domains.contains(&"self-tape".to_string()));
+        assert!(!agents["director"].domains.contains(&"self-tape".to_string()));
     }
 
     #[test]
@@ -1917,15 +1977,17 @@ mod tests {
 
     #[test]
     fn mcp_grants_match_the_users_exact_table() {
-        let cases: [(&str, &[&str]); 8] = [
+        let cases: [(&str, &[&str]); 10] = [
             ("whatsapp", &["booking", "ops"]),
             ("gmail", &["booking", "ops"]),
             ("time", &["booking", "coder", "ops"]),
-            ("filesystem", &["booking", "coder", "librarian", "prompter", "designer", "ops"]),
+            ("filesystem", &["booking", "coder", "librarian", "prompter", "designer", "director", "ops"]),
             ("knowledge-graph", &["booking", "librarian", "prompter", "ops"]),
             ("git", &["coder"]),
             ("fetch", &["coder", "librarian", "prompter", "designer"]),
             ("brave-search", &["coder", "librarian"]),
+            ("shotcut", &["director"]),
+            ("media-forge", &["director"]),
         ];
         for (id, want) in cases {
             assert_eq!(default_mcp_grants(id), want.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{id}");

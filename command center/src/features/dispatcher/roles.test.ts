@@ -33,13 +33,13 @@ describe("toggleGrant", () => {
 });
 
 describe("roles", () => {
-  it("ROLE_IDS covers all 7 roles with general first", () => {
+  it("ROLE_IDS covers all 8 roles with general first", () => {
     expect(ROLE_IDS[0]).toBe("general");
-    expect(ROLE_IDS).toHaveLength(7);
+    expect(ROLE_IDS).toHaveLength(8);
   });
 
   it("SUB_AGENT_IDS excludes general and matches the Part 2 pill order", () => {
-    expect(SUB_AGENT_IDS).toEqual(["booking", "coder", "prompter", "designer", "librarian", "ops"]);
+    expect(SUB_AGENT_IDS).toEqual(["booking", "coder", "prompter", "designer", "director", "librarian", "ops"]);
   });
 
   it("toRoleId accepts 'tony' as an alias of 'general'", () => {

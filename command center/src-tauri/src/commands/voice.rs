@@ -436,6 +436,7 @@ pub(crate) fn default_agent_voice(role: &str) -> Option<&'static str> {
         "prompter" => Some("bm_george"),
         "coder" => Some("am_adam"),
         "designer" => Some("af_nicole"),
+        "director" => Some("bm_daniel"),
         "librarian" => Some("bf_emma"),
         "ops" => Some("am_eric"),
         "verifier" => Some("bm_lewis"),
@@ -1047,8 +1048,8 @@ mod part3_tests {
         assert_eq!(roster_entry_for(&m, Some("booking"), true).unwrap().voice.as_deref(), Some("booking-voice"));
         assert_eq!(roster_entry_for(&m, Some("general"), true).unwrap().voice.as_deref(), Some("tony-voice"));
         // Every sub-agent default is distinct.
-        let ids: std::collections::BTreeSet<_> = ["booking", "prompter", "coder", "designer", "librarian", "ops", "verifier", "staging", "system"].iter().filter_map(|r| default_agent_voice(r)).collect();
-        assert_eq!(ids.len(), 9);
+        let ids: std::collections::BTreeSet<_> = ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "verifier", "staging", "system"].iter().filter_map(|r| default_agent_voice(r)).collect();
+        assert_eq!(ids.len(), 10);
         // An empty roster (per-agent voices never set up) still gives each agent its own
         // Kokoro default when Kokoro is configured (Part 6: the old `!is_empty()` guard is gone)…
         assert_eq!(roster_entry_for(&BTreeMap::new(), Some("ops"), true).unwrap().voice.as_deref(), Some("am_eric"));

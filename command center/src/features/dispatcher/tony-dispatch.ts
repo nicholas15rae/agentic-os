@@ -5,7 +5,7 @@
  * pulls `spoken_reply` out of a half-streamed packet so TTS starts at the first sentence.
  */
 
-export const AGENT_ROLES = ["librarian", "prompter", "coder", "designer", "financer", "observer", "security"] as const;
+export const AGENT_ROLES = ["librarian", "prompter", "coder", "designer", "director", "financer", "observer", "security"] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 export const PRIORITIES = ["low", "normal", "urgent"] as const;
 export type Priority = (typeof PRIORITIES)[number];

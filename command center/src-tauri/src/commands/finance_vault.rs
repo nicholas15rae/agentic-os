@@ -22,7 +22,14 @@ use std::time::{Duration, Instant};
 pub const KEY_SERVICE: &str = "agentic-os-finance-vault";
 const KEY_ACCOUNT: &str = "ledger-key";
 pub const LEDGER_FILE: &str = "ledger.aosv";
-pub const KINDS: [&str; 3] = ["expense", "income", "transfer"];
+/// `quote` is a non-posting record (an estimate sent or received): kept in the ledger, never a
+/// balance movement.
+pub const KINDS: [&str; 4] = ["expense", "income", "transfer", "quote"];
+/// The one AnythingLLM workspace finance may have: role `finance` -> slug `finance`, never with
+/// embedded documents (the Finance agent gets ledger rows per turn, by tag, from this vault).
+pub const FINANCE_WORKSPACE: &str = "finance";
+/// The ledger tag of entries written before ledgers were partitioned (personal / untagged).
+pub const UNTAGGED: &str = "personal";
 const AMOUNT_MAX: i64 = 100_000_000_000; // 1e9 in currency units, as cents
 
 /// One ledger line. Unknown fields are refused (schema-validated writes only).
@@ -44,6 +51,36 @@ pub struct LedgerInput {
     /// Where it came from (`manual`, `receipt-scan`, `tony`…).
     #[serde(default)]
     pub source: String,
+    /// The ledger partition (a registry `financeLedgerTag`). Missing = [`UNTAGGED`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_tag: Option<String>,
+    /// The business event this came from (`invoice`, `receipt`…), for Ops hand-offs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_type: Option<String>,
+    /// A reference to a supporting file inside the business's own folder (never its content).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_ref: Option<String>,
+}
+
+impl LedgerInput {
+    pub fn tag(&self) -> &str {
+        self.ledger_tag.as_deref().unwrap_or(UNTAGGED)
+    }
+}
+
+/// `^[a-z][a-z0-9_]{1,31}$` (a registry business id) or `personal`.
+pub fn valid_ledger_tag(t: &str) -> bool {
+    let b = t.as_bytes();
+    (2..=32).contains(&b.len()) && b[0].is_ascii_lowercase() && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// Observer / health: a finance-named workspace mapping other than exactly `finance -> finance`
+/// is an anomaly (no finance RAG store anywhere else, no ledger embedded under another role).
+pub fn finance_mapping_anomaly(workspaces: &std::collections::BTreeMap<String, String>) -> bool {
+    workspaces.iter().any(|(k, v)| {
+        let named = k.contains("financ") || v.to_ascii_lowercase().contains("financ");
+        named && !(k == FINANCE_WORKSPACE && v == FINANCE_WORKSPACE)
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -103,6 +140,19 @@ pub fn validate(i: &LedgerInput) -> Result<LedgerInput, String> {
         category: clean(&i.category, 40, "category", false)?,
         memo: clean(&i.memo, 500, "memo", false)?,
         source: clean(if i.source.trim().is_empty() { "manual" } else { &i.source }, 40, "source", false)?,
+        ledger_tag: match i.ledger_tag.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(t) if valid_ledger_tag(t) => Some(t.to_string()),
+            Some(t) => return Err(format!("ledgerTag {:?}: a business id (a-z 0-9 _)", t.chars().take(40).collect::<String>())),
+        },
+        tx_type: match i.tx_type.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(t) => Some(clean(t, 32, "txType", true)?),
+        },
+        attachment_ref: match i.attachment_ref.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(t) => Some(clean(t, 200, "attachmentRef", true)?),
+        },
     })
 }
 
@@ -220,6 +270,12 @@ fn add_entry(o: &mut Open, input: LedgerInput, p: &Path) -> Result<LedgerEntry, 
     Ok(e)
 }
 
+/// The scoped Librarian over one partition: `tag` keeps only that ledger's rows.
+pub fn search_tagged(l: &Ledger, tag: Option<&str>, q: &str, k: usize) -> Vec<LedgerEntry> {
+    let part = Ledger { version: l.version, entries: l.entries.iter().filter(|e| tag.map_or(true, |t| e.input.tag() == t)).cloned().collect() };
+    search(&part, q, k)
+}
+
 /// The scoped Librarian: keyword match over payee / category / memo / date (open vault only).
 pub fn search(l: &Ledger, q: &str, k: usize) -> Vec<LedgerEntry> {
     let terms: Vec<String> = q.to_lowercase().split_whitespace().filter(|w| !w.is_empty()).map(str::to_string).collect();
@@ -255,7 +311,7 @@ fn spawn_relock(idle: Duration) {
 }
 
 fn summary(e: &LedgerEntry) -> Value {
-    json!({ "id": e.id, "date": e.input.date, "amountCents": e.input.amount_cents, "currency": e.input.currency, "kind": e.input.kind, "payee": e.input.payee, "category": e.input.category, "memo": e.input.memo, "source": e.input.source })
+    json!({ "id": e.id, "date": e.input.date, "amountCents": e.input.amount_cents, "currency": e.input.currency, "kind": e.input.kind, "payee": e.input.payee, "category": e.input.category, "memo": e.input.memo, "source": e.input.source, "ledgerTag": e.input.tag(), "txType": e.input.tx_type, "attachmentRef": e.input.attachment_ref })
 }
 
 /// The isolation check (system health): the vault sits apart from the mesh and is sealed at rest.
@@ -278,8 +334,8 @@ pub fn isolation_check(cfg: &super::os_core::OsConfig, mesh_roots: &[PathBuf]) -
         None => check("vault initialised", false, "the vault dir is not set".into()),
     }
     check("not a shared memory namespace", !super::memtier::valid_ns("finance"), "memtier refuses `finance`".into());
-    let mapped = cfg.anythingllm.workspaces.keys().any(|k| k.contains("financ"));
-    check("no AnythingLLM workspace for finance", !mapped, if mapped { "a finance workspace is mapped".into() } else { "none mapped".into() });
+    let mapped = finance_mapping_anomaly(&cfg.anythingllm.workspaces);
+    check("no finance RAG workspace (only the empty `finance` chat workspace)", !mapped, if mapped { "a finance-named workspace other than finance -> finance is mapped".into() } else { "none besides finance -> finance".into() });
     check("key in its own keychain service", true, KEY_SERVICE.into());
     json!({ "ok": ok, "open": is_open(), "checks": checks })
 }
@@ -318,14 +374,31 @@ pub fn finance_vault_lock() -> Value {
     json!({ "open": false })
 }
 
+/// The user's ledger view (open vault). `ledgerTag` narrows it to one partition.
 #[tauri::command]
-pub fn finance_ledger_list(limit: Option<usize>) -> Result<Value, String> {
-    with_open(|o| Ok(json!(o.ledger.entries.iter().rev().take(limit.unwrap_or(100).min(1000)).map(summary).collect::<Vec<_>>())))
+pub fn finance_ledger_list(limit: Option<usize>, ledger_tag: Option<String>) -> Result<Value, String> {
+    let tag = ledger_tag.filter(|t| !t.trim().is_empty());
+    with_open(|o| Ok(json!(o.ledger.entries.iter().rev().filter(|e| tag.as_deref().map_or(true, |t| e.input.tag() == t)).take(limit.unwrap_or(100).min(1000)).map(summary).collect::<Vec<_>>())))
 }
 
 #[tauri::command]
-pub fn finance_search(q: String, k: Option<usize>) -> Result<Value, String> {
-    with_open(|o| Ok(json!(search(&o.ledger, &q, k.unwrap_or(10).min(50)).iter().map(summary).collect::<Vec<_>>())))
+pub fn finance_search(q: String, k: Option<usize>, ledger_tag: Option<String>) -> Result<Value, String> {
+    let tag = ledger_tag.filter(|t| !t.trim().is_empty());
+    with_open(|o| Ok(json!(search_tagged(&o.ledger, tag.as_deref(), &q, k.unwrap_or(10).min(50)).iter().map(summary).collect::<Vec<_>>())))
+}
+
+/// The Finance Librarian: deterministic retrieval over ONE ledger partition. The tag is
+/// mandatory, so no caller can pull every business's rows into one context.
+pub fn librarian_rows(ledger_tag: &str, q: &str, k: usize) -> Result<Vec<Value>, String> {
+    if !valid_ledger_tag(ledger_tag) {
+        return Err("finance_librarian: a valid ledgerTag is required".into());
+    }
+    with_open(|o| Ok(search_tagged(&o.ledger, Some(ledger_tag), q, k.clamp(1, 50)).iter().map(summary).collect()))
+}
+
+#[tauri::command]
+pub fn finance_librarian_search(ledger_tag: String, q: String, k: Option<usize>) -> Result<Value, String> {
+    Ok(json!({ "ledgerTag": ledger_tag, "rows": librarian_rows(ledger_tag.trim(), &q, k.unwrap_or(10))? }))
 }
 
 /// A ledger write. Open vault: written at once. Sealed vault: only with `delegated: true` (a
@@ -333,14 +406,20 @@ pub fn finance_search(q: String, k: Option<usize>) -> Result<Value, String> {
 #[tauri::command]
 pub async fn finance_ledger_write(entry: Value, delegated: Option<bool>) -> Result<Value, String> {
     let input: LedgerInput = serde_json::from_value(entry).map_err(|e| format!("ledger schema: {e}"))?;
+    write_input(input, delegated == Some(true), "tony").await.map(|e| summary(&e))
+}
+
+/// The one ledger write path (the command above and the Ops -> Finance hand-off). Sealed vault:
+/// only `delegated`, which opens, writes and re-seals in one step.
+pub(crate) async fn write_input(input: LedgerInput, delegated: bool, from: &'static str) -> Result<LedgerEntry, String> {
     let input = validate(&input)?;
     let p = path()?;
     if is_open() {
         let e = with_open(|o| add_entry(o, input, &p))?;
-        super::arbiter::get().handoff("tony", "finance", "ledger write");
-        return Ok(summary(&e));
+        super::arbiter::get().handoff(from, "finance", "ledger write");
+        return Ok(e);
     }
-    if delegated != Some(true) {
+    if !delegated {
         return Err("LOCKED_VAULT: the Finance vault is sealed; unlock it or send a delegated write".into());
     }
     let e = super::arbiter::get()
@@ -355,8 +434,8 @@ pub async fn finance_ledger_write(entry: Value, delegated: Option<bool>) -> Resu
             .map_err(|e| e.to_string())?
         })
         .await?;
-    super::arbiter::get().handoff("tony", "finance", "delegated ledger write");
-    Ok(summary(&e))
+    super::arbiter::get().handoff(from, "finance", "delegated ledger write");
+    Ok(e)
 }
 
 #[cfg(test)]
@@ -364,7 +443,7 @@ mod tests {
     use super::*;
 
     fn input() -> LedgerInput {
-        LedgerInput { date: "2026-11-20".into(), amount_cents: -4599, currency: "cad".into(), kind: "Expense".into(), payee: " Staples ".into(), category: "office".into(), memo: "".into(), source: "".into() }
+        LedgerInput { date: "2026-11-20".into(), amount_cents: -4599, currency: "cad".into(), kind: "Expense".into(), payee: " Staples ".into(), category: "office".into(), memo: "".into(), source: "".into(), ledger_tag: None, tx_type: None, attachment_ref: None }
     }
 
     #[test]
@@ -398,18 +477,42 @@ mod tests {
     }
 
     #[test]
+    fn ledgers_are_partitioned_by_tag() {
+        let t = |tag: Option<&str>, payee: &str| LedgerEntry { id: payee.into(), input: validate(&LedgerInput { ledger_tag: tag.map(String::from), payee: payee.into(), ..input() }).unwrap(), created_at: 1 };
+        let l = Ledger { version: 1, entries: vec![t(Some("trades_contracting"), "Ridge Electric"), t(Some("supplements_ecom"), "Whey Wholesale"), t(None, "Staples")] };
+        let payees = |tag: Option<&str>| search_tagged(&l, tag, "", 10).into_iter().map(|e| e.input.payee).collect::<Vec<_>>();
+        assert_eq!(payees(Some("trades_contracting")), ["Ridge Electric"]);
+        assert_eq!(payees(Some("supplements_ecom")), ["Whey Wholesale"]);
+        assert_eq!(payees(Some(UNTAGGED)), ["Staples"], "pre-partition rows read as personal");
+        assert_eq!(payees(None).len(), 3, "only the user's own unfiltered view sees every ledger");
+        // A keyword that only exists in another ledger finds nothing.
+        assert!(search_tagged(&l, Some("supplements_ecom"), "ridge electric", 10).is_empty());
+        // Tag validation, and old sealed files without the new fields still open.
+        assert!(validate(&LedgerInput { ledger_tag: Some("../x".into()), ..input() }).is_err());
+        let old = json!({ "date": "2026-11-20", "amountCents": 100, "currency": "CAD", "kind": "income", "payee": "x" });
+        assert_eq!(serde_json::from_value::<LedgerInput>(old).unwrap().tag(), UNTAGGED);
+        assert!(librarian_rows("", "x", 5).is_err(), "the Finance Librarian needs a tag");
+        // Only finance → finance is allowed.
+        let ws = |pairs: &[(&str, &str)]| pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<std::collections::BTreeMap<_, _>>();
+        assert!(!finance_mapping_anomaly(&ws(&[("finance", "finance"), ("ops", "ops")])));
+        for bad in [&[("finance_librarian", "finance-rag")][..], &[("finance", "finance-ledger")], &[("ops", "finance")], &[("financer", "x")]] {
+            assert!(finance_mapping_anomaly(&ws(bad)), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn locked_by_default_and_lock_drops_plaintext() {
         let dir = std::env::temp_dir().join(format!("finvault-{}-{}", std::process::id(), super::super::arbiter::now_ms()));
         init(&dir);
         assert!(!is_open());
-        assert!(finance_ledger_list(None).unwrap_err().starts_with("LOCKED_VAULT"));
+        assert!(finance_ledger_list(None, None).unwrap_err().starts_with("LOCKED_VAULT"));
         unlock_with("test-key".into()).unwrap();
         let p = path().unwrap();
         with_open(|o| add_entry(o, validate(&input()).unwrap(), &p)).unwrap();
-        assert_eq!(finance_search("staples".into(), None).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(finance_search("staples".into(), None, None).unwrap().as_array().unwrap().len(), 1);
         lock();
         assert!(!is_open());
-        assert!(finance_search("staples".into(), None).is_err());
+        assert!(finance_search("staples".into(), None, None).is_err());
         // Reopen with the same key: the entry is there; the file on disk is sealed.
         assert_eq!(unlock_with("test-key".into()).unwrap(), 1);
         lock();

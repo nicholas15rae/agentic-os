@@ -127,6 +127,80 @@ pub(crate) async fn workspace_chat_streamed(state: &DispatchState, os: &OsState,
     Ok((r.text, r.sources))
 }
 
+// ── Business lock ───────────────────────────────────────────────────────────
+
+/// The locked business for an Operations-Manager / Finance turn.
+pub(crate) struct LockedBusiness {
+    pub slug: String,
+    /// Scoped context for the prompt: that business's notes (bizops) or its ledger rows (finance).
+    pub block: String,
+}
+
+/// `Some(reason)` when an unrouted line names exactly one active registry business.
+fn business_route(role: &str, kind: &str, text: &str, held: bool) -> Option<String> {
+    if held || role != "general" || kind != "Default" {
+        return None;
+    }
+    let store = super::business_registry::store().ok()?;
+    match super::business_registry::resolve_business(&store.snapshot(), None, text) {
+        super::business_registry::Resolution::One(b) => Some(format!("names the business {}", b.display_name)),
+        _ => None,
+    }
+}
+
+/// Lock a turn to one business. `Err(answer)`: Tony's clarification (or why it can't run).
+pub(crate) fn business_lock(role: &str, selected: Option<&str>, text: &str) -> Result<LockedBusiness, String> {
+    use super::business_registry::{clarification, resolve_business, Resolution};
+    let store = super::business_registry::store()?;
+    let reg = store.snapshot();
+    let b = match resolve_business(&reg, selected, text) {
+        Resolution::One(b) => b,
+        other => return Err(clarification(&reg, &other)),
+    };
+    let scope = store.scope(&b.business_id)?;
+    if role == "finance" {
+        let rows = super::finance_vault::librarian_rows(scope.ledger_tag(), text, 15).map_err(|e| {
+            if e.starts_with("LOCKED_VAULT") {
+                "The Finance vault is sealed. Unlock it on the Finance node first, then ask again.".to_string()
+            } else {
+                e
+            }
+        })?;
+        let lines: Vec<String> = rows.iter().map(|r| format!("- {} {} {} {} {} ({}) {}", r["date"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or(""), r["amountCents"].as_i64().unwrap_or(0) as f64 / 100.0, r["currency"].as_str().unwrap_or(""), r["payee"].as_str().unwrap_or(""), r["category"].as_str().unwrap_or(""), r["memo"].as_str().unwrap_or(""))).collect();
+        let block = format!(
+            "\n\nLEDGER `{}` ONLY ({}; {} matching row(s), amounts in currency units). Answer only from these rows; never mention any other ledger or business:\n{}",
+            scope.ledger_tag(),
+            scope.display_name(),
+            lines.len(),
+            if lines.is_empty() { "(no matching rows)".to_string() } else { lines.join("\n") }
+        );
+        return Ok(LockedBusiness { slug: super::finance_vault::FINANCE_WORKSPACE.into(), block });
+    }
+    let notes = scope.search_notes(text, 4);
+    let block = if notes.is_empty() {
+        format!("\n\nBUSINESS: {} (`{}`). No matching notes in its memory.", scope.display_name(), scope.id())
+    } else {
+        format!(
+            "\n\nBUSINESS: {} (`{}`). Its own notes (this business only):\n{}",
+            scope.display_name(),
+            scope.id(),
+            notes.iter().map(|(rel, t)| format!("[{rel}]\n{}", t.chars().take(800).collect::<String>())).collect::<Vec<_>>().join("\n---\n")
+        )
+    };
+    Ok(LockedBusiness { slug: scope.workspace_slug().to_string(), block })
+}
+
+/// Refuse a Finance turn if its workspace holds any documents (a ledger must never be embedded).
+async fn finance_workspace_is_empty(state: &DispatchState, cfg: &OsConfig, slug: &str) -> Result<(), String> {
+    let reader = AllmReader::new(AllmConn::local(state, cfg)?);
+    let ws = reader.get_workspace(slug, 10).await?;
+    let docs = ws["documents"].as_array().map(|d| d.len()).unwrap_or(0);
+    if docs > 0 {
+        return Err(format!("SECURITY_FAIL_CLOSED: the finance workspace holds {docs} embedded document(s); remove them before Finance can answer"));
+    }
+    Ok(())
+}
+
 // ── Prompt building ─────────────────────────────────────────────────────────
 
 /// Display label for a role id. Tony (`general` or any self alias) is the OS name.
@@ -142,6 +216,8 @@ pub(crate) fn role_label(role: &str, os_name: &str) -> String {
         "prompter" => "Prompter".into(),
         "designer" => "Designer".into(),
         "director" => "Director".into(),
+        "bizops" => "Operations Manager".into(),
+        "finance" => "Finance".into(),
         // Any future registry id (Phase 2 §4 prep): `security-patrol` → "Security Patrol".
         r => title_case_id(r),
     }
@@ -163,7 +239,7 @@ fn title_case_id(id: &str) -> String {
 /// Tony's own ids): the current roles in their historic order, then any later id A→Z. Data-driven
 /// so a future specialist (Security Patrol, Finance…) joins the sentence with no code change.
 pub(crate) fn sub_agent_roster(cfg: &OsConfig) -> Vec<String> {
-    const ORDER: [&str; 7] = ["librarian", "coder", "booking", "ops", "prompter", "designer", "director"];
+    const ORDER: [&str; 9] = ["librarian", "coder", "booking", "ops", "bizops", "finance", "prompter", "designer", "director"];
     let ids: Vec<&String> = cfg.routing.agents.keys().filter(|id| !super::routing::is_self_role(id, &cfg.os_name)).collect();
     let mut out: Vec<String> = ORDER.iter().filter(|o| ids.iter().any(|i| i.as_str() == **o)).map(|o| role_label(o, &cfg.os_name)).collect();
     out.extend(ids.iter().filter(|i| !ORDER.contains(&i.as_str())).map(|i| role_label(i, &cfg.os_name)));
@@ -1116,6 +1192,11 @@ pub struct OsTurnRequest {
     /// the Tier-2 hint rides on his system message. Missing (phone / old webview) = false.
     #[serde(default)]
     pub(crate) no_delegate: bool,
+    /// The Business Switcher's selection (a registry `businessId`). Operations-Manager and
+    /// Finance turns are locked to exactly one business (`business_lock`); missing = resolve
+    /// from the text, and ask if that isn't exactly one.
+    #[serde(default)]
+    pub(crate) active_business_id: Option<String>,
 }
 
 /// `(delegation gate approved, Ask-tier tools approved)` for a turn. `approved` (the turn's own
@@ -1398,6 +1479,12 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate, solo, learning },
         &cfg,
     );
+    // A registered business named in an otherwise unrouted line ("how's Corner Bakery doing?")
+    // is the Operations Manager's: registry names are data, not routing triggers.
+    let (role, route_kind, route_reason) = match business_route(&role, &route_kind, &text, learning || req.no_delegate || solo) {
+        Some(reason) => ("bizops".to_string(), "Domain".to_string(), reason),
+        None => (role, route_kind, route_reason),
+    };
     // Route kind + target only (the reason can quote the request).
     emit(Hop::Router, &router_hop_label(&route_kind, &role, &cfg.os_name), true, started.elapsed().as_millis(), None);
 
@@ -1443,7 +1530,43 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // The delegation gate runs BEFORE any tool: a PERMISSION_REQUIRED here makes the UI
     // re-run the whole turn with approved=true, so a prefetched action (a Spotify skip)
     // would otherwise run once now and again on the retry — or run although the user said no.
-    let slug = cfg.anythingllm.workspaces.get(&role).filter(|s| !s.is_empty()).cloned();
+    // ── Business lock (Operations Manager / Finance) ── exactly one business, or Tony asks.
+    let lock = if !learning && matches!(role.as_str(), "bizops" | "finance") { Some(business_lock(&role, req.active_business_id.as_deref(), &text)) } else { None };
+    let (slug, business_block) = match lock {
+        Some(Err(answer)) => {
+            let res = OsTurnResult {
+                answer,
+                steps,
+                provider_id: "bizops".into(),
+                delegated_to: None,
+                tool: None,
+                latency_ms: started.elapsed().as_millis(),
+                reason: "business not locked (clarification)".into(),
+                redacted: false,
+                comms_thread: None,
+                routed_role: role.clone(),
+                route_reason: route_reason.clone(),
+                route_kind: route_kind.clone(),
+                pending_spotify: None,
+                answered_by: "tony".into(),
+                learned: vec![],
+                dispatch: None,
+            };
+            emit(Hop::Router, "business lock → clarification", true, started.elapsed().as_millis(), None);
+            log_turn(bridge, &role, &text, &res, &super::devqueue::known_secrets(state, os));
+            return Ok(res);
+        }
+        Some(Ok(b)) if role == "bizops" => (Some(b.slug), b.block),
+        Some(Ok(b)) => {
+            // Finance: its one workspace must hold no documents (the ledger is never embedded).
+            let slug = cfg.anythingllm.workspaces.get("finance").filter(|s| s.as_str() == super::finance_vault::FINANCE_WORKSPACE).cloned();
+            if let Some(sl) = &slug {
+                finance_workspace_is_empty(state, &cfg, sl).await?;
+            }
+            (slug, b.block)
+        }
+        None => (cfg.anythingllm.workspaces.get(&role).filter(|s| !s.is_empty()).cloned(), String::new()),
+    };
     let (delegation_ok, tools_ok) = turn_approvals(req.approved, req.delegation_approved);
     if role != "general" && comms_thread.is_none() {
         if let Some(slug) = &slug {
@@ -1520,7 +1643,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     if skills.is_empty() { String::new() } else { format!("\nYour attached skills:\n{skills}") }
                 )
             };
-            let task = format!("{base}{identity}{tool_note}");
+            let task = format!("{base}{identity}{business_block}{tool_note}");
             // The chat shows the request as sent, with the identity file and raw live tool data
             // named rather than pasted (they stay in the prompt; never in a transcript).
             steps.push(step("delegate", "os", &role, delegate_shown(&base, !identity.is_empty(), tool_note.chars().count()), true, 0));
@@ -2645,12 +2768,12 @@ mod tests {
     fn roster_sentence_is_built_from_the_registry() {
         let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
         // The default registry keeps today's sentence byte for byte.
-        assert!(system_prompt(&cfg, "", &[], false).contains("You can hand work to seven local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer, Director) and use local MCP tools;"));
+        assert!(system_prompt(&cfg, "", &[], false).contains("You can hand work to nine local sub-agents (Librarian, Coder, Booking Desk, Ops, Operations Manager, Finance, Prompter, Designer, Director) and use local MCP tools;"));
         // A future specialist joins it with no code change.
         let mut more = cfg.clone();
         more.routing.agents.insert("security-patrol".into(), Default::default());
         let s = system_prompt(&more, "", &[], false);
-        assert!(s.contains("eight local sub-agents (Librarian, Coder, Booking Desk, Ops, Prompter, Designer, Director, Security Patrol)"), "{s}");
+        assert!(s.contains("ten local sub-agents (Librarian, Coder, Booking Desk, Ops, Operations Manager, Finance, Prompter, Designer, Director, Security Patrol)"), "{s}");
         assert_eq!(role_label("security-patrol", "Tony"), "Security Patrol");
         assert_eq!(role_label("finance", "Tony"), "Finance");
         assert_eq!(role_label("finance_2", "Tony"), "Finance 2");

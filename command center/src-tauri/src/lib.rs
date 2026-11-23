@@ -4,7 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{buildhub, handoff_cues, lifecycle};
-use commands::{arbiter, finance_vault, memtier};
+use commands::{arbiter, business_registry, finance_handoff, finance_vault, memtier, ops_scope};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
@@ -126,6 +126,8 @@ pub fn run() {
                 // (<config dir>/vault/finance, sealed at start).
                 memtier::init(&dir);
                 finance_vault::init(&dir);
+                // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
+                business_registry::init(&dir);
                 // Away Mode survives a restart (an overnight run keeps going).
                 {
                     let os = app.state::<os_core::OsState>();
@@ -248,6 +250,17 @@ pub fn run() {
             finance_vault::finance_ledger_list,
             finance_vault::finance_ledger_write,
             finance_vault::finance_search,
+            finance_vault::finance_librarian_search,
+            business_registry::business_list,
+            business_registry::business_create,
+            business_registry::business_provision,
+            business_registry::business_update,
+            business_registry::business_set_archived,
+            ops_scope::bizops_memory_list,
+            ops_scope::bizops_memory_read,
+            ops_scope::bizops_memory_write,
+            ops_scope::bizops_memory_search,
+            finance_handoff::bizops_finance_handoff,
             commands::tony_dispatch::tony_dispatch_approve,
             commands::tony_dispatch::tony_dispatch_discard,
             secrets::secret_set,

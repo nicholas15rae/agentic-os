@@ -638,9 +638,38 @@ impl AllmWriter {
         Self(conn)
     }
 
+    /// business_registry.rs only: provision one business's isolated workspace (`bizops_<id>`).
+    pub(crate) fn for_ops_provision(conn: AllmConn) -> Self {
+        Self(conn)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn base(&self) -> &str {
         self.0.base()
+    }
+
+    /// `GET /v1/workspace/{slug}` → the workspace object, `None` when it doesn't exist.
+    pub(crate) async fn find_workspace(&self, slug: &str, secs: u64) -> Result<Option<Value>, String> {
+        check_slug(slug)?;
+        match self.0.call(reqwest::Method::GET, &format!("/v1/workspace/{slug}"), None, secs).await {
+            Ok(v) => {
+                let ws = unwrap_workspace(&v);
+                Ok((!ws.is_null()).then_some(ws))
+            }
+            Err(e) if e.starts_with("not found") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `POST /v1/workspace/new` (chat mode, the given prompt / model) → the slug AnythingLLM gave it.
+    pub(crate) async fn create_workspace(&self, name: &str, prompt: &str, chat_model: Option<&str>, secs: u64) -> Result<String, String> {
+        let mut body = json!({ "name": name, "openAiPrompt": prompt, "openAiTemp": 0.4, "openAiHistory": 20, "chatMode": "chat" });
+        if let Some(m) = chat_model.filter(|m| !m.trim().is_empty()) {
+            body["chatProvider"] = json!("lmstudio");
+            body["chatModel"] = json!(m);
+        }
+        let v = self.0.call(reqwest::Method::POST, "/v1/workspace/new", Some(body), secs).await?;
+        v["workspace"]["slug"].as_str().map(String::from).ok_or_else(|| "AnythingLLM created no workspace slug".into())
     }
 
     /// `POST /v1/document/raw-text` into `workspaces` (comma-separated slugs).
@@ -1094,7 +1123,13 @@ mod tests {
     fn raw_calls_and_writer_constructors_are_confined() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("commands");
         let raw = regex::Regex::new(r"(^|[^A-Za-z0-9_])(allm|allm_key)\(").unwrap();
-        let allowed: [(&str, &[&str]); 4] = [("AllmWriter::for_memory(", &["memory.rs"]), ("AllmWriter::for_documenter(", &["documenter.rs", "pipeline.rs"]), ("AllmWriter::for_model_lab(", &["modellab.rs"]), ("AllmWriter::for_prompts(", &["agent_prompts.rs"])];
+        let allowed: [(&str, &[&str]); 5] = [
+            ("AllmWriter::for_memory(", &["memory.rs"]),
+            ("AllmWriter::for_documenter(", &["documenter.rs", "pipeline.rs"]),
+            ("AllmWriter::for_model_lab(", &["modellab.rs"]),
+            ("AllmWriter::for_prompts(", &["agent_prompts.rs"]),
+            ("AllmWriter::for_ops_provision(", &["business_registry.rs"]),
+        ];
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if !name.ends_with(".rs") || name == "allm.rs" {

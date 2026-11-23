@@ -128,7 +128,7 @@ pub async fn downtime_loop(app: tauri::AppHandle) {
             clock.observer_next = Duration::from_secs(jitter_minutes(r.observer_min_minutes, r.observer_max_minutes, arbiter::now_ms()) as u64 * 60);
             let db = app.state::<super::envelope::TaskStore>().path();
             let slot = os.slot.view();
-            let finance_mapped = cfg.anythingllm.workspaces.keys().any(|k| k.contains("financ"));
+            let finance_mapped = super::finance_vault::finance_mapping_anomaly(&cfg.anythingllm.workspaces);
             let _ = a.run_task("observer", "integrity audit", async move { tauri::async_runtime::spawn_blocking(move || observer_pass(db.as_deref(), &slot, finance_mapped)).await.map_err(|e| e.to_string())? }).await;
         }
     }
@@ -197,7 +197,7 @@ pub fn observer_pass(db: Option<&Path>, slot: &super::scheduler::SlotView, finan
         checked = agents.len();
     }
     if finance_mapped {
-        issues.push("an AnythingLLM workspace is mapped to finance (the vault must stay off the mesh)".into());
+        issues.push("a finance-named AnythingLLM workspace other than finance → finance is mapped (no ledger RAG store may exist)".into());
     }
     if slot.settling > 0 && slot.active.is_empty() && slot.waiting.len() > 2 {
         issues.push(format!("GPU settling with {} waiter(s)", slot.waiting.len()));

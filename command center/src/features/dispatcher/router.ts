@@ -27,7 +27,7 @@ export interface Route {
 
 /** Tie-break order for domain scoring. `general` sits last (its own topic
  * triggers are mostly intercepted earlier by the OS-control intent layer). */
-export const DOMAIN_TIEBREAK = ["booking", "ops", "coder", "designer", "director", "librarian", "prompter", "general"] as const;
+export const DOMAIN_TIEBREAK = ["booking", "bizops", "finance", "ops", "coder", "designer", "director", "librarian", "prompter", "general"] as const;
 
 /** Role ids that ARE Tony (the OS itself): never a delegation target. The OS name (lower-cased)
  * counts too (`isSelfRoleId(id, osName)`). Mirrors `SELF_ROLE_IDS` in routing.rs. */
@@ -76,8 +76,16 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
       domains: ["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"],
     },
     ops: {
-      names: ["ops", "operations", "business", "finance"],
-      domains: ["invoice", "receipt", "bf supplements", "contracting", "quote", "schedule", "calendar", "droplet"],
+      names: ["ops", "infra", "infrastructure"],
+      domains: ["droplet", "docker", "n8n", "server status", "schedule", "calendar"],
+    },
+    bizops: {
+      names: ["bizops", "operations manager", "ops manager", "business manager", "operations", "business"],
+      domains: ["invoice", "quote", "job site", "subcontractor", "inventory", "fulfillment", "open orders", "bf supplements", "supplements", "contracting", "masonry", "ecommerce"],
+    },
+    finance: {
+      names: ["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"],
+      domains: ["ledger", "expenses", "receipt", "receipts", "cash flow", "profit", "p&l", "my books"],
     },
     general: { names: [], domains: ["system status", "switch model"] },
   },

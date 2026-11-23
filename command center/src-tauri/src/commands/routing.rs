@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// this only breaks exact score ties). `general`'s own domain triggers are
 /// mostly intercepted earlier by the OS-control intent layer (Part 4), so it
 /// sits last here as a catch-all, never stealing a tie from a sub-agent.
-pub const DOMAIN_TIEBREAK: [&str; 8] = ["booking", "ops", "coder", "designer", "director", "librarian", "prompter", "general"];
+pub const DOMAIN_TIEBREAK: [&str; 10] = ["booking", "bizops", "finance", "ops", "coder", "designer", "director", "librarian", "prompter", "general"];
 
 /// "(hey tony,? )?(tell|ask|have|get|let|send|route|hand|pass) (it )?(to )?(my|the|our)? NAME…"
 const VERBS_A: [&str; 9] = ["tell", "ask", "have", "get", "let", "send", "route", "hand", "pass"];

@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(policy_for("librarian"), Some(RolePolicy::LIBRARIAN));
         assert_eq!(policy_for(" Librarian "), Some(RolePolicy::LIBRARIAN));
         assert_eq!(policy_for("coder"), Some(RolePolicy::CODER));
-        for r in ["prompter", "designer", "booking", "ops", "security-patrol", "finance_2"] {
+        for r in ["prompter", "designer", "booking", "ops", "bizops", "finance", "finance_librarian", "security-patrol", "finance_2"] {
             assert_eq!(policy_for(r), Some(RolePolicy::READ_ONLY), "{r}");
         }
         let long = "x".repeat(33);

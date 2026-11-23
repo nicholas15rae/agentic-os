@@ -83,7 +83,7 @@ pub struct AnythingLlmConfig {
 }
 impl Default for AnythingLlmConfig {
     fn default() -> Self {
-        let ws = [("librarian", "librarian"), ("coder", "coder"), ("booking", "booking"), ("ops", "ops"), ("general", "my-workspace"), ("prompter", "prompter-dispatcher"), ("designer", "designer"), ("director", "director")];
+        let ws = [("librarian", "librarian"), ("coder", "coder"), ("booking", "booking"), ("ops", "ops"), ("general", "my-workspace"), ("prompter", "prompter-dispatcher"), ("designer", "designer"), ("director", "director"), ("finance", "finance")];
         Self {
             base_url: "http://127.0.0.1:3001".into(),
             workspaces: ws.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
@@ -145,10 +145,11 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "librarian".to_string(),
         trig(&["librarian", "memory", "vault", "researcher"], &["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"]),
     );
-    m.insert(
-        "ops".to_string(),
-        trig(&["ops", "operations", "business", "finance"], &["invoice", "receipt", "bf supplements", "contracting", "quote", "schedule", "calendar", "droplet"]),
-    );
+    // Ops is infrastructure only; business work is the Operations Manager's (`bizops`, one
+    // isolated workspace per registry business) and money is Finance's.
+    m.insert("ops".to_string(), trig(&["ops", "infra", "infrastructure"], &["droplet", "docker", "n8n", "server status", "schedule", "calendar"]));
+    m.insert("bizops".to_string(), trig(&["bizops", "operations manager", "ops manager", "business manager", "operations", "business"], &["invoice", "quote", "job site", "subcontractor", "inventory", "fulfillment", "open orders", "bf supplements", "supplements", "contracting", "masonry", "ecommerce"]));
+    m.insert("finance".to_string(), trig(&["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"], &["ledger", "expenses", "receipt", "receipts", "cash flow", "profit", "p&l", "my books"]));
     // Tony has no name triggers: addressing him ("thanks tony", "ask the dispatcher…") is
     // `routing::SELF_NAMES` → kind Self, never a delegation to himself.
     m.insert("general".to_string(), trig(&[], &["system status", "switch model"]));
@@ -899,6 +900,10 @@ const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
 pub(crate) const MIGRATE_VAULT_CADENCE: &str = "vault-cadence";
+/// Migration id: business / finance triggers left `ops` (infra) for `bizops` and `finance`.
+pub(crate) const MIGRATE_BIZOPS_SPLIT: &str = "bizops-split";
+/// The `ops` triggers that moved to `bizops` / `finance` (removed once from a saved config).
+const MOVED_OFF_OPS: [&str; 8] = ["operations", "business", "finance", "invoice", "receipt", "bf supplements", "contracting", "quote"];
 
 /// One-time upgrades of a saved config. `read_only: false` is never written to disk, so an
 /// older os.json can't say whether WhatsApp was left writable on purpose: mark it read-only
@@ -930,6 +935,23 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
         }
         cfg.memory.auto_monthly = false;
         cfg.migrations.push(MIGRATE_VAULT_CADENCE.into());
+    }
+    // `ops` became infra-only: the business / finance phrases the user's saved `ops` row still
+    // carries would out-score `bizops` / `finance`, so drop exactly those, once. Anything else
+    // the user added to `ops` stays.
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BIZOPS_SPLIT) {
+        if let Some(o) = cfg.routing.agents.get_mut("ops") {
+            let moved = |p: &String| MOVED_OFF_OPS.iter().any(|m| super::routing::normalize(p) == *m);
+            o.names.retain(|n| !moved(n));
+            o.domains.retain(|d| !moved(d));
+            if o.names.is_empty() {
+                o.names = vec!["ops".into(), "infra".into()];
+            }
+        }
+        for (role, t) in default_routing_agents().into_iter().filter(|(r, _)| r == "bizops" || r == "finance") {
+            cfg.routing.agents.entry(role).or_insert(t);
+        }
+        cfg.migrations.push(MIGRATE_BIZOPS_SPLIT.into());
     }
 }
 
@@ -2065,7 +2087,31 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string()]);
+    }
+
+    #[test]
+    fn bizops_split_moves_business_triggers_off_ops_once() {
+        // A saved pre-split config: ops still carries business / finance phrases plus one of the user's own.
+        let mut cfg = OsConfig::default();
+        cfg.routing.agents.remove("bizops");
+        cfg.routing.agents.remove("finance");
+        cfg.routing.agents.insert("ops".into(), trig(&["ops", "operations", "business", "finance"], &["invoice", "receipt", "BF Supplements", "contracting", "quote", "schedule", "calendar", "droplet", "grafana"]));
+        apply_migrations(&mut cfg);
+        let ops = &cfg.routing.agents["ops"];
+        assert_eq!(ops.names, ["ops"]);
+        assert_eq!(ops.domains, ["schedule", "calendar", "droplet", "grafana"], "the user's own trigger stays");
+        assert_eq!(cfg.routing.agents["bizops"], default_routing_agents()["bizops"]);
+        assert!(cfg.routing.agents["finance"].names.contains(&"finance".to_string()));
+        // Routing now sends business paperwork to bizops and money questions to Finance.
+        assert_eq!(super::super::routing::resolve("pull up the invoice and the quote", &cfg).role.as_deref(), Some("bizops"));
+        assert_eq!(super::super::routing::resolve("ask the bookkeeper about expenses", &cfg).role.as_deref(), Some("finance"));
+        // Once: a phrase the user puts back on ops afterwards is left alone.
+        cfg.routing.agents.get_mut("ops").unwrap().domains.push("invoice".into());
+        apply_migrations(&mut cfg);
+        assert!(cfg.routing.agents["ops"].domains.contains(&"invoice".to_string()));
+        // The finance workspace mapping is exactly finance → finance (not an anomaly).
+        assert!(!super::super::finance_vault::finance_mapping_anomaly(&OsConfig::default().anythingllm.workspaces));
     }
 
     #[test]

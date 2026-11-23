@@ -19,10 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// `(file name, compiled-in bytes)`.
-pub const RULE_FILES: [(&str, &[u8]); 3] = [
+pub const RULE_FILES: [(&str, &[u8]); 4] = [
     ("security.rules.json", include_bytes!("../../rules/security.rules.json")),
     ("garbage.rules.json", include_bytes!("../../rules/garbage.rules.json")),
     ("bizops.prompt.md", include_bytes!("../../rules/bizops.prompt.md")),
+    ("finance.prompt.md", include_bytes!("../../rules/finance.prompt.md")),
 ];
 
 pub fn sha256_hex(b: &[u8]) -> String {

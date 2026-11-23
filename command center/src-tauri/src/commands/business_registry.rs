@@ -475,6 +475,37 @@ impl Store {
     }
 }
 
+/// The Finance agent's prompt (checksummed with the other rules, `integrity.rs`).
+pub const FINANCE_PROMPT: &str = include_str!("../../rules/finance.prompt.md");
+
+/// The number of documents embedded in a workspace object.
+fn doc_count(ws: &Value) -> usize {
+    ws["documents"].as_array().map(Vec::len).unwrap_or(0)
+}
+
+/// Create (or adopt) the one `finance` chat workspace. It must come back with exactly that slug
+/// and hold NO documents: Finance answers only from tag-filtered ledger rows given per turn, so
+/// a ledger is never embedded anywhere. Returns `"created"` or `"exists"`.
+pub async fn provision_finance_workspace(w: &super::allm::AllmWriter, chat_model: Option<&str>) -> Result<&'static str, String> {
+    let slug = super::finance_vault::FINANCE_WORKSPACE;
+    let outcome = match w.find_workspace(slug, 15).await? {
+        Some(_) => "exists",
+        None => {
+            let got = w.create_workspace("Finance", FINANCE_PROMPT.trim(), chat_model, 30).await?;
+            if got != slug {
+                return Err(format!("AnythingLLM named the workspace {got:?}, not {slug:?}: rename or remove the clashing workspace, then retry"));
+            }
+            "created"
+        }
+    };
+    let ws = w.find_workspace(slug, 15).await?.ok_or_else(|| format!("workspace {slug} didn't read back"))?;
+    let n = doc_count(&ws);
+    if n > 0 {
+        return Err(format!("SECURITY_FAIL_CLOSED: the {slug} workspace holds {n} embedded document(s); Finance must have none"));
+    }
+    Ok(outcome)
+}
+
 /// The Ops system prompt for one business.
 pub fn ops_prompt(b: &Business) -> String {
     OPS_PROMPT_TEMPLATE.replace("{display_name}", &b.display_name).replace("{business_id}", &b.business_id).replace("{description}", &b.description).trim().to_string()
@@ -611,6 +642,34 @@ mod live {
                     Ok(nb) => println!("OK {id}: {:?} workspace {} memory {}", nb.status, nb.workspace_slug, nb.memory_path),
                     Err(e) => println!("FAILED {id}: {e}"),
                 }
+            }
+        });
+    }
+
+    /// The empty `finance` chat workspace only (AnythingLLM; never touches the registry file, so
+    /// it's safe while the app runs).
+    /// `ALLM_LIVE_WRITE=1 cargo test --lib live_provision_finance_workspace -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_provision_finance_workspace() {
+        if !std::env::var("ALLM_LIVE_WRITE").is_ok_and(|v| v == "1") {
+            println!("SKIPPED: set ALLM_LIVE_WRITE=1 to let this test write to AnythingLLM");
+            return;
+        }
+        let dir = PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
+        let state = super::super::dispatch::DispatchState::default();
+        state.load_or_init(&dir);
+        let key = super::super::secrets::get(&state, "anythingllm").expect("AnythingLLM key in the keychain");
+        let base = std::fs::read_to_string(dir.join("os.json")).ok().and_then(|s| serde_json::from_str::<super::super::os_core::OsConfig>(&s).ok()).map(|c| c.anythingllm.base_url).unwrap_or_else(|| "http://127.0.0.1:3001".into());
+        let model = state.snapshot().providers.iter().find(|p| p.id == "lmstudio").map(|p| p.model.clone()).filter(|m| !m.is_empty() && m != "local-model");
+        let w = super::super::allm::AllmWriter::for_ops_provision(super::super::allm::AllmConn::with_key(&state, &base, key));
+        tauri::async_runtime::block_on(async {
+            match provision_finance_workspace(&w, model.as_deref()).await {
+                Ok(o) => println!("OK finance: workspace {o}, 0 documents (model {model:?})"),
+                Err(e) => println!("FAILED finance: {e}"),
+            }
+            if let Ok(Some(ws)) = w.find_workspace("finance", 10).await {
+                println!("READBACK slug={} chatMode={} model={} documentsField={} promptStartsOk={}", ws["slug"], ws["chatMode"], ws["chatModel"], ws.get("documents").is_some(), ws["openAiPrompt"].as_str().is_some_and(|p| p.starts_with("You are the Finance agent")));
             }
         });
     }
@@ -773,6 +832,41 @@ pub(crate) mod tests {
             s.provision_workspace_for("trades_contracting", &w, None).await.unwrap();
             assert_eq!(srv.count("POST", "/workspace/new"), 1);
             let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn the_finance_workspace_is_created_empty_or_refused() {
+        tauri::async_runtime::block_on(async {
+            use super::super::allm::mock::{start, Resp};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+            // 0 = absent, 1 = created empty, 2 = created but someone embedded a document.
+            let state = Arc::new(AtomicUsize::new(0));
+            let s2 = state.clone();
+            let srv = start(move |r| {
+                if r.method == "POST" && r.path == "/api/v1/workspace/new" {
+                    s2.store(1, Ordering::SeqCst);
+                    return Resp::json(json!({ "workspace": { "slug": "finance" } }));
+                }
+                match s2.load(Ordering::SeqCst) {
+                    0 => Resp::status(404, json!({ "error": "no" })),
+                    1 => Resp::json(json!({ "workspace": [{ "slug": "finance", "documents": [] }] })),
+                    _ => Resp::json(json!({ "workspace": [{ "slug": "finance", "documents": [{ "docpath": "custom-documents/ledger.json" }] }] })),
+                }
+            })
+            .await;
+            let w = super::super::allm::AllmWriter::for_ops_provision(super::super::allm::AllmConn::test(&srv.base));
+            assert_eq!(provision_finance_workspace(&w, Some("qwen/qwen3.5-9b")).await.unwrap(), "created");
+            let new = srv.reqs().into_iter().find(|r| r.path == "/api/v1/workspace/new").unwrap();
+            assert_eq!((new.body["name"].as_str(), new.body["chatMode"].as_str()), (Some("Finance"), Some("chat")));
+            assert!(new.body["openAiPrompt"].as_str().unwrap().contains("LEDGER rows"));
+            // Idempotent.
+            assert_eq!(provision_finance_workspace(&w, None).await.unwrap(), "exists");
+            assert_eq!(srv.count("POST", "/workspace/new"), 1);
+            // A document in it fails closed.
+            state.store(2, Ordering::SeqCst);
+            assert!(provision_finance_workspace(&w, None).await.unwrap_err().starts_with("SECURITY_FAIL_CLOSED"));
         });
     }
 

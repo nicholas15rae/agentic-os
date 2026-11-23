@@ -7,8 +7,13 @@ import { isTauri, native } from "@/lib/platform";
 import type { HealthSnapshot } from "@/features/lifecycle/health";
 import type { BuildEnvelope, BuildHubView, DeleteReport, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport } from "@/features/buildhub/types";
 import type { TranscriptConversation, TranscriptMessage, TranscriptPage } from "@/features/transcript/types";
+import type { DirectorCommands } from "@/features/director/contract";
 
-export interface ExtCommands {
+/** Director Suite (media.rs): every JSON-args command. The two raw-body ones (`media_ingest_chunk`,
+ * `media_voiceover_save`) go through `features/director/api.ts`, never `xcmd`. */
+export type DirectorJsonCommands = Omit<DirectorCommands, "media_ingest_chunk" | "media_voiceover_save">;
+
+export interface ExtCommands extends DirectorJsonCommands {
   // ── Phase 1: lifecycle ──
   gateway_health: { args: undefined; result: HealthSnapshot };
   gateway_reconnect: { args: undefined; result: HealthSnapshot };
@@ -64,7 +69,7 @@ export function xcmd<K extends keyof ExtCommands>(name: K, ...args: ExtCommands[
   return native<ExtCommands[K]["result"]>(name, args[0] as Record<string, unknown> | undefined);
 }
 
-export type ExtEventName = "gateway-health" | "build-hub" | "agent-transcript";
+export type ExtEventName = "gateway-health" | "build-hub" | "agent-transcript" | "media-render" | "media-ingest";
 
 /** Subscribe to one of this feature's Rust → webview events. No-op on the PWA. */
 export async function onExtEvent<P>(event: ExtEventName, handler: (payload: P) => void): Promise<() => void> {

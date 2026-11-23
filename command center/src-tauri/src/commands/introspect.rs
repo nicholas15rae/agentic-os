@@ -673,6 +673,13 @@ fn stores_block(config_dir: Option<&Path>, workdir: &Path) -> Vec<Value> {
         })),
         None => out.push(json!({ "id": "tasks", "label": "Task envelopes (tasks.db)", "kind": "sqlite", "exists": false, "health": "missing", "error": "app config dir unknown", "tables": [], "metrics": {} })),
     }
+    // Director Suite index (projects, assets, plans, verified renders).
+    if let Some(d) = config_dir {
+        out.push(sqlite_store("media", "Director Suite (media.db)", &d.join("media.db"), |p, m| {
+            m.insert("projects".into(), json!(sqlite_scalar(p, "SELECT COUNT(*) FROM project")));
+            m.insert("renders".into(), json!(sqlite_scalar(p, "SELECT COUNT(*) FROM render")));
+        }));
+    }
     out.push(sqlite_store("cc", "Gateway store (cc.db)", &workdir.join("data").join("command-center").join("cc.db"), |p, m| {
         // RAG vectors = vault rows that carry an embedding (what /api/cc/health reports as `embedded`).
         m.insert("ragVectors".into(), json!(sqlite_scalar(p, "SELECT COUNT(*) FROM vault WHERE vector IS NOT NULL")));

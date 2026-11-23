@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SHOTCUT_DIR = Path(os.environ.get("SHOTCUT_DIR", r"C:\Program Files\Shotcut"))
-PROJECT_SUBDIRS = ("raw", "proxies", "mlt", "exports", "stills")
+PROJECT_SUBDIRS = ("raw", "working", "renders")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 
 
@@ -121,9 +121,10 @@ def writable(s: Settings, p: str, *, overwrite: bool = False) -> Path:
 
 
 def project_dir(s: Settings, slug: str) -> Path:
+    """`<media_root>/projects/<slug>/{raw,working,renders}`, created on demand."""
     if not SLUG_RE.match(slug or ""):
         raise PolicyError("project slug must be a-z, 0-9 and dashes, up to 48 chars")
-    base = s.media_root / slug
+    base = s.media_root / "projects" / slug
     for sub in PROJECT_SUBDIRS:
         (base / sub).mkdir(parents=True, exist_ok=True)
     return base

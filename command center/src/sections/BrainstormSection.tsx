@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { BellPlus, CheckSquare, FlaskConical, Loader2, Mic, Plus, Search, Sparkles, Square, Trash2 } from "lucide-react";
+import { BellPlus, CheckSquare, Clapperboard, FlaskConical, Loader2, Mic, Plus, Search, Sparkles, Square, Trash2 } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { collections, useCollection, type Item } from "@/lib/cc-api";
 import { useBrainstorm, type BrainstormNote } from "@/features/brainstorm/capture";
@@ -11,6 +11,7 @@ import { isTauri } from "@/lib/platform";
 import { IntakeModal } from "@/features/buildhub/IntakeModal";
 import { noteToIntake } from "@/features/buildhub/notes";
 import type { IntakeNote } from "@/features/buildhub/compile";
+import { brainstormHandoff, sendToDirector } from "@/features/director/handoff";
 
 const LISTEN_PROFILE_OPTIONS: { id: ListenProfile; label: string }[] = [
   { id: "snappy", label: "Snappy 1s" },
@@ -71,7 +72,7 @@ export function BrainstormSection() {
           </button>
         </div>
         {error && <p className="mb-2 text-[11px] text-alert">Gateway: {error}</p>}
-        <div className="mb-2 flex items-center gap-1.5">
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <button
             type="button"
             onClick={() => {
@@ -93,6 +94,17 @@ export function BrainstormSection() {
               title={isTauri() ? "The Prompter interviews you first, then the build is staged in the Play Place" : "Staging builds needs the desktop app"}
             >
               <FlaskConical size={12} /> Push to Play Place{picked.size ? ` (${picked.size})` : ""}
+            </button>
+          )}
+          {selecting && (
+            <button
+              type="button"
+              disabled={!picked.size || !isTauri()}
+              onClick={() => void sendToDirector(brainstormHandoff(items.filter((n) => picked.has(n.id))))}
+              className="pill-glass !h-8 !px-2.5 text-[11px] disabled:opacity-50"
+              title={isTauri() ? "Open a Director Suite project with these notes as its brief" : "The Director Suite needs the desktop app"}
+            >
+              <Clapperboard size={12} /> Send to Director Suite
             </button>
           )}
         </div>

@@ -31,6 +31,7 @@ pub mod lifecycle;
 pub mod maps;
 pub mod market;
 pub mod mcp;
+pub mod media;
 pub mod net_telemetry;
 pub mod memory;
 pub mod memtier;

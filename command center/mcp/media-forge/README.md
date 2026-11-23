@@ -3,19 +3,41 @@
 Local media utilities for the Command Center **Director** agent, served over stdio MCP. See
 `docs/proposals/director-media-mcp-plan.md` for where it fits in the toolbelt alongside `shotcut-mcp`.
 
-## Tools (16)
+## Tools (17)
 
 | Group | Tools |
 |---|---|
 | Project | `media_status`, `ensure_project`, `import_to_raw` |
 | Inspect | `probe_media`, `detect_silence`, `verify_output` |
-| Video jobs | `quick_assemble` (trim → 2-pass EBU R128 → concat → H.264/AAC, size cap), `reframe_and_caption` (9:16 / 4:5 / 1:1 / 16:9, crop / pad / blur, burned or soft captions) |
+| Video jobs | `render_timeline` (JSON timeline spec from the Command Center: video + image clips, letterbox to W×H, fades, voiceover/music layers, 2-pass EBU R128, size cap), `quick_assemble` (trim → 2-pass EBU R128 → concat → H.264/AAC, size cap), `reframe_and_caption` (9:16 / 4:5 / 1:1 / 16:9, crop / pad / blur, burned or soft captions) |
 | Analysis jobs | `transcribe_clip` (faster-whisper, CPU int8, VAD, word timestamps → .srt/.vtt/.json), `detect_scenes` (PySceneDetect + thumbnails) |
 | Stills | `process_photos` (auto-level, WB, exposure, sharpen, face-aware crop, watermark), `contact_sheet`, `make_thumbnail` |
 | Jobs | `job_status`, `job_cancel`, `job_list` |
 
 Heavy tools start a background job and wait up to `wait_s` (≤ 540 s, under the gateway's 600 s per-call cap).
 If still running, the call returns the job id; poll `job_status`.
+
+## Project layout
+
+`ensure_project` creates `<MEDIA_ROOT>/projects/<slug>/`:
+
+| Folder | Holds |
+|---|---|
+| `raw/` | Originals. Read-only to this server. |
+| `working/` | Intermediates: `captions/` (transcripts), `scenes/` (scene thumbnails), `stills/` (photo batch, contact sheets, thumbnails), `voiceover/`, `timeline/` (specs). |
+| `renders/` | Finished videos from `render_timeline`, `quick_assemble` and `reframe_and_caption`. |
+
+## render_timeline spec (v1)
+
+```json
+{ "version": 1, "project": "my-slug", "width": 1920, "height": 1080, "fps": 30,
+  "clips": [ { "path": "C:\\...\\raw\\take1.mp4", "kind": "video", "in": 0.8, "out": 5.2, "fade_ms": 0 },
+             { "path": "C:\\...\\raw\\slate.png",  "kind": "image", "in": 0,   "out": 3.0, "fade_ms": 250 } ],
+  "audio": [ { "path": "C:\\...\\working\\voiceover\\vo_v001.webm", "start": 1.0, "in": 0, "out": 6.5, "volume": 1.0 } ],
+  "clip_audio_volume": 1.0, "loudness_lufs": -18, "max_size_mb": null }
+```
+
+Limits: 1–200 clips; `kind` video | image; `0 ≤ in < out`; an image is held `out − in` seconds (0.2–60); a video `out` ≤ its duration + 0.05 s; `fade_ms` 0–2000 (fade in and out, from/to black); audio `volume` and `clip_audio_volume` 0–2; `start` ≥ 0; width/height even 320–3840; fps 10–60; `loudness_lufs` −14 / −16 / −18, or null for no normalisation (omitted = −18). Unknown keys are rejected. The spec file and every path must be under `MEDIA_ROOT`. Output: `output`, else `renders/<spec name>_vNNN.mp4` of `project` (or the spec's `project`).
 
 ## Rules it enforces
 

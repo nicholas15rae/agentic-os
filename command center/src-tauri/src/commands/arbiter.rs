@@ -63,7 +63,7 @@ const fn node(id: &'static str, label: &'static str, group: &'static str, comput
 }
 
 /// The roster, in topology order.
-pub const NODES: [NodeDef; 12] = [
+pub const NODES: [NodeDef; 13] = [
     node("tony", "Tony", "foreground", "gpu", Some("tony"), "foreground: preempts background work; yields in Away Mode"),
     node("prompter", "Prompter", "build_circle", "gpu", Some("build_circle"), "build circle: Prompter → Coder → Designer, one token at a time"),
     node("coder", "Coder", "build_circle", "gpu", Some("build_circle"), "build circle"),
@@ -76,6 +76,7 @@ pub const NODES: [NodeDef; 12] = [
     node("observer", "Observer", "auditor", "cpu", Some("observer"), "jittered idle / Away audit of hand-off integrity"),
     node("ops", "Ops", "mesh", "gpu", None, "on demand (AnythingLLM workspace)"),
     node("director", "Director", "mesh", "gpu", Some("director"), "on demand: edit plans on the GPU slot; renders run on the CPU (libx264)"),
+    node("bizops", "Biz Ops", "mesh", "gpu", None, "on demand: one business per turn, in that business's own bizops_<id> workspace"),
 ];
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -92,6 +93,10 @@ pub fn node_id(agent: &str) -> Option<&'static str> {
     }
     if a == "financer" {
         return Some("finance");
+    }
+    // Every business's workspace (`bizops_<id>`) is the Operations Manager's.
+    if a.starts_with("bizops_") {
+        return Some("bizops");
     }
     NODES.iter().find(|n| n.id == a).map(|n| n.id)
 }
@@ -466,7 +471,7 @@ impl Arbiter {
 }
 
 /// Edges the topology draws (valid hand-off paths), `from → to`.
-pub const EDGES: [(&str, &str); 19] = [
+pub const EDGES: [(&str, &str); 22] = [
     ("tony", "prompter"),
     ("prompter", "coder"),
     ("coder", "designer"),
@@ -486,6 +491,10 @@ pub const EDGES: [(&str, &str); 19] = [
     ("finance", "librarian"),
     ("tony", "ops"),
     ("observer", "tony"),
+    ("tony", "bizops"),
+    ("bizops", "tony"),
+    // The Ops -> Finance hand-off (finance_handoff.rs): a validated ledger write, nothing else.
+    ("bizops", "finance"),
 ];
 
 // ── Away Mode ───────────────────────────────────────────────────────────────
@@ -617,7 +626,10 @@ mod tests {
         assert_eq!(node_for_label("lmstudio · background"), None);
         assert_eq!(node_id("general"), Some("tony"));
         assert_eq!(node_id("financer"), Some("finance"));
-        assert_eq!(NODES.len(), 12);
+        assert_eq!(NODES.len(), 13);
+        assert_eq!(node_id("bizops"), Some("bizops"));
+        assert_eq!(node_for_label("anythingllm · bizops_trades_contracting"), Some("bizops"));
+        assert_eq!(node_for_label("anythingllm · finance"), Some("finance"));
         for (a, b) in EDGES {
             assert!(node_def(a).is_some() && node_def(b).is_some(), "{a} → {b}");
         }

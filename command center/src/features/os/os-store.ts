@@ -80,6 +80,10 @@ export function agentBadge(id: string): string {
       return "DESIGNER";
     case "director":
       return "DIRECTOR";
+    case "bizops":
+      return "BIZ OPS";
+    case "finance":
+      return "FINANCE";
     case "general":
       return osName().toUpperCase();
     case "user":

@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { BookOpen, Bot, CalendarCheck, Clapperboard, Code2, ListTree, Palette, Radar, Sparkles } from "lucide-react";
+import { BookOpen, Bot, Briefcase, CalendarCheck, Clapperboard, Code2, Landmark, ListTree, Palette, Radar, Sparkles } from "lucide-react";
 import type { Priority } from "@/lib/platform";
 import { osName } from "@/features/os/os-store";
 import { TONY_INTRO, TONY_ROLE, TONY_STYLE } from "@/features/voice/persona";
@@ -16,7 +16,7 @@ import { useModes } from "@/features/modes/modes-store";
  * Security Patrol or Finance (Phase 2 §4, prep only) — still resolves: `agentFor` / `SUB_AGENTS[id]`
  * give it a generic read-only agent that reports to Tony, labelled from its id.
  */
-export type KnownRole = "librarian" | "coder" | "booking" | "ops" | "prompter" | "designer" | "director" | "general";
+export type KnownRole = "librarian" | "coder" | "booking" | "ops" | "bizops" | "finance" | "prompter" | "designer" | "director" | "general";
 /** A known role, or any later registry id (validated `^[a-z][a-z0-9_-]{0,31}$` in Rust). */
 export type AgentRole = KnownRole | (string & {});
 
@@ -114,6 +114,31 @@ const AGENT_DEFS: SubAgent[] = [
     keywords: ["docker", "container", "netbird", "n8n", "workflow", "webhook", "droplet", "server", "uptime", "gpu", "vram"],
     get systemPrompt() {
       return `You are Ops, the infrastructure agent of ${osName()}. Report status as short telemetry lines; flag anything degraded first. ${GUARDRAIL}`;
+    },
+  },
+  {
+    // Operations Manager: one isolated workspace per registry business. Rust locks every turn to
+    // exactly one business (the top-bar switcher or the request's wording) or Tony asks which.
+    role: "bizops",
+    label: "Biz Ops",
+    icon: Briefcase,
+    gatewayAgent: "opencode",
+    priority: "interactive",
+    keywords: ["business", "invoice", "quote", "job site", "subcontractor", "inventory", "fulfillment", "open orders", "supplements", "contracting", "masonry", "ecommerce"],
+    get systemPrompt() {
+      return `You are the Operations Manager of ${osName()}, working for exactly one business at a time. Never mix in another business's clients, vendors, jobs or numbers; if a request seems to belong to a different business, say so and stop. ${GUARDRAIL}`;
+    },
+  },
+  {
+    // Finance: answers only from one ledger's rows (sealed vault, tag-filtered in Rust).
+    role: "finance",
+    label: "Finance",
+    icon: Landmark,
+    gatewayAgent: "opencode",
+    priority: "interactive",
+    keywords: ["ledger", "expenses", "receipt", "receipts", "cash flow", "profit", "bookkeeping", "bookkeeper", "my books"],
+    get systemPrompt() {
+      return `You are Finance, the bookkeeper of ${osName()}. Answer only from the ledger rows you are given for one business (or the personal ledger); never mention another ledger, never invent figures, and never move money. ${GUARDRAIL}`;
     },
   },
   {

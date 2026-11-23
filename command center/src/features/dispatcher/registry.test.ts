@@ -27,7 +27,7 @@ describe("data-driven agent registry", () => {
   it("known agents are unchanged and enumeration lists only them", () => {
     expect(agentFor("coder")).toBe(SUB_AGENTS.coder);
     expect(SUB_AGENTS.booking.label).toBe("Booking Desk");
-    expect(Object.keys(SUB_AGENTS).sort()).toEqual(["booking", "coder", "designer", "director", "general", "librarian", "ops", "prompter"]);
+    expect(Object.keys(SUB_AGENTS).sort()).toEqual(["bizops", "booking", "coder", "designer", "director", "finance", "general", "librarian", "ops", "prompter"]);
     // An invalid id never becomes an agent: it falls back to Tony.
     expect(agentFor("../etc").role).toBe("general");
     expect(SUB_AGENTS["Not An Id"]).toBeUndefined();
@@ -50,8 +50,9 @@ describe("data-driven agent registry", () => {
     expect(roleIds(null)).toEqual([...ROLE_IDS]);
     expect(subAgentIds(undefined)).toEqual([...SUB_AGENT_IDS]);
     const agents = { general: {}, coder: {}, finance: {}, "security-patrol": {}, tony: {}, "Bad Id": {} };
-    expect(roleIds(agents)).toEqual([...ROLE_IDS, "finance", "security-patrol"]);
-    expect(subAgentIds(agents)).toEqual([...SUB_AGENT_IDS, "finance", "security-patrol"]);
+    // finance is a built-in role now; only ids outside the static list are appended.
+    expect(roleIds(agents)).toEqual([...ROLE_IDS, "security-patrol"]);
+    expect(subAgentIds(agents)).toEqual([...SUB_AGENT_IDS, "security-patrol"]);
   });
 
   it("Tony's gateway prompt carries the active MODE block (Brainstorming by default)", () => {

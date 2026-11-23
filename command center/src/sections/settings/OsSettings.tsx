@@ -165,7 +165,7 @@ export function DropletCard() {
 
 // Curated display order for this card; derived from the shared ROLE_IDS so a role added or
 // removed there can't silently drift out of sync — any id not listed here is appended.
-const ROLE_ORDER: RoleId[] = ["librarian", "coder", "booking", "ops", "general", "prompter", "designer", "director"];
+const ROLE_ORDER: RoleId[] = ["librarian", "coder", "booking", "ops", "bizops", "finance", "general", "prompter", "designer", "director"];
 const ROLE_LABEL_OVERRIDES: Partial<Record<RoleId, string>> = { general: "Tony (own RAG)", prompter: "Prompter / dispatcher" };
 const ROLES: [RoleId, string][] = [...ROLE_ORDER, ...ROLE_IDS.filter((id) => !ROLE_ORDER.includes(id))].map((id) => [id, ROLE_LABEL_OVERRIDES[id] ?? roleLabel(id)]);
 

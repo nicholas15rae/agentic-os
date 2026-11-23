@@ -295,7 +295,7 @@ async function n8nWorkflows(): Promise<WorkflowInfo[]> {
   return workflowsCache.list;
 }
 
-const ROLE_PROMPT_ORDER: AgentRole[] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops"];
+const ROLE_PROMPT_ORDER: AgentRole[] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "bizops", "finance"];
 
 function plannerPrompt(workflows: WorkflowInfo[]): string {
   const wf = workflows.map((w) => `"${w.name}"${w.description ? ` (${w.description})` : ""}`).join(", ");

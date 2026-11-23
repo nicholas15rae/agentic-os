@@ -75,11 +75,11 @@ GUARDS_VERSION = 8
 # ── roster (mirror of the Command Center; tests/test_memory_scrolls_guards.py checks it) ─────────
 
 # roles.ts ROLE_IDS
-ROLE_IDS = ("general", "booking", "prompter", "coder", "designer", "librarian", "ops")
+ROLE_IDS = ("general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "bizops", "finance")
 # router.ts SELF_ROLE_IDS: every id that means Tony himself
 SELF_ROLE_IDS = ("general", "tony", "os", "dispatcher", "orchestrator", "jarvis")
 # agents.ts labels (+ Tony, the default OS name roles.ts shows for `general`)
-ROLE_LABELS = ("Tony", "Prompter", "Designer", "Librarian", "Coder", "Booking Desk", "Ops")
+ROLE_LABELS = ("Tony", "Prompter", "Designer", "Director", "Librarian", "Coder", "Booking Desk", "Ops", "Biz Ops", "Finance")
 # agents.ts: prep-only registry ids that already resolve (Phase 2 section 4)
 PLACEHOLDER_AGENTS = ("Security Patrol", "Finance")
 # ai-hub roster names that alias Command Center agents (AI_HUB_BASELINE_REPORT conflict 1)

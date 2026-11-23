@@ -33,7 +33,7 @@ export const BUSES: Readonly<Record<BusId, BusLook>> = {
 };
 
 /** The roster (arbiter node ids), Tony first. */
-export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "observer", "security", "garbage"] as const;
+export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "bizops", "observer", "security", "garbage"] as const;
 export type RosterId = (typeof ROSTER)[number];
 
 export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
@@ -46,6 +46,7 @@ export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
   finance: "vault",
   booking: "ops",
   ops: "ops",
+  bizops: "ops",
   observer: "security",
   security: "security",
   garbage: "security",
@@ -61,6 +62,7 @@ export const NODE_LABEL: Readonly<Record<RosterId, string>> = {
   finance: "Financer",
   booking: "Booking Agent",
   ops: "Ops",
+  bizops: "Biz Ops",
   observer: "Observer",
   security: "Security",
   garbage: "Garbage Daemon",
@@ -106,6 +108,8 @@ export const SURFACE_TONE: Readonly<Record<Surface, string>> = {
 const INTROSPECT_ROLE: Partial<Record<RosterId, string>> = { tony: "general", prompter: "prompter", coder: "coder", designer: "designer", director: "director", librarian: "librarian", ops: "ops", booking: "booking", finance: "finance" };
 
 export function agentFor(id: RosterId, agents: readonly SnapAgent[] | undefined): SnapAgent | undefined {
+  // Biz Ops has one workspace per business (`bizops_<id>`): show the first one's model.
+  if (id === "bizops") return agents?.find((a) => a.role === "bizops" || a.slug.startsWith("bizops_"));
   const role = INTROSPECT_ROLE[id];
   return role ? agents?.find((a) => a.role === role || a.slug === role) : undefined;
 }
@@ -133,6 +137,7 @@ export const HOOKUP_HINTS: Readonly<Record<RosterId, readonly string[]>> = {
   finance: ["market", "trading", "finance"],
   booking: ["n8n", "gmail", "calendar", "instagram"],
   ops: ["n8n", "scheduler", "services"],
+  bizops: ["gmail", "calendar", "time", "knowledge"],
   observer: ["trace", "telemetry"],
   security: ["security", "bridge"],
   garbage: [],
@@ -155,9 +160,10 @@ export const BOUNDARY: Readonly<Record<RosterId, string>> = {
   designer: "Write: staging/<slug> assets only; read `build_circle`",
   director: "Media projects: writes new renders / exports only; never modifies original raw footage or photos",
   librarian: "Read-only over every non-vault namespace + cold archives; writes `librarian`",
-  finance: "SEALED vault: AES-GCM ledger, opens only on your explicit unlock; never in shared memory",
+  finance: "SEALED vault: AES-GCM ledger, opens only on your explicit unlock; never in shared memory. The Finance agent answers from one ledger's rows; its workspace holds no documents",
   booking: "Outbound via the n8n webhook only; writes `booking`",
   ops: "AnythingLLM workspace (on demand); no direct filesystem access",
+  bizops: "One business per turn: reads / writes only memory/ops/<business> (jailed), RAG only its bizops_<id> workspace; money only through the approved Finance hand-off",
   observer: "Read-only audit of hand-off integrity; writes `observer`",
   security: "Read-only injection / boundary scan of new hand-offs; writes `security` dumps",
   garbage: "Delete inside its allowlist only (dumps, stale memory, staging temp); never the vault",
@@ -200,7 +206,7 @@ export function liveTraces<H extends Pick<Handoff, "from" | "to" | "kind" | "at"
 // ── Schematic layout (viewBox units) ───────────────────────────────────────
 
 export const FLOW_W = 1600;
-export const FLOW_H = 1240;
+export const FLOW_H = 1410;
 export const SPINE_X = 800;
 export const CARD_W = 300;
 export const CARD_H = 156;
@@ -208,7 +214,7 @@ export const CARD_H = 156;
 export const USER_BOX = { x: SPINE_X, y: 70, w: 240, h: 58 };
 export const TONY_BOX = { x: SPINE_X, y: 230, w: 300, h: 128 };
 /** Where the bottom (security) row's horizontal bus runs. */
-export const BOTTOM_BUS_Y = 990;
+export const BOTTOM_BUS_Y = 1160;
 
 export interface FlowNode {
   /** Card centre. */
@@ -226,9 +232,10 @@ export const FLOW_NODES: Readonly<Record<Exclude<RosterId, "tony">, FlowNode>> =
   finance: { x: 1310, y: 570, col: "right" },
   booking: { x: 1310, y: 740, col: "right" },
   ops: { x: 1310, y: 910, col: "right" },
-  observer: { x: 470, y: 1110, col: "bottom" },
-  security: { x: 800, y: 1110, col: "bottom" },
-  garbage: { x: 1130, y: 1110, col: "bottom" },
+  bizops: { x: 1310, y: 1080, col: "right" },
+  observer: { x: 470, y: 1280, col: "bottom" },
+  security: { x: 800, y: 1280, col: "bottom" },
+  garbage: { x: 1130, y: 1280, col: "bottom" },
 };
 
 /** Each bus drops off the spine on its own lane, so parallel traces never overlap. */
@@ -303,6 +310,7 @@ export const ORBITS: Readonly<Record<RosterId, Orbit>> = {
   director: { radius: 13.5, speed: 0.04, phase: 0.2, tilt: -0.03, size: 0.64, palette: ["#2a0a2e", "#a3389a", "#f5c2ec"], atmosphere: "#e879f9", kind: "planet" },
   librarian: { radius: 15, speed: 0.036, phase: 1.1, tilt: -0.07, size: 0.95, palette: ["#062b22", "#1f8a6b", "#a7f3d0"], atmosphere: "#34d399", kind: "planet" },
   ops: { radius: 18, speed: 0.03, phase: 5.3, tilt: 0.05, size: 0.74, palette: ["#0b1f3a", "#2f6fb4", "#bfdbfe"], atmosphere: "#60a5fa", kind: "planet" },
+  bizops: { radius: 19.5, speed: 0.027, phase: 1.7, tilt: -0.02, size: 0.72, palette: ["#062a2e", "#1b8a96", "#a5f3fc"], atmosphere: "#22d3ee", kind: "planet" },
   booking: { radius: 21, speed: 0.025, phase: 3.0, tilt: -0.05, size: 0.66, palette: ["#2a2410", "#8f7a3a", "#e9dca2"], atmosphere: "#facc15", kind: "planet" },
   observer: { radius: 24, speed: 0.021, phase: 0.9, tilt: 0.08, size: 0.6, palette: ["#1d2130", "#5b6378", "#cfd6e6"], atmosphere: "#93c5fd", kind: "planet" },
   finance: { radius: 27.5, speed: 0.018, phase: 2.6, tilt: -0.06, size: 1.05, palette: ["#1e0b3a", "#6d3fc4", "#d8c4ff"], atmosphere: "#a78bfa", kind: "vault" },

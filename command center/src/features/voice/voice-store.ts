@@ -28,7 +28,7 @@ export type VoiceState =
 
 export type Channel = "voice" | "text";
 export type ThreadId = "auto" | AgentRole;
-export const THREADS: ThreadId[] = ["auto", "general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops"];
+export const THREADS: ThreadId[] = ["auto", "general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops", "bizops", "finance"];
 
 /** The phone HUD (`/cc/?view=hud`, MobileHud): Tony's thread there is always "general". */
 const HUD_VIEW = typeof location !== "undefined" && new URLSearchParams(location.search).get("view") === "hud";

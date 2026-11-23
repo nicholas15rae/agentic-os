@@ -23,6 +23,7 @@ export const LAYOUT: Readonly<Record<string, Pos>> = {
   security: { x: 30, y: 57 },
   garbage: { x: 58, y: 57 },
   finance: { x: 92, y: 30 },
+  bizops: { x: 92, y: 50 },
 };
 
 /** Valid hand-off paths (mirrors `arbiter::EDGES`). */
@@ -46,6 +47,9 @@ export const EDGES: readonly [string, string][] = [
   ["finance", "librarian"],
   ["tony", "ops"],
   ["observer", "tony"],
+  ["tony", "bizops"],
+  ["bizops", "tony"],
+  ["bizops", "finance"],
 ];
 
 export const edgeKey = (a: string, b: string) => [a, b].sort().join("~");

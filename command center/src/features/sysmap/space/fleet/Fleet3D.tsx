@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import e46Url from "@/assets/orbital-models/e46.glb?url";
+import fighterUrl from "@/assets/orbital-models/fighter.glb?url";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { DROP_IN_BACKDROPS, SPRITE_URLS } from "../space-assets";
 import { useSpace } from "../space-store";
 import { useSysMap } from "../../sysmap-store";
 import { FOLLOW, followTarget, type FollowTarget } from "./follow";
-import { buildCapital, buildE46, buildE46FromMesh, buildFighter, buildRockGeometry, glowTexture, rockMaterial, type ShipModel } from "./models";
+import { buildCapital, buildE46, buildE46FromMesh, buildFighter, buildFighterFromMesh, buildRockGeometry, glowTexture, rockMaterial, type ShipModel } from "./models";
 import { B_MAX, FleetSim, P_MAX, type Particle } from "./sim";
 
 /**
@@ -199,11 +200,13 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
   const size = useThree((s) => s.size);
   const dpr = useThree((s) => s.viewport.dpr);
 
-  // The generated (Hunyuan3D) E46 replaces the hand-built one as soon as it has loaded.
-  const [e46Mesh, setE46Mesh] = useState<THREE.Object3D | null>(null);
+  // The generated (Hunyuan3D) ships replace the hand-built ones once both have loaded (one
+  // rebuild, not two); a failed load keeps the hand-built model for that ship.
+  const [meshes, setMeshes] = useState<{ e46: THREE.Object3D | null; fighter: THREE.Object3D | null } | null>(null);
   useEffect(() => {
     let dead = false;
-    new GLTFLoader().load(e46Url, (g) => !dead && setE46Mesh(g.scene), undefined, () => undefined);
+    const load = (url: string) => new Promise<THREE.Object3D | null>((res) => new GLTFLoader().load(url, (g) => res(g.scene), undefined, () => res(null)));
+    void Promise.all([load(e46Url), load(fighterUrl)]).then(([e46, fighter]) => !dead && setMeshes({ e46, fighter }));
     return () => {
       dead = true;
     };
@@ -211,8 +214,8 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
 
   const kit = useMemo(() => {
     const glow = glowTexture();
-    const e46 = e46Mesh ? buildE46FromMesh(glow, e46Mesh) : buildE46(glow);
-    const fighters = Array.from({ length: SHIPS_MAX - 1 }, () => buildFighter(glow));
+    const e46 = meshes?.e46 ? buildE46FromMesh(glow, meshes.e46) : buildE46(glow);
+    const fighters = Array.from({ length: SHIPS_MAX - 1 }, () => (meshes?.fighter ? buildFighterFromMesh(glow, meshes.fighter) : buildFighter(glow)));
     const capital = buildCapital(glow);
     const rockGeos = [0, 1, 2].map((i) => buildRockGeometry(i + 1));
     const rockMat = rockMaterial();
@@ -282,7 +285,7 @@ export function Fleet3D({ positions, reduced }: { positions: ReadonlyMap<string,
       });
     station.visible = false;
     return { glow, e46, fighters, capital, rockGeos, rockMat, boltCore, boltGlow, points, station, e46Plumes, fighterPlumes };
-  }, [e46Mesh]);
+  }, [meshes]);
 
   const sim = useMemo(() => new FleetSim(), []);
   // Dev-only handle for inspecting the fleet from the console / browser tests.

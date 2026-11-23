@@ -1,0 +1,25 @@
+[project]
+name = "media-forge-mcp"
+version = "0.1.0"
+description = "Local media utility MCP server for the Command Center Director agent (FFmpeg, faster-whisper, PySceneDetect, Pillow)."
+requires-python = ">=3.10"
+dependencies = [
+    # The gateway's uv-launched Python servers crash on mcp 2.x; keep the 1.x line.
+    "mcp>=1.6,<2",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+transcribe = ["faster-whisper>=1.1"]
+# OpenCV 5 moved the Haar face cascade out of the main package: stay on 4.x.
+scenes = ["scenedetect>=0.6.4", "opencv-python-headless>=4.9,<5"]
+all = ["faster-whisper>=1.1", "scenedetect>=0.6.4", "opencv-python-headless>=4.9,<5"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

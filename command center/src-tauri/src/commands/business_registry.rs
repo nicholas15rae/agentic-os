@@ -345,10 +345,6 @@ impl Store {
         store
     }
 
-    pub fn memory_root(&self) -> &Path {
-        &self.memory_root
-    }
-
     pub fn snapshot(&self) -> Registry {
         self.reg.lock().unwrap().clone()
     }
@@ -585,6 +581,7 @@ pub(crate) mod tests {
 
     /// A store whose two seeds are provisioned locally and marked active (no AnythingLLM).
     pub(crate) fn active_store(tag: &str) -> (Store, PathBuf) {
+        super::super::integrity::init_for_test();
         let dir = temp_dir(tag);
         let s = Store::open(&dir);
         for id in ["trades_contracting", "supplements_ecom"] {

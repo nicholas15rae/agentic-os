@@ -228,6 +228,11 @@ pub async fn daemon(app: tauri::AppHandle) {
     loop {
         tokio::select! {
             Some(id) = rx.recv() => {
+                // Fail closed: a tampered rules file halts every automated purge (integrity.rs).
+                if let Err(e) = super::integrity::ensure() {
+                    eprintln!("[garbage] handshake {id} held: {e}");
+                    continue;
+                }
                 let r = purge_packet(&a, &id);
                 let mut s = status().lock().unwrap();
                 s.handshakes += 1;
@@ -239,6 +244,9 @@ pub async fn daemon(app: tauri::AppHandle) {
                 super::arbiter::get().handoff("security", "garbage", &format!("purge handshake {id}"));
             }
             _ = tick.tick() => {
+                if super::integrity::ensure().is_err() {
+                    continue;
+                }
                 let r = app.state::<super::os_core::OsState>().snapshot().roster.clone();
                 let (a2, keep, grad) = (a.clone(), r.dump_keep_days, r.graduate_after_days);
                 let res = super::arbiter::get().run_task("garbage", "hygiene pass", async move {

@@ -860,6 +860,9 @@ pub struct OsConfig {
     /// The whiteboard roster's scripts (Booking scan, Security / Garbage / Observer cadence,
     /// Finance vault re-seal): see `arbiter::RosterConfig`.
     pub roster: super::arbiter::RosterConfig,
+    /// The HITL review queue: digest hour / threshold and the optional webhook switch (its URL
+    /// lives in the OS keychain, `review_queue::WEBHOOK_SERVICE`).
+    pub review: ReviewConfig,
     /// One-time config migrations already applied (`apply_migrations`), so a setting the user
     /// changes afterwards is never flipped back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -889,8 +892,26 @@ impl Default for OsConfig {
             worker: WorkerConfig::default(),
             voice: VoiceConfig::default(),
             roster: super::arbiter::RosterConfig::default(),
+            review: ReviewConfig::default(),
             migrations: vec![],
         }
+    }
+}
+
+/// The review queue's digest (`review_queue.rs`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReviewConfig {
+    /// Local hour (0–23) of the daily digest when items are waiting.
+    pub digest_hour: u32,
+    /// Pending items that trigger a digest before the daily one.
+    pub threshold: u32,
+    /// Also push the counts-only digest to the configured webhook.
+    pub webhook_enabled: bool,
+}
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self { digest_hour: 18, threshold: 10, webhook_enabled: false }
     }
 }
 

@@ -87,6 +87,21 @@ impl BusinessScope {
         if !hits.is_empty() {
             return Err(cross_domain_error(&hits));
         }
+        self.write_checked(rel, text)
+    }
+
+    /// A blocked write the user released from the review queue ("Reject & Restore"): the
+    /// cross-domain check was the human's call; jail, extension and size rules still apply.
+    pub(crate) fn write_note_reviewed(&self, rel: &str, text: &str) -> Result<PathBuf, String> {
+        Self::check_ext(rel)?;
+        if text.len() > NOTE_MAX {
+            return Err(format!("note too large (max {} KB)", NOTE_MAX / 1024));
+        }
+        self.write_checked(rel, text)
+    }
+
+    fn write_checked(&self, rel: &str, text: &str) -> Result<PathBuf, String> {
+        super::integrity::ensure()?;
         let target = super::staging::ensure_parent(&self.memory_dir, rel)?;
         super::staging::atomic_write(&target, text.as_bytes())?;
         self.jail(rel)?; // re-verify the final path
@@ -217,11 +232,23 @@ pub fn bizops_memory_read(business_id: String, rel: String) -> Result<Value, Str
     Ok(json!({ "businessId": sc.id(), "rel": rel, "text": sc.read_note(&rel)? }))
 }
 
+/// A scoped write. A cross-domain hit isn't written: it goes to the review queue as a Security
+/// flag (`blocked_write`), where the user can discard it or release it into this business.
 #[tauri::command]
 pub fn bizops_memory_write(business_id: String, rel: String, text: String) -> Result<Value, String> {
     let (sc, reg) = scoped(&business_id)?;
-    sc.write_note(&reg, &rel, &text)?;
-    Ok(json!({ "businessId": sc.id(), "rel": rel, "bytes": text.len() }))
+    match sc.write_note(&reg, &rel, &text) {
+        Ok(_) => {
+            let _ = super::ops_audit::append("bizops", "note_write", sc.id(), &rel, &format!("{} bytes", text.len()));
+            Ok(json!({ "businessId": sc.id(), "rel": rel, "bytes": text.len() }))
+        }
+        Err(e) if e.starts_with("CROSS_DOMAIN") => {
+            let hits = cross_domain_hits(&sc, &reg, &format!("{rel}\n{text}"));
+            let q = super::quarantine::global()?.stage_blocked_write(&sc, &rel, &text, "security", &hits)?;
+            Err(format!("{e} (review item {})", q.item_id))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[tauri::command]
@@ -238,6 +265,7 @@ mod tests {
 
     #[test]
     fn notes_stay_inside_their_business() {
+        super::super::integrity::init_for_test();
         let (s, dir) = active_store("scope");
         let reg = s.snapshot();
         let t = s.scope("trades_contracting").unwrap();

@@ -113,7 +113,8 @@ pub async fn downtime_loop(app: tauri::AppHandle) {
         if !idle {
             continue;
         }
-        if clock.due("security", Duration::from_secs(r.security_minutes.max(2) as u64 * 60)) {
+        // A tampered rules file halts Security's automated pass (fail closed; integrity.rs).
+        if clock.due("security", Duration::from_secs(r.security_minutes.max(2) as u64 * 60)) && super::integrity::ensure().is_ok() {
             clock.last.insert("security", Instant::now());
             let db = app.state::<super::envelope::TaskStore>().path();
             let from = clock.security_seq;

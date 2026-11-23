@@ -129,7 +129,9 @@ pub async fn bizops_finance_handoff(handoff: Value, approved: Option<bool>, stat
     if approved != Some(true) {
         return Err("PERMISSION_REQUIRED:finance-handoff".into());
     }
+    super::integrity::ensure()?;
     let e = super::finance_vault::write_input(input, true, "bizops").await?;
+    let _ = super::ops_audit::append("bizops", "finance_handoff", scope.id(), &e.id, &format!("{} {}", h.transaction_type.as_str(), e.input.currency));
     Ok(json!({ "id": e.id, "ledgerTag": e.input.tag(), "kind": e.input.kind, "amountCents": e.input.amount_cents, "currency": e.input.currency, "date": e.input.date }))
 }
 

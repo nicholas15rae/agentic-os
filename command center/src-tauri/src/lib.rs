@@ -4,7 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{buildhub, handoff_cues, lifecycle};
-use commands::{arbiter, business_registry, finance_handoff, finance_vault, memtier, ops_scope};
+use commands::{arbiter, business_registry, finance_handoff, finance_vault, integrity, memtier, ops_audit, ops_scope, quarantine, review_queue};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
@@ -128,6 +128,15 @@ pub fn run() {
                 finance_vault::init(&dir);
                 // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
                 business_registry::init(&dir);
+                // Zero-trust layer: append-only audit (<config>/security/ops-audit.db), the
+                // quarantine (<config>/staging/quarantine) and the checksum-verified rules
+                // (<resource dir>/rules; a mismatch latches fail-closed).
+                ops_audit::init(&dir);
+                quarantine::init(&dir);
+                match app.path().resource_dir() {
+                    Ok(res) => integrity::init(res.join("rules")),
+                    Err(e) => eprintln!("[integrity] no resource dir ({e}); automated purge / flag / ops writes stay halted"),
+                }
                 // Away Mode survives a restart (an overnight run keeps going).
                 {
                     let os = app.state::<os_core::OsState>();
@@ -210,6 +219,8 @@ pub fn run() {
             tauri::async_runtime::spawn(commands::downtime::downtime_loop(app.handle().clone()));
             // Garbage daemon: deterministic purge on schedule / quota / Security's handshake (0 VRAM).
             tauri::async_runtime::spawn(commands::garbage::daemon(app.handle().clone()));
+            // HITL review queue: Garbage's business sweep + the batched digest / webhook.
+            tauri::async_runtime::spawn(commands::review_queue::daemon(app.handle().clone()));
             #[cfg(desktop)]
             if let Err(e) = build_tray(app) {
                 eprintln!("[tray] {e}");
@@ -261,6 +272,18 @@ pub fn run() {
             ops_scope::bizops_memory_write,
             ops_scope::bizops_memory_search,
             finance_handoff::bizops_finance_handoff,
+            integrity::integrity_status,
+            ops_audit::ops_audit_recent,
+            quarantine::quarantine_flag_note,
+            review_queue::review_list,
+            review_queue::review_inspect,
+            review_queue::review_approve,
+            review_queue::review_reject,
+            review_queue::review_settings,
+            review_queue::review_config_set,
+            review_queue::review_webhook_set,
+            review_queue::review_webhook_clear,
+            review_queue::review_webhook_test,
             commands::tony_dispatch::tony_dispatch_approve,
             commands::tony_dispatch::tony_dispatch_discard,
             secrets::secret_set,

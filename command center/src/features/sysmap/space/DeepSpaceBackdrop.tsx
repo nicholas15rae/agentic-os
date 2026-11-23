@@ -260,7 +260,7 @@ function Wallpapers({ mode, active, reduced, size, onGrade }: { mode: Exclude<Sp
   }, [plates]);
 
   const hasImages = imgs.length > 0;
-  const opacity = hasImages ? (mode === "cinema" ? 0.85 : 0.55) : mode === "cinema" ? 1 : 0.8;
+  const opacity = hasImages ? (mode === "cinema" ? 0.95 : 0.8) : mode === "cinema" ? 1 : 0.85;
   return (
     <>
       {plates.map((p, i) => (
@@ -269,7 +269,7 @@ function Wallpapers({ mode, active, reduced, size, onGrade }: { mode: Exclude<Sp
       {/* Unified grade: one cool cosmic tint, an obsidian scrim and a radial vignette over every
           plate, so transitions read as one continuous galaxy and the HUD stays sharp. */}
       <div className="absolute inset-0" style={{ background: "linear-gradient(155deg, rgba(34,18,84,0.28), rgba(4,24,44,0.22) 55%, rgba(30,10,46,0.26))" }} />
-      <div className="absolute inset-0" style={{ background: `rgba(2,3,8,${mode === "cinema" ? 0.22 : 0.38})` }} />
+      <div className="absolute inset-0" style={{ background: `rgba(2,3,8,${mode === "cinema" ? 0.16 : 0.26})` }} />
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_35%,rgba(2,3,8,0.82)_100%)]" />
     </>
   );

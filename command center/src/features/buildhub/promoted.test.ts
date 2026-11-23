@@ -9,9 +9,13 @@ describe("promotedWidgets", () => {
   it("lists only promoted internal widgets, newest first", () => {
     const view = { builds: [build("a", "internal_widget", 10), build("b", "internal_widget", null), build("c", "external_app", 30), build("d", "internal_widget", 20)] } as BuildHubView;
     expect(promotedWidgets(view)).toEqual([
-      { buildId: "d", title: "T d", promotedAt: 20 },
-      { buildId: "a", title: "T a", promotedAt: 10 },
+      { buildId: "d", title: "T d", buildTitle: null, promotedAt: 20 },
+      { buildId: "a", title: "T a", buildTitle: null, promotedAt: 10 },
     ]);
+  });
+  it("names a widget by its own page title, keeping the build title as a hint", () => {
+    const b = { ...build("a", "internal_widget", 10), widget_title: "Clock Faces Widget" } as BuildHubView["builds"][number];
+    expect(promotedWidgets({ builds: [b] } as BuildHubView)).toEqual([{ buildId: "a", title: "Clock Faces Widget", buildTitle: "T a", promotedAt: 10 }]);
   });
   it("is empty before the hub has loaded", () => {
     expect(promotedWidgets(null)).toEqual([]);

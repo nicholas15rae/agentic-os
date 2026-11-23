@@ -1112,6 +1112,8 @@ pub struct BuildView {
     pub build: Build,
     pub position: Option<usize>,
     pub peek: PeekInfo,
+    /// A promoted internal widget's own name (its frozen page's `<title>`), for the Add widget tray.
+    pub widget_title: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1295,6 +1297,28 @@ fn known_of(app: &AppHandle) -> Vec<String> {
     devqueue::known_secrets(app.state::<DispatchState>().inner(), app.state::<OsState>().inner())
 }
 
+/// The first `<title>` of a page, trimmed and capped; None when missing or empty.
+pub fn html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let open_end = start + lower[start..].find('>')? + 1;
+    let close = open_end + lower[open_end..].find("</title>")?;
+    let t: String = html[open_end..close].split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'");
+    let t: String = t.chars().take(60).collect();
+    (!t.is_empty()).then_some(t)
+}
+
+fn promoted_widget_title(app: &AppHandle, b: &Build) -> Option<String> {
+    if b.promoted_at.is_none() || b.envelope.target_runtime != Runtime::InternalWidget || !valid_build_id(&b.envelope.build_id) {
+        return None;
+    }
+    let path = app.path().app_config_dir().ok()?.join("promoted").join(&b.envelope.build_id).join(smoke::ENTRY);
+    // Only the head is needed for the title.
+    let bytes = std::fs::read(path).ok()?;
+    html_title(&String::from_utf8_lossy(&bytes[..bytes.len().min(16 * 1024)]))
+}
+
 fn view(app: &AppHandle) -> HubView {
     let hub = app.state::<HubState>();
     let f = hub.snapshot();
@@ -1316,7 +1340,8 @@ fn view(app: &AppHandle) -> HubView {
             }
             let url = b.envelope.preview_url.clone().or_else(|| previews.get(&b.envelope.build_id).map(|p| p.url()));
             let (reachable, checked_at) = peeks.get(&b.envelope.build_id).unwrap_or((false, 0));
-            BuildView { build, position, peek: PeekInfo { url, reachable, checked_at } }
+            let widget_title = promoted_widget_title(app, b);
+            BuildView { build, position, peek: PeekInfo { url, reachable, checked_at }, widget_title }
         })
         .collect();
     HubView {

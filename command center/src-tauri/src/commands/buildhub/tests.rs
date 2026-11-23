@@ -1248,3 +1248,13 @@ fn rework_refuses_unpromoted_builds_external_apps_and_empty_text() {
     x.promote("b-x", 31).unwrap();
     assert!(x.rework("b-x", "change it", 40, &[]).is_err(), "external apps aren't dashboard tiles");
 }
+
+#[test]
+fn html_title_reads_the_page_name_for_the_widget_tray() {
+    assert_eq!(html_title("<html><head><TITLE>
+  Clock Faces Widget </title></head>").as_deref(), Some("Clock Faces Widget"));
+    assert_eq!(html_title("<title lang=\"en\">Tips &amp; Tricks</title>").as_deref(), Some("Tips & Tricks"));
+    assert_eq!(html_title("<title>   </title>"), None);
+    assert_eq!(html_title("<p>no title</p>"), None);
+    assert_eq!(html_title(&format!("<title>{}</title>", "x".repeat(200))).map(|t| t.len()), Some(60));
+}

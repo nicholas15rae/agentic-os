@@ -84,6 +84,8 @@ export interface BuildView {
   /** 1-based place among the builds still waiting (null once handed to an agent). */
   position: number | null;
   peek: { url: string | null; reachable: boolean; checked_at: number };
+  /** A promoted internal widget's own name (its page <title>); null when it has none. */
+  widget_title?: string | null;
 }
 
 export interface BuildHubView {

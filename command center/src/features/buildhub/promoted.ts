@@ -2,7 +2,10 @@ import type { BuildHubView, BuildView } from "./types";
 
 export interface PromotedWidget {
   buildId: string;
+  /** The widget's own name (its page title), else the build's title. */
   title: string;
+  /** The Play Place build it came from, when that differs from `title`. */
+  buildTitle: string | null;
   promotedAt: number;
 }
 
@@ -15,7 +18,11 @@ export function promotedWidgets(view: BuildHubView | null): PromotedWidget[] {
   if (!view) return [];
   return view.builds
     .filter((b) => b.envelope.target_runtime === "internal_widget" && b.promoted_at != null)
-    .map((b) => ({ buildId: b.envelope.build_id, title: b.envelope.title, promotedAt: b.promoted_at as number }))
+    .map((b) => {
+      const own = b.widget_title?.trim();
+      const title = own || b.envelope.title;
+      return { buildId: b.envelope.build_id, title, buildTitle: title === b.envelope.title ? null : b.envelope.title, promotedAt: b.promoted_at as number };
+    })
     .sort((a, b) => b.promotedAt - a.promotedAt);
 }
 

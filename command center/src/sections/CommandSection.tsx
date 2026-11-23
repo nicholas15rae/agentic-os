@@ -100,6 +100,23 @@ function WidgetTray() {
 
   return (
     <div className="mx-4 mb-3 space-y-2 md:mx-6 xl:mx-8">
+      {promoted.length > 0 && (
+        <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2" aria-label="Your Play Place builds">
+          <span className="label-caps shrink-0 px-2 text-violet">From Play Place</span>
+          {promoted.map((b) => (
+            <button
+              key={b.buildId}
+              title={b.buildTitle ? `Promoted from the Play Place build “${b.buildTitle}”` : "Promoted from the Play Place"}
+              onClick={() => addAndReport("staged-build", b.title, { buildId: b.buildId, title: b.title })}
+              className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
+            >
+              <Plus size={13} />
+              <FlaskConical size={14} className="text-violet" />
+              {b.title}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2">
         <span className="label-caps shrink-0 px-2 text-amber-soft">Add</span>
         {availableWidgets()
@@ -119,18 +136,6 @@ function WidgetTray() {
               </button>
             );
           })}
-        {promoted.map((b) => (
-          <button
-            key={b.buildId}
-            title="A widget you built in the Play Place and promoted"
-            onClick={() => addAndReport("staged-build", b.title, { buildId: b.buildId, title: b.title })}
-            className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
-          >
-            <Plus size={13} />
-            <FlaskConical size={14} className="text-violet" />
-            {b.title}
-          </button>
-        ))}
         <GlassAllSwitch />
         <GlassOpacitySlider />
         <button onClick={reset} className="pill-glass !h-9 shrink-0 !px-3 text-[13px]" title="Restores the default layout on the first page, or clears any other page. Other pages are untouched.">

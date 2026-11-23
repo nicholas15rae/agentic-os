@@ -2,7 +2,8 @@ import { useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { isTauri } from "@/lib/platform";
 import { onDirectorEvent } from "@/features/director/api";
-import { createProject, lastSlug, loadProjects, onIngestEvent, onRenderEvent, openProject, useDirector } from "@/features/director/director-store";
+import { createProject, lastSlug, loadProjects, onIngestEvent, onRenderEvent, openProject, refreshAssets, useDirector } from "@/features/director/director-store";
+import { onPullDone, startCloud } from "@/features/cloud/cloud-store";
 import { DesktopOnlyView, EmptyStateView } from "@/features/director/EmptyState";
 import { StudioBar } from "@/features/director/StudioBar";
 import { StagingBin } from "@/features/director/StagingBin";
@@ -36,7 +37,16 @@ function DirectorStudio() {
     const last = lastSlug();
     if (last && !useDirector.getState().slug) void openProject(last);
     const offs = [onDirectorEvent("media-render", onRenderEvent), onDirectorEvent("media-ingest", onIngestEvent)];
-    return () => offs.forEach((p) => void p.then((off) => off()));
+    // Google Drive: status/transfers for the shelf and bin; a finished pull into the open project refreshes the bin.
+    const releaseCloud = startCloud();
+    const offPull = onPullDone((t) => {
+      if (t.project === useDirector.getState().slug) void refreshAssets(t.project);
+    });
+    return () => {
+      offs.forEach((p) => void p.then((off) => off()));
+      offPull();
+      releaseCloud();
+    };
   }, []);
 
   return (

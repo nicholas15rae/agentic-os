@@ -234,6 +234,19 @@ export async function flushSave(by: TimelineManifest["updatedBy"] = "nic", force
   return ok;
 }
 
+/** Re-read the open project's assets and renders (e.g. after a Drive import finished). Leaves the
+ * manifest, chat and selection alone. */
+export async function refreshAssets(slug: string): Promise<void> {
+  if (get().slug !== slug) return;
+  try {
+    const data = await api.projectGet({ slug });
+    if (get().slug !== slug) return;
+    set({ assets: data.assets, renders: data.renders });
+  } catch {
+    /* the next open reloads it */
+  }
+}
+
 export function addAssets(assets: MediaAsset[]) {
   if (!assets.length) return;
   set((s) => ({ assets: [...s.assets.filter((a) => !assets.some((n) => n.id === a.id)), ...assets] }));

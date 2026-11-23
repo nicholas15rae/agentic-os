@@ -207,14 +207,20 @@ pub struct McpReady {
 
 // ── Schema / state ─────────────────────────────────────────────────────────────
 
-const MIGRATIONS: &[&str] = &["CREATE TABLE project (slug TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at TEXT NOT NULL);
+pub(crate) const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE project (slug TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at TEXT NOT NULL);
      CREATE TABLE asset (id TEXT PRIMARY KEY, project TEXT NOT NULL, json TEXT NOT NULL, added_at TEXT NOT NULL);
      CREATE INDEX asset_project ON asset(project, added_at);
      CREATE TABLE plan (id TEXT PRIMARY KEY, project TEXT NOT NULL, json TEXT NOT NULL);
      CREATE TABLE render (id TEXT PRIMARY KEY, project TEXT NOT NULL, json TEXT NOT NULL, created_at TEXT NOT NULL);
-     CREATE INDEX render_project ON render(project, created_at);"];
+     CREATE INDEX render_project ON render(project, created_at);",
+    // v2: cloud sync records (gdrive.rs) and app-wide key/value settings (Drive inbox/outbox).
+    "CREATE TABLE drive_sync (id TEXT PRIMARY KEY, provider TEXT NOT NULL, direction TEXT NOT NULL CHECK (direction IN ('pull','push')), project TEXT NOT NULL, local_path TEXT NOT NULL, drive_file_id TEXT NOT NULL, name TEXT NOT NULL, size_bytes INTEGER NOT NULL, web_view_link TEXT, at TEXT NOT NULL);
+     CREATE INDEX drive_sync_project ON drive_sync(project, at);
+     CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+];
 
-fn sql_err(e: rusqlite::Error) -> String {
+pub(crate) fn sql_err(e: rusqlite::Error) -> String {
     format!("media library: {e}")
 }
 
@@ -272,7 +278,7 @@ impl MediaState {
         }
     }
 
-    fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T, String>) -> Result<T, String> {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T, String>) -> Result<T, String> {
         let mut g = self.conn.lock().unwrap();
         if g.is_none() {
             let path = self.path.lock().unwrap().clone().ok_or("media library isn't initialised")?;
@@ -281,7 +287,7 @@ impl MediaState {
         f(g.as_mut().expect("connection just opened"))
     }
 
-    fn projects_root(&self) -> PathBuf {
+    pub(crate) fn projects_root(&self) -> PathBuf {
         self.root.lock().unwrap().clone().unwrap_or_else(|| PathBuf::from(os_core::MEDIA_ROOT).join("projects"))
     }
 
@@ -298,11 +304,11 @@ impl MediaState {
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn short_id(prefix: &str) -> String {
+pub(crate) fn short_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -365,11 +371,11 @@ pub(crate) fn safe_file_name(name: &str) -> String {
     s
 }
 
-fn ext_of(name: &str) -> String {
+pub(crate) fn ext_of(name: &str) -> String {
     Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
 }
 
-fn kind_for_ext(ext: &str) -> Option<&'static str> {
+pub(crate) fn kind_for_ext(ext: &str) -> Option<&'static str> {
     if IMAGE_EXT.contains(&ext) {
         Some("image")
     } else if VIDEO_EXT.contains(&ext) {
@@ -383,7 +389,7 @@ fn kind_for_ext(ext: &str) -> Option<&'static str> {
 
 const ROLES: [&str; 7] = ["clip", "photo", "slate", "outro", "voiceover", "music", "sfx"];
 
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
     if !p.exists() {
         return p;
@@ -424,7 +430,7 @@ fn set_read_only(path: &Path) {
     }
 }
 
-fn inside(path: &Path, root: &Path) -> bool {
+pub(crate) fn inside(path: &Path, root: &Path) -> bool {
     match (dunce_canon(path), dunce_canon(root)) {
         (Some(p), Some(r)) => p.starts_with(r),
         _ => false,
@@ -432,7 +438,7 @@ fn inside(path: &Path, root: &Path) -> bool {
 }
 
 /// Canonical path without the `\\?\` prefix (so comparisons and the webview's asset URLs agree).
-fn dunce_canon(p: &Path) -> Option<PathBuf> {
+pub(crate) fn dunce_canon(p: &Path) -> Option<PathBuf> {
     let c = std::fs::canonicalize(p).ok()?;
     let s = c.to_string_lossy();
     Some(PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()))
@@ -534,14 +540,14 @@ fn make_thumb(ffmpeg: &str, src: &Path, kind: &str, duration: Option<f64>, out: 
 
 // ── Projects ───────────────────────────────────────────────────────────────────
 
-fn project_root(state: &MediaState, slug: &str) -> Result<PathBuf, String> {
+pub(crate) fn project_root(state: &MediaState, slug: &str) -> Result<PathBuf, String> {
     if !valid_slug(slug) {
         return Err(format!("bad project slug: {slug:?}"));
     }
     Ok(state.projects_root().join(slug))
 }
 
-fn load_project(state: &MediaState, slug: &str) -> Result<MediaProject, String> {
+pub(crate) fn load_project(state: &MediaState, slug: &str) -> Result<MediaProject, String> {
     state
         .with(|c| c.query_row("SELECT json FROM project WHERE slug = ?1", [slug], |r| r.get::<_, String>(0)).optional().map_err(sql_err))?
         .ok_or_else(|| format!("no media project {slug:?}"))
@@ -650,7 +656,7 @@ pub(crate) fn create_project(state: &MediaState, title: &str, source: Option<Sou
 
 /// Finish an ingest: `staged` is already inside `raw/` (copied or uploaded). Marks it
 /// read-only, probes it, makes a thumbnail and records the asset.
-fn finalize_asset(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, staged: &Path, display: &str, role: &str, read_only: bool) -> Result<MediaAsset, String> {
+pub(crate) fn finalize_asset(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, staged: &Path, display: &str, role: &str, read_only: bool) -> Result<MediaAsset, String> {
     let ext = ext_of(display);
     let ffprobe = media_bin(cfg, "ffprobe").ok_or("ffprobe not found (install FFmpeg or Shotcut)")?;
     let pr = probe(&ffprobe, staged)?;
@@ -698,7 +704,7 @@ fn finalize_asset(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, stage
     Ok(a)
 }
 
-fn check_role(role: &str) -> Result<(), String> {
+pub(crate) fn check_role(role: &str) -> Result<(), String> {
     ROLES.contains(&role).then_some(()).ok_or_else(|| format!("unknown asset role {role:?}"))
 }
 
@@ -734,7 +740,7 @@ pub(crate) fn ingest_paths(state: &MediaState, cfg: &os_core::OsConfig, slug: &s
     Ok(out)
 }
 
-fn remove_staged(p: &Path) {
+pub(crate) fn remove_staged(p: &Path) {
     if let Ok(meta) = std::fs::metadata(p) {
         let mut perm = meta.permissions();
         #[allow(clippy::permissions_set_readonly_false)]
@@ -1052,7 +1058,7 @@ pub(crate) fn verify_render(pr: &Probe, size: u64, expect_sec: f64, w: u32, h: u
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 

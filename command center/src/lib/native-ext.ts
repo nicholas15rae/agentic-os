@@ -8,12 +8,14 @@ import type { HealthSnapshot } from "@/features/lifecycle/health";
 import type { BuildEnvelope, BuildHubView, DeleteReport, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport } from "@/features/buildhub/types";
 import type { TranscriptConversation, TranscriptMessage, TranscriptPage } from "@/features/transcript/types";
 import type { DirectorCommands } from "@/features/director/contract";
+import type { CloudCommands } from "@/features/cloud/contract";
 
 /** Director Suite (media.rs): every JSON-args command. The two raw-body ones (`media_ingest_chunk`,
  * `media_voiceover_save`) go through `features/director/api.ts`, never `xcmd`. */
 export type DirectorJsonCommands = Omit<DirectorCommands, "media_ingest_chunk" | "media_voiceover_save">;
 
-export interface ExtCommands extends DirectorJsonCommands {
+/** Cloud storage (gdrive.rs): every `cloud_*` command is plain JSON, so the locked contract is used as is. */
+export interface ExtCommands extends DirectorJsonCommands, CloudCommands {
   // ── Phase 1: lifecycle ──
   gateway_health: { args: undefined; result: HealthSnapshot };
   gateway_reconnect: { args: undefined; result: HealthSnapshot };
@@ -69,7 +71,7 @@ export function xcmd<K extends keyof ExtCommands>(name: K, ...args: ExtCommands[
   return native<ExtCommands[K]["result"]>(name, args[0] as Record<string, unknown> | undefined);
 }
 
-export type ExtEventName = "gateway-health" | "build-hub" | "agent-transcript" | "media-render" | "media-ingest";
+export type ExtEventName = "gateway-health" | "build-hub" | "agent-transcript" | "media-render" | "media-ingest" | "cloud-transfer" | "cloud-status";
 
 /** Subscribe to one of this feature's Rust → webview events. No-op on the PWA. */
 export async function onExtEvent<P>(event: ExtEventName, handler: (payload: P) => void): Promise<() => void> {

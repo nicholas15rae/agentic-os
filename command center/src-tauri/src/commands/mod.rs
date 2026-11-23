@@ -19,6 +19,7 @@ pub mod envfile;
 pub mod finance_vault;
 pub mod events;
 pub mod garbage;
+pub mod gdrive;
 pub mod gmail;
 pub mod handoff_cues;
 pub mod hygiene;

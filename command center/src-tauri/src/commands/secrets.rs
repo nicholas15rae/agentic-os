@@ -22,9 +22,21 @@ fn valid_id(id: &str) -> bool {
 /// default slot and its REST API key in "api". Still bound to the host.
 const SLOTS: [&str; 1] = ["api"];
 
+/// Rust-only keychain entries that are not providers.json providers (e.g. the Google Drive
+/// refresh token written by gdrive.rs), each bound to a fixed host. The webview commands refuse
+/// these ids, so it can neither overwrite nor delete them.
+const INTERNAL: [(&str, &str); 1] = [("gdrive-token", "oauth2.googleapis.com")];
+
+fn internal_account(provider: &str) -> Option<String> {
+    INTERNAL.iter().find(|(id, _)| *id == provider).map(|(id, host)| format!("{id}@{host}"))
+}
+
 fn account_slot(state: &DispatchState, provider: &str, slot: Option<&str>) -> Result<String, String> {
     if !valid_id(provider) {
         return Err("invalid provider id".into());
+    }
+    if internal_account(provider).is_some() {
+        return Err("reserved provider id".into());
     }
     let host = state.provider_host(provider).ok_or("unknown provider")?;
     match slot {
@@ -50,8 +62,30 @@ fn entry(account: &str) -> Result<keyring::Entry, String> {
 
 /// Rust-only accessor. Never expose through a command.
 pub(crate) fn get(state: &DispatchState, provider: &str) -> Option<String> {
-    let acct = account(state, provider).ok()?;
+    let acct = internal_account(provider).or_else(|| account(state, provider).ok())?;
     entry(&acct).ok()?.get_password().ok()
+}
+
+/// Rust-only writer (e.g. the Drive refresh token). Never expose through a command.
+pub(crate) fn set(state: &DispatchState, provider: &str, value: &str) -> Result<(), String> {
+    let acct = match internal_account(provider) {
+        Some(a) => a,
+        None => account(state, provider)?,
+    };
+    check_secret_value(value)?;
+    entry(&acct)?.set_password(value).map_err(|e| e.to_string())
+}
+
+/// Rust-only delete; a missing entry is fine.
+pub(crate) fn delete(state: &DispatchState, provider: &str) -> Result<(), String> {
+    let acct = match internal_account(provider) {
+        Some(a) => a,
+        None => account(state, provider)?,
+    };
+    match entry(&acct)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// `host[:port]` of a URL (lower-case host), or None when it doesn't parse.
@@ -142,6 +176,17 @@ mod tests {
         assert!(e.contains("1024") && !e.contains("aaaa"));
         // 700 non-BMP chars = 1400 UTF-16 units = 2800 bytes: over the Credential Manager limit.
         assert!(check_secret_value(&"\u{1F600}".repeat(700)).is_err());
+    }
+
+    #[test]
+    fn internal_ids_are_rust_only() {
+        let st = DispatchState::default();
+        // The webview-facing account resolver refuses the Drive refresh-token id…
+        assert_eq!(account_slot(&st, "gdrive-token", None).unwrap_err(), "reserved provider id");
+        // …while the Rust-only path binds it to Google's token host.
+        assert_eq!(internal_account("gdrive-token").as_deref(), Some("gdrive-token@oauth2.googleapis.com"));
+        assert_eq!(internal_account("google"), None);
+        assert!(account(&st, "google").unwrap().starts_with("google@"));
     }
 
     #[test]

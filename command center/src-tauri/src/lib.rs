@@ -4,7 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{buildhub, handoff_cues, lifecycle};
-use commands::{arbiter, finance_vault, media, memtier};
+use commands::{arbiter, finance_vault, gdrive, media, memtier};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
@@ -103,6 +103,7 @@ pub fn run() {
         .manage(lifecycle::LifecycleState::default())
         .manage(buildhub::HubState::default())
         .manage(media::MediaState::default())
+        .manage(gdrive::GdriveState::default())
         .setup(|app| {
             use tauri::Manager;
             // System Map: app uptime counts from here.
@@ -333,6 +334,17 @@ pub fn run() {
             media::media_render_cancel,
             media::media_readiness,
             media::media_reveal,
+            gdrive::cloud_status,
+            gdrive::cloud_connect,
+            gdrive::cloud_disconnect,
+            gdrive::cloud_list,
+            gdrive::cloud_set_folders,
+            gdrive::cloud_pull,
+            gdrive::cloud_push,
+            gdrive::cloud_share,
+            gdrive::cloud_cancel,
+            gdrive::cloud_transfers,
+            gdrive::cloud_history,
             agents::tony_tools_preview,
             mcp::mcp_call,
             mcp::mcp_sync_anythingllm,

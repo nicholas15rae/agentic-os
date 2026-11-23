@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { FileAudio, FolderOpen, Image as ImageIcon, Lock, Plus, Upload, Video } from "lucide-react";
+import { Cloud, FileAudio, FolderOpen, Image as ImageIcon, Lock, Plus, Upload, Video } from "lucide-react";
 import { Card, Empty, Select } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
+import { DrivePickerModal } from "@/features/cloud/DrivePickerModal";
 import { api, fileSrc } from "./api";
 import type { AssetRole, MediaAsset } from "./contract";
 import { addAssets, editManifest, select, useDirector } from "./director-store";
@@ -31,6 +32,8 @@ export function StagingBin() {
   const selection = useDirector((s) => s.selection);
   const [role, setRole] = useState<AssetRole>("clip");
   const [over, setOver] = useState(false);
+  const [drive, setDrive] = useState(false);
+  const projectTitle = useDirector((s) => s.project?.title ?? s.slug ?? "");
 
   const pick = async () => {
     if (!slug) return;
@@ -60,6 +63,10 @@ export function StagingBin() {
           <button onClick={() => void pick()} className="pill-glass !h-8 !px-2.5 text-xs" title="Copy files into this project's raw/ folder (originals untouched)">
             <FolderOpen size={13} /> Add
           </button>
+          <button onClick={() => setDrive(true)} disabled={!slug} className="pill-glass !h-8 !px-2.5 text-xs disabled:opacity-50" title="From Google Drive… import footage from a Drive folder into this project" aria-label="From Google Drive…">
+            <Cloud size={13} /> Drive…
+          </button>
+          {drive && slug && <DrivePickerModal slug={slug} projectTitle={projectTitle} role={role} onRole={setRole} onClose={() => setDrive(false)} />}
         </>
       }
     >

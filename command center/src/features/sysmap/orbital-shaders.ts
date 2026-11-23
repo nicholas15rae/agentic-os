@@ -70,63 +70,150 @@ void main(){
 `;
 
 /**
- * Planet surface: fbm bands in the palette, lit from the central star (Tony sits at the origin),
- * a soft terminator, a dim night side, and the Fresnel rim folded in. uActive brightens and
- * gently pulses the surface; uDim greys a dormant / offline node; uAlert tints an error red.
+ * Planet surface, physically flavoured: `uKind` 0 = gas giant (turbulent latitude bands, a great
+ * storm, limb darkening), 1 = terrestrial (domain-warped continents, oceans with a sun glint,
+ * relief from the height field, polar caps, drifting cloud deck, city lights on the night side
+ * in the agent colour), 2 = ice world (cracked glaze, sub-surface tint). One star lights
+ * everything from the origin: a hard terminator with a thin scattering band, a near-black night
+ * side. uActive brightens and pulses; uDim greys a dormant / offline node; uAlert tints red.
  */
 export const PLANET_FRAG = /* glsl */ `
 uniform vec3 uC0; uniform vec3 uC1; uniform vec3 uC2; uniform vec3 uAtmo;
 uniform float uSeed; uniform float uTime; uniform float uActive; uniform float uDim; uniform float uAlert; uniform float uBands;
+uniform float uKind;
 varying vec3 vN; varying vec3 vW; varying vec3 vObj;
 ${NOISE}
+float fbm6(vec3 p){
+  float f=0.0;float a=0.5;
+  for(int i=0;i<6;i++){f+=a*snoise(p);p*=2.02;a*=0.5;}
+  return f;
+}
 void main(){
   vec3 p=normalize(vObj);
-  float warp=fbm(p*2.2+uSeed);
-  float band=sin((p.y+warp*0.35)*uBands+uSeed*3.0)*0.5+0.5;
-  float detail=fbm(p*6.0+vec3(uSeed*1.7,0.0,uTime*0.01));
-  vec3 col=mix(uC0,uC1,smoothstep(0.15,0.85,band));
-  col=mix(col,uC2,smoothstep(0.35,0.9,detail*0.5+0.5)*0.55);
+  vec3 N=normalize(vN);
   vec3 L=normalize(-vW);
   vec3 V=normalize(cameraPosition-vW);
-  float diff=dot(vN,L);
-  float lit=smoothstep(-0.25,0.6,diff);
-  vec3 c=col*(0.07+1.05*lit);
-  float fres=pow(1.0-max(dot(vN,V),0.0),2.5);
-  c+=uAtmo*fres*(0.25+0.55*lit);
-  c*=1.0+uActive*(0.35+0.15*sin(uTime*2.4));
+  vec3 H=normalize(L+V);
+  float ndl=dot(N,L);
+  vec3 col;
+  float spec=0.0;
+  float clouds=0.0;
+  float night=0.0;
+  if(uKind<0.5){
+    // Gas giant: latitude bands sheared by turbulence, fine streaks, one great storm.
+    float turb=fbm(p*vec3(2.0,6.0,2.0)+uSeed+vec3(uTime*0.004,0.0,0.0));
+    float lat=p.y+turb*0.09;
+    float b=sin(lat*uBands*1.6+uSeed*3.0)*0.5+0.5;
+    float b2=sin(lat*uBands*4.3+uSeed)*0.5+0.5;
+    vec3 zone=mix(uC1,uC2,0.45);
+    vec3 belt=mix(uC0,uC1,0.55);
+    col=mix(belt,zone,smoothstep(0.25,0.75,b));
+    col=mix(col,uC2,smoothstep(0.7,1.0,b2)*0.25);
+    col=mix(col,uC0,smoothstep(0.92,1.0,b2)*0.3);
+    float streak=fbm(vec3(p.x*3.0,lat*40.0,p.z*3.0)+uSeed);
+    col*=0.94+streak*0.1;
+    vec3 sc=normalize(vec3(cos(uSeed*2.0),-0.28,sin(uSeed*2.0)));
+    float sd=length((p-sc)*vec3(1.0,2.1,1.0));
+    float storm=smoothstep(0.32,0.0,sd);
+    float swirl=fbm(p*14.0+vec3(sd*9.0));
+    col=mix(col,mix(uC2,uC1,0.35)*(0.95+swirl*0.25),storm*0.85);
+    col*=0.72+0.28*pow(max(dot(N,V),0.0),0.6);
+  } else if(uKind<1.5){
+    // Terrestrial: warped continents, coasts, mountains, ice caps, cloud deck.
+    vec3 q=p*1.6+uSeed;
+    vec3 w=vec3(fbm(q),fbm(q+5.2),fbm(q+9.7));
+    float h=fbm6(p*1.7+w*0.8+uSeed);
+    float sea=0.02;
+    float land=smoothstep(sea,sea+0.03,h);
+    float elev=clamp((h-sea)*2.4,0.0,1.0);
+    vec3 deep=uC0*0.35;
+    vec3 shallow=mix(uC0,uAtmo,0.35)*0.75;
+    vec3 ocean=mix(deep,shallow,smoothstep(-0.25,sea,h));
+    vec3 lowland=mix(uC1*0.85,uC1,fbm(p*9.0+uSeed)*0.5+0.5);
+    vec3 high=mix(uC1*0.55,uC2*0.9,smoothstep(0.35,0.8,elev));
+    vec3 ground=mix(lowland,high,smoothstep(0.15,0.7,elev));
+    float cap=smoothstep(0.72,0.86,abs(p.y)+fbm(p*5.0)*0.08);
+    col=mix(ocean,ground,land);
+    col=mix(col,vec3(0.92,0.95,1.0),cap);
+    // Relief read from the height field as soft shading (valleys darker, ridges catch light).
+    col*=mix(1.0,0.78+0.32*elev,land*(1.0-cap));
+    spec=pow(max(dot(normalize(vN),H),0.0),90.0)*(1.0-land)*(1.0-cap)*1.6;
+    clouds=smoothstep(0.08,0.55,fbm6(p*3.1+vec3(uTime*0.012,0.0,uTime*0.007)+uSeed*1.3));
+    night=smoothstep(0.55,0.85,fbm(p*42.0+uSeed))*land*(1.0-cap)*smoothstep(0.25,0.6,fbm(p*6.0+uSeed+3.0)*0.5+0.5);
+  } else {
+    // Ice world: pale glaze, blue crevasse network, sub-surface tint.
+    float n=fbm6(p*3.0+uSeed);
+    float cr=1.0-smoothstep(0.0,0.05,abs(fbm(p*7.0+uSeed*2.0)));
+    col=mix(uC2,mix(uC1,vec3(0.85,0.92,1.0),0.5),smoothstep(-0.4,0.6,n));
+    col=mix(col,uC0*0.7,cr*0.6);
+    spec=pow(max(dot(normalize(vN),H),0.0),40.0)*0.5;
+  }
+  // One sun: hard terminator, a sliver of wrap, almost black night.
+  float lit=smoothstep(-0.04,0.22,ndl);
+  float cl=clamp(ndl,0.0,1.0);
+  vec3 c=col*(0.015+1.15*(0.35*lit+0.65*cl));
+  c=mix(c*(1.0-clouds*0.25),vec3(1.0)*(0.02+1.1*cl),clouds*0.85);
+  c+=vec3(1.0,0.95,0.85)*spec*lit;
+  float term=smoothstep(-0.1,0.05,ndl)*(1.0-smoothstep(0.05,0.3,ndl));
+  c+=mix(vec3(1.0,0.45,0.2),uAtmo,0.5)*term*0.18;
+  c+=uAtmo*night*(1.0-lit)*(0.9+uActive*0.8)*(1.0-clouds*0.7);
+  float fres=pow(1.0-max(dot(normalize(vN),V),0.0),4.0);
+  c+=uAtmo*fres*(0.08+0.7*smoothstep(-0.2,0.5,dot(normalize(vN),L)));
+  c*=1.0+uActive*(0.22+0.1*sin(uTime*2.4));
   c=mix(c,vec3(dot(c,vec3(0.3,0.59,0.11)))*0.55,uDim);
-  c=mix(c,vec3(1.0,0.25,0.25)*(0.4+lit),uAlert*0.6);
+  c=mix(c,vec3(1.0,0.25,0.25)*(0.3+lit),uAlert*0.6);
   gl_FragColor=vec4(c,1.0);
 }
 `;
 
-/** Atmosphere shell (additive, back faces culled out by alpha): a Fresnel halo on the lit limb. */
+/**
+ * Atmosphere shell (additive): a thin Rayleigh-like halo, strongest on the sunlit limb and
+ * reddening towards the terminator, gone on the night side.
+ */
 export const ATMO_FRAG = /* glsl */ `
 uniform vec3 uAtmo; uniform float uStrength;
 varying vec3 vN; varying vec3 vW; varying vec3 vObj;
 void main(){
   vec3 V=normalize(cameraPosition-vW);
-  float f=pow(1.0-abs(dot(vN,V)),3.2);
-  float lit=0.35+0.65*smoothstep(-0.4,0.5,dot(vN,normalize(-vW)));
-  gl_FragColor=vec4(uAtmo*f*lit*uStrength,f*uStrength);
+  vec3 N=normalize(vN);
+  vec3 L=normalize(-vW);
+  float f=pow(1.0-abs(dot(N,V)),4.5);
+  float sun=dot(N,L);
+  float lit=smoothstep(-0.35,0.45,sun);
+  vec3 tint=mix(vec3(1.0,0.5,0.25),uAtmo,smoothstep(-0.1,0.4,sun));
+  float a=f*lit*uStrength;
+  gl_FragColor=vec4(tint*a*1.2,a);
 }
 `;
 
-/** Tony's star: boiling granulation, limb-brightened, hotter while Tony holds the GPU token. */
+/**
+ * Tony's star: convective granulation, sunspots with penumbra, faculae near the limb, and real
+ * limb darkening (the disc dims and reddens towards its edge); hotter while Tony holds the token.
+ */
 export const STAR_FRAG = /* glsl */ `
 uniform vec3 uC0; uniform vec3 uC1; uniform vec3 uC2; uniform float uTime; uniform float uActive; uniform float uDim;
 varying vec3 vN; varying vec3 vW; varying vec3 vObj;
 ${NOISE}
 void main(){
   vec3 p=normalize(vObj);
-  float n=fbm(p*3.0+vec3(0.0,uTime*0.05,uTime*0.03));
-  float g=fbm(p*9.0-vec3(uTime*0.08));
-  vec3 c=mix(uC0,uC1,smoothstep(-0.4,0.5,n));
-  c=mix(c,uC2,smoothstep(0.2,0.8,g*0.5+0.5)*0.6);
   vec3 V=normalize(cameraPosition-vW);
-  float limb=pow(1.0-max(dot(vN,V),0.0),1.6);
-  c+=uC2*limb*0.6;
-  c*=1.25+uActive*0.5;
+  float mu=max(dot(normalize(vN),V),0.0);
+  float g1=snoise(p*28.0+vec3(uTime*0.12));
+  float g2=snoise(p*55.0-vec3(uTime*0.18));
+  float gran=smoothstep(-0.6,0.8,g1*0.7+g2*0.3);
+  float big=fbm(p*3.5+vec3(0.0,uTime*0.03,uTime*0.02));
+  vec3 c=mix(uC1,uC2,gran*0.75+big*0.25);
+  float spots=fbm(p*5.0+vec3(7.3,uTime*0.01,1.1));
+  float umbra=smoothstep(0.52,0.62,spots);
+  float pen=smoothstep(0.4,0.52,spots);
+  c=mix(c,uC0*0.55,pen*0.55);
+  c=mix(c,uC0*0.18,umbra);
+  float fac=smoothstep(0.35,0.6,fbm(p*9.0+3.0))*(1.0-mu)*0.6;
+  c+=uC2*fac;
+  float ld=0.4+0.6*mu;
+  c*=ld;
+  c=mix(c*vec3(1.0,0.78,0.55),c,mu);
+  c*=1.55+uActive*0.45;
   c=mix(c,c*0.45,uDim);
   gl_FragColor=vec4(c,1.0);
 }

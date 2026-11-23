@@ -231,6 +231,8 @@ function bodyUniforms(o: Orbit, seed: number) {
     uDim: { value: 0 },
     uAlert: { value: 0 },
     uBands: { value: 6 + (seed % 5) * 2 },
+    // Surface type: the big worlds are gas giants, the cold blue / grey ones ice, the rest rock.
+    uKind: { value: o.size >= 0.9 ? 0 : /^#(0b1f3a|1d2130|062a2e)$/i.test(o.palette[0]) ? 2 : 1 },
   };
 }
 
@@ -297,7 +299,7 @@ function Body({ id, live, time, positions, flashes, selected, onPick, glow }: Bo
       m.position.set(Math.cos(a) * r, Math.sin(a * 0.7 + i) * o.size * 0.25, Math.sin(a) * r);
       const base = moonSize(counts[i], o.kind === "star" ? 0.32 : Math.max(0.12, o.size * 0.22));
       m.scale.setScalar(base * (i === 0 ? 1 + glowNow * 0.8 : 1));
-      const mat = m.material as THREE.MeshBasicMaterial;
+      const mat = m.material as THREE.MeshStandardMaterial;
       mat.opacity = counts[i] > 0 ? 0.95 : 0.3;
     });
   });
@@ -318,7 +320,7 @@ function Body({ id, live, time, positions, flashes, selected, onPick, glow }: Bo
           </mesh>
         ) : (
           <mesh onClick={pick} onDoubleClick={pick} material={surfaceMat} scale={o.size}>
-            <sphereGeometry args={[1, o.kind === "star" ? 64 : 56, o.kind === "star" ? 48 : 40]} />
+            <sphereGeometry args={[1, 96, 64]} />
           </mesh>
         )}
       </group>
@@ -356,8 +358,8 @@ function Body({ id, live, time, positions, flashes, selected, onPick, glow }: Bo
       )}
       {MOONS.map((m, i) => (
         <mesh key={m.key} ref={(el) => void (moonRefs.current[i] = el)} onClick={pick}>
-          <sphereGeometry args={[1, 16, 12]} />
-          <meshBasicMaterial color={m.color} transparent opacity={0.9} />
+          <sphereGeometry args={[1, 32, 24]} />
+          <meshStandardMaterial color={m.color} emissive={m.color} emissiveIntensity={0.28} roughness={0.85} metalness={0.05} transparent opacity={0.9} />
         </mesh>
       ))}
     </group>

@@ -608,6 +608,45 @@ export function buildE46(glowTex: THREE.Texture, scale = 0.65): ShipModel {
   return model;
 }
 
+/**
+ * The E46 from a generated mesh (Hunyuan3D-2 from the GABAGOUL render, see
+ * `assets-src/orbital/README-3d.md`): 2 units long with its nose at -Z, four thrusters low on the
+ * tailgate. Turned to face +Z, sized to the same 4.5 m as the hand-built model, given clear-coated
+ * paint, and fitted with thruster cores and glows at its real nozzles.
+ */
+export function buildE46FromMesh(glowTex: THREE.Texture, src: THREE.Object3D, scale = 0.65): ShipModel {
+  const model: ShipModel = { root: new THREE.Group(), nozzles: [], glows: [] };
+  const k = 2.3; // 2.0 generated units → 4.6 m
+  const lift = 0.85; // match the hand-built model's ride height
+  const body = src.clone(true);
+  body.rotation.y = Math.PI;
+  body.scale.setScalar(k);
+  body.position.y = lift;
+  body.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const old = m.material as THREE.MeshStandardMaterial;
+    // The render's nebula leaves a violet cast in the bake: warm it back towards silver.
+    m.material = new THREE.MeshPhysicalMaterial({ map: old.map ?? null, color: new THREE.Color(1.12, 1.08, 1.0), metalness: 0.12, roughness: 0.5, clearcoat: 0.55, clearcoatRoughness: 0.14, envMapIntensity: 1.0 });
+    old.dispose();
+  });
+  model.root.add(body);
+  const cyan = new THREE.MeshStandardMaterial({ color: "#0d3c48", emissive: "#4fe6ff", emissiveIntensity: 2.4, toneMapped: false });
+  const core = new THREE.CircleGeometry(0.17, 28);
+  for (const x of [-0.23, -0.1, 0.1, 0.23]) {
+    // Generated-space nozzle (x, -0.16, +0.99) after the half-turn → (-x, -0.16, -0.99).
+    const at = new THREE.Vector3(-x * k, -0.16 * k + lift, -0.99 * k);
+    const disc = new THREE.Mesh(core, cyan);
+    disc.position.copy(at).add(new THREE.Vector3(0, 0, -0.02));
+    disc.rotation.y = Math.PI;
+    model.root.add(disc);
+    addGlow(model, at.clone().add(new THREE.Vector3(0, 0, -0.2)), "#55d8ff", 1.25, glowTex);
+  }
+  model.root.scale.setScalar(scale);
+  for (const n of model.nozzles) n.multiplyScalar(scale);
+  return model;
+}
+
 // ── Interceptor ──────────────────────────────────────────────────────────────
 
 export function buildFighter(glowTex: THREE.Texture, scale = 0.55): ShipModel {
@@ -702,6 +741,13 @@ export function buildCapital(glowTex: THREE.Texture, scale = 1.6): ShipModel {
     prof.push(new THREE.Vector2(Math.cos(a) * R * 0.98, L / 2 - 8 + Math.sin(a) * 8));
   }
   const hull = new THREE.LatheGeometry(prof, 64);
+  // Lathe UVs advance per profile point, which crams the long midsection into a sliver of
+  // texture: re-derive v from the position along the axis so the marbling isn't smeared.
+  {
+    const pos = hull.attributes.position as THREE.BufferAttribute;
+    const uv = hull.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < uv.count; i++) uv.setY(i, (pos.getY(i) + L / 2) / L);
+  }
   hull.rotateX(Math.PI / 2); // lathe axis y → z (bow +Z)
   const hullMesh = mesh(hull, meat);
   hullMesh.scale.set(1, 0.86, 1);

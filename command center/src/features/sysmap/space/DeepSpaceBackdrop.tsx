@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { DROP_IN_BACKDROPS } from "./space-assets";
 import { analyzeImage, NEBULA_GRADES, type Grade } from "./grade";
 import { createParallax, type CameraView } from "./parallax";
-import { BACKDROP_CONFIG, SpaceEngine } from "./space-engine";
 import { useSpace, type SpaceMode } from "./space-store";
 
 export type { CameraView } from "./parallax";
@@ -13,6 +12,18 @@ interface Size {
 }
 
 const STAR_FPS = 30;
+
+/** Wallpaper motion and rotation. Times in seconds. */
+export const BACKDROP_CONFIG = {
+  /** Wallpaper sway speed, degrees per minute, and its ± range in degrees. */
+  nebulaRotationSpeed: 0.8,
+  nebulaRotationRange: 2.5,
+  /** Wallpaper drift amplitude, px. */
+  nebulaDriftPx: 26,
+  /** Seconds each wallpaper holds before crossfading, and the crossfade length. */
+  wallpaperCycleInterval: 240,
+  wallpaperCrossfade: 5,
+};
 
 function seeded(seed: number) {
   let s = seed;
@@ -275,43 +286,13 @@ function Wallpapers({ mode, active, reduced, size, onGrade }: { mode: Exclude<Sp
   );
 }
 
-// ── Layers 1–3 · Space engine canvas ─────────────────────────────────────────
-
-function EngineLayer({ size, mode, active, reduced, view, engineRef, gradeRef }: { size: Size; mode: Exclude<SpaceMode, "minimal">; active: boolean; reduced: boolean; view: MutableRefObject<CameraView>; engineRef: MutableRefObject<SpaceEngine | null>; gradeRef: MutableRefObject<Grade | null> }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  const auto = useSpace((s) => s.flybys);
-  const flybyReq = useSpace((s) => s.flybyReq);
-  const seenReq = useRef(flybyReq);
-
-  useEffect(() => {
-    const cv = ref.current;
-    if (!cv) return;
-    const e = new SpaceEngine(cv, createParallax(view, () => ref.current));
-    engineRef.current = e;
-    if (gradeRef.current) e.setGrade(gradeRef.current);
-    return () => {
-      e.dispose();
-      engineRef.current = null;
-    };
-  }, [view, engineRef, gradeRef]);
-  useEffect(() => engineRef.current?.setSize(size.w, size.h), [size.w, size.h, engineRef]);
-  useEffect(() => engineRef.current?.setOptions({ reduced, auto, intensity: mode === "cinema" ? 1 : 0.75 }), [reduced, auto, mode, engineRef]);
-  useEffect(() => engineRef.current?.setActive(active && size.w > 0), [active, size.w, engineRef]);
-  useEffect(() => {
-    if (flybyReq === seenReq.current) return;
-    seenReq.current = flybyReq;
-    engineRef.current?.trigger(useSpace.getState().flybyKind);
-  }, [flybyReq, engineRef]);
-
-  return <canvas ref={ref} className="absolute inset-0 h-full w-full" />;
-}
-
 // ── Stack ────────────────────────────────────────────────────────────────────
 
 /**
  * The Orbital Ecosystem's deep-space backdrop, back to front, all `pointer-events: none` beneath
- * the WebGL star map: nebula plates → unified grade → parallax starfield → space engine canvas
- * (Death Star, debris, E46 flight events, additive FX).
+ * the WebGL star map: nebula plates → unified grade → parallax starfield. The fleet, asteroids,
+ * capital ship and station live in the star map's own 3D scene (`fleet/Fleet3D.tsx`); the nebula
+ * grade sampled here lights them through the space store.
  *
  * Mounted only while Page 3 shows; every loop and timer stops while `active` is false (window
  * hidden / minimised). `wallpapers={false}` when the user's own imported backdrop (Wallpaper
@@ -319,9 +300,6 @@ function EngineLayer({ size, mode, active, reduced, view, engineRef, gradeRef }:
  */
 export function DeepSpaceBackdrop({ mode, active, reduced, view, wallpapers }: { mode: Exclude<SpaceMode, "minimal">; active: boolean; reduced: boolean; view: MutableRefObject<CameraView>; wallpapers: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
-  const engine = useRef<SpaceEngine | null>(null);
-  // The latest nebula grade, kept for an engine that mounts after the first plate.
-  const grade = useRef<Grade | null>(null);
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
   useEffect(() => {
     const el = ref.current;
@@ -336,13 +314,9 @@ export function DeepSpaceBackdrop({ mode, active, reduced, view, wallpapers }: {
   }, []);
   return (
     <div ref={ref} aria-hidden className="pointer-events-none absolute inset-0 z-0 select-none overflow-hidden" data-space-backdrop={mode}>
-      {wallpapers && <Wallpapers mode={mode} active={active} reduced={reduced} size={size} onGrade={(g) => {
-            grade.current = g;
-            engine.current?.setGrade(g);
-          }}
+      {wallpapers && <Wallpapers mode={mode} active={active} reduced={reduced} size={size} onGrade={(g) => useSpace.getState().setGrade(g)}
         />}
       <Starfield size={size} mode={mode} active={active} reduced={reduced} view={view} />
-      <EngineLayer size={size} mode={mode} active={active} reduced={reduced} view={view} engineRef={engine} gradeRef={grade} />
     </div>
   );
 }

@@ -1,12 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { TriggerKind } from "./space-engine";
+import type { TriggerKind } from "./fleet/sim";
+import type { Grade } from "./grade";
 
 /**
  * Orbital Ecosystem deep-space backdrop preferences.
  *  - `minimal`: the original procedural scene (opaque WebGL clear + GL nebula, zero extra layers).
- *  - `deep`:    rotating nebulae + parallax starfield + the space engine at 75 % strength.
- *  - `cinema`:  brighter nebulae, denser stars, the engine at full strength.
+ *  - `deep`:    rotating nebulae + parallax starfield + the 3D fleet in the star map.
+ *  - `cinema`:  brighter nebulae and denser stars.
  * `mode` and `flybys` (ambient flight events on/off) persist to localStorage (`cc.orbital-space`);
  * the request counters are one-shot signals for the engine and never persist.
  */
@@ -23,6 +24,9 @@ interface SpaceStore {
   /** Bumped by the preview buttons; `flybyKind` says which event. */
   flybyReq: number;
   flybyKind: TriggerKind;
+  /** The showing nebula's colour grade (lights the 3D fleet). Not persisted. */
+  grade: Grade | null;
+  setGrade: (g: Grade) => void;
   /** Bumped by "Next Backdrop" (drop-in wallpapers / procedural nebula). */
   nextReq: number;
   setMode: (m: SpaceMode) => void;
@@ -41,6 +45,8 @@ export const useSpace = create<SpaceStore>()(
       flybyReq: 0,
       flybyKind: "random",
       nextReq: 0,
+      grade: null,
+      setGrade: (grade) => set({ grade }),
       setMode: (mode) => set({ mode }),
       setFlybys: (flybys) => set({ flybys }),
       triggerFlyby: (kind = "random") => set((s) => ({ flybyReq: s.flybyReq + 1, flybyKind: kind })),

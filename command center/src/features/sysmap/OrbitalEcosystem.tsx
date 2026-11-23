@@ -16,6 +16,7 @@ import { BackdropHudToggle } from "@/features/wallpaper/BackdropHudToggle";
 import { DeepSpaceBackdrop, type CameraView } from "./space/DeepSpaceBackdrop";
 import { SpaceControls } from "./space/SpaceControls";
 import { useSpace } from "./space/space-store";
+import { Fleet3D } from "./space/fleet/Fleet3D";
 import { agentFor, BUSES, hookupsFor, isRoster, modelName, moonSize, NODE_BUS, NODE_LABEL, orbitPos, ORBITS, ROSTER, surfaceState, SURFACE_TONE, type Orbit, type RosterId } from "./model";
 import { ARC_FRAG, ARC_VERT, ATMO_FRAG, BODY_VERT, NEBULA_FRAG, NEBULA_VERT, PLANET_FRAG, RING_FRAG, RING_VERT, STAR_FRAG, STARS_FRAG, STARS_VERT } from "./orbital-shaders";
 
@@ -587,6 +588,8 @@ function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positio
       {!backdrop && <Nebula />}
       {/* Deep Space / Full Cinema: the DOM parallax starfield replaces the GL one (no doubled stars). */}
       {stars3d && <Starfield time={time} />}
+      {/* Deep Space / Full Cinema: the fleet flies inside the map itself (real perspective, orbitable). */}
+      {!stars3d && <Fleet3D positions={positions} reduced={reduced} />}
       <GalacticDust time={time} />
       {ROSTER.filter((r) => ORBITS[r].radius > 0).map((r, i, all) => {
         const o = ORBITS[r];

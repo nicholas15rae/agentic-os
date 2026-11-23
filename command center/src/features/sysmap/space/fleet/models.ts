@@ -647,6 +647,34 @@ export function buildE46FromMesh(glowTex: THREE.Texture, src: THREE.Object3D, sc
   return model;
 }
 
+/**
+ * The interceptor from a generated mesh (Hunyuan3D-2 from the dogfight render): ±1 unit of wing
+ * span along X with the cockpit and chin guns towards +Z, the same frame as `buildFighter`.
+ */
+export function buildFighterFromMesh(glowTex: THREE.Texture, src: THREE.Object3D, scale = 0.55): ShipModel {
+  const model: ShipModel = { root: new THREE.Group(), nozzles: [], glows: [] };
+  const k = 1.6;
+  const body = src.clone(true);
+  body.scale.setScalar(k);
+  body.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const old = m.material as THREE.MeshStandardMaterial;
+    m.material = new THREE.MeshStandardMaterial({ map: old.map ?? null, color: new THREE.Color(1.05, 1.0, 0.98), metalness: 0.3, roughness: 0.5, envMapIntensity: 1.0 });
+    old.dispose();
+  });
+  model.root.add(body);
+  const red = new THREE.MeshStandardMaterial({ color: "#3a0805", emissive: "#ff3018", emissiveIntensity: 2.2, toneMapped: false });
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(0.2, 24), red);
+  disc.position.set(0, 0, -0.5 * k);
+  disc.rotation.y = Math.PI;
+  model.root.add(disc);
+  addGlow(model, new THREE.Vector3(0, 0, -0.5 * k - 0.15), "#ff4a2a", 1.0, glowTex);
+  model.root.scale.setScalar(scale);
+  for (const n of model.nozzles) n.multiplyScalar(scale);
+  return model;
+}
+
 // ── Interceptor ──────────────────────────────────────────────────────────────
 
 export function buildFighter(glowTex: THREE.Texture, scale = 0.55): ShipModel {

@@ -18,7 +18,8 @@ import { SpaceControls } from "./space/SpaceControls";
 import { useSpace } from "./space/space-store";
 import { Fleet3D } from "./space/fleet/Fleet3D";
 import { chaseOffset, FOLLOW, isShipKey } from "./space/fleet/follow";
-import { agentFor, BUSES, hookupsFor, isRoster, modelName, moonSize, NODE_BUS, NODE_LABEL, orbitPos, ORBITS, ROSTER, surfaceState, SURFACE_TONE, type Orbit, type RosterId } from "./model";
+import { useTradingAgent } from "@/features/trading/useTradingAgent";
+import { agentFor, BUSES, hookupsFor, isIsolated, isRoster, modelName, moonSize, NODE_BUS, NODE_LABEL, orbitPos, ORBITS, ROSTER, surfaceState, SURFACE_TONE, type Orbit, type RosterId } from "./model";
 import { ARC_FRAG, ARC_VERT, ATMO_FRAG, BODY_VERT, NEBULA_FRAG, NEBULA_VERT, PLANET_FRAG, RING_FRAG, RING_VERT, STAR_FRAG, STARS_FRAG, STARS_VERT } from "./orbital-shaders";
 
 /** Frame cap while visible (the RTX 3060 runs local inference: never more than this). */
@@ -391,12 +392,15 @@ function CalloutSync({ positions, els }: { positions: Positions; els: MutableRef
 }
 
 function Callouts({ live, hud, els, onPick }: { live: Live; hud: "minimal" | "full"; els: MutableRefObject<Map<string, HTMLDivElement>>; onPick: (id: RosterId) => void }) {
+  // The Trading Agent's state comes from the agent itself (the engine only sees its hand-offs).
+  const { view: trading } = useTradingAgent();
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
       {ROSTER.map((id) => {
         const o = ORBITS[id];
         const node = live.nodes.get(id);
-        const s = surfaceState(node);
+        const s =
+          id === "trading" && trading ? (trading.runs[0]?.status === "running" ? "ACTIVE" : trading.enabled ? "IDLE" : "DORMANT") : surfaceState(node);
         const sealed = id === "finance" && !live.vaultOpen;
         const ns = NS_OF[id];
         const mem = ns ? live.mems.get(ns) : undefined;
@@ -413,11 +417,12 @@ function Callouts({ live, hud, els, onPick }: { live: Live; hud: "minimal" | "fu
               <button type="button" className="tag" onClick={() => onPick(id)} style={{ background: "transparent", border: 0, borderLeft: "1px solid rgba(251,146,60,0.9)", textAlign: "left", color: "inherit" }}>
                 <div style={{ fontSize: o.kind === "star" ? 12 : 10.5, letterSpacing: "0.14em", color: "#fde6d0", textTransform: "uppercase" }}>{NODE_LABEL[id]}</div>
                 <div style={{ fontSize: 9.5, letterSpacing: "0.12em", color: SURFACE_TONE[sealed ? "SEALED" : s] }}>{sealed ? "SEALED" : s}</div>
+                {isIsolated(id) && <div style={{ fontSize: 9, letterSpacing: "0.12em", color: BUSES[NODE_BUS[id]].color }}>⛨ ISOLATED · FINANCER-ONLY</div>}
                 {hud === "full" && (
                   <>
                     <div style={{ fontSize: 9.5, color: "#94a3b8" }}>{ragText}</div>
                     <div style={{ fontSize: 9.5, color: "#64748b" }}>
-                      {(node?.compute ?? "—").toUpperCase()} · {live.models[id] ?? (node?.compute === "cpu" ? "deterministic" : "—")} · {live.tools[id] ?? 0} MCP
+                      {id === "trading" ? "LOCAL LLM · paper only" : `${(node?.compute ?? "—").toUpperCase()} · ${live.models[id] ?? (node?.compute === "cpu" ? "deterministic" : "—")}`} · {live.tools[id] ?? 0} MCP
                     </div>
                   </>
                 )}

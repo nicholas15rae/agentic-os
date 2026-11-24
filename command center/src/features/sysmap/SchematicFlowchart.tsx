@@ -3,6 +3,8 @@ import { Maximize, Minus, Plus } from "lucide-react";
 import { usePoll } from "@/lib/use-poll";
 import { isTauri } from "@/lib/platform";
 import { useArbiter } from "@/features/arbiter/arbiter-store";
+import { shortModel, useTradingAgent } from "@/features/trading/useTradingAgent";
+import type { AgentView } from "@/features/trading/AgentPanel.contract";
 import { useMemmapData } from "@/features/memmap/use-memmap-data";
 import type { ArbiterNode, MemoryRow } from "@/features/arbiter/api";
 import { useSysMap, type InspectFocus } from "./sysmap-store";
@@ -15,6 +17,7 @@ import {
   clampView,
   FLOW_H,
   FLOW_NODES,
+  isIsolated,
   FLOW_W,
   hookupsFor,
   linkPath,
@@ -76,7 +79,9 @@ function AgentCard({
   vaultOpen,
   ragLit,
   open,
+  trading,
 }: {
+  trading?: AgentView | null;
   id: Exclude<RosterId, "tony">;
   node: ArbiterNode | undefined;
   mem: MemoryRow | undefined;
@@ -89,12 +94,14 @@ function AgentCard({
 }) {
   const p = FLOW_NODES[id];
   const bus = BUSES[NODE_BUS[id]];
-  const s = surfaceState(node);
+  // The trading node's state comes from the agent itself (the arbiter only sees its hand-offs):
+  // running → ACTIVE, switched on → IDLE (armed), off → DORMANT.
+  const s = id === "trading" && trading ? (trading.runs[0]?.status === "running" ? "ACTIVE" : trading.enabled ? "IDLE" : "DORMANT") : surfaceState(node);
   const tone = SURFACE_TONE[s];
   const x = p.x - CARD_W / 2;
   const y = p.y - CARD_H / 2;
   const hot = s === "ACTIVE";
-  const rag = id === "finance" ? (vaultOpen ? "vault · open" : "vault · sealed") : mem ? `${mem.active} live` : id === "garbage" || id === "ops" ? "stateless" : "—";
+  const rag = id === "finance" ? (vaultOpen ? "vault · open" : "vault · sealed") : id === "trading" ? "trading_rag" : mem ? `${mem.active} live` : id === "garbage" || id === "ops" ? "stateless" : "—";
   const memory = id === "finance" ? "encrypted" : mem ? `${mem.activeKb}KB · ${mem.archived} disk` : "—";
   const sub = (CARD_W - 32) / 3;
   return (
@@ -112,12 +119,22 @@ function AgentCard({
         </text>
       </g>
       <text x={x + 14} y={y + 42} className="sysmap-mono" fontSize={9.5} fill="#64748b">
-        {(node?.compute ?? "—").toUpperCase()} · {model ?? (node?.compute === "cpu" ? "deterministic" : "model —")}
+        {id === "trading" ? "LOCAL LLM" : (node?.compute ?? "—").toUpperCase()} · {model ?? (node?.compute === "cpu" ? "deterministic" : "model —")}
       </text>
       <text x={x + 14} y={y + 58} className="sysmap-mono" fontSize={9} fill="#475569">
         runs {node?.runs ?? 0} · {skills} skill{skills === 1 ? "" : "s"}
         {node?.error ? ` · ${node.error.slice(0, 24)}` : ""}
       </text>
+      {id === "trading" && (
+        // The Security Detail is the trading module's own deterministic gate (not the mesh Security agent).
+        <g aria-label="Security Detail gate: every proposal passes it before the IBKR paper bridge (localhost only)">
+          <rect x={x + 8} y={y + 66} width={CARD_W - 16} height={18} rx={4} fill={`rgba(${bus.rgb},0.08)`} stroke={`rgba(${bus.rgb},0.45)`} strokeDasharray="2 2" />
+          {/* textLength pins the line to the strip: it can never spill past the card. */}
+          <text x={x + 16} y={y + 79} className="sysmap-mono" fontSize={8.5} fill={bus.color} textLength={CARD_W - 32} lengthAdjust="spacingAndGlyphs">
+            ⛨ SECURITY DETAIL → IBKR PAPER · 127.0.0.1:7497 only
+          </text>
+        </g>
+      )}
       <SubBox x={x + 8} y={y + CARD_H - 46} w={sub} label="RAG" value={rag} color={BUSES.memory.color} lit={ragLit} onClick={() => open("rag")} />
       <SubBox x={x + 16 + sub} y={y + CARD_H - 46} w={sub} label="MEMORY" value={memory} color="#38bdf8" onClick={() => open("memory")} />
       <SubBox x={x + 24 + 2 * sub} y={y + CARD_H - 46} w={sub} label="TOOLS" value={`${tools} MCP`} color="#fbbf24" onClick={() => open("caps")} />
@@ -138,6 +155,7 @@ export function SchematicFlowchart() {
   const open = useSysMap((s) => s.open);
   const inspecting = useSysMap((s) => s.inspect);
   const { snap: sys } = useMemmapData();
+  const { view: trading } = useTradingAgent();
   const backdrop = useBackdropActive("flowchart");
   useEffect(() => void useArbiter.getState().start(), []);
   usePoll(() => (isTauri() ? useArbiter.getState().refresh() : Promise.resolve()), POLL_MS);
@@ -269,7 +287,7 @@ export function SchematicFlowchart() {
           </g>
 
           {/* Buses (base layer, then lit layer) */}
-          {ROSTER.filter((r): r is Exclude<RosterId, "tony"> => r !== "tony").map((id) => {
+          {ROSTER.filter((r): r is Exclude<RosterId, "tony"> => r !== "tony" && !isIsolated(r)).map((id) => {
             const b = BUSES[NODE_BUS[id]];
             const hot = lit.get(`bus:${id}`);
             const d = busPath(id);
@@ -293,8 +311,22 @@ export function SchematicFlowchart() {
               </g>
             );
           })}
+          {links.some(([a, b]) => pairKey(a, b) === pairKey("finance", "trading")) && (
+            <text
+              x={FLOW_NODES.trading.x + CARD_W / 2 + 48}
+              y={(FLOW_NODES.finance.y + FLOW_NODES.trading.y) / 2}
+              transform={`rotate(90 ${FLOW_NODES.trading.x + CARD_W / 2 + 48} ${(FLOW_NODES.finance.y + FLOW_NODES.trading.y) / 2})`}
+              textAnchor="middle"
+              className="sysmap-mono"
+              fontSize={9}
+              fill={BUSES.trading.color}
+              letterSpacing={2}
+            >
+              FINANCER-ONLY LINK
+            </text>
+          )}
           {/* Bus taps on the spine */}
-          {ROSTER.filter((r): r is Exclude<RosterId, "tony"> => r !== "tony" && FLOW_NODES[r as Exclude<RosterId, "tony">].col !== "bottom").map((id) => {
+          {ROSTER.filter((r): r is Exclude<RosterId, "tony"> => r !== "tony" && !isIsolated(r) && FLOW_NODES[r as Exclude<RosterId, "tony">].col !== "bottom").map((id) => {
             const n = FLOW_NODES[id];
             const edge = n.col === "left" ? n.x + CARD_W / 2 : n.x - CARD_W / 2;
             return <Port key={id} x={edge} y={n.y} color={BUSES[NODE_BUS[id]].color} />;
@@ -328,12 +360,13 @@ export function SchematicFlowchart() {
                 id={id}
                 node={nodes.get(id)}
                 mem={ns ? mems.get(ns) : undefined}
-                model={modelName(agentFor(id, sys?.agents))}
+                model={id === "trading" ? shortModel(trading?.config.model) : modelName(agentFor(id, sys?.agents))}
                 tools={hookupsFor(id, sys?.bus).length}
                 skills={skillsFor(id, sys?.skills.items).length}
                 vaultOpen={vaultOpen}
                 ragLit={lit.has(`rag:${id}`)}
                 open={(f) => open(id, f)}
+                trading={id === "trading" ? trading : undefined}
               />
             );
           })}

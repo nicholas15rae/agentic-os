@@ -5,6 +5,8 @@ import { isTauri } from "@/lib/platform";
 import { useMemmapData } from "@/features/memmap/use-memmap-data";
 import { fmtMs } from "@/features/arbiter/agent-graph";
 import { inspectAgent, isVault, useSysMap, type AgentInspect, type InspectFocus } from "./sysmap-store";
+import { TradingAgentStatusCard } from "@/features/trading/TradingAgentStatusCard";
+import { useTradingAgent } from "@/features/trading/useTradingAgent";
 import { agentFor, BOUNDARY, BUSES, hookupsFor, isRoster, modelName, NODE_BUS, NODE_LABEL, skillsFor, surfaceState, SURFACE_TONE } from "./model";
 
 /** Refresh while the drawer is open and the window visible (usePoll skips hidden ticks). */
@@ -55,6 +57,8 @@ export function DeepInspector() {
   const id = useSysMap((s) => s.inspect);
   const focus = useSysMap((s) => s.focus);
   const close = useSysMap((s) => s.close);
+  // The Trading Agent's state comes from the agent itself (the engine only sees its hand-offs).
+  const { view: tradingView } = useTradingAgent(30_000);
   const { snap } = useMemmapData();
   const poll = usePoll<AgentInspect | null>(() => (id && isTauri() ? inspectAgent(id) : Promise.resolve(null)), POLL_MS, [id]);
   useEffect(() => {
@@ -66,7 +70,14 @@ export function DeepInspector() {
   if (!id || !isRoster(id)) return null;
   const d = poll.data && poll.data.node.id === id ? poll.data : null;
   const bus = BUSES[NODE_BUS[id]];
-  const surface = surfaceState(d?.live ?? undefined);
+  const surface =
+    id === "trading" && tradingView
+      ? tradingView.runs[0]?.status === "running"
+        ? "ACTIVE"
+        : tradingView.enabled
+          ? "IDLE"
+          : "DORMANT"
+      : surfaceState(d?.live ?? undefined);
   const agent = agentFor(id, snap?.agents);
   const skills = skillsFor(id, snap?.skills.items);
   const hooks = hookupsFor(id, snap?.bus);
@@ -92,10 +103,10 @@ export function DeepInspector() {
               {surface}
             </span>
             <span className="flex items-center gap-1 font-mono text-ink-3">
-              <Cpu size={11} aria-hidden /> {d?.node.compute.toUpperCase() ?? "—"}
+              <Cpu size={11} aria-hidden /> {id === "trading" ? "LOCAL LLM" : d?.node.compute.toUpperCase() ?? "—"}
             </span>
             <span className="truncate font-mono text-ink-2" title="Model assignment (AnythingLLM workspace)">
-              {modelName(agent) ?? (d?.node.compute === "cpu" ? "deterministic (no model)" : "model —")}
+              {id === "trading" ? "local model · see card below" : modelName(agent) ?? (d?.node.compute === "cpu" ? "deterministic (no model)" : "model —")}
             </span>
             {d?.holder === id && <span className="label-caps text-teal">holds GPU token</span>}
           </div>
@@ -106,6 +117,7 @@ export function DeepInspector() {
       </header>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        {id === "trading" && <TradingAgentStatusCard />}
         {!isTauri() && <p className="text-[12px] text-ink-3">Live inspection needs the desktop engine.</p>}
         {poll.error && <p className="font-mono text-[11px] text-alert">{poll.error}</p>}
         {d?.node.schedule && <p className="text-[11.5px] leading-relaxed text-ink-3">{d.node.schedule}</p>}

@@ -12,7 +12,7 @@ import type { SnapAgent, SnapBus, SnapSkill } from "@/lib/platform";
 
 // ── Buses ─────────────────────────────────────────────────────────────────────
 
-export type BusId = "core" | "build" | "media" | "memory" | "vault" | "ops" | "security";
+export type BusId = "core" | "build" | "media" | "memory" | "vault" | "ops" | "security" | "trading";
 
 export interface BusLook {
   label: string;
@@ -30,10 +30,11 @@ export const BUSES: Readonly<Record<BusId, BusLook>> = {
   vault: { label: "Finance vault", color: "#a78bfa", rgb: "167,139,250" },
   ops: { label: "Ops / booking", color: "#60a5fa", rgb: "96,165,250" },
   security: { label: "Security / garbage", color: "#f43f5e", rgb: "244,63,94" },
+  trading: { label: "Trading (isolated)", color: "#84cc16", rgb: "132,204,22" },
 };
 
 /** The roster (arbiter node ids), Tony first. */
-export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "bizops", "observer", "security", "garbage"] as const;
+export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "bizops", "trading", "observer", "security", "garbage"] as const;
 export type RosterId = (typeof ROSTER)[number];
 
 export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
@@ -47,6 +48,7 @@ export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
   booking: "ops",
   ops: "ops",
   bizops: "ops",
+  trading: "trading",
   observer: "security",
   security: "security",
   garbage: "security",
@@ -63,12 +65,21 @@ export const NODE_LABEL: Readonly<Record<RosterId, string>> = {
   booking: "Booking Agent",
   ops: "Ops",
   bizops: "Biz Ops",
+  trading: "Trading Agent",
   observer: "Observer",
   security: "Security",
   garbage: "Garbage Daemon",
 };
 
 export const isRoster = (id: string): id is RosterId => (ROSTER as readonly string[]).includes(id);
+
+/**
+ * Nodes off Tony's dispatch tree (arbiter::ISOLATED): no spine trace, only their allowlisted edges.
+ * The Trading Agent's one peer is the Financer; its risk gate (the Security Detail) is part of the
+ * trading module itself, not the mesh Security agent.
+ */
+export const ISOLATED: readonly RosterId[] = ["trading"];
+export const isIsolated = (id: string): boolean => (ISOLATED as readonly string[]).includes(id);
 
 // ── Surface state ───────────────────────────────────────────────────────────
 
@@ -138,6 +149,7 @@ export const HOOKUP_HINTS: Readonly<Record<RosterId, readonly string[]>> = {
   booking: ["n8n", "gmail", "calendar", "instagram"],
   ops: ["n8n", "scheduler", "services"],
   bizops: ["gmail", "calendar", "time", "knowledge"],
+  trading: ["ibkr", "trading"],
   observer: ["trace", "telemetry"],
   security: ["security", "bridge"],
   garbage: [],
@@ -164,6 +176,8 @@ export const BOUNDARY: Readonly<Record<RosterId, string>> = {
   booking: "Outbound via the n8n webhook only; writes `booking`",
   ops: "AnythingLLM workspace (on demand); no direct filesystem access",
   bizops: "One business per turn: reads / writes only memory/ops/<business> (jailed), RAG only its bizops_<id> workspace; money only through the approved Finance hand-off",
+  trading:
+    "Isolated: talks only to the Financer. Proposes OrderIntents; every one passes the Security Detail (deterministic risk + sizing gate) before the paper bridge at 127.0.0.1:7497 (localhost-only)",
   observer: "Read-only audit of hand-off integrity; writes `observer`",
   security: "Read-only injection / boundary scan of new hand-offs; writes `security` dumps",
   garbage: "Delete inside its allowlist only (dumps, stale memory, staging temp); never the vault",
@@ -233,13 +247,16 @@ export const FLOW_NODES: Readonly<Record<Exclude<RosterId, "tony">, FlowNode>> =
   booking: { x: 1310, y: 740, col: "right" },
   ops: { x: 1310, y: 910, col: "right" },
   bizops: { x: 1310, y: 1080, col: "right" },
-  observer: { x: 470, y: 1280, col: "bottom" },
-  security: { x: 800, y: 1280, col: "bottom" },
-  garbage: { x: 1130, y: 1280, col: "bottom" },
+  // Off Tony's spine (isolated): under Biz Ops, joined only to the Financer by a side link.
+  trading: { x: 1310, y: 1250, col: "right" },
+  // The bottom row sits left of the Trading card.
+  observer: { x: 360, y: 1280, col: "bottom" },
+  security: { x: 690, y: 1280, col: "bottom" },
+  garbage: { x: 1000, y: 1280, col: "bottom" },
 };
 
 /** Each bus drops off the spine on its own lane, so parallel traces never overlap. */
-export const BUS_LANE: Readonly<Record<BusId, number>> = { core: 0, build: -36, media: -18, memory: 30, vault: 54, ops: 78, security: 0 };
+export const BUS_LANE: Readonly<Record<BusId, number>> = { core: 0, build: -36, media: -18, memory: 30, vault: 54, ops: 78, security: 0, trading: 0 };
 
 /** The 90°-routed trace from Tony's spine to a node's card (SVG path). Pure. */
 export function busPath(id: Exclude<RosterId, "tony">): string {
@@ -314,6 +331,8 @@ export const ORBITS: Readonly<Record<RosterId, Orbit>> = {
   booking: { radius: 21, speed: 0.025, phase: 3.0, tilt: -0.05, size: 0.66, palette: ["#2a2410", "#8f7a3a", "#e9dca2"], atmosphere: "#facc15", kind: "planet" },
   observer: { radius: 24, speed: 0.021, phase: 0.9, tilt: 0.08, size: 0.6, palette: ["#1d2130", "#5b6378", "#cfd6e6"], atmosphere: "#93c5fd", kind: "planet" },
   finance: { radius: 27.5, speed: 0.018, phase: 2.6, tilt: -0.06, size: 1.05, palette: ["#1e0b3a", "#6d3fc4", "#d8c4ff"], atmosphere: "#a78bfa", kind: "vault" },
+  // Orbits just outside the Finance vault (its only peer).
+  trading: { radius: 29.5, speed: 0.019, phase: 3.1, tilt: -0.05, size: 0.7, palette: ["#1a2e05", "#4d7c0f", "#d9f99d"], atmosphere: "#84cc16", kind: "planet" },
   security: { radius: 32, speed: -0.016, phase: 4.6, tilt: 0.12, size: 0.38, palette: ["#2a0a10", "#9f1239", "#fda4af"], atmosphere: "#f43f5e", kind: "sentinel" },
   garbage: { radius: 32, speed: -0.016, phase: 4.6 + Math.PI, tilt: 0.12, size: 0.34, palette: ["#1f0f0f", "#7f1d1d", "#fca5a5"], atmosphere: "#ef4444", kind: "sentinel" },
 };

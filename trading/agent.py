@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import time
 import urllib.error
@@ -41,6 +42,9 @@ EVENT_MIN_GAP_S = 20 * 60
 EVENT_MIN_ADJ = 0.60
 EVENT_MIN_CALLS = 10
 GATEWAY = "http://127.0.0.1:8080"
+# Same default as the gateway's /agent/think (trading_api._agent_model); both read TRADING_AGENT_MODEL.
+AGENT_MODEL = (os.environ.get("TRADING_AGENT_MODEL") or "qwen/qwen3.5-9b").strip()
+ADVISORY_DAYS = 7
 ETF_CLASSES = {"etf", "commodity_etf"}
 
 RUNS_SCHEMA = """
@@ -180,6 +184,8 @@ class TradingAgent:
 
     def set_enabled(self, enabled: bool, actor: str) -> dict[str, Any]:
         s = {**self.settings(), "enabled": bool(enabled)}
+        if enabled and not s.get("advisoryStart"):
+            s["advisoryStart"] = self.clock()  # the ADVISORY week starts the first time it's switched on
         self.desk._save_state(agent=s)
         self.desk.audit.append("agent_enabled", {"enabled": bool(enabled)}, ref="trading_agent", verdict="ON" if enabled else "OFF", actor=actor)
         return s
@@ -409,11 +415,43 @@ class TradingAgent:
                     return start.strftime("%a %H:%M")
         return None
 
+    def advisory_start(self) -> float | None:
+        """When the ADVISORY week began: saved on first enable; for an agent switched on before that
+        was recorded, the earliest 'agent_enabled ON' audit row (then saved)."""
+        s = self.settings()
+        if s.get("advisoryStart"):
+            return float(s["advisoryStart"])
+        ons = [r["ts"] for r in self.desk.audit.tail(500, kinds=("agent_enabled",)) if r["verdict"] == "ON"]
+        if not ons:
+            return None
+        start = min(ons)
+        self.desk._save_state(agent={**s, "advisoryStart": start})
+        return start
+
+    def config(self) -> dict[str, Any]:
+        """The agent's active configuration for the UI status card (TradingAgentConfig in the contract)."""
+        import healthcheck
+
+        start = self.advisory_start()
+        last = healthcheck.last_result(self.desk.d) or {}
+        exp = next((c for c in last.get("checks", []) if c.get("name") == "tws_exposure"), None)
+        localhost_only = None if not exp or exp["status"] == "SKIP" else exp["status"] == "PASS"
+        return {
+            "model": AGENT_MODEL,
+            "schedule": "09:15 ET pre-market + hourly 10:00–15:00 ET + up to "
+                        f"{EVENT_MAX_PER_DAY} event runs/day",
+            "universe": self.desk.watchlist.symbols(),
+            "deskMode": self.desk.state()["mode"],
+            "advisoryStart": start, "advisoryEnd": start + ADVISORY_DAYS * 86400 if start else None,
+            "isolation": {"peer": "finance", "broker": "127.0.0.1:7497", "localhostOnly": localhost_only},
+        }
+
     def view(self) -> dict[str, Any]:
         s = self.settings()
         return {"enabled": s["enabled"], "blocked": self.blocked("slot"), "nextSlot": self.next_slot(),
                 "eventsToday": len([1 for k, _ in self._runs_today(("event",)) if k == "event"]), "eventMax": EVENT_MAX_PER_DAY,
-                "runs": self.runs(10), "leaderboard": self.desk.calls.leaderboard(5), "callCounts": self.desk.calls.counts()}
+                "runs": self.runs(10), "leaderboard": self.desk.calls.leaderboard(5), "callCounts": self.desk.calls.counts(),
+                "config": self.config()}
 
 
 def d_midnight(now: float) -> float:

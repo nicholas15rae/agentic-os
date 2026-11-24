@@ -225,6 +225,33 @@ class AgentRunTests(unittest.TestCase):
         self.assertIn("outside", rec["detail"])
         self.assertEqual(self.ex.placed, [])
 
+    def test_config_for_the_status_card(self):
+        desk = self.make()
+        cfg = desk.agent.view()["config"]
+        self.assertEqual((cfg["model"], cfg["deskMode"], cfg["advisoryStart"]), ("qwen/qwen3.5-9b", "ADVISORY", None))
+        self.assertEqual(cfg["universe"][:3], ["SPY", "QQQ", "IWM"])
+        self.assertEqual(cfg["isolation"]["broker"], "127.0.0.1:7497")
+        self.assertIsNone(cfg["isolation"]["localhostOnly"])            # no health check yet
+        desk.agent.set_enabled(True, "t")
+        cfg = desk.agent.view()["config"]
+        self.assertEqual(cfg["advisoryStart"], self.now)
+        self.assertEqual(cfg["advisoryEnd"], self.now + 7 * 86400)
+        self.now += 3600
+        desk.agent.set_enabled(False, "t")
+        desk.agent.set_enabled(True, "t")
+        self.assertEqual(desk.agent.view()["config"]["advisoryStart"], self.now - 3600)  # re-enabling keeps the week's start
+        (self.d / "healthcheck").mkdir(exist_ok=True)
+        (self.d / "healthcheck" / "latest.json").write_text(json.dumps({"checks": [{"name": "tws_exposure", "status": "PASS"}]}), encoding="utf-8")
+        self.assertTrue(desk.agent.view()["config"]["isolation"]["localhostOnly"])
+
+    def test_advisory_start_recovered_from_audit(self):
+        desk = self.make()
+        desk.audit.append("agent_enabled", {"enabled": True}, ref="trading_agent", verdict="ON", actor="t")
+        desk._save_state(agent={"enabled": True})                         # enabled before advisoryStart existed
+        start = desk.agent.view()["config"]["advisoryStart"]
+        self.assertIsNotNone(start)
+        self.assertEqual(desk.state()["agent"]["advisoryStart"], start)   # persisted once recovered
+
     def test_slots_and_next_slot(self):
         self.assertEqual(ag.slot_key(ny(2026, 11, 24, 9, 20)), "20261124-0915")
         self.assertEqual(ag.slot_key(ny(2026, 11, 24, 10, 39)), "20261124-1000")

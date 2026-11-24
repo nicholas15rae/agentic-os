@@ -24,6 +24,8 @@ export const LAYOUT: Readonly<Record<string, Pos>> = {
   garbage: { x: 58, y: 57 },
   finance: { x: 92, y: 30 },
   bizops: { x: 92, y: 50 },
+  // Isolated (off Tony's tree): its only edges are to and from the Financer.
+  trading: { x: 96, y: 8 },
 };
 
 /** Valid hand-off paths (mirrors `arbiter::EDGES`). */
@@ -50,6 +52,8 @@ export const EDGES: readonly [string, string][] = [
   ["tony", "bizops"],
   ["bizops", "tony"],
   ["bizops", "finance"],
+  ["trading", "finance"],
+  ["finance", "trading"],
 ];
 
 export const edgeKey = (a: string, b: string) => [a, b].sort().join("~");

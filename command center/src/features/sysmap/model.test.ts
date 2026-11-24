@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EDGES } from "@/features/arbiter/agent-graph";
 import type { SnapBus, SnapSkill } from "@/lib/platform";
 import {
+  BOUNDARY,
   BUS_LANE,
   busPath,
   CARD_H,
@@ -11,6 +12,7 @@ import {
   FLOW_NODES,
   FLOW_W,
   hookupsFor,
+  isIsolated,
   liveTraces,
   moonSize,
   NODE_BUS,
@@ -136,5 +138,33 @@ describe("orbits", () => {
     expect(moonSize(9, 1)).toBeCloseTo(0.8);
     expect(moonSize(null, 1)).toBeCloseTo(0.55);
     expect(moonSize(1000, 1)).toBeGreaterThan(moonSize(10, 1));
+  });
+});
+
+describe("Trading Agent on the map (isolated, Financer-only)", () => {
+  it("is in the roster on its own bus, off Tony's spine", () => {
+    expect(ROSTER).toContain("trading");
+    expect(isIsolated("trading")).toBe(true);
+    expect(isIsolated("finance")).toBe(false);
+    expect(NODE_BUS.trading).toBe("trading");
+    expect(BOUNDARY.trading).toMatch(/Financer/);
+    expect(BOUNDARY.trading).toMatch(/Security Detail/);
+    expect(BOUNDARY.trading).toMatch(/127\.0\.0\.1:7497/);
+  });
+
+  it("links only to the Financer, as a same-column side link", () => {
+    const links = siblingLinks([["trading", "finance"], ["finance", "trading"], ["tony", "trading"]]);
+    expect(links).toEqual([["trading", "finance"]]);
+    expect(tracesFor({ from: "trading", to: "finance", kind: "handoff" })).toEqual(["link:finance~trading"]);
+  });
+
+  it("its card doesn't overlap the bottom row or leave the canvas", () => {
+    const t = FLOW_NODES.trading;
+    const overlaps = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+      Math.abs(a.x - b.x) < CARD_W && Math.abs(a.y - b.y) < CARD_H;
+    for (const id of ["observer", "security", "garbage", "bizops"] as const) expect(overlaps(t, FLOW_NODES[id]), id).toBe(false);
+    expect(t.x + CARD_W / 2).toBeLessThanOrEqual(FLOW_W);
+    expect(t.y + CARD_H / 2).toBeLessThanOrEqual(FLOW_H);
+    expect(ORBITS.trading.radius).toBeGreaterThan(ORBITS.finance.radius);
   });
 });

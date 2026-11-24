@@ -1,4 +1,5 @@
 // AgentPanel.contract.ts — LOCKED 2026-11-24 (approved by Nic). Changes need a new approval.
+// Amended 2026-11-24 (approved): AgentView.config (TradingAgentConfig) for the System Map status card.
 // Mount: Trading section, below EnginesPanel. Gateway HTTP only (no Tauri IPC) → desktop and phone.
 import type { ExecMode } from "@/features/trading/ibkr";
 
@@ -50,6 +51,17 @@ export interface DeskLeaderRow {
   avgRet: number;
 }
 
+/** The agent's active configuration (served by the backend, never hard-coded in the UI). */
+export interface TradingAgentConfig {
+  model: string; // "qwen/qwen3.5-9b" (local)
+  schedule: string; // "09:15 ET pre-market + hourly 10:00–15:00 ET + up to 3 event runs/day"
+  universe: string[]; // watchlist (ETFs + commodity ETFs)
+  deskMode: ExecMode;
+  advisoryStart: number | null; // epoch s; start of the 1-week ADVISORY rollout
+  advisoryEnd: number | null; // advisoryStart + 7 days
+  isolation: { peer: "finance"; broker: "127.0.0.1:7497"; localhostOnly: boolean | null }; // from the last health check
+}
+
 /** GET /api/trading/agent (polled every 15 s). */
 export interface AgentView {
   enabled: boolean;
@@ -60,6 +72,7 @@ export interface AgentView {
   runs: AgentRun[];
   leaderboard: DeskLeaderRow[];
   callCounts: Partial<Record<DeskLeaderRow["id"], number>>;
+  config: TradingAgentConfig;
 }
 
 export interface AgentPanelState {

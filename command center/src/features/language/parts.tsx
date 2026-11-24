@@ -2,7 +2,7 @@ import { useState } from "react";
 import { BookmarkCheck, BookmarkPlus, Check, Copy, Loader2, Mic, Square, Volume2 } from "lucide-react";
 import { Select } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
-import { ENGINE_LABEL, expectedEngine, speak } from "./audio";
+import { expectedVoice, speak } from "./audio";
 import { LANGUAGES } from "./languages";
 import { useHub } from "./store";
 
@@ -29,7 +29,7 @@ export function PlayButton({ text, lang, size = 14, label = "Play audio" }: { te
     <button
       type="button"
       aria-label={label}
-      title={`${label} · ${ENGINE_LABEL[expectedEngine(lang)]}`}
+      title={`${label} · ${expectedVoice(lang)}`}
       className="pill-glass !h-8 !w-8 !p-0"
       onClick={async () => {
         setBusy(true);
@@ -94,8 +94,9 @@ export function EngineBadge() {
   const e = useHub((s) => s.lastEngine);
   if (!e) return null;
   return (
-    <span role="status" className={`rounded-full border px-2 py-0.5 font-mono text-[10px] ${e === "kokoro" ? "border-teal/40 text-teal" : e === "web-speech" ? "border-amber/40 text-amber-light" : "border-alert/40 text-alert"}`}>
-      voice: {ENGINE_LABEL[e]}
+    <span role="status" title={e.reason ? `Fell back: ${e.reason}` : undefined} className={`max-w-[60vw] truncate rounded-full border bg-[rgba(11,13,17,0.6)] px-2 py-0.5 font-mono text-[10px] ${e.fallback ? "border-amber/40 text-amber-light" : "border-teal/40 text-teal"}`}>
+      voice: {e.label}
+      {e.reason ? ` — ${e.reason}` : ""}
     </span>
   );
 }

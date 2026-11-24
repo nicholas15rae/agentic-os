@@ -8,9 +8,11 @@
 //!   started on first use and stopped by `lang_release` (the Hub unmounting) or after
 //!   `SIDECAR_IDLE` with no request. The sidecar sits in a kill-on-close Job, so it never
 //!   outlives the app. Same mic gate as `stt_transcribe`.
-//! * TTS: Kokoro only (never ElevenLabs — these are ad-hoc phrases, kept local), with a voice per
-//!   language; a language Kokoro has no voice for answers `UNSUPPORTED_LANG` and the webview falls
-//!   back to the browser's Web Speech voice.
+//! * TTS: the engine, model and voice the user picks in the Hub's Voice panel (any configured TTS
+//!   provider: Kokoro by default, ElevenLabs, XTTS…), stored in this file's `settings` table so the
+//!   phone shares it. Kokoro with no voice picked uses one per language; a language it has no voice
+//!   for answers `UNSUPPORTED_LANG` and the webview falls back. ElevenLabs is refused while the
+//!   kill switch is on (`KILL_SWITCH`), and the webview then falls back to a local voice.
 //! * LLM: the `policy.primaryLocal` provider (LM Studio), JSON-only prompts built in TypeScript,
 //!   with reasoning switched off per request (fast, and the JSON isn't starved by a think block).
 
@@ -60,6 +62,10 @@ CREATE TABLE IF NOT EXISTS tracks(
   again INTEGER NOT NULL DEFAULT 0,
   lessons INTEGER NOT NULL DEFAULT 0,
   updated REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 ";
 
@@ -126,6 +132,19 @@ pub struct SttResult {
     text: String,
     language: Option<String>,
     engine: String,
+}
+
+/// A TTS provider the Hub can speak with (from providers.json; keys never leave Rust).
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceEngineInfo {
+    id: String,
+    label: String,
+    engine: String,
+    /// Runs on this machine (false = cloud, e.g. ElevenLabs).
+    local: bool,
+    model: String,
+    voice: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -324,6 +343,38 @@ pub fn save_track(c: &Connection, mut t: LangTrack) -> Result<LangTrack, String>
     )
     .map_err(|e| e.to_string())?;
     Ok(t)
+}
+
+/// Hub settings (e.g. "voice"): small JSON values keyed by a short name.
+pub fn valid_setting_key(k: &str) -> bool {
+    (1..=40).contains(&k.len()) && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' || c == '.') && !k.contains("..")
+}
+
+pub fn get_setting(c: &Connection, key: &str) -> Result<Option<Value>, String> {
+    if !valid_setting_key(key) {
+        return Err("bad setting key".into());
+    }
+    let raw: Option<String> = c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
+}
+
+pub fn set_setting(c: &Connection, key: &str, value: &Value) -> Result<(), String> {
+    if !valid_setting_key(key) {
+        return Err("bad setting key".into());
+    }
+    let raw = value.to_string();
+    if raw.len() > 64 * 1024 {
+        return Err("setting too large".into());
+    }
+    c.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2", params![key, raw]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Languages ElevenLabs accepts as `language_code` (Latin isn't one: the model reads it unaided).
+pub fn eleven_lang(lang: &str) -> Option<&str> {
+    let base = lang.split('-').next().unwrap_or_default();
+    const OK: [&str; 29] = ["en", "es", "fr", "it", "ja", "pt", "de", "zh", "ko", "hi", "ar", "ru", "el", "nl", "pl", "tr", "vi", "sv", "da", "fi", "no", "cs", "ro", "uk", "id", "ms", "ta", "fil", "hu"];
+    OK.contains(&base).then_some(base)
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -615,17 +666,74 @@ pub async fn lang_stt(d: State<'_, DispatchState>, hub: State<'_, LangHubState>,
     Ok(SttResult { text, language, engine: engine.into() })
 }
 
-/// Kokoro audio (mp3) for `text` in `lang`; `UNSUPPORTED_LANG` / `NO_LOCAL_TTS` → Web Speech fallback.
+/// Audio for `text` in `lang` on the chosen TTS provider (`engine` = provider id; default Kokoro).
+/// `voice` / `model` override the provider's own. Errors the webview treats as "fall back":
+/// `UNSUPPORTED_LANG`, `NO_LOCAL_TTS`, `KILL_SWITCH`, or the engine's own failure.
 #[tauri::command]
-pub async fn lang_tts(d: State<'_, DispatchState>, text: String, lang: String) -> Result<Response, String> {
+pub async fn lang_tts(
+    d: State<'_, DispatchState>,
+    os: State<'_, super::os_core::OsState>,
+    text: String,
+    lang: String,
+    engine: Option<String>,
+    voice: Option<String>,
+    model: Option<String>,
+) -> Result<Response, String> {
     let text = text.trim();
     if text.is_empty() || text.chars().count() > 2000 {
         return Err("text must be 1–2000 characters".into());
     }
-    let voice = kokoro_voice(&lang).ok_or("UNSUPPORTED_LANG")?;
-    let p = kokoro(&d).ok_or("NO_LOCAL_TTS")?;
-    let bytes = synth_local(&d, &p, text, Some(voice.to_string())).await?;
+    let voice = voice.map(|v| v.trim().to_string()).filter(|v| !v.is_empty() && v.len() <= 128);
+    let p = match engine.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        Some(id) => d.snapshot().providers.into_iter().find(|p| p.id == id && p.kind == Kind::Tts).ok_or_else(|| format!("no TTS provider '{id}'"))?,
+        None => kokoro(&d).ok_or("NO_LOCAL_TTS")?,
+    };
+    if p.engine.as_deref() == Some("elevenlabs") {
+        if os.snapshot().privacy.kill_switch {
+            return Err("KILL_SWITCH".into());
+        }
+        let voice_id = voice.or_else(|| p.voice.clone()).ok_or("pick an ElevenLabs voice in the Language Hub's Voice panel")?;
+        let mut p = p.clone();
+        p.language = eleven_lang(&lang).map(str::to_string);
+        let bytes = super::elevenlabs::synthesize(&d, &p, text, &voice_id, model.as_deref(), None).await.map_err(|e| e.reason())?;
+        return Ok(Response::new(bytes));
+    }
+    // Local engines (Kokoro / XTTS): an explicit voice wins, else Kokoro's voice for the language.
+    let voice = match voice {
+        Some(v) => v,
+        None if p.engine.as_deref() == Some("kokoro") => kokoro_voice(&lang).ok_or("UNSUPPORTED_LANG")?.to_string(),
+        None => p.voice.clone().ok_or("UNSUPPORTED_LANG")?,
+    };
+    let bytes = synth_local(&d, &p, text, Some(voice)).await?;
     Ok(Response::new(bytes))
+}
+
+/// The TTS providers the Voice panel offers (ids, engines, default model/voice — never keys).
+#[tauri::command]
+pub fn lang_voice_engines(d: State<'_, DispatchState>) -> Vec<VoiceEngineInfo> {
+    d.snapshot()
+        .providers
+        .into_iter()
+        .filter(|p| p.kind == Kind::Tts)
+        .map(|p| VoiceEngineInfo {
+            local: p.engine.as_deref() != Some("elevenlabs"),
+            engine: p.engine.clone().unwrap_or_else(|| "kokoro".into()),
+            label: p.label.clone(),
+            id: p.id,
+            model: p.model,
+            voice: p.voice,
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn lang_settings_get(d: State<'_, DispatchState>, hub: State<'_, LangHubState>, key: String) -> Result<Option<Value>, String> {
+    hub.with(&d, |c| get_setting(c, &key))
+}
+
+#[tauri::command]
+pub fn lang_settings_set(d: State<'_, DispatchState>, hub: State<'_, LangHubState>, key: String, value: Value) -> Result<(), String> {
+    hub.with(&d, |c| set_setting(c, &key, &value))
 }
 
 /// One JSON-only completion on the local LLM (prompts are built in TypeScript).
@@ -752,6 +860,20 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!((all[0].level.as_str(), all[0].got), ("intermediate", 5));
         assert!(save_track(&c, LangTrack { level: "fluent".into(), ..t }).is_err());
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let c = mem();
+        assert_eq!(get_setting(&c, "voice").unwrap(), None);
+        let v = serde_json::json!({"engine": "elevenlabs", "voices": {"elevenlabs": {"*": "abc"}}});
+        set_setting(&c, "voice", &v).unwrap();
+        set_setting(&c, "voice", &v).unwrap(); // upsert
+        assert_eq!(get_setting(&c, "voice").unwrap(), Some(v));
+        assert!(set_setting(&c, "../x", &serde_json::json!(1)).is_err());
+        assert!(set_setting(&c, "big", &serde_json::json!("x".repeat(70_000))).is_err());
+        assert_eq!(eleven_lang("pt-BR"), Some("pt"));
+        assert_eq!(eleven_lang("la"), None);
     }
 
     #[test]

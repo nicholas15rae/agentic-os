@@ -15,15 +15,21 @@
  *   lang_tracks_list                   GET    /api/cc/lang/tracks
  *   lang_track_save {track}            PUT    /api/cc/lang/tracks/{lang}
  *   lang_stt  (raw WAV, x-lang header) POST   /api/cc/lang/stt?lang=…   (raw WAV body)
- *   lang_tts {text, lang}              POST   /api/cc/lang/tts           → audio/mpeg
+ *   lang_tts {text, lang, engine?, voice?, model?}
+ *                                      POST   /api/cc/lang/tts           → audio (local engines only)
+ *   lang_voice_engines                 GET    /api/cc/lang/voice/engines
+ *   tts_voices {engine} (existing)     GET    /api/cc/lang/voice/voices?engine=<provider id>
+ *   provider_models {id} (existing)    (desktop only — cloud models)
+ *   lang_settings_get/set {key,value}  GET/PUT /api/cc/lang/settings/{key}
  *   lang_llm_json {system, prompt}     POST   /api/cc/lang/llm           (local LM Studio, thinking off)
  *   lang_release                       POST   /api/cc/lang/release
  *
  * STT routing: `en` → the configured Whisper (base.en, Tony's); anything else / auto → an
  * on-demand multilingual whisper-server sidecar on 127.0.0.1:8179, started on first use and
- * stopped on `release` (leaving the Hub) or after 3 idle minutes. TTS: Kokoro voices for
- * en/es/fr/it/ja/pt/hi/zh; any other language answers `UNSUPPORTED_LANG` and the webview speaks
- * it with the browser's Web Speech voice instead (shown as the active engine).
+ * stopped on `release` (leaving the Hub) or after 3 idle minutes. TTS: whatever the Voice panel
+ * picks (voice.ts resolves it); by default Kokoro, with a voice per language. When the chosen
+ * engine can't speak a line it falls back to Kokoro, then the browser's Web Speech voice, and the
+ * badge says so.
  */
 
 export type Category = "public_capture" | "my_translation" | "lesson_vocab";
@@ -133,5 +139,41 @@ export interface Lesson {
   items: LessonItem[];
 }
 
-/** Which voice actually spoke a line (shown next to the play button). */
-export type VoiceEngine = "kokoro" | "web-speech" | "none";
+/** Which voice actually spoke a line (the badge). `fallback`: the chosen engine couldn't. */
+export interface SpokeWith {
+  label: string;
+  fallback: boolean;
+  reason?: string;
+}
+
+/** "Engine" id for this device's own Web Speech voices. */
+export const BROWSER_ENGINE = "browser";
+
+/**
+ * The Hub's voice choice (settings key "voice"; shared by desktop and phone). Voices are kept per
+ * engine so switching engines and back keeps your picks.
+ */
+export interface VoicePrefs {
+  /** A TTS provider id from providers.json (kokoro, elevenlabs, …) or BROWSER_ENGINE. */
+  engine: string;
+  /** Cloud model override (ElevenLabs model id); null = the provider's own. */
+  model: string | null;
+  /** engine id → language code, or "*" for every language → voice id. Missing = automatic. */
+  voices: Record<string, Record<string, string>>;
+}
+
+/** A TTS provider the Voice panel offers (`lang_voice_engines` / GET /api/cc/lang/voice/engines). */
+export interface VoiceEngineInfo {
+  id: string;
+  label: string;
+  engine: string;
+  /** false = cloud (ElevenLabs): desktop only, off while the kill switch is on. */
+  local: boolean;
+  model: string;
+  voice: string | null;
+}
+
+export interface VoiceOption {
+  id: string;
+  label: string | null;
+}

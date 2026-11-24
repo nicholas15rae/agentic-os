@@ -72,6 +72,30 @@ class LanguageHubApi(unittest.TestCase):
         self.assertEqual(self.c.post("/api/cc/lang/stt?lang=../x", content=b"x" * 2048).status_code, 400)
         self.assertEqual(self.c.post("/api/cc/lang/stt?lang=en", content=b"short").status_code, 400)
 
+    def test_voice_settings_roundtrip(self):
+        self.assertIsNone(self.c.get("/api/cc/lang/settings/voice").json()["value"])
+        v = {"engine": "kokoro", "model": None, "voices": {"kokoro": {"it": "im_nicola"}}}
+        self.assertEqual(self.c.put("/api/cc/lang/settings/voice", json={"value": v}).status_code, 200)
+        self.assertEqual(self.c.get("/api/cc/lang/settings/voice").json()["value"], v)
+        self.assertEqual(self.c.put("/api/cc/lang/settings/..x", json={"value": 1}).status_code, 400)
+        self.assertEqual(self.c.put("/api/cc/lang/settings/big", json={"value": "x" * 70_000}).status_code, 413)
+
+    def test_cloud_engine_is_desktop_only(self):
+        saved = lh._providers
+        lh._providers = lambda: {"providers": [
+            {"id": "kokoro", "kind": "tts", "engine": "kokoro", "baseUrl": "http://127.0.0.1:1/v1", "model": "kokoro", "voice": "am_michael"},
+            {"id": "elevenlabs", "kind": "tts", "engine": "elevenlabs", "baseUrl": "https://api.elevenlabs.io/v1", "model": "eleven_v4_turbo", "voice": "abc"},
+        ]}
+        try:
+            engines = self.c.get("/api/cc/lang/voice/engines").json()["engines"]
+            self.assertEqual([(e["id"], e["local"]) for e in engines], [("kokoro", True), ("elevenlabs", False)])
+            r = self.c.post("/api/cc/lang/tts", json={"text": "Ciao", "lang": "it", "engine": "elevenlabs"})
+            self.assertEqual((r.status_code, r.json()["detail"]), (422, "ENGINE_DESKTOP_ONLY"))
+            self.assertEqual(self.c.get("/api/cc/lang/voice/voices?engine=elevenlabs").status_code, 422)
+            self.assertEqual(self.c.post("/api/cc/lang/tts", json={"text": "Ciao", "lang": "it", "engine": "nope"}).status_code, 422)
+        finally:
+            lh._providers = saved
+
     def test_pick_ml_model(self):
         (self.tmp / "ggml-base.en.bin").write_bytes(b"x")
         self.assertIsNone(lh.pick_ml_model(self.tmp))

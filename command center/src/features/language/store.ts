@@ -4,7 +4,8 @@
  * (localStorage, best effort). Nothing here is shared with any other feature's store.
  */
 import { create } from "zustand";
-import type { Category, LangEntry, LangEntryPatch, LangStatus, LangTrack, Level, NewLangEntry, TutorReply, VoiceEngine } from "./contract";
+import type { Category, LangEntry, LangEntryPatch, LangStatus, LangTrack, Level, NewLangEntry, SpokeWith, TutorReply, VoiceEngineInfo, VoicePrefs } from "./contract";
+import { defaultVoicePrefs, normalizeVoicePrefs } from "./voice";
 import { langApi } from "./api";
 import type { TutorTurn } from "./prompts";
 
@@ -51,10 +52,12 @@ interface Prefs {
   autoSave: boolean;
   autoSpeak: boolean;
   trackLang: string;
+  /** This device's Web Speech voice per language ("*" = all), by voiceURI. Device-specific, so not synced. */
+  browserVoices: Record<string, string>;
 }
 
 const PREFS_KEY = "language-hub.prefs.v1";
-const DEFAULT_PREFS: Prefs = { view: "translate", source: "auto", target: "it", autoSave: true, autoSpeak: true, trackLang: "it" };
+const DEFAULT_PREFS: Prefs = { view: "translate", source: "auto", target: "it", autoSave: true, autoSpeak: true, trackLang: "it", browserVoices: {} };
 
 function loadPrefs(): Prefs {
   try {
@@ -85,7 +88,10 @@ interface HubState extends Prefs {
   feed: FeedItem[];
   tutor: Record<string, TutorMsg[]>;
   deck: DrillCard[];
-  lastEngine: VoiceEngine | null;
+  lastEngine: SpokeWith | null;
+  /** The shared voice choice (settings "voice") and the TTS providers available. */
+  voice: VoicePrefs;
+  engines: VoiceEngineInfo[];
 
   setPrefs: (p: Partial<Prefs>) => void;
   swap: () => void;
@@ -102,10 +108,11 @@ interface HubState extends Prefs {
   patchTutor: (lang: string, key: string, reply: TutorReply) => void;
   resetTutor: (lang: string) => void;
   setDeck: (cards: DrillCard[]) => void;
-  setEngine: (e: VoiceEngine) => void;
+  setEngine: (e: SpokeWith) => void;
+  setVoice: (v: VoicePrefs) => Promise<void>;
 }
 
-const prefsOf = (s: Prefs): Prefs => ({ view: s.view, source: s.source, target: s.target, autoSave: s.autoSave, autoSpeak: s.autoSpeak, trackLang: s.trackLang });
+const prefsOf = (s: Prefs): Prefs => ({ view: s.view, source: s.source, target: s.target, autoSave: s.autoSave, autoSpeak: s.autoSpeak, trackLang: s.trackLang, browserVoices: s.browserVoices });
 
 export const useHub = create<HubState>((set, get) => ({
   ...loadPrefs(),
@@ -118,6 +125,8 @@ export const useHub = create<HubState>((set, get) => ({
   tutor: {},
   deck: [],
   lastEngine: null,
+  voice: defaultVoicePrefs(),
+  engines: [],
 
   setPrefs: (p) => {
     set(p);
@@ -131,8 +140,14 @@ export const useHub = create<HubState>((set, get) => ({
 
   loadAll: async () => {
     try {
-      const [library, tracks, status] = await Promise.all([langApi.list(), langApi.tracks().catch(() => []), langApi.status().catch(() => null)]);
-      set({ library, libraryLoaded: true, libraryError: null, status, tracks: Object.fromEntries(tracks.map((t) => [t.lang, t])) });
+      const [library, tracks, status, engines, voiceRaw] = await Promise.all([
+        langApi.list(),
+        langApi.tracks().catch(() => []),
+        langApi.status().catch(() => null),
+        langApi.voiceEngines().catch(() => [] as VoiceEngineInfo[]),
+        langApi.getSetting("voice").catch(() => null),
+      ]);
+      set({ library, libraryLoaded: true, libraryError: null, status, tracks: Object.fromEntries(tracks.map((t) => [t.lang, t])), engines, voice: normalizeVoicePrefs(voiceRaw, engines) });
     } catch (e) {
       set({ libraryLoaded: true, libraryError: e instanceof Error ? e.message : String(e) });
     }
@@ -198,4 +213,8 @@ export const useHub = create<HubState>((set, get) => ({
   resetTutor: (lang) => set((s) => ({ tutor: { ...s.tutor, [lang]: [] } })),
   setDeck: (deck) => set({ deck }),
   setEngine: (lastEngine) => set({ lastEngine }),
+  setVoice: async (voice) => {
+    set({ voice });
+    await langApi.setSetting("voice", voice);
+  },
 }));

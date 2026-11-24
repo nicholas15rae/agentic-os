@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { BookOpen, GraduationCap, Languages } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AudioLines, BookOpen, GraduationCap, Languages } from "lucide-react";
 import { langApi } from "./api";
 import { stopSpeaking } from "./audio";
 import { LearnView } from "./LearnView";
@@ -7,6 +7,7 @@ import { LibraryView } from "./LibraryView";
 import { EngineBadge } from "./parts";
 import { useHub, type HubView } from "./store";
 import { TranslateView } from "./TranslateView";
+import { VoicePanel } from "./VoicePanel";
 
 const VIEWS: { id: HubView; label: string; short: string; icon: typeof Languages }[] = [
   { id: "translate", label: "Live Translate", short: "Translate", icon: Languages },
@@ -25,6 +26,7 @@ export function LanguageHub({ compact = false }: { compact?: boolean }) {
   const setPrefs = useHub((s) => s.setPrefs);
   const libCount = useHub((s) => s.library.length);
   const loaded = useHub((s) => s.libraryLoaded);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   useEffect(() => {
     void useHub.getState().loadAll();
     return () => {
@@ -56,10 +58,14 @@ export function LanguageHub({ compact = false }: { compact?: boolean }) {
             </button>
           ))}
         </div>
-        <div className="ml-auto">
+        <div className="ml-auto flex min-w-0 items-center gap-2">
           <EngineBadge />
+          <button type="button" onClick={() => setVoiceOpen((o) => !o)} aria-expanded={voiceOpen} aria-label="Voice settings" title="Choose the engine and voice" className={`pill-glass !h-9 shrink-0 text-xs ${voiceOpen ? "!border-amber/60 !text-amber-light" : ""}`}>
+            <AudioLines size={14} /> Voice
+          </button>
         </div>
       </div>
+      {voiceOpen && <VoicePanel onClose={() => setVoiceOpen(false)} />}
       <div role="tabpanel">
         {view === "translate" && <TranslateView compact={compact} />}
         {view === "learn" && <LearnView compact={compact} />}

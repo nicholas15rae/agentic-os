@@ -7,9 +7,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { audioContext, encodeWav16k, micErrorMessage, openMic } from "@/features/voice/engines";
 import { assertMicAllowed, captureClosed, captureOpened, MicLockedError, MIC_LOCKED_MSG, micEnabled, registerCapture } from "@/features/voice/mic-gate";
 import { useSettings } from "@/stores/settings";
-import type { VoiceEngine } from "./contract";
+import type { SpokeWith } from "./contract";
 import { langApi } from "./api";
 import { langInfo } from "./languages";
+import { useHub } from "./store";
+import { kokoroSpeaks, resolveVoice, type VoicePlan } from "./voice";
 
 const MAX_RECORD_MS = 90_000;
 
@@ -110,10 +112,32 @@ export function stopSpeaking() {
   if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
 }
 
-function webSpeechVoice(lang: string): { voice: SpeechSynthesisVoice | null; tag: string } {
+/** This device's Web Speech voices (fills in asynchronously on most browsers). */
+export function useBrowserVoices(): SpeechSynthesisVoice[] {
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>(() => (typeof speechSynthesis !== "undefined" ? speechSynthesis.getVoices() : []));
+  useEffect(() => {
+    if (typeof speechSynthesis === "undefined") return;
+    const load = () => setVoices(speechSynthesis.getVoices());
+    load();
+    speechSynthesis.addEventListener("voiceschanged", load);
+    return () => speechSynthesis.removeEventListener("voiceschanged", load);
+  }, []);
+  return voices;
+}
+
+/** Browser voices that speak `lang` (Latin also lists the Italian voices it falls back to). */
+export function browserVoicesFor(voices: SpeechSynthesisVoice[], lang: string): SpeechSynthesisVoice[] {
+  const info = langInfo(lang);
+  const bases = [info?.bcp47 ?? lang, info?.speechFallback].filter(Boolean).map((t) => (t as string).split("-")[0].toLowerCase());
+  return voices.filter((v) => bases.includes(v.lang.split(/[-_]/)[0].toLowerCase()));
+}
+
+function webSpeechVoice(lang: string, pick: string | null): { voice: SpeechSynthesisVoice | null; tag: string } {
   const info = langInfo(lang);
   const tags = [info?.bcp47 ?? lang, info?.speechFallback].filter(Boolean) as string[];
   const voices = typeof speechSynthesis !== "undefined" ? speechSynthesis.getVoices() : [];
+  const chosen = pick ? voices.find((v) => v.voiceURI === pick || v.name === pick) : undefined;
+  if (chosen) return { voice: chosen, tag: chosen.lang };
   for (const tag of tags) {
     const base = tag.split("-")[0].toLowerCase();
     const v = voices.find((x) => x.lang.toLowerCase() === tag.toLowerCase()) ?? voices.find((x) => x.lang.toLowerCase().startsWith(base));
@@ -122,41 +146,78 @@ function webSpeechVoice(lang: string): { voice: SpeechSynthesisVoice | null; tag
   return { voice: null, tag: tags[0] };
 }
 
-function speakWeb(text: string, lang: string): Promise<VoiceEngine> {
-  if (typeof speechSynthesis === "undefined") return Promise.resolve("none");
+function speakWeb(text: string, lang: string, pick: string | null): Promise<string | null> {
+  if (typeof speechSynthesis === "undefined") return Promise.resolve(null);
   return new Promise((resolve) => {
-    const { voice, tag } = webSpeechVoice(lang);
+    const { voice, tag } = webSpeechVoice(lang, pick);
     const u = new SpeechSynthesisUtterance(text);
     u.lang = voice?.lang ?? tag;
     if (voice) u.voice = voice;
     u.rate = 0.95;
-    u.onend = () => resolve("web-speech");
-    u.onerror = () => resolve("web-speech");
+    const name = voice ? `Browser · ${voice.name}` : "Browser voice";
+    u.onend = () => resolve(name);
+    u.onerror = () => resolve(name);
     speechSynthesis.cancel();
     speechSynthesis.speak(u);
     // Some engines never fire onend for an unsupported tag; don't hang the caller.
-    setTimeout(() => resolve("web-speech"), 250);
+    setTimeout(() => resolve(name), 250);
   });
 }
 
-/** Speak `text` in `lang`: Kokoro when it has a voice for it, else the browser's voice. Returns the engine used. */
-export async function speak(text: string, lang: string): Promise<VoiceEngine> {
-  stopSpeaking();
-  if (langInfo(lang)?.kokoro !== false) {
-    try {
-      const buf = await langApi.tts(text, lang);
-      currentUrl = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
-      current = new Audio(currentUrl);
-      await current.play();
-      return "kokoro";
-    } catch {
-      // UNSUPPORTED_LANG / NO_LOCAL_TTS / Kokoro down → the browser's voice.
-    }
-  }
-  return speakWeb(text, lang);
+async function playServer(text: string, lang: string, plan: { engine?: string; voice?: string | null; model?: string | null }) {
+  const buf = await langApi.tts(text, lang, plan);
+  currentUrl = URL.createObjectURL(new Blob([buf]));
+  current = new Audio(currentUrl);
+  await current.play();
 }
 
-export const ENGINE_LABEL: Record<VoiceEngine, string> = { kokoro: "Kokoro (local)", "web-speech": "Web Speech (browser)", none: "No voice available" };
+const why = (e: unknown) => {
+  const m = e instanceof Error ? e.message : String(e);
+  if (/KILL_SWITCH/.test(m)) return "kill switch is on";
+  if (/ENGINE_DESKTOP_ONLY/.test(m)) return "cloud voices are desktop-only";
+  if (/UNSUPPORTED_LANG/.test(m)) return "no voice for this language";
+  return m.slice(0, 120);
+};
 
-/** Which engine WOULD speak this language (for the badge before anything plays). */
-export const expectedEngine = (lang: string): VoiceEngine => (langInfo(lang)?.kokoro === false ? "web-speech" : "kokoro");
+/**
+ * Speak `text` in `lang` with the Voice panel's choice (or `override`, for previews). If that
+ * engine can't, fall back to Kokoro's own voice for the language, then the browser's voice.
+ * Returns what actually spoke (the badge).
+ */
+export async function speak(text: string, lang: string, override?: VoicePlan): Promise<SpokeWith> {
+  stopSpeaking();
+  const s = useHub.getState();
+  const plan = override ?? resolveVoice(s.voice, lang, s.engines);
+  const browserPick = plan.kind === "browser" ? plan.voice : (s.browserVoices[lang.split("-")[0]] ?? s.browserVoices["*"] ?? null);
+  if (plan.kind === "browser") {
+    const name = await speakWeb(text, lang, browserPick);
+    return name ? { label: name, fallback: false } : { label: "No voice available", fallback: true, reason: "this browser has no speech voices" };
+  }
+  let reason: string | undefined;
+  try {
+    await playServer(text, lang, plan);
+    return { label: plan.voice ? `${plan.label} · ${plan.voice}` : plan.label, fallback: false };
+  } catch (e) {
+    reason = why(e);
+  }
+  const kokoro = s.engines.find((e) => e.engine === "kokoro");
+  if (kokoro && kokoro.id !== plan.engine && kokoroSpeaks(lang)) {
+    // Your own Kokoro picks still apply when Kokoro is only standing in.
+    const k = resolveVoice({ ...s.voice, engine: kokoro.id }, lang, s.engines);
+    try {
+      await playServer(text, lang, { engine: kokoro.id, voice: k.voice });
+      return { label: `${kokoro.label}${k.voice ? ` · ${k.voice}` : ""} (fallback)`, fallback: true, reason };
+    } catch {
+      /* fall through to the browser */
+    }
+  }
+  const name = await speakWeb(text, lang, browserPick);
+  return { label: name ? `${name} (fallback)` : "No voice available", fallback: true, reason };
+}
+
+/** What WOULD speak this language (the play button's tooltip). */
+export function expectedVoice(lang: string): string {
+  const s = useHub.getState();
+  const plan = resolveVoice(s.voice, lang, s.engines);
+  return plan.voice ? `${plan.label} · ${plan.voice}` : plan.label;
+}

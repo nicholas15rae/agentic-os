@@ -40,8 +40,12 @@ export interface NativeCommands {
   lang_library_delete: { args: { ids: string[] }; result: number };
   lang_tracks_list: { args: undefined; result: import("@/features/language/contract").LangTrack[] };
   lang_track_save: { args: { track: import("@/features/language/contract").LangTrack }; result: import("@/features/language/contract").LangTrack };
-  /** Kokoro mp3; rejects with UNSUPPORTED_LANG / NO_LOCAL_TTS so the caller uses Web Speech. */
-  lang_tts: { args: { text: string; lang: string }; result: ArrayBuffer };
+  /** Audio on the chosen TTS provider (default Kokoro); rejects with UNSUPPORTED_LANG / NO_LOCAL_TTS / KILL_SWITCH so the caller falls back. */
+  lang_tts: { args: { text: string; lang: string; engine?: string; voice?: string; model?: string }; result: ArrayBuffer };
+  /** TTS providers the Language Hub's Voice panel offers (no keys). */
+  lang_voice_engines: { args: undefined; result: import("@/features/language/contract").VoiceEngineInfo[] };
+  lang_settings_get: { args: { key: string }; result: unknown };
+  lang_settings_set: { args: { key: string; value: unknown }; result: void };
   lang_llm_json: { args: { system: string; prompt: string }; result: unknown };
   /** Stops the on-demand multilingual Whisper sidecar; true if one was running. */
   lang_release: { args: undefined; result: boolean };

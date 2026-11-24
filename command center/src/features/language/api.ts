@@ -5,7 +5,7 @@
 import { cmd, isTauri, nativeRaw } from "@/lib/platform";
 import { authHeader, gateway, GatewayError } from "@/lib/gateway";
 import { useSettings } from "@/stores/settings";
-import type { LangEntry, LangEntryPatch, LangStatus, LangTrack, NewLangEntry, SttResult } from "./contract";
+import type { LangEntry, LangEntryPatch, LangStatus, LangTrack, NewLangEntry, SttResult, VoiceEngineInfo, VoiceOption } from "./contract";
 
 const json = (body: unknown) => ({ body: JSON.stringify(body) });
 const base = () => useSettings.getState().gatewayUrl.replace(/\/+$/, "");
@@ -35,13 +35,15 @@ export const langApi = {
       ? nativeRaw<SttResult>("lang_stt", wav, { "x-lang": lang })
       : gateway<SttResult>(`/api/cc/lang/stt?lang=${encodeURIComponent(lang)}`, { method: "POST", body: wav as BodyInit, headers: { "Content-Type": "audio/wav" }, timeoutMs: 200_000 }),
 
-  /** Kokoro mp3, or a rejection whose message starts with UNSUPPORTED_LANG / NO_LOCAL_TTS. */
-  tts: async (text: string, lang: string): Promise<ArrayBuffer> => {
-    if (isTauri()) return cmd("lang_tts", { text, lang });
+  /** Audio on `opts.engine` (default Kokoro), or a rejection (UNSUPPORTED_LANG, NO_LOCAL_TTS, KILL_SWITCH,
+   * ENGINE_DESKTOP_ONLY on the phone, or the engine's own error) — the caller falls back. */
+  tts: async (text: string, lang: string, opts: { engine?: string; voice?: string | null; model?: string | null } = {}): Promise<ArrayBuffer> => {
+    const extra = { engine: opts.engine || undefined, voice: opts.voice || undefined, model: opts.model || undefined };
+    if (isTauri()) return cmd("lang_tts", { text, lang, ...extra });
     const res = await fetch(`${base()}/api/cc/lang/tts`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeader(useSettings.getState().gatewayToken) },
-      body: JSON.stringify({ text, lang }),
+      body: JSON.stringify({ text, lang, ...extra }),
     });
     if (!res.ok) throw new GatewayError(String((await res.json().catch(() => ({}))).detail ?? res.status), res.status);
     return res.arrayBuffer();
@@ -54,6 +56,31 @@ export const langApi = {
     } catch (e) {
       throw new Error(`Local LLM: ${errText(e)}`);
     }
+  },
+
+  /** TTS providers for the Voice panel. */
+  voiceEngines: async (): Promise<VoiceEngineInfo[]> =>
+    isTauri() ? cmd("lang_voice_engines") : (await gateway<{ engines: VoiceEngineInfo[] }>("/api/cc/lang/voice/engines")).engines,
+
+  /** Voices of one provider (desktop: the existing `tts_voices`, which also lists ElevenLabs; phone: local engines only). */
+  voices: async (engine: VoiceEngineInfo): Promise<VoiceOption[]> => {
+    if (isTauri()) {
+      const v = await cmd("tts_voices", { engine: engine.engine });
+      if (v.serverError && !v.voices.length) throw new Error(v.serverError);
+      return v.voices.map((x) => ({ id: x.id, label: x.label }));
+    }
+    return (await gateway<{ voices: VoiceOption[] }>(`/api/cc/lang/voice/voices?engine=${encodeURIComponent(engine.id)}`)).voices;
+  },
+
+  /** Models of a cloud provider (ElevenLabs), desktop only; [] elsewhere. */
+  models: async (engine: VoiceEngineInfo): Promise<string[]> => (isTauri() && !engine.local ? cmd("provider_models", { id: engine.id }) : []),
+
+  getSetting: async (key: string): Promise<unknown> =>
+    isTauri() ? cmd("lang_settings_get", { key }) : (await gateway<{ value: unknown }>(`/api/cc/lang/settings/${encodeURIComponent(key)}`)).value,
+
+  setSetting: async (key: string, value: unknown): Promise<void> => {
+    if (isTauri()) return cmd("lang_settings_set", { key, value });
+    await gateway(`/api/cc/lang/settings/${encodeURIComponent(key)}`, { method: "PUT", ...json({ value }) });
   },
 
   /** Leaving the Hub: stop the multilingual Whisper sidecar now. Best effort. */

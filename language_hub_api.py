@@ -9,8 +9,11 @@ Voice, all local:
   * STT  — English → the configured Whisper (Tony's base.en). Any other language / auto-detect →
            a multilingual whisper-server sidecar on 127.0.0.1:8179, started on first use and
            stopped by POST /release or after 3 idle minutes (zero idle overhead).
-  * TTS  — Kokoro voices for en/es/fr/it/ja/pt/hi/zh; anything else answers 422 UNSUPPORTED_LANG
-           and the phone speaks it with its own Web Speech voice.
+  * TTS  — the engine/voice picked in the Hub's Voice panel (settings table, shared with the
+           desktop). The gateway speaks LOCAL engines only (Kokoro / XTTS): a cloud engine
+           (ElevenLabs — its key lives in the desktop keychain) answers 422 ENGINE_DESKTOP_ONLY and
+           the phone falls back. Kokoro with no voice picked uses one per language; a language it
+           can't speak answers 422 UNSUPPORTED_LANG and the phone uses its own Web Speech voice.
   * LLM  — POST /llm: local LM Studio, JSON only, reasoning switched off per request (a thinking
            model otherwise burns the whole budget and returns no JSON). Backs off while the
            desktop holds the GPU, like /api/cc/llm/json.
@@ -74,11 +77,16 @@ CREATE TABLE IF NOT EXISTS tracks(
   lessons INTEGER NOT NULL DEFAULT 0,
   updated REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 """
 
 router = APIRouter(prefix="/api/cc/lang", tags=["language-hub"])
 _lock = threading.Lock()
 _LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,4})?$")
+_KEY_RE = re.compile(r"^[a-z0-9_.-]{1,40}$")
 
 
 def valid_lang(s: str, allow_auto: bool = False) -> bool:
@@ -213,6 +221,32 @@ def save_track(lang: str, t: dict = Body(...)):
     return row
 
 
+# ── settings (e.g. "voice"; shared with the desktop through the same file) ────
+
+@router.get("/settings/{key}")
+def get_setting(key: str):
+    if not _KEY_RE.match(key) or ".." in key:
+        raise HTTPException(400, "bad setting key")
+    with db() as c:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    try:
+        return {"key": key, "value": json.loads(r["value"]) if r else None}
+    except ValueError:
+        return {"key": key, "value": None}
+
+
+@router.put("/settings/{key}")
+def put_setting(key: str, body: dict = Body(...)):
+    if not _KEY_RE.match(key) or ".." in key:
+        raise HTTPException(400, "bad setting key")
+    raw = json.dumps(body.get("value"))
+    if len(raw) > 64 * 1024:
+        raise HTTPException(413, "setting too large")
+    with _lock, db() as c:
+        c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, raw))
+    return {"ok": True}
+
+
 # ── providers (read from the desktop app's providers.json; local engines only) ─
 
 def _providers() -> dict:
@@ -236,6 +270,41 @@ def _kokoro() -> Optional[dict]:
         if p.get("kind") == "tts" and p.get("engine") == "kokoro":
             return p
     return None
+
+
+def _tts_providers() -> list[dict]:
+    return [p for p in _providers().get("providers", []) if p.get("kind") == "tts"]
+
+
+@router.get("/voice/engines")
+def voice_engines():
+    """TTS providers for the Voice panel (no keys). `local: false` = desktop only."""
+    return {
+        "engines": [
+            {"id": p.get("id"), "label": p.get("label") or p.get("id"), "engine": p.get("engine") or "kokoro", "local": p.get("engine") != "elevenlabs", "model": p.get("model") or "", "voice": p.get("voice")}
+            for p in _tts_providers()
+        ]
+    }
+
+
+@router.get("/voice/voices")
+def voice_list(engine: str = Query(..., max_length=64)):
+    """Voices of a LOCAL provider (Kokoro / XTTS server list). Cloud engines: desktop only."""
+    p = next((x for x in _tts_providers() if x.get("id") == engine), None)
+    if not p:
+        raise HTTPException(404, "no such TTS provider")
+    if p.get("engine") == "elevenlabs":
+        raise HTTPException(422, "ENGINE_DESKTOP_ONLY")
+    base = p["baseUrl"].rstrip("/")
+    url = base.rsplit("/v1", 1)[0] + "/speakers_list" if p.get("engine") == "xtts" else f"{base}/audio/voices"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise HTTPException(502, f"voice list unavailable: {getattr(e, 'reason', e)}")
+    items = data.get("voices", data) if isinstance(data, dict) else data
+    ids = [i if isinstance(i, str) else i.get("id") or i.get("name") for i in items or []]
+    return {"voices": [{"id": i, "label": None} for i in ids if i]}
 
 
 def pick_ml_model(d: Path) -> Optional[Path]:
@@ -374,12 +443,31 @@ def tts(body: dict = Body(...)):
     lang = str(body.get("lang") or "")
     if not text or len(text) > 2000:
         raise HTTPException(400, "text must be 1–2000 characters")
-    voice = KOKORO_VOICES.get(lang.split("-")[0])
+    engine = str(body.get("engine") or "").strip()
+    voice = str(body.get("voice") or "").strip()[:128] or None
+    if engine:
+        p = next((x for x in _tts_providers() if x.get("id") == engine), None)
+        if not p:
+            raise HTTPException(422, f"no TTS provider '{engine}'")
+        if p.get("engine") == "elevenlabs":
+            raise HTTPException(422, "ENGINE_DESKTOP_ONLY")
+    else:
+        p = _kokoro()
+        if not p:
+            raise HTTPException(422, "NO_LOCAL_TTS")
+    if not voice:
+        voice = KOKORO_VOICES.get(lang.split("-")[0]) if p.get("engine", "kokoro") == "kokoro" else p.get("voice")
     if not voice:
         raise HTTPException(422, "UNSUPPORTED_LANG")
-    p = _kokoro()
-    if not p:
-        raise HTTPException(422, "NO_LOCAL_TTS")
+    if p.get("engine") == "xtts":
+        root = p["baseUrl"].rstrip("/").rsplit("/v1", 1)[0]
+        payload = json.dumps({"text": text, "speaker_wav": voice, "language": lang.split("-")[0] or "en"}).encode()
+        req = urllib.request.Request(f"{root}/tts_to_audio/", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return Response(content=r.read(), media_type="audio/wav")
+        except (urllib.error.URLError, OSError) as e:
+            raise HTTPException(502, f"XTTS unavailable: {getattr(e, 'reason', e)}")
     payload = json.dumps({"model": p.get("model") or "kokoro", "input": text, "voice": voice, "response_format": "mp3", "speed": 1.0}).encode()
     req = urllib.request.Request(f"{p['baseUrl'].rstrip('/')}/audio/speech", data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:

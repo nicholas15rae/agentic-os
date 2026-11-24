@@ -86,6 +86,12 @@ def api_handshake_accepted(ip: str, port: int = 7497, timeout: float = 2.0) -> b
         s.close()
 
 
+def is_cgnat(ip: str) -> bool:
+    """100.64.0.0/10: the shared address space mesh VPNs (NetBird, Tailscale) hand out."""
+    parts = ip.split(".")
+    return len(parts) == 4 and parts[0] == "100" and parts[1].isdigit() and 64 <= int(parts[1]) <= 127
+
+
 def lan_exposed(port: int = 7497, timeout: float = 2.0) -> list[str]:
     """Non-loopback addresses of this machine on which TWS accepts the IB API handshake."""
     try:
@@ -164,14 +170,18 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
         if not tws_probe():
             return SKIP, "TWS is not listening on 127.0.0.1:7497, so its network exposure can't be tested"
         hits = lan_probe()
-        if hits:
-            mesh = [ip for ip in hits if ip.startswith("100.") and 64 <= int(ip.split(".")[1]) <= 127]  # CGNAT range: NetBird / Tailscale
-            hint = ("tick 'Allow connections from localhost only' in TWS API settings; if it's already ticked, remove these addresses "
-                    "from TWS's Trusted IPs")
-            if mesh:
-                hint += (f"; {', '.join(mesh)} is your VPN mesh (NetBird), whose userspace networking can look local to TWS: "
-                         "block TCP 7497 for this peer with a NetBird access-control policy")
-            return WARN, f"TWS accepts the API handshake on {', '.join(hits)} — {hint}"
+        # This PC's own mesh address (CGNAT 100.64.0.0/10: NetBird / Tailscale) is a SELF-connection: TWS
+        # accepts it even with localhost-only on and an empty Trusted IPs list, while a real mesh peer is
+        # refused (verified 2026-11-24 from the droplet). It says nothing about the mesh, so it's noted,
+        # not warned. A LAN address answering is a real network path and stays a WARN.
+        mesh = [ip for ip in hits if is_cgnat(ip)]
+        lan = [ip for ip in hits if ip not in mesh]
+        if lan:
+            return WARN, (f"TWS accepts the API handshake on {', '.join(lan)} — tick 'Allow connections from localhost only' in TWS API "
+                          "settings; if it's already ticked, remove these addresses from TWS's Trusted IPs")
+        if mesh:
+            return PASS, (f"LAN refused. TWS answers this PC on its own mesh address {', '.join(mesh)} (a self-connection, not "
+                          "exposure); a remote mesh peer must test it: see docs/netbird-least-privilege-acl.md")
         return PASS, "TWS API not reachable from the network"
     await step("safety", "tws_exposure", exposure)
 

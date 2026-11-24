@@ -117,6 +117,20 @@ class HealthTests(unittest.TestCase):
         c = by_name(self.run_check(self.desk(), tws_probe=lambda: False, lan_probe=lambda: ["10.0.0.5"]))
         self.assertEqual(c["tws_exposure"]["status"], "SKIP")
 
+    def test_own_mesh_address_is_a_self_connection_not_exposure(self):
+        c = by_name(self.run_check(self.desk(), lan_probe=lambda: ["100.84.91.149"]))
+        self.assertEqual(c["tws_exposure"]["status"], "PASS")
+        self.assertIn("self-connection", c["tws_exposure"]["detail"])
+        mixed = by_name(self.run_check(self.desk(), lan_probe=lambda: ["100.84.91.149", "10.0.0.174"]))
+        self.assertEqual(mixed["tws_exposure"]["status"], "WARN")          # a LAN path still warns
+        self.assertIn("10.0.0.174", mixed["tws_exposure"]["detail"])
+        self.assertNotIn("100.84.91.149", mixed["tws_exposure"]["detail"])
+
+    def test_cgnat_range(self):
+        for ip, want in [("100.64.0.1", True), ("100.84.91.149", True), ("100.127.255.254", True),
+                         ("100.63.0.1", False), ("100.128.0.1", False), ("10.0.0.174", False), ("junk", False)]:
+            self.assertEqual(hc.is_cgnat(ip), want, ip)
+
     def test_loop_ages_never_negative(self):
         dk = self.desk()
         dk.heartbeats = {k: NOW + 30 for k in hc.LOOP_LIMITS}  # loops ticked while the check ran

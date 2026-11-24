@@ -72,3 +72,9 @@ Optional while you're in the dashboard:
 The health check probes from this PC, so it proves TWS only accepts localhost. It can't prove the
 ACL, because traffic from a machine to its own mesh address never crosses the mesh. The droplet
 rows above are what prove the ACL.
+
+**Verified 2026-11-24** (TWS: "localhost only" on, Trusted IPs empty): from the droplet, an IB API
+handshake to `100.84.91.149:7497` is **refused**. From this PC, TWS still answers its *own* mesh
+address. That's a self-connection quirk, not exposure, and the health check reports it as PASS
+with a note. TWS refuses the LAN address (`10.0.0.174`) outright. Even so, keep the ACL: it stops
+port 7497 at the mesh whatever TWS does, and it also closes SMB, AnythingLLM, n8n and LM Link.

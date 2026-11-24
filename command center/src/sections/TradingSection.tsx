@@ -12,6 +12,7 @@ import { TradingDesk } from "@/features/trading/TradingDesk";
 import { EnginesPanel } from "@/features/trading/EnginesPanel";
 import { IntelPanel } from "@/features/trading/IntelPanel";
 import { HealthCard } from "@/features/trading/HealthCard";
+import { AgentPanel } from "@/features/trading/AgentPanel";
 
 const INTERVALS: [string, string, string][] = [
   // [yahoo, label, tradingview]
@@ -168,6 +169,8 @@ export function TradingSection() {
       <TradingDesk />
 
       <EnginesPanel />
+
+      <AgentPanel />
 
       <IntelPanel />
 

@@ -36,7 +36,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-ACTIVE_MAX = 2000
+# Sized for months of Discord calls + Quantgress disclosures (~0.5 KB each, ~10 MB at the cap).
+# Measured at 20k: query ~0.4 s, a single put ~0.3 s (full rewrite) — fine off the hot path.
+ACTIVE_MAX = 20000
 TEXT_MAX = 1200
 
 EXTERNAL_SIGNAL_HYPOTHESIS = "external_signal_hypothesis"

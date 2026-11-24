@@ -10,6 +10,7 @@ import { CompanionChart } from "@/features/trading/CompanionChart";
 import { IbkrHud } from "@/features/trading/IbkrHud";
 import { TradingDesk } from "@/features/trading/TradingDesk";
 import { EnginesPanel } from "@/features/trading/EnginesPanel";
+import { IntelPanel } from "@/features/trading/IntelPanel";
 
 const INTERVALS: [string, string, string][] = [
   // [yahoo, label, tradingview]
@@ -164,6 +165,8 @@ export function TradingSection() {
       <TradingDesk />
 
       <EnginesPanel />
+
+      <IntelPanel />
 
       <Card
         title={`Supply / demand & POC · ${data?.symbol ?? t.symbol} · ${t.interval}`}

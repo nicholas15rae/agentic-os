@@ -35,7 +35,7 @@ except ImportError:  # tests / --check without fastapi
     HTTPException = Request = Any  # type: ignore[misc,assignment]
 
 from config import Endpoint, TradingConfig, is_paper_account, load_config, resolve_endpoint  # noqa: E402
-from telemetry import account_block, fx_block, orders_block, pnl_block, positions_block  # noqa: E402
+from telemetry import account_block, fills_block, fx_block, orders_block, pnl_block, positions_block  # noqa: E402
 
 log = logging.getLogger("ibkr_bridge")
 
@@ -77,6 +77,7 @@ class Bridge:
             "pnl": pnl_block(None),
             "positions": [],
             "openOrders": [],
+            "fills": [],
         }
 
     # ── state helpers ────────────────────────────────────────────────
@@ -181,6 +182,7 @@ class Bridge:
             pnl=pnl_block(self._pnl),
             positions=positions_block(ib.portfolio(account)),
             openOrders=orders_block(ib.openTrades()),
+            fills=fills_block(ib.fills()),
         )
 
     def _disconnect(self) -> None:
@@ -207,7 +209,11 @@ def create_app(bridge: Bridge, desk: Any = None):
     @asynccontextmanager
     async def lifespan(_app):
         tasks = [asyncio.create_task(bridge.run()), asyncio.create_task(desk.monitor()),
-                 asyncio.create_task(desk.options_guard_loop()), asyncio.create_task(desk.auto_scan_loop())]
+                 asyncio.create_task(desk.options_guard_loop()), asyncio.create_task(desk.auto_scan_loop()),
+                 asyncio.create_task(desk.intel_loop())]
+        import discord_live
+
+        tasks.append(asyncio.create_task(discord_live.poll_forever(desk.discord, desk.rag, desk.watchlist.symbols, desk.discord_status)))
         import quantgress
 
         if quantgress.api_key():
@@ -346,6 +352,54 @@ def create_app(bridge: Bridge, desk: Any = None):
                                                str(b.get("structure", "single")), bool(b.get("submit")), actor(req))
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
+
+    # ── intel: Discord, outcomes, journal (Phase 4) ──────────────────
+    @app.get("/intel")
+    def intel():
+        return desk.intel_view()
+
+    @app.get("/intel/discord/search")
+    def discord_search(q: str = "", ticker: str | None = None, limit: int = 20):
+        return {"results": desk.discord.search(q[:200], ticker=ticker.upper()[:10] if ticker else None, limit=max(1, min(limit, 100)))}
+
+    @app.post("/intel/discord/import")
+    async def discord_import(req: Request):
+        return await asyncio.to_thread(desk.discord_import, actor(req))
+
+    @app.post("/intel/discord/ingest")
+    async def discord_ingest(req: Request):
+        b = await body(req)
+        msgs = b.get("messages")
+        if not isinstance(msgs, list):
+            raise HTTPException(400, "messages: a list of Discord API message objects")
+        return await asyncio.to_thread(desk.discord_ingest_api, msgs, actor(req))
+
+    @app.post("/intel/discord/poll")
+    async def discord_poll(req: Request):
+        import discord_live
+
+        rep = await asyncio.to_thread(discord_live.poll_once, desk.discord, desk.rag, universe=desk.watchlist.symbols())
+        desk.discord_status.clear()
+        desk.discord_status.update(rep)
+        return rep
+
+    @app.post("/intel/outcomes/score")
+    async def outcomes_score(req: Request):
+        return await desk.score_outcomes(actor(req))
+
+    @app.get("/intel/leaderboards")
+    def leaderboards(horizon: int = 5):
+        if horizon not in (1, 5, 20):
+            raise HTTPException(400, "horizon: 1, 5 or 20")
+        return desk.leaderboards(horizon)
+
+    @app.post("/intel/journal/pass")
+    def journal_pass(req: Request):
+        return desk.journal_pass()
+
+    @app.get("/intel/journal")
+    def journal(limit: int = 30):
+        return {"trades": desk.journal_list(limit)}
 
     @app.post("/engines/b/guard")
     async def engine_b_guard(req: Request):

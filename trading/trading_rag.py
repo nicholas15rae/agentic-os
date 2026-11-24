@@ -40,16 +40,20 @@ ACTIVE_MAX = 2000
 TEXT_MAX = 1200
 
 EXTERNAL_SIGNAL_HYPOTHESIS = "external_signal_hypothesis"
-SIGNAL_CLASSES = (EXTERNAL_SIGNAL_HYPOTHESIS, "market_telemetry", "desk_note")
-EXTERNAL_SOURCES = ("quantgress", "quiver")
+# trade_journal: the desk's own post-trade records (fills, slippage, P&L, post-mortem) — real
+# execution feedback, so it is NOT a hypothesis class.
+SIGNAL_CLASSES = (EXTERNAL_SIGNAL_HYPOTHESIS, "market_telemetry", "desk_note", "trade_journal")
+EXTERNAL_SOURCES = ("quantgress", "quiver", "discord")
 HYPOTHESIS_LABEL = "External Signal Hypothesis"
 HYPOTHESIS_BANNER = f"[{HYPOTHESIS_LABEL} — context only, NOT a trade instruction]"
 # Citation prefix the Trading Agent uses for a hypothesis entry in an OrderIntent.
-HYPOTHESIS_CITATION_PREFIXES = ("quantgress:", "quiver:", "hypothesis:")
+HYPOTHESIS_CITATION_PREFIXES = ("quantgress:", "quiver:", "discord:", "hypothesis:")
 
 AGENT_DIRECTIVE = (
-    "The entries below tagged 'External Signal Hypothesis' are third-party disclosures "
-    "(political and insider trades), filed days or weeks after the trade. Treat them as "
+    "The entries below tagged 'External Signal Hypothesis' are third-party inputs: "
+    "political and insider disclosures (filed days or weeks after the trade) and calls "
+    "posted in Discord trading chats (opinions, often biased, scored after the fact in "
+    "the outcome table — check the author's / channel's track record). Treat them as "
     "hypotheses to test, never as orders: a disclosure is not a reason to trade by itself. "
     "Before proposing an OrderIntent, cross-reference each one with current market "
     "telemetry (price trend, volume, spread, volatility, news) and cite that telemetry "
@@ -162,6 +166,51 @@ class TradingRag:
             self._archive(overflow)
             self._save()
             return e
+
+    def put_many(self, items: Iterable[tuple[str, Iterable[str], str | None, int | None]]) -> int:
+        """Batch insert (text, tags, entry_id, at_ms) with ONE file rewrite. Same rules as put().
+        Returns how many were new. Bad items are skipped, not fatal (bulk imports)."""
+        added = 0
+        with self._lock:
+            existing = {e.id for e in self._active}
+            archived = self._archived_ids()
+            for text, tags, entry_id, at in items:
+                try:
+                    clean = validate_tags(tags)
+                except TagError:
+                    continue
+                text = str(text).strip()
+                if not text:
+                    continue
+                if f"class:{EXTERNAL_SIGNAL_HYPOTHESIS}" in clean and not text.startswith(HYPOTHESIS_BANNER):
+                    text = f"{HYPOTHESIS_BANNER} {text}"
+                text = text[:TEXT_MAX]
+                eid = entry_id or hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+                if eid in existing or eid in archived:
+                    continue
+                self._active.append(Entry(id=eid, text=text, tags=clean, at=at if at is not None else int(time.time() * 1000)))
+                existing.add(eid)
+                added += 1
+            if added:
+                overflow: list[Entry] = []
+                if len(self._active) > ACTIVE_MAX:
+                    self._active.sort(key=lambda x: max(x.at, x.last_hit))
+                    overflow, self._active = self._active[:-ACTIVE_MAX], self._active[-ACTIVE_MAX:]
+                self._archive(overflow)
+                self._save()
+        return added
+
+    def _archived_ids(self) -> set[str]:
+        p = self.root / "archive.jsonl"
+        ids: set[str] = set()
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        ids.add(json.loads(line)["id"])
+                    except (ValueError, KeyError):
+                        continue
+        return ids
 
     def _archived(self, eid: str) -> bool:
         p = self.root / "archive.jsonl"

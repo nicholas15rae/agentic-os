@@ -78,7 +78,9 @@ class MarketData:
             return hit[1]
         ib = await self._ensure()
         c = await self.stock(symbol, currency)
-        bars = await asyncio.wait_for(ib.reqHistoricalDataAsync(c, "", f"{int(days * 1.5)} D", "1 day", "TRADES", useRTH=True, formatDate=1), 30)
+        # IBKR wants "Y" units past a year; "D" requests are capped well below that.
+        duration = f"{int(days * 1.5)} D" if days * 1.5 <= 365 else f"{math.ceil(days / 252) + 1} Y"
+        bars = await asyncio.wait_for(ib.reqHistoricalDataAsync(c, "", duration, "1 day", "TRADES", useRTH=True, formatDate=1), 60)
         out = [{"date": str(b.date), "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume} for b in bars or []]
         self._bars[key] = (time.time(), out)
         return out

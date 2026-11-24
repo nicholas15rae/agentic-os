@@ -97,6 +97,7 @@ def offline_status(reason: str) -> dict:
         "pnl": {"daily": None, "unrealized": None, "realized": None},
         "positions": [],
         "openOrders": [],
+        "fills": [],
     }
 
 
@@ -179,6 +180,32 @@ def trading_signals_ingest(request: Request):
 
 
 ENGINE_POSTS = {"a/scan", "a/watchlist", "a/auto", "b/propose", "b/guard"}
+INTEL_POSTS = {"discord/import", "discord/ingest", "discord/poll", "outcomes/score", "journal/pass"}
+INTEL_GETS = {"", "discord/search", "leaderboards", "journal"}
+
+
+@router.get("/intel")
+@router.get("/intel/{path:path}")
+def trading_intel_get(request: Request, path: str = ""):
+    if path not in INTEL_GETS:
+        raise HTTPException(404, "unknown intel view")
+    qs = urllib.parse.urlencode([(k, v) for k, v in request.query_params.items() if k in ("q", "ticker", "limit", "horizon")])
+    try:
+        return _bridge_get(f"/intel{'/' + path if path else ''}{'?' + qs if qs else ''}", timeout=10.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+@router.post("/intel/{path:path}")
+async def trading_intel_post(path: str, request: Request):
+    """Discord import / relay ingest / poll, outcome scoring, journal pass. Read-only for the broker."""
+    if path not in INTEL_POSTS:
+        raise HTTPException(404, "unknown intel action")
+    body = await _json(request)
+    try:
+        return _bridge_post(f"/intel/{path}", body, _actor(request), timeout=300.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
 
 
 @router.get("/engines")

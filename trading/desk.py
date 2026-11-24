@@ -40,7 +40,10 @@ from fx import FxSource, merged_rates
 from intents import IntentError, OrderIntent, RiskLimits, load_limits, parse_intent
 from quantgress import last_report as quantgress_last_report
 from trading_rag import TradingRag
+import journal as jr
 import options as opt
+import outcomes
+from discord_ingest import DiscordStore, import_inbox
 from engines.equities_commodities import EngineA, Watchlist
 from engines.options_engine import EngineB, flatten_plan
 from security_detail import NY, Context, Decision, evaluate, market_stats_from_bars, regular_hours_fallback, session_open_from_hours
@@ -66,6 +69,15 @@ CREATE TABLE IF NOT EXISTS intents (
   updated REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS intents_status ON intents(status, updated);
+CREATE TABLE IF NOT EXISTS journal (
+  intent_id TEXT PRIMARY KEY,
+  closed_at REAL NOT NULL,
+  symbol TEXT NOT NULL,
+  pnl REAL NOT NULL,
+  outcome TEXT NOT NULL,
+  record TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS journal_closed ON journal(closed_at);
 """
 
 QuoteFn = Callable[[OrderIntent], Awaitable[tuple[dict[str, float | None] | None, bool | None]]]
@@ -117,6 +129,10 @@ class Desk:
         self.watchlist = Watchlist(self.d / "watchlist.json")
         self.engine_a = EngineA(self.md, self.watchlist, clock=clock)
         self.engine_b = EngineB(self.md, clock=clock)
+        # Phase 4: Discord intel store (inside the isolated trading_rag folder) + live status.
+        self.discord = DiscordStore(self.d / "trading_rag" / "discord.db")
+        self.discord_status: dict[str, Any] = {}
+        self.last_scoring: dict[str, Any] | None = None
         self._lock = asyncio.Lock()
         self._db = self.d / "desk.db"
         with self._conn() as c:
@@ -613,6 +629,122 @@ class Desk:
             except Exception as e:  # noqa: BLE001
                 log.warning("options guard: %s", e)
             await asyncio.sleep(OPTIONS_GUARD_S)
+
+    # ── Phase 4: Discord intel, outcome scoring, trade journal ──────
+    def discord_import(self, actor: str) -> dict[str, Any]:
+        rep = import_inbox(self.discord, self.rag, self.d / "discord" / "inbox", universe=self.watchlist.symbols())
+        self.audit.append("discord_import", {"files": [{k: f.get(k) for k in ("file", "kept", "calls", "dup", "rag", "error")} for f in rep["files"]]},
+                          ref="discord", verdict="OK" if all("error" not in f for f in rep["files"]) else "PARTIAL", actor=actor)
+        return rep
+
+    def discord_ingest_api(self, messages: list[dict[str, Any]], actor: str) -> dict[str, Any]:
+        """Relay path (n8n etc.): Discord API message objects for the configured channels."""
+        from discord_ingest import allowed_channels, parse_api_message
+
+        parsed = []
+        for m in messages[:500]:
+            try:
+                parsed.append(parse_api_message(m))
+            except (KeyError, ValueError):
+                continue
+        rep = self.discord.ingest(parsed, via="relay", rag=self.rag, universe=self.watchlist.symbols(), channels=allowed_channels() or None)
+        self.audit.append("discord_relay", {k: rep[k] for k in ("seen", "kept", "calls", "dup", "rag")}, ref="discord", verdict="OK", actor=actor)
+        return rep
+
+    async def score_outcomes(self, actor: str) -> dict[str, Any]:
+        rep = await outcomes.score_pending(self.discord, self.md, now_ms=int(self.clock() * 1000))
+        self.last_scoring = rep
+        self.audit.append("outcomes_scored", {k: rep[k] for k in ("calls", "tickers", "scored", "rows")}, ref="discord", verdict="OK", actor=actor)
+        return rep
+
+    def leaderboards(self, horizon: int = 5) -> dict[str, Any]:
+        rows = self.discord.outcome_rows()
+        return {"horizon": horizon, "authors": outcomes.leaderboard(rows, horizon=horizon, by="author")[:25],
+                "channels": outcomes.leaderboard(rows, horizon=horizon, by="channel", min_calls=1)[:10]}
+
+    def journal_pass(self) -> dict[str, Any]:
+        """Close out finished trades: journal record, trading_rag write-back, Financer P&L roll-up."""
+        snap = self.bridge.snapshot()
+        fills = snap.get("fills") or []
+        rep: dict[str, Any] = {"closed": []}
+        if not fills:
+            return rep
+        with self._conn() as c:
+            ids = [r[0] for r in c.execute("SELECT intent_id FROM intents WHERE status IN ('submitted','closed_stop')").fetchall()]
+        for iid in ids:
+            row = self._row(iid)
+            rec = jr.build_record(row, fills)
+            if rec is None:
+                continue
+            with self._conn() as c:
+                c.execute("INSERT OR IGNORE INTO journal VALUES (?,?,?,?,?,?)",
+                          (iid, rec["closedAt"], rec["symbol"], rec["pnl"], rec["outcome"], json.dumps(rec, default=str)))
+            self._set_status(iid, "closed", {**(row.get("result") or {}), "journal": {"pnl": rec["pnl"], "exitReason": rec["exitReason"]}})
+            text, tags, eid = jr.rag_entry(rec)
+            try:
+                self.rag.put(text, tags, entry_id=eid, now_ms=int(rec["closedAt"] * 1000))
+            except Exception as e:  # noqa: BLE001 — the journal row is the source of truth
+                log.warning("journal rag write %s: %s", iid, e)
+            self.audit.append("trade_closed", {k: rec[k] for k in ("symbol", "pnl", "rMultiple", "exitReason", "outcome", "slippage")},
+                              ref=iid, verdict=rec["outcome"].upper(), actor="journal")
+            rep["closed"].append({"intentId": iid, "pnl": rec["pnl"], "exitReason": rec["exitReason"]})
+        if rep["closed"]:
+            rep["financer"] = self.report_pnl_to_financer()
+        return rep
+
+    def report_pnl_to_financer(self) -> dict[str, Any]:
+        """Today's realized P&L (journal, converted to base) through the Financer-only comms contract."""
+        snap = self.bridge.snapshot()
+        base = (snap.get("account") or {}).get("currency") or "USD"
+        start = ny_midnight(self.clock())
+        with self._conn() as c:
+            rows = c.execute("SELECT record FROM journal WHERE closed_at >= ?", (start,)).fetchall()
+        recs = [json.loads(r[0]) for r in rows]
+        fx_rates = {**(snap.get("fx") or {})}
+        realized = 0.0
+        for r in recs:
+            rate = 1.0 if r["currency"] == base else fx_rates.get(r["currency"]) or (self.fx.rate_to_base(r["currency"], base) if self.fx else None)
+            realized += r["pnl"] * (rate or 0.0)
+        day = datetime.fromtimestamp(self.clock(), NY).strftime("%Y-%m-%d")
+        env = {"msg_id": f"pnl-{day.replace('-', '')}-{len(recs)}", "from": "trading", "to": "financer", "kind": "pnl_report",
+               "payload": {"date": day, "realized_base": round(realized, 2),
+                           "unrealized_base": float((snap.get("pnl") or {}).get("unrealized") or 0.0), "trades": len(recs)}}
+        return self.handle_comms(env, "journal")
+
+    def journal_list(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT record FROM journal ORDER BY closed_at DESC LIMIT ?", (max(1, min(limit, 200)),)).fetchall()
+        out = []
+        for (r,) in rows:
+            rec = json.loads(r)
+            rec.pop("entryFills", None)
+            rec.pop("exitFills", None)
+            out.append(rec)
+        return out
+
+    def intel_view(self) -> dict[str, Any]:
+        from discord_live import configured
+
+        with self._conn() as c:
+            agg = c.execute("SELECT COUNT(*), COALESCE(SUM(pnl),0), SUM(outcome='win') FROM journal").fetchone()
+        return {"discord": {**self.discord.stats(), "live": configured(), "liveStatus": self.discord_status,
+                            "inbox": str(self.d / "discord" / "inbox")},
+                "lastScoring": self.last_scoring, "leaderboards": self.leaderboards(),
+                "journal": {"trades": agg[0], "pnl": agg[1], "wins": agg[2] or 0, "recent": self.journal_list(10)},
+                "rag": self.rag.stats()}
+
+    async def intel_loop(self) -> None:
+        """Journal every minute; outcome scoring every 6 hours (cheap when nothing is due)."""
+        last_score = 0.0
+        while True:
+            try:
+                self.journal_pass()
+                if self.clock() - last_score > 6 * 3600:
+                    last_score = self.clock()
+                    await self.score_outcomes("outcomes:auto")
+            except Exception as e:  # noqa: BLE001
+                log.warning("intel loop: %s", e)
+            await asyncio.sleep(60)
 
     # ── view for the HUD ─────────────────────────────────────────────
     def view(self) -> dict[str, Any]:

@@ -130,3 +130,24 @@ def orders_block(trades: Iterable[Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def fills_block(fills: Iterable[Any]) -> list[dict[str, Any]]:
+    """IBKR executions (+ commission reports) for the trade journal. orderRef ties a fill to its intent."""
+    rows = []
+    for f in fills:
+        ex, cr = f.execution, getattr(f, "commissionReport", None)
+        t = getattr(f, "time", None) or getattr(ex, "time", None)
+        rows.append({
+            **_contract(f.contract),
+            "execId": getattr(ex, "execId", ""),
+            "orderId": getattr(ex, "orderId", 0),
+            "orderRef": getattr(ex, "orderRef", "") or "",
+            "side": getattr(ex, "side", ""),            # BOT / SLD
+            "shares": num(getattr(ex, "shares", None)),
+            "price": num(getattr(ex, "price", None)),
+            "time": t.timestamp() if hasattr(t, "timestamp") else None,
+            "commission": num(getattr(cr, "commission", None)) if cr else None,
+            "realizedPnl": num(getattr(cr, "realizedPNL", None)) if cr else None,
+        })
+    return rows

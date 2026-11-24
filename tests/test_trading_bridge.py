@@ -138,6 +138,9 @@ class FakeIB:
     def openTrades(self):
         return []
 
+    def fills(self):
+        return []
+
     def disconnect(self):
         self.disconnected = True
 

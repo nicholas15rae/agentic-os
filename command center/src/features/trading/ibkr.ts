@@ -225,6 +225,77 @@ export const enginesApi = {
   guard: () => gateway<{ flatten: unknown[]; stops: unknown[]; errors: string[]; skipped?: string }>("/api/trading/engines/b/guard", { method: "POST", body: "{}", timeoutMs: 60_000 }),
 };
 
+export interface LeaderRow {
+  id: string;
+  name: string;
+  calls: number;
+  hits: number;
+  hitRate: number;
+  shrunkHitRate: number;
+  avgRet: number;
+  medianRet: number;
+  horizon: number;
+}
+
+export interface JournalRecord {
+  intentId: string;
+  symbol: string;
+  secType: string;
+  source: string;
+  action: string;
+  units: number;
+  currency: string;
+  entryPrice: number;
+  exitPrice: number;
+  slippage: number | null;
+  pnl: number;
+  rMultiple: number | null;
+  holdHours: number;
+  exitReason: string;
+  outcome: "win" | "loss" | "flat";
+  postMortem: string;
+  closedAt: number;
+  hypothesisCitations: string[];
+}
+
+export interface IntelView {
+  discord: {
+    messages: number;
+    calls: number;
+    from: number | null;
+    to: number | null;
+    scoredCalls: number;
+    sources: { channelId: string; guild: string; channel: string; messages: number; lastPoll: number | null }[];
+    live: { token: boolean; channels: string[]; pollSeconds: number };
+    liveStatus: { at?: number; skipped?: string; channels?: { channelId: string; channel?: string; kept?: number; error?: string }[] };
+    inbox: string;
+  };
+  lastScoring: { calls: number; scored: number; rows: number; at: string; errors: string[] } | null;
+  leaderboards: { horizon: number; authors: LeaderRow[]; channels: LeaderRow[] };
+  journal: { trades: number; pnl: number; wins: number; recent: JournalRecord[] };
+  rag: { active: number; archived: number; byClass: Record<string, number> };
+}
+
+export interface DiscordHit {
+  key: string;
+  ts: number;
+  channel: string;
+  author: string;
+  content: string;
+  tickers: string[];
+  direction: string | null;
+}
+
+export const intelApi = {
+  view: () => gateway<IntelView>("/api/trading/intel", { timeoutMs: 10_000 }),
+  search: (q: string, ticker?: string) =>
+    gateway<{ results: DiscordHit[] }>(`/api/trading/intel/discord/search?q=${encodeURIComponent(q)}${ticker ? `&ticker=${encodeURIComponent(ticker)}` : ""}&limit=25`, { timeoutMs: 10_000 }),
+  leaderboards: (horizon: number) => gateway<IntelView["leaderboards"]>(`/api/trading/intel/leaderboards?horizon=${horizon}`),
+  importInbox: () => gateway<{ files: { file: string; kept?: number; calls?: number; dup?: number; error?: string }[]; channelsFilter: string[] | null }>("/api/trading/intel/discord/import", { method: "POST", body: "{}", timeoutMs: 300_000 }),
+  poll: () => gateway<IntelView["discord"]["liveStatus"]>("/api/trading/intel/discord/poll", { method: "POST", body: "{}", timeoutMs: 60_000 }),
+  score: () => gateway<NonNullable<IntelView["lastScoring"]>>("/api/trading/intel/outcomes/score", { method: "POST", body: "{}", timeoutMs: 300_000 }),
+};
+
 const post = <T>(path: string, body: unknown = {}, timeoutMs = 20_000) => gateway<T>(path, { method: "POST", body: JSON.stringify(body), timeoutMs });
 
 export const tradingApi = {

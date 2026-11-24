@@ -50,7 +50,19 @@ export interface SettingsState {
   micDeviceId: string;
   /** Printed on invoices. Stays on this device + the local gateway. */
   business: { name: string; address: string; email: string; phone: string; hstNumber: string; province: string; hstRate: number; currency: string };
-  trading: { symbol: string; tvSymbol: string; interval: string; range: string; showPoc: boolean; showZones: boolean; showValueArea: boolean };
+  trading: {
+    symbol: string;
+    tvSymbol: string;
+    interval: string;
+    range: string;
+    showPoc: boolean;
+    showZones: boolean;
+    showValueArea: boolean;
+    /** Quick-switch tickers (Yahoo format). Optional: older persisted settings lack it. */
+    watchlist?: string[];
+    /** Top chart feed. "ibkr" = lightweight chart fed by IBKR bars (bridge must be connected). */
+    chartSource?: "tradingview" | "ibkr";
+  };
   /** `listenProfile` picks how patient Brainstorm Listen Mode is before it ends a thought (see capture.ts LISTEN_PROFILES). */
   brainstorm: { autoOrganizeEvery: number; listenProfile: ListenProfile };
   /** The OS's name ("Tony"). Mirrored from Rust os.json; drives headers, badges, wake words. */
@@ -116,7 +128,17 @@ const defaults: Omit<SettingsState, "set"> = {
   gatewayUrl: defaultGateway(),
   micDeviceId: "",
   business: { name: "", address: "", email: "", phone: "", hstNumber: "", province: "ON", hstRate: 13, currency: "CAD" },
-  trading: { symbol: "SPY", tvSymbol: "AMEX:SPY", interval: "5m", range: "5d", showPoc: true, showZones: true, showValueArea: true },
+  trading: {
+    symbol: "SPY",
+    tvSymbol: "AMEX:SPY",
+    interval: "5m",
+    range: "5d",
+    showPoc: true,
+    showZones: true,
+    showValueArea: true,
+    watchlist: ["SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "DBC"],
+    chartSource: "tradingview",
+  },
   brainstorm: { autoOrganizeEvery: 6, listenProfile: "relaxed" },
   osName: "Tony",
   wakeWords: ["hey tony", "yo tony", "tony"],

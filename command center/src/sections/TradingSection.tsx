@@ -7,6 +7,7 @@ import { cc, type MarketData } from "@/lib/cc-api";
 import { useSettings } from "@/stores/settings";
 import { supplyDemandZones, toTradingView, volumeProfile } from "@/features/trading/analysis";
 import { CompanionChart } from "@/features/trading/CompanionChart";
+import { IbkrHud } from "@/features/trading/IbkrHud";
 
 const INTERVALS: [string, string, string][] = [
   // [yahoo, label, tradingview]
@@ -17,18 +18,34 @@ const INTERVALS: [string, string, string][] = [
   ["60m", "1h", "60"],
   ["1d", "1D", "D"],
 ];
+const DEFAULT_WATCHLIST = ["SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "DBC"];
 const RANGES = ["1d", "5d", "1mo", "3mo", "6mo", "1y"];
 
 /**
- * Day Trading — research only. No broker connection, no order entry.
- * TradingView widgets + news on top; below, a companion chart fed by live
- * candles from the local gateway with Supply/Demand zones and the POC.
+ * Day Trading. TradingView widgets + news on top, the IBKR paper-account HUD
+ * (read-only telemetry from trading/ibkr_bridge.py via /api/trading/*), then a
+ * companion chart fed by candles from the local gateway with S/D zones and POC.
+ * No order entry here yet — that arrives behind the Security Detail (Phase 2).
  */
 export function TradingSection() {
   const t = useSettings((s) => s.trading);
   const set = useSettings((s) => s.set);
   const up = (patch: Partial<typeof t>) => set({ trading: { ...t, ...patch } });
   const [symbolInput, setSymbolInput] = useState(t.symbol);
+  const [tvInput, setTvInput] = useState(t.tvSymbol);
+  useEffect(() => setTvInput(t.tvSymbol), [t.tvSymbol]);
+  const watchlist = t.watchlist ?? DEFAULT_WATCHLIST;
+  const chartSource = t.chartSource ?? "tradingview";
+  const pick = (s: string) => {
+    setSymbolInput(s);
+    up({ symbol: s, tvSymbol: toTradingView(s) });
+  };
+  // Commit the TradingView override on Enter / blur only — every keystroke would rebuild the widget.
+  const commitTv = () => {
+    const v = tvInput.trim().toUpperCase();
+    if (v && v !== t.tvSymbol) up({ tvSymbol: v });
+    else setTvInput(t.tvSymbol);
+  };
   const [data, setData] = useState<MarketData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,15 +90,17 @@ export function TradingSection() {
           onSubmit={(e) => {
             e.preventDefault();
             const s = symbolInput.trim().toUpperCase();
-            if (s) up({ symbol: s, tvSymbol: toTradingView(s) });
+            if (s) pick(s);
           }}
         >
           <Input value={symbolInput} onChange={(e) => setSymbolInput(e.target.value)} className="!h-9 !w-36 !py-1 font-mono text-[13px] uppercase" aria-label="Ticker" placeholder="SPY, ES=F, BTC-USD" />
           <button className="pill-primary !h-9 text-xs">Load</button>
         </form>
         <Input
-          value={t.tvSymbol}
-          onChange={(e) => up({ tvSymbol: e.target.value.toUpperCase() })}
+          value={tvInput}
+          onChange={(e) => setTvInput(e.target.value.toUpperCase())}
+          onBlur={commitTv}
+          onKeyDown={(e) => e.key === "Enter" && commitTv()}
           className="!h-9 !w-40 !py-1 font-mono text-[12px]"
           aria-label="TradingView symbol"
           title="TradingView symbol (auto-mapped; override if needed)"
@@ -98,17 +117,46 @@ export function TradingSection() {
             <option key={r}>{r}</option>
           ))}
         </Select>
-        <span className="ml-auto text-[11px] text-ink-3">Research only — no broker connection.</span>
+        <span className="ml-auto text-[11px] text-ink-3">IBKR paper · read-only — no order entry.</span>
+      </div>
+
+      <div className="glass flex flex-wrap items-center gap-1.5 rounded-[18px] p-2.5" aria-label="Watchlist">
+        {watchlist.map((s) => (
+          <Chip key={s} active={t.symbol === s} onClick={() => pick(s)}>
+            {s}
+          </Chip>
+        ))}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.7fr_1fr]">
-        <Card title={`TradingView · ${t.tvSymbol}`} className="!p-3">
-          <TvChart symbol={t.tvSymbol} interval={tvInterval} />
+        <Card
+          title={chartSource === "tradingview" ? `TradingView · ${t.tvSymbol}` : `IBKR · ${t.symbol}`}
+          className="!p-3"
+          action={
+            <div className="flex gap-1">
+              <Chip active={chartSource === "tradingview"} onClick={() => up({ chartSource: "tradingview" })}>
+                TradingView
+              </Chip>
+              <Chip active={chartSource === "ibkr"} onClick={() => up({ chartSource: "ibkr" })}>
+                IBKR bars
+              </Chip>
+            </div>
+          }
+        >
+          {chartSource === "tradingview" ? (
+            <TvChart symbol={t.tvSymbol} interval={tvInterval} />
+          ) : (
+            <div className="grid h-[440px] place-items-center px-6 text-center text-sm text-ink-3">
+              IBKR-fed chart (lightweight-charts) arrives once the bridge streams bars. Switch back to TradingView for now.
+            </div>
+          )}
         </Card>
         <Card title="Market news" className="!p-3">
           <iframe key={newsSrc} src={newsSrc} title="Market news" className="h-[440px] w-full rounded-[12px] border-0" loading="lazy" />
         </Card>
       </div>
+
+      <IbkrHud />
 
       <Card
         title={`Supply / demand & POC · ${data?.symbol ?? t.symbol} · ${t.interval}`}

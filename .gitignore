@@ -47,3 +47,6 @@ memory/tony/
 # Memory Scrolls (Phase 3): cold archive fallback root and local compaction state / scroll history
 /archive/
 /data/memory-scrolls/
+
+# IBKR bridge runtime logs
+data/trading/

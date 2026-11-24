@@ -78,6 +78,11 @@ os_api.init()
 for _r in (os_api.play_router, os_api.pipeline_router, os_api.comms_router, os_api.inbox_router, os_api.tasks_router, os_api.models_router, os_api.spotify_router):
     app.include_router(_r)
 
+# IBKR paper trading: proxies the separate trading/ibkr_bridge.py process (loopback only).
+import trading_api  # noqa: E402
+
+app.include_router(trading_api.router)
+
 # No-cache for dashboard assets — SPA JS is loaded on demand and updated
 # frequently during development (v4.0). Prevents stale-cached pages.
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -1950,5 +1955,9 @@ if __name__ == "__main__":
         sk.bind((h, args.port))
         socks.append(sk)
     print(f"[gateway] listening on {', '.join(f'{h}:{args.port}' for h in hosts)}")
+    try:
+        print(f"[gateway] {trading_api.autostart_bridge()}")
+    except Exception as _e:  # never let the trading bridge block the gateway
+        print(f"[gateway] trading bridge autostart failed: {_e}")
     config = uvicorn.Config(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
     uvicorn.Server(config).run(sockets=socks)

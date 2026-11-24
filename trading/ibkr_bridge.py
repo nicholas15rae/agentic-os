@@ -59,6 +59,9 @@ class Bridge:
         self._sleep = sleep
         self.ib: Any = None
         self._pnl: Any = None
+        # Authoritative open-order list from the last reqAllOpenOrders: client 11 never hears about
+        # cancels made by other clients (executor 13, kill 19), so its openTrades() keeps dead orders.
+        self._open_trades: list[Any] | None = None
         self._stop = asyncio.Event()
         self.attempts = 0
         self.state: dict[str, Any] = {
@@ -169,7 +172,8 @@ class Bridge:
 
     async def _refresh_orders(self) -> None:
         try:
-            await asyncio.wait_for(self.ib.reqAllOpenOrdersAsync(), 5)
+            trades = await asyncio.wait_for(self.ib.reqAllOpenOrdersAsync(), 5)
+            self._open_trades = list(trades or [])
         except Exception as e:  # noqa: BLE001 — orders are best-effort telemetry
             log.debug("open orders refresh failed: %s", e)
 
@@ -181,7 +185,7 @@ class Bridge:
             fx=fx_block(values, account),
             pnl=pnl_block(self._pnl),
             positions=positions_block(ib.portfolio(account)),
-            openOrders=orders_block(ib.openTrades()),
+            openOrders=orders_block(self._open_trades if self._open_trades is not None else ib.openTrades()),
             fills=fills_block(ib.fills()),
         )
 
@@ -193,6 +197,7 @@ class Bridge:
                 pass
         self.ib = None
         self._pnl = None
+        self._open_trades = None
 
 
 # ── HTTP surface (loopback only; the gateway proxies /api/trading/*) ──────

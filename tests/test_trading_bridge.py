@@ -169,6 +169,25 @@ class BridgeStateTests(unittest.TestCase):
         self.assertEqual(b.state["account"]["netLiquidation"], 100.0)
         self.assertEqual(b.state["pnl"]["realized"], 3.0)
 
+    def test_open_orders_follow_the_tws_snapshot_not_stale_local_trades(self):
+        """Client 11 never hears about cancels made by clients 13/19 (seen live after the kill switch:
+        the desk kept showing a cancelled bracket and an old flatten order). The reqAllOpenOrders
+        snapshot is what TWS really has working."""
+        c = NS(symbol="SPY", localSymbol="SPY", secType="STK", currency="USD", conId=756733)
+
+        def tr(oid, otype):
+            return NS(contract=c, order=NS(orderId=oid, permId=oid, clientId=19, action="SELL", totalQuantity=1, orderType=otype,
+                                           lmtPrice=0.0, auxPrice=0.0, tif="DAY", orderRef=""), orderStatus=NS(status="PreSubmitted", filled=0, remaining=1))
+        ib = FakeIB(live_ticks=3)
+        ib.openTrades = lambda: [tr(15, "STP"), tr(16, "LMT"), tr(17, "MKT"), tr(20, "MKT")]  # stale local view
+
+        async def snapshot():
+            return [tr(20, "MKT")]  # what TWS actually has open
+        ib.reqAllOpenOrdersAsync = snapshot
+        b = Bridge(config_loader=cfg, ib_factory=lambda: ib)
+        run_bridge(b, 2)
+        self.assertEqual([o["orderId"] for o in b.state["openOrders"]], [20])
+
     def test_drop_goes_to_reconnecting_and_retries(self):
         made = []
         b = Bridge(config_loader=cfg, ib_factory=lambda: made.append(FakeIB(live_ticks=1)) or made[-1])

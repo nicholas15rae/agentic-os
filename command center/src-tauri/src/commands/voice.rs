@@ -911,7 +911,7 @@ pub async fn tts_synthesize(
 }
 
 /// Kokoro / XTTS on this machine.
-async fn synth_local(state: &DispatchState, p: &Provider, text: &str, voice: Option<String>) -> Result<Vec<u8>, String> {
+pub(crate) async fn synth_local(state: &DispatchState, p: &Provider, text: &str, voice: Option<String>) -> Result<Vec<u8>, String> {
     let key = state.key_for(p)?;
     let voice = voice.or_else(|| p.voice.clone()).unwrap_or_else(|| "af_bella".into());
 

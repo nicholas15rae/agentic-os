@@ -31,6 +31,20 @@ export async function native<T>(cmd: string, args?: Record<string, unknown>): Pr
 /** Typed contract for every Rust command exposed in src-tauri/src/lib.rs. Keep in sync. */
 export interface NativeCommands {
   system_stats: { args: undefined; result: SystemStats };
+  // ── Language Hub (commands/language_hub.rs; types in features/language/contract.ts) ──
+  lang_status: { args: undefined; result: import("@/features/language/contract").LangStatus };
+  lang_library_list: { args: undefined; result: import("@/features/language/contract").LangEntry[] };
+  lang_library_save: { args: { entry: import("@/features/language/contract").NewLangEntry }; result: import("@/features/language/contract").LangEntry };
+  lang_library_update: { args: { id: string; patch: import("@/features/language/contract").LangEntryPatch }; result: import("@/features/language/contract").LangEntry };
+  /** Permanent delete; returns how many rows went. */
+  lang_library_delete: { args: { ids: string[] }; result: number };
+  lang_tracks_list: { args: undefined; result: import("@/features/language/contract").LangTrack[] };
+  lang_track_save: { args: { track: import("@/features/language/contract").LangTrack }; result: import("@/features/language/contract").LangTrack };
+  /** Kokoro mp3; rejects with UNSUPPORTED_LANG / NO_LOCAL_TTS so the caller uses Web Speech. */
+  lang_tts: { args: { text: string; lang: string }; result: ArrayBuffer };
+  lang_llm_json: { args: { system: string; prompt: string }; result: unknown };
+  /** Stops the on-demand multilingual Whisper sidecar; true if one was running. */
+  lang_release: { args: undefined; result: boolean };
   secret_set: { args: { provider: string; value: string; slot?: "api" }; result: void };
   secret_status: { args: { providers: string[] }; result: Record<string, boolean> };
   secret_delete: { args: { provider: string; slot?: "api" }; result: void };
@@ -278,9 +292,9 @@ export interface NativeCommands {
  * Send raw bytes to a Rust command that takes `tauri::ipc::Request`
  * (WAV → stt_transcribe, a voice file → tts_voice_upload).
  */
-export async function nativeRaw<T>(cmdName: "stt_transcribe" | "tts_voice_upload", body: Uint8Array, headers?: Record<string, string>): Promise<T> {
+export async function nativeRaw<T>(cmdName: "stt_transcribe" | "tts_voice_upload" | "lang_stt", body: Uint8Array, headers?: Record<string, string>): Promise<T> {
   // Phase 2 Part B: no audio leaves the webview for Whisper while the mic is locked off.
-  if (cmdName === "stt_transcribe" && !micEnabled()) throw new MicLockedError();
+  if ((cmdName === "stt_transcribe" || cmdName === "lang_stt") && !micEnabled()) throw new MicLockedError();
   if (!isTauri()) throw new Error(`native command "${cmdName}" is desktop-only`);
   const { invoke } = await import("@tauri-apps/api/core");
   return timed(cmdName, invoke<T>(cmdName, body, headers ? { headers } : undefined));

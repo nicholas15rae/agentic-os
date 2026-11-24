@@ -83,6 +83,11 @@ import trading_api  # noqa: E402
 
 app.include_router(trading_api.router)
 
+# Language Hub: the phone's path to the local phrase library + Whisper/Kokoro (self-contained store).
+import language_hub_api  # noqa: E402
+
+app.include_router(language_hub_api.router)
+
 # No-cache for dashboard assets — SPA JS is loaded on demand and updated
 # frequently during development (v4.0). Prevents stale-cached pages.
 from starlette.middleware.base import BaseHTTPMiddleware

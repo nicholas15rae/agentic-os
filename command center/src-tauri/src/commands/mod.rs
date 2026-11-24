@@ -26,6 +26,7 @@ pub mod gmail;
 pub mod handoff_cues;
 pub mod hygiene;
 pub mod integrity;
+pub mod language_hub;
 pub mod instagram;
 pub mod introspect;
 pub mod job_abort;

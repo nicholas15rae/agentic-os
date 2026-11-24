@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { CandlestickChart, Cloud, Cpu, FlaskConical, Layers, Lock, MessagesSquare, MicOff, Network, Phone, ShieldCheck, ShieldOff } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { CandlestickChart, Cloud, Cpu, FlaskConical, Languages, Layers, Lock, MessagesSquare, MicOff, Network, Phone, ShieldCheck, ShieldOff } from "lucide-react";
 import { gateway } from "@/lib/gateway";
 import { cc, type MarketData } from "@/lib/cc-api";
 import { cmd, isTauri, type ComputeMode } from "@/lib/platform";
@@ -23,18 +23,21 @@ import { MicLockBadge } from "@/features/voice/MicLockBadge";
 import { hudMicChips } from "@/features/voice/mic-indicator";
 import { applyOptimistic, type HudCommand, type OsStatus } from "./hud-status";
 
+const LanguageHub = lazy(() => import("@/features/language/LanguageHub").then((m) => ({ default: m.LanguageHub })));
+
 /**
  * Galaxy S22 "Lockdown Command Center" — /mobile-hud (→ /cc/?view=hud).
- * Four tabs, nothing else: Tony & pipelines, Comms, Markets, Play Place & tasks.
+ * Five tabs, nothing else: Tony & pipelines, Comms, Markets, Play Place & tasks, Language Hub.
  * `?mode=lockdown` = pure-black OLED, full screen on first tap; pair with a
  * Samsung Modes & Routines mode that pauses Instagram & co (see HANDOFF.md).
  */
-type Tab = "tony" | "comms" | "markets" | "play";
+type Tab = "tony" | "comms" | "markets" | "play" | "language";
 const TABS: { id: Tab; label: string; icon: typeof Phone }[] = [
   { id: "tony", label: "Tony", icon: MessagesSquare },
   { id: "comms", label: "Comms", icon: Phone },
   { id: "markets", label: "Markets", icon: CandlestickChart },
   { id: "play", label: "Play Place", icon: FlaskConical },
+  { id: "language", label: "Language", icon: Languages },
 ];
 
 
@@ -91,7 +94,7 @@ function useHudModes(hud: Hud): { modes: TonyMode[]; activeId: string; name: str
 export function MobileHud() {
   const params = useMemo(() => new URLSearchParams(location.search), []);
   const lockdown = params.get("mode") === "lockdown";
-  const [tab, setTab] = useState<Tab>(() => (["tony", "comms", "markets", "play"].includes(params.get("tab") ?? "") ? (params.get("tab") as Tab) : "tony"));
+  const [tab, setTab] = useState<Tab>(() => (["tony", "comms", "markets", "play", "language"].includes(params.get("tab") ?? "") ? (params.get("tab") as Tab) : "tony"));
   const name = useOsName();
   const hud = useStatus();
 
@@ -118,6 +121,11 @@ export function MobileHud() {
         {tab === "tony" && <TonyTab hud={hud} />}
         {tab === "comms" && <CommsPanel compact />}
         {tab === "markets" && <MarketsTab />}
+        {tab === "language" && (
+          <Suspense fallback={<div className="grid h-40 place-items-center font-mono text-xs text-ink-3">loading…</div>}>
+            <LanguageHub compact />
+          </Suspense>
+        )}
         {tab === "play" && (
           <div className="space-y-3">
             <PipelineBars />
@@ -126,7 +134,7 @@ export function MobileHud() {
           </div>
         )}
       </main>
-      <nav className="grid grid-cols-4 border-t border-white/10 bg-black/80 pb-[env(safe-area-inset-bottom)] backdrop-blur" aria-label="Command center tabs">
+      <nav className="grid grid-cols-5 border-t border-white/10 bg-black/80 pb-[env(safe-area-inset-bottom)] backdrop-blur" aria-label="Command center tabs">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? "page" : undefined} className={`flex flex-col items-center gap-1 py-2.5 text-[10px] uppercase tracking-wider ${tab === id ? "text-amber-light" : "text-ink-3"}`}>
             <Icon size={20} />

@@ -50,3 +50,6 @@ memory/tony/
 
 # IBKR bridge runtime logs
 data/trading/
+
+# Language Hub phrase library (personal data)
+data/language-hub/

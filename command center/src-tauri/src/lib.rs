@@ -3,7 +3,7 @@ mod commands;
 mod exe_resolve;
 mod proc;
 
-use commands::{buildhub, handoff_cues, lifecycle};
+use commands::{buildhub, handoff_cues, language_hub, lifecycle};
 use commands::{arbiter, business_registry, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
@@ -134,6 +134,7 @@ pub fn run() {
         .manage(buildhub::HubState::default())
         .manage(media::MediaState::default())
         .manage(gdrive::GdriveState::default())
+        .manage(language_hub::LangHubState::default())
         .setup(|app| {
             use tauri::Manager;
             // System Map: app uptime counts from here.
@@ -336,6 +337,17 @@ pub fn run() {
             services::provider_models,
             services::gateway_ensure,
             voice::stt_transcribe,
+            language_hub::lang_status,
+            language_hub::lang_library_list,
+            language_hub::lang_library_save,
+            language_hub::lang_library_update,
+            language_hub::lang_library_delete,
+            language_hub::lang_tracks_list,
+            language_hub::lang_track_save,
+            language_hub::lang_stt,
+            language_hub::lang_tts,
+            language_hub::lang_llm_json,
+            language_hub::lang_release,
             voice::mic_set_enabled,
             voice::mic_get,
             voice::stt_configure,

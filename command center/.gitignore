@@ -9,3 +9,4 @@ src-tauri/gen/
 # Local voice tooling (not part of the app)
 whisper.cpp/
 *.mp3
+src-tauri/target-langhub/

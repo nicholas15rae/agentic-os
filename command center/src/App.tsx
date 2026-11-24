@@ -35,6 +35,8 @@ const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.E
   // Operations Manager: business registry, Review Queue (HITL digest), audit trail.
   operations: lazy(() => import("@/sections/OperationsSection").then((m) => ({ default: m.OperationsSection }))),
   trading: lazy(() => import("@/sections/TradingSection").then((m) => ({ default: m.TradingSection }))),
+  // Language Hub: translator, tutor, phrase library (its own store; on the phone via the gateway).
+  language: lazy(() => import("@/sections/LanguageSection").then((m) => ({ default: m.LanguageSection }))),
   vault: lazy(() => import("@/sections/VaultSection").then((m) => ({ default: m.VaultSection }))),
   wallpapers: lazy(() => import("@/sections/WallpapersSection").then((m) => ({ default: m.WallpapersSection }))),
   // System Map: the only chunk that loads three.js (Part 5's HoloViewport).

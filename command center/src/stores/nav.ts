@@ -1,9 +1,9 @@
 import { create } from "zustand";
 import type { LucideIcon } from "lucide-react";
-import { Briefcase, CandlestickChart, Clapperboard, Cpu, FlaskConical, Gauge, Image, Lightbulb, MessagesSquare, Phone, Receipt, Search, Settings2 } from "lucide-react";
+import { Briefcase, CandlestickChart, Clapperboard, Cpu, FlaskConical, Gauge, Image, Languages, Lightbulb, MessagesSquare, Phone, Receipt, Search, Settings2 } from "lucide-react";
 
 /** "app" is a mounted MY APPS page (`#/app/<id>`), not one of the fixed SECTIONS. */
-export type Section = "command" | "agents" | "playplace" | "director" | "comms" | "brainstorm" | "finance" | "operations" | "trading" | "vault" | "wallpapers" | "memorymap" | "settings" | "app";
+export type Section = "command" | "agents" | "playplace" | "director" | "comms" | "brainstorm" | "finance" | "operations" | "trading" | "language" | "vault" | "wallpapers" | "memorymap" | "settings" | "app";
 export type FixedSection = Exclude<Section, "app">;
 
 export const SECTIONS: { id: FixedSection; label: string; icon: LucideIcon; mobile: boolean }[] = [
@@ -16,6 +16,7 @@ export const SECTIONS: { id: FixedSection; label: string; icon: LucideIcon; mobi
   { id: "finance", label: "Finance", icon: Receipt, mobile: true },
   { id: "operations", label: "Operations", icon: Briefcase, mobile: false },
   { id: "trading", label: "Trading", icon: CandlestickChart, mobile: false },
+  { id: "language", label: "Language Hub", icon: Languages, mobile: false },
   { id: "vault", label: "Vault", icon: Search, mobile: false },
   { id: "wallpapers", label: "Wallpapers", icon: Image, mobile: false },
   { id: "memorymap", label: "System Map", icon: Cpu, mobile: false },

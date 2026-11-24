@@ -152,5 +152,12 @@ def resolve_endpoint(cfg: TradingConfig) -> Endpoint:
     return Endpoint(cfg.mode, cfg.host, None, True, tuple(reasons + [f"unknown TRADING_MODE {cfg.mode!r}"]))
 
 
+def data_dir() -> Path:
+    """Runtime state (lock file, audit db, desk db, incidents). TRADING_DATA_DIR overrides (tests)."""
+    d = Path(os.environ.get("TRADING_DATA_DIR") or REPO_ROOT / "data" / "trading")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def is_paper_account(account_id: str) -> bool:
     return account_id.upper().startswith(PAPER_ACCOUNT_PREFIXES)

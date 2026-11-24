@@ -21,6 +21,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
+/// Tony's dispatch targets. `trading` is deliberately NOT here: the Trading Agent is isolated and
+/// only the Financer may talk to it (arbiter::ISOLATED, trading/comms.py), so `validate` refuses
+/// any packet aimed at it.
 pub const AGENTS: [&str; 8] = ["librarian", "prompter", "coder", "designer", "director", "financer", "observer", "security"];
 pub const PRIORITIES: [&str; 3] = ["low", "normal", "urgent"];
 pub const TASKS_MAX: usize = 12;
@@ -304,6 +307,15 @@ mod tests {
             ]
         })
         .to_string()
+    }
+
+    #[test]
+    fn tony_cannot_dispatch_to_the_isolated_trading_agent() {
+        for target in ["trading", "trading_agent"] {
+            let d = TonyDispatch { spoken_reply: "ok".into(), requires_dispatch: true, priority: "normal".into(), tasks: vec![pkt("t1", target, &[])] };
+            let err = validate(&d).unwrap_err();
+            assert!(err.contains("target_agent"), "{err}");
+        }
     }
 
     #[test]

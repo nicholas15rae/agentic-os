@@ -29,8 +29,13 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+try:  # module-level so FastAPI can resolve `req: Request` (annotations are strings here)
+    from fastapi import HTTPException, Request
+except ImportError:  # tests / --check without fastapi
+    HTTPException = Request = Any  # type: ignore[misc,assignment]
+
 from config import Endpoint, TradingConfig, is_paper_account, load_config, resolve_endpoint  # noqa: E402
-from telemetry import account_block, orders_block, pnl_block, positions_block  # noqa: E402
+from telemetry import account_block, fx_block, orders_block, pnl_block, positions_block  # noqa: E402
 
 log = logging.getLogger("ibkr_bridge")
 
@@ -68,6 +73,7 @@ class Bridge:
             "connectedSince": None,
             "updatedAt": time.time(),
             "account": None,
+            "fx": {},
             "pnl": pnl_block(None),
             "positions": [],
             "openOrders": [],
@@ -168,8 +174,10 @@ class Bridge:
 
     def _collect(self, account: str) -> None:
         ib = self.ib
+        values = ib.accountValues(account)
         self._set(
-            account=account_block(ib.accountValues(account), account),
+            account=account_block(values, account),
+            fx=fx_block(values, account),
             pnl=pnl_block(self._pnl),
             positions=positions_block(ib.portfolio(account)),
             openOrders=orders_block(ib.openTrades()),
@@ -186,21 +194,44 @@ class Bridge:
 
 
 # ── HTTP surface (loopback only; the gateway proxies /api/trading/*) ──────
-def create_app(bridge: Bridge):
+def create_app(bridge: Bridge, desk: Any = None):
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI
 
+    if desk is None:
+        from desk import Desk
+
+        desk = Desk(bridge)
+
     @asynccontextmanager
     async def lifespan(_app):
-        task = asyncio.create_task(bridge.run())
+        tasks = [asyncio.create_task(bridge.run()), asyncio.create_task(desk.monitor())]
+        import quiver
+
+        if quiver.token():
+            tasks.append(asyncio.create_task(quiver.poll_forever(desk.rag)))
         try:
             yield
         finally:
             bridge.stop()
-            task.cancel()
+            desk.executor.disconnect()
+            for t in tasks:
+                t.cancel()
 
     app = FastAPI(title="IBKR bridge", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+    async def body(req: Request) -> dict:
+        try:
+            data = await req.json()
+        except ValueError:
+            raise HTTPException(400, "body must be JSON") from None
+        if not isinstance(data, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        return data
+
+    def actor(req: Request) -> str:
+        return (req.headers.get("x-trading-actor") or "unknown")[:40]
 
     @app.get("/health")
     def health():
@@ -209,6 +240,63 @@ def create_app(bridge: Bridge):
     @app.get("/status")
     def status():
         return bridge.snapshot()
+
+    @app.get("/desk")
+    def desk_view():
+        return desk.view()
+
+    @app.post("/intents")
+    async def submit(req: Request):
+        return await desk.submit(await body(req), actor(req))
+
+    @app.post("/intents/{intent_id}/approve")
+    async def approve(intent_id: str, req: Request):
+        return await desk.approve(intent_id, actor(req))
+
+    @app.post("/intents/{intent_id}/reject")
+    def reject(intent_id: str, req: Request):
+        return desk.reject(intent_id, actor(req))
+
+    @app.post("/mode")
+    async def mode(req: Request):
+        b = await body(req)
+        try:
+            return {"ok": True, "state": desk.set_mode(str(b.get("mode", "")), actor(req), bool(b.get("confirm")))}
+        except (ValueError, PermissionError) as e:
+            raise HTTPException(409, str(e)) from None
+
+    @app.post("/kill-switch")
+    async def kill(req: Request):
+        b = await body(req)
+        return await desk.kill(str(b.get("reason") or "manual kill switch")[:200], actor(req), dry_run=bool(b.get("dryRun")))
+
+    @app.post("/kill-switch/reset")
+    async def reset(req: Request):
+        b = await body(req)
+        try:
+            return desk.reset(str(b.get("confirm", "")), actor(req))
+        except PermissionError as e:
+            raise HTTPException(409, str(e)) from None
+
+    @app.post("/comms")
+    async def comms_in(req: Request):
+        return desk.handle_comms(await body(req), actor(req))
+
+    @app.get("/signals")
+    def signals(q: str = "", ticker: str | None = None, k: int = 8):
+        return desk.signals(q[:200], ticker.upper()[:10] if ticker else None, k)
+
+    @app.post("/quiver/ingest")
+    async def quiver_ingest(req: Request):
+        import quiver
+
+        try:
+            rep = await asyncio.to_thread(quiver.ingest, desk.rag, d=desk.d)
+        except quiver.QuiverError as e:
+            raise HTTPException(409, str(e)) from None
+        desk.audit.append("quiver_ingest", {"new": rep["new"], "feeds": rep["feeds"]}, ref="quiver",
+                          verdict="OK" if rep["ok"] else "FAILED", actor=actor(req))
+        return rep
 
     return app
 

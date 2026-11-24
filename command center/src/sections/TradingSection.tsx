@@ -8,6 +8,7 @@ import { useSettings } from "@/stores/settings";
 import { supplyDemandZones, toTradingView, volumeProfile } from "@/features/trading/analysis";
 import { CompanionChart } from "@/features/trading/CompanionChart";
 import { IbkrHud } from "@/features/trading/IbkrHud";
+import { TradingDesk } from "@/features/trading/TradingDesk";
 
 const INTERVALS: [string, string, string][] = [
   // [yahoo, label, tradingview]
@@ -25,7 +26,8 @@ const RANGES = ["1d", "5d", "1mo", "3mo", "6mo", "1y"];
  * Day Trading. TradingView widgets + news on top, the IBKR paper-account HUD
  * (read-only telemetry from trading/ibkr_bridge.py via /api/trading/*), then a
  * companion chart fed by candles from the local gateway with S/D zones and POC.
- * No order entry here yet — that arrives behind the Security Detail (Phase 2).
+ * Below it, the execution desk: kill switch, ADVISORY / SEMI_AUTO / FULL_AUTO and
+ * trade cards — every OrderIntent passes the deterministic Security Detail first.
  */
 export function TradingSection() {
   const t = useSettings((s) => s.trading);
@@ -117,7 +119,7 @@ export function TradingSection() {
             <option key={r}>{r}</option>
           ))}
         </Select>
-        <span className="ml-auto text-[11px] text-ink-3">IBKR paper · read-only — no order entry.</span>
+        <span className="ml-auto text-[11px] text-ink-3">IBKR paper only · every order passes the Security Detail.</span>
       </div>
 
       <div className="glass flex flex-wrap items-center gap-1.5 rounded-[18px] p-2.5" aria-label="Watchlist">
@@ -157,6 +159,8 @@ export function TradingSection() {
       </div>
 
       <IbkrHud />
+
+      <TradingDesk />
 
       <Card
         title={`Supply / demand & POC · ${data?.symbol ?? t.symbol} · ${t.interval}`}

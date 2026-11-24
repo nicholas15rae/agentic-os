@@ -63,7 +63,7 @@ const fn node(id: &'static str, label: &'static str, group: &'static str, comput
 }
 
 /// The roster, in topology order.
-pub const NODES: [NodeDef; 13] = [
+pub const NODES: [NodeDef; 14] = [
     node("tony", "Tony", "foreground", "gpu", Some("tony"), "foreground: preempts background work; yields in Away Mode"),
     node("prompter", "Prompter", "build_circle", "gpu", Some("build_circle"), "build circle: Prompter → Coder → Designer, one token at a time"),
     node("coder", "Coder", "build_circle", "gpu", Some("build_circle"), "build circle"),
@@ -77,7 +77,23 @@ pub const NODES: [NodeDef; 13] = [
     node("ops", "Ops", "mesh", "gpu", None, "on demand (AnythingLLM workspace)"),
     node("director", "Director", "mesh", "gpu", Some("director"), "on demand: edit plans on the GPU slot; renders run on the CPU (libx264)"),
     node("bizops", "Biz Ops", "mesh", "gpu", None, "on demand: one business per turn, in that business's own bizops_<id> workspace"),
+    // The IBKR paper-trading agent (trading/ in the repo). Off the shared mesh: its only peer is
+    // Finance (see `ISOLATED` / `mesh_allows`), and every order it proposes passes the
+    // deterministic Security Detail before the broker bridge.
+    node("trading", "Trading", "isolated", "cpu", Some("trading_rag"), "isolated: talks only to Finance; orders pass the Security Detail"),
 ];
+
+/// Nodes whose hand-offs are restricted to their listed `EDGES` (an allowlist, not just a drawing).
+pub const ISOLATED: [&str; 1] = ["trading"];
+
+/// May `from` hand off to `to`? Unrestricted for the shared mesh (EDGES there are display only);
+/// for an isolated node only its exact listed edges are allowed (pure).
+pub fn mesh_allows(from: &str, to: &str) -> bool {
+    if !ISOLATED.contains(&from) && !ISOLATED.contains(&to) {
+        return true;
+    }
+    EDGES.iter().any(|(a, b)| *a == from && *b == to)
+}
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn node_def(id: &str) -> Option<&'static NodeDef> {
@@ -93,6 +109,9 @@ pub fn node_id(agent: &str) -> Option<&'static str> {
     }
     if a == "financer" {
         return Some("finance");
+    }
+    if matches!(a, "trading_agent" | "trader") {
+        return Some("trading");
     }
     // Every business's workspace (`bizops_<id>`) is the Operations Manager's.
     if a.starts_with("bizops_") {
@@ -321,13 +340,19 @@ impl Arbiter {
         self.publish();
     }
 
-    /// An agent → agent hand-off (task worker rows, delegation).
-    pub fn handoff(&self, from: &str, to: &str, label: &str) {
-        let (Some(f), Some(t)) = (node_id(from), node_id(to)) else { return };
+    /// An agent → agent hand-off (task worker rows, delegation). Returns false (and records
+    /// nothing) when the edge touches an isolated node and isn't on its allowlist.
+    pub fn handoff(&self, from: &str, to: &str, label: &str) -> bool {
+        let (Some(f), Some(t)) = (node_id(from), node_id(to)) else { return false };
         if f == t {
-            return;
+            return false;
+        }
+        if !mesh_allows(f, t) {
+            eprintln!("[arbiter] refused hand-off {f} -> {t}: {t_or_f} is isolated (Finance-only)", t_or_f = if ISOLATED.contains(&f) { f } else { t });
+            return false;
         }
         self.push_handoff(Handoff { at: now_ms(), from: f.into(), to: t.into(), kind: "handoff".into(), ms: None, label: super::envelope::clip(&super::envelope::one_line(label), 80) });
+        true
     }
 
     /// A memory read / write by `node` in `namespace` (pulses node ↔ its memory on the map).
@@ -471,7 +496,7 @@ impl Arbiter {
 }
 
 /// Edges the topology draws (valid hand-off paths), `from → to`.
-pub const EDGES: [(&str, &str); 22] = [
+pub const EDGES: [(&str, &str); 24] = [
     ("tony", "prompter"),
     ("prompter", "coder"),
     ("coder", "designer"),
@@ -495,6 +520,9 @@ pub const EDGES: [(&str, &str); 22] = [
     ("bizops", "tony"),
     // The Ops -> Finance hand-off (finance_handoff.rs): a validated ledger write, nothing else.
     ("bizops", "finance"),
+    // Trading is isolated: Finance is its only peer (capital, budget limits, P&L, risk posture).
+    ("trading", "finance"),
+    ("finance", "trading"),
 ];
 
 // ── Away Mode ───────────────────────────────────────────────────────────────
@@ -626,13 +654,33 @@ mod tests {
         assert_eq!(node_for_label("lmstudio · background"), None);
         assert_eq!(node_id("general"), Some("tony"));
         assert_eq!(node_id("financer"), Some("finance"));
-        assert_eq!(NODES.len(), 13);
+        assert_eq!(NODES.len(), 14);
         assert_eq!(node_id("bizops"), Some("bizops"));
         assert_eq!(node_for_label("anythingllm · bizops_trades_contracting"), Some("bizops"));
         assert_eq!(node_for_label("anythingllm · finance"), Some("finance"));
         for (a, b) in EDGES {
             assert!(node_def(a).is_some() && node_def(b).is_some(), "{a} → {b}");
         }
+    }
+
+    #[test]
+    fn trading_is_isolated_to_finance() {
+        assert_eq!(node_id("trading_agent"), Some("trading"));
+        assert!(mesh_allows("trading", "finance"));
+        assert!(mesh_allows("finance", "trading"));
+        for other in ["tony", "librarian", "prompter", "coder", "designer", "director", "booking", "security", "garbage", "observer", "ops", "bizops"] {
+            assert!(!mesh_allows("trading", other), "trading -> {other}");
+            assert!(!mesh_allows(other, "trading"), "{other} -> trading");
+        }
+        // The shared mesh keeps its old behaviour (EDGES there are drawn, not enforced).
+        assert!(mesh_allows("coder", "tony"));
+        let a = Arbiter::default();
+        assert!(!a.handoff("tony", "trading", "do a trade"));
+        assert!(!a.handoff("trading_agent", "librarian", "fetch"));
+        assert!(a.handoff("trading", "financer", "pnl_report"));
+        let feed = a.inner.lock().unwrap().feed.clone();
+        let edges: Vec<(String, String)> = feed.iter().map(|h| (h.from.clone(), h.to.clone())).collect();
+        assert_eq!(edges, vec![("trading".into(), "finance".into())]);
     }
 
     #[test]

@@ -65,8 +65,111 @@ export interface IbkrStatus {
   openOrders: IbkrOrder[];
 }
 
+export type ExecMode = "ADVISORY" | "SEMI_AUTO" | "FULL_AUTO";
+export type Verdict = "APPROVED" | "MODIFIED" | "REJECTED";
+
+export interface SecurityCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface Decision {
+  verdict: Verdict;
+  intentId: string;
+  quantity: number;
+  requestedQuantity: number;
+  checks: SecurityCheck[];
+  reasons: string[];
+  tripKill: boolean;
+  entryRef: number | null;
+  riskBase: number | null;
+  notionalBase: number | null;
+}
+
+/** Mirrors trading/intents.py OrderIntent.to_dict(). */
+export interface OrderIntent {
+  intent_id: string;
+  source: "trading_agent" | "engine_a" | "engine_b" | "manual";
+  asset_class: string;
+  symbol: string;
+  action: "BUY" | "SELL";
+  quantity: number;
+  order_type: "MKT" | "LMT";
+  stop_loss: number;
+  limit_price: number | null;
+  take_profit: number | null;
+  time_in_force: string;
+  thesis: string;
+  citations: string[];
+  currency: string;
+  created_at: number;
+}
+
+export type IntentStatus = "hypothetical" | "pending_approval" | "submitting" | "submitted" | "rejected" | "failed" | "expired" | "dismissed";
+
+export interface DeskIntent {
+  intentId: string;
+  status: IntentStatus;
+  intent: OrderIntent;
+  decision: Decision;
+  result: unknown;
+  created: number;
+  updated: number;
+}
+
+export interface KillLock {
+  locked: true;
+  at: number;
+  reason: string;
+  actor: string;
+  incidentId: string;
+}
+
+export interface AuditRow {
+  id: number;
+  ts: number;
+  kind: string;
+  ref: string;
+  verdict: string;
+  actor: string;
+  payload: Record<string, unknown>;
+}
+
+export interface DeskView {
+  mode: ExecMode;
+  agentHalted: boolean;
+  posture: "normal" | "defensive" | "halt";
+  financer: { allocation_base?: number; max_daily_loss_pct?: number };
+  lock: KillLock | null;
+  limits: Record<string, number | boolean | null> | null;
+  limitsError: string | null;
+  pending: DeskIntent[];
+  recent: DeskIntent[];
+  audit: { ok: boolean; note: string; tail: AuditRow[] };
+}
+
+export interface KillIncident {
+  incidentId: string;
+  dryRun: boolean;
+  ok: boolean;
+  steps: { step: string; ok: boolean; detail: string }[];
+  cancelled: unknown[];
+  flatten: { symbol: string; action: string; qty: number; status?: string }[];
+  errors: string[];
+  failsafe?: boolean;
+}
+
+const post = <T>(path: string, body: unknown = {}, timeoutMs = 20_000) => gateway<T>(path, { method: "POST", body: JSON.stringify(body), timeoutMs });
+
 export const tradingApi = {
   status: () => gateway<IbkrStatus>("/api/trading/status", { timeoutMs: 6_000 }),
+  desk: () => gateway<DeskView>("/api/trading/desk", { timeoutMs: 8_000 }),
+  setMode: (mode: ExecMode, confirm: boolean) => post<{ ok: boolean }>("/api/trading/mode", { mode, confirm }),
+  approve: (id: string) => post<{ ok: boolean; status?: string; error?: string; decision?: Decision }>(`/api/trading/intents/${encodeURIComponent(id)}/approve`, {}, 35_000),
+  reject: (id: string) => post<{ ok: boolean }>(`/api/trading/intents/${encodeURIComponent(id)}/reject`),
+  kill: (reason: string, dryRun = false) => post<KillIncident & { lock?: KillLock; note?: string }>("/api/trading/kill-switch", { reason, dryRun }, 50_000),
+  reset: (confirm: string) => post<{ locked: boolean }>("/api/trading/kill-switch/reset", { confirm }),
 };
 
 /** What the HUD badge shows. A stale snapshot (bridge hung) is not "Connected". */

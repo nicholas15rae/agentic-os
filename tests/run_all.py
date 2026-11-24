@@ -36,6 +36,8 @@ import test_memory_scrolls_v6  # noqa: E402
 import test_memory_scrolls_v7  # noqa: E402
 import test_memory_scrolls_v8  # noqa: E402
 import test_trading_bridge  # noqa: E402
+import test_trading_desk  # noqa: E402
+import test_trading_signals  # noqa: E402
 
 
 def main() -> int:
@@ -47,7 +49,7 @@ def main() -> int:
                    test_task_mirror, test_memory_scrolls, test_memory_scrolls_offload,
                    test_memory_scrolls_privacy, test_memory_scrolls_hub, test_memory_scrolls_guards,
                    test_memory_scrolls_curated, test_memory_scrolls_fidelity, test_memory_scrolls_v6,
-                   test_memory_scrolls_v7, test_memory_scrolls_v8, test_trading_bridge):
+                   test_memory_scrolls_v7, test_memory_scrolls_v8, test_trading_bridge, test_trading_desk, test_trading_signals):
         suite.addTests(loader.loadTestsFromModule(module))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

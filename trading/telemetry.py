@@ -44,6 +44,18 @@ def account_block(values: Iterable[Any], account: str) -> dict[str, Any]:
     return out
 
 
+def fx_block(values: Iterable[Any], account: str) -> dict[str, float]:
+    """IBKR 'ExchangeRate' rows: units of base currency per 1 unit of `currency`."""
+    out: dict[str, float] = {}
+    for v in values:
+        if getattr(v, "tag", "") != "ExchangeRate" or getattr(v, "account", account) != account:
+            continue
+        cur, rate = getattr(v, "currency", ""), num(v.value)
+        if cur and cur != "BASE" and rate and rate > 0:
+            out[cur] = rate
+    return out
+
+
 def pnl_block(pnl: Any) -> dict[str, float | None]:
     if pnl is None:
         return {"daily": None, "unrealized": None, "realized": None}

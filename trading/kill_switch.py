@@ -155,6 +155,8 @@ async def execute_kill(
         # 3. Flatten every position with a market order.
         try:
             positions = await asyncio.wait_for(ib.reqPositionsAsync(), 8)
+            # Buy back short option legs before selling longs: a vertical is never left as a naked short.
+            positions = sorted(positions, key=lambda p: (getattr(p.contract, "secType", "") != "OPT" or float(p.position) > 0))
             trades = []
             for p in positions:
                 qty = float(p.position)

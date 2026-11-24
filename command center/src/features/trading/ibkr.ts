@@ -104,6 +104,9 @@ export interface OrderIntent {
   citations: string[];
   currency: string;
   created_at: number;
+  sec_type?: "STK" | "OPT" | "BAG";
+  legs?: { action: string; right: string; strike: number; expiry: string }[];
+  multiplier?: number;
 }
 
 export type IntentStatus = "hypothetical" | "pending_approval" | "submitting" | "submitted" | "rejected" | "failed" | "expired" | "dismissed";
@@ -159,6 +162,68 @@ export interface KillIncident {
   errors: string[];
   failsafe?: boolean;
 }
+
+export interface ScanRow {
+  symbol: string;
+  signal: boolean;
+  why: string;
+  close?: number;
+  momentum20?: number;
+  relVolume?: number;
+  atr?: number;
+  date?: string;
+  intent?: OrderIntent | null;
+  desk?: { status?: string; verdict?: Verdict; reasons: string[]; error?: string };
+}
+
+export interface WatchRow {
+  symbol: string;
+  source: string;
+  reason: string;
+  addedAt: number;
+  status: "active" | "rejected";
+  problems: string[];
+  advValueUsd: number | null;
+  spreadPct: number | null;
+}
+
+export interface OptionsProposal {
+  symbol: string;
+  structure: "single" | "vertical";
+  view: "bullish" | "bearish" | null;
+  viewWhy: string;
+  expiry?: string;
+  dte?: number;
+  underlying?: number;
+  scanned?: number;
+  notes?: string[];
+  intent?: (OrderIntent & { legs: { action: string; right: string; strike: number; expiry: string }[] }) | null;
+  desk?: ScanRow["desk"];
+  result: string;
+  at: number;
+}
+
+export interface EnginesView {
+  watchlist: string[];
+  watchlistRows: WatchRow[];
+  lastScan: { at: number; rows: ScanRow[] } | null;
+  lastOptions: OptionsProposal | null;
+  optionLimits: Record<string, number | string> | null;
+  optionLimitsError: string | null;
+  autoScanMinutes: number;
+  guard: { at?: number; flattened?: number; stopped?: number; errors?: string[] };
+}
+
+export const enginesApi = {
+  view: () => gateway<EnginesView>("/api/trading/engines", { timeoutMs: 8_000 }),
+  scan: (submit: boolean, symbols?: string[]) => gateway<{ ok: boolean; error?: string; at: number; rows: ScanRow[] }>("/api/trading/engines/a/scan", { method: "POST", body: JSON.stringify({ submit, symbols }), timeoutMs: 125_000 }),
+  addWatch: (symbol: string, reason: string) => gateway<WatchRow>("/api/trading/engines/a/watchlist", { method: "POST", body: JSON.stringify({ symbol, reason, source: "user" }), timeoutMs: 40_000 }),
+  removeWatch: (symbol: string) => gateway<{ ok: boolean }>(`/api/trading/engines/a/watchlist/${encodeURIComponent(symbol)}/remove`, { method: "POST", body: "{}" }),
+  setAuto: (minutes: number) => gateway<EnginesView>("/api/trading/engines/a/auto", { method: "POST", body: JSON.stringify({ minutes }) }),
+  propose: (symbol: string, view: string, structure: string, submit: boolean) =>
+    gateway<OptionsProposal & { ok: boolean; error?: string }>("/api/trading/engines/b/propose", { method: "POST", body: JSON.stringify({ symbol, view, structure, submit }), timeoutMs: 125_000 }),
+  guard: () => gateway<{ flatten: unknown[]; stops: unknown[]; errors: string[]; skipped?: string }>("/api/trading/engines/b/guard", { method: "POST", body: "{}", timeoutMs: 60_000 }),
+};
 
 const post = <T>(path: string, body: unknown = {}, timeoutMs = 20_000) => gateway<T>(path, { method: "POST", body: JSON.stringify(body), timeoutMs });
 

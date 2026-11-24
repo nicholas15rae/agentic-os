@@ -14,7 +14,7 @@ so the HUD / Librarian tooling can read it, in two files:
 Bias hygiene — the mandatory tagging schema
 -------------------------------------------
 Every entry carries exactly one `class:<signal class>` tag. External
-alternative data (Quiver political / insider disclosures) MUST be stored as
+alternative data (Quantgress congressional / insider disclosures) MUST be stored as
 `class:external_signal_hypothesis`; `put()` refuses an entry from an external
 source with any other class, and refuses an entry with no class at all. Each
 hypothesis entry's text starts with HYPOTHESIS_BANNER so the framing survives
@@ -41,11 +41,11 @@ TEXT_MAX = 1200
 
 EXTERNAL_SIGNAL_HYPOTHESIS = "external_signal_hypothesis"
 SIGNAL_CLASSES = (EXTERNAL_SIGNAL_HYPOTHESIS, "market_telemetry", "desk_note")
-EXTERNAL_SOURCES = ("quiver",)
+EXTERNAL_SOURCES = ("quantgress", "quiver")
 HYPOTHESIS_LABEL = "External Signal Hypothesis"
 HYPOTHESIS_BANNER = f"[{HYPOTHESIS_LABEL} — context only, NOT a trade instruction]"
 # Citation prefix the Trading Agent uses for a hypothesis entry in an OrderIntent.
-HYPOTHESIS_CITATION_PREFIXES = ("quiver:", "hypothesis:")
+HYPOTHESIS_CITATION_PREFIXES = ("quantgress:", "quiver:", "hypothesis:")
 
 AGENT_DIRECTIVE = (
     "The entries below tagged 'External Signal Hypothesis' are third-party disclosures "
@@ -214,7 +214,8 @@ class TradingRag:
         if any(e.tag("class") == EXTERNAL_SIGNAL_HYPOTHESIS for e in entries):
             lines += [AGENT_DIRECTIVE, ""]
         for e in entries:
-            cite = f"quiver:{e.id}" if e.tag("source") == "quiver" else f"rag:{e.id}"
+            src = e.tag("source")
+            cite = f"{src}:{e.id}" if src in EXTERNAL_SOURCES else f"rag:{e.id}"
             lines.append(f"- ({cite}) {e.text}")
         return "\n".join(lines)
 

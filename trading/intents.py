@@ -19,8 +19,14 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-SEC_TYPES = ("STK",)  # Phase 3 adds OPT (Engine B) and FUT behind their own caps.
-ASSET_CLASSES = ("equity", "etf", "commodity_etf")
+# STK: shares/ETFs (Engine A). OPT: one long option. BAG: a debit vertical (two legs).
+# Futures (FUT) stay out until Engine A's resolver is switched on with its own caps.
+SEC_TYPES = ("STK", "OPT", "BAG")
+OPTION_SEC_TYPES = ("OPT", "BAG")
+ASSET_CLASSES = ("equity", "etf", "commodity_etf", "option")
+RIGHTS = ("C", "P")
+EXPIRY_RE = re.compile(r"^20\d{6}$")
+OPTION_MULTIPLIER = 100
 ACTIONS = ("BUY", "SELL")
 ORDER_TYPES = ("MKT", "LMT")
 TIFS = ("DAY", "GTC")
@@ -53,11 +59,24 @@ class OrderIntent:
     thesis: str = ""
     citations: tuple[str, ...] = ()
     created_at: float = 0.0
+    # Options only: [{action, right, strike, expiry}] — 1 leg (OPT) or 2 legs (BAG debit vertical).
+    # Prices (limit / stop / take-profit) are then PER-CONTRACT premium; quantity is contracts.
+    legs: tuple[dict[str, Any], ...] = ()
+    multiplier: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["citations"] = list(self.citations)
+        d["legs"] = [dict(x) for x in self.legs]
         return d
+
+    @property
+    def is_option(self) -> bool:
+        return self.sec_type in OPTION_SEC_TYPES
+
+    @property
+    def expiry(self) -> str | None:
+        return self.legs[0]["expiry"] if self.legs else None
 
     @property
     def is_long(self) -> bool:
@@ -135,6 +154,8 @@ def parse_intent(raw: Any) -> OrderIntent:
     elif tp is not None and ((action == "BUY" and tp <= stop) or (action == "SELL" and tp >= stop)):
         raise IntentError("take_profit is on the wrong side of stop_loss")
 
+    legs, multiplier = _parse_legs(raw, sec_type, asset_class, action, order_type)
+
     thesis = str(raw.get("thesis", ""))
     if len(thesis) > 4000:
         raise IntentError("thesis: at most 4000 characters")
@@ -147,7 +168,57 @@ def parse_intent(raw: Any) -> OrderIntent:
         quantity=qty, order_type=order_type, stop_loss=stop, sec_type=sec_type, exchange=exchange,
         currency=currency, limit_price=limit, take_profit=tp, time_in_force=tif, thesis=thesis,
         citations=tuple(cites), created_at=float(raw.get("created_at") or time.time()),
+        legs=legs, multiplier=multiplier,
     )
+
+
+def _parse_legs(raw: dict[str, Any], sec_type: str, asset_class: str, action: str, order_type: str) -> tuple[tuple[dict[str, Any], ...], int]:
+    """Defined-risk option structures only. Stocks must not carry legs."""
+    raw_legs = raw.get("legs")
+    if sec_type == "STK":
+        if raw_legs:
+            raise IntentError("legs are only for options (sec_type OPT / BAG)")
+        if asset_class == "option":
+            raise IntentError("asset_class option needs sec_type OPT or BAG")
+        if raw.get("multiplier", 1) != 1:
+            raise IntentError("stocks have multiplier 1")
+        return (), 1
+    if asset_class != "option":
+        raise IntentError("options need asset_class option")
+    if action != "BUY":
+        raise IntentError("options: only BUY (long option / debit vertical) — no naked or credit structures")
+    if order_type != "LMT":
+        raise IntentError("options: limit orders only")
+    if raw.get("multiplier", OPTION_MULTIPLIER) != OPTION_MULTIPLIER:
+        raise IntentError(f"options: multiplier must be {OPTION_MULTIPLIER}")
+    want = 1 if sec_type == "OPT" else 2
+    if not isinstance(raw_legs, list) or len(raw_legs) != want:
+        raise IntentError(f"{sec_type} needs exactly {want} leg(s)")
+    legs = []
+    for i, leg in enumerate(raw_legs):
+        if not isinstance(leg, dict) or set(leg) != {"action", "right", "strike", "expiry"}:
+            raise IntentError(f"leg {i}: exactly action, right, strike, expiry")
+        if leg["action"] not in ACTIONS or leg["right"] not in RIGHTS:
+            raise IntentError(f"leg {i}: action BUY/SELL, right C/P")
+        if not isinstance(leg["expiry"], str) or not EXPIRY_RE.match(leg["expiry"]):
+            raise IntentError(f"leg {i}: expiry YYYYMMDD")
+        legs.append({"action": leg["action"], "right": leg["right"], "strike": _price(leg["strike"], f"leg {i} strike"), "expiry": leg["expiry"]})
+    if sec_type == "OPT":
+        if legs[0]["action"] != "BUY":
+            raise IntentError("single-leg options must be bought (no naked shorts)")
+    else:
+        a, b = legs
+        if {a["action"], b["action"]} != {"BUY", "SELL"}:
+            raise IntentError("vertical: one BUY leg and one SELL leg")
+        if a["right"] != b["right"] or a["expiry"] != b["expiry"] or a["strike"] == b["strike"]:
+            raise IntentError("vertical: same right and expiry, different strikes")
+        long_leg = a if a["action"] == "BUY" else b
+        short_leg = b if long_leg is a else a
+        nearer = long_leg["strike"] < short_leg["strike"] if long_leg["right"] == "C" else long_leg["strike"] > short_leg["strike"]
+        if not nearer:
+            raise IntentError("vertical must be a DEBIT spread (long leg nearer the money)")
+        legs = [long_leg, short_leg]
+    return tuple(legs), OPTION_MULTIPLIER
 
 
 # ── Risk limits ──────────────────────────────────────────────────────────────

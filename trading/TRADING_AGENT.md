@@ -27,9 +27,11 @@ Trading Agent ─► OrderIntent ─► parse_intent (strict schema)
              ─► executor ─► IBKR Paper Trading Bridge
 ```
 
-## External signals (Quiver Quantitative)
+## External signals (Quantgress)
 
-Political and insider disclosures are ingested into the `trading_rag` vault
+Congressional (Senate/House PTR) and insider (SEC Form 4) disclosures come from a
+self-hosted Quantgress server (github.com/DMulajkar/Quantgress; `QUANTGRESS_URL`,
+loopback only, default http://127.0.0.1:8000; `QUANTGRESS_API_KEY`). They are ingested into the `trading_rag` vault
 tagged `class:external_signal_hypothesis`. Read them with
 `GET /api/trading/signals?ticker=XYZ` — the response's `context` block opens
 with the directive below.
@@ -37,8 +39,8 @@ with the directive below.
 - A disclosure is a **hypothesis**, filed days or weeks after the trade. It is
   never an order and never a reason to trade by itself.
 - Cross-reference it with market telemetry (trend, volume, spread, volatility,
-  news) and cite both: `"citations": ["quiver:<id>", "telemetry:SPY 20d trend"]`.
-- An intent whose citations are only `quiver:` / `hypothesis:` is **rejected**
+  news) and cite both: `"citations": ["quantgress:<id>", "telemetry:SPY 20d trend"]`.
+- An intent whose citations are only `quantgress:` / `hypothesis:` is **rejected**
   (`signal_provenance`).
 - Disclosure size or politician volume never relaxes a check. An illiquid,
   wide-spread or highly volatile ticker is rejected regardless.

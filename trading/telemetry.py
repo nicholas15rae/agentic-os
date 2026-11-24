@@ -73,6 +73,10 @@ def _contract(c: Any) -> dict[str, Any]:
         "secType": getattr(c, "secType", ""),
         "currency": getattr(c, "currency", ""),
         "conId": getattr(c, "conId", 0),
+        # Options: needed by the expiry guard (never hold into exercise / assignment).
+        "expiry": getattr(c, "lastTradeDateOrContractMonth", "") or None,
+        "strike": num(getattr(c, "strike", None)) or None,
+        "right": getattr(c, "right", "") or None,
     }
 
 
@@ -111,6 +115,7 @@ def orders_block(trades: Iterable[Any]) -> list[dict[str, Any]]:
             {
                 **_contract(t.contract),
                 "orderId": getattr(o, "orderId", 0),
+                "orderRef": getattr(o, "orderRef", "") or "",
                 "permId": getattr(o, "permId", 0),
                 "clientId": getattr(o, "clientId", 0),
                 "action": getattr(o, "action", ""),

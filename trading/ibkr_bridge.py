@@ -206,16 +206,18 @@ def create_app(bridge: Bridge, desk: Any = None):
 
     @asynccontextmanager
     async def lifespan(_app):
-        tasks = [asyncio.create_task(bridge.run()), asyncio.create_task(desk.monitor())]
-        import quiver
+        tasks = [asyncio.create_task(bridge.run()), asyncio.create_task(desk.monitor()),
+                 asyncio.create_task(desk.options_guard_loop()), asyncio.create_task(desk.auto_scan_loop())]
+        import quantgress
 
-        if quiver.token():
-            tasks.append(asyncio.create_task(quiver.poll_forever(desk.rag)))
+        if quantgress.api_key():
+            tasks.append(asyncio.create_task(quantgress.poll_forever(desk.rag)))
         try:
             yield
         finally:
             bridge.stop()
             desk.executor.disconnect()
+            desk.md.disconnect()
             for t in tasks:
                 t.cancel()
 
@@ -286,17 +288,69 @@ def create_app(bridge: Bridge, desk: Any = None):
     def signals(q: str = "", ticker: str | None = None, k: int = 8):
         return desk.signals(q[:200], ticker.upper()[:10] if ticker else None, k)
 
-    @app.post("/quiver/ingest")
-    async def quiver_ingest(req: Request):
-        import quiver
+    @app.post("/signals/ingest")
+    async def signals_ingest(req: Request):
+        import quantgress
 
         try:
-            rep = await asyncio.to_thread(quiver.ingest, desk.rag, d=desk.d)
-        except quiver.QuiverError as e:
+            rep = await asyncio.to_thread(quantgress.ingest, desk.rag, d=desk.d)
+        except quantgress.QuantgressError as e:
             raise HTTPException(409, str(e)) from None
-        desk.audit.append("quiver_ingest", {"new": rep["new"], "feeds": rep["feeds"]}, ref="quiver",
+        desk.audit.append("signals_ingest", {"source": "quantgress", "new": rep["new"], "feeds": rep["feeds"]}, ref="quantgress",
                           verdict="OK" if rep["ok"] else "FAILED", actor=actor(req))
         return rep
+
+
+    # ── engines (Phase 3) ────────────────────────────────────────────
+    @app.get("/engines")
+    def engines():
+        return desk.engines_view()
+
+    @app.post("/engines/a/scan")
+    async def engine_a_scan(req: Request):
+        b = await body(req)
+        syms = b.get("symbols")
+        if syms is not None and (not isinstance(syms, list) or len(syms) > 40 or not all(isinstance(x, str) for x in syms)):
+            raise HTTPException(400, "symbols: a list of up to 40 tickers")
+        return await desk.engine_a_scan([x.upper()[:10] for x in syms] if syms else None, bool(b.get("submit")), actor(req))
+
+    @app.post("/engines/a/watchlist")
+    async def watchlist_add(req: Request):
+        b = await body(req)
+        from engines.equities_commodities import ContractRefused
+
+        try:
+            return await desk.watchlist_add(str(b.get("symbol", "")), str(b.get("source") or actor(req)), str(b.get("reason", "")))
+        except ContractRefused as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/engines/a/watchlist/{symbol}/remove")
+    def watchlist_remove(symbol: str, req: Request):
+        ok = desk.watchlist.remove(symbol)
+        desk.audit.append("watchlist_remove", {"symbol": symbol.upper()}, ref=symbol.upper(), verdict="OK" if ok else "ABSENT", actor=actor(req))
+        return {"ok": ok}
+
+    @app.post("/engines/a/auto")
+    async def engine_a_auto(req: Request):
+        b = await body(req)
+        try:
+            return desk.set_auto_scan(int(b.get("minutes", 0)), actor(req))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/engines/b/propose")
+    async def engine_b_propose(req: Request):
+        b = await body(req)
+        try:
+            return await desk.engine_b_propose(str(b.get("symbol", "SPY"))[:10], str(b.get("view", "auto")),
+                                               str(b.get("structure", "single")), bool(b.get("submit")), actor(req))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.post("/engines/b/guard")
+    async def engine_b_guard(req: Request):
+        """Run one options-guard pass now (it also runs every minute)."""
+        return await desk.options_guard()
 
     return app
 

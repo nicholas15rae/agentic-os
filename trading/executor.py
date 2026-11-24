@@ -5,8 +5,11 @@ when the desk is in SEMI_AUTO / FULL_AUTO. Immediately before every placement
 it re-checks the kill-switch lock and the paper endpoint (no time-of-check /
 time-of-use gap between the Security Detail verdict and the socket call).
 
-Every entry is a bracket: parent (LMT or MKT, DAY) + protective STOP (GTC) and,
-when given, a take-profit LMT (GTC). Children are GTC so a filled DAY entry is
+Every stock entry is a bracket: parent (LMT or MKT, DAY) + protective STOP (GTC)
+and, when given, a take-profit LMT (GTC). Options (OPT single leg / BAG debit
+vertical) get parent LMT + take-profit LMT only: a STP on an option or combo
+triggers off thin last-trade prints, so the premium stop and the expiry-day
+flatten are enforced by the desk's options monitor instead (close_option()). Children are GTC so a filled DAY entry is
 never left unprotected overnight. `orderRef` = intent_id ties fills back to
 the intent and the audit log.
 """
@@ -39,11 +42,13 @@ def build_bracket(intent: OrderIntent, qty: int, parent_id: int, factories: dict
     parent.orderRef = intent.intent_id
     parent.transmit = False
     exit_side = opposite(intent.action)
-    stop = factories["stop"](exit_side, qty, intent.stop_loss)
-    stop.parentId = parent_id
-    stop.tif = "GTC"
-    stop.orderRef = intent.intent_id
-    orders = [parent, stop]
+    orders = [parent]
+    if not intent.is_option:
+        stop = factories["stop"](exit_side, qty, intent.stop_loss)
+        stop.parentId = parent_id
+        stop.tif = "GTC"
+        stop.orderRef = intent.intent_id
+        orders.append(stop)
     if intent.take_profit is not None:
         tp = factories["limit"](exit_side, qty, intent.take_profit)
         tp.parentId = parent_id
@@ -92,17 +97,67 @@ class Executor:
             from ib_async import LimitOrder, MarketOrder, Stock, StopOrder
 
             factories = {"limit": LimitOrder, "market": MarketOrder, "stop": StopOrder, "stock": Stock}
-        contract = factories["stock"](intent.symbol, "SMART", intent.currency)
-        qualified = await ib.qualifyContractsAsync(contract)
-        if not qualified or not getattr(qualified[0], "conId", 0):
-            raise ExecutionRefused(f"could not resolve contract {intent.symbol} {intent.currency}")
-        contract = qualified[0]
+        contract = await self._contract(ib, intent, factories)
         orders = build_bracket(intent, qty, ib.client.getReqId(), factories)
         self._guard()  # last look: lock / endpoint, right before the socket call
         trades = [ib.placeOrder(contract, o) for o in orders]
         return {"conId": contract.conId, "orders": [{"orderId": t.order.orderId, "type": t.order.orderType,
                                                       "action": t.order.action, "qty": t.order.totalQuantity,
                                                       "status": t.orderStatus.status} for t in trades]}
+
+    async def _contract(self, ib: Any, intent: OrderIntent, factories: dict[str, Callable[..., Any]]) -> Any:
+        if not intent.is_option:
+            q = await ib.qualifyContractsAsync(factories["stock"](intent.symbol, "SMART", intent.currency))
+            if not q or not getattr(q[0], "conId", 0):
+                raise ExecutionRefused(f"could not resolve contract {intent.symbol} {intent.currency}")
+            return q[0]
+        Option = factories.get("option")
+        if Option is None:
+            from ib_async import ComboLeg, Contract, Option  # noqa: N811
+
+            factories = {**factories, "option": Option, "combo_leg": ComboLeg, "contract": Contract}
+            Option = factories["option"]
+        legs = [Option(intent.symbol, l["expiry"], l["strike"], l["right"], "SMART", multiplier=str(intent.multiplier), currency=intent.currency) for l in intent.legs]
+        q = await ib.qualifyContractsAsync(*legs)
+        if len(q) != len(legs) or not all(getattr(c, "conId", 0) for c in q):
+            raise ExecutionRefused(f"could not resolve option leg(s) for {intent.symbol}")
+        if intent.sec_type == "OPT":
+            return q[0]
+        bag = factories["contract"](secType="BAG", symbol=intent.symbol, currency=intent.currency, exchange="SMART")
+        bag.comboLegs = [factories["combo_leg"](conId=c.conId, ratio=1, action=l["action"], exchange="SMART") for c, l in zip(q, intent.legs)]
+        return bag
+
+    async def close_option(self, contract: Any, qty: float, limit: float | None, ref: str, action: str = "SELL") -> dict[str, Any]:
+        """Risk-reducing exit for a held long option / spread (premium stop or expiry flatten).
+        Refused while LOCKED (the kill switch already flattened at market)."""
+        ib = await self._ensure()
+        from ib_async import LimitOrder, MarketOrder
+
+        if action not in ("BUY", "SELL"):
+            raise ExecutionRefused("close action must be BUY (cover a short leg) or SELL (close a long)")
+        order = LimitOrder(action, qty, limit) if limit else MarketOrder(action, qty)
+        order.tif = "DAY"
+        order.orderRef = ref
+        if getattr(contract, "secType", "") != "BAG" and not getattr(contract, "exchange", ""):
+            contract.exchange = "SMART"
+        self._guard()
+        t = ib.placeOrder(contract, order)
+        return {"orderId": t.order.orderId, "type": t.order.orderType, "qty": qty, "limit": limit, "status": t.orderStatus.status}
+
+    async def cancel_working(self, *, ref: str | None = None, con_ids: set[int] | None = None, symbol: str | None = None) -> int:
+        """Cancel working orders by orderRef, by contract conId, or (combos) by underlying symbol.
+        Used before a guard exit so a resting take-profit can't fill afterwards and open a short."""
+        ib = await self._ensure()
+        await ib.reqAllOpenOrdersAsync()
+        n = 0
+        for t in ib.openTrades():
+            if t.orderStatus.status in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
+                continue
+            hit = (ref and t.order.orderRef == ref) or (con_ids and t.contract.conId in con_ids)                 or (symbol and t.contract.secType in ("OPT", "BAG") and t.contract.symbol == symbol and not (t.order.orderRef or "").startswith("GUARD-"))
+            if hit:
+                ib.cancelOrder(t.order)
+                n += 1
+        return n
 
     def disconnect(self) -> None:
         if self.ib is not None:

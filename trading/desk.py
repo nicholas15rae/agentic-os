@@ -38,8 +38,11 @@ from config import data_dir
 from executor import ExecutionRefused, Executor
 from fx import FxSource, merged_rates
 from intents import IntentError, OrderIntent, RiskLimits, load_limits, parse_intent
-from quiver import last_report as quiver_last_report
+from quantgress import last_report as quantgress_last_report
 from trading_rag import TradingRag
+import options as opt
+from engines.equities_commodities import EngineA, Watchlist
+from engines.options_engine import EngineB, flatten_plan
 from security_detail import NY, Context, Decision, evaluate, market_stats_from_bars, regular_hours_fallback, session_open_from_hours
 
 log = logging.getLogger("trading.desk")
@@ -47,6 +50,7 @@ log = logging.getLogger("trading.desk")
 MODES = ("ADVISORY", "SEMI_AUTO", "FULL_AUTO")
 ACTIVE = ("pending_approval", "submitted", "hypothetical")
 MONITOR_S = 10.0
+OPTIONS_GUARD_S = 60.0
 
 DESK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS intents (
@@ -84,6 +88,8 @@ class Desk:
         kill_connect: Callable[[bool], Awaitable[Any]] | None = None,
         kill_market_order: Callable[[str, float], Any] | None = None,
         fx_source: FxSource | None | bool = None,
+        option_quote_fn: Callable[[OrderIntent], Awaitable[tuple[dict[str, Any] | None, list[dict[str, Any]]]]] | None = None,
+        market_data: Any = None,
         d: Path | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -99,8 +105,18 @@ class Desk:
         # None → Bank of Canada fallback; False → IBKR rates only (tests).
         self.fx = FxSource(self.d / "fx_cache.json") if fx_source is None else (fx_source or None)
         self.clock = clock
-        # The Trading Agent's isolated vault (Quiver disclosures land here as External Signal Hypotheses).
+        # The Trading Agent's isolated vault (Quantgress disclosures land here as External Signal Hypotheses).
         self.rag = TradingRag(self.d / "trading_rag")
+        # Engines read market data on their own read-only client (12); they only ever call submit().
+        if market_data is None:
+            from market_data import MarketData
+
+            market_data = MarketData()
+        self.md = market_data
+        self._option_quote = option_quote_fn or self._md_option_quote
+        self.watchlist = Watchlist(self.d / "watchlist.json")
+        self.engine_a = EngineA(self.md, self.watchlist, clock=clock)
+        self.engine_b = EngineB(self.md, clock=clock)
         self._lock = asyncio.Lock()
         self._db = self.d / "desk.db"
         with self._conn() as c:
@@ -142,6 +158,9 @@ class Desk:
         if fin.get("max_daily_loss_pct"):
             lim = dataclasses.replace(lim, max_daily_loss_pct=comms.tightened_daily_loss(lim.max_daily_loss_pct, float(fin["max_daily_loss_pct"])))
         return lim
+
+    def option_limits(self) -> opt.OptionLimits:
+        return opt.load_option_limits(self.d / "option_limits.json")
 
     def _row(self, intent_id: str) -> dict[str, Any] | None:
         with self._conn() as c:
@@ -231,10 +250,28 @@ class Desk:
             self._stats_cache[key] = stats
         return stats
 
+    async def _md_option_quote(self, intent: OrderIntent) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Per-leg quotes (in intent.legs order) and the structure's own bid/ask per contract."""
+        rows = await self.md.option_quotes(intent.symbol, intent.currency, "", intent.multiplier,
+                                           [(l["expiry"], l["strike"], l["right"]) for l in intent.legs])
+        legs = []
+        for l in intent.legs:
+            m = [r for r in rows if r["expiry"].startswith(l["expiry"]) and abs(r["strike"] - l["strike"]) < 1e-6 and r["right"] == l["right"]]
+            legs.append(m[0] if m else {})
+        return structure_quote(intent, legs), legs
+
     async def build_context(self, intent: OrderIntent, *, exclude_self: bool = False) -> Context:
         snap = self.bridge.snapshot()
         acct = snap.get("account") or {}
-        quote, session = await self._quote(intent)
+        quote, session = await self._quote(intent)  # underlying quote + its trading session
+        option_legs, option_limits = None, None
+        if intent.is_option:
+            try:
+                option_limits = self.option_limits()
+                quote, option_legs = await self._option_quote(intent)
+            except Exception as e:  # noqa: BLE001 — missing option data → the gate fails closed
+                log.warning("option context for %s: %s", intent.intent_id, e)
+                quote, option_legs = None, None
         stats = await self._stats(intent)
         row = self._row(intent.intent_id)
         seen = bool(row) and (not exclude_self or row["status"] == "submitted")
@@ -248,6 +285,7 @@ class Desk:
             fx_to_base=fx, positions=snap.get("positions") or [], open_orders=snap.get("openOrders") or [],
             quote=quote, market_stats=stats, session_open=session, seen_intent=seen, recent=self._recent(intent.intent_id),
             orders_today=self.audit.count_since("order_submitted", ny_midnight(self.clock())),
+            option_limits=option_limits, option_legs=option_legs,
         )
 
     # ── intents ──────────────────────────────────────────────────────
@@ -406,6 +444,176 @@ class Desk:
                 log.warning("monitor: %s", e)
             await asyncio.sleep(MONITOR_S)
 
+    # ── engines ──────────────────────────────────────────────────────
+    async def _sizing(self) -> tuple[float, float, float]:
+        """(equity used for sizing, USD->base rate, stock risk budget): a size hint only; the gate caps."""
+        snap = self.bridge.snapshot()
+        acct = snap.get("account") or {}
+        eq = acct.get("netLiquidation") or 0.0
+        lim = self.limits()
+        eq_used = min(eq, lim.financer_allocation_base) if lim.financer_allocation_base else eq
+        base = acct.get("currency")
+        fx, _ = await asyncio.to_thread(merged_rates, snap.get("fx") or {}, {"USD"}, base, self.fx)
+        usd = 1.0 if base == "USD" else fx.get("USD", 0.0)
+        budget = min(lim.max_risk_per_trade_pct / 100 * eq_used, lim.max_risk_per_trade_base)
+        return eq_used, usd, budget
+
+    def _engines_halted(self) -> str | None:
+        if kill_switch.is_locked(self.d):
+            return "trading is LOCKED by the kill switch"
+        if self.state().get("agentHalted"):
+            return "the agent / engines are halted"
+        return None
+
+    async def engine_a_scan(self, symbols: list[str] | None, submit: bool, actor: str) -> dict[str, Any]:
+        halted = self._engines_halted()
+        if submit and halted:
+            return {"ok": False, "error": halted}
+        _eq, usd, budget = await self._sizing()
+        if submit and not usd:
+            return {"ok": False, "error": "no USD rate, can't size"}
+        res = await self.engine_a.scan(symbols=symbols, risk_budget_base=budget, fx_usd=usd or 1.0,
+                                       submit=self.submit if submit else None, actor=actor)
+        return {"ok": True, **res}
+
+    async def engine_b_propose(self, symbol: str, view: str, structure: str, submit: bool, actor: str) -> dict[str, Any]:
+        halted = self._engines_halted()
+        if submit and halted:
+            return {"ok": False, "error": halted}
+        olim = self.option_limits()
+        eq_used, usd, _budget = await self._sizing()
+        if not usd:
+            return {"ok": False, "error": "no USD rate, can't size"}
+        budget = min(olim.max_premium_pct / 100 * eq_used, olim.max_premium_base)
+        res = await self.engine_b.propose(symbol.upper(), view=view, structure=structure, lim=olim, premium_budget_base=budget,
+                                          fx=usd, submit=self.submit if submit else None, actor=actor)
+        return {"ok": True, **res}
+
+    async def watchlist_add(self, symbol: str, source: str, reason: str) -> dict[str, Any]:
+        stats = quote = None
+        try:
+            bars = await self.md.daily_bars(symbol.upper())
+            stats = market_stats_from_bars(bars)
+            quote = await self.md.stock_quote(symbol.upper())
+        except Exception as e:  # noqa: BLE001 -- the prefilter then rejects for missing data
+            log.info("watchlist prefilter data for %s: %s", symbol, e)
+        row = self.watchlist.add(symbol, source=source, reason=reason, stats=stats, quote=quote, now=self.clock())
+        self.audit.append("watchlist_add", row, ref=row["symbol"], verdict=row["status"].upper(), actor=source)
+        return row
+
+    def engines_view(self) -> dict[str, Any]:
+        try:
+            olim, olim_err = self.option_limits().to_dict(), None
+        except Exception as e:  # noqa: BLE001
+            olim, olim_err = None, str(e)
+        st = self.state()
+        return {"watchlist": self.watchlist.symbols(), "watchlistRows": self.watchlist.rows(),
+                "lastScan": self.engine_a.last_scan, "lastOptions": self.engine_b.last,
+                "optionLimits": olim, "optionLimitsError": olim_err,
+                "autoScanMinutes": int(st.get("autoScanMinutes") or 0), "guard": st.get("optionsGuard") or {}}
+
+    def set_auto_scan(self, minutes: int, actor: str) -> dict[str, Any]:
+        if minutes not in (0, 5, 15, 30, 60):
+            raise ValueError("autoScanMinutes must be 0 (off), 5, 15, 30 or 60")
+        self._save_state(autoScanMinutes=minutes)
+        self.audit.append("engine_auto_scan", {"minutes": minutes}, ref="engine_a", verdict="OK", actor=actor)
+        return self.engines_view()
+
+    async def auto_scan_loop(self) -> None:
+        """Engine A on a timer (off by default). Skips whenever trading is locked or the agent is halted."""
+        last = 0.0
+        while True:
+            await asyncio.sleep(30)
+            try:
+                minutes = int(self.state().get("autoScanMinutes") or 0)
+                if not minutes or self._engines_halted() or self.clock() - last < minutes * 60:
+                    continue
+                if not regular_hours_fallback(self.clock()):
+                    continue
+                last = self.clock()
+                await self.engine_a_scan(None, True, "engine_a:auto")
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto scan: %s", e)
+
+    # ── options guard: premium stops + never hold into expiry ────────
+    async def options_guard(self, contract_factory: Callable[..., Any] | None = None) -> dict[str, Any]:
+        """One pass. Expiry flatten for every held option line; premium stop for desk-opened structures."""
+        report: dict[str, Any] = {"at": self.clock(), "flatten": [], "stops": [], "errors": []}
+        if kill_switch.is_locked(self.d):
+            report["skipped"] = "locked (the kill switch already flattened)"
+            return report
+        snap = self.bridge.snapshot()
+        if snap.get("state") != "CONNECTED":
+            report["skipped"] = "bridge not connected"
+            return report
+        olim = self.option_limits()
+        positions, orders = snap.get("positions") or [], snap.get("openOrders") or []
+        guard_working = [o for o in orders if (o.get("orderRef") or "").startswith("GUARD-")]
+        # 1. Expiry flatten (shorts bought back before longs are sold).
+        plan = flatten_plan(positions, guard_working, self.clock(), olim)
+        if plan:
+            if contract_factory is None:
+                from ib_async import Contract as contract_factory  # noqa: N813
+            unders = {next((x.get("underlying") or x.get("symbol") for x in positions if x.get("conId") == st["conId"]), st["symbol"]) for st in plan}
+            for u in unders:
+                try:
+                    await self.executor.cancel_working(symbol=u)  # resting take-profits must not fill after we exit
+                except Exception as e:  # noqa: BLE001
+                    report["errors"].append(f"cancel {u}: {e}")
+            for st in plan:
+                try:
+                    res = await self.executor.close_option(contract_factory(conId=st["conId"], exchange="SMART"), st["qty"], None,
+                                                           f"GUARD-EXP-{st['conId']}", action=st["action"])
+                    report["flatten"].append({**st, **res})
+                    self.audit.append("options_expiry_flatten", {**st, **res}, ref=str(st["conId"]), verdict="SUBMITTED", actor="options_guard")
+                except Exception as e:  # noqa: BLE001
+                    report["errors"].append(f"flatten {st['symbol']}: {e}")
+        # 2. Premium stops for structures the desk opened.
+        with self._conn() as c:
+            ids = [r[0] for r in c.execute("SELECT intent_id FROM intents WHERE status='submitted'").fetchall()]
+        for iid in ids:
+            row = self._row(iid)
+            intent = parse_intent(row["intent"])
+            if not intent.is_option:
+                continue
+            lg = intent.legs[0]
+            held = [p for p in positions if p.get("secType") == "OPT" and (p.get("underlying") or "") == intent.symbol
+                    and (p.get("position") or 0) > 0 and (p.get("expiry") or "").startswith(lg["expiry"])
+                    and p.get("right") == lg["right"] and abs((p.get("strike") or 0) - lg["strike"]) < 1e-6]
+            if not held:
+                continue
+            try:
+                quote, _legs = await self._option_quote(intent)
+            except Exception as e:  # noqa: BLE001
+                report["errors"].append(f"quote {iid}: {e}")
+                continue
+            m = opt.mid(quote or {})
+            if m is None or m > intent.stop_loss:
+                continue
+            qty = min(int(held[0]["position"]), row["decision"]["quantity"] or intent.quantity)
+            try:
+                await self.executor.cancel_working(ref=iid)  # the resting take-profit
+                ib = await self.executor._ensure()
+                contract = await self.executor._contract(ib, intent, {})
+                limit = opt.tick(max(quote["bid"], 0.01))
+                res = await self.executor.close_option(contract, qty, limit, f"GUARD-STOP-{iid}", action="SELL")
+                self._set_status(iid, "closed_stop", {"exit": res, "mid": m})
+                report["stops"].append({"intentId": iid, "mid": m, "stop": intent.stop_loss, **res})
+                self.audit.append("options_premium_stop", {"mid": m, "stop": intent.stop_loss, **res}, ref=iid, verdict="SUBMITTED", actor="options_guard")
+            except Exception as e:  # noqa: BLE001
+                report["errors"].append(f"stop {iid}: {e}")
+        self._save_state(optionsGuard={"at": report["at"], "flattened": len(report["flatten"]), "stopped": len(report["stops"]),
+                                       "errors": report["errors"][:5]})
+        return report
+
+    async def options_guard_loop(self) -> None:
+        while True:
+            try:
+                await self.options_guard()
+            except Exception as e:  # noqa: BLE001
+                log.warning("options guard: %s", e)
+            await asyncio.sleep(OPTIONS_GUARD_S)
+
     # ── view for the HUD ─────────────────────────────────────────────
     def view(self) -> dict[str, Any]:
         st = self.state()
@@ -422,10 +630,23 @@ class Desk:
             "lock": kill_switch.read_lock(self.d), "limits": limits, "limitsError": limits_error,
             "pending": [self._row(r[0]) for r in pend], "recent": [self._row(r[0]) for r in recent],
             "audit": {"ok": ok, "note": note, "tail": self.audit.tail(25)},
-            "signals": {"rag": self.rag.stats(), "quiver": quiver_last_report(self.d)},
+            "signals": {"rag": self.rag.stats(), "quantgress": quantgress_last_report(self.d)},
+            "engines": self.engines_view(),
         }
 
     def signals(self, q: str = "", ticker: str | None = None, k: int = 8) -> dict[str, Any]:
         """Context block for the Trading Agent: hypotheses come wrapped in the bias-hygiene directive."""
         entries = self.rag.query(q, ticker=ticker, k=max(1, min(k, 25)))
         return {"entries": [dataclasses.asdict(e) for e in entries], "context": self.rag.render_context(entries)}
+
+
+def structure_quote(intent: OrderIntent, legs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Bid/ask of the whole structure per contract: a single leg, or long - short for a debit vertical."""
+    if not legs or any(not l or l.get("bid") is None or not l.get("ask") for l in legs):
+        return None
+    if len(legs) == 1:
+        return {"bid": legs[0]["bid"], "ask": legs[0]["ask"], "last": legs[0].get("last")}
+    long_q, short_q = legs
+    bid = round(long_q["bid"] - short_q["ask"], 4)
+    ask = round(long_q["ask"] - short_q["bid"], 4)
+    return {"bid": max(bid, 0.0), "ask": ask, "last": None} if ask > 0 else None

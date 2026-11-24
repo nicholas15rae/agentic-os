@@ -13,10 +13,10 @@ audit log shows *all* reasons, not just the first. Verdicts:
 Fail-closed rule: missing data (no quote, unknown hours, unknown equity, no FX
 rate, no daily bars for volume / volatility) is a failure, never a pass.
 
-Alternative data has no override: an intent built on a Quiver disclosure faces
+Alternative data has no override: an intent built on a Quantgress disclosure faces
 exactly the same checks as any other, and there is no field through which a
 disclosure's size or a politician's volume can relax one. On top of that, an
-intent whose citations are ONLY external hypotheses (`quiver:` / `hypothesis:`)
+intent whose citations are ONLY external hypotheses (`quantgress:` / `hypothesis:`)
 is rejected (`signal_provenance`) — it must also cite market telemetry.
 """
 
@@ -59,6 +59,10 @@ class Context:
     seen_intent: bool = False
     recent: list[dict[str, Any]] = field(default_factory=list)  # [{symbol, action, quantity, ts}] accepted intents
     orders_today: int = 0
+    # Options only (Engine B): options.OptionLimits, and per-leg quotes [{bid, ask, openInterest, volume}]
+    # in intent.legs order. ctx.quote is then the quote of the whole structure (per contract).
+    option_limits: Any = None
+    option_legs: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -206,10 +210,15 @@ def evaluate(intent: OrderIntent, ctx: Context) -> Decision:
     else:
         mid = (bid + ask) / 2
         spread_pct = (ask - bid) / mid * 100
-        check("liquidity", spread_pct <= lim.max_spread_pct, f"spread {spread_pct:.3f}% (max {lim.max_spread_pct}%)")
+        max_spread = ctx.option_limits.max_spread_pct if intent.is_option and ctx.option_limits else lim.max_spread_pct
+        check("liquidity", spread_pct <= max_spread, f"spread {spread_pct:.3f}% (max {max_spread}%)")
         entry = intent.limit_price if intent.order_type == "LMT" else (ask if intent.is_long else bid)
-        drift = abs(entry - mid) / mid * 100
-        check("price_sanity", drift <= lim.max_price_drift_pct, f"entry {entry:.4f} is {drift:.2f}% from mid {mid:.4f} (max {lim.max_price_drift_pct}%)")
+        if intent.is_option:
+            # Premium moves in big % steps; the rule is "inside the market, never chase past the ask".
+            check("price_sanity", bid <= entry <= ask, f"limit {entry:.2f} vs market {bid:.2f} x {ask:.2f} (must be inside)")
+        else:
+            drift = abs(entry - mid) / mid * 100
+            check("price_sanity", drift <= lim.max_price_drift_pct, f"entry {entry:.4f} is {drift:.2f}% from mid {mid:.4f} (max {lim.max_price_drift_pct}%)")
         # The stop must still be on the protective side of where we'd actually fill.
         stop_ok = intent.stop_loss < entry if intent.is_long else intent.stop_loss > entry
         check("stop_side", stop_ok, f"stop {intent.stop_loss} vs entry {entry:.4f}")
@@ -231,32 +240,45 @@ def evaluate(intent: OrderIntent, ctx: Context) -> Decision:
         check("volatility", calm,
               f"20d realized vol {ms['volatility_pct']:.1f}% (max {lim.max_volatility_pct}%), 14d ATR {ms['atr_pct']:.2f}% (max {lim.max_atr_pct}%)")
 
-    # 6c. Signal provenance: external hypotheses (Quiver disclosures) are context, not a trade reason on their own.
+    # 6c. Signal provenance: external hypotheses (Quantgress disclosures) are context, not a trade reason on their own.
     hyp = [c for c in intent.citations if is_hypothesis_citation(c)]
     if hyp and lim.require_corroboration:
         corroborated = len(intent.citations) > len(hyp)
         check("signal_provenance", corroborated,
               f"{len(hyp)} external-hypothesis citation(s) " + ("plus market telemetry" if corroborated else "and NO telemetry citation — a disclosure alone is not a trade reason"))
 
+    # 6d. Options: defined risk, DTE window, per-leg liquidity, option line count.
+    olim = ctx.option_limits
+    if intent.is_option:
+        _option_checks(intent, ctx, olim, check)
+
     # 7-8. Size: risk per trade and per-order notional (may MODIFY quantity down)
     qty = intent.quantity
     risk_base = notional_base = None
     sizing_ok = False
-    if equity is None or equity <= 0 or not fx or entry is None:
-        check("position_size", False, "can't size: " + ("no FX rate for " + intent.currency if not fx else "equity or entry price unknown"))
+    if equity is None or equity <= 0 or not fx or entry is None or (intent.is_option and olim is None):
+        check("position_size", False, "can't size: " + ("no FX rate for " + intent.currency if not fx else "option limits unavailable" if intent.is_option and olim is None else "equity or entry price unknown"))
     else:
         alloc = lim.financer_allocation_base
         eq_used = min(equity, alloc) if alloc else equity
-        per_share = abs(entry - intent.stop_loss) * fx
-        risk_cap = min(lim.max_risk_per_trade_pct / 100 * eq_used, lim.max_risk_per_trade_base)
-        notional_cap = lim.max_position_pct / 100 * eq_used
+        if intent.is_option:
+            # Defined risk: the whole debit is the worst case, whatever the stop says.
+            per_share = entry * intent.multiplier * fx
+            risk_cap = min(olim.max_premium_pct / 100 * eq_used, olim.max_premium_base)
+            notional_cap = risk_cap
+            max_by_notional = math.floor(notional_cap / per_share) if per_share > 0 else 0
+        else:
+            per_share = abs(entry - intent.stop_loss) * fx
+            risk_cap = min(lim.max_risk_per_trade_pct / 100 * eq_used, lim.max_risk_per_trade_base)
+            notional_cap = lim.max_position_pct / 100 * eq_used
+            max_by_notional = math.floor(notional_cap / (entry * fx))
         max_by_risk = math.floor(risk_cap / per_share) if per_share > 0 else 0
-        max_by_notional = math.floor(notional_cap / (entry * fx))
         qty = min(intent.quantity, max_by_risk, max_by_notional)
-        risk_base, notional_base = qty * per_share, qty * entry * fx
+        risk_base = qty * per_share
+        notional_base = qty * per_share if intent.is_option else qty * entry * fx
         sizing_ok = qty >= 1
         if not sizing_ok:
-            check("position_size", False, f"even 1 share breaches caps (risk cap {risk_cap:.2f}, notional cap {notional_cap:.2f} {ctx.base_currency})")
+            check("position_size", False, f"even 1 {'contract' if intent.is_option else 'share'} breaches caps (risk cap {risk_cap:.2f}, notional cap {notional_cap:.2f} {ctx.base_currency})")
         elif qty < intent.quantity:
             check("position_size", True, f"cut {intent.quantity}→{qty}: risk {risk_base:.2f}/{risk_cap:.2f}, notional {notional_base:.2f}/{notional_cap:.2f} {ctx.base_currency}")
         else:
@@ -288,3 +310,37 @@ def evaluate(intent: OrderIntent, ctx: Context) -> Decision:
     else:
         verdict = APPROVED
     return Decision(verdict, intent.intent_id, qty if verdict != REJECTED else 0, intent.quantity, checks, trip, entry, risk_base, notional_base)
+
+
+def _option_checks(intent: OrderIntent, ctx: Context, olim: Any, check: Any) -> None:
+    """Engine B rules on top of the common checks. olim is options.OptionLimits (None → fail closed)."""
+    if olim is None:
+        check("option_rules", False, "option limits unavailable")
+        return
+    from options import dte as _dte
+
+    days = _dte(intent.expiry, ctx.now)
+    check("option_dte", olim.min_dte <= days <= olim.max_dte, f"{days} DTE (window {olim.min_dte}-{olim.max_dte})")
+    # Schema already refuses naked/credit structures; re-assert here so the gate never trusts a caller.
+    long_first = intent.legs and intent.legs[0]["action"] == "BUY" and intent.action == "BUY"
+    defined = long_first and (len(intent.legs) == 1 or (len(intent.legs) == 2 and intent.legs[1]["action"] == "SELL"))
+    check("defined_risk", bool(defined), "long option or debit vertical" if defined else "undefined-risk structure")
+    legs = ctx.option_legs or []
+    if len(legs) != len(intent.legs):
+        check("option_liquidity", False, "per-leg quotes missing")
+    else:
+        bad = []
+        for spec, q in zip(intent.legs, legs):
+            name = f"{spec['right']}{spec['strike']:g}"
+            if (q.get("openInterest") or 0) < olim.min_open_interest:
+                bad.append(f"{name} OI {q.get('openInterest')}")
+            if (q.get("volume") or 0) < olim.min_volume:
+                bad.append(f"{name} vol {q.get('volume')}")
+            b, a = q.get("bid"), q.get("ask")
+            if not (b is not None and a and a >= b) or (a - b) / ((a + b) / 2) * 100 > olim.max_spread_pct:
+                bad.append(f"{name} spread")
+        check("option_liquidity", not bad, "; ".join(bad) if bad else f"OI ≥ {olim.min_open_interest}, vol ≥ {olim.min_volume}, spreads ≤ {olim.max_spread_pct}% per leg")
+    lines = {(p.get("underlying") or p.get("symbol"), p.get("secType")) for p in ctx.positions if p.get("position") and p.get("secType") in ("OPT", "BAG")}
+    pending = {(o.get("symbol"), o.get("secType")) for o in ctx.open_orders if o.get("secType") in ("OPT", "BAG")}
+    n = len(lines | pending)
+    check("option_positions", n < olim.max_option_positions, f"{n} open/pending option lines (max {olim.max_option_positions})")

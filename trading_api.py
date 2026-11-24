@@ -162,7 +162,7 @@ async def trading_comms(request: Request):
 
 @router.get("/signals")
 def trading_signals(q: str = "", ticker: str = "", k: int = 8):
-    """trading_rag context for the Trading Agent (Quiver disclosures arrive as External Signal Hypotheses)."""
+    """trading_rag context for the Trading Agent (Quantgress disclosures arrive as External Signal Hypotheses)."""
     qs = urllib.parse.urlencode({k_: v for k_, v in {"q": q[:200], "ticker": ticker[:10], "k": max(1, min(k, 25))}.items() if v})
     try:
         return _bridge_get(f"/signals?{qs}", timeout=6.0)
@@ -170,10 +170,36 @@ def trading_signals(q: str = "", ticker: str = "", k: int = 8):
         raise _offline(e) from None
 
 
-@router.post("/quiver/ingest")
-def trading_quiver_ingest(request: Request):
+@router.post("/signals/ingest")
+def trading_signals_ingest(request: Request):
     try:
-        return _bridge_post("/quiver/ingest", {}, _actor(request), timeout=90.0)
+        return _bridge_post("/signals/ingest", {}, _actor(request), timeout=90.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+ENGINE_POSTS = {"a/scan", "a/watchlist", "a/auto", "b/propose", "b/guard"}
+
+
+@router.get("/engines")
+def trading_engines():
+    try:
+        return _bridge_get("/engines", timeout=6.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+@router.post("/engines/{path:path}")
+async def trading_engine_post(path: str, request: Request):
+    """Engine A scan / watchlist / auto-scan, Engine B propose / guard. Engines only ever SUBMIT
+    intents to the desk; the Security Detail and the execution mode decide what happens next."""
+    allowed = path in ENGINE_POSTS or (path.startswith("a/watchlist/") and path.endswith("/remove") and path.count("/") == 3)
+    if not allowed:
+        raise HTTPException(404, "unknown engine action")
+    body = await _json(request)
+    try:
+        # Scans quote many symbols and option chains: give them time.
+        return _bridge_post(f"/engines/{path}", body, _actor(request), timeout=120.0)
     except OFFLINE as e:
         raise _offline(e) from None
 

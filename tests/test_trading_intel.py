@@ -217,6 +217,33 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(outcomes.score_call(bars, ts, "bullish", horizons=(20,)), {})  # not enough future yet
         self.assertEqual(outcomes.score_call(bars, ts - 30 * 86_400_000, "bullish"), {})  # before any bar
 
+    def test_unscoreable_tickers_are_marked_once_transient_errors_retry(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = di.DiscordStore(Path(d) / "x.db")
+            msgs = [msg(1, "$EVTV calls, breakout", ts="2026-09-01T15:00:00+00:00"),
+                    msg(2, "$SPY calls, breakout", ts="2026-09-02T15:00:00+00:00", author="43")]
+            store.ingest(di.parse_export_json(export(msgs)), via="import", rag=None)
+            now = int(datetime(2026, 11, 24, tzinfo=timezone.utc).timestamp() * 1000)
+
+            class MD:
+                def __init__(self, down=False):
+                    self.down = down
+
+                async def daily_bars(self, t, days=80):
+                    if t == "EVTV":
+                        raise LookupError("unknown contract EVTV USD")
+                    if self.down:
+                        raise ConnectionRefusedError("TWS down")
+                    return daily("2026-08-03", [100 + i for i in range(80)])
+
+            r1 = asyncio.run(outcomes.score_pending(store, MD(down=True), now_ms=now))
+            self.assertEqual((r1["unscoreable"], r1["scored"]), (1, 0))
+            r2 = asyncio.run(outcomes.score_pending(store, MD(), now_ms=now))
+            self.assertEqual((r2["calls"], r2["scored"]), (1, 1))  # EVTV not re-queued; SPY retried after the outage
+            self.assertEqual(asyncio.run(outcomes.score_pending(store, MD(), now_ms=now))["calls"], 0)
+            self.assertEqual(store.stats()["scoredCalls"], 1)  # the unscoreable call doesn't count as scored
+            self.assertTrue(all(r["authorId"] == "43" for r in store.outcome_rows()))
+
     def test_leaderboard_shrinks_small_samples(self):
         rows = [{"horizon": 5, "ret": 3.0, "hit": 1, "authorId": "lucky", "author": "lucky", "channelId": CH, "channel": "c"}] * 3
         rows += [{"horizon": 5, "ret": 1.0, "hit": i % 10 < 7, "authorId": "steady", "author": "steady", "channelId": CH, "channel": "c"} for i in range(40)]

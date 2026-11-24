@@ -197,6 +197,9 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
                "citations": ["telemetry:SPY:healthcheck"], "thesis": "health check probe — never submitted"}
         intent = parse_intent(raw)
         ctx = await desk.build_context(intent)
+        if ctx.session_open and not (ctx.quote or {}).get("ask"):
+            # The first quote after a fresh (re)connect can time out; one retry before calling it broken.
+            ctx = await desk.build_context(intent)
         d = evaluate(intent, ctx)
         failed = {x["name"]: x["detail"] for x in d.checks if not x["ok"]}
         closed = ctx.session_open is False

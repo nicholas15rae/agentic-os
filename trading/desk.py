@@ -541,6 +541,7 @@ class Desk:
     async def auto_scan_loop(self) -> None:
         """Engine A on a timer (off by default). Skips whenever trading is locked or the agent is halted."""
         last = 0.0
+        self.heartbeats["auto_scan"] = self.clock()  # alive from the start, not only after the first sleep
         while True:
             await asyncio.sleep(30)
             self.heartbeats["auto_scan"] = self.clock()

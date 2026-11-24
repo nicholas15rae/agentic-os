@@ -105,7 +105,15 @@ async def score_pending(store: Any, md: Any, *, now_ms: int | None = None, limit
         days = int((now_ms - oldest) / 86_400_000) + 40
         try:
             bars = await md.daily_bars(ticker, days=days)
-        except Exception as e:  # noqa: BLE001 — unknown / delisted ticker: skip it
+        except LookupError as e:
+            # Unknown / delisted / not a stock (VIX is an index): mark these calls unscoreable once
+            # (hit NULL, excluded from leaderboards) so they don't head every future batch.
+            rep["errors"].append(f"{ticker}: {type(e).__name__}: {e}"[:160])
+            rows += [{"key": c["key"], "ticker": ticker, "horizon": max(HORIZONS), "direction": c["direction"], "ref": None,
+                      "exit": None, "ret": None, "hit": None, "scoredAt": now_ms} for c in cs]
+            rep["unscoreable"] = rep.get("unscoreable", 0) + len(cs)
+            continue
+        except Exception as e:  # noqa: BLE001 — transient (TWS down, timeout): retry next run
             rep["errors"].append(f"{ticker}: {type(e).__name__}: {e}"[:160])
             continue
         for c in cs:

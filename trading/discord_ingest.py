@@ -427,7 +427,7 @@ class DiscordStore:
         with self._conn() as c:
             n = c.execute("SELECT COUNT(*), SUM(is_call), MIN(ts_ms), MAX(ts_ms) FROM messages").fetchone()
             srcs = c.execute("SELECT channel_id, guild, channel, imported, last_poll_ms FROM sources ORDER BY imported DESC").fetchall()
-            scored = c.execute("SELECT COUNT(DISTINCT msg_key) FROM outcomes").fetchone()[0]
+            scored = c.execute("SELECT COUNT(DISTINCT msg_key) FROM outcomes WHERE hit IS NOT NULL").fetchone()[0]
         return {"messages": n[0] or 0, "calls": n[1] or 0, "from": n[2], "to": n[3], "scoredCalls": scored,
                 "sources": [dict(zip(("channelId", "guild", "channel", "messages", "lastPoll"), s)) for s in srcs]}
 

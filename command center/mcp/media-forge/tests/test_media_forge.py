@@ -27,7 +27,7 @@ def test_outside_root_refused(s, tmp_path):
 
 
 def test_no_overwrite_and_versions(s):
-    d = config.project_dir(s, "test-tape") / "exports"
+    d = config.project_dir(s, "test-tape") / "renders"
     first = config.next_version(d, "cut", ".mp4")
     first.write_bytes(b"x")
     assert config.next_version(d, "cut", ".mp4").name == "cut_v002.mp4"
@@ -69,7 +69,7 @@ def test_silence_trim_points(s, raw):
 
 def test_scenes(s, jobs, raw):
     pytest.importorskip("scenedetect")
-    d = config.project_dir(s, "test-tape") / "proxies"
+    d = config.project_dir(s, "test-tape") / "working"
     a = tone_clip(d / "sc_a.mp4", 0, 2, 0, pattern="testsrc2")
     b = tone_clip(d / "sc_b.mp4", 0, 2, 0, pattern="smptebars")
     lst = d / "list.txt"
@@ -89,7 +89,7 @@ def test_self_tape_assemble(s, jobs, raw):
     assert plan["width"] == 1280 and plan["height"] == 720
     assert plan["clips"][0]["auto_trim"] and plan["clips"][2]["auto_trim"] is None  # no audio → no trim
     assert abs(plan["clips"][0]["duration"] - 3.5) < 0.2
-    out = config.writable(s, str(config.project_dir(s, "test-tape") / "exports" / "tape_v001.mp4"))
+    out = config.writable(s, str(config.project_dir(s, "test-tape") / "renders" / "tape_v001.mp4"))
     res = wait(jobs, jobs.start("assemble", "t", lambda ctx: video.assemble(
         s, ctx, plan, out, "self-tape", True, None, None, "x264")))
     assert res["verify"]["ok"], res["verify"]
@@ -102,7 +102,7 @@ def test_self_tape_assemble(s, jobs, raw):
 def test_size_cap(s, jobs, raw):
     clips = [{"path": str(raw["slate"])}, {"path": str(raw["take"])}]
     plan = video.plan_assembly(s, clips, False, -35, 0.25, 0, 1280, 720)
-    out = config.writable(s, str(config.project_dir(s, "test-tape") / "exports" / "capped_v001.mp4"))
+    out = config.writable(s, str(config.project_dir(s, "test-tape") / "renders" / "capped_v001.mp4"))
     res = wait(jobs, jobs.start("assemble", "t", lambda ctx: video.assemble(
         s, ctx, plan, out, "web", False, None, 1.5, "x264")))
     assert res["verify"]["ok"], res
@@ -110,7 +110,7 @@ def test_size_cap(s, jobs, raw):
 
 
 def test_reframe_with_burned_captions(s, jobs, raw):
-    src = config.project_dir(s, "test-tape") / "exports" / "tape_v001.mp4"
+    src = config.project_dir(s, "test-tape") / "renders" / "tape_v001.mp4"
     if not src.exists():
         pytest.skip("depends on test_self_tape_assemble")
     srt = src.with_suffix(".srt")
@@ -127,7 +127,7 @@ def test_reframe_with_burned_captions(s, jobs, raw):
 def test_cancel(s, jobs, raw):
     clips = [{"path": str(raw["slate"])}] * 12
     plan = video.plan_assembly(s, clips, False, -35, 0.25, 0, 1920, 1080)
-    out = config.writable(s, str(config.project_dir(s, "test-tape") / "exports" / "cancel_v001.mp4"))
+    out = config.writable(s, str(config.project_dir(s, "test-tape") / "renders" / "cancel_v001.mp4"))
     job = jobs.start("assemble", "t", lambda ctx: video.assemble(s, ctx, plan, out, "web", True, None, None, "x264"))
     import time
     time.sleep(1.0)
@@ -145,7 +145,7 @@ def test_photos_and_thumbnail(s, jobs, raw):
     d = config.project_dir(s, "test-tape") / "raw"
     img = d / "head.jpg"
     Image.new("RGB", (3000, 2000), (120, 90, 80)).save(img)
-    out_dir = config.project_dir(s, "test-tape") / "stills"
+    out_dir = config.project_dir(s, "test-tape") / "working" / "stills"
     res = wait(jobs, jobs.start("photos", "t", lambda ctx: photos.batch(
         s, ctx, [img], out_dir, {"crop": "4:5", "white_balance": True, "long_edge": 1500, "watermark": "© test"},
         "jpg", 90)))
@@ -161,7 +161,7 @@ def test_photos_and_thumbnail(s, jobs, raw):
 def test_transcribe_cpu(s, jobs):
     pytest.importorskip("faster_whisper")
     speech = Path(os.environ["MF_TEST_WHISPER"])
-    d = config.project_dir(s, "test-tape") / "proxies"
+    d = config.project_dir(s, "test-tape") / "working"
     src = d / speech.name
     shutil.copyfile(speech, src)
     res = wait(jobs, jobs.start("transcribe", "t", lambda ctx: analyze.transcribe(

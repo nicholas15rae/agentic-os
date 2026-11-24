@@ -15,7 +15,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from media_forge import analyze, config, ff, photos, video
+from media_forge import analyze, config, ff, photos, timeline, video
 from media_forge.config import PolicyError, next_version, project_dir, readable, writable
 from media_forge.jobs import JobManager
 
@@ -70,7 +70,9 @@ async def media_status() -> dict:
 
 @mcp.tool()
 async def ensure_project(project: str) -> dict:
-    """Create (or reuse) <media_root>/<project>/{raw,proxies,mlt,exports,stills}. Returns the paths."""
+    """Create (or reuse) <media_root>/projects/<project>/{raw,working,renders}. Returns the paths.
+    raw/ holds originals (read-only to this server), working/ intermediates (captions, scene
+    thumbnails, stills, voiceover), renders/ finished versioned videos."""
     def run() -> dict:
         base = project_dir(S, project)
         return {"project": project, "root": str(base),
@@ -142,7 +144,7 @@ async def quick_assemble(clips: list[dict], project: str | None = None, output: 
     preset: self-tape (-18 LUFS), web (-16), short (-14). `lufs` overrides. `max_size_mb` targets a
     file size (casting limits). encoder: x264 (CPU, default) or nvenc (only when the GPU is free).
     dry_run returns the edit plan (resolved trims, format) without rendering.
-    Output defaults to <project>/exports/<preset>_vNNN.mp4. Never touches raw/ files.
+    Output defaults to <project>/renders/<preset>_vNNN.mp4. Never touches raw/ files.
     """
     def plan() -> dict:
         ff.refuse_gpu_args(S, encoder)
@@ -151,10 +153,39 @@ async def quick_assemble(clips: list[dict], project: str | None = None, output: 
     edit_plan = await _guard(plan)
     if dry_run:
         return {"dry_run": True, "edit_plan": edit_plan}
-    out = await _guard(_out_path, project, output, "exports", preset, ".mp4")
+    out = await _guard(_out_path, project, output, "renders", preset, ".mp4")
     job = JOBS.start("assemble", f"{len(clips)} clips → {out.name}",
                      lambda ctx: video.assemble(S, ctx, edit_plan, out, preset, normalize_audio, lufs,
                                                 max_size_mb, encoder))
+    return await _await_job(job.id, wait_s)
+
+
+@mcp.tool()
+async def render_timeline(spec_path: str, output: str | None = None, project: str | None = None,
+                          wait_s: float = 480) -> dict:
+    """Render a timeline spec JSON (written by the Command Center) to an H.264/AAC MP4.
+
+    spec (v1): {"version": 1, "project": slug, "width": even 320-3840, "height": even 320-3840,
+    "fps": 10-60, "clips": [{"path", "kind": "video"|"image", "in", "out", "fade_ms": 0-2000}] (1-200;
+    for images out-in is the hold, 0.2-60 s), "audio": [{"path", "start", "in", "out", "volume": 0-2}],
+    "clip_audio_volume": 0-2, "loudness_lufs": -14|-16|-18|null (null = no normalisation),
+    "max_size_mb": MB|null}. The spec file and every media path must be under the media root.
+    Clips are trimmed/held, letterboxed to W x H and concatenated with their own audio; audio layers
+    (voiceover, music) are delayed to `start` and mixed over it; then 2-pass EBU R128, CPU libx264,
+    size cap and an ffprobe verify. Output: `output`, else <project>/renders/<spec name>_vNNN.mp4
+    (`project` falls back to the spec's). Never touches raw/ files. Runs as a job like quick_assemble.
+    """
+    def prep() -> tuple[dict, Path, Path]:
+        ff.refuse_gpu_args(S, "x264")
+        spec = readable(S, spec_path)
+        plan = timeline.load_spec(S, spec)
+        slug = project or plan["project"]
+        out = _out_path(slug, output, "renders", spec.stem or "render", ".mp4")
+        return plan, spec, out
+
+    plan, spec, out = await _guard(prep)
+    job = JOBS.start("timeline", f"{len(plan['clips'])} clips → {out.name}",
+                     lambda ctx: timeline.render(S, ctx, plan, out, spec))
     return await _await_job(job.id, wait_s)
 
 
@@ -168,7 +199,7 @@ async def reframe_and_caption(input: str, aspect: str = "9:16", mode: str = "blu
         ff.refuse_gpu_args(S, encoder)
         src = readable(S, input)
         srt = readable(S, srt_path) if srt_path else None
-        out = _out_path(project, output, "exports", f"{src.stem}_{aspect.replace(':', 'x')}", ".mp4")
+        out = _out_path(project, output, "renders", f"{src.stem}_{aspect.replace(':', 'x')}", ".mp4")
         return src, srt, out
 
     src, srt, out = await _guard(prep)
@@ -181,14 +212,15 @@ async def reframe_and_caption(input: str, aspect: str = "9:16", mode: str = "blu
 async def transcribe_clip(path: str, project: str | None = None, model: str | None = None,
                           language: str | None = None, word_timestamps: bool = True, wait_s: float = 480) -> dict:
     """Local faster-whisper (CPU int8 by default; never touches the LLM's GPU) with VAD.
-    Writes .srt / .vtt / .json next to the clip (or into <project>/exports when the clip is in raw/).
+    Writes .srt / .vtt / .json into <project>/working/captions when `project` is given (required for
+    clips in raw/), else next to the clip.
     Returns timestamped segments, first/last speech times (slate and line detection)."""
     def prep() -> tuple[Path, Path]:
         src = readable(S, path)
-        if "raw" in (part.lower() for part in src.relative_to(S.media_root).parts[:-1]):
-            if not project:
-                raise PolicyError("the clip is in raw/: pass `project` so captions go to exports/")
-            base = project_dir(S, project) / "exports" / src.stem
+        if project:
+            base = project_dir(S, project) / "working" / "captions" / src.stem
+        elif "raw" in (part.lower() for part in src.relative_to(S.media_root).parts[:-1]):
+            raise PolicyError("the clip is in raw/: pass `project` so captions go to working/captions/")
         else:
             base = src.with_suffix("")
         writable(S, str(base.with_suffix(".srt")), overwrite=True)
@@ -205,10 +237,10 @@ async def transcribe_clip(path: str, project: str | None = None, model: str | No
 async def detect_scenes(path: str, threshold: float = 27.0, min_scene_s: float = 0.6, project: str | None = None,
                         thumbnails: bool = True, wait_s: float = 480) -> dict:
     """Shot boundaries (PySceneDetect ContentDetector) with optional mid-shot thumbnails in
-    <project>/stills. Use for take selection and B-roll logging."""
+    <project>/working/scenes. Use for take selection and B-roll logging."""
     def prep() -> tuple[Path, Path | None]:
         src = readable(S, path)
-        thumbs = project_dir(S, project) / "stills" / "scenes" if (thumbnails and project) else None
+        thumbs = project_dir(S, project) / "working" / "scenes" if (thumbnails and project) else None
         return src, thumbs
 
     src, thumbs = await _guard(prep)
@@ -221,14 +253,14 @@ async def detect_scenes(path: str, threshold: float = 27.0, min_scene_s: float =
 @mcp.tool()
 async def process_photos(paths: list[str], project: str, operations: dict | None = None, format: str = "jpg",
                          quality: int = 92, wait_s: float = 480) -> dict:
-    """Batch polish into <project>/stills (originals untouched). operations (all optional):
+    """Batch polish into <project>/working/stills (originals untouched). operations (all optional):
     auto_level (default true), white_balance, exposure / contrast / saturation (1.0 = unchanged),
     sharpen (default true), crop: 4:5 | 8x10 | headshot | 1:1 | 16:9 | 9:16 | 3:2 | 2:3,
     focus: face | center, long_edge: px, watermark: text."""
     def prep() -> tuple[list[Path], Path]:
         if not paths:
             raise PolicyError("no photos given")
-        return [readable(S, p) for p in paths], project_dir(S, project) / "stills"
+        return [readable(S, p) for p in paths], project_dir(S, project) / "working" / "stills"
 
     srcs, out_dir = await _guard(prep)
     job = JOBS.start("photos", f"{len(srcs)} photos",
@@ -238,10 +270,10 @@ async def process_photos(paths: list[str], project: str, operations: dict | None
 
 @mcp.tool()
 async def contact_sheet(paths: list[str], project: str, columns: int = 4, cell_px: int = 360) -> dict:
-    """A labelled grid of images (selects review, headshot proofs) saved to <project>/stills."""
+    """A labelled grid of images (selects review, headshot proofs) saved to <project>/working/stills."""
     def run() -> dict:
         srcs = [readable(S, p) for p in paths]
-        out = _out_path(project, None, "stills", "contact_sheet", ".jpg")
+        out = _out_path(project, None, "working/stills", "contact_sheet", ".jpg")
         return photos.contact_sheet(S, srcs, out, max(1, min(columns, 10)), max(120, min(cell_px, 800)))
     return await _guard(run)
 
@@ -250,10 +282,11 @@ async def contact_sheet(paths: list[str], project: str, columns: int = 4, cell_p
 async def make_thumbnail(source: str, text: str, project: str, aspect: str = "16:9", at_sec: float | None = None,
                          subtitle: str | None = None) -> dict:
     """Text-on-frame thumbnail/cover from an image or a video frame (`at_sec`, default 1/3 in).
-    aspect 16:9 (YouTube, 1280 wide) or 9:16 / 4:5 / 1:1 (covers, 1080 wide). Face-aware crop."""
+    aspect 16:9 (YouTube, 1280 wide) or 9:16 / 4:5 / 1:1 (covers, 1080 wide). Face-aware crop.
+    Saved to <project>/working/stills."""
     def run() -> dict:
         src = readable(S, source)
-        out = _out_path(project, None, "stills", f"thumb_{aspect.replace(':', 'x')}", ".jpg")
+        out = _out_path(project, None, "working/stills", f"thumb_{aspect.replace(':', 'x')}", ".jpg")
         return photos.thumbnail(S, src, at_sec, out, text, aspect, subtitle)
     return await _guard(run)
 

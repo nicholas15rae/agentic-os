@@ -1,0 +1,80 @@
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Send, TriangleAlert } from "lucide-react";
+import { Card, Empty } from "@/components/ui";
+import { sendDirectorTurn } from "./director-chat";
+import { useDirector } from "./director-store";
+
+/** Zone 4: typed chat with the `director` workspace (no voice, no TTS). */
+export function DirectorChat() {
+  const chat = useDirector((s) => s.chat);
+  const busy = useDirector((s) => s.chatBusy);
+  const focus = useDirector((s) => s.focus);
+  const [text, setText] = useState("");
+  const list = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    list.current?.scrollTo({ top: list.current.scrollHeight });
+  }, [chat]);
+  useEffect(() => {
+    if (focus?.target === "chat") input.current?.focus();
+  }, [focus]);
+
+  const send = () => {
+    const t = text.trim();
+    if (!t || busy) return;
+    setText("");
+    void sendDirectorTurn(t);
+  };
+
+  return (
+    <Card title="Director" hint="Plans shots and edits. Its suggestions fill the shot list, timeline and render plan; nothing runs until you approve it.">
+      <div ref={list} className="max-h-[420px] min-h-[160px] space-y-2 overflow-y-auto pr-1">
+        {chat.length === 0 && <Empty>Tell the Director what you're making.</Empty>}
+        {chat.map((m) => (
+          <div key={m.id} className={`flex ${m.role === "nic" ? "justify-end" : "justify-start"}`}>
+            <div className={`max-w-[88%] rounded-[14px] px-3 py-2 text-[13px] leading-relaxed ${m.role === "nic" ? "border border-amber/30 bg-amber/12 text-ink" : "border border-white/[0.08] bg-white/[0.03] text-ink-2"}`}>
+              {m.streaming && !m.text ? <Loader2 size={13} className="animate-spin text-ink-3" /> : <p className="whitespace-pre-wrap">{m.text}</p>}
+              {m.applied?.map((a) => (
+                <p key={a} className="mt-1 font-mono text-[10px] text-teal-soft">
+                  ✓ {a}
+                </p>
+              ))}
+              {m.errors?.map((e) => (
+                <p key={e} className="mt-1 flex items-start gap-1 font-mono text-[10px] text-amber-soft">
+                  <TriangleAlert size={10} className="mt-0.5 shrink-0" /> ignored action: {e}
+                </p>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <form
+        className="mt-3 flex items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
+        }}
+      >
+        <textarea
+          ref={input}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          rows={2}
+          placeholder="Ask the Director…"
+          className="field min-h-[44px] resize-none text-[13px]"
+          aria-label="Message the Director"
+        />
+        <button type="submit" disabled={!text.trim() || busy} className="pill-primary !h-10 !w-10 shrink-0 !p-0 disabled:opacity-50" aria-label="Send">
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+        </button>
+      </form>
+    </Card>
+  );
+}

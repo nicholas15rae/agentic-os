@@ -1,15 +1,16 @@
 import { create } from "zustand";
 import type { LucideIcon } from "lucide-react";
-import { Briefcase, CandlestickChart, Cpu, FlaskConical, Gauge, Image, Lightbulb, MessagesSquare, Phone, Receipt, Search, Settings2 } from "lucide-react";
+import { Briefcase, CandlestickChart, Clapperboard, Cpu, FlaskConical, Gauge, Image, Lightbulb, MessagesSquare, Phone, Receipt, Search, Settings2 } from "lucide-react";
 
 /** "app" is a mounted MY APPS page (`#/app/<id>`), not one of the fixed SECTIONS. */
-export type Section = "command" | "agents" | "playplace" | "comms" | "brainstorm" | "finance" | "operations" | "trading" | "vault" | "wallpapers" | "memorymap" | "settings" | "app";
+export type Section = "command" | "agents" | "playplace" | "director" | "comms" | "brainstorm" | "finance" | "operations" | "trading" | "vault" | "wallpapers" | "memorymap" | "settings" | "app";
 export type FixedSection = Exclude<Section, "app">;
 
 export const SECTIONS: { id: FixedSection; label: string; icon: LucideIcon; mobile: boolean }[] = [
   { id: "command", label: "Command", icon: Gauge, mobile: true },
   { id: "agents", label: "Agents", icon: MessagesSquare, mobile: true },
   { id: "playplace", label: "Play Place", icon: FlaskConical, mobile: false },
+  { id: "director", label: "Director Suite", icon: Clapperboard, mobile: false },
   { id: "comms", label: "Comms", icon: Phone, mobile: true },
   { id: "brainstorm", label: "Brainstorm", icon: Lightbulb, mobile: true },
   { id: "finance", label: "Finance", icon: Receipt, mobile: true },

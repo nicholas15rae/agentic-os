@@ -4,7 +4,7 @@ mod exe_resolve;
 mod proc;
 
 use commands::{buildhub, handoff_cues, lifecycle};
-use commands::{arbiter, business_registry, finance_handoff, finance_vault, integrity, memtier, ops_audit, ops_scope, quarantine, review_queue};
+use commands::{arbiter, business_registry, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
@@ -117,6 +117,8 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| on_second_launch(app)));
     builder
         .plugin(tauri_plugin_notification::init())
+        // Director Suite file picker: open-file dialogs only (capability `dialog:allow-open`).
+        .plugin(tauri_plugin_dialog::init())
         .manage(system::SysState::default())
         .manage(dispatch::DispatchState::default())
         .manage(bridge::BridgeState::default())
@@ -130,6 +132,8 @@ pub fn run() {
         .manage(introspect::IntrospectState::default())
         .manage(lifecycle::LifecycleState::default())
         .manage(buildhub::HubState::default())
+        .manage(media::MediaState::default())
+        .manage(gdrive::GdriveState::default())
         .setup(|app| {
             use tauri::Manager;
             // System Map: app uptime counts from here.
@@ -180,6 +184,8 @@ pub fn run() {
                 pipelines::load_last_sync(&state, &app.state::<pipelines::PipelineState>());
                 // System Map dev task queue: <config dir>/devqueue.db (works without the gateway).
                 app.state::<devqueue::DevQueueState>().init(&dir);
+                // Director Suite index: <config dir>/media.db (projects live in C:i-hub\media\projects).
+                app.state::<media::MediaState>().init(&dir);
                 // P6: a run the last session left "running" died with it (its job was killed).
                 claude_fix::recover_interrupted(&app.state::<devqueue::DevQueueState>());
                 // TaskEnvelope store: <config dir>/tasks.db (separate from devqueue.db). A failure
@@ -379,6 +385,32 @@ pub fn run() {
             agents::os_turn_cancel,
             agents::overseer_ask,
             mcp::mcp_list_tools,
+            media::media_projects,
+            media::media_project_create,
+            media::media_project_get,
+            media::media_ingest_paths,
+            media::media_ingest_begin,
+            media::media_ingest_chunk,
+            media::media_ingest_finish,
+            media::media_voiceover_save,
+            media::media_manifest_save,
+            media::media_chat_log,
+            media::media_render_plan,
+            media::media_render_execute,
+            media::media_render_cancel,
+            media::media_readiness,
+            media::media_reveal,
+            gdrive::cloud_status,
+            gdrive::cloud_connect,
+            gdrive::cloud_disconnect,
+            gdrive::cloud_list,
+            gdrive::cloud_set_folders,
+            gdrive::cloud_pull,
+            gdrive::cloud_push,
+            gdrive::cloud_share,
+            gdrive::cloud_cancel,
+            gdrive::cloud_transfers,
+            gdrive::cloud_history,
             agents::tony_tools_preview,
             mcp::mcp_call,
             mcp::mcp_sync_anythingllm,

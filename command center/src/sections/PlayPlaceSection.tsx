@@ -17,6 +17,8 @@ import { StagingHub } from "@/features/buildhub/StagingHub";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
 import { PinButton } from "@/features/myapps/PinButton";
+import { SendToDirectorButton } from "@/features/director/SendToDirectorButton";
+import { playCardHandoff } from "@/features/director/handoff";
 
 /** Phase 2 Part D: Solo (surface_only) builds nothing; the Rust gate stays authoritative. */
 const SOLO_BUILD_HINT = "Solo mode: switch modes to build";
@@ -242,6 +244,7 @@ function ParkedCardView({ card, compact, focused, onArchive, onDiscard }: { card
         >
           <Hammer size={13} /> Build prototype
         </button>
+        <SendToDirectorButton handoff={() => playCardHandoff(card)} />
         <button onClick={onArchive} className="pill-glass !h-9 text-xs" title="Hide from the Play Place (kept in the vault)">
           <Archive size={13} /> Archive
         </button>
@@ -308,6 +311,7 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
         {card.versions && <span className="font-mono text-[11px] text-ink-3">v{card.versions.length}</span>}
         <div className="ml-auto flex gap-1">
           {(card.hasHtml || !!card.html) && <PinButton target={{ kind: "card", ref: card.id, title: card.title }} size="md" />}
+          <SendToDirectorButton handoff={() => playCardHandoff(card)} className="!h-8 !px-2.5" />
           <button onClick={() => setCode((v) => !v)} className="pill-glass !h-8 !px-2.5 text-xs" aria-pressed={code} title="Code inspector">
             {code ? <Eye size={13} /> : <Code2 size={13} />} {code ? "Preview" : "Code"}
           </button>

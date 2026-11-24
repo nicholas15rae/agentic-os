@@ -28,6 +28,7 @@ const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.E
   command: CommandSection,
   agents: lazy(() => import("@/sections/AgentsSection").then((m) => ({ default: m.AgentsSection }))),
   playplace: lazy(() => import("@/sections/PlayPlaceSection").then((m) => ({ default: m.PlayPlaceSection }))),
+  director: lazy(() => import("@/sections/DirectorSuiteSection").then((m) => ({ default: m.DirectorSuiteSection }))),
   comms: lazy(() => import("@/sections/CommsSection").then((m) => ({ default: m.CommsSection }))),
   brainstorm: lazy(() => import("@/sections/BrainstormSection").then((m) => ({ default: m.BrainstormSection }))),
   finance: lazy(() => import("@/sections/FinanceSection").then((m) => ({ default: m.FinanceSection }))),

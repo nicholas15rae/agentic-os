@@ -231,6 +231,28 @@ async def trading_engine_post(path: str, request: Request):
         raise _offline(e) from None
 
 
+@router.get("/health/last")
+def trading_health_last():
+    try:
+        return _bridge_get("/health/last", timeout=6.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+@router.post("/health/check")
+async def trading_health_check(request: Request):
+    """Read-only pipeline health check. If the bridge itself is down, say so as a FAIL result."""
+    body = await _json(request)
+    try:
+        return _bridge_post("/health/check", body, _actor(request), timeout=240.0)
+    except OFFLINE as e:
+        now = time.time()
+        return {"at": now, "atNy": time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), "overall": "FAIL",
+                "counts": {"PASS": 0, "WARN": 0, "FAIL": 1, "SKIP": 0},
+                "checks": [{"stage": "runtime", "name": "bridge_process", "status": "FAIL", "ms": 0,
+                            "detail": f"trading bridge not reachable on 127.0.0.1:{_bridge_port()} ({type(e).__name__}) - restart the gateway or run trading/ibkr_bridge.py"}]}
+
+
 @router.post("/kill-switch/reset")
 async def trading_kill_reset(request: Request):
     body = await _json(request)

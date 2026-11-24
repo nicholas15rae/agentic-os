@@ -296,6 +296,21 @@ export const intelApi = {
   score: () => gateway<NonNullable<IntelView["lastScoring"]>>("/api/trading/intel/outcomes/score", { method: "POST", body: "{}", timeoutMs: 300_000 }),
 };
 
+export type HealthStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
+
+export interface HealthResult {
+  at: number;
+  atNy: string;
+  overall: HealthStatus | null;
+  counts?: Record<HealthStatus, number>;
+  checks: { stage: string; name: string; status: HealthStatus; detail: string; ms: number }[];
+}
+
+export const healthApi = {
+  last: () => gateway<HealthResult>("/api/trading/health/last", { timeoutMs: 8_000 }),
+  run: (dryRunKill = true) => gateway<HealthResult>("/api/trading/health/check", { method: "POST", body: JSON.stringify({ dryRunKill }), timeoutMs: 240_000 }),
+};
+
 const post = <T>(path: string, body: unknown = {}, timeoutMs = 20_000) => gateway<T>(path, { method: "POST", body: JSON.stringify(body), timeoutMs });
 
 export const tradingApi = {

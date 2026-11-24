@@ -11,6 +11,7 @@ import { IbkrHud } from "@/features/trading/IbkrHud";
 import { TradingDesk } from "@/features/trading/TradingDesk";
 import { EnginesPanel } from "@/features/trading/EnginesPanel";
 import { IntelPanel } from "@/features/trading/IntelPanel";
+import { HealthCard } from "@/features/trading/HealthCard";
 
 const INTERVALS: [string, string, string][] = [
   // [yahoo, label, tradingview]
@@ -123,6 +124,8 @@ export function TradingSection() {
         </Select>
         <span className="ml-auto text-[11px] text-ink-3">IBKR paper only · every order passes the Security Detail.</span>
       </div>
+
+      <HealthCard />
 
       <div className="glass flex flex-wrap items-center gap-1.5 rounded-[18px] p-2.5" aria-label="Watchlist">
         {watchlist.map((s) => (

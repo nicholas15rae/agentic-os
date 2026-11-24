@@ -133,6 +133,8 @@ class Desk:
         self.discord = DiscordStore(self.d / "trading_rag" / "discord.db")
         self.discord_status: dict[str, Any] = {}
         self.last_scoring: dict[str, Any] | None = None
+        # Background-loop heartbeats (name -> last iteration, epoch s) for the health check.
+        self.heartbeats: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._db = self.d / "desk.db"
         with self._conn() as c:
@@ -452,6 +454,7 @@ class Desk:
 
     async def monitor(self) -> None:
         while True:
+            self.heartbeats["drawdown_monitor"] = self.clock()
             try:
                 if self.drawdown_breached():
                     log.error("daily drawdown breached — tripping kill switch")
@@ -540,6 +543,7 @@ class Desk:
         last = 0.0
         while True:
             await asyncio.sleep(30)
+            self.heartbeats["auto_scan"] = self.clock()
             try:
                 minutes = int(self.state().get("autoScanMinutes") or 0)
                 if not minutes or self._engines_halted() or self.clock() - last < minutes * 60:
@@ -624,6 +628,7 @@ class Desk:
 
     async def options_guard_loop(self) -> None:
         while True:
+            self.heartbeats["options_guard"] = self.clock()
             try:
                 await self.options_guard()
             except Exception as e:  # noqa: BLE001
@@ -737,6 +742,7 @@ class Desk:
         """Journal every minute; outcome scoring every 6 hours (cheap when nothing is due)."""
         last_score = 0.0
         while True:
+            self.heartbeats["intel"] = self.clock()
             try:
                 self.journal_pass()
                 if self.clock() - last_score > 6 * 3600:

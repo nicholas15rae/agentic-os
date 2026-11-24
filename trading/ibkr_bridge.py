@@ -211,6 +211,9 @@ def create_app(bridge: Bridge, desk: Any = None):
         tasks = [asyncio.create_task(bridge.run()), asyncio.create_task(desk.monitor()),
                  asyncio.create_task(desk.options_guard_loop()), asyncio.create_task(desk.auto_scan_loop()),
                  asyncio.create_task(desk.intel_loop())]
+        import healthcheck
+
+        tasks.append(asyncio.create_task(healthcheck.morning_loop(desk)))
         import discord_live
 
         tasks.append(asyncio.create_task(discord_live.poll_forever(desk.discord, desk.rag, desk.watchlist.symbols, desk.discord_status)))
@@ -240,6 +243,19 @@ def create_app(bridge: Bridge, desk: Any = None):
 
     def actor(req: Request) -> str:
         return (req.headers.get("x-trading-actor") or "unknown")[:40]
+
+    @app.post("/health/check")
+    async def health_check(req: Request):
+        import healthcheck
+
+        b = await body(req)
+        return await healthcheck.run_checks(desk, dry_run_kill=b.get("dryRunKill", True) is not False)
+
+    @app.get("/health/last")
+    def health_last():
+        import healthcheck
+
+        return healthcheck.last_result(desk.d) or {"overall": None, "checks": []}
 
     @app.get("/health")
     def health():

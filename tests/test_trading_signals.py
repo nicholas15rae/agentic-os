@@ -90,6 +90,16 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((msft.ticker, msft.transaction, msft.traded_date, msft.filed_date, msft.size_low_usd, msft.planned_sale),
                          ("MSFT", "buy", "2026-11-15", "2026-11-18", 410_000.0, False))
 
+    def test_house_asset_type_and_non_trade_form4(self):
+        house = {"chamber": "H", "last_name": "Case", "tkr": "AAPL", "tx_type": "Purchase", "asset_type": "Stocks (including ADRs)",
+                 "amount_low": 1001, "amount_high": 15000, "txn_date": "2026-11-16", "filed_date": "2026-11-21"}
+        self.assertIsNotNone(quantgress.normalize_congress(house))
+        self.assertIsNone(quantgress.normalize_congress({**house, "asset_type": "Stock Option"}))
+        award = {**INSIDERS[0], "trans_code": "A", "acquired_disposed": "A"}
+        withholding = {**INSIDERS[0], "trans_code": "F"}
+        self.assertIsNone(quantgress.normalize_insider(award))
+        self.assertIsNone(quantgress.normalize_insider(withholding))
+
     def test_tx_types(self):
         t = quantgress._congress_txn
         self.assertEqual([t("Purchase"), t("P"), t("Sale (Full)"), t("S (partial)"), t("Sale"), t("Exchange")],

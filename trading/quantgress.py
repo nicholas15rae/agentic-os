@@ -220,8 +220,10 @@ def normalize_congress(row: Any) -> Disclosure | None:
     if not isinstance(row, dict):
         return None
     ticker = str(_first(row, "tkr", "ticker") or "").strip().upper()
+    # House: "Stocks (including ADRs)"; Senate: "Stock"; PTR codes "ST" / "EF". Options, bonds, funds etc. are dropped.
     atype = str(_first(row, "asset_type") or "Stock").strip().lower()
-    if not SYMBOL_RE.match(ticker) or atype not in ("stock", "st", "etf", "common stock"):
+    is_stock = atype in ("st", "ef", "etf") or (atype.startswith(("stock", "common stock")) and "option" not in atype)
+    if not SYMBOL_RE.match(ticker) or not is_stock:
         return None
     last = str(_first(row, "last_name") or "").strip()
     first = str(_first(row, "first_name") or "").strip()
@@ -254,6 +256,10 @@ def normalize_insider(row: Any) -> Disclosure | None:
     if not actor or not filed:
         return None
     code = str(_first(row, "trans_code") or "").strip().upper()
+    # Only open-market purchases (P) and sales (S) carry a view; awards (A), withholding (F), option
+    # exercises (M), gifts (G) etc. are compensation mechanics and would flood the vault with noise.
+    if code[:1] not in ("P", "S"):
+        return None
     ad = str(_first(row, "acquired_disposed") or "").strip().upper()
     shares = _num(_first(row, "shares"))
     price = _num(_first(row, "price_per_share"))
@@ -261,7 +267,7 @@ def normalize_insider(row: Any) -> Disclosure | None:
     return Disclosure(
         id=_make_id("insider", _first(row, "accession_number") or "", _first(row, "trans_seq") or "", actor, ticker, code, shares, price),
         kind="insider", actor=actor[:120], role=str(_first(row, "owner_relationship") or "insider").strip()[:60], party="",
-        ticker=ticker, transaction={"P": "buy", "S": "sell"}.get(code[:1], "other"),
+        ticker=ticker, transaction="buy" if code[:1] == "P" else "sell",
         size_low_usd=value, size_high_usd=value, shares=shares,
         traded_date=_date(_first(row, "trans_date")), filed_date=filed, raw_transaction=f"{code}/{ad}".strip("/")[:60],
         planned_sale=_truthy(row.get("is_10b5_1")), source_url=str(_first(row, "source_url") or "")[:300],

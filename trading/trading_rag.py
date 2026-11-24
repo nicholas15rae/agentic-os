@@ -235,25 +235,30 @@ class TradingRag:
 
     # ── reads ────────────────────────────────────────────────────────
     def query(self, text: str = "", *, ticker: str | None = None, signal_class: str | None = None,
-              k: int = 8, char_budget: int = 4000) -> list[Entry]:
+              k: int = 8, char_budget: int = 4000, touch: bool = True) -> list[Entry]:
+        """touch=False is a pure read: hit counters aren't bumped and the file isn't rewritten
+        (use it for frequent polling — a touching query rewrites the whole active file)."""
         want = _tokens(text)
         with self._lock:
             pool = [e for e in self._active
                     if (ticker is None or e.tag("ticker") == ticker.upper())
                     and (signal_class is None or e.tag("class") == signal_class)]
-            scored = sorted(pool, key=lambda e: (len(want & _tokens(e.text + " " + " ".join(e.tags))), e.at), reverse=True)
             if want:
+                scored = sorted(pool, key=lambda e: (len(want & _tokens(e.text + " " + " ".join(e.tags))), e.at), reverse=True)
                 scored = [e for e in scored if want & _tokens(e.text + " " + " ".join(e.tags))]
+            else:
+                scored = sorted(pool, key=lambda e: e.at, reverse=True)  # no text: newest first, no tokenizing
             out, used = [], 0
             now = int(time.time() * 1000)
             for e in scored[:k]:
                 if used + len(e.text) > char_budget:
                     break
                 used += len(e.text)
-                e.hits += 1
-                e.last_hit = now
+                if touch:
+                    e.hits += 1
+                    e.last_hit = now
                 out.append(e)
-            if out:
+            if out and touch:
                 self._save()
             return out
 

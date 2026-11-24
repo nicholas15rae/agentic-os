@@ -41,7 +41,9 @@ def ctx(**over):
     base = dict(now=NOW, mode="PAPER", port=7497, connected=True, locked=False, limits=RiskLimits(),
                 equity_base=100_000.0, daily_pnl_base=0.0, base_currency="CAD", fx_to_base={"USD": 1.4},
                 positions=[], open_orders=[], quote={"bid": 499.95, "ask": 500.05, "last": 500.0},
-                market_stats=dict(LIQUID), session_open=True, seen_intent=False, recent=[], orders_today=0)
+                market_stats=dict(LIQUID), session_open=True, seen_intent=False, recent=[], orders_today=0,
+                # raw_intent() comes from the Trading Agent: the desk scopes it to the watchlist (Phase 5).
+                allowed_symbols={"SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "DBC"})
     base.update(over)
     return Context(**base)
 

@@ -37,7 +37,7 @@ ORDER = {PASS: 0, SKIP: 0, WARN: 1, FAIL: 2}
 NY = ZoneInfo("America/New_York")
 
 # name -> max seconds since the loop's last iteration before it counts as stalled
-LOOP_LIMITS = {"drawdown_monitor": 60, "options_guard": 240, "auto_scan": 120, "intel": 240}
+LOOP_LIMITS = {"drawdown_monitor": 60, "options_guard": 240, "auto_scan": 120, "intel": 240, "agent": 120}
 FRESH_TELEMETRY_S = 20
 
 
@@ -82,9 +82,17 @@ def lan_exposed(port: int = 7497, timeout: float = 0.6) -> list[str]:
     return hits
 
 
+def agent_model_probe(gateway: str = "http://127.0.0.1:8080") -> dict[str, Any]:
+    import urllib.request
+
+    with urllib.request.urlopen(f"{gateway}/api/trading/agent/model", timeout=6) as r:  # noqa: S310 — local gateway
+        return json.loads(r.read().decode("utf-8"))
+
+
 async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None = None,
                      lan_probe: Callable[[], list[str]] = lan_exposed,
-                     tws_probe: Callable[[], bool] = tws_listening) -> dict[str, Any]:
+                     tws_probe: Callable[[], bool] = tws_listening,
+                     model_probe: Callable[[], dict[str, Any]] = agent_model_probe) -> dict[str, Any]:
     from config import is_paper_account, load_config, resolve_endpoint
     from fx import merged_rates
     from intents import parse_intent
@@ -286,6 +294,35 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
         rep = desk.journal_pass()
         return PASS, f"journal pass ok ({len(rep.get('closed', []))} newly closed)"
     await step("intel", "journal", journal)
+
+    # 7b. Trading Agent ─────────────────────────────────────────────
+    async def agent_model():
+        if getattr(desk, "agent", None) is None:
+            return SKIP, "agent not started in this process"
+        m = await asyncio.to_thread(model_probe)
+        if not m.get("reachable"):
+            return FAIL, f"LM Studio unreachable: {m.get('error', '')}"
+        if not m.get("loaded"):
+            return FAIL, f"{m.get('model')} is not loaded in LM Studio (loaded: {', '.join(m.get('loadedModels') or []) or 'none'})"
+        return PASS, f"{m.get('model')} loaded" + (" · GPU held by the desktop right now" if (m.get("gpu") or {}).get("active") else "")
+    await step("agent", "agent_model", agent_model)
+
+    def agent_runs():
+        ag = getattr(desk, "agent", None)
+        if ag is None:
+            return SKIP, "agent not started in this process"
+        v = ag.view()
+        runs = [r for r in v["runs"] if r["kind"] != "manual"][:3]
+        state = f"{'on' if v['enabled'] else 'OFF'} · next {v['nextSlot'] or 'n/a'}" + (f" · blocked: {v['blocked']}" if v["blocked"] else "")
+        if not runs:
+            return PASS, f"{state} · no scheduled runs yet"
+        bad = [r for r in runs if r["status"] in ("no_json", "skipped")]
+        last = runs[0]
+        detail = f"{state} · last {last['kind']} run {last['status']}" + (f" ({last['detail'][:120]})" if last.get("detail") else "")
+        if len(bad) == len(runs) and len(runs) >= 2:
+            return WARN, f"the last {len(runs)} scheduled runs produced nothing — {detail}"
+        return PASS, detail
+    await step("agent", "agent_runs", agent_runs)
 
     # 8. Background loops ──────────────────────────────────────────────
     def loops():

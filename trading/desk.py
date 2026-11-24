@@ -41,6 +41,7 @@ from intents import IntentError, OrderIntent, RiskLimits, load_limits, parse_int
 from quantgress import last_report as quantgress_last_report
 from trading_rag import TradingRag
 import journal as jr
+from callbook import CallBook
 import options as opt
 import outcomes
 from discord_ingest import DiscordStore, import_inbox
@@ -132,6 +133,10 @@ class Desk:
         # Phase 4: Discord intel store (inside the isolated trading_rag folder) + live status.
         self.discord = DiscordStore(self.d / "trading_rag" / "discord.db")
         self.discord_status: dict[str, Any] = {}
+        # Phase 5: the agent's / Engine A's calls + SPY baseline, scored like Discord calls.
+        self.calls = CallBook(self.d / "desk.db")
+        self.agent: Any = None  # set by the bridge (agent.TradingAgent)
+        self.last_call_scoring: dict[str, Any] | None = None
         self.last_scoring: dict[str, Any] | None = None
         # Background-loop heartbeats (name -> last iteration, epoch s) for the health check.
         self.heartbeats: dict[str, float] = {}
@@ -212,36 +217,32 @@ class Desk:
 
     # ── market context ───────────────────────────────────────────────
     async def _ib_quote(self, intent: OrderIntent):
-        ib = getattr(self.bridge, "ib", None)
-        if ib is None or not ib.isConnected():
-            return None, None
-        from ib_async import Stock
+        """Quote + trading session for the gate, via the market-data client (12).
 
-        c = Stock(intent.symbol, "SMART", intent.currency)
-        q = await ib.qualifyContractsAsync(c)
-        if not q or not getattr(q[0], "conId", 0):
+        It used to borrow the bridge's telemetry connection (client 11) with an 8 s wait; a symbol's
+        first quote there could miss (seen live on UNG while client 12 quoted it in ~1 s), and the
+        gate then rejects a good idea for "no quote". Client 12 is built for quotes (12 s wait), and
+        one retry during the session covers a slow first subscription."""
+        try:
+            c = await self.md.stock(intent.symbol, intent.currency)
+        except Exception:  # noqa: BLE001 — unknown symbol / data client down → fail closed in the gate
             return None, None
-        c = q[0]
         session = None
         try:
-            details = await asyncio.wait_for(ib.reqContractDetailsAsync(c), 6)
+            details = await asyncio.wait_for(self.md.ib.reqContractDetailsAsync(c), 6)
             if details:
                 session = session_open_from_hours(details[0].liquidHours, details[0].timeZoneId, self.clock())
         except Exception:  # noqa: BLE001
             session = None
         if session is None:
             session = regular_hours_fallback(self.clock())
-        t = ib.reqMktData(c, "", False, False)
         try:
-            # The first (delayed) subscription after a fresh connect can take several seconds.
-            for _ in range(40):
-                await asyncio.sleep(0.2)
-                if t.bid == t.bid and t.ask == t.ask and t.bid > 0 and t.ask > 0:  # not NaN
-                    break
-        finally:
-            ib.cancelMktData(c)
-        clean = lambda v: None if v is None or (isinstance(v, float) and math.isnan(v)) or v <= 0 else float(v)  # noqa: E731
-        return {"bid": clean(t.bid), "ask": clean(t.ask), "last": clean(t.last)}, session
+            q = await self.md.quote(c)
+            if session and not (q.get("bid") and q.get("ask")):
+                q = await self.md.quote(c)
+        except Exception:  # noqa: BLE001
+            return None, session
+        return {"bid": q.get("bid"), "ask": q.get("ask"), "last": q.get("last")}, session
 
     async def _ib_stats(self, intent: OrderIntent) -> dict[str, float] | None:
         """~40 sessions of daily TRADES bars → volume / volatility stats. Cached per symbol per NY day."""
@@ -304,6 +305,7 @@ class Desk:
             quote=quote, market_stats=stats, session_open=session, seen_intent=seen, recent=self._recent(intent.intent_id),
             orders_today=self.audit.count_since("order_submitted", ny_midnight(self.clock())),
             option_limits=option_limits, option_legs=option_legs,
+            allowed_symbols=set(self.watchlist.symbols()) if intent.source == "trading_agent" else None,
         )
 
     # ── intents ──────────────────────────────────────────────────────
@@ -493,6 +495,12 @@ class Desk:
             return {"ok": False, "error": "no USD rate, can't size"}
         res = await self.engine_a.scan(symbols=symbols, risk_budget_base=budget, fx_usd=usd or 1.0,
                                        submit=self.submit if submit else None, actor=actor)
+        # Every live Engine A setup is a scored "call" (once per symbol per day), paired with the SPY baseline.
+        day = datetime.fromtimestamp(self.clock(), NY).strftime("%Y%m%d")
+        for r in res.get("rows") or []:
+            if r.get("signal"):
+                self.calls.add(f"engine_a:{r['symbol']}:{day}", "engine_a", r["symbol"], "bullish", int(self.clock() * 1000),
+                               ref=str((r.get("intent") or {}).get("intent_id", "")), baseline=True)
         return {"ok": True, **res}
 
     async def engine_b_propose(self, symbol: str, view: str, structure: str, submit: bool, actor: str) -> dict[str, Any]:
@@ -666,7 +674,8 @@ class Desk:
     def leaderboards(self, horizon: int = 5) -> dict[str, Any]:
         rows = self.discord.outcome_rows()
         return {"horizon": horizon, "authors": outcomes.leaderboard(rows, horizon=horizon, by="author")[:25],
-                "channels": outcomes.leaderboard(rows, horizon=horizon, by="channel", min_calls=1)[:10]}
+                "channels": outcomes.leaderboard(rows, horizon=horizon, by="channel", min_calls=1)[:10],
+                "desk": self.calls.leaderboard(horizon)}
 
     def journal_pass(self) -> dict[str, Any]:
         """Close out finished trades: journal record, trading_rag write-back, Financer P&L roll-up."""
@@ -741,11 +750,14 @@ class Desk:
 
     async def intel_loop(self) -> None:
         """Journal every minute; outcome scoring every 6 hours (cheap when nothing is due)."""
-        last_score = 0.0
+        last_score = last_calls = 0.0
         while True:
             self.heartbeats["intel"] = self.clock()
             try:
                 self.journal_pass()
+                if self.clock() - last_calls > 3600:  # the agent's ADVISORY week needs daily feedback
+                    last_calls = self.clock()
+                    self.last_call_scoring = await self.calls.score(self.md, int(self.clock() * 1000))
                 if self.clock() - last_score > 6 * 3600:
                     last_score = self.clock()
                     await self.score_outcomes("outcomes:auto")
@@ -771,6 +783,7 @@ class Desk:
             "audit": {"ok": ok, "note": note, "tail": self.audit.tail(25)},
             "signals": {"rag": self.rag.stats(), "quantgress": quantgress_last_report(self.d)},
             "engines": self.engines_view(),
+            "agent": self.agent.view() if self.agent else None,
         }
 
     def signals(self, q: str = "", ticker: str | None = None, k: int = 8) -> dict[str, Any]:

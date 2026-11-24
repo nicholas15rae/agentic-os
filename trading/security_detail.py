@@ -63,6 +63,8 @@ class Context:
     # in intent.legs order. ctx.quote is then the quote of the whole structure (per contract).
     option_limits: Any = None
     option_legs: list[dict[str, Any]] | None = None
+    # Trading Agent scope (Phase 5): the symbols it may propose (watchlist). None for other sources.
+    allowed_symbols: set[str] | None = None
 
 
 @dataclass
@@ -168,6 +170,13 @@ def evaluate(intent: OrderIntent, ctx: Context) -> Decision:
     # 1. Port & mode
     check("port_mode", ctx.mode == "PAPER" and ctx.port == PAPER_PORT and ctx.connected,
           f"mode={ctx.mode} port={ctx.port} connected={ctx.connected} (needs PAPER on {PAPER_PORT})")
+
+    # 1b. Trading Agent scope: ETFs / commodity ETFs in the watchlist, shares, long only (phase 5 v1).
+    if intent.source == "trading_agent":
+        in_scope = (ctx.allowed_symbols is not None and intent.symbol in ctx.allowed_symbols and intent.sec_type == "STK"
+                    and intent.asset_class in ("etf", "commodity_etf") and intent.action == "BUY")
+        check("agent_scope", in_scope, f"{intent.action} {intent.sec_type} {intent.symbol} ({intent.asset_class})"
+              + ("" if in_scope else " — the agent may only BUY watchlist ETFs / commodity ETFs"))
 
     # 2. Kill switch lock
     check("kill_switch", not ctx.locked, "trading is LOCKED by the kill switch" if ctx.locked else "not locked")

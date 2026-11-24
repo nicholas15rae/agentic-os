@@ -15,6 +15,7 @@ starts `trading/kill_switch.py` in the trading venv to cancel and flatten.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -128,7 +129,7 @@ def trading_desk():
 async def trading_intent(request: Request):
     body = await _json(request)
     try:
-        return _bridge_post("/intents", body, _actor(request), timeout=30.0)
+        return await asyncio.to_thread(_bridge_post, "/intents", body, _actor(request), timeout=30.0)
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -147,7 +148,7 @@ def trading_intent_verb(intent_id: str, verb: str, request: Request):
 async def trading_mode(request: Request):
     body = await _json(request)
     try:
-        return _bridge_post("/mode", body, _actor(request))
+        return await asyncio.to_thread(_bridge_post, "/mode", body, _actor(request))
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -156,7 +157,7 @@ async def trading_mode(request: Request):
 async def trading_comms(request: Request):
     body = await _json(request)
     try:
-        return _bridge_post("/comms", body, _actor(request))
+        return await asyncio.to_thread(_bridge_post, "/comms", body, _actor(request))
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -203,7 +204,7 @@ async def trading_intel_post(path: str, request: Request):
         raise HTTPException(404, "unknown intel action")
     body = await _json(request)
     try:
-        return _bridge_post(f"/intel/{path}", body, _actor(request), timeout=300.0)
+        return await asyncio.to_thread(_bridge_post, f"/intel/{path}", body, _actor(request), timeout=300.0)
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -226,7 +227,7 @@ async def trading_engine_post(path: str, request: Request):
     body = await _json(request)
     try:
         # Scans quote many symbols and option chains: give them time.
-        return _bridge_post(f"/engines/{path}", body, _actor(request), timeout=120.0)
+        return await asyncio.to_thread(_bridge_post, f"/engines/{path}", body, _actor(request), timeout=120.0)
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -244,7 +245,7 @@ async def trading_health_check(request: Request):
     """Read-only pipeline health check. If the bridge itself is down, say so as a FAIL result."""
     body = await _json(request)
     try:
-        return _bridge_post("/health/check", body, _actor(request), timeout=240.0)
+        return await asyncio.to_thread(_bridge_post, "/health/check", body, _actor(request), timeout=240.0)
     except OFFLINE as e:
         now = time.time()
         return {"at": now, "atNy": time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), "overall": "FAIL",
@@ -253,11 +254,113 @@ async def trading_health_check(request: Request):
                             "detail": f"trading bridge not reachable on 127.0.0.1:{_bridge_port()} ({type(e).__name__}) - restart the gateway or run trading/ibkr_bridge.py"}]}
 
 
+# ── Trading Agent (Phase 5) ──────────────────────────────────────────────────
+# The agent runs in the bridge; its model call happens HERE, because the gateway is where the
+# desktop's GPU baton is visible (command_center_api.gpu_busy). It never preempts Tony: wait up
+# to `waitS` for the desktop to release the GPU, otherwise report "skipped" and let the agent
+# try again at its next slot. It never JIT-loads a model next to Tony's either.
+AGENT_PROMPT_MAX = 40_000
+AGENT_SYSTEM_MAX = 8_000
+
+
+def _agent_model() -> str:
+    return (os.environ.get("TRADING_AGENT_MODEL") or "qwen/qwen3.5-9b").strip()
+
+
+@router.get("/agent/model")
+def trading_agent_model(request: Request):
+    import command_center_api as cca
+
+    cca.require_loopback(request)
+    want = _agent_model()
+    try:
+        loaded = [m["id"] for m in cca.llm_loaded_models()]
+    except Exception as e:  # noqa: BLE001
+        return {"model": want, "loaded": False, "reachable": False, "error": str(e)[:200]}
+    return {"model": want, "loaded": want in loaded, "reachable": True, "loadedModels": loaded, "gpu": cca.gpu_state()}
+
+
+@router.post("/agent/think")
+async def trading_agent_think(request: Request):
+    import asyncio
+
+    import command_center_api as cca
+
+    cca.require_loopback(request)
+    body = await _json(request)
+    system, prompt = str(body.get("system") or ""), str(body.get("prompt") or "")
+    if not system or not prompt:
+        raise HTTPException(400, "system and prompt are required")
+    if len(system) > AGENT_SYSTEM_MAX or len(prompt) > AGENT_PROMPT_MAX:
+        raise HTTPException(413, f"system <= {AGENT_SYSTEM_MAX} and prompt <= {AGENT_PROMPT_MAX} characters")
+    max_tokens = max(256, min(int(body.get("maxTokens") or 3000), 6000))
+    wait_s = max(0.0, min(float(body.get("waitS") or 90), 180))
+    model = _agent_model()
+    try:
+        loaded = [m["id"] for m in cca.llm_loaded_models()]
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "skipped": "model_unreachable", "detail": str(e)[:200], "model": model}
+    if model not in loaded:
+        return {"ok": False, "skipped": "model_not_loaded", "detail": f"{model} is not loaded in LM Studio (loaded: {loaded})", "model": model}
+    t_wait = time.time()
+    free = await asyncio.to_thread(cca.wait_gpu, wait_s)
+    waited = time.time() - t_wait
+    if not free:
+        return {"ok": False, "skipped": "gpu_busy", "detail": f"the desktop held the GPU for {waited:.0f}s ({cca.gpu_state().get('holder')})",
+                "model": model, "waitedS": round(waited, 1)}
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+    # qwen3.5 is a thinking model and ignores /no_think, enable_thinking and reasoning_effort: left alone
+    # it spends the whole token budget on hidden reasoning and returns empty content (~80 s per try).
+    # Pre-filling an empty think block makes it answer directly (measured: 0 reasoning tokens, ~1 s on
+    # a short prompt). The JSON's "thesis" fields still carry its explicit reasoning.
+    thinking = bool(body.get("thinking"))
+    prefill = [] if thinking else [{"role": "assistant", "content": "<think>\n\n</think>\n\n"}]
+    t0 = time.time()
+    try:
+        out = await asyncio.to_thread(cca.llm_chat, msgs + prefill, model=model, max_tokens=max_tokens, temperature=0.2, gpu_wait=0)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "skipped": "model_error", "detail": str(e)[:300], "model": model}
+    j = cca.extract_json(out)
+    retried = False
+    if j is None and not cca.gpu_busy():
+        retried = True
+        try:
+            out2 = await asyncio.to_thread(cca.llm_chat, msgs + [{"role": "assistant", "content": out[-4000:]},
+                                                                 {"role": "user", "content": "Return ONLY the JSON object, nothing else."}] + prefill,
+                                           model=model, max_tokens=max_tokens, temperature=0.1, gpu_wait=0)
+            j = cca.extract_json(out2)
+            out = out2 if j is not None else out
+        except Exception:  # noqa: BLE001
+            j = None
+    return {"ok": j is not None, "json": j, "model": model, "seconds": round(time.time() - t0, 1), "waitedS": round(waited, 1),
+            "rawChars": len(out), "retried": retried, "raw": None if j is not None else out[-3000:]}
+
+
+@router.get("/agent")
+def trading_agent_view():
+    try:
+        return _bridge_get("/agent", timeout=8.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+@router.post("/agent/{verb}")
+async def trading_agent_post(verb: str, request: Request):
+    if verb not in ("run", "enable"):
+        raise HTTPException(404, "unknown agent action")
+    body = await _json(request)
+    try:
+        # A run includes one local-model call (can wait for the GPU first): allow minutes.
+        return await asyncio.to_thread(_bridge_post, f"/agent/{verb}", body, _actor(request), timeout=600.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
 @router.post("/kill-switch/reset")
 async def trading_kill_reset(request: Request):
     body = await _json(request)
     try:
-        return _bridge_post("/kill-switch/reset", body, _actor(request))
+        return await asyncio.to_thread(_bridge_post, "/kill-switch/reset", body, _actor(request))
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -273,7 +376,7 @@ async def trading_kill_switch(request: Request):
     reason = str(body.get("reason") or "manual kill switch")[:200]
     actor = _actor(request)
     try:
-        return _bridge_post("/kill-switch", {"reason": reason, "dryRun": dry}, actor, timeout=45.0)
+        return await asyncio.to_thread(_bridge_post, "/kill-switch", {"reason": reason, "dryRun": dry}, actor, timeout=45.0)
     except OFFLINE as e:
         if dry:
             raise _offline(e) from None

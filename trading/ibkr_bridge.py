@@ -214,6 +214,11 @@ def create_app(bridge: Bridge, desk: Any = None):
         import healthcheck
 
         tasks.append(asyncio.create_task(healthcheck.morning_loop(desk)))
+        from agent import TradingAgent
+
+        if desk.agent is None:
+            desk.agent = TradingAgent(desk)
+        tasks.append(asyncio.create_task(desk.agent.loop()))
         import discord_live
 
         tasks.append(asyncio.create_task(discord_live.poll_forever(desk.discord, desk.rag, desk.watchlist.symbols, desk.discord_status)))
@@ -243,6 +248,26 @@ def create_app(bridge: Bridge, desk: Any = None):
 
     def actor(req: Request) -> str:
         return (req.headers.get("x-trading-actor") or "unknown")[:40]
+
+    # ── Trading Agent (Phase 5) ──────────────────────────────────────
+    @app.get("/agent")
+    def agent_view():
+        return desk.agent.view() if desk.agent else {"enabled": False, "blocked": "agent not started", "runs": []}
+
+    @app.post("/agent/run")
+    async def agent_run(req: Request):
+        """Run now. submit=false is a dry run: think + evaluate in memory, nothing stored as an intent."""
+        b = await body(req)
+        if desk.agent is None:
+            raise HTTPException(503, "agent not started")
+        return await desk.agent.run("manual", submit=b.get("submit", True) is not False)
+
+    @app.post("/agent/enable")
+    async def agent_enable(req: Request):
+        b = await body(req)
+        if desk.agent is None:
+            raise HTTPException(503, "agent not started")
+        return desk.agent.set_enabled(bool(b.get("enabled")), actor(req))
 
     @app.post("/health/check")
     async def health_check(req: Request):

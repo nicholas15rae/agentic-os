@@ -22,6 +22,7 @@ import asyncio
 import dataclasses
 import json
 import socket
+import struct
 import sys
 import time
 import uuid
@@ -66,20 +67,32 @@ def tws_listening(port: int = 7497, timeout: float = 0.6) -> bool:
         return False
 
 
-def lan_exposed(port: int = 7497, timeout: float = 0.6) -> list[str]:
-    """Is the TWS API socket reachable on a non-loopback address of this machine?"""
-    hits = []
+def api_handshake_accepted(ip: str, port: int = 7497, timeout: float = 2.0) -> bool:
+    """Does TWS accept the IB API handshake from `ip`? A bare TCP connect isn't enough: TWS listens
+    on every interface even with "Allow connections from localhost only" ticked, then aborts the
+    connection at the handshake. Only a server-version reply means a client could actually trade."""
+    try:
+        s = socket.create_connection((ip, port), timeout=timeout)
+    except OSError:
+        return False
+    try:
+        msg = b"v100..187"
+        s.sendall(b"API\x00" + struct.pack(">I", len(msg)) + msg)
+        s.settimeout(timeout)
+        return bool(s.recv(64))
+    except OSError:  # timeout, ConnectionAbortedError / ResetError = refused at the handshake
+        return False
+    finally:
+        s.close()
+
+
+def lan_exposed(port: int = 7497, timeout: float = 2.0) -> list[str]:
+    """Non-loopback addresses of this machine on which TWS accepts the IB API handshake."""
     try:
         addrs = {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
     except OSError:
-        return hits
-    for ip in sorted(a for a in addrs if not a.startswith("127.")):
-        try:
-            with socket.create_connection((ip, port), timeout=timeout):
-                hits.append(ip)
-        except OSError:
-            continue
-    return hits
+        return []
+    return [ip for ip in sorted(a for a in addrs if not a.startswith("127.")) if api_handshake_accepted(ip, port, timeout)]
 
 
 def agent_model_probe(gateway: str = "http://127.0.0.1:8080") -> dict[str, Any]:
@@ -152,7 +165,13 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
             return SKIP, "TWS is not listening on 127.0.0.1:7497, so its network exposure can't be tested"
         hits = lan_probe()
         if hits:
-            return WARN, f"TWS API port 7497 answers on {', '.join(hits)} — enable 'Allow connections from localhost only' in TWS"
+            mesh = [ip for ip in hits if ip.startswith("100.") and 64 <= int(ip.split(".")[1]) <= 127]  # CGNAT range: NetBird / Tailscale
+            hint = ("tick 'Allow connections from localhost only' in TWS API settings; if it's already ticked, remove these addresses "
+                    "from TWS's Trusted IPs")
+            if mesh:
+                hint += (f"; {', '.join(mesh)} is your VPN mesh (NetBird), whose userspace networking can look local to TWS: "
+                         "block TCP 7497 for this peer with a NetBird access-control policy")
+            return WARN, f"TWS accepts the API handshake on {', '.join(hits)} — {hint}"
         return PASS, "TWS API not reachable from the network"
     await step("safety", "tws_exposure", exposure)
 

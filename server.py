@@ -1853,6 +1853,23 @@ def mobile_hud(request: Request):
     return RedirectResponse(f"/cc/?view=hud{'&' + q if q else ''}", status_code=307)
 
 
+# Phone HTTPS (mic/camera need a secure origin): the gateway also listens on HTTPS_PORT with
+# data/certs/gateway.{crt,key} when those exist. The phone trusts the local CA once, fetched here.
+CERT_DIR = BASE_DIR / "data" / "certs"
+HTTPS_PORT = 8443
+
+
+@app.get("/agentic-os-ca.crt", include_in_schema=False)
+def local_ca_cert():
+    """The local CA's PUBLIC certificate, so the phone can install it (Settings → Security →
+    Install a certificate → CA certificate). Never the private key."""
+    from starlette.responses import FileResponse, PlainTextResponse
+    ca = CERT_DIR / "agentic-os-ca.crt"
+    if not ca.is_file():
+        return PlainTextResponse("No local CA yet.", status_code=404)
+    return FileResponse(ca, media_type="application/x-x509-ca-cert", filename="agentic-os-ca.crt")
+
+
 cc_dist = BASE_DIR / "command center" / "dist"
 if cc_dist.exists():
     app.mount("/cc", StaticFiles(directory=str(cc_dist), html=True), name="command-center")
@@ -1946,6 +1963,7 @@ if __name__ == "__main__":
     parser.add_argument("--ssl-certfile", type=str, default=None)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--no-mesh", action="store_true", help="Don't also listen on the NetBird (100.64.x.x) address")
+    parser.add_argument("--https-port", type=int, default=HTTPS_PORT, help="Also serve HTTPS here when data/certs/gateway.{crt,key} exist (0 = off)")
     args = parser.parse_args()
     # Strict binding: loopback + (if NetBird is up) the mesh address — never 0.0.0.0.
     import socket as _socket
@@ -1960,9 +1978,36 @@ if __name__ == "__main__":
         sk.bind((h, args.port))
         socks.append(sk)
     print(f"[gateway] listening on {', '.join(f'{h}:{args.port}' for h in hosts)}")
+    # Second listener: HTTPS on the same hosts when the local cert exists (phone mic needs it).
+    # Same app; lifespan off so the scheduler doesn't start twice. A failure here never
+    # takes the plain-HTTP gateway down.
+    tls_socks = []
+    crt, key = CERT_DIR / "gateway.crt", CERT_DIR / "gateway.key"
+    if not args.ssl_certfile and args.https_port and crt.is_file() and key.is_file():
+        try:
+            for h in hosts:
+                sk = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                sk.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                sk.bind((h, args.https_port))
+                tls_socks.append(sk)
+            print(f"[gateway] HTTPS on {', '.join(f'{h}:{args.https_port}' for h in hosts)}")
+        except OSError as _e:
+            for sk in tls_socks:
+                sk.close()
+            tls_socks = []
+            print(f"[gateway] HTTPS listener skipped: {_e}")
     try:
         print(f"[gateway] {trading_api.autostart_bridge()}")
     except Exception as _e:  # never let the trading bridge block the gateway
         print(f"[gateway] trading bridge autostart failed: {_e}")
     config = uvicorn.Config(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
-    uvicorn.Server(config).run(sockets=socks)
+    if not tls_socks:
+        uvicorn.Server(config).run(sockets=socks)
+    else:
+        import asyncio
+        tls = uvicorn.Config(app, host=args.host, port=args.https_port, ssl_certfile=str(crt), ssl_keyfile=str(key), lifespan="off")
+
+        async def _serve_both():
+            await asyncio.gather(uvicorn.Server(config).serve(sockets=socks), uvicorn.Server(tls).serve(sockets=tls_socks))
+
+        asyncio.run(_serve_both())

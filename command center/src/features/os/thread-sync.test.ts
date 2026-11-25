@@ -3,7 +3,9 @@ import type { VoiceTurn } from "@/features/voice/voice-store";
 
 vi.mock("@/lib/gateway", () => ({ gateway: vi.fn() }));
 vi.mock("@/lib/platform", () => ({ isTauri: () => true }));
-vi.mock("@/stores/settings", () => ({ useSettings: Object.assign(() => "", { getState: () => ({}) }) }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => true,
+  isAndroidApp: () => false, useSettings: Object.assign(() => "", { getState: () => ({}) }) }));
 vi.mock("./os-store", () => ({ useOs: { getState: () => ({ load: async () => undefined }) } }));
 vi.mock("./pipeline-store", () => ({ startPipelineFeed: vi.fn() }));
 

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/platform", () => ({ cmd: vi.fn(), isTauri: () => false }));
-vi.mock("@/stores/settings", () => ({ useSettings: { getState: () => ({ reminders: { osFallback: true } }) } }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => false,
+  isAndroidApp: () => false, useSettings: { getState: () => ({ reminders: { osFallback: true } }) } }));
 
 const { OS_GRACE_MS, osAlarmFixes, osAlarmRang } = await import("./os-alarm");
 

@@ -11,7 +11,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => h.tauri }));
-vi.mock("@/stores/settings", () => ({ useSettings: { getState: () => ({ osName: "Tony" }) } }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => h.tauri,
+  isAndroidApp: () => false, useSettings: { getState: () => ({ osName: "Tony" }) } }));
 vi.mock("@/features/voice/voice-store", () => ({ useVoice: { getState: () => ({ pending: h.pending }) } }));
 vi.mock("@/features/reminders/notify", () => ({ useToasts: { getState: () => ({ push: h.toast }) } }));
 vi.mock("@/features/bridge/gate", () => ({ gated: h.gated }));

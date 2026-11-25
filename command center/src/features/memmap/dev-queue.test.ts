@@ -20,7 +20,9 @@ vi.mock("@/features/orchestrator/plan", () => ({
   heuristicPlan: (utterance: string) => ({ id: "plan-1", utterance, target: { kind: "none" }, payload: {}, mutating: false, summary: "", intent: "", readBack: "", verification: { status: "unverified", notes: [] } }),
 }));
 vi.mock("@/stores/nav", () => ({ useNav: { getState: () => ({ section: "memorymap" }) } }));
-vi.mock("@/stores/settings", () => ({ useSettings: { getState: () => ({ systemMapMode: "xray" }) } }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => true,
+  isAndroidApp: () => false, useSettings: { getState: () => ({ systemMapMode: "xray" }) } }));
 vi.mock("@/features/voice/voice-store", () => ({ useVoice: { getState: () => ({ state: "idle", activeThread: "general" }) } }));
 
 const { dispatchFix, matchFix, pushProgress, queueFix, recentErrors, useFixProgress, FIX_ERRORS_MAX, PROGRESS_MAX } = await import("./dev-queue");

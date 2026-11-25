@@ -4,6 +4,7 @@ import { Field, Select } from "@/components/ui";
 import { cmd, isTauri, nativeRaw, type VoicesView } from "@/lib/platform";
 import { audio } from "@/features/cues/player";
 import type { CueWidget } from "@/features/cues/types";
+import { synthBytes } from "@/features/voice/engines";
 
 /** One fetch of the TTS engine's voices, shared by every cue card. */
 let voicesP: Promise<VoicesView> | null = null;
@@ -58,7 +59,7 @@ export function CueVoiceLine({ cue, onChange }: { cue: CueWidget; onChange: (p: 
     setBusy("Synthesizing…");
     setNote(null);
     try {
-      const bytes = await cmd("tts_synthesize", voice ? { text: line.slice(0, 2000), voice } : { text: line.slice(0, 2000) });
+      const bytes = await synthBytes(voice ? { text: line.slice(0, 2000), voice } : { text: line.slice(0, 2000) });
       const a = audio();
       const src = a.createBufferSource();
       src.buffer = await a.decodeAudioData(bytes);

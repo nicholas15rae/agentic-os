@@ -37,6 +37,8 @@ const h = vi.hoisted(() => ({
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => true, onNativeEvent: async () => () => undefined, platform: "desktop" }));
 vi.mock("@/stores/nav", () => ({ useNav: { getState: () => ({ section: "command" }) } }));
 vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => true,
+  isAndroidApp: () => false,
   useSettings: { getState: () => ({ ...h.settings, set: (patch: Partial<typeof h.settings>) => Object.assign(h.settings, patch) }) },
 }));
 vi.mock("@/features/os/os-store", () => ({ useOs: { getState: () => ({ cfg: null }) }, osName: () => "Tony", useOsName: () => "Tony" }));

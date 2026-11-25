@@ -10,7 +10,9 @@ vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => h.tauri, onNativeE
 vi.mock("@/lib/gateway", () => ({ gateway: h.gateway }));
 vi.mock("@/lib/cc-api", () => ({ collections: { snapshot: () => [] } }));
 vi.mock("@/stores/nav", () => ({ useNav: { getState: () => ({ section: "command", go: vi.fn() }) } }));
-vi.mock("@/stores/settings", () => ({ useSettings: { getState: () => ({ osName: "Tony", systemMapMode: "streamlined" }) } }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => h.tauri,
+  isAndroidApp: () => false, useSettings: { getState: () => ({ osName: "Tony", systemMapMode: "streamlined" }) } }));
 vi.mock("@/features/cues/cue-runtime", () => ({ fireCue: vi.fn() }));
 vi.mock("@/features/cues/player", () => ({ cueRecentlyActive: () => false, gabagoolOn: () => false, nudgeCueVolume: vi.fn(), stopAllAudio: vi.fn(), useCueRun: { getState: () => ({ running: null }) } }));
 vi.mock("@/features/services/use-health", () => ({ useHealthStore: { getState: () => ({ services: [{ label: "Gateway", up: true }] }) } }));

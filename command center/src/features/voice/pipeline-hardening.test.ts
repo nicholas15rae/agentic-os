@@ -35,7 +35,9 @@ vi.mock("@/lib/platform", () => ({
   },
 }));
 vi.mock("@/stores/nav", () => ({ useNav: { getState: () => ({ section: "command" }) } }));
-vi.mock("@/stores/settings", () => ({ useSettings: { getState: () => ({ ...h.settings, set: (p: Partial<typeof h.settings>) => Object.assign(h.settings, p) }) } }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => true,
+  isAndroidApp: () => false, useSettings: { getState: () => ({ ...h.settings, set: (p: Partial<typeof h.settings>) => Object.assign(h.settings, p) }) } }));
 vi.mock("@/features/os/os-store", () => ({ useOs: { getState: () => ({ cfg: null }) }, osName: () => "Tony", useOsName: () => "Tony" }));
 vi.mock("@/sections/settings/use-providers", () => ({ useProviders: { getState: () => ({ view: null, load: async () => undefined }) } }));
 vi.mock("@/features/cues/cue-runtime", () => ({ cueFor: () => null, fireCue: vi.fn(), registerCueIO: vi.fn() }));

@@ -1,5 +1,6 @@
 import { api, gateway } from "@/lib/gateway";
-import { cmd, isTauri, type ChatMessage, type DispatchResult } from "@/lib/platform";
+import { cmd, type ChatMessage, type DispatchResult } from "@/lib/platform";
+import { isDesktopApp } from "@/stores/settings";
 import { SUB_AGENTS, type AgentRole } from "./agents";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve } from "./router";
 
@@ -74,7 +75,8 @@ export async function queueDesktopItem(kind: "turn" | "task" | "pipeline", paylo
  *
  * Desktop: Rust `dispatch_chat` picks local vs cloud (GPU-load aware), injects
  * API keys from the OS keychain, and reports whether it fell back.
- * PWA:     the Agentic OS gateway (FastAPI) runs the agent; no keys in the browser.
+ * PWA and the Android app: the turn is queued for the desktop's Tony through the gateway (its Rust
+ *          side runs on the phone, where 127.0.0.1 isn't the PC); the gateway's own agent is the fallback.
  */
 /** Queue a turn for the desktop app and wait for the answer (null if the desktop isn't picking up). */
 async function desktopTurn(
@@ -113,7 +115,7 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
   const routeReason = opts.noDelegate && !direct ? "brainstorm with Tony (Tier 2)" : routed.reason;
   const agent = SUB_AGENTS[role];
 
-  if (isTauri()) {
+  if (isDesktopApp()) {
     const messages: ChatMessage[] = [
       { role: "system", content: agent.systemPrompt },
       ...(opts.history ?? []).slice(-10),

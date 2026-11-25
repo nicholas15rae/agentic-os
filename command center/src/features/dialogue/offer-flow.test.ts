@@ -38,6 +38,8 @@ vi.mock("@/features/modes/modes-store", async () => {
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => env.tauri, onNativeEvent: async () => () => undefined, platform: "desktop" }));
 vi.mock("@/stores/nav", () => ({ useNav: { getState: () => ({ section: "command" }) } }));
 vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => env.tauri,
+  isAndroidApp: () => false,
   useSettings: { getState: () => ({ osName: "Tony", wakeMode: false, confirmTimeoutSec: 30, routing: { announcerHandoff: false }, audioRoute: "auto" }) },
 }));
 vi.mock("@/features/os/os-store", () => ({ useOs: { getState: () => ({ cfg: null }) }, osName: () => "Tony", useOsName: () => "Tony" }));

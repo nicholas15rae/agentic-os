@@ -11,6 +11,7 @@ import { duckReadout } from "@/features/voice/media-duck";
 import { modelsFor, useProviders } from "./use-providers";
 import { ModelSelect } from "./ServicesSettings";
 import { Toggle } from "./os-ui";
+import { synthBytes } from "@/features/voice/engines";
 
 const LANGS: [string, string][] = [
   ["auto", "Auto-detect"], ["en", "English"], ["fr", "French"], ["es", "Spanish"], ["it", "Italian"], ["pt", "Portuguese"],
@@ -155,7 +156,7 @@ export function TtsCard() {
   const preview = async (voice: string) => {
     setBusy(`Previewing ${voice}…`);
     try {
-      const bytes = await cmd("tts_synthesize", { text: `Hi, I'm ${useSettings.getState().osName || "Tony"}. This is how I'll sound on your command center.`, voice });
+      const bytes = await synthBytes({ text: `Hi, I'm ${useSettings.getState().osName || "Tony"}. This is how I'll sound on your command center.`, voice });
       const ac = await audioContext();
       const buf = await ac.decodeAudioData(bytes);
       const src = ac.createBufferSource();
@@ -366,7 +367,7 @@ function RosterRow({ role, entry, defaultEngine, note, onPatch }: { role: string
     setBusy("Previewing…");
     try {
       // Its own breaker scope (P1): a failing click falls back once with ONE notice.
-      const bytes = await cmd("tts_synthesize", { text: `Hey Nic, ${roleLabel(role)} online. What are we building?`, agent: role, utteranceId: crypto.randomUUID() });
+      const bytes = await synthBytes({ text: `Hey Nic, ${roleLabel(role)} online. What are we building?`, agent: role, utteranceId: crypto.randomUUID() });
       const ac = await audioContext();
       const buf = await ac.decodeAudioData(bytes);
       const src = ac.createBufferSource();

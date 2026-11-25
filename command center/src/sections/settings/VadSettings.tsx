@@ -5,8 +5,9 @@ import { MicCapture, encodeWav16k } from "@/features/voice/engines";
 import { MicLockedError, onMicChange, useMic } from "@/features/voice/mic-gate";
 import { ThresholdMeter } from "@/features/voice/ThresholdMeter";
 import { SPEECH_PROB_OFF, SPEECH_PROB_ON } from "@/features/voice/vad-gate";
-import { isTauri, nativeRaw } from "@/lib/platform";
+import { isTauri } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
+import { transcribeWav } from "@/features/voice/engines";
 
 /**
  * Settings → Voice & Triggers → Activation threshold (Phase 2 Part B). One absolute dBFS gate
@@ -69,7 +70,7 @@ export function VoiceDetectionCard() {
           if (isTauri()) {
             try {
               const w0 = performance.now();
-              const text = await nativeRaw<string>("stt_transcribe", encodeWav16k(pcm, rate));
+              const text = await transcribeWav(encodeWav16k(pcm, rate));
               line += ` · Whisper ${Math.round(performance.now() - w0)}ms → “${text.trim()}”`;
             } catch (e) {
               line += ` · Whisper failed: ${String(e).slice(0, 80)}`;

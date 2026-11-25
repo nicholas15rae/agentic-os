@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const gateway = vi.fn();
 vi.mock("@/lib/gateway", () => ({ gateway: (...a: unknown[]) => gateway(...a), GatewayError: class extends Error {}, authHeader: () => ({}) }));
-vi.mock("@/stores/settings", () => ({ useSettings: Object.assign(() => "", { getState: () => ({ gatewayUrl: "http://127.0.0.1:8080" }) }) }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => true,
+  isAndroidApp: () => false, useSettings: Object.assign(() => "", { getState: () => ({ gatewayUrl: "http://127.0.0.1:8080" }) }) }));
 
 import { cc, FINANCE_COLLECTIONS, isFinanceCollection } from "./cc-api";
 

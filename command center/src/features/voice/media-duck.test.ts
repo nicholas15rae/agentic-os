@@ -13,7 +13,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => h.tauri }));
-vi.mock("@/stores/settings", () => ({ useSettings: { getState: () => ({ conversation: { mediaDuck: h.cfg }, vad: { maxUtteranceMs: 15_000 } }) } }));
+vi.mock("@/stores/settings", () => ({
+  isDesktopApp: () => h.tauri,
+  isAndroidApp: () => false, useSettings: { getState: () => ({ conversation: { mediaDuck: h.cfg }, vad: { maxUtteranceMs: 15_000 } }) } }));
 
 type Duck = typeof import("./media-duck");
 let d: Duck;

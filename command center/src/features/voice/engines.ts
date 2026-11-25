@@ -5,6 +5,27 @@ import { SileroStream, preloadSilero } from "./silero";
 import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, thresholdFor } from "./vad-gate";
 import { MIC_LOCKED_MSG, MicLockedError, assertMicAllowed, captureClosed, captureOpened, micEnabled, publishMeter, registerCapture, unpublishMeter, type MeterSnapshot } from "./mic-gate";
 import { perSentenceOpts, sentences, stripForSpeech, synthArgs } from "./tts-text";
+import { isAndroidApp } from "@/stores/settings";
+import { langApi } from "@/features/language/api";
+
+// ── Android: the PC's voice stack through the gateway ────────────────────────
+// The Android app is Tauri, but its Rust side runs on the phone, where 127.0.0.1 is the phone, so
+// `tts_synthesize` / `stt_transcribe` can't reach Kokoro / Whisper. The gateway's Language Hub
+// endpoints (/api/cc/lang/tts and /stt, over NetBird with the token) run the same local engines.
+// ElevenLabs: the gateway calls it with the PC's key (never on the phone) using the desktop roster's
+// voice for the line's agent, and falls back to Kokoro when it's blocked, keyless or failing.
+
+/** Audio bytes for one line: Rust on the desktop, the gateway's Kokoro on the phone. */
+export function synthBytes(args: ReturnType<typeof synthArgs>): Promise<ArrayBuffer> {
+  if (!isAndroidApp()) return cmd("tts_synthesize", args);
+  return langApi.tts(args.text, "en", { agent: args.agent || "general", voice: args.voice || undefined });
+}
+
+/** Text for one WAV: Rust's Whisper on the desktop, the gateway's Whisper on the phone. */
+export async function transcribeWav(wav: Uint8Array): Promise<string> {
+  if (!isAndroidApp()) return nativeRaw<string>("stt_transcribe", wav);
+  return (await langApi.stt(wav, "en")).text;
+}
 import type { SpeakOpts, TtsEngine } from "./tts-types";
 import { FallbackTts } from "./tts-fallback";
 import { PinCache, unpinEverywhere } from "./tts-pin";
@@ -436,7 +457,7 @@ export class WhisperStt implements SttEngine {
     const wav = encodeWav16k(pcm, rate);
     for (let attempt = 1; ; attempt++) {
       try {
-        const text = await nativeRaw<string>("stt_transcribe", wav);
+        const text = await transcribeWav(wav);
         // Locked off while Whisper worked: what was heard before the mute is dropped.
         if (this.handlers === h) h.onFinal(micEnabled() ? text.trim() : "");
         return;
@@ -585,14 +606,14 @@ export class KokoroTts implements TtsEngine {
     const key = this.key(s, opts);
     if (opts?.cache) {
       listenForUnpins();
-      return this.pinned.get(key, (pinId) => cmd("tts_synthesize", synthArgs(s, opts, pinId))); // no previousText / utteranceId
+      return this.pinned.get(key, (pinId) => synthBytes(synthArgs(s, opts, pinId))); // no previousText / utteranceId
     }
     const hit = this.ahead.get(key);
     if (hit) {
       this.ahead.delete(key);
       return hit.p;
     }
-    return cmd("tts_synthesize", synthArgs(s, opts));
+    return synthBytes(synthArgs(s, opts));
   }
 
   prefetch(text: string, opts?: SpeakOpts) {
@@ -601,7 +622,7 @@ export class KokoroTts implements TtsEngine {
     for (const { s, opts: sOpts } of perSentenceOpts(text, opts)) {
       const key = this.key(s, sOpts);
       if (this.ahead.has(key)) continue;
-      const p = cmd("tts_synthesize", synthArgs(s, sOpts));
+      const p = synthBytes(synthArgs(s, sOpts));
       p.catch(() => this.ahead.delete(key));
       this.ahead.set(key, { at: now, p });
     }

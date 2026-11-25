@@ -21,10 +21,10 @@ import { cueFor, fireCue, registerCueIO } from "@/features/cues/cue-runtime";
 import { cueRecentlyActive, registerSpeechCancel, setCueDuck, stopAllAudio } from "@/features/cues/player";
 import { cc } from "@/lib/cc-api";
 import { clientTrace } from "@/features/memmap/client-trace";
-import { cmd, isTauri, onNativeEvent, type AgentEvent, type ChatMessage, type OsTurnResult, type RoutingConfig, type TaskSource, type TtsFallbackEvent } from "@/lib/platform";
+import { cmd, onNativeEvent, type AgentEvent, type ChatMessage, type OsTurnResult, type RoutingConfig, type TaskSource, type TtsFallbackEvent } from "@/lib/platform";
 import { useProviders } from "@/sections/settings/use-providers";
 import { useNav } from "@/stores/nav";
-import { useSettings } from "@/stores/settings";
+import { isDesktopApp, useSettings } from "@/stores/settings";
 import { audioContext, createEngines, type SpeakOpts } from "./engines";
 import { nextStreamChunk, utteranceIdFor } from "./tts-text";
 import { fallbackNotice } from "./tts-fallback-notice";
@@ -866,7 +866,7 @@ export async function requestConfirmation(plan: ActionPlan, channel: Channel) {
 
   // Manual Overseer Mode: a second opinion lands on the card while you decide.
   const os = useOs.getState().cfg;
-  if (os?.overseer.manualMode && isTauri() && plan.target.kind !== "bridge") void overseerReview(plan);
+  if (os?.overseer.manualMode && isDesktopApp() && plan.target.kind !== "bridge") void overseerReview(plan);
 
   if (channel === "voice") {
     await say(plan.readBack);
@@ -1014,9 +1014,10 @@ async function run(plan: Parameters<typeof execute>[0], channel: Channel) {
   store().setState("thinking");
   const thread = plan.thread ?? tonyThread();
   // Read-only questions go through the OS core (context + sub-agents + tools).
-  if (!plan.mutating && plan.target.kind === "agent" && !plan.run && isTauri()) return osRun(plan, channel, thread);
+  // Desktop only: on the phone (PWA / Android) `execute` → `dispatch` queues the turn for the desktop's Tony.
+  if (!plan.mutating && plan.target.kind === "agent" && !plan.run && isDesktopApp()) return osRun(plan, channel, thread);
   // An approved Tier-3 delegation (P3): the OS core, straight to that agent (only reached from approve()).
-  if (plan.delegateTo && !plan.run && isTauri()) return osRun(plan, channel, thread);
+  if (plan.delegateTo && !plan.run && isDesktopApp()) return osRun(plan, channel, thread);
   try {
     const traceId = clientTrace.id ?? undefined;
     const r = await execute(plan, history(thread).slice(0, -1));
@@ -1166,7 +1167,7 @@ async function offerDelegation(t: string, thread: ThreadId, channel: Channel, ta
   plan.plannerNote = "delegation offer (Tier 3)";
   plan.onCancel = () => undefined;
   if (target.kind === "pipeline") plan.run = () => delegateBuild(brief, title, thread, channel === "voice" ? "voice" : "typed");
-  else if (isTauri()) plan.delegateTo = target.role;
+  else if (isDesktopApp()) plan.delegateTo = target.role;
   else {
     const role = target.role;
     plan.run = async () => {
@@ -1257,7 +1258,7 @@ export const BUILD_QUEUED_LINE = "Queued. The Prompter's on it. Ask me where the
  */
 async function delegateBuild(brief: string, title: string, thread: ThreadId, source: TaskSource, opts: { auto?: boolean } = {}): Promise<{ text: string; meta: string }> {
   const auto = opts.auto === true;
-  if (isTauri()) {
+  if (isDesktopApp()) {
     const r = await cmd("task_create", { raw_intent: brief, title, thread, source, ...(auto ? { auto: true } : {}) });
     markAnnounced(r.task_id);
     trackTask(r.task_id, r.title || title, thread);
@@ -1650,7 +1651,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   }
   // Typed turn: silent unless this agent's roster entry has auto-speak on
   // (Part 3) — a voice turn always speaks (above); a typed one only opts in.
-  if (isTauri() && agentAutoSpeak(voiceAgent)) {
+  if (isDesktopApp() && agentAutoSpeak(voiceAgent)) {
     store().setState("speaking");
     if (handoffCue) await handoffCue.done; // never talk over (or get cut by) the hand-off beats
     await say(r.answer, { agent: voiceAgent, traceId, utteranceId: uttFor(voiceAgent) });
@@ -1828,7 +1829,7 @@ registerCueIO(
 // The voice roster lives in providers.json, loaded only when Settings → Voice is
 // opened; fetch it once up front too, so `agentAutoSpeak`/per-agent voices work for a
 // session that never visits Settings. Settings' own `load()` keeps it fresh afterwards.
-if (isTauri()) void useProviders.getState().load();
+if (isDesktopApp()) void useProviders.getState().load();
 
 // Rust fell back from an agent's configured engine to a local one (offline, out of
 // quota…) — surfaced here instead of only in the Rust console (`eprintln!`). P1: ONE
@@ -2198,7 +2199,7 @@ function onAgentReply(h: (e: { streamId: string; agent: string; text: string }) 
   return onNativeEvent<{ streamId: string; agent: string; text: string }>("os-agent-reply", h);
 }
 
-if (isTauri()) void detectRoute();
+if (isDesktopApp()) void detectRoute();
 
 // ── Part 6 narration: agent progress in each agent's roster voice, never over Nic or Tony ──
 
@@ -2283,7 +2284,7 @@ function liveTraceIds(): ReadonlySet<string> {
 }
 
 /** The desktop narrator (the phone gets no agent events; it asks for status instead). */
-export const narrator = isTauri()
+export const narrator = isDesktopApp()
   ? startNarrator({
       narrate,
       snapshot: narratorSnapshot,

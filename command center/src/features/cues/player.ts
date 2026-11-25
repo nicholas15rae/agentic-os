@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { cc, collections } from "@/lib/cc-api";
-import { cmd, isTauri } from "@/lib/platform";
+import { cmd } from "@/lib/platform";
+import { contextIsDead } from "@/lib/audio-context";
+import { isDesktopApp } from "@/stores/settings";
 import type { AudioClip, CueWidget, ThemeClip } from "./types";
 import { DUCK_GAIN, clampVolume, nudgeVolume, softClipCurve, updateDuckSources, volumeGain, type DuckSource } from "./volume";
 
@@ -18,10 +20,26 @@ import { DUCK_GAIN, clampVolume, nudgeVolume, softClipCurve, updateDuckSources, 
  * Clip volumes go up to 300 %; the limiter and soft clip keep that from clipping hard.
  */
 let ctx: AudioContext | null = null;
+let ctxBroken = false;
 const buffers = new Map<string, Promise<AudioBuffer>>();
 
+/** The cue context, rebuilt (with its master bus) when the audio device dropped it: on Android the
+ * mic opening reroutes audio and a broken context stays silent for the rest of the session. Decoded
+ * clips stay cached (an AudioBuffer isn't tied to one context). */
 export function audio(): AudioContext {
-  ctx ??= new AudioContext();
+  if (ctx && contextIsDead(ctx, ctxBroken)) {
+    void ctx.close().catch(() => undefined);
+    ctx = null;
+    busNode = null;
+  }
+  if (!ctx) {
+    const c = new AudioContext();
+    ctxBroken = false;
+    c.addEventListener?.("error", () => {
+      if (ctx === c) ctxBroken = true;
+    });
+    ctx = c;
+  }
   if (ctx.state === "suspended" && !cueHeld) void ctx.resume();
   return ctx;
 }
@@ -308,7 +326,8 @@ export function stopAllAudio() {
 
 async function introText(w: CueWidget): Promise<string> {
   if (w.intro.mode === "static" || !w.intro.text.trim()) return w.intro.text;
-  if (!isTauri()) return w.intro.text;
+  // Phone: the static line (the phone's Rust has no model; an LLM intro would only wait out a failure).
+  if (!isDesktopApp()) return w.intro.text;
   try {
     const now = new Date().toLocaleString("en-CA", { weekday: "long", hour: "numeric", minute: "2-digit" });
     const r = await cmd("dispatch_chat", {

@@ -5,6 +5,7 @@ import { SileroStream, preloadSilero } from "./silero";
 import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, thresholdFor } from "./vad-gate";
 import { MIC_LOCKED_MSG, MicLockedError, assertMicAllowed, captureClosed, captureOpened, micEnabled, publishMeter, registerCapture, unpublishMeter, type MeterSnapshot } from "./mic-gate";
 import { perSentenceOpts, sentences, stripForSpeech, synthArgs } from "./tts-text";
+import { contextIsDead } from "@/lib/audio-context";
 import { isAndroidApp } from "@/stores/settings";
 import { langApi } from "@/features/language/api";
 
@@ -79,8 +80,21 @@ export interface SttEngine {
 // ── Shared audio context (created lazily inside a user gesture) ─────────────
 
 let ctx: AudioContext | null = null;
+let ctxBroken = false;
+
 export async function audioContext(): Promise<AudioContext> {
-  if (!ctx || ctx.state === "closed") ctx = new AudioContext();
+  if (ctx && contextIsDead(ctx, ctxBroken)) {
+    void ctx.close().catch(() => undefined);
+    ctx = null;
+  }
+  if (!ctx) {
+    const c = new AudioContext();
+    ctxBroken = false;
+    c.addEventListener?.("error", () => {
+      if (ctx === c) ctxBroken = true;
+    });
+    ctx = c;
+  }
   if (ctx.state === "suspended") await ctx.resume();
   return ctx;
 }

@@ -53,25 +53,6 @@ import security_api  # noqa: E402
 app.add_middleware(security_api.StepUpMiddleware)
 app.include_router(security_api.router)
 
-# CORS for local dev
-DEV_ORIGIN_RE = r"^http://(localhost|127\.0\.0\.1):14[23][0-9]$"
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:8080", "http://localhost:8080",
-        # Command Center ("command center/"): Vite dev, Tauri webview (Windows / macOS+Linux), PWA preview.
-        # The phone loads the PWA from this server at /cc/ (same origin), so it needs no entry here.
-        "http://localhost:1420", "http://tauri.localhost", "tauri://localhost", "http://localhost:4173",
-    ],
-    # Extra Vite dev ports on loopback (1420-1439): a second checkout or worktree runs its dev
-    # server on 1422, 1430… and its window was silently cut off from every view while the Rust
-    # heartbeat (no CORS) still said "Connected". Loopback only, this port band only.
-    allow_origin_regex=DEV_ORIGIN_RE,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Command Center gateway: shared store (phone ↔ desktop sync), vault, OCR, backups.
 import command_center_api  # noqa: E402
 
@@ -319,6 +300,27 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS, registered last so it is the OUTERMOST middleware (Starlette runs the last-added
+# first): every response, including ZeroTrust's 401/403 and StepUp's 423, carries the CORS
+# headers, so the webview / phone app can read the real status instead of a bare "CORS error".
+DEV_ORIGIN_RE = r"^http://(localhost|127\.0\.0\.1):14[23][0-9]$"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:8080", "http://localhost:8080",
+        # Command Center ("command center/"): Vite dev, Tauri webview (Windows / macOS+Linux), PWA preview.
+        # The phone loads the PWA from this server at /cc/ (same origin), so it needs no entry here.
+        "http://localhost:1420", "http://tauri.localhost", "tauri://localhost", "http://localhost:4173",
+    ],
+    # Extra Vite dev ports on loopback (1420-1439): a second checkout or worktree runs its dev
+    # server on 1422, 1430… and its window was silently cut off from every view while the Rust
+    # heartbeat (no CORS) still said "Connected". Loopback only, this port band only.
+    allow_origin_regex=DEV_ORIGIN_RE,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ─── Agent Discovery (instant filesystem checks) ────────────────────
 

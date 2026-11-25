@@ -80,21 +80,113 @@ class LanguageHubApi(unittest.TestCase):
         self.assertEqual(self.c.put("/api/cc/lang/settings/..x", json={"value": 1}).status_code, 400)
         self.assertEqual(self.c.put("/api/cc/lang/settings/big", json={"value": "x" * 70_000}).status_code, 413)
 
-    def test_cloud_engine_is_desktop_only(self):
-        saved = lh._providers
-        lh._providers = lambda: {"providers": [
+    PROVIDERS = {
+        "providers": [
             {"id": "kokoro", "kind": "tts", "engine": "kokoro", "baseUrl": "http://127.0.0.1:1/v1", "model": "kokoro", "voice": "am_michael"},
-            {"id": "elevenlabs", "kind": "tts", "engine": "elevenlabs", "baseUrl": "https://api.elevenlabs.io/v1", "model": "eleven_v4_turbo", "voice": "abc"},
-        ]}
+            {"id": "elevenlabs", "kind": "tts", "engine": "elevenlabs", "baseUrl": "https://api.elevenlabs.io/v1", "model": "eleven_v4_turbo", "voice": "QhEKgDl6KUJsO1FPiuSD"},
+        ],
+        "agentVoices": {
+            "general": {"engine": "elevenlabs", "voice": "QhEKgDl6KUJsO1FPiuSD"},
+            "coder": {"engine": "elevenlabs", "voice": "FGY2WhTYpPnrIDTdsKH5", "model": "eleven_flash_v2_5"},
+            "librarian": {"engine": "kokoro", "voice": "bm_george"},
+        },
+    }
+
+    def patched(self, **kw):
+        """Swap gateway helpers for the test; returns a restore function."""
+        saved = {k: getattr(lh, k) for k in kw}
+        for k, v in kw.items():
+            setattr(lh, k, v)
+        return lambda: [setattr(lh, k, v) for k, v in saved.items()]
+
+    def test_resolve_agent_voice_follows_the_desktop_roster(self):
+        cfg = self.PROVIDERS
+        self.assertEqual(lh.resolve_agent_voice(cfg, "general", None), {"engine": "elevenlabs", "voice": "QhEKgDl6KUJsO1FPiuSD", "model": "eleven_v4_turbo"})
+        self.assertEqual(lh.resolve_agent_voice(cfg, "coder", None)["model"], "eleven_flash_v2_5")
+        self.assertEqual(lh.resolve_agent_voice(cfg, "librarian", None), {"engine": "kokoro", "voice": "bm_george", "model": "kokoro"})
+        # Unknown agent -> Tony's voice; an explicit Kokoro id -> Kokoro; an explicit other id -> ElevenLabs.
+        self.assertEqual(lh.resolve_agent_voice(cfg, "nobody", None)["voice"], "QhEKgDl6KUJsO1FPiuSD")
+        self.assertEqual(lh.resolve_agent_voice(cfg, "general", "af_heart")["engine"], "kokoro")
+        self.assertEqual(lh.resolve_agent_voice(cfg, "librarian", "CwhRBWXzGAHq8TQ4Fs17")["engine"], "elevenlabs")
+        # No roster at all -> Kokoro with the provider's voice.
+        self.assertEqual(lh.resolve_agent_voice({"providers": cfg["providers"]}, "general", None), {"engine": "kokoro", "voice": "am_michael", "model": "kokoro"})
+
+    def test_agent_line_uses_elevenlabs_with_the_pcs_key(self):
+        calls = []
+        restore = self.patched(_providers=lambda: self.PROVIDERS,
+                               _eleven_tts=lambda t, v, m: calls.append((t, v, m)) or b"MP3-ELEVEN",
+                               _kokoro_tts=lambda p, t, v: b"MP3-KOKORO")
+        try:
+            r = self.c.post("/api/cc/lang/tts", json={"text": "Hey Nic", "lang": "en", "agent": "general"})
+            self.assertEqual((r.status_code, r.content, r.headers["x-tts-engine"]), (200, b"MP3-ELEVEN", "elevenlabs"))
+            self.assertEqual(calls, [("Hey Nic", "QhEKgDl6KUJsO1FPiuSD", "eleven_v4_turbo")])
+        finally:
+            restore()
+
+    def test_agent_line_falls_back_to_kokoro(self):
+        def blocked(t, v, m):
+            raise lh.HTTPException(422, "KILL_SWITCH")
+        used = []
+        restore = self.patched(_providers=lambda: self.PROVIDERS, _eleven_tts=blocked,
+                               _kokoro_tts=lambda p, t, v: used.append(v) or b"MP3-KOKORO")
+        try:
+            r = self.c.post("/api/cc/lang/tts", json={"text": "Hey Nic", "lang": "en", "agent": "general"})
+            self.assertEqual((r.status_code, r.content, r.headers["x-tts-engine"], r.headers["x-tts-fallback"]), (200, b"MP3-KOKORO", "kokoro", "KILL_SWITCH"))
+            self.assertEqual(used, ["am_michael"])  # Tony's Kokoro voice, never the ElevenLabs id
+            r = self.c.post("/api/cc/lang/tts", json={"text": "Hi", "lang": "en", "agent": "librarian"})
+            self.assertEqual((r.headers["x-tts-engine"], used[-1]), ("kokoro", "bm_george"))
+        finally:
+            restore()
+
+    def test_eleven_tts_guards(self):
+        restore = self.patched(_kill_switch=lambda: True, _eleven_key=lambda: "k" * 32)
+        try:
+            with self.assertRaises(lh.HTTPException) as e:
+                lh._eleven_tts("hi", "QhEKgDl6KUJsO1FPiuSD", "eleven_v4_turbo")
+            self.assertEqual(e.exception.detail, "KILL_SWITCH")
+        finally:
+            restore()
+        restore = self.patched(_kill_switch=lambda: False, _eleven_key=lambda: None)
+        try:
+            with self.assertRaises(lh.HTTPException) as e:
+                lh._eleven_tts("hi", "QhEKgDl6KUJsO1FPiuSD", "eleven_v4_turbo")
+            self.assertEqual(e.exception.detail, "ELEVENLABS_NO_KEY")
+        finally:
+            restore()
+        restore = self.patched(_kill_switch=lambda: False, _eleven_key=lambda: "k" * 32)
+        try:
+            with self.assertRaises(lh.HTTPException) as e:
+                lh._eleven_tts("hi", "../../etc", "eleven_v4_turbo")
+            self.assertEqual(e.exception.detail, "ELEVENLABS_BAD_VOICE")
+        finally:
+            restore()
+
+    def test_kill_switch_reads_the_desktop_mirror_and_fails_closed(self):
+        saved = lh.OS_STATE_JSON
+        try:
+            lh.OS_STATE_JSON = self.tmp / "missing.json"
+            self.assertTrue(lh._kill_switch())
+            lh.OS_STATE_JSON = self.tmp / "os-state.json"
+            lh.OS_STATE_JSON.write_text('{"privacy": {"killSwitch": false}}', encoding="utf-8")
+            self.assertFalse(lh._kill_switch())
+            lh.OS_STATE_JSON.write_text('{"privacy": {"killSwitch": true}}', encoding="utf-8")
+            self.assertTrue(lh._kill_switch())
+        finally:
+            lh.OS_STATE_JSON = saved
+
+    def test_explicit_elevenlabs_engine_returns_its_error(self):
+        def no_key(t, v, m):
+            raise lh.HTTPException(422, "ELEVENLABS_NO_KEY")
+        restore = self.patched(_providers=lambda: self.PROVIDERS, _eleven_tts=no_key)
         try:
             engines = self.c.get("/api/cc/lang/voice/engines").json()["engines"]
             self.assertEqual([(e["id"], e["local"]) for e in engines], [("kokoro", True), ("elevenlabs", False)])
             r = self.c.post("/api/cc/lang/tts", json={"text": "Ciao", "lang": "it", "engine": "elevenlabs"})
-            self.assertEqual((r.status_code, r.json()["detail"]), (422, "ENGINE_DESKTOP_ONLY"))
+            self.assertEqual((r.status_code, r.json()["detail"]), (422, "ELEVENLABS_NO_KEY"))
             self.assertEqual(self.c.get("/api/cc/lang/voice/voices?engine=elevenlabs").status_code, 422)
             self.assertEqual(self.c.post("/api/cc/lang/tts", json={"text": "Ciao", "lang": "it", "engine": "nope"}).status_code, 422)
         finally:
-            lh._providers = saved
+            restore()
 
     def test_pick_ml_model(self):
         (self.tmp / "ggml-base.en.bin").write_bytes(b"x")

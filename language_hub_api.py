@@ -437,6 +437,93 @@ async def stt(request: Request, lang: str = Query("auto")):
     return {"text": text, "language": language, "engine": engine}
 
 
+# ── ElevenLabs for the phone (the key never leaves the PC) ────────────────────
+# The Android app can't read the PC's key, so the gateway makes the ElevenLabs call for it with the
+# same key resolution as the desktop (elevenlabs.rs): ELEVENLABS_API_KEY, then the repo .env. The
+# outbound kill switch (mirrored by the desktop into os-state.json) blocks it; unreadable = blocked.
+
+REPO_ENV = Path(__file__).parent / ".env"
+OS_STATE_JSON = Path(__file__).parent / "data" / "command-center" / "os-state.json"
+ELEVEN_API = "https://api.elevenlabs.io/v1"
+ELEVEN_VOICE_RE = re.compile(r"^[A-Za-z0-9]{10,40}$")
+KOKORO_VOICE_RE = re.compile(r"^[a-z]{2}_[a-z0-9]+$", re.I)
+
+
+def _eleven_key() -> Optional[str]:
+    k = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if k:
+        return k
+    try:
+        for line in REPO_ENV.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*ELEVENLABS_API_KEY\s*=\s*(.*)$", line)
+            if m:
+                return m.group(1).strip().strip("\"'") or None
+    except OSError:
+        pass
+    return None
+
+
+def _kill_switch() -> bool:
+    try:
+        return bool((json.loads(OS_STATE_JSON.read_text(encoding="utf-8")).get("privacy") or {}).get("killSwitch"))
+    except Exception:
+        return True  # can't tell: no cloud call
+
+
+def _eleven_tts(text: str, voice_id: str, model: str) -> bytes:
+    """One ElevenLabs TTS call (same request as the desktop's tts_request, without stitching)."""
+    if _kill_switch():
+        raise HTTPException(422, "KILL_SWITCH")
+    key = _eleven_key()
+    if not key:
+        raise HTTPException(422, "ELEVENLABS_NO_KEY")
+    if not ELEVEN_VOICE_RE.match(voice_id or ""):
+        raise HTTPException(422, "ELEVENLABS_BAD_VOICE")
+    body = json.dumps({"text": text, "model_id": model or "eleven_flash_v2_5", "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}}).encode()
+    req = urllib.request.Request(
+        f"{ELEVEN_API}/text-to-speech/{voice_id}?output_format=mp3_44100_128",
+        data=body,
+        headers={"xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise HTTPException(502, f"ElevenLabs HTTP {e.code}")
+    except (urllib.error.URLError, OSError) as e:
+        raise HTTPException(502, f"ElevenLabs unavailable: {getattr(e, 'reason', e)}")
+
+
+def _kokoro_tts(p: dict, text: str, voice: str) -> bytes:
+    payload = json.dumps({"model": p.get("model") or "kokoro", "input": text, "voice": voice, "response_format": "mp3", "speed": 1.0}).encode()
+    req = urllib.request.Request(f"{p['baseUrl'].rstrip('/')}/audio/speech", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            return r.read()
+    except (urllib.error.URLError, OSError) as e:
+        raise HTTPException(502, f"Kokoro unavailable: {getattr(e, 'reason', e)}")
+
+
+def resolve_agent_voice(cfg: dict, agent: str, voice: Optional[str]) -> dict:
+    """The phone's Tony / agent line -> {engine, voice, model}, like the desktop's tts_synthesize:
+    the agent's roster entry (agentVoices, falling back to "general"); an explicit voice id wins
+    (a Kokoro-style id -> Kokoro, anything else -> ElevenLabs). Pure."""
+    roster = cfg.get("agentVoices") or {}
+    av = roster.get(agent) or roster.get("general") or {}
+    providers = {p.get("engine"): p for p in cfg.get("providers", []) if p.get("kind") == "tts"}
+    eleven, kokoro = providers.get("elevenlabs") or {}, providers.get("kokoro") or {}
+    if voice:
+        engine = "kokoro" if KOKORO_VOICE_RE.match(voice) else "elevenlabs"
+    else:
+        engine = "elevenlabs" if (av.get("engine") or (cfg.get("policy") or {}).get("tts")) == "elevenlabs" else "kokoro"
+        voice = av.get("voice") if (av.get("engine") or "kokoro") == engine else None
+    if engine == "elevenlabs":
+        return {"engine": "elevenlabs", "voice": voice or eleven.get("voice"), "model": av.get("model") or eleven.get("model") or "eleven_flash_v2_5"}
+    kv = voice if voice and KOKORO_VOICE_RE.match(voice) else None
+    return {"engine": "kokoro", "voice": kv or kokoro.get("voice") or KOKORO_VOICES.get("en"), "model": kokoro.get("model") or "kokoro"}
+
+
 @router.post("/tts")
 def tts(body: dict = Body(...)):
     text = str(body.get("text") or "").strip()
@@ -445,12 +532,39 @@ def tts(body: dict = Body(...)):
         raise HTTPException(400, "text must be 1–2000 characters")
     engine = str(body.get("engine") or "").strip()
     voice = str(body.get("voice") or "").strip()[:128] or None
+    agent = str(body.get("agent") or "").strip()[:32]
+
+    # The phone's Tony / agent lines: the desktop roster's voice. ElevenLabs when that's the pick;
+    # Kokoro (Tony's Kokoro voice) when ElevenLabs is blocked, keyless or failing. X-TTS-Engine says which.
+    if agent and not engine:
+        cfg = _providers()
+        plan = resolve_agent_voice(cfg, agent, voice)
+        fallback = None
+        if plan["engine"] == "elevenlabs":
+            try:
+                audio = _eleven_tts(text, plan["voice"] or "", plan["model"])
+                return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Engine": "elevenlabs"})
+            except HTTPException as e:
+                fallback = str(e.detail)
+        kp = _kokoro()
+        if not kp:
+            raise HTTPException(422, "NO_LOCAL_TTS")
+        kvoice = plan["voice"] if plan["engine"] == "kokoro" else (kp.get("voice") or KOKORO_VOICES.get("en"))
+        headers = {"X-TTS-Engine": "kokoro"}
+        if fallback:
+            headers["X-TTS-Fallback"] = fallback[:120]
+        return Response(content=_kokoro_tts(kp, text, kvoice), media_type="audio/mpeg", headers=headers)
+
     if engine:
         p = next((x for x in _tts_providers() if x.get("id") == engine), None)
         if not p:
             raise HTTPException(422, f"no TTS provider '{engine}'")
         if p.get("engine") == "elevenlabs":
-            raise HTTPException(422, "ENGINE_DESKTOP_ONLY")
+            # Language Hub on the phone: an explicit ElevenLabs pick. Errors are returned (KILL_SWITCH,
+            # ELEVENLABS_NO_KEY, 502) so the client's own fallback runs.
+            v = voice if voice and not KOKORO_VOICE_RE.match(voice) else p.get("voice")
+            audio = _eleven_tts(text, v or "", str(body.get("model") or "") or p.get("model") or "")
+            return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Engine": "elevenlabs"})
     else:
         p = _kokoro()
         if not p:
@@ -468,14 +582,7 @@ def tts(body: dict = Body(...)):
                 return Response(content=r.read(), media_type="audio/wav")
         except (urllib.error.URLError, OSError) as e:
             raise HTTPException(502, f"XTTS unavailable: {getattr(e, 'reason', e)}")
-    payload = json.dumps({"model": p.get("model") or "kokoro", "input": text, "voice": voice, "response_format": "mp3", "speed": 1.0}).encode()
-    req = urllib.request.Request(f"{p['baseUrl'].rstrip('/')}/audio/speech", data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=45) as r:
-            audio = r.read()
-    except (urllib.error.URLError, OSError) as e:
-        raise HTTPException(502, f"Kokoro unavailable: {getattr(e, 'reason', e)}")
-    return Response(content=audio, media_type="audio/mpeg")
+    return Response(content=_kokoro_tts(p, text, voice), media_type="audio/mpeg")
 
 
 @router.post("/llm")

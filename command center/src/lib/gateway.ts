@@ -4,6 +4,7 @@
  */
 import { useSettings } from "@/stores/settings";
 import { gatewayUpPerHeartbeat, noteWebviewReach } from "@/features/lifecycle/health-store";
+import { phoneTokenReady } from "@/features/lifecycle/phone-token";
 
 export class GatewayError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -17,6 +18,7 @@ export class GatewayError extends Error {
  * PIN. A 423 STEP_UP_REQUIRED opens the PIN modal (desktop) and retries once with a token.
  */
 export async function gateway<T>(path: string, init?: RequestInit & { timeoutMs?: number }, retried = false): Promise<T> {
+  await phoneTokenReady(); // Android: the stored token, before the first calls at launch
   const { gatewayUrl, gatewayToken } = useSettings.getState();
   const base = gatewayUrl.replace(/\/+$/, "");
   const method = (init?.method ?? "GET").toUpperCase();

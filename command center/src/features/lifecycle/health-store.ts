@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { onExtEvent, xcmd } from "@/lib/native-ext";
 import { isDesktopApp, useSettings } from "@/stores/settings";
-import { initPhoneToken } from "./phone-token";
+import { phoneTokenReady } from "./phone-token";
 import { foldProbe, UNKNOWN_HEALTH, type HealthSnapshot, type Probe, type WebviewReach } from "./health";
 
 /**
@@ -38,7 +38,7 @@ export function startHealth(): void {
   if (started) return;
   started = true;
   // Android: the gateway token comes back from the Keystore-encrypted store (and is saved on change).
-  void initPhoneToken();
+  void phoneTokenReady();
   if (isDesktopApp()) {
     void xcmd("gateway_health")
       .then((h) => h.checkedAt && useHealth.getState().set(h))

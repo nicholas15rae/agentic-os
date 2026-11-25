@@ -9,6 +9,8 @@ import type { SpotifyIntent } from "@/lib/platform";
 import { cueIntroMigration, DEFAULT_CUES, type CueWidget } from "./types";
 import { norm } from "./gaba";
 import { cueGeneration, runCue, stopAllAudio, useCueRun } from "./player";
+import { originalBuiltin, startupQueue, type LiveCue } from "./startup";
+export { originalBuiltin, startupQueue } from "./startup";
 
 /**
  * Cue triggers: voice/text phrase, time of day, app startup. The voice
@@ -76,10 +78,8 @@ export function fireCue(w: CueWidget) {
  * together made each `runCue` stop the one before it, so only the last survived. A cue the
  * user stops (or that anything else supersedes) ends the chain.
  */
-export async function runStartupCues(cues: (CueWidget & { _deleted?: boolean })[]) {
-  const queue = cues
-    .filter((c) => c.enabled && c.startup && !c._deleted)
-    .sort((a, b) => Number(b.builtin === "startup") - Number(a.builtin === "startup"));
+export async function runStartupCues(cues: LiveCue[]) {
+  const queue = startupQueue(cues);
   for (const c of queue) {
     const run = runCue(c, speak, runAction);
     const gen = cueGeneration(); // runCue bumps it synchronously before its first await
@@ -95,7 +95,7 @@ export async function runStartupCues(cues: (CueWidget & { _deleted?: boolean })[
 /** Toggle from the top-bar pill: stop if running, else start Gabagool Mode. */
 export function toggleGabagool() {
   if (useCueRun.getState().running) return stopAllAudio();
-  const w = collections.snapshot<CueWidget>("cues").find((c) => c.builtin === "gabagool" && !c._deleted);
+  const w = originalBuiltin(collections.snapshot<LiveCue>("cues"), "gabagool");
   if (w) fireCue(w);
   else useToasts.getState().push({ title: "Gabagool Mode", body: "Set it up in Settings → Voice & Triggers.", tone: "info" });
 }
@@ -108,7 +108,7 @@ export function toggleGabagool() {
 export function toggleGabagoolMode() {
   const run = useCueRun.getState();
   if (run.running && run.builtin === "gabagool") return stopAllAudio();
-  const w = collections.snapshot<CueWidget>("cues").find((c) => c.builtin === "gabagool" && !c._deleted);
+  const w = originalBuiltin(collections.snapshot<LiveCue>("cues"), "gabagool");
   if (!w) return void useToasts.getState().push({ title: "Gabagool Mode", body: "Set it up in Settings → Voice & Triggers.", tone: "info" });
   if (run.running) stopAllAudio();
   fireCue(w);
@@ -118,20 +118,23 @@ const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.g
 
 /** Seeds the built-in widgets, fires startup cues once, and runs the time-of-day schedule. */
 export function useCueScheduler() {
-  const { items, loaded, create, update } = useCollection<CueWidget>("cues");
+  const { items, loaded, error, create, update } = useCollection<CueWidget>("cues");
+  // Only a load that SUCCEEDED counts: a failed read (gateway down, the phone's token not loaded
+  // yet) looks like an empty list, which re-seeded the defaults and ran startup with no cues.
+  const ready = loaded && !error;
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!ready) return;
     for (const d of DEFAULT_CUES) if (!items.some((i) => i.builtin === d.builtin)) void create(d);
     // One-time upgrade of an untouched old default line (P5: the startup greeting).
     for (const i of items) {
       const intro = i._deleted ? null : cueIntroMigration(i);
       if (intro) void update(i.id, { intro }).catch(() => undefined);
     }
-  }, [loaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!ready) return;
     // The once-per-session flag is claimed only when the timer actually fires: React StrictMode
     // (dev) mounts → cleans up → mounts again, and a flag set up front made the second mount bail
     // while the first mount's timer had been cleared, so startup cues never played in dev.
@@ -149,7 +152,7 @@ export function useCueScheduler() {
       });
     }, 2500);
     return () => clearTimeout(t);
-  }, [loaded]);
+  }, [ready]);
 
   useEffect(() => {
     const tick = () => {

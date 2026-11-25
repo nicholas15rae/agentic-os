@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { PHONE_LITE } from "@/lib/phone-lite";
 import { micLevel, voiceLevel, type VoiceState } from "./voice-store";
 
 const ANIMATED: VoiceState[] = ["listening", "transcribing", "speaking", "thinking", "holding"];
@@ -94,10 +95,18 @@ export function VoiceOrb({ state, size = 64 }: { state: VoiceState; size?: numbe
       ctx.fill();
 
       t += 0.016;
-      if (animate || amp > 0.002) raf = requestAnimationFrame(draw); // settle, then stop entirely
+      // Settle, then stop entirely. Phone: ~20 fps while it moves (the mic level keeps it moving).
+      if (animate || amp > 0.002) {
+        if (PHONE_LITE) timer = setTimeout(() => (raf = requestAnimationFrame(draw)), 40);
+        else raf = requestAnimationFrame(draw);
+      }
     };
+    let timer: ReturnType<typeof setTimeout> | undefined;
     draw();
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+    };
   }, [state, animate, colors, size]);
 
   const full = size * 1.7;

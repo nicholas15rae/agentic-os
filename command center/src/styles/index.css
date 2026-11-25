@@ -287,3 +287,29 @@
 .sysmap-callout { pointer-events: none; transform: translate(-0.5px, -100%); white-space: nowrap; }
 .sysmap-callout .stem { width: 1px; margin: 0; background: linear-gradient(to top, rgba(251, 146, 60, 0.85), rgba(251, 146, 60, 0.15)); }
 .sysmap-callout .tag { pointer-events: auto; cursor: pointer; border-left: 1px solid rgba(251, 146, 60, 0.9); padding: 1px 0 1px 7px; font-family: "JetBrains Mono Variable", ui-monospace, monospace; }
+
+/*
+ * Phone performance mode (the Android app, lib/phone-lite.ts): no live blur. ~35 backdrop-filter
+ * layers re-blurred every frame lagged the phone; solid translucent glass looks nearly the same.
+ * Unlayered on purpose, so it wins over the @utility rules.
+ */
+.phone-lite *,
+.phone-lite *::before,
+.phone-lite *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+.phone-lite .glass {
+  background:
+    linear-gradient(rgba(24, 28, 38, 0.9), rgba(24, 28, 38, 0.9)) padding-box,
+    linear-gradient(to bottom right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03)) border-box;
+}
+.phone-lite .glass-thin {
+  background: rgba(11, 13, 17, 0.8);
+}
+.phone-lite .glass-ultra {
+  background: rgba(11, 13, 17, max(var(--ultra-alpha, 0.08), 0.6));
+}
+.phone-lite .pill-glass {
+  background: rgba(255, 255, 255, 0.08);
+}

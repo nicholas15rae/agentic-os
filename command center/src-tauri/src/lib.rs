@@ -185,6 +185,7 @@ pub fn run() {
                 commands::live::init(app.handle());
                 // Diagnostic probe reports (<config dir>/telemetry/diagnostics) + their schedule /
                 // request.json loop.
+                #[cfg(desktop)]
                 diagnostics::init(app.handle(), &dir);
                 finance_vault::init(&dir);
                 // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
@@ -249,67 +250,72 @@ pub fn run() {
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
                 audio::ducker::recover(&dir);
             }
-            // Spotify: load the saved session / refresh silently so the widget's first status
-            // check is instant. Never opens a browser; no-op when not connected.
-            tauri::async_runtime::spawn(spotify::warm(app.handle().clone()));
-            // MCP: start listing enabled stdio servers ~5 s after launch (into the cache, in
-            // the background). No HTTP / token-gated server is contacted.
-            tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
-            tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
-            tauri::async_runtime::spawn(commands::hygiene::lifecycle_loop(app.handle().clone()));
-            // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).
-            tauri::async_runtime::spawn(commands::compaction::compaction_loop(app.handle().clone()));
-            // Phone HUD → desktop: Tony turns, pipelines, kill switch / compute mode.
-            tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
-            // The sequential TaskEnvelope worker: one stage of one task at a time (Part 5).
-            tauri::async_runtime::spawn(taskworker::worker_loop(app.handle().clone()));
-            // Thought-to-Product Phase 1: the gateway heartbeat (`gateway-health`, off the UI thread).
-            tauri::async_runtime::spawn(lifecycle::health_loop(app.handle().clone()));
-            // Play Place hub orchestration: FIFO hand-off, worker sync, smoke tests, peeks.
-            tauri::async_runtime::spawn(buildhub::hub_loop(app.handle().clone()));
-            // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
-            tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
-            // Renew the Instagram long-lived token before its 60 days run out.
-            tauri::async_runtime::spawn(instagram::refresh_loop(app.handle().clone()));
-            // GPU baton events → top-bar "ACTIVE GPU SLOT" pill; droplet auto-reconnect.
+            // The engine's background work runs on the desktop only. On the phone (Android) these loops
+            // would poll 127.0.0.1 (= the phone) every few seconds: battery drain and UI lag, for nothing.
+            #[cfg(desktop)]
             {
-                use tauri::Emitter;
-                let h = app.handle().clone();
-                app.state::<os_core::OsState>().slot.set_notify(move |v| {
-                    arbiter::get().on_slot(&v);
-                    let _ = h.emit("gpu-slot", v);
+                // Spotify: load the saved session / refresh silently so the widget's first status
+                // check is instant. Never opens a browser; no-op when not connected.
+                tauri::async_runtime::spawn(spotify::warm(app.handle().clone()));
+                // MCP: start listing enabled stdio servers ~5 s after launch (into the cache, in
+                // the background). No HTTP / token-gated server is contacted.
+                tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
+                tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
+                tauri::async_runtime::spawn(commands::hygiene::lifecycle_loop(app.handle().clone()));
+                // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).
+                tauri::async_runtime::spawn(commands::compaction::compaction_loop(app.handle().clone()));
+                // Phone HUD → desktop: Tony turns, pipelines, kill switch / compute mode.
+                tauri::async_runtime::spawn(pipeline::inbox_loop(app.handle().clone()));
+                // The sequential TaskEnvelope worker: one stage of one task at a time (Part 5).
+                tauri::async_runtime::spawn(taskworker::worker_loop(app.handle().clone()));
+                // Thought-to-Product Phase 1: the gateway heartbeat (`gateway-health`, off the UI thread).
+                tauri::async_runtime::spawn(lifecycle::health_loop(app.handle().clone()));
+                // Play Place hub orchestration: FIFO hand-off, worker sync, smoke tests, peeks.
+                tauri::async_runtime::spawn(buildhub::hub_loop(app.handle().clone()));
+                // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
+                tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
+                // Renew the Instagram long-lived token before its 60 days run out.
+                tauri::async_runtime::spawn(instagram::refresh_loop(app.handle().clone()));
+                // GPU baton events → top-bar "ACTIVE GPU SLOT" pill; droplet auto-reconnect.
+                {
+                    use tauri::Emitter;
+                    let h = app.handle().clone();
+                    app.state::<os_core::OsState>().slot.set_notify(move |v| {
+                        arbiter::get().on_slot(&v);
+                        let _ = h.emit("gpu-slot", v);
+                    });
+                }
+                // GPU baton → gateway cooperative lease (PUT /api/os/gpu), best-effort, latest-wins.
+                tauri::async_runtime::spawn(commands::scheduler::gpu_mirror_loop(app.handle().clone()));
+                // Loopback GPU lease API for the gateway (Trading = Tier 1), 127.0.0.1:8792.
+                commands::lease::init(app.handle());
+                tauri::async_runtime::spawn(os_core::droplet_link_loop(app.handle().clone()));
+                // Keep the local model sized to fit VRAM even after Bionic auto-reloads it.
+                tauri::async_runtime::spawn(services::whisper_keepalive_loop(app.handle().clone()));
+                tauri::async_runtime::spawn(services::local_fit_loop(app.handle().clone()));
+                tauri::async_runtime::spawn(services::tts_warm_loop(app.handle().clone()));
+                // Zero-VRAM roster scripts (Security, Garbage, Observer, Booking) on idle / Away Mode.
+                tauri::async_runtime::spawn(commands::downtime::downtime_loop(app.handle().clone()));
+                // Garbage daemon: deterministic purge on schedule / quota / Security's handshake (0 VRAM).
+                tauri::async_runtime::spawn(commands::garbage::daemon(app.handle().clone()));
+                // HITL review queue: Garbage's business sweep + the batched digest / webhook.
+                tauri::async_runtime::spawn(commands::review_queue::daemon(app.handle().clone()));
+                #[cfg(desktop)]
+                if let Err(e) = build_tray(app) {
+                    eprintln!("[tray] {e}");
+                }
+                // Bring up the gateway (sync hub for the phone) and bind n8n to its
+                // Docker container in the background, so the window opens instantly.
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let st = handle.state::<dispatch::DispatchState>();
+                    match services::gateway_ensure(st.clone()).await {
+                        Ok(s) => eprintln!("[gateway] {}", if s.is_up() { "up" } else { "down" }),
+                        Err(e) => eprintln!("[gateway] {e}"),
+                    }
+                    let _ = n8n::n8n_discover(st, Some(true)).await;
                 });
             }
-            // GPU baton → gateway cooperative lease (PUT /api/os/gpu), best-effort, latest-wins.
-            tauri::async_runtime::spawn(commands::scheduler::gpu_mirror_loop(app.handle().clone()));
-            // Loopback GPU lease API for the gateway (Trading = Tier 1), 127.0.0.1:8792.
-            commands::lease::init(app.handle());
-            tauri::async_runtime::spawn(os_core::droplet_link_loop(app.handle().clone()));
-            // Keep the local model sized to fit VRAM even after Bionic auto-reloads it.
-            tauri::async_runtime::spawn(services::whisper_keepalive_loop(app.handle().clone()));
-            tauri::async_runtime::spawn(services::local_fit_loop(app.handle().clone()));
-            tauri::async_runtime::spawn(services::tts_warm_loop(app.handle().clone()));
-            // Zero-VRAM roster scripts (Security, Garbage, Observer, Booking) on idle / Away Mode.
-            tauri::async_runtime::spawn(commands::downtime::downtime_loop(app.handle().clone()));
-            // Garbage daemon: deterministic purge on schedule / quota / Security's handshake (0 VRAM).
-            tauri::async_runtime::spawn(commands::garbage::daemon(app.handle().clone()));
-            // HITL review queue: Garbage's business sweep + the batched digest / webhook.
-            tauri::async_runtime::spawn(commands::review_queue::daemon(app.handle().clone()));
-            #[cfg(desktop)]
-            if let Err(e) = build_tray(app) {
-                eprintln!("[tray] {e}");
-            }
-            // Bring up the gateway (sync hub for the phone) and bind n8n to its
-            // Docker container in the background, so the window opens instantly.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let st = handle.state::<dispatch::DispatchState>();
-                match services::gateway_ensure(st.clone()).await {
-                    Ok(s) => eprintln!("[gateway] {}", if s.is_up() { "up" } else { "down" }),
-                    Err(e) => eprintln!("[gateway] {e}"),
-                }
-                let _ = n8n::n8n_discover(st, Some(true)).await;
-            });
             #[cfg(desktop)]
             register_voice_hotkey(app)?;
             Ok(())

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { PHONE_LITE } from "@/lib/phone-lite";
 import { micLevel, voiceLevel, type VoiceState } from "./voice-store";
 
 /**
@@ -131,6 +132,8 @@ export function Waveform({ state, height = 72, className = "", locked = false }:
     const schedule = (settled: boolean) => {
       if (typeof document !== "undefined" && document.hidden) idleTimer = setTimeout(() => schedule(settled), 500);
       else if (settled) idleTimer = setTimeout(() => (raf = requestAnimationFrame(draw)), 100);
+      // Phone: ~20 fps while it moves (hands-free listening keeps it moving all the time).
+      else if (PHONE_LITE) idleTimer = setTimeout(() => (raf = requestAnimationFrame(draw)), 40);
       else raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);

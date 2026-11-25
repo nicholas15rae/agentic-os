@@ -175,7 +175,11 @@ function GatewayCard() {
       {(!isTauri() || isAndroidApp()) && (
         <Field label="Gateway token (network lock)" className="mt-2">
           <Input type="password" value={s.gatewayToken} onChange={(e) => s.set({ gatewayToken: e.target.value })} placeholder="From desktop → Settings → Integrations → New phone token" className="font-mono" autoComplete="off" />
-          <p className="mt-1 text-xs text-ink-3">Not saved to this device — re-enter it each session so it never sits in plaintext storage.</p>
+          <p className="mt-1 text-xs text-ink-3">
+            {isAndroidApp()
+              ? "Kept on this phone, encrypted with an Android Keystore key (never in plaintext)."
+              : "Not saved to this device — re-enter it each session so it never sits in plaintext storage."}
+          </p>
         </Field>
       )}
       <GatewayStatusCard />

@@ -61,6 +61,9 @@ export interface NativeCommands {
   /** Stops the on-demand multilingual Whisper sidecar; true if one was running. */
   lang_release: { args: undefined; result: boolean };
   secret_set: { args: { provider: string; value: string; slot?: "api" }; result: void };
+  /** Android only: Keystore-encrypted phone secrets (allow-listed keys). */
+  phone_secret_get: { args: { key: "gateway-token" }; result: string | null };
+  phone_secret_set: { args: { key: "gateway-token"; value: string }; result: void };
   secret_status: { args: { providers: string[] }; result: Record<string, boolean> };
   secret_delete: { args: { provider: string; slot?: "api" }; result: void };
   bridge_get: { args: undefined; result: BridgeView };

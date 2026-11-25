@@ -1,4 +1,5 @@
 pub mod agent_prompts;
+pub mod phone_secrets;
 pub mod agents;
 pub mod alarm;
 pub mod arbiter;

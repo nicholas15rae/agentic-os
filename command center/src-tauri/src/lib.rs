@@ -126,6 +126,9 @@ pub fn run() {
     // Fingerprint / face on Android and iOS (called from Rust: security::biometric).
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_biometric::init());
+    // The phone's Keystore-encrypted secret store (gateway token): commands::phone_secrets.
+    #[cfg(mobile)]
+    let builder = builder.plugin(commands::phone_secrets::plugin());
     builder
         .plugin(tauri_plugin_notification::init())
         // Director Suite file picker: open-file dialogs only (capability `dialog:allow-open`).
@@ -391,6 +394,8 @@ pub fn run() {
             commands::tony_dispatch::tony_dispatch_approve,
             commands::tony_dispatch::tony_dispatch_discard,
             secrets::secret_set,
+            commands::phone_secrets::phone_secret_get,
+            commands::phone_secrets::phone_secret_set,
             secrets::secret_status,
             secrets::secret_delete,
             dispatch::providers_list,

@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, CheckCircle2, KeyRound, Loader2, Plus, RefreshCw, S
 import { Card, Field, Input, Select } from "@/components/ui";
 import { cmd, CHAT_KINDS, type ProviderInfo } from "@/lib/platform";
 import { useServicesHealth } from "@/features/services/use-health";
+import { isDesktopApp } from "@/stores/settings";
 import { modelsFor, useProviders } from "./use-providers";
 import { useOs } from "@/features/os/os-store";
 
@@ -334,6 +335,8 @@ function IconBtn({ label, onClick, disabled, children }: { label: string; onClic
 
 export function GatewayStatusCard() {
   const { services, refresh } = useServicesHealth();
+  // Phone / browser: the gateway runs on the PC, so the button re-tests instead of starting it.
+  const desktop = isDesktopApp();
   const gw = services.find((s) => s.id === "gateway");
   const [busy, setBusy] = useState<string | null>(null);
   return (
@@ -345,12 +348,17 @@ export function GatewayStatusCard() {
           className="pill-primary ml-auto !h-8 text-xs"
           onClick={async () => {
             setBusy("Starting…");
+            if (!desktop) {
+              await refresh();
+              setBusy(null);
+              return;
+            }
             const r = await cmd("gateway_ensure").catch((e) => ({ up: false, detail: String(e) }));
             setBusy(r.up ? null : r.detail);
             await refresh();
           }}
         >
-          {busy === "Starting…" ? <Loader2 size={13} className="animate-spin" /> : null} Start gateway
+          {busy === "Starting…" ? <Loader2 size={13} className="animate-spin" /> : null} {desktop ? "Start gateway" : "Test connection"}
         </button>
       )}
       {busy && busy !== "Starting…" && <p className="w-full text-xs text-alert">{busy}</p>}

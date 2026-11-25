@@ -1,7 +1,6 @@
 import { create } from "zustand";
-import { isTauri } from "@/lib/platform";
 import { onExtEvent, xcmd } from "@/lib/native-ext";
-import { useSettings } from "@/stores/settings";
+import { isDesktopApp, useSettings } from "@/stores/settings";
 import { foldProbe, UNKNOWN_HEALTH, type HealthSnapshot, type Probe, type WebviewReach } from "./health";
 
 /**
@@ -37,7 +36,7 @@ let worker: Worker | null = null;
 export function startHealth(): void {
   if (started) return;
   started = true;
-  if (isTauri()) {
+  if (isDesktopApp()) {
     void xcmd("gateway_health")
       .then((h) => h.checkedAt && useHealth.getState().set(h))
       .catch(() => undefined);
@@ -60,7 +59,7 @@ export function startHealth(): void {
 /** One-click Master Reset / Reconnect: Rust re-probes and relaunches the gateway if it is down;
  * the phone just re-probes now. The caller soft-refreshes the views afterwards. */
 export async function reconnectGateway(): Promise<HealthSnapshot> {
-  if (isTauri()) {
+  if (isDesktopApp()) {
     useHealth.getState().set({ ...useHealth.getState().health, reconnecting: true });
     const h = await xcmd("gateway_reconnect");
     useHealth.getState().set(h);

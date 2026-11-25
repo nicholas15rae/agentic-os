@@ -135,6 +135,15 @@ export function isAndroidApp(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
 }
 
+/**
+ * The desktop engine: Tauri on the PC, where Rust probes the local services (loopback) and can
+ * start the gateway. The Android app is Tauri too, but its Rust side runs on the phone, so for
+ * gateway health it behaves like the PWA (probe `gatewayUrl` with the token over NetBird).
+ */
+export function isDesktopApp(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !isAndroidApp();
+}
+
 /** The full default state (everything but the `set` action) — also the fallback side of `deepMergeDefaults`. */
 const defaults: Omit<SettingsState, "set"> = {
   gatewayUrl: defaultGateway(),
@@ -254,8 +263,10 @@ export const useSettings = create<SettingsState>()(
       // instead of leaving that field `undefined`. Runs on every load, not just on a version bump.
       merge: (persisted, current) => {
         const s = deepMergeDefaults(persisted as DeepPartial<SettingsState> | null | undefined, current);
-        // The phone app's first launches stored the desktop loopback default, which is the phone itself.
-        if (isAndroidApp() && LOOPBACK_GATEWAY.test(s.gatewayUrl)) s.gatewayUrl = PHONE_GATEWAY;
+        // Phone app: the desktop loopback default is the phone itself, and anything that isn't an
+        // http(s) URL (e.g. the token pasted into the URL box) can't be a gateway. Both fall back to
+        // the NetBird HTTPS gateway, which also drops a pasted token from storage.
+        if (isAndroidApp() && (LOOPBACK_GATEWAY.test(s.gatewayUrl) || !/^https?:\/\/[^\s/]+/i.test(s.gatewayUrl))) s.gatewayUrl = PHONE_GATEWAY;
         return s;
       },
       // Never write the bearer token to disk. `deepMergeDefaults` backfills it from `defaults`

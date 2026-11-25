@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Loader2, Power, RefreshCw } from "lucide-react";
 import { StatusDot, WidgetHeader } from "@/components/WidgetHeader";
-import { cmd, isTauri } from "@/lib/platform";
+import { cmd } from "@/lib/platform";
+import { isDesktopApp } from "@/stores/settings";
 import { useServicesHealth } from "@/features/services/use-health";
 
 const TAG: Record<string, string> = { local: "LOCAL", cloud: "CLOUD", "agentic-os": "AGENT", stt: "STT", tts: "TTS", n8n: "N8N" };
@@ -13,7 +14,15 @@ export default function AgentNodes() {
   const up = services.filter((s) => s.up).length;
   const gateway = services.find((s) => s.id === "gateway");
 
+  const desktop = isDesktopApp();
   const startGateway = async () => {
+    if (!desktop) {
+      // Phone / browser: the gateway runs on the PC. Re-test it and show the real reason.
+      setStarting("Starting test…");
+      await refresh();
+      setStarting(null);
+      return;
+    }
     setStarting("Starting gateway…");
     try {
       const r = await cmd("gateway_ensure");
@@ -37,11 +46,13 @@ export default function AgentNodes() {
           </>
         }
       />
-      {isTauri() && gateway && !gateway.up && (
+      {gateway && !gateway.up && (
         <button onClick={() => void startGateway()} disabled={!!starting && starting.startsWith("Starting")} className="pill-primary mb-2 !h-8 w-full text-xs">
-          {starting?.startsWith("Starting") ? <Loader2 size={13} className="animate-spin" /> : <Power size={13} />} Start gateway (server.py)
+          {starting?.startsWith("Starting") ? <Loader2 size={13} className="animate-spin" /> : desktop ? <Power size={13} /> : <RefreshCw size={13} />}{" "}
+          {desktop ? "Start gateway (server.py)" : "Test gateway connection"}
         </button>
       )}
+      {gateway && !gateway.up && !desktop && <p className="mb-2 text-[11px] text-alert">{gateway.detail}</p>}
       {starting && !starting.startsWith("Starting") && <p className="mb-2 text-[11px] text-alert">{starting}</p>}
       <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto">
         {services.map((s) => (

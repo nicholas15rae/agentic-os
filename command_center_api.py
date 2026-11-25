@@ -1182,6 +1182,76 @@ def os_state():
     return data
 
 
+# ── The desktop's settings, read-only, for the phone's Settings screens ───────
+# The Android app's Rust side has its own (loopback, keyless) providers.json/os.json, so its Settings
+# showed the wrong endpoints and "no key" everywhere. This serves the DESKTOP's files instead, with
+# secrets kept out: keys stay in the Windows credential store (only whether one EXISTS is reported,
+# from credential names, never values) and MCP env values are masked.
+
+APP_CFG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "os.agentic.commandcenter"
+_CRED_SERVICE = "agentic-os-command-center"
+
+
+def _cred_names() -> set[str]:
+    """Names (never values) of this app's Windows credentials, e.g. 'droplet@100.84.235.228:8000'."""
+    if os.name != "nt":
+        return set()
+    import ctypes
+    import ctypes.wintypes as wt
+
+    class CREDENTIALW(ctypes.Structure):
+        _fields_ = [("Flags", wt.DWORD), ("Type", wt.DWORD), ("TargetName", wt.LPWSTR), ("Comment", wt.LPWSTR),
+                    ("LastWritten", wt.FILETIME), ("CredentialBlobSize", wt.DWORD), ("CredentialBlob", ctypes.c_void_p),
+                    ("Persist", wt.DWORD), ("AttributeCount", wt.DWORD), ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", wt.LPWSTR), ("UserName", wt.LPWSTR)]
+
+    adv = ctypes.windll.advapi32
+    count = wt.DWORD()
+    creds = ctypes.POINTER(ctypes.POINTER(CREDENTIALW))()
+    if not adv.CredEnumerateW(f"*.{_CRED_SERVICE}", 0, ctypes.byref(count), ctypes.byref(creds)):
+        return set()
+    try:
+        suffix = f".{_CRED_SERVICE}"
+        return {n[: -len(suffix)] for n in (creds[i].contents.TargetName for i in range(count.value)) if n and n.endswith(suffix)}
+    finally:
+        adv.CredFree(creds)
+
+
+def _provider_host(base_url: str) -> str:
+    """Same as dispatch.rs provider_host: host, plus ':port' when the URL names one."""
+    try:
+        u = urllib.parse.urlsplit(base_url)
+        return f"{u.hostname}:{u.port}" if u.port else (u.hostname or "")
+    except ValueError:
+        return ""
+
+
+def desktop_config_view(providers: dict, os_cfg: Optional[dict], cred_names: set[str]) -> dict:
+    """Pure: the phone's view of the desktop's config (hasKey from credential names; env masked)."""
+    out = []
+    for p in providers.get("providers", []) or []:
+        q = dict(p)
+        q["hasKey"] = bool(q.get("needsKey")) and f"{q.get('id')}@{_provider_host(str(q.get('baseUrl') or ''))}" in cred_names
+        q.setdefault("custom", False)
+        out.append(q)
+    os_view = json.loads(json.dumps(os_cfg)) if isinstance(os_cfg, dict) else None
+    for m in (os_view or {}).get("mcps", []) or []:
+        if isinstance(m.get("env"), dict):
+            m["env"] = {k: "•••" for k in m["env"]}
+    return {"providers": {"providers": out, "policy": providers.get("policy") or {}, "agentVoices": providers.get("agentVoices") or {}}, "os": os_view}
+
+
+@os_router.get("/desktop-config")
+def desktop_config():
+    def load(name: str) -> Optional[dict]:
+        try:
+            return json.loads((APP_CFG_DIR / name).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    return desktop_config_view(load("providers.json") or {}, load("os.json"), _cred_names())
+
+
 @os_router.put("/gpu")
 def os_gpu_put(request: Request, body: dict = Body(...)):
     """The desktop's GpuSlot mirror: {busy, holder, until (epoch s or ms)}. Localhost only."""

@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { gateway } from "@/lib/gateway";
 import { cmd, isTauri, type OsConfig, type OsConfigPatch } from "@/lib/platform";
-import { useSettings } from "@/stores/settings";
+import { isAndroidApp, useSettings } from "@/stores/settings";
+import { desktopConfig, PHONE_READ_ONLY } from "@/sections/settings/use-providers";
 import { roleLabel } from "@/features/dispatcher/roles";
 
 /**
@@ -30,7 +31,13 @@ export const useOs = create<OsStore>((set) => ({
   saving: false,
   load: async () => {
     try {
-      if (isTauri()) {
+      if (isAndroidApp()) {
+        // The desktop's os.json (the phone's own copy has loopback defaults), read-only.
+        const cfg = (await desktopConfig()).os;
+        if (!cfg) throw new Error("The desktop's OS settings aren't available");
+        set({ cfg, error: null });
+        mirror(cfg.osName, cfg.wakeWords);
+      } else if (isTauri()) {
         const cfg = await cmd("os_config_get");
         set({ cfg, error: null });
         mirror(cfg.osName, cfg.wakeWords);
@@ -44,6 +51,10 @@ export const useOs = create<OsStore>((set) => ({
   },
   patch: async (p) => {
     if (!isTauri()) return null;
+    if (isAndroidApp()) {
+      set({ error: PHONE_READ_ONLY });
+      throw new Error(PHONE_READ_ONLY);
+    }
     set({ saving: true });
     try {
       const cfg = await cmd("os_config_update", { patch: p });

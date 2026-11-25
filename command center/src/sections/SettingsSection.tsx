@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { isAndroidApp, useSettings } from "@/stores/settings";
+import { isAndroidApp, isDesktopApp, useSettings } from "@/stores/settings";
+import { DesktopMirrorCard } from "./settings/DesktopMirror";
 import { Waveform } from "@/features/voice/Waveform";
 import { VoiceOrb } from "@/features/voice/VoiceOrb";
 import { isTauri } from "@/lib/platform";
@@ -51,7 +52,9 @@ export function SettingsSection() {
     window.addEventListener(SETTINGS_TAB_EVENT, on);
     return () => window.removeEventListener(SETTINGS_TAB_EVENT, on);
   }, []);
-  const desktop = isTauri();
+  // The desktop app only: the Android app is Tauri too, but its Rust side runs on the phone, so these
+  // cards' buttons would probe the phone ("all providers failed", "could not start python").
+  const desktop = isDesktopApp();
   return (
     <div className="mx-auto h-full w-full max-w-4xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
       <div className="flex flex-wrap items-center gap-3">
@@ -77,7 +80,10 @@ export function SettingsSection() {
               <MemoryScrollsCard />
             </>
           ) : (
-            <DesktopOnly what="Backend, model and verifier switching" />
+            <>
+              <DesktopMirrorCard />
+              <DesktopOnly what="Backend, model and verifier switching" />
+            </>
           )}
           <ConfirmGateCard />
         </>

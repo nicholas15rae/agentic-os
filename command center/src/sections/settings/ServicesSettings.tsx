@@ -300,6 +300,14 @@ export function VerifierCard() {
 
 function KeyRow({ p, onChange }: { p: ProviderInfo; onChange: () => void }) {
   const [key, setKey] = useState("");
+  // Phone: keys live on the desktop (its Windows keychain); the desktop and gateway make those calls.
+  if (!isDesktopApp())
+    return (
+      <p className="mt-2 flex items-center gap-2 text-xs text-ink-3">
+        {p.hasKey ? <ShieldCheck size={14} className="shrink-0 text-teal" /> : <KeyRound size={14} className="shrink-0 text-amber" />}
+        {p.hasKey ? "Key stored on the desktop" : "No key on the desktop yet: add it in the desktop app"}
+      </p>
+    );
   return (
     <form
       className="mt-2 flex items-center gap-2"

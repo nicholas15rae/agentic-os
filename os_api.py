@@ -645,12 +645,19 @@ def inbox_post(data: dict = Body(...)):
     return {"id": qid, "status": "pending"}
 
 
+# When the desktop last polled the inbox. The phone uses it (with "another item is running") to
+# tell "the desktop is busy with an earlier turn" (keep waiting for Tony) from "no desktop app"
+# (fall back to the gateway's own agent). In memory: 0 until the first poll after a restart.
+_DESKTOP_SEEN: dict[str, float] = {"at": 0.0}
+
+
 @inbox_router.get("/inbox")
 def inbox_pending():
     """The desktop app polls this: pending items plus running items whose lease ran out.
     It claims each (POST /inbox/{id}/claim) and answers with POST /inbox/{id}/result."""
     _ensure_schema()
     now = time.time()
+    _DESKTOP_SEEN["at"] = now
     with cc._db_lock, cc.db() as c:
         _sweep_expired(c, now)
         rows = c.execute(
@@ -663,12 +670,17 @@ def inbox_pending():
 @inbox_router.get("/inbox/{qid}")
 def inbox_get(qid: str):
     _ensure_schema()
+    now = time.time()
     with cc._db_lock, cc.db() as c:
-        _sweep_expired(c, time.time())
+        _sweep_expired(c, now)
         r = c.execute("SELECT * FROM os_queue WHERE id=?", (qid,)).fetchone()
+        busy = c.execute("SELECT 1 FROM os_queue WHERE status='running' AND COALESCE(lease_until,0) > ? LIMIT 1", (now,)).fetchone() is not None
     if not r:
         raise HTTPException(404, "Not found")
-    return _queue_row(r, with_result=True)
+    out = _queue_row(r, with_result=True)
+    out["desktopSeenAt"] = _DESKTOP_SEEN["at"]
+    out["desktopBusy"] = busy
+    return out
 
 
 @inbox_router.post("/inbox/{qid}/claim")

@@ -107,6 +107,23 @@ class InboxTests(GatewayCase):
         self.assertEqual(g["status"], "done")
         self.assertEqual(g["result"], {"ok": True, "result": {"answer": "hello"}})
 
+    def test_item_reports_desktop_liveness(self):
+        """A queued phone turn says whether the desktop is alive and busy (so the phone keeps
+        waiting for Tony instead of falling back while an earlier turn is still running)."""
+        os_api._DESKTOP_SEEN["at"] = 0.0
+        first, second = self.post(), self.post()
+        s, g = self.api("GET", f"/api/os/inbox/{second}")
+        self.assertEqual((g["status"], g["desktopSeenAt"], g["desktopBusy"]), ("pending", 0.0, False))
+        self.pending_ids()  # the desktop polls
+        s, c = self.api("POST", f"/api/os/inbox/{first}/claim", {"lease_secs": 120})
+        s, g = self.api("GET", f"/api/os/inbox/{second}")
+        self.assertEqual(g["status"], "pending")
+        self.assertAlmostEqual(g["desktopSeenAt"], time.time(), delta=5)
+        self.assertTrue(g["desktopBusy"])  # the first turn is running under a live lease
+        self.api("POST", f"/api/os/inbox/{first}/result", {"ok": True, "result": {"answer": "a"}, "claim_token": c["claim_token"]})
+        s, g = self.api("GET", f"/api/os/inbox/{second}")
+        self.assertFalse(g["desktopBusy"])
+
     def test_double_claim_is_409(self):
         qid = self.post()
         s, c = self.api("POST", f"/api/os/inbox/{qid}/claim", {})

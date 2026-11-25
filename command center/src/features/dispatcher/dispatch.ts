@@ -51,15 +51,22 @@ export async function queueDesktopTurn(payload: Record<string, unknown> & { noDe
  * as `queueDesktopTurn`). A desktop refusal (e.g. the mode gate's `MODE_SURFACE_ONLY` /
  * `MODE_NOT_AUTO` on a `task`) throws its error text, so the caller never claims success.
  */
+/** The desktop is working through the inbox: busy with another item, or polled in the last 15 s. */
+export function desktopAlive(r: { desktopSeenAt?: number; desktopBusy?: boolean }, nowMs = Date.now()): boolean {
+  return !!r.desktopBusy || (!!r.desktopSeenAt && nowMs / 1000 - r.desktopSeenAt < 15);
+}
+
 export async function queueDesktopItem(kind: "turn" | "task" | "pipeline", payload: Record<string, unknown>, opts: { capMs?: number } = {}): Promise<DesktopResult | null> {
   const q = await gateway<{ id: string }>("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind, payload }) });
   const t0 = Date.now();
   const cap = opts.capMs ?? DESKTOP_ANSWER_CAP_MS;
   while (Date.now() - t0 < cap) {
     await new Promise((r) => setTimeout(r, DESKTOP_POLL_MS));
-    const r = await gateway<{ status: QueueStatus; result: { ok: boolean; result?: DesktopResult; error?: string } | null }>(`/api/os/inbox/${q.id}`);
+    const r = await gateway<{ status: QueueStatus; result: { ok: boolean; result?: DesktopResult; error?: string } | null; desktopSeenAt?: number; desktopBusy?: boolean }>(`/api/os/inbox/${q.id}`);
     if (r.status === "pending") {
-      if (Date.now() - t0 > DESKTOP_PICKUP_MS) return null; // desktop app not running → fall back
+      // Not picked up yet. Fall back only when there's no desktop app: one that is busy with an earlier
+      // turn (it takes them one at a time) or polled lately will answer, so keep waiting for Tony.
+      if (Date.now() - t0 > DESKTOP_PICKUP_MS && !desktopAlive(r)) return null;
       continue;
     }
     if (r.status === "running") continue; // claimed: the desktop is working on it

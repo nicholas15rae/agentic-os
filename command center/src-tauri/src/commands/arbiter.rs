@@ -125,7 +125,8 @@ pub fn node_id(agent: &str) -> Option<&'static str> {
 /// maintenance, an unlabelled background call).
 pub fn node_for_label(label: &str) -> Option<&'static str> {
     let l = label.to_ascii_lowercase();
-    if l.starts_with("maintenance") {
+    // Diagnostic probes (`diagnostics.rs`) hold the slot out-of-band: never a node's token / run.
+    if l.starts_with("maintenance") || l.starts_with("diagnostic") {
         return None;
     }
     if l.contains("· tony") || l.ends_with("tony") {
@@ -398,6 +399,12 @@ impl Arbiter {
         r
     }
 
+    /// One CPU/API script permit for a diagnostic probe: the same semaphore `run_task` uses (so
+    /// contention is real) but nothing is counted — no `runs`, no state change, no hand-off row.
+    pub async fn probe_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.tasks.clone().acquire_owned().await.map_err(|_| "arbiter closed".to_string())
+    }
+
     /// Mark a node configured / not (`IDLE / UNCONFIGURED` on the map) with a short why.
     pub fn set_status(&self, node: &str, configured: bool, note: &str) {
         self.inner.lock().unwrap().status.insert(node.into(), (configured, note.into()));
@@ -651,6 +658,8 @@ mod tests {
         assert_eq!(node_for_label("anythingllm · booking"), Some("booking"));
         assert_eq!(node_for_label("memory · compact"), Some("librarian"));
         assert_eq!(node_for_label("maintenance · reload"), None);
+        assert_eq!(node_for_label("diagnostic · probe tony"), None);
+        assert_eq!(node_for_label("diagnostic · probe coder"), None);
         assert_eq!(node_for_label("lmstudio · background"), None);
         assert_eq!(node_id("general"), Some("tony"));
         assert_eq!(node_id("financer"), Some("finance"));

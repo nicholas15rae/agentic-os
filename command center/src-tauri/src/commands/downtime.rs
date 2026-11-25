@@ -114,7 +114,8 @@ pub async fn downtime_loop(app: tauri::AppHandle) {
             continue;
         }
         // A tampered rules file halts Security's automated pass (fail closed; integrity.rs).
-        if clock.due("security", Duration::from_secs(r.security_minutes.max(2) as u64 * 60)) && super::integrity::ensure().is_ok() {
+        // Staggered (stagger.rs): a daemon turned away stays due and asks again next tick.
+        if clock.due("security", Duration::from_secs(r.security_minutes.max(2) as u64 * 60)) && super::integrity::ensure().is_ok() && super::stagger::claim("security", super::stagger::gap_seconds()).is_ok() {
             clock.last.insert("security", Instant::now());
             let db = app.state::<super::envelope::TaskStore>().path();
             let from = clock.security_seq;
@@ -124,7 +125,7 @@ pub async fn downtime_loop(app: tauri::AppHandle) {
                 clock.security_seq = seq;
             }
         }
-        if clock.last.get("observer").map(|t| t.elapsed() >= clock.observer_next).unwrap_or(clock.started.elapsed() >= STARTUP_GRACE * 2) {
+        if clock.last.get("observer").map(|t| t.elapsed() >= clock.observer_next).unwrap_or(clock.started.elapsed() >= STARTUP_GRACE * 2) && super::stagger::claim("observer", super::stagger::gap_seconds()).is_ok() {
             clock.last.insert("observer", Instant::now());
             clock.observer_next = Duration::from_secs(jitter_minutes(r.observer_min_minutes, r.observer_max_minutes, arbiter::now_ms()) as u64 * 60);
             let db = app.state::<super::envelope::TaskStore>().path();

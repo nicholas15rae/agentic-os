@@ -3,9 +3,19 @@ import { isTauri, native } from "@/lib/platform";
 import type { NodeDef } from "./types";
 import type { ArbiterNode, Handoff } from "@/features/arbiter/api";
 
+/** Page ids are stable (1 Blueprint · 2 Schematic · 3 Orbital); the TAB ORDER lives in `PAGES`. */
 export type SysPage = 1 | 2 | 3;
 
-const PAGE_KEY = "cc.sysmap.page";
+/** The System Map always opens on the Schematic Flowchart (the operational view). */
+export const DEFAULT_PAGE: SysPage = 2;
+
+/** Tab order (operational view first). Ids stay stable; the pill number is the tab POSITION. */
+export const PAGES: readonly { id: SysPage; label: string; hint: string }[] = [
+  { id: 2, label: "Schematic Flowchart", hint: "Architectural wiring, live diagnostics & orchestration mode" },
+  { id: 1, label: "Gabagool Blueprint", hint: "Agent blueprint: hardware & telemetry deck" },
+  { id: 3, label: "Orbital Ecosystem", hint: "3D planetary star map" },
+];
+
 const HUD_KEY = "cc.sysmap.hud";
 
 function read<T>(key: string, ok: (v: string) => boolean, fallback: T, parse: (v: string) => T): T {
@@ -29,7 +39,8 @@ export type InspectFocus = "rag" | "memory" | "caps";
 
 /**
  * System Map page + Deep Inspector state, shared by Page 2 (Schematic) and Page 3 (Orbital).
- * The page and the HUD density are per-viewer conveniences (localStorage, guarded).
+ * Every load starts on the Schematic Flowchart (`DEFAULT_PAGE`); the HUD density is a per-viewer
+ * convenience (localStorage, guarded).
  */
 export interface SysMapStore {
   page: SysPage;
@@ -44,14 +55,11 @@ export interface SysMapStore {
 }
 
 export const useSysMap = create<SysMapStore>((set) => ({
-  page: read<SysPage>(PAGE_KEY, (v) => ["1", "2", "3"].includes(v), 1, (v) => Number(v) as SysPage),
+  page: DEFAULT_PAGE,
   inspect: null,
   focus: "rag",
   hud: read<"minimal" | "full">(HUD_KEY, (v) => v === "minimal" || v === "full", "minimal", (v) => v as "minimal" | "full"),
-  setPage: (page) => {
-    write(PAGE_KEY, String(page));
-    set({ page });
-  },
+  setPage: (page) => set({ page }),
   open: (inspect, focus = "rag") => set({ inspect, focus }),
   close: () => set({ inspect: null }),
   setHud: (hud) => {

@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { Cloud, Cpu, Layers, ShieldAlert, ShieldCheck, ShieldOff } from "lucide-react";
-import type { ComputeMode } from "@/lib/platform";
+import { isTauri, type ComputeMode } from "@/lib/platform";
+import { securityApi } from "@/features/security/api";
+import { KILL_CONFIRM_MS, KILL_PRESSES, killStageLabel } from "@/features/trading/kill-switch-core";
 import { useNav } from "@/stores/nav";
 import { useSettings } from "@/stores/settings";
 import { useOs } from "./os-store";
@@ -40,22 +43,55 @@ export function ComputeModeSwitch({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/** Instant local lockdown: severs cloud, verifier, overseer, droplet and ElevenLabs traffic. */
+/**
+ * Instant local lockdown: severs cloud, verifier, overseer, droplet and ElevenLabs traffic.
+ * Engaging takes a deliberate 3-click ARM → CONFIRM → EXECUTE KILL sequence (each click within
+ * 4 s of the last, so a stray click resets; a deliberate one fires in well under 2 s) and goes
+ * through Rust `security_lockdown_engage` (audited + alerted; allowed even mid-step-up).
+ * Disengaging is a settings change: it needs a step-up PIN (the Rust gate asks).
+ */
 export function KillSwitch() {
   const cfg = useOs((s) => s.cfg);
   const patch = useOs((s) => s.patch);
+  const [pressed, setPressed] = useState(0);
+  useEffect(() => {
+    if (!pressed) return;
+    const t = window.setTimeout(() => setPressed(0), KILL_CONFIRM_MS);
+    return () => window.clearTimeout(t);
+  }, [pressed]);
   if (!cfg) return null;
   const on = cfg.privacy.killSwitch;
+  const press = () => {
+    if (on) {
+      void patch({ privacy: { killSwitch: false } }).catch(() => undefined);
+      return;
+    }
+    const next = pressed + 1;
+    if (next < KILL_PRESSES) return setPressed(next);
+    setPressed(0);
+    void (isTauri() ? securityApi.lockdownEngage("front-page 3-click").then((c) => useOs.setState({ cfg: c })) : patch({ privacy: { killSwitch: true } })).catch(() => undefined);
+  };
+  const armed = pressed > 0 && !on;
+  const label = on ? "Lockdown" : armed ? killStageLabel(pressed) : "Kill switch";
   return (
     <button
       role="switch"
       aria-checked={on}
-      onClick={() => void patch({ privacy: { killSwitch: !on } })}
-      title={on ? "Kill switch ON — everything stays on 127.0.0.1. Click to restore cloud routing." : "Outbound cloud kill switch — click for instant local lockdown"}
-      className={`flex h-11 items-center gap-2 rounded-full px-3.5 transition-colors ${on ? "bg-alert/90 text-white shadow-[0_0_18px_rgba(255,77,77,0.55)]" : "glass-thin text-ink-2 hover:text-ink"}`}
+      aria-label={on ? "Kill switch on (lockdown)" : armed ? `Kill switch: click to ${killStageLabel(pressed)}` : "Kill switch: click 3 times to engage"}
+      onClick={press}
+      title={
+        on
+          ? "Kill switch ON — everything stays on 127.0.0.1. Click to restore cloud routing (needs your PIN)."
+          : armed
+            ? `${KILL_PRESSES - pressed} more click${KILL_PRESSES - pressed === 1 ? "" : "s"} within ${KILL_CONFIRM_MS / 1000} s to engage the lockdown`
+            : "Outbound cloud kill switch — ARM → CONFIRM → EXECUTE (3 clicks) for instant local lockdown"
+      }
+      className={`flex h-11 items-center gap-2 rounded-full px-3.5 transition-colors ${
+        on ? "bg-alert/90 text-white shadow-[0_0_18px_rgba(255,77,77,0.55)]" : armed ? "bg-alert/40 text-white ring-2 ring-alert" : "glass-thin text-ink-2 hover:text-ink"
+      }`}
     >
       {on ? <ShieldOff size={15} /> : <ShieldAlert size={15} />}
-      <span className="label-caps hidden xl:inline">{on ? "Lockdown" : "Kill switch"}</span>
+      <span className={`label-caps ${armed ? "inline" : "hidden xl:inline"}`}>{label}</span>
     </button>
   );
 }

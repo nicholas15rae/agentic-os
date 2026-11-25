@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, OctagonX, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
-import { KILL_HOTKEY_LABEL, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
+import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killStageLabel, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -41,9 +41,28 @@ export function TradingDesk() {
 
   const kill = (dryRun: boolean) =>
     run(dryRun ? "dry" : "kill", async () => {
-      const r = await tripKillSwitch(dryRun ? "dry run from Trading UI" : "red button in Trading UI", dryRun);
+      const r = await tripKillSwitch(dryRun ? "dry run from Trading UI" : "red button in Trading UI (confirmed)", dryRun);
       toast({ title: dryRun ? (r.ok ? "Kill-switch dry run passed" : "Kill-switch dry run found problems") : "Trading LOCKED", body: summarizeIncident(r), tone: dryRun && r.ok ? "info" : "error" });
     });
+
+  // Multi-press: KILL_PRESSES clicks, each within KILL_CONFIRM_MS of the last (the timer restarts on every
+  // click); a pause longer than that disarms it. Only the last click fires.
+  const [pressed, setPressed] = useState(0);
+  const armed = pressed > 0;
+  useEffect(() => {
+    if (!armed) return;
+    const t = window.setTimeout(() => setPressed(0), KILL_CONFIRM_MS);
+    return () => window.clearTimeout(t);
+  }, [armed, pressed]);
+  const pressKill = () => {
+    const next = pressed + 1;
+    if (next < KILL_PRESSES) return setPressed(next);
+    setPressed(0);
+    void kill(false);
+  };
+  const remaining = KILL_PRESSES - pressed;
+  // ARM → CONFIRM → EXECUTE KILL: the label names what the next click does.
+  const killLabel = !armed ? "KILL SWITCH · ARM" : killStageLabel(pressed);
 
   const locked = !!data?.lock;
 
@@ -60,15 +79,20 @@ export function TradingDesk() {
           >
             {busy === "dry" ? <Loader2 size={12} className="animate-spin" /> : null} Dry run
           </button>
+          {armed && (
+            <button onClick={() => setPressed(0)} className="pill-glass !h-8 text-[11px]" aria-label="Cancel kill switch">
+              Cancel
+            </button>
+          )}
           <button
-            onClick={() => void kill(false)}
+            onClick={pressKill}
             disabled={busy === "kill"}
-            aria-label="Kill switch: lock trading, cancel all orders, flatten all positions"
-            title={`Kill switch (${KILL_HOTKEY_LABEL}): lock, cancel all orders, flatten all positions`}
-            className="flex h-10 items-center gap-2 rounded-full border-2 border-alert bg-alert/85 px-4 text-[13px] font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95"
+            aria-label={armed ? `Kill switch armed: ${remaining} more click${remaining === 1 ? "" : "s"} to lock trading, cancel all orders, sell all positions at market` : `Kill switch: click ${KILL_PRESSES} times to lock trading, cancel all orders, flatten all positions`}
+            title={armed ? `${remaining} more click${remaining === 1 ? "" : "s"}, each within ${KILL_CONFIRM_MS / 1000} s` : `Kill switch (or ${KILL_HOTKEY_LABEL} ×${KILL_PRESSES}): click ${KILL_PRESSES} times. Locks, cancels all orders, flattens all positions`}
+            className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 text-[13px] font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
           >
             {busy === "kill" ? <Loader2 size={16} className="animate-spin" /> : <OctagonX size={16} />}
-            KILL SWITCH
+            {killLabel}
           </button>
         </div>
       }
@@ -198,7 +222,7 @@ export function TradingDesk() {
           </ul>
         </details>
       ) : null}
-      <p className="mt-3 text-[11px] text-ink-3">E-stop shortcut: {KILL_HOTKEY_LABEL} (works from any section). Paper account only — port 7497.</p>
+      <p className="mt-3 text-[11px] text-ink-3">E-stop: click the red button {KILL_PRESSES} times, or press {KILL_HOTKEY_LABEL} {KILL_PRESSES} times, each within {KILL_CONFIRM_MS / 1000} s (works from any section; Esc cancels the hotkey). Paper account only — port 7497.</p>
     </Card>
   );
 }

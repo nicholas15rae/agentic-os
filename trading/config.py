@@ -38,8 +38,10 @@ PAPER_ACCOUNT_PREFIXES = ("DU", "DF")
 LIVE_SUPPORTED = False
 
 MODES = ("PAPER", "LIVE")
-WORKERS = ("bridge", "data", "exec", "kill")
-DEFAULT_CLIENT_IDS = {"bridge": 11, "data": 12, "exec": 13, "kill": 19}
+WORKERS = ("bridge", "data", "exec", "kill", "overseer", "overseer_act", "cli", "cli_act", "snapshot", "status")
+# 20-25: desk-cli and its overseer (trading/tws_adapter.py); each is also held under an OS lease there.
+DEFAULT_CLIENT_IDS = {"bridge": 11, "data": 12, "exec": 13, "kill": 19,
+                      "overseer": 20, "overseer_act": 21, "cli": 22, "cli_act": 23, "snapshot": 24, "status": 25}
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
@@ -69,7 +71,9 @@ class TradingConfig:
     allow_live_execution: bool = False
     live_confirmed: bool = False
     client_ids: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_CLIENT_IDS))
-    market_data_type: int = 3  # 1 live, 2 frozen, 3 delayed, 4 delayed-frozen
+    # 4 = delayed-frozen: delayed ticks in RTH (no live sub on paper). Type 3 stopped returning any
+    # SPY ticks on client 12 (2026-11-24) while 4 quoted in 0.2 s; the gate checks market hours itself.
+    market_data_type: int = 4  # 1 live, 2 frozen, 3 delayed, 4 delayed-frozen
     bridge_port: int = 8091
     errors: tuple[str, ...] = ()
 
@@ -110,7 +114,7 @@ def load_config(env: Mapping[str, str] | None = None, dotenv: Path | None = None
         allow_live_execution=_truthy(merged.get("ALLOW_LIVE_EXECUTION", "")),
         live_confirmed=False,  # only a UI confirmation flow may set this; never env
         client_ids=ids,
-        market_data_type=num("IBKR_MARKET_DATA_TYPE", 3),
+        market_data_type=num("IBKR_MARKET_DATA_TYPE", 4),
         bridge_port=num("TRADING_BRIDGE_PORT", 8091),
         errors=tuple(errors),
     )

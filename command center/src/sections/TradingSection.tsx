@@ -8,11 +8,13 @@ import { useSettings } from "@/stores/settings";
 import { supplyDemandZones, toTradingView, volumeProfile } from "@/features/trading/analysis";
 import { CompanionChart } from "@/features/trading/CompanionChart";
 import { IbkrHud } from "@/features/trading/IbkrHud";
+import { IbkrBarsChart } from "@/features/trading/IbkrBarsChart";
 import { TradingDesk } from "@/features/trading/TradingDesk";
 import { EnginesPanel } from "@/features/trading/EnginesPanel";
 import { IntelPanel } from "@/features/trading/IntelPanel";
 import { HealthCard } from "@/features/trading/HealthCard";
 import { AgentPanel } from "@/features/trading/AgentPanel";
+import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
 
 const INTERVALS: [string, string, string][] = [
   // [yahoo, label, tradingview]
@@ -90,6 +92,10 @@ export function TradingSection() {
 
   return (
     <div className="mx-auto h-full w-full max-w-7xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
+      {/* Read-Only by default: positions, balances and telemetry are safe to view; orders, mode and engine changes need a step-up PIN. */}
+      <div className="flex justify-end">
+        <ReadOnlyBanner module="trading" />
+      </div>
       <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2.5">
         <form
           className="flex gap-2"
@@ -154,9 +160,7 @@ export function TradingSection() {
           {chartSource === "tradingview" ? (
             <TvChart symbol={t.tvSymbol} interval={tvInterval} />
           ) : (
-            <div className="grid h-[440px] place-items-center px-6 text-center text-sm text-ink-3">
-              IBKR-fed chart (lightweight-charts) arrives once the bridge streams bars. Switch back to TradingView for now.
-            </div>
+            <IbkrBarsChart symbol={t.symbol} interval={t.interval} range={t.range} />
           )}
         </Card>
         <Card title="Market news" className="!p-3">

@@ -18,8 +18,10 @@ import { RoutingSettings } from "./settings/RoutingSettings";
 import { ModesManagerCard } from "./settings/ModesManager";
 import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
+import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
+import { SecurityCard } from "@/features/security/SecurityCard";
 
-type Tab = "services" | "voice" | "modes" | "integrations" | "business" | "appearance";
+type Tab = "services" | "voice" | "modes" | "integrations" | "business" | "appearance" | "security";
 const TABS: { id: Tab; label: string }[] = [
   { id: "services", label: "Services" },
   { id: "voice", label: "Voice & Triggers" },
@@ -27,6 +29,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "integrations", label: "Integrations" },
   { id: "business", label: "Business" },
   { id: "appearance", label: "Appearance" },
+  { id: "security", label: "Security" },
 ];
 
 export function SettingsSection() {
@@ -51,7 +54,13 @@ export function SettingsSection() {
   const desktop = isTauri();
   return (
     <div className="mx-auto h-full w-full max-w-4xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <SubTabs tabs={TABS} value={tab} onChange={go} />
+      <div className="flex flex-wrap items-center gap-3">
+        <SubTabs tabs={TABS} value={tab} onChange={go} />
+        <span className="ml-auto">
+          <ReadOnlyBanner module="settings" />
+        </span>
+      </div>
+      {tab === "security" && <SecurityCard />}
       {tab === "services" && (
         <>
           <GatewayCard />

@@ -105,10 +105,17 @@ class Desk:
         market_data: Any = None,
         d: Path | None = None,
         clock: Callable[[], float] = time.time,
+        pretrade: bool = True,
     ) -> None:
         self.bridge = bridge
         self.d = d or data_dir()
         self.audit = AuditLog(self.d / "audit.db")
+        # Deterministic pre-trade gates (trading/pretrade.py) right before anything is sent to TWS.
+        # On in production (the bridge builds Desk(bridge)); only Security-Detail-only unit tests turn it off.
+        self.pretrade = pretrade
+        from ledger import Ledger
+
+        self.ledger = Ledger(self.d / "ledger.jsonl")
         self.executor = executor or Executor(lock_dir=self.d)
         self._quote = quote_fn or self._ib_quote
         self._stats = stats_fn or self._ib_stats
@@ -242,7 +249,7 @@ class Desk:
                 q = await self.md.quote(c)
         except Exception:  # noqa: BLE001
             return None, session
-        return {"bid": q.get("bid"), "ask": q.get("ask"), "last": q.get("last")}, session
+        return {"bid": q.get("bid"), "ask": q.get("ask"), "last": q.get("last"), "time": q.get("time")}, session
 
     async def _ib_stats(self, intent: OrderIntent) -> dict[str, float] | None:
         """~40 sessions of daily TRADES bars → volume / volatility stats. Cached per symbol per NY day."""
@@ -338,7 +345,35 @@ class Desk:
             if st["mode"] == "SEMI_AUTO":
                 self._put(intent, "pending_approval", decision)
                 return {"ok": True, "status": "pending_approval", "decision": decision.to_dict()}
+            refused = self._pretrade(intent, decision, ctx, actor)
+            if refused:
+                self._put(intent, "rejected", decision, {"pretrade": refused})
+                return refused
             return await self._execute(intent, decision, actor)
+
+    def _pretrade(self, intent: OrderIntent, decision: Decision, ctx: Context, actor: str) -> dict[str, Any] | None:
+        """Run pretrade.gate (allowlist, size/notional, rate limit, cooldown, intent hash, bracket, stale data)
+        immediately before execution. None = pass; otherwise the rejection to return. Fails closed."""
+        if not self.pretrade:
+            return None
+        import pretrade
+        import risk_policy
+
+        try:
+            policy = risk_policy.load_policy(risk_policy.policy_path(self.d))
+        except risk_policy.PolicyError as e:
+            self.audit.append("pretrade_rejected", {"error": str(e)}, ref=intent.intent_id, verdict="REJECTED", actor=actor)
+            return {"ok": False, "status": "rejected", "error": f"pretrade: {e}", "decision": decision.to_dict()}
+        snap = self.bridge.snapshot()
+        now = time.time()  # the ledger stamps rows with wall time; windows must use the same clock
+        age = now - float(snap["updatedAt"]) if snap.get("updatedAt") else None
+        fx = 1.0 if intent.currency == ctx.base_currency else ctx.fx_to_base.get(intent.currency)
+        r = pretrade.gate(intent.to_dict(), {"now": now, "quote": ctx.quote, "snapshot_age_s": age, "recent": None,
+                                             "fx_to_base": fx, "entry_price": decision.entry_ref}, policy, self.ledger, actor)
+        if r["ok"]:
+            return None
+        self.audit.append("pretrade_rejected", {"failed": r["failed"], "hash": r["hash"]}, ref=intent.intent_id, verdict="REJECTED", actor=actor)
+        return {"ok": False, "status": "rejected", "error": "pretrade: " + ", ".join(r["failed"]), "pretrade": r, "decision": decision.to_dict()}
 
     async def _execute(self, intent: OrderIntent, decision: Decision, actor: str) -> dict[str, Any]:
         self._put(intent, "submitting", decision)
@@ -364,11 +399,16 @@ class Desk:
                 self.audit.append("approval", {"note": "expired"}, ref=intent_id, verdict="EXPIRED", actor=actor)
                 return {"ok": False, "status": "expired"}
             intent = parse_intent(row["intent"])
-            decision = evaluate(intent, await self.build_context(intent, exclude_self=True))
+            ctx = await self.build_context(intent, exclude_self=True)
+            decision = evaluate(intent, ctx)
             self.audit.append("approval", {"decision": decision.to_dict()}, ref=intent_id, verdict=decision.verdict, actor=actor)
             if not decision.executable:
                 self._set_status(intent_id, "rejected", {"recheck": decision.to_dict()})
                 return {"ok": False, "status": "rejected", "decision": decision.to_dict()}
+            refused = self._pretrade(intent, decision, ctx, actor)
+            if refused:
+                self._set_status(intent_id, "rejected", {"pretrade": refused.get("pretrade") or refused.get("error")})
+                return refused
             return await self._execute(intent, decision, actor)
 
     def reject(self, intent_id: str, actor: str) -> dict[str, Any]:

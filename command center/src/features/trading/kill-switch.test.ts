@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isKillHotkey, summarizeIncident } from "./kill-switch-core";
+import { createKillArm, isKillHotkey, KILL_PRESSES, summarizeIncident } from "./kill-switch-core";
 
 const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey", boolean>> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...mods });
 
@@ -11,6 +11,41 @@ describe("kill-switch hotkey", () => {
     expect(isKillHotkey(key("x", { shiftKey: true }))).toBe(false);
     expect(isKillHotkey(key("x", { ctrlKey: true, shiftKey: true, altKey: true }))).toBe(false);
     expect(isKillHotkey(key("k", { ctrlKey: true, shiftKey: true }))).toBe(false);
+  });
+});
+
+describe("kill-switch arm/confirm", () => {
+  const arming = (remaining: number) => ({ kind: "arming", remaining });
+  it("defaults to three presses", () => {
+    expect(KILL_PRESSES).toBe(3);
+    const arm = createKillArm();
+    expect(arm.press(0)).toEqual(arming(2));
+    expect(arm.press(1_000)).toEqual(arming(1));
+    expect(arm.press(2_000)).toEqual({ kind: "fire" });
+    expect(arm.isArmed(2_001)).toBe(false); // firing disarms
+    expect(arm.press(2_500)).toEqual(arming(2)); // the next press starts over
+  });
+  it("each press must come within the window of the previous one", () => {
+    const arm = createKillArm(3, 5_000);
+    arm.press(0);
+    arm.press(4_000);
+    expect(arm.press(8_500)).toEqual({ kind: "fire" }); // 4.5 s after the 2nd press: still live
+    arm.press(10_000);
+    arm.press(12_000);
+    expect(arm.pressed(17_001)).toBe(0); // paused over 5 s: disarmed
+    expect(arm.press(17_001)).toEqual(arming(2));
+  });
+  it("cancel disarms mid-sequence", () => {
+    const arm = createKillArm();
+    arm.press(0);
+    arm.press(100);
+    arm.cancel();
+    expect(arm.press(200)).toEqual(arming(2));
+  });
+  it("supports a different press count", () => {
+    const arm = createKillArm(2, 5_000);
+    expect(arm.press(0)).toEqual(arming(1));
+    expect(arm.press(1)).toEqual({ kind: "fire" });
   });
 });
 

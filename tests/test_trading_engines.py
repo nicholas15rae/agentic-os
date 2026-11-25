@@ -217,6 +217,64 @@ class BracketOptionTests(unittest.TestCase):
         self.assertEqual(orders[1].tif, "GTC")
 
 
+class AckTests(unittest.TestCase):
+    """The executor must not call an order 'submitted' until TWS acknowledges it (seen live:
+    error 321 'The API interface is currently in Read-Only mode' arrived after placeOrder returned)."""
+
+    def trade(self, oid, status="PendingSubmit", log=()):
+        t = NS(order=NS(orderId=oid), orderStatus=NS(status=status, filled=0), log=list(log))
+        t.isDone = lambda: t.orderStatus.status in ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+        return t
+
+    def run_ack(self, trades, timeout=1.0, evolve=None):
+        import executor as ex
+
+        ib = NS(cancelled=[])
+        ib.cancelOrder = lambda o: ib.cancelled.append(o.orderId)
+        ticks = {"n": 0}
+
+        async def sleep(_s):
+            ticks["n"] += 1
+            if evolve:
+                evolve(ticks["n"], trades)
+        asyncio.run(ex.await_ack(ib, trades, timeout=timeout, sleep=sleep))
+        return ib
+
+    def test_read_only_rejection_raises_and_cancels_the_rest(self):
+        import executor as ex
+
+        ro = NS(status="ValidationError", errorCode=321, message="Warning 321: The API interface is currently in Read-Only mode.")
+        trades = [self.trade(4, log=[ro]), self.trade(5), self.trade(6)]
+        with self.assertRaises(ex.ExecutionRefused) as cm:
+            self.run_ack(trades)
+        self.assertIn("Read-Only", str(cm.exception))
+
+    def test_accepted_bracket_returns(self):
+        def evolve(n, ts):
+            if n == 2:
+                for t, s in zip(ts, ("Submitted", "PreSubmitted", "PreSubmitted")):
+                    t.orderStatus.status = s
+        ib = self.run_ack([self.trade(4), self.trade(5), self.trade(6)], evolve=evolve)
+        self.assertEqual(ib.cancelled, [])
+
+    def test_one_leg_cancelled_kills_the_bracket(self):
+        import executor as ex
+
+        def evolve(n, ts):
+            ts[0].orderStatus.status = "Submitted"
+            ts[1].orderStatus.status = "Cancelled"
+        with self.assertRaises(ex.ExecutionRefused):
+            self.run_ack([self.trade(4), self.trade(5), self.trade(6)], evolve=evolve)
+
+    def test_no_acknowledgement_times_out_and_cancels(self):
+        import executor as ex
+
+        trades = [self.trade(4), self.trade(5)]
+        with self.assertRaises(ex.ExecutionRefused) as cm:
+            ib = self.run_ack(trades, timeout=0.05)
+        self.assertIn("didn't acknowledge", str(cm.exception))
+
+
 class EngineATests(unittest.TestCase):
     def test_signal_and_intent(self):
         sig = trend_breakout(bars_trending())
@@ -351,7 +409,8 @@ class DeskEngineTests(unittest.TestCase):
         async def quote(intent):  # same market as FakeMD
             return {"bid": 729.9, "ask": 730.1, "last": 730.0}, True
         return Desk(bridge or big_bridge(), executor=self.ex, quote_fn=quote, stats_fn=good_stats, fx_source=False,
-                    option_quote_fn=option_quote, market_data=md or FakeMD(), d=self.d, clock=lambda: NOW)
+                    option_quote_fn=option_quote, market_data=md or FakeMD(), d=self.d, clock=lambda: NOW,
+                    pretrade=False)  # engine flow only; the pre-trade gates are tested in test_trading_desk_pretrade.py
 
     def test_engine_a_scan_submits_through_the_gate(self):
         dk = self.desk()

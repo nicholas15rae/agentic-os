@@ -56,3 +56,15 @@ data/language-hub/
 
 # Local HTTPS for the phone (private keys)
 data/certs/
+
+# Command Center security layer: keys, PIN-hash fallback, audit trail, runtime state (never commit)
+data/security/
+
+# Command Center launcher: service stdout/stderr logs + PID file (scripts/start-command-center.ps1)
+/logs/
+
+# Local build output, backups and agent scratch (never committed)
+/command center/src-tauri/target-*/
+/command center/dist.bak-*/
+/.claude/worktrees/
+/.agentic/

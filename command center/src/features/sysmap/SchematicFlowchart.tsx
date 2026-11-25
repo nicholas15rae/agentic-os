@@ -39,6 +39,8 @@ import {
 import { EDGES } from "@/features/arbiter/agent-graph";
 import { SurfaceBackdropLayer, useBackdropActive } from "@/features/wallpaper/SurfaceBackdropLayer";
 import { BackdropHudToggle } from "@/features/wallpaper/BackdropHudToggle";
+import { DiagnosticBadges, DiagnosticConduits } from "./DiagnosticOverlay";
+import { DiagnosticPanel } from "./DiagnosticPanel";
 
 /** How long a hand-off keeps its trace lit (CSS dash animation only; no rAF loop). */
 const LIT_MS = 1600;
@@ -332,6 +334,9 @@ export function SchematicFlowchart() {
             return <Port key={id} x={edge} y={n.y} color={BUSES[NODE_BUS[id]].color} />;
           })}
 
+          {/* Diagnostic probe packets on their conduits (under the cards) */}
+          <DiagnosticConduits />
+
           {/* TONY — the orchestrator / spine head */}
           <g className="sysmap-hit" onClick={() => open("tony")} role="button" aria-label={`Tony: ${tonyState}`}>
             {tonyState === "ACTIVE" && <rect x={TONY_BOX.x - TONY_BOX.w / 2 - 6} y={TONY_BOX.y - TONY_BOX.h / 2 - 6} width={TONY_BOX.w + 12} height={TONY_BOX.h + 12} rx={14} fill="none" stroke={BUSES.core.color} strokeOpacity={0.4} className="sysmap-breathe" />}
@@ -370,8 +375,12 @@ export function SchematicFlowchart() {
               />
             );
           })}
+
+          {/* Diagnostic health rings + RTT badges (over the cards) */}
+          <DiagnosticBadges />
         </g>
       </svg>
+      <DiagnosticPanel />
 
       {!snap && (
         <p className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[11px] text-ink-3">

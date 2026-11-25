@@ -9,6 +9,7 @@ import { STATE_LABEL, useVoice } from "@/features/voice/voice-store";
 import { STATE_DOT } from "@/features/voice/VoiceParts";
 import { headerSubtitle } from "@/features/voice/voice-status";
 import { ActiveSlotPill, ComputeModeSwitch, DropletBadge, KillSwitch, PrivacyPill } from "@/features/os/OsControls";
+import { LockNowButton } from "@/features/security/SecurityGate";
 import { ModePill } from "@/features/modes/ModePill";
 import { MicLockBadge, useMicIndicator } from "@/features/voice/MicLockBadge";
 import { isMicOff } from "@/features/voice/mic-indicator";
@@ -68,6 +69,7 @@ export function TopBar() {
         <DropletBadge />
         <ModePill />
         <PrivacyPill />
+        <LockNowButton />
         <KillSwitch />
       </div>
 

@@ -22,6 +22,7 @@ import { CommandSection } from "@/sections/CommandSection";
 import { useRefresh } from "@/features/lifecycle/refresh";
 import { bootOps } from "@/features/ops/ops-store";
 import { useKillSwitchHotkey } from "@/features/trading/kill-switch";
+import { SecurityGate } from "@/features/security/SecurityGate";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -62,7 +63,9 @@ const MobileHud = lazy(() => import("@/features/hud/MobileHud").then((m) => ({ d
 const HUD_VIEW = typeof location !== "undefined" && new URLSearchParams(location.search).get("view") === "hud";
 
 export default function App() {
-  return HUD_VIEW ? <HudApp /> : <MainApp />;
+  // The app only mounts while the Rust session is unlocked (desktop / mobile app; the PWA
+  // passes through and the gateway keeps its protected modules read-only).
+  return <SecurityGate>{HUD_VIEW ? <HudApp /> : <MainApp />}</SecurityGate>;
 }
 
 /** Galaxy S22 Lockdown Command Center (/mobile-hud → /cc/?view=hud). */

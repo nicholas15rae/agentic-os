@@ -53,9 +53,11 @@
 
 @layer base {
   html, body, #root { height: 100%; }
+  /* Canvas colour on <html> only: a <body> background would paint over the -z-10 wallpaper. */
+  html { background: var(--color-canvas); }
   body {
     margin: 0;
-    background: var(--color-canvas);
+    background: transparent;
     color: var(--color-ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;

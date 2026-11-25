@@ -21,11 +21,22 @@ export const isTauri = (): boolean =>
 
 export const platform: Platform = isTauri() ? "desktop" : "pwa";
 
-/** Invoke a Rust command. Throws on the PWA — guard with `isTauri()` or use a hook with a fallback. */
+/** Invoke a Rust command. Throws on the PWA — guard with `isTauri()` or use a hook with a fallback.
+ *  Every invoke passes the Rust security gate (src-tauri/src/security/gate.rs). A
+ *  `STEP_UP_REQUIRED:<module>` refusal opens the PIN modal and, once unlocked, retries the
+ *  command once; `LOCKED` / `HARD_LOCKED` refresh the security status (the lock screen takes over). */
 export async function native<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) throw new Error(`native command "${cmd}" is desktop-only`);
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(cmd, args);
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    if (typeof e === "string" && /^(STEP_UP_REQUIRED|LOCKED|HARD_LOCKED):/.test(e) && !cmd.startsWith("security_")) {
+      const { onSecurityRefusal } = await import("@/features/security/store");
+      if (await onSecurityRefusal(e)) return invoke<T>(cmd, args);
+    }
+    throw e;
+  }
 }
 
 /** Typed contract for every Rust command exposed in src-tauri/src/lib.rs. Keep in sync. */
@@ -339,6 +350,8 @@ export interface TtsUnpinEvent {
 
 /** Subscribe to a Rust → webview event. Returns an unsubscribe function. No-op on the PWA. */
 export type NativeEventName =
+  /** Lock state / elevation / hard lock changed (security/commands.rs `Status`). */
+  | "security-state"
   | "voice-toggle"
   | "memory-progress"
   | "pipeline-step"

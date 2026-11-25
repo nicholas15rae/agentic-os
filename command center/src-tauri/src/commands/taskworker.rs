@@ -1548,34 +1548,40 @@ impl<'a> Worker<'a> {
     /// D15 forensic hook: archive ids cited in the Librarian's `retrieved_context` /
     /// `discrepancies_flagged` that appear in a gathered scroll header (max 2) are read from the
     /// cold archive (read-only `archive_lookup`), capped at `FORENSIC_MAX` chars in total.
-    async fn forensic(&self, j: Option<&Value>, packet: &Packet, kws: &[String], s: &WorkerSettings) -> Vec<Value> {
-        let Some(j) = j else { return vec![] };
+    /// Also returns the archive bytes read (pipeline profile).
+    async fn forensic(&self, j: Option<&Value>, packet: &Packet, kws: &[String], s: &WorkerSettings) -> (Vec<Value>, u64) {
+        let Some(j) = j else { return (vec![], 0) };
         let cited = format!("{} {}", j["retrieved_context"], j["discrepancies_flagged"]);
         let ids = librarian::cited_archive_ids(&cited, packet, FORENSIC_IDS);
         let mut out = Vec::new();
         let mut budget = FORENSIC_MAX;
+        let mut bytes = 0u64;
+        let item_max = super::policy::current().librarian.item_max_chars;
         for id in ids {
             let Some(root) = s.sources.archive_root.clone() else {
                 out.push(json!({ "kind": "forensic", "archive_id": id, "excerpts": [], "skipped": ["no cold archive root is configured"] }));
                 continue;
             };
             let (kws2, known, id2) = (kws.to_vec(), s.known.clone(), id.clone());
-            let p = tauri::async_runtime::spawn_blocking(move || librarian::archive_lookup(&root, &id2, &kws2, &known)).await.unwrap_or_default();
+            let (p, read) = tauri::async_runtime::spawn_blocking(move || librarian::archive_lookup_profiled(&root, &id2, &kws2, &known)).await.unwrap_or_default();
+            bytes += read;
             let mut excerpts = Vec::new();
             for it in p.items {
                 if budget < 40 {
                     break;
                 }
-                let text = clip(&it.text, budget.min(librarian::ITEM_MAX));
+                let text = clip(&it.text, budget.min(item_max));
                 budget = budget.saturating_sub(text.chars().count());
                 excerpts.push(json!({ "source": it.source, "text": text }));
             }
             out.push(json!({ "kind": "forensic", "archive_id": id, "excerpts": excerpts, "skipped": p.skipped }));
         }
-        out
+        (out, bytes)
     }
 
     async fn h_preflight(&self, e: &Envelope, s: &WorkerSettings) -> Result<Outcome, StageErr> {
+        // Pipeline profile (proposal §3): every phase of this Librarian run is timed.
+        let t_start = Instant::now();
         let tri = &e.prompt_spec["triage"];
         let ckw = str_list(&tri["context_keywords"], 8, 40).join(" ");
         let kws = librarian::keywords(&[&e.title, &ckw, &e.raw_intent.text], 12);
@@ -1583,16 +1589,22 @@ impl<'a> Worker<'a> {
         let known = s.known.clone();
         let (task_id, slug) = (e.task_id.clone(), e.project_slug.clone());
         let kws2 = kws.clone();
-        let mut packet = tauri::async_runtime::spawn_blocking(move || librarian::gather_local(&sources, &Query { task_id: Some(&task_id), keywords: &kws2, slug: slug.as_deref() }, &known)).await.unwrap_or_default();
+        let t_gather = Instant::now();
+        let (mut packet, gather_stats) = tauri::async_runtime::spawn_blocking(move || librarian::gather_local_profiled(&sources, &Query { task_id: Some(&task_id), keywords: &kws2, slug: slug.as_deref() }, &known)).await.unwrap_or_default();
+        let retrieval = t_gather.elapsed();
         let queries = str_list(&tri["research_queries"], RESEARCH_SEARCHES, 120);
         let o = Opts::of(e);
+        let mut research_ms = None;
         let research = if queries.is_empty() || !tri["needs_research"].as_bool().unwrap_or(false) {
             json!({ "searches": 0, "fetches": 0 })
         } else if !research_allowed(s, o) {
             packet.skip("external research off (kill switch, compute Local or a local-only task)");
             json!({ "searches": 0, "fetches": 0, "blocked": true })
         } else {
-            self.research(&queries, &mut packet, &s.known).await
+            let t_research = Instant::now();
+            let r = self.research(&queries, &mut packet, &s.known).await;
+            research_ms = Some(t_research.elapsed().as_millis() as u64);
+            r
         };
         let gathered: Vec<Value> = packet.items.iter().map(|i| json!({ "source": i.source, "type": i.kind, "chars": i.text.chars().count() })).collect();
         // The Librarian condenses. A failure never stalls the task: the gathered packet stands in.
@@ -1612,7 +1624,22 @@ impl<'a> Worker<'a> {
         brief["by"] = json!(by);
         // Phase 3 (D15): the worker, not the model, does the deep-forensic archive read when
         // the Librarian cites an archive id that a gathered scroll actually carries.
-        let forensic = self.forensic(j.as_ref(), &packet, &kws, s).await;
+        let t_forensic = Instant::now();
+        let (forensic, forensic_bytes) = self.forensic(j.as_ref(), &packet, &kws, s).await;
+        let forensic_ms = (!forensic.is_empty()).then(|| t_forensic.elapsed().as_millis() as u64);
+        record_librarian_run(LibRunTiming {
+            task_id: &e.task_id,
+            stage: "preflight",
+            total: t_start.elapsed(),
+            retrieval: Some(retrieval),
+            research_ms,
+            forensic_ms,
+            stats: Some(&gather_stats),
+            extra_bytes: forensic_bytes,
+            packet: Some(&packet),
+            ok: j.is_some(),
+            by: &by,
+        });
         let conflicts = brief["discrepancies_flagged"].as_array().map(|a| a.iter().filter(|d| d["severity"] == "conflict").count()).unwrap_or(0);
         let n = packet.items.len();
         let mut notes = json!({ "librarian_brief": brief, "audits": [] });
@@ -2006,13 +2033,17 @@ impl<'a> Worker<'a> {
         let arts = e.code_artifacts.clone();
         let it = e.iteration_count;
         let doc = e.raw_intent.memory_reference["memoryDoc"].as_str().map(String::from);
+        // Pipeline profile: the read-report + page read is this run's retrieval phase.
+        let t_start = Instant::now();
         let report = tauri::async_runtime::spawn_blocking(move || librarian::read_report(&root, &slug, &arts, it, doc.as_deref())).await.unwrap_or_else(|_| json!({ "ok": false, "discrepancies": ["read-report failed"] }));
         let html = e.project_slug.as_deref().and_then(|sl| staging::resolve(&s.staging_root, sl, "index.html").ok()).and_then(|p| std::fs::read(p).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let retrieval = t_start.elapsed();
         let digest = html_digest(&html);
         let (j, by) = match self.ask(e, "librarian", "audit", prompt_audit(e, &report, &digest), s, None, None).await {
             Ok(r) => (extract_json(&r.text), r.by),
             Err(err) => (None, format!("unavailable: {}", clip(&err.msg, 120))),
         };
+        record_librarian_run(LibRunTiming { task_id: &e.task_id, stage: "audit", total: t_start.elapsed(), retrieval: Some(retrieval), research_ms: None, forensic_ms: None, stats: None, extra_bytes: 0, packet: None, ok: j.is_some(), by: &by });
         // Build problems go to the Coder as conflicts; Tony's memory bookkeeping (a missing task
         // note) is his own, informational, and never loops the Coder.
         let (build_d, memory_d) = report_split(&report);
@@ -3211,6 +3242,114 @@ pub fn cancel_task(store: &TaskStore, task_id: &str, known: &[String]) -> Result
     store.fail(task_id, expect_of(&e), "tony", "cancelled by user", known)
 }
 
+// ── Librarian pipeline profiling (proposal §3) ──────────────────────────────
+//
+// The Librarian's model call always goes LM Studio direct (`LiveModel::ask`). That call notes
+// what it measured (GPU-slot queue wait, request wall time, the response's usage / timing stats)
+// under `task_id:stage`; the stage handler takes it and adds the retrieval side. Numbers and
+// labels only: never the prompt, the packet text or the reply.
+
+/// What one Librarian model call measured.
+#[derive(Clone, Debug, Default)]
+pub struct LibCallStats {
+    pub queue_wait_ms: Option<u64>,
+    /// Request sent → response parsed (prefill + generation; non-streamed).
+    pub model_ms: Option<u64>,
+    pub split: super::diagnostics::ModelSplit,
+    pub max_output_tokens: Option<u32>,
+    pub vram_pct: Option<f64>,
+}
+
+const LIB_CALLS_MAX: usize = 64;
+
+fn lib_calls() -> &'static Mutex<HashMap<String, LibCallStats>> {
+    static M: std::sync::OnceLock<Mutex<HashMap<String, LibCallStats>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn lib_key(task_id: &str, stage: &str) -> String {
+    format!("{task_id}:{stage}")
+}
+
+fn note_lib_call(call: &ModelCall, f: impl FnOnce(&mut LibCallStats)) {
+    if call.agent != "librarian" {
+        return;
+    }
+    let mut m = lib_calls().lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() >= LIB_CALLS_MAX && !m.contains_key(&lib_key(&call.task_id, call.stage)) {
+        // Entries left by calls that never reached their stage's profile (aborts): drop them.
+        m.clear();
+    }
+    f(m.entry(lib_key(&call.task_id, call.stage)).or_default());
+}
+
+/// Take (and forget) what the last Librarian call for `task_id:stage` measured.
+pub fn take_lib_call(task_id: &str, stage: &str) -> Option<LibCallStats> {
+    lib_calls().lock().unwrap_or_else(|e| e.into_inner()).remove(&lib_key(task_id, stage))
+}
+
+/// The retrieval side of one Librarian run, as the stage handler timed it.
+pub struct LibRunTiming<'a> {
+    pub task_id: &'a str,
+    pub stage: &'static str,
+    /// Stage start → profile (retrieval + research + queue + model + forensic).
+    pub total: Duration,
+    pub retrieval: Option<Duration>,
+    pub research_ms: Option<u64>,
+    pub forensic_ms: Option<u64>,
+    pub stats: Option<&'a librarian::GatherStats>,
+    /// Bytes read outside the gather (forensic archive reads).
+    pub extra_bytes: u64,
+    pub packet: Option<&'a Packet>,
+    /// The model answered with usable JSON (else the gathered packet stood in).
+    pub ok: bool,
+    pub by: &'a str,
+}
+
+/// The profile of one Librarian run (pure): the handler's timings + the model call's stats.
+pub fn librarian_run(t: &LibRunTiming, call: Option<LibCallStats>, at: u64) -> super::diagnostics::LibrarianRun {
+    let call = call.unwrap_or_default();
+    let bytes = match (t.stats, t.extra_bytes) {
+        (None, 0) => None,
+        (s, x) => Some(s.map(|s| s.bytes_read).unwrap_or(0) + x),
+    };
+    super::diagnostics::LibrarianRun {
+        source: "worker",
+        stage: t.stage.to_string(),
+        task_id: Some(t.task_id.to_string()),
+        at,
+        outcome: if t.ok { "ok" } else { "fallback" },
+        // The route label only (an error message is not telemetry).
+        by: Some(if t.ok { t.by.to_string() } else { "unavailable".into() }),
+        total_ms: t.total.as_millis() as u64,
+        queue_wait_ms: call.queue_wait_ms,
+        retrieval_ms: t.retrieval.map(|d| d.as_millis() as u64),
+        research_ms: t.research_ms,
+        forensic_ms: t.forensic_ms,
+        files_walked: t.stats.map(|s| s.files_walked),
+        bytes_read: bytes,
+        hits: t.stats.map(|s| s.hits.clone()).unwrap_or_default(),
+        packet_chars: t.packet.map(|p| p.chars()),
+        packet_items: t.packet.map(|p| p.items.len()),
+        model_ms: call.model_ms,
+        split: if call.model_ms.is_some() { call.split } else { super::diagnostics::ModelSplit { split_method: "no model response measured (call failed, was preempted, or ran outside LM Studio direct)".into(), ..Default::default() } },
+        max_output_tokens: call.max_output_tokens,
+        vram_pct: call.vram_pct,
+    }
+}
+
+/// The output-token cap for a direct call (pure): only the Librarian's, only when the policy
+/// sets `librarian.maxOutputTokens`.
+pub fn output_cap(agent: &str, l: &super::policy::LibrarianPolicy) -> Option<u32> {
+    (agent == "librarian").then_some(l.max_output_tokens).flatten()
+}
+
+/// Profile one Librarian run: ring (last 50) + `librarian` live event.
+fn record_librarian_run(t: LibRunTiming) {
+    let call = take_lib_call(t.task_id, t.stage);
+    super::diagnostics::record_librarian(&librarian_run(&t, call, super::arbiter::now_ms()));
+}
+
 // ── The live model client (AnythingLLM task session → LM Studio direct) ─────
 
 /// Per-process caches the live client keeps between calls.
@@ -3311,7 +3450,11 @@ impl LiveModel<'_> {
                 }
             }
         }
+        let q0 = Instant::now();
         let mut guard = slot.acquire(&format!("worker · {} {} · lmstudio", call.agent, call.stage), false, self.tony_priority_pct).await;
+        let queue_wait_ms = q0.elapsed().as_millis() as u64;
+        // Librarian profile: a fresh record per call (a retry never inherits the last one).
+        note_lib_call(call, |s| *s = LibCallStats { queue_wait_ms: Some(queue_wait_ms), ..Default::default() });
         guard.arm_settle(self.settle);
         // Hot potato: dropping the HTTP request makes LM Studio stop generating, so a preempted
         // call releases the token at once (no settle window).
@@ -3341,20 +3484,50 @@ impl LiveModel<'_> {
         }
     }
 
-    async fn lm_direct(&self, call: &ModelCall) -> Result<String, String> {
-        let body = json!({
+    /// The request body for LM Studio direct. The Librarian's output is capped by the policy's
+    /// `librarian.maxOutputTokens` when set (read at call time; None = no cap, as before).
+    pub fn direct_body(&self, call: &ModelCall) -> Value {
+        let mut body = json!({
             "model": self.lm_model,
             "messages": [{ "role": "system", "content": self.direct_system(call) }, { "role": "user", "content": call.user }],
             "stream": false,
             "temperature": 0.3,
             "reasoning_effort": "none",
         });
+        if let Some(n) = output_cap(call.agent, &super::policy::current().librarian) {
+            body["max_tokens"] = json!(n);
+        }
+        body
+    }
+
+    async fn lm_direct(&self, call: &ModelCall) -> Result<String, String> {
+        let body = self.direct_body(call);
+        let max_output_tokens = body["max_tokens"].as_u64().map(|n| n as u32);
         let mut rb = self.http.post(format!("{}/chat/completions", self.lm_base.trim_end_matches('/'))).timeout(Duration::from_secs(call.secs.clamp(10, 900))).json(&body);
+        drop(body);
         if let Some(k) = &self.lm_key {
             rb = rb.bearer_auth(k);
         }
+        let t0 = Instant::now();
         let res = rb.send().await.map_err(super::dispatch::short)?;
         let v: Value = res.error_for_status().map_err(super::dispatch::short)?.json().await.map_err(super::dispatch::short)?;
+        if call.agent == "librarian" {
+            // Numbers only: usage + the server's own timing stats (when it sends them).
+            let model_ms = t0.elapsed().as_millis() as u64;
+            let split = super::diagnostics::split_from_response(&v, model_ms);
+            // VRAM from the process sampler only while something already runs it (Live mode, a
+            // diagnostic run); never started for this. None = not sampled.
+            let vram_pct = super::procstats::latest().and_then(|sp| match (sp.system.vram_used_mb, sp.vram_total_mb) {
+                (Some(u), Some(t)) if t > 0 => Some((u as f64 * 1000.0 / t as f64).round() / 10.0),
+                _ => None,
+            });
+            note_lib_call(call, |s| {
+                s.model_ms = Some(model_ms);
+                s.split = split;
+                s.max_output_tokens = max_output_tokens;
+                s.vram_pct = vram_pct;
+            });
+        }
         let text = super::dispatch::usable_text_from_message(&v["choices"][0]["message"]).ok_or("malformed completion")?;
         Ok(super::dispatch::strip_think(&text))
     }
@@ -3545,7 +3718,8 @@ pub async fn worker_loop(app: tauri::AppHandle) {
         // Learning mode keeps the GPU for Tony: no queued build starts while Nic is training him
         // (a pass already running finishes; the queue resumes when he switches modes).
         let learning = super::modes::is_learning(&os.modes.effective());
-        if !enabled || learning || store.unavailable().is_some() {
+        // The remote failsafe (security hard lock) stops new work too.
+        if !enabled || learning || store.unavailable().is_some() || crate::security::commands::hard_locked() {
             let _ = tokio::time::timeout(Duration::from_secs(15), ws.notify.notified()).await;
             continue;
         }
@@ -3674,3 +3848,57 @@ pub mod quality;
 
 #[cfg(test)]
 mod tests;
+
+/// Librarian pipeline profiling (the stage handlers' half; the pure maths is in diagnostics.rs).
+#[cfg(test)]
+mod librarian_profile_tests {
+    use super::*;
+
+    fn call(agent: &'static str, task: &str, stage: &'static str) -> ModelCall {
+        ModelCall { agent, task_id: task.into(), stage, system: String::new(), user: String::new(), secs: 30, offload: None, cwd: None }
+    }
+
+    #[test]
+    fn output_cap_is_librarian_only_and_policy_driven() {
+        let mut l = super::super::policy::LibrarianPolicy::default();
+        assert_eq!(output_cap("librarian", &l), None, "null = unchanged");
+        l.max_output_tokens = Some(256);
+        assert_eq!(output_cap("librarian", &l), Some(256));
+        for a in ["prompter", "designer", "coder"] {
+            assert_eq!(output_cap(a, &l), None, "{a}");
+        }
+    }
+
+    #[test]
+    fn call_stats_are_keyed_per_task_stage_and_taken_once() {
+        let c = call("librarian", "t-prof-1", "preflight");
+        note_lib_call(&c, |s| s.queue_wait_ms = Some(40));
+        note_lib_call(&c, |s| s.model_ms = Some(900));
+        note_lib_call(&call("coder", "t-prof-1", "code"), |s| s.model_ms = Some(1));
+        assert!(take_lib_call("t-prof-1", "code").is_none(), "only the Librarian is recorded");
+        let s = take_lib_call("t-prof-1", "preflight").unwrap();
+        assert_eq!((s.queue_wait_ms, s.model_ms), (Some(40), Some(900)));
+        assert!(take_lib_call("t-prof-1", "preflight").is_none());
+    }
+
+    #[test]
+    fn run_profile_combines_handler_and_call() {
+        let mut p = Packet::default();
+        p.push("a.md", "internal", "whisper port 8178", &[]);
+        let stats = librarian::GatherStats { files_walked: 120, bytes_read: 40_000, hits: [("hub".to_string(), 1usize)].into_iter().collect() };
+        let t = LibRunTiming { task_id: "t-1", stage: "preflight", total: Duration::from_millis(10_000), retrieval: Some(Duration::from_millis(4_000)), research_ms: None, forensic_ms: Some(100), stats: Some(&stats), extra_bytes: 500, packet: Some(&p), ok: true, by: "lmstudio-direct" };
+        let call = LibCallStats { queue_wait_ms: Some(300), model_ms: Some(5_600), split: super::super::diagnostics::split_from_response(&json!({ "usage": { "prompt_tokens": 2300, "completion_tokens": 280 } }), 5_600), max_output_tokens: None, vram_pct: Some(78.0) };
+        let r = librarian_run(&t, Some(call), 1);
+        assert_eq!((r.files_walked, r.bytes_read, r.packet_items), (Some(120), Some(40_500), Some(1)));
+        assert_eq!((r.queue_wait_ms, r.retrieval_ms, r.model_ms), (Some(300), Some(4_000), Some(5_600)));
+        assert_eq!(r.split.prefill_ms, None, "a plain non-streamed response has no split");
+        let v = super::super::diagnostics::librarian_profile(&r);
+        assert_eq!(v["diagnosis"], "retrieval / disk", "{v}");
+        assert_eq!(v["inputTokens"], 2300);
+        // The model call never ran (preempted / failed): said so, nothing invented.
+        let failed = librarian_run(&LibRunTiming { ok: false, by: "unavailable: boom secret-ish detail", ..t }, None, 1);
+        assert_eq!(failed.outcome, "fallback");
+        assert_eq!(failed.by.as_deref(), Some("unavailable"), "error text never reaches telemetry");
+        assert!(failed.model_ms.is_none() && failed.split.split_method.starts_with("no model response"));
+    }
+}

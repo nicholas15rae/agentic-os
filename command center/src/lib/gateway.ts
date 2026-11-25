@@ -11,18 +11,29 @@ export class GatewayError extends Error {
   }
 }
 
-export async function gateway<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+/**
+ * Protected modules (trading / finance / settings) are Read-Only at the gateway
+ * (security_api.py): a write needs an `X-CC-Elevation` token minted by Rust after a step-up
+ * PIN. A 423 STEP_UP_REQUIRED opens the PIN modal (desktop) and retries once with a token.
+ */
+export async function gateway<T>(path: string, init?: RequestInit & { timeoutMs?: number }, retried = false): Promise<T> {
   const { gatewayUrl, gatewayToken } = useSettings.getState();
   const base = gatewayUrl.replace(/\/+$/, "");
+  const method = (init?.method ?? "GET").toUpperCase();
+  const elevation = method !== "GET" ? await elevationFor(path) : null;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), init?.timeoutMs ?? 15_000);
   try {
     const res = await fetch(`${base}${path}`, {
       ...init,
       signal: ctrl.signal,
-      headers: { "Content-Type": "application/json", ...authHeader(gatewayToken), ...(init?.headers ?? {}) },
+      headers: { "Content-Type": "application/json", ...authHeader(gatewayToken), ...(elevation ? { "X-CC-Elevation": elevation } : {}), ...(init?.headers ?? {}) },
     });
     noteWebviewReach(true);
+    if (res.status === 423) {
+      clearTimeout(timer);
+      return await onLocked<T>(res, path, init, retried);
+    }
     if (!res.ok) throw new GatewayError(`${res.status} ${res.statusText}`, res.status);
     return (await res.json()) as T;
   } catch (err) {
@@ -34,6 +45,34 @@ export async function gateway<T>(path: string, init?: RequestInit & { timeoutMs?
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function elevationFor(path: string): Promise<string | null> {
+  const { gatewayModule } = await import("@/features/security/api");
+  const module = gatewayModule(path);
+  if (!module) return null;
+  const { elevationHeader } = await import("@/features/security/store");
+  return elevationHeader(module);
+}
+
+async function onLocked<T>(res: Response, path: string, init: (RequestInit & { timeoutMs?: number }) | undefined, retried: boolean): Promise<T> {
+  const body = (await res.json().catch(() => null)) as { detail?: { code?: string; module?: string; message?: string } } | null;
+  const d = body?.detail ?? {};
+  const { isTauri } = await import("@/lib/platform");
+  if (d.code === "STEP_UP_REQUIRED" && d.module && isTauri() && !retried) {
+    const { useSecurity } = await import("@/features/security/store");
+    try {
+      await useSecurity.getState().requestStepUp(d.module);
+    } catch (e) {
+      throw new GatewayError(e instanceof Error ? e.message : "step-up cancelled", 423); // cancelled: stays read-only
+    }
+    return gateway<T>(path, init, true);
+  }
+  if (d.code === "HARD_LOCKED" && isTauri()) {
+    const { useSecurity } = await import("@/features/security/store");
+    void useSecurity.getState().refresh();
+  }
+  throw new GatewayError(d.message ?? (d.code === "STEP_UP_REQUIRED" ? `${d.module ?? "This module"} is read-only on this device` : "Locked"), 423);
 }
 
 /** Network lock: the phone presents the gateway token (the desktop on loopback doesn't need it). */

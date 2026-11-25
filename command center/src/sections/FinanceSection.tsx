@@ -4,6 +4,7 @@ import { Card, Stat, SubTabs, money } from "@/components/ui";
 import { useCollection } from "@/lib/cc-api";
 import { invoiceTotals, receiptItc, type Check, type Goal, type Income, type Invoice, type Receipt } from "@/features/finance/types";
 import { useSettings } from "@/stores/settings";
+import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
 import { ScanPanel } from "./finance/ScanPanel";
 import { ReceiptsTable } from "./finance/ReceiptsTable";
 import { InvoicesPanel } from "./finance/InvoicesPanel";
@@ -30,6 +31,7 @@ export function FinanceSection() {
         <span className="ml-auto flex items-center gap-1.5 text-[11px] text-ink-3">
           <Lock size={12} /> 100% local · no bank connections
         </span>
+        <ReadOnlyBanner module="finance" />
       </div>
       {tab === "overview" && <Overview go={setTab} />}
       {tab === "scan" && <ScanPanel onSaved={(where) => setTab(where === "checks" ? "cheques" : "receipts")} />}

@@ -59,6 +59,9 @@ class Bridge:
         self._sleep = sleep
         self.ib: Any = None
         self._pnl: Any = None
+        # Authoritative open-order list from the last reqAllOpenOrders: client 11 never hears about
+        # cancels made by other clients (executor 13, kill 19), so its openTrades() keeps dead orders.
+        self._open_trades: list[Any] | None = None
         self._stop = asyncio.Event()
         self.attempts = 0
         self.state: dict[str, Any] = {
@@ -169,7 +172,8 @@ class Bridge:
 
     async def _refresh_orders(self) -> None:
         try:
-            await asyncio.wait_for(self.ib.reqAllOpenOrdersAsync(), 5)
+            trades = await asyncio.wait_for(self.ib.reqAllOpenOrdersAsync(), 5)
+            self._open_trades = list(trades or [])
         except Exception as e:  # noqa: BLE001 — orders are best-effort telemetry
             log.debug("open orders refresh failed: %s", e)
 
@@ -181,7 +185,7 @@ class Bridge:
             fx=fx_block(values, account),
             pnl=pnl_block(self._pnl),
             positions=positions_block(ib.portfolio(account)),
-            openOrders=orders_block(ib.openTrades()),
+            openOrders=orders_block(self._open_trades if self._open_trades is not None else ib.openTrades()),
             fills=fills_block(ib.fills()),
         )
 
@@ -193,6 +197,7 @@ class Bridge:
                 pass
         self.ib = None
         self._pnl = None
+        self._open_trades = None
 
 
 # ── HTTP surface (loopback only; the gateway proxies /api/trading/*) ──────
@@ -327,6 +332,25 @@ def create_app(bridge: Bridge, desk: Any = None):
         except PermissionError as e:
             raise HTTPException(409, str(e)) from None
 
+    @app.post("/orders/cancel")
+    async def orders_cancel(req: Request):
+        """desk-cli / overseer: cancel working orders owned by this bridge's executor (client 13), which TWS
+        lets no other client id cancel. Risk-reducing only (never places anything); audited."""
+        b = await body(req)
+        ids = b.get("orderIds")
+        reason = str(b.get("reason") or "").strip()[:200]
+        if not isinstance(ids, list) or not ids or len(ids) > 50 or not all(isinstance(i, int) and not isinstance(i, bool) and i > 0 for i in ids):
+            raise HTTPException(400, "orderIds: a list of 1-50 positive integer order ids")
+        if not reason:
+            raise HTTPException(400, "reason is required")
+        try:
+            results = await desk.executor.cancel_ids(ids)
+        except Exception as e:  # noqa: BLE001
+            desk.audit.append("orders_cancel", {"orderIds": ids, "reason": reason, "error": str(e)}, ref="cancel", verdict="FAILED", actor=actor(req))
+            raise HTTPException(503, f"{type(e).__name__}: {e}") from None
+        desk.audit.append("orders_cancel", {"orderIds": ids, "reason": reason, "results": results}, ref="cancel", verdict="OK", actor=actor(req))
+        return {"ok": True, "results": results}
+
     @app.post("/comms")
     async def comms_in(req: Request):
         return desk.handle_comms(await body(req), actor(req))
@@ -347,6 +371,18 @@ def create_app(bridge: Bridge, desk: Any = None):
                           verdict="OK" if rep["ok"] else "FAILED", actor=actor(req))
         return rep
 
+
+    # ── chart bars (Command Center "IBKR bars" tab) ──────────────────
+    @app.get("/bars")
+    async def chart_bars(symbol: str = "SPY", interval: str = "5m", range: str = "5d"):  # noqa: A002
+        from bars import BarsRefused
+
+        try:
+            return await desk.md.chart_bars(symbol, interval, range)
+        except BarsRefused as e:
+            raise HTTPException(400, str(e)) from None
+        except (ConnectionError, LookupError, asyncio.TimeoutError) as e:
+            raise HTTPException(503, f"{type(e).__name__}: {e}") from None
 
     # ── engines (Phase 3) ────────────────────────────────────────────
     @app.get("/engines")

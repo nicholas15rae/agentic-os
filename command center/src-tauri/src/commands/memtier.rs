@@ -217,6 +217,41 @@ pub fn query(node: &str, ns: &str, q: &str, k: usize, char_budget: usize, deep: 
     hits
 }
 
+/// Read-only twin of [`query`] for the diagnostic probe runner (`diagnostics.rs`): same scoring
+/// and the same Tier-2 scan cost, but no `hits` / `last_hit` bump, no arbiter memory pulse and no
+/// write of any kind, so a probe never changes what the map or Garbage's graduation sees.
+pub fn peek(ns: &str, q: &str, k: usize, char_budget: usize, deep: bool) -> Vec<Entry> {
+    if !valid_ns(ns) || k == 0 {
+        return vec![];
+    }
+    let qt = tokens(q);
+    if qt.is_empty() {
+        return vec![];
+    }
+    let (mut hits, root) = {
+        let mut s = svc().lock().unwrap();
+        ensure(&mut s, ns);
+        let root = s.root.clone();
+        let sp = &s.spaces[ns];
+        let mut scored: Vec<(usize, &Entry)> = sp.active.iter().map(|e| (tokens(&e.text).intersection(&qt).count(), e)).filter(|(n, _)| *n > 0).collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.last_hit.cmp(&a.1.last_hit)));
+        (scored.into_iter().take(k).map(|(_, e)| e.clone()).collect::<Vec<_>>(), root)
+    };
+    if deep && hits.len() < k {
+        if let Some(root) = &root {
+            let mut cold: Vec<(usize, Entry)> = read_jsonl(&ns_dir(root, ns).join("archive.jsonl")).into_iter().map(|e| (tokens(&e.text).intersection(&qt).count(), e)).filter(|(n, _)| *n > 0).collect();
+            cold.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.at.cmp(&a.1.at)));
+            hits.extend(cold.into_iter().take(k - hits.len()).map(|(_, e)| e));
+        }
+    }
+    let mut used = 0;
+    hits.retain(|e| {
+        used += e.text.chars().count();
+        used <= char_budget
+    });
+    hits
+}
+
 /// Mark entries tagged `tag` done (they graduate on the next Garbage pass).
 pub fn mark_done(ns: &str, tag: &str) {
     if !valid_ns(ns) {

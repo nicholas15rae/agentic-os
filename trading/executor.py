@@ -27,6 +27,60 @@ class ExecutionRefused(RuntimeError):
     pass
 
 
+PENDING = {"", "PendingSubmit", "ApiPending"}
+REJECTED = {"Cancelled", "ApiCancelled", "Inactive"}
+ACK_TIMEOUT_S = 15.0  # a TWS order-confirmation dialog on the first API order can take a few seconds
+
+
+def rejection(trade: Any) -> str | None:
+    """Why TWS refused this order, or None. A ValidationError log entry or a dead status counts."""
+    for e in getattr(trade, "log", []) or []:
+        if getattr(e, "status", "") == "ValidationError" or (getattr(e, "errorCode", 0) and getattr(e, "status", "") in REJECTED):
+            return getattr(e, "message", "") or f"error {e.errorCode}"
+    st = trade.orderStatus.status
+    if st in REJECTED and not (trade.orderStatus.filled or 0):
+        return f"order {trade.order.orderId} {st}"
+    return None
+
+
+async def await_ack(ib: Any, trades: list[Any], timeout: float = ACK_TIMEOUT_S, sleep: Any = None) -> None:
+    """Wait until TWS has acknowledged every order of a bracket. Any rejection, or no acknowledgement
+    within `timeout`, cancels whatever is still live and raises ExecutionRefused: no half-placed brackets."""
+    import asyncio
+    import time
+
+    sleep = sleep or asyncio.sleep
+    deadline = time.monotonic() + timeout
+    while True:
+        bad = [r for r in (rejection(t) for t in trades) if r]
+        if bad:
+            _cancel_live(ib, trades)
+            raise ExecutionRefused("TWS rejected the order: " + "; ".join(dict.fromkeys(bad)))
+        if all(t.orderStatus.status not in PENDING for t in trades):
+            return
+        if time.monotonic() >= deadline:
+            seen = "; ".join(_describe(t) for t in trades)
+            _cancel_live(ib, trades)
+            raise ExecutionRefused(f"TWS didn't acknowledge the order within {timeout:.0f}s; cancelled to avoid an orphan [{seen}]")
+        await sleep(0.2)
+
+
+def _describe(t: Any) -> str:
+    """'#12 LMT PendingSubmit: <last TWS message>' for a diagnosable timeout error."""
+    last = next((e for e in reversed(getattr(t, "log", []) or []) if getattr(e, "message", "")), None)
+    msg = f": {last.message}" if last else ""
+    return f"#{t.order.orderId} {getattr(t.order, 'orderType', '')} {t.orderStatus.status or 'no status'}{msg}"
+
+
+def _cancel_live(ib: Any, trades: list[Any]) -> None:
+    for t in trades:
+        if t.orderStatus.status not in REJECTED and not t.isDone():
+            try:
+                ib.cancelOrder(t.order)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def opposite(action: str) -> str:
     return "SELL" if action == "BUY" else "BUY"
 
@@ -101,6 +155,9 @@ class Executor:
         orders = build_bracket(intent, qty, ib.client.getReqId(), factories)
         self._guard()  # last look: lock / endpoint, right before the socket call
         trades = [ib.placeOrder(contract, o) for o in orders]
+        # Don't report "submitted" until TWS has acknowledged every order: a rejection (e.g. 321 "API is
+        # in Read-Only mode") arrives a moment later, and the desk must record it as a failure, not a trade.
+        await await_ack(ib, trades)
         return {"conId": contract.conId, "orders": [{"orderId": t.order.orderId, "type": t.order.orderType,
                                                       "action": t.order.action, "qty": t.order.totalQuantity,
                                                       "status": t.orderStatus.status} for t in trades]}
@@ -158,6 +215,39 @@ class Executor:
                 ib.cancelOrder(t.order)
                 n += 1
         return n
+
+    async def cancel_ids(self, order_ids: list[int], wait_s: float = 10.0, sleep: Any = None) -> list[dict[str, Any]]:
+        """Cancel THIS client's (13) working orders by id — for desk-cli / the overseer, which can't cancel
+        another client id's orders. Risk-reducing, so allowed while LOCKED (the endpoint gate still applies;
+        nothing is ever placed here). Returns [{orderId, status}] after waiting for TWS to confirm."""
+        import asyncio
+        import time
+
+        sleep = sleep or asyncio.sleep
+        cfg = load_config()
+        ep = resolve_endpoint(cfg)
+        if ep.locked or ep.port is None:
+            raise ExecutionRefused("endpoint LOCKED: " + "; ".join(ep.reasons))
+        if self.ib is None or not self.ib.isConnected():
+            self.ib = self._new_ib()
+            await self.ib.connectAsync(ep.host, ep.port, clientId=cfg.client_ids["exec"], readonly=False, timeout=10)
+        ib = self.ib
+        await asyncio.wait_for(ib.reqOpenOrdersAsync(), 8)  # bind this client's own working orders
+        want = {int(i) for i in order_ids}
+        mine = {t.order.orderId: t for t in ib.openTrades() if t.order.orderId in want and t.order.clientId == cfg.client_ids["exec"]}
+        out: dict[int, str] = {}
+        for oid in want:
+            t = mine.get(oid)
+            if t is None:
+                out[oid] = "NotWorking"  # already done, or not ours: the caller's own book check decides
+            elif t.orderStatus.status not in REJECTED and not t.isDone():
+                ib.cancelOrder(t.order)
+        deadline = time.monotonic() + wait_s
+        while any(not t.isDone() for t in mine.values()) and time.monotonic() < deadline:
+            await sleep(0.2)
+        for oid, t in mine.items():
+            out[oid] = t.orderStatus.status or "Unknown"
+        return [{"orderId": k, "status": v} for k, v in sorted(out.items())]
 
     def disconnect(self) -> None:
         if self.ib is not None:

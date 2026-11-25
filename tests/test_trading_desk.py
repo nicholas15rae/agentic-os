@@ -328,7 +328,8 @@ class DeskTests(unittest.TestCase):
         async def connect(readonly):
             return self.kill_ib
 
-        self.desk = Desk(FakeBridge(), executor=self.ex, quote_fn=good_quote, stats_fn=good_stats, kill_connect=connect, kill_market_order=mkt, fx_source=False, d=self.d, clock=lambda: NOW)
+        self.desk = Desk(FakeBridge(), executor=self.ex, quote_fn=good_quote, stats_fn=good_stats, kill_connect=connect, kill_market_order=mkt, fx_source=False, d=self.d, clock=lambda: NOW,
+                         pretrade=False)  # Security Detail flow only; the pre-trade gates are tested in test_trading_desk_pretrade.py
 
     def tearDown(self):
         self.td.cleanup()

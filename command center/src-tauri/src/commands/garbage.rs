@@ -223,8 +223,9 @@ pub async fn daemon(app: tauri::AppHandle) {
     let a = Allow::for_config(&dir);
     let Some(mut rx) = chan().1.lock().unwrap().take() else { return };
     status().lock().unwrap().running = true;
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Next scheduled pass: TICK after a pass (or a market-hours hold), RETRY after a stagger refusal.
+    const RETRY: Duration = Duration::from_secs(60);
+    let mut next = tokio::time::Instant::now();
     loop {
         tokio::select! {
             Some(id) = rx.recv() => {
@@ -243,8 +244,20 @@ pub async fn daemon(app: tauri::AppHandle) {
                 drop(s);
                 super::arbiter::get().handoff("security", "garbage", &format!("purge handshake {id}"));
             }
-            _ = tick.tick() => {
+            _ = tokio::time::sleep_until(next) => {
+                next = tokio::time::Instant::now() + TICK;
                 if super::integrity::ensure().is_err() {
+                    continue;
+                }
+                // Alive either way: a held / staggered pass still counts as a heartbeat (system_health).
+                if let Some(why) = super::stagger::garbage_hold_reason(now_ms()) {
+                    super::stagger::note_deferred("garbage", &why);
+                    status().lock().unwrap().heartbeat_at = Some(now_ms());
+                    continue;
+                }
+                if super::stagger::claim("garbage", super::stagger::gap_seconds()).is_err() {
+                    status().lock().unwrap().heartbeat_at = Some(now_ms());
+                    next = tokio::time::Instant::now() + RETRY;
                     continue;
                 }
                 let r = app.state::<super::os_core::OsState>().snapshot().roster.clone();

@@ -311,6 +311,28 @@ export const healthApi = {
   run: (dryRunKill = true) => gateway<HealthResult>("/api/trading/health/check", { method: "POST", body: JSON.stringify({ dryRunKill }), timeoutMs: 240_000 }),
 };
 
+/** GET /api/trading/bars — IBKR historical bars for the "IBKR bars" chart (trading/bars.py shapes them). */
+export interface IbkrBars {
+  ok: boolean;
+  error?: string;
+  symbol: string;
+  currency?: string;
+  interval: string;
+  range: string;
+  barSize?: string;
+  duration?: string;
+  /** Same shape as the Yahoo companion chart: epoch seconds + OHLCV, oldest first. */
+  candles: { t: number; o: number; h: number; l: number; c: number; v: number }[];
+  fetchedAt?: number;
+  cached?: boolean;
+}
+
+export const barsUrl = (symbol: string, interval: string, range: string) =>
+  `/api/trading/bars?${new URLSearchParams({ symbol: symbol.trim().toUpperCase(), interval, range })}`;
+
+/** How often the IBKR chart re-requests: IBKR paces identical historical requests (≥15 s apart, ≤60 / 10 min). */
+export const barsRefreshMs = (interval: string) => (interval === "1d" ? 300_000 : interval === "1m" ? 20_000 : 30_000);
+
 const post = <T>(path: string, body: unknown = {}, timeoutMs = 20_000) => gateway<T>(path, { method: "POST", body: JSON.stringify(body), timeoutMs });
 
 export const tradingApi = {
@@ -321,6 +343,7 @@ export const tradingApi = {
   reject: (id: string) => post<{ ok: boolean }>(`/api/trading/intents/${encodeURIComponent(id)}/reject`),
   kill: (reason: string, dryRun = false) => post<KillIncident & { lock?: KillLock; note?: string }>("/api/trading/kill-switch", { reason, dryRun }, 50_000),
   reset: (confirm: string) => post<{ locked: boolean }>("/api/trading/kill-switch/reset", { confirm }),
+  bars: (symbol: string, interval: string, range: string) => gateway<IbkrBars>(barsUrl(symbol, interval, range), { timeoutMs: 70_000 }),
 };
 
 /** What the HUD badge shows. A stale snapshot (bridge hung) is not "Connected". */

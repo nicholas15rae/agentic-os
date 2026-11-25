@@ -22,18 +22,91 @@ use std::path::{Path, PathBuf};
 use super::devqueue::scrub;
 use super::envelope::{clip, one_line};
 
-/// One context item (chars).
+// Retrieval limits. The consts below are the documented DEFAULTS; the values in force are read
+// at call time from the hot-reloadable policy (`policy::current().librarian`, whose
+// `LibrarianPolicy::default()` mirrors them), so they can be tuned without a rebuild.
+
+/// One context item (chars). Policy: `librarian.itemMaxChars`.
+#[allow(dead_code)] // documented default; the policy value is used
 pub const ITEM_MAX: usize = 1600;
 /// The whole packet (chars), so the Librarian prompt stays inside a 16k-context budget.
+/// Policy: `librarian.packetMaxChars`.
+#[allow(dead_code)] // documented default; the policy value is used
 pub const PACKET_MAX: usize = 9000;
 /// Files larger than this are never opened.
 pub const FILE_READ_MAX: u64 = 256 * 1024;
 /// Bytes of a file scanned for keywords.
 const SCAN_BYTES: usize = 8 * 1024;
-const WALK_FILES_MAX: usize = 600;
-const WALK_DEPTH: usize = 4;
-const PER_ROOT_HITS: usize = 3;
-const HISTORY_HITS: usize = 5;
+/// Policy: `librarian.walkFilesMax`.
+#[allow(dead_code)] // documented default; the policy value is used
+pub const WALK_FILES_MAX: usize = 600;
+/// Policy: `librarian.walkDepth`.
+#[allow(dead_code)] // documented default; the policy value is used
+pub const WALK_DEPTH: usize = 4;
+/// Policy: `librarian.perRootHits`.
+#[allow(dead_code)] // documented default; the policy value is used
+pub const PER_ROOT_HITS: usize = 3;
+/// Policy: `librarian.historyHits`.
+#[allow(dead_code)] // documented default; the policy value is used
+pub const HISTORY_HITS: usize = 5;
+
+/// The retrieval limits in force (a cheap `Arc` clone of the live policy).
+fn limits() -> std::sync::Arc<super::policy::Policy> {
+    super::policy::current()
+}
+
+// ── Retrieval cost counters (profiling only) ────────────────────────────────
+//
+// `gather_local` runs on one blocking thread; these thread-local counters let it report how
+// much disk it touched without threading a counter through every reader. Counts only.
+
+thread_local! {
+    static IO: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn io_reset() {
+    IO.with(|c| c.set((0, 0)));
+}
+
+fn io_files(n: u64) {
+    IO.with(|c| {
+        let (f, b) = c.get();
+        c.set((f + n, b));
+    });
+}
+
+fn io_bytes(n: u64) {
+    IO.with(|c| {
+        let (f, b) = c.get();
+        c.set((f, b + n));
+    });
+}
+
+fn io_take() -> (u64, u64) {
+    IO.with(|c| c.replace((0, 0)))
+}
+
+/// What one gather cost: files the walks enumerated (text-file candidates + scroll files
+/// considered), bytes actually read from files (tasks.db reads go through SQLite and are not
+/// counted), and the items each source contributed.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatherStats {
+    pub files_walked: u64,
+    pub bytes_read: u64,
+    pub hits: std::collections::BTreeMap<String, usize>,
+}
+
+/// `Read` wrapper counting bytes pulled from the underlying file.
+struct Counted<R>(R);
+
+impl<R: std::io::Read> std::io::Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(buf)?;
+        io_bytes(n as u64);
+        Ok(n)
+    }
+}
 const TEXT_EXT: [&str; 6] = ["md", "txt", "json", "yml", "yaml", "toml"];
 /// Where Part 7 saved each AnythingLLM workspace's previous prompt (under Tony's notes root).
 /// Old role prompts are not context for a build, so the gather walk never enters it.
@@ -63,10 +136,13 @@ const SCROLL_FILES_MAX: usize = 64;
 /// Archive ids shown in a scroll item header (newest last in the frontmatter list).
 const SCROLL_HEADER_IDS: usize = 6;
 /// Cold-archive file (gz bytes) and decompressed read caps for a forensic lookup.
+/// Policy: `librarian.archiveGzMaxBytes`.
+#[allow(dead_code)] // documented default; the policy value is used
 pub const ARCHIVE_GZ_MAX: u64 = 8 * 1024 * 1024;
 pub const ARCHIVE_RAW_MAX: u64 = 4 * 1024 * 1024;
-/// Records returned per forensic lookup, and chars per excerpt.
-const ARCHIVE_HITS: usize = 5;
+/// Records returned per forensic lookup (policy: `librarian.archiveHits`), and chars per excerpt.
+#[allow(dead_code)] // documented default; the policy value is used
+pub const ARCHIVE_HITS: usize = 5;
 const ARCHIVE_EXCERPT: usize = 400;
 /// The staging preview of the offload utility (never build output).
 pub const SCROLLS_PREVIEW_DIR: &str = "memory-scrolls-preview";
@@ -94,18 +170,21 @@ impl Packet {
         self.items.iter().map(|i| i.text.chars().count() + i.source.len()).sum()
     }
 
-    /// Add an item (scrubbed, one-lined, capped). `false` once the packet is full.
+    /// Add an item (scrubbed, one-lined, capped at `librarian.itemMaxChars` / the packet at
+    /// `librarian.packetMaxChars`). `false` once the packet is full.
     pub fn push(&mut self, source: &str, kind: &str, text: &str, known: &[String]) -> bool {
-        let text = clip(&one_line(&scrub(text, known)), ITEM_MAX);
+        let pol = limits();
+        let (item_max, packet_max) = (pol.librarian.item_max_chars, pol.librarian.packet_max_chars);
+        let text = clip(&one_line(&scrub(text, known)), item_max);
         if text.is_empty() {
             return true;
         }
-        let room = PACKET_MAX.saturating_sub(self.chars());
+        let room = packet_max.saturating_sub(self.chars());
         if room < 120 {
             self.skip("context packet is full");
             return false;
         }
-        let text = clip(&text, room.saturating_sub(source.len()).min(ITEM_MAX));
+        let text = clip(&text, room.saturating_sub(source.len()).min(item_max));
         self.items.push(Item { source: clip(&scrub(source, known), 300), kind: kind.into(), text });
         true
     }
@@ -181,16 +260,22 @@ fn read_capped(p: &Path, max: usize) -> Option<String> {
     if !md.is_file() || md.len() > FILE_READ_MAX {
         return None;
     }
-    let mut f = std::fs::File::open(p).ok()?;
+    let f = std::fs::File::open(p).ok()?;
     let mut buf = Vec::with_capacity(max.min(md.len() as usize));
-    f.by_ref().take(max as u64).read_to_end(&mut buf).ok()?;
+    Counted(f).take(max as u64).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Text files under `root` (depth / count capped; links, skip dirs and secret files excluded).
-/// `extra_skip` holds canonical directories never entered (the scrolls root, read on its own,
-/// and the cold archive, which is never walked).
-fn walk(root: &Path, extra_skip: &[PathBuf]) -> Vec<PathBuf> {
+/// Text files under `root` (depth / count capped by `librarian.walkDepth` / `walkFilesMax`;
+/// links, skip dirs and secret files excluded). `extra_skip` holds canonical directories never
+/// entered (the scrolls root, read on its own, and the cold archive, which is never walked).
+fn walk(root: &Path, extra_skip: &[PathBuf], l: &super::policy::LibrarianPolicy) -> Vec<PathBuf> {
+    let out = walk_inner(root, extra_skip, l.walk_files_max, l.walk_depth);
+    io_files(out.len() as u64);
+    out
+}
+
+fn walk_inner(root: &Path, extra_skip: &[PathBuf], files_max: usize, max_depth: usize) -> Vec<PathBuf> {
     let Ok(canon) = std::fs::canonicalize(root) else { return vec![] };
     if extra_skip.iter().any(|s| *s == canon) {
         return vec![];
@@ -202,7 +287,7 @@ fn walk(root: &Path, extra_skip: &[PathBuf]) -> Vec<PathBuf> {
         let mut entries: Vec<_> = rd.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
-            if out.len() >= WALK_FILES_MAX {
+            if out.len() >= files_max {
                 return out;
             }
             let p = e.path();
@@ -213,7 +298,7 @@ fn walk(root: &Path, extra_skip: &[PathBuf]) -> Vec<PathBuf> {
             }
             if md.is_dir() {
                 let skipped = !extra_skip.is_empty() && std::fs::canonicalize(&p).map(|c| extra_skip.contains(&c)).unwrap_or(true);
-                if depth + 1 < WALK_DEPTH && !skipped && !SKIP_DIRS.contains(&name.to_ascii_lowercase().as_str()) && !name.starts_with('.') {
+                if depth + 1 < max_depth && !skipped && !SKIP_DIRS.contains(&name.to_ascii_lowercase().as_str()) && !name.starts_with('.') {
                     stack.push((p, depth + 1));
                 }
             } else if md.is_file() && text_file(&p) && md.len() <= FILE_READ_MAX && inside(&canon, &p) {
@@ -246,7 +331,7 @@ fn excerpt(text: &str, kws: &[String]) -> String {
 }
 
 /// Keyword-ranked text files of one root.
-fn files(p: &mut Packet, root: &Path, label: &str, kws: &[String], known: &[String], extra_skip: &[PathBuf]) {
+fn files(p: &mut Packet, root: &Path, label: &str, kws: &[String], known: &[String], extra_skip: &[PathBuf], l: &super::policy::LibrarianPolicy) {
     if !root.is_dir() {
         p.skip(&format!("{label}: {} not found", root.display()));
         return;
@@ -255,7 +340,7 @@ fn files(p: &mut Packet, root: &Path, label: &str, kws: &[String], known: &[Stri
         return;
     }
     let mut scored: Vec<(usize, PathBuf, String)> = Vec::new();
-    for f in walk(root, extra_skip) {
+    for f in walk(root, extra_skip, l) {
         let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
         let Some(head) = read_capped(&f, SCAN_BYTES) else { continue };
         let score = hits(&rel, kws) * 3 + hits(&head, kws);
@@ -264,7 +349,7 @@ fn files(p: &mut Packet, root: &Path, label: &str, kws: &[String], known: &[Stri
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    for (_, f, head) in scored.into_iter().take(PER_ROOT_HITS) {
+    for (_, f, head) in scored.into_iter().take(l.per_root_hits) {
         if !p.push(&f.display().to_string(), "internal", &excerpt(&head, kws), known) {
             return;
         }
@@ -272,7 +357,7 @@ fn files(p: &mut Packet, root: &Path, label: &str, kws: &[String], known: &[Stri
 }
 
 /// Earlier tasks (SELECT only, read-only connection) that share keywords with this one.
-fn history(p: &mut Packet, db: &Path, q: &Query, known: &[String]) {
+fn history(p: &mut Packet, db: &Path, q: &Query, known: &[String], l: &super::policy::LibrarianPolicy) {
     let conn = match super::envelope::open_read_only(db) {
         Ok(c) => c,
         Err(e) => {
@@ -312,7 +397,7 @@ fn history(p: &mut Packet, db: &Path, q: &Query, known: &[String]) {
     if scored.is_empty() {
         return;
     }
-    let text = scored.into_iter().take(HISTORY_HITS).map(|(_, t)| t).collect::<Vec<_>>().join(" | ");
+    let text = scored.into_iter().take(l.history_hits).map(|(_, t)| t).collect::<Vec<_>>().join(" | ");
     p.push(&format!("tasks.db ({})", db.display()), "internal", &format!("Related earlier tasks: {text}"), known);
 }
 
@@ -391,27 +476,53 @@ fn staging_outputs(p: &mut Packet, root: &Path, q: &Query, known: &[String]) {
 /// Everything local the Librarian may see for `q`. Never writes; a missing source is noted.
 /// Memory Scrolls come FIRST (the distilled living truth), then tasks.db history, Tony's notes,
 /// the hub (which never re-walks the scrolls or the cold archive) and staging outputs.
+#[allow(dead_code)] // the plain API (tests, other callers); the worker uses the profiled one
 pub fn gather_local(src: &Sources, q: &Query, known: &[String]) -> Packet {
+    gather_local_profiled(src, q, known).0
+}
+
+/// [`gather_local`] plus what it cost ([`GatherStats`]). Exactly the same reads and packet; the
+/// limits in force are one snapshot of `policy::current().librarian`.
+pub fn gather_local_profiled(src: &Sources, q: &Query, known: &[String]) -> (Packet, GatherStats) {
+    let pol = limits();
+    let l = &pol.librarian;
+    io_reset();
     let mut p = Packet::default();
+    let mut hits = std::collections::BTreeMap::new();
+    let mut mark = |p: &Packet, source: &str, before: usize| {
+        let n = p.items.len().saturating_sub(before);
+        *hits.entry(source.to_string()).or_insert(0usize) += n;
+    };
     if let Some(r) = &src.scrolls_root {
+        let b = p.items.len();
         scrolls(&mut p, r, q.keywords, known);
+        mark(&p, "scrolls", b);
     }
     let extra_skip: Vec<PathBuf> = [&src.scrolls_root, &src.archive_root].into_iter().flatten().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
+    let b = p.items.len();
     match &src.tasks_db {
-        Some(db) => history(&mut p, db, q, known),
+        Some(db) => history(&mut p, db, q, known, l),
         None => p.skip("tasks.db: no file-backed store"),
     }
+    mark(&p, "history", b);
+    let b = p.items.len();
     match &src.notes_root {
-        Some(r) => files(&mut p, r, "memory", q.keywords, known, &extra_skip),
+        Some(r) => files(&mut p, r, "memory", q.keywords, known, &extra_skip, l),
         None => p.skip("memory: notes root unavailable"),
     }
+    mark(&p, "memory", b);
+    let b = p.items.len();
     for r in src.hub_roots.iter().take(3) {
-        files(&mut p, r, "ai-hub", q.keywords, known, &extra_skip);
+        files(&mut p, r, "ai-hub", q.keywords, known, &extra_skip, l);
     }
+    mark(&p, "hub", b);
     if let Some(r) = &src.staging_root {
+        let b = p.items.len();
         staging_outputs(&mut p, r, q, known);
+        mark(&p, "staging", b);
     }
-    p
+    let (files_walked, bytes_read) = io_take();
+    (p, GatherStats { files_walked, bytes_read, hits })
 }
 
 // ── Phase 3: Memory Scrolls (Tier 2) and the cold archive (Tier 3), both read-only ──────────
@@ -591,6 +702,7 @@ fn scrolls(p: &mut Packet, root: &Path, kws: &[String], known: &[String]) {
             if !name.ends_with(".md") || secret_looking(&name) || !inside(&canon, &f) {
                 continue;
             }
+            io_files(1);
             let Some(text) = read_capped(&f, SCAN_BYTES) else { continue };
             let Some((meta, body)) = parse_scroll(&text, Some(category)) else {
                 invalid += 1;
@@ -678,12 +790,14 @@ pub fn archive_lookup(root: &Path, archive_id: &str, kws: &[String], known: &[St
         p.skip(&format!("archive {archive_id}: outside the archive root; refused"));
         return p;
     }
-    if md.len() > ARCHIVE_GZ_MAX {
+    let pol = limits();
+    let (gz_max, max_hits) = (pol.librarian.archive_gz_max_bytes, pol.librarian.archive_hits);
+    if md.len() > gz_max {
         p.skip(&format!("archive {archive_id}: too large to read ({} bytes)", md.len()));
         return p;
     }
     let mut raw = Vec::new();
-    let read = std::fs::File::open(&file).and_then(|f| flate2::read::GzDecoder::new(f).take(ARCHIVE_RAW_MAX).read_to_end(&mut raw));
+    let read = std::fs::File::open(&file).and_then(|f| flate2::read::GzDecoder::new(Counted(f)).take(ARCHIVE_RAW_MAX).read_to_end(&mut raw));
     if let Err(e) = read {
         p.skip(&format!("archive {archive_id}: unreadable ({e})"));
         return p;
@@ -691,7 +805,7 @@ pub fn archive_lookup(root: &Path, archive_id: &str, kws: &[String], known: &[St
     let text = String::from_utf8_lossy(&raw);
     let mut found = 0usize;
     for line in text.lines() {
-        if found >= ARCHIVE_HITS {
+        if found >= max_hits {
             break;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
@@ -713,6 +827,13 @@ pub fn archive_lookup(root: &Path, archive_id: &str, kws: &[String], known: &[St
         p.skip(&format!("archive {archive_id}: no record matches"));
     }
     p
+}
+
+/// [`archive_lookup`] plus the bytes it read from the archive file (profiling).
+pub fn archive_lookup_profiled(root: &Path, archive_id: &str, kws: &[String], known: &[String]) -> (Packet, u64) {
+    io_reset();
+    let p = archive_lookup(root, archive_id, kws, known);
+    (p, io_take().1)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -925,6 +1046,64 @@ mod tests {
         let all = serde_json::to_string(&p).unwrap();
         assert!(all.contains("2026-11-19-status-card.md"), "{all}");
         assert!(!all.contains("BACKUP-PROMPT-TEXT") && !all.contains(PROMPT_BACKUPS_DIR), "prompt backups must not be gathered: {all}");
+    }
+
+    /// The policy defaults mirror the documented consts (hot values start where the build was).
+    #[test]
+    fn policy_defaults_mirror_the_consts() {
+        let l = super::super::policy::LibrarianPolicy::default();
+        assert_eq!((l.packet_max_chars, l.item_max_chars, l.per_root_hits, l.history_hits, l.archive_hits), (PACKET_MAX, ITEM_MAX, PER_ROOT_HITS, HISTORY_HITS, ARCHIVE_HITS));
+        assert_eq!((l.walk_files_max, l.walk_depth, l.archive_gz_max_bytes), (WALK_FILES_MAX, WALK_DEPTH, ARCHIVE_GZ_MAX));
+    }
+
+    /// The walk obeys the limits it is given (the policy's, at call time).
+    #[test]
+    fn walk_limits_come_from_the_policy() {
+        let root = tmp("walklim");
+        std::fs::create_dir_all(root.join("a").join("b").join("c")).unwrap();
+        for i in 0..5 {
+            std::fs::write(root.join(format!("f{i}.md")), "x").unwrap();
+        }
+        std::fs::write(root.join("a").join("b").join("c").join("deep.md"), "x").unwrap();
+        let l = super::super::policy::LibrarianPolicy { walk_files_max: 2, ..Default::default() };
+        assert_eq!(walk(&root, &[], &l).len(), 2);
+        let shallow = super::super::policy::LibrarianPolicy { walk_depth: 1, ..Default::default() };
+        let all = walk(&root, &[], &shallow);
+        assert_eq!(all.len(), 5, "depth 1 never enters a/: {all:?}");
+        let deep = walk(&root, &[], &super::super::policy::LibrarianPolicy::default());
+        assert!(deep.iter().any(|p| p.ends_with("deep.md")), "{deep:?}");
+    }
+
+    /// The profiled gather returns the same packet plus its cost.
+    #[test]
+    fn profiled_gather_counts_files_bytes_and_hits() {
+        let root = tmp("stats");
+        let notes = root.join("notes");
+        let hub = root.join("hub");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&hub).unwrap();
+        let body = "# Whisper\nwhisper port notes 8178\n";
+        std::fs::write(notes.join("whisper-port.md"), body).unwrap();
+        std::fs::write(hub.join("whisper-hub.md"), body).unwrap();
+        std::fs::write(hub.join("unrelated.md"), "nothing here").unwrap();
+        let kws = keywords(&["whisper port"], 8);
+        let src = Sources { notes_root: Some(notes), hub_roots: vec![hub], ..Default::default() };
+        let q = Query { task_id: None, keywords: &kws, slug: None };
+        let (p, st) = gather_local_profiled(&src, &q, &[]);
+        assert_eq!(p, gather_local(&src, &q, &[]), "profiling never changes what is gathered");
+        assert_eq!(st.files_walked, 3);
+        assert_eq!(st.bytes_read, (body.len() * 2 + "nothing here".len()) as u64);
+        assert_eq!(st.hits.get("memory"), Some(&1));
+        assert_eq!(st.hits.get("hub"), Some(&1));
+        assert_eq!(st.hits.get("history"), Some(&0));
+        let v = serde_json::to_value(&st).unwrap();
+        assert!(v.get("filesWalked").is_some() && v.get("bytesRead").is_some(), "{v}");
+        // A forensic lookup reports the archive bytes it read.
+        let id = "arch-2026-11-19-01";
+        let gz = write_archive(&root.join("archive"), id, &[("turn", "whisper port 8178")]);
+        let (fp, bytes) = archive_lookup_profiled(&root.join("archive"), id, &kws, &[]);
+        assert_eq!(fp.items.len(), 1);
+        assert_eq!(bytes, std::fs::metadata(gz).unwrap().len());
     }
 
     /// Acceptance (addendum): ZERO write / edit / upload / embed / delete paths in the

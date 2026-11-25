@@ -2,8 +2,11 @@ mod audio;
 mod commands;
 mod exe_resolve;
 mod proc;
+/// Sovereign security layer (app lock, step-up, audit, alerts, failsafe). `pub` so the
+/// `gabagool-cli` binary (src/bin) shares the exact same code.
+pub mod security;
 
-use commands::{buildhub, handoff_cues, language_hub, lifecycle};
+use commands::{buildhub, diagnostics, handoff_cues, language_hub, lifecycle};
 use commands::{arbiter, business_registry, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
 use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
@@ -120,6 +123,9 @@ pub fn run() {
     // First: a second launch hands over to this engine (one GPU arbiter per machine).
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| on_second_launch(app)));
+    // Fingerprint / face on Android and iOS (called from Rust: security::biometric).
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_biometric::init());
     builder
         .plugin(tauri_plugin_notification::init())
         // Director Suite file picker: open-file dialogs only (capability `dialog:allow-open`).
@@ -162,9 +168,21 @@ pub fn run() {
                 app.state::<bridge::BridgeState>().init(&dir, repo.join("training_logs"));
                 // OS identity, compute mode, skills/MCP registry, privacy shield, memory lifecycle.
                 app.state::<os_core::OsState>().load_or_init(&dir, &repo);
+                // App lock / step-up / audit / failsafe watcher (<repo>/data/security, shared with
+                // the gateway and gabagool-cli). After OsState: a held hard lock re-engages the
+                // privacy kill switch at start.
+                security::commands::install(app.handle(), Some(repo.clone()), &dir);
                 // Two-tier agent memory (<config dir>/memory-tiers) and the sealed Finance vault
                 // (<config dir>/vault/finance, sealed at start).
                 memtier::init(&dir);
+                // Hot-reloadable orchestration policy (<config dir>/telemetry/orchestrator_policy.json).
+                commands::policy::init(&dir);
+                // GPU capacity follows the policy hot; Live Observer stays OFF until toggled.
+                commands::scheduler::install_policy(&app.state::<os_core::OsState>().slot);
+                commands::live::init(app.handle());
+                // Diagnostic probe reports (<config dir>/telemetry/diagnostics) + their schedule /
+                // request.json loop.
+                diagnostics::init(app.handle(), &dir);
                 finance_vault::init(&dir);
                 // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
                 business_registry::init(&dir);
@@ -261,6 +279,8 @@ pub fn run() {
             }
             // GPU baton → gateway cooperative lease (PUT /api/os/gpu), best-effort, latest-wins.
             tauri::async_runtime::spawn(commands::scheduler::gpu_mirror_loop(app.handle().clone()));
+            // Loopback GPU lease API for the gateway (Trading = Tier 1), 127.0.0.1:8792.
+            commands::lease::init(app.handle());
             tauri::async_runtime::spawn(os_core::droplet_link_loop(app.handle().clone()));
             // Keep the local model sized to fit VRAM even after Bionic auto-reloads it.
             tauri::async_runtime::spawn(services::whisper_keepalive_loop(app.handle().clone()));
@@ -301,10 +321,43 @@ pub fn run() {
             }
         })
         // Keep this list in sync with `NativeCommands` in src/lib/platform.ts.
-        .invoke_handler(tauri::generate_handler![
+        // Every invoke passes the security gate first (security::gate): locked / hard-locked
+        // apps refuse everything but `security_*`; protected modules need a step-up.
+        .invoke_handler({
+            fn typed<F: Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool>(f: F) -> F {
+                f
+            }
+            let handler = typed(tauri::generate_handler![
+            security::commands::security_status,
+            security::commands::security_touch,
+            security::commands::security_unlock_pin,
+            security::commands::security_biometric,
+            security::commands::security_companion_request,
+            security::commands::security_companion_poll,
+            security::commands::security_lock,
+            security::commands::security_elevate,
+            security::commands::security_elevation_token,
+            security::commands::security_drop_elevation,
+            security::commands::security_lockdown_engage,
+            security::commands::security_audit_recent,
+            security::commands::security_companion_sign,
+            security::commands::security_companion_store_key,
+            security::commands::security_companion_check_alerts,
+            security::commands::security_pin_setup,
             system::system_stats,
             arbiter::arbiter_snapshot,
             arbiter::arbiter_set_away,
+            diagnostics::diag_run,
+            diagnostics::diag_abort,
+            diagnostics::diag_latest,
+            diagnostics::diag_reports,
+            diagnostics::diag_schedule_get,
+            diagnostics::diag_schedule_set,
+            commands::policy::policy_get,
+            commands::policy::policy_set_mode,
+            commands::live::live_set,
+            commands::live::live_status,
+            commands::live::live_ui_event,
             arbiter::system_health,
             finance_vault::finance_vault_status,
             finance_vault::finance_vault_unlock,
@@ -562,7 +615,24 @@ pub fn run() {
             buildhub::build_open_browser,
             buildhub::build_intake_questions,
             handoff_cues::handoff_pool_get,
-        ])
+            ]);
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                let decision = {
+                    let args = match invoke.message.payload() {
+                        tauri::ipc::InvokeBody::Json(v) => Some(v),
+                        _ => None,
+                    };
+                    security::gate::decide(invoke.message.command(), args)
+                };
+                match decision {
+                    Ok(()) => handler(invoke),
+                    Err(e) => {
+                        invoke.resolver.reject(e);
+                        true
+                    }
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building Jarvis Command Center")
         .run(|app, event| {

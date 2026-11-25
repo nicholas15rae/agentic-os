@@ -45,6 +45,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Agentic OS", version="4.0", lifespan=lifespan)
 
+# Command Center security layer: step-up (read-only by default) for trading / finance / settings
+# writes, the remote failsafe webhook and the companion mailbox (security_api.py). Added BEFORE
+# CORS so it sits inside it: a 423 still carries the CORS headers the webview needs to read it.
+import security_api  # noqa: E402
+
+app.add_middleware(security_api.StepUpMiddleware)
+app.include_router(security_api.router)
+
 # CORS for local dev
 DEV_ORIGIN_RE = r"^http://(localhost|127\.0\.0\.1):14[23][0-9]$"
 app.add_middleware(
@@ -164,6 +172,9 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
         # Stored files and Play Place previews are loaded by <img>/<iframe> (no headers possible);
         # their random ids act as capability URLs.
         capability = request.method == "GET" and (path.startswith("/api/cc/files/") or (path.startswith("/api/play-place/") and path.endswith("/preview")))
+        # The remote failsafe authenticates with its own HMAC signature (security_api.py), so a
+        # phone shortcut / n8n over NetBird needs only the remote-kill secret, not the gateway token.
+        capability = capability or (request.method == "POST" and path == "/api/security/emergency-kill")
         if loopback or capability or request.method == "OPTIONS" or not path.startswith("/api") or not self.TOKEN_FILE.exists():
             return await call_next(request)
         try:

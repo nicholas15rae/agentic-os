@@ -83,6 +83,21 @@ def reset_lock(confirm: str, actor: str, audit: AuditLog, d: Path | None = None)
     prev = read_lock(d)
     if prev is None:
         return {"locked": False, "note": "was not locked"}
+    if prev.get("requiresReconcile"):
+        # Locks written by the overseer / desk-cli (Dead Man's Switch, breakers, STATE_DRIFT) stay until the
+        # broker reconciles clean: run `desk-cli reconcile` (or `desk-cli unlock`) first. Typed RESET still required.
+        import desk_lock
+        import risk_policy
+
+        try:
+            pol = risk_policy.load_policy(risk_policy.policy_path(d or data_dir()))
+            max_age = pol["unlock"]["reconcile_max_age_s"]
+        except risk_policy.PolicyError:
+            max_age = risk_policy.DEFAULTS["unlock"]["reconcile_max_age_s"]
+        why = desk_lock.unlock_blockers(d or data_dir(), max_age)
+        if why:
+            audit.append("kill_switch_reset", {"previous": prev, "refused": why}, ref=str(prev.get("incidentId", "")), verdict="REFUSED", actor=actor)
+            raise PermissionError("this lock needs a passing reconcile first (`desk-cli reconcile`): " + "; ".join(why))
     lock_path(d).unlink()
     audit.append("kill_switch_reset", {"previous": prev}, ref=str(prev.get("incidentId", "")), verdict="UNLOCKED", actor=actor)
     return {"locked": False, "previous": prev}

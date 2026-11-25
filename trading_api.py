@@ -7,7 +7,7 @@ proxies its loopback HTTP surface. Auth is whatever server.py's
 ZeroTrustMiddleware already enforces for /api (loopback trusted, mesh needs the
 gateway token).
 
-Routes: status, desk view, intents (+approve/reject), mode, comms, and the
+Routes: status, desk view, intents (+approve/reject), mode, comms, chart bars, and the
 kill switch. The kill switch is fail-safe: if the bridge can't be reached the
 gateway writes the persistent lock itself (stdlib only, no ib_async) and then
 starts `trading/kill_switch.py` in the trading venv to cancel and flatten.
@@ -217,6 +217,28 @@ def trading_engines():
         raise _offline(e) from None
 
 
+@router.get("/bars")
+def trading_bars(symbol: str = "SPY", interval: str = "5m", range: str = "5d"):  # noqa: A002 — the UI's query name
+    """IBKR historical bars for the Trading view's "IBKR bars" chart (read-only, market-data client).
+    Yahoo-style inputs; the bridge maps them (trading/bars.py) and caches to stay inside IBKR pacing.
+    A bridge refusal (unsupported symbol, no permissions, pacing) comes back as 200 {ok: false, error}
+    so the chart can show the reason; only an unreachable bridge is a 503."""
+    qs = urllib.parse.urlencode({"symbol": symbol[:16], "interval": interval[:4], "range": range[:4]})
+    try:
+        return _bridge_get(f"/bars?{qs}", timeout=65.0)
+    except urllib.error.HTTPError as e:  # the bridge answered: pass its reason through
+        detail = e.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("detail", detail)
+        except ValueError:
+            pass
+        if e.code == 404 and detail == "Not Found":
+            detail = "the running trading bridge has no /bars route yet; restart it to load the IBKR bars feed"
+        return {"ok": False, "error": str(detail)[:400], "status": e.code, "symbol": symbol, "interval": interval, "range": range, "candles": []}
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
 @router.post("/engines/{path:path}")
 async def trading_engine_post(path: str, request: Request):
     """Engine A scan / watchlist / auto-scan, Engine B propose / guard. Engines only ever SUBMIT
@@ -375,12 +397,26 @@ async def trading_kill_switch(request: Request):
     dry = bool(body.get("dryRun"))
     reason = str(body.get("reason") or "manual kill switch")[:200]
     actor = _actor(request)
+    if not dry:
+        _security_audit_kill(reason, actor)
     try:
         return await asyncio.to_thread(_bridge_post, "/kill-switch", {"reason": reason, "dryRun": dry}, actor, timeout=45.0)
     except OFFLINE as e:
         if dry:
             raise _offline(e) from None
         return _gateway_failsafe_kill(reason, actor, e)
+
+
+def _security_audit_kill(reason: str, actor: str) -> None:
+    """CRITICAL entry in security_audit.jsonl + SMS, off the E-stop's path (never delays or fails it)."""
+    def run():
+        try:
+            import security_api  # noqa: PLC0415 — server.py imports it first; lazy to avoid a cycle
+            security_api.audit("trading_kill_switch", "critical", "success", "trading", f"gateway:{actor}", {"reason": reason})
+        except Exception as e:  # noqa: BLE001
+            print(f"[security] trading kill-switch audit failed: {type(e).__name__}")
+    import threading  # noqa: PLC0415
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _write_lock_failsafe(reason: str, actor: str, incident: str) -> dict:

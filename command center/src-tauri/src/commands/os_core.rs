@@ -990,6 +990,47 @@ pub struct RedactionRecord {
     pub replacements: Vec<Replacement>,
 }
 
+/// Parse os.json without ever silently resetting it. A single bad or out-of-date field used to
+/// make the whole parse fail, fall back to `OsConfig::default()` and save that over the file: the
+/// droplet went "OFFLINE (manual)" with its host reset to the placeholder, and every other
+/// setting reset too. Now each top-level section is kept if it parses and only a broken section
+/// falls back to its default; the original file is copied aside first so nothing is lost.
+pub fn parse_os_config_lenient(text: &str, path: &Path) -> OsConfig {
+    let err = match serde_json::from_str::<OsConfig>(text) {
+        Ok(c) => return c,
+        Err(e) => e,
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let backup = path.with_file_name(format!("os.json.invalid-{stamp}"));
+    let _ = std::fs::write(&backup, text);
+    let (cfg, dropped) = recover_os_config(text);
+    eprintln!("[os] os.json didn't parse ({err}); kept the readable sections, reset {dropped:?}; original saved as {}", backup.display());
+    cfg
+}
+
+/// Section-by-section recovery: start from the defaults and take each top-level key from `text`
+/// whenever the config still parses with it. Returns the config and the keys that were reset.
+pub fn recover_os_config(text: &str) -> (OsConfig, Vec<String>) {
+    let Ok(serde_json::Value::Object(file)) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (OsConfig::default(), vec!["(whole file: not JSON)".into()]);
+    };
+    let mut merged = serde_json::to_value(OsConfig::default()).unwrap_or_else(|_| serde_json::json!({}));
+    let mut dropped = Vec::new();
+    for (k, v) in file {
+        let Some(obj) = merged.as_object_mut() else { break };
+        let prev = obj.insert(k.clone(), v);
+        if serde_json::from_value::<OsConfig>(merged.clone()).is_err() {
+            let obj = merged.as_object_mut().expect("object");
+            match prev {
+                Some(p) => obj.insert(k.clone(), p),
+                None => obj.remove(&k),
+            };
+            dropped.push(k);
+        }
+    }
+    (serde_json::from_value(merged).unwrap_or_default(), dropped)
+}
+
 #[derive(Default)]
 pub struct OsState {
     config: RwLock<OsConfig>,
@@ -1016,10 +1057,7 @@ impl OsState {
         *self.path.write().unwrap() = Some(path.clone());
         *self.mirror.write().unwrap() = Some(repo.join("data").join("command-center").join("os-state.json"));
         let mut cfg = match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str::<OsConfig>(&s).unwrap_or_else(|e| {
-                eprintln!("[os] os.json invalid ({e}); using defaults");
-                OsConfig::default()
-            }),
+            Ok(s) => parse_os_config_lenient(&s, &path),
             Err(_) => OsConfig::default(),
         };
         // Self-alias keys ("tony", "dispatcher"…) fold into general before any back-fill.
@@ -1808,6 +1846,36 @@ pub fn gpu_slot_view(os: State<'_, OsState>) -> super::scheduler::SlotView {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn one_bad_section_does_not_reset_the_droplet() {
+        // A good droplet section next to a section of the wrong type (e.g. written by another
+        // version): the droplet must survive; only the broken section goes back to defaults.
+        let mut v = serde_json::to_value(OsConfig::default()).unwrap();
+        v["droplet"] = json!({ "enabled": true, "host": "100.84.1.36", "modelUrl": "http://100.84.1.36:8000/v1" });
+        v["compute"] = json!("not-an-object");
+        let text = v.to_string();
+        assert!(serde_json::from_str::<OsConfig>(&text).is_err(), "the fixture must not parse as a whole");
+        let (cfg, dropped) = recover_os_config(&text);
+        assert!(cfg.droplet.enabled);
+        assert_eq!(cfg.droplet.host, "100.84.1.36");
+        assert_eq!(cfg.droplet.model_url, "http://100.84.1.36:8000/v1");
+        assert_eq!(dropped, vec!["compute".to_string()]);
+    }
+
+    #[test]
+    fn lenient_parse_keeps_a_copy_of_the_bad_file() {
+        let dir = std::env::temp_dir().join(format!("os-lenient-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("os.json");
+        let text = r#"{"droplet":{"enabled":true,"host":"h"},"compute":7}"#;
+        let cfg = parse_os_config_lenient(text, &path);
+        assert!(cfg.droplet.enabled);
+        let copies: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("os.json.invalid-")).collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(std::fs::read_to_string(copies[0].path()).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn voice_defaults_clamp_and_mirror() {

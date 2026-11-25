@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSettings } from "@/stores/settings";
+import { isAndroidApp, useSettings } from "@/stores/settings";
 import { Waveform } from "@/features/voice/Waveform";
 import { VoiceOrb } from "@/features/voice/VoiceOrb";
 import { isTauri } from "@/lib/platform";
@@ -170,7 +170,9 @@ function GatewayCard() {
   return (
     <Card title="Gateway" hint="The Agentic OS server (server.py): sync hub for phone ↔ desktop, OCR, vault and backups. The desktop app starts it automatically. On your phone, open http(s)://<desktop NetBird IP>:8080/cc/ and Add to Home screen.">
       <Input className="font-mono" value={s.gatewayUrl} onChange={(e) => s.set({ gatewayUrl: e.target.value })} spellCheck={false} aria-label="Gateway URL" />
-      {!isTauri() && (
+      {/* The desktop app reaches the gateway on loopback (no token); the PWA and the Android
+          app come in over NetBird, where the network lock wants the token. */}
+      {(!isTauri() || isAndroidApp()) && (
         <Field label="Gateway token (network lock)" className="mt-2">
           <Input type="password" value={s.gatewayToken} onChange={(e) => s.set({ gatewayToken: e.target.value })} placeholder="From desktop → Settings → Integrations → New phone token" className="font-mono" autoComplete="off" />
           <p className="mt-1 text-xs text-ink-3">Not saved to this device — re-enter it each session so it never sits in plaintext storage.</p>

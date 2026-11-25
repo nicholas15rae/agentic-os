@@ -2321,7 +2321,10 @@ class HubWriteGuardTests(unittest.TestCase):
             r"\\localhost\c$\ai-hub2", r"\\localhost\d$\ai-hub-memory\scrolls", r"\\localhost\c$",
         ]
         for p in refused:
-            self.assertEqual(_fsutil.protected_root(p), self.HUB, p)
+            # C:\ai-hub may be a junction to G:\ai-hub (the 2026-11-23 move), in which case the
+            # resolved form matches G:\ai-hub first. Either label is a refusal; what matters is
+            # that the path maps to a protected root.
+            self.assertIn(_fsutil.protected_root(p), _fsutil.PROTECTED_WRITE_ROOTS, p)
             with self.assertRaises(HubWriteRefused, msg=p):
                 _fsutil.refuse_protected(p)
         for p in allowed:

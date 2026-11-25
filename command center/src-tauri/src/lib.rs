@@ -15,19 +15,23 @@ const TRAY_SHOW: &str = "tray-show";
 const TRAY_AWAY: &str = "tray-away";
 const TRAY_QUIT: &str = "tray-quit";
 
-/// Keeps the tray's Away Mode check item in step with the UI toggle.
+/// Keeps the tray's Away Mode check item in step with the UI toggle. Desktop only: mobile
+/// builds have no tray (tauri::menu is configured out there).
+#[cfg(desktop)]
 static TRAY_AWAY_ITEM: std::sync::OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
-/// The tray check mark follows Away Mode (called from `arbiter_set_away`).
-pub fn tray_set_away(_app: &tauri::AppHandle, on: bool) {
+/// The tray check mark follows Away Mode (called from `arbiter_set_away`). No-op on mobile.
+pub fn tray_set_away(_app: &tauri::AppHandle, _on: bool) {
+    #[cfg(desktop)]
     if let Some(item) = TRAY_AWAY_ITEM.get() {
-        let _ = item.set_checked(on);
+        let _ = item.set_checked(_on);
     }
 }
 
 fn show_main(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {
+        #[cfg(desktop)]
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -110,6 +114,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 /// Set by "Quit Engine Completely": the next close really exits.
 static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
     // First: a second launch hands over to this engine (one GPU arbiter per machine).
@@ -168,9 +173,18 @@ pub fn run() {
                 // (<resource dir>/rules; a mismatch latches fail-closed).
                 ops_audit::init(&dir);
                 quarantine::init(&dir);
+                #[cfg(desktop)]
                 match app.path().resource_dir() {
                     Ok(res) => integrity::init(res.join("rules")),
                     Err(e) => eprintln!("[integrity] no resource dir ({e}); automated purge / flag / ops writes stay halted"),
+                }
+                // Android: bundle resources stay inside the signed APK (an `asset://` URL that
+                // std::fs can't open), so the rules are written from the compiled-in copies to
+                // app-private storage, which no other app or agent can write to.
+                #[cfg(mobile)]
+                match integrity::materialize(&dir.join("rules")) {
+                    Ok(rules) => integrity::init(rules),
+                    Err(e) => eprintln!("[integrity] could not write rules ({e}); automated purge / flag / ops writes stay halted"),
                 }
                 // Away Mode survives a restart (an overnight run keeps going).
                 {
@@ -568,6 +582,23 @@ pub fn run() {
                     // Bounded by the 3 s network timeout inside the sync.
                     let _ = tauri::async_runtime::block_on(pipelines::run_gdrive_sync(&state, &bridge, &pipes, bridge::Actor::Scheduler, false, "app-exit"));
                 }
+            }
+            // Android: once the activity is destroyed, tao ends the process with
+            // std::process::exit. exit() runs C++ static destructors while Android's own
+            // RenderThread / hwuiTask threads are still drawing, and they abort on a destroyed
+            // mutex (FORTIFY, "app keeps stopping"). Our cleanup above is done and Tauri's
+            // cleanup only clears in-memory tables, so finish with _exit, which skips them.
+            #[cfg(target_os = "android")]
+            if let tauri::RunEvent::Exit = event {
+                use std::io::Write;
+                app.cleanup_before_exit();
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+                extern "C" {
+                    fn _exit(code: std::os::raw::c_int) -> !;
+                }
+                // SAFETY: bionic's _exit; nothing runs after it.
+                unsafe { _exit(0) }
             }
         });
 }

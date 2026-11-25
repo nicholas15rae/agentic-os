@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The gateway's HTTPS listener (8443, over NetBird) uses a certificate signed by the private
+  "Agentic OS Local CA", which is installed on the phone as a user CA. Android apps ignore user
+  CAs unless they opt in here; the WebView follows this config.
+-->
+<network-security-config>
+    <base-config>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

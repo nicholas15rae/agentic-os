@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "crossDomain": {
+    "minTermChars": 3,
+    "checkFilenames": true,
+    "onHit": "quarantine"
+  },
+  "notes": {
+    "extensions": ["md", "txt", "json"],
+    "maxBytes": 1048576
+  },
+  "secrets": {
+    "onHit": "refuse"
+  },
+  "webhook": {
+    "allowSchemes": ["https", "http"],
+    "timeoutSecs": 10,
+    "payload": "counts-only"
+  }
+}

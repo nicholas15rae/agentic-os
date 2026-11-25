@@ -281,6 +281,10 @@ pub async fn gateway_ensure(state: State<'_, DispatchState>) -> Result<GatewaySt
     if gateway_up(&state, &gw.url).await {
         return Ok(GatewayStatus { up: true, started: false, url: gw.url, detail: "running".into() });
     }
+    // The phone build can't run server.py; it only talks to the PC's gateway over NetBird.
+    if cfg!(mobile) {
+        return Ok(GatewayStatus { up: false, started: false, url: gw.url, detail: "down (phone build: the gateway runs on the PC)".into() });
+    }
     if !gw.autostart {
         return Ok(GatewayStatus { up: false, started: false, url: gw.url, detail: "down (autostart off)".into() });
     }

@@ -152,6 +152,20 @@ pub fn init(rules_dir: PathBuf) {
     }
 }
 
+/// Mobile: write the compiled-in rules into `dir` (app-private storage) and return it. The APK
+/// is signed, so the compiled-in copies are the trusted source; `init` then verifies them as usual.
+#[cfg_attr(desktop, allow(dead_code))]
+pub fn materialize(dir: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    for (name, bytes) in RULE_FILES {
+        let p = dir.join(name);
+        if std::fs::read(&p).ok().as_deref() != Some(bytes) {
+            std::fs::write(&p, bytes)?;
+        }
+    }
+    Ok(dir.to_path_buf())
+}
+
 /// The gate every Security / Garbage / quarantine / review / Operations write calls first.
 /// Not initialised = fail closed (in tests, `init_for_test` installs a verified copy).
 pub fn ensure() -> Result<Rules, String> {

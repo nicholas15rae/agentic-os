@@ -120,8 +120,20 @@ export interface SettingsState {
  */
 const defaultGateway = (): string => {
   if (typeof location !== "undefined" && location.pathname.startsWith("/cc")) return location.origin;
+  if (isAndroidApp()) return PHONE_GATEWAY;
   return "http://127.0.0.1:8080";
 };
+
+/**
+ * The Android (Tauri) build: 127.0.0.1 is the phone itself there, so it talks to the PC's gateway
+ * over NetBird HTTPS (8443; the phone trusts the Agentic OS Local CA). Override with
+ * VITE_PHONE_GATEWAY_URL at build time.
+ */
+const PHONE_GATEWAY: string = import.meta.env.VITE_PHONE_GATEWAY_URL || "https://100.84.91.149:8443";
+const LOOPBACK_GATEWAY = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/;
+export function isAndroidApp(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+}
 
 /** The full default state (everything but the `set` action) — also the fallback side of `deepMergeDefaults`. */
 const defaults: Omit<SettingsState, "set"> = {
@@ -240,7 +252,12 @@ export const useSettings = create<SettingsState>()(
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults
       // instead of leaving that field `undefined`. Runs on every load, not just on a version bump.
-      merge: (persisted, current) => deepMergeDefaults(persisted as DeepPartial<SettingsState> | null | undefined, current),
+      merge: (persisted, current) => {
+        const s = deepMergeDefaults(persisted as DeepPartial<SettingsState> | null | undefined, current);
+        // The phone app's first launches stored the desktop loopback default, which is the phone itself.
+        if (isAndroidApp() && LOOPBACK_GATEWAY.test(s.gatewayUrl)) s.gatewayUrl = PHONE_GATEWAY;
+        return s;
+      },
       // Never write the bearer token to disk. `deepMergeDefaults` backfills it from `defaults`
       // (empty string) on every load, same as any other field a persisted snapshot doesn't have.
       partialize: ({ gatewayToken: _gatewayToken, ...rest }) => rest,

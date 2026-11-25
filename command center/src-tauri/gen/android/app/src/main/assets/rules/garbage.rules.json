@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "neverHardDeleteBusinessData": true,
+  "sweep": {
+    "emptyFiles": true,
+    "tempLeftovers": true,
+    "tempMinAgeMinutes": 60,
+    "maxItemsPerSweep": 50
+  },
+  "purge": {
+    "requiresApproval": true,
+    "keepTombstone": true
+  },
+  "digest": {
+    "defaultThreshold": 10,
+    "defaultHour": 18
+  }
+}

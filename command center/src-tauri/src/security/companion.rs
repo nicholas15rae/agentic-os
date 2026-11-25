@@ -80,13 +80,29 @@ fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())
 }
 
-/// Can the companion path be used right now (enabled, paired, gateway answering)?
+/// The phone polls the mailbox every 3 s while its app is open; older than this = not there.
+pub const PHONE_SEEN_WITHIN_S: f64 = 30.0;
+
+/// Can the companion path be used right now: enabled, paired, AND the phone itself checked the
+/// gateway mailbox recently. The desktop reaching its own loopback gateway proves nothing about
+/// the phone; counting that as "available" blocked the PIN-only fallback while the phone was
+/// offline (PIN refused with SECOND_FACTOR_REQUIRED and no phone to approve: a deadlock).
 pub async fn reachable(gateway: &str, dir: &Path, enabled: bool) -> bool {
     if !enabled || pair_key(dir).is_none() {
         return false;
     }
     let Ok(c) = client(Duration::from_millis(1500)) else { return false };
-    c.get(format!("{}/api/security/state", gateway.trim_end_matches('/'))).send().await.is_ok_and(|r| r.status().is_success())
+    let Ok(r) = c.get(format!("{}/api/security/state", gateway.trim_end_matches('/'))).send().await else { return false };
+    if !r.status().is_success() {
+        return false;
+    }
+    let seen = r.json::<serde_json::Value>().await.ok().and_then(|v| v.get("companionSeenAt").and_then(|x| x.as_f64())).unwrap_or(0.0);
+    phone_recent(seen, super::now())
+}
+
+/// `seen` = the gateway's `companionSeenAt` (0 = never since it started).
+pub fn phone_recent(seen: f64, now: f64) -> bool {
+    seen > 0.0 && now - seen <= PHONE_SEEN_WITHIN_S
 }
 
 /// Post a new approval request; returns `(id, expiresAt)`.
@@ -174,4 +190,19 @@ fn forget(id: &str) {
 pub fn sign(dir: &Path, id: &str, nonce: &str, device: &str) -> Result<String, String> {
     let key = device_key(dir).ok_or("COMPANION_UNPAIRED: enter the pairing key from `gabagool-cli pair-companion` first")?;
     Ok(super::token::companion_sign(&key, id, nonce, device))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn companion_counts_only_when_the_phone_polled_recently() {
+        // Gateway up but the phone never polled (offline / no token): not a usable factor.
+        assert!(!phone_recent(0.0, 1000.0));
+        // Polled 5 s ago: usable.
+        assert!(phone_recent(995.0, 1000.0));
+        // Last poll older than the window: the phone is gone, the PIN fallback applies.
+        assert!(!phone_recent(1000.0 - PHONE_SEEN_WITHIN_S - 1.0, 1000.0));
+    }
 }

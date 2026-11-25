@@ -514,7 +514,11 @@ def security_state():
     d = sec_dir()
     s = read_state(d)
     cfg = load_config(d)
-    return {"enabled": cfg.get("enabled", True) and _key(d) is not None, "hardLocked": bool(s.get("hardLocked")), "epoch": int(s.get("epoch") or 0)}
+    return {"enabled": cfg.get("enabled", True) and _key(d) is not None, "hardLocked": bool(s.get("hardLocked")), "epoch": int(s.get("epoch") or 0),
+            # When the paired phone last checked the mailbox (0 = not since the gateway started).
+            # The desktop counts the companion as a usable second factor only while this is fresh,
+            # so a phone that can't reach the gateway doesn't block the PIN-only fallback.
+            "companionSeenAt": _COMPANION_SEEN["at"]}
 
 
 _SEEN_SIGS: dict[str, float] = {}
@@ -601,6 +605,8 @@ async def emergency_kill(request: Request):
 # Companion mailbox: id → request (+ response). In memory: requests live ≤ 10 min.
 _COMPANION: dict[str, dict[str, Any]] = {}
 _COMPANION_LOCK = threading.Lock()
+# Last time a non-loopback client (the phone) polled /companion/pending; reported by /state.
+_COMPANION_SEEN: dict[str, float] = {"at": 0.0}
 
 
 def _gc():
@@ -631,8 +637,10 @@ async def companion_request(request: Request):
 
 
 @router.get("/companion/pending")
-def companion_pending():
+def companion_pending(request: Request):
     now = _now()
+    if not _loopback((request.client.host if request.client else "") or ""):
+        _COMPANION_SEEN["at"] = now
     with _COMPANION_LOCK:
         _gc()
         return {"requests": [{k: v[k] for k in ("id", "nonce", "device", "purpose", "expiresAt")} for v in _COMPANION.values() if v["state"] == "pending" and now <= v["expiresAt"]]}

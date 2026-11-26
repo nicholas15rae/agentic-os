@@ -30,6 +30,9 @@ $INSTANCE2_PORT     = 1236
 $DOCKER_DESKTOP_EXE = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
 $KOKORO_HEALTH_URL  = 'http://127.0.0.1:8880/health'
 $N8N_HEALTH_URL     = 'http://127.0.0.1:5678/healthz'
+$TWS_EXE            = 'C:\Jts\tws.exe'      # IBKR Trader Workstation; you log in to the PAPER account yourself
+$TWS_API_PORT       = 7497                  # paper API port the trading bridge dials (live 7496 is never used)
+$TWS_AUTOSTART      = $true                 # the logon task and the launcher open TWS when it isn't running
 
 $AI_STACK_CONFIG = 'G:\ai-startup\ai-stack.config.ps1'
 if (Test-Path $AI_STACK_CONFIG) { . $AI_STACK_CONFIG }
@@ -147,6 +150,15 @@ function Get-HttpCode([string]$url, [int]$timeoutSec = 4) {
         if ($resp -and $resp.StatusCode) { return [int]$resp.StatusCode }
         return 0
     }
+}
+
+# TWS is an install4j launcher: its processes run from the install folder (tws.exe, or its bundled JRE).
+function Get-TwsProcess {
+    $dir = Split-Path $TWS_EXE -Parent
+    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) -and
+        $_.Name -notmatch '^(uninstall|i4jdel|updater|restarter)'
+    })
 }
 
 # Kill a process and its children. If its parent is a launcher for the same command line

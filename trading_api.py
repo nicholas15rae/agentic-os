@@ -181,6 +181,18 @@ def trading_signals_ingest(request: Request):
 
 
 ENGINE_POSTS = {"a/scan", "a/watchlist", "a/auto", "b/propose", "b/guard"}
+# Engine R (deterministic rules) + its after-hours analyst. Under /engines/ on purpose: the security layer's
+# existing "POST /api/trading/engines/*" rule puts every one of these (approving a rule change, changing the
+# hard limits, scans) behind the PIN step-up for UI and mesh clients, with no new security config.
+RULE_POSTS = {"r/scan", "r/enable", "r/evaluate", "r/propose", "r/limits", "r/analyst", "r/analyst-enable"}
+RULE_SLOW = {"r/analyst", "r/evaluate"}  # model calls (GPU wait) / ~3 years of IBKR daily bars
+
+
+def _rule_change_post(path: str) -> bool:
+    """r/changes/<id>/approve | reject"""
+    parts = path.split("/")
+    return (len(parts) == 4 and parts[:2] == ["r", "changes"] and parts[3] in ("approve", "reject")
+            and 1 <= len(parts[2]) <= 64 and all(c.isalnum() or c in "-_" for c in parts[2]))
 INTEL_POSTS = {"discord/import", "discord/ingest", "discord/poll", "outcomes/score", "journal/pass"}
 INTEL_GETS = {"", "discord/search", "leaderboards", "journal"}
 
@@ -243,13 +255,35 @@ def trading_bars(symbol: str = "SPY", interval: str = "5m", range: str = "5d"): 
 async def trading_engine_post(path: str, request: Request):
     """Engine A scan / watchlist / auto-scan, Engine B propose / guard. Engines only ever SUBMIT
     intents to the desk; the Security Detail and the execution mode decide what happens next."""
-    allowed = path in ENGINE_POSTS or (path.startswith("a/watchlist/") and path.endswith("/remove") and path.count("/") == 3)
+    allowed = (path in ENGINE_POSTS or path in RULE_POSTS or _rule_change_post(path)
+               or (path.startswith("a/watchlist/") and path.endswith("/remove") and path.count("/") == 3))
     if not allowed:
         raise HTTPException(404, "unknown engine action")
     body = await _json(request)
     try:
-        # Scans quote many symbols and option chains: give them time.
-        return await asyncio.to_thread(_bridge_post, f"/engines/{path}", body, _actor(request), timeout=120.0)
+        # Scans quote many symbols and option chains: give them time. The analyst may wait for the GPU twice.
+        return await asyncio.to_thread(_bridge_post, f"/engines/{path}", body, _actor(request), timeout=600.0 if path in RULE_SLOW else 120.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+@router.get("/rules")
+def trading_rules():
+    """Engine R: active rule version, hard limits, pending rule changes, last scan, last 70/30 evaluation, analyst."""
+    try:
+        return _bridge_get("/rules", timeout=8.0)
+    except OFFLINE as e:
+        raise _offline(e) from None
+
+
+@router.get("/rules/{view}")
+def trading_rules_view(view: str, request: Request):
+    """evaluation (70/30 report) · log (every trade and rule change, with reasons) · changes (?status=pending)."""
+    if view not in ("evaluation", "log", "changes"):
+        raise HTTPException(404, "unknown rules view")
+    qs = urllib.parse.urlencode([(k, v[:20]) for k, v in request.query_params.items() if k in ("limit", "status")])
+    try:
+        return _bridge_get(f"/rules/{view}{'?' + qs if qs else ''}", timeout=8.0)
     except OFFLINE as e:
         raise _offline(e) from None
 
@@ -276,8 +310,10 @@ async def trading_health_check(request: Request):
                             "detail": f"trading bridge not reachable on 127.0.0.1:{_bridge_port()} ({type(e).__name__}) - restart the gateway or run trading/ibkr_bridge.py"}]}
 
 
-# ── Trading Agent (Phase 5) ──────────────────────────────────────────────────
-# The agent runs in the bridge; its model call happens HERE, because the gateway is where the
+# ── Trading Agent (Phase 5) → after-hours analyst ───────────────────────────
+# The LLM no longer trades (Engine R does); /agent/think now serves trading/analyst.py, which calls it only
+# outside trading hours and only to file PENDING rule-change suggestions.
+# The analyst runs in the bridge; its model call happens HERE, because the gateway is where the
 # desktop's GPU baton is visible (command_center_api.gpu_busy). It never preempts Tony: wait up
 # to `waitS` for the desktop to release the GPU, otherwise report "skipped" and let the agent
 # try again at its next slot. It never JIT-loads a model next to Tony's either.

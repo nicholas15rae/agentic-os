@@ -30,7 +30,9 @@ LIQUID = {"adv_shares": 60_000_000.0, "adv_value": 3.0e10, "volatility_pct": 15.
 
 
 def raw_intent(**over):
-    d = {"intent_id": "intent-0001", "source": "trading_agent", "asset_class": "etf", "symbol": "SPY",
+    # Default source "manual": the LLM's "trading_agent" source is refused by the desk outright (desk.LLM_SOURCES),
+    # so desk-mechanics tests use a source that can still be evaluated; agent-scope tests pass source="trading_agent".
+    d = {"intent_id": "intent-0001", "source": "manual", "asset_class": "etf", "symbol": "SPY",
          "action": "BUY", "quantity": 10, "order_type": "LMT", "limit_price": 500.0, "stop_loss": 495.0,
          "take_profit": 510.0, "thesis": "test", "citations": ["rag:1"]}
     d.update(over)
@@ -42,7 +44,7 @@ def ctx(**over):
                 equity_base=100_000.0, daily_pnl_base=0.0, base_currency="CAD", fx_to_base={"USD": 1.4},
                 positions=[], open_orders=[], quote={"bid": 499.95, "ask": 500.05, "last": 500.0},
                 market_stats=dict(LIQUID), session_open=True, seen_intent=False, recent=[], orders_today=0,
-                # raw_intent() comes from the Trading Agent: the desk scopes it to the watchlist (Phase 5).
+                # The desk scopes a Trading Agent intent to the watchlist (Phase 5; only for source trading_agent).
                 allowed_symbols={"SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "DBC"})
     base.update(over)
     return Context(**base)
@@ -392,7 +394,7 @@ class DeskTests(unittest.TestCase):
 
     def test_halted_agent_blocked_but_manual_allowed(self):
         self.desk._save_state(agentHalted=True)
-        self.assertEqual(self.submit()["status"], "rejected")
+        self.assertEqual(self.submit(source="rule_engine")["status"], "rejected")   # autonomous sources stop while halted
         self.assertEqual(self.submit(intent_id="intent-0003", source="manual", symbol="QQQ")["status"], "hypothetical")
 
 

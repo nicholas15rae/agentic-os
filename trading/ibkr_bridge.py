@@ -220,10 +220,17 @@ def create_app(bridge: Bridge, desk: Any = None):
 
         tasks.append(asyncio.create_task(healthcheck.morning_loop(desk)))
         from agent import TradingAgent
+        from analyst import Analyst
+        from rule_engine import RuleEngine
 
         if desk.agent is None:
-            desk.agent = TradingAgent(desk)
-        tasks.append(asyncio.create_task(desk.agent.loop()))
+            desk.agent = TradingAgent(desk)  # retired as a trader: kept for its run history; its loop is NOT started
+        if desk.rules is None:
+            desk.rules = RuleEngine(desk)
+        if desk.analyst is None:
+            desk.analyst = Analyst(desk, desk.rules)
+        tasks.append(asyncio.create_task(desk.rules.loop()))     # Engine R: deterministic, CPU, the 15:45 ET scan
+        tasks.append(asyncio.create_task(desk.analyst.loop()))   # the LLM: after the close only, pending suggestions only
         import discord_live
 
         tasks.append(asyncio.create_task(discord_live.poll_forever(desk.discord, desk.rag, desk.watchlist.symbols, desk.discord_status)))
@@ -261,18 +268,103 @@ def create_app(bridge: Bridge, desk: Any = None):
 
     @app.post("/agent/run")
     async def agent_run(req: Request):
-        """Run now. submit=false is a dry run: think + evaluate in memory, nothing stored as an intent."""
-        b = await body(req)
-        if desk.agent is None:
-            raise HTTPException(503, "agent not started")
-        return await desk.agent.run("manual", submit=b.get("submit", True) is not False)
+        """Retired: the LLM no longer proposes trades. Engine R executes; the analyst runs after the close."""
+        raise HTTPException(410, "the Trading Agent is retired as a trader: Engine R executes rules "
+                                 "(POST /engines/r/scan); the LLM analyst runs after the close (POST /engines/r/analyst)")
 
     @app.post("/agent/enable")
     async def agent_enable(req: Request):
+        raise HTTPException(410, "the Trading Agent is retired as a trader: use POST /engines/r/enable or /engines/r/analyst-enable")
+
+    # ── Engine R (deterministic rules) + the after-hours analyst ─────
+    def rules_engine():
+        if desk.rules is None:
+            raise HTTPException(503, "Engine R not started")
+        return desk.rules
+
+    def rule_call(fn, *a, **kw):
+        import rules as rl
+
+        try:
+            return fn(*a, **kw)
+        except PermissionError as e:
+            raise HTTPException(403, str(e)) from None
+        except rl.RuleError as e:
+            raise HTTPException(409, str(e)) from None
+
+    @app.get("/rules")
+    def rules_view():
+        return {**rules_engine().view(), "analyst": desk.analyst.view() if desk.analyst else None}
+
+    @app.get("/rules/evaluation")
+    def rules_evaluation():
+        return rules_engine().last_evaluation() or {"at": None, "note": "no evaluation yet: POST /engines/r/evaluate"}
+
+    @app.get("/rules/log")
+    def rules_log(limit: int = 100):
+        return {"rows": rules_engine().log(max(1, min(limit, 500)))}
+
+    @app.get("/rules/changes")
+    def rules_changes(status: str = "", limit: int = 30):
+        return {"changes": rules_engine().store.changes(status or None, limit)}
+
+    @app.post("/engines/r/scan")
+    async def rules_scan(req: Request):
+        """Scan now (respects every gate and hard limit). submit=false: dry run, nothing sent to the desk."""
         b = await body(req)
-        if desk.agent is None:
-            raise HTTPException(503, "agent not started")
-        return desk.agent.set_enabled(bool(b.get("enabled")), actor(req))
+        return await rules_engine().scan("manual", submit=b.get("submit", True) is not False)
+
+    @app.post("/engines/r/enable")
+    async def rules_enable(req: Request):
+        b = await body(req)
+        return rules_engine().set_enabled(bool(b.get("enabled")), actor(req))
+
+    @app.post("/engines/r/evaluate")
+    async def rules_evaluate(req: Request):
+        b = await body(req)
+        return await rules_engine().evaluate(refresh=b.get("refresh", True) is not False, actor=actor(req))
+
+    @app.post("/engines/r/propose")
+    async def rules_propose(req: Request):
+        """Nic's own proposal: scored on the same 70/30 cutoff and stored PENDING like an analyst suggestion."""
+        import rules as rl
+
+        b = await body(req)
+        try:
+            return await rules_engine().propose(b.get("params"), source="manual", actor=actor(req), rationale=str(b.get("reason") or ""))
+        except rl.RuleError as e:
+            raise HTTPException(409, str(e)) from None
+
+    @app.post("/engines/r/changes/{change_id}/{verb}")
+    async def rules_decide(change_id: str, verb: str, req: Request):
+        b = await body(req)
+        store = rules_engine().store
+        if verb == "approve":
+            return rule_call(store.approve, change_id, confirm=str(b.get("confirm", "")), actor=actor(req), note=str(b.get("note") or ""))
+        if verb == "reject":
+            return rule_call(store.reject, change_id, actor=actor(req), note=str(b.get("note") or ""))
+        raise HTTPException(404, "unknown action")
+
+    @app.post("/engines/r/limits")
+    async def rules_limits(req: Request):
+        b = await body(req)
+        lim = rule_call(rules_engine().store.set_limits, b.get("limits"), str(b.get("confirm", "")), str(b.get("reason") or ""), actor(req))
+        return {"ok": True, "limits": lim.to_dict()}
+
+    @app.post("/engines/r/analyst")
+    async def rules_analyst(req: Request):
+        """Run the analyst now. Refused inside trading hours (weekdays 08:45-16:30 New York)."""
+        b = await body(req)
+        if desk.analyst is None:
+            raise HTTPException(503, "analyst not started")
+        return await desk.analyst.run("manual", force_suggest=bool(b.get("suggest", True)))
+
+    @app.post("/engines/r/analyst-enable")
+    async def rules_analyst_enable(req: Request):
+        b = await body(req)
+        if desk.analyst is None:
+            raise HTTPException(503, "analyst not started")
+        return desk.analyst.set_enabled(bool(b.get("enabled")), actor(req))
 
     @app.post("/health/check")
     async def health_check(req: Request):

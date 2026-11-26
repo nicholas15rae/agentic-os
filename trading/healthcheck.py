@@ -38,7 +38,8 @@ ORDER = {PASS: 0, SKIP: 0, WARN: 1, FAIL: 2}
 NY = ZoneInfo("America/New_York")
 
 # name -> max seconds since the loop's last iteration before it counts as stalled
-LOOP_LIMITS = {"drawdown_monitor": 60, "options_guard": 240, "auto_scan": 120, "intel": 240, "agent": 120}
+# "agent" is gone: the LLM Trading Agent loop is retired. Engine R scans on the CPU; the analyst ticks every minute.
+LOOP_LIMITS = {"drawdown_monitor": 60, "options_guard": 240, "auto_scan": 120, "intel": 240, "rule_engine": 120, "analyst": 300}
 FRESH_TELEMETRY_S = 20
 
 
@@ -329,29 +330,42 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
         if getattr(desk, "agent", None) is None:
             return SKIP, "agent not started in this process"
         m = await asyncio.to_thread(model_probe)
+        # Only the after-hours analyst uses the model now (execution is Engine R, CPU only): a missing model
+        # delays the analyst, it never stops trading, so it is a WARN, not a FAIL.
         if not m.get("reachable"):
-            return FAIL, f"LM Studio unreachable: {m.get('error', '')}"
+            return WARN, f"LM Studio unreachable (the after-hours analyst will skip): {m.get('error', '')}"
         if not m.get("loaded"):
-            return FAIL, f"{m.get('model')} is not loaded in LM Studio (loaded: {', '.join(m.get('loadedModels') or []) or 'none'})"
+            return WARN, f"{m.get('model')} is not loaded in LM Studio (loaded: {', '.join(m.get('loadedModels') or []) or 'none'}); the analyst will skip"
         return PASS, f"{m.get('model')} loaded" + (" · GPU held by the desktop right now" if (m.get("gpu") or {}).get("active") else "")
     await step("agent", "agent_model", agent_model)
 
-    def agent_runs():
-        ag = getattr(desk, "agent", None)
-        if ag is None:
-            return SKIP, "agent not started in this process"
-        v = ag.view()
-        runs = [r for r in v["runs"] if r["kind"] != "manual"][:3]
-        state = f"{'on' if v['enabled'] else 'OFF'} · next {v['nextSlot'] or 'n/a'}" + (f" · blocked: {v['blocked']}" if v["blocked"] else "")
-        if not runs:
-            return PASS, f"{state} · no scheduled runs yet"
-        bad = [r for r in runs if r["status"] in ("no_json", "skipped")]
-        last = runs[0]
-        detail = f"{state} · last {last['kind']} run {last['status']}" + (f" ({last['detail'][:120]})" if last.get("detail") else "")
-        if len(bad) == len(runs) and len(runs) >= 2:
-            return WARN, f"the last {len(runs)} scheduled runs produced nothing — {detail}"
+    def rule_engine():
+        eng = getattr(desk, "rules", None)
+        if eng is None:
+            return SKIP, "Engine R not started in this process"
+        v = eng.view()
+        if v["limitsError"]:
+            return FAIL, f"hard limits invalid: {v['limitsError']}"
+        last = v["lastScan"] or {}
+        state = (f"{'on' if v['enabled'] else 'OFF'} · rules v{v['active']['version']} · {v['entriesToday']} entr(y/ies) today"
+                 f" · {len(v['pending'])} pending change(s)" + (f" · blocked: {v['blocked']}" if v["blocked"] else ""))
+        detail = state + (f" · last scan {last.get('status')}" + (f" ({str(last.get('detail'))[:100]})" if last.get("detail") else "") if last else "")
         return PASS, detail
-    await step("agent", "agent_runs", agent_runs)
+    await step("agent", "rule_engine", rule_engine)
+
+    def analyst_runs():
+        an = getattr(desk, "analyst", None)
+        if an is None:
+            return SKIP, "analyst not started in this process"
+        runs = an.runs(3)
+        if not runs:
+            return PASS, f"{'on' if an.settings()['enabled'] else 'OFF'} · no runs yet (after the close only)"
+        last = runs[0]
+        detail = f"last run {last['day']} {last['status']}" + (f" ({str(last['detail'])[:120]})" if last.get("detail") else "")
+        if len(runs) >= 3 and all(r["status"] == "skipped" for r in runs):
+            return WARN, f"the last {len(runs)} analyst runs were skipped — {detail}"
+        return PASS, detail
+    await step("agent", "analyst", analyst_runs)
 
     # 8. Background loops ──────────────────────────────────────────────
     def loops():

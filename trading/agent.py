@@ -1,4 +1,13 @@
-"""The Trading Agent — Phase 5. The LLM judgment layer on top of the existing desk.
+"""The Trading Agent — Phase 5. RETIRED AS A TRADER (Nov 2026).
+
+The LLM no longer makes live buy/sell decisions: the bridge does not start this loop any more, its
+/agent/run and /agent/enable routes refuse, and the desk refuses every intent with source
+"trading_agent" (desk.LLM_SOURCES). Deterministic execution is Engine R (rule_engine.py); the model
+is now the after-hours analyst (analyst.py), which only files PENDING rule-change suggestions.
+This module stays for its run history (the status card), its gateway_think() client (reused by the
+analyst) and its tests. The original design, for reference:
+
+The LLM judgment layer on top of the existing desk.
 
   slots / events ─► run gate ─► context pack (agent_context) ─► local model (gateway /agent/think,
   waits for Tony's GPU turn) ─► validate JSON ─► OrderIntents (source trading_agent) ─► desk.submit
@@ -46,6 +55,8 @@ GATEWAY = "http://127.0.0.1:8080"
 AGENT_MODEL = (os.environ.get("TRADING_AGENT_MODEL") or "qwen/qwen3.5-9b").strip()
 ADVISORY_DAYS = 7
 ETF_CLASSES = {"etf", "commodity_etf"}
+RETIRED = ("retired as a trader: the LLM is an after-hours analyst that files pending rule-change suggestions; "
+           "Engine R (deterministic rules) executes")
 
 RUNS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -448,7 +459,7 @@ class TradingAgent:
 
     def view(self) -> dict[str, Any]:
         s = self.settings()
-        return {"enabled": s["enabled"], "blocked": self.blocked("slot"), "nextSlot": self.next_slot(),
+        return {"retired": RETIRED, "enabled": s["enabled"], "blocked": self.blocked("slot"), "nextSlot": self.next_slot(),
                 "eventsToday": len([1 for k, _ in self._runs_today(("event",)) if k == "event"]), "eventMax": EVENT_MAX_PER_DAY,
                 "runs": self.runs(10), "leaderboard": self.desk.calls.leaderboard(5), "callCounts": self.desk.calls.counts(),
                 "config": self.config()}

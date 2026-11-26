@@ -139,10 +139,11 @@ class ValidateTests(unittest.TestCase):
 
 class ScopeGateTests(unittest.TestCase):
     def test_agent_scope(self):
-        ok = evaluate(parse_intent(raw_intent()), ctx())
+        ag_intent = lambda **o: raw_intent(source="trading_agent", **o)  # noqa: E731
+        ok = evaluate(parse_intent(ag_intent()), ctx())
         self.assertNotIn("agent_scope", {c["name"] for c in ok.checks if not c["ok"]})
-        for c, raw in [(ctx(allowed_symbols={"GLD"}), raw_intent()), (ctx(allowed_symbols=None), raw_intent()),
-                       (ctx(), raw_intent(action="SELL", limit_price=500.0, stop_loss=505.0, take_profit=490.0))]:
+        for c, raw in [(ctx(allowed_symbols={"GLD"}), ag_intent()), (ctx(allowed_symbols=None), ag_intent()),
+                       (ctx(), ag_intent(action="SELL", limit_price=500.0, stop_loss=505.0, take_profit=490.0))]:
             d = evaluate(parse_intent(raw), c)
             self.assertIn("agent_scope", {x["name"] for x in d.checks if not x["ok"]})
         manual = evaluate(parse_intent(raw_intent(source="manual")), ctx(allowed_symbols=None))
@@ -174,20 +175,24 @@ class AgentRunTests(unittest.TestCase):
         desk.agent = ag.TradingAgent(desk, think_fn=think, clock=lambda: self.now)
         return desk
 
-    def test_slot_run_submits_through_gate_in_advisory(self):
+    def test_slot_run_can_no_longer_place_trades(self):
+        """Retired as a trader: even a direct run's proposals are refused by the desk (any mode), never sent."""
         desk = self.make()
+        desk.set_mode("FULL_AUTO", "t", confirm=True)
         rec = asyncio.run(desk.agent.run("slot", run_id="20261124-1000"))
         self.assertEqual(rec["status"], "done", rec)
-        self.assertEqual(rec["results"][0]["status"], "hypothetical")   # ADVISORY: nothing sent
+        self.assertEqual(rec["results"][0]["status"], "rejected")
+        self.assertIn("analyst only", rec["results"][0]["error"])
         self.assertEqual(self.ex.placed, [])
+        self.assertEqual(desk.audit.tail(50, kinds=("llm_trade_refused",))[0]["ref"], "ag-20261124-1000-GLD")
+        with desk._conn() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM intents").fetchone()[0], 0)        # not even a hypothetical row
         self.assertEqual(desk.calls.counts(), {"trading_agent": 1, "baseline_spy": 1})
         self.assertIn("UNTRUSTED_DATA", self.think_calls[0][1])
         self.assertIn("LIVE bid 729.90 / ask 730.10", self.think_calls[0][1])  # priced off the live market, not the daily close
         self.assertIn("more than 1.5% away from the live mid", self.think_calls[0][0])
         self.assertEqual(desk.agent.runs(1)[0]["status"], "done")
-        self.assertTrue(desk.rag.query("market view", touch=False))  # market view noted (desk_note)
-        rec2 = asyncio.run(desk.agent.run("slot", run_id="20261124-1000"))
-        self.assertEqual(rec2["results"][0]["status"], "rejected")     # same slot again: idempotent ids
+        self.assertTrue(desk.agent.view()["retired"])
 
     def test_dry_run_evaluates_but_stores_nothing(self):
         desk = self.make()

@@ -1,9 +1,10 @@
 """Trading desk: execution modes, the SEMI_AUTO approval queue, the drawdown
 monitor, Financer comms and the kill switch — wired around the Security Detail.
 
-Flow for every OrderIntent (from the Trading Agent, an engine, or manual):
+Flow for every OrderIntent (from Engine R, Engine A / B, or manual):
 
-  parse_intent (strict schema) ─► build Context from live telemetry + quote
+  parse_intent (strict schema) ─► LLM-sourced ("trading_agent")? refused, audited llm_trade_refused
+  ─► build Context from live telemetry + quote
   ─► security_detail.evaluate ─► audit "intent_evaluated" (every verdict)
   ─► REJECTED: stop.  (drawdown breach also trips the kill switch)
   ─► ADVISORY:  logged as a hypothetical trade, never sent
@@ -53,6 +54,12 @@ log = logging.getLogger("trading.desk")
 
 MODES = ("ADVISORY", "SEMI_AUTO", "FULL_AUTO")
 ACTIVE = ("pending_approval", "submitted", "hypothetical")
+# The LLM never places trades or makes live buy/sell decisions: an intent from it is refused before evaluation,
+# in every mode, and a legacy pending card from it can't be approved. Execution is Engine R (rule_engine.py).
+LLM_SOURCES = ("trading_agent",)
+# Autonomous sources stop while the agent/engines are halted (kill switch, Financer halt, overseer).
+AUTONOMOUS_SOURCES = ("trading_agent", "rule_engine")
+LLM_REFUSAL = "LLM-sourced intents never reach the broker: the model is an analyst only (Engine R executes rules)"
 MONITOR_S = 10.0
 OPTIONS_GUARD_S = 60.0
 
@@ -142,7 +149,9 @@ class Desk:
         self.discord_status: dict[str, Any] = {}
         # Phase 5: the agent's / Engine A's calls + SPY baseline, scored like Discord calls.
         self.calls = CallBook(self.d / "desk.db")
-        self.agent: Any = None  # set by the bridge (agent.TradingAgent)
+        self.agent: Any = None  # set by the bridge (agent.TradingAgent; retired as a trader, kept for its run history)
+        self.rules: Any = None  # set by the bridge (rule_engine.RuleEngine: Engine R, the only autonomous executor)
+        self.analyst: Any = None  # set by the bridge (analyst.Analyst: the LLM, outside trading hours, suggestions only)
         self.last_call_scoring: dict[str, Any] | None = None
         self.last_scoring: dict[str, Any] | None = None
         # Background-loop heartbeats (name -> last iteration, epoch s) for the health check.
@@ -324,6 +333,9 @@ class Desk:
             self.audit.append("intent_schema_rejected", {"error": str(e), "raw": raw if isinstance(raw, dict) else str(raw)[:500]},
                               ref=str(ref)[:64], verdict="REJECTED", actor=actor)
             return {"ok": False, "status": "rejected", "error": f"schema: {e}"}
+        if intent.source in LLM_SOURCES:
+            self.audit.append("llm_trade_refused", {"intent": intent.to_dict(), "why": LLM_REFUSAL}, ref=intent.intent_id, verdict="REFUSED", actor=actor)
+            return {"ok": False, "status": "rejected", "error": LLM_REFUSAL}
         async with self._lock:
             ctx = await self.build_context(intent)
             decision = evaluate(intent, ctx)
@@ -336,9 +348,9 @@ class Desk:
                 if not ctx.seen_intent:
                     self._put(intent, "rejected", decision)
                 return {"ok": False, "status": "rejected", "decision": decision.to_dict()}
-            if st["agentHalted"] and intent.source == "trading_agent":
-                self._put(intent, "rejected", decision, {"error": "agent halted"})
-                return {"ok": False, "status": "rejected", "error": "the Trading Agent is halted", "decision": decision.to_dict()}
+            if st["agentHalted"] and intent.source in AUTONOMOUS_SOURCES:
+                self._put(intent, "rejected", decision, {"error": "autonomous trading halted"})
+                return {"ok": False, "status": "rejected", "error": "autonomous trading is halted", "decision": decision.to_dict()}
             if st["mode"] == "ADVISORY":
                 self._put(intent, "hypothetical", decision)
                 return {"ok": True, "status": "hypothetical", "decision": decision.to_dict()}
@@ -399,6 +411,11 @@ class Desk:
                 self.audit.append("approval", {"note": "expired"}, ref=intent_id, verdict="EXPIRED", actor=actor)
                 return {"ok": False, "status": "expired"}
             intent = parse_intent(row["intent"])
+            if intent.source in LLM_SOURCES:  # a card queued before the LLM was retired as a trader
+                self._set_status(intent_id, "rejected", {"error": LLM_REFUSAL})
+                self.audit.append("llm_trade_refused", {"intent": intent.to_dict(), "why": LLM_REFUSAL, "path": "approve"}, ref=intent_id,
+                                  verdict="REFUSED", actor=actor)
+                return {"ok": False, "status": "rejected", "error": LLM_REFUSAL}
             ctx = await self.build_context(intent, exclude_self=True)
             decision = evaluate(intent, ctx)
             self.audit.append("approval", {"decision": decision.to_dict()}, ref=intent_id, verdict=decision.verdict, actor=actor)
@@ -824,6 +841,8 @@ class Desk:
             "signals": {"rag": self.rag.stats(), "quantgress": quantgress_last_report(self.d)},
             "engines": self.engines_view(),
             "agent": self.agent.view() if self.agent else None,
+            "rules": self.rules.view() if self.rules else None,
+            "analyst": self.analyst.view() if self.analyst else None,
         }
 
     def signals(self, q: str = "", ticker: str | None = None, k: int = 8) -> dict[str, Any]:

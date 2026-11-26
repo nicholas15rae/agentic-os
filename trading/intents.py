@@ -30,7 +30,9 @@ OPTION_MULTIPLIER = 100
 ACTIONS = ("BUY", "SELL")
 ORDER_TYPES = ("MKT", "LMT")
 TIFS = ("DAY", "GTC")
-SOURCES = ("trading_agent", "engine_a", "engine_b", "manual")
+# "trading_agent" (the LLM) still parses so old rows and audit entries stay readable, but the desk refuses to
+# evaluate, queue or execute it: the LLM is an analyst only (desk.LLM_SOURCES). "rule_engine" is Engine R.
+SOURCES = ("trading_agent", "engine_a", "engine_b", "rule_engine", "manual")
 SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")

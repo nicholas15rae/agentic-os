@@ -6,7 +6,8 @@
 
  Starts (only what isn't already running - safe to run any number of times):
    Quantgress :8000 -> Gateway server.py :8080 + HTTPS :8443 (phone, NetBird)
-   -> trading bridge :8091 (the gateway spawns it) -> Whisper STT :8178
+   -> trading bridge :8091 (the gateway spawns it) -> TWS paper API :7497 (opened by
+   start-tws.ps1; you log in) -> Whisper STT :8178
    -> Docker Desktop + Kokoro TTS :8880 + n8n :5678 -> Bionic / LM Studio :1235
    (also the verifier model) -> AnythingLLM :3001 -> Ollama :11434
    -> llama-server :1236 (only when MODEL_PATH is set in ai-stack.config.ps1)
@@ -138,6 +139,16 @@ New-Svc 'phone' 'Phone HTTPS (NetBird)' "https://${phoneHost}:$CC_HTTPS_PORT" 90
 New-Svc 'bridge' 'Trading bridge' "127.0.0.1:$CC_BRIDGE_PORT" 60 (Join-Path $CC_ROOT 'data\trading\bridge.log') `
     { if ((Get-HttpCode "http://127.0.0.1:$CC_BRIDGE_PORT/health") -in 200..499) { 'started by the gateway' } } `
     { } | Out-Null   # the gateway spawns it on start-up (TRADING_BRIDGE_AUTOSTART)
+
+# TWS (IBKR paper): opened here, logged in by you; the bridge connects once the API port opens. Deliberately NOT in
+# the PID file, so stop-command-center.ps1 never closes TWS (or throws away its login).
+New-Svc 'tws' 'TWS (IBKR paper API)' "127.0.0.1:$TWS_API_PORT" 90 (Join-Path $CC_LOG_DIR 'tws-start.log') `
+    { if (Test-Listening $TWS_API_PORT) { 'logged in; the trading bridge connects by itself' } } `
+    {
+        if (-not $TWS_AUTOSTART) { throw 'SKIP:TWS_AUTOSTART is off in G:\ai-startup\ai-stack.config.ps1' }
+        $out = & (Join-Path $PSScriptRoot 'start-tws.ps1')
+        if ($LASTEXITCODE -eq 1) { throw [string]($out | Select-Object -Last 1) }
+    } | Out-Null
 
 # Whisper STT: same model choice as services.rs whisper_ensure (providers.json -> policy.stt).
 New-Svc 'whisper' 'Whisper STT' '127.0.0.1:8178' 45 (& $L 'whisper') `
@@ -308,6 +319,12 @@ if (-not $DryRun) { Wait-Svcs $svcs }
 $gw = Get-Svc 'gateway'; $ph = Get-Svc 'phone'
 if ($gw.State -eq 'up' -and $meshIp -and -not ((Get-ListenAddrs $GATEWAY_PORT) -contains $meshIp)) {
     $ph.State = 'failed'; $ph.Note = 'gateway is not listening on the NetBird IP (it started before NetBird) - run with -RestartGateway'
+}
+
+# TWS open but not logged in yet isn't a failure: it is waiting for you (the bridge connects once you log in).
+$tw = Get-Svc 'tws'
+if ($tw.State -in 'failed', 'down' -and @(Get-TwsProcess).Count) {
+    $tw.State = 'down'; $tw.Note = 'TWS is open - log in to the PAPER account (the trading bridge connects by itself)'
 }
 
 # ---------------------------------------------------------------- summary ---

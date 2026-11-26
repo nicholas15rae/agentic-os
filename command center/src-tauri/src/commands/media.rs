@@ -188,6 +188,10 @@ pub struct MediaAsset {
     pub moments: Vec<Moment>,
     #[serde(default)]
     pub slot_id: Option<String>,
+    /// Shot-cut times in seconds (media-forge detect_scenes, after the probe; video only, ≤ 200).
+    /// `None` = not detected (yet); `Some([])` = one continuous shot. Kept in the json column.
+    #[serde(default)]
+    pub scenes: Option<Vec<f64>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -517,6 +521,11 @@ pub struct MediaState {
     jobs: Mutex<HashMap<String, LiveRender>>,
     /// Serialises manifest read-modify-write per process.
     manifest_lock: Mutex<()>,
+    /// Serialises every project row read-modify-write (status, brief, review rounds) per process.
+    /// Lock order: `manifest_lock` before `project_lock`, never the other way round.
+    project_lock: Mutex<()>,
+    /// Projects with a render batch being prepared or running (one live batch per project).
+    rendering: Mutex<HashSet<String>>,
     /// v2 intake: per-project pipeline state, filled by the intake tick.
     intake: Mutex<HashMap<String, IntakeInfo>>,
     /// v2 pipeline queue (new intake assets and `media_transcribe` picks), drained one at a time.
@@ -545,9 +554,45 @@ pub(crate) struct IntakeJob {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InboxSeen {
     pub size: u64,
-    /// This size already failed to ingest (or its inbox copy couldn't be removed): don't retry
-    /// until the file changes.
+    /// Last-write time at the last tick: a file is stable only when size *and* mtime held.
+    pub mtime: Option<std::time::SystemTime>,
+    /// This size/mtime failed permanently (unsupported, unreadable media): don't retry until the
+    /// file changes.
     pub failed: bool,
+    /// A transient failure (locked, ffprobe missing, db busy): retry from this moment.
+    pub retry_at: Option<std::time::Instant>,
+    /// Transient failures in a row (the backoff doubles with each).
+    pub attempts: u32,
+}
+
+impl InboxSeen {
+    fn fresh(size: u64, mtime: Option<std::time::SystemTime>) -> Self {
+        Self { size, mtime, failed: false, retry_at: None, attempts: 0 }
+    }
+}
+
+/// One stable inbox file, as the tick saw it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InboxFile {
+    pub path: PathBuf,
+    pub size: u64,
+    pub mtime: Option<std::time::SystemTime>,
+}
+
+/// Why an inbox file wasn't ingested: `Permanent` waits for the file to change; `Transient` is
+/// retried with backoff.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum IntakeFail {
+    Permanent(String),
+    Transient(String),
+}
+
+impl IntakeFail {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Permanent(e) | Self::Transient(e) => e,
+        }
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -893,6 +938,7 @@ fn save_project(state: &MediaState, p: &MediaProject) -> Result<(), String> {
 /// Automatic status moves only go forward (brief → shooting → editing → review → done); Nic can
 /// move a project anywhere by hand with `media_project_update`.
 fn advance_status(state: &MediaState, slug: &str, status: &str) {
+    let _g = state.project_lock.lock().unwrap();
     if let Ok(mut p) = load_project(state, slug) {
         if status_rank(status) > status_rank(&p.status) {
             p.status = status.into();
@@ -989,8 +1035,24 @@ fn manifest_path(root: &Path) -> PathBuf {
     root.join("working").join("timeline_manifest.json")
 }
 
+/// Lenient load for display only (project open): an unreadable manifest shows as empty. Anything
+/// that writes the manifest or acts on it uses `load_manifest_strict`.
 fn load_manifest(root: &Path, slug: &str) -> TimelineManifest {
-    std::fs::read_to_string(manifest_path(root)).ok().and_then(|t| serde_json::from_str(&t).ok()).map(upgrade_manifest).unwrap_or_else(|| default_manifest(slug))
+    load_manifest_strict(root, slug).unwrap_or_else(|e| {
+        eprintln!("[media] {slug}: {e}");
+        default_manifest(slug)
+    })
+}
+
+/// The saved manifest, or the default only when there is no file yet. A file that exists but
+/// can't be read or parsed is an error, so a writer never replaces the timeline with an empty one.
+pub(crate) fn load_manifest_strict(root: &Path, slug: &str) -> Result<TimelineManifest, String> {
+    let path = manifest_path(root);
+    match std::fs::read_to_string(&path) {
+        Ok(t) => serde_json::from_str::<TimelineManifest>(&t).map(upgrade_manifest).map_err(|e| format!("MANIFEST_UNREADABLE: {} doesn't parse ({e}); it was left as it is", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(default_manifest(slug)),
+        Err(e) => Err(format!("MANIFEST_UNREADABLE: can't read {} ({e}); it was left as it is", path.display())),
+    }
 }
 
 pub(crate) fn create_project(state: &MediaState, title: &str, source: Option<Source>) -> Result<MediaProject, String> {
@@ -1076,10 +1138,13 @@ pub(crate) fn finalize_asset(state: &MediaState, cfg: &os_core::OsConfig, slug: 
     };
     save_asset(state, &a)?;
     // v1 moved intake → awaiting_media here. v2 has no "first file" trigger: shooting comes from an
-    // approved brief, editing from filled film slots or clips on the timeline.
-    let mut p = load_project(state, slug)?;
-    p.updated_at = now_iso();
-    save_project(state, &p)?;
+    // approved brief, editing from filled film slots or clips on the timeline. The asset is saved:
+    // touching the project's timestamp is best-effort so a failure here never orphans it.
+    let _g = state.project_lock.lock().unwrap();
+    if let Ok(mut p) = load_project(state, slug) {
+        p.updated_at = now_iso();
+        let _ = save_project(state, &p);
+    }
     Ok(a)
 }
 
@@ -1358,7 +1423,7 @@ pub(crate) fn manifest_save(state: &MediaState, slug: &str, m: TimelineManifest)
     let _g = state.manifest_lock.lock().unwrap();
     load_project(state, slug)?;
     let root = project_root(state, slug)?;
-    let current = load_manifest(&root, slug);
+    let current = load_manifest_strict(&root, slug)?;
     if m.revision != current.revision {
         return Err(format!("STALE_REVISION: the timeline changed (now revision {}); reload it", current.revision));
     }
@@ -1424,6 +1489,7 @@ pub(crate) fn validate_brief(b: &CreativeBrief) -> Result<(), String> {
 }
 
 pub(crate) fn project_update(state: &MediaState, slug: &str, title: Option<String>, brief: Option<CreativeBrief>, status: Option<String>, speed: Option<String>) -> Result<MediaProject, String> {
+    let _g = state.project_lock.lock().unwrap();
     let mut p = load_project(state, slug)?;
     if let Some(t) = title {
         let t = t.trim();
@@ -1512,7 +1578,7 @@ pub(crate) fn asset_update(state: &MediaState, slug: &str, asset_id: &str, tags:
         if s.is_empty() {
             a.slot_id = None;
         } else {
-            let m = load_manifest(&project_root(state, slug)?, slug);
+            let m = load_manifest_strict(&project_root(state, slug)?, slug)?;
             if !m.shot_list.iter().any(|x| x.id == s) {
                 return Err(format!("no shot slot {s:?} in this project"));
             }
@@ -1527,6 +1593,7 @@ pub(crate) fn asset_update(state: &MediaState, slug: &str, asset_id: &str, tags:
 
 pub(crate) fn note_add(state: &MediaState, slug: &str, input: NoteInput) -> Result<Note, String> {
     let _g = state.manifest_lock.lock().unwrap();
+    let _pg = state.project_lock.lock().unwrap();
     let mut p = load_project(state, slug)?;
     let root = project_root(state, slug)?;
     let text = input.text.trim().to_string();
@@ -1536,7 +1603,7 @@ pub(crate) fn note_add(state: &MediaState, slug: &str, input: NoteInput) -> Resu
         }
     }
     let note = Note { id: short_id("n"), render_id: input.render_id, at_sec: input.at_sec.map(|t| (t * 1000.0).round() / 1000.0), text, by: input.by, via_voice: input.via_voice, resolved: false, at: now_iso() };
-    let mut m = load_manifest(&root, slug);
+    let mut m = load_manifest_strict(&root, slug)?;
     m.notes.push(note.clone());
     validate_notes(&m.notes)?;
     // Notes don't bump the revision: the editor's next save keeps them (manifest_save).
@@ -1556,7 +1623,7 @@ pub(crate) fn note_resolve(state: &MediaState, slug: &str, note_id: &str) -> Res
     let _g = state.manifest_lock.lock().unwrap();
     load_project(state, slug)?;
     let root = project_root(state, slug)?;
-    let mut m = load_manifest(&root, slug);
+    let mut m = load_manifest_strict(&root, slug)?;
     let n = m.notes.iter_mut().find(|n| n.id == note_id).ok_or_else(|| format!("no note {note_id:?}"))?;
     n.resolved = true;
     write_atomic(&manifest_path(&root), serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?.as_bytes())
@@ -1637,56 +1704,190 @@ fn inbox_ignored(name: &str) -> bool {
     l.starts_with('.') || l.starts_with('~') || [".part", ".partial", ".tmp", ".crdownload", ".download", ".opdownload"].iter().any(|x| l.ends_with(x))
 }
 
-/// The stable files in one inbox: present at the last tick with the same, non-zero size (and not
-/// already failed at that size). Updates the seen sizes; forgets files that went away.
-pub(crate) fn stable_inbox_files(state: &MediaState, inbox: &Path) -> Vec<(PathBuf, u64)> {
-    let mut now: Vec<(PathBuf, u64)> = std::fs::read_dir(inbox)
+/// The stable files in one inbox: present at the last tick with the same, non-zero size and the
+/// same last-write time (not failed permanently at that state, and past any retry backoff).
+/// Updates what was seen; forgets files that went away.
+pub(crate) fn stable_inbox_files(state: &MediaState, inbox: &Path) -> Vec<InboxFile> {
+    let mut now: Vec<InboxFile> = std::fs::read_dir(inbox)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
                 .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false) && !inbox_ignored(&e.file_name().to_string_lossy()))
-                .map(|e| (e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)))
+                .map(|e| {
+                    let meta = e.metadata().ok();
+                    InboxFile { path: e.path(), size: meta.as_ref().map(|m| m.len()).unwrap_or(0), mtime: meta.and_then(|m| m.modified().ok()) }
+                })
                 .collect()
         })
         .unwrap_or_default();
-    now.sort();
+    now.sort_by(|a, b| a.path.cmp(&b.path));
     let mut seen = state.inbox_seen.lock().unwrap();
-    seen.retain(|p, _| !p.starts_with(inbox) || now.iter().any(|(q, _)| q == p));
+    seen.retain(|p, _| !p.starts_with(inbox) || now.iter().any(|f| &f.path == p));
+    let at = std::time::Instant::now();
     let mut stable = vec![];
-    for (p, size) in now {
-        match seen.get(&p) {
-            Some(s) if s.size == size && size > 0 && !s.failed => stable.push((p, size)),
-            Some(s) if s.size == size => {} // empty, or failed at this size: wait for a change
+    for f in now {
+        match seen.get(&f.path) {
+            Some(s) if s.size == f.size && s.mtime == f.mtime => {
+                // Empty, failed at this state, or backing off: wait.
+                if f.size > 0 && !s.failed && s.retry_at.map_or(true, |t| at >= t) {
+                    stable.push(f);
+                }
+            }
             _ => {
-                seen.insert(p, InboxSeen { size, failed: false });
+                seen.insert(f.path.clone(), InboxSeen::fresh(f.size, f.mtime));
             }
         }
     }
     stable
 }
 
-fn mark_inbox_failed(state: &MediaState, path: &Path, size: u64) {
-    state.inbox_seen.lock().unwrap().insert(path.to_path_buf(), InboxSeen { size, failed: true });
+/// A permanent failure: skipped until the file changes.
+fn mark_inbox_failed(state: &MediaState, f: &InboxFile) {
+    state.inbox_seen.lock().unwrap().insert(f.path.clone(), InboxSeen { failed: true, ..InboxSeen::fresh(f.size, f.mtime) });
 }
 
-/// Ingest one stable inbox file: `ingest_paths` copies it into `raw/` (read-only), the copy is
-/// checked (on disk, same size), and only then is the inbox copy deleted. Returns the new asset.
-pub(crate) fn intake_ingest(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, path: &Path, size: u64) -> Result<MediaAsset, String> {
+/// A transient failure: retried after 10 s, 20 s, 40 s … (capped at 10 min) while unchanged.
+fn mark_inbox_retry(state: &MediaState, f: &InboxFile) {
+    let mut seen = state.inbox_seen.lock().unwrap();
+    let attempts = seen.get(&f.path).filter(|s| s.size == f.size && s.mtime == f.mtime).map_or(0, |s| s.attempts) + 1;
+    let wait = Duration::from_secs((10u64 << attempts.saturating_sub(1).min(6)).min(600));
+    seen.insert(f.path.clone(), InboxSeen { retry_at: Some(std::time::Instant::now() + wait), attempts, ..InboxSeen::fresh(f.size, f.mtime) });
+}
+
+/// Open the inbox file for reading only if nobody has it open for writing (Windows: no
+/// FILE_SHARE_WRITE, so a copy/sync still writing it makes this fail). While the handle is held,
+/// no one else can open it for writing either.
+fn open_exclusive_read(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        o.share_mode(0x0000_0001); // FILE_SHARE_READ only
+    }
+    o.open(path)
+}
+
+/// Byte-for-byte: does `a` (read from its start) hold exactly what the file at `b` holds?
+fn same_content(a: &mut std::fs::File, b: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    fn fill(f: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut n = 0;
+        while n < buf.len() {
+            match f.read(&mut buf[n..])? {
+                0 => break,
+                k => n += k,
+            }
+        }
+        Ok(n)
+    }
+    a.seek(SeekFrom::Start(0))?;
+    let mut fb = std::fs::File::open(b)?;
+    let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let (n, m) = (fill(a, &mut x)?, fill(&mut fb, &mut y)?);
+        if n != m || x[..n] != y[..m] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// media.db kv: an inbox file that was ingested but whose inbox copy couldn't be deleted, so a
+/// later tick (or the next app start) only retries the delete and never ingests it twice.
+fn inbox_ingested_key(path: &Path) -> String {
+    format!("inbox-ingested:{}", path.to_string_lossy())
+}
+
+fn mtime_ms(t: Option<std::time::SystemTime>) -> u64 {
+    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
+}
+
+fn remember_ingested(state: &MediaState, f: &InboxFile, asset_id: &str) {
+    let v = json!({ "size": f.size, "mtimeMs": mtime_ms(f.mtime), "assetId": asset_id }).to_string();
+    let _ = state.with(|c| c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![inbox_ingested_key(&f.path), v]).map(|_| ()).map_err(sql_err));
+}
+
+/// The asset an unchanged inbox file was already ingested as (a record for an older version of
+/// the file is dropped).
+fn already_ingested(state: &MediaState, f: &InboxFile) -> Option<String> {
+    let key = inbox_ingested_key(&f.path);
+    let v: Value = state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get::<_, String>(0)).optional().map_err(sql_err)).ok().flatten().and_then(|s| serde_json::from_str(&s).ok())?;
+    if v["size"].as_u64() == Some(f.size) && v["mtimeMs"].as_u64() == Some(mtime_ms(f.mtime)) {
+        return v["assetId"].as_str().map(String::from);
+    }
+    forget_ingested(state, &f.path);
+    None
+}
+
+fn forget_ingested(state: &MediaState, path: &Path) {
+    let _ = state.with(|c| c.execute("DELETE FROM kv WHERE key = ?1", [inbox_ingested_key(path)]).map(|_| ()).map_err(sql_err));
+}
+
+/// Ingest one stable inbox file, safely: the file is opened so no one else can be writing it,
+/// copied into `raw/`, the copy compared byte for byte and the source re-checked (size and mtime
+/// unchanged), and only then recorded as an asset. Nothing is recorded if any check fails. The
+/// inbox copy is deleted last; `Ok((asset, Some(msg)))` = ingested, but the inbox copy is still
+/// there (the caller remembers it so it's never ingested twice).
+pub(crate) fn intake_ingest(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, f: &InboxFile) -> Result<(MediaAsset, Option<String>), IntakeFail> {
+    use IntakeFail::{Permanent, Transient};
+    let path = &f.path;
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let ext = ext_of(&name);
     if kind_for_ext(&ext).is_none() {
-        return Err(format!("{name}: not a supported video, photo or audio file (left in the inbox)"));
+        return Err(Permanent(format!("{name}: not a supported video, photo or audio file (left in the inbox)")));
     }
-    let a = ingest_paths(state, cfg, slug, &[path.to_string_lossy().to_string()], role_for_ext(&ext))?.into_iter().next().ok_or("ingest returned nothing")?;
-    let raw = PathBuf::from(&a.path);
-    let raw_size = std::fs::metadata(&raw).map(|m| m.len()).unwrap_or(0);
-    if !raw.is_file() || raw_size != size || a.size_bytes != size {
-        return Err(format!("{name}: the raw/ copy doesn't match the inbox file ({raw_size} of {size} bytes); the inbox copy is kept"));
+    load_project(state, slug).map_err(Transient)?;
+    let mut src = open_exclusive_read(path).map_err(|e| Transient(format!("{name} is still being written or is open elsewhere ({e}); retrying")))?;
+    let ffprobe = media_bin(cfg, "ffprobe").ok_or_else(|| Transient("ffprobe not found (install FFmpeg or Shotcut); the inbox file is kept and retried".into()))?;
+    let unchanged = |m: &std::fs::Metadata| m.len() == f.size && m.modified().ok() == f.mtime;
+    if !src.metadata().map(|m| unchanged(&m)).unwrap_or(false) {
+        return Err(Transient(format!("{name} changed since the last check; waiting for it to settle")));
     }
+    let raw = project_root(state, slug).map_err(Transient)?.join("raw");
+    std::fs::create_dir_all(&raw).map_err(|e| Transient(e.to_string()))?;
+    let display = safe_file_name(&name);
+    let dst = unique_path(&raw, &display);
+    let copied = (|| -> std::io::Result<bool> {
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&dst)?;
+        std::io::copy(&mut src, &mut out)?;
+        out.sync_all()?;
+        drop(out);
+        same_content(&mut src, &dst)
+    })();
+    let fail = |e: String| {
+        remove_staged(&dst);
+        Err(Transient(e))
+    };
+    match copied {
+        Err(e) => return fail(format!("copy {name}: {e}; the inbox copy is kept")),
+        Ok(false) => return fail(format!("{name}: the raw/ copy doesn't match the inbox file; the inbox copy is kept")),
+        Ok(true) => {}
+    }
+    if !std::fs::metadata(path).map(|m| unchanged(&m)).unwrap_or(false) {
+        return fail(format!("{name} changed while it was copied; the inbox copy is kept"));
+    }
+    drop(src);
+    // Media ffprobe can't read (or with no streams) stays unreadable until the file changes.
+    let pr = match probe(&ffprobe, &dst) {
+        Ok(pr) => pr,
+        Err(e) => {
+            remove_staged(&dst);
+            return Err(Permanent(e));
+        }
+    };
+    if kind_for_ext(&ext) != Some("image") && !pr.has_video && !pr.has_audio {
+        remove_staged(&dst);
+        return Err(Permanent(format!("{display}: no video or audio stream")));
+    }
+    let a = match finalize_asset(state, cfg, slug, &dst, &display, role_for_ext(&ext), true) {
+        Ok(a) => a,
+        Err(e) => return fail(e),
+    };
     remove_staged(path);
-    if path.exists() {
-        return Err(format!("{name} was ingested, but its inbox copy couldn't be removed (is it open somewhere?)"));
-    }
-    Ok(a)
+    let left = path.exists().then(|| format!("{name} was ingested, but its inbox copy couldn't be removed (is it open somewhere?); retrying the delete"));
+    Ok((a, left))
 }
 
 /// `(w, h)` against the brief's aspect: a flag when the ratio is more than 8% off.
@@ -1770,13 +1971,55 @@ pub(crate) fn probe_flags(cfg: &os_core::OsConfig, a: &MediaAsset, brief_aspect:
         if !pr.has_audio {
             flags.push(AssetFlag { kind: "silent".into(), detail: "no audio track".into() });
         } else {
-            match ffmpeg.as_deref().and_then(|ff| sample_peak_db(ff, &path)) {
+            // One volumedetect pass gives both: silent (peak ≤ -50 dBFS) and clipped (peak ≥ -0.1 dBFS).
+            let peak = ffmpeg.as_deref().and_then(|ff| sample_peak_db(ff, &path));
+            match peak {
                 Some(db) if db <= SILENT_DB => flags.push(AssetFlag { kind: "silent".into(), detail: format!("peak {db:.0} dBFS") }),
                 _ => sound = true,
             }
+            flags.extend(peak.and_then(clipped_flag));
         }
     }
     Ok((flags, sound))
+}
+
+/// Peak level (dBFS) at or above which a track counts as clipped (volumedetect prints one decimal).
+const CLIPPED_DB: f64 = -0.1;
+
+/// `clipped_audio` from a volumedetect peak (contract §3 flag kinds).
+pub(crate) fn clipped_flag(peak_db: f64) -> Option<AssetFlag> {
+    (peak_db.is_finite() && peak_db >= CLIPPED_DB).then(|| AssetFlag { kind: "clipped_audio".into(), detail: format!("peak {peak_db:.1} dBFS: the loudest parts may be distorted") })
+}
+
+/// How long one scene detection may take before the pipeline gives up on it.
+const SCENES_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// At most this many cut times are kept on an asset.
+pub(crate) const MAX_SCENE_CUTS: usize = 200;
+
+/// Cut times (seconds, ms precision, ascending, > 0) from media-forge detect_scenes' result
+/// (`{scene_count, scenes: [{index, start, end, duration}]}`): every scene start but the first.
+pub(crate) fn scene_cuts(result: &Value) -> Result<Vec<f64>, String> {
+    let scenes = result["scenes"].as_array().ok_or("detect_scenes returned no scenes")?;
+    let mut cuts: Vec<f64> = scenes.iter().filter_map(|s| s["start"].as_f64()).filter(|t| t.is_finite() && *t > 0.001).map(|t| (t * 1000.0).round() / 1000.0).collect();
+    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    cuts.dedup();
+    cuts.truncate(MAX_SCENE_CUTS);
+    Ok(cuts)
+}
+
+/// CPU shot detection of one video asset through media-forge `detect_scenes` (no thumbnails);
+/// stores the cut times on the asset.
+pub(crate) fn detect_asset_scenes(state: &MediaState, forge: &dyn Forge, slug: &str, asset_id: &str) -> Result<Vec<f64>, String> {
+    let a = load_asset(state, slug, asset_id)?;
+    if a.kind != "video" {
+        return Err(format!("{}: only video has shots", a.name));
+    }
+    let args = json!({ "path": a.path, "project": slug, "thumbnails": false, "wait_s": 0 });
+    let cuts = scene_cuts(&forge_job(forge, "detect_scenes", &args, SCENES_TIMEOUT)?)?;
+    let mut a = load_asset(state, slug, asset_id)?;
+    a.scenes = Some(cuts.clone());
+    save_asset(state, &a)?;
+    Ok(cuts)
 }
 
 /// Flags of the given kinds are replaced by `fresh` (other kinds, e.g. media-forge's, are kept).
@@ -1790,7 +2033,7 @@ pub(crate) fn merge_flags(old: &[AssetFlag], fresh: Vec<AssetFlag>, kinds: &[&st
     out
 }
 
-const PROBE_FLAG_KINDS: [&str; 5] = ["too_short", "wrong_aspect", "dark", "overexposed", "silent"];
+const PROBE_FLAG_KINDS: [&str; 6] = ["too_short", "wrong_aspect", "dark", "overexposed", "silent", "clipped_audio"];
 
 /// The transcript summary stored on the asset, from media-forge's transcribe .json
 /// (`{language, segments: [{start, end, text, words?: [{w, s, e, p}]}]}`).
@@ -1880,7 +2123,15 @@ pub(crate) fn run_intake_job(state: &MediaState, cfg: &os_core::OsConfig, forge:
         let mut fresh = load_asset(state, slug, id)?;
         fresh.flags = merge_flags(&fresh.flags, flags, &PROBE_FLAG_KINDS);
         save_asset(state, &fresh)?;
-        let detail = if fresh.flags.is_empty() { "no problems found".to_string() } else { fresh.flags.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>().join(", ") };
+        let mut detail = if fresh.flags.is_empty() { "no problems found".to_string() } else { fresh.flags.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>().join(", ") };
+        // Shot cuts (CPU) before "probed", so the refresh that event triggers carries them. Optional:
+        // without PySceneDetect / Media Forge the pass carries on to transcription.
+        if a.kind == "video" {
+            match detect_asset_scenes(state, forge, slug, id) {
+                Ok(cuts) => detail.push_str(&format!("; {} shot{}", cuts.len() + 1, if cuts.is_empty() { "" } else { "s" })),
+                Err(e) => eprintln!("[media intake] {slug}/{id}: scene detection skipped: {e}"),
+            }
+        }
         emit(intake_event(slug, Some(id), "probed", &detail));
         transcribe &= sound;
     }
@@ -1906,18 +2157,41 @@ pub(crate) fn intake_tick_once(state: &MediaState, cfg: &os_core::OsConfig, forg
         if !inbox.is_dir() {
             continue;
         }
-        for (path, size) in stable_inbox_files(state, &inbox) {
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        for f in stable_inbox_files(state, &inbox) {
+            // Ingested before, but its inbox copy couldn't be deleted: retry only the delete.
+            if already_ingested(state, &f).is_some() {
+                remove_staged(&f.path);
+                if f.path.exists() {
+                    mark_inbox_retry(state, &f);
+                } else {
+                    forget_ingested(state, &f.path);
+                    state.inbox_seen.lock().unwrap().remove(&f.path);
+                }
+                continue;
+            }
+            let name = f.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             set_intake(state, slug, |i| i.processing = Some(name.clone()));
-            match intake_ingest(state, cfg, slug, &path, size) {
-                Ok(a) => {
-                    state.inbox_seen.lock().unwrap().remove(&path);
+            match intake_ingest(state, cfg, slug, &f) {
+                Ok((a, left)) => {
                     emit(intake_event(slug, Some(&a.id), "ingested", &a.name));
-                    state.transcribe_queue.lock().unwrap().push_back(IntakeJob { slug: slug.clone(), asset_id: a.id, analyze: true });
+                    state.transcribe_queue.lock().unwrap().push_back(IntakeJob { slug: slug.clone(), asset_id: a.id.clone(), analyze: true });
+                    match left {
+                        None => {
+                            state.inbox_seen.lock().unwrap().remove(&f.path);
+                        }
+                        Some(msg) => {
+                            remember_ingested(state, &f, &a.id);
+                            mark_inbox_retry(state, &f);
+                            intake_failed(state, slug, None, &msg, emit);
+                        }
+                    }
                 }
                 Err(e) => {
-                    mark_inbox_failed(state, &path, size);
-                    intake_failed(state, slug, None, &e, emit);
+                    match &e {
+                        IntakeFail::Permanent(_) => mark_inbox_failed(state, &f),
+                        IntakeFail::Transient(_) => mark_inbox_retry(state, &f),
+                    }
+                    intake_failed(state, slug, None, e.text(), emit);
                 }
             }
             set_intake(state, slug, |i| i.processing = None);
@@ -2042,14 +2316,14 @@ pub(crate) fn approve_final(state: &MediaState, slug: &str, render_ids: &[String
     if !approved {
         return Err("PERMISSION_REQUIRED:media-approve-final — Nic approves the final cut".into());
     }
-    let mut p = load_project(state, slug)?;
+    load_project(state, slug)?;
     let unique: HashSet<&String> = render_ids.iter().collect();
     if render_ids.is_empty() || render_ids.len() > 4 || unique.len() != render_ids.len() {
         return Err("approve 1–4 different renders".into());
     }
     let root = project_root(state, slug)?;
     let renders = list_renders(state, slug)?;
-    let m = load_manifest(&root, slug);
+    let m = load_manifest_strict(&root, slug)?;
     let mut picked = vec![];
     for id in render_ids {
         let r = renders.iter().find(|r| &r.id == id).ok_or_else(|| format!("no verified render {id:?} in this project"))?;
@@ -2072,6 +2346,11 @@ pub(crate) fn approve_final(state: &MediaState, slug: &str, render_ids: &[String
         let s = |p: PathBuf| dunce_canon(&p).unwrap_or(p).to_string_lossy().to_string();
         out.push(Deliverable { platform, render_id: r.id.clone(), path: s(file), caption_path: caption.map(s), thumb_path: thumb.map(s) });
     }
+    // The copies can take minutes: only now take the lock and re-load, so a note, round or brief
+    // written meanwhile isn't overwritten by a stale copy.
+    let _g = state.project_lock.lock().unwrap();
+    let mut p = load_project(state, slug)?;
+    let renders = list_renders(state, slug)?;
     let hit: Vec<usize> = render_ids.iter().filter_map(|id| round_index(&p.review, id, &renders)).collect();
     for i in hit {
         p.review.rounds[i].status = "approved".into();
@@ -2079,7 +2358,23 @@ pub(crate) fn approve_final(state: &MediaState, slug: &str, render_ids: &[String
     p.status = "done".into();
     p.updated_at = now_iso();
     save_project(state, &p)?;
+    // Kept so the deliverables (and the Biz Ops entry point) survive a project switch or restart.
+    let j = serde_json::to_string(&out).map_err(|e| e.to_string())?;
+    state.with(|c| c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![format!("deliverables:{slug}"), j]).map(|_| ()).map_err(sql_err))?;
     Ok(out)
+}
+
+/// The deliverables of the last "Approve final", still on disk (a file that's gone is dropped).
+pub(crate) fn deliverables_get(state: &MediaState, slug: &str) -> Result<Vec<Deliverable>, String> {
+    load_project(state, slug)?;
+    let j = state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [format!("deliverables:{slug}")], |r| r.get::<_, String>(0)).optional().map_err(sql_err))?;
+    let all: Vec<Deliverable> = j.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+    Ok(all.into_iter().filter(|d| Path::new(&d.path).is_file()).collect())
+}
+
+#[tauri::command]
+pub async fn media_deliverables_get(app: tauri::AppHandle, slug: String) -> Result<Vec<Deliverable>, String> {
+    blocking(move || deliverables_get(&app.state::<MediaState>(), &slug)).await
 }
 
 // ── Chat ───────────────────────────────────────────────────────────────────────
@@ -2128,7 +2423,7 @@ pub(crate) fn build_plan(state: &MediaState, slug: &str, proposed_by: &str) -> R
     let p = load_project(state, slug)?;
     check_review_limit(&p.review, proposed_by)?;
     let root = project_root(state, slug)?;
-    let m = load_manifest(&root, slug);
+    let m = load_manifest_strict(&root, slug)?;
     if m.clips.is_empty() {
         return Err("the timeline has no clips yet".into());
     }
@@ -2498,17 +2793,19 @@ pub async fn media_render_execute(app: tauri::AppHandle, slug: String, plan_id: 
     if !approved {
         return Err("PERMISSION_REQUIRED:media-render — approve the Render Plan first".into());
     }
+    // One live batch per project: a double click, a re-sent card or a second plan waits its turn
+    // (two batches would pick the same output paths). Released when the batch ends.
+    claim_render(&app.state::<MediaState>(), &slug)?;
+    let claim = RenderClaim { app: app.clone(), slug: slug.clone() };
     let app2 = app.clone();
     let (plan, outs, expect) = {
         let (slug, plan_id) = (slug.clone(), plan_id.clone());
         blocking(move || {
             let st = app2.state::<MediaState>();
             let plan = load_plan(&st, &plan_id)?;
-            if plan.project != slug {
-                return Err("that plan belongs to another project".into());
-            }
+            check_plan_executable(&st, &slug, &plan)?;
             let root = project_root(&st, &slug)?;
-            let m = load_manifest(&root, &slug);
+            let m = load_manifest_strict(&root, &slug)?;
             if m.revision != plan.manifest_revision {
                 return Err("STALE_PLAN: the timeline changed after this plan was made; make a new plan".into());
             }
@@ -2525,11 +2822,71 @@ pub async fn media_render_execute(app: tauri::AppHandle, slug: String, plan_id: 
     }
     // The first output starts now (so a refusal reaches the card); its job id names the batch.
     let job_id = start_render_job(&app, &outs[0]).await?;
+    // Executed: the same plan can't start a second batch later.
+    mark_plan_used(&app.state::<MediaState>(), &plan.plan_id);
     app.state::<MediaState>().jobs.lock().unwrap().insert(job_id.clone(), LiveRender { forge_job: job_id.clone(), cancelled: false });
     // v2: no "rendering" status (the job shows it); the project stays where it is.
     render_event(&app, &slug, &job_id, "queued", 0.0, None, &stage_label(&outs[0].platform, 0, outs.len(), "queued"), json!({}));
-    tauri::async_runtime::spawn(run_outputs(app.clone(), slug, job_id.clone(), plan, outs, expect));
+    tauri::async_runtime::spawn(run_outputs(app.clone(), slug, job_id.clone(), plan, outs, expect, claim));
     Ok(json!({ "jobId": job_id }))
+}
+
+/// Claim the project's one live render batch (`RenderClaim` releases it).
+pub(crate) fn claim_render(state: &MediaState, slug: &str) -> Result<(), String> {
+    if !state.rendering.lock().unwrap().insert(slug.to_string()) {
+        return Err("RENDER_BUSY: a render for this project is already running; wait for it to finish (or cancel it)".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn release_render(state: &MediaState, slug: &str) {
+    state.rendering.lock().unwrap().remove(slug);
+}
+
+/// Releases the project's render claim when the batch ends, however it ends.
+struct RenderClaim {
+    app: tauri::AppHandle,
+    slug: String,
+}
+
+impl Drop for RenderClaim {
+    fn drop(&mut self) {
+        release_render(&self.app.state::<MediaState>(), &self.slug);
+    }
+}
+
+fn plan_used_key(plan_id: &str) -> String {
+    format!("plan-used:{plan_id}")
+}
+
+pub(crate) fn mark_plan_used(state: &MediaState, plan_id: &str) {
+    let _ = state.with(|c| c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![plan_used_key(plan_id), now_iso()]).map(|_| ()).map_err(sql_err));
+}
+
+/// At execute time (not only when the plan was made): the plan is this project's, hasn't run
+/// already, and a Director plan still fits the 2-round review cap (contract §5).
+pub(crate) fn check_plan_executable(state: &MediaState, slug: &str, plan: &RenderPlan) -> Result<(), String> {
+    if plan.project != slug {
+        return Err("that plan belongs to another project".into());
+    }
+    let used = state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [plan_used_key(&plan.plan_id)], |r| r.get::<_, String>(0)).optional().map_err(sql_err))?;
+    if used.is_some() {
+        return Err("PLAN_USED: this plan has already been rendered; make a new plan".into());
+    }
+    let p = load_project(state, slug)?;
+    check_review_limit(&p.review, &plan.proposed_by)
+}
+
+/// After starting output k > 0: record its media-forge job on the batch and say whether Nic
+/// cancelled the batch while the start was in flight (then the new job must be cancelled too).
+pub(crate) fn adopt_forge_job(jobs: &Mutex<HashMap<String, LiveRender>>, batch: &str, forge_job: &str) -> bool {
+    match jobs.lock().unwrap().get_mut(batch) {
+        Some(l) => {
+            l.forge_job = forge_job.to_string();
+            l.cancelled
+        }
+        None => true,
+    }
 }
 
 /// "reels 1/2 · encoding" for a batch; the bare stage for a single output.
@@ -2556,7 +2913,8 @@ enum Outcome {
 
 /// The approved batch: each output rendered in turn (one media-forge job at a time, CPU), each
 /// verified by Rust before it's listed. A failure or a cancel stops the outputs after it.
-async fn run_outputs(app: tauri::AppHandle, slug: String, batch: String, plan: RenderPlan, outs: Vec<RenderOut>, expect: f64) {
+async fn run_outputs(app: tauri::AppHandle, slug: String, batch: String, plan: RenderPlan, outs: Vec<RenderOut>, expect: f64, claim: RenderClaim) {
+    let _claim = claim; // held until the batch ends
     let n = outs.len();
     for (k, o) in outs.iter().enumerate() {
         let forge_job = if k == 0 {
@@ -2569,8 +2927,13 @@ async fn run_outputs(app: tauri::AppHandle, slug: String, batch: String, plan: R
             }
             match start_render_job(&app, o).await {
                 Ok(id) => {
-                    if let Some(l) = app.state::<MediaState>().jobs.lock().unwrap().get_mut(&batch) {
-                        l.forge_job = id.clone();
+                    if adopt_forge_job(&app.state::<MediaState>().jobs, &batch, &id) {
+                        // Cancelled while this output was starting: stop the job that just began.
+                        let (d, os, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
+                        let _ = super::mcp::call_tool(&d, &os, &b, "media-forge.job_cancel", &json!({ "job_id": id }), true, "director").await;
+                        app.state::<MediaState>().jobs.lock().unwrap().remove(&batch);
+                        render_event(&app, &slug, &batch, "cancelled", batch_pct(k, n, 0.0), None, "cancelled", json!({}));
+                        return;
                     }
                     render_event(&app, &slug, &batch, "queued", batch_pct(k, n, 0.0), None, &stage_label(&o.platform, k, n, "queued"), json!({}));
                     id
@@ -2695,6 +3058,7 @@ pub(crate) fn round_index(review: &ProjectReview, render_id: &str, renders: &[Ve
 /// Contract §1/§5: a verified render moves the project to review and opens a review round (one
 /// round per approved batch: the other outputs of the same plan join it).
 pub(crate) fn on_verified_render(state: &MediaState, slug: &str, render_id: &str) {
+    let _g = state.project_lock.lock().unwrap();
     if let Ok(mut p) = load_project(state, slug) {
         let renders = list_renders(state, slug).unwrap_or_default();
         if round_index(&p.review, render_id, &renders).is_none() {
@@ -2789,6 +3153,67 @@ pub(crate) fn review_get(state: &MediaState, slug: &str) -> Result<ProjectReview
 #[tauri::command]
 pub async fn media_review_get(app: tauri::AppHandle, slug: String) -> Result<ProjectReview, String> {
     blocking(move || review_get(&app.state::<MediaState>(), &slug)).await
+}
+
+pub(crate) const MAX_REVIEW_SUMMARY: usize = 2000;
+pub(crate) const MAX_OPEN_DECISIONS: usize = 12;
+pub(crate) const MAX_DECISION_CHARS: usize = 300;
+
+/// Store the Director's words on the review (contract §5): a round's "choices" summary (that round
+/// must exist: rounds open with verified renders) and/or the open-decisions list (replaced whole).
+/// Text only: nothing renders, resolves or changes status.
+pub(crate) fn review_write(state: &MediaState, slug: &str, round: u8, summary: Option<String>, open_decisions: Option<Vec<String>>) -> Result<ProjectReview, String> {
+    if round != 1 && round != 2 {
+        return Err("round must be 1 or 2".into());
+    }
+    if summary.is_none() && open_decisions.is_none() {
+        return Err("nothing to write: give a summary or open decisions".into());
+    }
+    let summary = summary.map(|s| s.trim().to_string());
+    if summary.as_ref().is_some_and(|s| s.chars().count() > MAX_REVIEW_SUMMARY) {
+        return Err(format!("the round summary is over {MAX_REVIEW_SUMMARY} characters"));
+    }
+    let decisions = match open_decisions {
+        None => None,
+        Some(ds) => {
+            if ds.len() > MAX_OPEN_DECISIONS {
+                return Err(format!("up to {MAX_OPEN_DECISIONS} open decisions"));
+            }
+            let mut out: Vec<String> = vec![];
+            for d in ds {
+                let t = d.trim();
+                if t.is_empty() {
+                    return Err("an open decision is empty".into());
+                }
+                if t.chars().count() > MAX_DECISION_CHARS {
+                    return Err(format!("an open decision is over {MAX_DECISION_CHARS} characters"));
+                }
+                if !out.iter().any(|x| x == t) {
+                    out.push(t.to_string());
+                }
+            }
+            Some(out)
+        }
+    };
+    // Same lock as note_add, which also rewrites project.json's review.
+    let _g = state.manifest_lock.lock().unwrap();
+    let _pg = state.project_lock.lock().unwrap();
+    let mut p = load_project(state, slug)?;
+    if let Some(s) = summary {
+        let r = p.review.rounds.iter_mut().find(|r| r.round == round).ok_or_else(|| format!("there's no review round {round} yet (a round opens with a verified render)"))?;
+        r.summary = s;
+    }
+    if let Some(d) = decisions {
+        p.review.open_decisions = d;
+    }
+    p.updated_at = now_iso();
+    save_project(state, &p)?;
+    Ok(p.review)
+}
+
+#[tauri::command]
+pub async fn media_review_write(app: tauri::AppHandle, slug: String, round: u8, summary: Option<String>, open_decisions: Option<Vec<String>>) -> Result<ProjectReview, String> {
+    blocking(move || review_write(&app.state::<MediaState>(), &slug, round, summary, open_decisions)).await
 }
 
 /// Only from Nic's "Approve final" click.
@@ -3355,6 +3780,8 @@ mod tests {
                     Ok(json!({ "id": "job-1", "status": "running", "progress_pct": 10.0 }))
                 }
                 "job_status" => Ok(json!({ "id": "job-1", "status": "done", "result": self.pending.borrow().clone() })),
+                // Two shots: a cut at 1.2 s (done at once, as a short job's first answer can be).
+                "detect_scenes" => Ok(json!({ "id": "job-s", "status": "done", "result": { "scene_count": 2, "scenes": [{ "index": 0, "start": 0.0, "end": 1.2 }, { "index": 1, "start": 1.2, "end": 2.0 }] } })),
                 other => Err(format!("unexpected tool {other}")),
             }
         }
@@ -3500,7 +3927,15 @@ mod tests {
         let tb: Vec<&Value> = calls.iter().filter(|(t, _)| t == "transcribe_batch").map(|(_, a)| a).collect();
         assert_eq!(tb.len(), 1);
         assert_eq!((tb[0]["model"].as_str(), tb[0]["output_stems"][0].as_str(), tb[0]["project"].as_str()), (Some("tiny.en"), Some(t.id.as_str()), Some(p.slug.as_str())));
+        // Both videos got a CPU scene pass after the probe (no thumbnails), cut times on the asset.
+        let ds: Vec<&Value> = calls.iter().filter(|(t, _)| t == "detect_scenes").map(|(_, a)| a).collect();
+        assert_eq!(ds.len(), 2);
+        assert_eq!((ds[0]["thumbnails"].as_bool(), ds[0]["project"].as_str()), (Some(false), Some(p.slug.as_str())));
+        let order: Vec<&str> = calls.iter().map(|(t, _)| t.as_str()).filter(|t| *t != "job_status").collect();
+        assert_eq!(order, ["detect_scenes", "detect_scenes", "transcribe_batch"]);
         drop(calls);
+        assert_eq!((t.scenes.clone(), d.scenes.clone()), (Some(vec![1.2]), Some(vec![1.2])));
+        assert!(ev.borrow().iter().any(|e| e["stage"] == "probed" && e["detail"].as_str().unwrap().contains("2 shots")), "{:?}", ev.borrow());
         let tr = t.transcript.clone().unwrap();
         assert_eq!((tr.words, tr.lang.as_str(), tr.first_speech_sec), (2, "en", Some(0.5)));
         assert!(tr.path.ends_with(&format!("{}.json", t.id)));
@@ -3726,6 +4161,299 @@ mod tests {
         // Stored in project.json too.
         let pj: Value = serde_json::from_str(&std::fs::read_to_string(Path::new(&p.root).join("project.json")).unwrap()).unwrap();
         assert_eq!(pj["review"]["rounds"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_scene_cuts_and_clipped_flag_pure() {
+        let r = json!({ "scene_count": 4, "scenes": [{ "start": 0.0 }, { "start": 3.33333 }, { "start": 1.5 }, { "start": 1.5 }, { "end": 9.0 }] });
+        assert_eq!(scene_cuts(&r), Ok(vec![1.5, 3.333]));
+        assert_eq!(scene_cuts(&json!({ "scene_count": 1, "scenes": [{ "start": 0.0, "end": 5.0 }] })), Ok(vec![])); // one continuous shot
+        assert!(scene_cuts(&json!({})).is_err());
+        let many: Vec<Value> = (0..400).map(|i| json!({ "start": i as f64 * 0.5 })).collect();
+        let cuts = scene_cuts(&json!({ "scenes": many })).unwrap();
+        assert_eq!((cuts.len(), cuts[0]), (MAX_SCENE_CUTS, 0.5));
+        assert_eq!(clipped_flag(0.0).unwrap().kind, "clipped_audio");
+        assert!(clipped_flag(-0.1).is_some() && clipped_flag(-0.2).is_none() && clipped_flag(-18.0).is_none() && clipped_flag(f64::NAN).is_none());
+        // A re-probe replaces an old clipped flag (it's a probe kind); detect_scenes on a photo is refused.
+        let merged = merge_flags(&[AssetFlag { kind: "clipped_audio".into(), detail: "old".into() }], vec![], &PROBE_FLAG_KINDS);
+        assert!(merged.is_empty());
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Stills", None).unwrap();
+        put_asset(&st, &p.slug, "ph", "image", None);
+        let forge = MockForge::new(&root, &[]);
+        assert!(detect_asset_scenes(&st, &forge, &p.slug, "ph").unwrap_err().contains("only video"));
+        assert!(forge.tools().is_empty());
+        // v1 asset json (no scenes key) reads as None; a stored list round-trips.
+        assert_eq!(load_asset(&st, &p.slug, "ph").unwrap().scenes, None);
+        let mut v = put_asset(&st, &p.slug, "v", "video", Some(5.0));
+        v.scenes = Some(vec![1.0, 2.5]);
+        save_asset(&st, &v).unwrap();
+        assert_eq!(load_asset(&st, &p.slug, "v").unwrap().scenes, Some(vec![1.0, 2.5]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_clipped_audio_flag_and_scene_failure_on_a_real_clip() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Loud", None).unwrap();
+        let scratch = root.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        // Full-scale square wave: peaks at 0 dBFS. A quiet sine (-18 dBFS) beside it isn't flagged.
+        let Some(loud) = make_clip(&scratch, "loud.mp4", "testsrc=size=160x120:rate=15", Some("aevalsrc=exprs=sgn(sin(2*PI*220*t)):s=48000"), 1.5) else {
+            eprintln!("ffmpeg not found: skipping the clipped-audio test");
+            return;
+        };
+        let calm = make_clip(&scratch, "calm.mp4", "testsrc=size=160x120:rate=15", Some("sine=frequency=440:sample_rate=48000"), 1.5).unwrap();
+        let a = ingest_paths(&st, &os_core::OsConfig::default(), &p.slug, &[loud.to_string_lossy().to_string(), calm.to_string_lossy().to_string()], "clip").unwrap();
+        let cfg = os_core::OsConfig::default();
+        let (lf, lsound) = probe_flags(&cfg, &a[0], None).unwrap();
+        assert!(lsound && lf.iter().any(|f| f.kind == "clipped_audio"), "{lf:?}");
+        let (cf, _) = probe_flags(&cfg, &a[1], None).unwrap();
+        assert!(!cf.iter().any(|f| f.kind == "clipped_audio"), "{cf:?}");
+        // Scene detection failing (no PySceneDetect / Media Forge off) doesn't stop the pass.
+        struct NoScenes(MockForge);
+        impl Forge for NoScenes {
+            fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+                if tool == "detect_scenes" {
+                    return Err("PySceneDetect is not installed".into());
+                }
+                self.0.call(tool, args)
+            }
+        }
+        let forge = NoScenes(MockForge::new(&root, &["loud"]));
+        let ev: Events = Default::default();
+        let emit = |v: Value| ev.borrow_mut().push(v);
+        run_intake_job(&st, &cfg, &forge, &IntakeJob { slug: p.slug.clone(), asset_id: a[0].id.clone(), analyze: true }, &emit).unwrap();
+        assert_eq!(stages(&ev), ["probed", "transcribed"]);
+        let got = load_asset(&st, &p.slug, &a[0].id).unwrap();
+        assert_eq!(got.scenes, None);
+        assert!(got.flags.iter().any(|f| f.kind == "clipped_audio") && got.transcript.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_review_write_stores_summary_and_open_decisions() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Words", None).unwrap();
+        // No round yet: a summary is refused, open decisions alone are fine.
+        assert!(review_write(&st, &p.slug, 1, Some("tight".into()), None).unwrap_err().contains("no review round 1"));
+        let rv = review_write(&st, &p.slug, 1, None, Some(vec![" Music or no music? ".into(), "Music or no music?".into()])).unwrap();
+        assert_eq!(rv.open_decisions, ["Music or no music?"]); // trimmed, de-duplicated
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        m.clips = vec![clip("c1", "v", 0.0, 3.0)];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let f = Path::new(&p.root).join("renders").join("r-1.mp4");
+        std::fs::write(&f, b"r-1").unwrap();
+        record_render(&st, &VerifiedRender { id: "r-1".into(), project: p.slug.clone(), plan_id: "p-1".into(), path: f.to_string_lossy().to_string(), duration_sec: 3.0, width: 1080, height: 1920, size_bytes: 3, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() }, None).unwrap();
+        on_verified_render(&st, &p.slug, "r-1");
+        let rv = review_write(&st, &p.slug, 1, Some("  Opened on the laugh; cut the second take.  ".into()), None).unwrap();
+        assert_eq!(rv.rounds[0].summary, "Opened on the laugh; cut the second take.");
+        assert_eq!(rv.open_decisions, ["Music or no music?"], "a summary-only write keeps the decisions");
+        assert_eq!(rv.rounds[0].status, "open", "writing words never changes a round's status");
+        assert!(review_write(&st, &p.slug, 2, Some("x".into()), None).unwrap_err().contains("no review round 2"));
+        // Limits and shape.
+        assert!(review_write(&st, &p.slug, 3, None, Some(vec![])).unwrap_err().contains("1 or 2"));
+        assert!(review_write(&st, &p.slug, 1, None, None).unwrap_err().contains("nothing to write"));
+        assert!(review_write(&st, &p.slug, 1, Some("x".repeat(MAX_REVIEW_SUMMARY + 1)), None).unwrap_err().contains("2000"));
+        assert!(review_write(&st, &p.slug, 1, None, Some(vec!["d".into(); MAX_OPEN_DECISIONS + 1])).unwrap_err().contains("12"));
+        assert!(review_write(&st, &p.slug, 1, None, Some(vec!["y".repeat(MAX_DECISION_CHARS + 1)])).unwrap_err().contains("300"));
+        assert!(review_write(&st, &p.slug, 1, None, Some(vec!["  ".into()])).unwrap_err().contains("empty"));
+        assert!(review_write(&st, "nope", 1, None, Some(vec![])).is_err());
+        // An empty list clears; the stored review is what media_review_get and project.json show.
+        review_write(&st, &p.slug, 1, None, Some(vec![])).unwrap();
+        let got = review_get(&st, &p.slug).unwrap();
+        assert_eq!((got.rounds[0].summary.as_str(), got.open_decisions.len()), ("Opened on the laugh; cut the second take.", 0));
+        let pj: Value = serde_json::from_str(&std::fs::read_to_string(Path::new(&p.root).join("project.json")).unwrap()).unwrap();
+        assert_eq!(pj["review"]["rounds"][0]["summary"], "Opened on the laugh; cut the second take.");
+        assert!(pj["review"]["openDecisions"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── Review-fix regressions ──
+
+    #[test]
+    fn fix_inbox_needs_stable_mtime_and_retries_transient_errors() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Mtime", None).unwrap();
+        let inbox = Path::new(&p.root).join("inbox");
+        let f = inbox.join("take.mp4");
+        std::fs::write(&f, vec![0u8; 64]).unwrap();
+        assert!(stable_inbox_files(&st, &inbox).is_empty(), "first sighting");
+        // Same size, new mtime (a preallocated file being filled in): not stable.
+        let h = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
+        h.set_modified(std::time::SystemTime::now() + Duration::from_secs(5)).unwrap();
+        drop(h);
+        assert!(stable_inbox_files(&st, &inbox).is_empty(), "mtime moved");
+        let s = stable_inbox_files(&st, &inbox);
+        assert_eq!(s.len(), 1);
+        // A transient failure backs off but isn't permanent.
+        mark_inbox_retry(&st, &s[0]);
+        assert!(stable_inbox_files(&st, &inbox).is_empty(), "backing off");
+        st.inbox_seen.lock().unwrap().get_mut(&f).unwrap().retry_at = Some(std::time::Instant::now());
+        assert_eq!(stable_inbox_files(&st, &inbox).len(), 1, "retried after the backoff");
+        assert_eq!(st.inbox_seen.lock().unwrap()[&f].attempts, 1);
+        mark_inbox_retry(&st, &s[0]);
+        assert_eq!(st.inbox_seen.lock().unwrap()[&f].attempts, 2);
+        // A permanent one waits for a change.
+        mark_inbox_failed(&st, &s[0]);
+        assert!(stable_inbox_files(&st, &inbox).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fix_inbox_file_open_for_writing_is_never_ingested() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Locked", None).unwrap();
+        let inbox = Path::new(&p.root).join("inbox");
+        let f = inbox.join("phone.mp4");
+        std::fs::write(&f, vec![0u8; 4096]).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&f).unwrap(); // a copy still in progress
+        let forge = MockForge::new(&root, &[]);
+        let ev: Events = Default::default();
+        let emit = |v: Value| ev.borrow_mut().push(v);
+        let cfg = os_core::OsConfig::default();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert_eq!(stages(&ev), ["failed"]);
+        assert!(ev.borrow()[0]["detail"].as_str().unwrap().contains("still being written"));
+        assert!(f.is_file() && list_assets(&st, &p.slug).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(Path::new(&p.root).join("raw")).unwrap().count(), 0, "no partial raw copy left");
+        let seen = st.inbox_seen.lock().unwrap()[&f];
+        assert!(!seen.failed && seen.retry_at.is_some(), "transient: retried, not skipped for good");
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fix_inbox_ingested_but_kept_only_retries_the_delete() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Kept", None).unwrap();
+        let inbox = Path::new(&p.root).join("inbox");
+        let f = inbox.join("take.mp4");
+        std::fs::write(&f, b"bytes").unwrap();
+        let meta = std::fs::metadata(&f).unwrap();
+        let file = InboxFile { path: f.clone(), size: meta.len(), mtime: meta.modified().ok() };
+        remember_ingested(&st, &file, "a-1");
+        assert_eq!(already_ingested(&st, &file).as_deref(), Some("a-1"));
+        let forge = MockForge::new(&root, &[]);
+        let ev: Events = Default::default();
+        let emit = |v: Value| ev.borrow_mut().push(v);
+        let cfg = os_core::OsConfig::default();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert!(!f.exists(), "the delete was retried");
+        assert!(ev.borrow().is_empty() && list_assets(&st, &p.slug).unwrap().is_empty(), "never ingested a second time");
+        assert_eq!(already_ingested(&st, &file), None);
+        // A record for an older version of the file doesn't match a changed one.
+        remember_ingested(&st, &file, "a-1");
+        assert_eq!(already_ingested(&st, &InboxFile { size: 99, ..file.clone() }), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fix_unreadable_manifest_is_never_replaced() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Corrupt", None).unwrap();
+        let mp = manifest_path(Path::new(&p.root));
+        let junk = b"{ \"version\": 2, \"clips\": [ truncated".to_vec();
+        std::fs::write(&mp, &junk).unwrap();
+        let note = NoteInput { render_id: None, at_sec: None, text: "hi".into(), by: "nic".into(), via_voice: false };
+        assert!(note_add(&st, &p.slug, note).unwrap_err().starts_with("MANIFEST_UNREADABLE"));
+        assert!(note_resolve(&st, &p.slug, "n-x").unwrap_err().starts_with("MANIFEST_UNREADABLE"));
+        assert!(manifest_save(&st, &p.slug, default_manifest(&p.slug)).unwrap_err().starts_with("MANIFEST_UNREADABLE"));
+        assert!(build_plan(&st, &p.slug, "nic").unwrap_err().starts_with("MANIFEST_UNREADABLE"));
+        assert_eq!(std::fs::read(&mp).unwrap(), junk, "left as it was");
+        // No file yet = the default (a new project).
+        std::fs::remove_file(&mp).unwrap();
+        assert_eq!(load_manifest_strict(Path::new(&p.root), &p.slug).unwrap().revision, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fix_cancel_during_output_start_is_kept() {
+        let jobs: Mutex<HashMap<String, LiveRender>> = Default::default();
+        jobs.lock().unwrap().insert("b".into(), LiveRender { forge_job: "j1".into(), cancelled: false });
+        assert!(!adopt_forge_job(&jobs, "b", "j2"));
+        assert_eq!(jobs.lock().unwrap()["b"].forge_job, "j2");
+        jobs.lock().unwrap().get_mut("b").unwrap().cancelled = true; // Cancel clicked while j3 starts
+        assert!(adopt_forge_job(&jobs, "b", "j3"), "the new job must be cancelled too");
+        assert_eq!(jobs.lock().unwrap()["b"].forge_job, "j3");
+        assert!(adopt_forge_job(&jobs, "gone", "j4"));
+    }
+
+    #[test]
+    fn fix_one_live_batch_per_project_and_plans_run_once_within_the_round_cap() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Batches", None).unwrap();
+        claim_render(&st, &p.slug).unwrap();
+        assert!(claim_render(&st, &p.slug).unwrap_err().starts_with("RENDER_BUSY"));
+        claim_render(&st, "other").unwrap();
+        release_render(&st, &p.slug);
+        claim_render(&st, &p.slug).unwrap();
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![clip("c1", "v", 0.0, 3.0)];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let plan = build_plan(&st, &p.slug, "director").unwrap();
+        assert_eq!(check_plan_executable(&st, &p.slug, &plan), Ok(()));
+        assert!(check_plan_executable(&st, "other", &plan).is_err());
+        // Two rounds open while the Director's plan waits (a hand render meanwhile): refused at execute.
+        let renders = Path::new(&p.root).join("renders");
+        for (id, pl) in [("r-1", "p-a"), ("r-2", "p-b")] {
+            let f = renders.join(format!("{id}.mp4"));
+            std::fs::write(&f, id.as_bytes()).unwrap();
+            let r = VerifiedRender { id: id.into(), project: p.slug.clone(), plan_id: pl.into(), path: f.to_string_lossy().to_string(), duration_sec: 3.0, width: 1920, height: 1080, size_bytes: 3, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() };
+            record_render(&st, &r, None).unwrap();
+            on_verified_render(&st, &p.slug, id);
+        }
+        assert_eq!(review_get(&st, &p.slug).unwrap().rounds.len(), 2);
+        assert!(check_plan_executable(&st, &p.slug, &plan).unwrap_err().starts_with("REVIEW_LIMIT"));
+        let nic = build_plan(&st, &p.slug, "nic").unwrap();
+        assert_eq!(check_plan_executable(&st, &p.slug, &nic), Ok(()));
+        mark_plan_used(&st, &nic.plan_id);
+        assert!(check_plan_executable(&st, &p.slug, &nic).unwrap_err().starts_with("PLAN_USED"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fix_project_writes_dont_drop_review_rounds_and_deliverables_persist() {
+        let root = tmp_root();
+        let st = std::sync::Arc::new(MediaState::in_memory(&root));
+        let p = create_project(&st, "Race", None).unwrap();
+        let f = Path::new(&p.root).join("renders").join("r-1.mp4");
+        std::fs::write(&f, b"render").unwrap();
+        put_render(&st, &p.slug, "r-1", &f, 1920, 1080);
+        let (a, b) = (st.clone(), st.clone());
+        let slug = p.slug.clone();
+        let edits = std::thread::spawn(move || {
+            for i in 0..40 {
+                project_update(&a, &slug, Some(format!("Race {i}")), None, None, None).unwrap();
+            }
+        });
+        let slug = p.slug.clone();
+        let round = std::thread::spawn(move || on_verified_render(&b, &slug, "r-1"));
+        edits.join().unwrap();
+        round.join().unwrap();
+        let q = load_project(&st, &p.slug).unwrap();
+        assert_eq!((q.review.rounds.len(), q.status.as_str(), q.title.as_str()), (1, "review", "Race 39"));
+        // Approve final: the deliverables come back after a project switch or restart.
+        assert!(deliverables_get(&st, &p.slug).unwrap().is_empty());
+        let out = approve_final(&st, &p.slug, &["r-1".into()], true).unwrap();
+        assert_eq!(deliverables_get(&st, &p.slug).unwrap(), out);
+        assert_eq!(load_project(&st, &p.slug).unwrap().review.rounds[0].status, "approved");
+        std::fs::remove_file(&out[0].path).unwrap();
+        assert!(deliverables_get(&st, &p.slug).unwrap().is_empty(), "a deliverable that's gone is dropped");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

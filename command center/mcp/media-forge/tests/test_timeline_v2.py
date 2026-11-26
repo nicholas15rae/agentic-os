@@ -414,3 +414,9 @@ def test_transcribe_batch_tool_checks(s, media, monkeypatch):
     assert view["status"] == "done", view
     cap_dir = config.project_dir(s, SLUG) / "working" / "captions"
     assert [b for _, b in seen["items"]] == [cap_dir / "as1", cap_dir / "as2"] and seen["model"] == "tiny.en"
+
+
+def test_default_whisper_model_is_the_local_tiny_en(monkeypatch):
+    # The default must be the model already on disk (resolve_model never downloads).
+    monkeypatch.delenv("WHISPER_MODEL", raising=False)
+    assert config.load().whisper_model == "tiny.en"

@@ -62,6 +62,6 @@ uv --directory "<this folder>" run server.py   # what the gateway launches
 | `MEDIA_CPU_PCT` | `70` |
 | `MEDIA_ALLOW_GPU` | `0` |
 | `MEDIA_MAX_JOBS` | `1` |
-| `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE` / `WHISPER_MODEL_DIR` | `small.en` / `cpu` / `int8` / `C:\ai-hub\models\faster-whisper` |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE` / `WHISPER_MODEL_DIR` | `tiny.en` (on disk; `small.en` is a ~480 MB opt-in download) / `cpu` / `int8` / `C:\ai-hub\models\faster-whisper` |
 
 Smoke-test any stdio MCP the way the gateway talks to it: `python ..\mcp_smoke.py --call media_status "{}" -- uv --directory . run server.py`.

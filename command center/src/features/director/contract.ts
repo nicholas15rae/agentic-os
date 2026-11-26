@@ -52,6 +52,9 @@ export interface MediaAsset {
   flags: AssetFlag[];         // Rust probe checks + media-forge detect_silence/scenes
   moments: Moment[];
   slotId: string | null;      // the matched shot (mirror of ShotSlot.assetId; the manifest is the source of truth)
+  /** Shot-cut times in seconds (media-forge detect_scenes after the probe; video only, ≤ 200).
+   * Absent / null = not detected (yet); [] = one continuous shot. */
+  scenes?: number[] | null;
 }
 
 export interface ShotSlot {
@@ -204,7 +207,12 @@ export interface DirectorCommands {
   media_note_add: { args: { slug: string; note: Omit<Note, "id" | "at" | "resolved"> }; result: Note };
   media_note_resolve: { args: { slug: string; noteId: string }; result: void };
   media_review_get: { args: { slug: string }; result: ProjectReview };
+  /** The Director's words on the review, stored in project.json: a round's summary (≤ 2000 chars;
+   * the round must exist) and/or the open decisions (≤ 12, each ≤ 300 chars; replaced whole). Text only. */
+  media_review_write: { args: { slug: string; round: 1 | 2; summary?: string; openDecisions?: string[] }; result: ProjectReview };
   media_approve_final: { args: { slug: string; renderIds: string[]; approved: true }; result: Deliverable[] };
+  /** The last "Approve final"'s deliverables still on disk (media.db), so they survive a switch or restart. */
+  media_deliverables_get: { args: { slug: string }; result: Deliverable[] };
 }
 export interface DirectorTurnRequest { text: string; history: { role: "user" | "assistant"; content: string }[]; context: string; streamId: string | null }
 export interface DirectorTurnResult { answer: string; providerId: string; latencyMs: number; answeredBy: "director" }

@@ -56,7 +56,8 @@ describe("Render Plan card", () => {
 describe("readiness pill", () => {
   const ok = { enabled: true, healthy: true, tools: 4, error: null };
   it("green / amber names the off server / red shows the error", () => {
-    expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: true }, null)).toMatchObject({ tone: "green", label: "MCP ready · 8 tools" });
+    expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: true }, null)).toMatchObject({ tone: "green", label: "MCP ready · Shotcut + MediaForge" });
+    expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: true }, null).detail).toMatch(/^8 tools listed \(Shotcut 4, MediaForge 4\)/);
     expect(readinessPill({ shotcut: { ...ok, enabled: false, tools: 0 }, mediaForge: ok, ffmpegFound: true }, null)).toMatchObject({ tone: "amber", label: "shotcut off" });
     expect(readinessPill({ shotcut: ok, mediaForge: { ...ok, healthy: false, error: "spawn failed" }, ffmpegFound: true }, null)).toMatchObject({ tone: "red", detail: "spawn failed" });
     expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: false }, null)).toMatchObject({ tone: "amber" });

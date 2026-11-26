@@ -41,6 +41,8 @@ export interface ChatMsg {
   errors?: string[];
   /** Short notes of what its valid actions changed. */
   applied?: string[];
+  /** This reply changed the timeline / shot list: the undo point that puts it back (while current). */
+  undoId?: string;
 }
 
 export type Selection = { kind: "asset" | "clip" | "render"; id: string } | null;
@@ -102,7 +104,7 @@ export interface DirectorState {
   // ── v2 ──
   /** Review rounds + open decisions (media_review_get). */
   review: ProjectReview | null;
-  /** The Director's latest report_open_decisions (display only; Rust has no command to store them). */
+  /** The Director's latest report_open_decisions (stored via media_review_write; loaded from media_review_get). */
   openDecisions: string[];
   matchSuggestions: MatchSuggestion[];
   momentSuggestions: MomentSuggestion[];
@@ -112,6 +114,19 @@ export interface DirectorState {
   deliverables: Deliverable[];
   /** Auto-send one match_footage turn when freshly transcribed clips leave film slots unfilled. */
   autoMatch: boolean;
+  /** The preview's own media time (seconds into whatever it plays), for notes on a render. */
+  previewTime: number;
+  /** A seek request for the preview (applied once its source is loaded); `n` changes per request. */
+  seek: { sec: number; n: number } | null;
+  /** The edit before the Director's last timeline / shot-list change, so Nic can put it back. */
+  undo: DirectorUndo | null;
+}
+
+/** What a Director reply replaced (clips, audio, shot list, looks, outputs), for one-click undo. */
+export interface DirectorUndo {
+  id: string;
+  slug: string;
+  before: Pick<TimelineManifest, "clips" | "audio" | "shotList" | "captions" | "color" | "outputs" | "output" | "clipAudioVolume">;
 }
 
 const LAST_KEY = "cc.director.lastSlug";
@@ -167,6 +182,9 @@ const initial: DirectorState = {
   revision: null,
   deliverables: [],
   autoMatch: true,
+  previewTime: 0,
+  seek: null,
+  undo: null,
 };
 
 export const useDirector = create<DirectorState>(() => ({ ...initial }));
@@ -198,14 +216,17 @@ export async function openProject(slug: string): Promise<void> {
   if (get().slug && get().slug !== slug) await flushSave();
   const same = get().slug === slug;
   if (!same) resetIntake();
-  set({ slug, loading: true, error: null, plan: null, selection: null, previewMode: "working", playhead: 0, chat: same ? get().chat : [], ...(same ? {} : PROJECT_V2_BLANK) });
+  set({ slug, loading: true, error: null, plan: null, selection: null, previewMode: "working", playhead: 0, previewTime: 0, seek: null, chat: same ? get().chat : [], ...(same ? {} : PROJECT_V2_BLANK) });
   rememberSlug(slug);
   try {
-    const [data, log, review] = await Promise.all([api.projectGet({ slug }), api.chatLog({ slug }).catch(() => []), loadReview(slug)]);
+    const [data, log, review, deliverables] = await Promise.all([api.projectGet({ slug }), api.chatLog({ slug }).catch(() => []), loadReview(slug), loadDeliverables(slug)]);
     if (get().slug !== slug) return;
     dirty = false;
+    const rv = review ?? data.project.review ?? null;
     set({
-      review: review ?? data.project.review ?? null,
+      ...(deliverables ? { deliverables } : {}),
+      review: rv,
+      openDecisions: rv?.openDecisions ?? [],
       // v1 rows / manifests read as v2 (Rust upgrades too; this keeps an older backend safe).
       project: upgradeProject(data.project),
       assets: data.assets.map(upgradeAsset),
@@ -228,12 +249,22 @@ export function closeProject() {
 }
 
 /** Per-project v2 state, cleared when another project opens. */
-const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [] };
+const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null };
 
 /** media_review_get, never throwing (an older backend or a missing project.json review is null). */
 async function loadReview(slug: string): Promise<ProjectReview | null> {
   try {
     return (await api.reviewGet({ slug })) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** media_deliverables_get (the last Approve final's files), never throwing: null = unknown. */
+async function loadDeliverables(slug: string): Promise<Deliverable[] | null> {
+  try {
+    const d = await api.deliverablesGet({ slug });
+    return Array.isArray(d) ? d : null;
   } catch {
     return null;
   }
@@ -333,15 +364,38 @@ export function addAssets(assets: MediaAsset[]) {
 
 // ── Director actions ─────────────────────────────────────────────────────────
 
-/** Replace clips/audio (+ captions/color/outputs when named) and save as the Director. */
-async function applyPlan(body: EditPlanBody): Promise<boolean> {
-  const m = get().manifest;
-  if (!m) return false;
+/** Replace clips/audio (+ captions/color/outputs when named) and save as the Director. False (and
+ * nothing applied) if another project opened meanwhile. `snap` runs on the manifest it replaces. */
+async function applyPlan(body: EditPlanBody, slug: string, snap: (m: TimelineManifest) => void): Promise<boolean> {
+  if (get().slug !== slug || !get().manifest) return false;
   await flushSave();
-  const cur = get().manifest ?? m;
+  const cur = get().manifest;
+  if (get().slug !== slug || !cur) return false;
+  snap(cur);
   set({ manifest: applyEditPlan(cur, body) });
   dirty = true;
   return flushSave("director", true);
+}
+
+const undoFields = (m: TimelineManifest): DirectorUndo["before"] => ({ clips: m.clips, audio: m.audio, shotList: m.shotList, captions: m.captions, color: m.color, outputs: m.outputs, output: m.output, clipAudioVolume: m.clipAudioVolume });
+
+/** Put back the edit from before the Director's last timeline / shot-list change (Nic's click). */
+export async function undoDirectorEdit(): Promise<boolean> {
+  const u = get().undo;
+  const slug = get().slug;
+  if (!u || !slug || u.slug !== slug || !get().manifest) return false;
+  await flushSave();
+  const cur = get().manifest;
+  if (get().slug !== slug || !cur) return false;
+  // The plan card and any waiting revision were for the Director's version.
+  set({ manifest: { ...cur, ...u.before }, undo: null, plan: null, revision: null });
+  dirty = true;
+  const ok = await flushSave("nic", true);
+  if (ok) {
+    toast("Director's edit undone", "Your timeline and shot list are back as they were.");
+    void refreshAssets(slug);
+  }
+  return ok;
 }
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : w.endsWith("ch") ? "es" : "s"}`;
@@ -363,9 +417,25 @@ export function reviseRefusal(round: 1 | 2, review: ProjectReview | null, pendin
 
 /** Apply validated Director actions to the UI. Nothing renders, posts or deletes: at most the
  * plan card opens, and matches / held brief drafts wait for Nic's click. */
-export async function applyDirectorActions(actions: DirectorAction[]): Promise<string[]> {
+export async function applyDirectorActions(actions: DirectorAction[], forSlug?: string): Promise<string[]> {
   const notes: string[] = [];
+  // Every action is for the project the reply was about: stop as soon as another one opens.
+  const slug = forSlug ?? get().slug;
+  if (!slug) return notes;
+  const alive = () => get().slug === slug;
+  // One undo point per reply: the manifest before its first timeline / shot-list change.
+  let snapped = false;
+  const snap = (m: TimelineManifest) => {
+    if (snapped) return;
+    snapped = true;
+    set({ undo: { id: newId("u"), slug, before: undoFields(m) } });
+  };
+  const stopped = () => notes.push("Stopped: another project opened before the rest of this reply applied");
   for (const a of actions) {
+    if (!alive()) {
+      stopped();
+      break;
+    }
     switch (a.type) {
       case "draft_brief": {
         const p = get().project;
@@ -388,11 +458,14 @@ export async function applyDirectorActions(actions: DirectorAction[]): Promise<s
         if (await updateProject({ brief })) notes.push(`Brief drafted for your approval${brief.guessed.length ? ` (${plural(brief.guessed.length, "guessed field")})` : ""}`);
         break;
       }
-      case "populate_shot_list":
+      case "populate_shot_list": {
+        const cur = get().manifest;
+        if (cur) snap(cur);
         editManifest((m) => setShotList(m, a.slots));
         set((s) => ({ matchSuggestions: s.matchSuggestions.filter((x) => a.slots.some((sl) => sl.id === x.slotId)) }));
         notes.push(`Shot list: ${plural(a.slots.length, "slot")}`);
         break;
+      }
       case "match_footage": {
         const m = get().manifest;
         const matches: MatchSuggestion[] = a.matches
@@ -409,9 +482,9 @@ export async function applyDirectorActions(actions: DirectorAction[]): Promise<s
         break;
       }
       case "propose_edit_plan":
-        if (await applyPlan(a)) {
+        if (await applyPlan(a, slug, snap)) {
           notes.push(`Edit plan: ${plural(a.clips.length, "clip")}, ${plural(a.audio.length, "audio layer")}`);
-          await requestPlan("director");
+          if (alive()) await requestPlan("director");
         }
         break;
       case "revise_edit": {
@@ -421,17 +494,22 @@ export async function applyDirectorActions(actions: DirectorAction[]): Promise<s
           break;
         }
         const body = revisePlanBody(a);
-        if (await applyPlan(body)) {
+        if (await applyPlan(body, slug, snap)) {
           set({ revision: { round: a.round, resolves: a.resolves, summary: a.summary } });
+          // The Director's "what changed" lands on the round it answers (text only).
+          if (a.summary.trim() && alive()) await writeReview({ round: a.round, summary: a.summary });
           notes.push(`Round ${a.round} revision: ${plural(body.clips.length, "clip")}, answers ${plural(a.resolves.length, "note")} (resolved when you approve the render)`);
-          await requestPlan("director");
+          if (alive()) await requestPlan("director");
         }
         break;
       }
-      case "report_open_decisions":
+      case "report_open_decisions": {
         set({ openDecisions: a.items });
+        const rounds = get().review?.rounds ?? [];
+        await writeReview({ round: rounds[rounds.length - 1]?.round ?? 1, openDecisions: a.items });
         notes.push(`Open decisions: ${a.items.length}`);
         break;
+      }
       case "execute_verified_render":
         await requestPlan("director");
         notes.push("Render plan raised for your approval");
@@ -443,6 +521,21 @@ export async function applyDirectorActions(actions: DirectorAction[]): Promise<s
     }
   }
   return notes;
+}
+
+/** media_review_write for the open project (the Director's round summary / open decisions). The
+ * stored review replaces the local one; a failure keeps the local copy and says so. */
+async function writeReview(fields: Omit<DirectorCommands["media_review_write"]["args"], "slug">): Promise<boolean> {
+  const slug = get().slug;
+  if (!slug) return false;
+  try {
+    const review = await api.reviewWrite({ slug, ...fields });
+    if (get().slug === slug && review) set({ review, openDecisions: review.openDecisions });
+    return true;
+  } catch (e) {
+    toast("Couldn't save the Director's review notes", errText(e), "warn");
+    return false;
+  }
 }
 
 /** Nic chose not to render the waiting revision: its notes stay open. */
@@ -576,6 +669,33 @@ export async function acceptMoment(id: string): Promise<boolean> {
 }
 export const rejectMoment = (id: string) => set((s) => ({ momentSuggestions: s.momentSuggestions.filter((x) => x.id !== id) }));
 
+export const MAX_TAGS = 12;
+export const TAG_MAX_CHARS = 32;
+/** Tags as Rust's clean_tags stores them: trimmed, lowercase, 1–32 chars, no duplicates, ≤ 12 (pure). */
+export function cleanTags(tags: string[]): string[] {
+  const out: string[] = [];
+  for (const t of tags) {
+    // eslint-disable-next-line no-control-regex
+    const tag = t.trim().toLowerCase().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, TAG_MAX_CHARS);
+    if (tag && !out.includes(tag)) out.push(tag);
+  }
+  return out.slice(0, MAX_TAGS);
+}
+
+/** Nic edits an asset's tags (media_asset_update); the stored asset replaces the local one. */
+export async function setAssetTags(assetId: string, tags: string[]): Promise<boolean> {
+  const slug = get().slug;
+  if (!slug) return false;
+  try {
+    const a = upgradeAsset(await api.assetUpdate({ slug, assetId, tags: cleanTags(tags) }));
+    if (get().slug === slug) replaceAsset(a);
+    return true;
+  } catch (e) {
+    toast("Couldn't save the tags", errText(e), "error");
+    return false;
+  }
+}
+
 // ── v2: review notes + final approval ────────────────────────────────────────
 
 /** Nic's review note (Rust owns notes: media_note_add; the result lands locally without a save). */
@@ -698,10 +818,28 @@ async function autoMatchTurn(slug: string): Promise<void> {
   // Only the unfilled film slots these clips could fill (same kind).
   const unfilled = manifest.shotList.filter((s) => s.source === "film" && !s.assetId && fresh.some((a) => a.kind === s.kind));
   if (!unfilled.length || !fresh.length) return;
-  for (const a of fresh) asked.add(a.id);
   const { sendDirectorTurn } = await import("./director-chat");
-  await sendDirectorTurn(autoMatchPrompt(fresh, unfilled));
+  // Re-check after the awaits: a turn Nic started meanwhile (or a project switch) must not drop
+  // these clips. Only a sent turn marks them as asked.
+  if (get().slug !== slug) return;
+  if (get().chatBusy) {
+    for (const a of fresh) transcribed.add(a.id);
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => void autoMatchTurn(slug), AUTO_MATCH_DEBOUNCE_MS);
+    return;
+  }
+  for (const a of fresh) asked.add(a.id);
+  // The page sent this turn, not Nic: only match_footage (suggestions) may apply from its reply.
+  const sent = await sendDirectorTurn(autoMatchPrompt(fresh, unfilled), { only: AUTO_TURN_ACTIONS });
+  if (!sent)
+    for (const a of fresh) {
+      asked.delete(a.id);
+      transcribed.add(a.id); // offered again with the next auto turn
+    }
 }
+
+/** The only action an automatic (page-sent) turn may apply: suggestions Nic accepts one by one. */
+export const AUTO_TURN_ACTIONS: DirectorAction["type"][] = ["match_footage"];
 
 /** Subscribe the store to every Director Suite event (render, ingest, intake). Returns the unsubscribe. */
 export async function startDirectorEvents(): Promise<() => void> {
@@ -761,7 +899,20 @@ export function onRenderEvent(e: RenderJob) {
     const r = e.render;
     set((s) => ({ renders: [r, ...s.renders.filter((x) => x.id !== r.id)] }));
     toast("Render verified", r.path.split(/[\\/]/).pop());
+    // Rust opened (or joined) a review round and moved the project to review: re-read both.
+    void refreshAfterRender(e.slug);
   } else if (e.status === "failed") toast("Render failed", e.error ?? e.stage, "error");
+}
+
+/** After a verified render: the stored review rounds and the project row (status), if still open. */
+export async function refreshAfterRender(slug: string): Promise<void> {
+  const [review, data] = await Promise.all([loadReview(slug), Promise.resolve().then(() => api.projectGet({ slug })).catch(() => null)]);
+  if (get().slug !== slug) return;
+  if (review) set({ review, openDecisions: review.openDecisions ?? [] });
+  if (data?.project) {
+    const p = upgradeProject(data.project);
+    set((s) => ({ project: p, projects: s.projects.map((x) => (x.slug === slug ? p : x)) }));
+  }
 }
 
 export function onIngestEvent(e: DirectorEvents["media-ingest"]) {
@@ -790,6 +941,12 @@ export function select(sel: Selection) {
 }
 export const setPreviewMode = (previewMode: DirectorState["previewMode"]) => set({ previewMode });
 export const setPlayhead = (playhead: number) => set({ playhead: Math.max(0, playhead) });
+export const setPreviewTime = (previewTime: number) => set({ previewTime: Number.isFinite(previewTime) ? Math.max(0, previewTime) : 0 });
+/** Show `sel` in the preview and seek it to `sec` (seconds into that source). */
+export function seekTo(sel: Selection, sec: number) {
+  if (sel) select(sel);
+  set((s) => ({ seek: { sec: Math.max(0, Number.isFinite(sec) ? sec : 0), n: (s.seek?.n ?? 0) + 1 } }));
+}
 export const setReadiness = (readiness: Readiness | null, readinessError: string | null) => set({ readiness, readinessError });
 
 /** Rendering needs media-forge green (enabled, healthy, listing tools) and ffmpeg. */

@@ -54,8 +54,11 @@ export const api = {
   noteAdd: (a: Args<"media_note_add">): Promise<Result<"media_note_add">> => xcmd("media_note_add", a),
   noteResolve: (a: Args<"media_note_resolve">): Promise<Result<"media_note_resolve">> => xcmd("media_note_resolve", a),
   reviewGet: (a: Args<"media_review_get">): Promise<Result<"media_review_get">> => xcmd("media_review_get", a),
+  /** Stores the Director's round summary / open decisions (text only: nothing renders or resolves). */
+  reviewWrite: (a: Args<"media_review_write">): Promise<Result<"media_review_write">> => xcmd("media_review_write", a),
   /** Only ever from Nic's "Approve final" click: copies verified renders to renders/final/<platform>/. */
   approveFinal: (a: Args<"media_approve_final">): Promise<Result<"media_approve_final">> => xcmd("media_approve_final", a),
+  deliverablesGet: (a: Args<"media_deliverables_get">): Promise<Result<"media_deliverables_get">> => xcmd("media_deliverables_get", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

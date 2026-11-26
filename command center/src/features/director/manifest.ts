@@ -525,6 +525,7 @@ export function upgradeAsset(raw: unknown): MediaAsset {
     flags: list(a.flags) as MediaAsset["flags"],
     moments: list(a.moments) as MediaAsset["moments"],
     slotId: typeof a.slotId === "string" ? a.slotId : null,
+    scenes: Array.isArray(a.scenes) ? (a.scenes as unknown[]).filter((t): t is number => typeof t === "number" && Number.isFinite(t)).slice(0, 200) : null,
   };
 }
 

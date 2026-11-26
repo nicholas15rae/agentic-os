@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Cloud, FileAudio, FolderOpen, Image as ImageIcon, Lock, Plus, Upload, Video } from "lucide-react";
+import { ChevronDown, ChevronUp, Cloud, FileAudio, FolderOpen, Image as ImageIcon, Lock, Plus, Upload, Video } from "lucide-react";
 import { Card, Empty, Select } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { DrivePickerModal } from "@/features/cloud/DrivePickerModal";
@@ -8,6 +8,9 @@ import type { AssetRole, MediaAsset } from "./contract";
 import { addAssets, editManifest, select, useDirector } from "./director-store";
 import { ASSET_MIME, DIALOG_FILTERS, hasFiles, ingestDropped } from "./dnd";
 import { INGEST_ROLES, addClip, timecode } from "./manifest";
+import { AssetBadges, AssetDetails } from "./AssetDetails";
+import { BinSuggestions } from "./BinSuggestions";
+import { IntakeStatusLine } from "./IntakeStatus";
 
 export const assetMeta = (a: MediaAsset) => [a.durationSec != null ? timecode(a.durationSec) : null, a.width && a.height ? `${a.width}×${a.height}` : null].filter(Boolean).join(" · ");
 
@@ -34,6 +37,8 @@ export function StagingBin() {
   const [over, setOver] = useState(false);
   const [drive, setDrive] = useState(false);
   const projectTitle = useDirector((s) => s.project?.title ?? s.slug ?? "");
+  const projectRoot = useDirector((s) => s.project?.root ?? null);
+  const [openId, setOpenId] = useState<string | null>(null);
 
   const pick = async () => {
     if (!slug) return;
@@ -70,6 +75,8 @@ export function StagingBin() {
         </>
       }
     >
+      <IntakeStatusLine />
+      <BinSuggestions />
       <div
         onDragOver={(e) => {
           if (!hasFiles(e)) return;
@@ -100,9 +107,10 @@ export function StagingBin() {
           <ul className="space-y-1.5">
             {assets.map((a) => {
               const on = selection?.kind === "asset" && selection.id === a.id;
+              const open = openId === a.id;
               return (
-                <li
-                  key={a.id}
+                <li key={a.id}>
+                <div
                   draggable
                   onDragStart={(e) => {
                     e.dataTransfer.setData(ASSET_MIME, a.id);
@@ -126,8 +134,27 @@ export function StagingBin() {
                         </span>
                       )}
                       <span className="font-mono text-[10px] text-ink-3">{assetMeta(a)}</span>
+                      <AssetBadges asset={a} />
+                      {a.tags.slice(0, 3).map((t) => (
+                        <span key={t} className="rounded-full border border-teal/25 px-1.5 text-[10px] text-teal-soft">
+                          {t}
+                        </span>
+                      ))}
+                      {a.tags.length > 3 && <span className="text-[10px] text-ink-3">+{a.tags.length - 3}</span>}
                     </div>
                   </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenId(open ? null : a.id);
+                    }}
+                    className="pill-glass !h-7 !w-7 shrink-0 !p-0 opacity-70 group-hover:opacity-100"
+                    title={open ? "Hide details" : "Tags, transcript, moments"}
+                    aria-label={open ? `Hide details for ${a.name}` : `Details for ${a.name}`}
+                    aria-expanded={open}
+                  >
+                    {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  </button>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -139,6 +166,8 @@ export function StagingBin() {
                   >
                     <Plus size={12} />
                   </button>
+                </div>
+                {open && <AssetDetails asset={a} projectRoot={projectRoot} />}
                 </li>
               );
             })}

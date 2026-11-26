@@ -80,6 +80,12 @@ describe("v1 → v2 upgrade on read", () => {
     const { tags: _t, transcript: _tr, flags: _f, moments: _m, slotId: _sl, ...a1 } = asset("a-x", "video");
     expect(upgradeAsset(a1)).toMatchObject({ id: "a-x", tags: [], transcript: null, flags: [], moments: [], slotId: null });
   });
+  it("keeps scene cut times (numbers only, ≤ 200); missing reads as null", () => {
+    expect(upgradeAsset({ id: "a-x" }).scenes).toBeNull();
+    expect(upgradeAsset({ id: "a-x", scenes: [] }).scenes).toEqual([]);
+    expect(upgradeAsset({ id: "a-x", scenes: [1.2, "x", Number.NaN, 3.4] }).scenes).toEqual([1.2, 3.4]);
+    expect(upgradeAsset({ id: "a-x", scenes: Array.from({ length: 250 }, (_, i) => i + 1) }).scenes).toHaveLength(200);
+  });
 });
 
 describe("platform presets", () => {

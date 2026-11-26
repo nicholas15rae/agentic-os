@@ -11,6 +11,7 @@ import { ACTION_FENCE } from "./actions";
 export const CONTEXT_BUDGET = 9000;
 const MAX_MOMENTS_SHOWN = 3;
 const MAX_NOTES_SHOWN = 12;
+const MAX_CUTS_SHOWN = 4;
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 const fmtDur = (s: number | null) => (s == null ? "—" : `${r2(s)}s`);
@@ -71,6 +72,10 @@ function assetLine(a: MediaAsset): string {
   if (a.slotId) bits.push(`slot ${a.slotId}`);
   if (a.tags.length) bits.push(`tags ${a.tags.slice(0, 6).join(",")}`);
   if (a.flags.length) bits.push(`flags ${a.flags.map((f) => f.kind).join(",")}`);
+  if (a.kind === "video" && Array.isArray(a.scenes)) {
+    const c = a.scenes;
+    bits.push(c.length ? `shots ${c.length + 1} (cuts ${c.slice(0, MAX_CUTS_SHOWN).map(r2).join(",")}${c.length > MAX_CUTS_SHOWN ? ` +${c.length - MAX_CUTS_SHOWN}` : ""})` : "one shot");
+  }
   if (a.transcript) {
     const t = a.transcript;
     bits.push(`speech ${t.words}w${t.firstSpeechSec != null && t.lastSpeechSec != null ? ` ${r2(t.firstSpeechSec)}–${r2(t.lastSpeechSec)}s` : ""}`);
@@ -103,6 +108,7 @@ function reviewLines(m: TimelineManifest, review: ProjectReview | null | undefin
   if (rounds.length) {
     const cur = rounds[rounds.length - 1];
     parts.push(`REVIEW: round ${cur.round} of 2 (${cur.status}) on render ${cur.renderId}${cur.round >= 2 ? " · no more revising: only report_open_decisions" : ""}`);
+    for (const r of rounds) if (r.summary.trim()) parts.push(`Round ${r.round} summary: ${cut(r.summary.trim(), 300)}`);
   } else parts.push("REVIEW: no verified render yet");
   if (review?.openDecisions.length) parts.push(`Open decisions: ${review.openDecisions.map((d) => cut(d, 100)).join(" | ")}`);
   if (open.length) {

@@ -17,11 +17,13 @@ vi.mock("./api", () => ({
     noteAdd: vi.fn(),
     noteResolve: vi.fn(),
     reviewGet: vi.fn(),
+    reviewWrite: vi.fn(),
     approveFinal: vi.fn(),
+    deliverablesGet: vi.fn(),
   },
   onDirectorEvent: vi.fn(async () => () => undefined),
 }));
-const sendDirectorTurn = vi.fn(async (_text: string) => undefined);
+const sendDirectorTurn = vi.fn(async (_text: string, _opts?: { only?: string[] }) => true);
 vi.mock("./director-chat", () => ({ sendDirectorTurn }));
 
 const { api, onDirectorEvent } = await import("./api");
@@ -55,6 +57,11 @@ beforeEach(async () => {
   m.projectUpdate.mockImplementation(async ({ slug, ...f }) => ({ ...project({ slug }), ...st().project, ...f }) as MediaProject);
   m.assetUpdate.mockImplementation(async ({ assetId, slotId, moments }) => ({ ...ASSETS.find((a) => a.id === assetId)!, ...(slotId !== undefined ? { slotId } : {}), ...(moments ? { moments } : {}) }));
   m.noteResolve.mockResolvedValue(undefined);
+  // Rust's review_write: a summary lands on its round, decisions replace the list.
+  m.reviewWrite.mockImplementation(async ({ round, summary, openDecisions }) => {
+    const cur = st().review ?? NO_REVIEW;
+    return { rounds: cur.rounds.map((r) => (summary !== undefined && r.round === round ? { ...r, summary } : r)), openDecisions: openDecisions ?? cur.openDecisions };
+  });
   await open();
 });
 afterEach(() => vi.useRealTimers());
@@ -199,6 +206,9 @@ describe("revise_edit respects the round cap", () => {
     const notes = await store.applyDirectorActions([revise(1)]);
     expect(notes[0]).toMatch(/Round 1 revision: 1 clip, answers 1 note/);
     expect(st().revision).toEqual({ round: 1, resolves: ["n-1"], summary: "trimmed" });
+    // The summary is stored on the round it answers (text only), and the stored review replaces the local one.
+    expect(m.reviewWrite).toHaveBeenCalledWith({ slug: "demo", round: 1, summary: "trimmed" });
+    expect(st().review?.rounds[0].summary).toBe("trimmed");
     expect(st().plan).toEqual(PLAN);
     expect(m.noteResolve).not.toHaveBeenCalled();
     expect(m.renderExecute).not.toHaveBeenCalled();
@@ -217,6 +227,20 @@ describe("revise_edit respects the round cap", () => {
     expect(notes[0]).toMatch(/no round 3/);
     expect(m.manifestSave).not.toHaveBeenCalled();
     expect(m.renderPlan).not.toHaveBeenCalled();
+    expect(m.reviewWrite).not.toHaveBeenCalled();
+  });
+
+  it("an empty summary isn't written; a refused write toasts and keeps the revision", async () => {
+    await open({}, shotted(), ROUND1);
+    await store.applyDirectorActions([{ ...revise(1), summary: "  " }]);
+    expect(m.reviewWrite).not.toHaveBeenCalled();
+    await open({}, shotted(), ROUND1);
+    m.reviewWrite.mockRejectedValueOnce(new Error("there's no review round 1 yet"));
+    const notes = await store.applyDirectorActions([revise(1)]);
+    expect(notes[0]).toMatch(/Round 1 revision/);
+    expect(st().revision?.summary).toBe("trimmed");
+    expect(st().review).toEqual(ROUND1);
+    expect(push).toHaveBeenCalledWith(expect.objectContaining({ tone: "warn" }));
   });
 
   it("discardRevision keeps the notes open", async () => {
@@ -228,11 +252,36 @@ describe("revise_edit respects the round cap", () => {
   });
 });
 
-it("report_open_decisions is stored for display only", async () => {
-  const notes = await store.applyDirectorActions([{ type: "report_open_decisions", items: ["logo or text end card?", "music drop at 0:12?"] }]);
-  expect(st().openDecisions).toEqual(["logo or text end card?", "music drop at 0:12?"]);
-  expect(notes).toEqual(["Open decisions: 2"]);
-  expect(m.manifestSave).not.toHaveBeenCalled();
+describe("report_open_decisions", () => {
+  const ITEMS = ["logo or text end card?", "music drop at 0:12?"];
+  it("is stored through media_review_write (latest round) and nothing else changes", async () => {
+    const ROUND2: ProjectReview = { rounds: [{ ...ROUND1.rounds[0], status: "revised" }, { round: 2, renderId: "r-2", notes: [], status: "open", summary: "" }], openDecisions: [] };
+    await open({}, shotted(), ROUND2);
+    const notes = await store.applyDirectorActions([{ type: "report_open_decisions", items: ITEMS }]);
+    expect(m.reviewWrite).toHaveBeenCalledWith({ slug: "demo", round: 2, openDecisions: ITEMS });
+    expect(st().openDecisions).toEqual(ITEMS);
+    expect(st().review?.openDecisions).toEqual(ITEMS);
+    expect(notes).toEqual(["Open decisions: 2"]);
+    expect(m.manifestSave).not.toHaveBeenCalled();
+    expect(m.renderPlan).not.toHaveBeenCalled();
+    expect(m.renderExecute).not.toHaveBeenCalled();
+  });
+  it("with no round yet it names round 1; a failed write keeps them on screen", async () => {
+    m.reviewWrite.mockRejectedValueOnce(new Error("offline"));
+    await store.applyDirectorActions([{ type: "report_open_decisions", items: ITEMS }]);
+    expect(m.reviewWrite).toHaveBeenCalledWith({ slug: "demo", round: 1, openDecisions: ITEMS });
+    expect(st().openDecisions).toEqual(ITEMS);
+    expect(push).toHaveBeenCalledWith(expect.objectContaining({ tone: "warn" }));
+  });
+  it("are loaded back from media_review_get on open, with the round summaries", async () => {
+    const stored: ProjectReview = { rounds: [{ ...ROUND1.rounds[0], summary: "Opened on the laugh" }], openDecisions: ITEMS };
+    await open({}, shotted(), stored);
+    expect(st().openDecisions).toEqual(ITEMS);
+    expect(st().review?.rounds[0].summary).toBe("Opened on the laugh");
+    // Another project with nothing stored starts empty.
+    await open({}, shotted(), NO_REVIEW);
+    expect(st().openDecisions).toEqual([]);
+  });
 });
 
 describe("notes + approve final", () => {
@@ -329,5 +378,105 @@ describe("media-intake events", () => {
     const off = await store.startDirectorEvents();
     expect(vi.mocked(onDirectorEvent).mock.calls.map((c) => c[0])).toEqual(["media-render", "media-ingest", "media-intake"]);
     off();
+  });
+});
+
+// ── Review-fix regressions ──
+
+describe("fixes: stale review, project switches, auto turns, undo, deliverables", () => {
+  const ev = (assetId: string, stage: "transcribed" = "transcribed") => ({ slug: "demo", assetId, stage, detail: "" });
+  const NEW1 = asset("a-new1", "video");
+  const R1 = { id: "r-1", project: "demo", planId: "p-1", path: "C:/x/demo_v001.mp4", durationSec: 2, width: 1920, height: 1080, sizeBytes: 10, loudnessLufs: null, verify: { ok: true as const, checks: [] }, createdAt: "t" };
+
+  it("a verified render re-reads the review rounds and the project status (ts-1)", async () => {
+    m.reviewGet.mockResolvedValueOnce(ROUND1);
+    m.projectGet.mockResolvedValueOnce({ project: project({ status: "review" }), assets: ASSETS, manifest: shotted(), renders: [] });
+    store.onRenderEvent({ slug: "demo", jobId: "j-1", status: "done", pct: 100, etaSec: 0, stage: "verified", render: R1 });
+    await vi.waitFor(() => expect(st().review).toEqual(ROUND1));
+    expect(st().project?.status).toBe("review");
+    // With round 1 open locally, a revise for round 1 is now judged on the real rounds.
+    expect(store.reviseRefusal(1, st().review, null)).toBeNull();
+  });
+
+  it("stops applying a reply once another project opens mid-way (ts-2)", async () => {
+    const other = manifest({ project: "other", revision: 9 });
+    // Project B is open by the time A's in-flight save (applyPlan's first flushSave) comes back.
+    m.manifestSave.mockImplementationOnce(async ({ manifest: x }) => {
+      store.useDirector.setState({ slug: "other", manifest: other });
+      return saved(x);
+    });
+    store.editManifest((x) => ({ ...x, clipAudioVolume: 0.5 })); // a pending edit: applyPlan's first flushSave saves it
+    const plan = { type: "propose_edit_plan" as const, clips: [{ assetId: "a-v1", inSec: 0, outSec: 2, fadeMs: 0, transitionIn: { kind: "cut" as const, ms: 0 }, punchIn: 1 }], audio: [], output: {}, note: "" };
+    const slots = { type: "populate_shot_list" as const, slots: [{ id: "x1", label: "From A", instructions: "", kind: "video" as const, targetSec: 3, framing: null, action: "", source: "film" as const, phoneTips: [] }] };
+    const notes = await store.applyDirectorActions([plan, slots], "demo");
+    expect(st().slug).toBe("other");
+    expect(st().manifest).toEqual(other);
+    expect(st().manifest?.clips).toEqual([]);
+    expect(st().manifest?.shotList).toEqual([]);
+    expect(m.renderPlan).not.toHaveBeenCalled();
+    expect(m.manifestSave).toHaveBeenCalledTimes(1); // nothing of A's was saved into B
+    expect(notes.join(" ")).toMatch(/another project opened/);
+  });
+
+  it("an auto turn applies only match_footage, and a turn started meanwhile doesn't drop the clips (safety-1, ts-3)", async () => {
+    vi.useFakeTimers();
+    const withNew = { project: project(), assets: [...ASSETS, NEW1], manifest: shotted(), renders: [] };
+    m.projectGet.mockResolvedValue(withNew);
+    store.onIntakeEvent(ev("a-new1"));
+    await vi.advanceTimersByTimeAsync(store.INTAKE_REFRESH_MS + 10); // the plain refresh
+    // The auto turn's own refresh is slow…
+    let resolveGet!: (v: unknown) => void;
+    m.projectGet.mockImplementationOnce(() => new Promise((res) => (resolveGet = res as (v: unknown) => void)));
+    await vi.advanceTimersByTimeAsync(store.AUTO_MATCH_DEBOUNCE_MS);
+    // Nic sends a message while the auto turn refreshes the assets.
+    store.useDirector.setState({ chatBusy: true });
+    resolveGet({ project: project(), assets: [...ASSETS, NEW1], manifest: shotted(), renders: [] });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sendDirectorTurn).not.toHaveBeenCalled();
+    store.useDirector.setState({ chatBusy: false });
+    m.projectGet.mockResolvedValue({ project: project(), assets: [...ASSETS, NEW1], manifest: shotted(), renders: [] });
+    await vi.advanceTimersByTimeAsync(store.AUTO_MATCH_DEBOUNCE_MS + 10);
+    expect(sendDirectorTurn).toHaveBeenCalledTimes(1);
+    expect(sendDirectorTurn.mock.calls[0][0]).toContain("a-new1");
+    expect(sendDirectorTurn.mock.calls[0][1]).toEqual({ only: ["match_footage"] });
+    expect(store.AUTO_TURN_ACTIONS).toEqual(["match_footage"]);
+  });
+
+  it("an unsent auto turn offers the clips again next time (ts-3)", async () => {
+    vi.useFakeTimers();
+    m.projectGet.mockResolvedValue({ project: project(), assets: [...ASSETS, NEW1], manifest: shotted(), renders: [] });
+    sendDirectorTurn.mockResolvedValueOnce(false);
+    store.onIntakeEvent(ev("a-new1"));
+    await vi.advanceTimersByTimeAsync(store.AUTO_MATCH_DEBOUNCE_MS + 10);
+    store.onIntakeEvent(ev(V2.id));
+    await vi.advanceTimersByTimeAsync(store.AUTO_MATCH_DEBOUNCE_MS + 10);
+    expect(sendDirectorTurn).toHaveBeenCalledTimes(2);
+    expect(sendDirectorTurn.mock.calls[1][0]).toContain("a-new1");
+  });
+
+  it("the Director's edit plan and shot list can be undone in one click (safety-2)", async () => {
+    const before = st().manifest!;
+    const plan = { type: "propose_edit_plan" as const, clips: [{ assetId: "a-v1", inSec: 0, outSec: 2, fadeMs: 0, transitionIn: { kind: "cut" as const, ms: 0 }, punchIn: 1 }], audio: [], output: {}, note: "" };
+    const slots = { type: "populate_shot_list" as const, slots: [{ id: "x1", label: "New", instructions: "", kind: "video" as const, targetSec: 3, framing: null, action: "", source: "film" as const, phoneTips: [] }] };
+    await store.applyDirectorActions([plan, slots]);
+    expect(st().manifest?.clips).toHaveLength(1);
+    expect(st().undo?.before.shotList).toEqual(before.shotList); // one undo point: from before the reply
+    expect(st().plan).toEqual(PLAN);
+    expect(await store.undoDirectorEdit()).toBe(true);
+    const last = m.manifestSave.mock.calls[m.manifestSave.mock.calls.length - 1][0].manifest;
+    expect(last.updatedBy).toBe("nic");
+    expect(last.clips).toEqual(before.clips);
+    expect(last.shotList).toEqual(before.shotList);
+    expect(st().undo).toBeNull();
+    expect(st().plan).toBeNull();
+    expect(await store.undoDirectorEdit()).toBe(false);
+  });
+
+  it("deliverables come back when the project is opened again (ts-5)", async () => {
+    const d = [{ platform: "reels" as const, renderId: "r-2", path: "C:/x/renders/final/reels/demo_v002.mp4", captionPath: null, thumbPath: null }];
+    m.deliverablesGet.mockResolvedValue(d);
+    await open({ status: "done" });
+    expect(m.deliverablesGet).toHaveBeenCalledWith({ slug: "demo" });
+    expect(st().deliverables).toEqual(d);
   });
 });

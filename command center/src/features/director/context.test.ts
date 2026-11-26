@@ -23,6 +23,8 @@ function typical() {
             ]
           : [],
       slotId: i < 5 ? `s${i + 1}` : null,
+      // Busy clips: 7 cuts each (only 4 are shown).
+      scenes: kind === "video" ? (i === 10 ? [] : [1.234, 2.5, 4.75, 6.1, 8.333, 9.9, 11.05]) : null,
     });
   });
   const shotList: ShotSlot[] = Array.from({ length: 8 }, (_, i) => ({
@@ -73,7 +75,10 @@ function typical() {
       updatedAt: "t",
     },
   });
-  const review = { rounds: [{ round: 1 as const, renderId: "r-1", notes: ["n-0", "n-1", "n-2", "n-3"], status: "open" as const, summary: "" }], openDecisions: ["Logo card or text end card?"] };
+  const review = {
+    rounds: [{ round: 1 as const, renderId: "r-1", notes: ["n-0", "n-1", "n-2", "n-3"], status: "open" as const, summary: `Opened on the big spin, cut on the beat, warm grade. ${"Kept the laugh as the outro. ".repeat(80)}` }],
+    openDecisions: ["Logo card or text end card?"],
+  };
   return { p, assets, m, review };
 }
 
@@ -93,11 +98,18 @@ describe("buildDirectorContext v2", () => {
     expect(c).toMatch(/- s1 Shot 1: Hook · video · film · wide · 3s · ← a-k0x0 · filmed — Hit the count/);
     expect(c).toMatch(/- s6 .* UNFILLED · filmed/);
     expect(c).toMatch(/- s8 .* image · generate .* UNFILLED/);
-    expect(c).toMatch(/a-k0x0 · IMG_4000_take_0\.MOV · video · role clip · 12\.37s · 1920×1080 · slot s1 · tags dance,studio,warm light · flags dark · speech 40w 0\.8–11\.2s · moments 1\.2–3\.4 "big spin"; 6–8\.5 "laugh"/);
+    expect(c).toMatch(/a-k0x0 · IMG_4000_take_0\.MOV · video · role clip · 12\.37s · 1920×1080 · slot s1 · tags dance,studio,warm light · flags dark · shots 8 \(cuts [\d.,]+ \+3\) · speech 40w 0\.8–11\.2s · moments 1\.2–3\.4 "big spin"; 6–8\.5 "laugh"/);
     expect(c).toContain('"captions":{"enabled":true,"style":"bold_pop"');
     expect(c).toContain('"outputs":["reels","youtube"]');
     expect(c).toContain('["a-k0x0",1.25,4.5,0,"cut",1.1]');
     expect(c).toContain("REVIEW: round 1 of 2 (open) on render r-1");
+    // Scene counts from detect_scenes; a long summary is cut to 300 chars.
+    expect(c).toContain("speech 40w 0.8–11.2s");
+    expect(c).toMatch(/a-k0x0 .* flags dark · shots 8 \(cuts 1\.23,2\.5,4\.75,6\.1 \+3\) · speech/);
+    expect(c).toMatch(/a-kax10 .* · one shot · /);
+    expect(c).not.toMatch(/a-kbx11 .*shot/); // stills have no shots
+    const sum = c.split("\n").find((l) => l.startsWith("Round 1 summary: Opened on the big spin"));
+    expect(sum && sum.length).toBeLessThanOrEqual("Round 1 summary: ".length + 300);
     expect(c).toContain("Open decisions: Logo card or text end card?");
     expect(c).toContain("OPEN NOTES (3):");
     expect(c).not.toContain("- n-0 ");

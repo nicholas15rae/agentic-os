@@ -112,7 +112,11 @@ export interface DirectorCommands {
   media_render_cancel: { args: { jobId: string }; result: void };
   media_readiness: { args: undefined; result: { shotcut: McpReady; mediaForge: McpReady; ffmpegFound: boolean } };
   media_reveal: { args: { path: string }; result: void };   // opens Explorer at a file inside projects/ only
+  /** v2 §1.0: the Director's own chat turn (director.rs), not a Tony turn through os_turn. */
+  director_turn: { args: { req: DirectorTurnRequest }; result: DirectorTurnResult };
 }
+export interface DirectorTurnRequest { text: string; history: { role: "user" | "assistant"; content: string }[]; context: string; streamId: string | null }
+export interface DirectorTurnResult { answer: string; providerId: string; latencyMs: number; answeredBy: "director" }
 export type McpReady = { enabled: boolean; healthy: boolean; tools: number; error: string | null };
 
 /** Events (onNativeEvent). */

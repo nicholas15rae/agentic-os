@@ -44,6 +44,7 @@ pub mod lifecycle;
 pub mod maps;
 pub mod market;
 pub mod mcp;
+pub mod director;
 pub mod media;
 pub mod net_telemetry;
 pub mod memory;

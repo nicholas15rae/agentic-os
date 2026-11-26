@@ -7,7 +7,7 @@ mod proc;
 pub mod security;
 
 use commands::{buildhub, diagnostics, handoff_cues, language_hub, lifecycle};
-use commands::{arbiter, business_registry, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
+use commands::{arbiter, business_registry, director, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
 use commands::{agents, allm, allm_audit, bridge, calendar, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
@@ -486,6 +486,7 @@ pub fn run() {
             agents::learning_discard,
             agents::overseer_ask,
             mcp::mcp_list_tools,
+            director::director_turn,
             media::media_projects,
             media::media_project_create,
             media::media_project_get,

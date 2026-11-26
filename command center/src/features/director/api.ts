@@ -41,6 +41,8 @@ export const api = {
   renderCancel: (a: Args<"media_render_cancel">): Promise<Result<"media_render_cancel">> => xcmd("media_render_cancel", a),
   readiness: (): Promise<Result<"media_readiness">> => xcmd("media_readiness"),
   reveal: (a: Args<"media_reveal">): Promise<Result<"media_reveal">> => xcmd("media_reveal", a),
+  /** The Director's own chat turn (director.rs). */
+  turn: (a: Args<"director_turn">): Promise<Result<"director_turn">> => xcmd("director_turn", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

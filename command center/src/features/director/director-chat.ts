@@ -1,12 +1,14 @@
 /**
- * Director chat: one typed turn to the `director` AnythingLLM workspace through `os_turn`, OUTSIDE
- * Tony's voice pipeline (no voice store, no TTS, nothing in Tony's thread). Tokens tagged
- * `agent === "director"` stream into this page's bubble; each message is appended to the
- * project's chat log (media_chat_log). Action blocks in the reply only fill the UI.
+ * Director chat: one typed turn to the Director's own `director_turn` command (director.rs): the
+ * Director persona + craft guide, this project's context and history, on the local chat chain.
+ * OUTSIDE Tony's voice pipeline and routing (no voice store, no TTS, nothing in Tony's thread, no
+ * Tony persona). `tony-token` deltas for this turn's own stream id stream into this page's bubble;
+ * each message is appended to the project's chat log (media_chat_log). Action blocks in the reply
+ * only fill the UI.
  */
-import { cmd, onNativeEvent, type ChatMessage, type OsTurnRequest } from "@/lib/platform";
-import { gated } from "@/features/bridge/gate";
+import { onNativeEvent, type ChatMessage } from "@/lib/platform";
 import { api } from "./api";
+import type { DirectorTurnRequest } from "./contract";
 import { parseDirectorActions } from "./actions";
 import { buildDirectorContext } from "./context";
 import { applyDirectorActions, useDirector, type ChatMsg } from "./director-store";
@@ -21,8 +23,8 @@ export function chatHistory(chat: ChatMsg[]): ChatMessage[] {
     .map((m) => ({ role: m.role === "nic" ? "user" : "assistant", content: m.text }));
 }
 
-export function directorRequest(text: string, history: ChatMessage[], context: string, streamId: string): OsTurnRequest {
-  return { text, role: "director", explicit: true, routeKind: "Tab", history, context, streamId, noDelegate: true, askCards: false };
+export function directorRequest(text: string, history: ChatMessage[], context: string, streamId: string): DirectorTurnRequest {
+  return { text, history: history.map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content })), context, streamId };
 }
 
 const st = () => useDirector.getState();
@@ -45,7 +47,7 @@ export async function sendDirectorTurn(text: string): Promise<void> {
 
   let buffered = "";
   const off = await onNativeEvent<{ streamId: string; delta: string; agent?: string }>("tony-token", (e) => {
-    if (e.streamId !== streamId || e.agent !== "director") return;
+    if (e.streamId !== streamId) return;
     buffered += e.delta;
     // Hide action blocks while they stream in: show the prose only.
     const cut = buffered.indexOf("```director-action");
@@ -54,10 +56,10 @@ export async function sendDirectorTurn(text: string): Promise<void> {
 
   const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest), streamId);
   try {
-    const r = await gated({ action: "os-turn", summary: "Let the Director answer", detail: { role: "director" }, silent: true }, (approved) => cmd("os_turn", { req: { ...req, approved } }), (x) => x.answer);
-    const answer = (r?.answer || buffered).trim();
+    const r = await api.turn({ req });
+    const answer = (r.answer || buffered).trim();
     if (!answer) {
-      patchMsg(replyId, { text: r ? "(no reply)" : "Cancelled.", streaming: false });
+      patchMsg(replyId, { text: "(no reply)", streaming: false });
       return;
     }
     if (st().slug !== slug) return;

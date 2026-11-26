@@ -12,11 +12,17 @@
 //! media-forge's `render_timeline` job as the Director (role-gated: media servers only; CPU
 //! libx264), polls it, verifies the file itself (exists, > 0 bytes, ffprobe streams, duration,
 //! resolution, size cap) and only then lists it. Nothing here runs from a model reply.
+//!
+//! v2 (docs/proposals/director-suite-v2-contract.md): projects gain a creative brief, a speed and a
+//! review (project.json), a watched `inbox/` and `working/captions/`; manifests are version 2
+//! (captions, color, platform outputs, notes) and v1 files load as v2 with defaults; asset rows gain
+//! tags / transcript / flags / moments / slotId (media.db v3 columns). v1 statuses map on read:
+//! intake→brief, awaiting_media→shooting, rendering→editing, ready→review.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -31,6 +37,22 @@ const MAX_VOICEOVER_BYTES: usize = 300 * 1024 * 1024;
 const CHAT_KEEP: usize = 200;
 const RENDER_EVENT: &str = "media-render";
 const INGEST_EVENT: &str = "media-ingest";
+/// v2 §8: intake pipeline progress (emitted by the intake tick).
+pub(crate) const INTAKE_EVENT: &str = "media-intake";
+const MAX_NOTES: usize = 500;
+const MAX_TAGS: usize = 12;
+const MAX_MOMENTS: usize = 50;
+
+pub(crate) const PROJECT_STATUSES: [&str; 5] = ["brief", "shooting", "editing", "review", "done"];
+pub(crate) const PLATFORMS: [&str; 7] = ["reels", "tiktok", "ig_feed", "youtube", "shorts", "self_tape", "custom"];
+const ASPECTS: [&str; 4] = ["16:9", "9:16", "4:5", "1:1"];
+const FRAMINGS: [&str; 7] = ["wide", "medium", "mcu", "closeup", "insert", "overhead", "pov"];
+const SLOT_SOURCES: [&str; 3] = ["film", "generate", "stock"];
+const TRANSITIONS: [&str; 3] = ["cut", "crossfade", "fade_black"];
+const CAPTION_STYLES: [&str; 4] = ["clean", "bold_pop", "karaoke", "minimal"];
+const COLOR_PRESETS: [&str; 6] = ["none", "warm", "cool", "punchy", "film", "bw"];
+const SPEEDS: [&str; 3] = ["rough", "polish", "full_ai"];
+const BRIEF_KEYS: [&str; 11] = ["idea", "goal", "platform", "lengthSec", "aspect", "tone", "references", "guessed", "approved", "updatedBy", "updatedAt"];
 
 const VIDEO_EXT: [&str; 7] = ["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts"];
 const IMAGE_EXT: [&str; 6] = ["jpg", "jpeg", "png", "webp", "bmp", "tif"];
@@ -46,19 +68,100 @@ pub struct Source {
     pub brief: Option<String>,
 }
 
+fn d_rough() -> String {
+    "rough".into()
+}
+fn d_film() -> String {
+    "film".into()
+}
+fn d_one() -> f64 {
+    1.0
+}
+
+/// contract.ts `CreativeBrief` (v2 §1).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeBrief {
+    pub idea: String,
+    pub goal: String,
+    pub platform: String,
+    pub length_sec: f64,
+    pub aspect: String,
+    pub tone: String,
+    pub references: Vec<String>,
+    pub guessed: Vec<String>,
+    pub approved: bool,
+    pub updated_by: String,
+    pub updated_at: String,
+}
+
+/// contract.ts `ReviewRound` (v2 §5).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewRound {
+    pub round: u8,
+    pub render_id: String,
+    pub notes: Vec<String>,
+    pub status: String,
+    pub summary: String,
+}
+
+/// `project.json` → `review` (v2 §5).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProjectReview {
+    pub rounds: Vec<ReviewRound>,
+    pub open_decisions: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaProject {
     pub slug: String,
     pub title: String,
+    /// v2 status; v1 rows are mapped on read (`upgrade_status`).
     pub status: String,
     pub root: String,
     pub created_at: String,
     pub updated_at: String,
     pub source: Source,
+    #[serde(default)]
+    pub brief: Option<CreativeBrief>,
+    #[serde(default = "d_rough")]
+    pub speed: String,
+    #[serde(default)]
+    pub review: ProjectReview,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssetFlag {
+    pub kind: String,
+    pub detail: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Moment {
+    pub id: String,
+    pub in_sec: f64,
+    pub out_sec: f64,
+    pub label: String,
+    pub score: f64,
+    pub by: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetTranscript {
+    pub path: String,
+    pub lang: String,
+    pub words: u32,
+    pub first_speech_sec: Option<f64>,
+    pub last_speech_sec: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaAsset {
     pub id: String,
@@ -74,6 +177,17 @@ pub struct MediaAsset {
     pub height: Option<u32>,
     pub thumb_path: Option<String>,
     pub added_at: String,
+    // v2 (v1 rows load with the defaults; media.db v3 keeps them in their own columns)
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub transcript: Option<AssetTranscript>,
+    #[serde(default)]
+    pub flags: Vec<AssetFlag>,
+    #[serde(default)]
+    pub moments: Vec<Moment>,
+    #[serde(default)]
+    pub slot_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -86,6 +200,30 @@ pub struct ShotSlot {
     pub target_sec: Option<f64>,
     pub asset_id: Option<String>,
     pub status: String,
+    // v2
+    #[serde(default)]
+    pub framing: Option<String>,
+    #[serde(default)]
+    pub action: String,
+    #[serde(default = "d_film")]
+    pub source: String,
+    #[serde(default)]
+    pub phone_tips: Vec<String>,
+    #[serde(default)]
+    pub filmed: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Transition {
+    pub kind: String,
+    pub ms: u32,
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Self { kind: "cut".into(), ms: 0 }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -96,6 +234,11 @@ pub struct TimelineClip {
     pub in_sec: f64,
     pub out_sec: f64,
     pub fade_ms: u32,
+    // v2
+    #[serde(default)]
+    pub transition_in: Transition,
+    #[serde(default = "d_one")]
+    pub punch_in: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -107,6 +250,97 @@ pub struct AudioLayer {
     pub in_sec: f64,
     pub out_sec: f64,
     pub volume: f64,
+    // v2
+    #[serde(default)]
+    pub fade_in_ms: u32,
+    #[serde(default)]
+    pub fade_out_ms: u32,
+    #[serde(default)]
+    pub duck_under_voice: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CaptionTrack {
+    pub enabled: bool,
+    pub style: String,
+    pub position: String,
+    pub max_words_per_line: u32,
+}
+
+impl Default for CaptionTrack {
+    fn default() -> Self {
+        Self { enabled: false, style: "clean".into(), position: "lower".into(), max_words_per_line: 4 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ColorLook {
+    pub preset: String,
+    pub strength: f64,
+}
+
+impl Default for ColorLook {
+    fn default() -> Self {
+        Self { preset: "none".into(), strength: 0.5 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformPreset {
+    pub platform: String,
+    pub aspect: String,
+    pub loudness_lufs: i32,
+    pub max_size_mb: Option<f64>,
+    pub max_sec: Option<f64>,
+}
+
+/// contract.ts `Note` (v2 §5). Rust owns notes: `media_note_add` / `media_note_resolve` write them
+/// and `manifest_save` keeps the saved ones rather than the client's copy.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Note {
+    pub id: String,
+    pub render_id: Option<String>,
+    pub at_sec: Option<f64>,
+    pub text: String,
+    pub by: String,
+    pub via_voice: bool,
+    pub resolved: bool,
+    pub at: String,
+}
+
+/// `media_note_add`'s `note` argument: `Omit<Note, "id" | "at" | "resolved">`.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoteInput {
+    pub render_id: Option<String>,
+    pub at_sec: Option<f64>,
+    pub text: String,
+    pub by: String,
+    pub via_voice: bool,
+}
+
+/// contract.ts `Deliverable` (v2 §6).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Deliverable {
+    pub platform: String,
+    pub render_id: String,
+    pub path: String,
+    pub caption_path: Option<String>,
+    pub thumb_path: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IntakeStatus {
+    pub inbox: String,
+    pub pending: u32,
+    pub processing: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -131,6 +365,15 @@ pub struct TimelineManifest {
     pub shot_list: Vec<ShotSlot>,
     pub updated_by: String,
     pub updated_at: String,
+    // v2
+    #[serde(default)]
+    pub captions: CaptionTrack,
+    #[serde(default)]
+    pub color: ColorLook,
+    #[serde(default)]
+    pub outputs: Vec<PlatformPreset>,
+    #[serde(default)]
+    pub notes: Vec<Note>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -218,6 +461,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "CREATE TABLE drive_sync (id TEXT PRIMARY KEY, provider TEXT NOT NULL, direction TEXT NOT NULL CHECK (direction IN ('pull','push')), project TEXT NOT NULL, local_path TEXT NOT NULL, drive_file_id TEXT NOT NULL, name TEXT NOT NULL, size_bytes INTEGER NOT NULL, web_view_link TEXT, at TEXT NOT NULL);
      CREATE INDEX drive_sync_project ON drive_sync(project, at);
      CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    // v3 (Director Suite v2 §9): JSON columns for the new asset fields. Every v1 row keeps its json
+    // and reads the column defaults (no tags/flags/moments, no transcript, no slot).
+    "ALTER TABLE asset ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+     ALTER TABLE asset ADD COLUMN flags TEXT NOT NULL DEFAULT '[]';
+     ALTER TABLE asset ADD COLUMN moments TEXT NOT NULL DEFAULT '[]';
+     ALTER TABLE asset ADD COLUMN transcript TEXT;
+     ALTER TABLE asset ADD COLUMN slot_id TEXT;
+     CREATE INDEX asset_slot ON asset(project, slot_id);",
 ];
 
 pub(crate) fn sql_err(e: rusqlite::Error) -> String {
@@ -262,10 +513,47 @@ pub struct MediaState {
     /// Projects root override (tests); `None` = `C:\ai-hub\media\projects`.
     root: Mutex<Option<PathBuf>>,
     uploads: Mutex<HashMap<String, Upload>>,
-    /// media-forge job id → project slug, while a render is live.
-    jobs: Mutex<HashMap<String, String>>,
+    /// Render job id (the first output's media-forge job id) → the live batch, while it runs.
+    jobs: Mutex<HashMap<String, LiveRender>>,
     /// Serialises manifest read-modify-write per process.
     manifest_lock: Mutex<()>,
+    /// v2 intake: per-project pipeline state, filled by the intake tick.
+    intake: Mutex<HashMap<String, IntakeInfo>>,
+    /// v2 pipeline queue (new intake assets and `media_transcribe` picks), drained one at a time.
+    transcribe_queue: Mutex<VecDeque<IntakeJob>>,
+    /// v2 intake: the size each inbox file had at the last tick (stable = unchanged for 2 ticks).
+    inbox_seen: Mutex<HashMap<PathBuf, InboxSeen>>,
+}
+
+/// One multi-output render batch (one approval): the media-forge job running now, and whether Nic
+/// cancelled it (the outputs after it are then skipped).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LiveRender {
+    pub forge_job: String,
+    pub cancelled: bool,
+}
+
+/// A queued pipeline pass for one asset: `analyze` = probe flags too (new intake files); a
+/// `media_transcribe` pick only transcribes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IntakeJob {
+    pub slug: String,
+    pub asset_id: String,
+    pub analyze: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct InboxSeen {
+    pub size: u64,
+    /// This size already failed to ingest (or its inbox copy couldn't be removed): don't retry
+    /// until the file changes.
+    pub failed: bool,
+}
+
+#[derive(Default, Clone, Debug)]
+pub(crate) struct IntakeInfo {
+    pub processing: Option<String>,
+    pub last_error: Option<String>,
 }
 
 impl MediaState {
@@ -295,6 +583,11 @@ impl MediaState {
     pub(crate) fn in_memory(root: &Path) -> Self {
         let mut c = Connection::open_in_memory().unwrap();
         migrate(&mut c).unwrap();
+        Self::with_conn(c, root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_conn(c: Connection, root: &Path) -> Self {
         let s = Self::default();
         *s.conn.lock().unwrap() = Some(c);
         *s.root.lock().unwrap() = Some(root.to_path_buf());
@@ -547,11 +840,47 @@ pub(crate) fn project_root(state: &MediaState, slug: &str) -> Result<PathBuf, St
     Ok(state.projects_root().join(slug))
 }
 
+/// v1 → v2 project status (v2 values pass through; anything unknown reads as "brief").
+pub(crate) fn upgrade_status(s: &str) -> &'static str {
+    match s {
+        "intake" | "brief" => "brief",
+        "awaiting_media" | "shooting" => "shooting",
+        "editing" | "rendering" => "editing",
+        "ready" | "review" => "review",
+        "done" => "done",
+        _ => "brief",
+    }
+}
+
+fn status_rank(s: &str) -> usize {
+    PROJECT_STATUSES.iter().position(|x| *x == s).unwrap_or(0)
+}
+
+/// A project row (v1 or v2) as v2. The upgraded status is written back on the next save.
+pub(crate) fn parse_project(j: &str) -> Result<MediaProject, String> {
+    let mut p: MediaProject = serde_json::from_str(j).map_err(|e| e.to_string())?;
+    p.status = upgrade_status(&p.status).into();
+    if !SPEEDS.contains(&p.speed.as_str()) {
+        p.speed = d_rough();
+    }
+    Ok(p)
+}
+
 pub(crate) fn load_project(state: &MediaState, slug: &str) -> Result<MediaProject, String> {
     state
         .with(|c| c.query_row("SELECT json FROM project WHERE slug = ?1", [slug], |r| r.get::<_, String>(0)).optional().map_err(sql_err))?
         .ok_or_else(|| format!("no media project {slug:?}"))
-        .and_then(|j| serde_json::from_str(&j).map_err(|e| e.to_string()))
+        .and_then(|j| parse_project(&j))
+}
+
+/// v2 folders: `inbox/` (watched) and `working/captions/`. Created with the project, and lazily for
+/// projects made before v2.
+pub(crate) fn ensure_project_dirs(root: &Path) -> Result<(), String> {
+    for sub in ["raw", "working", "renders", "inbox"] {
+        std::fs::create_dir_all(root.join(sub)).map_err(|e| format!("create {}: {e}", root.join(sub).display()))?;
+    }
+    let cap = root.join("working").join("captions");
+    std::fs::create_dir_all(&cap).map_err(|e| format!("create {}: {e}", cap.display()))
 }
 
 fn save_project(state: &MediaState, p: &MediaProject) -> Result<(), String> {
@@ -561,9 +890,11 @@ fn save_project(state: &MediaState, p: &MediaProject) -> Result<(), String> {
     write_atomic(&root.join("project.json"), serde_json::to_string_pretty(p).map_err(|e| e.to_string())?.as_bytes())
 }
 
-fn set_status(state: &MediaState, slug: &str, status: &str) {
+/// Automatic status moves only go forward (brief → shooting → editing → review → done); Nic can
+/// move a project anywhere by hand with `media_project_update`.
+fn advance_status(state: &MediaState, slug: &str, status: &str) {
     if let Ok(mut p) = load_project(state, slug) {
-        if p.status != status {
+        if status_rank(status) > status_rank(&p.status) {
             p.status = status.into();
             p.updated_at = now_iso();
             let _ = save_project(state, &p);
@@ -571,17 +902,50 @@ fn set_status(state: &MediaState, slug: &str, status: &str) {
     }
 }
 
+const ASSET_COLS: &str = "json, tags, flags, moments, transcript, slot_id";
+
+/// An asset row: the json (v1 or v2) with the v3 columns laid over it (the columns own the v2 fields).
+fn asset_from_row(r: &rusqlite::Row) -> rusqlite::Result<Option<MediaAsset>> {
+    let j: String = r.get(0)?;
+    let (tags, flags, moments): (String, String, String) = (r.get(1)?, r.get(2)?, r.get(3)?);
+    let (transcript, slot_id): (Option<String>, Option<String>) = (r.get(4)?, r.get(5)?);
+    let Ok(mut a) = serde_json::from_str::<MediaAsset>(&j) else { return Ok(None) };
+    a.tags = serde_json::from_str(&tags).unwrap_or_default();
+    a.flags = serde_json::from_str(&flags).unwrap_or_default();
+    a.moments = serde_json::from_str(&moments).unwrap_or_default();
+    a.transcript = transcript.and_then(|t| serde_json::from_str(&t).ok());
+    a.slot_id = slot_id;
+    Ok(Some(a))
+}
+
 fn list_assets(state: &MediaState, slug: &str) -> Result<Vec<MediaAsset>, String> {
     state.with(|c| {
-        let mut st = c.prepare("SELECT json FROM asset WHERE project = ?1 ORDER BY added_at, id").map_err(sql_err)?;
-        let rows = st.query_map([slug], |r| r.get::<_, String>(0)).map_err(sql_err)?;
-        Ok(rows.filter_map(|r| r.ok()).filter_map(|j| serde_json::from_str(&j).ok()).collect())
+        let mut st = c.prepare(&format!("SELECT {ASSET_COLS} FROM asset WHERE project = ?1 ORDER BY added_at, id")).map_err(sql_err)?;
+        let rows = st.query_map([slug], asset_from_row).map_err(sql_err)?;
+        Ok(rows.filter_map(|r| r.ok().flatten()).collect())
     })
+}
+
+fn load_asset(state: &MediaState, slug: &str, id: &str) -> Result<MediaAsset, String> {
+    state
+        .with(|c| c.query_row(&format!("SELECT {ASSET_COLS} FROM asset WHERE project = ?1 AND id = ?2"), [slug, id], asset_from_row).optional().map_err(sql_err))?
+        .flatten()
+        .ok_or_else(|| format!("no asset {id:?} in this project"))
 }
 
 fn save_asset(state: &MediaState, a: &MediaAsset) -> Result<(), String> {
     let j = serde_json::to_string(a).map_err(|e| e.to_string())?;
-    state.with(|c| c.execute("INSERT OR REPLACE INTO asset (id, project, json, added_at) VALUES (?1, ?2, ?3, ?4)", params![a.id, a.project, j, a.added_at]).map(|_| ()).map_err(sql_err))
+    let js = |v: serde_json::Result<String>| v.map_err(|e| e.to_string());
+    let (tags, flags, moments) = (js(serde_json::to_string(&a.tags))?, js(serde_json::to_string(&a.flags))?, js(serde_json::to_string(&a.moments))?);
+    let transcript = a.transcript.as_ref().map(serde_json::to_string).transpose().map_err(|e| e.to_string())?;
+    state.with(|c| {
+        c.execute(
+            "INSERT OR REPLACE INTO asset (id, project, json, added_at, tags, flags, moments, transcript, slot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![a.id, a.project, j, a.added_at, tags, flags, moments, transcript, a.slot_id],
+        )
+        .map(|_| ())
+        .map_err(sql_err)
+    })
 }
 
 fn list_renders(state: &MediaState, slug: &str) -> Result<Vec<VerifiedRender>, String> {
@@ -593,7 +957,7 @@ fn list_renders(state: &MediaState, slug: &str) -> Result<Vec<VerifiedRender>, S
 }
 
 fn default_manifest(slug: &str) -> TimelineManifest {
-    TimelineManifest {
+    upgrade_manifest(TimelineManifest {
         version: 1,
         project: slug.into(),
         revision: 0,
@@ -604,7 +968,21 @@ fn default_manifest(slug: &str) -> TimelineManifest {
         shot_list: vec![],
         updated_by: "nic".into(),
         updated_at: now_iso(),
+        captions: CaptionTrack::default(),
+        color: ColorLook::default(),
+        outputs: vec![],
+        notes: vec![],
+    })
+}
+
+/// v1 → v2 (pure): serde already filled every new field with its default; this sets the version
+/// and gives a manifest without outputs the v1 `output` as its single (custom) output.
+pub(crate) fn upgrade_manifest(mut m: TimelineManifest) -> TimelineManifest {
+    m.version = 2;
+    if m.outputs.is_empty() {
+        m.outputs.push(PlatformPreset { platform: "custom".into(), aspect: m.output.aspect.clone(), loudness_lufs: m.output.loudness_lufs, max_size_mb: m.output.max_size_mb, max_sec: None });
     }
+    m
 }
 
 fn manifest_path(root: &Path) -> PathBuf {
@@ -612,7 +990,7 @@ fn manifest_path(root: &Path) -> PathBuf {
 }
 
 fn load_manifest(root: &Path, slug: &str) -> TimelineManifest {
-    std::fs::read_to_string(manifest_path(root)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| default_manifest(slug))
+    std::fs::read_to_string(manifest_path(root)).ok().and_then(|t| serde_json::from_str(&t).ok()).map(upgrade_manifest).unwrap_or_else(|| default_manifest(slug))
 }
 
 pub(crate) fn create_project(state: &MediaState, title: &str, source: Option<Source>) -> Result<MediaProject, String> {
@@ -632,19 +1010,20 @@ pub(crate) fn create_project(state: &MediaState, title: &str, source: Option<Sou
         n += 1;
     }
     let root = state.projects_root().join(&slug);
-    for sub in ["raw", "working", "renders"] {
-        std::fs::create_dir_all(root.join(sub)).map_err(|e| format!("create {}: {e}", root.join(sub).display()))?;
-    }
+    ensure_project_dirs(&root)?;
     let brief = source.brief.map(|b| b.chars().take(8000).collect::<String>());
     let now = now_iso();
     let p = MediaProject {
         slug: slug.clone(),
         title: title.into(),
-        status: "intake".into(),
+        status: "brief".into(),
         root: root.to_string_lossy().to_string(),
         created_at: now.clone(),
         updated_at: now,
         source: Source { from: source.from, ref_id: source.ref_id.map(|r| r.chars().take(120).collect()), brief },
+        brief: None,
+        speed: d_rough(),
+        review: ProjectReview::default(),
     };
     save_project(state, &p)?;
     let m = default_manifest(&slug);
@@ -693,12 +1072,12 @@ pub(crate) fn finalize_asset(state: &MediaState, cfg: &os_core::OsConfig, slug: 
         height: pr.height,
         thumb_path: thumb,
         added_at: now_iso(),
+        ..Default::default()
     };
     save_asset(state, &a)?;
+    // v1 moved intake → awaiting_media here. v2 has no "first file" trigger: shooting comes from an
+    // approved brief, editing from filled film slots or clips on the timeline.
     let mut p = load_project(state, slug)?;
-    if p.status == "intake" {
-        p.status = "awaiting_media".into();
-    }
     p.updated_at = now_iso();
     save_project(state, &p)?;
     Ok(a)
@@ -835,7 +1214,7 @@ fn finite_in(v: f64, lo: f64, hi: f64) -> bool {
 
 /// Every rule of contract.ts `TimelineManifest`, checked against the project's assets.
 pub(crate) fn validate_manifest(m: &TimelineManifest, slug: &str, assets: &[MediaAsset]) -> Result<(), String> {
-    if m.version != 1 || m.project != slug {
+    if m.version != 2 || m.project != slug {
         return Err("manifest is for another project or version".into());
     }
     if m.clips.len() > 200 || m.audio.len() > 50 || m.shot_list.len() > 30 {
@@ -853,6 +1232,12 @@ pub(crate) fn validate_manifest(m: &TimelineManifest, slug: &str, assets: &[Medi
         }
         if c.fade_ms > 2000 {
             return Err(format!("clip {}: fade over 2000 ms", c.id));
+        }
+        if !TRANSITIONS.contains(&c.transition_in.kind.as_str()) || c.transition_in.ms > 1500 {
+            return Err(format!("clip {}: transition must be cut, crossfade or fade_black, 0–1500 ms", c.id));
+        }
+        if !finite_in(c.punch_in, 1.0, 1.5) {
+            return Err(format!("clip {}: punch-in must be 1.0–1.5", c.id));
         }
         if a.kind == "image" {
             if c.in_sec != 0.0 || !finite_in(c.out_sec, 0.2, 60.0) {
@@ -876,6 +1261,9 @@ pub(crate) fn validate_manifest(m: &TimelineManifest, slug: &str, assets: &[Medi
         let dur = a.duration_sec.unwrap_or(0.0);
         if !(finite_in(l.start_sec, 0.0, 36_000.0) && finite_in(l.in_sec, 0.0, dur) && finite_in(l.out_sec, 0.0, dur + 0.05) && l.in_sec < l.out_sec && finite_in(l.volume, 0.0, 2.0)) {
             return Err(format!("audio {}: bad start/in/out/volume", l.id));
+        }
+        if l.fade_in_ms > 10_000 || l.fade_out_ms > 10_000 {
+            return Err(format!("audio {}: fades must be 0–10000 ms", l.id));
         }
     }
     if !finite_in(m.clip_audio_volume, 0.0, 2.0) {
@@ -902,14 +1290,71 @@ pub(crate) fn validate_manifest(m: &TimelineManifest, slug: &str, assets: &[Medi
                 return Err(format!("shot slot {} points at an asset that isn't in this project", s.id));
             }
         }
+        if s.framing.as_deref().is_some_and(|f| !FRAMINGS.contains(&f)) || !SLOT_SOURCES.contains(&s.source.as_str()) {
+            return Err(format!("shot slot {}: bad framing or source", s.id));
+        }
+        if s.action.chars().count() > 500 || s.phone_tips.len() > 4 || s.phone_tips.iter().any(|t| t.trim().is_empty() || t.chars().count() > 120) {
+            return Err(format!("shot slot {}: action over 500 characters, or more than 4 phone tips (each 1–120 characters)", s.id));
+        }
     }
+    let slot_ids: HashSet<&str> = m.shot_list.iter().map(|s| s.id.as_str()).collect();
+    if slot_ids.len() != m.shot_list.len() {
+        return Err("duplicate shot slot id".into());
+    }
+    if !CAPTION_STYLES.contains(&m.captions.style.as_str()) || !["lower", "middle"].contains(&m.captions.position.as_str()) || !(1..=12).contains(&m.captions.max_words_per_line) {
+        return Err("captions: bad style, position or words per line (1–12)".into());
+    }
+    if !COLOR_PRESETS.contains(&m.color.preset.as_str()) || !finite_in(m.color.strength, 0.0, 1.0) {
+        return Err("color: bad preset or strength (0–1)".into());
+    }
+    if m.outputs.is_empty() || m.outputs.len() > 4 {
+        return Err("give the manifest 1–4 outputs".into());
+    }
+    let mut platforms = HashSet::new();
+    for o in &m.outputs {
+        if !PLATFORMS.contains(&o.platform.as_str()) || !platforms.insert(o.platform.as_str()) {
+            return Err(format!("output {:?}: unknown or repeated platform", o.platform));
+        }
+        if !ASPECTS.contains(&o.aspect.as_str()) || ![-14, -16, -18].contains(&o.loudness_lufs) {
+            return Err(format!("output {}: aspect or loudness not allowed", o.platform));
+        }
+        if o.max_size_mb.is_some_and(|x| !finite_in(x, 1.0, 4096.0)) || o.max_sec.is_some_and(|x| !finite_in(x, 1.0, 600.0)) {
+            return Err(format!("output {}: size cap 1–4096 MB, length cap 1–600 s", o.platform));
+        }
+    }
+    validate_notes(&m.notes)?;
     if !["nic", "director"].contains(&m.updated_by.as_str()) {
         return Err("updatedBy must be nic or director".into());
     }
     Ok(())
 }
 
-pub(crate) fn manifest_save(state: &MediaState, slug: &str, mut m: TimelineManifest) -> Result<TimelineManifest, String> {
+fn validate_notes(notes: &[Note]) -> Result<(), String> {
+    if notes.len() > MAX_NOTES {
+        return Err(format!("more than {MAX_NOTES} review notes"));
+    }
+    let mut ids = HashSet::new();
+    for n in notes {
+        if n.id.is_empty() || n.id.len() > 40 || !ids.insert(n.id.as_str()) {
+            return Err(format!("bad or duplicate note id {:?}", n.id));
+        }
+        if n.render_id.as_deref().is_some_and(|r| r.is_empty() || r.len() > 40) || n.at_sec.is_some_and(|t| !finite_in(t, 0.0, 36_000.0)) {
+            return Err(format!("note {}: bad render id or time", n.id));
+        }
+        if n.text.trim().is_empty() || n.text.chars().count() > 2000 || n.by != "nic" || n.at.len() > 40 {
+            return Err(format!("note {}: text must be 1–2000 characters, by nic", n.id));
+        }
+    }
+    Ok(())
+}
+
+/// Every "film" slot has footage (the shooting → editing trigger; manifest.ts `filmSlotsFilled`).
+pub(crate) fn film_slots_filled(m: &TimelineManifest) -> bool {
+    let mut film = m.shot_list.iter().filter(|s| s.source == "film").peekable();
+    film.peek().is_some() && film.all(|s| s.asset_id.is_some())
+}
+
+pub(crate) fn manifest_save(state: &MediaState, slug: &str, m: TimelineManifest) -> Result<TimelineManifest, String> {
     let _g = state.manifest_lock.lock().unwrap();
     load_project(state, slug)?;
     let root = project_root(state, slug)?;
@@ -917,14 +1362,724 @@ pub(crate) fn manifest_save(state: &MediaState, slug: &str, mut m: TimelineManif
     if m.revision != current.revision {
         return Err(format!("STALE_REVISION: the timeline changed (now revision {}); reload it", current.revision));
     }
-    validate_manifest(&m, slug, &list_assets(state, slug)?)?;
+    // A v1-shaped save is upgraded; notes are Rust's (note_add / note_resolve), never the client's copy.
+    let mut m = upgrade_manifest(m);
+    m.notes = current.notes;
+    let assets = list_assets(state, slug)?;
+    validate_manifest(&m, slug, &assets)?;
     m.revision = current.revision + 1;
     m.updated_at = now_iso();
     write_atomic(&manifest_path(&root), serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?.as_bytes())?;
-    if !m.clips.is_empty() {
-        set_status(state, slug, "editing");
+    sync_slot_mirror(state, &m, &assets);
+    // Contract §1: shooting → editing once every film slot is filled. Clips on the timeline also
+    // mean editing has begun (kept from v1 so a quick edit without a shot list still moves on).
+    if film_slots_filled(&m) || !m.clips.is_empty() {
+        advance_status(state, slug, "editing");
     }
     Ok(m)
+}
+
+/// `MediaAsset.slotId` mirrors `ShotSlot.assetId`: after a save, every asset points at the slot
+/// that holds it (or none).
+fn sync_slot_mirror(state: &MediaState, m: &TimelineManifest, assets: &[MediaAsset]) {
+    let holder: HashMap<&str, &str> = m.shot_list.iter().filter_map(|s| s.asset_id.as_deref().map(|a| (a, s.id.as_str()))).collect();
+    for a in assets {
+        let want = holder.get(a.id.as_str()).map(|s| s.to_string());
+        if a.slot_id != want {
+            let _ = state.with(|c| c.execute("UPDATE asset SET slot_id = ?3 WHERE project = ?1 AND id = ?2", params![a.project, a.id, want]).map(|_| ()).map_err(sql_err));
+        }
+    }
+}
+
+// ── v2: brief, project update, asset update ───────────────────────────────────
+
+pub(crate) fn validate_brief(b: &CreativeBrief) -> Result<(), String> {
+    if b.idea.trim().is_empty() || b.idea.chars().count() > 8000 {
+        return Err("brief: the idea must be 1–8000 characters".into());
+    }
+    if b.goal.chars().count() > 300 || b.tone.chars().count() > 200 {
+        return Err("brief: goal up to 300 characters, tone up to 200".into());
+    }
+    if !PLATFORMS.contains(&b.platform.as_str()) || !ASPECTS.contains(&b.aspect.as_str()) {
+        return Err("brief: unknown platform or aspect".into());
+    }
+    if !finite_in(b.length_sec, 5.0, 600.0) {
+        return Err("brief: length must be 5–600 s".into());
+    }
+    if b.references.len() > 10 || b.references.iter().any(|r| r.trim().is_empty() || r.chars().count() > 500) {
+        return Err("brief: up to 10 references, each 1–500 characters".into());
+    }
+    let mut seen = HashSet::new();
+    if b.guessed.iter().any(|g| !BRIEF_KEYS.contains(&g.as_str()) || !seen.insert(g.as_str())) {
+        return Err("brief: \"guessed\" lists unknown or repeated fields".into());
+    }
+    if !["nic", "director"].contains(&b.updated_by.as_str()) {
+        return Err("brief: updatedBy must be nic or director".into());
+    }
+    // Approval is Nic's click; a Director draft is only ever a suggestion.
+    if b.approved && b.updated_by != "nic" {
+        return Err("PERMISSION_REQUIRED: only Nic approves a brief".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn project_update(state: &MediaState, slug: &str, title: Option<String>, brief: Option<CreativeBrief>, status: Option<String>, speed: Option<String>) -> Result<MediaProject, String> {
+    let mut p = load_project(state, slug)?;
+    if let Some(t) = title {
+        let t = t.trim();
+        if t.is_empty() || t.chars().count() > 120 {
+            return Err("give the project a title (up to 120 characters)".into());
+        }
+        p.title = t.into();
+    }
+    if let Some(s) = &speed {
+        if !SPEEDS.contains(&s.as_str()) {
+            return Err(format!("unknown speed {s:?}"));
+        }
+        p.speed = s.clone();
+    }
+    if let Some(mut b) = brief {
+        validate_brief(&b)?;
+        b.updated_at = now_iso();
+        // Contract §1: an approved brief moves a project out of "brief".
+        if b.approved && status.is_none() && p.status == "brief" {
+            p.status = "shooting".into();
+        }
+        p.brief = Some(b);
+    }
+    if let Some(s) = status {
+        if !PROJECT_STATUSES.contains(&s.as_str()) {
+            return Err(format!("unknown project status {s:?}"));
+        }
+        p.status = s; // by hand: any status
+    }
+    p.updated_at = now_iso();
+    save_project(state, &p)?;
+    Ok(p)
+}
+
+/// Tags: trimmed, lowercase, 1–32 characters, ≤ 12, duplicates dropped.
+pub(crate) fn clean_tags(tags: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = vec![];
+    for t in tags {
+        let t = t.trim().to_lowercase();
+        if t.is_empty() || t.chars().count() > 32 || t.chars().any(|c| c.is_control()) {
+            return Err(format!("tag {t:?} must be 1–32 characters"));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    if out.len() > MAX_TAGS {
+        return Err(format!("up to {MAX_TAGS} tags"));
+    }
+    Ok(out)
+}
+
+pub(crate) fn validate_moments(moments: &[Moment], asset: &MediaAsset) -> Result<(), String> {
+    if moments.len() > MAX_MOMENTS {
+        return Err(format!("up to {MAX_MOMENTS} moments per asset"));
+    }
+    let dur = asset.duration_sec.filter(|d| *d > 0.0).unwrap_or(86_400.0);
+    let mut ids = HashSet::new();
+    for m in moments {
+        if m.id.is_empty() || m.id.len() > 40 || !ids.insert(m.id.as_str()) {
+            return Err(format!("bad or duplicate moment id {:?}", m.id));
+        }
+        if !(finite_in(m.in_sec, 0.0, dur) && finite_in(m.out_sec, 0.0, dur + 0.05) && m.in_sec < m.out_sec) {
+            return Err(format!("moment {}: in/out outside 0–{dur}", m.id));
+        }
+        if !finite_in(m.score, 0.0, 1.0) || m.label.chars().count() > 120 || !["director", "nic"].contains(&m.by.as_str()) {
+            return Err(format!("moment {}: score 0–1, label up to 120 characters, by director or nic", m.id));
+        }
+    }
+    Ok(())
+}
+
+/// `slot_id`: `None` leaves it, `Some("")` clears it (api.ts sends a contract `null` as ""), any
+/// other value must be a slot in the saved shot list.
+pub(crate) fn asset_update(state: &MediaState, slug: &str, asset_id: &str, tags: Option<Vec<String>>, moments: Option<Vec<Moment>>, slot_id: Option<String>) -> Result<MediaAsset, String> {
+    load_project(state, slug)?;
+    let mut a = load_asset(state, slug, asset_id)?;
+    if let Some(t) = tags {
+        a.tags = clean_tags(&t)?;
+    }
+    if let Some(ms) = moments {
+        validate_moments(&ms, &a)?;
+        a.moments = ms;
+    }
+    if let Some(s) = slot_id {
+        if s.is_empty() {
+            a.slot_id = None;
+        } else {
+            let m = load_manifest(&project_root(state, slug)?, slug);
+            if !m.shot_list.iter().any(|x| x.id == s) {
+                return Err(format!("no shot slot {s:?} in this project"));
+            }
+            a.slot_id = Some(s);
+        }
+    }
+    save_asset(state, &a)?;
+    Ok(a)
+}
+
+// ── v2: review notes and rounds ───────────────────────────────────────────────
+
+pub(crate) fn note_add(state: &MediaState, slug: &str, input: NoteInput) -> Result<Note, String> {
+    let _g = state.manifest_lock.lock().unwrap();
+    let mut p = load_project(state, slug)?;
+    let root = project_root(state, slug)?;
+    let text = input.text.trim().to_string();
+    if let Some(r) = &input.render_id {
+        if !list_renders(state, slug)?.iter().any(|x| &x.id == r) {
+            return Err(format!("no verified render {r:?} in this project"));
+        }
+    }
+    let note = Note { id: short_id("n"), render_id: input.render_id, at_sec: input.at_sec.map(|t| (t * 1000.0).round() / 1000.0), text, by: input.by, via_voice: input.via_voice, resolved: false, at: now_iso() };
+    let mut m = load_manifest(&root, slug);
+    m.notes.push(note.clone());
+    validate_notes(&m.notes)?;
+    // Notes don't bump the revision: the editor's next save keeps them (manifest_save).
+    write_atomic(&manifest_path(&root), serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?.as_bytes())?;
+    if let Some(r) = &note.render_id {
+        let renders = list_renders(state, slug)?;
+        if let Some(round) = round_index(&p.review, r, &renders).map(|i| &mut p.review.rounds[i]) {
+            round.notes.push(note.id.clone());
+            p.updated_at = now_iso();
+            save_project(state, &p)?;
+        }
+    }
+    Ok(note)
+}
+
+pub(crate) fn note_resolve(state: &MediaState, slug: &str, note_id: &str) -> Result<(), String> {
+    let _g = state.manifest_lock.lock().unwrap();
+    load_project(state, slug)?;
+    let root = project_root(state, slug)?;
+    let mut m = load_manifest(&root, slug);
+    let n = m.notes.iter_mut().find(|n| n.id == note_id).ok_or_else(|| format!("no note {note_id:?}"))?;
+    n.resolved = true;
+    write_atomic(&manifest_path(&root), serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?.as_bytes())
+}
+
+/// Contract §5: a verified render opens a review round (round 1, then round 2; the round before it
+/// becomes "revised"). There's no round 3: later renders add no round.
+pub(crate) fn record_review_round(review: &mut ProjectReview, render_id: &str) {
+    if review.rounds.len() >= 2 || review.rounds.iter().any(|r| r.render_id == render_id) {
+        return;
+    }
+    for r in review.rounds.iter_mut().filter(|r| r.status == "open") {
+        r.status = "revised".into();
+    }
+    review.rounds.push(ReviewRound { round: review.rounds.len() as u8 + 1, render_id: render_id.into(), notes: vec![], status: "open".into(), summary: String::new() });
+}
+
+// ── v2: intake (§3) ───────────────────────────────────────────────────────────
+
+pub(crate) fn intake_status(state: &MediaState, slug: &str) -> Result<IntakeStatus, String> {
+    load_project(state, slug)?;
+    let root = project_root(state, slug)?;
+    ensure_project_dirs(&root)?;
+    let inbox = root.join("inbox");
+    let pending = std::fs::read_dir(&inbox)
+        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false) && !e.file_name().to_string_lossy().starts_with('.')).count())
+        .unwrap_or(0) as u32;
+    let info = state.intake.lock().unwrap().get(slug).cloned().unwrap_or_default();
+    Ok(IntakeStatus { inbox: dunce_canon(&inbox).unwrap_or(inbox).to_string_lossy().to_string(), pending, processing: info.processing, last_error: info.last_error })
+}
+
+/// The Whisper model the pipeline forces: the local **tiny.en** (media-forge resolves the name to the
+/// copy already on disk and never downloads). small.en is better but a ~480 MB download: ask first.
+pub(crate) const TRANSCRIBE_MODEL: &str = "tiny.en";
+/// How long one transcription may take before the pipeline gives up on it.
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+/// Brightness (8-bit YAVG, 16–235 video range) below / above which a shot is flagged.
+const DARK_YAVG: f64 = 40.0;
+const BRIGHT_YAVG: f64 = 225.0;
+/// Peak level (dBFS) at or below which a track counts as silent.
+const SILENT_DB: f64 = -50.0;
+
+/// media-forge as the intake pipeline sees it: a tool call returning the tool's JSON. The app's
+/// version goes through `mcp::call_tool` as the Director; tests pass a mock.
+pub(crate) trait Forge {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, String>;
+}
+
+/// The `media-intake` event (contract §8): `stage` = ingested | probed | transcribed | failed
+/// ("matched" is the webview's, after its `match_footage` turn).
+pub(crate) fn intake_event(slug: &str, asset_id: Option<&str>, stage: &str, detail: &str) -> Value {
+    json!({ "slug": slug, "assetId": asset_id.unwrap_or(""), "stage": stage, "detail": detail.chars().take(800).collect::<String>() })
+}
+
+fn set_intake(state: &MediaState, slug: &str, f: impl FnOnce(&mut IntakeInfo)) {
+    f(state.intake.lock().unwrap().entry(slug.to_string()).or_default());
+}
+
+fn intake_failed(state: &MediaState, slug: &str, asset_id: Option<&str>, err: &str, emit: &dyn Fn(Value)) {
+    let err: String = err.chars().take(800).collect();
+    eprintln!("[media intake] {slug}: {err}");
+    set_intake(state, slug, |i| i.last_error = Some(err.clone()));
+    emit(intake_event(slug, asset_id, "failed", &err));
+}
+
+/// The role a dropped file gets, from its extension (ingest fits it to the probed kind anyway).
+pub(crate) fn role_for_ext(ext: &str) -> &'static str {
+    match kind_for_ext(ext) {
+        Some("image") => "photo",
+        Some("audio") => "music",
+        _ => "clip",
+    }
+}
+
+/// Names the watcher leaves alone: hidden files and the partial files browsers / sync tools write.
+fn inbox_ignored(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    l.starts_with('.') || l.starts_with('~') || [".part", ".partial", ".tmp", ".crdownload", ".download", ".opdownload"].iter().any(|x| l.ends_with(x))
+}
+
+/// The stable files in one inbox: present at the last tick with the same, non-zero size (and not
+/// already failed at that size). Updates the seen sizes; forgets files that went away.
+pub(crate) fn stable_inbox_files(state: &MediaState, inbox: &Path) -> Vec<(PathBuf, u64)> {
+    let mut now: Vec<(PathBuf, u64)> = std::fs::read_dir(inbox)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false) && !inbox_ignored(&e.file_name().to_string_lossy()))
+                .map(|e| (e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)))
+                .collect()
+        })
+        .unwrap_or_default();
+    now.sort();
+    let mut seen = state.inbox_seen.lock().unwrap();
+    seen.retain(|p, _| !p.starts_with(inbox) || now.iter().any(|(q, _)| q == p));
+    let mut stable = vec![];
+    for (p, size) in now {
+        match seen.get(&p) {
+            Some(s) if s.size == size && size > 0 && !s.failed => stable.push((p, size)),
+            Some(s) if s.size == size => {} // empty, or failed at this size: wait for a change
+            _ => {
+                seen.insert(p, InboxSeen { size, failed: false });
+            }
+        }
+    }
+    stable
+}
+
+fn mark_inbox_failed(state: &MediaState, path: &Path, size: u64) {
+    state.inbox_seen.lock().unwrap().insert(path.to_path_buf(), InboxSeen { size, failed: true });
+}
+
+/// Ingest one stable inbox file: `ingest_paths` copies it into `raw/` (read-only), the copy is
+/// checked (on disk, same size), and only then is the inbox copy deleted. Returns the new asset.
+pub(crate) fn intake_ingest(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, path: &Path, size: u64) -> Result<MediaAsset, String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = ext_of(&name);
+    if kind_for_ext(&ext).is_none() {
+        return Err(format!("{name}: not a supported video, photo or audio file (left in the inbox)"));
+    }
+    let a = ingest_paths(state, cfg, slug, &[path.to_string_lossy().to_string()], role_for_ext(&ext))?.into_iter().next().ok_or("ingest returned nothing")?;
+    let raw = PathBuf::from(&a.path);
+    let raw_size = std::fs::metadata(&raw).map(|m| m.len()).unwrap_or(0);
+    if !raw.is_file() || raw_size != size || a.size_bytes != size {
+        return Err(format!("{name}: the raw/ copy doesn't match the inbox file ({raw_size} of {size} bytes); the inbox copy is kept"));
+    }
+    remove_staged(path);
+    if path.exists() {
+        return Err(format!("{name} was ingested, but its inbox copy couldn't be removed (is it open somewhere?)"));
+    }
+    Ok(a)
+}
+
+/// `(w, h)` against the brief's aspect: a flag when the ratio is more than 8% off.
+pub(crate) fn aspect_flag(w: u32, h: u32, aspect: &str) -> Option<AssetFlag> {
+    let (aw, ah) = aspect.split_once(':').and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))?;
+    if w == 0 || h == 0 || aw <= 0.0 || ah <= 0.0 {
+        return None;
+    }
+    let off = (w as f64 / h as f64) / (aw / ah);
+    let shape = |r: f64| if r > 1.05 { "landscape" } else if r < 0.95 { "portrait" } else { "square" };
+    ((off - 1.0).abs() > 0.08).then(|| AssetFlag { kind: "wrong_aspect".into(), detail: format!("{w}×{h} is {}; the brief is {aspect} ({})", shape(w as f64 / h as f64), shape(aw / ah)) })
+}
+
+/// Mean of the `lavfi.signalstats.YAVG=` lines ffmpeg's metadata filter prints.
+pub(crate) fn parse_yavg(text: &str) -> Option<f64> {
+    let v: Vec<f64> = text.lines().filter_map(|l| l.trim().strip_prefix("lavfi.signalstats.YAVG=")).filter_map(|x| x.trim().parse::<f64>().ok()).filter(|x| x.is_finite()).collect();
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+}
+
+pub(crate) fn exposure_flag(yavg: f64) -> Option<AssetFlag> {
+    let pct = ((yavg - 16.0) / 219.0 * 100.0).clamp(0.0, 100.0);
+    if yavg < DARK_YAVG {
+        Some(AssetFlag { kind: "dark".into(), detail: format!("mean brightness {pct:.0}%") })
+    } else if yavg > BRIGHT_YAVG {
+        Some(AssetFlag { kind: "overexposed".into(), detail: format!("mean brightness {pct:.0}%") })
+    } else {
+        None
+    }
+}
+
+/// `max_volume: -91.0 dB` from ffmpeg's volumedetect.
+pub(crate) fn parse_max_volume(text: &str) -> Option<f64> {
+    text.lines().find_map(|l| l.split("max_volume:").nth(1)).and_then(|r| r.trim().trim_end_matches("dB").trim().parse().ok())
+}
+
+/// A cheap brightness sample: up to 5 frames (1 fps) from ~10 s near the start, scaled down,
+/// 8-bit. `None` when ffmpeg isn't there or can't read it (the check is then skipped).
+fn sample_yavg(ffmpeg: &str, path: &Path, kind: &str, duration: Option<f64>) -> Option<f64> {
+    let p = path.to_string_lossy().to_string();
+    let vf = "fps=1,scale=160:-2,format=yuv420p,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-";
+    let ss = format!("{:.2}", duration.map(|d| (d * 0.1).min(2.0)).unwrap_or(0.0));
+    let mut args = vec!["-hide_banner", "-nostats", "-loglevel", "error"];
+    if kind == "video" {
+        args.extend(["-ss", ss.as_str(), "-t", "10"]);
+    }
+    args.extend(["-i", p.as_str(), "-vf", vf, "-frames:v", "5", "-an", "-f", "null", "-"]);
+    let out = run_hidden(ffmpeg, &args, Duration::from_secs(90)).ok()?;
+    parse_yavg(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Peak level of the first 10 minutes of audio (ffmpeg volumedetect, CPU).
+fn sample_peak_db(ffmpeg: &str, path: &Path) -> Option<f64> {
+    let p = path.to_string_lossy().to_string();
+    let out = run_hidden(ffmpeg, &["-hide_banner", "-nostats", "-t", "600", "-i", &p, "-vn", "-af", "volumedetect", "-f", "null", "-"], Duration::from_secs(180)).ok()?;
+    parse_max_volume(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// Probe-based flags (contract §3): too_short (< 1 s), wrong_aspect (vs the brief), dark /
+/// overexposed (signalstats sample, skipped without ffmpeg), silent (no audio track, or a peak at
+/// or below -50 dBFS). Returns the flags and whether there is sound worth transcribing.
+pub(crate) fn probe_flags(cfg: &os_core::OsConfig, a: &MediaAsset, brief_aspect: Option<&str>) -> Result<(Vec<AssetFlag>, bool), String> {
+    let path = PathBuf::from(&a.path);
+    let ffprobe = media_bin(cfg, "ffprobe").ok_or("ffprobe not found (install FFmpeg or Shotcut)")?;
+    let pr = probe(&ffprobe, &path)?;
+    let ffmpeg = media_bin(cfg, "ffmpeg");
+    let mut flags = vec![];
+    let dur = a.duration_sec.or(pr.duration);
+    if a.kind != "image" && dur.is_some_and(|d| d < 1.0) {
+        flags.push(AssetFlag { kind: "too_short".into(), detail: format!("{:.2} s long", dur.unwrap_or(0.0)) });
+    }
+    if a.kind != "audio" {
+        if let (Some(asp), Some(w), Some(h)) = (brief_aspect, a.width.or(pr.width), a.height.or(pr.height)) {
+            flags.extend(aspect_flag(w, h, asp));
+        }
+        if let Some(y) = ffmpeg.as_deref().and_then(|ff| sample_yavg(ff, &path, &a.kind, a.duration_sec)) {
+            flags.extend(exposure_flag(y));
+        }
+    }
+    let mut sound = false;
+    if a.kind != "image" {
+        if !pr.has_audio {
+            flags.push(AssetFlag { kind: "silent".into(), detail: "no audio track".into() });
+        } else {
+            match ffmpeg.as_deref().and_then(|ff| sample_peak_db(ff, &path)) {
+                Some(db) if db <= SILENT_DB => flags.push(AssetFlag { kind: "silent".into(), detail: format!("peak {db:.0} dBFS") }),
+                _ => sound = true,
+            }
+        }
+    }
+    Ok((flags, sound))
+}
+
+/// Flags of the given kinds are replaced by `fresh` (other kinds, e.g. media-forge's, are kept).
+pub(crate) fn merge_flags(old: &[AssetFlag], fresh: Vec<AssetFlag>, kinds: &[&str]) -> Vec<AssetFlag> {
+    let mut out: Vec<AssetFlag> = old.iter().filter(|f| !kinds.contains(&f.kind.as_str())).cloned().collect();
+    for f in fresh {
+        if !out.iter().any(|x| x.kind == f.kind) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+const PROBE_FLAG_KINDS: [&str; 5] = ["too_short", "wrong_aspect", "dark", "overexposed", "silent"];
+
+/// The transcript summary stored on the asset, from media-forge's transcribe .json
+/// (`{language, segments: [{start, end, text, words?: [{w, s, e, p}]}]}`).
+pub(crate) fn transcript_summary(path: &str, json_text: &str) -> Result<AssetTranscript, String> {
+    let v: Value = serde_json::from_str(json_text).map_err(|e| format!("transcript {path}: {e}"))?;
+    let segs = v["segments"].as_array().ok_or_else(|| format!("transcript {path}: no segments"))?;
+    let (mut words, mut first, mut last) = (0u32, None::<f64>, None::<f64>);
+    for s in segs {
+        let ws = s["words"].as_array().filter(|w| !w.is_empty());
+        let n = match ws {
+            Some(w) => w.iter().filter(|x| x["w"].as_str().is_some_and(|t| !t.trim().is_empty())).count(),
+            None => s["text"].as_str().map(|t| t.split_whitespace().count()).unwrap_or(0),
+        };
+        if n == 0 {
+            continue;
+        }
+        words += n as u32;
+        let start = ws.and_then(|w| w.first()).and_then(|x| x["s"].as_f64()).or(s["start"].as_f64());
+        let end = ws.and_then(|w| w.last()).and_then(|x| x["e"].as_f64()).or(s["end"].as_f64());
+        first = first.or(start);
+        last = end.or(last);
+    }
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    Ok(AssetTranscript { path: path.into(), lang: v["language"].as_str().unwrap_or("en").chars().take(12).collect(), words, first_speech_sec: first.map(r3), last_speech_sec: last.map(r3) })
+}
+
+/// Start a media-forge job tool and wait for it (job_status long-polls), up to `timeout`.
+pub(crate) fn forge_job(forge: &dyn Forge, tool: &str, args: &Value, timeout: Duration) -> Result<Value, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut v = forge.call(tool, args)?;
+    loop {
+        match v["status"].as_str() {
+            Some("done") => return Ok(v["result"].clone()),
+            Some("queued" | "running") => {}
+            Some("cancelled") => return Err(format!("{tool} was cancelled")),
+            Some(_) => return Err(v["error"].as_str().unwrap_or("the job failed").to_string()),
+            None => return Err(format!("media-forge did not start a {tool} job: {}", v.to_string().chars().take(300).collect::<String>())),
+        }
+        let id = v["id"].as_str().ok_or("job without an id")?.to_string();
+        if std::time::Instant::now() >= deadline {
+            let _ = forge.call("job_cancel", &json!({ "job_id": id }));
+            return Err(format!("{tool} took longer than {} min; cancelled", timeout.as_secs() / 60));
+        }
+        v = forge.call("job_status", &json!({ "job_id": id, "wait_s": 30 }))?;
+    }
+}
+
+/// CPU transcription of one asset through media-forge `transcribe_batch` (local tiny.en, output
+/// stem = the asset id → `working/captions/<id>.json`). Stores the summary; 0 words → `no_speech`.
+pub(crate) fn transcribe_asset(state: &MediaState, forge: &dyn Forge, slug: &str, asset_id: &str) -> Result<AssetTranscript, String> {
+    let a = load_asset(state, slug, asset_id)?;
+    if a.kind == "image" {
+        return Err(format!("{}: a photo has nothing to transcribe", a.name));
+    }
+    let args = json!({ "paths": [a.path], "project": slug, "model": TRANSCRIBE_MODEL, "output_stems": [a.id], "word_timestamps": true, "wait_s": 0 });
+    let res = forge_job(forge, "transcribe_batch", &args, TRANSCRIBE_TIMEOUT)?;
+    let item = res["results"].as_array().and_then(|r| r.first()).cloned().ok_or("transcribe_batch returned no result")?;
+    if item["ok"].as_bool() != Some(true) {
+        return Err(format!("{}: {}", a.name, item["error"].as_str().unwrap_or("transcription failed")));
+    }
+    let jpath = PathBuf::from(item["json"].as_str().ok_or("transcribe_batch returned no .json path")?);
+    let root = project_root(state, slug)?;
+    if !inside(&jpath, &root) {
+        return Err("the transcript landed outside this project".into());
+    }
+    let canon = dunce_canon(&jpath).unwrap_or(jpath.clone()).to_string_lossy().to_string();
+    let t = transcript_summary(&canon, &std::fs::read_to_string(&jpath).map_err(|e| format!("read {}: {e}", jpath.display()))?)?;
+    // Re-read before writing: Nic may have tagged it meanwhile.
+    let mut a = load_asset(state, slug, asset_id)?;
+    let speech = if t.words == 0 { vec![AssetFlag { kind: "no_speech".into(), detail: "no words heard".into() }] } else { vec![] };
+    a.flags = merge_flags(&a.flags, speech, &["no_speech"]);
+    a.transcript = Some(t.clone());
+    save_asset(state, &a)?;
+    Ok(t)
+}
+
+/// One pipeline pass (one asset): probe flags (new intake files), then transcription when there's
+/// sound. Each stage emits `media-intake`; a failure ends the pass with the error.
+pub(crate) fn run_intake_job(state: &MediaState, cfg: &os_core::OsConfig, forge: &dyn Forge, job: &IntakeJob, emit: &dyn Fn(Value)) -> Result<(), String> {
+    let (slug, id) = (job.slug.as_str(), job.asset_id.as_str());
+    let a = load_asset(state, slug, id)?;
+    set_intake(state, slug, |i| i.processing = Some(a.name.clone()));
+    let mut transcribe = a.kind != "image";
+    if job.analyze {
+        let aspect = load_project(state, slug)?.brief.map(|b| b.aspect);
+        let (flags, sound) = probe_flags(cfg, &a, aspect.as_deref())?;
+        let mut fresh = load_asset(state, slug, id)?;
+        fresh.flags = merge_flags(&fresh.flags, flags, &PROBE_FLAG_KINDS);
+        save_asset(state, &fresh)?;
+        let detail = if fresh.flags.is_empty() { "no problems found".to_string() } else { fresh.flags.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>().join(", ") };
+        emit(intake_event(slug, Some(id), "probed", &detail));
+        transcribe &= sound;
+    }
+    if transcribe {
+        let t = transcribe_asset(state, forge, slug, id)?;
+        emit(intake_event(slug, Some(id), "transcribed", &format!("{} words ({})", t.words, t.lang)));
+    }
+    Ok(())
+}
+
+/// One pass of the watched-folder intake (contract §3), for every project: ingest the inbox files
+/// that are stable (size unchanged across two ticks), then run the queued pipeline passes one at a
+/// time. Each error lands in that project's `lastError` and a `failed` event; the pass carries on.
+pub(crate) fn intake_tick_once(state: &MediaState, cfg: &os_core::OsConfig, forge: &dyn Forge, emit: &dyn Fn(Value)) -> Result<(), String> {
+    let slugs: Vec<String> = state.with(|c| {
+        let mut st = c.prepare("SELECT slug FROM project ORDER BY slug").map_err(sql_err)?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(sql_err)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })?;
+    for slug in &slugs {
+        let Ok(root) = project_root(state, slug) else { continue };
+        let inbox = root.join("inbox");
+        if !inbox.is_dir() {
+            continue;
+        }
+        for (path, size) in stable_inbox_files(state, &inbox) {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            set_intake(state, slug, |i| i.processing = Some(name.clone()));
+            match intake_ingest(state, cfg, slug, &path, size) {
+                Ok(a) => {
+                    state.inbox_seen.lock().unwrap().remove(&path);
+                    emit(intake_event(slug, Some(&a.id), "ingested", &a.name));
+                    state.transcribe_queue.lock().unwrap().push_back(IntakeJob { slug: slug.clone(), asset_id: a.id, analyze: true });
+                }
+                Err(e) => {
+                    mark_inbox_failed(state, &path, size);
+                    intake_failed(state, slug, None, &e, emit);
+                }
+            }
+            set_intake(state, slug, |i| i.processing = None);
+        }
+    }
+    loop {
+        let Some(job) = state.transcribe_queue.lock().unwrap().pop_front() else { break };
+        match run_intake_job(state, cfg, forge, &job, emit) {
+            Ok(()) => set_intake(state, &job.slug, |i| i.last_error = None),
+            Err(e) => intake_failed(state, &job.slug, Some(&job.asset_id), &e, emit),
+        }
+        set_intake(state, &job.slug, |i| i.processing = None);
+    }
+    Ok(())
+}
+
+/// media-forge through the MCP layer, as the Director (media servers only; CPU). Runs on the intake
+/// thread, which is not an async context, so it may block on the call.
+struct AppForge(tauri::AppHandle);
+
+impl Forge for AppForge {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+        let app = &self.0;
+        if !app.state::<OsState>().snapshot().mcps.iter().any(|m| m.id == "media-forge" && m.enabled) {
+            return Err("Media Forge is off: turn it on in Settings → MCP Registry to transcribe".into());
+        }
+        let name = format!("media-forge.{tool}");
+        let text = tauri::async_runtime::block_on(async {
+            let (d, o, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
+            super::mcp::call_tool(&d, &o, &b, &name, args, true, "director").await
+        })?;
+        Ok(tool_json(&text))
+    }
+}
+
+/// The 10-second intake tick (contract §3), on its own thread so a long transcription never holds
+/// the UI or the async runtime. Spawned once from lib.rs.
+pub fn spawn_intake(app: tauri::AppHandle) {
+    let spawned = std::thread::Builder::new().name("media-intake".into()).spawn(move || {
+        let forge = AppForge(app.clone());
+        let emit = |v: Value| {
+            let _ = app.emit(INTAKE_EVENT, v);
+        };
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            let cfg = app.state::<OsState>().snapshot();
+            let st = app.state::<MediaState>();
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| intake_tick_once(&st, &cfg, &forge, &emit)));
+            match run {
+                Ok(Err(e)) => eprintln!("[media intake] {e}"),
+                Err(_) => eprintln!("[media intake] a tick panicked; carrying on"),
+                Ok(Ok(())) => {}
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("[media intake] could not start: {e}");
+    }
+}
+
+/// `media_transcribe`: queue video/audio assets for the CPU transcription pass (the intake
+/// thread drains the queue within 10 s). Returns how many were newly queued.
+pub(crate) fn transcribe_enqueue(state: &MediaState, slug: &str, asset_ids: &[String]) -> Result<u32, String> {
+    load_project(state, slug)?;
+    if asset_ids.is_empty() || asset_ids.len() > 50 {
+        return Err("pick between 1 and 50 assets".into());
+    }
+    let assets = list_assets(state, slug)?;
+    for id in asset_ids {
+        let a = assets.iter().find(|a| &a.id == id).ok_or_else(|| format!("no asset {id:?} in this project"))?;
+        if a.kind == "image" {
+            return Err(format!("{}: a photo has nothing to transcribe", a.name));
+        }
+    }
+    let mut q = state.transcribe_queue.lock().unwrap();
+    let mut n = 0;
+    for id in asset_ids {
+        if !q.iter().any(|j| j.slug == slug && &j.asset_id == id) {
+            q.push_back(IntakeJob { slug: slug.into(), asset_id: id.clone(), analyze: false });
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+// ── v2: approve final (§6) ───────────────────────────────────────────────────
+
+/// Which output a render was made for, when the batch didn't record it (renders from before v2):
+/// the first output whose frame size matches, else "custom".
+pub(crate) fn platform_for_render(r: &VerifiedRender, outputs: &[PlatformPreset]) -> String {
+    outputs.iter().find(|o| dims_for(&o.aspect) == (r.width, r.height)).map(|o| o.platform.clone()).unwrap_or_else(|| "custom".into())
+}
+
+fn copy_verified(src: &Path, dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let name = src.file_name().map(|n| n.to_string_lossy().to_string()).ok_or("render has no file name")?;
+    let size = std::fs::metadata(src).map(|m| m.len()).map_err(|e| e.to_string())?;
+    let same = dir.join(&name);
+    if std::fs::metadata(&same).map(|m| m.len() == size).unwrap_or(false) {
+        return Ok(same); // approved before: idempotent
+    }
+    let dst = unique_path(dir, &name);
+    std::fs::copy(src, &dst).map_err(|e| format!("copy {name}: {e}"))?;
+    if std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0) != size {
+        let _ = std::fs::remove_file(&dst);
+        return Err(format!("the copy of {name} is incomplete"));
+    }
+    Ok(dst)
+}
+
+/// A sidecar next to the render with the same stem (captions: .srt/.ass/.vtt, thumb: .jpg/.png).
+fn sidecar(render: &Path, exts: &[&str]) -> Option<PathBuf> {
+    let stem = render.file_stem()?.to_string_lossy().to_string();
+    let dir = render.parent()?;
+    exts.iter().map(|e| dir.join(format!("{stem}.{e}"))).find(|p| p.is_file())
+}
+
+/// "Approve final": copies each verified render (and its caption/thumb sidecars) to
+/// `renders/final/<platform>/`, marks the review rounds approved and moves the project to done.
+/// Only from Nic's click (`approved: true`); nothing is posted or deleted.
+pub(crate) fn approve_final(state: &MediaState, slug: &str, render_ids: &[String], approved: bool) -> Result<Vec<Deliverable>, String> {
+    if !approved {
+        return Err("PERMISSION_REQUIRED:media-approve-final — Nic approves the final cut".into());
+    }
+    let mut p = load_project(state, slug)?;
+    let unique: HashSet<&String> = render_ids.iter().collect();
+    if render_ids.is_empty() || render_ids.len() > 4 || unique.len() != render_ids.len() {
+        return Err("approve 1–4 different renders".into());
+    }
+    let root = project_root(state, slug)?;
+    let renders = list_renders(state, slug)?;
+    let m = load_manifest(&root, slug);
+    let mut picked = vec![];
+    for id in render_ids {
+        let r = renders.iter().find(|r| &r.id == id).ok_or_else(|| format!("no verified render {id:?} in this project"))?;
+        let path = PathBuf::from(&r.path);
+        if !r.verify.ok || !path.is_file() || !inside(&path, &state.projects_root()) {
+            return Err(format!("render {id} isn't a verified file inside this project any more"));
+        }
+        if std::fs::metadata(&path).map(|x| x.len()).unwrap_or(0) != r.size_bytes {
+            return Err(format!("render {id} changed on disk since it was verified"));
+        }
+        picked.push((r.clone(), path));
+    }
+    let mut out = vec![];
+    for (r, path) in picked {
+        let platform = stored_platform(state, &r.id).filter(|p| PLATFORMS.contains(&p.as_str())).unwrap_or_else(|| platform_for_render(&r, &m.outputs));
+        let dir = root.join("renders").join("final").join(&platform);
+        let file = copy_verified(&path, &dir)?;
+        let caption = sidecar(&path, &["srt", "ass", "vtt"]).map(|c| copy_verified(&c, &dir)).transpose()?;
+        let thumb = sidecar(&path, &["jpg", "png"]).map(|t| copy_verified(&t, &dir)).transpose()?;
+        let s = |p: PathBuf| dunce_canon(&p).unwrap_or(p).to_string_lossy().to_string();
+        out.push(Deliverable { platform, render_id: r.id.clone(), path: s(file), caption_path: caption.map(s), thumb_path: thumb.map(s) });
+    }
+    let hit: Vec<usize> = render_ids.iter().filter_map(|id| round_index(&p.review, id, &renders)).collect();
+    for i in hit {
+        p.review.rounds[i].status = "approved".into();
+    }
+    p.status = "done".into();
+    p.updated_at = now_iso();
+    save_project(state, &p)?;
+    Ok(out)
 }
 
 // ── Chat ───────────────────────────────────────────────────────────────────────
@@ -957,11 +2112,21 @@ pub(crate) fn dims_for(aspect: &str) -> (u32, u32) {
     }
 }
 
+/// Contract §5: after round 2 the Director only lists open decisions; a third Director render
+/// (a third revise) is refused. Nic can still render by hand (it adds no round).
+pub(crate) fn check_review_limit(review: &ProjectReview, proposed_by: &str) -> Result<(), String> {
+    if proposed_by == "director" && review.rounds.len() >= 2 {
+        return Err("REVIEW_LIMIT: this cut has had its 2 review rounds, so there's no round 3. The Director lists the open decisions instead; Nic can still start a render by hand.".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn build_plan(state: &MediaState, slug: &str, proposed_by: &str) -> Result<RenderPlan, String> {
     if !["director", "nic"].contains(&proposed_by) {
         return Err("proposedBy must be director or nic".into());
     }
-    load_project(state, slug)?;
+    let p = load_project(state, slug)?;
+    check_review_limit(&p.review, proposed_by)?;
     let root = project_root(state, slug)?;
     let m = load_manifest(&root, slug);
     if m.clips.is_empty() {
@@ -969,10 +2134,11 @@ pub(crate) fn build_plan(state: &MediaState, slug: &str, proposed_by: &str) -> R
     }
     let assets = list_assets(state, slug)?;
     validate_manifest(&m, slug, &assets)?;
+    // Every output's spec must build now (e.g. captions need transcripts), not after approval.
+    for o in &m.outputs {
+        render_spec(&m, &assets, o, &root)?;
+    }
     let name_of = |id: &str| assets.iter().find(|a| a.id == id).map(|a| a.name.clone()).unwrap_or_default();
-    let (w, h) = dims_for(&m.output.aspect);
-    let total: f64 = m.clips.iter().map(|c| c.out_sec - c.in_sec).sum();
-    let cap = m.output.max_size_mb.map(|x| format!(" · ≤ {x} MB")).unwrap_or_default();
     let plan = RenderPlan {
         plan_id: short_id("p"),
         project: slug.into(),
@@ -980,13 +2146,44 @@ pub(crate) fn build_plan(state: &MediaState, slug: &str, proposed_by: &str) -> R
         sources: m.clips.iter().map(|c| PlanSource { asset_id: c.asset_id.clone(), name: name_of(&c.asset_id), in_sec: c.in_sec, out_sec: c.out_sec }).collect(),
         audio: m.audio.iter().map(|l| PlanAudio { asset_id: l.asset_id.clone(), name: name_of(&l.asset_id), start_sec: l.start_sec, volume: l.volume }).collect(),
         output_name: slugify(&m.output.name),
-        output_spec: format!("{w}×{h} · H.264/AAC · {} LUFS · {:.1} s{cap}", m.output.loudness_lufs, total),
+        output_spec: outputs_text(&m),
         render_mode: "cpu_only".into(),
         proposed_by: proposed_by.into(),
     };
     let j = serde_json::to_string(&plan).map_err(|e| e.to_string())?;
     state.with(|c| c.execute("INSERT INTO plan (id, project, json) VALUES (?1, ?2, ?3)", params![plan.plan_id, slug, j]).map(|_| ()).map_err(sql_err))?;
     Ok(plan)
+}
+
+/// The plan card's output line: one entry per output ("reels 1080×1920 · … | youtube …"); a single
+/// custom output reads exactly as v1 did. v2 looks (captions, colour, transitions) are appended.
+pub(crate) fn outputs_text(m: &TimelineManifest) -> String {
+    let total = expected_duration(m);
+    let one = |o: &PlatformPreset| {
+        let (w, h) = dims_for(&o.aspect);
+        let cap = o.max_size_mb.map(|x| format!(" · ≤ {x} MB")).unwrap_or_default();
+        let over = o.max_sec.filter(|s| total > *s + 0.05).map(|s| format!(" · over its {s:.0} s cap")).unwrap_or_default();
+        format!("{w}×{h} · H.264/AAC · {} LUFS · {total:.1} s{cap}{over}", o.loudness_lufs)
+    };
+    let mut s = match m.outputs.as_slice() {
+        [o] if o.platform == "custom" => one(o),
+        outs => outs.iter().map(|o| format!("{} {}", o.platform, one(o))).collect::<Vec<_>>().join(" | "),
+    };
+    let mut extra = vec![];
+    if m.captions.enabled {
+        extra.push(format!("captions {}", m.captions.style));
+    }
+    if m.color.preset != "none" && m.color.strength > 0.0 {
+        extra.push(format!("{} look", m.color.preset));
+    }
+    let xf = m.clips.iter().enumerate().filter(|(k, c)| spec_transition(*k, c).0 != "cut").count();
+    if xf > 0 {
+        extra.push(format!("{xf} transition{}", if xf == 1 { "" } else { "s" }));
+    }
+    if !extra.is_empty() {
+        s.push_str(&format!(" · {}", extra.join(" · ")));
+    }
+    s
 }
 
 fn load_plan(state: &MediaState, plan_id: &str) -> Result<RenderPlan, String> {
@@ -996,31 +2193,106 @@ fn load_plan(state: &MediaState, plan_id: &str) -> Result<RenderPlan, String> {
         .and_then(|j| serde_json::from_str(&j).map_err(|e| e.to_string()))
 }
 
-/// The media-forge `render_timeline` spec for an approved plan (paths resolved from the
-/// project's own assets; nothing from the model).
-pub(crate) fn render_spec(m: &TimelineManifest, assets: &[MediaAsset]) -> Result<Value, String> {
+/// Does the manifest use anything spec v1 can't express? A v1 (or v1-equivalent) manifest keeps
+/// the v1 spec, so old projects render exactly as before.
+pub(crate) fn needs_spec_v2(m: &TimelineManifest) -> bool {
+    m.clips.iter().enumerate().any(|(k, c)| spec_transition(k, c).0 != "cut" || c.punch_in != 1.0)
+        || m.audio.iter().any(|l| l.fade_in_ms > 0 || l.fade_out_ms > 0 || l.duck_under_voice)
+        || m.captions.enabled
+        || (m.color.preset != "none" && m.color.strength > 0.0)
+}
+
+/// The transition media-forge will apply: 0 ms is a cut, and the first clip can't crossfade
+/// (from nothing), so it cuts in.
+pub(crate) fn spec_transition(k: usize, c: &TimelineClip) -> (&str, u32) {
+    match c.transition_in.kind.as_str() {
+        _ if c.transition_in.ms == 0 => ("cut", 0),
+        "crossfade" if k == 0 => ("cut", 0),
+        "crossfade" => ("crossfade", c.transition_in.ms),
+        "fade_black" => ("fade_black", c.transition_in.ms),
+        _ => ("cut", 0),
+    }
+}
+
+/// The render's expected length, as media-forge lays it out: each crossfade overlaps its clips by
+/// its length, capped at 45% of the shorter neighbour (fade_black dips without overlap).
+pub(crate) fn expected_duration(m: &TimelineManifest) -> f64 {
+    let lens: Vec<f64> = m.clips.iter().map(|c| c.out_sec - c.in_sec).collect();
+    if !needs_spec_v2(m) {
+        return lens.iter().sum();
+    }
+    let mut t = 0.0;
+    for (k, c) in m.clips.iter().enumerate() {
+        if let ("crossfade", ms) = spec_transition(k, c) {
+            let cap = lens[k].min(lens[k - 1]) * 0.45;
+            t -= ((ms as f64 / 1000.0).min(cap) * 1000.0).round() / 1000.0;
+        }
+        t += lens[k];
+    }
+    t
+}
+
+/// A transcript file on disk for a clip's asset (stored absolute; a relative one is under the project).
+fn transcript_file(a: &MediaAsset, root: &Path) -> Option<String> {
+    let t = a.transcript.as_ref()?;
+    let p = PathBuf::from(&t.path);
+    let p = if p.is_absolute() { p } else { root.join(p) };
+    p.is_file().then(|| dunce_canon(&p).unwrap_or(p).to_string_lossy().to_string())
+}
+
+/// The media-forge `render_timeline` spec for one output of an approved plan (paths resolved from
+/// the project's own assets; nothing from the model). Spec v2 (transitions, punch-in, layer fades
+/// and ducking, captions from each clip's transcript, colour) when the manifest uses any of it,
+/// else the v1 spec unchanged.
+pub(crate) fn render_spec(m: &TimelineManifest, assets: &[MediaAsset], out: &PlatformPreset, root: &Path) -> Result<Value, String> {
     let by_id: HashMap<&str, &MediaAsset> = assets.iter().map(|a| (a.id.as_str(), a)).collect();
-    let (w, h) = dims_for(&m.output.aspect);
-    let clips: Result<Vec<Value>, String> = m
-        .clips
-        .iter()
-        .map(|c| {
-            let a = by_id.get(c.asset_id.as_str()).ok_or("clip asset missing")?;
-            Ok(json!({ "path": a.path, "kind": a.kind, "in": c.in_sec, "out": c.out_sec, "fade_ms": c.fade_ms }))
-        })
-        .collect();
-    let audio: Result<Vec<Value>, String> = m
-        .audio
-        .iter()
-        .map(|l| {
-            let a = by_id.get(l.asset_id.as_str()).ok_or("audio asset missing")?;
-            Ok(json!({ "path": a.path, "start": l.start_sec, "in": l.in_sec, "out": l.out_sec, "volume": l.volume }))
-        })
-        .collect();
+    let (w, h) = dims_for(&out.aspect);
+    let v2 = needs_spec_v2(m);
+    let mut any_transcript = false;
+    let mut clips = vec![];
+    for (k, c) in m.clips.iter().enumerate() {
+        let a = by_id.get(c.asset_id.as_str()).ok_or("clip asset missing")?;
+        let mut j = json!({ "path": a.path, "kind": a.kind, "in": c.in_sec, "out": c.out_sec, "fade_ms": c.fade_ms });
+        if v2 {
+            let (kind, ms) = spec_transition(k, c);
+            let transcript = if m.captions.enabled && a.kind == "video" { transcript_file(a, root) } else { None };
+            any_transcript |= transcript.is_some();
+            let o = j.as_object_mut().expect("object");
+            o.insert("transition_in".into(), json!({ "kind": kind, "ms": ms }));
+            o.insert("punch_in".into(), json!(c.punch_in));
+            o.insert("transcript".into(), json!(transcript));
+        }
+        clips.push(j);
+    }
+    let mut audio = vec![];
+    for l in &m.audio {
+        let a = by_id.get(l.asset_id.as_str()).ok_or("audio asset missing")?;
+        let mut j = json!({ "path": a.path, "start": l.start_sec, "in": l.in_sec, "out": l.out_sec, "volume": l.volume });
+        if v2 {
+            let o = j.as_object_mut().expect("object");
+            o.insert("fade_in_ms".into(), json!(l.fade_in_ms));
+            o.insert("fade_out_ms".into(), json!(l.fade_out_ms));
+            o.insert("duck_under_voice".into(), json!(l.duck_under_voice));
+        }
+        audio.push(j);
+    }
+    if !v2 {
+        return Ok(json!({
+            "version": 1, "project": m.project, "width": w, "height": h, "fps": 30,
+            "clips": clips, "audio": audio, "clip_audio_volume": m.clip_audio_volume,
+            "loudness_lufs": out.loudness_lufs, "max_size_mb": out.max_size_mb,
+        }));
+    }
+    if m.captions.enabled && !any_transcript {
+        return Err("captions are on, but none of the video clips has a transcript yet: transcribe them first (or turn captions off)".into());
+    }
+    let c = &m.captions;
     Ok(json!({
-        "version": 1, "project": m.project, "width": w, "height": h, "fps": 30,
-        "clips": clips?, "audio": audio?, "clip_audio_volume": m.clip_audio_volume,
-        "loudness_lufs": m.output.loudness_lufs, "max_size_mb": m.output.max_size_mb,
+        "version": 2, "project": m.project, "width": w, "height": h, "fps": 30,
+        "clips": clips, "audio": audio, "clip_audio_volume": m.clip_audio_volume,
+        "loudness_lufs": out.loudness_lufs, "max_size_mb": out.max_size_mb,
+        "captions": { "enabled": c.enabled, "style": c.style, "position": c.position, "max_words_per_line": c.max_words_per_line },
+        "color": { "preset": m.color.preset, "strength": m.color.strength },
     }))
 }
 
@@ -1069,7 +2341,7 @@ pub async fn media_projects(app: tauri::AppHandle) -> Result<Vec<MediaProject>, 
         st.with(|c| {
             let mut s = c.prepare("SELECT json FROM project ORDER BY updated_at DESC").map_err(sql_err)?;
             let rows = s.query_map([], |r| r.get::<_, String>(0)).map_err(sql_err)?;
-            Ok(rows.filter_map(|r| r.ok()).filter_map(|j| serde_json::from_str(&j).ok()).collect())
+            Ok(rows.filter_map(|r| r.ok()).filter_map(|j| parse_project(&j).ok()).collect())
         })
     })
     .await
@@ -1086,6 +2358,7 @@ pub async fn media_project_get(app: tauri::AppHandle, slug: String) -> Result<Va
         let st = app.state::<MediaState>();
         let project = load_project(&st, &slug)?;
         let root = project_root(&st, &slug)?;
+        let _ = ensure_project_dirs(&root); // v2 folders for projects made before v2
         Ok(json!({ "project": project, "assets": list_assets(&st, &slug)?, "manifest": load_manifest(&root, &slug), "renders": list_renders(&st, &slug)? }))
     })
     .await
@@ -1184,13 +2457,49 @@ fn render_event(app: &tauri::AppHandle, slug: &str, job_id: &str, status: &str, 
     let _ = app.emit(RENDER_EVENT, v);
 }
 
+/// One output of an approved render batch: its spec file, target file and verification bounds.
+#[derive(Clone, Debug)]
+pub(crate) struct RenderOut {
+    pub platform: String,
+    pub spec_path: PathBuf,
+    pub out: PathBuf,
+    pub w: u32,
+    pub h: u32,
+    pub cap: Option<f64>,
+}
+
+/// Write every output's spec for an approved plan (one output: `render_<plan>.json` →
+/// `<name>_vNNN.mp4`, as v1; several: `render_<plan>_<platform>.json` → `<name>_<platform>_vNNN.mp4`).
+pub(crate) fn prepare_outputs(m: &TimelineManifest, assets: &[MediaAsset], plan: &RenderPlan, root: &Path) -> Result<Vec<RenderOut>, String> {
+    let many = m.outputs.len() > 1;
+    let mut outs = vec![];
+    for o in &m.outputs {
+        let spec = render_spec(m, assets, o, root)?;
+        let tag = if many { format!("_{}", o.platform) } else { String::new() };
+        let spec_path = root.join("working").join(format!("render_{}{tag}.json", plan.plan_id));
+        write_atomic(&spec_path, serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?.as_bytes())?;
+        let (w, h) = dims_for(&o.aspect);
+        outs.push(RenderOut { platform: o.platform.clone(), spec_path, out: next_render_path(root, &format!("{}{tag}", plan.output_name)), w, h, cap: o.max_size_mb });
+    }
+    Ok(outs)
+}
+
+async fn start_render_job(app: &tauri::AppHandle, o: &RenderOut) -> Result<String, String> {
+    let args = json!({ "spec_path": o.spec_path.to_string_lossy(), "output": o.out.to_string_lossy(), "wait_s": 0 });
+    let res = {
+        let (d, os, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
+        super::mcp::call_tool(&d, &os, &b, "media-forge.render_timeline", &args, true, "director").await?
+    };
+    tool_json(&res)["id"].as_str().map(String::from).ok_or_else(|| format!("media-forge did not start a job: {}", res.chars().take(300).collect::<String>()))
+}
+
 #[tauri::command]
 pub async fn media_render_execute(app: tauri::AppHandle, slug: String, plan_id: String, approved: bool) -> Result<Value, String> {
     if !approved {
         return Err("PERMISSION_REQUIRED:media-render — approve the Render Plan first".into());
     }
     let app2 = app.clone();
-    let (plan, spec_path, out_path, manifest) = {
+    let (plan, outs, expect) = {
         let (slug, plan_id) = (slug.clone(), plan_id.clone());
         blocking(move || {
             let st = app2.state::<MediaState>();
@@ -1205,11 +2514,8 @@ pub async fn media_render_execute(app: tauri::AppHandle, slug: String, plan_id: 
             }
             let assets = list_assets(&st, &slug)?;
             validate_manifest(&m, &slug, &assets)?;
-            let spec = render_spec(&m, &assets)?;
-            let spec_path = root.join("working").join(format!("render_{}.json", plan.plan_id));
-            write_atomic(&spec_path, serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?.as_bytes())?;
-            let out = next_render_path(&root, &plan.output_name);
-            Ok((plan, spec_path, out, m))
+            let outs = prepare_outputs(&m, &assets, &plan, &root)?;
+            Ok((plan, outs, expected_duration(&m)))
         })
         .await?
     };
@@ -1217,43 +2523,93 @@ pub async fn media_render_execute(app: tauri::AppHandle, slug: String, plan_id: 
     if !cfg.mcps.iter().any(|m| m.id == "media-forge" && m.enabled) {
         return Err("Media Forge is off: turn it on in Settings → MCP Registry".into());
     }
-    let args = json!({ "spec_path": spec_path.to_string_lossy(), "output": out_path.to_string_lossy(), "wait_s": 0 });
-    let res = {
-        let (d, o, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
-        super::mcp::call_tool(&d, &o, &b, "media-forge.render_timeline", &args, true, "director").await?
-    };
-    let job = tool_json(&res);
-    let job_id = job["id"].as_str().ok_or_else(|| format!("media-forge did not start a job: {}", res.chars().take(300).collect::<String>()))?.to_string();
-    app.state::<MediaState>().jobs.lock().unwrap().insert(job_id.clone(), slug.clone());
-    {
-        let st = app.state::<MediaState>();
-        set_status(&st, &slug, "rendering");
-    }
-    render_event(&app, &slug, &job_id, "queued", 0.0, None, "queued", json!({}));
-    let expect: f64 = manifest.clips.iter().map(|c| c.out_sec - c.in_sec).sum();
-    let (w, h) = dims_for(&manifest.output.aspect);
-    let cap = manifest.output.max_size_mb;
-    let lufs_target = manifest.output.loudness_lufs;
-    tauri::async_runtime::spawn(watch_render(app.clone(), slug, job_id.clone(), plan, out_path, expect, w, h, cap, lufs_target));
+    // The first output starts now (so a refusal reaches the card); its job id names the batch.
+    let job_id = start_render_job(&app, &outs[0]).await?;
+    app.state::<MediaState>().jobs.lock().unwrap().insert(job_id.clone(), LiveRender { forge_job: job_id.clone(), cancelled: false });
+    // v2: no "rendering" status (the job shows it); the project stays where it is.
+    render_event(&app, &slug, &job_id, "queued", 0.0, None, &stage_label(&outs[0].platform, 0, outs.len(), "queued"), json!({}));
+    tauri::async_runtime::spawn(run_outputs(app.clone(), slug, job_id.clone(), plan, outs, expect));
     Ok(json!({ "jobId": job_id }))
 }
 
+/// "reels 1/2 · encoding" for a batch; the bare stage for a single output.
+pub(crate) fn stage_label(platform: &str, k: usize, n: usize, stage: &str) -> String {
+    if n <= 1 {
+        stage.to_string()
+    } else if stage.is_empty() {
+        format!("{platform} {}/{n}", k + 1)
+    } else {
+        format!("{platform} {}/{n} · {stage}", k + 1)
+    }
+}
+
+/// Overall percent for output `k` of `n` at `pct` through its own render.
+pub(crate) fn batch_pct(k: usize, n: usize, pct: f64) -> f64 {
+    ((k as f64 + pct.clamp(0.0, 100.0) / 100.0) / n.max(1) as f64 * 1000.0).round() / 10.0
+}
+
+enum Outcome {
+    Done(VerifiedRender),
+    Failed(String),
+    Cancelled,
+}
+
+/// The approved batch: each output rendered in turn (one media-forge job at a time, CPU), each
+/// verified by Rust before it's listed. A failure or a cancel stops the outputs after it.
+async fn run_outputs(app: tauri::AppHandle, slug: String, batch: String, plan: RenderPlan, outs: Vec<RenderOut>, expect: f64) {
+    let n = outs.len();
+    for (k, o) in outs.iter().enumerate() {
+        let forge_job = if k == 0 {
+            batch.clone()
+        } else {
+            if app.state::<MediaState>().jobs.lock().unwrap().get(&batch).map_or(true, |l| l.cancelled) {
+                app.state::<MediaState>().jobs.lock().unwrap().remove(&batch);
+                render_event(&app, &slug, &batch, "cancelled", batch_pct(k, n, 0.0), None, "cancelled", json!({}));
+                return;
+            }
+            match start_render_job(&app, o).await {
+                Ok(id) => {
+                    if let Some(l) = app.state::<MediaState>().jobs.lock().unwrap().get_mut(&batch) {
+                        l.forge_job = id.clone();
+                    }
+                    render_event(&app, &slug, &batch, "queued", batch_pct(k, n, 0.0), None, &stage_label(&o.platform, k, n, "queued"), json!({}));
+                    id
+                }
+                Err(e) => return finish_failed(&app, &slug, &batch, &format!("{}: {e}", o.platform)),
+            }
+        };
+        match watch_one(&app, &slug, &batch, &forge_job, k, n, &plan, o, expect).await {
+            Outcome::Done(r) => {
+                if k + 1 == n {
+                    app.state::<MediaState>().jobs.lock().unwrap().remove(&batch);
+                }
+                render_event(&app, &slug, &batch, "done", batch_pct(k + 1, n, 0.0), Some(0.0), &stage_label(&o.platform, k, n, "verified"), json!({ "render": r }));
+            }
+            Outcome::Failed(e) => return finish_failed(&app, &slug, &batch, &if n > 1 { format!("{}: {e}", o.platform) } else { e }),
+            Outcome::Cancelled => {
+                app.state::<MediaState>().jobs.lock().unwrap().remove(&batch);
+                render_event(&app, &slug, &batch, "cancelled", batch_pct(k, n, 0.0), None, "cancelled", json!({}));
+                return;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn watch_render(app: tauri::AppHandle, slug: String, job_id: String, plan: RenderPlan, out: PathBuf, expect: f64, w: u32, h: u32, cap: Option<f64>, _lufs: i32) {
+async fn watch_one(app: &tauri::AppHandle, slug: &str, batch: &str, job_id: &str, k: usize, n: usize, plan: &RenderPlan, o: &RenderOut, expect: f64) -> Outcome {
     let mut failures = 0;
     loop {
         tokio::time::sleep(Duration::from_millis(1000)).await;
         let res = {
-            let (d, o, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
-            super::mcp::call_tool(&d, &o, &b, "media-forge.job_status", &json!({ "job_id": job_id, "wait_s": 2 }), true, "director").await
+            let (d, os, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
+            super::mcp::call_tool(&d, &os, &b, "media-forge.job_status", &json!({ "job_id": job_id, "wait_s": 2 }), true, "director").await
         };
         let v = match res {
             Ok(t) => tool_json(&t),
             Err(e) => {
                 failures += 1;
                 if failures >= 10 {
-                    finish_failed(&app, &slug, &job_id, &format!("lost track of the render: {e}"));
-                    return;
+                    return Outcome::Failed(format!("lost track of the render: {e}"));
                 }
                 continue;
             }
@@ -1264,28 +2620,28 @@ async fn watch_render(app: tauri::AppHandle, slug: String, job_id: String, plan:
         let eta = v["eta_s"].as_f64();
         let stage = v["stage"].as_str().unwrap_or("").to_string();
         match status.as_str() {
-            "queued" | "running" => render_event(&app, &slug, &job_id, &status, pct, eta, &stage, json!({})),
+            "queued" | "running" => render_event(app, slug, batch, &status, batch_pct(k, n, pct), eta, &stage_label(&o.platform, k, n, &stage), json!({})),
             "done" => {
                 let lufs = v["result"]["loudness_measured"].as_f64();
                 let app2 = app.clone();
-                let (slug2, plan2, out2) = (slug.clone(), plan.clone(), out.clone());
+                let (slug2, plan_id, o2) = (slug.to_string(), plan.plan_id.clone(), o.clone());
                 let verdict = blocking(move || {
                     let cfg = app2.state::<OsState>().snapshot();
                     let ffprobe = media_bin(&cfg, "ffprobe").ok_or("ffprobe not found")?;
-                    if !out2.is_file() {
-                        return Err(format!("the render reported done but {} is not on disk", out2.display()));
+                    if !o2.out.is_file() {
+                        return Err(format!("the render reported done but {} is not on disk", o2.out.display()));
                     }
-                    let size = std::fs::metadata(&out2).map(|m| m.len()).unwrap_or(0);
-                    let pr = probe(&ffprobe, &out2)?;
-                    let verify = verify_render(&pr, size, expect, w, h, cap);
+                    let size = std::fs::metadata(&o2.out).map(|m| m.len()).unwrap_or(0);
+                    let pr = probe(&ffprobe, &o2.out)?;
+                    let verify = verify_render(&pr, size, expect, o2.w, o2.h, o2.cap);
                     if !verify.ok {
                         return Err(format!("render failed verification: {}", verify.checks.join("; ")));
                     }
                     let r = VerifiedRender {
                         id: short_id("r"),
                         project: slug2.clone(),
-                        plan_id: plan2.plan_id.clone(),
-                        path: dunce_canon(&out2).unwrap_or(out2.clone()).to_string_lossy().to_string(),
+                        plan_id,
+                        path: dunce_canon(&o2.out).unwrap_or(o2.out.clone()).to_string_lossy().to_string(),
                         duration_sec: pr.duration.unwrap_or(0.0),
                         width: pr.width.unwrap_or(0),
                         height: pr.height.unwrap_or(0),
@@ -1295,48 +2651,82 @@ async fn watch_render(app: tauri::AppHandle, slug: String, job_id: String, plan:
                         created_at: now_iso(),
                     };
                     let st = app2.state::<MediaState>();
-                    let j = serde_json::to_string(&r).map_err(|e| e.to_string())?;
-                    st.with(|c| c.execute("INSERT INTO render (id, project, json, created_at) VALUES (?1, ?2, ?3, ?4)", params![r.id, r.project, j, r.created_at]).map(|_| ()).map_err(sql_err))?;
-                    set_status(&st, &slug2, "ready");
+                    record_render(&st, &r, Some(&o2.platform))?;
+                    on_verified_render(&st, &slug2, &r.id);
                     Ok(r)
                 })
                 .await;
-                app.state::<MediaState>().jobs.lock().unwrap().remove(&job_id);
-                match verdict {
-                    Ok(r) => render_event(&app, &slug, &job_id, "done", 100.0, Some(0.0), "verified", json!({ "render": r })),
-                    Err(e) => finish_failed(&app, &slug, &job_id, &e),
-                }
-                return;
+                return match verdict {
+                    Ok(r) => Outcome::Done(r),
+                    Err(e) => Outcome::Failed(e),
+                };
             }
-            "cancelled" => {
-                app.state::<MediaState>().jobs.lock().unwrap().remove(&job_id);
-                set_status(&app.state::<MediaState>(), &slug, "editing");
-                render_event(&app, &slug, &job_id, "cancelled", pct, None, "cancelled", json!({}));
-                return;
-            }
-            _ => {
-                let err = v["error"].as_str().unwrap_or("the render failed").to_string();
-                finish_failed(&app, &slug, &job_id, &err);
-                return;
-            }
+            "cancelled" => return Outcome::Cancelled,
+            _ => return Outcome::Failed(v["error"].as_str().unwrap_or("the render failed").to_string()),
         }
+    }
+}
+
+/// List a verified render, remembering which output (platform) it was made for (media.db kv
+/// `render-platform:<id>`; the VerifiedRender shape stays the contract's).
+pub(crate) fn record_render(state: &MediaState, r: &VerifiedRender, platform: Option<&str>) -> Result<(), String> {
+    let j = serde_json::to_string(r).map_err(|e| e.to_string())?;
+    state.with(|c| {
+        c.execute("INSERT INTO render (id, project, json, created_at) VALUES (?1, ?2, ?3, ?4)", params![r.id, r.project, j, r.created_at]).map_err(sql_err)?;
+        if let Some(p) = platform {
+            c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![format!("render-platform:{}", r.id), p]).map_err(sql_err)?;
+        }
+        Ok(())
+    })
+}
+
+fn stored_platform(state: &MediaState, render_id: &str) -> Option<String> {
+    state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [format!("render-platform:{render_id}")], |r| r.get::<_, String>(0)).optional().map_err(sql_err)).ok().flatten()
+}
+
+/// The round a render belongs to: its own, or the round opened by another output of the same
+/// approved batch (same plan).
+pub(crate) fn round_index(review: &ProjectReview, render_id: &str, renders: &[VerifiedRender]) -> Option<usize> {
+    let plan_of = |id: &str| renders.iter().find(|r| r.id == id).map(|r| r.plan_id.clone());
+    let plan = plan_of(render_id);
+    review.rounds.iter().position(|x| x.render_id == render_id || (plan.is_some() && plan_of(&x.render_id) == plan))
+}
+
+/// Contract §1/§5: a verified render moves the project to review and opens a review round (one
+/// round per approved batch: the other outputs of the same plan join it).
+pub(crate) fn on_verified_render(state: &MediaState, slug: &str, render_id: &str) {
+    if let Ok(mut p) = load_project(state, slug) {
+        let renders = list_renders(state, slug).unwrap_or_default();
+        if round_index(&p.review, render_id, &renders).is_none() {
+            record_review_round(&mut p.review, render_id);
+        }
+        if status_rank("review") > status_rank(&p.status) {
+            p.status = "review".into();
+        }
+        p.updated_at = now_iso();
+        let _ = save_project(state, &p);
     }
 }
 
 fn finish_failed(app: &tauri::AppHandle, slug: &str, job_id: &str, err: &str) {
     app.state::<MediaState>().jobs.lock().unwrap().remove(job_id);
-    set_status(&app.state::<MediaState>(), slug, "editing");
+    // v2: a failed render leaves the status alone (v1 reset it to editing from "rendering").
     let err: String = err.chars().take(800).collect();
     render_event(app, slug, job_id, "failed", 0.0, None, "failed", json!({ "error": err }));
 }
 
+/// Cancels the batch: the output rendering now is stopped and the ones after it are skipped.
 #[tauri::command]
 pub async fn media_render_cancel(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
-    if !app.state::<MediaState>().jobs.lock().unwrap().contains_key(&job_id) {
-        return Err("no live render with that id".into());
-    }
+    let forge_job = {
+        let st = app.state::<MediaState>();
+        let mut jobs = st.jobs.lock().unwrap();
+        let live = jobs.get_mut(&job_id).ok_or("no live render with that id")?;
+        live.cancelled = true;
+        live.forge_job.clone()
+    };
     let (d, o, b) = (app.state::<super::dispatch::DispatchState>(), app.state::<OsState>(), app.state::<super::bridge::BridgeState>());
-    super::mcp::call_tool(&d, &o, &b, "media-forge.job_cancel", &json!({ "job_id": job_id }), true, "director").await.map(|_| ())
+    super::mcp::call_tool(&d, &o, &b, "media-forge.job_cancel", &json!({ "job_id": forge_job }), true, "director").await.map(|_| ())
 }
 
 #[tauri::command]
@@ -1356,6 +2746,55 @@ pub async fn media_readiness(app: tauri::AppHandle, os: State<'_, OsState>, disp
         blocking(move || Ok(media_bin(&cfg2, "ffprobe").is_some())).await?
     };
     Ok(json!({ "shotcut": ready("shotcut"), "mediaForge": ready("media-forge"), "ffmpegFound": ffmpeg_found }))
+}
+
+// ── v2 commands (contract §8) ──
+
+#[tauri::command]
+pub async fn media_project_update(app: tauri::AppHandle, slug: String, title: Option<String>, brief: Option<CreativeBrief>, status: Option<String>, speed: Option<String>) -> Result<MediaProject, String> {
+    blocking(move || project_update(&app.state::<MediaState>(), &slug, title, brief, status, speed)).await
+}
+
+/// `slot_id`: "" clears (api.ts maps the contract's `null`), absent leaves it.
+#[tauri::command]
+pub async fn media_asset_update(app: tauri::AppHandle, slug: String, asset_id: String, tags: Option<Vec<String>>, moments: Option<Vec<Moment>>, slot_id: Option<String>) -> Result<MediaAsset, String> {
+    blocking(move || asset_update(&app.state::<MediaState>(), &slug, &asset_id, tags, moments, slot_id)).await
+}
+
+#[tauri::command]
+pub async fn media_intake_status(app: tauri::AppHandle, slug: String) -> Result<IntakeStatus, String> {
+    blocking(move || intake_status(&app.state::<MediaState>(), &slug)).await
+}
+
+#[tauri::command]
+pub async fn media_transcribe(app: tauri::AppHandle, slug: String, asset_ids: Vec<String>) -> Result<Value, String> {
+    blocking(move || transcribe_enqueue(&app.state::<MediaState>(), &slug, &asset_ids).map(|n| json!({ "queued": n }))).await
+}
+
+#[tauri::command]
+pub async fn media_note_add(app: tauri::AppHandle, slug: String, note: NoteInput) -> Result<Note, String> {
+    blocking(move || note_add(&app.state::<MediaState>(), &slug, note)).await
+}
+
+#[tauri::command]
+pub async fn media_note_resolve(app: tauri::AppHandle, slug: String, note_id: String) -> Result<(), String> {
+    blocking(move || note_resolve(&app.state::<MediaState>(), &slug, &note_id)).await
+}
+
+/// The review rounds and open decisions, as stored in project.json (contract §5).
+pub(crate) fn review_get(state: &MediaState, slug: &str) -> Result<ProjectReview, String> {
+    load_project(state, slug).map(|p| p.review)
+}
+
+#[tauri::command]
+pub async fn media_review_get(app: tauri::AppHandle, slug: String) -> Result<ProjectReview, String> {
+    blocking(move || review_get(&app.state::<MediaState>(), &slug)).await
+}
+
+/// Only from Nic's "Approve final" click.
+#[tauri::command]
+pub async fn media_approve_final(app: tauri::AppHandle, slug: String, render_ids: Vec<String>, approved: bool) -> Result<Vec<Deliverable>, String> {
+    blocking(move || approve_final(&app.state::<MediaState>(), &slug, &render_ids, approved)).await
 }
 
 #[tauri::command]
@@ -1383,11 +2822,15 @@ mod tests {
     }
 
     fn asset(id: &str, kind: &str, dur: Option<f64>) -> MediaAsset {
-        MediaAsset { id: id.into(), project: "p".into(), kind: kind.into(), role: "clip".into(), name: format!("{id}.x"), path: format!("C:/x/{id}"), read_only: true, size_bytes: 1, duration_sec: dur, width: Some(1920), height: Some(1080), thumb_path: None, added_at: now_iso() }
+        MediaAsset { id: id.into(), project: "p".into(), kind: kind.into(), role: "clip".into(), name: format!("{id}.x"), path: format!("C:/x/{id}"), read_only: true, size_bytes: 1, duration_sec: dur, width: Some(1920), height: Some(1080), thumb_path: None, added_at: now_iso(), ..Default::default() }
+    }
+
+    fn slot(id: &str, asset: Option<&str>) -> ShotSlot {
+        ShotSlot { id: id.into(), label: "Hook".into(), instructions: "15 s".into(), kind: "video".into(), target_sec: Some(15.0), asset_id: asset.map(String::from), status: if asset.is_some() { "attached" } else { "needed" }.into(), framing: None, action: String::new(), source: "film".into(), phone_tips: vec![], filmed: false }
     }
 
     fn clip(id: &str, asset: &str, i: f64, o: f64) -> TimelineClip {
-        TimelineClip { id: id.into(), asset_id: asset.into(), in_sec: i, out_sec: o, fade_ms: 0 }
+        TimelineClip { id: id.into(), asset_id: asset.into(), in_sec: i, out_sec: o, fade_ms: 0, transition_in: Transition::default(), punch_in: 1.0 }
     }
 
     #[test]
@@ -1406,7 +2849,7 @@ mod tests {
         let assets = vec![asset("v", "video", Some(10.0)), asset("i", "image", None), asset("a", "audio", Some(5.0))];
         let mut m = default_manifest("p");
         m.clips = vec![clip("c1", "v", 1.0, 9.0), clip("c2", "i", 0.0, 3.0)];
-        m.audio = vec![AudioLayer { id: "l1".into(), asset_id: "a".into(), start_sec: 1.0, in_sec: 0.0, out_sec: 5.0, volume: 0.8 }];
+        m.audio = vec![AudioLayer { id: "l1".into(), asset_id: "a".into(), start_sec: 1.0, in_sec: 0.0, out_sec: 5.0, volume: 0.8, fade_in_ms: 0, fade_out_ms: 0, duck_under_voice: false }];
         assert_eq!(validate_manifest(&m, "p", &assets), Ok(()));
         let bad = |f: &dyn Fn(&mut TimelineManifest)| {
             let mut x = m.clone();
@@ -1439,7 +2882,7 @@ mod tests {
 
         let m0 = load_manifest(Path::new(&p.root), &p.slug);
         let mut m = m0.clone();
-        m.shot_list = vec![ShotSlot { id: "s1".into(), label: "Hook".into(), instructions: "15 s".into(), kind: "video".into(), target_sec: Some(15.0), asset_id: None, status: "needed".into() }];
+        m.shot_list = vec![slot("s1", None)];
         let saved = manifest_save(&st, &p.slug, m.clone()).unwrap();
         assert_eq!(saved.revision, 1);
         // A save from the old revision is refused, not merged.
@@ -1477,8 +2920,9 @@ mod tests {
         let assets = vec![asset("v", "video", Some(10.0)), asset("i", "image", None)];
         let mut m = default_manifest("p");
         m.output.aspect = "9:16".into();
+        m.outputs[0].aspect = "9:16".into();
         m.clips = vec![clip("c1", "v", 1.0, 9.0), clip("c2", "i", 0.0, 3.0)];
-        let spec = render_spec(&m, &assets).unwrap();
+        let spec = render_spec(&m, &assets, &m.outputs[0], Path::new("C:/x")).unwrap();
         assert_eq!((spec["width"].as_u64(), spec["height"].as_u64()), (Some(1080), Some(1920)));
         assert_eq!(spec["clips"][1]["kind"], "image");
         assert_eq!(spec["clips"][0]["path"], "C:/x/v");
@@ -1490,5 +2934,798 @@ mod tests {
         assert!(!verify_render(&good, 20 * 1024 * 1024, 11.0, 1080, 1920, Some(10.0)).ok);
         let p = parse_probe(r#"{"format":{"duration":"4.5"},"streams":[{"codec_type":"video","width":1920,"height":1080,"side_data_list":[{"rotation":-90}]},{"codec_type":"audio"}]}"#);
         assert_eq!((p.width, p.height, p.has_audio, p.duration), (Some(1080), Some(1920), true, Some(4.5)));
+    }
+
+    // ── v2 (docs/proposals/director-suite-v2-contract.md) ──
+
+    fn brief(by: &str, approved: bool) -> CreativeBrief {
+        CreativeBrief {
+            idea: "a moody dance reel in the rain".into(),
+            goal: "get booked for a dance gig".into(),
+            platform: "reels".into(),
+            length_sec: 30.0,
+            aspect: "9:16".into(),
+            tone: "moody, slow, warm".into(),
+            references: vec!["like the last reel".into()],
+            guessed: vec!["lengthSec".into()],
+            approved,
+            updated_by: by.into(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn put_asset(st: &MediaState, slug: &str, id: &str, kind: &str, dur: Option<f64>) -> MediaAsset {
+        let a = MediaAsset { project: slug.into(), ..asset(id, kind, dur) };
+        save_asset(st, &a).unwrap();
+        a
+    }
+
+    fn put_render(st: &MediaState, slug: &str, id: &str, path: &Path, w: u32, h: u32) -> VerifiedRender {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let r = VerifiedRender { id: id.into(), project: slug.into(), plan_id: "p-1".into(), path: path.to_string_lossy().to_string(), duration_sec: 3.0, width: w, height: h, size_bytes: size, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() };
+        let j = serde_json::to_string(&r).unwrap();
+        st.with(|c| c.execute("INSERT INTO render (id, project, json, created_at) VALUES (?1, ?2, ?3, ?4)", params![r.id, r.project, j, r.created_at]).map(|_| ()).map_err(sql_err)).unwrap();
+        r
+    }
+
+    const V1_MANIFEST: &str = r#"{"version":1,"project":"old","revision":7,
+        "clips":[{"id":"c1","assetId":"v","inSec":1,"outSec":4,"fadeMs":200}],
+        "audio":[{"id":"l1","assetId":"a","startSec":0,"inSec":0,"outSec":5,"volume":0.8}],
+        "clipAudioVolume":0.5,"output":{"aspect":"9:16","loudnessLufs":-18,"maxSizeMb":100,"name":"old"},
+        "shotList":[{"id":"s1","label":"Hook","instructions":"","kind":"video","targetSec":3,"assetId":"v","status":"attached"}],
+        "updatedBy":"director","updatedAt":"2026-11-22T00:00:00Z"}"#;
+
+    #[test]
+    fn v1_manifest_loads_as_v2_with_defaults() {
+        let m = upgrade_manifest(serde_json::from_str(V1_MANIFEST).unwrap());
+        assert_eq!((m.version, m.revision, m.clip_audio_volume), (2, 7, 0.5));
+        assert_eq!(m.clips[0].transition_in, Transition { kind: "cut".into(), ms: 0 });
+        assert_eq!((m.clips[0].punch_in, m.clips[0].fade_ms), (1.0, 200));
+        assert_eq!((m.audio[0].fade_in_ms, m.audio[0].fade_out_ms, m.audio[0].duck_under_voice), (0, 0, false));
+        let s = &m.shot_list[0];
+        assert_eq!((s.framing.clone(), s.action.as_str(), s.source.as_str(), s.phone_tips.len(), s.filmed), (None, "", "film", 0, false));
+        assert_eq!(m.captions, CaptionTrack::default());
+        assert_eq!(m.color, ColorLook::default());
+        assert_eq!(m.outputs, vec![PlatformPreset { platform: "custom".into(), aspect: "9:16".into(), loudness_lufs: -18, max_size_mb: Some(100.0), max_sec: None }]);
+        assert!(m.notes.is_empty());
+        let assets = vec![asset("v", "video", Some(10.0)), asset("a", "audio", Some(5.0))];
+        assert_eq!(validate_manifest(&m, "old", &assets), Ok(()));
+        // The same file read from disk by load_manifest.
+        let root = tmp_root();
+        std::fs::create_dir_all(root.join("working")).unwrap();
+        std::fs::write(manifest_path(&root), V1_MANIFEST).unwrap();
+        assert_eq!(load_manifest(&root, "old"), m);
+        // A v2 manifest round-trips unchanged.
+        let again: TimelineManifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(upgrade_manifest(again), m);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_manifest_rules_hold() {
+        let assets = vec![asset("v", "video", Some(10.0)), asset("a", "audio", Some(5.0))];
+        let mut m = default_manifest("p");
+        m.clips = vec![clip("c1", "v", 0.0, 4.0)];
+        m.audio = vec![AudioLayer { id: "l1".into(), asset_id: "a".into(), start_sec: 0.0, in_sec: 0.0, out_sec: 5.0, volume: 1.0, fade_in_ms: 500, fade_out_ms: 2000, duck_under_voice: true }];
+        m.shot_list = vec![slot("s1", Some("v"))];
+        m.notes = vec![Note { id: "n1".into(), render_id: Some("r-1".into()), at_sec: Some(2.0), text: "tighter".into(), by: "nic".into(), via_voice: false, resolved: false, at: now_iso() }];
+        assert_eq!(validate_manifest(&m, "p", &assets), Ok(()));
+        let bad = |f: &dyn Fn(&mut TimelineManifest)| {
+            let mut x = m.clone();
+            f(&mut x);
+            validate_manifest(&x, "p", &assets).is_err()
+        };
+        assert!(bad(&|x| x.version = 1)); // only upgraded manifests validate
+        assert!(bad(&|x| x.clips[0].transition_in = Transition { kind: "wipe".into(), ms: 0 }));
+        assert!(bad(&|x| x.clips[0].transition_in = Transition { kind: "crossfade".into(), ms: 1501 }));
+        assert!(!bad(&|x| x.clips[0].transition_in = Transition { kind: "fade_black".into(), ms: 1500 }));
+        assert!(bad(&|x| x.clips[0].punch_in = 1.6));
+        assert!(bad(&|x| x.clips[0].punch_in = 0.9));
+        assert!(bad(&|x| x.clips[0].punch_in = f64::NAN));
+        assert!(bad(&|x| x.audio[0].fade_out_ms = 10_001));
+        assert!(bad(&|x| x.shot_list[0].framing = Some("dutch".into())));
+        assert!(!bad(&|x| x.shot_list[0].framing = Some("closeup".into())));
+        assert!(bad(&|x| x.shot_list[0].source = "borrow".into()));
+        assert!(bad(&|x| x.shot_list[0].phone_tips = vec!["a".into(); 5]));
+        assert!(bad(&|x| x.shot_list[0].phone_tips = vec!["  ".into()]));
+        assert!(bad(&|x| x.shot_list[0].action = "x".repeat(501)));
+        assert!(bad(&|x| x.shot_list.push(slot("s1", None)))); // duplicate slot id
+        assert!(bad(&|x| x.captions.max_words_per_line = 0));
+        assert!(bad(&|x| x.captions.max_words_per_line = 13));
+        assert!(bad(&|x| x.captions.style = "comic".into()));
+        assert!(bad(&|x| x.captions.position = "top".into()));
+        assert!(bad(&|x| x.color.preset = "sepia".into()));
+        assert!(bad(&|x| x.color.strength = 1.01));
+        assert!(bad(&|x| x.outputs.clear()));
+        assert!(bad(&|x| {
+            let o = x.outputs[0].clone();
+            x.outputs.push(o); // repeated platform
+        }));
+        assert!(bad(&|x| {
+            for p in ["reels", "tiktok", "youtube", "shorts"] {
+                x.outputs.push(PlatformPreset { platform: p.into(), aspect: "9:16".into(), loudness_lufs: -14, max_size_mb: None, max_sec: Some(60.0) });
+            }
+        })); // 5 outputs
+        assert!(bad(&|x| x.outputs[0].platform = "myspace".into()));
+        assert!(bad(&|x| x.outputs[0].loudness_lufs = -23));
+        assert!(bad(&|x| x.outputs[0].max_sec = Some(601.0)));
+        assert!(bad(&|x| x.outputs[0].max_size_mb = Some(0.5)));
+        assert!(bad(&|x| x.notes[0].by = "director".into()));
+        assert!(bad(&|x| x.notes[0].text = " ".into()));
+        assert!(bad(&|x| x.notes[0].at_sec = Some(-1.0)));
+        assert!(bad(&|x| {
+            let n = x.notes[0].clone();
+            x.notes.push(n);
+        }));
+    }
+
+    #[test]
+    fn v1_project_rows_read_as_v2() {
+        assert_eq!(["intake", "awaiting_media", "editing", "rendering", "ready", "done", "???"].map(upgrade_status), ["brief", "shooting", "editing", "editing", "review", "done", "brief"]);
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        for (slug, status) in [("a", "intake"), ("b", "awaiting_media"), ("c", "rendering"), ("d", "ready")] {
+            let j = format!(r#"{{"slug":"{slug}","title":"Old","status":"{status}","root":"x","createdAt":"t","updatedAt":"t","source":{{"from":"suite","refId":null,"brief":"the handoff"}}}}"#);
+            st.with(|c| c.execute("INSERT INTO project (slug, json, updated_at) VALUES (?1, ?2, 't')", params![slug, j]).map(|_| ()).map_err(sql_err)).unwrap();
+        }
+        let got: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| load_project(&st, s).unwrap().status).collect();
+        assert_eq!(got, ["brief", "shooting", "editing", "review"]);
+        let p = load_project(&st, "a").unwrap();
+        assert_eq!((p.brief, p.speed.as_str(), p.review, p.source.brief.as_deref()), (None, "rough", ProjectReview::default(), Some("the handoff")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn media_db_v3_migration_keeps_v1_asset_rows() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(MIGRATIONS[0]).unwrap();
+        c.execute_batch(MIGRATIONS[1]).unwrap();
+        c.execute_batch("PRAGMA user_version = 2").unwrap();
+        let v1 = r#"{"id":"a-old","project":"p","kind":"video","role":"clip","name":"take.mp4","path":"C:/x/take.mp4","readOnly":true,"sizeBytes":5,"durationSec":10.0,"width":1920,"height":1080,"thumbPath":null,"addedAt":"2026-11-20T00:00:00Z"}"#;
+        c.execute("INSERT INTO asset (id, project, json, added_at) VALUES ('a-old', 'p', ?1, '2026-11-20T00:00:00Z')", [v1]).unwrap();
+        assert_eq!(migrate(&mut c).unwrap(), 3);
+        assert_eq!(c.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0)).unwrap(), 3);
+        assert_eq!(migrate(&mut c).unwrap(), 3); // idempotent
+        let root = tmp_root();
+        let st = MediaState::with_conn(c, &root);
+        let a = &list_assets(&st, "p").unwrap()[0];
+        assert_eq!((a.id.as_str(), a.duration_sec, a.tags.len(), a.flags.len(), a.moments.len(), a.transcript.clone(), a.slot_id.clone()), ("a-old", Some(10.0), 0, 0, 0, None, None));
+        // v2 fields round-trip through their columns.
+        let mut b = a.clone();
+        b.tags = vec!["rain".into()];
+        b.flags = vec![AssetFlag { kind: "dark".into(), detail: "mean luma 12%".into() }];
+        b.transcript = Some(AssetTranscript { path: "working/captions/a-old.json".into(), lang: "en".into(), words: 12, first_speech_sec: Some(0.4), last_speech_sec: Some(8.0) });
+        save_asset(&st, &b).unwrap();
+        assert_eq!(load_asset(&st, "p", "a-old").unwrap(), b);
+        // A newer schema than this app is refused.
+        let mut newer = Connection::open_in_memory().unwrap();
+        newer.execute_batch("PRAGMA user_version = 9").unwrap();
+        assert!(migrate(&mut newer).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_project_create_update_and_brief_rules() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Rain Reel", None).unwrap();
+        assert_eq!((p.status.as_str(), p.speed.as_str(), p.brief.is_none()), ("brief", "rough", true));
+        let r = Path::new(&p.root);
+        assert!(r.join("inbox").is_dir() && r.join("working").join("captions").is_dir());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(r.join("project.json")).unwrap()).unwrap();
+        assert!(json["review"]["rounds"].is_array() && json["speed"] == "rough");
+
+        // Brief validation.
+        let bad = |f: &dyn Fn(&mut CreativeBrief)| {
+            let mut b = brief("director", false);
+            f(&mut b);
+            validate_brief(&b).is_err()
+        };
+        assert_eq!(validate_brief(&brief("director", false)), Ok(()));
+        assert!(bad(&|b| b.idea = "  ".into()));
+        assert!(bad(&|b| b.length_sec = 4.0));
+        assert!(bad(&|b| b.length_sec = 601.0));
+        assert!(bad(&|b| b.platform = "myspace".into()));
+        assert!(bad(&|b| b.aspect = "21:9".into()));
+        assert!(bad(&|b| b.references = vec!["x".into(); 11]));
+        assert!(bad(&|b| b.guessed = vec!["budget".into()]));
+        assert!(bad(&|b| b.guessed = vec!["tone".into(), "tone".into()]));
+        assert!(bad(&|b| b.updated_by = "tony".into()));
+        assert!(bad(&|b| b.goal = "g".repeat(301)));
+        // Only Nic approves.
+        assert!(project_update(&st, &p.slug, None, Some(brief("director", true)), None, None).unwrap_err().starts_with("PERMISSION_REQUIRED"));
+        // A draft keeps the status; Nic's approval moves brief → shooting.
+        let d = project_update(&st, &p.slug, None, Some(brief("director", false)), None, None).unwrap();
+        assert_eq!(d.status, "brief");
+        assert!(!d.brief.as_ref().unwrap().updated_at.is_empty());
+        let a = project_update(&st, &p.slug, Some(" Rain Reel 2 ".into()), Some(brief("nic", true)), None, Some("polish".into())).unwrap();
+        assert_eq!((a.status.as_str(), a.title.as_str(), a.speed.as_str()), ("shooting", "Rain Reel 2", "polish"));
+        assert_eq!(load_project(&st, &p.slug).unwrap(), a);
+        // By hand: any status; bad values refused.
+        assert_eq!(project_update(&st, &p.slug, None, None, Some("brief".into()), None).unwrap().status, "brief");
+        assert!(project_update(&st, &p.slug, None, None, Some("ready".into()), None).is_err());
+        assert!(project_update(&st, &p.slug, None, None, None, Some("warp".into())).is_err());
+        assert!(project_update(&st, &p.slug, Some("".into()), None, None, None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_asset_update_and_slot_mirror() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Tags", None).unwrap();
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        assert_eq!(clean_tags(&[" Rain ".into(), "rain".into(), "Night".into()]).unwrap(), ["rain", "night"]);
+        assert!(clean_tags(&(0..13).map(|i| format!("t{i}")).collect::<Vec<_>>()).is_err());
+        assert!(clean_tags(&["".into()]).is_err());
+        let a = asset_update(&st, &p.slug, "v", Some(vec!["Rain".into()]), None, None).unwrap();
+        assert_eq!(a.tags, ["rain"]);
+        let mo = |i: f64, o: f64, score: f64| Moment { id: "m1".into(), in_sec: i, out_sec: o, label: "the spin".into(), score, by: "director".into() };
+        assert_eq!(asset_update(&st, &p.slug, "v", None, Some(vec![mo(1.0, 3.0, 0.9)]), None).unwrap().moments.len(), 1);
+        assert!(asset_update(&st, &p.slug, "v", None, Some(vec![mo(1.0, 11.0, 0.9)]), None).is_err()); // past the clip
+        assert!(asset_update(&st, &p.slug, "v", None, Some(vec![mo(3.0, 1.0, 0.9)]), None).is_err()); // in after out
+        assert!(asset_update(&st, &p.slug, "v", None, Some(vec![mo(1.0, 3.0, 1.5)]), None).is_err()); // score
+        assert!(asset_update(&st, &p.slug, "v", None, Some(vec![mo(1.0, 2.0, 0.5), mo(2.0, 3.0, 0.5)]), None).is_err()); // dup id
+        assert!(asset_update(&st, &p.slug, "v", None, None, Some("s9".into())).is_err()); // no such slot
+        assert!(asset_update(&st, &p.slug, "ghost", None, None, None).is_err());
+        // Saving a manifest whose slot holds the asset sets the mirror; detaching clears it.
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.shot_list = vec![slot("s1", Some("v"))];
+        let saved = manifest_save(&st, &p.slug, m).unwrap();
+        assert_eq!(load_asset(&st, &p.slug, "v").unwrap().slot_id.as_deref(), Some("s1"));
+        assert_eq!(asset_update(&st, &p.slug, "v", None, None, Some("".into())).unwrap().slot_id, None);
+        assert_eq!(asset_update(&st, &p.slug, "v", None, None, Some("s1".into())).unwrap().slot_id.as_deref(), Some("s1"));
+        let mut m2 = saved.clone();
+        m2.shot_list[0].asset_id = None;
+        m2.shot_list[0].status = "needed".into();
+        manifest_save(&st, &p.slug, m2).unwrap();
+        assert_eq!(load_asset(&st, &p.slug, "v").unwrap().slot_id, None);
+        assert_eq!(load_asset(&st, &p.slug, "v").unwrap().tags, ["rain"]); // the rest survives
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_status_moves_forward_from_existing_triggers() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Moves", None).unwrap();
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        project_update(&st, &p.slug, None, Some(brief("nic", true)), None, None).unwrap();
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.shot_list = vec![slot("s1", None), ShotSlot { source: "generate".into(), ..slot("s2", None) }];
+        let m = manifest_save(&st, &p.slug, m).unwrap();
+        assert_eq!(load_project(&st, &p.slug).unwrap().status, "shooting"); // a film slot is still empty
+        let mut m2 = m.clone();
+        m2.shot_list[0].asset_id = Some("v".into());
+        m2.shot_list[0].status = "attached".into();
+        assert!(film_slots_filled(&m2));
+        manifest_save(&st, &p.slug, m2).unwrap();
+        assert_eq!(load_project(&st, &p.slug).unwrap().status, "editing"); // the generate slot doesn't count
+        on_verified_render(&st, &p.slug, "r-1");
+        let q = load_project(&st, &p.slug).unwrap();
+        assert_eq!(q.status, "review");
+        assert_eq!(q.review.rounds.len(), 1);
+        // A later edit save doesn't pull a project back out of review.
+        let cur = load_manifest(Path::new(&p.root), &p.slug);
+        manifest_save(&st, &p.slug, cur).unwrap();
+        assert_eq!(load_project(&st, &p.slug).unwrap().status, "review");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_notes_are_rust_owned_and_rounds_stop_at_two() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Notes", None).unwrap();
+        let file = Path::new(&p.root).join("renders").join("notes_v001.mp4");
+        std::fs::write(&file, b"render").unwrap();
+        put_render(&st, &p.slug, "r-1", &file, 1920, 1080);
+        on_verified_render(&st, &p.slug, "r-1");
+        let input = |render: Option<&str>, text: &str| NoteInput { render_id: render.map(String::from), at_sec: Some(2.5), text: text.into(), by: "nic".into(), via_voice: false };
+        assert!(note_add(&st, &p.slug, input(Some("r-ghost"), "x")).is_err());
+        assert!(note_add(&st, &p.slug, input(Some("r-1"), "   ")).is_err());
+        assert!(note_add(&st, &p.slug, NoteInput { by: "director".into(), ..input(None, "x") }).is_err());
+        let rev_before = load_manifest(Path::new(&p.root), &p.slug).revision;
+        let n = note_add(&st, &p.slug, input(Some("r-1"), "  tighter open ")).unwrap();
+        assert_eq!((n.text.as_str(), n.resolved, n.id.starts_with("n-")), ("tighter open", false, true));
+        let m = load_manifest(Path::new(&p.root), &p.slug);
+        assert_eq!((m.notes.len(), m.revision), (1, rev_before)); // no revision bump
+        assert_eq!(load_project(&st, &p.slug).unwrap().review.rounds[0].notes, vec![n.id.clone()]);
+        // A client save without the note keeps it.
+        let mut client = m.clone();
+        client.notes.clear();
+        assert_eq!(manifest_save(&st, &p.slug, client).unwrap().notes.len(), 1);
+        note_resolve(&st, &p.slug, &n.id).unwrap();
+        assert!(load_manifest(Path::new(&p.root), &p.slug).notes[0].resolved);
+        assert!(note_resolve(&st, &p.slug, "n-ghost").is_err());
+        // Rounds: 1 → 2 (round 1 revised), never a round 3.
+        let mut rv = ProjectReview::default();
+        record_review_round(&mut rv, "r-1");
+        record_review_round(&mut rv, "r-1");
+        record_review_round(&mut rv, "r-2");
+        record_review_round(&mut rv, "r-3");
+        assert_eq!(rv.rounds.iter().map(|r| (r.round, r.render_id.as_str(), r.status.as_str())).collect::<Vec<_>>(), [(1, "r-1", "revised"), (2, "r-2", "open")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_approve_final_copies_verified_renders() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Final", None).unwrap();
+        let renders = Path::new(&p.root).join("renders");
+        let vert = renders.join("final_v001.mp4");
+        std::fs::write(&vert, b"vertical render").unwrap();
+        std::fs::write(renders.join("final_v001.srt"), b"1\n00:00:00,000 --> 00:00:01,000\nhi\n").unwrap();
+        let wide = renders.join("final_v002.mp4");
+        std::fs::write(&wide, b"wide render!").unwrap();
+        put_render(&st, &p.slug, "r-1", &vert, 1080, 1920);
+        put_render(&st, &p.slug, "r-2", &wide, 1920, 1080);
+        on_verified_render(&st, &p.slug, "r-1");
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.outputs = vec![
+            PlatformPreset { platform: "reels".into(), aspect: "9:16".into(), loudness_lufs: -14, max_size_mb: None, max_sec: Some(90.0) },
+            PlatformPreset { platform: "youtube".into(), aspect: "16:9".into(), loudness_lufs: -14, max_size_mb: None, max_sec: None },
+        ];
+        manifest_save(&st, &p.slug, m).unwrap();
+
+        assert!(approve_final(&st, &p.slug, &["r-1".into()], false).unwrap_err().starts_with("PERMISSION_REQUIRED"));
+        assert!(approve_final(&st, &p.slug, &[], true).is_err());
+        assert!(approve_final(&st, &p.slug, &["r-1".into(), "r-1".into()], true).is_err());
+        assert!(approve_final(&st, &p.slug, &["r-ghost".into()], true).is_err());
+        assert_ne!(load_project(&st, &p.slug).unwrap().status, "done");
+
+        let out = approve_final(&st, &p.slug, &["r-1".into(), "r-2".into()], true).unwrap();
+        assert_eq!(out.iter().map(|d| d.platform.as_str()).collect::<Vec<_>>(), ["reels", "youtube"]);
+        let reel = PathBuf::from(&out[0].path);
+        assert!(reel.starts_with(dunce_canon(&renders.join("final").join("reels")).unwrap()));
+        assert_eq!(std::fs::read(&reel).unwrap(), b"vertical render");
+        assert!(out[0].caption_path.as_deref().is_some_and(|c| c.ends_with("final_v001.srt")));
+        assert_eq!((out[1].caption_path.clone(), out[1].thumb_path.clone()), (None, None));
+        assert!(vert.is_file()); // the original stays
+        let q = load_project(&st, &p.slug).unwrap();
+        assert_eq!((q.status.as_str(), q.review.rounds[0].status.as_str()), ("done", "approved"));
+        // Approving again reuses the same copies.
+        assert_eq!(approve_final(&st, &p.slug, &["r-1".into()], true).unwrap()[0].path, out[0].path);
+        // A render that changed on disk after verification is refused.
+        std::fs::write(&wide, b"tampered, longer bytes").unwrap();
+        assert!(approve_final(&st, &p.slug, &["r-2".into()], true).unwrap_err().contains("changed on disk"));
+        // Frame size matches no output → custom.
+        let r = VerifiedRender { width: 1080, height: 1080, ..put_render(&st, &p.slug, "r-3", &vert, 1080, 1080) };
+        assert_eq!(platform_for_render(&r, &load_manifest(Path::new(&p.root), &p.slug).outputs), "custom");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_intake_status_and_transcribe_queue() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Intake", None).unwrap();
+        let inbox = Path::new(&p.root).join("inbox");
+        std::fs::remove_dir_all(&inbox).unwrap(); // a project from before v2
+        let s0 = intake_status(&st, &p.slug).unwrap();
+        assert!(inbox.is_dir() && s0.pending == 0 && s0.processing.is_none() && s0.last_error.is_none());
+        std::fs::write(inbox.join("take1.mp4"), b"x").unwrap();
+        std::fs::write(inbox.join(".partial"), b"x").unwrap();
+        std::fs::create_dir_all(inbox.join("sub")).unwrap();
+        assert_eq!(intake_status(&st, &p.slug).unwrap().pending, 1);
+        
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        put_asset(&st, &p.slug, "i", "image", None);
+        assert!(transcribe_enqueue(&st, &p.slug, &["i".into()]).is_err());
+        assert!(transcribe_enqueue(&st, &p.slug, &["ghost".into()]).is_err());
+        assert!(transcribe_enqueue(&st, &p.slug, &[]).is_err());
+        assert_eq!(transcribe_enqueue(&st, &p.slug, &["v".into()]), Ok(1));
+        assert_eq!(transcribe_enqueue(&st, &p.slug, &["v".into()]), Ok(0)); // already queued
+        assert!(intake_status(&st, "nope").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── v2 behaviour: intake pipeline, spec v2 + outputs, review rounds ──
+
+    /// media-forge stand-in: transcribe_batch writes a words .json for the asset's stem and hands
+    /// back a running job; job_status finishes it. Every call is logged.
+    struct MockForge {
+        root: PathBuf,
+        words: Vec<&'static str>,
+        calls: std::cell::RefCell<Vec<(String, Value)>>,
+        pending: std::cell::RefCell<Option<Value>>,
+    }
+
+    impl MockForge {
+        fn new(root: &Path, words: &[&'static str]) -> Self {
+            Self { root: root.to_path_buf(), words: words.to_vec(), calls: Default::default(), pending: Default::default() }
+        }
+        fn tools(&self) -> Vec<String> {
+            self.calls.borrow().iter().map(|(t, _)| t.clone()).collect()
+        }
+    }
+
+    impl Forge for MockForge {
+        fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+            self.calls.borrow_mut().push((tool.to_string(), args.clone()));
+            match tool {
+                "transcribe_batch" => {
+                    let (slug, stem) = (args["project"].as_str().unwrap(), args["output_stems"][0].as_str().unwrap());
+                    let js = self.root.join(slug).join("working").join("captions").join(format!("{stem}.json"));
+                    let words: Vec<Value> = self.words.iter().enumerate().map(|(i, w)| json!({ "w": w, "s": 0.5 + i as f64 * 0.4, "e": 0.8 + i as f64 * 0.4, "p": 0.9 })).collect();
+                    let segs = if words.is_empty() { json!([]) } else { json!([{ "start": 0.5, "end": 2.0, "text": self.words.join(" "), "words": words }]) };
+                    std::fs::write(&js, json!({ "language": "en", "duration": 3.0, "segments": segs }).to_string()).unwrap();
+                    *self.pending.borrow_mut() = Some(json!({ "results": [{ "path": args["paths"][0], "ok": true, "json": js.to_string_lossy() }], "done": 1, "failed": 0 }));
+                    Ok(json!({ "id": "job-1", "status": "running", "progress_pct": 10.0 }))
+                }
+                "job_status" => Ok(json!({ "id": "job-1", "status": "done", "result": self.pending.borrow().clone() })),
+                other => Err(format!("unexpected tool {other}")),
+            }
+        }
+    }
+
+    type Events = std::cell::RefCell<Vec<Value>>;
+
+    fn stages(ev: &Events) -> Vec<String> {
+        ev.borrow().iter().map(|e| e["stage"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// A short test clip made by ffmpeg (CPU libx264), or None when ffmpeg isn't installed.
+    fn make_clip(dir: &Path, name: &str, video: &str, audio: Option<&str>, secs: f64) -> Option<PathBuf> {
+        let ff = media_bin(&os_core::OsConfig::default(), "ffmpeg")?;
+        let out = dir.join(name);
+        let t = format!("{secs}");
+        let mut args = vec!["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", video];
+        if let Some(a) = audio {
+            args.extend(["-f", "lavfi", "-i", a]);
+        }
+        args.extend(["-t", t.as_str(), "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]);
+        if audio.is_some() {
+            args.extend(["-c:a", "aac", "-shortest"]);
+        }
+        let o = out.to_string_lossy().to_string();
+        args.push(o.as_str());
+        run_hidden(&ff, &args, Duration::from_secs(60)).ok().filter(|r| r.status.success()).map(|_| out)
+    }
+
+    #[test]
+    fn v2_intake_pure_checks() {
+        assert_eq!(role_for_ext("mov"), "clip");
+        assert_eq!(role_for_ext("heic"), "clip"); // unknown → refused later by ingest
+        assert_eq!((role_for_ext("png"), role_for_ext("m4a")), ("photo", "music"));
+        assert!(inbox_ignored(".DS_Store") && inbox_ignored("take.mp4.part") && inbox_ignored("x.crdownload") && !inbox_ignored("take.mp4"));
+        assert_eq!(aspect_flag(1080, 1920, "9:16"), None);
+        assert_eq!(aspect_flag(1080, 1350, "4:5"), None);
+        let f = aspect_flag(1920, 1080, "9:16").unwrap();
+        assert_eq!(f.kind, "wrong_aspect");
+        assert!(f.detail.contains("landscape") && f.detail.contains("9:16"), "{}", f.detail);
+        assert!(aspect_flag(1080, 1080, "16:9").is_some() && aspect_flag(0, 0, "16:9").is_none() && aspect_flag(10, 10, "wide").is_none());
+        let txt = "frame:0 pts:0 pts_time:0\nlavfi.signalstats.YAVG=20.000000\nframe:1\nlavfi.signalstats.YAVG=30.0\n";
+        assert_eq!(parse_yavg(txt), Some(25.0));
+        assert_eq!(parse_yavg("nothing"), None);
+        assert_eq!(exposure_flag(25.0).unwrap().kind, "dark");
+        assert_eq!(exposure_flag(240.0).unwrap().kind, "overexposed");
+        assert_eq!(exposure_flag(120.0), None);
+        assert_eq!(parse_max_volume("[Parsed_volumedetect_0 @ 0x1] mean_volume: -91.0 dB\n[Parsed_volumedetect_0 @ 0x1] max_volume: -91.0 dB"), Some(-91.0));
+        assert_eq!(parse_max_volume("no audio"), None);
+        let old = vec![AssetFlag { kind: "dark".into(), detail: "old".into() }, AssetFlag { kind: "blurry".into(), detail: "forge".into() }];
+        let merged = merge_flags(&old, vec![AssetFlag { kind: "too_short".into(), detail: "0.5 s".into() }], &PROBE_FLAG_KINDS);
+        assert_eq!(merged.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(), ["blurry", "too_short"]); // re-probe replaces its own kinds only
+        // Transcript summaries: word timestamps, or segment text when a file has no words.
+        let t = transcript_summary("C:/p/a.json", r#"{"language":"en","segments":[{"start":0.4,"end":1.0,"text":" hi there","words":[{"w":"hi","s":0.42,"e":0.6,"p":1},{"w":"there","s":0.6,"e":0.95,"p":1}]},{"start":2,"end":3.5,"text":"bye now ok"}]}"#).unwrap();
+        assert_eq!((t.words, t.first_speech_sec, t.last_speech_sec, t.lang.as_str()), (5, Some(0.42), Some(3.5), "en"));
+        let none = transcript_summary("x", r#"{"language":"en","segments":[]}"#).unwrap();
+        assert_eq!((none.words, none.first_speech_sec), (0, None));
+        assert!(transcript_summary("x", "not json").is_err() && transcript_summary("x", "{}").is_err());
+        // forge_job: errors, cancels and timeouts are reported, never hang.
+        struct Fixed(Value);
+        impl Forge for Fixed {
+            fn call(&self, tool: &str, _: &Value) -> Result<Value, String> {
+                Ok(if tool == "job_cancel" { json!({}) } else { self.0.clone() })
+            }
+        }
+        assert_eq!(forge_job(&Fixed(json!({ "id": "j", "status": "failed", "error": "model missing" })), "transcribe_batch", &json!({}), Duration::from_secs(5)), Err("model missing".into()));
+        assert!(forge_job(&Fixed(json!({ "id": "j", "status": "cancelled" })), "t", &json!({}), Duration::from_secs(5)).unwrap_err().contains("cancelled"));
+        assert!(forge_job(&Fixed(json!({ "raw": "boom" })), "t", &json!({}), Duration::from_secs(5)).unwrap_err().contains("did not start"));
+        assert!(forge_job(&Fixed(json!({ "id": "j", "status": "running" })), "t", &json!({}), Duration::ZERO).unwrap_err().contains("cancelled"));
+    }
+
+    #[test]
+    fn v2_intake_tick_waits_for_stable_files_and_reports_errors() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Inbox", None).unwrap();
+        let inbox = Path::new(&p.root).join("inbox");
+        let forge = MockForge::new(&root, &["hi"]);
+        let ev: Events = Default::default();
+        let emit = |v: Value| ev.borrow_mut().push(v);
+        let cfg = os_core::OsConfig::default();
+        std::fs::write(inbox.join("notes.txt"), b"not media").unwrap();
+        std::fs::write(inbox.join("take.mp4.part"), b"still copying").unwrap();
+        std::fs::write(inbox.join("empty.mp4"), b"").unwrap();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert!(ev.borrow().is_empty(), "first sighting: nothing is stable yet");
+        // Growing between ticks → still not stable.
+        std::fs::write(inbox.join("notes.txt"), b"not media, longer").unwrap();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert!(ev.borrow().is_empty());
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert_eq!(stages(&ev), ["failed"]);
+        assert!(ev.borrow()[0]["detail"].as_str().unwrap().contains("notes.txt"));
+        let s = intake_status(&st, &p.slug).unwrap();
+        assert!(s.last_error.as_deref().unwrap().contains("not a supported") && s.processing.is_none());
+        assert!(inbox.join("notes.txt").is_file() && inbox.join("take.mp4.part").is_file()); // nothing deleted
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert_eq!(ev.borrow().len(), 1, "a failed file isn't retried until it changes");
+        assert!(list_assets(&st, &p.slug).unwrap().is_empty() && forge.tools().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_intake_ingests_flags_and_transcribes_real_clips() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Drop", None).unwrap();
+        project_update(&st, &p.slug, None, Some(brief("nic", true)), None, None).unwrap(); // 9:16
+        let inbox = Path::new(&p.root).join("inbox");
+        let scratch = root.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let Some(talk) = make_clip(&scratch, "talk.mp4", "testsrc=size=320x240:rate=15", Some("sine=frequency=440:sample_rate=48000"), 2.0) else {
+            eprintln!("ffmpeg not found: skipping the real-clip intake test");
+            return;
+        };
+        let dark = make_clip(&scratch, "dark.mp4", "color=c=black:size=180x320:rate=15", Some("anullsrc=r=48000:cl=stereo"), 0.6).unwrap();
+        std::fs::copy(&talk, inbox.join("talk.mp4")).unwrap();
+        std::fs::copy(&dark, inbox.join("dark.mp4")).unwrap();
+        let forge = MockForge::new(&root, &["hello", "there"]);
+        let ev: Events = Default::default();
+        let emit = |v: Value| ev.borrow_mut().push(v);
+        let cfg = os_core::OsConfig::default();
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        assert!(ev.borrow().is_empty());
+        intake_tick_once(&st, &cfg, &forge, &emit).unwrap();
+        // Ingested in name order, then one pipeline pass at a time.
+        assert_eq!(stages(&ev), ["ingested", "ingested", "probed", "probed", "transcribed"], "{:?}", ev.borrow());
+        assert!(std::fs::read_dir(&inbox).unwrap().next().is_none(), "inbox copies deleted after the raw copy checked out");
+        let assets = list_assets(&st, &p.slug).unwrap();
+        assert_eq!(assets.len(), 2);
+        let by = |n: &str| assets.iter().find(|a| a.name == n).unwrap().clone();
+        let (d, t) = (by("dark.mp4"), by("talk.mp4"));
+        assert!(Path::new(&t.path).starts_with(dunce_canon(&Path::new(&p.root).join("raw")).unwrap()) && t.read_only && t.role == "clip");
+        let kinds = |a: &MediaAsset| a.flags.iter().map(|f| f.kind.clone()).collect::<Vec<_>>();
+        assert_eq!(kinds(&t), ["wrong_aspect"], "320×240 against a 9:16 brief");
+        let dk = kinds(&d);
+        for k in ["too_short", "dark", "silent"] {
+            assert!(dk.contains(&k.to_string()), "dark.mp4 flags {dk:?}");
+        }
+        assert!(!dk.contains(&"wrong_aspect".to_string()));
+        // Only the clip with sound went to transcription, with the local tiny.en model.
+        let calls = forge.calls.borrow();
+        let tb: Vec<&Value> = calls.iter().filter(|(t, _)| t == "transcribe_batch").map(|(_, a)| a).collect();
+        assert_eq!(tb.len(), 1);
+        assert_eq!((tb[0]["model"].as_str(), tb[0]["output_stems"][0].as_str(), tb[0]["project"].as_str()), (Some("tiny.en"), Some(t.id.as_str()), Some(p.slug.as_str())));
+        drop(calls);
+        let tr = t.transcript.clone().unwrap();
+        assert_eq!((tr.words, tr.lang.as_str(), tr.first_speech_sec), (2, "en", Some(0.5)));
+        assert!(tr.path.ends_with(&format!("{}.json", t.id)));
+        assert!(d.transcript.is_none());
+        let s = intake_status(&st, &p.slug).unwrap();
+        assert_eq!((s.pending, s.processing, s.last_error), (0, None, None));
+        // media_transcribe re-runs only the transcription (no re-probe); 0 words → no_speech.
+        let quiet = MockForge::new(&root, &[]);
+        assert_eq!(transcribe_enqueue(&st, &p.slug, &[t.id.clone()]), Ok(1));
+        ev.borrow_mut().clear();
+        intake_tick_once(&st, &cfg, &quiet, &emit).unwrap();
+        assert_eq!(stages(&ev), ["transcribed"]);
+        let t2 = load_asset(&st, &p.slug, &t.id).unwrap();
+        assert_eq!(t2.transcript.as_ref().unwrap().words, 0);
+        assert_eq!(kinds(&t2), ["wrong_aspect", "no_speech"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_transcribe_queue_survives_errors() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Queue", None).unwrap();
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        put_asset(&st, &p.slug, "w", "video", Some(10.0));
+        struct Broken;
+        impl Forge for Broken {
+            fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+                Err("Media Forge is off".into())
+            }
+        }
+        let ev: Events = Default::default();
+        let emit = |v: Value| ev.borrow_mut().push(v);
+        transcribe_enqueue(&st, &p.slug, &["v".into(), "w".into()]).unwrap();
+        intake_tick_once(&st, &os_core::OsConfig::default(), &Broken, &emit).unwrap();
+        // Both passes ran (one failing doesn't stop the next); the error is kept for the panel.
+        assert_eq!(stages(&ev), ["failed", "failed"]);
+        assert_eq!(ev.borrow()[1]["assetId"], "w");
+        assert_eq!(intake_status(&st, &p.slug).unwrap().last_error.as_deref(), Some("Media Forge is off"));
+        assert!(st.transcribe_queue.lock().unwrap().is_empty());
+        // A transcript outside the project is refused; a clean pass clears lastError.
+        let forge = MockForge::new(&root, &["one"]);
+        transcribe_enqueue(&st, &p.slug, &["v".into()]).unwrap();
+        intake_tick_once(&st, &os_core::OsConfig::default(), &forge, &emit).unwrap();
+        assert_eq!(load_asset(&st, &p.slug, "v").unwrap().transcript.unwrap().words, 1);
+        assert_eq!(intake_status(&st, &p.slug).unwrap().last_error, None);
+        struct Elsewhere(PathBuf);
+        impl Forge for Elsewhere {
+            fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+                Ok(json!({ "id": "j", "status": "done", "result": { "results": [{ "ok": true, "json": self.0.to_string_lossy() }] } }))
+            }
+        }
+        let outside = root.join("outside.json");
+        std::fs::write(&outside, r#"{"language":"en","segments":[]}"#).unwrap();
+        assert!(transcribe_asset(&st, &Elsewhere(outside), &p.slug, "w").unwrap_err().contains("outside this project"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn v2_edit(m: &mut TimelineManifest) {
+        m.clips = vec![
+            TimelineClip { transition_in: Transition { kind: "crossfade".into(), ms: 500 }, ..clip("c1", "v", 0.0, 4.0) }, // first clip: cut in
+            TimelineClip { transition_in: Transition { kind: "crossfade".into(), ms: 1500 }, punch_in: 1.2, ..clip("c2", "v", 4.0, 6.0) }, // capped at 0.9 s
+            TimelineClip { transition_in: Transition { kind: "fade_black".into(), ms: 400 }, ..clip("c3", "i", 0.0, 3.0) },
+        ];
+        m.audio = vec![AudioLayer { id: "l1".into(), asset_id: "a".into(), start_sec: 0.0, in_sec: 0.0, out_sec: 5.0, volume: 0.6, fade_in_ms: 500, fade_out_ms: 1500, duck_under_voice: true }];
+        m.captions = CaptionTrack { enabled: true, style: "bold_pop".into(), position: "middle".into(), max_words_per_line: 3 };
+        m.color = ColorLook { preset: "warm".into(), strength: 0.7 };
+    }
+
+    #[test]
+    fn v2_render_spec_maps_the_manifest() {
+        let root = tmp_root();
+        let words = root.join("v.json");
+        std::fs::write(&words, "{}").unwrap();
+        let mut v = asset("v", "video", Some(10.0));
+        v.transcript = Some(AssetTranscript { path: words.to_string_lossy().to_string(), lang: "en".into(), words: 3, first_speech_sec: None, last_speech_sec: None });
+        let assets = vec![v, asset("i", "image", None), asset("a", "audio", Some(5.0))];
+        let mut m = default_manifest("p");
+        v2_edit(&mut m);
+        assert_eq!(validate_manifest(&m, "p", &assets), Ok(()));
+        let reels = PlatformPreset { platform: "reels".into(), aspect: "9:16".into(), loudness_lufs: -14, max_size_mb: Some(100.0), max_sec: Some(90.0) };
+        let s = render_spec(&m, &assets, &reels, &root).unwrap();
+        let keys = |v: &Value| {
+            let mut k = v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+            k.sort();
+            k
+        };
+        // Exactly media-forge's v2 key sets (it refuses unknown keys).
+        assert_eq!(keys(&s), ["audio", "captions", "clip_audio_volume", "clips", "color", "fps", "height", "loudness_lufs", "max_size_mb", "project", "version", "width"]);
+        assert_eq!(keys(&s["clips"][0]), ["fade_ms", "in", "kind", "out", "path", "punch_in", "transcript", "transition_in"]);
+        assert_eq!(keys(&s["audio"][0]), ["duck_under_voice", "fade_in_ms", "fade_out_ms", "in", "out", "path", "start", "volume"]);
+        assert_eq!((s["version"].as_u64(), s["width"].as_u64(), s["height"].as_u64(), s["loudness_lufs"].as_i64(), s["max_size_mb"].as_f64()), (Some(2), Some(1080), Some(1920), Some(-14), Some(100.0)));
+        assert_eq!(s["clips"][0]["transition_in"], json!({ "kind": "cut", "ms": 0 }));
+        assert_eq!(s["clips"][1]["transition_in"], json!({ "kind": "crossfade", "ms": 1500 }));
+        assert_eq!(s["clips"][1]["punch_in"].as_f64(), Some(1.2));
+        assert_eq!(s["clips"][2]["transition_in"], json!({ "kind": "fade_black", "ms": 400 }));
+        assert_eq!(s["clips"][0]["transcript"].as_str(), Some(dunce_canon(&words).unwrap().to_string_lossy().as_ref()));
+        assert_eq!(s["clips"][2]["transcript"], Value::Null); // a still has no speech
+        assert_eq!(s["audio"][0]["duck_under_voice"], true);
+        assert_eq!((s["audio"][0]["fade_in_ms"].as_u64(), s["audio"][0]["fade_out_ms"].as_u64()), (Some(500), Some(1500)));
+        assert_eq!(s["captions"], json!({ "enabled": true, "style": "bold_pop", "position": "middle", "max_words_per_line": 3 }));
+        assert_eq!(s["color"], json!({ "preset": "warm", "strength": 0.7 }));
+        // 4 + 2 + 3 − the crossfade capped at 45% of the 2 s clip.
+        assert!((expected_duration(&m) - 8.1).abs() < 1e-9, "{}", expected_duration(&m));
+        // Captions need a transcript on disk.
+        let mut no_words = assets.clone();
+        no_words[0].transcript = None;
+        assert!(render_spec(&m, &no_words, &reels, &root).unwrap_err().contains("transcribe them first"));
+        let mut off = m.clone();
+        off.captions.enabled = false;
+        let s2 = render_spec(&off, &no_words, &reels, &root).unwrap();
+        assert_eq!((s2["version"].as_u64(), s2["clips"][0]["transcript"].clone()), (Some(2), Value::Null));
+        // A v1-equivalent manifest (a loaded v1 file) still gets the v1 spec, unchanged.
+        let v1 = upgrade_manifest(serde_json::from_str(V1_MANIFEST).unwrap());
+        let old_assets = vec![asset("v", "video", Some(10.0)), asset("a", "audio", Some(5.0))];
+        assert!(!needs_spec_v2(&v1));
+        let s1 = render_spec(&v1, &old_assets, &v1.outputs[0], &root).unwrap();
+        assert_eq!(keys(&s1), ["audio", "clip_audio_volume", "clips", "fps", "height", "loudness_lufs", "max_size_mb", "project", "version", "width"]);
+        assert_eq!(keys(&s1["clips"][0]), ["fade_ms", "in", "kind", "out", "path"]);
+        assert_eq!((s1["version"].as_u64(), s1["width"].as_u64(), s1["loudness_lufs"].as_i64(), s1["max_size_mb"].as_f64()), (Some(1), Some(1080), Some(-18), Some(100.0)));
+        assert_eq!(expected_duration(&v1), 3.0);
+        // A 0 ms transition is a cut; a crossfade on clip 1 alone isn't a v2 feature.
+        let mut cuts = v1.clone();
+        cuts.clips[0].transition_in = Transition { kind: "crossfade".into(), ms: 800 };
+        assert!(!needs_spec_v2(&cuts));
+        cuts.clips[0].transition_in = Transition { kind: "fade_black".into(), ms: 0 };
+        assert!(!needs_spec_v2(&cuts));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_multi_output_plan_and_specs() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Multi", None).unwrap();
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![clip("c1", "v", 0.0, 4.0), TimelineClip { transition_in: Transition { kind: "crossfade".into(), ms: 1000 }, ..clip("c2", "v", 4.0, 8.0) }];
+        m.color = ColorLook { preset: "film".into(), strength: 0.5 };
+        m.outputs = vec![
+            PlatformPreset { platform: "reels".into(), aspect: "9:16".into(), loudness_lufs: -14, max_size_mb: None, max_sec: Some(5.0) },
+            PlatformPreset { platform: "youtube".into(), aspect: "16:9".into(), loudness_lufs: -14, max_size_mb: Some(500.0), max_sec: None },
+        ];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let plan = build_plan(&st, &p.slug, "nic").unwrap();
+        assert_eq!(plan.output_spec, "reels 1080×1920 · H.264/AAC · -14 LUFS · 7.0 s · over its 5 s cap | youtube 1920×1080 · H.264/AAC · -14 LUFS · 7.0 s · ≤ 500 MB · film look · 1 transition");
+        let root_p = Path::new(&p.root);
+        let m = load_manifest(root_p, &p.slug);
+        let outs = prepare_outputs(&m, &list_assets(&st, &p.slug).unwrap(), &plan, root_p).unwrap();
+        assert_eq!(outs.iter().map(|o| (o.platform.as_str(), o.w, o.h, o.cap)).collect::<Vec<_>>(), [("reels", 1080, 1920, None), ("youtube", 1920, 1080, Some(500.0))]);
+        assert_eq!(outs[0].out.file_name().unwrap().to_string_lossy(), "multi_reels_v001.mp4");
+        assert_eq!(outs[1].out.file_name().unwrap().to_string_lossy(), "multi_youtube_v001.mp4");
+        let spec0: Value = serde_json::from_str(&std::fs::read_to_string(&outs[0].spec_path).unwrap()).unwrap();
+        let spec1: Value = serde_json::from_str(&std::fs::read_to_string(&outs[1].spec_path).unwrap()).unwrap();
+        assert_eq!((spec0["width"].as_u64(), spec1["width"].as_u64(), spec1["max_size_mb"].as_f64()), (Some(1080), Some(1920), Some(500.0)));
+        assert_ne!(outs[0].spec_path, outs[1].spec_path);
+        // One output (the v1 default): v1 names and the v1 plan text.
+        let q = create_project(&st, "Single", None).unwrap();
+        put_asset(&st, &q.slug, "w", "video", Some(10.0));
+        let mut m1 = load_manifest(Path::new(&q.root), &q.slug);
+        m1.clips = vec![clip("c1", "w", 1.0, 3.5)];
+        manifest_save(&st, &q.slug, m1).unwrap();
+        let plan1 = build_plan(&st, &q.slug, "director").unwrap();
+        assert_eq!(plan1.output_spec, "1920×1080 · H.264/AAC · -16 LUFS · 2.5 s");
+        let m1 = load_manifest(Path::new(&q.root), &q.slug);
+        let o1 = prepare_outputs(&m1, &list_assets(&st, &q.slug).unwrap(), &plan1, Path::new(&q.root)).unwrap();
+        assert_eq!((o1.len(), o1[0].out.file_name().unwrap().to_string_lossy().to_string()), (1, "single_v001.mp4".to_string()));
+        assert!(o1[0].spec_path.ends_with(format!("render_{}.json", plan1.plan_id)));
+        // Progress across the batch.
+        assert_eq!((batch_pct(0, 2, 50.0), batch_pct(1, 2, 50.0), batch_pct(2, 2, 0.0), batch_pct(0, 1, 40.0)), (25.0, 75.0, 100.0, 40.0));
+        assert_eq!((stage_label("reels", 0, 2, "encoding"), stage_label("reels", 0, 1, "encoding")), ("reels 1/2 · encoding".to_string(), "encoding".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v2_review_rounds_per_batch_and_no_round_three() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Rounds", None).unwrap();
+        put_asset(&st, &p.slug, "v", "video", Some(10.0));
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![clip("c1", "v", 0.0, 3.0)];
+        m.outputs = vec![
+            PlatformPreset { platform: "reels".into(), aspect: "9:16".into(), loudness_lufs: -14, max_size_mb: None, max_sec: None },
+            PlatformPreset { platform: "tiktok".into(), aspect: "9:16".into(), loudness_lufs: -14, max_size_mb: None, max_sec: None },
+        ];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let renders = Path::new(&p.root).join("renders");
+        let mk = |id: &str, plan: &str, platform: &str| {
+            let f = renders.join(format!("{id}.mp4"));
+            std::fs::write(&f, id.as_bytes()).unwrap();
+            let r = VerifiedRender { id: id.into(), project: p.slug.clone(), plan_id: plan.into(), path: f.to_string_lossy().to_string(), duration_sec: 3.0, width: 1080, height: 1920, size_bytes: id.len() as u64, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() };
+            record_render(&st, &r, Some(platform)).unwrap();
+            on_verified_render(&st, &p.slug, id);
+        };
+        // Round 1: both outputs of one approved batch share it.
+        mk("r-a", "p-1", "reels");
+        mk("r-b", "p-1", "tiktok");
+        let rv = review_get(&st, &p.slug).unwrap();
+        assert_eq!(rv.rounds.iter().map(|r| (r.round, r.render_id.as_str(), r.status.as_str())).collect::<Vec<_>>(), [(1, "r-a", "open")]);
+        assert_eq!(load_project(&st, &p.slug).unwrap().status, "review");
+        // A note on the second output's render joins round 1.
+        let n = note_add(&st, &p.slug, NoteInput { render_id: Some("r-b".into()), at_sec: Some(1.0), text: "tighter".into(), by: "nic".into(), via_voice: false }).unwrap();
+        assert_eq!(review_get(&st, &p.slug).unwrap().rounds[0].notes, vec![n.id]);
+        // The Director can revise once: round 2.
+        assert_eq!(check_review_limit(&review_get(&st, &p.slug).unwrap(), "director"), Ok(()));
+        build_plan(&st, &p.slug, "director").unwrap();
+        mk("r-c", "p-2", "reels");
+        let rv = review_get(&st, &p.slug).unwrap();
+        assert_eq!(rv.rounds.iter().map(|r| (r.round, r.status.as_str())).collect::<Vec<_>>(), [(1, "revised"), (2, "open")]);
+        // A third Director revise is refused with a clear message; Nic can still render by hand.
+        let e = build_plan(&st, &p.slug, "director").unwrap_err();
+        assert!(e.starts_with("REVIEW_LIMIT") && e.contains("no round 3"), "{e}");
+        build_plan(&st, &p.slug, "nic").unwrap();
+        mk("r-d", "p-3", "reels");
+        assert_eq!(review_get(&st, &p.slug).unwrap().rounds.len(), 2);
+        // Approve final: the recorded platform picks the folder (both outputs are 9:16).
+        let out = approve_final(&st, &p.slug, &["r-a".into(), "r-b".into()], true).unwrap();
+        assert_eq!(out.iter().map(|d| d.platform.as_str()).collect::<Vec<_>>(), ["reels", "tiktok"]);
+        assert!(PathBuf::from(&out[1].path).starts_with(dunce_canon(&renders.join("final").join("tiktok")).unwrap()));
+        let q = load_project(&st, &p.slug).unwrap();
+        assert_eq!((q.status.as_str(), q.review.rounds[0].status.as_str(), q.review.rounds[1].status.as_str()), ("done", "approved", "open")); // only the approved batch's round changes
+        // Stored in project.json too.
+        let pj: Value = serde_json::from_str(&std::fs::read_to_string(Path::new(&p.root).join("project.json")).unwrap()).unwrap();
+        assert_eq!(pj["review"]["rounds"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

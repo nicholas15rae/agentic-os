@@ -277,6 +277,8 @@ pub fn run() {
                 tauri::async_runtime::spawn(buildhub::hub_loop(app.handle().clone()));
                 // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
                 tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
+                // Director Suite v2 §3: the 10 s watched-inbox intake + CPU transcription thread.
+                media::spawn_intake(app.handle().clone());
                 // Renew the Instagram long-lived token before its 60 days run out.
                 tauri::async_runtime::spawn(instagram::refresh_loop(app.handle().clone()));
                 // GPU baton events → top-bar "ACTIVE GPU SLOT" pill; droplet auto-reconnect.
@@ -502,6 +504,14 @@ pub fn run() {
             media::media_render_cancel,
             media::media_readiness,
             media::media_reveal,
+            media::media_project_update,
+            media::media_asset_update,
+            media::media_intake_status,
+            media::media_transcribe,
+            media::media_note_add,
+            media::media_note_resolve,
+            media::media_review_get,
+            media::media_approve_final,
             gdrive::cloud_status,
             gdrive::cloud_connect,
             gdrive::cloud_disconnect,

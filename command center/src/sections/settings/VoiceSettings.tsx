@@ -321,13 +321,13 @@ export function TtsCard() {
 }
 
 /** Row order the spec gives: Tony first, then the sub-agents. */
-const ROSTER_ORDER = ["general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops", "bizops", "finance"] as const;
+const ROSTER_ORDER = ["general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops", "bizops", "finance", "trading"] as const;
 
 /** Per-agent voice roster (Part 3): engine, voice, model and auto-speak, one row
  * per agent. Tony's own row ("general") doubles as the fallback for any agent
  * with no row of its own — see `tts_synthesize`'s roster resolution in Rust. */
 export function AgentVoiceRoster() {
-  const { view, agentVoice } = useProviders();
+  const { view, agentVoice, allTony } = useProviders();
   if (!view) return null;
   const defaultEngine = view.providers.find((p) => p.id === view.policy.tts)?.engine ?? "kokoro";
   // Mirrors voice.rs `roster_entry_for`: once the roster is in use, a sub-agent without a row
@@ -339,10 +339,16 @@ export function AgentVoiceRoster() {
   return (
     <Card
       title="Agent voice roster"
-      hint="Give each agent its own engine, voice and model. A row left on “Default” speaks with the Text-to-speech card above; auto-speak reads that agent's reply aloud even when you typed instead of talked."
+      hint="Give each agent its own engine, voice and model. A row left on “Default” speaks with the Text-to-speech card above; auto-speak reads that agent's reply aloud even when you typed instead of talked. Own voice: that agent's finished-job reports (Comms inbox) play in its voice; off, Tony reads them."
     >
+      <Toggle
+        on={!!view.agentVoicesAllTony}
+        onChange={(on) => void allTony(on)}
+        label="All Tony"
+        hint="Every agent report speaks in Tony's voice, whatever the Own voice switches below say. Turn it off and each agent's switch applies again, as you left it."
+      />
       <div className="-mx-1 overflow-x-auto">
-        <table className="w-full min-w-[700px] text-left text-sm">
+        <table className="w-full min-w-[780px] text-left text-sm">
           <thead>
             <tr className="label-caps text-[11px] text-ink-3">
               <th className="px-1 py-1.5">Agent</th>
@@ -351,11 +357,12 @@ export function AgentVoiceRoster() {
               <th className="px-1 py-1.5">Model</th>
               <th className="px-1 py-1.5">Preview</th>
               <th className="px-1 py-1.5">Auto-speak</th>
+              <th className="px-1 py-1.5" title="Speak in own voice: this agent's reports play in its voice (off: Tony reads them)">Own voice</th>
             </tr>
           </thead>
           <tbody>
             {ROSTER_ORDER.map((role) => (
-              <RosterRow key={role} role={role} entry={view.agentVoices[role]} defaultEngine={defaultEngine} note={fallbackNote(role)} onPatch={(patch) => void agentVoice(role, patch)} />
+              <RosterRow key={role} role={role} entry={view.agentVoices[role]} defaultEngine={defaultEngine} note={fallbackNote(role)} allTony={!!view.agentVoicesAllTony} onPatch={(patch) => void agentVoice(role, patch)} />
             ))}
           </tbody>
         </table>
@@ -364,7 +371,8 @@ export function AgentVoiceRoster() {
   );
 }
 
-function RosterRow({ role, entry, defaultEngine, note, onPatch }: { role: string; entry: AgentVoice | undefined; defaultEngine: string; note?: string; onPatch: (p: AgentVoicePatch) => void }) {
+function RosterRow({ role, entry, defaultEngine, note, allTony, onPatch }: { role: string; entry: AgentVoice | undefined; defaultEngine: string; note?: string; allTony: boolean; onPatch: (p: AgentVoicePatch) => void }) {
+  const own = entry?.ownVoice !== false;
   const engine = entry?.engine ?? defaultEngine;
   const [voices, setVoices] = useState<VoicesView | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -455,6 +463,23 @@ function RosterRow({ role, entry, defaultEngine, note, onPatch }: { role: string
         >
           <span className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition-[left] duration-200 ${entry?.autoSpeak ? "left-[18px]" : "left-0.5"}`} />
         </button>
+      </td>
+      <td className="px-1 py-1.5">
+        {role === "general" ? (
+          <span className="text-ink-3">—</span>
+        ) : (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={own}
+            aria-label={`Speak in own voice: ${roleLabel(role)}`}
+            title={allTony ? "All Tony is on: Tony reads every report (this switch is kept for later)" : own ? "Reports play in this agent's voice" : "Tony reads this agent's reports"}
+            onClick={() => onPatch({ ownVoice: !own })}
+            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${own ? "bg-teal/80" : "bg-white/15"} ${allTony ? "opacity-40" : ""}`}
+          >
+            <span className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition-[left] duration-200 ${own ? "left-[18px]" : "left-0.5"}`} />
+          </button>
+        )}
       </td>
     </tr>
   );

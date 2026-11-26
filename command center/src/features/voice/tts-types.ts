@@ -28,6 +28,8 @@ export interface SpeakOpts {
   /** Part 6 narration with `feedback.narrationEngine: "kokoro"`: synthesize on the local engine in
    * this agent's own local voice (spares the ElevenLabs quota). Part of the cache key. */
   localOnly?: boolean;
+  /** Agent reports: the ElevenLabs model for this line ("eleven_turbo_v2_5"), over the roster row's. */
+  model?: string;
 }
 
 export interface TtsEngine {

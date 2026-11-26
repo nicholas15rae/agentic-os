@@ -249,6 +249,10 @@ pub struct Config {
     /// Empty by default — nothing here means "use policy.tts" exactly as before.
     #[serde(default)]
     pub agent_voices: BTreeMap<String, AgentVoice>,
+    /// The roster's master "All Tony" switch: every agent report speaks in Tony's voice, whatever
+    /// each row's `ownVoice` says (the rows keep their settings for when it goes off).
+    #[serde(default)]
+    pub agent_voices_all_tony: bool,
 }
 
 /// Agent ids a voice-roster entry (or any other per-agent config in this
@@ -274,7 +278,9 @@ pub(crate) fn valid_role(r: &str) -> bool {
 
 /// Part 6: every id that can SPEAK (narration, a roster voice): the routing roles plus the
 /// task worker's non-routing speakers. `ROLE_IDS` stays the routing list.
-pub(crate) const NARRATOR_IDS: [&str; 11] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "verifier", "staging", "system"];
+/// `trading` speaks only its own reports (Comms inbox / urgent alerts): it has a roster voice
+/// but is never a routing role (arbiter.rs keeps it boxed to the Financer).
+pub(crate) const NARRATOR_IDS: [&str; 12] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "verifier", "staging", "system", "trading"];
 
 /// A voice-roster key (`agentVoices`, `agent_voice_update`): any `NARRATOR_IDS` entry.
 pub(crate) fn valid_narrator(r: &str) -> bool {
@@ -294,6 +300,10 @@ pub struct AgentVoice {
     pub model: Option<String>,
     #[serde(default)]
     pub auto_speak: bool,
+    /// "Speak in own voice": an agent report plays in this row's voice (unset = on). Off = Tony's
+    /// voice reads the report. Overridden by `agentVoicesAllTony`, and remembered under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_voice: Option<bool>,
 }
 
 fn default_voice_engine() -> String {
@@ -366,6 +376,7 @@ impl Default for Config {
             gateway: GatewayConfig::default(),
             pipelines: PipelinesConfig::default(),
             agent_voices: BTreeMap::new(),
+            agent_voices_all_tony: false,
         }
     }
 }
@@ -684,10 +695,13 @@ pub struct ProvidersView {
     policy: Policy,
     /// Part 3: the voice roster, by role id.
     agent_voices: BTreeMap<String, AgentVoice>,
+    /// The roster's master "All Tony" switch.
+    agent_voices_all_tony: bool,
 }
 
 fn view(state: &DispatchState, cfg: Config) -> ProvidersView {
     let agent_voices = cfg.agent_voices.clone();
+    let agent_voices_all_tony = cfg.agent_voices_all_tony;
     ProvidersView {
         providers: cfg
             .providers
@@ -703,6 +717,7 @@ fn view(state: &DispatchState, cfg: Config) -> ProvidersView {
             .collect(),
         policy: cfg.policy,
         agent_voices,
+        agent_voices_all_tony,
     }
 }
 
@@ -780,6 +795,8 @@ pub struct AgentVoicePatch {
     voice: Option<String>,
     model: Option<String>,
     auto_speak: Option<bool>,
+    #[serde(default)]
+    own_voice: Option<bool>,
 }
 
 /// Pure merge of a patch into one roster entry, kept separate from the
@@ -801,6 +818,10 @@ pub(crate) fn apply_agent_voice_patch(entry: &mut AgentVoice, patch: AgentVoiceP
     if let Some(v) = patch.auto_speak {
         entry.auto_speak = v;
     }
+    if let Some(v) = patch.own_voice {
+        // On is the default: store only the exception, so an untouched row stays as it was.
+        entry.own_voice = (!v).then_some(false);
+    }
     Ok(())
 }
 
@@ -814,8 +835,19 @@ pub fn agent_voice_update(state: State<'_, DispatchState>, role: String, patch: 
         return Err(format!("unknown agent role '{role}'"));
     }
     let cfg = state.update(|cfg| {
-        let entry = cfg.agent_voices.entry(role.clone()).or_insert_with(|| AgentVoice { engine: default_voice_engine(), voice: None, model: None, auto_speak: false });
+        let entry = cfg.agent_voices.entry(role.clone()).or_insert_with(|| AgentVoice { engine: default_voice_engine(), voice: None, model: None, auto_speak: false, own_voice: None });
         apply_agent_voice_patch(entry, patch)
+    })?;
+    Ok(view(&state, cfg))
+}
+
+/// Settings → Voice: the roster's master "All Tony" switch (every agent report in Tony's voice).
+/// The per-agent `ownVoice` switches are left untouched, so turning it off restores them.
+#[tauri::command]
+pub fn agent_voices_all_tony(state: State<'_, DispatchState>, on: bool) -> Result<ProvidersView, String> {
+    let cfg = state.update(|cfg| {
+        cfg.agent_voices_all_tony = on;
+        Ok(())
     })?;
     Ok(view(&state, cfg))
 }
@@ -1652,10 +1684,10 @@ mod part3_tests {
         for r in ROLE_IDS {
             assert!(NARRATOR_IDS.contains(&r) && valid_narrator(r), "{r}");
         }
-        for r in ["verifier", "staging", "system"] {
+        for r in ["verifier", "staging", "system", "trading"] {
             assert!(valid_narrator(r) && !valid_role(r), "{r} narrates but never routes");
         }
-        assert_eq!(NARRATOR_IDS.len(), ROLE_IDS.len() + 3);
+        assert_eq!(NARRATOR_IDS.len(), ROLE_IDS.len() + 4);
         assert!(!valid_narrator("tony") && !valid_narrator("overseer"));
     }
 
@@ -1672,36 +1704,36 @@ mod part3_tests {
     #[test]
     fn agent_voices_pass_validation_when_well_formed() {
         let mut cfg = Config::default();
-        cfg.agent_voices.insert("general".into(), AgentVoice { engine: "elevenlabs".into(), voice: Some("QhEKgDl6KUJsO1FPiuSD".into()), model: Some("eleven_v4".into()), auto_speak: false });
-        cfg.agent_voices.insert("booking".into(), AgentVoice { engine: "kokoro".into(), voice: Some("am_michael".into()), model: None, auto_speak: true });
+        cfg.agent_voices.insert("general".into(), AgentVoice { engine: "elevenlabs".into(), voice: Some("QhEKgDl6KUJsO1FPiuSD".into()), model: Some("eleven_v4".into()), auto_speak: false, own_voice: None });
+        cfg.agent_voices.insert("booking".into(), AgentVoice { engine: "kokoro".into(), voice: Some("am_michael".into()), model: None, auto_speak: true, own_voice: None });
         assert!(validate(&cfg).is_ok());
     }
 
     #[test]
     fn agent_voices_reject_unknown_role() {
         let mut cfg = Config::default();
-        cfg.agent_voices.insert("overseer".into(), AgentVoice { engine: "elevenlabs".into(), voice: None, model: None, auto_speak: false });
+        cfg.agent_voices.insert("overseer".into(), AgentVoice { engine: "elevenlabs".into(), voice: None, model: None, auto_speak: false, own_voice: None });
         assert!(validate(&cfg).unwrap_err().contains("unknown role"));
     }
 
     #[test]
     fn agent_voices_reject_bad_engine() {
         let mut cfg = Config::default();
-        cfg.agent_voices.insert("coder".into(), AgentVoice { engine: "xtts".into(), voice: None, model: None, auto_speak: false });
+        cfg.agent_voices.insert("coder".into(), AgentVoice { engine: "xtts".into(), voice: None, model: None, auto_speak: false, own_voice: None });
         assert!(validate(&cfg).unwrap_err().contains("engine must be"));
     }
 
     #[test]
     fn agent_voices_reject_oversized_fields() {
         let mut cfg = Config::default();
-        cfg.agent_voices.insert("coder".into(), AgentVoice { engine: "kokoro".into(), voice: Some("x".repeat(121)), model: None, auto_speak: false });
+        cfg.agent_voices.insert("coder".into(), AgentVoice { engine: "kokoro".into(), voice: Some("x".repeat(121)), model: None, auto_speak: false, own_voice: None });
         assert!(validate(&cfg).unwrap_err().contains("too long"));
     }
 
     #[test]
     fn apply_agent_voice_patch_merges_only_given_fields() {
-        let mut entry = AgentVoice { engine: "elevenlabs".into(), voice: Some("old-voice".into()), model: Some("eleven_v4".into()), auto_speak: false };
-        apply_agent_voice_patch(&mut entry, AgentVoicePatch { engine: None, voice: Some("new-voice".into()), model: None, auto_speak: Some(true) }).unwrap();
+        let mut entry = AgentVoice { engine: "elevenlabs".into(), voice: Some("old-voice".into()), model: Some("eleven_v4".into()), auto_speak: false, own_voice: None };
+        apply_agent_voice_patch(&mut entry, AgentVoicePatch { engine: None, voice: Some("new-voice".into()), model: None, auto_speak: Some(true), own_voice: None }).unwrap();
         assert_eq!(entry.engine, "elevenlabs"); // untouched
         assert_eq!(entry.voice.as_deref(), Some("new-voice"));
         assert_eq!(entry.model.as_deref(), Some("eleven_v4")); // untouched
@@ -1710,16 +1742,16 @@ mod part3_tests {
 
     #[test]
     fn apply_agent_voice_patch_rejects_bad_engine() {
-        let mut entry = AgentVoice { engine: "kokoro".into(), voice: None, model: None, auto_speak: false };
-        let err = apply_agent_voice_patch(&mut entry, AgentVoicePatch { engine: Some("xtts".into()), voice: None, model: None, auto_speak: None }).unwrap_err();
+        let mut entry = AgentVoice { engine: "kokoro".into(), voice: None, model: None, auto_speak: false, own_voice: None };
+        let err = apply_agent_voice_patch(&mut entry, AgentVoicePatch { engine: Some("xtts".into()), voice: None, model: None, auto_speak: None, own_voice: None }).unwrap_err();
         assert!(err.contains("elevenlabs"));
         assert_eq!(entry.engine, "kokoro"); // unchanged on error
     }
 
     #[test]
     fn apply_agent_voice_patch_clearing_voice_with_blank_string() {
-        let mut entry = AgentVoice { engine: "kokoro".into(), voice: Some("am_michael".into()), model: None, auto_speak: false };
-        apply_agent_voice_patch(&mut entry, AgentVoicePatch { engine: None, voice: Some("   ".into()), model: None, auto_speak: None }).unwrap();
+        let mut entry = AgentVoice { engine: "kokoro".into(), voice: Some("am_michael".into()), model: None, auto_speak: false, own_voice: None };
+        apply_agent_voice_patch(&mut entry, AgentVoicePatch { engine: None, voice: Some("   ".into()), model: None, auto_speak: None, own_voice: None }).unwrap();
         assert_eq!(entry.voice, None); // blank clears it, matching every other trimmed-string patch field in this file
     }
 }

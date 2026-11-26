@@ -25,8 +25,8 @@ import { cmd, onNativeEvent, type AgentEvent, type ChatMessage, type OsTurnResul
 import { useProviders } from "@/sections/settings/use-providers";
 import { useNav } from "@/stores/nav";
 import { isDesktopApp, useSettings } from "@/stores/settings";
-import { audioContext, createEngines, type SpeakOpts } from "./engines";
-import { nextStreamChunk, utteranceIdFor } from "./tts-text";
+import { audioContext, createEngines, synthBytes, type SpeakOpts } from "./engines";
+import { nextStreamChunk, perSentenceOpts, synthArgs, utteranceIdFor } from "./tts-text";
 import { fallbackNotice } from "./tts-fallback-notice";
 import { introLine } from "./handoff";
 import { currentPool, loadPool, noteHandoff, pickExchange, playExchange, type CueHandle } from "./handoff-cues";
@@ -41,6 +41,10 @@ import { hydrateMic, micEnabled, onMicChange, requestMicEnabled, MIC_LOCKED_MSG 
 import { syncThresholdFromOs } from "./threshold";
 import { cutMedia, holdMedia, releaseMedia, type HeldMedia } from "./media-hold";
 import { startNarrator, type NarratorSnapshot } from "./narrator";
+import { directorReport, inboxLine, isReportEvent, newTradingAlerts, parseInboxAsk, REPORT_MODEL, reportFromEvent, reportVoice, startReportPlayer, type AgentReport, type RenderEvent, type SpeechOutcome } from "./agent-reports";
+import { useAgentInbox } from "@/features/comms/agent-inbox";
+import { tradingApi } from "@/features/trading/ibkr";
+import { onDirectorEvent } from "@/features/director/api";
 import { currentFreeze, isToolLiveNow, useModes } from "@/features/modes/modes-store";
 import { calmModeError, frozenOfferLine, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
 import { answeringIds, pillPathways, stripLearnTags } from "@/features/modes/learning";
@@ -115,6 +119,7 @@ export function ttsIdle(): Promise<void> {
 /** Hard speech stop: `tts.cancel()`, and anyone waiting for Tony to go quiet stops waiting. */
 function cancelTts() {
   tts.cancel();
+  stopOverlay();
   flushTtsIdle();
 }
 
@@ -758,6 +763,10 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
     fireCue(cue);
     return;
   }
+
+  // "Any messages?" / "play my messages": the Comms inbox of agent reports, answered in-process.
+  const inboxAsk = parseInboxAsk(t);
+  if (inboxAsk) return inboxTurn(inboxAsk.play, thread, opts.channel, gen);
 
   // Native OS controls (cue volume, Spotify, workspace switch, model swap, compute mode,
   // kill switch, status, plus a backstop for Gabagool phrasings the cue phrase list doesn't
@@ -2532,7 +2541,7 @@ function dropPassiveListen() {
  * speech onset cancels the line. Not cached: narration text is mostly one-off (the session pin
  * cache is unbounded).
  */
-export async function narrate(text: string, agent: string, opts: { localOnly?: boolean } = {}): Promise<void> {
+export async function narrate(text: string, agent: string, opts: { localOnly?: boolean; model?: string } = {}): Promise<void> {
   if (!tts.supported || !text.trim() || !micEnabled()) return; // D6: no narration while the mic is locked off
   const passive = isPassiveWakeListen();
   const dropMic = passive && currentRoute() !== "headset";
@@ -2540,7 +2549,7 @@ export async function narrate(text: string, agent: string, opts: { localOnly?: b
   narration.active = true;
   const gen = ++narration.gen;
   try {
-    await say(text, { agent, localOnly: opts.localOnly || undefined });
+    await say(text, { agent, localOnly: opts.localOnly || undefined, model: opts.model });
   } finally {
     if (narration.gen === gen) narration.active = false;
     if (dropMic && wake.armed) rearmWake();
@@ -2594,6 +2603,170 @@ export const narrator = isDesktopApp()
         const st = useSettings.getState();
         return [...(st.wakeWords ?? []), st.osName || "Tony", "tony", "jarvis"];
       },
-      subscribe: (h) => onNativeEvent<AgentEvent>("agent-event", h),
+      // A finished background job is an agent REPORT (own voice, Comms inbox), never a narration line.
+      subscribe: (h) => onNativeEvent<AgentEvent>("agent-event", (ev) => (isReportEvent(ev) ? pushEventReport(ev) : h(ev))),
     })
   : null;
+
+// ── Agent reports (Comms inbox) ─────────────────────────────────────────────
+//
+// A specialist's finished background job: its own short report to Nic, played as written in that
+// agent's roster voice (or Tony's: "All Tony", or the row's "Speak in own voice" off) on
+// ElevenLabs Turbo, sentence by sentence. Never while Nic is mid-conversation with Tony; only the
+// Trading agent's urgent alerts cut in (Tony held, the alert, Tony resumes). Every report lands in
+// the Comms inbox; every outcome goes to telemetry (`agent_speech`).
+
+/** The urgent alert playing over Tony right now (its own audio path, outside `tts`). */
+const overlay: { gen: number; src: AudioBufferSourceNode | null } = { gen: 0, src: null };
+
+function stopOverlay() {
+  overlay.gen++;
+  try {
+    overlay.src?.stop();
+  } catch {
+    /* not started */
+  }
+  overlay.src = null;
+}
+
+/** Can a report be heard at all right now (D6 mic lock, TTS, Learning mode's voice lock)? */
+function reportAudible(voice: string): boolean {
+  if (!tts.supported || !micEnabled()) return false;
+  return voice === "general" || !isLearningMode(useModes.getState().effective);
+}
+
+/** A normal report: the narration path (waits for quiet; Nic's speech onset can still cut it). */
+async function speakReport(r: AgentReport, voice: string): Promise<boolean> {
+  if (!reportAudible(voice)) return false;
+  await narrate(r.text, voice, { model: REPORT_MODEL });
+  return true;
+}
+
+/**
+ * An urgent Trading alert over Tony: his reply is held where it is (the sentence replays on
+ * resume; a reply that hasn't started yet waits), cue audio ducks, the alert plays on its own
+ * audio path, then Tony carries on. A hold Nic set himself stays held.
+ */
+async function interruptWithReport(r: AgentReport, voice: string): Promise<boolean> {
+  if (!reportAudible(voice)) return false;
+  const gen = ++overlay.gen;
+  const wasHeld = hold.active;
+  if (tts.pause) tts.pause();
+  else tts.duck?.(true);
+  setCueDuck("tts", true);
+  const dropMic = isPassiveWakeListen() && currentRoute() !== "headset";
+  if (dropMic) dropPassiveListen();
+  try {
+    const ac = await audioContext();
+    const parts = perSentenceOpts(r.text, { agent: voice, model: REPORT_MODEL, utteranceId: crypto.randomUUID() });
+    // Every sentence is requested now (ElevenLabs /stream), played strictly in order.
+    const pending = parts.map(({ s, opts }) => synthBytes(synthArgs(s, opts)).then((b) => ac.decodeAudioData(b)));
+    for (const p of pending) {
+      const buf = await p;
+      if (gen !== overlay.gen) return true; // cut ("stop", a stand-down)
+      await new Promise<void>((done) => {
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(ac.destination);
+        src.onended = () => done();
+        overlay.src = src;
+        src.start();
+      });
+    }
+    return true;
+  } finally {
+    if (gen === overlay.gen) overlay.src = null;
+    setCueDuck("tts", sayDepth > 0);
+    if (!tts.pause) tts.duck?.(false);
+    else if (!wasHeld && !hold.active) tts.resume?.();
+    if (dropMic && wake.armed) rearmWake();
+  }
+}
+
+const voicePrefs = () => useProviders.getState().view;
+
+function logSpeech(r: AgentReport, m: { voice: string; outcome: SpeechOutcome; interrupted: boolean; waitedMs: number }) {
+  void cmd("agent_speech_event", { agent: r.agent, voice: m.voice, outcome: m.outcome, interrupted: m.interrupted, waitedMs: Math.round(m.waitedMs), urgent: r.urgent }).catch(() => undefined);
+}
+
+/** The desktop's report player (the phone gets no agent events). */
+export const reportPlayer = isDesktopApp()
+  ? startReportPlayer({
+      speak: speakReport,
+      interrupt: interruptWithReport,
+      snapshot: narratorSnapshot,
+      level: () => useOs.getState().cfg?.feedback?.sensitivity ?? 1,
+      prefs: voicePrefs,
+      inbox: { add: (r) => useAgentInbox.getState().add(r), heard: (id, meta) => useAgentInbox.getState().heard(id, meta) },
+      log: logSpeech,
+    })
+  : null;
+
+function reportWakeWords(): string[] {
+  const st = useSettings.getState();
+  return [...(st.wakeWords ?? []), st.osName || "Tony", "tony", "jarvis"];
+}
+
+function pushEventReport(ev: AgentEvent) {
+  const r = reportFromEvent(ev, reportWakeWords());
+  if (r) reportPlayer?.push(r);
+}
+
+/** Comms → replay: the report again in whoever's voice reads it now (always plays: Nic asked). */
+export async function replayReport(id: string): Promise<void> {
+  const m = useAgentInbox.getState().messages.find((x) => x.id === id);
+  if (!m || !tts.supported) return;
+  const voice = reportVoice(m.agent, voicePrefs());
+  useAgentInbox.getState().read({ ids: [id] });
+  logSpeech(m, { voice, outcome: "replayed", interrupted: false, waitedMs: 0 });
+  await say(m.text, { agent: voice, model: REPORT_MODEL });
+}
+
+/** "Any messages?" → Tony's one line; "play my messages" → that line, then each unread report, oldest first. */
+async function inboxTurn(play: boolean, thread: ThreadId, channel: Channel, gen: number): Promise<void> {
+  const unread = useAgentInbox.getState().messages.filter((m) => !m.read);
+  const line = inboxLine(unread);
+  store().pushTurn({ who: "agent", from: "os", text: line, thread, meta: "comms" });
+  const oldestFirst = [...unread].reverse();
+  if (channel !== "voice") {
+    store().setState("idle");
+    if (play) for (const m of oldestFirst) await replayReport(m.id);
+    return;
+  }
+  store().setState("speaking");
+  startBargeIn();
+  await say(line, { agent: "general" });
+  if (play)
+    for (const m of oldestFirst) {
+      if (gen !== micGen) break; // a cut / a new command stops the read-out
+      await replayReport(m.id);
+    }
+  return afterVoiceReply(gen);
+}
+
+// The Director's renders: its own report when a render job ends.
+if (isDesktopApp())
+  void onDirectorEvent("media-render", (ev) => {
+    const r = directorReport(ev as RenderEvent, Date.now());
+    if (r) reportPlayer?.push(r);
+  }).catch(() => undefined);
+
+// The Trading Desk's audit tail: urgent alerts (kill switch, daily loss limit, a blocked or failed
+// trade). A read-only gateway poll; nothing is ever sent to the Trading agent.
+if (isDesktopApp()) {
+  let mark: number | null = null;
+  let wait = 20_000;
+  const poll = async () => {
+    try {
+      const desk = await tradingApi.desk();
+      const { alerts, mark: next } = newTradingAlerts(desk.audit?.tail ?? [], mark, Date.now());
+      mark = next;
+      for (const a of alerts) reportPlayer?.push(a);
+      wait = 20_000;
+    } catch {
+      wait = Math.min(wait * 2, 120_000); // gateway or desk down: back off
+    }
+    setTimeout(() => void poll(), wait);
+  };
+  setTimeout(() => void poll(), 15_000);
+}

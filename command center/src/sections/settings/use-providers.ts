@@ -19,6 +19,8 @@ interface ProvidersState {
   policy: (p: PolicyPatch) => Promise<void>;
   /** Part 3: edit one agent's voice-roster row ("tony" accepted as an alias of "general"). */
   agentVoice: (role: string, p: AgentVoicePatch) => Promise<void>;
+  /** The roster's master "All Tony" switch. */
+  allTony: (on: boolean) => Promise<void>;
   apply: (v: Promise<ProvidersView>) => Promise<void>;
 }
 
@@ -48,6 +50,7 @@ export const useProviders = create<ProvidersState>((set, get) => ({
   patch: (patch) => get().apply(isAndroidApp() ? phoneReadOnly() : cmd("providers_update", { patch })),
   policy: (patch) => get().apply(isAndroidApp() ? phoneReadOnly() : cmd("policy_update", { patch })),
   agentVoice: (role, patch) => get().apply(isAndroidApp() ? phoneReadOnly() : cmd("agent_voice_update", { role, patch })),
+  allTony: (on) => get().apply(isAndroidApp() ? phoneReadOnly() : cmd("agent_voices_all_tony", { on })),
 }));
 
 const modelCache = new Map<string, { at: number; models: string[] }>();

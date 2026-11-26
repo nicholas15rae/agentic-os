@@ -736,7 +736,7 @@ export class KokoroTts implements TtsEngine {
   /** Deliberately excludes `utteranceId`: callers pass the same id to a reply's prefetch and
    * speak (osRun), and a speak() that mints its own id still reuses the prefetched audio. */
   private key(s: string, opts?: SpeakOpts) {
-    return `${opts?.agent ?? ""}|${opts?.voice ?? ""}|${opts?.localOnly ? "local" : ""}|${opts?.previousText ?? ""}|${s}`;
+    return `${opts?.agent ?? ""}|${opts?.voice ?? ""}|${opts?.localOnly ? "local" : ""}|${opts?.model ?? ""}|${opts?.previousText ?? ""}|${s}`;
   }
 
   /** Session cache for `cache: true` lines (intros, acks, the greeting). Holds the raw bytes;

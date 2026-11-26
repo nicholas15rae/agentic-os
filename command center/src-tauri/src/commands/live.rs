@@ -32,7 +32,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Kinds written to `events.jsonl` even when Live Observer Mode is off.
-pub const ALWAYS_LOGGED: [&str; 5] = ["policy", "breaker", "defer", "queue_timeout", "error"];
+/// `agent_speech`: which agent spoke a report, when, in whose voice, and whether it interrupted.
+pub const ALWAYS_LOGGED: [&str; 6] = ["policy", "breaker", "defer", "queue_timeout", "error", "agent_speech"];
 pub const EVENTS_FILE: &str = "events.jsonl";
 const EVENTS_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -314,6 +315,28 @@ pub async fn live_ui_event(kind: String, ms: u64, detail: Option<String>) {
     if let Some((kind, payload)) = ui_event(&kind, ms, detail.as_deref()) {
         event(kind, payload);
     }
+}
+
+/// The webview's agent-report player: one line per report it played or queued (Comms inbox).
+#[tauri::command]
+pub async fn agent_speech_event(agent: String, voice: String, outcome: String, interrupted: bool, waited_ms: u64, urgent: bool) {
+    if let Some(payload) = speech_event(&agent, &voice, &outcome, interrupted, waited_ms, urgent) {
+        event("agent_speech", payload);
+    }
+}
+
+/// Validate an `agent_speech` event (pure): ids only (never the report text), known outcomes only.
+pub fn speech_event(agent: &str, voice: &str, outcome: &str, interrupted: bool, waited_ms: u64, urgent: bool) -> Option<Value> {
+    let id = |s: &str| -> Option<String> {
+        let s = s.trim().to_ascii_lowercase();
+        (!s.is_empty() && s.len() <= 32 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')).then_some(s)
+    };
+    let (agent, voice) = (id(agent)?, id(voice)?);
+    let outcome = match outcome {
+        "spoke" | "queued" | "inbox_only" | "replayed" | "failed" => outcome,
+        _ => return None,
+    };
+    Some(json!({ "agent": agent, "voice": voice, "outcome": outcome, "interrupted": interrupted, "waitedMs": waited_ms.min(86_400_000), "urgent": urgent }))
 }
 
 /// Validate + clip a webview event (pure). Unknown kinds are dropped.
@@ -720,6 +743,19 @@ mod tests {
     use super::super::procstats::{Footprint, ProcRow, Split};
     use super::super::stagger::Decision;
     use super::*;
+
+    #[test]
+    fn speech_event_keeps_ids_only_and_known_outcomes() {
+        let v = speech_event("Trading", "general", "spoke", true, 1200, true).unwrap();
+        assert_eq!(v["agent"], "trading");
+        assert_eq!(v["voice"], "general");
+        assert_eq!(v["interrupted"], true);
+        assert_eq!(v["waitedMs"], 1200);
+        assert!(speech_event("director", "director", "shouted", false, 0, false).is_none());
+        assert!(speech_event("Nic, the edit's done.", "director", "spoke", false, 0, false).is_none());
+        assert!(speech_event("", "general", "spoke", false, 0, false).is_none());
+        assert!(ALWAYS_LOGGED.contains(&"agent_speech"));
+    }
 
     #[test]
     fn tick_assembly_matches_the_proposal_shape() {

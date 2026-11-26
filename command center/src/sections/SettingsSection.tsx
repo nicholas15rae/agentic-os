@@ -7,7 +7,7 @@ import { isTauri } from "@/lib/platform";
 import { Card, Field, Input, Select, SubTabs } from "@/components/ui";
 import { GatewayStatusCard, OrchestratorCard, VerifierCard } from "./settings/ServicesSettings";
 import { AgentVoiceRoster, ConversationReflexesCard, SttCard, TtsCard } from "./settings/VoiceSettings";
-import { BraveCard, GmailCard, GoogleCard, InstagramCard, LocalLlmCard, MapsCard, N8nCard, SpotifyCard } from "./settings/IntegrationSettings";
+import { BraveCard, CalendarCard, GmailCard, GoogleCard, InstagramCard, LocalLlmCard, MapsCard, N8nCard, SpotifyCard } from "./settings/IntegrationSettings";
 import { BridgeCard, PipelinesCard } from "./settings/PipelineSettings";
 import { ComputeCard, DropletCard, MarketDataCard, OsIdentityCard, OsPermissionsCard, OverseerCard, PrivacyShieldCard, WorkspacesCard } from "./settings/OsSettings";
 import { McpRegistryCard, SkillsLibraryCard } from "./settings/LibrarySettings";
@@ -126,6 +126,7 @@ export function SettingsSection() {
               <SkillsLibraryCard />
               <McpRegistryCard />
               <GmailCard />
+              <CalendarCard />
               <SpotifyCard />
               <BraveCard />
               <InstagramCard />

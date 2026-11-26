@@ -3,14 +3,14 @@
 
     powershell -ExecutionPolicy Bypass -File "G:\agentic os\scripts\start-voice.ps1"
 
-  - Whisper STT  : C:\whisper\bin\whisper-server.exe  -> http://127.0.0.1:8178/v1/audio/transcriptions
+  - Whisper STT  : G:\whisper\bin\whisper-server.exe  -> http://127.0.0.1:8178/v1/audio/transcriptions
   - Kokoro TTS   : Docker container "kokoro"           -> http://127.0.0.1:8880/v1/audio/speech
   - Gateway      : server.py                           -> http://127.0.0.1:8080  (the desktop app also starts this)
 
   Safe to run repeatedly: anything already listening is left alone.
 #>
 param(
-  [string]$WhisperModel = "C:\whisper\models\ggml-base.en.bin",
+  [string]$WhisperModel = "G:\whisper\models\ggml-base.en.bin",
   [int]$Threads = 6,
   [switch]$NoGateway
 )
@@ -30,15 +30,15 @@ function Wait-Port([int]$port, [int]$seconds) {
 # -- Whisper ------------------------------------------------------------------
 if (Test-Port 8178) {
   Write-Host "Whisper   already running on :8178" -ForegroundColor DarkGray
-} elseif (-not (Test-Path "C:\whisper\bin\whisper-server.exe")) {
-  Write-Host "Whisper   not installed (C:\whisper\bin\whisper-server.exe missing)" -ForegroundColor Red
+} elseif (-not (Test-Path "G:\whisper\bin\whisper-server.exe")) {
+  Write-Host "Whisper   not installed (G:\whisper\bin\whisper-server.exe missing)" -ForegroundColor Red
 } else {
-  Start-Process -FilePath "C:\whisper\bin\whisper-server.exe" `
+  Start-Process -FilePath "G:\whisper\bin\whisper-server.exe" `
     -ArgumentList "-m", $WhisperModel, "--host", "127.0.0.1", "--port", "8178", "--inference-path", "/v1/audio/transcriptions", "-t", "$Threads" `
-    -WorkingDirectory "C:\whisper" -WindowStyle Hidden `
-    -RedirectStandardError "C:\whisper\server.log" -RedirectStandardOutput "C:\whisper\server.out.log"
+    -WorkingDirectory "G:\whisper" -WindowStyle Hidden `
+    -RedirectStandardError "G:\whisper\server.log" -RedirectStandardOutput "G:\whisper\server.out.log"
   if (Wait-Port 8178 20) { Write-Host "Whisper   started on :8178 ($(Split-Path -Leaf $WhisperModel))" -ForegroundColor Green }
-  else { Write-Host "Whisper   failed to start - see C:\whisper\server.log" -ForegroundColor Red }
+  else { Write-Host "Whisper   failed to start - see G:\whisper\server.log" -ForegroundColor Red }
 }
 
 # -- Kokoro (Docker) ----------------------------------------------------------

@@ -541,9 +541,11 @@ async def comms_ws(ws: WebSocket):
 # While a turn runs the desktop may stream Tony's answer (POST /inbox/{id}/delta); the phone
 # long-polls GET /inbox/{id}?wait=&after= for it, and the desktop long-polls GET /inbox?wait=.
 
-_QUEUE_KINDS = {"turn", "command", "pipeline", "playplace", "task"}
+_QUEUE_KINDS = {"turn", "command", "pipeline", "playplace", "task", "action"}
 QUEUE_STATUSES = ("pending", "running", "done", "error", "expired")
-QUEUE_TTL = {"turn": 600.0, "command": 600.0, "playplace": 3600.0, "pipeline": 86400.0, "task": 86400.0}
+# `action` (the phone's approved confirmation card) is short-lived: an approval nobody ran within
+# five minutes is not run later.
+QUEUE_TTL = {"turn": 600.0, "command": 600.0, "playplace": 3600.0, "pipeline": 86400.0, "task": 86400.0, "action": 300.0}
 LEASE_MAX_SECS = 900
 LEASE_DEFAULT_SECS = 300
 _PAYLOAD_MAX = 64 * 1024
@@ -620,10 +622,12 @@ def _validate_task_payload(payload: dict) -> None:
 
 
 # Phone -> desktop commands. `micEnabled` (Phase 2 Part B: the phone locks / unlocks the desktop
-# mic) and `modeId` / `overrides` / `resetOverrides` (Part C: Tony's mode) are applied by the
-# desktop's InboxAction::Command; the desktop re-validates every value.
-_COMMAND_KEYS = {"killSwitch", "computeMode", "micEnabled", "modeId", "overrides", "resetOverrides"}
+# mic), `modeId` / `overrides` / `resetOverrides` (Part C: Tony's mode) and `memoryApprove` /
+# `memoryDiscard` (decision 5: the card under a Learning reply; a pending proposal id) are applied
+# by the desktop's InboxAction::Command; the desktop re-validates every value.
+_COMMAND_KEYS = {"killSwitch", "computeMode", "micEnabled", "modeId", "overrides", "resetOverrides", "memoryApprove", "memoryDiscard"}
 _MODE_ID_MAX = 64
+_MEMORY_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # agents.rs resolve_proposal's id rule
 
 
 def _validate_command_payload(payload: dict) -> None:
@@ -640,6 +644,54 @@ def _validate_command_payload(payload: dict) -> None:
     ov = payload.get("overrides")
     if "overrides" in payload and (not isinstance(ov, dict) or not all(v is None or isinstance(v, str) for v in ov.values())):
         raise HTTPException(400, "overrides must be an object of strings")
+    for k in ("memoryApprove", "memoryDiscard"):
+        if k in payload and (not isinstance(payload[k], str) or not _MEMORY_ID.fullmatch(payload[k])):
+            raise HTTPException(400, f"{k} must be a memory proposal id (1-64 letters, digits, - or _)")
+    if "memoryApprove" in payload and "memoryDiscard" in payload:
+        raise HTTPException(400, "memoryApprove and memoryDiscard can't be sent together")
+
+
+# Phone -> desktop approved actions (kind `action`): the phone's confirmation card, after Nic's
+# yes, for the two carded tools the desktop runs through their approved-only Rust paths
+# (pipeline.rs run_approved_action: calendar.rs create_event_approved / gmail.rs
+# create_draft_approved). Never a gateway CLI agent; gateway Tony never takes one (eligible()).
+_ACTION_TOOLS = {
+    "calendar.create_event": {"title", "date", "startTime", "endTime", "allDay", "location", "description"},
+    "gmail.create_draft": {"to", "subject", "body"},
+}
+_ACTION_KEYS = {"tool", "args", "planId", "approvedAt"}
+_ACTION_ARGS_MAX = 24 * 1024
+_PLAN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _validate_action_payload(payload: dict) -> None:
+    """{tool, args, planId, approvedAt}: an allowlisted tool, only its own argument names (strings,
+    allDay a boolean), a plan id, an approval stamp. The desktop validates every field again."""
+    if not set(payload) <= _ACTION_KEYS:
+        raise HTTPException(400, f"action keys: {sorted(_ACTION_KEYS)}")
+    tool = payload.get("tool")
+    if not isinstance(tool, str) or tool not in _ACTION_TOOLS:
+        raise HTTPException(400, f"action tool must be one of {sorted(_ACTION_TOOLS)}")
+    args = payload.get("args")
+    if not isinstance(args, dict) or not args:
+        raise HTTPException(400, "action args must be a non-empty object")
+    extra = set(args) - _ACTION_TOOLS[tool]
+    if extra:
+        raise HTTPException(400, f"{tool} takes only {sorted(_ACTION_TOOLS[tool])}")
+    for k, v in args.items():
+        if k == "allDay":
+            if not isinstance(v, bool):
+                raise HTTPException(400, "allDay must be a boolean")
+        elif not isinstance(v, str):
+            raise HTTPException(400, f"{k} must be a string")
+    if len(json.dumps(args)) > _ACTION_ARGS_MAX:
+        raise HTTPException(413, "action args too large")
+    pid = payload.get("planId")
+    if not isinstance(pid, str) or not _PLAN_ID.fullmatch(pid):
+        raise HTTPException(400, "planId must be 1-64 letters, digits, - or _")
+    at = payload.get("approvedAt")
+    if not isinstance(at, str) or not at.strip() or len(at) > 40:
+        raise HTTPException(400, "approvedAt must be the approval time (an ISO string)")
 
 
 @inbox_router.post("/inbox")
@@ -649,7 +701,7 @@ def inbox_post(data: dict = Body(...)):
     _ensure_schema()
     kind = str(data.get("kind") or "turn")
     if kind not in _QUEUE_KINDS:
-        raise HTTPException(400, "kind must be turn, command, pipeline, playplace or task")
+        raise HTTPException(400, "kind must be turn, command, pipeline, playplace, task or action")
     payload = data.get("payload") or {}
     if not isinstance(payload, dict):
         raise HTTPException(400, "payload must be an object")
@@ -657,6 +709,8 @@ def inbox_post(data: dict = Body(...)):
         _validate_command_payload(payload)
     if kind == "task":
         _validate_task_payload(payload)
+    if kind == "action":
+        _validate_action_payload(payload)
     raw = json.dumps(payload)
     if len(raw) > _PAYLOAD_MAX:
         # Never truncate: a cut JSON string would poison GET /inbox for every later item.

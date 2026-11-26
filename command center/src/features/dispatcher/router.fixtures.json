@@ -25,7 +25,8 @@
     "text": "booking desk, please check my calendar for tomorrow",
     "role": "booking",
     "kind": "Named",
-    "taskContains": "check"
+    "taskContains": "check",
+    "direct": "calendar"
   },
   {
     "desc": "vocative address form without comma or please",
@@ -135,10 +136,11 @@
     "kind": "Domain"
   },
   {
-    "desc": "'check what's up on my calendar' is a calendar question, not a WhatsApp read",
+    "desc": "'check what's up on my calendar' is a calendar question, not a WhatsApp read (A2: Tony's own calendar read)",
     "text": "check what's up on my calendar",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "direct": "calendar"
   },
   {
     "desc": "greeting: 'come on, what's up' ('on' after come / hang / hold is no WhatsApp cue)",
@@ -567,6 +569,81 @@
   {
     "desc": "ops stays infrastructure",
     "text": "is the droplet healthy and is docker up",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "A2: a Gmail booking read stays with Tony (no name, booking words only)",
+    "text": "check my Gmail for what I got booked for",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: 'booking' merely mentioned in a mail read is a topic, not the Booking Desk",
+    "text": "check gmail for booking emails",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: 'audition' (a Booking name) inside a mail read stays with Tony",
+    "text": "any audition emails?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: a casting-call mail read is at most a topic; the live-tool backstop keeps it with Tony",
+    "text": "check my inbox for the casting call",
+    "role": "booking",
+    "kind": "Domain",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: call sheets in the inbox are a booking-mail read",
+    "text": "search my email for call sheets",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: the desk addressed at the start of a mail read still gets it",
+    "text": "booking desk, any new emails about the shoot?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: 'tell booking to …' still delegates a mail read",
+    "text": "tell booking to check my email for the callback",
+    "role": "booking",
+    "kind": "Named",
+    "taskContains": "check my email",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2: a mention outside a mail read still names the desk",
+    "text": "what did the booking desk say about the shoot",
+    "role": "booking",
+    "kind": "Named"
+  },
+  {
+    "desc": "A2: a calendar read is Tony's own live tool (ops topic, Direct wins)",
+    "text": "what's on my calendar tomorrow",
+    "role": "ops",
+    "kind": "Domain",
+    "direct": "calendar"
+  },
+  {
+    "desc": "A2: a calendar add is a write, never a direct read",
+    "text": "add the Netflix shoot to my calendar",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "A2: 'put it on my calendar' is a write too",
+    "text": "put it on my calendar for tomorrow",
     "role": "ops",
     "kind": "Domain"
   }

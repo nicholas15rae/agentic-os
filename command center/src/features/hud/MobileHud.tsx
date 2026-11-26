@@ -22,6 +22,7 @@ import { requestMicEnabled, useMic } from "@/features/voice/mic-gate";
 import { MicLockBadge } from "@/features/voice/MicLockBadge";
 import { hudMicChips } from "@/features/voice/mic-indicator";
 import { applyOptimistic, type HudCommand, type OsStatus } from "./hud-status";
+import { MESH_PATH_POLL_MS, meshPathChip, type MeshPathChip } from "./mesh-path";
 
 const LanguageHub = lazy(() => import("@/features/language/LanguageHub").then((m) => ({ default: m.LanguageHub })));
 
@@ -80,6 +81,33 @@ function useStatus() {
 }
 
 type Hud = ReturnType<typeof useStatus>;
+
+/**
+ * Phone only: is this phone's NetBird link to the desktop direct (P2P) or relayed? Polled every
+ * 45 s while visible, and again on return to the app. Quiet: any failure just hides the reading.
+ */
+function useMeshPath(): MeshPathChip | null {
+  const [chip, setChip] = useState<MeshPathChip | null>(null);
+  useEffect(() => {
+    if (isTauri()) return;
+    let live = true;
+    const load = () => {
+      if (document.hidden) return;
+      void gateway<unknown>("/api/net/path", { timeoutMs: 8_000 })
+        .then((p) => live && setChip(meshPathChip(p)))
+        .catch(() => live && setChip(null));
+    };
+    load();
+    const iv = setInterval(load, MESH_PATH_POLL_MS);
+    document.addEventListener("visibilitychange", load);
+    return () => {
+      live = false;
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", load);
+    };
+  }, []);
+  return chip;
+}
 
 /** Tony's modes for the HUD: the desktop store on desktop, the mirror on the phone. */
 function useHudModes(hud: Hud): { modes: TonyMode[]; activeId: string; name: string; curiosity: Curiosity; overridden: boolean } | null {
@@ -151,7 +179,9 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
   const phoneMic = useMic((s) => s.enabled);
   const micChips = hudMicChips(phoneMic, status?.voice?.micEnabled, isTauri());
   const mode = useHudModes(hud);
-  const mesh = location.hostname.startsWith("100.") || location.hostname === "127.0.0.1" || location.hostname === "localhost" || isTauri();
+  const meshPath = useMeshPath();
+  const [pathInfo, setPathInfo] = useState(false); // tap the MESH chip: ICE details (phones show no tooltips)
+  const mesh =location.hostname.startsWith("100.") || location.hostname === "127.0.0.1" || location.hostname === "localhost" || isTauri();
   const modes: { id: ComputeMode; icon: typeof Cpu }[] = [
     { id: "local", icon: Cpu },
     { id: "hybrid", icon: Layers },
@@ -181,9 +211,21 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
       <span className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${status?.privacy.diffuser ? "text-teal" : "text-ink-3"}`} title="Privacy diffuser">
         <ShieldCheck size={11} /> DIFFUSER {status?.privacy.diffuser ? "ON" : "OFF"}
       </span>
-      <span className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${mesh && status?.privacy.networkLock ? "text-teal" : "text-amber-soft"}`} title="NetBird mesh">
+      <button
+        type="button"
+        disabled={!meshPath}
+        aria-expanded={meshPath ? pathInfo : undefined}
+        onClick={() => setPathInfo((v) => !v)}
+        className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${mesh && status?.privacy.networkLock ? "text-teal" : "text-amber-soft"}`}
+        title={meshPath ? meshPath.title : "NetBird mesh"}
+      >
         <Network size={11} /> MESH {mesh && status?.privacy.networkLock ? "LOCKED" : "OPEN"}
-      </span>
+        {meshPath && (
+          <span data-testid="mesh-path" className={meshPath.tone === "direct" ? "text-teal" : "text-amber-light"}>
+            · {meshPath.text}
+          </span>
+        )}
+      </button>
       <button
         role="switch"
         aria-checked={kill}
@@ -192,6 +234,7 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
       >
         <ShieldOff size={12} /> {kill ? "LOCAL ONLY" : "KILL"}
       </button>
+      {pathInfo && meshPath && <span className="w-full font-mono text-[10px] text-ink-3">{meshPath.title}</span>}
       <div className="flex w-full flex-wrap items-center gap-1.5">
         {status?.scheduler && (
           <span className="rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] text-ink-2" title="Compute split">

@@ -11,8 +11,8 @@
 //!     removals, and Spotify's kill-switch check. Sub-agents get only the Spotify read
 //!     tools (`spotify_intent::READ_TOOLS`). Nothing
 //!     else here writes files, sends messages or runs arbitrary commands; the
-//!     one other mutating builtin (`gmail.create_draft`) is hidden from the
-//!     router and refuses to run unless the user approved it, and every other
+//!     other mutating builtins (`gmail.create_draft`, `calendar.create_event`) are
+//!     hidden from the router and refuse to run unless the user approved them, and every other
 //!     mutating tool (`is_mutating_tool`) stays excluded from the router.
 //!   - Filesystem / git are confined to the allowed roots (canonicalised).
 //!   - Fetch refuses loopback / private / mesh addresses (no SSRF into your
@@ -68,7 +68,13 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
             t(id, "gmail.recent", "Most recent inbox emails (sender, subject, date, preview).", &["count?"]),
             t(id, "gmail.search", "Search Gmail with Gmail query syntax (from:sam, is:unread, subject:rates, newer_than:7d).", &["query", "limit?"]),
             t(id, "gmail.read_thread", "Read one email thread in full by its thread id (from gmail.recent / gmail.search).", &["threadId"]),
+            t(id, super::gmail::BOOKING_SCAN, "Scan Gmail for booking mail (booked, confirmed, call sheet, deal memo, audition, on hold; last 30 days) and read the newest threads.", &["limit?", "read?"]),
             t(id, "gmail.create_draft", "Save a draft email (not sent). Only after the user's confirmation card.", &["to", "subject", "body"]),
+        ],
+        "calendar" => vec![
+            t(id, "calendar.upcoming", "Google Calendar events for a period: today, tomorrow, week (next 7 days), next week or month; query filters by text.", &["period", "query?"]),
+            t(id, "calendar.day", "Google Calendar events on one day (date as YYYY-MM-DD, or today / tomorrow).", &["date"]),
+            t(id, super::calendar::CREATE, "Add an event to Google Calendar (no invites). Only after the user's confirmation card.", &["title", "startTime?", "endTime?", "date?", "allDay?", "location?", "description?"]),
         ],
         "spotify" => spotify_tools(id),
         "maps" => vec![
@@ -119,9 +125,16 @@ fn spotify_tools(id: &str) -> Vec<ToolInfo> {
     rows.iter().map(|(name, desc, args)| t(id, name, &format!("{desc}{ONLY}"), args)).collect()
 }
 
-/// A builtin's tools, or an error when its backend isn't configured, so the
-/// registry never shows a false "ok" for a server that can't answer.
+/// Tests: `builtin_listing_with` with Google Calendar's backend present.
+#[cfg(test)]
 fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: impl Fn() -> bool, spotify: impl Fn() -> Result<(), String>, has_instagram_token: impl Fn() -> bool) -> Result<Vec<ToolInfo>, String> {
+    builtin_listing_with(id, gmail, has_brave_key, spotify, has_instagram_token, || true)
+}
+
+/// A builtin's tools, or an error when its backend isn't configured, so the
+/// registry never shows a false "ok" for a server that can't answer. `has_calendar`: Google
+/// Calendar's Apps Script pair is set (or was just imported from AnythingLLM on first use).
+fn builtin_listing_with(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: impl Fn() -> bool, spotify: impl Fn() -> Result<(), String>, has_instagram_token: impl Fn() -> bool, has_calendar: impl Fn() -> bool) -> Result<Vec<ToolInfo>, String> {
     match id {
         "gmail" => match gmail() {
             GmailSource::None => Err(super::gmail::NO_BACKEND.into()),
@@ -129,6 +142,7 @@ fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: imp
             GmailSource::Script => Ok(builtin_tools(id)),
         },
         "brave-search" if !has_brave_key() => Err("Brave Search: no API key — add one in Settings → Integrations".into()),
+        "calendar" if !has_calendar() => Err(super::calendar::NO_BACKEND.into()),
         "spotify" => spotify().map(|_| builtin_tools(id)),
         "instagram" if !has_instagram_token() => Err(super::instagram::NO_TOKEN.into()),
         _ => Ok(builtin_tools(id)),
@@ -149,7 +163,14 @@ pub(crate) fn unavailable_reason(state: &DispatchState, cfg: &OsConfig, id: &str
 }
 
 fn listing(state: &DispatchState, id: &str) -> Result<Vec<ToolInfo>, String> {
-    builtin_listing(id, || super::gmail::source(state), || brave_key(state).is_some(), || super::spotify::readiness(state), || super::envfile::os_key(state, super::instagram::SECRET).is_some())
+    builtin_listing_with(
+        id,
+        || super::gmail::source(state),
+        || brave_key(state).is_some(),
+        || super::spotify::readiness(state),
+        || super::envfile::os_key(state, super::instagram::SECRET).is_some(),
+        || super::calendar::ensure_creds(state).is_some(),
+    )
 }
 
 // ── Listing ─────────────────────────────────────────────────────────────────
@@ -366,6 +387,10 @@ fn failed_set(id: &str, entry: Option<(u64, u64, String)>) {
 /// Tools that change the world (send, delete, write…) are never offered to the
 /// model's router — those go through the confirmation card (e.g. Comms → send).
 pub fn is_mutating_tool(name: &str) -> bool {
+    // Reads whose names happen to start with a write verb, by their exact full name only.
+    if KNOWN_READS.contains(&name) {
+        return false;
+    }
     let tool = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
     // "append" / "insert" / "replace" / "drop" / "alter" / "truncate": SQLite's write_query /
     // create_table / append_insight and Serena's code edits; "clink" (PAL) runs other CLIs;
@@ -380,6 +405,10 @@ pub fn is_mutating_tool(name: &str) -> bool {
         .any(|v| tool.starts_with(v) || tool.contains(&format!("_{v}")))
         || mutating_by_word(&tool)
 }
+
+/// Builtin reads the verb list would misread: `gmail.booking_scan` ("book…") only searches and
+/// reads mail. Exact full names, so another server's `booking_*` tool stays a write.
+const KNOWN_READS: [&str; 1] = [super::gmail::BOOKING_SCAN];
 
 /// Write verbs matched as a WHOLE word of the tool name (`_` / `-` separated), so
 /// `merge_pull_request`, `git_reset` and `unstar_repository` are writes while reads that merely
@@ -1176,6 +1205,8 @@ async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             }
             // Drafts never run from here (whatever `approved` says): only `gmail_create_draft`, after the confirmation card.
             gmail if gmail.starts_with("gmail.") && server_on("gmail") => super::gmail::tool(state, os, gmail, args, false).await,
+            // Adds never run from here (whatever `approved` says): only `gcal_create_event` / the phone's approved action.
+            cal if cal.starts_with("calendar.") && server_on("calendar") => super::calendar::tool(state, os, cal, args, false).await,
             spotify if spotify.starts_with("spotify.") && server_on("spotify") => super::spotify::tool(state, os, spotify, args).await,
             maps if maps.starts_with("maps.") && server_on("maps") => super::maps::tool(state, os, maps, args).await,
             // Replies / publishing never run from here (whatever `approved` says): only the approved-card commands.
@@ -2418,11 +2449,27 @@ mod tests {
     #[test]
     fn gmail_tools_split_read_only_and_draft() {
         let names: Vec<String> = builtin_tools("gmail").into_iter().map(|t| t.name).collect();
-        assert_eq!(names, ["gmail.recent", "gmail.search", "gmail.read_thread", "gmail.create_draft"]);
-        for t in ["gmail.recent", "gmail.search", "gmail.read_thread"] {
+        assert_eq!(names, ["gmail.recent", "gmail.search", "gmail.read_thread", "gmail.booking_scan", "gmail.create_draft"]);
+        for t in ["gmail.recent", "gmail.search", "gmail.read_thread", "gmail.booking_scan"] {
             assert!(!is_mutating_tool(t), "{t}");
+            assert!(offered_to_router(t, true), "{t}");
         }
         assert!(is_mutating_tool("gmail.create_draft"));
+        // The booking-scan exemption is by exact name: any other "booking" tool is still a write.
+        assert!(is_mutating_tool("crm.booking_scan") && is_mutating_tool("gmail.book_slot") && is_mutating_tool("calendar.booking_create"));
+    }
+
+    #[test]
+    fn calendar_tools_split_reads_and_the_carded_create() {
+        let names: Vec<String> = builtin_tools("calendar").into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["calendar.upcoming", "calendar.day", "calendar.create_event"]);
+        assert!(!is_mutating_tool("calendar.upcoming") && !is_mutating_tool("calendar.day"));
+        assert!(is_mutating_tool("calendar.create_event"));
+        let tony: Vec<String> = router_filter(&builtin_tools("calendar"), true).into_iter().map(|t| t.name).collect();
+        assert_eq!(tony, ["calendar.upcoming", "calendar.day"], "the router never sees the create");
+        let ok = || Ok(());
+        assert_eq!(builtin_listing_with("calendar", || GmailSource::None, || true, ok, || true, || false).unwrap_err(), super::super::calendar::NO_BACKEND);
+        assert_eq!(builtin_listing_with("calendar", || GmailSource::None, || true, ok, || true, || true).unwrap().len(), 3);
     }
 
     #[test]
@@ -2464,7 +2511,7 @@ mod tests {
         assert!(e.starts_with("Gmail: no backend"), "{e}");
         let n8n: Vec<String> = builtin_listing("gmail", || GmailSource::N8n("gmail-digest"), || true, ok, || true).unwrap().into_iter().map(|t| t.name).collect();
         assert_eq!(n8n, ["gmail.recent"]);
-        assert_eq!(builtin_listing("gmail", || GmailSource::Script, || true, ok, || true).unwrap().len(), 4);
+        assert_eq!(builtin_listing("gmail", || GmailSource::Script, || true, ok, || true).unwrap().len(), 5);
         assert!(builtin_listing("brave-search", || GmailSource::None, || false, ok, || true).is_err());
         assert_eq!(builtin_listing("brave-search", || GmailSource::None, || true, ok, || true).unwrap().len(), 1);
         assert_eq!(builtin_listing("weather", || GmailSource::None, || false, ok, || true).unwrap().len(), 1);
@@ -2694,7 +2741,7 @@ mod tests {
         let ids_in = |cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str| servers_for(cfg, e, agent).into_iter().map(|s| s.id).collect::<Vec<_>>();
         let ids = |e: &super::super::modes::Effective, agent: &str| ids_in(&cfg, e, agent);
         // No overlay: Tony gets exactly his own servers (never the Director's media servers).
-        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "whatsapp"]);
+        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "calendar", "whatsapp"]);
         assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
         assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
         // Builder: gmail / WhatsApp are frozen for Tony; the Coder keeps its three.
@@ -2707,7 +2754,7 @@ mod tests {
         let mut cfg = cfg.clone();
         cfg.switchboard.frozen_tools = vec!["spotify".into()];
         cfg.mcps.iter_mut().find(|m| m.id == "weather").unwrap().enabled = false;
-        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "whatsapp"]);
+        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "calendar", "whatsapp"]);
         // Synthetic tools: the mode switch is always Tony's; skills.read follows skill grants.
         let set = assemble_tools(&cfg, "general", vec![]);
         assert_eq!(set.all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [TONY_SET_MODE]);

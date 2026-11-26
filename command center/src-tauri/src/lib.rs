@@ -8,7 +8,7 @@ pub mod security;
 
 use commands::{buildhub, diagnostics, handoff_cues, language_hub, lifecycle};
 use commands::{arbiter, business_registry, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
-use commands::{agents, allm, allm_audit, bridge, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
+use commands::{agents, allm, allm_audit, bridge, calendar, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
@@ -187,6 +187,9 @@ pub fn run() {
                 // request.json loop.
                 #[cfg(desktop)]
                 diagnostics::init(app.handle(), &dir);
+                // Model Lab A/B compare reports (<config dir>/telemetry/modellab) + its request.json loop.
+                #[cfg(desktop)]
+                modellab::compare::init(app.handle(), &dir);
                 finance_vault::init(&dir);
                 // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
                 business_registry::init(&dir);
@@ -415,6 +418,7 @@ pub fn run() {
             services::provider_models,
             services::gateway_ensure,
             voice::stt_transcribe,
+            voice::stt_partial,
             language_hub::lang_status,
             language_hub::lang_library_list,
             language_hub::lang_library_save,
@@ -476,6 +480,8 @@ pub fn run() {
             allm_audit::anythingllm_workspace_audit,
             agents::os_turn,
             agents::os_turn_cancel,
+            agents::learning_approve,
+            agents::learning_discard,
             agents::overseer_ask,
             mcp::mcp_list_tools,
             media::media_projects,
@@ -512,6 +518,12 @@ pub fn run() {
             gmail::gmail_status,
             gmail::gmail_import_anythingllm,
             gmail::gmail_create_draft,
+            gmail::gmail_booking_instructions,
+            gmail::gmail_booking_instructions_open,
+            gmail::gmail_last_bookings,
+            calendar::gcal_status,
+            calendar::gcal_import_anythingllm,
+            calendar::gcal_create_event,
             maps::map_route,
             maps::map_geocode,
             maps::map_reverse,
@@ -562,6 +574,9 @@ pub fn run() {
             modellab::model_lab_list,
             modellab::model_bench,
             modellab::model_use,
+            modellab::compare::model_compare,
+            modellab::compare::model_compare_status,
+            modellab::compare::model_compare_cancel,
             pipeline::pipeline_resume,
             taskworker::task_create,
             modes::tony_modes_get,

@@ -331,6 +331,12 @@ fn leads_with_self(toks: &[&str], self_names: &[(String, String)]) -> bool {
     match_name_at(toks, p, self_names).is_some()
 }
 
+/// The line opens with one of `names` (an agent's), optionally after "hey / hi / ok / yo / so".
+fn leads_with_name(toks: &[&str], names: &[(String, String)]) -> bool {
+    let p = toks.iter().take_while(|w| ADDRESS_LEADS.contains(*w)).count();
+    match_name_at(toks, p, names).is_some()
+}
+
 /// The line ends with a self name ("…, tony", "… tony please") that isn't an object (`NOT_VOCATIVE_BEFORE`).
 fn trailing_vocative(toks: &[&str], self_names: &[(String, String)]) -> bool {
     let end = if toks.last() == Some(&"please") { toks.len() - 1 } else { toks.len() };
@@ -461,9 +467,14 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         }
         break;
     }
-    // (b) any (non-self) name trigger mentioned anywhere.
+    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar read ("check gmail
+    // for booking emails", "any audition emails?") is Tony's own live tool: a name merely
+    // mentioned there is a topic, not an address. Only opening the line with it ("booking desk,
+    // any …") or step (a) above ("tell booking to …") hands it over.
     if let Some(role) = match_name_anywhere(&toks, &names) {
-        return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
+        if !matches!(direct_tool(&original), Some("gmail" | "calendar")) || leads_with_name(&toks, &names) {
+            return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
+        }
     }
     if match_name_anywhere(&toks, &self_names).is_some() {
         self_hit = true;
@@ -527,6 +538,14 @@ const DIRECT_WHATSAPP_READ: &str = r"\b(?:check|read|any|anything|new|latest|las
 const DIRECT_WHATSAPP_NOUN: &str = r"\b(?:on|from|in|my|check) whatsapp\b|\bwhatsapp (?:messages?|texts?|chats?|unread)\b";
 const DIRECT_GMAIL: &str = r"\b(?:gmail|inbox|emails?|mail)\b";
 const DIRECT_GMAIL_READ: &str = r"\b(?:check|read|any|anything|latest|last|recent|unread|updates?|whats in|what is in|did i get|have i got|got any|who emailed|new (?:emails?|mail|messages?))\b";
+/// A booking word next to the mail ("check my gmail for what I got booked for", "call sheets in my
+/// inbox"): a booking-mail read (agents.rs `booking_mail_plan`). Mirrors router.ts.
+const DIRECT_BOOKING_MAIL: &str = r"\b(?:booked|bookings?|gigs?|jobs?|auditions?|callbacks?|call ?sheets?|deal memos?|confirmed|on hold|shoots?|avails?)\b";
+/// Google Calendar, read form only ("what's on my calendar tomorrow", "check my calendar").
+const DIRECT_CALENDAR: &str = r"\b(?:calendar|agenda)\b";
+/// Calendar writes DIRECT_WRITE doesn't list ("put / pop / pencil it on my calendar").
+const DIRECT_CALENDAR_WRITE: &str = r"\b(?:put|pop|stick|throw|pencil|block (?:off|out))\b";
+const DIRECT_CALENDAR_READ: &str = r"\b(?:check|read|any|anything|whats|what is|what do i have|do i have|am i free|am i busy|show|look|today|tonight|tomorrow|this week|next week|upcoming|next|free|busy|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b";
 /// Weather words only in read form: a question or check, or next to a time / place word.
 const DIRECT_WEATHER: &str = r"\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$";
 /// Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read.
@@ -537,7 +556,7 @@ fn direct_re(slot: &'static std::sync::OnceLock<regex::Regex>, pat: &str) -> &'s
     slot.get_or_init(|| regex::Regex::new(pat).unwrap())
 }
 
-/// The live tool a read question is for: "whatsapp" | "gmail" | "weather" | "spotify".
+/// The live tool a read question is for: "whatsapp" | "gmail" | "calendar" | "weather" | "spotify".
 /// Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
 pub fn direct_tool(text: &str) -> Option<&'static str> {
     static WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -546,6 +565,10 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     static WA_NOUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static GMAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static GMAIL_READ: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static BOOKING_MAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CALENDAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CALENDAR_READ: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CALENDAR_WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static WEATHER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static SPOTIFY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static UPDATE_NOUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -563,8 +586,11 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
         }
     }
     let work = direct_re(&NOT_LIVE, DIRECT_NOT_LIVE).is_match(&n);
-    if !work && direct_re(&GMAIL, DIRECT_GMAIL).is_match(&n) && direct_re(&GMAIL_READ, DIRECT_GMAIL_READ).is_match(&n) {
+    if !work && direct_re(&GMAIL, DIRECT_GMAIL).is_match(&n) && (direct_re(&GMAIL_READ, DIRECT_GMAIL_READ).is_match(&n) || direct_re(&BOOKING_MAIL, DIRECT_BOOKING_MAIL).is_match(&n)) {
         return Some("gmail");
+    }
+    if !work && direct_re(&CALENDAR, DIRECT_CALENDAR).is_match(&n) && direct_re(&CALENDAR_READ, DIRECT_CALENDAR_READ).is_match(&n) && !direct_re(&CALENDAR_WRITE, DIRECT_CALENDAR_WRITE).is_match(&n) {
+        return Some("calendar");
     }
     if !work && direct_re(&WEATHER, DIRECT_WEATHER).is_match(&n) {
         return Some("weather");
@@ -779,8 +805,18 @@ mod tests {
             ("weather forecast for Paris", "weather"),
             ("what's the weather", "weather"),
             ("check my what's up messages", "whatsapp"),
+            ("check my Gmail for what I got booked for", "gmail"),
+            ("any audition emails?", "gmail"),
+            ("search my email for call sheets", "gmail"),
+            ("what's on my calendar tomorrow", "calendar"),
+            ("check my calendar", "calendar"),
+            ("am I free on Friday? check the calendar", "calendar"),
         ] {
             assert_eq!(direct_tool(text), Some(tool), "{text}");
+        }
+        // Calendar writes and work talk stay off the read path.
+        for text in ["add the Netflix shoot to my calendar", "put the audition on my calendar", "put it on my calendar for tomorrow", "fix the calendar widget", "schedule a meeting on my calendar", "cancel tomorrow on my calendar"] {
+            assert_eq!(direct_tool(text), None, "{text}");
         }
         for text in ["send a whatsapp to Sam", "delete my last email", "tell him on whatsapp I'm late", "play purple rain", "what's the CPU temperature", "hey what's up", ""] {
             assert_eq!(direct_tool(text), None, "{text}");
@@ -897,6 +933,27 @@ mod tests {
         // "ui" must not match inside "quick".
         let r = resolve("give me a quick summary", &cfg);
         assert_eq!(r.kind, RouteKind::Default);
+    }
+
+    /// A Gmail booking read stays with Tony: "booking" / "audition" / "casting" merely mentioned in
+    /// a mail read is a topic, never the Booking Desk; addressing the desk still hands it over.
+    /// Mirrors router.test.ts (and the shared fixtures).
+    #[test]
+    fn a_mail_read_naming_a_booking_word_stays_with_tony() {
+        let cfg = OsConfig::default();
+        for text in ["check gmail for booking emails", "any audition emails?", "check my inbox for the casting call", "check my calendar for the audition"] {
+            let r = resolve(text, &cfg);
+            // At most a topic (Domain), which the live-tool backstop keeps with Tony (`direct_tool`).
+            assert_ne!(r.kind, RouteKind::Named, "{text}: {r:?}");
+            assert!(matches!(direct_tool(text), Some("gmail" | "calendar")), "{text}");
+        }
+        for (text, conf) in [("booking desk, any new emails about the shoot?", "medium"), ("tell booking to check my email for the callback", "high"), ("booking desk check my inbox", "high"), ("hey booking agent, any emails?", "medium")] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("booking"), RouteKind::Named, conf), "{text}");
+        }
+        // Not a mail read: a mention still names the desk, as before.
+        let r = resolve("what did the booking desk say", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named));
     }
 
     #[test]

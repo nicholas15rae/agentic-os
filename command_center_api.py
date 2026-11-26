@@ -9,8 +9,9 @@ Everything here is local-first and standard-library only:
   * Files             Scanned receipts / invoices / checks / scripts on disk.
   * Local LLM         OpenAI-compatible endpoint (LM Studio by default) for
                       OCR via a vision model, brainstorm organizing, JSON gen.
-  * Vector vault      Local embeddings (LM Studio /embeddings) + lexical
-                      fallback, so search works even with no embedding model.
+  * Vector vault      Local embeddings (a CPU-only llama-server on :1237, never
+                      a GPU JIT load on LM Studio) + lexical fallback, so search
+                      works even with no embedding model.
   * Market proxy      Candles for the Day Trading companion chart (no broker).
   * Backups           Scheduled + on-demand zip of the db, files and configs.
 
@@ -54,6 +55,11 @@ DB_PATH = CC_DIR / "cc.db"
 CONFIG_PATH = CC_DIR / "config.json"
 
 DEFAULT_LLM_BASE_URL = "http://127.0.0.1:1235/v1"  # LM Studio (Bionic) on this machine; :1234 is closed
+# Vault embeddings go to a CPU-only llama-server (G:\ai-startup\start-ai-stack.ps1 step 1a) serving
+# the nomic GGUF Bionic bundles: 0 VRAM. On Bionic the same request JIT-loads nomic onto the GPU
+# (~300 MiB next to Tony's model, measured 2026-11-26).
+DEFAULT_EMBED_BASE_URL = "http://127.0.0.1:1237/v1"
+DEFAULT_EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
 
 
 def _valid_http_url(u: str) -> bool:
@@ -67,13 +73,22 @@ def _default_llm_base(env: Optional[dict] = None) -> str:
     return v if _valid_http_url(v) else DEFAULT_LLM_BASE_URL
 
 
+def _default_embed_base(env: Optional[dict] = None) -> str:
+    """`CC_EMBED_BASE_URL` overrides the CPU embedder's default (a saved config.json still wins)."""
+    v = ((env if env is not None else os.environ).get("CC_EMBED_BASE_URL") or "").strip()
+    return v if _valid_http_url(v) else DEFAULT_EMBED_BASE_URL
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     # Zero-cost local LLM for OCR, organizing, widget generation and embeddings.
     "llm": {
         "baseUrl": _default_llm_base(),
         "model": "",  # empty = the model LM Studio already has loaded (never JIT-loads a second one)
         "visionModel": "",  # e.g. a Qwen2.5-VL / LLaVA build loaded in LM Studio
-        "embeddingModel": "text-embedding-nomic-embed-text-v1.5",
+        "embeddingModel": DEFAULT_EMBED_MODEL,
+        # The CPU embedder (0 VRAM). "" = embed on baseUrl as before (the rollback; that path can
+        # JIT-load the embedding model onto the GPU next to Tony's).
+        "embeddingBaseUrl": _default_embed_base(),
         "timeoutSecs": 120,
     },
     "backup": {
@@ -310,9 +325,15 @@ def _pick_model(preferred: str, want: str = "chat") -> str:
 # thread defers, and every other llm_chat waits up to 30 s before going ahead anyway.
 # A flag without `until` goes stale 30 s after it was set; `until` is honoured for at most
 # 15 minutes, so a crashed desktop can never wedge the gateway.
+#
+# Maintenance window: a holder starting "maintenance" (the desktop's GpuSlot label for a model
+# unload / reload / bench / A-B compare; the Model Lab compare re-sends it every 30 s) means the
+# loaded model is being swapped or tested, so it is nobody's to use: llm_chat never goes ahead
+# during one (GpuMaintenance), and gateway Tony answers with his "testing a model" line.
 
 GPU_STALE_SECS = 30.0
 GPU_MAX_HOLD_SECS = 900.0
+GPU_MAINTENANCE_PREFIX = "maintenance"
 _gpu_lock = threading.Lock()
 _gpu: dict[str, Any] = {"busy": False, "holder": "", "until": None, "at": 0.0}
 
@@ -351,11 +372,29 @@ def gpu_busy(now: Optional[float] = None) -> bool:
         return bool(_gpu["busy"]) and now < gpu_expires_at(_gpu)
 
 
+def _is_maintenance(holder: Any) -> bool:
+    return str(holder or "").strip().lower().startswith(GPU_MAINTENANCE_PREFIX)
+
+
+def gpu_maintenance(now: Optional[float] = None) -> bool:
+    """The desktop holds the GPU for model maintenance (a live lease whose holder starts
+    "maintenance"): whatever is loaded now may be a model under test, not Tony's."""
+    now = time.time() if now is None else now
+    with _gpu_lock:
+        return bool(_gpu["busy"]) and now < gpu_expires_at(_gpu) and _is_maintenance(_gpu["holder"])
+
+
 def gpu_state(now: Optional[float] = None) -> dict:
     now = time.time() if now is None else now
     with _gpu_lock:
         s = dict(_gpu)
-    return {**s, "active": bool(s["busy"]) and now < gpu_expires_at(s), "expiresAt": gpu_expires_at(s) if s["busy"] else None}
+    active = bool(s["busy"]) and now < gpu_expires_at(s)
+    return {**s, "active": active, "maintenance": active and _is_maintenance(s["holder"]), "expiresAt": gpu_expires_at(s) if s["busy"] else None}
+
+
+class GpuMaintenance(RuntimeError):
+    """llm_chat during a maintenance window: the caller skips (or answers 503) instead of running
+    on a model that is being swapped or tested."""
 
 
 def wait_gpu(max_wait: Optional[float], poll: float = 0.5) -> bool:
@@ -388,9 +427,12 @@ def require_loopback(request: Any) -> None:
 def llm_chat(messages: list[dict], *, model: str = "", max_tokens: int = 1200, temperature: float = 0.2, gpu_wait: Optional[float] = GPU_STALE_SECS, think: bool = False) -> str:
     """One non-streaming chat completion. Reasoning is off unless `think=True`: a thinking model
     (Qwen3.5) otherwise spends 13-90 s and most of the token budget on hidden reasoning. Both flags
-    are sent: this server honours only "reasoning_effort": "none"; others read enable_thinking."""
+    are sent: this server honours only "reasoning_effort": "none"; others read enable_thinking.
+    Never during a maintenance window (whatever gpu_wait says): GpuMaintenance instead."""
     if gpu_wait:
         wait_gpu(gpu_wait)  # cooperative: let the desktop's generation finish first, then go ahead anyway
+    if gpu_maintenance():
+        raise GpuMaintenance("the desktop is testing or swapping models on the GPU; try again in a few minutes")
     cfg = load_config()["llm"]
     body = _chat_body(messages, _pick_model(model or cfg["model"]), max_tokens=max_tokens, temperature=temperature, think=think, stream=False)
     out = _http_json(f"{cfg['baseUrl'].rstrip('/')}/chat/completions", body, timeout=cfg.get("timeoutSecs", 120))
@@ -601,12 +643,82 @@ def extract_json(text: str) -> Optional[dict]:
     return None
 
 
+# A refused localhost connect costs ~2 s on Windows, so a down CPU embedder is remembered for
+# EMBED_DOWN_SECS instead of being re-probed by every vault write and search.
+EMBED_DOWN_SECS = 30.0
+EMBED_UP_SECS = 60.0
+_embedder_cache: dict[str, tuple[float, Optional[list[str]]]] = {}
+# llama-server's answer to an input longer than its batch (Bionic truncates such inputs itself).
+_EMBED_TOO_LARGE = re.compile(r"input \((\d+) tokens\) is too large.*?batch size: (\d+)", re.S)
+
+
+def _embedder_models(base: str) -> Optional[list[str]]:
+    """The model ids the CPU embedder at `base` serves (GET /models), or None while it is down
+    (an embedder that lists no model counts as down too)."""
+    now = time.time()
+    hit = _embedder_cache.get(base)
+    if hit and now - hit[0] < (EMBED_UP_SECS if hit[1] is not None else EMBED_DOWN_SECS):
+        return hit[1]
+    try:
+        ids: Optional[list[str]] = [m.get("id", "") for m in _http_json(f"{base}/models", timeout=4).get("data", [])] or None
+    except Exception:
+        ids = None
+    _embedder_cache[base] = (now, ids)
+    return ids
+
+
+def _embed_at(base: str, model: str, texts: list[str]) -> list[list[float]]:
+    out = _http_json(f"{base}/embeddings", {"model": model, "input": texts}, timeout=60)
+    return [d["embedding"] for d in sorted(out["data"], key=lambda d: d.get("index", 0))]
+
+
+def _embed_fit(base: str, model: str, texts: list[str]) -> list[list[float]]:
+    """_embed_at on llama-server, which refuses an input longer than its batch: cut the long texts
+    to fit (keeping their start, as Bionic's truncation does) and try again, twice at most."""
+    for attempt in range(3):
+        try:
+            return _embed_at(base, model, texts)
+        except urllib.error.HTTPError as e:
+            try:
+                why = e.read().decode("utf-8", "replace")
+            except Exception:
+                why = ""
+            m = _EMBED_TOO_LARGE.search(why)
+            if not m or attempt == 2:
+                raise
+            tokens, cap = int(m.group(1)), int(m.group(2))
+            keep = max(1, int(max(len(t) for t in texts) * cap * 0.9 / max(tokens, 1)))
+            texts = [t[:keep] for t in texts]
+    raise RuntimeError("unreachable")
+
+
 def embed(texts: list[str]) -> tuple[list[list[float]], str]:
+    """Vault embeddings. They go to the CPU embedder (`llm.embeddingBaseUrl`) when it serves the
+    configured model. While it is down, LM Studio is used only if that model is ALREADY loaded
+    there: an embedding request never JIT-loads a model onto the GPU next to Tony's (with "unload
+    previous JIT model" on, a JIT load could also swap out a JIT-loaded Tony). Otherwise this
+    raises and the vault stays lexical. An empty `embeddingBaseUrl` is the old path (LM Studio),
+    and so is a configured model the CPU embedder does not serve (Nic picked an LM Studio one)."""
     cfg = load_config()["llm"]
+    llm_base = cfg["baseUrl"].rstrip("/")
+    cpu_base = (cfg.get("embeddingBaseUrl") or "").strip().rstrip("/")
+    if cpu_base and cpu_base != llm_base:
+        served = _embedder_models(cpu_base)
+        model = cfg.get("embeddingModel") or (served[0] if served else DEFAULT_EMBED_MODEL)
+        if served is not None and model in served:
+            try:
+                return _embed_fit(cpu_base, model, texts), model
+            except urllib.error.HTTPError:
+                raise
+            except OSError:  # it went down since the last /models check
+                _embedder_cache[cpu_base] = (time.time(), None)
+                served = None
+        if served is None:
+            if any(m.get("id") == model for m in llm_loaded_models()):
+                return _embed_at(llm_base, model, texts), model
+            raise RuntimeError(f"CPU embedder {cpu_base} is down and {model} is not loaded in LM Studio (no GPU JIT load)")
     model = _pick_model(cfg.get("embeddingModel", ""), "embed")
-    out = _http_json(f"{cfg['baseUrl'].rstrip('/')}/embeddings", {"model": model, "input": texts}, timeout=60)
-    vecs = [d["embedding"] for d in sorted(out["data"], key=lambda d: d.get("index", 0))]
-    return vecs, model
+    return _embed_at(llm_base, model, texts), model
 
 
 # ── vector vault ─────────────────────────────────────────────────────────────
@@ -899,12 +1011,16 @@ def put_config(patch: dict):
     cfg = _deep_merge(load_config(), {k: v for k, v in patch.items() if k in DEFAULT_CONFIG})
     if not _valid_http_url(cfg["llm"]["baseUrl"]):
         raise HTTPException(400, "llm.baseUrl must be an http(s) URL")
+    eb = cfg["llm"].get("embeddingBaseUrl")
+    if eb is not None and (not isinstance(eb, str) or (eb.strip() and not _valid_http_url(eb.strip()))):
+        raise HTTPException(400, "llm.embeddingBaseUrl must be an http(s) URL, or empty for llm.baseUrl")
     b = cfg["backup"]
     b["intervalHours"] = max(1, min(24 * 30, float(b.get("intervalHours", 24))))
     b["keep"] = max(1, min(365, int(b.get("keep", 14))))
     save_config(cfg)
     _models_cache.clear()
     _loaded_cache.clear()
+    _embedder_cache.clear()
     return cfg
 
 

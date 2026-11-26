@@ -1,8 +1,10 @@
 import { cmd, isTauri, nativeRaw, onNativeEvent, type TtsUnpinEvent } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
-import { micLevel, voiceLevel } from "./voice-store";
+import { micLevel, useVoice, voiceLevel } from "./voice-store";
 import { SileroStream, preloadSilero } from "./silero";
-import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, thresholdFor } from "./vad-gate";
+import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, isQuietFrame, thresholdFor } from "./vad-gate";
+import { PARTIAL_QUIET_MS, PartialLoop, newCaptureId, partialMsFrom, replyStreaming, sttPartial, type SpeechTick } from "./stt-partials";
+import { PhoneSttStream, streamFinalMs, streamUrl } from "./stt-stream";
 import { MIC_LOCKED_MSG, MicLockedError, assertMicAllowed, captureClosed, captureOpened, micEnabled, publishMeter, registerCapture, unpublishMeter, type MeterSnapshot } from "./mic-gate";
 import { perSentenceOpts, sentences, stripForSpeech, synthArgs } from "./tts-text";
 import { contextIsDead } from "@/lib/audio-context";
@@ -50,7 +52,9 @@ export type { SpeakOpts, TtsEngine };
  * mute stops whatever is open at once (Phase 2 Part B).
  */
 export interface SttHandlers {
-  onPartial: (t: string) => void;
+  /** A live caption of what's been said so far (`stable`: the LocalAgreement-2 prefix that will
+   * not change; `t` = stable + the tentative rest). Whisper: only on a GPU STT, see stt-partials.ts. */
+  onPartial: (t: string, stable?: string) => void;
   onFinal: (t: string) => void;
   onError: (e: string) => void;
   /** Speech started/ended — lets the UI say "Listening…" vs "Transcribing…". */
@@ -65,6 +69,8 @@ export interface SttStartOpts {
   speakers?: boolean;
   endSilenceMs?: number;
   maxUtteranceMs?: number;
+  /** Live captions wanted right now (default yes); read per caption, so a listen can turn them on/off. */
+  partials?: () => boolean;
 }
 
 export interface SttEngine {
@@ -122,6 +128,12 @@ interface CaptureOpts {
   endSilenceMs?: number;
   /** Hard cap (ms) on one utterance, measured from speech start. Overrides `vad.maxUtteranceMs`; `Infinity` disables the cap. */
   maxUtteranceMs?: number;
+  /** Every frame while the VAD hears speech (live captions): speech so far, the quiet run, the audio. */
+  onSpeechTick?: (t: SpeechTick) => void;
+  /** The audio from the speech onset on, as it arrives (the phone's stream): the pre-roll chunks at
+   * the onset, then each frame up to and including the one that ends the utterance, i.e. exactly
+   * what `onUtteranceEnd` then hands over. */
+  onSpeechAudio?: (frames: Float32Array[], rate: number) => void;
 }
 
 const FRAME_SAMPLES = 1024;
@@ -208,6 +220,10 @@ export class MicCapture {
     let frames = 0;
     let speechAt = 0;
     let speechChunk = 0;
+    // Live hooks: chunks already handed to onSpeechAudio, frames of speech, the current quiet run.
+    let streamedTo = 0;
+    let speechFrames = 0;
+    let quietRunMs = 0;
 
     // Neural VAD: once its model is loaded, its latest probability is the gate's AND condition.
     const silero = opts.onUtteranceEnd ? new SileroStream(ac.sampleRate, () => undefined) : null;
@@ -253,8 +269,24 @@ export class MicCapture {
           this.speechStarted = true;
           this.speechChunkAt = speechChunk;
         }
+        streamedTo = speechChunk;
+        speechFrames = 0;
+        quietRunMs = 0;
         opts.onSpeechStart?.();
-      } else if (ev === "end") this.finish(ac.sampleRate, opts, speechChunk);
+      }
+      if (opts.onSpeechAudio && (gate.speaking || ev === "end") && streamedTo < this.chunks.length) {
+        opts.onSpeechAudio(this.chunks.slice(streamedTo), ac.sampleRate);
+        streamedTo = this.chunks.length;
+        if (this.done) return; // the hook stopped this capture
+      }
+      if (opts.onSpeechTick && gate.speaking) {
+        speechFrames++;
+        quietRunMs = isQuietFrame(levelDb, prob, thrDb) ? quietRunMs + frameMs : 0;
+        const from = speechChunk;
+        opts.onSpeechTick({ speechMs: speechFrames * frameMs, quietMs: quietRunMs, rate: ac.sampleRate, audio: () => this.audioFrom(from) });
+        if (this.done) return;
+      }
+      if (ev === "end") this.finish(ac.sampleRate, opts, speechChunk);
     };
 
     // Safety net if the audio thread stalls (device unplugged…): give up after the max utterance.
@@ -289,16 +321,21 @@ export class MicCapture {
     this.finish(ctx.sampleRate, { record: true, onUtteranceEnd }, this.speechChunkAt);
   }
 
-  private finish(rate: number, opts: CaptureOpts, fromChunk: number) {
-    this.done = true;
+  /** The captured audio from chunk `fromChunk` on, in one piece. */
+  private audioFrom(fromChunk: number): Float32Array {
     const chunks = this.chunks.slice(fromChunk);
-    const total = chunks.reduce((n, c) => n + c.length, 0);
-    const pcm = new Float32Array(total);
+    const pcm = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
     let o = 0;
     for (const c of chunks) {
       pcm.set(c, o);
       o += c.length;
     }
+    return pcm;
+  }
+
+  private finish(rate: number, opts: CaptureOpts, fromChunk: number) {
+    this.done = true;
+    const pcm = this.audioFrom(fromChunk);
     this.stop();
     // Never hand audio on once the line is dead (a mute in the same tick as the end of speech).
     if (micEnabled()) opts.onUtteranceEnd?.(pcm, rate);
@@ -420,6 +457,9 @@ export class WhisperStt implements SttEngine {
   readonly supported = isTauri();
   private mic = new MicCapture();
   private handlers: SttHandlers | null = null;
+  /** This capture's live captions (desktop) and its stream to the gateway (phone). */
+  private partials: PartialLoop | null = null;
+  private stream: PhoneSttStream | null = null;
 
   constructor() {
     // Load Silero now so the first utterance is already judged by the neural VAD.
@@ -429,6 +469,7 @@ export class WhisperStt implements SttEngine {
   start(h: SttHandlers, opts?: SttStartOpts) {
     // Locked off: never touch the mic (no getUserMedia, no Whisper request).
     if (!micEnabled()) return h.onError(MIC_LOCKED_MSG);
+    this.endLive();
     this.handlers = h;
     h.onPhase?.("waiting");
     const current = () => this.handlers === h;
@@ -443,8 +484,68 @@ export class WhisperStt implements SttEngine {
         onSpeechStart: () => current() && h.onPhase?.("speech"),
         onNoSpeech: () => current() && h.onFinal(""),
         onUtteranceEnd: (pcm, rate) => void this.transcribe(pcm, rate, h),
+        ...this.liveHooks(h, current, opts?.partials),
       })
       .catch((e) => current() && h.onError(e instanceof MicLockedError ? MIC_LOCKED_MSG : micErrorMessage(e)));
+  }
+
+  /**
+   * Live captions while you speak (`vad.partialMs`, 0 = off). Desktop: the clip so far through Rust
+   * `stt_partial` every partialMs. Phone: the audio streams to the gateway's WebSocket, which sends
+   * captions and, at the end, the final (the upload stays the fallback). Both pause while Tony's
+   * reply streams (his model has the GPU) and in a trailing pause (the final is near).
+   */
+  private liveHooks(h: SttHandlers, current: () => boolean, partials?: () => boolean): Pick<CaptureOpts, "onSpeechTick" | "onSpeechAudio"> {
+    const { vad, gatewayUrl } = useSettings.getState();
+    const everyMs = partialMsFrom(vad?.partialMs);
+    if (everyMs <= 0) return {};
+    const wanted = () => partials?.() ?? true;
+    const caption = (t: string, stable: string) => {
+      if (current() && micEnabled() && wanted()) h.onPartial(t, stable);
+    };
+    const pausedNow = () => !wanted() || replyStreaming(useVoice.getState());
+    if (isAndroidApp()) {
+      const url = streamUrl(gatewayUrl);
+      if (!url) return {};
+      let tried = false;
+      return {
+        onSpeechAudio: (frames, rate) => {
+          if (!current()) return;
+          if (!this.stream && !tried) {
+            tried = true; // one stream per capture: a broken one leaves the upload to do the work
+            this.stream = new PhoneSttStream({
+              url,
+              token: () => useSettings.getState().gatewayToken.trim(),
+              inRate: rate,
+              partials: !pausedNow(),
+              partialMs: everyMs,
+              onPartial: caption,
+            });
+          }
+          for (const f of frames) this.stream?.push(f);
+        },
+        onSpeechTick: (t) => current() && this.stream?.setPartials(t.quietMs <= PARTIAL_QUIET_MS && !pausedNow()),
+      };
+    }
+    const loop = new PartialLoop({
+      everyMs,
+      capture: newCaptureId(),
+      send: sttPartial,
+      encode: encodeWav16k,
+      onPartial: caption,
+      paused: pausedNow,
+      allowed: micEnabled,
+    });
+    this.partials = loop;
+    return { onSpeechTick: (t) => current() && loop.tick(t) };
+  }
+
+  /** No caption after this, and the phone's stream (if any) is dropped. */
+  private endLive() {
+    this.partials?.close();
+    this.partials = null;
+    this.stream?.abort();
+    this.stream = null;
   }
 
   /** Stop button: transcribe what we have instead of discarding it. */
@@ -454,6 +555,7 @@ export class WhisperStt implements SttEngine {
     // Stopped before the mic even opened: nothing was captured, so the listen simply ends empty.
     if (this.mic.starting) {
       this.mic.stop();
+      this.endLive();
       return h.onFinal("");
     }
     this.mic.flush((pcm, rate) => void this.transcribe(pcm, rate, h));
@@ -461,13 +563,34 @@ export class WhisperStt implements SttEngine {
 
   abort() {
     this.handlers = null;
+    this.endLive();
     this.mic.stop();
   }
 
   private async transcribe(pcm: Float32Array, rate: number, h: SttHandlers) {
     if (this.handlers !== h) return;
-    if (pcm.length < rate * 0.3 || !micEnabled()) return h.onFinal("");
+    // The final takes over: captions stop here (a late one would outlive the final's text).
+    this.partials?.close();
+    this.partials = null;
+    const stream = this.stream;
+    this.stream = null;
+    if (pcm.length < rate * 0.3 || !micEnabled()) {
+      stream?.abort();
+      return h.onFinal("");
+    }
     h.onPhase?.("transcribing");
+    if (stream) {
+      // Phone: the gateway already has the audio; its final is the same decode the upload gets.
+      try {
+        const text = await stream.finish(streamFinalMs(pcm.length / rate));
+        if (this.handlers === h) h.onFinal(micEnabled() ? text.trim() : "");
+        return;
+      } catch {
+        // No stream / an error / too slow: today's single upload below.
+        if (this.handlers !== h) return;
+        if (!micEnabled()) return h.onFinal("");
+      }
+    }
     const wav = encodeWav16k(pcm, rate);
     for (let attempt = 1; ; attempt++) {
       try {

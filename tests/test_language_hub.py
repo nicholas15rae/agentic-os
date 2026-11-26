@@ -15,9 +15,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "stt"))
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 import language_hub_api as lh  # noqa: E402
 
@@ -201,10 +203,12 @@ class LanguageHubApi(unittest.TestCase):
 
 
 class SlowWhisper:
-    """A stdlib stand-in for whisper-server: /v1/audio/transcriptions answers after `delay` s."""
+    """A stdlib stand-in for whisper-server: /v1/audio/transcriptions answers after `delay` s.
+    `bodies` keeps every request body; `status` lets it play a 503 (loading / no GPU)."""
 
-    def __init__(self, delay=0.0, reply=None):
-        self.delay, self.reply, self.hits = delay, reply or {"text": " Ciao a tutti ", "language": "it"}, 0
+    def __init__(self, delay=0.0, reply=None, status=200, headers=None):
+        self.delay, self.reply, self.hits, self.status, self.bodies = delay, reply or {"text": " Ciao a tutti ", "language": "it"}, 0, status, []
+        self.headers = headers or {}
         stub = self
 
         class H(BaseHTTPRequestHandler):
@@ -212,12 +216,14 @@ class SlowWhisper:
                 pass
 
             def do_POST(self):
-                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                stub.bodies.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
                 stub.hits += 1
                 time.sleep(stub.delay)
                 raw = json.dumps(stub.reply).encode()
-                self.send_response(200)
+                self.send_response(stub.status)
                 self.send_header("Content-Type", "application/json")
+                for k, v in stub.headers.items():
+                    self.send_header(k, v)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -302,7 +308,7 @@ class SttOffTheEventLoop(unittest.TestCase):
         self.assertGreaterEqual(total, 1.4)
         self.assertLess(ping_at, 1.0, "the event loop was blocked by the Whisper call")
         self.assertEqual(status, 200, data)
-        self.assertEqual(data, {"text": "Ciao a tutti", "language": "it", "engine": "whisper"})
+        self.assertEqual(data, {"text": "Ciao a tutti", "language": "it", "engine": "whisper", "backend": "whispercpp"})
 
     def test_sidecar_start_and_whisper_call_run_on_a_worker_thread(self):
         whisper = SlowWhisper(reply={"text": "[BLANK_AUDIO]"})
@@ -322,15 +328,523 @@ class SttOffTheEventLoop(unittest.TestCase):
         finally:
             whisper.close()
         self.assertEqual(status, 200, data)
-        self.assertEqual(data, {"text": "", "language": None, "engine": "whisper-multilingual"})
+        self.assertEqual(data, {"text": "", "language": None, "engine": "whisper-multilingual", "backend": "whispercpp"})
         self.assertNotEqual(seen["sidecar"], seen["loop"])
         self.assertEqual(whisper.hits, 1)
+        # Non-English keeps verbose_json (the detected language) and sends no English vocabulary prompt.
+        self.assertIn(b'name="response_format"\r\n\r\nverbose_json', whisper.bodies[0])
+        self.assertNotIn(b'name="prompt"', whisper.bodies[0])
 
     def test_whisper_errors_still_map_to_502(self):
         lh._stt_main = lambda: {"baseUrl": "http://127.0.0.1:1/v1"}
         r = TestClient(self.app).post("/api/cc/lang/stt?lang=en", content=b"x" * 2048)
         self.assertEqual(r.status_code, 502, r.text)
         self.assertIn("Whisper unavailable", r.json()["detail"])
+
+
+def closed_port() -> int:
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class EnglishStt(unittest.TestCase):
+    """The phone's English STT: plain json + the desktop's vocabulary prompt and echo guard;
+    faster-whisper :8177 first, whisper.cpp :8178 when it is down / not ready, re-spawn with backoff."""
+
+    def setUp(self):
+        self._saved = {k: getattr(lh, k) for k in ("_providers", "FW_PYTHON", "subprocess")}
+        self._fw = dict(lh._fw)
+        lh._fw.update(down_until=0.0, next_spawn=0.0, backoff=0.0, spawns=0)
+        self.servers, self.spawned = [], []
+
+        class FakePopen:
+            def __init__(fake, args, **kw):
+                self.spawned.append((args, kw))
+
+        class FakeSubprocess:
+            Popen = FakePopen
+            DEVNULL = -3
+
+        lh.subprocess = FakeSubprocess
+        lh.FW_PYTHON = Path(__file__)  # any existing file stands in for the venv python
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(lh, k, v)
+        lh._fw.clear()
+        lh._fw.update(self._fw)
+        for s in self.servers:
+            s.close()
+
+    def stub(self, **kw):
+        s = SlowWhisper(**kw)
+        self.servers.append(s)
+        return s
+
+    def config(self, fw_base, wc_base, policy="faster-whisper", stt_prompt=None):
+        fw = {"id": "faster-whisper", "label": "faster-whisper", "kind": "stt", "baseUrl": fw_base, "model": "large-v3-turbo", "needsKey": False, "engine": "fasterwhisper", "language": "en"}
+        if stt_prompt is not None:
+            fw["sttPrompt"] = stt_prompt
+        cfg = {"policy": {"stt": policy}, "providers": [
+            {"id": "whisper", "label": "Whisper STT", "kind": "stt", "baseUrl": wc_base, "model": "base.en", "needsKey": False, "engine": "whispercpp", "modelsDir": "G:\\whisper\\models"},
+            fw,
+        ]}
+        lh._providers = lambda: cfg
+
+    def test_prefers_faster_whisper_with_json_and_the_vocabulary_prompt(self):
+        fw, wc = self.stub(reply={"text": " Tony, cut it. "}), self.stub(reply={"text": "wrong"})
+        self.config(fw.base, wc.base)
+        out = lh._transcribe(b"x" * 2048, "en")
+        self.assertEqual(out, {"text": "Tony, cut it.", "language": "en", "engine": "whisper", "backend": "faster-whisper"})
+        self.assertEqual((fw.hits, wc.hits), (1, 0))
+        body = fw.bodies[0]
+        self.assertIn(b'name="response_format"\r\n\r\njson\r\n', body)
+        self.assertIn(b'name="model"\r\n\r\nlarge-v3-turbo\r\n', body)
+        self.assertIn(f'name="prompt"\r\n\r\n{lh.DEFAULT_STT_PROMPT}\r\n'.encode(), body)
+        self.assertNotIn(b"verbose_json", body)
+
+    def test_falls_back_to_whisper_cpp_on_503_without_respawning(self):
+        fw, wc = self.stub(status=503, reply={"error": {"type": "not_ready"}}), self.stub(reply={"text": "Play Bilmuri."})
+        self.config(fw.base, wc.base)
+        out = lh._transcribe(b"x" * 2048, "en")
+        self.assertEqual((out["text"], out["backend"]), ("Play Bilmuri.", "whispercpp"))
+        self.assertIn(b'name="model"\r\n\r\nbase.en\r\n', wc.bodies[0])
+        self.assertIn(b'name="response_format"\r\n\r\njson\r\n', wc.bodies[0])
+        self.assertEqual(self.spawned, [])
+        # Marked down: the next turn goes straight to whisper.cpp (no 503 round trip).
+        lh._transcribe(b"x" * 2048, "en")
+        self.assertEqual((fw.hits, wc.hits), (1, 2))
+
+    def test_dead_server_is_respawned_once_per_backoff_window(self):
+        wc = self.stub(reply={"text": "Cut it."})
+        port = closed_port()
+        self.config(f"http://127.0.0.1:{port}/v1", wc.base)
+        t0 = time.monotonic()
+        self.assertEqual(lh._transcribe(b"x" * 2048, "en")["backend"], "whispercpp")
+        # A refused localhost connect costs ~2 s on Windows; the port check keeps the fallback quick.
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(len(self.spawned), 1)
+        args, kw = self.spawned[0]
+        self.assertEqual(args[1:], [str(lh.FW_SCRIPT), "--port", str(port), "--model", "large-v3-turbo"])
+        self.assertTrue(kw["creationflags"] & 0x8, "detached, so it outlives the gateway")
+        for _ in range(3):
+            lh._transcribe(b"x" * 2048, "en")
+            lh._fw["down_until"] = 0.0  # force the retry path too
+        self.assertEqual(len(self.spawned), 1, "re-spawned inside the backoff window")
+        self.assertEqual(lh._fw["backoff"], lh.FW_BACKOFF[0])
+        lh._fw["next_spawn"] = 0.0  # window over: the next failure spawns again, with a longer backoff
+        lh._transcribe(b"x" * 2048, "en")
+        self.assertEqual((len(self.spawned), lh._fw["backoff"]), (2, lh.FW_BACKOFF[0] * 2))
+        self.assertEqual(wc.hits, 5)
+
+    def test_a_turn_fw_server_forwarded_to_whisper_cpp_is_labelled_so(self):
+        # :8177 up without a GPU model answers through its own whisper.cpp fallback: one round trip.
+        fw, wc = self.stub(reply={"text": "Cut it."}, headers={"X-STT-Backend": "whispercpp", "X-Fallback-Reason": "not_ready"}), self.stub()
+        self.config(fw.base, wc.base)
+        out = lh._transcribe(b"x" * 2048, "en")
+        self.assertEqual(out, {"text": "Cut it.", "language": "en", "engine": "whisper", "backend": "whispercpp"})
+        self.assertEqual((fw.hits, wc.hits), (1, 0))
+        self.assertEqual(self.spawned, [])
+
+    def test_success_resets_the_backoff(self):
+        fw, wc = self.stub(reply={"text": "Whoa."}), self.stub()
+        self.config(fw.base, wc.base)
+        lh._fw.update(backoff=120.0, next_spawn=time.time() + 100)
+        lh._transcribe(b"x" * 2048, "en")
+        self.assertEqual((lh._fw["backoff"], lh._fw["next_spawn"]), (0.0, 0.0))
+
+    def test_whisper_cpp_policy_keeps_one_endpoint(self):
+        wc = self.stub(reply={"text": "Take it easy."})
+        self.config("http://127.0.0.1:1/v1", wc.base, policy="whisper")
+        self.assertEqual(lh._transcribe(b"x" * 2048, "en")["backend"], "whispercpp")
+        self.assertEqual(self.spawned, [])
+
+    def test_prompt_echo_and_junk_are_dropped(self):
+        fw, wc = self.stub(reply={"text": "Tony, Gabagool mode. Take it easy. Cut it. Whoa."}), self.stub()
+        self.config(fw.base, wc.base)
+        self.assertEqual(lh._transcribe(b"x" * 2048, "en")["text"], "")
+        fw.reply = {"text": "[BLANK_AUDIO]"}
+        self.assertEqual(lh._transcribe(b"x" * 2048, "en")["text"], "")
+
+    def test_provider_prompt_override_and_blank_prompt(self):
+        fw, wc = self.stub(reply={"text": "ok"}), self.stub()
+        self.config(fw.base, wc.base, stt_prompt="  ")
+        lh._transcribe(b"x" * 2048, "en")
+        self.assertNotIn(b'name="prompt"', fw.bodies[-1])
+        self.config(fw.base, wc.base, stt_prompt=" Custom words. ")
+        lh._transcribe(b"x" * 2048, "en")
+        self.assertIn(b'name="prompt"\r\n\r\nCustom words.\r\n', fw.bodies[-1])
+
+
+def pcm16(seconds: float) -> bytes:
+    """Raw PCM16 16 kHz mono (a 220 Hz tone), what the phone streams."""
+    import numpy as np
+
+    n = int(seconds * 16000)
+    return (np.sin(np.arange(n) * 2 * np.pi * 220 / 16000) * 0.1 * 32767).astype("<i2").tobytes()
+
+
+class FwStub:
+    """fw_server over plain HTTP, like the live :8177 whose venv has no `websockets` package:
+    /v1/stream answers the upgrade with 404. `text(seconds, partial)` makes each reply."""
+
+    def __init__(self, text=None, device="cuda", final_status=200):
+        self.text = text or (lambda secs, partial: "Tony, cut it.")
+        self.device, self.final_status, self.bodies, self.gets = device, final_status, [], []
+        stub = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"  # like uvicorn, so the WebSocket client reads the 404 as a status
+
+            def log_message(self, *a):
+                pass
+
+            def reply(self, code, obj):
+                raw = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                stub.gets.append(self.path)
+                if self.path == "/health":
+                    return self.reply(200, {"ready": True, "device": stub.device})
+                self.reply(404, {"detail": "Not Found"})
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                stub.bodies.append(body)
+                partial = b'name="partial"\r\n\r\n1\r\n' in body
+                wav = body.split(b"Content-Type: audio/wav\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0]
+                if not partial and stub.final_status != 200:
+                    return self.reply(stub.final_status, {"error": {"type": "not_ready"}})
+                self.reply(200, {"text": stub.text((len(wav) - 44) / 32000, partial)})
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}/v1"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def finals(self):
+        return [b for b in self.bodies if b'name="partial"' not in b]
+
+    def partials(self):
+        return [b for b in self.bodies if b'name="partial"\r\n\r\n1\r\n' in b]
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def growing(secs, partial):
+    if not partial:
+        return "Tony, cut it."
+    return "Tony" if secs < 0.9 else "Tony cut" if secs < 1.5 else "Tony, cut it"
+
+
+class SttStream(unittest.TestCase):
+    """WebSocket /api/cc/lang/stt/stream: the phone streams PCM while you speak, sees partials,
+    and gets the final without uploading the clip at the end."""
+
+    def setUp(self):
+        self._saved = {k: getattr(lh, k) for k in ("_providers", "FW_PYTHON", "subprocess", "GATEWAY_TOKEN_FILE", "STREAM_MAX_BYTES")}
+        self._fw, self._st = dict(lh._fw), dict(lh._stream_state)
+        lh._fw.update(down_until=0.0, next_spawn=0.0, backoff=0.0, spawns=0)
+        lh._stream_state.update(no_ws_until=0.0, health=(0.0, "", False))
+        self.tmp = Path(tempfile.mkdtemp(prefix="lang-stream-"))
+        lh.GATEWAY_TOKEN_FILE = self.tmp / "gateway.token"  # absent = network lock off
+        self.servers = []
+
+        class FakeSubprocess:  # a down :8177 is re-spawned by the upload path; never for real here
+            DEVNULL = -3
+
+            @staticmethod
+            def Popen(*a, **kw):
+                return None
+
+        lh.subprocess = FakeSubprocess
+        lh.FW_PYTHON = Path(__file__)
+        self.app = FastAPI()
+        self.app.include_router(lh.router)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(lh, k, v)
+        lh._fw.clear()
+        lh._fw.update(self._fw)
+        lh._stream_state.clear()
+        lh._stream_state.update(self._st)
+        for s in self.servers:
+            s.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def fw(self, **kw):
+        s = FwStub(**kw)
+        self.servers.append(s)
+        return s
+
+    def config(self, fw_base, wc_base="http://127.0.0.1:1/v1", policy="faster-whisper"):
+        cfg = {"policy": {"stt": policy}, "providers": [
+            {"id": "whisper", "kind": "stt", "baseUrl": wc_base, "model": "base.en", "needsKey": False, "engine": "whispercpp"},
+            {"id": "faster-whisper", "kind": "stt", "baseUrl": fw_base, "model": "large-v3-turbo", "needsKey": False, "engine": "fasterwhisper", "language": "en"},
+        ]}
+        lh._providers = lambda: cfg
+
+    def client(self, host="127.0.0.1", **kw):
+        return TestClient(self.app, client=(host, 50000), **kw)
+
+    @staticmethod
+    def begin(ws, **start):
+        ws.send_text(json.dumps({"type": "start", "lang": "en", "partials": True, "partial_ms": 600, **start}))
+        return ws.receive_json()
+
+    def test_http_mode_streams_partials_and_answers_with_the_upload_paths_final(self):
+        fw = self.fw(text=growing)
+        self.config(fw.base)
+        with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws), {"type": "ready", "partials": True, "mode": "http"})
+            got = []
+            for _ in range(3):
+                ws.send_bytes(pcm16(0.6))
+                got.append(ws.receive_json())
+            ws.send_text(json.dumps({"type": "end"}))
+            final = ws.receive_json()
+            with self.assertRaises(WebSocketDisconnect) as closed:
+                ws.receive_json()
+        self.assertEqual(closed.exception.code, 1000)
+        self.assertEqual([(g["partial"], g["stable"]) for g in got], [("Tony", ""), ("Tony cut", "Tony"), ("Tony cut it", "Tony cut")])
+        self.assertEqual(final, {"type": "final", "final": "Tony, cut it.", "backend": "faster-whisper", "mode": "http"})
+        self.assertIn("/v1/stream", fw.gets)  # it knocked first, got a 404, and remembers it
+        self.assertGreater(lh._stream_state["no_ws_until"], time.time())
+        for b in fw.partials():
+            self.assertIn(f'name="prompt"\r\n\r\n{lh.DEFAULT_STT_PROMPT}\r\n'.encode(), b)
+            self.assertIn(b'name="session"\r\n\r\ngw-', b)
+        (body,) = fw.finals()
+        # The final is the upload path's own request: json + the vocabulary prompt, the whole clip.
+        self.assertIn(b'name="response_format"\r\n\r\njson\r\n', body)
+        self.assertIn(f'name="prompt"\r\n\r\n{lh.DEFAULT_STT_PROMPT}\r\n'.encode(), body)
+        self.assertIn(lh._pcm_wav(pcm16(0.6) * 3), body)
+
+    def test_relay_mode_uses_fw_servers_own_websocket(self):
+        import fw_server as fws
+        import uvicorn
+
+        models = self.tmp / "models"
+        (models / "faster-whisper-large-v3-turbo").mkdir(parents=True)
+        (models / "faster-whisper-large-v3-turbo" / "model.bin").write_bytes(b"x")
+        calls = []
+
+        class Backend:
+            def transcribe(self, audio, opts):
+                calls.append(opts)
+                text = growing(audio.size / 16000, opts.partial) if opts.initial_prompt else "warm"
+                return {"text": text, "segments": [{"no_speech_prob": 0.0, "avg_logprob": -0.1}], "language": "en"}
+
+        worker = fws.Worker(lambda p, d, c: Backend(), models, gpu=lambda: (8400, 3700), retry_backoff=(0.0, 0.0))
+        self.addCleanup(worker.stop)
+        self.assertTrue(worker.load("large-v3-turbo", "cuda", "int8_float16").result(5)["ready"])
+        sock = fws.bind_exclusive("127.0.0.1", 0)
+        server = uvicorn.Server(uvicorn.Config(fws.create_app(worker), log_level="warning", lifespan="off"))
+        t = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+        t.start()
+
+        def stop():
+            server.should_exit = True
+            t.join(10)
+            sock.close()
+
+        self.addCleanup(stop)
+        for _ in range(200):
+            if server.started:
+                break
+            time.sleep(0.02)
+        self.config(f"http://127.0.0.1:{sock.getsockname()[1]}/v1")
+        with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws), {"type": "ready", "partials": True, "mode": "relay"})
+            got = []
+            for _ in range(2):
+                ws.send_bytes(pcm16(0.6))
+                got.append(ws.receive_json())
+            ws.send_text(json.dumps({"type": "end"}))
+            final = ws.receive_json()
+        self.assertEqual([(g["partial"], g["stable"]) for g in got], [("Tony", ""), ("Tony cut", "Tony")])
+        self.assertEqual(final, {"type": "final", "final": "Tony, cut it.", "backend": "faster-whisper", "mode": "relay"})
+        real = [o for o in calls if o.initial_prompt]
+        self.assertEqual([o.partial for o in real], [True, True, False])
+        self.assertEqual({o.initial_prompt for o in real}, {lh.DEFAULT_STT_PROMPT})
+
+    def test_a_failed_final_goes_down_the_upload_chain_to_whisper_cpp(self):
+        fw, wc = self.fw(final_status=503), SlowWhisper(reply={"text": "Play Bilmuri."})
+        self.servers.append(wc)
+        self.config(fw.base, wc.base)
+        with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.begin(ws, partials=False)
+            ws.send_bytes(pcm16(1.0))
+            ws.send_text(json.dumps({"type": "end"}))
+            final = ws.receive_json()
+        self.assertEqual((final["final"], final["backend"]), ("Play Bilmuri.", "whispercpp"))
+        self.assertEqual(fw.partials(), [])
+        self.assertIn(lh._pcm_wav(pcm16(1.0)), wc.bodies[0])
+
+    def test_no_stream_without_faster_whisper_up(self):
+        # whisper.cpp policy, or :8177 closed: the phone uploads (that path knows the fallbacks).
+        for base, policy in (("http://127.0.0.1:1/v1", "whisper"), (f"http://127.0.0.1:{closed_port()}/v1", "faster-whisper")):
+            self.config(base, policy=policy)
+            with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+                self.assertEqual(self.begin(ws), {"type": "error", "error": "unavailable"})
+                with self.assertRaises(WebSocketDisconnect) as closed:
+                    ws.receive_json()
+            self.assertEqual(closed.exception.code, 1013)
+
+    def test_partials_only_on_the_gpu_and_never_a_read_back_prompt(self):
+        fw = self.fw(device="cpu-unavailable")
+        self.config(fw.base)
+        with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws)["partials"], False)
+            ws.send_bytes(pcm16(1.5))
+            ws.send_text(json.dumps({"type": "end"}))
+            self.assertEqual(ws.receive_json()["type"], "final")
+        self.assertEqual(fw.partials(), [])
+        lh._stream_state["health"] = (0.0, "", False)
+        echo = self.fw(text=lambda s, p: "Tony, Gabagool mode. Take it easy. Cut it. Whoa." if p else "Cut it.")
+        self.config(echo.base)
+        with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.begin(ws)
+            ws.send_bytes(pcm16(0.6))
+            self.wait_for(lambda: len(echo.partials()) == 1)
+            ws.send_text(json.dumps({"type": "end"}))
+            self.assertEqual(ws.receive_json(), {"type": "final", "final": "Cut it.", "backend": "faster-whisper", "mode": "http"})
+
+    def test_partials_pause_and_resume(self):
+        fw = self.fw(text=growing)
+        self.config(fw.base)
+        with self.client().websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws, partials=False)["partials"], False)  # Tony was still streaming
+            ws.send_bytes(pcm16(0.6))
+            ws.send_text(json.dumps({"type": "config", "partials": True}))
+            ws.send_bytes(pcm16(0.6))
+            self.assertEqual(ws.receive_json()["partial"], "Tony cut")
+            ws.send_text(json.dumps({"type": "end"}))
+            self.assertEqual(ws.receive_json()["type"], "final")
+        self.assertEqual(len(fw.partials()), 1)
+
+    def wait_for(self, cond, timeout=5.0):
+        t0 = time.monotonic()
+        while not cond():
+            self.assertLess(time.monotonic() - t0, timeout, "timed out")
+            time.sleep(0.01)
+
+    def test_network_lock_token_mesh_and_origin_rules(self):
+        fw = self.fw()
+        self.config(fw.base)
+        # The phone over NetBird with the lock off: allowed.
+        with self.client("100.84.1.7").websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws)["type"], "ready")
+        lh.GATEWAY_TOKEN_FILE.write_text("s3cret-token\n", encoding="utf-8")
+        for start in ({}, {"token": "wrong"}, {"token": 7}):
+            with self.client("100.84.1.7").websocket_connect("/api/cc/lang/stt/stream") as ws:
+                self.assertEqual(self.begin(ws, **start)["error"], "Gateway token required (network lock is on).")
+                with self.assertRaises(WebSocketDisconnect) as closed:
+                    ws.receive_json()
+            self.assertEqual(closed.exception.code, 4401)
+        with self.client("100.84.1.7").websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws, token="s3cret-token")["type"], "ready")
+        with self.client("100.84.1.7").websocket_connect("/api/cc/lang/stt/stream", headers={"authorization": "Bearer s3cret-token"}) as ws:
+            self.assertEqual(self.begin(ws)["type"], "ready")
+        # The desktop needs no token; a LAN peer, a tunnel and a web page in the desktop's browser are refused.
+        with self.client().websocket_connect("/api/cc/lang/stt/stream", headers={"origin": "http://tauri.localhost"}) as ws:
+            self.assertEqual(self.begin(ws)["type"], "ready")
+        for host, headers in (("192.168.1.20", {}), ("127.0.0.1", {"x-forwarded-for": "1.2.3.4"}), ("127.0.0.1", {"origin": "https://evil.example"})):
+            with self.assertRaises(WebSocketDisconnect, msg=f"{host} {headers}"):
+                with self.client(host).websocket_connect("/api/cc/lang/stt/stream", headers=headers) as ws:
+                    ws.receive_json()
+
+    def test_bad_messages_and_payload_caps(self):
+        fw = self.fw()
+        self.config(fw.base)
+        c = self.client()
+        with c.websocket_connect("/api/cc/lang/stt/stream") as ws:
+            ws.send_bytes(pcm16(0.1))
+            self.assertEqual(ws.receive_json()["error"], "expected a start message")
+        with c.websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws, lang="it")["error"], "only English streams")
+        with c.websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.begin(ws)
+            ws.send_bytes(b"\x01\x02\x03")
+            self.assertEqual(ws.receive_json()["error"], "audio too long or not PCM16")
+        lh.STREAM_MAX_BYTES = 32000
+        with c.websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.begin(ws, partials=False)
+            ws.send_bytes(pcm16(0.6))
+            ws.send_bytes(pcm16(0.6))
+            self.assertEqual(ws.receive_json()["error"], "audio too long or not PCM16")
+        with c.websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.begin(ws, partials=False)
+            ws.send_text(json.dumps({"type": "cancel"}))
+            with self.assertRaises(WebSocketDisconnect):
+                ws.receive_json()
+        self.assertEqual(fw.finals(), [])
+
+    def test_the_full_gateway_serves_it_with_this_routes_own_auth(self):
+        # server.app's BaseHTTPMiddleware layers (ZeroTrust, StepUp) never see a WebSocket and CORS
+        # passes it through, so the route's own checks are what guard it there.
+        import server
+
+        fw = self.fw()
+        self.config(fw.base)
+        lh.GATEWAY_TOKEN_FILE.write_text("s3cret-token", encoding="utf-8")
+        phone = TestClient(server.app, client=("100.84.1.7", 50000))
+        with phone.websocket_connect("/api/cc/lang/stt/stream", headers={"origin": "http://tauri.localhost"}) as ws:
+            self.assertEqual(self.begin(ws, token="s3cret-token")["type"], "ready")
+            ws.send_bytes(pcm16(1.0))
+            ws.send_text(json.dumps({"type": "end"}))
+            self.assertEqual(ws.receive_json()["final"], "Tony, cut it.")
+        with phone.websocket_connect("/api/cc/lang/stt/stream") as ws:
+            self.assertEqual(self.begin(ws, token="nope")["type"], "error")
+        with self.assertRaises(WebSocketDisconnect):
+            with TestClient(server.app, client=("192.168.1.20", 50000)).websocket_connect("/api/cc/lang/stt/stream") as ws:
+                ws.receive_json()
+
+    def test_local_agreement_matches_fw_server(self):
+        import fw_server as fws
+
+        seq = ("Play", "Play Bill", "Play Bilmuri on", "play, Bilmuri on Spotify.", "Pay Bilmuri on Spotify now", "")
+        a, b = lh.LocalAgreement(), fws.LocalAgreement()
+        for s in seq:
+            self.assertEqual(a.push(s), b.push(s), s)
+
+
+class EchoGuardParity(unittest.TestCase):
+    """The same cases as voice.rs stt_prompt_tests: the phone and the desktop drop the same lines."""
+
+    P = lh.DEFAULT_STT_PROMPT
+
+    def test_prompt_echo_is_dropped(self):
+        for echo in ("Tony, Gabagool mode. Take it easy.", "prompter designer coder booking desk", "WhatsApp, Gmail, Spotify, Tauri",
+                     "uh BOOKING-DESK, librarian and ops!", "Tony, Gabagool mode. Take it easy. Cut it. Whoa."):
+            self.assertTrue(lh.echoes_prompt(echo, self.P), echo)
+
+    def test_real_lines_pass(self):
+        for ok in ("Cut it.", "cut it", "Take it easy.", "take it easy", "Take it ease.", "take it ease", "Whoa.", "madone", "aspetta", "Tony, cut it",
+                   "play Bilmuri on Spotify", "check my Gmail", "tell the Booking Desk to check WhatsApp", "take it easy on the bass",
+                   "Hey, take it easy", "Tony, take it easy", "Hey Tony, take it easy man", "hey take it easy", "Spotify Gmail WhatsApp Tauri",
+                   "Take it easy, cut it.", "take it easy cut it", "Hey Tony, take it easy, cut it", "Cut it, take it easy.",
+                   "I want a landing page with a hero, a pricing table and a signup form, and then loop in the booking desk, librarian and ops "
+                   "so they know it's coming. Make the colors warm."):
+            self.assertFalse(lh.echoes_prompt(ok, self.P), ok)
+        self.assertFalse(lh.echoes_prompt("take it ease cut it", "cut it"))
+
+    def test_effective_prompt(self):
+        self.assertEqual(lh.effective_stt_prompt({}), self.P)
+        self.assertIsNone(lh.effective_stt_prompt({"sttPrompt": "   "}))
+        self.assertEqual(lh.effective_stt_prompt({"sttPrompt": " Custom words. "}), "Custom words.")
 
 
 if __name__ == "__main__":

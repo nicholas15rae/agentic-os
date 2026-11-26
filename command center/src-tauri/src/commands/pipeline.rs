@@ -482,6 +482,9 @@ pub(crate) enum InboxAction {
     Turn,
     Command,
     PlayPlace,
+    /// The phone's approved confirmation card (`kind: action`): one carded tool, run through the
+    /// same approved-only path as the desktop card (`run_approved_action`). Never a gateway agent.
+    Action,
     /// A Capture that arrived under Solo mode: parked in the Ideas Ledger, not queued.
     SoloPark(String),
     Unknown,
@@ -514,6 +517,7 @@ pub(crate) fn inbox_action(queue_id: &str, kind: Option<&str>, p: &Value) -> Inb
         },
         Some("command") => InboxAction::Command,
         Some("playplace") => InboxAction::PlayPlace,
+        Some("action") => InboxAction::Action,
         _ => InboxAction::Unknown,
     }
 }
@@ -599,6 +603,10 @@ async fn run_inbox_item(app: &AppHandle, id: &str, kind: Option<&str>, p: &Value
                     super::modes::notify_changed(app);
                     out["mode"] = json!({ "id": e.mode_id, "name": e.name, "overridden": e.overridden });
                 }
+                // Decision 5: the phone's card answers Tony's pending core-memory proposal.
+                if let Some(m) = super::agents::memory_inbox_command(app, &st, &os, p) {
+                    out["memory"] = m?;
+                }
                 Ok(out)
             })
         }
@@ -628,8 +636,57 @@ async fn run_inbox_item(app: &AppHandle, id: &str, kind: Option<&str>, p: &Value
                 _ => Err("playplace action must be approve, iterate or commit".into()),
             }
         }
+        InboxAction::Action => {
+            let bridge = app.state::<BridgeState>();
+            run_approved_action(&st, &os, &bridge, p).await
+        }
         InboxAction::Unknown => Err("unknown queue item".into()),
     }
+}
+
+/// The tools a phone card may approve through the inbox (os_api.py `_ACTION_TOOLS`).
+pub(crate) const APPROVED_ACTION_TOOLS: [&str; 2] = [super::calendar::CREATE, "gmail.create_draft"];
+
+/// A phone `action` payload `{tool, args, planId, approvedAt}` → (tool, args), re-validated here
+/// (the gateway checked it too): an allowlisted tool, an args object, an approval stamp. Pure.
+pub(crate) fn approved_action(p: &Value) -> Result<(&'static str, Value), String> {
+    let tool = p["tool"].as_str().unwrap_or("");
+    let tool = APPROVED_ACTION_TOOLS.iter().copied().find(|t| *t == tool).ok_or("that action can't be approved from the phone")?;
+    if !p["approvedAt"].as_str().is_some_and(|a| !a.trim().is_empty()) {
+        return Err("the action wasn't approved on the card".into());
+    }
+    let args = p["args"].clone();
+    if !args.is_object() {
+        return Err("the approved action has no arguments".into());
+    }
+    Ok((tool, args))
+}
+
+/// The IPC gate's hard-lock rule for the phone's approved card (`security::gate::decide_with`):
+/// while the remote failsafe holds the app nothing the phone approved runs, exactly as the desktop
+/// card's `gcal_create_event` / `gmail_create_draft` get `HARD_LOCKED`. An idle / manual LOCK of the
+/// desktop session doesn't refuse it: that lock guards the desktop's own screen, and the phone's
+/// card (behind the gateway token) is the approval, like every other phone inbox item. Pure.
+pub(crate) fn approved_action_lock(hard_locked: bool) -> Result<(), String> {
+    if hard_locked {
+        return Err("HARD_LOCKED: the remote failsafe locked this app; nothing was done. Release it with `gabagool-cli clear-lock`".into());
+    }
+    Ok(())
+}
+
+/// Run the phone's approved card: the calendar add or Gmail draft through its approved-only path
+/// (hard lock, permission gate, kill switch, switched-on check, no content logged), answered as
+/// `answer`.
+async fn run_approved_action(st: &DispatchState, os: &OsState, bridge: &BridgeState, p: &Value) -> Result<Value, String> {
+    approved_action_lock(crate::security::commands::hard_locked())?;
+    let (tool, args) = approved_action(p)?;
+    let s = |k: &str| args[k].as_str().unwrap_or("").to_string();
+    let answer = if tool == super::calendar::CREATE {
+        super::calendar::create_event_approved(st, os, bridge, &args, true, "phone").await?
+    } else {
+        super::gmail::create_draft_approved(st, os, bridge, s("to"), s("subject"), s("body"), true).await?
+    };
+    Ok(json!({ "answer": answer, "tool": tool }))
 }
 
 /// Claim and run what the phone HUD queued on the gateway (Tony turns, builds, Play Place
@@ -2294,8 +2351,38 @@ mod tests {
         assert_eq!(inbox_action("q6", Some("turn"), &json!({ "text": "hi", "noDelegate": true })), InboxAction::Turn);
         assert_eq!(inbox_action("q7", Some("playplace"), &json!({})), InboxAction::PlayPlace);
         assert_eq!(inbox_action("q8", Some("nope"), &json!({})), InboxAction::Unknown);
+        assert_eq!(inbox_action("q9", Some("action"), &json!({ "tool": "calendar.create_event" })), InboxAction::Action);
         assert_eq!(claim_lease(Some("playplace")), 900);
         assert_eq!(claim_lease(Some("task")), 120);
+    }
+
+    /// The phone's approved card: only the two carded tools, with an approval stamp and an args
+    /// object; anything else is refused before any tool runs.
+    #[test]
+    fn approved_actions_are_allowlisted_and_stamped() {
+        let ok = approved_action(&json!({ "tool": "calendar.create_event", "args": { "title": "Shoot" }, "planId": "p1", "approvedAt": "2026-11-26T15:00:00Z" })).unwrap();
+        assert_eq!(ok, ("calendar.create_event", json!({ "title": "Shoot" })));
+        assert_eq!(approved_action(&json!({ "tool": "gmail.create_draft", "args": {}, "approvedAt": "x" })).unwrap().0, "gmail.create_draft");
+        for bad in [
+            json!({ "tool": "gmail.send", "args": {}, "approvedAt": "x" }),
+            json!({ "tool": "whatsapp.send_message", "args": {}, "approvedAt": "x" }),
+            json!({ "tool": "calendar.create_event", "args": {} }),
+            json!({ "tool": "calendar.create_event", "args": {}, "approvedAt": " " }),
+            json!({ "tool": "calendar.create_event", "args": "title", "approvedAt": "x" }),
+        ] {
+            assert!(approved_action(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// The remote failsafe stops the phone's approved card too (the desktop card gets HARD_LOCKED
+    /// from the IPC gate); an unlocked app lets it through to the approved-only path.
+    #[test]
+    fn a_hard_lock_refuses_the_phones_approved_action() {
+        let e = approved_action_lock(true).unwrap_err();
+        assert!(e.starts_with("HARD_LOCKED") && e.contains("nothing was done"), "{e}");
+        assert!(approved_action_lock(false).is_ok());
+        // The live check reads the same runtime flag the background workers honour.
+        assert_eq!(approved_action_lock(crate::security::commands::hard_locked()).is_ok(), !crate::security::commands::hard_locked());
     }
 
     /// The inbox's task path is a synchronous insert: it returns with the task `queued` and

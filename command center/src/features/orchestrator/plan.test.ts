@@ -116,6 +116,82 @@ describe("heuristicPlan — an approved-action card only for a live tool its age
   });
 });
 
+describe("heuristicPlan — the calendar-add card (A2)", () => {
+  const NOW = new Date(2026, 10, 26, 10, 0, 0);
+  const NETFLIX = { threadId: "t1", subject: "CONFIRMED: Netflix day player", from: "Sam Agent <sam@agency.ca>", date: "2026-11-28", time: "06:30", location: "Pinewood Studios" };
+
+  it("is a mutating calendar.create_event plan for Tony, fields from the booking scan, gaps on the card", () => {
+    desktop();
+    const p = heuristicPlan("Hey Tony, add it to my calendar", "ops", { bookings: [NETFLIX], now: NOW });
+    expect(p.mutating).toBe(true);
+    expect(p.role).toBe("general");
+    expect(p.target).toEqual({ kind: "tool", tool: "calendar.create_event", args: expect.objectContaining({ title: "CONFIRMED: Netflix day player", date: "2026-11-28", startTime: "06:30", location: "Pinewood Studios" }) });
+    expect(p.missing).toEqual(["end time"]);
+    expect(p.summary).toBe('Add "CONFIRMED: Netflix day player" to Google Calendar: Sat Nov 28, 6:30 AM');
+    expect(p.readBack).toBe('Got it — adding "CONFIRMED: Netflix day player" to your Google Calendar on Sat Nov 28, 6:30 AM, for an hour. No invites go out. I don\'t have the end time. Proceed?');
+    expect(p.source).toEqual({ subject: NETFLIX.subject, from: NETFLIX.from, date: "2026-11-28", time: "06:30", location: "Pinewood Studios" });
+    expect(p.run).toBeUndefined();
+  });
+
+  it("never a gateway agent: no scan or no date is Tony's question, the PWA says use the app", async () => {
+    desktop();
+    const ask = heuristicPlan("add it to my calendar", "general", { bookings: [], now: NOW });
+    expect(ask.mutating).toBe(false);
+    expect((await ask.run!()).text).toMatch(/What should I put on your calendar\?/);
+    vi.unstubAllGlobals();
+    const pwa = heuristicPlan("add it to my calendar", "general", { bookings: [NETFLIX], now: NOW });
+    expect(pwa.mutating).toBe(false);
+    expect((await pwa.run!()).text).toBe("Calendar adds go through the app — ask me there.");
+  });
+
+  it("a mode that freezes the calendar: no card, the frozen reason", async () => {
+    desktop();
+    useModes.setState({ effective: effectiveOf(PRESET_MODES, "builder") });
+    const p = heuristicPlan("add it to my calendar", "general", { bookings: [NETFLIX], now: NOW });
+    expect(p.mutating).toBe(false);
+    expect((await p.run!()).text).toMatch(/^Google Calendar is frozen in Builder mode, so I left it alone\./);
+  });
+
+  it("a calendar read is never an action", () => {
+    desktop();
+    expect(heuristicPlan("what's on my calendar tomorrow", "general").mutating).toBe(false);
+  });
+
+  it("schedule / create / book phrasings are the calendar card too, never a gateway agent", () => {
+    desktop();
+    const sched = heuristicPlan("schedule the Netflix shoot on my calendar for Friday at 7am", "ops", { bookings: [NETFLIX], now: NOW });
+    expect(sched).toMatchObject({ mutating: true, role: "general", target: { kind: "tool", tool: "calendar.create_event", args: { title: "CONFIRMED: Netflix day player", date: "2026-11-27", startTime: "07:00" } } });
+    const create = heuristicPlan("create an event on my calendar for the audition Friday at 2pm", "ops", { bookings: [], now: NOW });
+    expect(create).toMatchObject({ mutating: true, target: { kind: "tool", tool: "calendar.create_event", args: { title: "Audition", date: "2026-11-27", startTime: "14:00" } } });
+    const book = heuristicPlan("book the shoot in my calendar", "booking", { bookings: [NETFLIX], now: NOW });
+    expect(book).toMatchObject({ mutating: true, target: { kind: "tool", tool: "calendar.create_event", args: { date: "2026-11-28" } } });
+  });
+
+  it("a question about an add is Tony's read, never a second card", () => {
+    desktop();
+    for (const q of ["did you add it to my calendar?", "did you put the Netflix shoot on my calendar?", "Hey Tony, have you added it to my calendar yet, Tony?", "did you add it to my calendar, and is it right?"]) {
+      const p = heuristicPlan(q, "ops", { bookings: [NETFLIX], now: NOW });
+      expect(p.mutating, q).toBe(false);
+      expect(p.target.kind, q).toBe("agent");
+      expect(p.role, q).toBe("general");
+      expect(p.run, q).toBeUndefined();
+    }
+  });
+
+  it("any other write on the calendar is Tony's plain reply, never an agent card", async () => {
+    desktop();
+    const move = heuristicPlan("move the Netflix shoot on my calendar to Saturday", "ops", { bookings: [NETFLIX], now: NOW });
+    expect(move).toMatchObject({ mutating: false, role: "general", target: { kind: "agent" } });
+    expect((await move.run!()).text).toMatch(/^I can only add events to your Google Calendar\..*nothing was changed\.$/);
+    const odd = heuristicPlan("I'd love it if the Netflix shoot ended up in my calendar, set that up", "ops", { bookings: [NETFLIX], now: NOW });
+    expect(odd.mutating).toBe(false);
+    expect((await odd.run!()).text).toMatch(/say it like "add the Netflix shoot to my calendar/);
+    // A coding task about a calendar is no calendar action: it keeps its agent and its card.
+    const code = heuristicPlan("add a calendar view to the dashboard", "coder");
+    expect(code).toMatchObject({ mutating: true, role: "coder", target: { kind: "agent" } });
+  });
+});
+
 describe("heuristicPlan — music controls are never gateway actions", () => {
   it.each(["set the volume to 30", "pause music", "pause the music", "play some jazz on spotify", "skip this song", "turn it down", "set spotify to 40%", "spotify volume 20", "resume spotify", "change the song", "start my workout playlist", "restart the track"])("%s", (s) => {
     const p = heuristicPlan(s, "general");

@@ -2,12 +2,19 @@ import { api, GatewayError } from "@/lib/gateway";
 import { cc } from "@/lib/cc-api";
 import { cmd, type ChatMessage } from "@/lib/platform";
 import { SUB_AGENTS } from "@/features/dispatcher/agents";
-import { dispatch } from "@/features/dispatcher/dispatch";
+import { APPROVED_ACTION_TOOLS, dispatch, sendApprovedAction, type ApprovedActionTool } from "@/features/dispatcher/dispatch";
+import type { LearnedPathway, PendingMemory } from "@/features/modes/learning";
+import { isDesktopApp } from "@/stores/settings";
+import { namesOwnCalendar, type CalendarArgs } from "./calendar-add";
 import type { ActionPlan } from "./plan";
 
 export interface ExecutionResult {
   text: string;
   meta: string;
+  /** A phone turn the desktop's Tony answered in Learning mode (decision 5): his proposals (the
+   * card) and the core memories a yes saved (the pills), as `dispatch` returned them. */
+  pendingMemory?: PendingMemory[];
+  learned?: LearnedPathway[];
 }
 
 /**
@@ -18,7 +25,9 @@ export interface ExecutionResult {
  *   read-only        → dispatch() chat (local model / cloud fallback / gateway)
  *   mutating + n8n   → named n8n webhook (Rust, URL from providers.json)
  *   mutating + tool  → that tool's approved-only Rust command (gmail_create_draft,
- *                      instagram_publish_post, instagram_reply_comment)
+ *                      gcal_create_event, instagram_publish_post, instagram_reply_comment);
+ *                      on the phone a calendar add / Gmail draft is an approved `action`
+ *                      inbox item the desktop runs the same way (`sendApprovedAction`)
  *   mutating + agent → Agentic OS agent via the gateway (opencode has real
  *                      tools). A plain chat model has NO tools and would
  *                      only *claim* it acted, so it is never used to
@@ -60,14 +69,16 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
     }
     // The plan's route kind goes along as `routeFor` decided it: a phone turn it kept with Tony
     // reaches the desktop as "Self" (never re-resolved); a plain no-match stays "Default".
-    const { result } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate, routeKind: plan.routeKind });
+    const { result, pendingMemory, learned } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate, routeKind: plan.routeKind });
     return {
       text: result.content || "(no response)",
       meta: `${agent.label} · ${result.providerId}${result.fellBack ? " · fallback" : ""}${vaultNote} · ${result.latencyMs}ms`,
+      ...(pendingMemory?.length ? { pendingMemory } : {}),
+      ...(learned?.length ? { learned } : {}),
     };
   }
 
-  if (plan.target.kind === "tool") return runTool(plan.target.tool, plan.target.args);
+  if (plan.target.kind === "tool") return runTool(plan.target.tool, plan.target.args, plan.id);
 
   if (plan.target.kind === "n8n") {
     const started = performance.now();
@@ -79,6 +90,12 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
       text: `Done — the ${plan.target.workflow} workflow ran.${out ? ` ${summariseOutput(out)}` : ""}`,
       meta: `n8n · ${plan.target.workflow} · ${Math.round(performance.now() - started)}ms`,
     };
+  }
+
+  // Guard: an approved action on Nic's own calendar never goes to a gateway agent (it has no
+  // calendar tool and could only claim it acted). Calendar adds run through `gcal_create_event`.
+  if (calendarActionForAgent(plan)) {
+    throw new Error('Nothing was done — calendar adds go through Google Calendar. Say it like "add the shoot to my calendar for Friday at 7 AM".');
   }
 
   // Guard: never send to a gateway agent that isn't installed — fail with a plain
@@ -110,14 +127,24 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
   };
 }
 
-/** An approved tool plan: each tool has its own Rust command that refuses without `approved`. */
-async function runTool(tool: string, args: Record<string, unknown>): Promise<ExecutionResult> {
+/** An approved tool plan: each tool has its own Rust command that refuses without `approved`.
+ * Off the desktop (the Android app) a calendar add or Gmail draft goes to the desktop as an
+ * approved `action` inbox item, run through the same approved-only path; never a gateway agent. */
+async function runTool(tool: string, args: Record<string, unknown>, planId: string): Promise<ExecutionResult> {
   const started = performance.now();
   const s = (k: string) => (typeof args[k] === "string" ? (args[k] as string) : "");
   const denied = (what: string) => (e: unknown): never => {
     const raw = e instanceof Error ? e.message : String(e);
     throw new Error(raw.startsWith("PERMISSION_DENIED") ? "Nothing was done — MCP tools are set to Deny in Settings → Integrations." : `${what} — ${raw}`);
   };
+  if (!isDesktopApp() && (APPROVED_ACTION_TOOLS as readonly string[]).includes(tool)) {
+    const text = await sendApprovedAction(tool as ApprovedActionTool, args, planId);
+    return { text, meta: `${tool === "calendar.create_event" ? "Google Calendar · add" : "Gmail · draft"} · via the desktop · ${Math.round(performance.now() - started)}ms` };
+  }
+  if (tool === "calendar.create_event") {
+    const text = await cmd("gcal_create_event", { args: args as unknown as CalendarArgs, approved: true }).catch(denied("Nothing was added to your calendar"));
+    return { text, meta: `Google Calendar · add · ${Math.round(performance.now() - started)}ms` };
+  }
   if (tool === "instagram.publish_post") {
     const text = await cmd("instagram_publish_post", { caption: s("caption"), imageUrl: s("imageUrl") || undefined, videoUrl: s("videoUrl") || undefined, approved: true }).catch(denied("Nothing was published"));
     return { text, meta: `Instagram · publish · ${Math.round(performance.now() - started)}ms` };
@@ -132,6 +159,13 @@ async function runTool(tool: string, args: Record<string, unknown>): Promise<Exe
     throw new Error(raw.startsWith("PERMISSION_DENIED") ? "Nothing was done — MCP tools are set to Deny in Settings → Integrations." : `No draft was saved — ${raw}`);
   });
   return { text, meta: `Gmail · draft · ${Math.round(performance.now() - started)}ms` };
+}
+
+/** A mutating agent-target plan whose words (the request, the model's intent / summary, or its
+ * payload) are about Nic's own calendar. Pure. */
+export function calendarActionForAgent(plan: Pick<ActionPlan, "mutating" | "target" | "utterance" | "intent" | "summary" | "payload">): boolean {
+  if (!plan.mutating || plan.target.kind !== "agent") return false;
+  return [plan.utterance, plan.intent, plan.summary, JSON.stringify(plan.payload ?? {})].some((t) => namesOwnCalendar(t));
 }
 
 function summariseOutput(raw: string): string {

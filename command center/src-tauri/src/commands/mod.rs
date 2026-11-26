@@ -6,6 +6,7 @@ pub mod arbiter;
 pub mod allm;
 pub mod allm_audit;
 pub mod bridge;
+pub mod calendar;
 pub mod business_registry;
 pub mod buildhub;
 pub mod claude_fix;

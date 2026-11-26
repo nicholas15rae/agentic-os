@@ -218,7 +218,8 @@ fn default_modules() -> BTreeMap<String, ModulePolicy> {
             .to_vec(),
             guarded_args: BTreeMap::from([(
                 "os_config_update".to_string(),
-                ["privacy", "mcps", "permissions", "skills", "fsRoots", "routing", "overseer", "identityPath", "rootDirective", "anythingllm", "droplet"].map(|k| format!("/patch/{k}")).to_vec(),
+                // `gmail` holds the booking check's instruction-file path (read into Tony's prompt).
+                ["privacy", "mcps", "permissions", "skills", "fsRoots", "routing", "overseer", "identityPath", "rootDirective", "anythingllm", "droplet", "gmail"].map(|k| format!("/patch/{k}")).to_vec(),
             )]),
             gateway: vec![rule("PUT", "/api/cc/config")],
         },
@@ -440,6 +441,7 @@ mod tests {
         let inv = |a: serde_json::Value| w.module_for_invoke("os_config_update", Some(&a)).map(str::to_string);
         assert_eq!(inv(serde_json::json!({"patch": {"privacy": {"killSwitch": false}}})).as_deref(), Some("settings"));
         assert_eq!(inv(serde_json::json!({"patch": {"mcps": []}})).as_deref(), Some("settings"));
+        assert_eq!(inv(serde_json::json!({"patch": {"gmail": {"bookingInstructionsPath": "x.md"}}})).as_deref(), Some("settings"), "the booking instruction path needs a step-up");
         assert_eq!(inv(serde_json::json!({"patch": {"privacy": {"killSwitch": true}}})), None, "engaging lockdown is never gated");
         assert_eq!(inv(serde_json::json!({"patch": {"voice": {"micEnabled": false}}})), None, "muting the mic is never gated");
         assert_eq!(w.module_for_invoke("secret_set", None), Some("settings"));

@@ -132,23 +132,11 @@ pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> R
     }
     let p = stt_provider(state)?;
     let key = state.key_for(&p)?;
-
-    let part = reqwest::multipart::Part::bytes(audio).file_name("speech.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
-    let mut form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("model", p.model.clone())
-        .text("response_format", "json")
-        .text("temperature", "0");
-    if let Some(lang) = p.language.clone() {
-        form = form.text("language", lang);
-    }
     // Vocabulary biasing (Phase 2 §1). whisper.cpp's server reads the `prompt` multipart
     // field on every inference route (incl. `--inference-path /v1/audio/transcriptions`),
     // as does the OpenAI-style API; servers that don't know it ignore the extra field.
     let prompt = effective_stt_prompt(&p);
-    if let Some(pr) = prompt.clone() {
-        form = form.text("prompt", pr);
-    }
+    let form = stt_form(stt_fields(&p, prompt.as_deref(), None), audio)?;
 
     let mut rb = state
         .http
@@ -166,9 +154,7 @@ pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> R
         return Ok(String::new());
     }
     let text = body["text"].as_str().unwrap_or_default().trim().to_string();
-    // Whisper emits these on silence (the client-side VAD avoids most of it).
-    let junk = ["[BLANK_AUDIO]", "(silence)", "[ Silence ]", "[silence]"];
-    if junk.iter().any(|j| text.eq_ignore_ascii_case(j)) {
+    if is_junk(&text) {
         return Ok(String::new());
     }
     // base.en sometimes reads its prompt back on a near-silent clip.
@@ -177,6 +163,150 @@ pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> R
         return Ok(String::new());
     }
     Ok(text)
+}
+
+/// Whisper emits these on silence (the client-side VAD avoids most of it).
+fn is_junk(text: &str) -> bool {
+    ["[BLANK_AUDIO]", "(silence)", "[ Silence ]", "[silence]"].iter().any(|j| text.eq_ignore_ascii_case(j))
+}
+
+/// The multipart text fields of one transcription request. `partial`: the capture id of a live
+/// caption (`partial=1` + `session`, fw_server's fast path: beam 1, no timestamps, no VAD, and a
+/// newer caption of the same session overtakes this one); `None` = the final. Pure.
+fn stt_fields(p: &Provider, prompt: Option<&str>, partial: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut f = vec![("model", p.model.clone()), ("response_format", "json".to_string()), ("temperature", "0".to_string())];
+    if let Some(lang) = p.language.clone() {
+        f.push(("language", lang));
+    }
+    if let Some(pr) = prompt {
+        f.push(("prompt", pr.to_string()));
+    }
+    if let Some(session) = partial {
+        f.push(("partial", "1".to_string()));
+        f.push(("session", session.to_string()));
+    }
+    f
+}
+
+fn stt_form(fields: Vec<(&'static str, String)>, audio: Vec<u8>) -> Result<reqwest::multipart::Form, String> {
+    let part = reqwest::multipart::Part::bytes(audio).file_name("speech.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
+    Ok(fields.into_iter().fold(reqwest::multipart::Form::new().part("file", part), |form, (k, v)| form.text(k, v)))
+}
+
+// ── Live partial transcripts (C1) ────────────────────────────────────────────
+//
+// While the VAD says you are speaking, the webview sends the clip so far every `vad.partialMs`
+// (~600 ms) and shows the answer as a caption (`onPartial`). The final transcript is still the
+// one full-clip `stt_transcribe` at the end of speech, so accuracy is unchanged. Partials run only
+// while the STT server's GET /health reports `device: "cuda"` (fw_server on the GPU): on a CPU
+// each pass costs ~0.5 s or more and would sit in front of the final. Same mic gate as the final.
+
+/// A partial covers at most one 30 s Whisper window of 16 kHz PCM16 (a multi-window pass is slow).
+const MAX_PARTIAL_BYTES: usize = 44 + 30 * 32_000 + 1024;
+const PARTIAL_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a /health answer is trusted (fw_server's /health asks nvidia-smi).
+const PARTIAL_HEALTH_TTL: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SttPartial {
+    pub text: String,
+    /// The server dropped it unread: a newer caption of this capture overtook it, or it waited too long.
+    pub stale: bool,
+    /// Partials are off (the STT is not on a GPU, or has no /health): stop asking for this capture.
+    pub off: bool,
+    /// A caption of this capture is already in flight (single-flight): this one was not sent.
+    pub busy: bool,
+}
+
+fn partial_flights() -> &'static Mutex<std::collections::HashSet<String>> {
+    static F: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// One in-flight caption of a capture; released on drop (success, error or timeout alike).
+struct PartialFlight(String);
+
+impl PartialFlight {
+    fn claim(capture: &str) -> Option<Self> {
+        let mut f = partial_flights().lock().unwrap_or_else(|e| e.into_inner());
+        f.insert(capture.to_string()).then(|| Self(capture.to_string()))
+    }
+}
+
+impl Drop for PartialFlight {
+    fn drop(&mut self) {
+        partial_flights().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// The webview's capture id (`x-capture`): letters, digits, `-` and `_`, at most 64.
+fn valid_capture(id: &str) -> Option<&str> {
+    Some(id).filter(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// Does the STT server decode on the GPU? whisper.cpp: no (no request). Otherwise its GET
+/// {origin}/health must say `ready` and `device: "cuda"`; any failure = no. Cached per origin.
+async fn partials_available(state: &DispatchState, p: &Provider) -> bool {
+    static CACHE: Mutex<Option<(String, Instant, bool)>> = Mutex::new(None);
+    if p.engine.as_deref() == Some("whispercpp") {
+        return false;
+    }
+    let o = origin(&p.base_url);
+    if let Some((at_origin, at, ok)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if at_origin == o && at.elapsed() < PARTIAL_HEALTH_TTL {
+            return ok;
+        }
+    }
+    let ok = match state.http.get(format!("{o}/health")).timeout(Duration::from_millis(1500)).send().await {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.is_ok_and(|h| h["ready"] == true && h["device"] == "cuda"),
+        _ => false,
+    };
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((o, Instant::now(), ok));
+    ok
+}
+
+/// One live caption of the clip so far (raw 16 kHz WAV bytes; header `x-capture` = the capture id).
+#[tauri::command]
+pub async fn stt_partial(state: State<'_, DispatchState>, request: Request<'_>) -> Result<SttPartial, String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected raw WAV bytes".into());
+    };
+    let capture = request.headers().get("x-capture").and_then(|v| v.to_str().ok()).unwrap_or("default").to_string();
+    partial_bytes(state.inner(), &capture, bytes.clone(), PARTIAL_TIMEOUT).await
+}
+
+/// `stt_partial`'s body. Refuses while the mic is locked off (before any request, /health
+/// included) and returns an empty caption for a request the mute overtook, like the final.
+pub(crate) async fn partial_bytes(state: &DispatchState, capture: &str, audio: Vec<u8>, timeout: Duration) -> Result<SttPartial, String> {
+    if !mic_enabled() {
+        return Err(MIC_DISABLED.into());
+    }
+    if audio.len() < 1024 || audio.len() > MAX_PARTIAL_BYTES {
+        return Err("audio too short or too long".into());
+    }
+    let capture = valid_capture(capture).ok_or("bad capture id")?;
+    let p = stt_provider(state)?;
+    if !partials_available(state, &p).await {
+        return Ok(SttPartial { off: true, ..Default::default() });
+    }
+    let Some(_flight) = PartialFlight::claim(capture) else {
+        return Ok(SttPartial { busy: true, ..Default::default() });
+    };
+    let key = state.key_for(&p)?;
+    let prompt = effective_stt_prompt(&p);
+    let form = stt_form(stt_fields(&p, prompt.as_deref(), Some(capture)), audio)?;
+    let mut rb = state.http.post(format!("{}/audio/transcriptions", p.base_url.trim_end_matches('/'))).timeout(timeout).multipart(form);
+    if let Some(k) = key {
+        rb = rb.bearer_auth(k);
+    }
+    let body: serde_json::Value = rb.send().await.map_err(short)?.error_for_status().map_err(short)?.json().await.map_err(short)?;
+    if !mic_enabled() {
+        return Ok(SttPartial::default());
+    }
+    let text = body["text"].as_str().unwrap_or_default().trim().to_string();
+    let drop = is_junk(&text) || prompt.as_deref().is_some_and(|pr| echoes_prompt(&text, pr));
+    Ok(SttPartial { text: if drop { String::new() } else { text }, stale: body["stale"] == true, ..Default::default() })
 }
 
 /// The prompt to send: the provider's own (empty = none), else the built-in default.
@@ -1381,6 +1511,138 @@ pub(crate) mod mic_gate_tests {
             assert_eq!(r, Ok("hello tony".to_string()));
             assert_eq!(srv.count("POST", "/v1/audio/transcriptions"), 1);
             assert_eq!(srv.reqs().len(), 1);
+        });
+    }
+
+    /// The STT provider at `base` as faster-whisper (engine "fasterwhisper", like policy.stt now).
+    fn fw_state_at(base: &str) -> DispatchState {
+        let st = state_at(base);
+        st.update(|c| {
+            c.providers.iter_mut().find(|p| p.id == "whisper").expect("whisper").engine = Some("fasterwhisper".into());
+            Ok(())
+        })
+        .expect("engine");
+        st
+    }
+
+    /// A mock fw_server: GET /health says `device`; POST answers `post` (after `delay_ms`).
+    async fn fw_mock(device: &'static str, post: serde_json::Value, delay_ms: u64) -> crate::commands::allm::mock::Server {
+        start(move |r| {
+            if r.path == "/health" {
+                Resp::json(serde_json::json!({ "ready": true, "device": device }))
+            } else {
+                Resp::json(post.clone()).delayed(delay_ms)
+            }
+        })
+        .await
+    }
+
+    const T: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn partial_fields_add_the_fast_path_to_the_finals() {
+        let st = DispatchState::default();
+        let p = st.provider("whisper").expect("whisper");
+        let fin = stt_fields(&p, Some("Tony, Gabagool mode."), None);
+        let keys = |f: &[(&str, String)]| f.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>();
+        assert_eq!(keys(&fin), ["model=base.en", "response_format=json", "temperature=0", "language=en", "prompt=Tony, Gabagool mode."]);
+        let part = stt_fields(&p, Some("Tony, Gabagool mode."), Some("cap-1"));
+        assert_eq!(keys(&part)[..5], keys(&fin)[..]);
+        assert_eq!(keys(&part)[5..], ["partial=1", "session=cap-1"]);
+    }
+
+    #[test]
+    fn partials_need_a_gpu_server() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            // whisper.cpp (the built-in engine): off without a single request.
+            let srv = fw_mock("cuda", serde_json::json!({ "text": "never" }), 0).await;
+            let st = state_at(&srv.base);
+            assert_eq!(partial_bytes(&st, "cap", wav(), T).await, Ok(SttPartial { off: true, ..Default::default() }));
+            assert_eq!(srv.reqs().len(), 0);
+            // faster-whisper on the CPU fallback: off after one /health, no decode.
+            let srv = fw_mock("cpu-unavailable", serde_json::json!({ "text": "never" }), 0).await;
+            let st = fw_state_at(&srv.base);
+            assert_eq!(partial_bytes(&st, "cap", wav(), T).await, Ok(SttPartial { off: true, ..Default::default() }));
+            assert_eq!((srv.count("GET", "/health"), srv.count("POST", "/v1/audio/transcriptions")), (1, 0));
+        });
+    }
+
+    #[test]
+    fn a_partial_on_the_gpu_is_one_post_and_health_is_cached() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let srv = fw_mock("cuda", serde_json::json!({ "text": " Tony, cut " }), 0).await;
+            let st = fw_state_at(&srv.base);
+            assert_eq!(partial_bytes(&st, "cap-a", wav(), T).await, Ok(SttPartial { text: "Tony, cut".into(), ..Default::default() }));
+            assert_eq!(partial_bytes(&st, "cap-a", wav(), T).await.map(|p| p.text), Ok("Tony, cut".into()));
+            assert_eq!((srv.count("GET", "/health"), srv.count("POST", "/v1/audio/transcriptions")), (1, 2));
+        });
+    }
+
+    #[test]
+    fn stale_echo_and_junk_partials() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let srv = fw_mock("cuda", serde_json::json!({ "text": "", "stale": true }), 0).await;
+            let st = fw_state_at(&srv.base);
+            assert_eq!(partial_bytes(&st, "c", wav(), T).await, Ok(SttPartial { stale: true, ..Default::default() }));
+            for said in ["Tony, Gabagool mode. Take it easy. Cut it. Whoa.", "[BLANK_AUDIO]"] {
+                let srv = fw_mock("cuda", serde_json::json!({ "text": said }), 0).await;
+                let st = fw_state_at(&srv.base);
+                assert_eq!(partial_bytes(&st, "c", wav(), T).await, Ok(SttPartial::default()), "{said}");
+            }
+        });
+    }
+
+    #[test]
+    fn partials_are_single_flight_per_capture_and_time_out() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let srv = fw_mock("cuda", serde_json::json!({ "text": "slow" }), 400).await;
+            let st = Arc::new(fw_state_at(&srv.base));
+            let spawn = |cap: &'static str| {
+                let st = Arc::clone(&st);
+                tauri::async_runtime::spawn(async move { partial_bytes(&st, cap, wav(), T).await })
+            };
+            let first = spawn("cap-x");
+            for _ in 0..100 {
+                if srv.count("POST", "/v1/audio/transcriptions") == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // The same capture while its caption is in flight: not sent. Another capture: sent.
+            assert_eq!(partial_bytes(&st, "cap-x", wav(), T).await, Ok(SttPartial { busy: true, ..Default::default() }));
+            let other = spawn("cap-y");
+            assert_eq!(first.await.expect("join").map(|p| p.text), Ok("slow".into()));
+            assert_eq!(other.await.expect("join").map(|p| p.text), Ok("slow".into()));
+            assert_eq!(srv.count("POST", "/v1/audio/transcriptions"), 2);
+            // A caption slower than its timeout fails, and releases the capture for the next one.
+            assert!(partial_bytes(&st, "cap-x", wav(), Duration::from_millis(100)).await.is_err());
+            assert_eq!(partial_bytes(&st, "cap-x", wav(), T).await.map(|p| p.busy), Ok(false));
+        });
+    }
+
+    #[test]
+    fn a_muted_mic_sends_no_partial_and_bad_input_is_refused() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            let srv = fw_mock("cuda", serde_json::json!({ "text": "never" }), 0).await;
+            let st = fw_state_at(&srv.base);
+            MIC_ENABLED.store(false, Ordering::SeqCst);
+            let r = partial_bytes(&st, "cap", wav(), T).await;
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            assert_eq!(r, Err(MIC_DISABLED.to_string()));
+            assert_eq!(srv.reqs().len(), 0, "a muted mic must not even ask /health");
+            assert!(partial_bytes(&st, "cap", vec![0u8; 100], T).await.is_err());
+            assert!(partial_bytes(&st, "cap", vec![0u8; MAX_PARTIAL_BYTES + 1], T).await.is_err());
+            assert_eq!(partial_bytes(&st, "../x", wav(), T).await, Err("bad capture id".to_string()));
+            assert_eq!(srv.reqs().len(), 0);
         });
     }
 

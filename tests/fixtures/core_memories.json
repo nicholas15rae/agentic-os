@@ -1,0 +1,101 @@
+{
+ "about": "Shared by learning.rs (core_block) and tests/test_gateway_tony.py (gateway_tony.core_block): both must render `expected` byte for byte from `store`.",
+ "store": {
+  "version": 2,
+  "pathways": [
+   {
+    "id": "lp-1700000000002-1",
+    "category": "persona",
+    "trigger_or_context": "always",
+    "directive_or_fact": "Call me Nic, never Nicholas, on the phone.",
+    "source": "learning_mode",
+    "timestamp": 1700000000002,
+    "updated_at": 1700000000002,
+    "confidence": "confirmed",
+    "core": true
+   },
+   {
+    "id": "lp-1700000000001-0",
+    "category": "domain_knowledge",
+    "trigger_or_context": "When someone asks who books me",
+    "directive_or_fact": "Say the Booking Desk handles all my bookings.",
+    "source": "learning_mode",
+    "timestamp": 1700000000001,
+    "updated_at": 1700000000001,
+    "confidence": "confirmed",
+    "core": true
+   },
+   {
+    "id": "lp-1700000000003-2",
+    "category": "rule",
+    "trigger_or_context": "naming files",
+    "directive_or_fact": "Use kebab-case (an old v1 entry: no core field).",
+    "source": "learning_mode",
+    "timestamp": 1700000000003,
+    "updated_at": 1700000000003,
+    "confidence": "confirmed"
+   },
+   {
+    "id": "lp-1700000000004-3",
+    "category": "preference",
+    "trigger_or_context": "booking dinner",
+    "directive_or_fact": "Prefer patios (core but provisional: never in the block).",
+    "source": "learning_mode",
+    "timestamp": 1700000000004,
+    "updated_at": 1700000000004,
+    "confidence": "provisional",
+    "core": true
+   },
+   {
+    "id": "lp-1700000000005-4",
+    "category": "workflow",
+    "trigger_or_context": "exporting  reports\n",
+    "directive_or_fact": "Send them as JSON files 🙂",
+    "source": "learning_mode",
+    "timestamp": 1700000000005,
+    "updated_at": 1700000000005,
+    "confidence": "confirmed",
+    "core": true
+   },
+   {
+    "id": "lp-1700000000006-5",
+    "category": "workflow",
+    "trigger_or_context": "Nic is on set",
+    "directive_or_fact": "When Nic is on set, hold every call and message until he says the shoot is wrapped, then read him a short list of who called, what each person wanted, and anything that needs an answer today. When Nic is on set, hold every call and message until he says the shoot is wrapped, then read him a short list of who called, what each person wanted, and anything that needs an answer today. When Nic is on set, hold every call and message until he says the shoot is wrapped, then read him a short list of who called, what each person wanted, and anything that needs an answer today. When Nic is on set, hold every call and message until he says the shoot is wrapped, then read him a short list of who called, what each person wanted, and anything that needs an answer today.",
+    "source": "learning_mode",
+    "timestamp": 1700000000006,
+    "updated_at": 1700000000006,
+    "confidence": "confirmed",
+    "core": true
+   },
+   {
+    "id": "lp-1700000000007-6",
+    "category": "rule",
+    "trigger_or_context": "always",
+    "directive_or_fact": "Keep replies short (after an overflow: recalled by keyword, never in the block).",
+    "source": "learning_mode",
+    "timestamp": 1700000000007,
+    "updated_at": 1700000000007,
+    "confidence": "confirmed",
+    "core": true
+   },
+   {
+    "id": "lp-1700000000000-9",
+    "category": "rule",
+    "trigger_or_context": "always",
+    "directive_or_fact": "Not core: never in the block.",
+    "source": "learning_mode",
+    "timestamp": 1700000000000,
+    "updated_at": 1700000000000,
+    "confidence": "confirmed",
+    "core": false
+   }
+  ]
+ },
+ "expected": "CORE MEMORIES (approved by Nic):\n- When someone asks who books me: Say the Booking Desk handles all my bookings.\n- Call me Nic, never Nicholas, on the phone.\n- When exporting reports: Send them as structured-data files 🙂",
+ "expectedIds": [
+  "lp-1700000000001-0",
+  "lp-1700000000002-1",
+  "lp-1700000000005-4"
+ ]
+}

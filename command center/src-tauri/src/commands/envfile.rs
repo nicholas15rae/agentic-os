@@ -76,6 +76,8 @@ pub(crate) const ENV_FOR: &[(&str, &str)] = &[
     ("brave", "BRAVE_API_KEY"),
     ("gmail-script-id", "GMAIL_SCRIPT_ID"),
     ("gmail-script-key", "GMAIL_SCRIPT_KEY"),
+    ("gcal-script-id", "GCAL_SCRIPT_ID"),
+    ("gcal-script-key", "GCAL_SCRIPT_KEY"),
     ("anthropic", "ANTHROPIC_API_KEY"),
     ("gemini", "GEMINI_API_KEY"),
     ("twelvedata", "TWELVEDATA_API_KEY"),
@@ -136,18 +138,28 @@ fn key_status(name: &str, env: &impl Fn(&str) -> Option<KeySource>, keychain: &i
 
 const GMAIL_ID: &str = "gmail-script-id";
 const GMAIL_KEY: &str = "gmail-script-key";
+/// The Apps Script ID / key pairs (Gmail `gmail::creds`, Google Calendar `calendar::creds`).
+const SCRIPT_PAIRS: [(&str, &str); 2] = [(GMAIL_ID, GMAIL_KEY), ("gcal-script-id", "gcal-script-key")];
 
-/// Status of every name, with Gmail's pair rule (matches `gmail::creds`): the env pair is
-/// used only when BOTH vars are set, else the keychain pair only when BOTH entries exist.
+/// Status of every name, with the Apps Script pair rule (matches `gmail::creds` /
+/// `calendar::creds`): the env pair is used only when BOTH vars are set, else the keychain pair
+/// only when BOTH entries exist.
 fn key_statuses(names: &[&str], env: impl Fn(&str) -> Option<KeySource>, keychain: impl Fn(&str) -> bool) -> BTreeMap<String, KeyStatus> {
     let mut out: BTreeMap<String, KeyStatus> = names.iter().map(|n| (n.to_string(), key_status(n, &env, &keychain))).collect();
-    if let (Some(id), Some(key)) = (out.get(GMAIL_ID).cloned(), out.get(GMAIL_KEY).cloned()) {
+    for (pair_id, pair_key) in SCRIPT_PAIRS {
+        apply_pair_rule(&mut out, pair_id, pair_key);
+    }
+    out
+}
+
+fn apply_pair_rule(out: &mut BTreeMap<String, KeyStatus>, pair_id: &str, pair_key: &str) {
+    if let (Some(id), Some(key)) = (out.get(pair_id).cloned(), out.get(pair_key).cloned()) {
         let is_env = |s: KeySource| matches!(s, KeySource::Env | KeySource::EnvFile);
         let env_pair = is_env(id.source) && is_env(key.source);
         if !env_pair {
             let kc_pair = id.keychain && key.keychain;
             let any = is_env(id.source) || is_env(key.source) || id.keychain || key.keychain;
-            for n in [GMAIL_ID, GMAIL_KEY] {
+            for n in [pair_id, pair_key] {
                 if let Some(s) = out.get_mut(n) {
                     s.source = if kc_pair { KeySource::Keychain } else { KeySource::Missing };
                     s.pair_incomplete = !kc_pair && any;
@@ -155,7 +167,6 @@ fn key_statuses(names: &[&str], env: impl Fn(&str) -> Option<KeySource>, keychai
             }
         }
     }
-    out
 }
 
 /// One secret's source, for status labels elsewhere (System Map). Not for Gmail.
@@ -280,6 +291,12 @@ mod tests {
         let s = statuses(&[], &[]);
         assert_eq!(s[GMAIL_ID].source, KeySource::Missing);
         assert!(!s[GMAIL_ID].pair_incomplete);
+        // Google Calendar's pair follows the same rule, on its own.
+        let s = statuses(&[("GCAL_SCRIPT_ID", KeySource::EnvFile), ("GCAL_SCRIPT_KEY", KeySource::EnvFile)], &[]);
+        assert_eq!((s["gcal-script-id"].source, s["gcal-script-key"].source), (KeySource::EnvFile, KeySource::EnvFile));
+        let s = statuses(&[("GCAL_SCRIPT_ID", KeySource::Env)], &["gcal-script-key"]);
+        assert_eq!((s["gcal-script-id"].source, s["gcal-script-key"].source), (KeySource::Missing, KeySource::Missing));
+        assert!(s["gcal-script-id"].pair_incomplete && s[GMAIL_ID].source == KeySource::Missing && !s[GMAIL_ID].pair_incomplete);
     }
 
     #[test]

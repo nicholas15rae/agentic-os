@@ -156,6 +156,19 @@ export interface NativeCommands {
   gmail_import_anythingllm: { args: undefined; result: { imported: boolean; detail: string } };
   /** Only after the confirmation card: returns `PERMISSION_REQUIRED:gmail-draft` unless `approved`. */
   gmail_create_draft: { args: { to: string; subject: string; body: string; approved?: boolean }; result: string };
+  /** The booking-mail check's editable instruction file (os.json `gmail.bookingInstructionsPath`): path, a 4 KB preview (secrets scrubbed), what the scan uses.
+   * `refused`: why the path isn't read (only a .md / .txt note under G:\ai-hub or an fsRoot, never .env); the built-in search is used then. */
+  gmail_booking_instructions: { args: undefined; result: { path: string; exists: boolean; preview: string; spec: { query: string; read: number; rules: string; source: "file" | "default" }; refused?: string } };
+  /** Opens that file in Notepad (only a path the check may read). */
+  gmail_booking_instructions_open: { args: undefined; result: void };
+  /** The last booking scan's threads (memory only, 2 h): the desktop's calendar-add card reads its fields from here. */
+  gmail_last_bookings: { args: undefined; result: import("@/features/orchestrator/bookings").BookingRef[] };
+  /** Which Google Calendar backend `calendar.*` tools use (names only; credentials `gcal-script-id` / `gcal-script-key` or GCAL_SCRIPT_ID / GCAL_SCRIPT_KEY). */
+  gcal_status: { args: undefined; result: { configured: boolean; source: "env" | "keychain" | "none" } };
+  /** Copies AnythingLLM Desktop's Google Calendar agent deployment into the keychain (values never reach the webview). */
+  gcal_import_anythingllm: { args: undefined; result: { imported: boolean; detail: string } };
+  /** Only after the confirmation card: returns `PERMISSION_REQUIRED:calendar-create` unless `approved`. Primary calendar, no invites, America/Toronto. */
+  gcal_create_event: { args: { args: import("@/features/orchestrator/calendar-add").CalendarArgs; approved?: boolean }; result: string };
   /** OpenStreetMap routing (Rust: Nominatim + OSRM). Also emits `map-route` for the Route Map widget. */
   map_route: { args: { destination: string; origin?: string; stops?: string[] }; result: MapRoute };
   map_geocode: { args: { query: string }; result: MapPlace[] };
@@ -665,6 +678,8 @@ export type OsSecret =
   | "anythingllm-remote"
   | "gmail-script-id"
   | "gmail-script-key"
+  | "gcal-script-id"
+  | "gcal-script-key"
   | "github-pat"
   | "sentry-token"
   | "agentmail-key"
@@ -1636,8 +1651,13 @@ export interface OsTurnResult {
   answeredBy?: "agent" | "os" | "overseer" | "tool";
   /** Learning mode: the pathways this turn saved / updated (Rust `learning::Saved`). */
   learned?: { id: string; title: string; category: string; confidence: string; outcome: string }[];
+  /** Learning mode (decision 5): lessons this reply proposed, waiting for Nic's yes (Rust
+   * `learning::PendingMemory`; the memory card, `learning_approve` / `learning_discard`). */
+  pendingMemory?: import("@/features/modes/learning").PendingMemory[];
   /** Tony's dispatch packet (tony_dispatch.rs `DispatchView`): held / pending / queued / invalid. */
   dispatch?: import("@/features/arbiter/api").DispatchView;
+  /** This turn's booking-mail scan (Rust `gmail::Booking`), one per thread read: the calendar-add card's fields. */
+  bookings?: import("@/features/orchestrator/bookings").BookingRef[];
 }
 
 export interface ToolInfo {

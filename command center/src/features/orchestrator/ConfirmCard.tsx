@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, Archive, Camera, Check, ChevronDown, Mail, Mic, Send, ShieldAlert, ShieldCheck, ShieldQuestion, Workflow, X } from "lucide-react";
+import { AlertTriangle, Archive, CalendarPlus, Camera, Check, ChevronDown, Mail, Mic, Send, ShieldAlert, ShieldCheck, ShieldQuestion, Workflow, X } from "lucide-react";
 import { SUB_AGENTS } from "@/features/dispatcher/agents";
 import { useVoice } from "@/features/voice/voice-store";
 import { approve, parkPending, reject } from "@/features/voice/voice-controller";
@@ -10,6 +10,7 @@ const TOOL_LABEL: Record<string, string> = {
   "gmail.create_draft": "Gmail · draft (not sent)",
   "instagram.publish_post": "Instagram · publishes LIVE to your account",
   "instagram.reply_comment": "Instagram · public reply",
+  "calendar.create_event": "Google Calendar · adds an event (no invites)",
 };
 
 /**
@@ -87,7 +88,13 @@ export function ConfirmCard() {
                 </>
               ) : plan.target.kind === "tool" ? (
                 <>
-                  {plan.target.tool.startsWith("instagram.") ? <Camera size={12} className="text-amber-soft" /> : <Mail size={12} className="text-amber-soft" />}{" "}
+                  {plan.target.tool.startsWith("instagram.") ? (
+                    <Camera size={12} className="text-amber-soft" />
+                  ) : plan.target.tool.startsWith("calendar.") ? (
+                    <CalendarPlus size={12} className="text-amber-soft" />
+                  ) : (
+                    <Mail size={12} className="text-amber-soft" />
+                  )}{" "}
                   {TOOL_LABEL[plan.target.tool] ?? plan.target.tool}
                 </>
               ) : plan.target.kind === "bridge" ? (

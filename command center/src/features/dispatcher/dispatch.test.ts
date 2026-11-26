@@ -57,8 +57,10 @@ import {
   longPollWait,
   postMayHaveQueued,
   postRefused,
+  MEMORY_DECISION_CAP_MS,
   queueDesktopTurn,
   sendDesktopTurn,
+  sendMemoryDecision,
   transientPollError,
 } from "./dispatch";
 import { DEFAULT_ROUTING_CONFIG, resolve } from "./router";
@@ -1170,5 +1172,50 @@ describe("P4: the CLI fallback answers as the agent, to Nic", () => {
     expect(t.value?.role).toBe("booking");
     expect(h.chat).toHaveBeenCalledWith("opencode", gatewayFallbackPrompt("Booking Desk", "hello"));
     expect(h.chat.mock.calls[0][1]).not.toContain("[Booking Desk]");
+  });
+});
+
+describe("decision 5: the Learning card reaches the phone", () => {
+  it("keeps pendingMemory and learned from the desktop's result (well-formed rows only)", async () => {
+    const result = {
+      answer: "So when someone asks who books you, the Booking Desk handles it? Want me to add that to my core memories?",
+      providerId: "lmstudio",
+      pendingMemory: [{ id: "mem-1-2", category: "domain_knowledge", text: "When someone asks who books Nic: the Booking Desk" }, { id: "../bad", category: "rule", text: "x" }, { id: "mem-1-3", category: "rule" }],
+      learned: [{ id: "lp-1-0", title: "Call me Nic", category: "persona", confidence: "confirmed", outcome: "saved" }, { id: 5 }],
+    };
+    stubQueue((t) => (t < 1_000 ? { status: "running", result: null } : { status: "done", result: { ok: true, result } }));
+    const p = dispatch("when someone asks who books me, it's the booking desk");
+    await vi.advanceTimersByTimeAsync(3_000);
+    const out = await p;
+    expect(out.result.content).toBe(result.answer);
+    expect(out.pendingMemory).toEqual([{ id: "mem-1-2", category: "domain_knowledge", text: "When someone asks who books Nic: the Booking Desk" }]);
+    expect(out.learned).toEqual([{ id: "lp-1-0", title: "Call me Nic", category: "persona", confidence: "confirmed", outcome: "saved" }]);
+  });
+
+  it("an ordinary answer carries neither", async () => {
+    stubQueue(() => ({ status: "done", result: { ok: true, result: { answer: "Hey Nic." } } }));
+    const p = dispatch("hey");
+    await vi.advanceTimersByTimeAsync(2_000);
+    const out = await p;
+    expect(out).not.toHaveProperty("pendingMemory");
+    expect(out).not.toHaveProperty("learned");
+  });
+
+  it("sendMemoryDecision queues a command and returns the desktop's memory answer", async () => {
+    const saved = [{ id: "lp-1-0", title: "Call me Nic", category: "persona", confidence: "confirmed", outcome: "saved" }];
+    stubQueue(() => ({ status: "done", result: { ok: true, result: { killSwitch: false, memory: { id: "mem-1-2", approved: true, saved } } } }));
+    const p = sendMemoryDecision("mem-1-2", true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await p).toEqual({ id: "mem-1-2", approved: true, saved });
+    const post = h.gateway.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(post[1].body)).toEqual({ kind: "command", payload: { memoryApprove: "mem-1-2" } });
+  });
+
+  it("a skip sends memoryDiscard; no desktop answer within the cap is null", async () => {
+    stubQueue(() => ({ status: "running", result: null }));
+    const p = sendMemoryDecision("mem-1-2", false);
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS + 5_000);
+    expect(await p).toBeNull();
+    expect(postedPayload()).toEqual({ memoryDiscard: "mem-1-2" });
   });
 });

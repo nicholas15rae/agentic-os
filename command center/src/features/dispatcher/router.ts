@@ -270,6 +270,13 @@ function leadsWithSelf(toks: string[], selfNames: [string, string][]): boolean {
   return !!matchNameAt(toks, p, selfNames);
 }
 
+/** The line opens with one of `names` (an agent's), optionally after "hey / hi / ok / yo / so". */
+function leadsWithName(toks: string[], names: [string, string][]): boolean {
+  let p = 0;
+  while (p < toks.length && ADDRESS_LEADS.includes(toks[p])) p += 1;
+  return !!matchNameAt(toks, p, names);
+}
+
 /** The line ends with a self name ("…, tony", "… tony please") that isn't an object (`NOT_VOCATIVE_BEFORE`). */
 function trailingVocative(toks: string[], selfNames: [string, string][]): boolean {
   const end = toks[toks.length - 1] === "please" ? toks.length - 1 : toks.length;
@@ -410,9 +417,14 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
     }
     break;
   }
-  // (b) any (non-self) name trigger mentioned anywhere.
+  // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar read ("check gmail for
+  // booking emails", "any audition emails?") is Tony's own live tool: a name merely mentioned there
+  // is a topic, not an address. Only opening the line with it ("booking desk, any …") or step (a)
+  // above ("tell booking to …") hands it over.
   const mentioned = matchNameAnywhere(toks, names);
-  if (mentioned) return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
+  const liveRead = directTool(original);
+  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar") || leadsWithName(toks, names)))
+    return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
   if (matchNameAnywhere(toks, selfNames)) selfHit = true;
   // A self name in an address position (beats a topic below); any other mention is step (d) only.
   const selfAddress = selfAddressed(toks, all, selfNames);
@@ -458,13 +470,21 @@ const DIRECT_WHATSAPP_READ = /\b(?:check|read|any|anything|new|latest|last|recen
 const DIRECT_WHATSAPP_NOUN = /\b(?:on|from|in|my|check) whatsapp\b|\bwhatsapp (?:messages?|texts?|chats?|unread)\b/;
 const DIRECT_GMAIL = /\b(?:gmail|inbox|emails?|mail)\b/;
 const DIRECT_GMAIL_READ = /\b(?:check|read|any|anything|latest|last|recent|unread|updates?|whats in|what is in|did i get|have i got|got any|who emailed|new (?:emails?|mail|messages?))\b/;
+/** A booking word next to the mail ("check my gmail for what I got booked for", "call sheets in my
+ * inbox"): a booking-mail read (agents.rs `booking_mail_plan`). Mirrors routing.rs. */
+const DIRECT_BOOKING_MAIL = /\b(?:booked|bookings?|gigs?|jobs?|auditions?|callbacks?|call ?sheets?|deal memos?|confirmed|on hold|shoots?|avails?)\b/;
+/** Google Calendar, read form only ("what's on my calendar tomorrow", "check my calendar"). */
+const DIRECT_CALENDAR = /\b(?:calendar|agenda)\b/;
+/** Calendar writes DIRECT_WRITE doesn't list ("put / pop / pencil it on my calendar"). */
+const DIRECT_CALENDAR_WRITE = /\b(?:put|pop|stick|throw|pencil|block (?:off|out))\b/;
+const DIRECT_CALENDAR_READ = /\b(?:check|read|any|anything|whats|what is|what do i have|do i have|am i free|am i busy|show|look|today|tonight|tomorrow|this week|next week|upcoming|next|free|busy|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/;
 /** Weather words only in read form: a question or check, or next to a time / place word. */
 const DIRECT_WEATHER = /\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$/;
 /** Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read. */
 const DIRECT_NOT_LIVE = /\b(?:widget|server|config|api|bug|code|app|script|dashboard|spreadsheet|sheet|sales|revenue|budget|quarter|q[1-4]|filter|settings?)\b/;
 const DIRECT_SPOTIFY = /\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b/;
 
-export type DirectTool = "whatsapp" | "gmail" | "weather" | "spotify";
+export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify";
 
 /**
  * "Any WhatsApp updates?", "check my inbox", "will it rain tomorrow", "what's playing":
@@ -481,7 +501,8 @@ export function directTool(text: string): DirectTool | null {
     if (read) return "whatsapp";
   }
   const work = DIRECT_NOT_LIVE.test(n);
-  if (!work && DIRECT_GMAIL.test(n) && DIRECT_GMAIL_READ.test(n)) return "gmail";
+  if (!work && DIRECT_GMAIL.test(n) && (DIRECT_GMAIL_READ.test(n) || DIRECT_BOOKING_MAIL.test(n))) return "gmail";
+  if (!work && DIRECT_CALENDAR.test(n) && DIRECT_CALENDAR_READ.test(n) && !DIRECT_CALENDAR_WRITE.test(n)) return "calendar";
   if (!work && DIRECT_WEATHER.test(n)) return "weather";
   if (DIRECT_SPOTIFY.test(n)) return "spotify";
   return null;

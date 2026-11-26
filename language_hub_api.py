@@ -6,9 +6,17 @@ file here. The DDL below is identical to Rust's `SCHEMA`. Self-contained: nothin
 Command Center store, the vault or any RAG index, and no other module reads this file.
 
 Voice, all local:
-  * STT  — English → the configured Whisper (Tony's base.en). Any other language / auto-detect →
-           a multilingual whisper-server sidecar on 127.0.0.1:8179, started on first use and
-           stopped by POST /release or after 3 idle minutes (zero idle overhead).
+  * STT  — English → the configured STT (policy.stt): faster-whisper on the GPU (127.0.0.1:8177,
+           stt/fw_server.py) when that is the pick. While :8177 is up but has no GPU model it
+           forwards the turn to whisper.cpp :8178 itself (reported as backend "whispercpp"); when
+           :8177 is down, or answers 503, the gateway uses :8178 directly and re-spawns :8177 in
+           the background, with backoff.
+           Plain json + the desktop's vocabulary prompt, with the same prompt-echo guard as
+           voice.rs. WebSocket /stt/stream is the live version for English: the phone streams
+           PCM16 while you speak and gets partial captions plus the final (see stt_stream).
+           Any other language / auto-detect → a multilingual whisper-server sidecar on
+           127.0.0.1:8179, started on first use and stopped by POST /release or after 3 idle
+           minutes (zero idle overhead).
   * TTS  — the engine/voice picked in the Hub's Voice panel (settings table, shared with the
            desktop). The gateway speaks LOCAL engines only (Kokoro / XTTS): a cloud engine
            (ElevenLabs — its key lives in the desktop keychain) answers 422 ENGINE_DESKTOP_ONLY and
@@ -20,7 +28,11 @@ Voice, all local:
 """
 from __future__ import annotations
 
+import asyncio
 import atexit
+import hmac
+import io
+import ipaddress
 import json
 import os
 import re
@@ -32,13 +44,15 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import wave
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocketDisconnect
 
 BASE_DIR = Path(__file__).parent.resolve()
 DB_PATH = Path(os.environ["LANG_HUB_DB"]).expanduser().resolve() if os.environ.get("LANG_HUB_DB") else BASE_DIR / "data" / "language-hub" / "library.db"
@@ -333,9 +347,9 @@ _side_lock = threading.Lock()
 _side: dict[str, Any] = {"proc": None, "last": 0.0}
 
 
-def _port_open(port: int) -> bool:
+def _port_open(port: int, timeout: float = 0.3) -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
             return True
     except OSError:
         return False
@@ -423,27 +437,560 @@ async def stt(request: Request, lang: str = Query("auto")):
     return await run_in_threadpool(_transcribe, audio, lang)
 
 
+# ── English STT: faster-whisper :8177 first, whisper.cpp :8178 as the fallback ──
+
+# voice.rs DEFAULT_STT_PROMPT (command center/src-tauri/src/commands/dispatch.rs): the vocabulary the
+# desktop biases Whisper with. A provider's own `sttPrompt` wins ("" = send none).
+DEFAULT_STT_PROMPT = ("Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, "
+                      "Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.")
+WHISPERCPP_FALLBACK = {"id": "whisper", "baseUrl": "http://127.0.0.1:8178/v1", "model": "base.en", "engine": "whispercpp"}
+STT_JUNK = ("[blank_audio]", "(silence)", "[ silence ]", "[silence]")
+FW_PYTHON = Path(os.environ.get("STT_FW_PYTHON", r"C:\ai-stt\.venv\Scripts\python.exe"))
+FW_SCRIPT = BASE_DIR / "stt" / "fw_server.py"
+FW_DOWN_SECS = 10.0  # after a failure, go straight to whisper.cpp for this long
+FW_BACKOFF = (30.0, 600.0)  # re-spawn backoff: first wait, cap (doubles each time)
+_fw_lock = threading.Lock()
+_fw: dict[str, Any] = {"down_until": 0.0, "next_spawn": 0.0, "backoff": 0.0, "spawns": 0}
+
+
+def effective_stt_prompt(p: dict) -> Optional[str]:
+    """voice.rs effective_stt_prompt: the provider's `sttPrompt` (blank = none), else the default."""
+    s = p.get("sttPrompt")
+    s = DEFAULT_STT_PROMPT if s is None else str(s)
+    return s.strip() or None
+
+
+def _prompt_words(s: str) -> list[str]:
+    words, cur = [], []
+    for c in s + " ":
+        if c.isalnum() or c == "'":
+            cur.append(c)
+        elif cur:
+            w = "".join(cur).replace("'", "").lower()
+            if w:
+                words.append(w)
+            cur = []
+    return words
+
+
+REFLEX_PHRASES = (("take", "it", "easy"), ("take", "it", "ease"), ("cut", "it", "out"), ("cut", "it"), ("cut", "that"), ("whoa",), ("madone",),
+                  ("aspetta",), ("hey",), ("yo",), ("tony",), ("ok",), ("okay",), ("man",))
+
+
+def _only_reflex_phrases(words: list[str]) -> bool:
+    i = 0
+    while i < len(words):
+        for p in REFLEX_PHRASES:
+            if tuple(words[i:i + len(p)]) == p:
+                i += len(p)
+                break
+        else:
+            return False
+    return True
+
+
+def echoes_prompt(text: str, prompt: str) -> bool:
+    """voice.rs echoes_prompt: True when the transcript is MOSTLY the prompt read back — words in
+    runs of 4+ consecutive prompt words (prompt order, case/punctuation-insensitive) are >= 70% of
+    it. A line made only of reflex phrases ("Take it easy, cut it") always passes. Pure."""
+    run = 4
+    t, p = _prompt_words(text), _prompt_words(prompt)
+    if len(t) < run or len(p) < run or _only_reflex_phrases(t):
+        return False
+    grams = {tuple(p[i:i + run]) for i in range(len(p) - run + 1)}
+    covered = [False] * len(t)
+    for i in range(len(t) - run + 1):
+        if tuple(t[i:i + run]) in grams:
+            covered[i:i + run] = [True] * run
+    return sum(covered) * 10 >= len(t) * 7
+
+
+def _stt_chain() -> list[dict]:
+    """English endpoints in order: the configured STT; when that is faster-whisper, whisper.cpp
+    (the "whisper" provider, or :8178) behind it."""
+    main = _stt_main()
+    chain = [main]
+    if main.get("engine") == "fasterwhisper":
+        wc = next((p for p in _providers().get("providers", []) if p.get("kind") == "stt" and p.get("engine") == "whispercpp" and not p.get("needsKey")), None)
+        chain.append(wc or WHISPERCPP_FALLBACK)
+    return chain
+
+
+def _local_port(base: str) -> Optional[int]:
+    from urllib.parse import urlparse
+
+    u = urlparse(base)
+    return (u.port or 80) if u.hostname in ("127.0.0.1", "localhost") else None
+
+
+def _spawn_fw(p: dict) -> bool:
+    """Start stt/fw_server.py detached (it outlives the gateway), at most once per backoff window,
+    only for a local endpoint whose port is closed. The request that noticed keeps using whisper.cpp."""
+    port = _local_port(p.get("baseUrl") or "")
+    with _fw_lock:
+        now = time.time()
+        if port is None or now < _fw["next_spawn"] or _port_open(port) or not FW_PYTHON.is_file() or not FW_SCRIPT.is_file():
+            return False
+        _fw["backoff"] = min(FW_BACKOFF[1], _fw["backoff"] * 2 if _fw["backoff"] else FW_BACKOFF[0])
+        _fw["next_spawn"] = now + _fw["backoff"]
+        args = [str(FW_PYTHON), str(FW_SCRIPT), "--port", str(port)]
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,80}", str(p.get("model") or "")):
+            args += ["--model", p["model"]]
+        detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        for flags in ((detached | 0x01000000, detached) if os.name == "nt" else (0,)):  # + CREATE_BREAKAWAY_FROM_JOB when allowed
+            try:
+                subprocess.Popen(args, cwd=str(FW_SCRIPT.parent), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=flags, close_fds=True)
+                _fw["spawns"] += 1
+                return True
+            except OSError:
+                continue
+        return False
+
+
+def _post_stt(base: str, fields: dict[str, str], audio: bytes, timeout: float = 180) -> dict:
+    """The reply JSON. When fw_server answered through its whisper.cpp fallback (X-STT-Backend:
+    whispercpp), the reply carries "_backend": "whispercpp"."""
+    body, ctype = _multipart(fields, audio)
+    req = urllib.request.Request(f"{base.rstrip('/')}/audio/transcriptions", data=body, headers={"Content-Type": ctype}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        out = json.loads(r.read().decode("utf-8"))
+        if isinstance(out, dict) and r.headers.get("X-STT-Backend") == "whispercpp":
+            out["_backend"] = "whispercpp"
+        return out
+
+
+def _transcribe_en(audio: bytes) -> tuple[dict, str, Optional[str]]:
+    """-> (reply, backend, prompt sent). faster-whisper when it answers; whisper.cpp otherwise."""
+    chain = _stt_chain()
+    prompt = effective_stt_prompt(chain[0])
+    fields = {"response_format": "json", "temperature": "0", "language": "en"}
+    if prompt:
+        fields["prompt"] = prompt
+    last: Optional[BaseException] = None
+    for i, p in enumerate(chain):
+        f = {"model": p.get("model") or "whisper-1", **fields}
+        if p.get("engine") == "fasterwhisper" and i < len(chain) - 1:
+            # A refused connect to a closed localhost port takes ~2 s on Windows (SYN retries): look
+            # at the port first (an open one answers in < 1 ms).
+            port = _local_port(p.get("baseUrl") or "")
+            if time.time() < _fw["down_until"]:
+                _spawn_fw(p)
+                continue
+            if port is not None and not _port_open(port, 0.1):
+                _fw["down_until"] = time.time() + FW_DOWN_SECS
+                _spawn_fw(p)
+                continue
+            try:
+                out = _post_stt(p["baseUrl"], f, audio)
+                _fw.update(down_until=0.0, backoff=0.0, next_spawn=0.0)
+                return out, out.pop("_backend", None) or "faster-whisper", prompt
+            except urllib.error.HTTPError as e:  # 503 = up but loading / no GPU: fall back, no re-spawn
+                last = e
+                if e.code >= 500:  # a 4xx is about this clip, not the server
+                    _fw["down_until"] = time.time() + FW_DOWN_SECS
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                last = e
+                _fw["down_until"] = time.time() + FW_DOWN_SECS
+                _spawn_fw(p)
+            continue
+        try:
+            return _post_stt(p["baseUrl"], f, audio), "faster-whisper" if p.get("engine") == "fasterwhisper" else "whispercpp", prompt
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            last = e
+    raise HTTPException(502, f"Whisper unavailable: {getattr(last, 'reason', last)}")
+
+
 def _transcribe(audio: bytes, lang: str) -> dict:
     """The blocking half of POST /stt: pick the Whisper endpoint and transcribe `audio`."""
+    prompt = None
     if lang == "en":
-        p = _stt_main()
-        base, model, engine = p["baseUrl"], p.get("model") or "whisper-1", "whisper"
+        out, backend, prompt = _transcribe_en(audio)
+        engine = "whisper"
     else:
-        base, model, engine = ensure_sidecar(), "whisper-1", "whisper-multilingual"
-    body, ctype = _multipart({"model": model, "response_format": "verbose_json", "temperature": "0", "language": lang.split("-")[0]}, audio)
-    req = urllib.request.Request(f"{base.rstrip('/')}/audio/transcriptions", data=body, headers={"Content-Type": ctype}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            out = json.loads(r.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        raise HTTPException(502, f"Whisper unavailable: {getattr(e, 'reason', e)}")
-    finally:
-        _side["last"] = time.time()
-    text = str(out.get("text") or "").strip()
-    if text.lower() in ("[blank_audio]", "(silence)", "[ silence ]", "[silence]"):
-        text = ""
+        base, engine, backend = ensure_sidecar(), "whisper-multilingual", "whispercpp"
+        body, ctype = _multipart({"model": "whisper-1", "response_format": "verbose_json", "temperature": "0", "language": lang.split("-")[0]}, audio)
+        req = urllib.request.Request(f"{base.rstrip('/')}/audio/transcriptions", data=body, headers={"Content-Type": ctype}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                out = json.loads(r.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise HTTPException(502, f"Whisper unavailable: {getattr(e, 'reason', e)}")
+        finally:
+            _side["last"] = time.time()
+    text = _clean_en(str(out.get("text") or ""), prompt)
     language = out.get("language") or (None if lang == "auto" else lang)
-    return {"text": text, "language": language, "engine": engine}
+    return {"text": text, "language": language, "engine": engine, "backend": backend}
+
+
+def _clean_en(text: str, prompt: Optional[str]) -> str:
+    """Whisper's silence markers and a read-back vocabulary prompt become "" (voice.rs's guards)."""
+    t = text.strip()
+    return "" if t.lower() in STT_JUNK or (prompt and echoes_prompt(t, prompt)) else t
+
+
+# ── English STT, live: WebSocket /stt/stream (the phone) ──────────────────────
+#
+# The phone streams PCM16 16 kHz mono while you speak instead of uploading one WAV when you stop
+# (over NetBird the upload is the slow part of a turn; here the audio is already in when you stop):
+#   phone   -> {"type":"start","lang":"en","token","partials":bool,"partial_ms":600}, binary frames,
+#              {"type":"config","partials":bool} (paused while Tony's reply streams), {"type":"end"}
+#              or {"type":"cancel"}
+#   gateway -> {"type":"ready","partials","mode"}, {"type":"partial","partial","stable"} (LocalAgreement-2),
+#              {"type":"final","final","backend","mode"}; {"type":"error","error"} + a close on any
+#              failure, which the phone answers with today's single upload (POST /stt).
+# "relay" mode: fw_server's own WebSocket /v1/stream does the work. When it has none (its venv
+# lacks the `websockets` package: the upgrade gets a 404) or refuses, "http" mode runs the same
+# session over loopback POSTs: partial=1 every partial_ms of new audio (only while its /health says
+# cuda), and the final through _transcribe: the exact upload path (json + prompt + echo guard,
+# whisper.cpp fallback, re-spawn), so the text is the same as a single upload's.
+# Auth: BaseHTTPMiddleware (server.ZeroTrustMiddleware) never sees a WebSocket, so this route applies
+# the same rule itself: no tunnel, loopback or the NetBird mesh only, and off loopback the gateway
+# token (sent in the start message, never in the URL) while the network lock is on.
+
+STREAM_MAX_BYTES = MAX_AUDIO - 44  # the upload's cap, as raw PCM16
+STREAM_PARTIAL_BYTES = (16000, 30 * 32000)  # partials on 0.5-30 s of audio only
+STREAM_PARTIAL_MS = (300, 3000, 600)  # min, max, default spacing (ms of new audio)
+STREAM_START_S = 5.0
+STREAM_IDLE_S = 30.0
+STREAM_UP_FINAL_S = 4.0  # wait this long for fw_server's final, then decide it here over POST
+STREAM_PARTIAL_TIMEOUT = 3.0
+STREAM_NO_WS_SECS = 600.0  # fw_server without a WebSocket: don't knock again for this long
+STREAM_HEALTH_TTL = 30.0
+_stream_state: dict[str, Any] = {"no_ws_until": 0.0, "health": (0.0, "", False)}
+GATEWAY_TOKEN_FILE = BASE_DIR / "data" / "command-center" / "gateway.token"  # server.ZeroTrustMiddleware's
+_MESH = ipaddress.ip_network("100.64.0.0/10")
+_LOCAL_ORIGIN_RE = re.compile(r"^(tauri://localhost|https?://tauri\.localhost|https?://(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?)$")
+
+
+def _norm_word(w: str) -> str:
+    return re.sub(r"^[^\w']+|[^\w']+$", "", w.lower())
+
+
+class LocalAgreement:
+    """LocalAgreement-2 (fw_server.LocalAgreement, stt-partials.ts): the words the last two
+    whole-clip hypotheses agree on from the start are committed (stable, never retracted); the
+    rest of the newest one is tentative. Pure."""
+
+    def __init__(self) -> None:
+        self.prev: list[str] = []
+        self.committed: list[str] = []
+
+    def push(self, text: str) -> tuple[str, str]:
+        cur = text.split()
+        c = len(self.committed)
+        if len(cur) >= c and all(_norm_word(a) == _norm_word(b) for a, b in zip(self.committed, cur)):
+            n = c
+            while n < min(len(self.prev), len(cur)) and _norm_word(self.prev[n]) == _norm_word(cur[n]):
+                n += 1
+            self.committed += cur[c:n]
+        self.prev = cur
+        return " ".join(self.committed + cur[len(self.committed):]), " ".join(self.committed)
+
+
+def _pcm_wav(pcm: bytes) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _ws_peer(ws: Any) -> Optional[str]:
+    """"loopback" (the desktop), "mesh" (the phone over NetBird) or None (refused): the rule of
+    server.ZeroTrustMiddleware. Forwarding headers mean a tunnel, i.e. the public internet."""
+    if any(h in ws.headers for h in ("x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip")):
+        return None
+    host = (ws.client.host if ws.client else "") or ""
+    if host in ("127.0.0.1", "::1", "localhost") or host.startswith("127."):
+        return "loopback"
+    try:
+        return "mesh" if ipaddress.ip_address(host) in _MESH else None
+    except ValueError:
+        return None
+
+
+def _ws_token_ok(ws: Any, sent: Any) -> bool:
+    """The gateway token, while the network lock has written it: `Authorization: Bearer` (a native
+    client) or the start message's `token` (a WebView can't set WebSocket headers)."""
+    if not GATEWAY_TOKEN_FILE.exists():
+        return True
+    try:
+        token = GATEWAY_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    hdr = ws.headers.get("authorization", "")
+    cand = hdr[7:].strip() if hdr.lower().startswith("bearer ") else (sent if isinstance(sent, str) else "")
+    return bool(token) and hmac.compare_digest(cand.encode(), token.encode())
+
+
+def _ws_json(msg: dict) -> Optional[dict]:
+    try:
+        obj = json.loads(msg.get("text") or "")
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _fw_cuda(p: dict) -> bool:
+    """fw_server's /health says it decodes on the GPU (partials are pointless on a CPU). Cached:
+    its /health asks nvidia-smi."""
+    base = (p.get("baseUrl") or "").rstrip("/")
+    at, b, ok = _stream_state["health"]
+    if b == base and time.time() - at < STREAM_HEALTH_TTL:
+        return ok
+    ok = False
+    try:
+        with urllib.request.urlopen(f"{base.rsplit('/v1', 1)[0]}/health", timeout=1.5) as r:
+            h = json.loads(r.read().decode("utf-8"))
+        ok = bool(isinstance(h, dict) and h.get("ready") and h.get("device") == "cuda")
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+    _stream_state["health"] = (time.time(), base, ok)
+    return ok
+
+
+class _PhoneStream:
+    def __init__(self, ws: WebSocket):
+        self.ws = ws
+        self.lock = asyncio.Lock()
+        self.buf = bytearray()
+        self.session = f"gw-{uuid.uuid4().hex[:12]}"
+        self.la = LocalAgreement()
+        self.main: dict = {}
+        self.prompt: Optional[str] = None
+        self.every = STREAM_PARTIAL_MS[2]
+        self.gpu = False
+        self.partials = False
+        self.last = 0
+        self.task: Optional[asyncio.Task] = None
+        self.done = False
+        self.up: Any = None  # fw_server's WebSocket (relay mode)
+        self.reader: Optional[asyncio.Task] = None
+        self.final: Optional[asyncio.Future] = None
+
+    async def send(self, obj: dict) -> None:
+        async with self.lock:
+            await self.ws.send_text(json.dumps(obj))
+
+    async def fail(self, msg: str, code: int = 1011) -> None:
+        try:
+            await self.send({"type": "error", "error": msg})
+            await self.ws.close(code=code)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+
+    async def caption(self, shown: str, stable: str) -> None:
+        if self.done or not self.partials or not shown or _clean_en(shown, self.prompt) == "":
+            return
+        try:
+            await self.send({"type": "partial", "partial": shown, "stable": stable})
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+
+    # -- relay: fw_server /v1/stream --
+    async def open_upstream(self, port: int, want: bool) -> Optional[dict]:
+        if time.time() < _stream_state["no_ws_until"]:
+            return None
+        try:
+            from websockets.asyncio.client import connect
+            from websockets.exceptions import InvalidHandshake
+        except ImportError:
+            return None
+        try:
+            up = await connect(f"ws://127.0.0.1:{port}/v1/stream", open_timeout=1.5, close_timeout=1.0, max_size=2 ** 20, compression=None)
+        except InvalidHandshake:  # it answered, but not as a WebSocket (uvicorn without a WS library: 404)
+            _stream_state["no_ws_until"] = time.time() + STREAM_NO_WS_SECS
+            return None
+        except Exception:  # noqa: BLE001 — refused, timed out: try again next stream
+            return None
+        try:
+            await up.send(json.dumps({"type": "start", "language": "en", "prompt": self.prompt or "", "partials": want,
+                                      "partial_ms": self.every, "model": str(self.main.get("model") or "")}))
+            ready = json.loads(await asyncio.wait_for(up.recv(), 2.0))
+        except Exception:  # noqa: BLE001
+            ready = None
+        if not isinstance(ready, dict) or ready.get("type") != "ready":
+            await self.drop_upstream(up)
+            return None
+        self.up = up
+        self.final = asyncio.get_running_loop().create_future()
+        self.reader = asyncio.create_task(self.read_upstream())
+        return ready
+
+    async def read_upstream(self) -> None:
+        try:
+            async for raw in self.up:
+                m = json.loads(raw) if isinstance(raw, str) else None
+                kind = m.get("type") if isinstance(m, dict) else None
+                if kind == "partial":
+                    await self.caption(str(m.get("partial") or ""), str(m.get("stable") or ""))
+                elif kind in ("final", "error"):
+                    if not self.final.done():
+                        self.final.set_result(m)
+                    return
+        except Exception:  # noqa: BLE001 — upstream gone: the final is decided over POST
+            pass
+        finally:
+            if self.final is not None and not self.final.done():
+                self.final.set_result({"type": "error", "error": "upstream closed"})
+
+    async def drop_upstream(self, up: Any = None) -> None:
+        up = up or self.up
+        if up is self.up:
+            self.up = None
+        if up is not None:
+            try:
+                await up.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # -- http: loopback POSTs --
+    def maybe_partial(self) -> None:
+        n = len(self.buf)
+        if not self.partials or self.up is not None or (self.task is not None and not self.task.done()):
+            return
+        if n - self.last < self.every * 32 or not STREAM_PARTIAL_BYTES[0] <= n <= STREAM_PARTIAL_BYTES[1]:
+            return
+        self.last = n
+        self.task = asyncio.create_task(self.http_partial(_pcm_wav(bytes(self.buf))))
+
+    async def http_partial(self, wav: bytes) -> None:
+        f = {"model": self.main.get("model") or "whisper-1", "response_format": "json", "temperature": "0", "language": "en",
+             "partial": "1", "session": self.session}
+        if self.prompt:
+            f["prompt"] = self.prompt
+        try:
+            out = await run_in_threadpool(_post_stt, self.main["baseUrl"], f, wav, STREAM_PARTIAL_TIMEOUT)
+        except Exception:  # noqa: BLE001 — a caption that fails is skipped
+            return
+        text = str(out.get("text") or "").strip() if isinstance(out, dict) else ""
+        if self.done or out.get("stale") or not text or _clean_en(text, self.prompt) == "":
+            return
+        await self.caption(*self.la.push(text))
+
+    async def run(self, peer: str) -> None:
+        try:
+            first = await asyncio.wait_for(self.ws.receive(), STREAM_START_S)
+        except asyncio.TimeoutError:
+            return await self.fail("no start message", 1008)
+        start = _ws_json(first) if first.get("type") == "websocket.receive" else None
+        if not start or start.get("type") != "start":
+            return await self.fail("expected a start message", 1008)
+        if peer != "loopback" and not _ws_token_ok(self.ws, start.get("token")):
+            return await self.fail("Gateway token required (network lock is on).", 4401)
+        if str(start.get("lang") or "en").lower().split("-")[0] != "en":
+            return await self.fail("only English streams", 1003)
+        main = _stt_main()
+        port = _local_port(main.get("baseUrl") or "")
+        # Streams need faster-whisper up; anything else is the upload's job (its fallback chain).
+        if main.get("engine") != "fasterwhisper" or port is None or time.time() < _fw["down_until"] or not await run_in_threadpool(_port_open, port, 0.1):
+            return await self.fail("unavailable", 1013)
+        self.main, self.prompt = main, effective_stt_prompt(main)
+        want = start.get("partials") is not False
+        try:
+            every = int(start.get("partial_ms") or STREAM_PARTIAL_MS[2])
+        except (TypeError, ValueError):
+            every = STREAM_PARTIAL_MS[2]
+        self.every = min(STREAM_PARTIAL_MS[1], max(STREAM_PARTIAL_MS[0], every))
+        ready = await self.open_upstream(port, want)
+        mode = "relay" if ready else "http"
+        # Known even when the phone starts with partials paused, so a later config can resume them.
+        self.gpu = ready.get("device") == "cuda" if ready else await run_in_threadpool(_fw_cuda, main)
+        self.partials = want and self.gpu
+        try:
+            await self.send({"type": "ready", "partials": self.partials, "mode": mode})
+            if not await self.receive_audio():
+                return
+            reply = await self.decide_final(mode)
+            if reply is None:
+                return
+            await self.send(reply)
+            await self.ws.close(code=1000)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            self.done = True
+            if self.reader is not None:
+                self.reader.cancel()
+            await self.drop_upstream()
+
+    async def receive_audio(self) -> bool:
+        """Frames and controls until "end" (True); False when the stream ended otherwise."""
+        while True:
+            try:
+                msg = await asyncio.wait_for(self.ws.receive(), STREAM_IDLE_S)
+            except asyncio.TimeoutError:
+                await self.fail("idle", 1008)
+                return False
+            if msg.get("type") == "websocket.disconnect":
+                return False
+            data = msg.get("bytes")
+            if data is not None:
+                if len(data) % 2 or len(self.buf) + len(data) > STREAM_MAX_BYTES:
+                    await self.fail("audio too long or not PCM16", 1009)
+                    return False
+                self.buf += data
+                if self.up is not None:
+                    try:
+                        await self.up.send(data)
+                    except Exception:  # noqa: BLE001 — carry on over POSTs; the buffer has everything
+                        await self.drop_upstream()
+                else:
+                    self.maybe_partial()
+                continue
+            ctl = _ws_json(msg) or {}
+            kind = ctl.get("type")
+            if kind == "config":
+                self.partials = ctl.get("partials") is True and self.gpu
+                if self.up is not None:
+                    try:
+                        await self.up.send(json.dumps({"type": "config", "partials": self.partials}))
+                    except Exception:  # noqa: BLE001
+                        await self.drop_upstream()
+            elif kind == "cancel":
+                self.done = True
+                await self.ws.close(code=1000)
+                return False
+            elif kind == "end":
+                return True
+            else:
+                await self.fail("unknown message", 1003)
+                return False
+
+    async def decide_final(self, mode: str) -> Optional[dict]:
+        self.done = True
+        pcm = bytes(self.buf)
+        if len(pcm) < 3200:  # < 0.1 s: nothing was said
+            return {"type": "final", "final": "", "backend": None, "mode": mode}
+        if self.up is not None:
+            try:
+                await self.up.send(json.dumps({"type": "end"}))
+                m = await asyncio.wait_for(asyncio.shield(self.final), STREAM_UP_FINAL_S)
+            except Exception:  # noqa: BLE001 — slow / gone: decided over POST below
+                m = None
+            if isinstance(m, dict) and m.get("type") == "final":
+                return {"type": "final", "final": _clean_en(str(m.get("final") or ""), self.prompt), "backend": m.get("backend") or "faster-whisper", "mode": "relay"}
+        try:
+            out = await run_in_threadpool(_transcribe, _pcm_wav(pcm), "en")
+        except HTTPException as e:
+            await self.fail(str(e.detail))
+            return None
+        return {"type": "final", "final": out["text"], "backend": out["backend"], "mode": "http"}
+
+
+@router.websocket("/stt/stream")
+async def stt_stream(ws: WebSocket):
+    """Live English STT for the phone (see the block comment above)."""
+    peer = _ws_peer(ws)
+    origin = ws.headers.get("origin")
+    if peer is None or (peer == "loopback" and origin and not _LOCAL_ORIGIN_RE.match(origin)):
+        await ws.close(code=4403)
+        return
+    await ws.accept()
+    await _PhoneStream(ws).run(peer)
 
 
 # ── ElevenLabs for the phone (the key never leaves the PC) ────────────────────

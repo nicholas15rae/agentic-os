@@ -1,6 +1,8 @@
 import { api, gateway, GatewayError } from "@/lib/gateway";
 import { cmd, type ChatMessage, type DispatchResult } from "@/lib/platform";
 import { isAndroidApp, isDesktopApp } from "@/stores/settings";
+import { learnedOf, pendingMemoryOf, type LearnedPathway, type PendingMemory } from "@/features/modes/learning";
+import { bookingsOf, rememberBookings } from "@/features/orchestrator/bookings";
 import { SUB_AGENTS, type AgentRole } from "./agents";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve, type RouteKind } from "./router";
 
@@ -13,6 +15,10 @@ export interface DispatchOutcome {
    * when it turned the POST away for now). A caller that already showed
    * (or spoke) his streamed partial answer keeps it and puts the notice in a turn of its own. */
   notice?: DesktopNotice;
+  /** Phone only (decision 5): the Learning lessons Tony proposed on this reply (the same card as the
+   * desktop's; `sendMemoryDecision` answers it) and the core memories it saved. */
+  pendingMemory?: PendingMemory[];
+  learned?: LearnedPathway[];
 }
 
 /** What a phone `dispatch` returned instead of an answer (`DispatchOutcome.notice`). */
@@ -207,14 +213,18 @@ export function postRefused(e: unknown): boolean {
   return e instanceof GatewayError && e.status !== undefined && POST_REFUSED_STATUSES.includes(e.status);
 }
 
+/** The inbox kinds the phone posts and waits on (`command`: a memory decision, `sendMemoryDecision`;
+ * `action`: an approved confirmation card, `sendApprovedAction`). */
+export type InboxKind = "turn" | "task" | "pipeline" | "command" | "action";
+
 /** Queue an inbox item for the desktop; resolves with the gateway's answer: the queue id and (newer
  * gateways) the desktop's liveness, as GET reports it. */
-export async function postInboxItem(kind: "turn" | "task" | "pipeline", payload: Record<string, unknown>): Promise<InboxPosted> {
+export async function postInboxItem(kind: InboxKind, payload: Record<string, unknown>): Promise<InboxPosted> {
   return gateway<InboxPosted>("/api/os/inbox", { method: "POST", body: JSON.stringify({ kind, payload }) });
 }
 
 /** Queue an inbox item for the desktop; resolves with its queue id. */
-export async function postDesktopItem(kind: "turn" | "task" | "pipeline", payload: Record<string, unknown>): Promise<string> {
+export async function postDesktopItem(kind: InboxKind, payload: Record<string, unknown>): Promise<string> {
   return (await postInboxItem(kind, payload)).id;
 }
 
@@ -378,10 +388,60 @@ export async function queueDesktopTurn(payload: DesktopTurnPayload): Promise<Des
  * `MODE_SURFACE_ONLY` / `MODE_NOT_AUTO` on a `task`) throws its error text, so the caller never
  * claims success. A failed POST throws (nothing was queued).
  */
-export async function queueDesktopItem(kind: "turn" | "task" | "pipeline", payload: Record<string, unknown>, opts: { capMs?: number } = {}): Promise<DesktopResult | null> {
+export async function queueDesktopItem(kind: InboxKind, payload: Record<string, unknown>, opts: { capMs?: number } = {}): Promise<DesktopResult | null> {
   const id = await postDesktopItem(kind, payload);
   const w = await awaitDesktopItem(id, kind, opts);
   return w.state === "done" ? w.result : null;
+}
+
+/** How long the phone waits for the desktop to answer a memory decision. */
+export const MEMORY_DECISION_CAP_MS = 30_000;
+
+/**
+ * Phone (decision 5): Save (`approve`) or Skip one of Tony's pending core-memory proposals: an inbox
+ * `command` (`memoryApprove` / `memoryDiscard`, applied by the desktop's InboxAction::Command).
+ * Resolves with the desktop's `memory` answer ({ id, approved, saved }); null when no desktop
+ * answered in time. A desktop refusal (expired / already answered) throws its text.
+ */
+export async function sendMemoryDecision(id: string, approve: boolean): Promise<Record<string, unknown> | null> {
+  const r = await queueDesktopItem("command", approve ? { memoryApprove: id } : { memoryDiscard: id }, { capMs: MEMORY_DECISION_CAP_MS });
+  const m = r?.memory;
+  return m && typeof m === "object" ? (m as Record<string, unknown>) : null;
+}
+
+/** How long the phone waits for the desktop to run an approved card (the gateway drops it after 5 min). */
+export const ACTION_CAP_MS = 60_000;
+/** The tools a phone card may approve through the inbox (os_api.py `_ACTION_TOOLS`, pipeline.rs `APPROVED_ACTION_TOOLS`). */
+export const APPROVED_ACTION_TOOLS = ["calendar.create_event", "gmail.create_draft"] as const;
+export type ApprovedActionTool = (typeof APPROVED_ACTION_TOOLS)[number];
+
+/** No desktop app took the approved card, and the gateway took it back: nothing ran, nothing will. */
+export const ACTION_NEEDS_DESKTOP_MESSAGE = "Nothing was done: that needs the desktop app running. Open it on the PC and approve it again.";
+/** The cancel got no answer: a desktop that starts soon may still run it. */
+export const ACTION_UNCANCELLED_MESSAGE = "The desktop app isn't answering, and I couldn't take the request back, so it may still run when the app starts. Check before approving it again.";
+/** The POST may have landed (no answer / 5xx). */
+export const ACTION_UNCONFIRMED_MESSAGE = "I couldn't confirm the desktop got that, so it may or may not run. Check before approving it again.";
+
+/**
+ * Phone: run an APPROVED confirmation card on the desktop (`action` inbox item; pipeline.rs runs it
+ * through the same approved-only path as the desktop card). Resolves with the desktop's answer.
+ * Never a gateway CLI agent: no desktop app → the item is cancelled at the gateway and this throws
+ * `ACTION_NEEDS_DESKTOP_MESSAGE` (nothing ran); a refusal throws its reason.
+ */
+export async function sendApprovedAction(tool: ApprovedActionTool, args: Record<string, unknown>, planId: string, now = new Date()): Promise<string> {
+  const payload = { tool, args, planId, approvedAt: now.toISOString() };
+  let posted: InboxPosted;
+  try {
+    posted = await postInboxItem("action", payload);
+  } catch (e) {
+    if (postMayHaveQueued(e)) throw new Error(ACTION_UNCONFIRMED_MESSAGE);
+    throw new Error(`Nothing was done — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const w = await awaitDesktopItem(posted.id, "action", { capMs: ACTION_CAP_MS, cancelUnclaimed: true, posted });
+  if (w.state === "done") return typeof w.result.answer === "string" && w.result.answer ? w.result.answer : "Done on the desktop.";
+  if (w.state === "unclaimed") throw new Error(ACTION_NEEDS_DESKTOP_MESSAGE);
+  if (w.state === "uncancelled") throw new Error(ACTION_UNCANCELLED_MESSAGE);
+  throw new Error(desktopTimeoutMessage(w));
 }
 
 /**
@@ -478,6 +538,11 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
     // Gateway Tony's cold start streamed a lead-in ("One sec, Nic — waking up. ") the answer never
     // repeats: the phone's speech lines the final up with it (voice-controller `streamedText`).
     const prefix = w.result.streamPrefix;
+    // Decision 5: the full OsTurnResult reaches the phone; keep the Learning card and pills.
+    const pendingMemory = pendingMemoryOf(w.result.pendingMemory);
+    const learned = learnedOf(w.result.learned);
+    // A2: a booking-mail scan's threads, for a calendar-add card on a later turn.
+    if (Array.isArray(w.result.bookings)) rememberBookings(bookingsOf(w.result.bookings));
     return {
       role,
       result: {
@@ -488,6 +553,8 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
         latencyMs: ms(),
         ...(typeof prefix === "string" && prefix ? { streamPrefix: prefix } : {}),
       },
+      ...(pendingMemory.length ? { pendingMemory } : {}),
+      ...(learned.length ? { learned } : {}),
     };
   }
   if (w.state === "timeout") {

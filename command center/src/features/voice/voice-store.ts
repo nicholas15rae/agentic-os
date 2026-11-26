@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { LearnedPathway } from "@/features/modes/learning";
+import type { LearnedPathway, PendingMemory } from "@/features/modes/learning";
 import type { DispatchView, PacketResult } from "@/features/arbiter/api";
 import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
@@ -77,6 +77,8 @@ export interface VoiceTurn {
   cardId?: string;
   /** Learning mode: the pathways Tony saved on this reply ("Memory saved: …" pills). */
   learned?: LearnedPathway[];
+  /** Learning mode: lessons Tony proposed on this reply, waiting for Nic's yes (the memory card). */
+  pendingMemory?: PendingMemory[];
   /** Tony's dispatch packet under his reply (held / pending approval / queued). */
   dispatch?: DispatchView;
   /** A dispatched packet's outcome (per task: status, attempts, output). */

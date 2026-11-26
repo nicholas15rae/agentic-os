@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Camera, Container, Copy, Download, FlaskConical, Loader2, Mail, Map as MapIcon, Music2, Plus, Radar, RefreshCw, ShieldCheck, Trash2, Unplug } from "lucide-react";
+import { CalendarDays, Camera, Container, Copy, Download, FileText, FlaskConical, Loader2, Mail, Map as MapIcon, Music2, Plus, Radar, RefreshCw, ShieldCheck, Trash2, Unplug } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
 import { cmd, isTauri, onNativeEvent, type N8nDiscovery, type NativeCommands, type SpotifyReauthEvent, type SpotifyStatus, type WorkflowInfo } from "@/lib/platform";
 import { cc, type CcConfig } from "@/lib/cc-api";
@@ -268,6 +268,129 @@ export function GmailCard() {
         <SecretRow name="gmail-script-id" label="Apps Script deployment ID" placeholder="AKfycb…" onChange={refresh} />
         <SecretRow name="gmail-script-key" label="Apps Script API key" onChange={refresh} />
         <p className="mt-1 text-xs text-ink-3">Used as a pair: GMAIL_SCRIPT_ID and GMAIL_SCRIPT_KEY (environment or repo-root .env, both set) take priority; otherwise both keychain entries (pasted here, or Import from AnythingLLM). Half of each is never mixed.</p>
+      </div>
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+      <BookingInstructionsRow />
+    </Card>
+  );
+}
+
+type BookingInstructions = NativeCommands["gmail_booking_instructions"]["result"];
+
+/** The booking check's editable instruction file (os.json `gmail.bookingInstructionsPath`): its
+ * path, the search the next check runs, a preview, and Open in editor (Notepad). Re-read by Rust on
+ * every check, so an edit applies at once. */
+function BookingInstructionsRow() {
+  const [info, setInfo] = useState<BookingInstructions | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setErr(null);
+    void cmd("gmail_booking_instructions").then(setInfo).catch((e) => setErr(String(e)));
+  }, []);
+  useEffect(load, [load]);
+  const open = async () => {
+    try {
+      await cmd("gmail_booking_instructions_open");
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+  return (
+    <div className="mt-3 border-t border-white/5 pt-3">
+      <p className="label-caps mb-1 text-ink-3">Booking check · instruction file</p>
+      <p className="text-xs text-ink-3">
+        “Check my Gmail for what I got booked for” runs this file’s search and reads the newest {info?.spec.read ?? 5} threads (read-only). Line 1 is <span className="font-mono">query:</span>, line 2 <span className="font-mono">read:</span>, then your rules for Tony.
+      </p>
+      {info && (
+        <p className="mt-1 break-all font-mono text-[11px] text-ink-2">
+          {info.path}
+          {info.exists || info.refused ? "" : " (missing: the built-in search is used)"}
+        </p>
+      )}
+      {info?.refused && <p className="mt-1 text-xs text-alert">Not read: {info.refused}. The built-in search is used.</p>}
+      {info && <p className="mt-1 break-all font-mono text-[11px] text-ink-3">query: {info.spec.query}</p>}
+      {info?.exists && <pre className="well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] text-ink-2">{info.preview}</pre>}
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button onClick={() => void open()} disabled={!info?.exists} className="pill-glass !h-8 text-xs" title="Open the instruction file in Notepad">
+          <FileText size={13} /> Open in editor
+        </button>
+        <button onClick={load} className="pill-glass !h-8 text-xs" title="Read the file again">
+          <RefreshCw size={13} /> Reload
+        </button>
+      </div>
+      {err && <p className="mt-1 text-xs text-alert">{err}</p>}
+    </div>
+  );
+}
+
+type CalendarStatus = NativeCommands["gcal_status"]["result"];
+const GCAL_SOURCE: Record<CalendarStatus["source"], string> = {
+  env: "GCAL_SCRIPT_ID / GCAL_SCRIPT_KEY (environment or .env)",
+  keychain: "Apps Script deployment (keychain)",
+  none: "not set up",
+};
+
+/**
+ * Google Calendar through the same Google Apps Script deployment AnythingLLM's Calendar agent uses
+ * (imported read-only from AnythingLLM, also on first use). Reads run when Tony is asked; an event
+ * is added only after the confirmation card: primary calendar, no guests, no invites.
+ */
+export function CalendarCard() {
+  const { cfg } = useOsCfg();
+  const [status, setStatus] = useState<CalendarStatus | null>(null);
+  const [rev, setRev] = useState(0);
+  const [busy, setBusy] = useState<"import" | "test" | "toggle" | null>(null);
+  const [out, setOut] = useState<{ ok: boolean; text: string } | null>(null);
+  const refresh = () => void cmd("gcal_status").then(setStatus).catch(() => setStatus(null));
+  useEffect(refresh, []);
+  const server = cfg?.mcps.find((m) => m.id === "calendar");
+
+  const run = async (what: "import" | "test" | "toggle", fn: () => Promise<{ ok: boolean; text: string } | null>) => {
+    setBusy(what);
+    try {
+      const r = await fn();
+      if (r) setOut(r);
+    } catch (e) {
+      setOut({ ok: false, text: String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const importAllm = () =>
+    run("import", async () => {
+      const r = await cmd("gcal_import_anythingllm");
+      refresh();
+      notifyIntegrationsChanged();
+      setRev((n) => n + 1);
+      return { ok: r.imported, text: r.detail };
+    });
+  // A click here is the user's own read-only request.
+  const test = () => run("test", async () => ({ ok: true, text: (await cmd("mcp_call", { name: "calendar.upcoming", args: { period: "today" }, approved: true, agent: "tony" })).slice(0, 600) }));
+  const toggle = (on: boolean) => run("toggle", async () => (await setMcpEnabled("calendar", on), null));
+
+  return (
+    <Card
+      title="Google Calendar"
+      hint="Tony reads your calendar through the Google Apps Script deployment AnythingLLM's Calendar agent uses. Adding an event only happens after you approve the confirmation card: your primary calendar, no guests, no invites."
+      action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
+    >
+      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+        <CalendarDays size={15} className={status?.configured ? "text-teal" : "text-ink-3"} />
+        <span className="text-ink-2">
+          Backend: <b className={status?.configured ? "text-teal" : "text-ink"}>{status ? GCAL_SOURCE[status.source] : "…"}</b>
+        </span>
+        <button onClick={() => void importAllm()} disabled={!!busy} className="pill-glass ml-auto !h-8 text-xs" title="Copy AnythingLLM Desktop's Google Calendar deployment into the keychain">
+          <Download size={13} /> Import from AnythingLLM
+        </button>
+        <button onClick={() => void test()} disabled={!!busy || !status?.configured || !server?.enabled} className="pill-glass !h-8 text-xs" title="Read today's events">
+          <FlaskConical size={13} /> Test
+        </button>
+      </div>
+      {server && <Toggle on={server.enabled} disabled={busy === "toggle"} onChange={(v) => void toggle(v)} label="Google Calendar tools on" hint="Off: Tony can't read your calendar, and calendar adds are refused." />}
+      <div key={rev}>
+        <SecretRow name="gcal-script-id" label="Apps Script deployment ID" placeholder="AKfycb…" onChange={refresh} />
+        <SecretRow name="gcal-script-key" label="Apps Script API key" onChange={refresh} />
+        <p className="mt-1 text-xs text-ink-3">Used as a pair, like Gmail's: GCAL_SCRIPT_ID and GCAL_SCRIPT_KEY (environment or repo-root .env) first, else both keychain entries.</p>
       </div>
       {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>

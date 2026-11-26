@@ -28,7 +28,7 @@ vi.mock("@/features/dispatcher/agents", () => ({
 }));
 vi.mock("@/features/dispatcher/router", () => ({ DEFAULT_ROUTING_CONFIG: {}, directTool: () => null, resolve: () => ({ kind: "Default", role: null, reason: "" }) }));
 
-import { DESKTOP_LOST_MESSAGE } from "@/features/dispatcher/dispatch";
+import { ACTION_NEEDS_DESKTOP_MESSAGE, DESKTOP_LOST_MESSAGE } from "@/features/dispatcher/dispatch";
 import { execute } from "./execute";
 import type { ActionPlan } from "./plan";
 
@@ -164,5 +164,80 @@ describe("execute: read-only plans go through dispatch() with the plan's route",
     expect(posted().payload).toMatchObject({ text: "am I free at 7?", role: "booking", explicit: false });
     expect(posted().payload.approved).toBeUndefined();
     expect(h.chat).not.toHaveBeenCalled();
+  });
+});
+
+describe("execute: an approved calendar add (A2)", () => {
+  const CAL = { title: "CONFIRMED: Netflix day player", date: "2026-11-28", startTime: "06:30", location: "Pinewood Studios" };
+  const calPlan = () => plan({ id: "plan-7", role: "general", utterance: "add it to my calendar", summary: "Add it", target: { kind: "tool", tool: "calendar.create_event", args: CAL }, payload: CAL });
+
+  it("desktop: the approved-only Rust command, never a gateway agent", async () => {
+    h.desktop = true;
+    h.cmd.mockResolvedValue('Added to your Google Calendar: "CONFIRMED: Netflix day player", Sat Nov 28, 6:30 AM – 7:30 AM. No invites were sent.');
+    const r = await execute(calPlan(), history);
+    expect(h.cmd).toHaveBeenCalledWith("gcal_create_event", { args: CAL, approved: true });
+    expect(r.text).toMatch(/^Added to your Google Calendar/);
+    expect(r.meta).toMatch(/^Google Calendar · add · \d+ms$/);
+    expect(h.chat).not.toHaveBeenCalled();
+    expect(h.gateway).not.toHaveBeenCalled();
+    h.cmd.mockRejectedValueOnce("PERMISSION_DENIED:mcp");
+    await expect(execute(calPlan(), history)).rejects.toThrow("Nothing was done — MCP tools are set to Deny");
+  });
+
+  it("Android: an approved `action` inbox item the desktop runs; its answer comes back", async () => {
+    h.android = true;
+    stubQueue(() => ({ status: "done", result: { ok: true, result: { answer: "Added to your Google Calendar.", tool: "calendar.create_event" } } }));
+    const p = execute(calPlan(), history);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const r = await p;
+    expect(r.text).toBe("Added to your Google Calendar.");
+    const body = posted();
+    expect(body.kind).toBe("action");
+    expect(body.payload).toMatchObject({ tool: "calendar.create_event", args: CAL, planId: "plan-7" });
+    expect(typeof body.payload.approvedAt).toBe("string");
+    expect(h.cmd).not.toHaveBeenCalled();
+    expect(h.chat).not.toHaveBeenCalled();
+  });
+
+  it("Android, no desktop app: the item is taken back and nothing runs — never a CLI", async () => {
+    h.android = true;
+    stubQueue(quiet);
+    const p = execute(calPlan(), history);
+    const done = expect(p).rejects.toThrow(ACTION_NEEDS_DESKTOP_MESSAGE);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await done;
+    expect(h.gateway.mock.calls.some(([path, init]) => path === "/api/os/inbox/q1/cancel" && init?.method === "POST")).toBe(true);
+    expect(h.chat).not.toHaveBeenCalled();
+    expect(h.health).not.toHaveBeenCalled();
+  });
+
+  it("an approved agent-target plan about Nic's calendar never reaches a gateway agent", async () => {
+    for (const s of [{ desktop: true, android: false }, { desktop: false, android: true }]) {
+      h.desktop = s.desktop;
+      h.android = s.android;
+      for (const utterance of ["schedule the Netflix shoot on my calendar for Friday at 7am", "create an event on my calendar for the audition Friday at 2pm", "book the shoot in my calendar"]) {
+        await expect(execute(plan({ role: "general", utterance, summary: "Calendar", payload: {} }), history), utterance).rejects.toThrow("Nothing was done — calendar adds go through Google Calendar.");
+      }
+      // The model planner's own words count too (its intent / summary / payload).
+      await expect(execute(plan({ utterance: "lock in Friday's shoot", intent: "add the shoot to your calendar", summary: "Shoot" }), history)).rejects.toThrow("calendar adds go through Google Calendar");
+      await expect(execute(plan({ utterance: "lock in Friday's shoot", summary: "Add the shoot to Google Calendar" }), history)).rejects.toThrow("calendar adds go through Google Calendar");
+    }
+    expect(h.chat).not.toHaveBeenCalled();
+    expect(h.health).not.toHaveBeenCalled();
+    expect(h.gateway).not.toHaveBeenCalled();
+    // A coding task about a calendar keeps its agent.
+    h.desktop = true;
+    await execute(plan({ utterance: "add a calendar view to the dashboard", summary: "Add a calendar view to the dashboard" }), history);
+    expect(h.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("Android: a Gmail draft goes the same way", async () => {
+    h.android = true;
+    stubQueue(() => ({ status: "done", result: { ok: true, result: { answer: "Draft saved in Gmail (not sent)." } } }));
+    const args = { to: "sam@agency.ca", subject: "Avail", body: "Free Friday." };
+    const p = execute(plan({ role: "general", target: { kind: "tool", tool: "gmail.create_draft", args }, payload: args }), history);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await p).text).toBe("Draft saved in Gmail (not sent).");
+    expect(posted().payload).toMatchObject({ tool: "gmail.create_draft", args });
   });
 });

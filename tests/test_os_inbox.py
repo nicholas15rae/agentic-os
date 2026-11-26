@@ -465,6 +465,25 @@ class InboxTests(QueueCase):
             s, d = self.api("POST", "/api/os/inbox", {"kind": "command", "payload": payload})
             self.assertEqual(s, 400, (payload, d))
 
+    def test_command_kind_accepts_memory_proposal_answers(self):
+        # Decision 5: the phone's card under a Learning reply answers a pending core-memory proposal.
+        for payload in ({"memoryApprove": "mem-1764100000000-12"}, {"memoryDiscard": "mem-1764100000000-13"}, {"memoryApprove": "a_b-C9"}):
+            qid = self.post("command", payload)
+            self.assertIn(qid, self.pending_ids())
+        for payload in (
+            {"memoryApprove": ""},
+            {"memoryApprove": 12},
+            {"memoryApprove": "../etc/passwd"},
+            {"memoryApprove": "mem 1"},
+            {"memoryApprove": "m" * 65},
+            {"memoryDiscard": ["mem-1"]},
+            {"memoryApprove": "mem-1\n"},
+            {"memoryApprove": "mem-1", "memoryDiscard": "mem-1"},
+            {"memorySave": "mem-1"},
+        ):
+            s, d = self.api("POST", "/api/os/inbox", {"kind": "command", "payload": payload})
+            self.assertEqual(s, 400, (payload, d))
+
     def test_bad_kind_and_oversize_payload(self):
         self.assertEqual(self.api("POST", "/api/os/inbox", {"kind": "nope", "payload": {}})[0], 400)
         self.assertEqual(self.api("POST", "/api/os/inbox", {"kind": "turn", "payload": ["x"]})[0], 400)

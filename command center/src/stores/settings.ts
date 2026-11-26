@@ -84,8 +84,10 @@ export interface SettingsState {
    * Voice detection (v7, Phase 2 Part B): `activationDb` is the absolute speech gate in dBFS
    * (-70..-10; on desktop it mirrors os.json `voice.activationDb`), `bargeMarginDb` the extra a
    * barge-in over Tony needs, then the pause that ends an utterance and the hard cap.
+   * `partialMs`: live captions while you speak, one every this many ms of speech (300-3000; 0 =
+   * off, which also turns the phone's streamed STT off). Only on a GPU STT (features/voice/stt-partials.ts).
    */
-  vad: { activationDb: number; bargeMarginDb: number; endSilenceMs: number; maxUtteranceMs: number };
+  vad: { activationDb: number; bargeMarginDb: number; endSilenceMs: number; maxUtteranceMs: number; partialMs?: number };
   /**
    * Conversation: reopen the mic after Tony answers; let you talk over him.
    * `bargeEndSilenceMs`: end-of-speech pause for a listen opened over Tony (Phase 2 reflexes).
@@ -167,7 +169,7 @@ const defaults: Omit<SettingsState, "set"> = {
   wakeRequire: true,
   glassOpacity: 8,
   gatewayToken: "",
-  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000 },
+  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 600 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true, vocalHandoffs: true },
   reminders: { osFallback: true },

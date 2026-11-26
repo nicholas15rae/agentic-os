@@ -320,6 +320,8 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
     let list: &[&str] = match id {
         "weather" | "spotify" | "brave-search" => &["general"],
         "gmail" | "whatsapp" | "time" => &["general", "booking"],
+        // Google Calendar: Tony's own (reads, and the calendar-add card).
+        "calendar" => &["general"],
         "knowledge-graph" => &["general", "librarian", "prompter", "booking"],
         "filesystem" => &["coder", "designer", "director", "librarian", "prompter", "booking"],
         "git" => &["coder"],
@@ -334,7 +336,7 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
 }
 
 /// Server ids whose grants the one-time tool-owner migration rewrites (`default_mcp_grants`).
-pub const TOOL_OWNER_SERVERS: [&str; 14] = ["weather", "time", "fetch", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "instagram", "whatsapp", "shotcut", "media-forge"];
+pub const TOOL_OWNER_SERVERS: [&str; 15] = ["weather", "time", "fetch", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "calendar", "spotify", "maps", "instagram", "whatsapp", "shotcut", "media-forge"];
 
 /// Skill grants of the tool-owner split: the Designer's two design skills, the Director's motion
 /// vocabulary. Tony has none (a skill body is injected into a sub-agent's task only when the task
@@ -414,6 +416,7 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("spotify", "Spotify", false, "Now playing, playback control, recent tracks and playlists (connect in Settings → Integrations)."),
         builtin("maps", "Maps / OpenStreetMap", true, "Geocoding (Nominatim), driving routes and ETAs (OSRM, no live traffic) and the Route Map widget. No key needed."),
         builtin("instagram", "Instagram", true, "Your Instagram Professional account: profile stats, recent posts and insights, comments. Replies and publishing only after the confirmation card (needs INSTAGRAM_ACCESS_TOKEN)."),
+        builtin("calendar", "Google Calendar", true, "Your upcoming events through the Google Apps Script deployment AnythingLLM's Calendar agent uses (imported on first use). Adding an event only after the confirmation card; never invites."),
         McpServer {
             id: "whatsapp".into(),
             name: "WhatsApp Bridge".into(),
@@ -925,6 +928,8 @@ pub struct OsConfig {
     /// The HITL review queue: digest hour / threshold and the optional webhook switch (its URL
     /// lives in the OS keychain, `review_queue::WEBHOOK_SERVICE`).
     pub review: ReviewConfig,
+    /// Gmail: where Nic's editable booking-mail instruction lives (`gmail::booking_spec`).
+    pub gmail: GmailConfig,
     /// One-time config migrations already applied (`apply_migrations`), so a setting the user
     /// changes afterwards is never flipped back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -959,9 +964,24 @@ impl Default for OsConfig {
             voice: VoiceConfig::default(),
             roster: super::arbiter::RosterConfig::default(),
             review: ReviewConfig::default(),
+            gmail: GmailConfig::default(),
             migrations: vec![],
             switchboard: SwitchboardConfig::default(),
         }
+    }
+}
+
+/// Gmail settings (`gmail.rs`). The Apps Script credentials live in the keychain / `.env`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GmailConfig {
+    /// The booking-mail check's instruction file (line 1 `query: …`, line 2 `read: N`, then Nic's
+    /// rules), re-read on every scan; missing = the built-in default query.
+    pub booking_instructions_path: String,
+}
+impl Default for GmailConfig {
+    fn default() -> Self {
+        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into() }
     }
 }
 
@@ -1541,8 +1561,10 @@ pub fn gate(bridge: &BridgeState, tier: Tier, what: &str, approved: bool, detail
 // to that service. The webview can set / check / delete, never read.
 
 const SERVICE: &str = "agentic-os-command-center";
-pub const OS_SECRETS: [&str; 13] = [
+pub const OS_SECRETS: [&str; 15] = [
     "anthropic", "gemini", "brave", "twelvedata", "vault", "gateway-token", "anythingllm-remote", "gmail-script-id", "gmail-script-key",
+    // Google Calendar's Apps Script deployment (`calendar.rs`): only ever sent to script.google.com.
+    "gcal-script-id", "gcal-script-key",
     // Remote MCP tokens: each is only ever sent to its own host (see `mcp::REMOTE_AUTH`).
     "github-pat", "sentry-token", "agentmail-key",
     // Instagram API with Instagram Login (`instagram.rs`): only ever sent to graph.instagram.com.
@@ -2261,8 +2283,9 @@ mod tests {
 
     #[test]
     fn mcp_grants_match_the_tool_owner_split() {
-        let cases: [(&str, &[&str]); 14] = [
+        let cases: [(&str, &[&str]); 15] = [
             ("weather", &["general"]),
+            ("calendar", &["general"]),
             ("spotify", &["general"]),
             ("brave-search", &["general"]),
             ("gmail", &["general", "booking"]),
@@ -2287,7 +2310,7 @@ mod tests {
             assert!(TOOL_OWNER_SERVERS.contains(&id), "{id}");
         }
         let tony: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), "tony")).map(|(id, _)| *id).collect();
-        assert_eq!(tony, ["weather", "spotify", "brave-search", "gmail", "whatsapp", "time", "knowledge-graph"]);
+        assert_eq!(tony, ["weather", "calendar", "spotify", "brave-search", "gmail", "whatsapp", "time", "knowledge-graph"]);
         for (agent, want) in [("coder", &["filesystem", "git", "fetch"][..]), ("designer", &["filesystem"]), ("director", &["filesystem", "shotcut", "media-forge"]), ("bizops", &["instagram"]), ("ops", &["maps"]), ("librarian", &["knowledge-graph", "filesystem"]), ("prompter", &["knowledge-graph", "filesystem", "fetch"]), ("finance", &[]), ("trader", &[])] {
             let mut got: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), agent)).map(|(id, _)| *id).collect();
             let mut want = want.to_vec();
@@ -2329,6 +2352,16 @@ mod tests {
         assert_eq!(weather.agents, Some(vec!["general".to_string()]));
         let spotify = mcps.iter().find(|m| m.id == "spotify").unwrap();
         assert!(!spotify.enabled && spotify.transport == "builtin");
+        // Google Calendar: Tony's own builtin, on by default (no backend = no tools listed).
+        let cal = mcps.iter().find(|m| m.id == "calendar").unwrap();
+        assert!(cal.enabled && cal.transport == "builtin" && !cal.read_only);
+        assert_eq!(cal.agents, Some(vec!["general".to_string()]));
+        assert!(OS_SECRETS.contains(&"gcal-script-id") && OS_SECRETS.contains(&"gcal-script-key"));
+        // The booking-mail instruction path: serde default, kept when saved.
+        let c: OsConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.gmail.booking_instructions_path, r"G:\ai-hub\protocols\booking-email-check.md");
+        let c: OsConfig = serde_json::from_str(r#"{"gmail":{"bookingInstructionsPath":"D:\\x.md"}}"#).unwrap();
+        assert_eq!(c.gmail.booking_instructions_path, r"D:\x.md");
     }
 
     #[test]

@@ -68,3 +68,6 @@ data/security/
 /command center/dist.bak-*/
 /.claude/worktrees/
 /.agentic/
+
+# STT benchmark clips and results (stt/bench; synthetic now, real voice recordings later)
+data/stt-bench/

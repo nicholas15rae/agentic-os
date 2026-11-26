@@ -485,6 +485,23 @@ fn learning_locks_dispatch_to_solo_and_carries_the_protocol() {
     assert_eq!(s.apply_override(&OverridePatch { dispatch: Some(DispatchPolicy::AutoDispatch), ..Default::default() }).dispatch, DispatchPolicy::AutoDispatch);
 }
 
+/// Decision 5: one curious follow-up at a time, the echo, then the core-memories question with the
+/// proposal tag; nothing claims a save. The question is the app's own constant, word for word, and
+/// the notes survive the busiest dials (Conversational) in full.
+#[test]
+fn the_learning_protocol_asks_curious_follow_ups_and_the_core_question() {
+    for part in ["one curious follow-up at a time (who, how, why, when)", "(So when X, you want Y?)", "[[LEARN category | when | rule or fact | confirmed]]", "Nothing is saved until he says yes."] {
+        assert!(LEARNING_PROTOCOL.contains(part), "{part}");
+    }
+    assert!(LEARNING_PROTOCOL.contains(super::super::learning::CORE_QUESTION));
+    assert!(!LEARNING_PROTOCOL.contains('"'), "the TS mirror test reads the constant between plain quotes");
+    let l = LEARNING_PROTOCOL.to_lowercase();
+    assert!(!l.contains("json") && !l.contains("gabagool") && !l.contains("save now"), "{l}");
+    let busiest = Effective { curiosity: Curiosity::High, verbosity: Verbosity::Conversational, ..eff(LEARNING_ID) };
+    let b = mode_block(&busiest);
+    assert!(b.chars().count() <= MODE_BLOCK_MAX && b.ends_with(&format!("\nMODE NOTES: {LEARNING_NOTES}")), "{}: {b}", b.chars().count());
+}
+
 #[test]
 fn tool_mode_names_resolve_to_work_modes_only() {
     for (q, id) in [

@@ -198,9 +198,11 @@ pub const VERBOSITY_TERSE: &str = "VERBOSITY TERSE: shortest useful answer; shor
 pub const VERBOSITY_CONVERSATIONAL: &str = "VERBOSITY CONVERSATIONAL: up to 4 short sentences when it helps the conversation.";
 pub const DISPATCH_SOLO: &str = "SOLO MODE: nothing is handed to the Prompter, Designer or Coder now. If Nic wants something built, offer to park it, or say it can be queued once he switches modes.";
 pub const DISPATCH_AUTO: &str = "BUILDER MODE: the app queues a clear build for the Prompter as soon as Nic commits; never say it was queued unless the app confirms it.";
-/// Learning mode's rules (in place of the Solo line). The `[[LEARN …]]` lines are pulled out of
-/// the reply by `learning::parse_tags` before anything is shown, spoken or logged.
-pub const LEARNING_PROTOCOL: &str = "LEARNING MODE: Nic is training you; offer no builds or hand-offs. Distill each lesson into a rule; ask one sharp question on edge cases or clashes with LEARNED; echo it back (So when X, you want Y?) before saving unless he says save now. To save, add a line per lesson: [[LEARN category | when | rule or fact | confirmed or provisional]], category one of preference, workflow, rule, persona, domain_knowledge, correction. Confirm briefly.";
+/// Learning mode's rules (in place of the Solo line): one curious follow-up at a time, then the
+/// echo and the core-memories question (decision 5). The `[[LEARN …]]` lines are pulled out of the
+/// reply by `learning::parse_tags` before anything is shown, spoken or logged, and wait as pending
+/// proposals until Nic's yes (`learning::Proposals`); the app appends the question if he left it out.
+pub const LEARNING_PROTOCOL: &str = "LEARNING MODE: Nic is training you; offer no builds or hand-offs. Ask one curious follow-up at a time (who, how, why, when) until you understand; check it against LEARNED. Then echo it (So when X, you want Y?), ask: Want me to add that to my core memories? and add a line per lesson: [[LEARN category | when | rule or fact | confirmed]], category one of preference, workflow, rule, persona, domain_knowledge, correction. Nothing is saved until he says yes.";
 /// The whole block's cap (the ON DUTY line, then the mode's own notes, are clipped to fit).
 pub const MODE_BLOCK_MAX: usize = 800;
 pub const MODIFIER_MAX: usize = 280;

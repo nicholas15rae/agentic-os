@@ -4,6 +4,7 @@ import { Card, Field, Select } from "@/components/ui";
 import { gateway } from "@/lib/gateway";
 import { cmd, type BenchResult, type CliStatus, type LabModel, type SchedulerConfig } from "@/lib/platform";
 import { gated } from "@/features/bridge/gate";
+import { ModelComparePanel } from "@/features/modellab/ModelComparePanel";
 import { CfgError, SecretRow, Toggle, useOsCfg } from "./os-ui";
 import { overseerFamilyOn, toggleOverseer, type OverseerFamily } from "./overseer-toggle";
 
@@ -354,7 +355,7 @@ export function ModelLabCard() {
   return (
     <Card
       title="Model Lab — choose Tony's brain"
-      hint="Benchmark loads ONE model alone at a context that fits your 12 GB card and times a real answer. “Use for Tony” switches Tony and every AnythingLLM agent to that model, so a second model never auto-loads next to it."
+      hint="Benchmark loads ONE model alone at a context that fits your 12 GB card and times a real answer. “Compare with Tony's model” runs an A/B on Tony's own prompts and puts his model back; it never switches him. “Use for Tony” switches Tony and every AnythingLLM agent to that model, so a second model never auto-loads next to it."
       action={
         <button onClick={load} className="pill-glass !h-8 text-xs">
           <RefreshCw size={13} /> Refresh
@@ -370,7 +371,7 @@ export function ModelLabCard() {
               <th className="py-1 font-normal">Model</th>
               <th className="font-normal">Size</th>
               <th className="font-normal">Fit (context)</th>
-              <th className="font-normal">First word · speed · VRAM</th>
+              <th className="font-normal">Load · first word · speed · VRAM</th>
               <th className="text-right font-normal">Try</th>
             </tr>
           </thead>
@@ -393,7 +394,7 @@ export function ModelLabCard() {
                     {m.fit} · {Math.round(m.context / 1024)}k
                   </td>
                   <td className="py-2 font-mono text-ink-2">
-                    {r ? (r.error ? <span className="text-alert">{r.error.slice(0, 80)}</span> : `${(r.firstTokenMs / 1000).toFixed(2)}s · ${r.tokensPerSec} tok/s · ${r.vramUsedGb}/${Math.round(r.vramTotalGb)} GB`) : "—"}
+                    {r ? (r.error ? <span className="text-alert">{r.error.slice(0, 80)}</span> : `${(r.loadMs / 1000).toFixed(1)}s load · ${(r.firstTokenMs / 1000).toFixed(2)}s · ${r.tokensPerSec} tok/s · ${r.vramUsedGb}/${Math.round(r.vramTotalGb)} GB`) : "—"}
                     {r?.reply && (
                       <span className="block max-w-[320px] truncate font-sans text-[11px] text-ink-3" title={r.reply}>
                         “{r.reply}”
@@ -416,6 +417,7 @@ export function ModelLabCard() {
           </tbody>
         </table>
       </div>
+      <ModelComparePanel models={list} />
       <details className="mt-3">
         <summary className="cursor-pointer text-sm text-ink">More models well-suited to a 12 GB RTX 3060</summary>
         <ul className="mt-2 space-y-1.5 text-xs">

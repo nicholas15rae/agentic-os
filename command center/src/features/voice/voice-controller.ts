@@ -560,7 +560,9 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
         if (wakeListen && wake.armed) rearmWakeAfterError(e);
       },
     },
-    { maxSilenceStartMs: opts.forConfirmation ? 8000 : 7000 },
+    // No live captions (nor their GPU passes) for hands-free's passive wake listen: room talk and
+    // the TV would be captioned in the HUD (onPartial above); a listen you opened gets them.
+    { maxSilenceStartMs: opts.forConfirmation ? 8000 : 7000, partials: () => !passiveListen },
   );
 }
 
@@ -1049,7 +1051,10 @@ async function run(plan: Parameters<typeof execute>[0], channel: Channel, addres
     // An empty result: the runner's caller posts (and speaks) the outcome itself (a gated
     // os_turn): never a second copy, and the turn's state is the caller's.
     if (!r.text) return;
-    store().pushTurn({ who: "agent", text: r.text, role: plan.role, meta: r.meta, thread, from: "os" });
+    // Decision 5: a typed phone turn in Learning mode gets the card and pills too (as phoneVoiceRun).
+    const learned = pillPathways(r.learned);
+    const memory = { ...(r.pendingMemory?.length ? { pendingMemory: r.pendingMemory } : {}), ...(learned.length ? { learned } : {}) };
+    store().pushTurn({ who: "agent", text: r.text, role: plan.role, meta: r.meta, thread, from: "os", ...memory });
     clientTrace.ui(traceId, "reply shown");
     if (gen !== micGen) return;
     if (channel === "voice") {
@@ -1239,6 +1244,8 @@ async function phoneVoiceRun(plan: ActionPlan, thread: ThreadId, gen: number) {
   let meta: string;
   let notice: DispatchOutcome["notice"];
   let streamPrefix = "";
+  // Decision 5: the Learning card and "Memory saved" pills the desktop's result carried.
+  let memory: Pick<VoiceTurn, "pendingMemory" | "learned"> = {};
   // In flight for the barge-in branches until dispatch settles (`phoneTurns`).
   const inFlight = { gen };
   phoneTurns.add(inFlight);
@@ -1248,6 +1255,8 @@ async function phoneVoiceRun(plan: ActionPlan, thread: ThreadId, gen: number) {
     const { result } = out;
     notice = out.notice;
     streamPrefix = streamPrefixOf(out);
+    const learnedPills = pillPathways(out.learned);
+    memory = { ...(out.pendingMemory?.length ? { pendingMemory: out.pendingMemory } : {}), ...(learnedPills.length ? { learned: learnedPills } : {}) };
     text = result.content || "(no response)";
     meta = `${SUB_AGENTS[plan.role].label} · ${result.providerId}${result.fellBack ? " · fallback" : ""} · ${result.latencyMs}ms`;
   } catch (e) {
@@ -1264,8 +1273,8 @@ async function phoneVoiceRun(plan: ActionPlan, thread: ThreadId, gen: number) {
     // already streamed stays as he said it, and the notice is a line of its own.
     store().updateTurn(live, { meta: "interrupted" });
     store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os" });
-  } else if (live) store().updateTurn(live, { text, role: plan.role, meta, from: "os", at: Date.now() });
-  else store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os" });
+  } else if (live) store().updateTurn(live, { text, role: plan.role, meta, from: "os", at: Date.now(), ...memory });
+  else store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os", ...memory });
   clientTrace.ui(traceId, "reply shown");
   if (!isLive()) return;
   // A notice is said whole after what's already queued; an answer only adds what wasn't said
@@ -1870,7 +1879,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId, addre
   // The answer is the agent's only when the agent itself produced it: on an explicit tab where
   // the agent failed (or has no workspace) Tony answers, and it is labelled — and voiced — as Tony.
   const learned = pillPathways(r.learned);
-  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}), ...(r.dispatch ? { dispatch: r.dispatch } : {}) };
+  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}), ...(r.pendingMemory?.length ? { pendingMemory: r.pendingMemory } : {}), ...(r.dispatch ? { dispatch: r.dispatch } : {}) };
   // Who the answer is spoken as: the sub-agent itself only for an explicit-tab
   // direct answer (`final.from` is the agent, not "os"); every Tony-synthesized
   // reply — delegated or his own — speaks as "general", matching `final.from`.

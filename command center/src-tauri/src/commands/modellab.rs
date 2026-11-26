@@ -6,6 +6,12 @@
 //!   model_use        — make it Tony's brain: providers.json + AnythingLLM default +
 //!                      every AnythingLLM workspace on LM Studio, so a second model is
 //!                      never auto-loaded next to it (the VRAM-spill trap).
+//!   model_compare    — A/B a candidate against Tony's model on Tony's own prompts inside ONE
+//!                      maintenance slot, then put Tony's model back (compare.rs; never model_use)
+
+mod cases;
+mod checks;
+pub mod compare;
 
 use serde::Serialize;
 use serde_json::{json, Value};

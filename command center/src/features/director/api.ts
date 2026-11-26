@@ -43,6 +43,19 @@ export const api = {
   reveal: (a: Args<"media_reveal">): Promise<Result<"media_reveal">> => xcmd("media_reveal", a),
   /** The Director's own chat turn (director.rs). */
   turn: (a: Args<"director_turn">): Promise<Result<"director_turn">> => xcmd("director_turn", a),
+  // ── v2 (contract §8) ──
+  /** Title / brief / status / speed. Approving the brief moves a "brief" project to "shooting". */
+  projectUpdate: (a: Args<"media_project_update">): Promise<Result<"media_project_update">> => xcmd("media_project_update", a),
+  /** Tauri can't tell a missing arg from `null`, so a `slotId: null` (clear) goes over the wire as "". */
+  assetUpdate: (a: Args<"media_asset_update">): Promise<Result<"media_asset_update">> =>
+    xcmd("media_asset_update", a.slotId === null ? ({ ...a, slotId: "" } as unknown as Args<"media_asset_update">) : a),
+  intakeStatus: (a: Args<"media_intake_status">): Promise<Result<"media_intake_status">> => xcmd("media_intake_status", a),
+  transcribe: (a: Args<"media_transcribe">): Promise<Result<"media_transcribe">> => xcmd("media_transcribe", a),
+  noteAdd: (a: Args<"media_note_add">): Promise<Result<"media_note_add">> => xcmd("media_note_add", a),
+  noteResolve: (a: Args<"media_note_resolve">): Promise<Result<"media_note_resolve">> => xcmd("media_note_resolve", a),
+  reviewGet: (a: Args<"media_review_get">): Promise<Result<"media_review_get">> => xcmd("media_review_get", a),
+  /** Only ever from Nic's "Approve final" click: copies verified renders to renders/final/<platform>/. */
+  approveFinal: (a: Args<"media_approve_final">): Promise<Result<"media_approve_final">> => xcmd("media_approve_final", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

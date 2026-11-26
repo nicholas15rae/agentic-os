@@ -5,10 +5,27 @@
  */
 import { create } from "zustand";
 import { useToasts } from "@/features/reminders/notify";
-import type { DirectorAction, DirectorCommands, DirectorEvents, MediaAsset, MediaProject, RenderPlan, TimelineManifest, VerifiedRender } from "./contract";
-import { api } from "./api";
-import { stripActionBlocks } from "./actions";
-import { applyEditPlan, presetManifest, setShotList, type QuickStart } from "./manifest";
+import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
+import { api, onDirectorEvent } from "./api";
+import { revisePlanBody, stripActionBlocks } from "./actions";
+import {
+  addSlot,
+  applyEditPlan,
+  attachSlot,
+  moveSlot,
+  newId,
+  presetManifest,
+  removeSlot,
+  setShotList,
+  toggleFilmed,
+  updateSlot,
+  upgradeAsset,
+  upgradeManifest,
+  upgradeProject,
+  withNote,
+  withNoteResolved,
+  type QuickStart,
+} from "./manifest";
 
 export type Readiness = DirectorCommands["media_readiness"]["result"];
 export type RenderJob = DirectorEvents["media-render"];
@@ -32,6 +49,29 @@ export interface Upload {
   name: string;
   received: number;
   total: number;
+}
+
+/** A Director `match_footage` pairing waiting for Nic's accept / reject. */
+export interface MatchSuggestion {
+  id: string;
+  assetId: string;
+  slotId: string;
+  reason: string;
+}
+/** A Director-suggested moment waiting for Nic's accept / reject. */
+export interface MomentSuggestion {
+  id: string;
+  assetId: string;
+  inSec: number;
+  outSec: number;
+  label: string;
+  score: number;
+}
+/** The revise_edit waiting on its render: its notes resolve when Nic approves the render plan. */
+export interface PendingRevision {
+  round: 1 | 2;
+  resolves: string[];
+  summary: string;
 }
 
 export interface DirectorState {
@@ -59,6 +99,19 @@ export interface DirectorState {
   playhead: number;
   /** "Modify Plan" focus request: a component focuses itself when `n` changes. */
   focus: { target: "timeline" | "chat"; n: number } | null;
+  // ── v2 ──
+  /** Review rounds + open decisions (media_review_get). */
+  review: ProjectReview | null;
+  /** The Director's latest report_open_decisions (display only; Rust has no command to store them). */
+  openDecisions: string[];
+  matchSuggestions: MatchSuggestion[];
+  momentSuggestions: MomentSuggestion[];
+  /** A Director draft_brief held back because Nic already approved a brief (accept to replace it). */
+  briefDraft: CreativeBrief | null;
+  revision: PendingRevision | null;
+  deliverables: Deliverable[];
+  /** Auto-send one match_footage turn when freshly transcribed clips leave film slots unfilled. */
+  autoMatch: boolean;
 }
 
 const LAST_KEY = "cc.director.lastSlug";
@@ -106,6 +159,14 @@ const initial: DirectorState = {
   previewMode: "working",
   playhead: 0,
   focus: null,
+  review: null,
+  openDecisions: [],
+  matchSuggestions: [],
+  momentSuggestions: [],
+  briefDraft: null,
+  revision: null,
+  deliverables: [],
+  autoMatch: true,
 };
 
 export const useDirector = create<DirectorState>(() => ({ ...initial }));
@@ -118,6 +179,7 @@ export function resetDirectorStore() {
   saveTimer = undefined;
   dirty = false;
   inflight = null;
+  resetIntake();
   useDirector.setState({ ...initial }, true);
 }
 
@@ -134,16 +196,20 @@ export async function loadProjects(): Promise<void> {
 
 export async function openProject(slug: string): Promise<void> {
   if (get().slug && get().slug !== slug) await flushSave();
-  set({ slug, loading: true, error: null, plan: null, selection: null, previewMode: "working", playhead: 0, chat: get().slug === slug ? get().chat : [] });
+  const same = get().slug === slug;
+  if (!same) resetIntake();
+  set({ slug, loading: true, error: null, plan: null, selection: null, previewMode: "working", playhead: 0, chat: same ? get().chat : [], ...(same ? {} : PROJECT_V2_BLANK) });
   rememberSlug(slug);
   try {
-    const [data, log] = await Promise.all([api.projectGet({ slug }), api.chatLog({ slug }).catch(() => [])]);
+    const [data, log, review] = await Promise.all([api.projectGet({ slug }), api.chatLog({ slug }).catch(() => []), loadReview(slug)]);
     if (get().slug !== slug) return;
     dirty = false;
     set({
-      project: data.project,
-      assets: data.assets,
-      manifest: data.manifest,
+      review: review ?? data.project.review ?? null,
+      // v1 rows / manifests read as v2 (Rust upgrades too; this keeps an older backend safe).
+      project: upgradeProject(data.project),
+      assets: data.assets.map(upgradeAsset),
+      manifest: upgradeManifest(data.manifest),
       renders: data.renders,
       loading: false,
       chat: log.map((m, i) => ({ id: `log-${i}`, role: m.role, text: m.role === "director" ? stripActionBlocks(m.text) || "(actions only)" : m.text, at: m.at })),
@@ -157,7 +223,20 @@ export async function openProject(slug: string): Promise<void> {
 export function closeProject() {
   void flushSave();
   rememberSlug(null);
-  set({ slug: null, project: null, assets: [], manifest: null, renders: [], chat: [], plan: null, selection: null, error: null });
+  resetIntake();
+  set({ slug: null, project: null, assets: [], manifest: null, renders: [], chat: [], plan: null, selection: null, error: null, ...PROJECT_V2_BLANK });
+}
+
+/** Per-project v2 state, cleared when another project opens. */
+const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [] };
+
+/** media_review_get, never throwing (an older backend or a missing project.json review is null). */
+async function loadReview(slug: string): Promise<ProjectReview | null> {
+  try {
+    return (await api.reviewGet({ slug })) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Create a project (optionally from a quick start's preset) and open it. */
@@ -241,7 +320,7 @@ export async function refreshAssets(slug: string): Promise<void> {
   try {
     const data = await api.projectGet({ slug });
     if (get().slug !== slug) return;
-    set({ assets: data.assets, renders: data.renders });
+    set({ assets: data.assets.map(upgradeAsset), renders: data.renders });
   } catch {
     /* the next open reloads it */
   }
@@ -254,28 +333,105 @@ export function addAssets(assets: MediaAsset[]) {
 
 // ── Director actions ─────────────────────────────────────────────────────────
 
-/** Apply validated Director actions to the UI. Nothing renders: at most the plan card opens. */
+/** Replace clips/audio (+ captions/color/outputs when named) and save as the Director. */
+async function applyPlan(body: EditPlanBody): Promise<boolean> {
+  const m = get().manifest;
+  if (!m) return false;
+  await flushSave();
+  const cur = get().manifest ?? m;
+  set({ manifest: applyEditPlan(cur, body) });
+  dirty = true;
+  return flushSave("director", true);
+}
+
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : w.endsWith("ch") ? "es" : "s"}`;
+
+/**
+ * Why a `revise_edit` can't apply now (contract §5), or null. `round` is the review round being
+ * answered: round 1's notes get ONE revision (its render becomes round 2); round 2 is the last,
+ * so after it the Director only lists open decisions.
+ */
+export function reviseRefusal(round: 1 | 2, review: ProjectReview | null, pending: PendingRevision | null): string | null {
+  const rounds = review?.rounds ?? [];
+  const latest = rounds[rounds.length - 1];
+  if (!latest) return "there's no verified render to revise yet (propose an edit plan instead)";
+  if (latest.round >= 2 || round >= 2) return "round 2 is the last review round, so there's no round 3: list the open decisions instead";
+  if (round !== latest.round) return `round ${latest.round} is the open round, not round ${round}`;
+  if (latest.status !== "open" || pending?.round === round) return `round ${round} already has its one revision`;
+  return null;
+}
+
+/** Apply validated Director actions to the UI. Nothing renders, posts or deletes: at most the
+ * plan card opens, and matches / held brief drafts wait for Nic's click. */
 export async function applyDirectorActions(actions: DirectorAction[]): Promise<string[]> {
   const notes: string[] = [];
   for (const a of actions) {
     switch (a.type) {
+      case "draft_brief": {
+        const p = get().project;
+        if (!p) break;
+        const prev = p.brief;
+        // The idea stays in Nic's words: an existing brief's idea is never rewritten by a draft.
+        const brief: CreativeBrief = {
+          ...a.brief,
+          idea: prev?.idea || a.brief.idea,
+          guessed: prev?.idea ? a.brief.guessed.filter((g) => g !== "idea") : a.brief.guessed,
+          approved: false,
+          updatedBy: "director",
+          updatedAt: new Date().toISOString(),
+        };
+        if (prev?.approved) {
+          set({ briefDraft: brief });
+          notes.push("Brief draft held: your approved brief stays until you accept the draft");
+          break;
+        }
+        if (await updateProject({ brief })) notes.push(`Brief drafted for your approval${brief.guessed.length ? ` (${plural(brief.guessed.length, "guessed field")})` : ""}`);
+        break;
+      }
       case "populate_shot_list":
         editManifest((m) => setShotList(m, a.slots));
-        notes.push(`Shot list: ${a.slots.length} slot${a.slots.length === 1 ? "" : "s"}`);
+        set((s) => ({ matchSuggestions: s.matchSuggestions.filter((x) => a.slots.some((sl) => sl.id === x.slotId)) }));
+        notes.push(`Shot list: ${plural(a.slots.length, "slot")}`);
         break;
-      case "propose_edit_plan": {
+      case "match_footage": {
         const m = get().manifest;
-        if (!m) break;
-        await flushSave();
-        const cur = get().manifest ?? m;
-        set({ manifest: applyEditPlan(cur, a) });
-        dirty = true;
-        if (await flushSave("director", true)) {
-          notes.push(`Edit plan: ${a.clips.length} clip${a.clips.length === 1 ? "" : "s"}, ${a.audio.length} audio layer${a.audio.length === 1 ? "" : "s"}`);
+        const matches: MatchSuggestion[] = a.matches
+          .filter((x) => m?.shotList.find((sl) => sl.id === x.slotId)?.assetId !== x.assetId)
+          .map((x) => ({ id: newId("mt"), ...x }));
+        const moments: MomentSuggestion[] = a.moments.map((x) => ({ id: newId("ms"), ...x }));
+        set((s) => ({
+          // A newer suggestion for a slot replaces the older one.
+          matchSuggestions: [...s.matchSuggestions.filter((o) => !matches.some((n) => n.slotId === o.slotId)), ...matches],
+          momentSuggestions: [...s.momentSuggestions.filter((o) => !moments.some((n) => n.assetId === o.assetId && n.inSec === o.inSec && n.outSec === o.outSec)), ...moments],
+        }));
+        const bits = [matches.length ? plural(matches.length, "match") : "", moments.length ? plural(moments.length, "moment") : ""].filter(Boolean);
+        if (bits.length) notes.push(`Suggested ${bits.join(" and ")}: accept or reject each`);
+        break;
+      }
+      case "propose_edit_plan":
+        if (await applyPlan(a)) {
+          notes.push(`Edit plan: ${plural(a.clips.length, "clip")}, ${plural(a.audio.length, "audio layer")}`);
+          await requestPlan("director");
+        }
+        break;
+      case "revise_edit": {
+        const refusal = reviseRefusal(a.round, get().review, get().revision);
+        if (refusal) {
+          notes.push(`Revision not applied: ${refusal}`);
+          break;
+        }
+        const body = revisePlanBody(a);
+        if (await applyPlan(body)) {
+          set({ revision: { round: a.round, resolves: a.resolves, summary: a.summary } });
+          notes.push(`Round ${a.round} revision: ${plural(body.clips.length, "clip")}, answers ${plural(a.resolves.length, "note")} (resolved when you approve the render)`);
           await requestPlan("director");
         }
         break;
       }
+      case "report_open_decisions":
+        set({ openDecisions: a.items });
+        notes.push(`Open decisions: ${a.items.length}`);
+        break;
       case "execute_verified_render":
         await requestPlan("director");
         notes.push("Render plan raised for your approval");
@@ -287,6 +443,270 @@ export async function applyDirectorActions(actions: DirectorAction[]): Promise<s
     }
   }
   return notes;
+}
+
+/** Nic chose not to render the waiting revision: its notes stay open. */
+export const discardRevision = () => set({ revision: null });
+
+// ── v2: project fields + brief ───────────────────────────────────────────────
+
+type ProjectFields = Omit<DirectorCommands["media_project_update"]["args"], "slug">;
+
+/** media_project_update for the open project; the result replaces the project (and its list row). */
+export async function updateProject(fields: ProjectFields): Promise<boolean> {
+  const slug = get().slug;
+  if (!slug) return false;
+  try {
+    const p = upgradeProject(await api.projectUpdate({ slug, ...fields }));
+    if (get().slug === slug) set((s) => ({ project: p, projects: s.projects.map((x) => (x.slug === slug ? p : x)) }));
+    return true;
+  } catch (e) {
+    toast("Couldn't update the project", errText(e), "error");
+    return false;
+  }
+}
+
+/** A starting brief for a project that has none: the handoff text (or title) as the idea, the rest guessed. */
+export function defaultBrief(p: MediaProject, m: TimelineManifest | null): CreativeBrief {
+  return {
+    idea: (p.source.brief || p.title).slice(0, 8000),
+    goal: "",
+    platform: "custom",
+    lengthSec: 30,
+    aspect: m?.output.aspect ?? "16:9",
+    tone: "",
+    references: [],
+    guessed: ["platform", "lengthSec", "aspect"],
+    approved: false,
+    updatedBy: "nic",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export type BriefPatch = Partial<Pick<CreativeBrief, "idea" | "goal" | "platform" | "lengthSec" | "aspect" | "tone" | "references">>;
+
+/** Nic edits the brief (creating one if there's none). Edited fields stop being "guessed"; approval is kept. */
+export async function editBrief(patch: BriefPatch): Promise<boolean> {
+  const { project, manifest } = get();
+  if (!project) return false;
+  const base = project.brief ?? defaultBrief(project, manifest);
+  const keys = Object.keys(patch) as (keyof CreativeBrief)[];
+  const brief: CreativeBrief = { ...base, ...patch, guessed: base.guessed.filter((g) => !keys.includes(g)), updatedBy: "nic", updatedAt: new Date().toISOString() };
+  return updateProject({ brief });
+}
+
+/** Nic's approval click (Rust then moves a "brief" project to "shooting"). */
+export async function approveBrief(): Promise<boolean> {
+  const b = get().project?.brief;
+  if (!b) return false;
+  return updateProject({ brief: { ...b, approved: true, updatedBy: "nic", updatedAt: new Date().toISOString() } });
+}
+
+/** Replace the approved brief with the held Director draft (unapproved until Nic approves it). */
+export async function acceptBriefDraft(): Promise<boolean> {
+  const d = get().briefDraft;
+  if (!d) return false;
+  const ok = await updateProject({ brief: d });
+  if (ok) set({ briefDraft: null });
+  return ok;
+}
+export const rejectBriefDraft = () => set({ briefDraft: null });
+
+// ── v2: shot list edits (pure manifest ops, saved like any manifest edit) ─────
+
+type SlotPatch = Partial<Omit<ShotSlot, "id" | "assetId" | "status">>;
+export const addShot = (p: SlotPatch = {}, index?: number) => editManifest((m) => addSlot(m, p, index));
+export const editShot = (slotId: string, patch: SlotPatch) => editManifest((m) => updateSlot(m, slotId, patch));
+export const moveShot = (from: number, to: number) => editManifest((m) => moveSlot(m, from, to));
+export const toggleShotFilmed = (slotId: string) => editManifest((m) => toggleFilmed(m, slotId));
+export function removeShot(slotId: string) {
+  editManifest((m) => removeSlot(m, slotId));
+  set((s) => ({ matchSuggestions: s.matchSuggestions.filter((x) => x.slotId !== slotId), assets: s.assets.map((a) => (a.slotId === slotId ? { ...a, slotId: null } : a)) }));
+}
+
+// ── v2: footage matches + moments (suggestions until Nic accepts) ─────────────
+
+const replaceAsset = (a: MediaAsset) => set((s) => ({ assets: s.assets.map((x) => (x.id === a.id ? a : x)) }));
+
+/** Accept a match: attach the asset to the slot (manifest save), then mirror it on the asset. */
+export async function acceptMatch(id: string): Promise<boolean> {
+  const { slug, manifest, assets, matchSuggestions } = get();
+  const sug = matchSuggestions.find((x) => x.id === id);
+  if (!slug || !manifest || !sug) return false;
+  const drop = () => set((s) => ({ matchSuggestions: s.matchSuggestions.filter((x) => x.id !== id) }));
+  const asset = assets.find((a) => a.id === sug.assetId);
+  const next = asset ? attachSlot(manifest, sug.slotId, asset) : manifest;
+  if (!asset || next.shotList.find((s) => s.id === sug.slotId)?.assetId !== asset.id) {
+    drop();
+    toast("That match no longer fits", "The clip or the slot changed since the Director suggested it.", "warn");
+    return false;
+  }
+  set({ manifest: next });
+  dirty = true;
+  if (!(await flushSave())) return false;
+  set((s) => ({
+    matchSuggestions: s.matchSuggestions.filter((x) => x.id !== id && x.slotId !== sug.slotId && x.assetId !== sug.assetId),
+    assets: s.assets.map((a) => (a.id === asset.id ? { ...a, slotId: sug.slotId } : a.slotId === sug.slotId ? { ...a, slotId: null } : a)),
+  }));
+  try {
+    replaceAsset(upgradeAsset(await api.assetUpdate({ slug, assetId: asset.id, slotId: sug.slotId })));
+  } catch (e) {
+    toast("Matched, but the clip's slot tag didn't save", errText(e), "warn");
+  }
+  return true;
+}
+export const rejectMatch = (id: string) => set((s) => ({ matchSuggestions: s.matchSuggestions.filter((x) => x.id !== id) }));
+
+/** Accept a suggested moment: it joins the asset's moments (by: director). */
+export async function acceptMoment(id: string): Promise<boolean> {
+  const { slug, assets, momentSuggestions } = get();
+  const sug = momentSuggestions.find((x) => x.id === id);
+  if (!slug || !sug) return false;
+  const asset = assets.find((a) => a.id === sug.assetId);
+  set((s) => ({ momentSuggestions: s.momentSuggestions.filter((x) => x.id !== id) }));
+  if (!asset) return false;
+  const moment: Moment = { id: newId("m"), inSec: sug.inSec, outSec: sug.outSec, label: sug.label, score: sug.score, by: "director" };
+  try {
+    replaceAsset(upgradeAsset(await api.assetUpdate({ slug, assetId: asset.id, moments: [...asset.moments, moment] })));
+    return true;
+  } catch (e) {
+    toast("Couldn't save the moment", errText(e), "error");
+    return false;
+  }
+}
+export const rejectMoment = (id: string) => set((s) => ({ momentSuggestions: s.momentSuggestions.filter((x) => x.id !== id) }));
+
+// ── v2: review notes + final approval ────────────────────────────────────────
+
+/** Nic's review note (Rust owns notes: media_note_add; the result lands locally without a save). */
+export async function addNote(text: string, opts: { renderId?: string | null; atSec?: number | null; viaVoice?: boolean } = {}): Promise<Note | null> {
+  const slug = get().slug;
+  const body = text.trim();
+  if (!slug || !body) return null;
+  try {
+    const note = await api.noteAdd({ slug, note: { renderId: opts.renderId ?? null, atSec: opts.atSec ?? null, text: body.slice(0, 2000), by: "nic", viaVoice: opts.viaVoice === true } });
+    if (get().slug !== slug) return note;
+    set((s) => ({ manifest: s.manifest ? withNote(s.manifest, note) : s.manifest }));
+    const review = await loadReview(slug);
+    if (review && get().slug === slug) set({ review });
+    return note;
+  } catch (e) {
+    toast("Couldn't save the note", errText(e), "error");
+    return null;
+  }
+}
+
+export async function resolveNote(noteId: string): Promise<boolean> {
+  const slug = get().slug;
+  if (!slug) return false;
+  try {
+    await api.noteResolve({ slug, noteId });
+    if (get().slug === slug) set((s) => ({ manifest: s.manifest ? withNoteResolved(s.manifest, noteId) : s.manifest }));
+    return true;
+  } catch (e) {
+    toast("Couldn't resolve the note", errText(e), "error");
+    return false;
+  }
+}
+
+/** Nic's "Approve final" click: copies the verified renders to renders/final/<platform>/ (Rust), status → done. */
+export async function approveFinal(renderIds: string[]): Promise<Deliverable[] | null> {
+  const slug = get().slug;
+  if (!slug || !renderIds.length) return null;
+  try {
+    const deliverables = await api.approveFinal({ slug, renderIds, approved: true });
+    if (get().slug !== slug) return deliverables;
+    set({ deliverables });
+    const [data, review] = await Promise.all([api.projectGet({ slug }).catch(() => null), loadReview(slug)]);
+    if (get().slug === slug) {
+      if (data) {
+        const p = upgradeProject(data.project);
+        set((s) => ({ project: p, projects: s.projects.map((x) => (x.slug === slug ? p : x)) }));
+      }
+      if (review) set({ review });
+    }
+    toast("Final approved", `${plural(deliverables.length, "file")} in renders/final`);
+    return deliverables;
+  } catch (e) {
+    toast("Couldn't approve the final", errText(e), "error");
+    return null;
+  }
+}
+
+// ── v2: intake events → refresh + one debounced match_footage turn ───────────
+
+export const INTAKE_REFRESH_MS = 300;
+export const AUTO_MATCH_DEBOUNCE_MS = 5000;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+let autoTimer: ReturnType<typeof setTimeout> | undefined;
+/** Assets transcribed since the last auto turn, and every asset an auto turn already asked about. */
+const transcribed = new Set<string>();
+const asked = new Set<string>();
+
+function resetIntake() {
+  clearTimeout(refreshTimer);
+  refreshTimer = undefined;
+  clearTimeout(autoTimer);
+  autoTimer = undefined;
+  transcribed.clear();
+  asked.clear();
+}
+
+export const setAutoMatch = (autoMatch: boolean) => set({ autoMatch });
+
+export function onIntakeEvent(e: DirectorEvents["media-intake"]) {
+  if (e.slug !== get().slug) return;
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined;
+    void refreshAssets(e.slug);
+  }, INTAKE_REFRESH_MS);
+  if (e.stage === "failed") toast("A clip didn't finish processing", e.detail || undefined, "warn");
+  if (e.stage === "transcribed") {
+    transcribed.add(e.assetId);
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => void autoMatchTurn(e.slug), AUTO_MATCH_DEBOUNCE_MS);
+  }
+}
+
+/** The line an auto match turn sends (pure). */
+export function autoMatchPrompt(assets: Pick<MediaAsset, "id" | "name">[], slots: Pick<ShotSlot, "id" | "label">[]): string {
+  const a = assets.map((x) => `${x.id} (${x.name})`).join(", ");
+  const s = slots.map((x) => `${x.id} ${x.label}`).join(", ");
+  return `[auto] New footage finished transcribing: ${a}. Unfilled film slots: ${s}. Suggest matches and the best moments with one match_footage block. Only suggest; Nic accepts each one.`;
+}
+
+async function autoMatchTurn(slug: string): Promise<void> {
+  autoTimer = undefined;
+  if (get().slug !== slug || !get().autoMatch) {
+    transcribed.clear();
+    return;
+  }
+  if (get().chatBusy) {
+    // One turn at a time: try again once the current reply lands.
+    autoTimer = setTimeout(() => void autoMatchTurn(slug), AUTO_MATCH_DEBOUNCE_MS);
+    return;
+  }
+  clearTimeout(refreshTimer);
+  refreshTimer = undefined;
+  await refreshAssets(slug);
+  const { manifest, assets } = get();
+  const ids = [...transcribed];
+  transcribed.clear();
+  if (get().slug !== slug || !manifest) return;
+  const fresh = ids.map((id) => assets.find((a) => a.id === id)).filter((a): a is MediaAsset => !!a && a.kind !== "audio" && !a.slotId && !asked.has(a.id));
+  // Only the unfilled film slots these clips could fill (same kind).
+  const unfilled = manifest.shotList.filter((s) => s.source === "film" && !s.assetId && fresh.some((a) => a.kind === s.kind));
+  if (!unfilled.length || !fresh.length) return;
+  for (const a of fresh) asked.add(a.id);
+  const { sendDirectorTurn } = await import("./director-chat");
+  await sendDirectorTurn(autoMatchPrompt(fresh, unfilled));
+}
+
+/** Subscribe the store to every Director Suite event (render, ingest, intake). Returns the unsubscribe. */
+export async function startDirectorEvents(): Promise<() => void> {
+  const offs = await Promise.all([onDirectorEvent("media-render", onRenderEvent), onDirectorEvent("media-ingest", onIngestEvent), onDirectorEvent("media-intake", onIntakeEvent)]);
+  return () => offs.forEach((off) => off());
 }
 
 // ── Render plan / job ────────────────────────────────────────────────────────
@@ -316,6 +736,12 @@ export async function approvePlan(): Promise<void> {
   try {
     const { jobId } = await api.renderExecute({ slug, planId: plan.planId, approved: true });
     set({ plan: null, job: { slug, jobId, status: "queued", pct: 0, etaSec: null, stage: "queued" } });
+    // A waiting revision's notes resolve with Nic's render approval, not with the model's reply.
+    const rev = get().revision;
+    if (rev) {
+      set({ revision: null });
+      for (const id of rev.resolves) await resolveNote(id);
+    }
   } catch (e) {
     toast("Render refused", errText(e), "error");
   } finally {

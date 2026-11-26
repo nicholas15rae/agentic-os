@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { ASSETS } from "./fixtures.test-util";
 import { extractActionBlocks, parseDirectorActions, stripActionBlocks, validateAction } from "./actions";
 
+// v2 defaults the parser fills in (contract v2 §2, §4).
+const CUT = { transitionIn: { kind: "cut", ms: 0 }, punchIn: 1 } as const;
+const SLOT_V2 = { framing: null, action: "", source: "film", phoneTips: [] } as const;
+
 const ctx = { assets: ASSETS };
 const block = (json: unknown) => "```director-action\n" + (typeof json === "string" ? json : JSON.stringify(json)) + "\n```";
 
@@ -51,8 +55,8 @@ describe("validation", () => {
       action: {
         type: "populate_shot_list",
         slots: [
-          { id: "s1", label: "Hook", instructions: "Open strong", kind: "video", targetSec: 600 },
-          { id: "s2", label: "Slate", instructions: "", kind: "image", targetSec: null },
+          { id: "s1", label: "Hook", instructions: "Open strong", kind: "video", targetSec: 600, ...SLOT_V2 },
+          { id: "s2", label: "Slate", instructions: "", kind: "image", targetSec: null, ...SLOT_V2 },
         ],
       },
     });
@@ -83,11 +87,11 @@ describe("validation", () => {
       action: {
         type: "propose_edit_plan",
         clips: [
-          { assetId: "a-v1", inSec: 0, outSec: 10, fadeMs: 2000 },
-          { assetId: "a-img", inSec: 0, outSec: 60, fadeMs: 0 },
-          { assetId: "a-img", inSec: 0, outSec: 3, fadeMs: 0 },
+          { assetId: "a-v1", inSec: 0, outSec: 10, fadeMs: 2000, ...CUT },
+          { assetId: "a-img", inSec: 0, outSec: 60, fadeMs: 0, ...CUT },
+          { assetId: "a-img", inSec: 0, outSec: 3, fadeMs: 0, ...CUT },
         ],
-        audio: [{ assetId: "a-mus", startSec: 0, inSec: 0, outSec: 30, volume: 2 }],
+        audio: [{ assetId: "a-mus", startSec: 0, inSec: 0, outSec: 30, volume: 2, fadeInMs: 0, fadeOutMs: 0, duckUnderVoice: false }],
         output: { aspect: "9:16", loudnessLufs: -18, maxSizeMb: null, name: "teaser_v1" },
         note: "Tight open.",
       },

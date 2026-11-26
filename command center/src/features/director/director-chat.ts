@@ -34,7 +34,7 @@ const log = (slug: string, role: ChatMsg["role"], text: string) => void api.chat
 /** Send one line to the Director for the open project. Resolves when the reply has landed. */
 export async function sendDirectorTurn(text: string): Promise<void> {
   const body = text.trim();
-  const { slug, project, assets, manifest, chat, chatBusy } = st();
+  const { slug, project, assets, manifest, chat, chatBusy, review } = st();
   if (!body || !slug || !project || !manifest || chatBusy) return;
 
   const history = chatHistory(chat);
@@ -54,7 +54,7 @@ export async function sendDirectorTurn(text: string): Promise<void> {
     patchMsg(replyId, { text: cut >= 0 ? buffered.slice(0, cut).trimEnd() : buffered });
   });
 
-  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest), streamId);
+  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest, review), streamId);
   try {
     const r = await api.turn({ req });
     const answer = (r.answer || buffered).trim();
@@ -63,7 +63,7 @@ export async function sendDirectorTurn(text: string): Promise<void> {
       return;
     }
     if (st().slug !== slug) return;
-    const parsed = parseDirectorActions(answer, { assets: st().assets });
+    const parsed = parseDirectorActions(answer, { assets: st().assets, manifest: st().manifest });
     patchMsg(replyId, { text: parsed.prose || "(actions only)", streaming: false, errors: parsed.errors.length ? parsed.errors : undefined });
     log(slug, "director", answer);
     if (parsed.actions.length) {

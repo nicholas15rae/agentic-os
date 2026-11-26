@@ -126,9 +126,9 @@ export function perSentenceOpts(text: string, opts?: SpeakOpts): { s: string; op
  * it must not be rendered under a reply's breaker. It sends its `pinId` instead: when Rust
  * answers it with a local engine (a cooldown, a failure, the kill switch) it emits
  * `tts-unpin` and the cache drops it (`tts-pin.ts`), so local audio is never pinned. */
-export function synthArgs(s: string, opts?: SpeakOpts, pinId?: string): { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string; localOnly?: boolean } {
+export function synthArgs(s: string, opts?: SpeakOpts, pinId?: string): { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string; localOnly?: boolean; model?: string } {
   // `localOnly` only when set, so every other line's args stay exactly as before.
-  const local = opts?.localOnly ? { localOnly: true } : {};
+  const local = { ...(opts?.localOnly ? { localOnly: true } : {}), ...(opts?.model ? { model: opts.model } : {}) };
   if (opts?.cache) return pinId ? { text: s, voice: opts.voice, agent: opts.agent, pinId, ...local } : { text: s, voice: opts.voice, agent: opts.agent, ...local };
   return { text: s, voice: opts?.voice, agent: opts?.agent, previousText: opts?.previousText, utteranceId: opts?.utteranceId, ...local };
 }

@@ -7,6 +7,9 @@ import { useSettings } from "@/stores/settings";
 import { confirmThen } from "@/features/bridge/gate";
 import { useFocus } from "@/features/os/focus-store";
 import { useToasts } from "@/features/reminders/notify";
+import { isDesktopApp } from "@/stores/settings";
+import { AgentInbox } from "@/features/comms/AgentInbox";
+import { unreadCount, useAgentInbox } from "@/features/comms/agent-inbox";
 
 interface Thread {
   thread: string;
@@ -82,11 +85,15 @@ export function CommsSection() {
   );
 }
 
-type Tab = "messages" | "dialer" | "whatsapp" | "setup";
+type Tab = "agents" | "messages" | "dialer" | "whatsapp" | "setup";
 
 export function CommsPanel({ compact = false }: { compact?: boolean }) {
-  const [tab, setTab] = useState<Tab>("messages");
+  // Agent reports are made on the desktop: their inbox lives there.
+  const agents = isDesktopApp();
+  const unread = useAgentInbox((s) => unreadCount(s.messages));
+  const [tab, setTab] = useState<Tab>(() => (agents && unreadCount(useAgentInbox.getState().messages) > 0 ? "agents" : "messages"));
   const tabs: { id: Tab; label: string }[] = [
+    ...(agents ? [{ id: "agents" as Tab, label: unread ? `Agents (${unread})` : "Agents" }] : []),
     { id: "messages", label: "Messages" },
     { id: "dialer", label: "Calls" },
     ...(isTauri() ? [{ id: "whatsapp" as Tab, label: "WhatsApp" }] : []),
@@ -95,6 +102,7 @@ export function CommsPanel({ compact = false }: { compact?: boolean }) {
   return (
     <div className="space-y-3">
       <SubTabs tabs={tabs} value={tab} onChange={setTab} />
+      {tab === "agents" && <AgentInbox />}
       {tab === "messages" && <Inbox compact={compact} />}
       {tab === "dialer" && <Dialer />}
       {tab === "whatsapp" && <WhatsAppPanel />}

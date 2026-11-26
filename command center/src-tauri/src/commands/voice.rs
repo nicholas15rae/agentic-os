@@ -572,6 +572,7 @@ pub(crate) fn default_agent_voice(role: &str) -> Option<&'static str> {
         "verifier" => Some("bm_lewis"),
         "staging" => Some("af_sarah"),
         "system" => Some("am_liam"),
+        "trading" => Some("bm_fable"),
         _ => None,
     }
 }
@@ -606,7 +607,7 @@ fn roster_entry_for(agent_voices: &std::collections::BTreeMap<String, AgentVoice
         return Some(own.clone());
     }
     if let Some(voice) = default_agent_voice(agent).filter(|_| kokoro) {
-        return Some(AgentVoice { engine: "kokoro".into(), voice: Some(voice.into()), model: None, auto_speak: false });
+        return Some(AgentVoice { engine: "kokoro".into(), voice: Some(voice.into()), model: None, auto_speak: false, own_voice: None });
     }
     agent_voices.get("general").cloned()
 }
@@ -934,6 +935,9 @@ pub async fn tts_synthesize(
     // (Kokoro) in this agent's local voice, sparing the ElevenLabs quota. Without a local TTS
     // provider the line takes the normal roster path instead.
     local_only: Option<bool>,
+    // Agent reports (Comms inbox): the ElevenLabs model for this line ("eleven_turbo_v2_5"),
+    // overriding the roster row's model. Only a known model id is honoured; local engines ignore it.
+    model: Option<String>,
 ) -> Result<Response, String> {
     use tauri::Emitter;
     let _touch = super::compaction::Touch::start();
@@ -985,7 +989,8 @@ pub async fn tts_synthesize(
     }
     if p.engine.as_deref() == Some("elevenlabs") {
         let chosen = explicit.clone().or_else(|| roster_voice.clone()).or_else(|| p.voice.clone()).ok_or("pick an ElevenLabs voice in Settings → Voice")?;
-        let model = roster_model.as_deref().filter(|m| !m.is_empty());
+        let model_override = model.as_deref().map(str::trim).filter(|m| elevenlabs::MODELS.contains(m));
+        let model = model_override.or(roster_model.as_deref().filter(|m| !m.is_empty()));
         let local_tts = || state.snapshot().providers.into_iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() != Some("elevenlabs"));
 
         // P1 breaker: this reply already failed, or ElevenLabs is paused (402/429).
@@ -1141,7 +1146,7 @@ mod part3_tests {
     use std::collections::BTreeMap;
 
     fn av(engine: &str, voice: &str) -> AgentVoice {
-        AgentVoice { engine: engine.into(), voice: Some(voice.into()), model: None, auto_speak: false }
+        AgentVoice { engine: engine.into(), voice: Some(voice.into()), model: None, auto_speak: false, own_voice: None }
     }
 
     #[test]

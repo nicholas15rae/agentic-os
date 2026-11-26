@@ -82,6 +82,10 @@ export interface NativeCommands {
   policy_update: { args: { patch: PolicyPatch }; result: ProvidersView };
   /** Settings → Voice: edit one agent's roster row ("tony" is an alias of "general"). */
   agent_voice_update: { args: { role: string; patch: AgentVoicePatch }; result: ProvidersView };
+  /** Settings → Voice: the roster's master "All Tony" switch (every agent report in Tony's voice). */
+  agent_voices_all_tony: { args: { on: boolean }; result: ProvidersView };
+  /** Telemetry (`events.jsonl`, kind `agent_speech`): one agent report played / queued / replayed. Ids only. */
+  agent_speech_event: { args: { agent: string; voice: string; outcome: "spoke" | "queued" | "inbox_only" | "replayed" | "failed"; interrupted: boolean; waitedMs: number; urgent: boolean }; result: void };
   dispatch_chat: { args: { req: DispatchRequest }; result: DispatchResult };
   services_health: { args: undefined; result: ServiceHealth[] };
   provider_models: { args: { id: string }; result: string[] };
@@ -104,8 +108,9 @@ export interface NativeCommands {
    * breaker's scope: after one failure the rest of that reply goes straight to local TTS
    * with a single `tts-fallback` event. 1–64 chars of `[A-Za-z0-9-]`, else ignored.
    * `localOnly` (Part 6 narration, `feedback.narrationEngine: "kokoro"`): the local engine in
-   * this agent's own local voice, sparing the ElevenLabs quota. */
-  tts_synthesize: { args: { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string; localOnly?: boolean }; result: ArrayBuffer };
+   * this agent's own local voice, sparing the ElevenLabs quota.
+   * `model` (agent reports): the ElevenLabs model for this line ("eleven_turbo_v2_5"), over the roster row's. */
+  tts_synthesize: { args: { text: string; voice?: string; agent?: string; previousText?: string; utteranceId?: string; pinId?: string; localOnly?: boolean; model?: string }; result: ArrayBuffer };
   /** `engine` previews an engine's voices even when it isn't the current `policy.tts`. */
   tts_voices: { args: { engine?: string }; result: VoicesView };
   n8n_workflows: { args: undefined; result: WorkflowInfo[] };
@@ -489,14 +494,18 @@ export interface AgentVoice {
   voice?: string;
   model?: string;
   autoSpeak: boolean;
+  /** "Speak in own voice" for agent reports; missing = on. Off: Tony's voice reads the report. */
+  ownVoice?: boolean;
 }
-export type AgentVoicePatch = Partial<Pick<AgentVoice, "engine" | "voice" | "model" | "autoSpeak">>;
+export type AgentVoicePatch = Partial<Pick<AgentVoice, "engine" | "voice" | "model" | "autoSpeak" | "ownVoice">>;
 
 export interface ProvidersView {
   providers: ProviderInfo[];
   policy: Policy;
   /** Part 3: the voice roster, by role id ("general" = Tony); missing role = no override. */
   agentVoices: Record<string, AgentVoice>;
+  /** The roster's master "All Tony" switch: every agent report speaks in Tony's voice. */
+  agentVoicesAllTony?: boolean;
 }
 
 export type ProviderPatch = { id: string } & Partial<Pick<ProviderInfo, "label" | "baseUrl" | "model" | "voice" | "language" | "engine" | "modelsDir" | "voicesDir" | "sttPrompt">>;

@@ -108,7 +108,7 @@ STRICT RULES
 - Keep prompts lean—strip fluff so local models stay well inside context limits.
 
 VOICE & STATUS OUTPUT
-Always include a `voice_summary` (1–2 crisp, direct sentences in your own matter-of-fact dispatcher persona) so the TTS layer can report your status directly to Nic if queried or when a milestone fires.
+Always include a `voice_summary` (crisp and direct, in your own matter-of-fact dispatcher persona) so the TTS layer can report your status directly to Nic if queried or when a milestone fires. Write it as your own short report to Nic: two or three short sentences, addressed to him by name, no preamble, under 240 characters (e.g. "Nic, the layout's done. I tightened the header and added captions.").
 
 OUTPUT FORMAT (STRICT JSON)
 {
@@ -123,7 +123,7 @@ OUTPUT FORMAT (STRICT JSON)
     "acceptance_criteria": ["<verifiable check 1>"]
   },
   "handoff_note": "<exact instruction for the next agent>",
-  "voice_summary": "<1-2 sentence spoken status in Prompter's voice>"
+  "voice_summary": "<2-3 sentence spoken report to Nic in Prompter's voice>"
 }"#;
 
 /// Nic's Designer prompt, verbatim.
@@ -146,7 +146,7 @@ STRICT BOUNDARIES
 - Never pause for live user Q&A; make decisive, opinionated design choices and note any assumptions cleanly.
 
 VOICE & STATUS OUTPUT
-Include a `voice_summary` (1–2 confident, visually focused sentences in your Designer persona) for the TTS observability router.
+Include a `voice_summary` (confident and visually focused, in your Designer persona) for the TTS observability router. Write it as your own short report to Nic: two or three short sentences, addressed to him by name, no preamble, under 240 characters (e.g. "Nic, the layout's done. I tightened the header and added captions.").
 
 OUTPUT FORMAT (STRICT JSON)
 {
@@ -170,7 +170,7 @@ OUTPUT FORMAT (STRICT JSON)
     "motion_and_ux_notes": "<transitions, feedback cues>",
     "assumptions": ["<any decisions made>"]
   },
-  "voice_summary": "<1-2 sentence spoken update in Designer's voice>"
+  "voice_summary": "<2-3 sentence spoken report to Nic in Designer's voice>"
 }"#;
 
 /// Nic's Coder prompt, verbatim.
@@ -191,7 +191,7 @@ STRICT SAFETY & SANDBOX RULES
 - Keep code modular, readable, and lightweight on local hardware (avoid heavy unnecessary dependencies).
 
 VOICE & STATUS OUTPUT
-Include a `voice_summary` (1–2 grounded, technical-yet-plain-English sentences in your Coder persona) for the TTS observability router.
+Include a `voice_summary` (grounded, technical-yet-plain-English, in your Coder persona) for the TTS observability router. Write it as your own short report to Nic: two or three short sentences, addressed to him by name, no preamble, under 240 characters (e.g. "Nic, the layout's done. I tightened the header and added captions.").
 
 OUTPUT FORMAT (STRICT JSON)
 {
@@ -207,7 +207,7 @@ OUTPUT FORMAT (STRICT JSON)
     },
     "known_issues": []
   },
-  "voice_summary": "<1-2 sentence spoken update in Coder's voice>"
+  "voice_summary": "<2-3 sentence spoken report to Nic in Coder's voice>"
 }"#;
 
 /// Nic's UPDATED Librarian master prompt (active researcher), verbatim.
@@ -230,7 +230,7 @@ PRECISION & EFFICIENCY RULES
 - Keep payloads tight and high-signal—strip filler so downstream local models stay fast and well within context limits.
 
 VOICE & STATUS OUTPUT
-Include a `voice_summary` (1–2 calm, crisp, archival sentences in your Librarian persona) for the TTS router when Nic queries you directly or when you flag an important finding.
+Include a `voice_summary` (calm, crisp and archival, in your Librarian persona) for the TTS router when Nic queries you directly or when you flag an important finding. Write it as your own short report to Nic: two or three short sentences, addressed to him by name, no preamble, under 240 characters (e.g. "Nic, the layout's done. I tightened the header and added captions.").
 
 OUTPUT FORMAT (STRICT JSON)
 {
@@ -251,7 +251,7 @@ OUTPUT FORMAT (STRICT JSON)
       "affected_agent": "tony | prompter | designer | coder"
     }
   ],
-  "voice_summary": "<1-2 sentence spoken summary in Librarian's voice>"
+  "voice_summary": "<2-3 sentence spoken report to Nic in Librarian's voice>"
 }"#;
 
 // ── App-contract adaptations (the minimum the worker needs) ─────────────────

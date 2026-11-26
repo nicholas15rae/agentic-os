@@ -10,3 +10,7 @@ src-tauri/gen/schemas/
 whisper.cpp/
 *.mp3
 src-tauri/target-langhub/
+
+# Playwright (npm run test:ui)
+test-results/
+playwright-report/

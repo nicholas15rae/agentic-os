@@ -4,6 +4,7 @@
  * Phase 1 is read-only telemetry; nothing here can place or cancel an order.
  */
 import { gateway } from "@/lib/gateway";
+import type { EngineRApi } from "@/features/trading/EngineRPanel.contract";
 
 export type BridgeState = "CONNECTED" | "CONNECTING" | "RECONNECTING" | "LOCKED" | "DISCONNECTED" | "BRIDGE_OFFLINE";
 
@@ -90,7 +91,7 @@ export interface Decision {
 /** Mirrors trading/intents.py OrderIntent.to_dict(). */
 export interface OrderIntent {
   intent_id: string;
-  source: "trading_agent" | "engine_a" | "engine_b" | "manual";
+  source: "trading_agent" | "engine_a" | "engine_b" | "rule_engine" | "manual";
   asset_class: string;
   symbol: string;
   action: "BUY" | "SELL";
@@ -344,6 +345,24 @@ export const tradingApi = {
   kill: (reason: string, dryRun = false) => post<KillIncident & { lock?: KillLock; note?: string }>("/api/trading/kill-switch", { reason, dryRun }, 50_000),
   reset: (confirm: string) => post<{ locked: boolean }>("/api/trading/kill-switch/reset", { confirm }),
   bars: (symbol: string, interval: string, range: string) => gateway<IbkrBars>(barsUrl(symbol, interval, range), { timeoutMs: 70_000 }),
+};
+
+/**
+ * Engine R (deterministic rules) — implements the locked EngineRApi contract. Every POST is under
+ * /api/trading/engines/r/*, so the security layer's PIN step-up applies; gateway() handles the 423.
+ * Nothing here can place an order: the only scan the UI can start is a dry run (submit: false).
+ */
+const rulePath = (id: string, verb: "approve" | "reject") => `/api/trading/engines/r/changes/${encodeURIComponent(id)}/${verb}`;
+
+export const engineRApi: EngineRApi = {
+  view: () => gateway("/api/trading/rules", { timeoutMs: 10_000 }),
+  evaluation: () => gateway("/api/trading/rules/evaluation", { timeoutMs: 10_000 }),
+  log: (limit: number) => gateway(`/api/trading/rules/log?limit=${Math.max(1, Math.min(Math.round(limit), 500))}`, { timeoutMs: 10_000 }),
+  approve: (changeId: string, confirm: string, note: string) => post(rulePath(changeId, "approve"), { confirm, note }),
+  reject: (changeId: string, note: string) => post(rulePath(changeId, "reject"), { note }),
+  enable: (enabled: boolean) => post("/api/trading/engines/r/enable", { enabled }),
+  dryScan: () => post("/api/trading/engines/r/scan", { submit: false }, 125_000),
+  evaluate: () => post("/api/trading/engines/r/evaluate", { refresh: true }, 610_000),
 };
 
 /** What the HUD badge shows. A stale snapshot (bridge hung) is not "Connected". */

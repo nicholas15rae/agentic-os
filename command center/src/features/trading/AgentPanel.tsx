@@ -1,19 +1,9 @@
 import { useState } from "react";
-import { Bot, ChevronDown, FlaskConical, Loader2, Play, Power } from "lucide-react";
+import { Bot, ChevronDown } from "lucide-react";
 import { Card } from "@/components/ui";
-import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
-import { tradingApi, type DeskView } from "@/features/trading/ibkr";
 import { agentApi } from "@/features/trading/agent-api";
-import {
-  needsConfirm,
-  type AgentPanelProps,
-  type AgentPanelState,
-  type AgentRun,
-  type AgentRunStatus,
-  type AgentView,
-  type DecisionAction,
-} from "@/features/trading/AgentPanel.contract";
+import type { AgentPanelProps, AgentPanelState, AgentRun, AgentRunStatus, AgentView, DecisionAction } from "@/features/trading/AgentPanel.contract";
 
 const STATUS_TONE: Record<AgentRunStatus, string> = {
   running: "text-amber-light",
@@ -48,101 +38,28 @@ const VERDICT_TONE: Record<"APPROVED" | "MODIFIED" | "REJECTED", string> = {
 const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
 const time = (s: number) => new Date(s * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-/** The Trading Agent: on/off, schedule, last market view, runs with gate verdicts, score vs baselines. */
+const RETIRED_FALLBACK = "retired as a trader: Engine R (deterministic rules) executes; the model only reviews after the close";
+
+/** The retired Trading Agent: read-only history (runs, last market view, track record). Engine R trades now. */
 export function AgentPanel(_props: AgentPanelProps) {
-  const { data, error, loading, refresh } = usePoll<AgentView>(agentApi.view, 15_000);
-  const desk = usePoll<DeskView>(tradingApi.desk, 15_000);
-  const toast = useToasts((s) => s.push);
-  const [ui, setUi] = useState<Omit<AgentPanelState, "status">>({ busy: null, expandedRunId: null, confirm: null });
+  const { data, error, loading } = usePoll<AgentView>(agentApi.view, 30_000);
+  const [ui, setUi] = useState<Omit<AgentPanelState, "status">>({ expandedRunId: null });
   const status: AgentPanelState["status"] = error && !data ? "error" : loading && !data ? "loading" : "ready";
-  const mode = desk.data?.mode ?? null;
-
-  const act = async (busy: NonNullable<AgentPanelState["busy"]>, fn: () => Promise<void>) => {
-    setUi((u) => ({ ...u, busy, confirm: null }));
-    try {
-      await fn();
-    } catch (e) {
-      toast({ title: "Trading Agent", body: e instanceof Error ? e.message : String(e), tone: "error" });
-    } finally {
-      setUi((u) => ({ ...u, busy: null }));
-      refresh();
-    }
-  };
-
-  const doRun = (submit: boolean) =>
-    act(submit ? "run" : "dry", async () => {
-      const r = await agentApi.run(submit);
-      setUi((u) => ({ ...u, expandedRunId: r.runId }));
-      const proposals = r.results?.length ?? 0;
-      toast({
-        title: `Agent ${submit ? "run" : "dry run"}: ${STATUS_LABEL[r.status]}`,
-        body: r.status === "done" || r.status === "dry_run" ? `${proposals} proposal(s)${r.modelS ? ` · ${r.modelS.toFixed(0)} s model time` : ""}` : r.detail,
-        tone: r.status === "no_json" ? "warn" : "info",
-      });
-    });
-
-  const doToggle = (enabled: boolean) =>
-    act("toggle", async () => {
-      await agentApi.enable(enabled);
-    });
-
-  const onRun = () => (needsConfirm("run", mode) ? setUi((u) => ({ ...u, confirm: "run" })) : void doRun(true));
-  const onToggle = () => {
-    if (!data) return;
-    if (data.enabled) return void doToggle(false);
-    return needsConfirm("enable", mode) ? setUi((u) => ({ ...u, confirm: "enable" })) : void doToggle(true);
-  };
-
   const last = data?.runs.find((r) => r.output?.marketView);
 
   return (
-    <Card
-      title="Trading Agent · local model"
-      action={
-        <div className="flex items-center gap-1.5">
-          <button className="pill-glass !h-8 text-[11px]" disabled={status !== "ready" || !!ui.busy} onClick={() => void doRun(false)} title="Think + evaluate in the gate, in memory. Sends nothing.">
-            {ui.busy === "dry" ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />} Dry run
-          </button>
-          <button className="pill-glass !h-8 text-[11px]" disabled={status !== "ready" || !!ui.busy} onClick={onRun} title={mode === "ADVISORY" ? "Run now: proposals are logged as hypothetical trades (ADVISORY)" : "Run now: proposals go to the desk in its current mode"}>
-            {ui.busy === "run" ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />} Run now
-          </button>
-          <button
-            className={`flex h-8 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold ${data?.enabled ? "border-teal/50 bg-teal/15 text-teal-soft" : "border-white/15 bg-white/[0.04] text-ink-3"}`}
-            disabled={status !== "ready" || !!ui.busy}
-            aria-pressed={!!data?.enabled}
-            onClick={onToggle}
-          >
-            {ui.busy === "toggle" ? <Loader2 size={12} className="animate-spin" /> : <Power size={12} />} {data?.enabled ? "ON" : "OFF"}
-          </button>
-        </div>
-      }
-    >
+    <Card title="Trading Agent · local model · retired" action={<span className="rounded-full border border-white/15 px-2 py-0.5 text-[11px] text-ink-3">history only</span>}>
       {status === "loading" && <div className="h-5 w-2/3 animate-pulse rounded bg-white/[0.06]" aria-label="Loading agent" />}
-      {status === "error" && <p className="text-[12px] text-alert">Agent unreachable — is the bridge running? ({error})</p>}
+      {status === "error" && <p className="text-[12px] text-alert">Agent history unreachable: is the bridge running? ({error})</p>}
 
       {data && (
         <>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-3">
-            <span className="flex items-center gap-1"><Bot size={12} /> qwen3.5-9b · ETFs only · long only</span>
-            <span>next run: <span className="text-ink-2">{data.enabled ? data.nextSlot ?? "—" : "off"}</span></span>
-            <span>events today: <span className="text-ink-2">{data.eventsToday}/{data.eventMax}</span></span>
-            <span>desk mode: <span className="text-ink-2">{mode ?? "…"}</span></span>
-          </div>
-          {data.blocked && <p className="mt-1.5 text-[12px] text-amber-light">Blocked: {data.blocked}</p>}
-
-          {ui.confirm && (
-            <div className="mt-3 rounded-[14px] border border-amber/50 bg-amber/10 p-3 text-[12px]">
-              <p className="text-ink">
-                {ui.confirm === "run"
-                  ? `The desk is in ${mode}: the agent's proposals will ${mode === "FULL_AUTO" ? "be SENT to the paper account" : "queue as trade cards for your approval"}. Run now?`
-                  : "The desk is in FULL_AUTO: once on, the agent's approved proposals are sent to the paper account automatically. Turn it on?"}
-              </p>
-              <div className="mt-2 flex gap-2">
-                <button className="pill-primary !h-8 text-[11px]" onClick={() => void (ui.confirm === "run" ? doRun(true) : doToggle(true))}>Confirm</button>
-                <button className="pill-glass !h-8 text-[11px]" onClick={() => setUi((u) => ({ ...u, confirm: null }))}>Cancel</button>
-              </div>
-            </div>
-          )}
+          <p className="flex items-start gap-1.5 text-[12px] text-ink-2">
+            <Bot size={13} className="mt-0.5 shrink-0 text-ink-3" />
+            <span>
+              The model is {data.retired ?? RETIRED_FALLBACK}. It no longer runs or proposes trades; its pending rule-change suggestions are in the Engine R panel.
+            </span>
+          </p>
 
           {last?.output?.marketView && (
             <div className="mt-3 rounded-[14px] border border-white/[0.06] bg-white/[0.02] p-3">
@@ -161,7 +78,7 @@ export function AgentPanel(_props: AgentPanelProps) {
                   ))}
                 </ul>
               ) : (
-                <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">No runs yet — try a Dry run.</p>
+                <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">No runs recorded.</p>
               )}
             </div>
             <div className="min-w-0">
@@ -188,7 +105,7 @@ export function AgentPanel(_props: AgentPanelProps) {
                   })}
                 </tbody>
               </table>
-              <p className="mt-1.5 text-[11px] text-ink-3">Calls are scored once 5 sessions have passed. The agent should beat the SPY baseline before it graduates from ADVISORY.</p>
+              <p className="mt-1.5 text-[11px] text-ink-3">Scored calls from before the agent was retired (5-session horizon), next to Engine A and the SPY baseline.</p>
             </div>
           </div>
         </>

@@ -11,6 +11,7 @@ import { IbkrHud } from "@/features/trading/IbkrHud";
 import { IbkrBarsChart } from "@/features/trading/IbkrBarsChart";
 import { TradingDesk } from "@/features/trading/TradingDesk";
 import { EnginesPanel } from "@/features/trading/EnginesPanel";
+import { EngineRPanel } from "@/features/trading/EngineRPanel";
 import { IntelPanel } from "@/features/trading/IntelPanel";
 import { HealthCard } from "@/features/trading/HealthCard";
 import { AgentPanel } from "@/features/trading/AgentPanel";
@@ -171,6 +172,8 @@ export function TradingSection() {
       <IbkrHud />
 
       <TradingDesk />
+
+      <EngineRPanel />
 
       <EnginesPanel />
 

@@ -184,7 +184,7 @@ export function TradingDesk() {
             </div>
           ) : (
             <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">
-              {data?.mode === "SEMI_AUTO" ? "No cards yet — the Trading Agent's approved intents land here." : "Cards appear in Semi-auto mode."}
+              {data?.mode === "SEMI_AUTO" ? "No cards yet: Engine R's approved intents land here." : "Cards appear in Semi-auto mode."}
             </p>
           )}
         </div>

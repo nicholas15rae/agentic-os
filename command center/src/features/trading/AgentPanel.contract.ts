@@ -1,5 +1,8 @@
 // AgentPanel.contract.ts — LOCKED 2026-11-24 (approved by Nic). Changes need a new approval.
 // Amended 2026-11-24 (approved): AgentView.config (TradingAgentConfig) for the System Map status card.
+// Amended 2026-11-25 (approved by Nic): retired as a trader. The bridge answers /agent/run and /agent/enable with 410
+// (Engine R executes; the model is an after-hours analyst, see EngineRPanel.contract.ts). AgentView.retired added;
+// AgentApi.run / enable, AgentPanelState.busy / confirm and needsConfirm removed. The card is read-only history.
 // Mount: Trading section, below EnginesPanel. Gateway HTTP only (no Tauri IPC) → desktop and phone.
 import type { ExecMode } from "@/features/trading/ibkr";
 
@@ -64,6 +67,7 @@ export interface TradingAgentConfig {
 
 /** GET /api/trading/agent (polled every 15 s). */
 export interface AgentView {
+  retired?: string; // agent.RETIRED: why it no longer trades (absent on a bridge that predates Engine R)
   enabled: boolean;
   blocked: string | null;
   nextSlot: string | null;
@@ -77,24 +81,10 @@ export interface AgentView {
 
 export interface AgentPanelState {
   status: "loading" | "ready" | "error"; // error = gateway / bridge unreachable
-  busy: null | "dry" | "run" | "toggle";
   expandedRunId: string | null; // one run open at a time
-  confirm: null | "run" | "enable"; // pending confirmation
 }
 
+/** Read-only: the trading routes (run / enable) are retired (410). */
 export interface AgentApi {
   view(): Promise<AgentView>;
-  run(submit: boolean): Promise<AgentRun>; // POST /api/trading/agent/run {submit}
-  enable(enabled: boolean): Promise<{ enabled: boolean }>; // POST /api/trading/agent/enable {enabled}
-}
-
-/**
- * Mutating actions and when they need a confirmation (from the approved contract):
- * - "run" (Run now): straight away in ADVISORY (hypothetical only); confirm in SEMI_AUTO / FULL_AUTO.
- * - "enable" (turning ON): confirm only in FULL_AUTO. Turning OFF never needs one.
- * - Dry run is not mutating: never confirmed.
- */
-export function needsConfirm(action: "run" | "enable", mode: ExecMode | null): boolean {
-  if (action === "run") return mode !== "ADVISORY";
-  return mode === "FULL_AUTO";
 }

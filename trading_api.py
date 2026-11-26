@@ -367,15 +367,17 @@ async def trading_agent_think(request: Request):
         return {"ok": False, "skipped": "gpu_busy", "detail": f"the desktop held the GPU for {waited:.0f}s ({cca.gpu_state().get('holder')})",
                 "model": model, "waitedS": round(waited, 1)}
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
-    # qwen3.5 is a thinking model and ignores /no_think, enable_thinking and reasoning_effort: left alone
-    # it spends the whole token budget on hidden reasoning and returns empty content (~80 s per try).
-    # Pre-filling an empty think block makes it answer directly (measured: 0 reasoning tokens, ~1 s on
-    # a short prompt). The JSON's "thesis" fields still carry its explicit reasoning.
+    # qwen3.5 is a thinking model: left alone it spends the whole token budget on hidden reasoning and
+    # returns empty content (~80 s per try). llm_chat sends "reasoning_effort": "none" unless think=True,
+    # and the pre-filled empty think block makes it answer directly too (measured: 0 reasoning tokens,
+    # ~1 s on a short prompt). The JSON's "thesis" fields still carry its explicit reasoning.
+    # An opt-in "thinking": true drops both, so the model reasons again.
     thinking = bool(body.get("thinking"))
     prefill = [] if thinking else [{"role": "assistant", "content": "<think>\n\n</think>\n\n"}]
     t0 = time.time()
     try:
-        out = await asyncio.to_thread(cca.llm_chat, msgs + prefill, model=model, max_tokens=max_tokens, temperature=0.2, gpu_wait=0)
+        out = await asyncio.to_thread(cca.llm_chat, msgs + prefill, model=model, max_tokens=max_tokens, temperature=0.2, gpu_wait=0,
+                                      think=thinking)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "skipped": "model_error", "detail": str(e)[:300], "model": model}
     j = cca.extract_json(out)
@@ -385,7 +387,7 @@ async def trading_agent_think(request: Request):
         try:
             out2 = await asyncio.to_thread(cca.llm_chat, msgs + [{"role": "assistant", "content": out[-4000:]},
                                                                  {"role": "user", "content": "Return ONLY the JSON object, nothing else."}] + prefill,
-                                           model=model, max_tokens=max_tokens, temperature=0.1, gpu_wait=0)
+                                           model=model, max_tokens=max_tokens, temperature=0.1, gpu_wait=0, think=thinking)
             j = cca.extract_json(out2)
             out = out2 if j is not None else out
         except Exception:  # noqa: BLE001

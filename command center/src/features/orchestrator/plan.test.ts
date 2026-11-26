@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { McpServer, OsConfig } from "@/lib/platform";
+import { PRESET_MODES, effectiveOf } from "@/features/modes/modes";
+import { resetModesForTests, useModes } from "@/features/modes/modes-store";
+import { useOs } from "@/features/os/os-store";
 import { heuristicPlan, parseConfirmation, parseOfferReply, stripWake } from "./plan";
 
 const desktop = () => vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetModesForTests();
+  useOs.setState({ cfg: null });
+});
 
 describe("heuristicPlan — Gmail draft binding", () => {
   it("a draft with an address is a mutating gmail.create_draft tool plan", () => {
@@ -59,6 +67,52 @@ describe("heuristicPlan — Instagram writes are gated tool plans", () => {
     const p = heuristicPlan("post my new headshot to Instagram", "general");
     expect(p.mutating).toBe(false);
     expect((await p.run!()).text).toMatch(/https link/);
+  });
+});
+
+describe("heuristicPlan — an approved-action card only for a live tool its agent owns", () => {
+  const DRAFT = "draft an email to sam@acme.ca about lunch saying I'm running late";
+  const POST = "post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots";
+  const server = (id: string, agents: string[] | null) => ({ id, name: id, agents, enabled: true, transport: "builtin", builtin: true }) as unknown as McpServer;
+  const withCfg = (mcps: McpServer[], frozenTools: string[] = []) => useOs.setState({ cfg: { mcps, switchboard: { version: 1, frozenAgents: [], frozenTools } } as unknown as OsConfig });
+  const replyOf = async (p: ReturnType<typeof heuristicPlan>) => (await p.run!()).text;
+
+  it("a mode that freezes Gmail: no card, Tony gives the frozen reason", async () => {
+    desktop();
+    useModes.setState({ effective: effectiveOf(PRESET_MODES, "builder") });
+    const p = heuristicPlan(DRAFT, "general");
+    expect(p.mutating).toBe(false);
+    expect(p.target.kind).toBe("agent");
+    expect(await replyOf(p)).toBe("Gmail is frozen in Builder mode, so I left it alone. Switch modes and I can use it.");
+  });
+
+  it("Instagram frozen on the master switchboard: no card, the master reason", async () => {
+    desktop();
+    withCfg([server("instagram", null)], ["instagram"]);
+    const p = heuristicPlan(POST, "general");
+    expect(p.mutating).toBe(false);
+    expect(await replyOf(p)).toBe("Instagram is frozen on the master switchboard, so I left it alone. Turn it back on in the switchboard and I can use it.");
+    const reply = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "general");
+    expect(reply.mutating).toBe(false);
+    expect(reply.target.kind).toBe("agent");
+  });
+
+  it("a tool another agent owns: no card for this one, 'that's <owner>'s job'", async () => {
+    desktop();
+    withCfg([server("gmail", ["bizops"])]);
+    const p = heuristicPlan(DRAFT, "general");
+    expect(p.mutating).toBe(false);
+    expect(await replyOf(p)).toBe("That's Biz Ops's job — ask Biz Ops to do it.");
+    // …while its owner gets the card.
+    expect(heuristicPlan(DRAFT, "bizops").target).toMatchObject({ kind: "tool", tool: "gmail.create_draft" });
+  });
+
+  it("live and owned (an 'all' grant, or one naming the agent): today's card", () => {
+    desktop();
+    withCfg([server("gmail", ["all"]), server("instagram", ["general", "ops"])]);
+    useModes.setState({ effective: effectiveOf(PRESET_MODES, "operations") });
+    expect(heuristicPlan(DRAFT, "general")).toMatchObject({ mutating: true, target: { kind: "tool", tool: "gmail.create_draft" } });
+    expect(heuristicPlan(POST, "ops")).toMatchObject({ mutating: true, target: { kind: "tool", tool: "instagram.publish_post" } });
   });
 });
 

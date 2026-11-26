@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ROUTING_CONFIG, directTool, isSelfRoleId, normalize, originalTail, resolve } from "./router";
+import { addressesSelf, DEFAULT_ROUTING_CONFIG, directTool, isSelfRoleId, normalize, originalTail, resolve } from "./router";
 import fixtures from "./router.fixtures.json";
 
 interface Fixture {
@@ -10,6 +10,8 @@ interface Fixture {
   taskContains?: string;
   /** `directTool`'s answer; missing = null. */
   direct?: string;
+  /** The configured OS name (Rust: `cfg.os_name`); missing = the default ("Tony" is built in). */
+  osName?: string;
 }
 
 describe("resolve (shared fixtures)", () => {
@@ -19,7 +21,7 @@ describe("resolve (shared fixtures)", () => {
   });
   for (const f of list) {
     it(`${f.desc} — ${JSON.stringify(f.text)}`, () => {
-      const r = resolve(f.text, DEFAULT_ROUTING_CONFIG);
+      const r = resolve(f.text, DEFAULT_ROUTING_CONFIG, f.osName);
       expect(r.role).toBe(f.role);
       expect(r.kind).toBe(f.kind);
       if (f.taskContains) expect(r.task).toContain(f.taskContains);
@@ -29,10 +31,51 @@ describe("resolve (shared fixtures)", () => {
 });
 
 describe("normalize", () => {
-  it("fixes the three Whisper mangles", () => {
-    expect(normalize("what's up")).toBe("whatsapp");
+  it("fixes the Whisper 'whats app' / 'what sapp' mangles anywhere", () => {
     expect(normalize("whats app")).toBe("whatsapp");
     expect(normalize("what sapp")).toBe("whatsapp");
+    expect(normalize("hey tony what's new on whats app")).toBe("hey tony whats new on whatsapp");
+  });
+  // Regression: every "what's up" greeting became "whatsapp" (a Booking domain) and was delegated
+  // to the Booking Desk (20-70 s instead of 2-5 s).
+  it.each([
+    ["what's up", "whats up"],
+    ["Hey Tony, what's up?", "hey tony whats up"],
+    ["what's up tony", "whats up tony"],
+    ["hey what's up tony", "hey whats up tony"],
+    ["what's up with the build", "whats up with the build"],
+    ["so I'm on my phone now hey tony what's up", "so im on my phone now hey tony whats up"],
+    ["what's up, any updates?", "whats up any updates"],
+    // "…what's up with X" asks about X, even after a before-cue word.
+    ["check what's up with the droplet", "check whats up with the droplet"],
+    ["on what's up with the build", "on whats up with the build"],
+    // "come / hang / hold on, what's up" is an idiom, not "on WhatsApp".
+    ["come on, what's up", "come on whats up"],
+    ["hang on what's up", "hang on whats up"],
+    ["hold on, what's up?", "hold on whats up"],
+    // "in" / "the" are no longer before-cues.
+    ["I'm in, what's up?", "im in whats up"],
+    ["anything new in what's up", "anything new in whats up"],
+    ["the what's up", "the whats up"],
+  ])("a greeting is not WhatsApp: %s", (text, out) => {
+    expect(normalize(text)).toBe(out);
+  });
+  it.each([
+    ["check my whats up messages", "check my whatsapp messages"],
+    ["any whats up messages", "any whatsapp messages"],
+    ["open whats up", "open whatsapp"],
+    ["on whats up", "on whatsapp"],
+    ["anything new on what's up", "anything new on whatsapp"],
+    ["read it from whats up", "read it from whatsapp"],
+    ["send it via what's up", "send it via whatsapp"],
+    ["check the what's up group", "check the whatsapp group"],
+    ["what's up texts from sam", "whatsapp texts from sam"],
+    ["any what's up DMs", "any whatsapp dms"],
+    ["clear my what's up notifications", "clear my whatsapp notifications"],
+    ["what's up msgs", "whatsapp msgs"],
+    ["any what's up chats", "any whatsapp chats"],
+  ])("clearly the app: %s", (text, out) => {
+    expect(normalize(text)).toBe(out);
   });
   it("spells out number words", () => {
     expect(normalize("last five messages")).toBe("last 5 messages");
@@ -54,9 +97,106 @@ describe("whole-word boundaries", () => {
 
 describe("domain tie-break", () => {
   it("prefers booking over ops on an equal score", () => {
-    const r = resolve("schedule a reminder about my messages", DEFAULT_ROUTING_CONFIG);
+    // booking "wardrobe" (8) vs ops "schedule" (8).
+    const r = resolve("schedule a wardrobe fitting", DEFAULT_ROUTING_CONFIG);
     expect(r.role).toBe("booking");
     expect(r.kind).toBe("Domain");
+  });
+});
+
+describe("default matrix: WhatsApp is not a Booking topic", () => {
+  it("booking's domains drop bare 'whatsapp' / 'messages' but keep 'last 5 messages'", () => {
+    const d = DEFAULT_ROUTING_CONFIG.agents.booking.domains;
+    expect(d).not.toContain("whatsapp");
+    expect(d).not.toContain("messages");
+    expect(d).toContain("last 5 messages");
+  });
+  it("WhatsApp lines are Tony's (Default + his live tool), never a Booking Domain", () => {
+    for (const text of ["check my whatsapp", "any whatsapp updates", "what's up", "check my what's up messages"]) {
+      const r = resolve(text, DEFAULT_ROUTING_CONFIG);
+      expect([r.role, r.kind], text).toEqual([null, "Default"]);
+    }
+  });
+});
+
+describe("Tony's name beats a topic", () => {
+  it("a self address + a Domain-only hit is Self", () => {
+    for (const text of ["hey tony, check my self-tape availability", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"]) {
+      expect(resolve(text, DEFAULT_ROUTING_CONFIG), text).toMatchObject({ role: "general", kind: "Self", confidence: "high" });
+    }
+    // The renamed OS's name counts too.
+    expect(resolve("friday, check my wardrobe for the shoot", DEFAULT_ROUTING_CONFIG, "Friday")).toMatchObject({ role: "general", kind: "Self" });
+  });
+  it("without Tony's name the same topic still delegates", () => {
+    expect(resolve("check my self-tape availability", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "booking", kind: "Domain" });
+    expect(resolve("friday, check my wardrobe for the shoot", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "booking", kind: "Domain" });
+  });
+  it("only his name, not his own topic, beats another agent's topic", () => {
+    expect(resolve("system status of the droplet", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "ops", kind: "Domain" });
+  });
+  it("a Named agent still wins over Tony's name", () => {
+    expect(resolve("hey tony, ask the booking desk to check my availability", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "booking", kind: "Named", confidence: "high", task: "check my availability" });
+    expect(resolve("tony, coder, fix the build", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "coder", kind: "Named" });
+    expect(resolve("tony, my booking agent hasn't replied about the wardrobe", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "booking", kind: "Named" });
+  });
+});
+
+// Regression: the override fired for a self name ANYWHERE in the line, so the common nouns in
+// SELF_NAMES ("dispatcher", "orchestrator") and a renamed OS name ("Friday") beat every topic.
+describe("only a real address beats a topic (not a mention)", () => {
+  const cfg = DEFAULT_ROUTING_CONFIG;
+  it("a self name used as a noun or an object leaves the topic's agent in charge", () => {
+    expect(resolve("fix bug in the orchestrator react code", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
+    expect(resolve("refactor the dispatcher rust code", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
+    expect(resolve("check my self-tape availability for friday", cfg, "Friday")).toMatchObject({ role: "booking", kind: "Domain" });
+    expect(resolve("book the wardrobe fitting before friday", cfg, "Friday")).toMatchObject({ role: "booking", kind: "Domain" });
+    expect(resolve("fix bug in the orchestrator", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
+    expect(resolve("get the orchestrator react code working", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
+    expect(resolve("the dispatcher keeps timing out, is the droplet healthy", cfg)).toMatchObject({ role: "ops", kind: "Domain" });
+  });
+  it("a mention with no topic is still Tony's (the step-(d) fallback)", () => {
+    expect(resolve("refactor the dispatcher", cfg)).toMatchObject({ role: "general", kind: "Self" });
+    expect(resolve("so I'm on my phone now hey tony what's up", cfg)).toMatchObject({ role: "general", kind: "Self" });
+  });
+  it.each([
+    ["hey tony, check my self-tape availability", ""],
+    ["ok jarvis, redo the color palette for the landing page", ""],
+    ["so tony, is the droplet healthy", ""],
+    ["yo tony check my calendar", ""],
+    ["friday, check my wardrobe for the shoot", "Friday"],
+    ["ask tony to check my self-tape availability", ""],
+    ["tell the dispatcher about the wardrobe fitting", ""],
+    ["have jarvis check the droplet", ""],
+    ["let tony know my availability changed", ""],
+    ["check my self-tape availability, tony", ""],
+    ["is the droplet healthy tony please", ""],
+    ["check my self-tape availability, friday", "Friday"],
+  ])("an address beats the topic: %s", (text, osName) => {
+    expect(resolve(text, cfg, osName)).toMatchObject({ role: "general", kind: "Self", confidence: "high", reason: "you addressed the OS by name" });
+    expect(addressesSelf(text, cfg, osName)).toBe(true);
+  });
+  it("addressesSelf is false for a mention, a greeting, a Named agent's own name and an empty line", () => {
+    for (const [text, osName] of [
+      ["fix bug in the orchestrator react code", ""],
+      ["refactor the dispatcher rust code", ""],
+      ["get the orchestrator react code working", ""],
+      ["check my self-tape availability for friday", "Friday"],
+      ["play something by tony", ""],
+      ["the dispatcher keeps timing out", ""],
+      ["check my self-tape availability", ""],
+      ["", ""],
+    ]) {
+      expect(addressesSelf(text, cfg, osName), text).toBe(false);
+    }
+  });
+  it("ignoreSelfAddress reads the topic only (the brainstorm's agent for an offer)", () => {
+    const o = { ignoreSelfAddress: true };
+    expect(resolve("I've been thinking about a warmer color palette for the landing page, tony", cfg, "Tony", o)).toMatchObject({ role: "designer", kind: "Domain" });
+    expect(resolve("hey tony, check my self-tape availability", cfg, "Tony", o)).toMatchObject({ role: "booking", kind: "Domain" });
+    // Without it, the same line is Tony's; with it, no topic is still Self, a Named agent still Named.
+    expect(resolve("I've been thinking about a warmer color palette for the landing page, tony", cfg, "Tony")).toMatchObject({ role: "general", kind: "Self" });
+    expect(resolve("thanks tony", cfg, "Tony", o)).toMatchObject({ role: "general", kind: "Self" });
+    expect(resolve("hey tony, ask the booking desk to check my availability", cfg, "Tony", o)).toMatchObject({ role: "booking", kind: "Named" });
   });
 });
 

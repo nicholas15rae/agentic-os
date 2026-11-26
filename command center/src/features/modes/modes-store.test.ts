@@ -13,10 +13,11 @@ const h = vi.hoisted(() => ({
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => h.tauri, onNativeEvent: h.onNativeEvent }));
 vi.mock("@/features/cues/cue-runtime", () => ({ toggleGabagoolMode: h.toggleGabagool }));
 vi.mock("@/lib/gateway", () => ({ gateway: h.gateway }));
+vi.mock("@/stores/settings", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/stores/settings")>()), isDesktopApp: () => h.tauri }));
 
 import { useOs } from "@/features/os/os-store";
 import type { OsConfig } from "@/lib/platform";
-import { PHONE_MODE_REFRESH_MS, resetModesForTests, useModes } from "./modes-store";
+import { PHONE_MODE_REFRESH_MS, currentFreeze, isAgentLiveNow, isToolLiveNow, resetModesForTests, useModes } from "./modes-store";
 
 const view = (active: string, overrides: Record<string, string> = {}): ModesView => ({
   modes: [...PRESET_MODES],
@@ -109,6 +110,26 @@ describe("modes store (desktop)", () => {
     expect(useModes.getState().overrides).toEqual({});
   });
 
+  it("the master switchboard comes from os.json on the desktop (nothing frozen before it loads)", async () => {
+    expect(currentFreeze()).toEqual({ frozenAgents: [], frozenTools: [] });
+    expect(isAgentLiveNow("booking")).toBe(true);
+    useOs.setState({ cfg: { switchboard: { version: 1, frozenAgents: ["booking"], frozenTools: ["instagram"] } } as unknown as OsConfig });
+    try {
+      await useModes.getState().load(); // the Rust view carries no mirror freezes
+      expect(useModes.getState().frozen).toBeNull();
+      expect(currentFreeze()).toEqual({ frozenAgents: ["booking"], frozenTools: ["instagram"] });
+      expect(isAgentLiveNow("booking")).toBe(false);
+      expect(isAgentLiveNow("coder")).toBe(true); // Brainstorming: no overlay
+      expect(isToolLiveNow("instagram")).toBe(false);
+      h.handler!(view("builder"));
+      expect(isAgentLiveNow("coder")).toBe(true);
+      expect(isAgentLiveNow("bizops")).toBe(false);
+      expect(isToolLiveNow("gmail")).toBe(false);
+    } finally {
+      useOs.setState({ cfg: null });
+    }
+  });
+
   it("a refused command keeps the state and surfaces the error", async () => {
     h.cmd.mockRejectedValueOnce(new Error("mode \"x\" not found"));
     await expect(useModes.getState().setActive("x")).rejects.toThrow(/not found/);
@@ -144,6 +165,40 @@ describe("modes store (phone)", () => {
     expect(h.cmd).not.toHaveBeenCalled();
     // Editing is desktop-only.
     await expect(useModes.getState().remove("my-mode")).rejects.toThrow(/desktop-only/);
+  });
+
+  it("keeps the mirror's switchboard freezes and Rust's exact MODE block (the phone's live rule)", async () => {
+    h.tauri = false;
+    h.gateway.mockImplementation(async (path: string) => {
+      if (path === "/api/os/state")
+        return {
+          mode: {
+            id: "operations",
+            name: "Operations",
+            icon: "clipboard-list",
+            curiosity: "medium",
+            verbosity: "balanced",
+            dispatch: "ask_before_dispatch",
+            feedbackLevel: 1,
+            overridden: [],
+            list: PRESET_MODES.map((m) => ({ id: m.id, name: m.name, icon: m.icon, isNovelty: m.is_novelty })),
+            promptTail: "\n\nMODE: Operations. tail",
+            switchboard: { agents: ["ops", "bizops"], tools: ["gmail"], frozenAgents: ["booking"], frozenTools: ["shotcut"] },
+          },
+        };
+      return {};
+    });
+    await useModes.getState().load();
+    expect(useModes.getState().promptTail).toBe("\n\nMODE: Operations. tail");
+    expect(currentFreeze()).toEqual({ frozenAgents: ["booking"], frozenTools: ["shotcut"] });
+    expect(isAgentLiveNow("bizops")).toBe(true);
+    expect(isAgentLiveNow("coder")).toBe(false);
+    expect(isAgentLiveNow("booking")).toBe(false);
+    expect(isAgentLiveNow("tony")).toBe(true);
+    expect(isToolLiveNow("gmail")).toBe(true);
+    expect(isToolLiveNow("git")).toBe(false);
+    expect(isToolLiveNow("time")).toBe(true);
+    resetModesForTests();
   });
 
   it("re-reads the mirror while visible, so a desktop switch reaches the phone (fix pass)", async () => {

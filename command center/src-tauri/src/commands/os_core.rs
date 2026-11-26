@@ -108,11 +108,13 @@ fn trig(names: &[&str], domains: &[&str]) -> AgentTriggers {
 /// The user's exact default trigger matrix (Part 1 spec). Keyed by role id.
 pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
     let mut m = BTreeMap::new();
+    // No bare "whatsapp" / "messages": a WhatsApp read is Tony's own live tool (`routing::direct_tool`),
+    // and "messages" alone pulled every chat-ish line (and Whisper's "what's up" greeting) to Booking.
     m.insert(
         "booking".to_string(),
         trig(
             &["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-            &["whatsapp", "messages", "last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
+            &["last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
         ),
     );
     m.insert(
@@ -221,8 +223,8 @@ pub struct McpServer {
     /// tool router) may use this server's tools. `None`, an empty list, or a
     /// list containing `"all"` all mean "every agent". Missing on disk for any
     /// config saved before this field existed — `load_or_init` backfills it
-    /// per id from `default_mcp_grants`. Tony (`general`/`tony`) always has
-    /// every enabled server regardless of this list; see `OsState`/`mcp.rs`.
+    /// per id from `default_mcp_grants`. Tony (`general`/`tony`) respects this
+    /// list like every other agent (the tool-owner split; `mcp::servers_for`).
     #[serde(default)]
     pub agents: Option<Vec<String>>,
     /// stdio: seconds to wait for the server's `initialize` reply (cold start), 5–600.
@@ -241,9 +243,8 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Does this server's grant list cover `agent`? Does NOT special-case
-    /// Tony/general — callers that must give Tony everything check that
-    /// themselves (he always does, regardless of this list).
+    /// Does this server's grant list cover `agent`? Tony is `general` here like
+    /// any other id (`"tony"` and the other self aliases match it).
     pub fn grants(&self, agent: &str) -> bool {
         match &self.agents {
             None => true,
@@ -305,24 +306,82 @@ pub fn agent_matches(list: &[String], agent: &str) -> bool {
     list.iter().any(|a| a == "all" || canon_agent(a) == agent)
 }
 
-/// Part 2's default per-agent MCP grants, by server id (the user's exact
-/// list). Any id not named here — `weather`, and any future built-in or
-/// user-added server — defaults to every agent ("all").
+/// The default per-agent MCP grants, by server id: the user's tool-ownership split (switchboard
+/// spec). Tony (`general`) respects these like every other agent: gmail (reads + the draft card),
+/// WhatsApp (read-only server), Brave, weather, time, Spotify and the knowledge graph are his.
+/// Coder: filesystem, git, fetch. Designer: filesystem. Director: Shotcut, Media Forge,
+/// filesystem (never Tony). Biz Ops: Instagram. Ops: maps. Librarian: knowledge graph,
+/// filesystem. Prompter: fetch, filesystem, knowledge graph (reads; it is a read-only role).
+/// Finance / a trader: none yet. Booking is frozen on the master switchboard but keeps the
+/// servers it had, so it comes back exactly as it was if Nic ever thaws it. Any id not named
+/// here (a future or user-added server) defaults to every agent ("all"); never `[]`, which also
+/// means everyone.
 pub fn default_mcp_grants(id: &str) -> Vec<String> {
     let list: &[&str] = match id {
-        "whatsapp" => &["booking", "ops"],
-        "gmail" => &["booking", "ops"],
-        "time" => &["booking", "coder", "ops"],
-        "filesystem" => &["booking", "coder", "librarian", "prompter", "designer", "director", "ops"],
-        "knowledge-graph" => &["booking", "librarian", "prompter", "ops"],
+        "weather" | "spotify" | "brave-search" => &["general"],
+        "gmail" | "whatsapp" | "time" => &["general", "booking"],
+        "knowledge-graph" => &["general", "librarian", "prompter", "booking"],
+        "filesystem" => &["coder", "designer", "director", "librarian", "prompter", "booking"],
         "git" => &["coder"],
-        "fetch" => &["coder", "librarian", "prompter", "designer"],
-        "brave-search" => &["coder", "librarian"],
+        "fetch" => &["coder", "prompter"],
+        "maps" => &["ops"],
+        "instagram" => &["bizops"],
         // Local media servers: only the Director edits and renders through them.
         "shotcut" | "media-forge" => &["director"],
         _ => &["all"],
     };
     list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Server ids whose grants the one-time tool-owner migration rewrites (`default_mcp_grants`).
+pub const TOOL_OWNER_SERVERS: [&str; 14] = ["weather", "time", "fetch", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "instagram", "whatsapp", "shotcut", "media-forge"];
+
+/// Skill grants of the tool-owner split: the Designer's two design skills, the Director's motion
+/// vocabulary. Tony has none (a skill body is injected into a sub-agent's task only when the task
+/// matches it, `mcp::relevant_skills`).
+pub const DESIGNER_SKILLS: [&str; 2] = ["impeccable", "design-taste-frontend"];
+pub const DIRECTOR_SKILLS: [&str; 1] = ["animation-vocabulary"];
+
+// ── Master switchboard ──────────────────────────────────────────────────────
+
+/// `switchboard.version` once the tool-owner migration ran (and for a fresh config).
+pub const SWITCHBOARD_VERSION: u32 = 1;
+
+/// The master (global) switchboard: agents (routing role ids) and tools (`mcps[].id`) that are
+/// frozen in EVERY mode. A runtime mask, like a mode's overlay (`modes::ModeSwitchboard`): a
+/// frozen agent or server keeps all of its settings and returns exactly as it was. `version` is
+/// the one-time tool-owner migration's flag (0 = an os.json saved before it).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchboardConfig {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default = "default_frozen_agents")]
+    pub frozen_agents: Vec<String>,
+    #[serde(default)]
+    pub frozen_tools: Vec<String>,
+}
+
+/// Frozen on a fresh master switchboard (and by the one-time migration): Booking, and the
+/// Librarian, which runs only as its scheduled script (internal / scheduled Librarian calls are
+/// not switchboard turns and stay ungated).
+pub const DEFAULT_FROZEN_AGENTS: [&str; 2] = ["booking", "librarian"];
+
+fn default_frozen_agents() -> Vec<String> {
+    DEFAULT_FROZEN_AGENTS.iter().map(|s| s.to_string()).collect()
+}
+
+impl Default for SwitchboardConfig {
+    fn default() -> Self {
+        Self { version: SWITCHBOARD_VERSION, frozen_agents: default_frozen_agents(), frozen_tools: vec![] }
+    }
+}
+
+impl SwitchboardConfig {
+    /// An os.json with no `switchboard` key: Booking and the Librarian frozen, migration still to run.
+    fn legacy() -> Self {
+        Self { version: 0, ..Self::default() }
+    }
 }
 
 fn builtin(id: &str, name: &str, enabled: bool, description: &str) -> McpServer {
@@ -870,6 +929,10 @@ pub struct OsConfig {
     /// changes afterwards is never flipped back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<String>,
+    /// The master switchboard: agents / tools frozen in every mode (`modes::agent_live`). Missing
+    /// on disk = a config saved before it (version 0: the tool-owner migration runs once).
+    #[serde(default = "SwitchboardConfig::legacy")]
+    pub switchboard: SwitchboardConfig,
 }
 
 impl Default for OsConfig {
@@ -897,6 +960,7 @@ impl Default for OsConfig {
             roster: super::arbiter::RosterConfig::default(),
             review: ReviewConfig::default(),
             migrations: vec![],
+            switchboard: SwitchboardConfig::default(),
         }
     }
 }
@@ -979,6 +1043,94 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     }
 }
 
+/// Backup suffix of the tool-owner migration: `os.json.bak-<YYYYMMDD-HHMMSS>-tool-owners`.
+pub(crate) const TOOL_OWNERS_TAG: &str = "tool-owners";
+
+/// A saved os.json from before the master switchboard (`switchboard.version` missing or < 1).
+/// Read from the raw text, so a lenient parse that fell back to the defaults can't hide it.
+pub(crate) fn needs_tool_owner_migration(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).ok().and_then(|v| v["switchboard"]["version"].as_u64()).unwrap_or(0) < u64::from(SWITCHBOARD_VERSION)
+}
+
+/// One-time (switchboard v1): every known server's grants become the tool-owner split
+/// (`default_mcp_grants`), the skill grants become the Designer's two design skills and the
+/// Director's motion vocabulary (Tony none; other agents' skills are kept), Booking and the
+/// Librarian (`DEFAULT_FROZEN_AGENTS`) are frozen on the master switchboard and the version is
+/// set, so it never runs twice. `enabled` is never touched: a server Nic switched off stays off.
+/// `has_skill`: the skill exists in the library.
+pub(crate) fn migrate_tool_owners(cfg: &mut OsConfig, has_skill: impl Fn(&str) -> bool) {
+    for m in cfg.mcps.iter_mut().filter(|m| TOOL_OWNER_SERVERS.contains(&m.id.as_str())) {
+        m.agents = Some(default_mcp_grants(&m.id));
+    }
+    for (name, agents) in cfg.skills.grants.iter_mut() {
+        agents.retain(|a| match canon_agent(a) {
+            "general" => false,
+            "designer" => DESIGNER_SKILLS.contains(&name.as_str()),
+            "director" => DIRECTOR_SKILLS.contains(&name.as_str()),
+            _ => true,
+        });
+    }
+    cfg.skills.grants.retain(|_, a| !a.is_empty());
+    for (agent, names) in [("designer", &DESIGNER_SKILLS[..]), ("director", &DIRECTOR_SKILLS[..])] {
+        for name in names.iter().filter(|n| has_skill(n)) {
+            let e = cfg.skills.grants.entry(name.to_string()).or_default();
+            if !e.iter().any(|x| x == agent) {
+                e.push(agent.into());
+            }
+        }
+    }
+    let sb = &mut cfg.switchboard;
+    for a in DEFAULT_FROZEN_AGENTS {
+        if !sb.frozen_agents.iter().any(|f| f == a) {
+            sb.frozen_agents.push(a.into());
+        }
+    }
+    sb.version = SWITCHBOARD_VERSION;
+}
+
+/// Designer / Director start with their skills while they have none attached (skills that exist).
+fn seed_skill_grants(cfg: &mut OsConfig, has_skill: impl Fn(&str) -> bool) {
+    for (agent, names) in [("designer", &DESIGNER_SKILLS[..]), ("director", &DIRECTOR_SKILLS[..])] {
+        if cfg.skills.grants.values().any(|a| a.iter().any(|x| x == agent)) {
+            continue;
+        }
+        for name in names.iter().filter(|n| has_skill(n)) {
+            cfg.skills.grants.entry(name.to_string()).or_default().push(agent.into());
+        }
+    }
+}
+
+/// Copy the saved os.json aside before a migration rewrites it (never overwrites a backup).
+fn backup_os_json(path: &Path, text: &str, tag: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup = path.with_file_name(format!("os.json.bak-{stamp}-{tag}"));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&backup).map_err(|e| format!("{}: {e}", backup.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    Ok(backup)
+}
+
+/// The tool-owner migration for a config read from `path` (`text` = the file as saved): backup
+/// first; no backup, no migration (version stays 0, so the next launch tries again).
+pub(crate) fn migrate_saved_tool_owners(cfg: &mut OsConfig, path: &Path, text: &str) -> Option<PathBuf> {
+    if !needs_tool_owner_migration(text) {
+        return None;
+    }
+    match backup_os_json(path, text, TOOL_OWNERS_TAG) {
+        Ok(b) => {
+            let dir = PathBuf::from(&cfg.skills.dir);
+            migrate_tool_owners(cfg, |n| dir.join(n).join("SKILL.md").exists());
+            eprintln!("[os] tool owners migrated (switchboard v{SWITCHBOARD_VERSION}); previous os.json saved as {}", b.display());
+            Some(b)
+        }
+        Err(e) => {
+            eprintln!("[os] tool-owner migration skipped, backup failed ({e}); it runs on the next launch");
+            None
+        }
+    }
+}
+
 // ── State ───────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -1056,9 +1208,10 @@ impl OsState {
         let path = dir.join("os.json");
         *self.path.write().unwrap() = Some(path.clone());
         *self.mirror.write().unwrap() = Some(repo.join("data").join("command-center").join("os-state.json"));
-        let mut cfg = match std::fs::read_to_string(&path) {
-            Ok(s) => parse_os_config_lenient(&s, &path),
-            Err(_) => OsConfig::default(),
+        let saved = std::fs::read_to_string(&path).ok();
+        let mut cfg = match saved.as_deref() {
+            Some(s) => parse_os_config_lenient(s, &path),
+            None => OsConfig::default(),
         };
         // Self-alias keys ("tony", "dispatcher"…) fold into general before any back-fill.
         canonicalize_self_keys(&mut cfg);
@@ -1087,18 +1240,14 @@ impl OsState {
             }
         }
         apply_migrations(&mut cfg);
-        // Designer starts with the UI/UX pack attached (taste, impeccable, Kowalski motion, Stitch).
-        if !cfg.skills.grants.values().any(|a| a.iter().any(|x| x == "designer")) {
-            let dir = std::path::PathBuf::from(&cfg.skills.dir);
-            for name in ["design-taste-frontend", "taste-design", "impeccable", "emil-design-eng", "animate", "stitch-generate-design", "stitch-manage-design-system", "frontend-design"] {
-                if dir.join(name).join("SKILL.md").exists() {
-                    let e = cfg.skills.grants.entry(name.to_string()).or_default();
-                    if !e.iter().any(|x| x == "designer") {
-                        e.push("designer".into());
-                    }
-                }
-            }
+        // Switchboard v1, once: the tool-owner split (a timestamped backup of os.json first).
+        if let Some(text) = saved.as_deref() {
+            migrate_saved_tool_owners(&mut cfg, &path, text);
         }
+        // Designer / Director start with their skills attached (impeccable + design-taste-frontend;
+        // animation-vocabulary).
+        let skills_dir = std::path::PathBuf::from(&cfg.skills.dir);
+        seed_skill_grants(&mut cfg, |n| skills_dir.join(n).join("SKILL.md").exists());
         self.slot.set_capacity(cfg.scheduler.max_concurrency as usize);
         // A mic locked off last session stays locked off (Phase 2 Part B, D2).
         super::voice::MIC_ENABLED.store(cfg.voice.mic_enabled, std::sync::atomic::Ordering::SeqCst);
@@ -1148,7 +1297,7 @@ impl OsState {
     /// The phone mirror with Tony's current mode (Phase 2 Part C).
     pub(crate) fn mirror_value(&self, cfg: &OsConfig) -> serde_json::Value {
         let mut m = mirror_json(cfg, self.runtime.lock().unwrap().clone());
-        m["mode"] = self.modes.mirror();
+        m["mode"] = self.modes.mirror(&cfg.switchboard);
         m
     }
 
@@ -1247,6 +1396,18 @@ fn validate(c: &OsConfig) -> Result<(), String> {
         if triggers.names.iter().any(|s| s.trim().is_empty()) || triggers.domains.iter().any(|s| s.trim().is_empty()) {
             return Err(format!("routing.{role}: triggers cannot be empty strings"));
         }
+    }
+    let sb = &c.switchboard;
+    if sb.frozen_agents.len() > 32 || sb.frozen_tools.len() > 64 {
+        return Err("switchboard: at most 32 frozen agents and 64 frozen tools".into());
+    }
+    for a in &sb.frozen_agents {
+        if !super::dispatch::valid_id(a) || super::routing::is_self_role(a, &c.os_name) {
+            return Err(format!("switchboard: \"{a}\" can't be frozen (an agent id, never {} himself)", c.os_name));
+        }
+    }
+    if let Some(t) = sb.frozen_tools.iter().find(|t| !super::dispatch::valid_id(t) || super::modes::ALWAYS_LIVE_SERVERS.contains(&t.as_str())) {
+        return Err(format!("switchboard: \"{t}\" can't be frozen (an MCP server id; time, skills and the mode switch always stay live)"));
     }
     let mut ids = std::collections::HashSet::new();
     for m in &c.mcps {
@@ -1547,7 +1708,7 @@ pub fn os_config_update(app: tauri::AppHandle, os: State<'_, OsState>, state: St
         ensure_gateway_token(&state);
     }
     // The MCP registry (or the MCP permission tier) changed: the tools a turn can use did too.
-    let mcp_view = |c: &OsConfig| serde_json::to_value((&c.mcps, c.permissions.mcp)).ok();
+    let mcp_view = |c: &OsConfig| serde_json::to_value((&c.mcps, c.permissions.mcp, &c.switchboard)).ok();
     if mcp_view(&next) != mcp_view(&before) {
         super::mcp::emit_tools_changed(&app, "mcp-registry-saved");
     }
@@ -2081,7 +2242,11 @@ mod tests {
             // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self).
             assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
         }
-        assert!(agents["booking"].domains.contains(&"whatsapp".to_string()));
+        // A WhatsApp read is Tony's live tool, and Whisper's "what's up" greeting used to land on
+        // Booking through these two: neither is a Booking topic any more.
+        assert!(!agents["booking"].domains.contains(&"whatsapp".to_string()));
+        assert!(!agents["booking"].domains.contains(&"messages".to_string()));
+        assert!(agents["booking"].domains.contains(&"last 5 messages".to_string()));
         // Casting logistics stay with Booking; editing a tape is the Director's.
         assert!(agents["booking"].domains.contains(&"self-tape".to_string()));
         assert!(!agents["director"].domains.contains(&"self-tape".to_string()));
@@ -2095,24 +2260,41 @@ mod tests {
     }
 
     #[test]
-    fn mcp_grants_match_the_users_exact_table() {
-        let cases: [(&str, &[&str]); 10] = [
-            ("whatsapp", &["booking", "ops"]),
-            ("gmail", &["booking", "ops"]),
-            ("time", &["booking", "coder", "ops"]),
-            ("filesystem", &["booking", "coder", "librarian", "prompter", "designer", "director", "ops"]),
-            ("knowledge-graph", &["booking", "librarian", "prompter", "ops"]),
+    fn mcp_grants_match_the_tool_owner_split() {
+        let cases: [(&str, &[&str]); 14] = [
+            ("weather", &["general"]),
+            ("spotify", &["general"]),
+            ("brave-search", &["general"]),
+            ("gmail", &["general", "booking"]),
+            ("whatsapp", &["general", "booking"]),
+            ("time", &["general", "booking"]),
+            ("knowledge-graph", &["general", "librarian", "prompter", "booking"]),
+            ("filesystem", &["coder", "designer", "director", "librarian", "prompter", "booking"]),
             ("git", &["coder"]),
-            ("fetch", &["coder", "librarian", "prompter", "designer"]),
-            ("brave-search", &["coder", "librarian"]),
+            ("fetch", &["coder", "prompter"]),
+            ("maps", &["ops"]),
+            ("instagram", &["bizops"]),
             ("shotcut", &["director"]),
             ("media-forge", &["director"]),
         ];
         for (id, want) in cases {
             assert_eq!(default_mcp_grants(id), want.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{id}");
         }
-        assert_eq!(default_mcp_grants("weather"), vec!["all".to_string()]);
         assert_eq!(default_mcp_grants("some-future-server"), vec!["all".to_string()]);
+        // Every known server is in the migration's list, and Tony owns none of the media servers.
+        assert_eq!(TOOL_OWNER_SERVERS.len(), cases.len());
+        for (id, _) in cases {
+            assert!(TOOL_OWNER_SERVERS.contains(&id), "{id}");
+        }
+        let tony: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), "tony")).map(|(id, _)| *id).collect();
+        assert_eq!(tony, ["weather", "spotify", "brave-search", "gmail", "whatsapp", "time", "knowledge-graph"]);
+        for (agent, want) in [("coder", &["filesystem", "git", "fetch"][..]), ("designer", &["filesystem"]), ("director", &["filesystem", "shotcut", "media-forge"]), ("bizops", &["instagram"]), ("ops", &["maps"]), ("librarian", &["knowledge-graph", "filesystem"]), ("prompter", &["knowledge-graph", "filesystem", "fetch"]), ("finance", &[]), ("trader", &[])] {
+            let mut got: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), agent)).map(|(id, _)| *id).collect();
+            let mut want = want.to_vec();
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "{agent}");
+        }
     }
 
     #[test]
@@ -2128,8 +2310,10 @@ mod tests {
         assert!(scoped.grants("coder"));
         assert!(scoped.grants("ops"));
         assert!(!scoped.grants("booking"));
-        // Tony is NOT special-cased by grants() itself — callers check that separately.
-        assert!(!scoped.grants("general"));
+        // Tony is NOT special-cased: he respects grants like every other agent.
+        assert!(!scoped.grants("general") && !scoped.grants("tony"));
+        let tony = McpServer { agents: Some(vec!["general".into()]), ..blank_mcp() };
+        assert!(tony.grants("general") && tony.grants("tony") && tony.grants("Tony") && !tony.grants("coder"));
     }
 
     fn blank_mcp() -> McpServer {
@@ -2140,9 +2324,9 @@ mod tests {
     fn default_mcps_carry_exact_grants() {
         let mcps = default_mcps();
         let whatsapp = mcps.iter().find(|m| m.id == "whatsapp").unwrap();
-        assert_eq!(whatsapp.agents, Some(vec!["booking".to_string(), "ops".to_string()]));
+        assert_eq!(whatsapp.agents, Some(vec!["general".to_string(), "booking".to_string()]));
         let weather = mcps.iter().find(|m| m.id == "weather").unwrap();
-        assert_eq!(weather.agents, Some(vec!["all".to_string()]));
+        assert_eq!(weather.agents, Some(vec!["general".to_string()]));
         let spotify = mcps.iter().find(|m| m.id == "spotify").unwrap();
         assert!(!spotify.enabled && spotify.transport == "builtin");
     }
@@ -2164,7 +2348,7 @@ mod tests {
                 m.agents = Some(default_mcp_grants(&m.id));
             }
         }
-        assert_eq!(cfg.mcps[0].agents, Some(vec!["booking".to_string(), "ops".to_string()]));
+        assert_eq!(cfg.mcps[0].agents, Some(vec!["general".to_string(), "booking".to_string()]));
         assert_eq!(cfg.mcps[1].agents, Some(vec!["booking".to_string()])); // untouched: user-edited value kept
     }
 
@@ -2329,5 +2513,207 @@ mod tests {
         assert_eq!((c.memory.target_hour, c.memory.weekly_day), (23, 0));
         assert_eq!((c.memory.hot_path.rag_timeout_ms, c.memory.hot_path.rag_top_k), (2500, 1));
         assert_eq!(MemoryConfig::default().hot_path.rag_timeout_ms, 2000);
+    }
+
+    // ── Master switchboard + the one-time tool-owner migration ──────────────
+
+    #[test]
+    fn switchboard_defaults_legacy_and_camel_case() {
+        let d = OsConfig::default();
+        // Booking and the Librarian (scheduled script only) are frozen on a fresh install.
+        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
+        // An os.json saved before the switchboard: both frozen, migration still to run.
+        let old: OsConfig = serde_json::from_str(r#"{"osName":"Tony"}"#).unwrap();
+        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // A saved choice is kept as is (Nic thawed Booking).
+        let thawed: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":[],"frozenTools":["instagram"]}}"#).unwrap();
+        assert_eq!((thawed.switchboard.frozen_agents.len(), thawed.switchboard.frozen_tools.clone()), (0, vec!["instagram".to_string()]));
+        assert!(needs_tool_owner_migration(r#"{"osName":"Tony"}"#));
+        assert!(needs_tool_owner_migration(r#"{"switchboard":{"version":0}}"#));
+        assert!(needs_tool_owner_migration("not json"));
+        assert!(!needs_tool_owner_migration(r#"{"switchboard":{"version":1}}"#));
+        assert!(!needs_tool_owner_migration(&serde_json::to_string(&d).unwrap()));
+    }
+
+    #[test]
+    fn validate_never_freezes_tony_or_the_always_live_tools() {
+        let ok = |f: &dyn Fn(&mut SwitchboardConfig)| {
+            let mut c = OsConfig::default();
+            f(&mut c.switchboard);
+            validate(&c).is_ok()
+        };
+        assert!(ok(&|_| {}));
+        assert!(ok(&|s| s.frozen_tools = vec!["instagram".into(), "media-forge".into()]));
+        assert!(!ok(&|s| s.frozen_agents.push("general".into())));
+        assert!(!ok(&|s| s.frozen_agents.push("Tony".into())));
+        assert!(!ok(&|s| s.frozen_agents.push("bad id!".into())));
+        for t in ["time", "skills", "tony"] {
+            assert!(!ok(&|s| s.frozen_tools = vec![t.into()]), "{t}");
+        }
+    }
+
+    /// The live shape before the switchboard: the old default grants, one server switched off,
+    /// the Designer's eight skills and a Tony skill.
+    fn pre_switchboard_os_json(skills_dir: &Path) -> String {
+        let old_grants = |id: &str| -> Vec<&str> {
+            match id {
+                "whatsapp" | "gmail" => vec!["booking", "ops"],
+                "time" => vec!["booking", "coder", "ops"],
+                "filesystem" => vec!["booking", "coder", "librarian", "prompter", "designer", "director", "ops"],
+                "knowledge-graph" => vec!["booking", "librarian", "prompter", "ops"],
+                "git" => vec!["coder"],
+                "fetch" => vec!["coder", "librarian", "prompter", "designer"],
+                "brave-search" => vec!["coder", "librarian"],
+                "shotcut" | "media-forge" => vec!["director"],
+                _ => vec!["all"],
+            }
+        };
+        let mcps: Vec<serde_json::Value> = default_mcps()
+            .into_iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(&m).unwrap();
+                v["agents"] = json!(old_grants(&m.id));
+                v["enabled"] = json!(m.id != "maps");
+                v
+            })
+            .collect();
+        let mut grants = serde_json::Map::new();
+        for n in ["animate", "design-taste-frontend", "emil-design-eng", "frontend-design", "impeccable", "stitch-generate-design", "stitch-manage-design-system", "taste-design"] {
+            grants.insert(n.into(), json!(["designer"]));
+        }
+        grants.insert("daily-standup".into(), json!(["tony", "ops"]));
+        json!({ "osName": "Tony", "mcps": mcps, "skills": { "dir": skills_dir.display().to_string(), "grants": grants }, "migrations": ["whatsapp-read-only", "self-routing", "vault-cadence", "bizops-split"] }).to_string()
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cc-os-switchboard-{tag}-{}-{}", std::process::id(), now_secs()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn tool_owner_migration_backs_up_first_runs_once_and_keeps_toggles() {
+        // `load_or_init` seeds the global mic flag: share the mic tests' lock.
+        let _mic = super::super::voice::mic_gate_tests::lock();
+        let root = tmp("migrate");
+        let (dir, repo, skills) = (root.join("cfg"), root.join("repo"), root.join("skills"));
+        for n in ["impeccable", "design-taste-frontend", "animation-vocabulary", "taste-design"] {
+            std::fs::create_dir_all(skills.join(n)).unwrap();
+            std::fs::write(skills.join(n).join("SKILL.md"), format!("---\nname: {n}\ndescription: x\n---\nbody")).unwrap();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = pre_switchboard_os_json(&skills);
+        std::fs::write(dir.join("os.json"), &saved).unwrap();
+        let os = OsState::default();
+        os.load_or_init(&dir, &repo);
+        let cfg = os.snapshot();
+        // 1. The backup holds the file exactly as it was, named os.json.bak-<YYYYMMDD-HHMMSS>-tool-owners.
+        let backups: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().unwrap().to_string_lossy().ends_with("-tool-owners")).collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        let name = backups[0].file_name().unwrap().to_string_lossy().into_owned();
+        let stamp = name.trim_start_matches("os.json.bak-").trim_end_matches("-tool-owners");
+        assert!(stamp.len() == 15 && stamp.as_bytes()[8] == b'-' && stamp.chars().filter(|c| c.is_ascii_digit()).count() == 14, "{name}");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), saved);
+        // 2. Grants are the split; toggles are untouched (maps stays off).
+        for m in &cfg.mcps {
+            assert_eq!(m.agents, Some(default_mcp_grants(&m.id)), "{}", m.id);
+            assert_eq!(m.enabled, m.id != "maps", "{}: a server Nic switched off stays off", m.id);
+        }
+        assert!(cfg.mcps.iter().find(|m| m.id == "whatsapp").unwrap().read_only);
+        // 3. Skills: the Designer's two, the Director's motion vocabulary, Tony none; others kept.
+        let who = |n: &str| cfg.skills.grants.get(n).cloned().unwrap_or_default();
+        assert_eq!(who("impeccable"), vec!["designer"]);
+        assert_eq!(who("design-taste-frontend"), vec!["designer"]);
+        assert_eq!(who("animation-vocabulary"), vec!["director"]);
+        for n in ["taste-design", "animate", "emil-design-eng", "frontend-design", "stitch-generate-design"] {
+            assert!(!cfg.skills.grants.contains_key(n), "{n}");
+        }
+        assert_eq!(who("daily-standup"), vec!["ops"], "Tony's grant is dropped, Ops keeps its own");
+        // 4. Booking and the Librarian frozen, version set, saved.
+        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        let on_disk: OsConfig = serde_json::from_str(&std::fs::read_to_string(dir.join("os.json")).unwrap()).unwrap();
+        assert_eq!(on_disk.switchboard.version, 1);
+        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string()]);
+        // 5. Never twice: Nic re-grants git to Tony and re-enables maps; a restart keeps both, no new backup.
+        os.update(|c| {
+            c.mcps.iter_mut().find(|m| m.id == "git").unwrap().agents = Some(vec!["coder".into(), "general".into()]);
+            c.mcps.iter_mut().find(|m| m.id == "maps").unwrap().enabled = true;
+            Ok(())
+        })
+        .unwrap();
+        let again = OsState::default();
+        again.load_or_init(&dir, &repo);
+        let c2 = again.snapshot();
+        assert_eq!(c2.mcps.iter().find(|m| m.id == "git").unwrap().agents, Some(vec!["coder".to_string(), "general".to_string()]));
+        assert!(c2.mcps.iter().find(|m| m.id == "maps").unwrap().enabled);
+        let n = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-tool-owners")).count();
+        assert_eq!(n, 1, "the migration never runs twice");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_migration_freezes_booking_and_the_librarian_once_and_keeps_other_freezes() {
+        // A version-0 switchboard that froze nothing (or only another agent): both are added,
+        // after what was already frozen, never twice.
+        for (before, want) in [(vec![], vec!["booking", "librarian"]), (vec!["designer"], vec!["designer", "booking", "librarian"]), (vec!["librarian"], vec!["librarian", "booking"])] {
+            let mut cfg = OsConfig::default();
+            cfg.switchboard = SwitchboardConfig { version: 0, frozen_agents: before.iter().map(|s| s.to_string()).collect(), frozen_tools: vec!["instagram".into()] };
+            migrate_tool_owners(&mut cfg, |_| false);
+            assert_eq!(cfg.switchboard.frozen_agents, want, "{before:?}");
+            assert_eq!((cfg.switchboard.version, cfg.switchboard.frozen_tools.clone()), (SWITCHBOARD_VERSION, vec!["instagram".to_string()]));
+            migrate_tool_owners(&mut cfg, |_| false);
+            assert_eq!(cfg.switchboard.frozen_agents, want, "idempotent: {before:?}");
+        }
+        // Already migrated (version 1): the saved switchboard is never rewritten, so a Librarian
+        // Nic thawed stays thawed.
+        let root = tmp("thawed-librarian");
+        let path = root.join("os.json");
+        let saved = r#"{"osName":"Tony","switchboard":{"version":1,"frozenAgents":["booking"],"frozenTools":[]}}"#;
+        let mut cfg: OsConfig = serde_json::from_str(saved).unwrap();
+        assert_eq!(migrate_saved_tool_owners(&mut cfg, &path, saved), None);
+        assert_eq!(cfg.switchboard.frozen_agents, vec!["booking".to_string()]);
+        assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("tool-owners")), "no backup either");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fresh_install_needs_no_migration_and_seeds_the_skill_grants() {
+        let root = tmp("fresh");
+        let skills = root.join("skills");
+        for n in ["impeccable", "design-taste-frontend", "animation-vocabulary"] {
+            std::fs::create_dir_all(skills.join(n)).unwrap();
+            std::fs::write(skills.join(n).join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        }
+        let mut cfg = OsConfig::default();
+        cfg.skills.dir = skills.display().to_string();
+        cfg.skills.grants.clear();
+        seed_skill_grants(&mut cfg, |n| skills.join(n).join("SKILL.md").exists());
+        assert_eq!(cfg.skills.grants.get("impeccable"), Some(&vec!["designer".to_string()]));
+        assert_eq!(cfg.skills.grants.get("design-taste-frontend"), Some(&vec!["designer".to_string()]));
+        assert_eq!(cfg.skills.grants.get("animation-vocabulary"), Some(&vec!["director".to_string()]));
+        assert!(!cfg.skills.grants.values().any(|a| agent_matches(a, "tony")));
+        // Seeding again adds nothing; a missing skill is never granted.
+        let before = cfg.skills.grants.clone();
+        seed_skill_grants(&mut cfg, |_| true);
+        assert_eq!(cfg.skills.grants, before);
+        // No saved file: nothing to migrate and no backup.
+        let mut fresh = OsConfig::default();
+        assert_eq!(migrate_saved_tool_owners(&mut fresh, &root.join("os.json"), &serde_json::to_string(&OsConfig::default()).unwrap()), None);
+        assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("tool-owners")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_backup_no_migration() {
+        let root = tmp("nobackup");
+        // The backup's folder doesn't exist: the migration is skipped and stays due.
+        let missing = root.join("gone").join("os.json");
+        let mut cfg: OsConfig = serde_json::from_str(r#"{"osName":"Tony"}"#).unwrap();
+        assert_eq!(migrate_saved_tool_owners(&mut cfg, &missing, r#"{"osName":"Tony"}"#), None);
+        assert_eq!(cfg.switchboard.version, 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

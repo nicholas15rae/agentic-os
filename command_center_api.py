@@ -43,6 +43,7 @@ from typing import Any, Iterator, Optional
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 BASE_DIR = Path(__file__).parent.resolve()
 # CC_DATA_DIR only exists so a scratch gateway (smoke tests) can run against its own store;
@@ -80,6 +81,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "intervalHours": 24,
         "keep": 14,
         "dir": str(BASE_DIR / "backups" / "command-center"),
+    },
+    # Gateway Tony (gateway_tony.py): while no desktop app works the inbox, the gateway answers a
+    # phone turn as Tony on his own local model. false is the rollback switch: phone turns then wait
+    # for the desktop exactly as before (read per decision, no restart needed).
+    "gatewayTony": {
+        "enabled": True,
     },
 }
 
@@ -378,19 +385,126 @@ def require_loopback(request: Any) -> None:
         raise HTTPException(403, "Only the desktop app on this machine may call this endpoint.")
 
 
-def llm_chat(messages: list[dict], *, model: str = "", max_tokens: int = 1200, temperature: float = 0.2, gpu_wait: Optional[float] = GPU_STALE_SECS) -> str:
+def llm_chat(messages: list[dict], *, model: str = "", max_tokens: int = 1200, temperature: float = 0.2, gpu_wait: Optional[float] = GPU_STALE_SECS, think: bool = False) -> str:
+    """One non-streaming chat completion. Reasoning is off unless `think=True`: a thinking model
+    (Qwen3.5) otherwise spends 13-90 s and most of the token budget on hidden reasoning. Both flags
+    are sent: this server honours only "reasoning_effort": "none"; others read enable_thinking."""
     if gpu_wait:
         wait_gpu(gpu_wait)  # cooperative: let the desktop's generation finish first, then go ahead anyway
     cfg = load_config()["llm"]
-    body = {
-        "model": _pick_model(model or cfg["model"]),
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
+    body = _chat_body(messages, _pick_model(model or cfg["model"]), max_tokens=max_tokens, temperature=temperature, think=think, stream=False)
     out = _http_json(f"{cfg['baseUrl'].rstrip('/')}/chat/completions", body, timeout=cfg.get("timeoutSecs", 120))
     return out["choices"][0]["message"]["content"] or ""
+
+
+def _chat_body(messages: list[dict], model: str, *, max_tokens: int, temperature: Optional[float], think: bool, stream: bool) -> dict[str, Any]:
+    """The /chat/completions body llm_chat and llm_stream share, so the thinking-off flags live in one
+    place. `temperature` None leaves the server's per-model default (what the desktop's Tony uses)."""
+    body: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": stream}
+    if temperature is not None:
+        body["temperature"] = temperature
+    if not think:
+        body["reasoning_effort"] = "none"
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    return body
+
+
+def _timed_lines(resp: Any, read_timeout: float, deadline: Any) -> Iterator[bytes]:
+    """The response's lines, every read bounded by the wall clock: before each read the socket
+    timeout is cut to what is left before `deadline()` (a time.monotonic() value), and TimeoutError
+    once it has passed, so a server that goes silent mid-answer can't hold a read past it. `read1`
+    makes each wait a single socket read. Plain iteration when http.client's socket isn't there."""
+    sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+    read1 = getattr(resp, "read1", None)
+    if sock is None or read1 is None:
+        yield from resp
+        return
+    buf = b""
+    while True:
+        i = buf.find(b"\n")
+        if i >= 0:
+            line, buf = buf[: i + 1], buf[i + 1:]
+            yield line
+            continue
+        left = deadline() - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("timed out")
+        sock.settimeout(max(0.01, min(read_timeout, left)))
+        chunk = read1(65536)
+        if not chunk:
+            if buf:
+                yield buf
+            return
+        buf += chunk
+
+
+def llm_stream(messages: list[dict], *, model: str, base_url: str = "", max_tokens: int = 400, temperature: Optional[float] = None,
+               first_token_s: float = 20.0, total_s: float = 60.0, on_delta: Optional[Any] = None, think: bool = False) -> str:
+    """One streamed chat completion (server-sent events) from an OpenAI-compatible server; returns
+    the whole content. Same body as llm_chat (thinking off unless `think`), stream on.
+
+    `model` is required: a stream never picks a model itself (so it can never answer on, or JIT-load,
+    whatever else the server has). `base_url` defaults to config llm.baseUrl. `on_delta(piece)` gets
+    each content piece as it arrives; an exception it raises ends the request (the connection closes,
+    so the server stops generating). No GPU-lease wait: the caller decides. Raises TimeoutError when
+    no content arrived within `first_token_s` or the answer ran past `total_s` (wall clock from the
+    request, even while the server is silent mid-answer), RuntimeError on an error event, and
+    urllib's errors for HTTP / connection failures."""
+    if not model:
+        raise ValueError("llm_stream needs an explicit model")
+    base = (base_url or load_config()["llm"]["baseUrl"]).rstrip("/")
+    body = _chat_body(messages, model, max_tokens=max_tokens, temperature=temperature, think=think, stream=True)
+    req = urllib.request.Request(f"{base}/chat/completions", data=json.dumps(body).encode(), method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    started = time.monotonic()
+    got_first = False
+    pieces: list[str] = []
+
+    def deadline() -> float:  # no content yet: the first-token limit too
+        return started + (total_s if got_first else min(first_token_s, total_s))
+
+    # The socket timeout bounds each read (a server that goes silent), cut to the time left on the
+    # wall clock (_timed_lines); the elapsed checks catch a server that keeps sending other lines.
+    read_timeout = max(0.5, min(first_token_s, total_s))
+    with urllib.request.urlopen(req, timeout=read_timeout) as resp:
+        try:
+            for raw in _timed_lines(resp, read_timeout, deadline):
+                elapsed = time.monotonic() - started
+                if not got_first and elapsed > first_token_s:
+                    raise TimeoutError(f"no answer within {first_token_s:.0f} s")
+                if elapsed > total_s:
+                    raise TimeoutError(f"answer ran past {total_s:.0f} s")
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    ev = json.loads(data)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("error"):
+                    raise RuntimeError(f"model server error: {str(ev['error'])[:160]}")
+                choices = ev.get("choices") or []
+                first = choices[0] if choices and isinstance(choices[0], dict) else {}
+                delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+                piece = delta.get("content")
+                if isinstance(piece, str) and piece:
+                    got_first = True
+                    pieces.append(piece)
+                    if on_delta is not None:
+                        on_delta(piece)
+        except TimeoutError as e:
+            if str(e) != "timed out":
+                raise
+            # A read the socket timeout (or the time left) cut: say which limit it was.
+            limit = f"no answer within {first_token_s:.0f} s" if not got_first else f"answer ran past {total_s:.0f} s"
+            raise TimeoutError(limit) from None
+    return "".join(pieces)
 
 
 _SMART_QUOTES = {"“": '"', "”": '"', "‘": "'", "’": "'"}
@@ -804,13 +918,19 @@ async def upload_file(file: UploadFile = File(...)):
     data = await file.read()
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "File larger than 15 MB")
+    # The disk write and the DB insert (which can wait on _db_lock / a busy SQLite) block: keep them
+    # off the event loop that every gateway request shares.
+    return await run_in_threadpool(_store_upload, data, mime, file.filename or "")
+
+
+def _store_upload(data: bytes, mime: str, filename: str) -> dict:
     fid = uuid.uuid4().hex
-    ext = (mimetypes.guess_extension(mime) or Path(file.filename or "").suffix or ".bin")[:8]
+    ext = (mimetypes.guess_extension(mime) or Path(filename).suffix or ".bin")[:8]
     sub = FILES_DIR / datetime.now().strftime("%Y-%m")
     sub.mkdir(parents=True, exist_ok=True)
     path = sub / f"{fid}{ext}"
     path.write_bytes(data)
-    name = Path(file.filename or f"capture{ext}").name[:120]
+    name = Path(filename or f"capture{ext}").name[:120]
     with _db_lock, db() as c:
         c.execute(
             "INSERT INTO files(id,name,mime,size,path,created) VALUES(?,?,?,?,?,?)",

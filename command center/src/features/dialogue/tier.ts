@@ -195,11 +195,13 @@ export type OfferTarget = { kind: "pipeline" } | { kind: "agent"; role: AgentRol
  * Who a Tier-3 yes hands the work to: a build-shaped conversation → the full pipeline; otherwise
  * the agent the brainstorm was about (the Domain / mentioned agent Tony kept it from), else the
  * routing matrix's read of what was said. Null: nothing to delegate (Tony just keeps talking).
+ * The matrix reads the topic only (`ignoreSelfAddress`): the brainstorm was said TO Tony ("…for
+ * the landing page, tony" / "ok let's do it, tony"), and his name must not hide its agent.
  */
 export function offerTarget(o: { buildShaped: boolean; topicRole?: AgentRole; userText: string; cfg: RoutingConfig; osName?: string }): OfferTarget | null {
   if (o.buildShaped || looksBuildShaped(o.userText)) return { kind: "pipeline" };
   if (o.topicRole && !isSelfRoleId(o.topicRole, o.osName)) return { kind: "agent", role: o.topicRole };
-  const r = resolve(o.userText, o.cfg, o.osName ?? "");
+  const r = resolve(o.userText, o.cfg, o.osName ?? "", { ignoreSelfAddress: true });
   if ((r.kind === "Named" || r.kind === "Domain") && r.role && !isSelfRoleId(r.role, o.osName)) return { kind: "agent", role: r.role as AgentRole };
   return null;
 }

@@ -295,9 +295,29 @@ You are {name}; never call yourself Jarvis, Hermes or a generic AI."
     s
 }
 
-/// Tony's turn system message before `/no_think`: persona, tool note, Tier-2 hint, MODE block.
-pub(crate) fn tony_turn_system(sys: &str, tool_note: &str, tier2: &str, mode_block: &str) -> String {
-    format!("{sys}{tool_note}{tier2}{mode_block}")
+/// Tony's turn system message before `/no_think`: persona, tool note, Tier-2 hint, then `tail`
+/// (`tony_turn_tail`, which ends with the MODE block).
+pub(crate) fn tony_turn_system(sys: &str, tool_note: &str, tier2: &str, tail: &str) -> String {
+    format!("{sys}{tool_note}{tier2}{tail}")
+}
+
+/// The end of Tony's system message: what he learned, his recall, the output contract, and the
+/// MODE block LAST (right before `/no_think`), so the mode is the final instruction he reads and
+/// the text above it doesn't change with the mode (pure).
+pub(crate) fn tony_turn_tail(learned: &str, recall: &str, contract: &str, mode_block: &str) -> String {
+    format!("{learned}{recall}{contract}{mode_block}")
+}
+
+/// The output contract of Tony's live turn: empty without packets (plain prose), else the
+/// live-only text (`tony_dispatch::contract`), which names only the targets the mode overlay and
+/// the master switchboard leave live this turn, so Tony never lists a frozen agent as a
+/// `target_agent` or starts a chain with it. It rides in the tail, so the cached prefix holds (pure).
+pub(crate) fn tony_live_contract(packets: bool, mode: &super::modes::Effective, g: &super::os_core::SwitchboardConfig) -> String {
+    if packets {
+        super::tony_dispatch::contract(mode, g)
+    } else {
+        String::new()
+    }
 }
 
 /// The model of the first chat provider in the routing chain (the one Tony's turn tries first).
@@ -330,7 +350,7 @@ lists. Mention LIVE DASHBOARD facts only when they matter to what Nic asked. Nev
 /// `action`: the line asks for a send / draft / playback (`action_shaped`). The "couldn't start
 /// it" and Spotify "say it didn't start" lines ride only on those turns.
 fn tools_section(tools: &[super::mcp::ToolInfo], action: bool) -> String {
-    let list = if tools.is_empty() { "none switched on right now".to_string() } else { tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ") };
+    let list = if tools.is_empty() { "none switched on right now".to_string() } else { tool_names_line(tools) };
     let mut s = format!(
         "\n\nTOOLS YOU HAVE THIS TURN: {list}.\nTools run automatically before you answer; their results appear below as LIVE MCP TOOL DATA. \
 Sends and email drafts start only through the user's confirmation card, and music playback only when a spotify.* result appears below as \
@@ -342,14 +362,10 @@ LIVE MCP TOOL DATA."
 phrasing that works (e.g. \"play <song> on Spotify\", \"draft an email to <address> about ...\"), never that you lack the tool or the skill.",
         );
     }
-    // The media controls, with their argument names, so the model knows Spotify is live.
-    let spotify: Vec<String> = tools
-        .iter()
-        .filter(|t| t.server == "spotify" && super::mcp::is_spotify_actuator(&t.name))
-        .map(|t| if t.args.is_empty() { t.name.clone() } else { format!("{}({})", t.name, t.args.join(", ")) })
-        .collect();
-    if !spotify.is_empty() {
-        s.push_str(&format!("\nSPOTIFY IS CONNECTED — controls available: {}.", spotify.join(", ")));
+    // Spotify's controls ride as the one compact `spotify.*` entry above; the command grammar
+    // (`spotify_intent`) and the router still know every Spotify tool by name.
+    if tools.iter().any(|t| t.server == "spotify" && super::mcp::is_spotify_actuator(&t.name)) {
+        s.push_str("\nSPOTIFY IS CONNECTED.");
         if action {
             s.push_str(
                 " A play/pause/skip/volume change has happened only if a spotify.* LIVE MCP TOOL DATA \
@@ -359,6 +375,26 @@ block appears below; if none does, say it didn't start and suggest \"play <artis
         s.push_str(" Never say Spotify isn't active or connected unless a TOOL FAILURE below says so.");
     }
     s
+}
+
+/// Tony's prompt shows Spotify as this ONE entry instead of its 23 tool names.
+pub(crate) const SPOTIFY_COMPACT: &str = "spotify.* (play, pause, next, previous, volume, now_playing, search, queue)";
+
+/// The TOOLS line: every tool name, with Tony's Spotify controls folded into `SPOTIFY_COMPACT`
+/// where the first Spotify tool stood (reads-only Spotify, a sub-agent's, stays by name).
+fn tool_names_line(tools: &[super::mcp::ToolInfo]) -> String {
+    let compact = tools.iter().any(|t| t.server == "spotify" && super::mcp::is_spotify_actuator(&t.name));
+    let mut out: Vec<&str> = vec![];
+    for t in tools {
+        if compact && t.server == "spotify" {
+            if !out.contains(&SPOTIFY_COMPACT) {
+                out.push(SPOTIFY_COMPACT);
+            }
+        } else {
+            out.push(&t.name);
+        }
+    }
+    out.join(", ")
 }
 
 /// The line asks for something to HAPPEN — a media command, a play request, a send / draft /
@@ -422,6 +458,19 @@ pub(crate) struct TurnRouteInput<'a> {
     /// Learning mode: one-on-one training. Every turn is Tony's own: no route, no tab, no live
     /// tool, whatever the caller resolved.
     pub learning: bool,
+    /// The phone's turn (`OsTurnRequest::stay_with_tony`): when a Default turn is re-resolved,
+    /// a Domain (topic) hit stays with Tony; a Named address still routes, and the business
+    /// route (`business_route`) still runs.
+    pub stay_with_tony: bool,
+}
+
+/// Why a phone turn's topic hit stayed with Tony (`TurnRouteInput::stay_with_tony`).
+pub(crate) const STAY_WITH_TONY_REASON: &str = "on the phone a topic stays with Tony";
+
+/// Whether `business_route` is held for this turn (Learning, a Tier-2 brainstorm, Solo). A
+/// phone turn's `stay_with_tony` never holds it: a named business still reaches its manager.
+pub(crate) fn business_route_held(input: &TurnRouteInput) -> bool {
+    input.learning || input.no_delegate || input.solo
 }
 
 /// The pipeline roles Solo never promotes a turn to (D15).
@@ -463,6 +512,11 @@ pub(crate) fn route_for_turn(input: &TurnRouteInput, cfg: &OsConfig) -> TurnRout
     if role == "general" && !input.explicit && kind == "Default" {
         let r = super::routing::resolve(input.text, cfg);
         match (r.kind, r.role) {
+            // The phone kept this topic with Tony: the safety net doesn't overrule it.
+            (super::routing::RouteKind::Domain, Some(rr)) if input.stay_with_tony && !super::routing::is_self_role(&rr, &cfg.os_name) => {
+                kind = "Self".into();
+                reason = STAY_WITH_TONY_REASON.into();
+            }
             (super::routing::RouteKind::Named | super::routing::RouteKind::Domain, Some(rr)) if !super::routing::is_self_role(&rr, &cfg.os_name) => {
                 role = rr;
                 kind = r.kind.as_str().into();
@@ -488,6 +542,45 @@ pub(crate) fn route_for_turn(input: &TurnRouteInput, cfg: &OsConfig) -> TurnRout
         }
     }
     TurnRoute { role, kind, reason }
+}
+
+/// The switchboard (pure): a turn routed to an agent that is frozen this turn stays with Tony
+/// (role `general`, kind Self, reason "<Agent> is frozen in <Mode> mode"), so automatic routing,
+/// a business name or a topic hit never wakes it. A DIRECT ask still reaches an agent the MODE
+/// froze, by the rule Solo uses: its own tab (`explicit`, which the phone also sets for a Named
+/// route) or a high-confidence Named address ("hey Coder, …"). An agent frozen on the master
+/// switchboard (Booking) never runs, however it is asked.
+pub(crate) fn switchboard_hold(route: TurnRoute, explicit: bool, text: &str, cfg: &OsConfig, e: &super::modes::Effective) -> TurnRoute {
+    if route.role == "general" {
+        return route;
+    }
+    let Some(reason) = super::modes::agent_frozen_reason(e, &cfg.switchboard, &route.role) else { return route };
+    let direct = explicit || (route.kind == "Named" && named_high_for(text, &route.role, cfg));
+    if direct && !super::modes::agent_globally_frozen(&cfg.switchboard, &route.role) {
+        return route;
+    }
+    TurnRoute { role: "general".into(), kind: "Self".into(), reason }
+}
+
+/// Tony's note for a turn the switchboard kept with him (`switchboard_hold`). `master`: the agent
+/// is frozen on the master switchboard (`modes::agent_globally_frozen`), which no mode overrides,
+/// so Tony says it is switched off there and comes back once thawed there, never "switch modes".
+/// A mode-overlay freeze keeps the offer to switch modes.
+pub(crate) fn frozen_note(reason: &str, master: bool) -> String {
+    if master {
+        format!("\n\nFROZEN THIS TURN: {reason}. If Nic wanted that agent, say in one short sentence that it is switched off on the master switchboard and comes back once it is thawed there (changing modes won't bring it back); otherwise just answer.")
+    } else {
+        format!("\n\nFROZEN THIS TURN: {reason}. If Nic wanted that agent, say so in one short sentence and offer to switch modes; otherwise just answer.")
+    }
+}
+
+/// Tony's FROZEN note for this turn, or empty when the switchboard didn't hold it: `routed_role`
+/// is where routing sent the turn, `held` what `switchboard_hold` left of it (pure).
+pub(crate) fn switchboard_note(routed_role: &str, held: &TurnRoute, g: &super::os_core::SwitchboardConfig) -> String {
+    if routed_role == "general" || held.role != "general" {
+        return String::new();
+    }
+    frozen_note(&held.reason, super::modes::agent_globally_frozen(g, routed_role))
 }
 
 /// Solo (D15): does the authoritative router read `text` as a high-confidence Named address of
@@ -527,14 +620,19 @@ pub(crate) fn comms_recall_intent(text: &str) -> Option<(String, String)> {
 }
 
 /// Only words tied to a tool's subject (weather, files, git, web, email,
-/// WhatsApp incl. Whisper's "what's up"…) — generic verbs like read/open/
-/// list/find/latest made the router fire on unrelated requests.
+/// WhatsApp…) — generic verbs like read/open/list/find/latest made the router
+/// fire on unrelated requests.
+///
+/// Whisper's "what's up" for WhatsApp counts only where `routing::normalize` turns it into
+/// "whatsapp" (next to an app cue: "check my what's up"). A raw `what's up` alternative made
+/// every greeting ("Hey Tony, what's up?") pay for a tool-router LLM call before Tony answered.
 fn wants_tools(text: &str) -> bool {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)\b(weather|forecast|temperature|rain|snow|wind|what time|the date|tomorrow|fetch|url|https?://|website|web ?page|files?|folders?|readme|repo|git|commit|branch|search|look ?up|google|news|knowledge|remember|who is|e-?mails?|inbox|gmail|mails?|what'?s ?app|whatsapp|messages?|texts?|chats?|what'?s ?up|dms?|skills?|spotify|music|songs?|tracks?|albums?|playlists?|what'?s playing|now playing|next (?:song|track))\b|[a-z]:[\\/]").unwrap()
+        regex::Regex::new(r"(?i)\b(weather|forecast|temperature|rain|snow|wind|what time|the date|tomorrow|fetch|url|https?://|website|web ?page|files?|folders?|readme|repo|git|commit|branch|search|look ?up|google|news|knowledge|remember|who is|e-?mails?|inbox|gmail|mails?|what'?s ?app|whatsapp|messages?|texts?|chats?|dms?|skills?|spotify|music|songs?|tracks?|albums?|playlists?|what'?s playing|now playing|next (?:song|track))\b|[a-z]:[\\/]").unwrap()
     })
     .is_match(text)
+        || super::routing::normalize(text).split(' ').any(|w| w == "whatsapp")
 }
 
 /// The line IS a media command once the address is stripped: it starts with play / put on /
@@ -570,6 +668,33 @@ fn router_keyword_ok(server: &str, norm: &str) -> bool {
             .get_or_init(|| regex::Regex::new(r"\b(spotify|music|songs?|tracks?|playing|playlists?|albums?|artist|listen(ed|ing)?)\b").unwrap())
             .is_match(norm),
         _ => true,
+    }
+}
+
+/// The router is offered a server's tools only when the line plausibly needs them, so a plain
+/// line ("search the web for …") carries a handful of tools, not every one (`text`: the raw
+/// line, for paths and links; `norm`: `routing::normalize`d). Gmail / WhatsApp / Spotify / Maps /
+/// Instagram keep `router_keyword_ok`; an unknown server (and the mode switch) is always offered.
+fn router_line_needs(server: &str, text: &str, norm: &str) -> bool {
+    static WEATHER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static TIME: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static SEARCH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static KG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FETCH: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FILES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static GIT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static MEDIA: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = |cell: &'static std::sync::OnceLock<regex::Regex>, pat: &str| cell.get_or_init(|| regex::Regex::new(pat).unwrap());
+    match server {
+        "weather" => re(&WEATHER, r"\b(weather|forecast|temperature|rain(ing|y)?|snow(ing|y)?|wind(y)?|sunny|degrees|umbrella|humid(ity)?|outside)\b").is_match(norm),
+        "time" => re(&TIME, r"\b(time|date|day|today|tonight|tomorrow|clock|weekday|month|year)\b").is_match(norm),
+        "brave-search" => re(&SEARCH, r"\b(search|look ?up|google|news|web|online|internet|who is|whos|find out)\b").is_match(norm),
+        "knowledge-graph" => re(&KG, r"\b(knowledge|remember|recall|notes?|graph|who is|whos|people|projects?|facts?)\b").is_match(norm),
+        "fetch" => re(&FETCH, r"(?i)(https?://|www\.|\burl\b|\bwebsite\b|\bweb ?page\b|\bfetch\b|\blink\b)").is_match(text),
+        "filesystem" => re(&FILES, r"(?i)(\bfiles?\b|\bfolders?\b|\breadme\b|\bdirector(y|ies)\b|\bpath\b|\b[a-z]:[\\/]|\.(md|txt|rs|ts|tsx|py|toml)\b)").is_match(text),
+        "git" => re(&GIT, r"\b(git|repo|repository|commits?|branch(es)?|diff)\b").is_match(norm),
+        "shotcut" | "media-forge" => re(&MEDIA, r"\b(video|videos|edit|editing|render|clips?|reels?|captions?|thumbnails?|photos?|timeline|shotcut|media|footage|transcribe|scenes?|self tape)\b").is_match(norm),
+        other => router_keyword_ok(other, norm),
     }
 }
 
@@ -1010,10 +1135,11 @@ async fn run_tool_router(
     }
 }
 
-/// The tools the JSON router is offered for `text`: Gmail / WhatsApp / Spotify
-/// only when the request names their subject (`router_keyword_ok`); Spotify's
-/// playback controls also for a line that is itself a media command ("skip", "turn it up").
-/// Spotify library edits (playlists, Liked Songs) only when the line names the library (D25).
+/// The tools the JSON router is offered for `text`: only the servers the line plausibly needs
+/// (`router_line_needs`; Gmail / WhatsApp / Spotify / Maps / Instagram when the request names
+/// their subject); Spotify's playback controls also for a line that is itself a media command
+/// ("skip", "turn it up"). Spotify library edits (playlists, Liked Songs) only when the line
+/// names the library (D25).
 fn router_offer<'a>(tools: &'a [super::mcp::ToolInfo], text: &str, os_name: &str) -> Vec<&'a super::mcp::ToolInfo> {
     static LIBRARY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let norm = super::routing::normalize(text);
@@ -1025,7 +1151,7 @@ fn router_offer<'a>(tools: &'a [super::mcp::ToolInfo], text: &str, os_name: &str
             if t.server == "spotify" && super::spotify_intent::is_library_write(&t.name) {
                 return library;
             }
-            router_keyword_ok(&t.server, &norm) || (command && super::mcp::is_spotify_actuator(&t.name))
+            router_line_needs(&t.server, text, &norm) || (command && super::mcp::is_spotify_actuator(&t.name))
         })
         .collect()
 }
@@ -1084,8 +1210,9 @@ fn spotify_ready(cfg: &OsConfig, connected: impl FnOnce() -> bool) -> bool {
 }
 
 /// Fetch live tool data for `agent`'s upcoming turn (its own granted tools;
-/// Tony's own turns pass `"general"`, which `mcp::tool_set` always gives
-/// every enabled server). Tries a deterministic plan first (instant, no LLM
+/// Tony's own turns pass `"general"` and, like every agent, get only the enabled
+/// servers granted to him that the switchboard leaves live this turn,
+/// `mcp::servers_for`). Tries a deterministic plan first (instant, no LLM
 /// call), then — if the text still plausibly wants a tool — the JSON router,
 /// restricted to that agent's tools. Mutating tools are never offered
 /// (`mcp::offered_to_router`, enforced inside `mcp::tool_set`; Tony's Spotify media controls are the one allowlisted exception). The whole
@@ -1120,11 +1247,16 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // backend / not connected): say why instead of letting the model invent a refusal.
     type Planner = fn(&str, &[super::mcp::ToolInfo], &str) -> Option<(String, Value)>;
     let planners: [(&str, Planner); 3] = [("gmail", |t, tools, _| gmail_plan(t, tools)), ("spotify", spotify_plan), ("whatsapp", |t, tools, _| whatsapp_plan(t, tools))];
+    let mode = os.modes.effective();
     for (id, plan) in planners {
-        let granted = cfg.mcps.iter().any(|m| m.id == id && (agent == "general" || m.grants(agent)));
-        if granted && !tools.iter().any(|t| t.server == id) && plan(text, &planner_tools(id), &cfg.os_name).is_some() {
-            // An enabled stdio WhatsApp server that listed nothing is a bridge that isn't running.
-            if let Some(reason) = super::mcp::unavailable_reason(state, cfg, id).or_else(|| (id == "whatsapp").then(|| WHATSAPP_DOWN.to_string())) {
+        // Tony respects his grants like every agent (`McpServer::grants("general")`).
+        let server = cfg.mcps.iter().find(|m| m.id == id && m.grants(agent));
+        if let Some(server) = server.filter(|_| !tools.iter().any(|t| t.server == id) && plan(text, &planner_tools(id), &cfg.os_name).is_some()) {
+            // Frozen by the switchboard first ("Gmail is frozen in Builder mode"), then switched
+            // off / no backend; an enabled stdio WhatsApp server that listed nothing is a bridge
+            // that isn't running.
+            let frozen = super::modes::tool_frozen_reason(&mode, &cfg.switchboard, id, &server.name);
+            if let Some(reason) = frozen.or_else(|| super::mcp::unavailable_reason(state, cfg, id)).or_else(|| (id == "whatsapp").then(|| WHATSAPP_DOWN.to_string())) {
                 out.steps.push(step("tool", "os", id, format!("failed: {reason}"), false, 0));
                 out.failure = Some((id.into(), reason));
                 return out;
@@ -1192,6 +1324,11 @@ pub struct OsTurnRequest {
     /// the Tier-2 hint rides on his system message. Missing (phone / old webview) = false.
     #[serde(default)]
     pub(crate) no_delegate: bool,
+    /// The phone's turn (TS `routeFor(…, { phone })`): a topic (Domain) hit stays with Tony, so
+    /// the safety net below doesn't re-promote a Default turn to a Domain agent the phone kept
+    /// with him. A Named address still routes. Missing (desktop / old phone) = false.
+    #[serde(default)]
+    pub(crate) stay_with_tony: bool,
     /// The Business Switcher's selection (a registry `businessId`). Operations-Manager and
     /// Finance turns are locked to exactly one business (`business_lock`); missing = resolve
     /// from the text, and ask if that isn't exactly one.
@@ -1380,6 +1517,18 @@ mod turn_cancel_tests {
 }
 
 pub async fn run_os_turn(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>) -> Result<OsTurnResult, String> {
+    run_os_turn_streaming(state, os, bridge, req, app, None).await
+}
+
+/// D2: where an inbox (phone) turn's answer streams while Tony writes it. Called with each new
+/// think-filtered piece of Tony's OWN final answer (his direct reply or his synthesis of a
+/// delegated one), in order; never with a sub-agent's reply, a tool's verbatim answer or an
+/// overseer's. The desktop webview never sees these pieces (no `tony-token` events).
+pub(crate) type AnswerSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+/// `run_os_turn`, with Tony's final answer streamed into `sink` (an inbox turn, D2). `None` is
+/// exactly `run_os_turn`.
+pub(crate) async fn run_os_turn_streaming(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>, sink: Option<AnswerSink>) -> Result<OsTurnResult, String> {
     // Phase 3: a live Tony turn keeps idle memory compaction away (entry and exit).
     let _touch = super::compaction::Touch::start();
     let id = req.trace_id.clone().filter(|t| super::trace::valid_id(t)).unwrap_or_else(super::trace::new_id);
@@ -1389,7 +1538,7 @@ pub async fn run_os_turn(state: &DispatchState, os: &OsState, bridge: &BridgeSta
     // Agent Conversation of a delegated turn: `turn:<stream id|trace id>`.
     let conv = super::transcript::turn_conv(req.stream_id.as_deref().filter(|s| !s.is_empty()).unwrap_or(&id));
     let (explicit, request) = (req.explicit, req.text.trim().to_string());
-    let mut r = super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app, &conv)).await?;
+    let mut r = super::trace::scoped(id, os_turn_traced(state, os, bridge, req, app, &conv, sink.as_ref())).await?;
     super::arbiter::get().record_tony_turn(t_turn.elapsed().as_millis() as u64);
     // Steps are shown in chat, persisted in localStorage and mirrored to the phone: scrub them.
     let known = super::devqueue::known_secrets(state, os);
@@ -1451,7 +1600,7 @@ pub(crate) fn scroll_summary_block(seed: Option<&str>, max: usize) -> String {
     }
 }
 
-async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>, conv: &str) -> Result<OsTurnResult, String> {
+async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeState, req: OsTurnRequest, app: Option<&tauri::AppHandle>, conv: &str, sink: Option<&AnswerSink>) -> Result<OsTurnResult, String> {
     use super::trace::{emit, emit_with, Hop};
     let (state, os, bridge) = (state, os, bridge);
     let started = Instant::now();
@@ -1475,16 +1624,21 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // Learning mode: Tony only. No routing, comms recall, live tools, Spotify or delegation run;
     // the only side effect is a pathway write (below).
     let learning = super::modes::is_learning(&mode);
-    let TurnRoute { role, kind: route_kind, reason: route_reason } = route_for_turn(
-        &TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate, solo, learning },
-        &cfg,
-    );
+    let route_input = TurnRouteInput { role: &req.role, explicit: req.explicit, text: &text, route_kind: req.route_kind.as_deref(), route_reason: req.route_reason.as_deref(), no_delegate: req.no_delegate, solo, learning, stay_with_tony: req.stay_with_tony };
+    let TurnRoute { role, kind: route_kind, reason: route_reason } = route_for_turn(&route_input, &cfg);
     // A registered business named in an otherwise unrouted line ("how's Corner Bakery doing?")
     // is the Operations Manager's: registry names are data, not routing triggers.
-    let (role, route_kind, route_reason) = match business_route(&role, &route_kind, &text, learning || req.no_delegate || solo) {
+    let (role, route_kind, route_reason) = match business_route(&role, &route_kind, &text, business_route_held(&route_input)) {
         Some(reason) => ("bizops".to_string(), "Domain".to_string(), reason),
         None => (role, route_kind, route_reason),
     };
+    // The switchboard, after the business route (a business name can't pull a frozen Biz Ops in).
+    let routed = TurnRoute { role, kind: route_kind, reason: route_reason };
+    let routed_role = routed.role.clone();
+    let held = switchboard_hold(routed, req.explicit, &text, &cfg, &mode);
+    // A master-switchboard freeze says "thaw it there", a mode freeze "switch modes".
+    let frozen_hint = switchboard_note(&routed_role, &held, &cfg.switchboard);
+    let TurnRoute { role, kind: route_kind, reason: route_reason } = held;
     // Route kind + target only (the reason can quote the request).
     emit(Hop::Router, &router_hop_label(&route_kind, &role, &cfg.os_name), true, started.elapsed().as_millis(), None);
 
@@ -1624,7 +1778,11 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     if role != "general" && comms_thread.is_none() {
         if let Some(slug) = slug {
             let label = role_label(&role, &cfg.os_name);
-            let skills = super::mcp::skill_digest(&cfg, &role);
+            // A skill's body rides along only when this task matches it (within a budget).
+            let skills = super::mcp::relevant_skills(&cfg, &role, &text, super::mcp::SKILL_BUDGET);
+            if !skills.names.is_empty() {
+                emit(Hop::Rules, &format!("skill {} → {label}", skills.names.join(", ")), true, 0, None);
+            }
             // Designer / Prompter / Director also get the user's identity file (taste, brand, goals).
             let identity = if matches!(role.as_str(), "designer" | "prompter" | "director") {
                 let r = os_core::read_identity(&cfg);
@@ -1634,19 +1792,18 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                 String::new()
             };
             let base = if req.explicit {
-                if skills.is_empty() { text.clone() } else { format!("{text}\n\n(Your attached skills: {})", skills.replace('\n', "; ")) }
+                text.clone()
             } else {
-                format!(
-                    "[{} → {label} agent] The user asked {} (their OS) to get this from you. Answer from your workspace data and documents; be specific and concise.{}\n\nRequest: {text}",
-                    cfg.os_name,
-                    cfg.os_name,
-                    if skills.is_empty() { String::new() } else { format!("\nYour attached skills:\n{skills}") }
-                )
+                format!("[{} → {label} agent] The user asked {} (their OS) to get this from you. Answer from your workspace data and documents; be specific and concise.\n\nRequest: {text}", cfg.os_name, cfg.os_name)
             };
-            let task = format!("{base}{identity}{business_block}{tool_note}");
-            // The chat shows the request as sent, with the identity file and raw live tool data
-            // named rather than pasted (they stay in the prompt; never in a transcript).
-            steps.push(step("delegate", "os", &role, delegate_shown(&base, !identity.is_empty(), tool_note.chars().count()), true, 0));
+            let task = format!("{base}{identity}{}{business_block}{tool_note}", skills.block);
+            // The chat shows the request as sent, with the identity file, skill text and raw live
+            // tool data named rather than pasted (they stay in the prompt; never in a transcript).
+            let mut shown = delegate_shown(&base, !identity.is_empty(), tool_note.chars().count());
+            if !skills.names.is_empty() {
+                shown.push_str(&format!("\n\n[+ skill attached: {}]", skills.names.join(", ")));
+            }
+            steps.push(step("delegate", "os", &role, shown, true, 0));
             emitted = emit_steps(app, req.stream_id.as_deref(), &steps, emitted, &known);
             let t0 = Instant::now();
             // Talking directly to this agent's tab (no Tony synthesis to follow):
@@ -1777,15 +1934,20 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // Phase 3b: Tony's dispatch packet (spoken_reply + tasks), on his own turns outside Learning
     // and the novelty overlay. Off in os.json (`roster.tonyPackets`) → plain prose as before.
     let packets = role == "general" && !learning && !mode.is_novelty && cfg.roster.tony_packets;
-    let contract = if packets { super::tony_dispatch::CONTRACT } else { "" };
-    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &tier2, &format!("{mode_block}{learned_block}{tony_recall}{contract}")), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
+    let contract = tony_live_contract(packets, &mode, &cfg.switchboard);
+    // The MODE block is the LAST block, right before `/no_think`: everything above it (persona,
+    // the full roster, style) is the same in every mode, so a switch keeps the cached prefix.
+    let tail = tony_turn_tail(&learned_block, &tony_recall, &contract, &mode_block);
+    let mut msgs = vec![ChatMessage::new("system", tony_system(tony_turn_system(&sys, &sys_tool_note, &format!("{tier2}{frozen_hint}"), &tail), tony_model(state).as_deref(), cfg.compute.deep_thinking))];
     super::arbiter::get().note_context(msgs.iter().map(|m| m.content.len()).sum::<usize>() + history_chars);
     msgs.extend(history);
     msgs.push(ChatMessage::new("user", user_msg));
 
     let t_model = Instant::now();
-    let answer = match (app, req.stream_id.as_deref()) {
-        (Some(app), Some(sid)) => super::dispatch::run_chat_streamed(state, os, msgs.clone(), Some(90), app, sid).await,
+    let answer = match (tony_stream(app.is_some(), req.stream_id.is_some(), sink.is_some()), app, req.stream_id.as_deref(), sink) {
+        // D2: an inbox turn — Tony's answer goes to the phone (via the gateway), not the webview.
+        (TonyStream::Sink, _, _, Some(sink)) => run_chat_streamed_into(state, os, msgs.clone(), Some(90), sink).await,
+        (TonyStream::Events, Some(app), Some(sid), _) => super::dispatch::run_chat_streamed(state, os, msgs.clone(), Some(90), app, sid).await,
         _ => run_chat(state, os, msgs.clone(), Priority::Interactive, None, Some(90)).await,
     };
     match &answer {
@@ -1799,7 +1961,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             if cfg.overseer.auto_escalate {
                 steps.push(step("error", "os", "user", format!("local chain failed: {e}"), false, 0));
                 let t0 = Instant::now();
-                let escalated = overseer_call(state, os, &cfg, &msgs).await;
+                // A user is waiting on this turn: the external engine gets 30 s, not 180 s.
+                let escalated = overseer_call(state, os, &cfg, &msgs, OverseerOrigin::Turn).await;
                 match &escalated {
                     Ok((_, engine, _)) => emit(Hop::Model, &format!("overseer · {engine}"), true, t0.elapsed().as_millis(), None),
                     Err(e) => emit_with(Hop::Model, "overseer", false, t0.elapsed().as_millis(), Some(e), None, &super::devqueue::known_secrets(state, os)),
@@ -1989,6 +2152,269 @@ pub(crate) fn scrub_steps(steps: &mut [OsStep], known: &[String]) {
     }
 }
 
+// ── D2: Tony's answer streamed into a sink (inbox turns) ────────────────────
+
+/// Where Tony's final model call streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TonyStream {
+    /// An inbox turn's `AnswerSink` (D2): the phone gets it through the gateway.
+    Sink,
+    /// `tony-token` events under the desktop turn's stream id (the webview's live bubble / voice).
+    Events,
+    /// One plain call (no streaming).
+    Off,
+}
+
+/// Pure. A sink wins (only an inbox turn has one, and no webview listens for it); otherwise the
+/// desktop's own streaming, exactly as before.
+pub(crate) fn tony_stream(app: bool, stream_id: bool, sink: bool) -> TonyStream {
+    if sink {
+        TonyStream::Sink
+    } else if app && stream_id {
+        TonyStream::Events
+    } else {
+        TonyStream::Off
+    }
+}
+
+/// One OpenAI-style SSE answer as it arrives, parsed the way `dispatch::run_chat_streamed`
+/// parses it: `data:` lines, `[DONE]` or a `finish_reason` (a complete answer), `usage`, and the
+/// content deltas through the think filter. Lines are split on raw bytes, so a character split
+/// across two network chunks is never mangled. Pure.
+#[derive(Default)]
+pub(crate) struct SseAnswer {
+    buf: Vec<u8>,
+    filter: super::dispatch::ThinkFilter,
+    /// The visible (think-filtered) answer so far.
+    pub(crate) content: String,
+    /// The model finished ([DONE] / a finish_reason); a stream that just stops is cut off.
+    pub(crate) completed: bool,
+    deltas: u32,
+    usage_tokens: Option<u64>,
+    first_at: Option<Instant>,
+    last_at: Option<Instant>,
+}
+
+impl SseAnswer {
+    /// Feed one network chunk; every new visible piece goes to `on_text`, in order.
+    pub(crate) fn push(&mut self, chunk: &[u8], on_text: &mut dyn FnMut(&str)) {
+        self.buf.extend_from_slice(chunk);
+        while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line);
+            let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else { continue };
+            if data == "[DONE]" {
+                self.completed = true;
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            if v["choices"][0]["finish_reason"].as_str().is_some_and(|r| !r.is_empty()) {
+                self.completed = true;
+            }
+            if let Some(u) = v["usage"]["completion_tokens"].as_u64() {
+                self.usage_tokens = Some(u);
+            }
+            if let Some(d) = v["choices"][0]["delta"]["content"].as_str().filter(|d| !d.is_empty()) {
+                self.deltas = self.deltas.saturating_add(1);
+                let now = Instant::now();
+                self.last_at = Some(now);
+                self.first_at.get_or_insert(now);
+                let shown = self.filter.feed(d);
+                if !shown.is_empty() {
+                    self.content.push_str(&shown);
+                    on_text(&shown);
+                }
+            }
+        }
+    }
+
+    /// End of stream: the think filter's held-back tail (never an unclosed think block).
+    pub(crate) fn finish(&mut self, on_text: &mut dyn FnMut(&str)) {
+        let tail = std::mem::take(&mut self.filter).finish();
+        if !tail.is_empty() {
+            self.content.push_str(&tail);
+            on_text(&tail);
+        }
+    }
+
+    fn tps(&self) -> Option<f64> {
+        let (f, l) = (self.first_at?, self.last_at?);
+        super::trace::tokens_per_sec(self.deltas, self.usage_tokens, l.duration_since(f).as_secs_f64() * 1000.0)
+    }
+}
+
+/// D2: Tony's answer with token streaming into `sink` instead of `tony-token` events, so an
+/// inbox turn reaches the phone as it is written and the desktop webview never sees it. The same
+/// provider choice, GPU slot, think filter, cut-off mark and fallbacks as
+/// `dispatch::run_chat_streamed` (keep the two in step): the first chain provider when it is
+/// local, else one plain `run_chat`, which streams nothing.
+pub(crate) async fn run_chat_streamed_into(state: &DispatchState, os: &OsState, messages: Vec<ChatMessage>, max_secs: Option<u64>, sink: &AnswerSink) -> Result<super::dispatch::DispatchResult, String> {
+    use super::dispatch::{stream_outcome, DispatchResult, Kind, CUT_OFF_MARK};
+    use futures_util::StreamExt;
+    let cfg = state.snapshot();
+    let osc = os.snapshot();
+    let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
+    let chars: usize = messages.iter().map(|m| m.content.len()).sum();
+    let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
+    let shaped = first.map(|p| os_core::shape_chain(&osc, vec![p], vram, chars, false).0).unwrap_or_default();
+    let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && p.id != "anythingllm" && !os_core::is_remote(p)) else {
+        return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
+    };
+    let started = Instant::now();
+    let slot = os.slot.acquire(&format!("{} · Tony (streaming)", p.id), true, osc.scheduler.tony_priority_pct).await;
+    let mut body = json!({ "model": p.model, "messages": messages, "stream": true });
+    if !osc.compute.deep_thinking {
+        body["reasoning_effort"] = json!("none");
+    }
+    let mut rb = state.http.post(format!("{}/chat/completions", p.base_url.trim_end_matches('/'))).timeout(Duration::from_secs(max_secs.unwrap_or(cfg.policy.local_timeout_secs))).json(&body);
+    if let Some(k) = state.key_for(&p)? {
+        rb = rb.bearer_auth(k);
+    }
+    let res = match rb.send().await.and_then(|r| r.error_for_status()) {
+        Ok(r) => r,
+        Err(_) => {
+            drop(slot);
+            return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
+        }
+    };
+    let mut stream = res.bytes_stream();
+    let mut sse = SseAnswer::default();
+    let mut on_text = |t: &str| sink(t);
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else { break };
+        sse.push(&chunk, &mut on_text);
+    }
+    sse.finish(&mut on_text);
+    if sse.content.trim().is_empty() {
+        drop(slot);
+        return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
+    }
+    let (content, reason) = stream_outcome(sse.content.trim(), sse.completed);
+    if !sse.completed {
+        sink(CUT_OFF_MARK);
+    }
+    Ok(DispatchResult { provider_id: p.id.clone(), content, fell_back: false, reason, latency_ms: started.elapsed().as_millis(), redacted: false, tps: sse.tps() })
+}
+
+#[cfg(test)]
+mod answer_sink_tests {
+    use super::super::allm::mock::{start, Resp};
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// D2: only an inbox turn (it has a sink) streams there; desktop turns stream exactly as
+    /// before (`tony-token` events with a stream id, else one plain call).
+    #[test]
+    fn only_an_inbox_turn_streams_into_a_sink() {
+        assert_eq!(tony_stream(true, false, true), TonyStream::Sink, "an inbox turn");
+        assert_eq!(tony_stream(true, true, true), TonyStream::Sink, "even if the phone sent a stream id");
+        assert_eq!(tony_stream(false, false, true), TonyStream::Sink);
+        assert_eq!(tony_stream(true, true, false), TonyStream::Events, "a desktop turn");
+        assert_eq!(tony_stream(true, false, false), TonyStream::Off);
+        assert_eq!(tony_stream(false, true, false), TonyStream::Off);
+    }
+
+    fn sse(deltas: &[&str], finish: bool) -> String {
+        let mut s: String = deltas.iter().map(|d| format!("data: {}\n\n", json!({ "choices": [{ "delta": { "content": d } }] }))).collect();
+        if finish {
+            s.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":9}}\n\ndata: [DONE]\n\n");
+        }
+        s
+    }
+
+    /// The SSE parse hands out the think-filtered answer in order, whatever the network chunking
+    /// (even one byte at a time, splitting multi-byte characters).
+    #[test]
+    fn sse_answers_stream_think_filtered_and_survive_any_chunking() {
+        let body = sse(&["<thi", "nk>plan the reply</th", "ink>Hi Nic", ", café ", "😀. Done."], true);
+        for size in [1, 3, 7, body.len()] {
+            let mut a = SseAnswer::default();
+            let mut got = Vec::<String>::new();
+            for chunk in body.as_bytes().chunks(size) {
+                a.push(chunk, &mut |t| got.push(t.to_string()));
+            }
+            a.finish(&mut |t| got.push(t.to_string()));
+            assert_eq!(got.concat(), "Hi Nic, café 😀. Done.", "chunk size {size}");
+            assert_eq!(a.content, got.concat());
+            assert!(a.completed, "finish_reason / [DONE]");
+            assert!(!got.iter().any(|g| g.contains("plan") || g.contains('<')), "{got:?}");
+        }
+        let mut a = SseAnswer::default();
+        a.push(sse(&["Half an ans"], false).as_bytes(), &mut |_| {});
+        assert!(!a.completed, "a stream that just stops is not complete");
+    }
+
+    fn sink_into(got: &Arc<Mutex<Vec<String>>>) -> AnswerSink {
+        let g = got.clone();
+        Arc::new(move |t: &str| g.lock().unwrap().push(t.to_string()))
+    }
+
+    fn local_llm(base: &str) -> (DispatchState, OsState) {
+        let state = DispatchState::default();
+        state
+            .update(|c| {
+                c.providers.iter_mut().find(|p| p.id == "lmstudio").unwrap().base_url = format!("{base}/v1");
+                Ok(())
+            })
+            .unwrap();
+        let os = OsState::default();
+        os.update(|c| {
+            c.compute.mode = os_core::ComputeMode::Local;
+            Ok(())
+        })
+        .unwrap();
+        (state, os)
+    }
+
+    /// D2: an inbox turn's answer streams into its sink as the model writes it (think-filtered),
+    /// and the returned answer is the same text.
+    #[test]
+    fn tonys_answer_streams_into_the_sink() {
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r| {
+                if r.path.ends_with("/chat/completions") {
+                    Resp::sse(vec![
+                        json!({ "choices": [{ "delta": { "content": "<think>hmm</think>Hi Nic. " } }] }),
+                        json!({ "choices": [{ "delta": { "content": "The build " } }] }),
+                        json!({ "choices": [{ "delta": { "content": "is green." }, "finish_reason": "stop" }] }),
+                    ])
+                } else {
+                    Resp::status(404, json!({}))
+                }
+            })
+            .await;
+            let (state, os) = local_llm(&srv.base);
+            let got: Arc<Mutex<Vec<String>>> = Arc::default();
+            let r = run_chat_streamed_into(&state, &os, vec![ChatMessage::new("user", "status?")], Some(10), &sink_into(&got)).await.unwrap();
+            assert_eq!(r.content, "Hi Nic. The build is green.");
+            assert_eq!(r.provider_id, "lmstudio");
+            let got = got.lock().unwrap().clone();
+            assert_eq!(got, vec!["Hi Nic. ", "The build ", "is green."], "piece by piece, as generated");
+            let req = srv.reqs().into_iter().find(|q| q.path.ends_with("/chat/completions")).unwrap();
+            assert_eq!(req.body["stream"], json!(true));
+        });
+    }
+
+    /// D2: a stream the model never finished is marked cut off in the sink too, so the phone's
+    /// partial matches the answer it then gets.
+    #[test]
+    fn a_cut_off_answer_is_marked_in_the_sink() {
+        tauri::async_runtime::block_on(async {
+            let srv = start(|_| {
+                let mut r = Resp::sse(vec![json!({ "choices": [{ "delta": { "content": "The landing page has three" } }] })]);
+                r.abort = true;
+                r
+            })
+            .await;
+            let (state, os) = local_llm(&srv.base);
+            let got: Arc<Mutex<Vec<String>>> = Arc::default();
+            let r = run_chat_streamed_into(&state, &os, vec![ChatMessage::new("user", "the page?")], Some(10), &sink_into(&got)).await.unwrap();
+            assert!(r.content.ends_with(super::super::dispatch::CUT_OFF_MARK), "{}", r.content);
+            assert_eq!(got.lock().unwrap().concat(), r.content);
+        });
+    }
+}
+
 /// Roles whose turns never reach `training_logs/` as text: the folder is read by memory harvest
 /// (fine-tune pairs) and uploaded by Drive sync. Finance phrases route to `ops` until a Finance
 /// agent exists.
@@ -2130,12 +2556,32 @@ and give the best concrete answer or next step. Be direct and brief. Values like
     let mut msgs = vec![ChatMessage::new("system", sys)];
     msgs.extend(req.transcript.into_iter().rev().take(12).collect::<Vec<_>>().into_iter().rev());
     msgs.push(ChatMessage::new("user", req.question));
-    let (answer, engine, redacted) = overseer_call(&state, &os, &cfg, &msgs).await?;
+    let (answer, engine, redacted) = overseer_call(&state, &os, &cfg, &msgs, OverseerOrigin::Explicit).await?;
     bridge.log(json!({ "type": "overseer", "engine": engine, "redacted": redacted, "latencyMs": started.elapsed().as_millis() as u64 }));
     Ok(OverseerResult { answer, engine, latency_ms: started.elapsed().as_millis(), redacted })
 }
 
-async fn overseer_call(state: &DispatchState, os: &OsState, cfg: &OsConfig, msgs: &[ChatMessage]) -> Result<(String, String, bool), String> {
+/// Who an overseer call is for, which sets the external engine's time budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverseerOrigin {
+    /// Auto-escalation inside a live turn (`run_os_turn`: desktop chat and voice, a phone inbox
+    /// turn). Someone is waiting, and the local chain has already failed once.
+    Turn,
+    /// `overseer_ask`: "Ask the Overseer", the manual-mode card review, the Settings check. The
+    /// user asked for the slow reviewer, so it keeps the long budget.
+    Explicit,
+}
+
+/// Seconds an external overseer engine (Claude / Gemini, CLI or API) gets. Pure. A live turn
+/// caps it at 30 s instead of making the user wait up to three minutes on a cold CLI.
+pub(crate) fn overseer_external_secs(origin: OverseerOrigin) -> u64 {
+    match origin {
+        OverseerOrigin::Turn => 30,
+        OverseerOrigin::Explicit => 180,
+    }
+}
+
+async fn overseer_call(state: &DispatchState, os: &OsState, cfg: &OsConfig, msgs: &[ChatMessage], origin: OverseerOrigin) -> Result<(String, String, bool), String> {
     match cfg.overseer.engine.as_str() {
         "droplet" => {
             let r = run_chat(state, os, msgs.to_vec(), Priority::Interactive, Some("droplet".into()), Some(120)).await?;
@@ -2146,9 +2592,24 @@ async fn overseer_call(state: &DispatchState, os: &OsState, cfg: &OsConfig, msgs
             Ok((r.content, r.provider_id, r.redacted))
         }
         engine => {
-            let (a, red) = external_chat(state, os, engine, msgs, 180).await?;
+            let (a, red) = external_chat(state, os, engine, msgs, overseer_external_secs(origin)).await?;
             Ok((a, engine.to_string(), red))
         }
+    }
+}
+
+#[cfg(test)]
+mod overseer_budget_tests {
+    use super::*;
+
+    #[test]
+    fn a_live_turn_caps_the_external_overseer_at_30_s() {
+        assert_eq!(overseer_external_secs(OverseerOrigin::Turn), 30);
+    }
+
+    #[test]
+    fn an_explicit_overseer_ask_keeps_the_long_budget() {
+        assert_eq!(overseer_external_secs(OverseerOrigin::Explicit), 180);
     }
 }
 
@@ -2461,7 +2922,9 @@ mod tests {
         assert!(wants_tools("read C:\\ai-hub\\README.md"));
         assert!(!wants_tools("tell me a joke"));
         // Part 2's widened gaps: the exact refusal-causing phrases from the MCP map.
+        // Whisper's "what's up" next to an app cue is WhatsApp (via routing::normalize).
         assert!(wants_tools("check my what's up"));
+        assert!(wants_tools("check my whatsapp"));
         assert!(wants_tools("last message in my WhatsApp group"));
         assert!(wants_tools("any texts from Sam?"));
         assert!(wants_tools("what's in my inbox"));
@@ -2469,6 +2932,19 @@ mod tests {
         assert!(!wants_tools("integrate this into Cloud Code"));
         assert!(!wants_tools("open the latest status page"));
         assert!(!wants_tools("find me a good name for the band"));
+    }
+
+    /// Regression: the raw `what'?s ?up` alternative sent every greeting through
+    /// run_tool_router (an extra LLM routing call, up to 15 s) before Tony answered.
+    #[test]
+    fn a_whats_up_greeting_never_wakes_the_tool_router() {
+        for line in ["Hey Tony, what's up?", "what's up", "whats up", "what's up tony", "hey what's up, any updates?", "so I'm on my phone now hey tony what's up"] {
+            assert!(!wants_tools(line), "a greeting is not a tool request: {line}");
+        }
+        // The app itself, spelled or misheard next to an app cue, still reaches the router.
+        for line in ["check my whatsapp", "check my WhatsApp", "check my what's up", "open whats up", "any what's up messages", "check my whats app"] {
+            assert!(wants_tools(line), "WhatsApp request: {line}");
+        }
     }
 
     fn gmail_tools() -> Vec<super::super::mcp::ToolInfo> {
@@ -2679,7 +3155,7 @@ mod tests {
     #[test]
     fn route_for_turn_never_routes_to_tony() {
         let cfg = OsConfig::default();
-        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false, learning: false }, &cfg);
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false, learning: false, stay_with_tony: false }, &cfg);
         // Self address: stays general, kind Self.
         for text in ["thanks tony", "tony what do you think", "system status", "ask the dispatcher to check the build"] {
             let r = rt("general", false, text, None);
@@ -2708,7 +3184,7 @@ mod tests {
     #[test]
     fn route_for_turn_no_delegate_keeps_tony() {
         let cfg = OsConfig::default();
-        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate, solo: false, learning: false }, &cfg);
+        let rt = |text: &str, kind: Option<&str>, no_delegate: bool| route_for_turn(&TurnRouteInput { role: "general", explicit: false, text, route_kind: kind, route_reason: None, no_delegate, solo: false, learning: false, stay_with_tony: false }, &cfg);
         // Without the flag the phone's Default is re-promoted to the Designer (today's net)…
         let r = rt("redo the color palette and layout", Some("Default"), false);
         assert_eq!(r.role, "designer");
@@ -2720,7 +3196,7 @@ mod tests {
             }
         }
         // A stale caller role is still forced back to Tony.
-        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true, solo: false, learning: false }, &cfg);
+        let r = route_for_turn(&TurnRouteInput { role: "designer", explicit: false, text: "what if the layout used a sidebar", route_kind: Some("Domain"), route_reason: None, no_delegate: true, solo: false, learning: false, stay_with_tony: false }, &cfg);
         assert_eq!(r.role, "general");
         // A live-tool read stays Tony's Direct path.
         assert_eq!(rt("any whatsapp updates", None, true).kind, "Direct");
@@ -2732,6 +3208,72 @@ mod tests {
         assert!(!r.no_delegate);
         let r: OsTurnRequest = serde_json::from_value(serde_json::json!({ "text": "hi", "role": "general", "noDelegate": true })).unwrap();
         assert!(r.no_delegate);
+    }
+
+    /// Integration review (C): the phone's `stayWithTony` rides on the turn request.
+    #[test]
+    fn os_turn_request_stay_with_tony_is_camel_case_and_defaults_false() {
+        let r: OsTurnRequest = serde_json::from_value(serde_json::json!({ "text": "hi", "role": "general" })).unwrap();
+        assert!(!r.stay_with_tony, "desktop / an older phone");
+        let r: OsTurnRequest = serde_json::from_value(serde_json::json!({ "text": "hi", "role": "general", "stayWithTony": true })).unwrap();
+        assert!(r.stay_with_tony);
+        let r: OsTurnRequest = serde_json::from_value(serde_json::json!({ "text": "hi", "role": "general", "stayWithTony": false })).unwrap();
+        assert!(!r.stay_with_tony);
+    }
+
+    fn phone_turn<'a>(text: &'a str, route_kind: Option<&'a str>, stay_with_tony: bool) -> TurnRouteInput<'a> {
+        TurnRouteInput { role: "general", explicit: false, text, route_kind, route_reason: None, no_delegate: false, solo: false, learning: false, stay_with_tony }
+    }
+
+    /// Integration review (C): the phone kept a topic hit with Tony (TS `routeFor` 'phone'), but
+    /// the Rust safety net re-resolved its Default turn and handed it to the Domain agent anyway.
+    #[test]
+    fn route_for_turn_keeps_a_phone_topic_with_tony() {
+        let cfg = OsConfig::default();
+        for (text, agent) in [("redo the color palette and layout", "designer"), ("write code for a timer script", "coder")] {
+            // Desktop (no flag): the safety net still promotes the Default turn.
+            let r = route_for_turn(&phone_turn(text, Some("Default"), false), &cfg);
+            assert_eq!((r.role.as_str(), r.kind.as_str()), (agent, "Domain"), "{text}");
+            // Phone: the topic stays with Tony.
+            for kind in [None, Some("Default")] {
+                let r = route_for_turn(&phone_turn(text, kind, true), &cfg);
+                assert_eq!(r, TurnRoute { role: "general".into(), kind: "Self".into(), reason: STAY_WITH_TONY_REASON.into() }, "{text} {kind:?}");
+            }
+        }
+        assert_eq!(STAY_WITH_TONY_REASON, "on the phone a topic stays with Tony");
+        // A live-tool read is still Tony's Direct path.
+        assert_eq!(route_for_turn(&phone_turn("any whatsapp updates", None, true), &cfg).kind, "Direct");
+    }
+
+    /// Integration review (C): `stayWithTony` holds topics only; a Named address still routes.
+    #[test]
+    fn route_for_turn_phone_named_address_still_routes() {
+        let cfg = OsConfig::default();
+        for text in ["ask the coder to fix the build", "hey Coder, write a timer script", "ask tony to ask the coder to fix the build"] {
+            for stay in [false, true] {
+                let r = route_for_turn(&phone_turn(text, Some("Default"), stay), &cfg);
+                assert_eq!((r.role.as_str(), r.kind.as_str()), ("coder", "Named"), "{text} stay={stay}");
+            }
+        }
+        // A self address is still Tony's own turn, with or without the flag.
+        let r = route_for_turn(&phone_turn("thanks tony", None, true), &cfg);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Self"));
+        assert_ne!(r.reason, STAY_WITH_TONY_REASON);
+    }
+
+    /// Integration review (C): `stayWithTony` never holds the business route: a line naming a
+    /// registered business with no topic hit stays an unrouted general Default turn (the only
+    /// kind `business_route` looks at), and the hold covers Learning / Tier 2 / Solo only.
+    #[test]
+    fn a_phone_turn_still_reaches_the_business_route() {
+        let cfg = OsConfig::default();
+        let input = phone_turn("how's Corner Bakery doing?", Some("Default"), true);
+        let r = route_for_turn(&input, &cfg);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Default"));
+        assert!(!business_route_held(&input), "stayWithTony is not a business hold");
+        let held = |no_delegate: bool, solo: bool, learning: bool| business_route_held(&TurnRouteInput { no_delegate, solo, learning, ..phone_turn("x", None, true) });
+        assert!(held(true, false, false) && held(false, true, false) && held(false, false, true));
+        assert!(!held(false, false, false));
     }
 
     #[test]
@@ -2786,7 +3328,7 @@ mod tests {
     #[test]
     fn route_for_turn_learning_keeps_every_turn_with_tony() {
         let cfg = OsConfig::default();
-        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: true, learning: true }, &cfg);
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo: true, learning: true, stay_with_tony: false }, &cfg);
         // A high-confidence Named address, an explicit tab, a Booking line and a live-tool read
         // all stay Tony's own turn in Learning mode.
         for (role, explicit, text, kind) in [
@@ -2804,7 +3346,7 @@ mod tests {
     #[test]
     fn route_for_turn_solo_keeps_pipeline_promotions_with_tony() {
         let cfg = OsConfig::default();
-        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>, solo: bool| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo, learning: false }, &cfg);
+        let rt = |role: &str, explicit: bool, text: &str, kind: Option<&str>, solo: bool| route_for_turn(&TurnRouteInput { role, explicit, text, route_kind: kind, route_reason: None, no_delegate: false, solo, learning: false, stay_with_tony: false }, &cfg);
         // A Default line the safety net would hand to the Coder stays with Tony under Solo.
         assert_eq!(rt("general", false, "write code for a timer script", Some("Default"), false).role, "coder");
         let r = rt("general", false, "write code for a timer script", Some("Default"), true);
@@ -2843,17 +3385,187 @@ mod tests {
     }
 
     #[test]
-    fn tools_section_lists_spotify_controls_with_args() {
-        let s = tools_section(&spotify_tools(), true);
-        assert!(s.contains("spotify.play(query?, type?, playlist_name?, device_name?, shuffle?)"), "{s}");
-        assert!(s.contains("spotify.volume(percent)") && s.contains("spotify.pause") && s.contains("spotify.next(count?)") && s.contains("spotify.resume(device_name?)"), "{s}");
-        assert!(s.contains("spotify.add_to_playlist(playlist_name, track_query?, create?)") && s.contains("spotify.transfer_device(device_name)"), "{s}");
-        // Reads aren't listed as controls; no IDs anywhere.
-        assert!(!s.contains("spotify.now_playing(") && !s.contains("uri") && !s.contains("_id"), "{s}");
-        assert!(s.contains("SPOTIFY IS CONNECTED"));
-        // Sub-agents (reads only) get no control line.
+    fn tools_section_folds_spotify_into_one_compact_entry() {
+        let mut tools = super::super::mcp::builtin_tools("weather");
+        tools.extend(spotify_tools());
+        tools.extend(super::super::mcp::builtin_tools("time"));
+        let s = tools_section(&tools, true);
+        // ONE entry where the first Spotify tool stood, instead of 23 names (and no args list).
+        assert!(s.contains(&format!("TOOLS YOU HAVE THIS TURN: weather.current, {SPOTIFY_COMPACT}, time.now.")), "{s}");
+        assert_eq!(SPOTIFY_COMPACT, "spotify.* (play, pause, next, previous, volume, now_playing, search, queue)");
+        assert_eq!(s.matches("spotify.").count(), s.matches("spotify.*").count(), "no single Spotify tool name: {s}");
+        assert!(!s.contains("spotify.play(") && !s.contains("uri") && !s.contains("_id"), "{s}");
+        assert!(s.contains("SPOTIFY IS CONNECTED."));
+        // Far shorter than the 23 names it replaces.
+        let names: usize = spotify_tools().iter().map(|t| t.name.len() + 2).sum();
+        assert!(SPOTIFY_COMPACT.len() * 3 < names, "{} vs {names}", SPOTIFY_COMPACT.len());
+        // Sub-agents (reads only) keep the names and get no control line.
         let reads = super::super::mcp::router_filter(&super::super::mcp::builtin_tools("spotify"), false);
-        assert!(!tools_section(&reads, true).contains("SPOTIFY IS CONNECTED"));
+        let r = tools_section(&reads, true);
+        assert!(!r.contains("SPOTIFY IS CONNECTED") && r.contains("spotify.now_playing") && !r.contains(SPOTIFY_COMPACT), "{r}");
+        // The command grammar still plans every Spotify tool (it reads the full list, not the line).
+        assert_eq!(spotify_plan("skip this song", &spotify_tools(), "Tony").map(|p| p.0).as_deref(), Some("spotify.next"));
+    }
+
+    #[test]
+    fn the_mode_block_ends_tonys_message_and_the_prefix_is_the_same_in_every_mode() {
+        let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
+        let sys = system_prompt(&cfg, "", &[], false);
+        let mut seen = vec![];
+        for m in super::super::modes::presets() {
+            let f = super::super::modes::ModesFile { active_mode_id: m.id.clone(), ..Default::default() };
+            let e = super::super::modes::effective(&f, &Default::default());
+            let block = super::super::modes::mode_block(&e);
+            let tail = tony_turn_tail("\n\nLEARNED: x", "\n\nEARLIER: y", super::super::tony_dispatch::CONTRACT, &block);
+            let msg = tony_system(tony_turn_system(&sys, "", "", &tail), Some("qwen/qwen3.5-9b"), false);
+            // MODE is the last block, right before the /no_think line.
+            let body = msg.trim_end_matches(super::super::agent_prompts::NO_THINK).trim_end();
+            assert!(body.ends_with(block.trim_end()), "{}: {msg}", m.id);
+            if !block.is_empty() {
+                assert!(msg.find("OUTPUT CONTRACT").unwrap() < msg.find("\n\nMODE: ").unwrap(), "{}", m.id);
+                assert!(msg.find("EARLIER: y").unwrap() < msg.find("\n\nMODE: ").unwrap(), "{}", m.id);
+            }
+            // Everything before the tail is byte-identical across modes (cache-stable prefix),
+            // and the roster sentence keeps the FULL registry even when the mode froze agents.
+            assert!(msg.starts_with(&sys), "{}", m.id);
+            assert!(sys.contains("You can hand work to nine local sub-agents (Librarian, Coder, Booking Desk, Ops, Operations Manager, Finance, Prompter, Designer, Director)"));
+            seen.push(block);
+        }
+        assert!(seen.iter().any(|b| b.contains("ON DUTY: Coder, Designer, Prompter;")));
+        assert_eq!(tony_turn_tail("a", "b", "c", "d"), "abcd");
+    }
+
+    /// The `target_agent` list and the chain line of the contract inside a whole system message.
+    fn contract_parts(msg: &str) -> (Vec<String>, String) {
+        let (_, rest) = msg.split_once("\"target_agent\": \"").unwrap_or_else(|| panic!("no packet contract: {msg}"));
+        let targets = rest.split('"').next().unwrap().split('|').map(str::to_string).collect();
+        let chain = msg.lines().find_map(|l| l.strip_prefix("- Chain with depends_on: ")).unwrap_or_default().to_string();
+        (targets, chain)
+    }
+
+    /// Source pin for the two call sites in `os_turn_traced` (the helpers are tested on their
+    /// own; this guards the wiring, e.g. against a merge putting back the static CONTRACT or a
+    /// direct `frozen_note(.., false)`). Split on lines, not "\n}\n", so CRLF checkouts work.
+    #[test]
+    fn os_turn_uses_the_live_contract_and_the_switchboard_note() {
+        let src = include_str!("agents.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let start = lines.iter().position(|l| l.starts_with("async fn os_turn_traced(")).expect("os_turn_traced");
+        let end = start + lines[start..].iter().position(|l| *l == "}").expect("end of os_turn_traced");
+        let body = lines[start..=end].join("\n");
+        assert!(body.contains("tony_live_contract(packets, &mode, &cfg.switchboard)"), "Tony's live turn must send the live-only contract");
+        assert!(body.contains("switchboard_note(&routed_role, &held, &cfg.switchboard)"), "the held route must get the master/mode-aware note");
+        assert!(!body.contains("tony_dispatch::CONTRACT"), "the static contract names frozen agents");
+        assert!(!body.contains("frozen_note("), "go through switchboard_note, which knows a master freeze");
+    }
+
+    #[test]
+    fn tonys_live_turn_sends_the_live_only_contract() {
+        // The default master switchboard freezes the Librarian (and Booking) in every mode.
+        let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
+        assert!(super::super::modes::agent_globally_frozen(&cfg.switchboard, "librarian"));
+        let sys = system_prompt(&cfg, "", &[], false);
+        let eff = |id: &str| super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default());
+        // Tony's whole live system message for `mode` under `g`, built the way os_turn_traced builds it.
+        let whole = |mode: &str, g: &super::super::os_core::SwitchboardConfig| {
+            let e = eff(mode);
+            let contract = tony_live_contract(true, &e, g);
+            let tail = tony_turn_tail("", "", &contract, &super::super::modes::mode_block(&e));
+            tony_system(tony_turn_system(&sys, "", "", &tail), Some("qwen/qwen3.5-9b"), false)
+        };
+        // Builder: the Librarian is never a target_agent and never starts (or joins) the chain.
+        let b = whole("builder", &cfg.switchboard);
+        let (targets, chain) = contract_parts(&b);
+        assert!(!targets.iter().any(|t| t == "librarian"), "{targets:?}");
+        assert!(!chain.is_empty() && !chain.starts_with("librarian") && !chain.contains("librarian"), "{chain}");
+        assert!(chain.starts_with("prompter locks the spec"), "{chain}");
+        assert!(!b.contains("librarian stages context") && !b.contains("librarian finds and stages"), "{b}");
+        // Every target the message names is live this turn.
+        for t in &targets {
+            assert!(super::super::modes::agent_live(&eff("builder"), &cfg.switchboard, t), "{t}");
+        }
+        // No overlay (Brainstorm) under the default master switchboard: still no Librarian.
+        let (targets, chain) = contract_parts(&whole("brainstorm", &cfg.switchboard));
+        assert!(!targets.iter().any(|t| t == "librarian") && !chain.contains("librarian"), "{targets:?} / {chain}");
+        // Thawed on the master switchboard (Booking alone frozen): the Librarian leads again.
+        let thawed = super::super::os_core::SwitchboardConfig { frozen_agents: vec!["booking".into()], ..Default::default() };
+        let (targets, chain) = contract_parts(&whole("brainstorm", &thawed));
+        assert!(targets.iter().any(|t| t == "librarian") && chain.starts_with("librarian stages context"), "{targets:?} / {chain}");
+        // No packets (Learning, the novelty overlay, roster.tonyPackets off, a sub-agent turn): prose.
+        assert_eq!(tony_live_contract(false, &eff("builder"), &cfg.switchboard), "");
+    }
+
+    #[test]
+    fn switchboard_hold_keeps_frozen_agents_with_tony_but_lets_a_direct_ask_through() {
+        let cfg = OsConfig::default();
+        let eff = |id: &str| super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default());
+        let r = |role: &str, kind: &str| TurnRoute { role: role.into(), kind: kind.into(), reason: "caller".into() };
+        let hold = |route: TurnRoute, explicit: bool, text: &str, mode: &str| switchboard_hold(route, explicit, text, &cfg, &eff(mode));
+        // Automatic routing (topic, default, a business name) never reaches a frozen agent.
+        let h = hold(r("coder", "Domain"), false, "write code for a timer script", "operations");
+        assert_eq!((h.role.as_str(), h.kind.as_str(), h.reason.as_str()), ("general", "Self", "Coder is frozen in Operations mode"));
+        let h = hold(r("bizops", "Domain"), false, "how's Corner Bakery doing", "builder");
+        assert_eq!((h.role.as_str(), h.reason.as_str()), ("general", "Operations Manager is frozen in Builder mode"));
+        // A medium Named (a bare mention) is held too, like Solo.
+        assert_eq!(hold(r("coder", "Named"), false, "I think the coder should write a timer script", "operations").role, "general");
+        // A DIRECT ask goes through: its own tab, or a high-confidence Named address.
+        assert_eq!(hold(r("coder", "Tab"), true, "fix the build", "operations").role, "coder");
+        assert_eq!(hold(r("coder", "Named"), false, "tell the coder to write a timer script", "operations").role, "coder");
+        // On-duty agents and modes with no overlay are untouched; Tony's own turns too.
+        assert_eq!(hold(r("coder", "Domain"), false, "write code", "builder"), r("coder", "Domain"));
+        assert_eq!(hold(r("ops", "Domain"), false, "check the droplet", "brainstorm"), r("ops", "Domain"));
+        assert_eq!(hold(r("general", "Self"), false, "hi", "operations"), r("general", "Self"));
+        // Booking is frozen on the master switchboard: never runs, not even from its tab.
+        for (kind, explicit, text) in [("Tab", true, "book a table"), ("Named", false, "hey booking desk, check my availability"), ("Domain", false, "casting call availability")] {
+            let h = hold(r("booking", kind), explicit, text, "brainstorm");
+            assert_eq!((h.role.as_str(), h.kind.as_str(), h.reason.as_str()), ("general", "Self", "Booking Desk is frozen on the master switchboard"), "{kind}");
+        }
+        // Thawed on the master switchboard: Booking routes as before.
+        let mut thawed = cfg.clone();
+        thawed.switchboard.frozen_agents.clear();
+        assert_eq!(switchboard_hold(r("booking", "Domain"), false, "casting call availability", &thawed, &eff("brainstorm")).role, "booking");
+        // Tony's note names the reason, and never the format word.
+        let n = frozen_note("Coder is frozen in Operations mode", false);
+        assert!(n.contains("Coder is frozen in Operations mode") && n.contains("offer to switch modes") && !n.to_lowercase().contains("json"), "{n}");
+        // A master-switchboard freeze: switched off there, back once thawed there; no mode advice.
+        let m = frozen_note("Booking Desk is frozen on the master switchboard", true);
+        assert!(m.contains("Booking Desk is frozen on the master switchboard") && m.contains("switched off on the master switchboard") && m.contains("thawed there"), "{m}");
+        assert!(!m.contains("switch modes") && !m.contains("offer to switch") && !m.to_lowercase().contains("json"), "{m}");
+        // The turn's note follows where the freeze lives: Booking (master) vs the Coder (mode).
+        let note = |routed: &str, explicit: bool, text: &str, mode: &str| switchboard_note(routed, &hold(r(routed, "Domain"), explicit, text, mode), &cfg.switchboard);
+        let b = note("booking", false, "casting call availability", "brainstorm");
+        assert!(b.contains("switched off on the master switchboard") && !b.contains("switch modes"), "{b}");
+        let c = note("coder", false, "write code for a timer script", "operations");
+        assert!(c.contains("Coder is frozen in Operations mode") && c.contains("offer to switch modes") && !c.contains("master switchboard"), "{c}");
+        // The Librarian, frozen on the master switchboard AND off duty in Builder: the master wins.
+        let l = note("librarian", false, "find the auth docs", "builder");
+        assert!(l.contains("Librarian is frozen on the master switchboard") && l.contains("thawed there") && !l.contains("switch modes"), "{l}");
+        // Not held (on duty, Tony's own turn, a direct ask through a mode freeze): no note.
+        assert_eq!(note("coder", false, "write code", "builder"), "");
+        assert_eq!(note("general", false, "hi", "operations"), "");
+        assert_eq!(note("coder", true, "fix the build", "operations"), "");
+    }
+
+    #[test]
+    fn the_router_is_offered_only_the_servers_a_line_needs() {
+        let mut tools = vec![];
+        for id in ["weather", "time", "fetch", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "maps"] {
+            tools.extend(super::super::mcp::router_filter(&super::super::mcp::builtin_tools(id), true));
+        }
+        tools.push(super::super::mcp::ToolInfo { name: "shotcut.probe_media".into(), description: "x".into(), server: "shotcut".into(), args: vec![] });
+        tools.push(super::super::mcp::ToolInfo { name: super::super::mcp::TONY_SET_MODE.into(), description: "x".into(), server: "tony".into(), args: vec!["mode".into()] });
+        let names = |line: &str| router_offer(&tools, line, "Tony").iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("search the web for the best pizza in town"), vec!["web.search", super::super::mcp::TONY_SET_MODE]);
+        assert_eq!(names("will it rain tomorrow in Lisbon"), vec!["weather.current", "time.now", super::super::mcp::TONY_SET_MODE]);
+        assert_eq!(names(r"read C:\ai-hub\README.md"), vec!["fs.list", "fs.read", super::super::mcp::TONY_SET_MODE]);
+        assert_eq!(names("fetch https://example.com/docs"), vec!["fetch.url", super::super::mcp::TONY_SET_MODE]);
+        assert_eq!(names("what's the git status of the repo"), vec!["git.status", super::super::mcp::TONY_SET_MODE]);
+        assert_eq!(names("what do you remember about the Corner Bakery project"), vec!["kg.search", super::super::mcp::TONY_SET_MODE]);
+        assert!(names("render the self tape clip").contains(&"shotcut.probe_media".to_string()));
+        assert!(!names("search the web for pizza").contains(&"shotcut.probe_media".to_string()));
+        // The keyword-gated servers keep their gates.
+        assert!(names("check my inbox").contains(&"gmail.recent".to_string()));
+        assert!(!names("search the web for pizza").iter().any(|n| n.starts_with("gmail.") || n.starts_with("maps.")));
     }
 
     #[test]
@@ -3227,6 +3939,105 @@ mod tests {
         assert!(time_plan("what time is it", &time_tool).is_some());
         assert!(time_plan("what time is it", &[]).is_none());
         assert!(time_plan("tell me a joke", &time_tool).is_none());
+    }
+}
+
+/// Read-only prompt-size probe for Tony (opt-in): his TOOLS section, the tool router's prompt on a
+/// plain line and the whole system message, built by the real prompt builders from the LIVE
+/// os.json (read, never written) plus the stdio servers' listings from `CC_MEASURE_TOOLS` (a JSON
+/// `{server: [{name, description, args}]}` captured without starting them).
+/// `CC_MEASURE_TOOLS=<file> cargo test --lib measure_live_prompt_sizes -- --ignored --nocapture`
+#[cfg(test)]
+mod measure {
+    use super::*;
+
+    /// The live os.json as the app would load it after this build: the one-time tool-owner
+    /// migration applied IN MEMORY only (nothing is written, no backup is made).
+    fn live_cfg() -> Option<OsConfig> {
+        let dir = std::env::var_os("APPDATA").map(std::path::PathBuf::from)?.join("os.agentic.commandcenter");
+        let text = std::fs::read_to_string(dir.join("os.json")).ok()?;
+        let mut cfg = serde_json::from_str::<OsConfig>(&text).ok()?;
+        if super::super::os_core::needs_tool_owner_migration(&text) {
+            let skills = std::path::PathBuf::from(&cfg.skills.dir);
+            super::super::os_core::migrate_tool_owners(&mut cfg, |n| skills.join(n).join("SKILL.md").exists());
+        }
+        Some(cfg)
+    }
+
+    fn eff(id: &str) -> super::super::modes::Effective {
+        let f = super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() };
+        super::super::modes::effective(&f, &Default::default())
+    }
+
+    fn listed(cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str, ext: &Value) -> Vec<super::super::mcp::ToolInfo> {
+        let mut out = vec![];
+        for s in super::super::mcp::servers_for(cfg, e, agent) {
+            let tools = if s.transport == "builtin" {
+                super::super::mcp::builtin_tools(&s.id)
+            } else {
+                ext[&s.id]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|t| super::super::mcp::ToolInfo {
+                        name: t["name"].as_str().unwrap_or("").into(),
+                        description: t["description"].as_str().unwrap_or("").chars().take(200).collect(),
+                        server: s.id.clone(),
+                        args: t["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect(),
+                    })
+                    .collect()
+            };
+            out.extend(super::super::mcp::visible_tools(&s, tools));
+        }
+        out
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_live_prompt_sizes() {
+        let Some(cfg) = live_cfg() else {
+            eprintln!("no live os.json");
+            return;
+        };
+        let ext: Value = std::env::var("CC_MEASURE_TOOLS").ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok()).unwrap_or(json!({}));
+        let plain = "search the web for the best pizza in town";
+        // Brainstorm: no overlay (grants only). Builder / Operations / Executive: grants + overlay.
+        for mode in ["brainstorm", "builder", "operations", "executive"] {
+            let e = eff(mode);
+            // The live-only contract, as Tony's live turn sends it in this mode.
+            let contract = tony_live_contract(cfg.roster.tony_packets, &e, &cfg.switchboard);
+            let set = super::super::mcp::assemble_tools(&cfg, "general", listed(&cfg, &e, "general", &ext));
+            let offered = router_offer(&set.offered, plain, &cfg.os_name);
+            let router = router_prompt(&offered, "", "");
+            let tools = tools_section(&set.offered, false);
+            let sys = system_prompt(&cfg, "", &set.offered, false);
+            let block = super::super::modes::mode_block(&e);
+            let whole = tony_turn_system(&sys, "", "", &tony_turn_tail("", "", &contract, &block));
+            println!(
+                "MEASURE mode={mode} all={} offered={} tools_section_chars={} router_plain_tools={} router_plain_chars={} system_prompt_chars={} system_message_chars={} mode_block_chars={}",
+                set.all.len(),
+                set.offered.len(),
+                tools.chars().count(),
+                offered.len(),
+                router.chars().count(),
+                sys.chars().count(),
+                whole.chars().count(),
+                block.chars().count()
+            );
+            println!("MEASURE mode={mode} offered: {}", set.offered.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "));
+            println!("MEASURE mode={mode} router_plain: {}", offered.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "));
+        }
+        // The worst router line for Tony: every gated subject named at once.
+        let e = eff("brainstorm");
+        let set = super::super::mcp::assemble_tools(&cfg, "general", listed(&cfg, &e, "general", &ext));
+        let worst = "search my email inbox, whatsapp messages, spotify playlists, maps route and instagram followers, the weather and the time, and remember the notes";
+        let offered = router_offer(&set.offered, worst, &cfg.os_name);
+        println!("MEASURE worst_router_tools={} worst_router_chars={}", offered.len(), router_prompt(&offered, "", "").chars().count());
+        for agent in ["designer", "director", "coder"] {
+            let set = super::super::mcp::assemble_tools(&cfg, agent, listed(&cfg, &e, agent, &ext));
+            let skills = super::super::mcp::relevant_skills(&cfg, agent, "redesign the landing page layout and polish the hero animation for the website", super::super::mcp::SKILL_BUDGET);
+            println!("MEASURE agent={agent} all={} offered={} skills={:?} skill_chars={}", set.all.len(), set.offered.len(), skills.names, skills.block.chars().count());
+        }
     }
 }
 

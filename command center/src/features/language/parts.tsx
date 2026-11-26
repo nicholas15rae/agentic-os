@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { BookmarkCheck, BookmarkPlus, Check, Copy, Loader2, Mic, Square, Volume2 } from "lucide-react";
 import { Select } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { expectedVoice, speak } from "./audio";
+import { pressHandlers } from "./press";
 import { LANGUAGES } from "./languages";
 import { useHub } from "./store";
 
@@ -126,7 +127,11 @@ export function RecordButton({
   tone?: "amber" | "teal";
   big?: boolean;
 }) {
-  const [downAt, setDownAt] = useState(0);
+  // Tap / hold handling (press.ts): refs, not state, so the click after a starting tap can't
+  // stop a recording whose mic is still opening. Latest props are read through a ref.
+  const live = useRef({ recording, busy, onStart, onStop });
+  live.current = { recording, busy, onStart, onStop };
+  const h = useRef(pressHandlers({ recording: () => live.current.recording, busy: () => live.current.busy, onStart: () => live.current.onStart(), onStop: () => live.current.onStop() })).current;
   // Solid dark backing under the tint: these sit on the wallpaper and must read in full sun.
   const ring =
     tone === "amber"
@@ -138,22 +143,10 @@ export function RecordButton({
       aria-pressed={recording}
       aria-label={recording ? `Stop — ${label}` : label}
       disabled={busy && !recording}
-      onPointerDown={() => {
-        if (recording || busy) return;
-        setDownAt(performance.now());
-        onStart();
-      }}
-      onPointerUp={() => {
-        if (!recording) return;
-        // A quick tap leaves it recording (tap-to-record); a hold stops on release.
-        if (downAt && performance.now() - downAt > 400) onStop();
-        setDownAt(0);
-      }}
-      onClick={(e) => {
-        // Keyboard (Enter/Space) has no pointer events: plain toggle.
-        if (e.detail === 0) return recording ? onStop() : busy ? undefined : onStart();
-        if (recording && !downAt) onStop();
-      }}
+      onPointerDown={() => h.down()}
+      onPointerUp={() => h.up()}
+      onPointerCancel={() => h.cancel()}
+      onClick={(e) => h.click(e.detail)}
       className={`relative flex w-full select-none items-center justify-center gap-3 rounded-[20px] border px-4 font-semibold backdrop-blur-md transition-colors touch-none ${big ? "min-h-24 text-lg" : "min-h-16 text-[15px]"} ${
         recording ? "border-alert/70 bg-[linear-gradient(rgba(255,90,95,0.25),rgba(255,90,95,0.25)),rgba(11,13,17,0.8)] text-ink" : ring
       } disabled:opacity-50`}

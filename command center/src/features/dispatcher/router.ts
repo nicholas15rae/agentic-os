@@ -45,15 +45,27 @@ export function isSelfRoleId(id: string, osName = ""): boolean {
 const VERBS_A = ["tell", "ask", "have", "get", "let", "send", "route", "hand", "pass"];
 const VERBS_B = ["check", "draft", "find", "look", "search", "tell", "send", "book", "schedule", "fetch", "get", "read", "email", "call", "write", "create", "cancel", "update", "confirm", "fix"];
 const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+/** Interjections a leading self address may open with ("hey tony, …", "ok jarvis …"). */
+const ADDRESS_LEADS = ["hey", "hi", "ok", "okay", "yo", "so"];
+/** After "ask / tell / have … <self name>", the words that keep it an address ("ask tony to …",
+ * "tell the dispatcher about …", "let tony know", "have jarvis check …", "tell tony I'm…", or the
+ * line's end). Any other word makes the name a noun modifier ("get the orchestrator react code
+ * working"): a mention, not an address. VERBS_B count too. */
+const ADDRESS_NEXT = ["to", "about", "for", "know", "please", "what", "whats", "how", "hows", "if", "whether", "when", "where", "who", "why", "which", "that", "i", "im", "ill", "we", "you", "my", "me", "it", "its", "the", "a", "an", "this", "and"];
+/** A trailing self name right after one of these is an object, not a vocative ("…availability for
+ * friday", "fix the bug in the orchestrator", "play something by tony"). */
+const NOT_VOCATIVE_BEFORE = ["the", "a", "an", "my", "our", "your", "his", "her", "their", "its", "this", "that", "next", "last", "every", "for", "to", "in", "into", "on", "of", "at", "by", "from", "with", "about", "until", "till", "before", "after", "since", "than", "like", "via", "and", "or"];
 
 /** The exact default trigger matrix (mirrors `default_routing_agents()` in os_core.rs). */
 export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   // `general` (Tony) has no name triggers: addressing him is `SELF_NAMES` → kind "Self".
   autoSwitch: true,
   agents: {
+    // No bare "whatsapp" / "messages": a WhatsApp read is Tony's own live tool (`directTool`), and
+    // "messages" alone pulled every chat-ish line (and Whisper's "what's up" greeting) to Booking.
     booking: {
       names: ["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-      domains: ["whatsapp", "messages", "last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
+      domains: ["last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
     },
     prompter: {
       names: ["prompter", "prompt builder", "spec writer", "architect prompt"],
@@ -91,10 +103,58 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   },
 };
 
+/** Whisper's "WhatsApp" → "what's up" is only the app when a word right before it names a place
+ * or a target ("on / my / check / open / from / via what's up") … No "in" / "the": "I'm in,
+ * what's up?" and "the what's up…" are as often a greeting. */
+const WHATSUP_APP_BEFORE = ["on", "my", "check", "open", "from", "via"];
+/** … except "come on / hang on / hold on, what's up" (a greeting, not "on WhatsApp") … */
+const WHATSUP_ON_IDIOM = ["come", "hang", "hold"];
+/** … or a messaging noun follows it ("what's up messages"). Mirrors routing.rs. */
+const WHATSUP_APP_AFTER = ["message", "messages", "msg", "msgs", "text", "texts", "chat", "chats", "group", "groups", "dm", "dms", "notification", "notifications"];
+
+/** "…what's up with / on / in / at / for / about X": a question about X, not the app. Mirrors routing.rs. */
+const WHATSUP_ABOUT = ["with", "on", "in", "at", "for", "about"];
+
+/** The word before "whats up" makes it the app: a before-cue, never "…what's up with X" (a
+ * question about X: "check what's up with the droplet", "check what's up on my calendar") and
+ * never "come / hang / hold on". A bare "check what's up" / "on whats up" is still the app. */
+function whatsupBeforeCue(toks: string[], i: number): boolean {
+  const before = toks[i - 1] ?? "";
+  if (!WHATSUP_APP_BEFORE.includes(before)) return false;
+  // … unless a messaging noun comes later ("check whats up for new messages").
+  const after = toks[i + 2];
+  const about = after === "with" || (after !== undefined && WHATSUP_ABOUT.includes(after) && toks[i + 3] !== undefined);
+  if (about && !toks.slice(i + 2).some((w) => WHATSUP_APP_AFTER.includes(w))) return false;
+  return !(before === "on" && WHATSUP_ON_IDIOM.includes(toks[i - 2] ?? ""));
+}
+
 /**
- * lowercase; strip punctuation except `&`; collapse whitespace; fix the
- * three Whisper mangles the spec calls out ("whats up/app", "what sapp" →
- * "whatsapp"); spell out number words 1..10.
+ * Whisper's WhatsApp mangles → "whatsapp", token by token: "whats app" / "what sapp" always;
+ * "whats up" only next to a WhatsApp cue (above) — "what's up", "hey tony what's up" and
+ * "what's up with the build" are greetings and stay as they are. Only the word right before
+ * "whats" counts ("…on my phone now hey tony what's up" is still a greeting).
+ */
+function fixWhatsappMangles(toks: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const [w, next] = [toks[i], toks[i + 1]];
+    const app =
+      (w === "whats" && next === "app") ||
+      (w === "what" && next === "sapp") ||
+      (w === "whats" && next === "up" && (whatsupBeforeCue(toks, i) || WHATSUP_APP_AFTER.includes(toks[i + 2] ?? "")));
+    if (app) {
+      out.push("whatsapp");
+      i += 1;
+    } else out.push(w);
+  }
+  return out;
+}
+
+/**
+ * lowercase; strip punctuation except `&`; collapse whitespace; fix
+ * Whisper's WhatsApp mangles ("whats app", "what sapp", and "whats up" only
+ * when it is clearly the app — `fixWhatsappMangles`) → "whatsapp"; spell out
+ * number words 1..10.
  *
  * NOTE: a matching-only normalization. A Named address's `Route.task` is cut
  * from the ORIGINAL text (`originalTail`): the agent gets Nic's exact words
@@ -108,17 +168,7 @@ export function normalize(text: string): string {
     // other punctuation: dropped entirely (not replaced by a space), so
     // "what's" normalizes to "whats", not "what s".
   }
-  let s = cleaned.split(/\s+/).filter(Boolean).join(" ");
-  for (const [from, to] of [
-    [" whats up ", " whatsapp "],
-    [" whats app ", " whatsapp "],
-    [" what sapp ", " whatsapp "],
-  ] as const) {
-    const padded = ` ${s} `;
-    if (padded.includes(from)) s = padded.split(from).join(to).trim();
-  }
-  return s
-    .split(" ")
+  return fixWhatsappMangles(cleaned.split(/\s+/).filter(Boolean))
     .map((w) => {
       const i = NUMBER_WORDS.indexOf(w);
       return i >= 0 ? String(i + 1) : w;
@@ -198,6 +248,83 @@ function matchNameAnywhere(toks: string[], names: [string, string][]): string | 
   return best ? best[0] : null;
 }
 
+/** "tell/ask/… (it)? (to)? (my/the/our)? NAME": the position NAME would start at after the verb at `i`. */
+function verbTarget(toks: string[], i: number): number {
+  let j = i + 1;
+  if (tokAt(toks, j) === "it") j += 1;
+  if (tokAt(toks, j) === "to") j += 1;
+  if (["my", "the", "our"].includes(tokAt(toks, j) ?? "")) j += 1;
+  return j;
+}
+
+/** The word at `k` (right after a self name a VERBS_A verb points at) keeps it an address. */
+const addressFollows = (toks: string[], k: number): boolean => {
+  const w = tokAt(toks, k);
+  return w === undefined || ADDRESS_NEXT.includes(w) || VERBS_B.includes(w);
+};
+
+/** The line opens with a self name, optionally after "hey / hi / ok / yo / so". */
+function leadsWithSelf(toks: string[], selfNames: [string, string][]): boolean {
+  let p = 0;
+  while (p < toks.length && ADDRESS_LEADS.includes(toks[p])) p += 1;
+  return !!matchNameAt(toks, p, selfNames);
+}
+
+/** The line ends with a self name ("…, tony", "… tony please") that isn't an object (`NOT_VOCATIVE_BEFORE`). */
+function trailingVocative(toks: string[], selfNames: [string, string][]): boolean {
+  const end = toks[toks.length - 1] === "please" ? toks.length - 1 : toks.length;
+  for (const [, phrase] of selfNames) {
+    const p = tokenize(phrase);
+    const start = end - p.length;
+    if (!p.length || start < 0 || p.some((w, k) => toks[start + k] !== w)) continue;
+    const prev = tokAt(toks, start - 1);
+    if (prev === undefined || !NOT_VOCATIVE_BEFORE.includes(prev)) return true;
+  }
+  return false;
+}
+
+/** "ask / tell / have … <self name> to / about / …" anywhere in the line. */
+function asksSelf(toks: string[], all: [string, string][]): boolean {
+  for (let i = 0; i < toks.length; i++) {
+    if (!VERBS_A.includes(toks[i])) continue;
+    const j = verbTarget(toks, i);
+    const m = matchNameAt(toks, j, all);
+    if (m && m[0] === "general" && addressFollows(toks, j + m[1])) return true;
+  }
+  return false;
+}
+
+/** Self names that are also everyday nouns in this codebase ("fix the rust dispatcher",
+ * "orchestrator react code has a bug"): they address Tony only when asked ("ask the dispatcher
+ * to …"), never just by opening or ending a line. Mirrors routing.rs. */
+const COMMON_SELF_NOUNS = ["dispatcher", "orchestrator"];
+const properSelfNames = (selfNames: [string, string][]): [string, string][] =>
+  selfNames.filter(([, p]) => !COMMON_SELF_NOUNS.includes(p.replace(/^the /, "")));
+
+/** `addressesSelf` on tokens (mirrors `self_addressed` in routing.rs). */
+const selfAddressed = (toks: string[], all: [string, string][], selfNames: [string, string][]): boolean => {
+  const proper = properSelfNames(selfNames);
+  return leadsWithSelf(toks, proper) || asksSelf(toks, all) || trailingVocative(toks, proper);
+};
+
+/**
+ * The line ADDRESSES Tony by a self name (`SELF_NAMES`, the OS name) in a real address position:
+ * it opens with the name ("hey tony, …"), asks him ("ask tony to …", "tell the dispatcher about
+ * …"), or ends on it as a vocative ("…, tony"). A mention anywhere else ("fix the bug in the
+ * orchestrator react code", "my availability for friday") is not an address. Pure.
+ */
+export function addressesSelf(text: string, cfg: RoutingConfig, osName = ""): boolean {
+  const toks = tokenize(normalize(text.trim()));
+  const all = namePairs(cfg, osName);
+  return selfAddressed(toks, all, all.filter(([r]) => r === "general"));
+}
+
+export interface ResolveOpts {
+  /** Read the topic only: a self address no longer beats a Domain match (the agent a
+   * brainstorm was about: tier.ts `offerTarget`, the voice controller's Tier-2 `agentKept`). */
+  ignoreSelfAddress?: boolean;
+}
+
 /** Does `phrase` occur as a contiguous run of whole tokens anywhere in `toks`? */
 function containsPhrase(toks: string[], phrase: string): boolean {
   const p = tokenize(phrase);
@@ -223,15 +350,19 @@ function domainScore(toks: string[], domains: string[]): number {
  * Resolve one utterance against the routing matrix. Priority:
  *  (a) explicit delegation pattern → Named, high
  *  (b) any name trigger mentioned anywhere → Named, medium
- *  (c) domain trigger score (longest phrases win; ties → `DOMAIN_TIEBREAK`) → Domain
- *  (d) only Tony himself was addressed / matched → Self (role general)
+ *  (c) domain trigger score (longest phrases win; ties → `DOMAIN_TIEBREAK`) → Domain,
+ *      unless Tony was ADDRESSED by a self name (`addressesSelf`: the line opens with it, "ask
+ *      tony to …", or a trailing "…, tony"): then Self (his name beats a topic). A mere mention
+ *      ("the orchestrator react code", "for friday") never beats a topic. `ignoreSelfAddress`
+ *      skips this (the topic's agent, for an offer).
+ *  (d) only Tony himself was addressed / mentioned / matched → Self (role general)
  *  (e) nothing → Default (the caller decides: keep the current tab, or general)
  *
  * Tony (`general`, any self alias, `SELF_NAMES`, the OS name) is never a delegation target:
  * a self match is skipped and the scan goes on, so "ask tony to ask the coder…" is coder.
  * `osName`: the configured OS name (Rust reads `cfg.os_name`); "tony" is built in either way.
  */
-export function resolve(text: string, cfg: RoutingConfig, osName = ""): Route {
+export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: ResolveOpts = {}): Route {
   const original = text.trim();
   const norm = normalize(original);
   const toks = tokenize(norm);
@@ -243,10 +374,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = ""): Route {
   // (a) "tell/ask/have/get/let/send/route/hand/pass (it)? (to)? (my/the/our)? NAME (agent/desk)? (to/about/for)? …"
   for (let i = 0; i < toks.length; i++) {
     if (!VERBS_A.includes(toks[i])) continue;
-    let j = i + 1;
-    if (tokAt(toks, j) === "it") j += 1;
-    if (tokAt(toks, j) === "to") j += 1;
-    if (["my", "the", "our"].includes(tokAt(toks, j) ?? "")) j += 1;
+    const j = verbTarget(toks, i);
     const m = matchNameAt(toks, j, all);
     if (m && m[0] === "general") {
       selfHit = true; // "ask tony to …": keep scanning for a real agent
@@ -286,26 +414,32 @@ export function resolve(text: string, cfg: RoutingConfig, osName = ""): Route {
   const mentioned = matchNameAnywhere(toks, names);
   if (mentioned) return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
   if (matchNameAnywhere(toks, selfNames)) selfHit = true;
+  // A self name in an address position (beats a topic below); any other mention is step (d) only.
+  const selfAddress = selfAddressed(toks, all, selfNames);
 
-  // (c) domain triggers (Tony's own topics only mark a self hit).
+  // (c) domain triggers (Tony's own topics only mark a self topic).
   let best: [string, number] | null = null;
+  let selfTopic = false;
   for (const role of DOMAIN_TIEBREAK) {
     const t = cfg.agents[role];
     if (!t) continue;
     const score = domainScore(toks, t.domains);
     if (score <= 0) continue;
     if (role === "general") {
-      selfHit = true;
+      selfTopic = true;
       continue;
     }
     if (!best || score > best[1]) best = [role, score];
   }
+  // Tony's name beats a topic: a line that ADDRESSES him by a self name ("hey tony, check my
+  // availability", "…, tony") is his to answer; only naming an agent (above) delegates.
+  if (best && selfAddress && !opts.ignoreSelfAddress) return { role: "general", reason: "you addressed the OS by name", confidence: "high", kind: "Self", task: original };
   if (best) {
     const [role, score] = best;
     return { role, reason: "matched this agent's trigger words", confidence: score >= 6 ? "medium" : "low", kind: "Domain", task: original };
   }
   // (d) only Tony himself.
-  if (selfHit) return { role: "general", reason: "you addressed the OS itself", confidence: "high", kind: "Self", task: original };
+  if (selfHit || selfAddress || selfTopic) return { role: "general", reason: "you addressed the OS itself", confidence: "high", kind: "Self", task: original };
   // (e) nothing matched.
   return { role: null, reason: "no name or trigger matched", confidence: "low", kind: "Default", task: original };
 }

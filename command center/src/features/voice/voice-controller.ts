@@ -1,12 +1,12 @@
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
-import { DEFAULT_ROUTING_CONFIG, isSelfRoleId, resolve } from "@/features/dispatcher/router";
+import { addressesSelf, DEFAULT_ROUTING_CONFIG, isSelfRoleId, resolve } from "@/features/dispatcher/router";
 import { execute } from "@/features/orchestrator/execute";
 import { heuristicPlan, parseConfirmation, parseOfferReply, planIntent, stripWake, type ActionPlan } from "@/features/orchestrator/plan";
 import { classifyTier, commitStrength, DEFER_LABEL, looksBuildShaped, offerTarget, parseDefer, type DeferTarget, type OfferTarget } from "@/features/dialogue/tier";
 import { useDialogue } from "@/features/dialogue/dialogue-store";
 import { briefOf, buildArtifact, conversationSlice, fallbackTitle, fitBrief, saveArtifact } from "@/features/dialogue/package";
 import { roleLabel } from "@/features/dispatcher/roles";
-import { dispatch, queueDesktopItem } from "@/features/dispatcher/dispatch";
+import { dispatch, queueDesktopItem, type DispatchOutcome } from "@/features/dispatcher/dispatch";
 import { handleLocalIntent } from "@/features/reminders/intents";
 import { gated } from "@/features/bridge/gate";
 import { liveContext } from "@/features/os/context";
@@ -32,7 +32,7 @@ import { introLine } from "./handoff";
 import { currentPool, loadPool, noteHandoff, pickExchange, playExchange, type CueHandle } from "./handoff-cues";
 import { ack, GREETING, maybeFlavour, standDownLine } from "./persona";
 import { setSectionSource, tonyThread, useVoice, type Channel, type ThreadId, type VoiceTurn } from "./voice-store";
-import { isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice, soloHold, type RoutedTurn } from "./route-for";
+import { frozenHold, isSelfRelay, isSubAgentThread, relayThreadFor, routeFor, routingNotice, soloHold, type RoutedTurn } from "./route-for";
 import { toggleAction, type TurnOrigin } from "./voice-status";
 import { wakeCommand } from "./wake-word";
 import { isBareCut, listenTakesReflex, parseReflex, type Reflex, type ReflexCtx } from "./reflex-parse";
@@ -41,8 +41,8 @@ import { hydrateMic, micEnabled, onMicChange, requestMicEnabled, MIC_LOCKED_MSG 
 import { syncThresholdFromOs } from "./threshold";
 import { cutMedia, holdMedia, releaseMedia, type HeldMedia } from "./media-hold";
 import { startNarrator, type NarratorSnapshot } from "./narrator";
-import { useModes } from "@/features/modes/modes-store";
-import { calmModeError, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
+import { currentFreeze, isToolLiveNow, useModes } from "@/features/modes/modes-store";
+import { calmModeError, frozenOfferLine, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
 import { pillPathways, stripLearnTags } from "@/features/modes/learning";
 import { spokenSoFar } from "@/features/dispatcher/tony-dispatch";
 import { onArbiterEvent, type PacketResult } from "@/features/arbiter/api";
@@ -212,6 +212,13 @@ let lastTtsEndAt = 0;
 let lastUserSpeechAt = 0;
 /** streamIds of `os_turn`s in flight, so "cut it" can stop them server-side (`os_turn_cancel`). */
 const activeStreams = new Set<string>();
+/** Phone voice turns (`phoneVoiceRun`) still waiting on `dispatch`, each with the `micGen` it
+ * started in. A turn in flight for the barge-in branches, like `activeStreams`, so a cough between
+ * two streamed sentences keeps the turn's state instead of going idle (and re-arming the wake
+ * listen) mid-reply. Never sent to `os_turn_cancel` (the phone has no stream of its own to stop);
+ * a turn a hard stop or a new command left behind (an older `micGen`) no longer counts. */
+const phoneTurns = new Set<{ gen: number }>();
+const phoneTurnInFlight = () => [...phoneTurns].some((t) => t.gen === micGen);
 /** Rust `agents::TURN_CANCELLED`: the error a cancelled os_turn returns. */
 const TURN_CANCELLED = "turn cancelled";
 /** Hold mode ("take it easy" over a busy turn / "whoa" / "madone" / "aspetta") — see the reflex section at the end. */
@@ -304,7 +311,7 @@ function speechHandlers() {
       settleNoise();
       convo.barged = false;
       tts.duck?.(false);
-      if (sayDepth > 0 || activeStreams.size > 0) {
+      if (sayDepth > 0 || activeStreams.size > 0 || phoneTurnInFlight()) {
         // Noise (or a long silence) over a reply / a turn still thinking: un-duck, keep the
         // turn's state, and keep listening for a reflex over the rest of it.
         store().setState(sayDepth > 0 ? "speaking" : "thinking");
@@ -324,7 +331,7 @@ function speechHandlers() {
       convo.ducked = false;
       convo.barged = false;
       followUpListen = false;
-      if (sayDepth > 0 || activeStreams.size > 0) {
+      if (sayDepth > 0 || activeStreams.size > 0 || phoneTurnInFlight()) {
         // He's still talking (or about to): keep the turn's state and listen for a reflex again,
         // a bounded number of times (a mic that keeps failing must not spin).
         store().setState(sayDepth > 0 ? "speaking" : "thinking");
@@ -661,7 +668,13 @@ async function switchModeTurn(line: string, mode: string, rest: string, opts: { 
 // an AnythingLLM sub-agent): the pure `routeFor` in route-for.ts. A Named sub-agent always wins;
 // Tony is never a target ("Self"); voice is always Tony's conversation (never "Tab"); typed text
 // on a sub-agent tab still goes to that agent.
-const routeOpts = (utterance: string, thread: ThreadId, channel: Channel, cfg: RoutingConfig) => ({ utterance, thread, channel, cfg, osName: useSettings.getState().osName || "Tony" });
+// `addressed`: the line called Tony by name — routeFor sees the wake-stripped text, so it can't
+// tell "Hey Tony, check my availability" (Tony's) from "check my availability" (Booking's).
+const routeOpts = (utterance: string, thread: ThreadId, channel: Channel, cfg: RoutingConfig, addressed = false) => ({ utterance, thread, channel, cfg, osName: useSettings.getState().osName || "Tony", addressed });
+
+/** `line` addresses Tony by name: `stripWake` removed a "hey tony," wake phrase, or the router
+ * reads a self address (a leading "ok tony", "ask tony to…", a trailing "…, tony"). */
+const addressesTony = (line: string, cfg: RoutingConfig) => stripWake(line) !== line || addressesSelf(line, cfg, useSettings.getState().osName || "Tony");
 
 // ── Input handling ──────────────────────────────────────────────────────────
 
@@ -693,9 +706,11 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   const intent = parseOsLine(t);
   let sp: SpotifyIntent | null = intent ? null : await parseSpotifyLine(t);
   if (sp && cueOwnsVolume(sp, cuePlayingNow(), t)) sp = null; // "volume 30" during Gabagool ⇒ Tony, as before
-  // Learning mode: no Spotify actions (external tools are off while Nic trains Tony).
+  // The Spotify fast path only runs while the spotify server is live this turn: frozen by the
+  // mode's switchboard (Learning freezes every external tool) or on the master switchboard, the
+  // line falls through to Tony's turn, where Rust gives the frozen reason.
   const learning = isLearningMode(useModes.getState().effective);
-  if (learning) sp = null;
+  if (sp && (learning || !isToolLiveNow("spotify"))) sp = null;
   if (store().pending) {
     if (intent && worksWhileConfirming(intent)) return controlWhileConfirming(t, intent, opts.channel);
     if (sp?.tool === "spotify.pause") return controlWhileConfirming(t, sp, opts.channel);
@@ -792,7 +807,8 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   if (!live()) return;
 
   const routingCfg = useOs.getState().cfg?.routing ?? DEFAULT_ROUTING_CONFIG;
-  const routed = routeFor(routeOpts(stripWake(t), thread, opts.channel, routingCfg));
+  const addressed = addressesTony(t, routingCfg);
+  const routed = routeFor(routeOpts(stripWake(t), thread, opts.channel, routingCfg, addressed));
 
   // ── P3 tiers (Tony's thread only) ──
   if (tonyTab) {
@@ -808,8 +824,11 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
       if (target) {
         // Phase 2 Part C: Tony's mode decides what the commit cue does (D15/D16). Builder +
         // a build-shaped brainstorm queues it at once (staging only); Solo hands nothing off and
-        // offers to park it; everything else is today's spoken offer card.
-        switch (tier3Action(useModes.getState().effective, target)) {
+        // offers to park it; a target the switchboard froze (the mode's overlay or the master
+        // switchboard) gets one calm line and no card; everything else is today's spoken offer card.
+        const effective = useModes.getState().effective;
+        const freeze = currentFreeze();
+        switch (tier3Action(effective, target, freeze)) {
           case "auto":
             // Only a real commit ("let's do it", "lock it in") skips the card: bare agreement
             // ("sounds good", "yeah that works") mid-brainstorm is usually a yes to a sub-point.
@@ -817,6 +836,8 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
             break;
           case "solo":
             return offerPark(t, thread, opts.channel, slice);
+          case "frozen":
+            return frozenOffer(frozenOfferLine(effective, target, freeze), thread, opts.channel);
         }
         return offerDelegation(t, thread, opts.channel, target, slice);
       }
@@ -824,8 +845,9 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
     }
     if (tier === 2) {
       // The agent Tony kept this from (voice on Tony's tab already folded a Domain hit into
-      // "Self", so read the matrix itself) — the Tier-3 delegate if it comes to that.
-      const det = resolve(stripWake(t), routingCfg, osName);
+      // "Self", so read the matrix itself) — the Tier-3 delegate if it comes to that. The topic
+      // only: "…for the landing page, tony" still names the Designer as the topic's agent.
+      const det = resolve(stripWake(t), routingCfg, osName, { ignoreSelfAddress: true });
       const agentKept = (det.kind === "Domain" || det.kind === "Named") && det.role && !isSelfRoleId(det.role, osName) ? (det.role as AgentRole) : undefined;
       dlg.touch(thread, userTurn.id, { topicRole: agentKept, buildShaped: looksBuildShaped(t) });
       return brainstormTurn(t, thread, opts.channel);
@@ -845,7 +867,7 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   plan.routeKind = routed.kind;
   plan.explicitRole = routed.kind === "Tab" || (routed.kind === "Named" && routed.role === thread);
 
-  if (!plan.mutating) return run(plan, opts.channel);
+  if (!plan.mutating) return run(plan, opts.channel, addressed);
   await requestConfirmation(plan, opts.channel);
 }
 
@@ -1009,15 +1031,18 @@ export function reject(reason: string, opts: { silent?: boolean } = {}) {
   if (p.channel === "voice" && !opts.silent && micEnabled()) void say("Cancelled.");
 }
 
-async function run(plan: Parameters<typeof execute>[0], channel: Channel) {
+/** `addressed`: the line called Tony by name (osRun re-routes the wake-stripped `plan.utterance`). */
+async function run(plan: Parameters<typeof execute>[0], channel: Channel, addressed = false) {
   const gen = micGen;
   store().setState("thinking");
   const thread = plan.thread ?? tonyThread();
   // Read-only questions go through the OS core (context + sub-agents + tools).
   // Desktop only: on the phone (PWA / Android) `execute` → `dispatch` queues the turn for the desktop's Tony.
-  if (!plan.mutating && plan.target.kind === "agent" && !plan.run && isDesktopApp()) return osRun(plan, channel, thread);
+  if (!plan.mutating && plan.target.kind === "agent" && !plan.run && isDesktopApp()) return osRun(plan, channel, thread, addressed);
   // An approved Tier-3 delegation (P3): the OS core, straight to that agent (only reached from approve()).
   if (plan.delegateTo && !plan.run && isDesktopApp()) return osRun(plan, channel, thread);
+  // P5, the phone: a spoken reply starts while the desktop's Tony is still writing it.
+  if (channel === "voice" && streamsOnPhone(plan)) return phoneVoiceRun(plan, thread, gen);
   try {
     const traceId = clientTrace.id ?? undefined;
     const r = await execute(plan, history(thread).slice(0, -1));
@@ -1037,6 +1062,221 @@ async function run(plan: Parameters<typeof execute>[0], channel: Channel) {
   } catch (e) {
     fail(e, thread);
   }
+}
+
+// ── P5: the phone speaks Tony's reply while the desktop is still writing it ──────
+
+/** A phone question `execute` would hand straight to `dispatch` (read-only, an agent, no runner):
+ * this path calls `dispatch` itself, with the same arguments and meta plus `onPartial`. The
+ * Librarian keeps `execute`'s vault lookup (and the whole-reply speech). */
+function streamsOnPhone(plan: ActionPlan): boolean {
+  return !isDesktopApp() && !plan.mutating && plan.target.kind === "agent" && !plan.run && plan.role !== "librarian";
+}
+
+/** A streamed text that stops right after a sentence end ("…plan." with nothing yet after it):
+ * the desktop forwards Tony's answer at sentence ends, so the next delta may be a while. A digit
+ * before the stop ("3.") isn't a sentence end: that may be a number cut mid-way. */
+const ENDS_SENTENCE = /[\p{L}"')\]][.!?…]+["')\]]*$/u;
+/** A lone '.' after an abbreviation ("Mr.", "Dr.", "etc.", "e.g.") or a single-letter word ("J.",
+ * "U.S.") usually has more of the sentence after it ("Dr. Patel"). */
+const ABBREVIATION_END = /(?:^|[^\p{L}\p{N}])(?:mrs?|ms|dr|st|jr|sr|vs|etc|e\.g|i\.e|\p{L})\.["')\]]*$/iu;
+
+/** `ENDS_SENTENCE`, but never at an abbreviation's dot (`ABBREVIATION_END`). Pure. */
+export function endsSentence(text: string): boolean {
+  return ENDS_SENTENCE.test(text) && !ABBREVIATION_END.test(text);
+}
+
+/** Index in `text` just past `prefix`, comparing only non-space characters; -1 when `text`
+ * doesn't start with `prefix` that way. */
+function afterPrefixIgnoringSpace(text: string, prefix: string): number {
+  let i = 0;
+  for (let j = 0; j < prefix.length; j++) {
+    if (/\s/.test(prefix[j])) continue;
+    while (i < text.length && /\s/.test(text[i])) i++;
+    if (text[i] !== prefix[j]) return -1;
+    i++;
+  }
+  return i;
+}
+
+/**
+ * P5: what of the final reply `final` is still to be said after `spoken` (the streamed text up to
+ * the end of its last spoken chunk, `lastChunk`). Never repeats: the final normally starts with
+ * what was spoken (exactly, or with different spacing), so the rest is what follows it. When it
+ * doesn't, that prefix is not said again: the rest follows the spoken text (or its last chunk)
+ * where the final has it further on; failing that (a different text), it starts at the first
+ * sentence that begins at or past as much text as was spoken, or is nothing. Pure.
+ */
+export function unspokenRest(final: string, spoken: string, lastChunk?: string): string {
+  const said = spoken.trim();
+  if (!said) return final.trim();
+  if (final.startsWith(spoken)) return final.slice(spoken.length).trim();
+  const at = afterPrefixIgnoringSpace(final, spoken);
+  if (at >= 0) return final.slice(at).trim();
+  for (const s of [said, lastChunk?.trim()]) {
+    const i = s ? final.indexOf(s) : -1;
+    if (s && i >= 0) return final.slice(i + s.length).trim();
+  }
+  const starts = /[.!?…]["')\]]*\s+/g;
+  for (let m = starts.exec(final); m; m = starts.exec(final)) {
+    if (m.index + m[0].length >= said.length) return final.slice(m.index + m[0].length).trim();
+  }
+  return "";
+}
+
+/**
+ * The text a streamed reply's speech is measured against at the end: the final answer, led by the
+ * stream's own lead-in when the final doesn't repeat it. The gateway's cold start streams
+ * "One sec, Nic — waking up. " ahead of Tony's answer and the final never includes it, so a short
+ * answer ("Sure.") would line up with nothing that was said. `prefix` is that lead-in (the result's
+ * `streamPrefix`); without one, a last streamed text that ends with the final answer stands in for
+ * it. Pure.
+ */
+export function streamedText(final: string, prefix = "", lastStreamed = ""): string {
+  const f = final.trim();
+  const p = prefix.trim();
+  if (p) return f.startsWith(p) ? final : `${p} ${f}`;
+  const s = lastStreamed.trimEnd();
+  return f && s.length > f.length && s.endsWith(f) ? s : final;
+}
+
+/** The lead-in the gateway streamed ahead of Tony's answer (`streamPrefix`, on the result or the
+ * outcome), or "" when there was none. */
+function streamPrefixOf(out: DispatchOutcome): string {
+  const field = (o: object): unknown => (o as Record<string, unknown>).streamPrefix;
+  const p = field(out.result) ?? field(out);
+  return typeof p === "string" ? p : "";
+}
+
+/**
+ * P5: speech for a reply that arrives as growing text, the way osRun speaks a streamed reply on
+ * the desktop: `nextStreamChunk` picks each piece worth sending on its own (the first clause, then
+ * whole sentences), the next one renders while the previous plays (`prefetch`), prosody chains
+ * through `previousText`, and the reply shares one TTS breaker scope (`utteranceId`). `feed`
+ * queues every complete piece of the text so far; `finish` queues only what was never spoken
+ * (measured against `streamedText`: the final plus the stream's lead-in, e.g. the gateway's
+ * cold-start line) and resolves once all of it has played. Each line checks `isLive` when its
+ * turn comes, so a hard stop drops the rest.
+ */
+function streamedSpeech(o: { isLive: () => boolean; traceId?: string; onStart: () => void }) {
+  const agent = "general";
+  const utteranceId = utteranceIdFor(`phone-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`, agent);
+  let spokenUpTo = 0;
+  let spoken = "";
+  let streamed = ""; // the last text fed
+  let last: string | undefined;
+  let q: Promise<void> = Promise.resolve();
+  const queue = (text: string) => {
+    const opts = { agent, previousText: last, utteranceId };
+    last = text;
+    tts.prefetch?.(text, opts);
+    o.onStart();
+    q = q.then(() => (o.isLive() ? say(text, { ...opts, traceId: o.traceId }) : undefined));
+  };
+  return {
+    get started() {
+      return spokenUpTo > 0;
+    },
+    feed(shown: string) {
+      if (!shown.startsWith(spoken)) return; // rewrote what was already said: the final settles it
+      streamed = shown;
+      const text = endsSentence(shown) ? `${shown} ` : shown;
+      for (let next = nextStreamChunk(text, spokenUpTo); next; next = nextStreamChunk(text, spokenUpTo)) {
+        spokenUpTo = next.end;
+        spoken = shown.slice(0, spokenUpTo);
+        queue(next.chunk);
+      }
+    },
+    /** `prefix`: the stream's lead-in the final doesn't repeat (the result's `streamPrefix`). */
+    finish(final: string, prefix = ""): Promise<void> {
+      const rest = unspokenRest(streamedText(final, prefix, streamed), spoken, last);
+      if (rest) queue(rest);
+      return q;
+    },
+    /** A line that isn't part of the streamed text (a notice in place of the answer): said whole,
+     * after everything already queued; resolves once all of it has played. */
+    append(line: string): Promise<void> {
+      if (line.trim()) queue(line.trim());
+      return q;
+    },
+  };
+}
+
+/**
+ * P5: a phone voice turn for the desktop's Tony. His answer streams back as he writes it
+ * (`onPartial`): it grows in a live bubble ("streaming…") and he starts speaking at the first
+ * complete sentence. The final answer replaces the bubble and only what wasn't said yet is
+ * spoken. With no partials (an older gateway, the CLI fallback) it is the turn `run` does: the
+ * whole reply shown, then spoken. A notice in place of the answer after partials (`notice`: the
+ * cap ran out, or the gateway can't confirm the item) never overwrites the streamed text: that
+ * bubble is marked "interrupted", the notice gets its own, and it is said whole after the speech
+ * already queued.
+ */
+async function phoneVoiceRun(plan: ActionPlan, thread: ThreadId, gen: number) {
+  const traceId = clientTrace.id ?? undefined;
+  const isLive = () => gen === micGen;
+  let live: string | null = null;
+  let settled = false;
+  const speech = streamedSpeech({
+    isLive,
+    traceId,
+    onStart: () => {
+      if (store().state === "speaking") return;
+      store().setState("speaking");
+      startBargeIn();
+    },
+  });
+  const onPartial = (soFar: string) => {
+    if (settled) return; // never after the final answer
+    // As osRun shows a stream: Tony's dispatch packet as its spoken_reply, no Learning-mode tags.
+    const shown = spokenSoFar(soFar) ?? stripLearnTags(soFar);
+    if (!shown.trim()) return;
+    if (!live) live = store().pushTurn({ who: "agent", from: "os", role: plan.role, text: shown, thread, meta: "streaming…" }).id;
+    else store().updateTurn(live, { text: shown });
+    if (isLive()) speech.feed(shown);
+  };
+  let text: string;
+  let meta: string;
+  let notice: DispatchOutcome["notice"];
+  let streamPrefix = "";
+  // In flight for the barge-in branches until dispatch settles (`phoneTurns`).
+  const inFlight = { gen };
+  phoneTurns.add(inFlight);
+  try {
+    // `execute`'s read-only dispatch (same arguments, same meta), plus the stream.
+    const out = await dispatch(plan.utterance, { role: plan.role, history: history(thread).slice(0, -1), noDelegate: plan.noDelegate, routeKind: plan.routeKind, onPartial });
+    const { result } = out;
+    notice = out.notice;
+    streamPrefix = streamPrefixOf(out);
+    text = result.content || "(no response)";
+    meta = `${SUB_AGENTS[plan.role].label} · ${result.providerId}${result.fellBack ? " · fallback" : ""} · ${result.latencyMs}ms`;
+  } catch (e) {
+    phoneTurns.delete(inFlight);
+    settled = true;
+    if (live) store().updateTurn(live, { meta: "interrupted" });
+    if (speech.started) endIdleBargeIn();
+    return fail(e, thread);
+  }
+  phoneTurns.delete(inFlight);
+  settled = true;
+  if (live && notice) {
+    // Not his answer (the desktop is still on it, or the gateway lost track of it): what Tony
+    // already streamed stays as he said it, and the notice is a line of its own.
+    store().updateTurn(live, { meta: "interrupted" });
+    store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os" });
+  } else if (live) store().updateTurn(live, { text, role: plan.role, meta, from: "os", at: Date.now() });
+  else store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os" });
+  clientTrace.ui(traceId, "reply shown");
+  if (!isLive()) return;
+  // A notice is said whole after what's already queued; an answer only adds what wasn't said
+  // (after a cold start's "One sec, Nic — waking up." too: measured against that lead-in + it).
+  if (speech.started) await (notice ? speech.append(text) : speech.finish(text, streamPrefix));
+  else {
+    store().setState("speaking");
+    startBargeIn();
+    await say(text, { traceId });
+  }
+  return afterVoiceReply(gen);
 }
 
 // Raw transport/parsing failures the chain can surface (dispatch.rs / plan.ts /
@@ -1171,7 +1411,8 @@ async function offerDelegation(t: string, thread: ThreadId, channel: Channel, ta
   else {
     const role = target.role;
     plan.run = async () => {
-      const { result } = await dispatch(handoff, { role, history: [] });
+      // "Named": the user approved handing it to this agent, so the desktop keeps it there.
+      const { result } = await dispatch(handoff, { role, routeKind: "Named", history: [] });
       return { text: result.content || "(no response)", meta: `${roleLabel(role)} · ${result.providerId} · delegated (Tier 3)` };
     };
   }
@@ -1208,6 +1449,25 @@ async function offerPark(t: string, thread: ThreadId, channel: Channel, slice: V
   };
   store().setState("idle");
   await requestConfirmation(plan, channel);
+}
+
+/**
+ * Tier 3 when the hand-off's agent (or one of the build crew) is frozen this turn (the mode's
+ * switchboard overlay, or the master switchboard): a frozen agent is never offered. No card, one
+ * calm line (`frozenOfferLine`), said on a voice turn. The brainstorm stays open, so "park it"
+ * still packages the whole conversation.
+ */
+async function frozenOffer(line: string, thread: ThreadId, channel: Channel) {
+  const gen = micGen;
+  store().pushTurn({ who: "agent", from: "os", text: line, thread, meta: "frozen (switchboard)" });
+  if (gen !== micGen) return;
+  if (channel === "voice") {
+    store().setState("speaking");
+    startBargeIn();
+    await say(line);
+    return afterVoiceReply(gen);
+  }
+  store().setState("idle");
 }
 
 /**
@@ -1342,7 +1602,7 @@ export function answeredByAgent(r: Pick<OsTurnResult, "answeredBy" | "steps">): 
   return !r.steps.some((s) => s.kind === "step-in");
 }
 
-async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
+async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId, addressed = false) {
   const gen = micGen;
   const isLive = () => gen === micGen;
   // System Map: Rust's os-trace steps for this turn join the webview's own hops.
@@ -1356,7 +1616,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
     ? { role: plan.delegateTo, kind: "Named", confidence: "high", reason: "approved delegation (Tier 3)", task: typeof plan.payload.brief === "string" ? plan.payload.brief : plan.utterance }
     : plan.noDelegate
       ? { role: "general", kind: "Self", confidence: "high", reason: "brainstorm with Tony (Tier 2)", task: plan.utterance }
-      : routeFor(routeOpts(plan.utterance, thread, channel, routingCfg));
+      : routeFor(routeOpts(plan.utterance, thread, channel, routingCfg, addressed));
   // "Explicit" = talking directly to the tab you're on — no Tony synthesis,
   // no relay turn, no link pill. A Named/Domain route that pulls you to a
   // *different* agent than the one you're looking at is never explicit, even
@@ -1366,11 +1626,28 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   // the chat never announces "Routing … to Coder…" (and plays the handoff cue) for a delegation
   // that doesn't happen. An approved Tier-3 hand-off is never held.
   // Learning mode: every turn is Tony's own (no hand-off notice, cue or agent voice), as in Rust.
-  const routed: RoutedTurn = isLearningMode(useModes.getState().effective)
+  // The switchboard hold comes right after Solo's: a route to an agent that is frozen this turn
+  // (the mode's overlay, or the master switchboard) stays Tony's, as Rust keeps it, so the chat
+  // never announces "Routing … to <frozen agent>…" or plays its handoff cue. That hold is the
+  // webview's view only (`routed`: the routing notice, handoff cue, announcer handoff, the gate's
+  // label): os_turn gets the route from before it (`sent`), so Rust's own `switchboard_hold` sees
+  // the frozen agent, keeps the turn with Tony and gives him its FROZEN THIS TURN note.
+  const effective = useModes.getState().effective;
+  const heldExplicit = thread !== "auto" && routed0.role === thread;
+  const sent: RoutedTurn = isLearningMode(effective)
     ? { ...routed0, role: "general", kind: "Self", confidence: "high", reason: "Learning mode: Tony only", task: plan.utterance }
     : plan.delegateTo
       ? routed0
-      : soloHold(routed0, { explicit: thread !== "auto" && routed0.role === thread, dispatch: useModes.getState().effective?.dispatch });
+      : soloHold(routed0, { explicit: heldExplicit, dispatch: effective?.dispatch });
+  const routed: RoutedTurn =
+    isLearningMode(effective) || plan.delegateTo
+      ? sent
+      : frozenHold(sent, {
+          explicit: heldExplicit,
+          effective,
+          freeze: currentFreeze(),
+          osName: useSettings.getState().osName || "Tony",
+        });
   const role = routed.role;
   const task = routed.task;
   const explicit = thread !== "auto" && role === thread;
@@ -1514,7 +1791,8 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId) {
   });
   // askCards: a Spotify write held by the Ask tier comes back as `pendingSpotify` (card below), not a failure note.
   // cuePlaying: Rust keeps "volume 30" during a Gabagool cue away from Spotify (same rule as cueOwnsVolume).
-  const req = { text: task, role, explicit, routeKind: routed.kind, routeReason: routed.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn() };
+  // The route before the switchboard hold (`sent`): Rust holds a frozen agent itself, with Tony's note.
+  const req = { text: task, role: sent.role, explicit: thread !== "auto" && sent.role === thread, routeKind: sent.kind, routeReason: sent.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn() };
   // The steps Rust reports as they happen (`os-step`): what Tony sent an agent and what came back
   // still reach the chat when the turn then fails or is cut.
   const liveSteps: OsTurnResult["steps"] = [];
@@ -1802,9 +2080,10 @@ void syncThresholdFromOs();
 // Phase 2 Part C: Tony's mode (Rust modes.json) — until it loads, Brainstorming (today's offer card).
 void useModes.getState().load();
 // A dispatched packet closed (packet_queue.rs): its outcome lands in Tony's thread, shown, not spoken.
+// A listener that can't attach (no Tauri event bridge) is never an unhandled rejection.
 void onArbiterEvent<PacketResult>("packet-result", (p) => {
   store().pushTurn({ who: "agent", from: "os", thread: tonyThread(), text: p.summary, meta: "packet result", packet: p, tone: p.results.every((r) => r.status === "done") ? "ok" : "warn" });
-});
+}).catch(() => undefined);
 
 // A stop said during a cue's intro also cancels Tony's TTS (no import cycle: player.ts
 // only holds the cancel function, it doesn't import the voice controller).

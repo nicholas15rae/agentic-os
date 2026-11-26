@@ -1,11 +1,12 @@
 //! Tony modes (Phase 2 Part C): a small rule set swapped into Tony's system prompt on his next
 //! turn. No extra model, no restart, zero VRAM: a mode is runtime state plus prompt text.
 //!
-//! - `modes.json` (beside os.json, ~3 KB) holds the custom modes and the active id. The six
-//!   presets (`BUILTIN_IDS`) are re-seeded from code on every load, so they always mean the same
-//!   thing (D12); a preset can be duplicated, never edited or deleted.
+//! - `modes.json` (beside os.json, ~3 KB) holds the custom modes and the active id. The presets
+//!   (`BUILTIN_IDS`) are re-seeded from code on every load, so they always mean the same thing
+//!   (D12); a preset can be duplicated, never edited or deleted.
 //! - `mode_block` is the deterministic prompt block (curiosity dial, verbosity, dispatch policy,
-//!   the mode's own notes). It is appended to Tony's own turns only (never a sub-agent or Booking).
+//!   the ON DUTY line, the mode's own notes). It ends Tony's own system message (never a
+//!   sub-agent's or Booking's), so everything above it is the same in every mode.
 //! - `dispatch_allowed` is the pure policy gate every pipeline build passes (`task_create`,
 //!   `capture_task`, `task_from_idea`, the inbox `task`): `surface_only` queues nothing,
 //!   `auto` (skipping the spoken Tier-3 offer) is honoured only under `auto_dispatch`.
@@ -16,6 +17,11 @@
 //!   `surface_only` (an override can't lift it), the MODE block carries `LEARNING_PROTOCOL`
 //!   instead of the Solo line, and `agents.rs` / the worker / the webview isolate the turn
 //!   (no routing, live tools, sub-agent calls, background builds or other voices).
+//! - Switchboard: a mode may carry an overlay (`ModeSwitchboard`: the agents on duty and the MCP
+//!   servers left live; `None` = everything, today's behaviour), on top of the master switchboard
+//!   in os.json (`os_core::SwitchboardConfig`: frozen in every mode). Freezing is a runtime mask
+//!   (`agent_live` / `tool_live`): os.json, grants and toggles are never changed, so a frozen
+//!   agent or tool comes back exactly as it was. Tony and the always-live tools are never frozen.
 //!
 //! No prompt text here may contain the format word that flips `dispatch::skip_agentic_os`, the
 //! thinking switch, or the novelty mode's name (enforced by `validate_mode` and the tests).
@@ -25,7 +31,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
-use super::os_core::OsState;
+use super::os_core::{OsState, SwitchboardConfig};
 
 // ── Schema (the spec's snake_case names, exactly) ───────────────────────────
 
@@ -61,6 +67,16 @@ pub enum TtsInterrupt {
     Full,
 }
 
+/// A mode's switchboard overlay: the agents on duty (routing role ids) and the tools left live
+/// (os.json `mcps[].id`) in this mode. Every other agent and server is frozen while it is active.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct ModeSwitchboard {
+    #[serde(default)]
+    pub agents: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TonyMode {
     pub id: String,
@@ -74,6 +90,12 @@ pub struct TonyMode {
     pub prompt_modifier: String,
     #[serde(default)]
     pub is_novelty: bool,
+    /// `None`: no overlay (every agent and tool the master switchboard leaves live).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchboard: Option<ModeSwitchboard>,
+    /// Learning: tonight's overnight training run is requested while this mode is used.
+    #[serde(default)]
+    pub night_training: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -84,18 +106,24 @@ pub struct ModesFile {
     pub modes: Vec<TonyMode>,
 }
 
+/// A file with no `version` is a v1 file.
 fn file_version() -> u32 {
     1
 }
 
+/// v2: the Operations preset and the switchboard fields (`normalize` rewrites a v1 file).
+pub const MODES_FILE_VERSION: u32 = 2;
+
 impl Default for ModesFile {
     fn default() -> Self {
-        Self { version: 1, active_mode_id: DEFAULT_MODE_ID.into(), modes: presets() }
+        Self { version: MODES_FILE_VERSION, active_mode_id: DEFAULT_MODE_ID.into(), modes: presets() }
     }
 }
 
 /// The presets, in switcher order. Read-only (D12); `is_preset` is derived from this list.
-pub const BUILTIN_IDS: [&str; 7] = ["surface", "brainstorm", "builder", "executive", "coach", "learning", "gabagool"];
+pub const BUILTIN_IDS: [&str; 8] = ["surface", "brainstorm", "builder", "operations", "executive", "coach", "learning", "gabagool"];
+/// Preset ids added after v1: a v1 file's custom mode with one of these ids is renamed, not lost.
+pub const NEW_BUILTIN_IDS: [&str; 1] = ["operations"];
 /// The first-launch mode: `ask_before_dispatch` is today's Tier-3 behaviour (D11).
 pub const DEFAULT_MODE_ID: &str = "brainstorm";
 /// The novelty overlay (D19): toggled by the cue system, never the active work mode.
@@ -119,13 +147,31 @@ fn preset(id: &str, name: &str, icon: &str, c: Curiosity, v: Verbosity, d: Dispa
         tts_interrupt_level: t,
         prompt_modifier: modifier.into(),
         is_novelty: novelty,
+        switchboard: None,
+        night_training: false,
     }
+}
+
+/// A preset with its switchboard overlay (`agents` on duty, `tools` left live).
+fn on_duty(m: TonyMode, agents: &[&str], tools: &[&str]) -> TonyMode {
+    TonyMode { switchboard: Some(ModeSwitchboard { agents: agents.iter().map(|s| s.to_string()).collect(), tools: tools.iter().map(|s| s.to_string()).collect() }), ..m }
 }
 
 pub const BRAINSTORM_NOTES: &str = "Refine raw ideas with sharp follow-ups; when one firms up, offer to park it in the Brainstorm list or hand it off.";
 pub const COACH_NOTES: &str = "Be a grounded, high-energy accountability partner: name the next concrete step and push Nic to take it.";
+pub const LEARNING_NOTES: &str = "Be curious: ask Nic what he's doing, how and why.";
 
-/// The seven presets (spec §2 + Learning), in `BUILTIN_IDS` order.
+/// The switchboard overlays of the presets (agents on duty; tools left live).
+pub const BUILDER_AGENTS: [&str; 3] = ["prompter", "designer", "coder"];
+pub const BUILDER_TOOLS: [&str; 8] = ["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"];
+pub const OPERATIONS_AGENTS: [&str; 2] = ["ops", "bizops"];
+pub const OPERATIONS_TOOLS: [&str; 9] = ["gmail", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"];
+/// The Librarian is not on Executive duty: it runs only as its scheduled script (frozen on the
+/// master switchboard by default, `os_core::default_frozen_agents`).
+pub const EXECUTIVE_AGENTS: [&str; 2] = ["bizops", "finance"];
+pub const EXECUTIVE_TOOLS: [&str; 5] = ["knowledge-graph", "gmail", "brave-search", "time", "weather"];
+
+/// The eight presets (spec §2 + Operations + Learning), in `BUILTIN_IDS` order.
 pub fn presets() -> Vec<TonyMode> {
     use Curiosity::*;
     use DispatchPolicy::*;
@@ -134,10 +180,11 @@ pub fn presets() -> Vec<TonyMode> {
     vec![
         preset("surface", "Surface / Solo", "message-circle", Medium, Balanced, SurfaceOnly, Silent, "", false),
         preset("brainstorm", "Brainstorming", "lightbulb", High, Conversational, AskBeforeDispatch, MilestonesOnly, BRAINSTORM_NOTES, false),
-        preset("builder", "Builder", "hammer", Medium, Balanced, AutoDispatch, Full, "", false),
-        preset("executive", "Executive", "briefcase", Low, Terse, AskBeforeDispatch, MilestonesOnly, "", false),
+        on_duty(preset("builder", "Builder", "hammer", Medium, Balanced, AutoDispatch, Full, "", false), &BUILDER_AGENTS, &BUILDER_TOOLS),
+        on_duty(preset("operations", "Operations", "clipboard-list", Medium, Balanced, AskBeforeDispatch, MilestonesOnly, "", false), &OPERATIONS_AGENTS, &OPERATIONS_TOOLS),
+        on_duty(preset("executive", "Executive", "briefcase", Low, Terse, AskBeforeDispatch, MilestonesOnly, "", false), &EXECUTIVE_AGENTS, &EXECUTIVE_TOOLS),
         preset("coach", "Motivation / Coach", "flame", Medium, Balanced, SurfaceOnly, MilestonesOnly, COACH_NOTES, false),
-        preset("learning", "Learning", "graduation-cap", High, Balanced, SurfaceOnly, Silent, "", false),
+        TonyMode { night_training: true, ..on_duty(preset("learning", "Learning", "graduation-cap", High, Balanced, SurfaceOnly, Silent, LEARNING_NOTES, false), &[], &[]) },
         preset(NOVELTY_ID, "Gabagool Mode", "\u{1F35D}", Medium, Balanced, SurfaceOnly, Silent, "", true),
     ]
 }
@@ -154,8 +201,8 @@ pub const DISPATCH_AUTO: &str = "BUILDER MODE: the app queues a clear build for 
 /// Learning mode's rules (in place of the Solo line). The `[[LEARN …]]` lines are pulled out of
 /// the reply by `learning::parse_tags` before anything is shown, spoken or logged.
 pub const LEARNING_PROTOCOL: &str = "LEARNING MODE: Nic is training you; offer no builds or hand-offs. Distill each lesson into a rule; ask one sharp question on edge cases or clashes with LEARNED; echo it back (So when X, you want Y?) before saving unless he says save now. To save, add a line per lesson: [[LEARN category | when | rule or fact | confirmed or provisional]], category one of preference, workflow, rule, persona, domain_knowledge, correction. Confirm briefly.";
-/// The whole block's cap (the mode's own notes are clipped to fit).
-pub const MODE_BLOCK_MAX: usize = 700;
+/// The whole block's cap (the ON DUTY line, then the mode's own notes, are clipped to fit).
+pub const MODE_BLOCK_MAX: usize = 800;
 pub const MODIFIER_MAX: usize = 280;
 
 pub fn curiosity_line(c: Curiosity) -> &'static str {
@@ -228,6 +275,9 @@ pub struct Effective {
     pub is_novelty: bool,
     /// Which fields an override changed (`curiosity`, `dispatch`, `verbosity`, `feedback`).
     pub overridden: Vec<&'static str>,
+    /// The active mode's switchboard overlay (`None`: no overlay).
+    pub switchboard: Option<ModeSwitchboard>,
+    pub night_training: bool,
 }
 
 /// The active mode (an unknown id falls back to the default preset).
@@ -268,6 +318,8 @@ pub fn effective(f: &ModesFile, o: &Overrides) -> Effective {
         prompt_modifier: m.prompt_modifier,
         is_novelty: m.is_novelty,
         overridden,
+        switchboard: m.switchboard,
+        night_training: m.night_training,
     }
 }
 
@@ -276,9 +328,125 @@ pub fn is_learning(e: &Effective) -> bool {
     e.mode_id == LEARNING_ID
 }
 
-/// Tony's MODE block (appended after the persona, before `/no_think`). Deterministic: the same
-/// effective state always gives the same text; empty lines are skipped; at most 700 chars (the
-/// mode's notes are clipped to fit). A novelty mode injects nothing.
+// ── Switchboard (pure) ──────────────────────────────────────────────────────
+
+/// Tools that are live in every mode, whatever any switchboard says: the clock, a skill's own
+/// text and the mode switch (how Nic always gets out of a mode by voice).
+pub const ALWAYS_LIVE_TOOLS: [&str; 3] = ["time", "skills.read", "tony.set_mode"];
+/// The server ids behind `ALWAYS_LIVE_TOOLS` (`time.now` is on `time`; the other two are synthetic).
+pub const ALWAYS_LIVE_SERVERS: [&str; 3] = ["time", "skills", "tony"];
+/// System scripts that are never switchboard agents (never frozen).
+pub const SYSTEM_AGENTS: [&str; 4] = ["security", "observer", "garbage", "trading"];
+/// The build pipeline's agents: a queued build waits while any of them is frozen.
+pub const PIPELINE_AGENTS: [&str; 3] = ["prompter", "designer", "coder"];
+/// Prefix of a tool call refused because its server is frozen (`tool_frozen_error`).
+pub const MODE_FROZEN: &str = "MODE_FROZEN";
+/// Per-list cap of a mode's overlay.
+pub const SWITCHBOARD_LIST_MAX: usize = 16;
+
+/// The switchboard id of a role / packet target / workspace: Tony's aliases → `general`,
+/// `financer` → `finance`, a business workspace `bizops_<id>` → `bizops`.
+pub fn board_agent(id: &str) -> String {
+    let a = id.trim().to_ascii_lowercase();
+    if super::roles::is_tony_id(&a) {
+        "general".into()
+    } else if a == "financer" {
+        "finance".into()
+    } else if a.starts_with("bizops_") {
+        "bizops".into()
+    } else {
+        a
+    }
+}
+
+/// `agent` is frozen in every mode (the master switchboard).
+pub fn agent_globally_frozen(g: &SwitchboardConfig, agent: &str) -> bool {
+    let a = board_agent(agent);
+    a != "general" && !SYSTEM_AGENTS.contains(&a.as_str()) && g.frozen_agents.iter().any(|f| board_agent(f) == a)
+}
+
+/// `agent` may work this turn: not globally frozen, and on duty in the mode's overlay (no
+/// overlay = everyone). Tony and the system scripts are always live.
+pub fn agent_live(e: &Effective, g: &SwitchboardConfig, agent: &str) -> bool {
+    let a = board_agent(agent);
+    if a == "general" || SYSTEM_AGENTS.contains(&a.as_str()) {
+        return true;
+    }
+    !agent_globally_frozen(g, &a) && e.switchboard.as_ref().map_or(true, |b| b.agents.iter().any(|x| board_agent(x) == a))
+}
+
+/// MCP server `server` (an os.json id) is live this turn: always-live, or not globally frozen
+/// and listed in the mode's overlay (no overlay = every server).
+pub fn tool_live(e: &Effective, g: &SwitchboardConfig, server: &str) -> bool {
+    let s = server.trim();
+    if ALWAYS_LIVE_SERVERS.contains(&s) {
+        return true;
+    }
+    !g.frozen_tools.iter().any(|f| f == s) && e.switchboard.as_ref().map_or(true, |b| b.tools.iter().any(|t| t == s))
+}
+
+/// "Builder" → "in Builder mode"; the master switchboard → "on the master switchboard".
+fn frozen_where(e: &Effective, master: bool) -> String {
+    if master {
+        return "on the master switchboard".into();
+    }
+    let name = one_line(&e.name);
+    let name = if name.to_ascii_lowercase().ends_with(" mode") { name[..name.len() - 5].to_string() } else { name };
+    format!("in {name} mode")
+}
+
+/// "<Agent> is frozen in <Mode> mode" (or "… on the master switchboard"); `None`: live.
+pub fn agent_frozen_reason(e: &Effective, g: &SwitchboardConfig, agent: &str) -> Option<String> {
+    if agent_live(e, g, agent) {
+        return None;
+    }
+    let a = board_agent(agent);
+    Some(format!("{} is frozen {}", super::agents::role_label(&a, ""), frozen_where(e, agent_globally_frozen(g, &a))))
+}
+
+/// "<label> is frozen in <Mode> mode" for server `server`; `None`: live.
+pub fn tool_frozen_reason(e: &Effective, g: &SwitchboardConfig, server: &str, label: &str) -> Option<String> {
+    if tool_live(e, g, server) {
+        return None;
+    }
+    Some(format!("{label} is frozen {}", frozen_where(e, g.frozen_tools.iter().any(|f| f == server.trim()))))
+}
+
+/// The call-time refusal of a frozen server's tool: "MODE_FROZEN: <server> is frozen in <Mode> mode".
+pub fn tool_frozen_error(e: &Effective, g: &SwitchboardConfig, server: &str) -> Option<String> {
+    tool_frozen_reason(e, g, server, server).map(|r| format!("{MODE_FROZEN}: {r}"))
+}
+
+/// The first build-pipeline agent that is frozen (a queued build waits for it), with why. A
+/// master-switchboard freeze is named first: switching modes won't start the build.
+pub fn pipeline_frozen(e: &Effective, g: &SwitchboardConfig) -> Option<String> {
+    let master = PIPELINE_AGENTS.iter().find(|a| agent_globally_frozen(g, a));
+    master.into_iter().chain(PIPELINE_AGENTS.iter()).find_map(|a| agent_frozen_reason(e, g, a))
+}
+
+/// A build-pipeline agent is frozen on the master switchboard (in every mode): a queued build
+/// starts only once Nic thaws it there.
+pub fn pipeline_frozen_on_master(g: &SwitchboardConfig) -> bool {
+    PIPELINE_AGENTS.iter().any(|a| agent_globally_frozen(g, a))
+}
+
+/// The mode's ON DUTY line (an overlay, outside Learning): its agents' labels, sorted, so the
+/// text is deterministic. `None`: no overlay, or Learning (its protocol already forbids hand-offs).
+pub fn on_duty_line(e: &Effective) -> Option<String> {
+    if is_learning(e) {
+        return None;
+    }
+    let b = e.switchboard.as_ref()?;
+    let mut labels: Vec<String> = b.agents.iter().map(|a| board_agent(a)).filter(|a| a != "general").map(|a| super::agents::role_label(&a, "")).collect();
+    labels.sort();
+    labels.dedup();
+    Some(if labels.is_empty() { "ON DUTY: none; every agent is frozen this mode.".to_string() } else { format!("ON DUTY: {}; every other agent is frozen this mode.", labels.join(", ")) })
+}
+
+/// Tony's MODE block: the LAST block of his system message, right before `/no_think` (the cached
+/// prompt prefix above it stays the same in every mode). Deterministic: the same effective state
+/// always gives the same text; empty lines are skipped; at most `MODE_BLOCK_MAX` chars (the ON
+/// DUTY line, then the mode's notes, are clipped to fit). A novelty mode injects nothing.
 pub fn mode_block(e: &Effective) -> String {
     if e.is_novelty {
         return String::new();
@@ -289,6 +457,13 @@ pub fn mode_block(e: &Effective) -> String {
         if !line.is_empty() {
             s.push('\n');
             s.push_str(line);
+        }
+    }
+    if let Some(duty) = on_duty_line(e) {
+        let room = MODE_BLOCK_MAX.saturating_sub(s.chars().count() + 1);
+        if room > 0 {
+            s.push('\n');
+            s.extend(duty.chars().take(room));
         }
     }
     let notes = one_line(&e.prompt_modifier);
@@ -390,6 +565,20 @@ pub fn validate_mode(m: &TonyMode) -> Result<(), String> {
             }
         }
     }
+    if let Some(b) = &m.switchboard {
+        if b.agents.len() > SWITCHBOARD_LIST_MAX || b.tools.len() > SWITCHBOARD_LIST_MAX {
+            return Err(format!("switchboard: at most {SWITCHBOARD_LIST_MAX} agents and {SWITCHBOARD_LIST_MAX} tools"));
+        }
+        for a in &b.agents {
+            // Agent labels reach Tony's prompt (the ON DUTY line): ids only, never Tony himself.
+            if !super::roles::valid_agent_id(a) || super::roles::is_tony_id(a) || banned_word(a).is_some() {
+                return Err(format!("switchboard agent \"{a}\": a sub-agent id (lowercase letters, digits, - or _), never Tony"));
+            }
+        }
+        if let Some(t) = b.tools.iter().find(|t| !super::dispatch::valid_id(t)) {
+            return Err(format!("switchboard tool \"{t}\": an MCP server id"));
+        }
+    }
     Ok(())
 }
 
@@ -483,17 +672,33 @@ impl ModesFile {
         Ok(copy)
     }
 
-    /// Re-seed the presets from code (D12), keep valid custom modes, repair the active id.
+    /// Re-seed the presets from code (D12), keep valid custom modes, repair the active id. A
+    /// custom mode of an older file whose id became a preset (`NEW_BUILTIN_IDS`) is renamed to a
+    /// free id and kept (the active id follows it), never silently dropped.
     pub fn normalize(mut self) -> ModesFile {
-        let custom: Vec<TonyMode> = self.modes.drain(..).filter(|m| !is_builtin(&m.id) && !m.is_novelty && validate_mode(m).is_ok()).collect();
+        let older = self.version < MODES_FILE_VERSION;
+        let rows: Vec<TonyMode> = self.modes.drain(..).filter(|m| !m.is_novelty && validate_mode(m).is_ok()).collect();
         let mut modes = presets();
-        for m in custom {
-            if !modes.iter().any(|x| x.id == m.id) {
+        let mut collided = vec![];
+        for m in rows {
+            if is_builtin(&m.id) {
+                if older && NEW_BUILTIN_IDS.contains(&m.id.as_str()) {
+                    collided.push(m);
+                }
+            } else if !modes.iter().any(|x| x.id == m.id) {
                 modes.push(m);
             }
         }
-        let active_ok = modes.iter().any(|m| m.id == self.active_mode_id && !m.is_novelty);
-        ModesFile { version: 1, active_mode_id: if active_ok { self.active_mode_id } else { DEFAULT_MODE_ID.into() }, modes }
+        let mut active = self.active_mode_id;
+        for m in collided {
+            let id = ModesFile { version: MODES_FILE_VERSION, active_mode_id: String::new(), modes: modes.clone() }.unique_id(&m.name);
+            if active == m.id {
+                active = id.clone();
+            }
+            modes.push(TonyMode { id, ..m });
+        }
+        let active_ok = modes.iter().any(|m| m.id == active && !m.is_novelty);
+        ModesFile { version: MODES_FILE_VERSION, active_mode_id: if active_ok { active } else { DEFAULT_MODE_ID.into() }, modes }
     }
 }
 
@@ -661,8 +866,11 @@ impl ModeStore {
         })
     }
 
-    /// The phone mirror's `mode` block (`/api/os/state`).
-    pub fn mirror(&self) -> Value {
+    /// The phone mirror's `mode` block (`/api/os/state`). `promptTail` is the exact MODE block
+    /// Tony's system message ends with (the gateway appends it verbatim); `switchboard` carries
+    /// the rule's inputs (`agents` / `tools`: the mode's overlay, `null` = none; `frozenAgents` /
+    /// `frozenTools`: the master switchboard), so a reader applies `agent_live` / `tool_live`.
+    pub fn mirror(&self, global: &SwitchboardConfig) -> Value {
         let e = self.effective();
         let list: Vec<Value> = self.file().modes.iter().map(|m| json!({ "id": m.id, "name": m.name, "icon": m.icon, "isNovelty": m.is_novelty })).collect();
         json!({
@@ -675,6 +883,14 @@ impl ModeStore {
             "feedbackLevel": e.feedback_level,
             "overridden": e.overridden,
             "list": list,
+            "nightTraining": e.night_training,
+            "promptTail": mode_block(&e),
+            "switchboard": {
+                "agents": e.switchboard.as_ref().map(|b| b.agents.clone()),
+                "tools": e.switchboard.as_ref().map(|b| b.tools.clone()),
+                "frozenAgents": global.frozen_agents,
+                "frozenTools": global.frozen_tools,
+            },
         })
     }
 }
@@ -742,9 +958,10 @@ pub fn install(app: &tauri::AppHandle) {
 pub fn resolve_work_mode(q: &str) -> Option<&'static str> {
     let q = q.trim().to_ascii_lowercase().replace(['/', '-', '_'], " ");
     let q = q.trim_end_matches(" mode").split_whitespace().collect::<Vec<_>>().join(" ");
-    const ALIASES: [(&str, &[&str]); 6] = [
+    const ALIASES: [(&str, &[&str]); 7] = [
         ("surface", &["surface", "solo", "surface solo"]),
         ("builder", &["builder", "build", "building"]),
+        ("operations", &["operations", "ops", "operation", "operational", "business operations"]),
         ("coach", &["coach", "coaching", "motivation", "motivational", "motivation coach", "motivational coach"]),
         ("brainstorm", &["brainstorm", "brainstorming"]),
         ("executive", &["executive", "exec", "strategy", "high level strategy"]),
@@ -756,7 +973,7 @@ pub fn resolve_work_mode(q: &str) -> Option<&'static str> {
 /// `tony.set_mode`: Tony switches its own work mode when the user asks in natural words ("act
 /// like my coach right now"). The same `switch_mode` + change event as the top-bar menu.
 pub fn set_mode_by_tool(os: &OsState, mode: &str) -> Result<String, String> {
-    let id = resolve_work_mode(mode).ok_or_else(|| format!("unknown mode \"{mode}\" — use surface, builder, coach, brainstorm, executive or learning"))?;
+    let id = resolve_work_mode(mode).ok_or_else(|| format!("unknown mode \"{mode}\" — use surface, builder, operations, coach, brainstorm, executive or learning"))?;
     let e = switch_mode(os, id)?;
     if let Some(app) = APP.get() {
         emit_changed(app, os);
@@ -767,8 +984,17 @@ pub fn set_mode_by_tool(os: &OsState, mode: &str) -> Result<String, String> {
 }
 
 fn emit_changed(app: &tauri::AppHandle, os: &OsState) {
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
     let _ = app.emit(MODE_CHANGED_EVENT, os.modes.view());
+    // A build the switchboard held (a pipeline agent frozen) resumes now, not on the next 15 s tick.
+    if let Some(ws) = app.try_state::<super::taskworker::WorkerState>() {
+        ws.notify.notify_one();
+    }
+    // The tools a turn can use follow the mode's switchboard: tell the webview, and start the
+    // servers that just became live so the first turn in the new mode doesn't wait on a cold start.
+    super::mcp::emit_tools_changed(app, "mode-changed");
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { super::mcp::warm_live(&app).await });
 }
 
 /// Tell the webview the mode changed (the phone inbox path).

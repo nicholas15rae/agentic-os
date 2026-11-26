@@ -2,7 +2,10 @@
 
 Run with: python3 tests/run_all.py  (or: python3 tests/test_v40.py)
 """
+import asyncio
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -133,6 +136,72 @@ class ChatUploadTests(unittest.TestCase):
             b"x",
         )
         self.assertEqual(status, 400)
+
+
+class ChatUploadOffTheEventLoop(unittest.TestCase):
+    """POST /api/chat/upload used to run the agent CLI (up to ~180 s) and its file writes on the
+    event loop that :8080 and :8443 share, stalling every gateway request. It now runs them on a
+    worker thread."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.h = Harness()
+        cls.h.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.h.stop()
+
+    def test_execute_agent_runs_on_a_worker_thread(self):
+        seen = {}
+
+        def fake_agent(agent, message):
+            seen["thread"] = threading.get_ident()
+            try:
+                asyncio.get_running_loop()
+                seen["loop"] = True
+            except RuntimeError:
+                seen["loop"] = False
+            seen["message"] = message
+            return "worker reply"
+
+        with mock.patch.object(server, "execute_agent", side_effect=fake_agent):
+            status, data = self.h.upload("/api/chat/upload", {"agent": "opencode", "message": "look"}, "a.txt", b"hello")
+        self.assertEqual(status, 200, data)
+        self.assertNotEqual(seen["thread"], self.h._server_thread.ident, "execute_agent ran on the event-loop thread")
+        self.assertFalse(seen["loop"], "execute_agent ran inside a running event loop")
+        self.assertEqual(seen["message"], "--- File: a.txt ---\nhello\n--- End a.txt ---\n\nlook")
+        # Response shape unchanged.
+        self.assertEqual(set(data), {"status", "response", "file", "saved_as"})
+        self.assertEqual((data["status"], data["file"]), ("ok", "a.txt"))
+        self.assertEqual(data["response"]["content"], "worker reply")
+        self.assertTrue(data["saved_as"].endswith("_a.txt"))
+
+    def test_other_requests_are_served_while_the_agent_runs(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow_agent(agent, message):
+            started.set()
+            release.wait(6)  # the CLI is "busy" until the test lets it go (or 6 s pass)
+            return "slow reply"
+
+        result = {}
+        with mock.patch.object(server, "execute_agent", side_effect=slow_agent):
+            t = threading.Thread(target=lambda: result.update(r=self.h.upload(
+                "/api/chat/upload", {"agent": "opencode", "message": ""}, "b.txt", b"x", timeout=20)))
+            t.start()
+            try:
+                self.assertTrue(started.wait(10), "the upload never reached execute_agent")
+                t0 = time.monotonic()
+                status, _ = self.h.api("GET", "/api/chat/history?limit=1", timeout=20)
+                elapsed = time.monotonic() - t0
+            finally:
+                release.set()
+                t.join(20)
+        self.assertEqual(status, 200)
+        self.assertLess(elapsed, 3.0, "the gateway stalled while the agent ran")
+        self.assertEqual(result["r"][0], 200, result["r"])
+        self.assertEqual(result["r"][1]["response"]["content"], "slow reply")
 
 
 class AgentNotInstalledTests(unittest.TestCase):

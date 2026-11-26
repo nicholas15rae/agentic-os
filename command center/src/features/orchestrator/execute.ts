@@ -24,7 +24,9 @@ export interface ExecutionResult {
  *                      only *claim* it acted, so it is never used to
  *                      "execute" a mutating action. Before sending, the
  *                      agent's health is checked so an uninstalled CLI never
- *                      shows a fake reply.
+ *                      shows a fake reply. The phone does exactly the same: a
+ *                      desktop inbox turn (`os_turn`) has no mutating tools,
+ *                      so an approved action is never queued for Tony there.
  */
 export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise<ExecutionResult> {
   const agent = SUB_AGENTS[plan.role];
@@ -56,7 +58,9 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
         vaultNote = ` · vault ${hits.results.length} (${hits.mode})`;
       }
     }
-    const { result } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate });
+    // The plan's route kind goes along as `routeFor` decided it: a phone turn it kept with Tony
+    // reaches the desktop as "Self" (never re-resolved); a plain no-match stays "Default".
+    const { result } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate, routeKind: plan.routeKind });
     return {
       text: result.content || "(no response)",
       meta: `${agent.label} · ${result.providerId}${result.fellBack ? " · fallback" : ""}${vaultNote} · ${result.latencyMs}ms`,

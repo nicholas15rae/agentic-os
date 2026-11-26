@@ -1,15 +1,15 @@
 /**
  * Deterministic fast path for Tony's work-mode switches (pure, unit-tested). Runs before any
  * model call, on typed AND spoken lines: "go into builder mode", "hey Tony, coaching mode",
- * "switch to exec mode and check the staging hub". Gabagool Mode (a toggle, not a work mode) stays
- * with the OS-intent parser.
+ * "switch to exec mode and check the staging hub", "ops mode". Gabagool Mode (a toggle, not a
+ * work mode) stays with the OS-intent parser.
  *
  * Only an explicit command matches: a switch verb + "<alias> mode" at the start of the line, or
  * the whole line being "<alias> mode" — so "what does builder mode do?" or "builder mode is
  * slow" never switch anything.
  */
 
-export type WorkModeId = "surface" | "builder" | "coach" | "brainstorm" | "executive" | "learning";
+export type WorkModeId = "surface" | "builder" | "operations" | "coach" | "brainstorm" | "executive" | "learning";
 
 /** Spoken / typed aliases → mode id (longest first when matching). */
 export const MODE_ALIASES: Readonly<Record<string, WorkModeId>> = {
@@ -20,6 +20,13 @@ export const MODE_ALIASES: Readonly<Record<string, WorkModeId>> = {
   builder: "builder",
   build: "builder",
   building: "builder",
+  // "ops" / "operations" are also Biz Ops / Ops routing names: they only switch with "mode"
+  // (every form below requires it), so "ops, check the invoices" still routes to an agent.
+  "business operations": "operations",
+  operations: "operations",
+  operational: "operations",
+  operation: "operations",
+  ops: "operations",
   "motivation coach": "coach",
   "motivational coach": "coach",
   coach: "coach",

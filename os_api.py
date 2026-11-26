@@ -29,12 +29,14 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from starlette.concurrency import run_in_threadpool
 
 import command_center_api as cc
+import gateway_tony
 
 play_router = APIRouter(prefix="/api/play-place", tags=["play-place"])
 pipeline_router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
@@ -69,7 +71,14 @@ def init() -> None:
 # Additive schema (claim/lease columns, task mirror). cc.db has no migration ladder, so each
 # change is a guarded ADD COLUMN / CREATE IF NOT EXISTS. Applied lazily on first use, once per
 # database file, so importing the gateway (the test suite does) never alters a live cc.db.
-_OS_QUEUE_COLUMNS = (("claimed_at", "REAL"), ("lease_until", "REAL"), ("claim_token", "TEXT"))
+# partial / partial_seq / partial_token: Tony's answer as streamed so far (POST /inbox/{id}/delta),
+# how many deltas were accepted, and the claim that streamed them. claimed_by: 'gateway' while
+# gateway Tony (gateway_tony.py) holds the item; NULL = the desktop, or a row from before it.
+_OS_QUEUE_COLUMNS = (
+    ("claimed_at", "REAL"), ("lease_until", "REAL"), ("claim_token", "TEXT"),
+    ("partial", "TEXT"), ("partial_seq", "INTEGER"), ("partial_token", "TEXT"),
+    ("claimed_by", "TEXT"),
+)
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
 
@@ -529,6 +538,8 @@ async def comms_ws(ws: WebSocket):
 # whose lease ran out is offered again. The desktop claims with POST /inbox/{id}/claim and
 # answers with POST /inbox/{id}/result {claim_token, ok, result|error}; an answer without a
 # claim_token still works, so a desktop build that predates claiming keeps functioning.
+# While a turn runs the desktop may stream Tony's answer (POST /inbox/{id}/delta); the phone
+# long-polls GET /inbox/{id}?wait=&after= for it, and the desktop long-polls GET /inbox?wait=.
 
 _QUEUE_KINDS = {"turn", "command", "pipeline", "playplace", "task"}
 QUEUE_STATUSES = ("pending", "running", "done", "error", "expired")
@@ -574,11 +585,21 @@ def _loads(raw: Optional[str], default: Any) -> Any:
         return default  # a row written by an older gateway that truncated mid-JSON
 
 
+_QUEUE_PRIVATE = {"claim_token", "partial_token"}  # tokens only ever go to the claimer
+_QUEUE_PARTIAL = {"partial", "partial_seq"}
+
+
 def _queue_row(r, *, with_result: bool) -> dict:
-    d = {k: r[k] for k in r.keys() if k != "claim_token"}  # the token only goes to the claimer
+    """One item as served. `with_result`: the phone's view of one item (GET /inbox/{id}): the
+    result plus the streamed answer so far as `partial` ("" if none) and `partialSeq` (0 if none).
+    Without it (the desktop's listing) neither is included."""
+    keys = r.keys()
+    d = {k: r[k] for k in keys if k not in _QUEUE_PRIVATE and k not in _QUEUE_PARTIAL}
     d["payload"] = _loads(r["payload"], {})
     if with_result:
         d["result"] = _loads(r["result"], None)
+        d["partial"] = (r["partial"] if "partial" in keys else None) or ""
+        d["partialSeq"] = int((r["partial_seq"] if "partial_seq" in keys else None) or 0)
     else:
         d.pop("result", None)
     return d
@@ -623,6 +644,8 @@ def _validate_command_payload(payload: dict) -> None:
 
 @inbox_router.post("/inbox")
 def inbox_post(data: dict = Body(...)):
+    """Queue an item. The answer carries desktopSeenAt / desktopBusy (the same values GET
+    /inbox/{id} reports), so the phone can tell at once that no desktop app is running."""
     _ensure_schema()
     kind = str(data.get("kind") or "turn")
     if kind not in _QUEUE_KINDS:
@@ -642,44 +665,264 @@ def inbox_post(data: dict = Body(...)):
     now = time.time()
     with cc._db_lock, cc.db() as c:
         c.execute("INSERT INTO os_queue(id,kind,payload,status,result,created,updated) VALUES(?,?,?,?,?,?,?)", (qid, kind, raw, "pending", None, now, now))
-    return {"id": qid, "status": "pending"}
+        # No desktop app working the inbox: gateway Tony claims the turn here, so it never reads as
+        # unclaimed (the answer says 'running' and desktopBusy, and the phone keeps waiting for Tony).
+        taken = gateway_tony.take_on_post(c, qid, kind, payload, now, absent=lambda: _desktop_absent_locked(c, now))
+        report = _desktop_report(c, now)
+    _notify_queue_change()  # a desktop waiting on GET /inbox?wait= picks it up now
+    if taken:
+        gateway_tony.kick(qid)
+        return {"id": qid, "status": "running", "claimedBy": "gateway", **report}
+    return {"id": qid, "status": "pending", **report}
 
 
-# When the desktop last polled the inbox. The phone uses it (with "another item is running") to
-# tell "the desktop is busy with an earlier turn" (keep waiting for Tony) from "no desktop app"
-# (fall back to the gateway's own agent). In memory: 0 until the first poll after a restart.
-_DESKTOP_SEEN: dict[str, float] = {"at": 0.0}
+# When the desktop last talked to the inbox (poll, claim or result: `at`) and last finished an item
+# (`resultAt`). The phone uses them (with "another item is running") to tell "the desktop is busy
+# with an earlier turn" (keep waiting for Tony) from "no desktop app" (fall back to the gateway's
+# own agent). In memory, so a restart forgets them.
+#
+# Restart grace: `at` never starts at 0. The phone counts the desktop alive while desktopBusy or
+# while desktopSeenAt is under 15 s old (dispatch.ts desktopAlive, checked on every poll once an
+# item has sat pending 12 s), so with 0 an item pending across a gateway restart was cancelled and
+# answered from the CLI just before the desktop's next poll claimed it. That poll can come late: the
+# desktop retries a down gateway every 15 s (pipeline.rs INBOX_DOWN) plus a refused connect (~2 s on
+# Windows), counted from when the gateway starts listening, seconds after this import (later
+# imports, NetBird lookup up to 5 s, trading-bridge probe, uvicorn start). The import time alone
+# would end the phone's 15 s window before that poll, so a desktop not heard from yet reads alive
+# for DESKTOP_RESTART_GRACE_SECS after the start: `at` = start + 15 s, a moment ahead. Harmless (the
+# phone only checks the age is under 15 s; the desktop's first call overwrites it). Cost: with no
+# desktop app at all, an item sent right after a restart falls back up to ~30 s after the start
+# instead of 12 s after it was sent. `resultAt` stays 0: a fresh start never claims "busy".
+GATEWAY_STARTED = time.time()
+DESKTOP_RESTART_GRACE_SECS = 30.0
+_PHONE_ALIVE_WINDOW_SECS = 15.0  # dispatch.ts desktopAlive: desktopSeenAt under 15 s old
+_DESKTOP_SEEN: dict[str, float] = {"at": GATEWAY_STARTED + DESKTOP_RESTART_GRACE_SECS - _PHONE_ALIVE_WINDOW_SECS, "resultAt": 0.0}
+# The desktop works through the inbox one item at a time and its next poll can be seconds after a
+# result, so an item queued behind a finished one still reads "desktop busy" for this long.
+DESKTOP_BUSY_GRACE_SECS = 10.0
+# A running item reads "desktop busy" only while the desktop running it is still there: seen in
+# the last DESKTOP_RUN_SEEN_SECS (or holding a GET /inbox?wait= open). Its lease alone (300 s for
+# a turn) would keep a crashed or closed desktop "busy" that long, and the phone would wait for an
+# answer that never comes instead of falling back. A working desktop renews its claim every 30 s
+# during a run (and every delta and result counts as seen), so 90 s is three renewals of slack.
+DESKTOP_RUN_SEEN_SECS = 90.0
+
+
+def _desktop_seen_at(now: float) -> float:
+    """While the desktop holds a GET /inbox?wait= open it is connected right now."""
+    return now if _desktop_list_waits > 0 else _DESKTOP_SEEN["at"]
+
+
+def _desktop_report(c, now: float) -> dict:
+    """desktopSeenAt / desktopBusy as POST /inbox and GET /inbox/{id} report them. Busy: an item
+    running under a live lease on a desktop seen in the last DESKTOP_RUN_SEEN_SECS, or one gateway
+    Tony is answering (its worker renews that lease itself, so a phone turn queued behind it keeps
+    waiting for Tony), or one just finished (the desktop's next poll is on the way)."""
+    seen_at = _desktop_seen_at(now)
+    desktop_recent = 1 if now - seen_at < DESKTOP_RUN_SEEN_SECS else 0
+    running = c.execute(
+        f"SELECT 1 FROM os_queue WHERE status='running' AND COALESCE(lease_until,0) > ? AND (? OR {gateway_tony.GATEWAY_ROW_SQL}) LIMIT 1",
+        (now, desktop_recent),
+    ).fetchone() is not None
+    return {"desktopSeenAt": seen_at, "desktopBusy": running or now - _DESKTOP_SEEN["resultAt"] < DESKTOP_BUSY_GRACE_SECS}
+
+
+def _desktop_absent_locked(c, now: float) -> bool:
+    """No desktop app is working the inbox, so gateway Tony may answer a phone turn. All of: no GET
+    /inbox?wait= open; the desktop not heard from for the phone's alive window less
+    gateway_tony.TAKEOVER_LEAD_SECS (the gateway claims a waiting turn just before the phone would
+    give up on it); nothing finished in the last DESKTOP_BUSY_GRACE_SECS; and no item running under
+    a live desktop lease on a desktop seen in the last DESKTOP_RUN_SEEN_SECS (gateway rows don't
+    count). The restart grace keeps the gateway out for its first ~28 s, as it keeps the phone waiting."""
+    if _desktop_list_waits > 0:
+        return False
+    seen = _DESKTOP_SEEN["at"]
+    if now - seen <= _PHONE_ALIVE_WINDOW_SECS - gateway_tony.TAKEOVER_LEAD_SECS:
+        return False
+    if now - _DESKTOP_SEEN["resultAt"] < DESKTOP_BUSY_GRACE_SECS:
+        return False
+    if now - seen >= DESKTOP_RUN_SEEN_SECS:
+        return True  # a lease left by a desktop gone this long is no desktop at all (_desktop_report agrees)
+    return c.execute(
+        f"SELECT 1 FROM os_queue WHERE status='running' AND COALESCE(lease_until,0) > ? AND NOT {gateway_tony.GATEWAY_ROW_SQL} LIMIT 1",
+        (now,),
+    ).fetchone() is None
+
+
+# ── Long-polls: GET /inbox?wait=W (the desktop) and GET /inbox/{id}?wait=W&after=S (the phone) ──
+#
+# A waiting request is an async route: it sleeps on the event loop (never in a worker thread, so
+# it can't starve the threadpool, and never under cc._db_lock) and re-checks the database with a
+# short threadpool call each time it wakes. Every route that changes os_queue wakes all waiters
+# right after its commit (_notify_queue_change); whatever changes with time alone (a lease or a
+# TTL running out) or behind the gateway's back is caught by the re-check every _WAIT_TICK_SECS.
+# A client that hangs up ends its wait at once.
+WAIT_MAX_SECS = 25.0
+_WAIT_TICK_SECS = 0.25
+_waiters_lock = threading.Lock()
+_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+_desktop_list_waits = 0  # open GET /inbox?wait= calls
+
+
+def _wait_secs(wait: float) -> float:
+    """The `wait` query parameter clamped to 0..WAIT_MAX_SECS (NaN and negatives: 0)."""
+    return min(float(wait), WAIT_MAX_SECS) if wait > 0 else 0.0
+
+
+def _count_list_wait(step: int) -> None:
+    global _desktop_list_waits
+    with _waiters_lock:
+        _desktop_list_waits += step
+
+
+def _notify_queue_change() -> None:
+    """Wake every open long-poll. Call after an os_queue write has committed; any thread."""
+    with _waiters_lock:
+        targets = list(_waiters)
+    for loop, ev in targets:
+        try:
+            loop.call_soon_threadsafe(ev.set)
+        except RuntimeError:  # that loop has closed
+            pass
+
+
+async def _long_wait(request: Request, secs: float, ready: Callable[[], bool]) -> bool:
+    """Wait until `ready()` (a short sync DB check, run in the threadpool) is true or `secs` have
+    passed. False when the client hung up meanwhile (its answer would go nowhere)."""
+    loop = asyncio.get_running_loop()
+    woken = asyncio.Event()
+    gone = asyncio.Event()
+    entry = (loop, woken)
+
+    async def watch_disconnect() -> None:
+        # request.is_disconnected() never sees a hang-up behind the BaseHTTPMiddleware stack; a
+        # pending receive() does (a GET's body message comes first, then only the disconnect).
+        try:
+            for _ in range(64):
+                if (await request.receive()).get("type") == "http.disconnect":
+                    gone.set()
+                    woken.set()
+                    return
+        except Exception:
+            return
+
+    watcher = asyncio.create_task(watch_disconnect())
+    with _waiters_lock:
+        _waiters.add(entry)
+    deadline = loop.time() + secs
+    try:
+        while True:
+            woken.clear()  # before the check: a change committed during it wakes the next wait
+            if gone.is_set():
+                return False
+            if await run_in_threadpool(ready):
+                return True
+            left = deadline - loop.time()
+            if left <= 0:
+                return True
+            try:
+                await asyncio.wait_for(woken.wait(), min(_WAIT_TICK_SECS, left))
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        with _waiters_lock:
+            _waiters.discard(entry)
+        watcher.cancel()
+
+
+async def _ensure_schema_async() -> None:
+    if str(cc.DB_PATH) not in _schema_ready:
+        await run_in_threadpool(_ensure_schema)
+
+
+_LISTABLE = "status='pending' OR (status='running' AND COALESCE(lease_until,0) <= ?)"
+
+
+def _list_items() -> list[dict]:
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        _sweep_expired(c, now)
+        rows = c.execute(f"SELECT * FROM os_queue WHERE {_LISTABLE} ORDER BY created LIMIT 10", (now,)).fetchall()
+    return [_queue_row(r, with_result=False) for r in rows]
+
+
+def _listable_probe() -> bool:
+    """Lock-free (WAL read): might GET /inbox list anything now?"""
+    with cc.db() as c:
+        return c.execute(f"SELECT 1 FROM os_queue WHERE {_LISTABLE} LIMIT 1", (time.time(),)).fetchone() is not None
 
 
 @inbox_router.get("/inbox")
-def inbox_pending():
+async def inbox_pending(request: Request, wait: float = 0.0):
     """The desktop app polls this: pending items plus running items whose lease ran out.
-    It claims each (POST /inbox/{id}/claim) and answers with POST /inbox/{id}/result."""
-    _ensure_schema()
-    now = time.time()
-    _DESKTOP_SEEN["at"] = now
-    with cc._db_lock, cc.db() as c:
-        _sweep_expired(c, now)
-        rows = c.execute(
-            "SELECT * FROM os_queue WHERE status='pending' OR (status='running' AND COALESCE(lease_until,0) <= ?) ORDER BY created LIMIT 10",
-            (now,),
-        ).fetchall()
-    return {"items": [_queue_row(r, with_result=False) for r in rows]}
+    It claims each (POST /inbox/{id}/claim) and answers with POST /inbox/{id}/result.
+
+    `wait` (0..25 s, default 0 = answer at once): with nothing listable, hold the request until
+    something is or `wait` passes. `waited` says how long it held (its presence tells the desktop
+    this gateway long-polls). While it is held the desktop counts as seen now."""
+    await _ensure_schema_async()
+    _DESKTOP_SEEN["at"] = time.time()
+    items = await run_in_threadpool(_list_items)
+    secs = _wait_secs(wait)
+    waited = 0.0
+    if not items and secs > 0:
+        found: list[dict] = []
+
+        def ready() -> bool:
+            if _listable_probe():
+                # Listed after a sweep: an item past its TTL turns `expired` and doesn't end the wait.
+                found[:] = _list_items()
+            return bool(found)
+
+        started = time.monotonic()
+        _count_list_wait(1)
+        try:
+            await _long_wait(request, secs, ready)
+        finally:
+            _count_list_wait(-1)
+            _DESKTOP_SEEN["at"] = time.time()  # connected until now
+        waited = time.monotonic() - started
+        items = found
+    return {"items": items, "waited": round(waited, 3)}
 
 
-@inbox_router.get("/inbox/{qid}")
-def inbox_get(qid: str):
-    _ensure_schema()
+def _item_view(qid: str) -> dict:
     now = time.time()
     with cc._db_lock, cc.db() as c:
         _sweep_expired(c, now)
         r = c.execute("SELECT * FROM os_queue WHERE id=?", (qid,)).fetchone()
-        busy = c.execute("SELECT 1 FROM os_queue WHERE status='running' AND COALESCE(lease_until,0) > ? LIMIT 1", (now,)).fetchone() is not None
+        report = _desktop_report(c, now)
     if not r:
         raise HTTPException(404, "Not found")
-    out = _queue_row(r, with_result=True)
-    out["desktopSeenAt"] = _DESKTOP_SEEN["at"]
-    out["desktopBusy"] = busy
+    return {**_queue_row(r, with_result=True), **report}
+
+
+def _item_moved(qid: str, status: str, after: int) -> bool:
+    """Lock-free (WAL read): should a long-poll on `qid` that began at `status` return now?"""
+    now = time.time()
+    with cc.db() as c:
+        r = c.execute("SELECT kind, status, created, lease_until, COALESCE(partial_seq,0) AS pseq FROM os_queue WHERE id=?", (qid,)).fetchone()
+    if r is None or r["status"] != status or r["status"] not in ("pending", "running") or r["pseq"] > after:
+        return True
+    # Past its TTL: the read that follows sweeps it to `expired`, a change the phone must see now.
+    lease_live = r["status"] == "running" and _num(r["lease_until"]) > now
+    return now - _num(r["created"], now) > _queue_ttl(r["kind"]) and not lease_live
+
+
+@inbox_router.get("/inbox/{qid}")
+async def inbox_get(qid: str, request: Request, wait: float = 0.0, after: int = -1):
+    """One item for the phone: status, result, the streamed answer so far (`partial`, `partialSeq`)
+    and desktopSeenAt / desktopBusy, all as of the moment it answers.
+
+    `wait` (0..25 s, default 0 = at once) holds the request until the item is finished, its status
+    changes (e.g. pending -> running), partialSeq exceeds `after` (default -1), or `wait` passes."""
+    await _ensure_schema_async()
+    out = await run_in_threadpool(_item_view, qid)
+    secs = _wait_secs(wait)
+    status = out["status"]
+    if secs > 0 and status in ("pending", "running") and out["partialSeq"] <= after:
+        if await _long_wait(request, secs, lambda: _item_moved(qid, status, after)):
+            out = await run_in_threadpool(_item_view, qid)
     return out
 
 
@@ -696,6 +939,7 @@ def inbox_claim(qid: str, data: Optional[dict] = Body(None)):
     token = data.get("claim_token")
     token = token if isinstance(token, str) and token else None
     now = time.time()
+    _DESKTOP_SEEN["at"] = now  # only the desktop claims; a lease renewal mid-turn counts too
     with cc._db_lock, cc.db() as c:
         _sweep_expired(c, now)
         r = c.execute("SELECT * FROM os_queue WHERE id=?", (qid,)).fetchone()
@@ -714,6 +958,7 @@ def inbox_claim(qid: str, data: Optional[dict] = Body(None)):
         )
         if not cur.rowcount:
             raise HTTPException(409, "claimed by someone else")
+    _notify_queue_change()  # the phone's long-poll sees pending -> running
     return {"id": qid, "kind": r["kind"], "payload": _loads(r["payload"], {}), "status": "running",
             "claim_token": new_token, "claimed_at": claimed_at, "lease_until": lease_until}
 
@@ -731,17 +976,129 @@ def inbox_result(qid: str, data: dict = Body(...)):
         ok = False
         raw = json.dumps({"ok": False, "error": f"desktop result too large ({len(raw)} bytes)"})
     now = time.time()
+    _DESKTOP_SEEN["at"] = now  # only the desktop answers
     with cc._db_lock, cc.db() as c:
         r = c.execute("SELECT status, claim_token FROM os_queue WHERE id=?", (qid,)).fetchone()
         if not r:
             raise HTTPException(404, "Not found")
         if isinstance(token, str) and token and r["claim_token"] and not hmac.compare_digest(token.encode(), str(r["claim_token"]).encode()):
             raise HTTPException(409, "claim superseded")
+        if r["status"] == "cancelled":
+            raise HTTPException(409, "cancelled")  # the phone took it back; it ran elsewhere
         c.execute(
             "UPDATE os_queue SET status=?, result=?, lease_until=NULL, updated=? WHERE id=?",
             ("done" if ok else "error", raw, now, qid),
         )
+    _DESKTOP_SEEN["resultAt"] = now
+    _notify_queue_change()
     return {"ok": True}
+
+
+PARTIAL_MAX_BYTES = 64 * 1024
+
+
+def _token_is(sent: Any, stored: Any) -> bool:
+    return isinstance(sent, str) and bool(sent) and bool(stored) and hmac.compare_digest(sent.encode(), str(stored).encode())
+
+
+def _append_partial(partial: str, text: str) -> tuple[str, bool]:
+    """`partial` + `text` within PARTIAL_MAX_BYTES of UTF-8; False when text was dropped. Past
+    the cap the text is cut at a character boundary, which leaves under 4 bytes of room; that
+    counts as full, so nothing after a cut is ever appended (the stored text has no gaps)."""
+    text = text.encode("utf-8", "replace").decode("utf-8")  # a lone surrogate can't be stored
+    room = PARTIAL_MAX_BYTES - len(partial.encode("utf-8"))
+    raw = text.encode("utf-8")
+    if not raw:
+        return partial, True
+    if room < 4:
+        return partial, False
+    if len(raw) <= room:
+        return partial + text, True
+    return partial + raw[:room].decode("utf-8", "ignore"), False
+
+
+@inbox_router.post("/inbox/{qid}/delta")
+def inbox_delta(qid: str, data: dict = Body(...)):
+    """Tony's answer while it is being written, so the phone can show and speak it early:
+    {claim_token, seq, text}. Only the current claim of a `running` item streams (409 otherwise,
+    404 unknown). `seq` counts from 1: seq == partialSeq + 1 appends `text`; seq <= partialSeq is
+    a 200 no-op (a retry is safe); a gap is 409. The stored text is capped at PARTIAL_MAX_BYTES:
+    past it a delta is still accepted (its seq counts) but its text is dropped. A later claim of
+    an item an earlier claim already streamed into gets 409 (the phone never sees two attempts
+    spliced together); its /result still lands. The final /result stays the authoritative answer."""
+    _ensure_schema()
+    now = time.time()
+    _DESKTOP_SEEN["at"] = now  # only the desktop streams
+    token, seq, text = data.get("claim_token"), data.get("seq"), data.get("text")
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+        raise HTTPException(400, "seq must be an integer from 1")
+    text = "" if text is None else text
+    if not isinstance(text, str):
+        raise HTTPException(400, "text must be a string")
+    with cc._db_lock, cc.db() as c:
+        r = c.execute("SELECT status, claim_token, partial, partial_seq, partial_token FROM os_queue WHERE id=?", (qid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Not found")
+        if r["status"] != "running":
+            raise HTTPException(409, f"not running (status {r['status']})")
+        if not _token_is(token, r["claim_token"]):
+            raise HTTPException(409, "not the current claim")
+        have = int(r["partial_seq"] or 0)
+        if have and r["partial_token"] != token:
+            raise HTTPException(409, "an earlier claim streamed this item")
+        if seq <= have:
+            return {"ok": True, "partialSeq": have, "duplicate": True}
+        if seq != have + 1:
+            raise HTTPException(409, f"expected seq {have + 1}")
+        partial, kept = _append_partial(r["partial"] or "", text)
+        c.execute(
+            "UPDATE os_queue SET partial=?, partial_seq=?, partial_token=?, updated=? WHERE id=?",
+            (partial, seq, token, now, qid),
+        )
+    _notify_queue_change()  # the phone's long-poll returns with the new text
+    return {"ok": True, "partialSeq": seq, **({} if kept else {"truncated": True})}
+
+
+CANCELLED_ERROR = "cancelled before the desktop picked it up"
+
+
+@inbox_router.post("/inbox/{qid}/cancel")
+def inbox_cancel(qid: str):
+    """The phone takes back an item no desktop picked up, before it runs that turn anywhere else
+    (so a desktop that starts later never runs it a second time). Atomic: only a `pending` item
+    (never claimed) becomes `cancelled` (terminal: never offered by GET /inbox, never claimable).
+    A claimed one is refused even after its lease ran out: a lapsed lease doesn't prove the
+    desktop stopped, and its late result would then contradict the cancel. 409 when claimed,
+    finished or expired; 404 when unknown. Cancelling twice is not an error.
+
+    No CLI while gateway Tony runs: the phone cancels only to answer the turn on the CLI, so while
+    gateway Tony is enabled and started a pending chat turn it may answer (gateway_tony.eligible: not
+    a capture) is claimed for gateway Tony in this transaction instead (busy or not: it waits for
+    the one worker, in order), and the answer is 409, so the phone keeps waiting for Tony. With
+    gateway Tony off or not started, or for any other item, a cancel is a cancel."""
+    _ensure_schema()
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        _sweep_expired(c, now)
+        r = c.execute("SELECT status, kind, payload FROM os_queue WHERE id=?", (qid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Not found")
+        if r["status"] == "cancelled":
+            return {"id": qid, "status": "cancelled"}
+        taken = r["status"] == "pending" and gateway_tony.take_on_cancel(c, qid, r["kind"], _loads(r["payload"], None), now)
+        if not taken:
+            cur = c.execute(
+                "UPDATE os_queue SET status='cancelled', result=?, lease_until=NULL, updated=? "
+                "WHERE id=? AND status='pending'",
+                (json.dumps({"ok": False, "error": CANCELLED_ERROR}), now, qid),
+            )
+            if not cur.rowcount:
+                raise HTTPException(409, f"not cancellable (status {r['status']})")
+    _notify_queue_change()
+    if taken:  # outside the transaction, so the claim is committed
+        gateway_tony.kick(qid)
+        raise HTTPException(409, "taken by gateway Tony")
+    return {"id": qid, "status": "cancelled"}
 
 
 # ── Task mirror (desktop TaskEnvelopes → phone status on demand) ────────────
@@ -909,12 +1266,31 @@ class _RedactSpotifyCode(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_RedactSpotifyCode())
 
 
+# ── Gateway Tony's hand-over (gateway_tony.py runs the worker; server.py's lifespan starts it) ──
+
+def _desktop_absent_now() -> bool:
+    _ensure_schema()
+    with cc.db() as c:  # lock-free WAL read
+        return _desktop_absent_locked(c, time.time())
+
+
+def _configure_gateway_tony() -> None:
+    """The worker wakes the phone's long-polls after its writes and asks this module whether a
+    desktop is here; it never touches _DESKTOP_SEEN."""
+    gateway_tony.configure(notify=_notify_queue_change, absent=_desktop_absent_now, ensure_schema=_ensure_schema)
+
+
+_configure_gateway_tony()
+
+
 # ── Local model library (D:\ drive scan → LM Studio / Bionic) ───────────────
 
 models_router = APIRouter(prefix="/api/models", tags=["models"])
 
 MODEL_DIRS = [r"D:\AI Models Productivity", r"D:\AI Models Media and Vision", r"D:\ai model voices"]
-LMSTUDIO_DIR = Path(r"D:\LM Studio")  # Bionic's downloadsFolder
+# Bionic's downloadsFolder (moved to C: 2026-11-25; the D: models are junctioned in under local-d
+# and lmstudio-community).
+LMSTUDIO_DIR = Path(r"C:\Users\nicho\.lmstudio\models")
 LINK_PUBLISHER = "local-d"
 _WEIGHT_EXT = {".gguf": "gguf", ".safetensors": "safetensors", ".bin": "pytorch-bin", ".pth": "pytorch", ".pt": "pytorch", ".onnx": "onnx", ".ckpt": "checkpoint", ".msgpack": "flax", ".h5": "tensorflow", ".npz": "numpy", ".tflite": "tflite"}
 
@@ -985,8 +1361,8 @@ def local_scan():
 
 @models_router.post("/sync-lmstudio")
 def sync_lmstudio():
-    """Link every GGUF folder from the D:\ model dirs into Bionic's library
-    (D:\LM Studio\local-d\<folder>) with a directory junction — no copying."""
+    r"""Link every GGUF folder from the D:\ model dirs into Bionic's library
+    (LMSTUDIO_DIR\local-d\<folder>) with a directory junction — no copying."""
     import subprocess
     linked, skipped, errors = [], [], []
     target_root = LMSTUDIO_DIR / LINK_PUBLISHER

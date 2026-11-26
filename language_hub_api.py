@@ -38,6 +38,7 @@ from typing import Any, Iterator, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 
 BASE_DIR = Path(__file__).parent.resolve()
 DB_PATH = Path(os.environ["LANG_HUB_DB"]).expanduser().resolve() if os.environ.get("LANG_HUB_DB") else BASE_DIR / "data" / "language-hub" / "library.db"
@@ -416,6 +417,14 @@ async def stt(request: Request, lang: str = Query("auto")):
     audio = await request.body()
     if len(audio) < 1024 or len(audio) > MAX_AUDIO:
         raise HTTPException(400, "audio too short or too long")
+    # Whisper (up to 180 s) and a cold sidecar start (up to 90 s of polling) block: run them on a
+    # worker thread. On the event loop they stalled every other gateway request (:8080 and :8443
+    # share one loop), the phone's inbox polls included.
+    return await run_in_threadpool(_transcribe, audio, lang)
+
+
+def _transcribe(audio: bytes, lang: str) -> dict:
+    """The blocking half of POST /stt: pick the Whisper endpoint and transcribe `audio`."""
     if lang == "en":
         p = _stt_main()
         base, model, engine = p["baseUrl"], p.get("model") or "whisper-1", "whisper"

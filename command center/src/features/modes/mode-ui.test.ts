@@ -15,10 +15,14 @@ import {
   modifierCount,
   newModeDraft,
   panelLayout,
+  switchboardSummary,
   switcherModes,
+  toggleOverlayItem,
   ttsToFeedback,
   uniqueModeId,
   validateModeDraft,
+  validateSwitchboard,
+  withOverlay,
 } from "./mode-ui";
 
 const preset = (id: string) => PRESET_MODES.find((m) => m.id === id)!;
@@ -42,7 +46,7 @@ describe("mode-ui", () => {
       ["auto_dispatch", "Auto", "alert"],
     ]);
     expect(DISPATCH_OPTS[2].hint).toContain("emails/messages/calendar still ask");
-    expect(MODE_ICON_NAMES).toEqual(["message-circle", "lightbulb", "hammer", "briefcase", "flame", "graduation-cap", "sparkles"]);
+    expect(MODE_ICON_NAMES).toEqual(["message-circle", "lightbulb", "hammer", "clipboard-list", "briefcase", "flame", "graduation-cap", "sparkles"]);
   });
 
   it("effectiveMode applies the dial overrides and leaves the mode's identity and rules alone", () => {
@@ -67,7 +71,7 @@ describe("mode-ui", () => {
 
   it("switcherModes never puts the novelty in the work group", () => {
     const { work, novelty } = switcherModes([...PRESET_MODES, custom()]);
-    expect(work.map((m) => m.id)).toEqual(["surface", "brainstorm", "builder", "executive", "coach", "learning", "focus"]);
+    expect(work.map((m) => m.id)).toEqual(["surface", "brainstorm", "builder", "operations", "executive", "coach", "learning", "focus"]);
     expect(novelty.map((m) => m.id)).toEqual(["gabagool"]);
     expect(work.some((m) => m.is_novelty)).toBe(false);
   });
@@ -139,5 +143,46 @@ describe("mode-ui", () => {
     expect(panelLayout({ w: 4, h: 2 }).grid).toBe("row");
     expect(panelLayout({ w: 6, h: 3 })).toEqual({ grid: "cols-3", iconsOnly: false, dials: true, footer: false });
     expect(panelLayout({ w: 3, h: 4 }).footer).toBe(true);
+  });
+});
+
+describe("switchboard overlay editing (custom modes)", () => {
+  it("withOverlay starts from everything (no Tony, no always-live server, Rust caps), or clears to none", () => {
+    const m = custom();
+    const on = withOverlay(m, true, { agents: ["general", "coder", "ops"], tools: ["time", "git"] });
+    expect(on.switchboard).toEqual({ agents: ["coder", "ops"], tools: ["git"] });
+    const many = withOverlay(m, true, { agents: [], tools: Array.from({ length: 20 }, (_, i) => `s${i}`) });
+    expect(many.switchboard!.tools).toHaveLength(16);
+    expect(validateModeDraft(many)).toBeNull();
+    expect(withOverlay(on, false, { agents: [], tools: [] }).switchboard).toBeNull();
+    expect(m.switchboard).toBeUndefined();
+  });
+
+  it("toggleOverlayItem flips one agent or tool, never touching the source", () => {
+    const m = custom({ switchboard: { agents: ["coder"], tools: ["git"] } });
+    expect(toggleOverlayItem(m, "agents", "coder").switchboard).toEqual({ agents: [], tools: ["git"] });
+    expect(toggleOverlayItem(m, "tools", "fetch").switchboard).toEqual({ agents: ["coder"], tools: ["git", "fetch"] });
+    expect(m.switchboard).toEqual({ agents: ["coder"], tools: ["git"] });
+    expect(toggleOverlayItem(custom(), "agents", "coder")).toEqual(custom());
+  });
+
+  it("duplicating a preset keeps its switchboard; a new mode has none", () => {
+    expect(duplicateMode(PRESET_MODES, preset("operations")).switchboard).toEqual(preset("operations").switchboard);
+    expect(newModeDraft(PRESET_MODES).switchboard ?? null).toBeNull();
+    expect(switchboardSummary(preset("operations"))).toBe("2 agents · 9 tools on duty; the rest are frozen");
+    expect(switchboardSummary(custom({ switchboard: { agents: ["coder"], tools: [] } }))).toBe("1 agent · 0 tools on duty; the rest are frozen");
+  });
+});
+
+describe("validateSwitchboard (mirrors modes::validate_mode)", () => {
+  it("caps each list at 16, refuses Tony, bad ids and banned words", () => {
+    expect(validateSwitchboard(null)).toBeNull();
+    expect(validateSwitchboard({ agents: ["coder"], tools: ["git", "brave-search"] })).toBeNull();
+    expect(validateSwitchboard({ agents: Array.from({ length: 17 }, (_, i) => `a${i}`), tools: [] })).toMatch(/at most 16/);
+    expect(validateSwitchboard({ agents: ["tony"], tools: [] })).toMatch(/never Tony/);
+    expect(validateSwitchboard({ agents: ["Coder!"], tools: [] })).toMatch(/sub-agent id/);
+    expect(validateSwitchboard({ agents: ["gabagool"], tools: [] })).toMatch(/sub-agent id/);
+    expect(validateSwitchboard({ agents: [], tools: ["bad id"] })).toMatch(/MCP server id/);
+    expect(validateModeDraft(custom({ switchboard: { agents: ["general"], tools: [] } }))).toMatch(/never Tony/);
   });
 });

@@ -159,6 +159,18 @@ describe("offerTarget (U5)", () => {
     expect(offerTarget({ buildShaped: false, userText: "should I call my mom tonight", cfg, osName: "Tony" })).toBeNull();
     expect(offerTarget({ buildShaped: false, topicRole: "general", userText: "", cfg, osName: "Tony" })).toBeNull();
   });
+  // Regression: the brainstorm was said TO Tony, so a self address ("…, tony") made the router
+  // answer "Self" and the offer had no agent (Tony's name beats a topic in `resolve`).
+  it("a brainstorm addressed to Tony still offers its topic's agent", () => {
+    const userText = ["I've been thinking about a warmer color palette for the landing page, tony", "maybe more orange", "ok let's do it, tony"].join("\n");
+    expect(resolve(userText, cfg, "Tony")).toMatchObject({ role: "general", kind: "Self" }); // the router alone: Tony's
+    expect(offerTarget({ buildShaped: false, userText, cfg, osName: "Tony" })).toEqual({ kind: "agent", role: "designer" });
+    expect(offerTarget({ buildShaped: false, userText: "hey tony, what if we redid the color palette", cfg, osName: "Tony" })).toEqual({ kind: "agent", role: "designer" });
+    // A renamed OS too.
+    expect(offerTarget({ buildShaped: false, userText: "friday, what if we redid the color palette", cfg, osName: "Friday" })).toEqual({ kind: "agent", role: "designer" });
+    // Still null with no topic, addressed or not.
+    expect(offerTarget({ buildShaped: false, userText: "what do you think, tony", cfg, osName: "Tony" })).toBeNull();
+  });
 });
 
 describe("dialogue-store sessions", () => {

@@ -3,10 +3,15 @@
 Runs against a temp library.db (DB_PATH redirected), never data/language-hub.
 Run with: python tests/test_language_hub.py
 """
+import asyncio
+import json
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -193,6 +198,139 @@ class LanguageHubApi(unittest.TestCase):
         self.assertIsNone(lh.pick_ml_model(self.tmp))
         (self.tmp / "ggml-small.bin").write_bytes(b"x")
         self.assertEqual(lh.pick_ml_model(self.tmp).name, "ggml-small.bin")
+
+
+class SlowWhisper:
+    """A stdlib stand-in for whisper-server: /v1/audio/transcriptions answers after `delay` s."""
+
+    def __init__(self, delay=0.0, reply=None):
+        self.delay, self.reply, self.hits = delay, reply or {"text": " Ciao a tutti ", "language": "it"}, 0
+        stub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                stub.hits += 1
+                time.sleep(stub.delay)
+                raw = json.dumps(stub.reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}/v1"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+async def asgi(app, method, path, body=b""):
+    """One request straight into the ASGI app on the CURRENT event loop (TestClient gives each
+    request its own loop, so it can't show one request stalling another). -> (status, json)."""
+    route, _, qs = path.partition("?")
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
+        "path": route, "raw_path": route.encode(), "query_string": qs.encode(), "root_path": "",
+        "headers": [(b"host", b"gw"), (b"content-length", str(len(body)).encode())],
+        "client": ("127.0.0.1", 50000), "server": ("gw", 80),
+    }
+    delivered, status, chunks = False, None, []
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(msg):
+        nonlocal status
+        if msg["type"] == "http.response.start":
+            status = msg["status"]
+        elif msg["type"] == "http.response.body":
+            chunks.append(msg.get("body", b""))
+
+    await app(scope, receive, send)
+    return status, json.loads(b"".join(chunks) or b"null")
+
+
+class SttOffTheEventLoop(unittest.TestCase):
+    """POST /stt used to call urlopen (and the sidecar's start-up wait) on the event loop, which
+    stalled every gateway request while Whisper ran. It now runs them on a worker thread."""
+
+    def setUp(self):
+        self.app = FastAPI()
+        self.app.include_router(lh.router)
+
+        @self.app.get("/ping")
+        async def ping():
+            return {"ok": True}
+
+        self._saved = {k: getattr(lh, k) for k in ("_stt_main", "ensure_sidecar")}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(lh, k, v)
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_other_requests_are_served_while_whisper_runs(self):
+        whisper = SlowWhisper(delay=1.5)
+        lh._stt_main = lambda: {"baseUrl": whisper.base, "model": "base.en"}
+        try:
+            async def scenario():
+                t0 = time.monotonic()
+                stt = asyncio.create_task(asgi(self.app, "POST", "/api/cc/lang/stt?lang=en", b"x" * 2048))
+                await asyncio.sleep(0.3)  # Whisper is now busy
+                ping = await asgi(self.app, "GET", "/ping")
+                ping_at = time.monotonic() - t0
+                r = await stt
+                return r, ping, ping_at, time.monotonic() - t0
+
+            (status, data), ping, ping_at, total = self._run(scenario())
+        finally:
+            whisper.close()
+        self.assertEqual(ping, (200, {"ok": True}))
+        self.assertGreaterEqual(total, 1.4)
+        self.assertLess(ping_at, 1.0, "the event loop was blocked by the Whisper call")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data, {"text": "Ciao a tutti", "language": "it", "engine": "whisper"})
+
+    def test_sidecar_start_and_whisper_call_run_on_a_worker_thread(self):
+        whisper = SlowWhisper(reply={"text": "[BLANK_AUDIO]"})
+        seen = {}
+
+        def fake_sidecar():
+            seen["sidecar"] = threading.get_ident()
+            return whisper.base
+
+        lh.ensure_sidecar = fake_sidecar
+        try:
+            async def scenario():
+                seen["loop"] = threading.get_ident()
+                return await asgi(self.app, "POST", "/api/cc/lang/stt?lang=auto", b"x" * 2048)
+
+            status, data = self._run(scenario())
+        finally:
+            whisper.close()
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data, {"text": "", "language": None, "engine": "whisper-multilingual"})
+        self.assertNotEqual(seen["sidecar"], seen["loop"])
+        self.assertEqual(whisper.hits, 1)
+
+    def test_whisper_errors_still_map_to_502(self):
+        lh._stt_main = lambda: {"baseUrl": "http://127.0.0.1:1/v1"}
+        r = TestClient(self.app).post("/api/cc/lang/stt?lang=en", content=b"x" * 2048)
+        self.assertEqual(r.status_code, 502, r.text)
+        self.assertIn("Whisper unavailable", r.json()["detail"])
 
 
 if __name__ == "__main__":

@@ -73,7 +73,7 @@ describe("ModeStripView (phone HUD)", () => {
   it("work chips only, teal when active, in a Tony mode radiogroup", () => {
     const html = strip();
     expect(html).toContain('role="radiogroup" aria-label="Tony mode"');
-    expect((html.match(/role="radio" aria-checked="(true|false)" aria-label="[^"]+"/g) ?? []).length).toBe(6);
+    expect((html.match(/role="radio" aria-checked="(true|false)" aria-label="[^"]+"/g) ?? []).length).toBe(7);
     expect(html).toMatch(/aria-checked="true" aria-label="Executive"[^>]*border-teal\/60 bg-teal\/15/);
     expect(html).not.toContain("Gabagool");
     expect(html).toMatch(/aria-label="Tony mode curiosity"[^]*?aria-checked="true"[^>]*>Low</);

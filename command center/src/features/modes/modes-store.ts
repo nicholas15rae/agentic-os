@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import { useOs } from "@/features/os/os-store";
+import { isDesktopApp } from "@/stores/settings";
 import type { FeedbackLevel } from "@/lib/platform";
-import { DEFAULT_EFFECTIVE, DEFAULT_MODE_ID, NOVELTY_MODE_ID, PRESET_MODES, BUILTIN_MODE_IDS, viewFromMirror, type Curiosity, type DispatchPolicy, type EffectiveMode, type ModeMirror, type ModeOverrides, type ModesView, type TonyMode, type Verbosity } from "./modes";
+import { osSwitchboard } from "@/features/os/switchboard";
+import { DEFAULT_EFFECTIVE, DEFAULT_MODE_ID, NOVELTY_MODE_ID, PRESET_MODES, BUILTIN_MODE_IDS, agentLive, toolLive, viewFromMirror, type Curiosity, type DispatchPolicy, type EffectiveMode, type ModeMirror, type ModeOverrides, type ModesView, type SwitchboardFreeze, type TonyMode, type Verbosity } from "./modes";
 
 /**
  * Tony's modes in the webview (Phase 2 Part C). Not persisted here: Rust owns modes.json and the
@@ -24,6 +26,10 @@ interface ModesState {
   effective: EffectiveMode;
   overrides: ModeOverrides;
   builtinIds: string[];
+  /** Phone: the master switchboard's freezes from the mirror (desktop: null, read os.json). */
+  frozen: { agents: string[]; tools: string[] } | null;
+  /** Phone: Rust's exact MODE block from the mirror (desktop: null). */
+  promptTail: string | null;
   loaded: boolean;
   error: string | null;
   load: () => Promise<void>;
@@ -66,15 +72,16 @@ export function syncFeedbackLevel(level: number): void {
 
 export const useModes = create<ModesState>((set, get) => {
   const apply = (v: ModesView) => {
-    set({ modes: v.modes, activeId: v.active_mode_id, effective: v.effective, overrides: v.overrides ?? {}, builtinIds: v.builtin_ids, loaded: true, error: null });
+    set({ modes: v.modes, activeId: v.active_mode_id, effective: v.effective, overrides: v.overrides ?? {}, builtinIds: v.builtin_ids, frozen: v.frozen ?? null, promptTail: v.prompt_tail ?? null, loaded: true, error: null });
     if (typeof v.effective?.feedback_level === "number") syncFeedbackLevel(v.effective.feedback_level);
   };
 
   /** Desktop: a command returning the new view. Phone: an inbox command, then a re-read. */
   const write = async (desktop: () => Promise<ModesView>, phone: Record<string, unknown> | null) => {
     try {
-      const p = await platform();
-      if (p.isTauri()) apply(await desktop());
+      // The Android app is Tauri too, but its Rust modes are the phone's own: it drives the desktop's
+      // Tony through the inbox like the PWA.
+      if (isDesktopApp()) apply(await desktop());
       else if (phone) {
         await phoneCommand(phone);
         setTimeout(() => void get().load(), 4000);
@@ -91,13 +98,15 @@ export const useModes = create<ModesState>((set, get) => {
     effective: DEFAULT_EFFECTIVE,
     overrides: {},
     builtinIds: [...BUILTIN_MODE_IDS],
+    frozen: null,
+    promptTail: null,
     loaded: false,
     error: null,
 
     load: async () => {
       try {
         const p = await platform();
-        if (p.isTauri()) {
+        if (isDesktopApp()) {
           if (!listening) {
             listening = true;
             void p.onNativeEvent<ModesView>("tony-mode-changed", (v) => v && apply(v)).catch(() => (listening = false));
@@ -176,10 +185,27 @@ function watchPhoneMode(reload: () => void): void {
   });
 }
 
+/**
+ * The master switchboard's freezes this turn: the phone mirror's when it carries them, else the
+ * desktop's os.json (`useOs.cfg.switchboard`). Nothing frozen before either has loaded.
+ */
+export function currentFreeze(): SwitchboardFreeze {
+  const f = useModes.getState().frozen;
+  if (f) return { frozenAgents: f.agents, frozenTools: f.tools };
+  const s = osSwitchboard(useOs.getState().cfg);
+  return { frozenAgents: s.frozenAgents, frozenTools: s.frozenTools };
+}
+
+/** Is `agent` live this turn (the active mode's overlay + the master switchboard)? */
+export const isAgentLiveNow = (agent: string, osName = ""): boolean => agentLive(useModes.getState().effective, agent, currentFreeze(), osName);
+
+/** Is the tool server `server` live this turn? */
+export const isToolLiveNow = (server: string): boolean => toolLive(useModes.getState().effective, server, currentFreeze());
+
 /** Tests only: back to the presets, not loaded. */
 export function resetModesForTests(): void {
   clearInterval(phoneRefresh);
   phoneRefresh = undefined;
   listening = false;
-  useModes.setState({ modes: [...PRESET_MODES], activeId: DEFAULT_MODE_ID, effective: DEFAULT_EFFECTIVE, overrides: {}, builtinIds: [...BUILTIN_MODE_IDS], loaded: false, error: null });
+  useModes.setState({ modes: [...PRESET_MODES], activeId: DEFAULT_MODE_ID, effective: DEFAULT_EFFECTIVE, overrides: {}, builtinIds: [...BUILTIN_MODE_IDS], frozen: null, promptTail: null, loaded: false, error: null });
 }

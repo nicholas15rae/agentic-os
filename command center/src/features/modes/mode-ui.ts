@@ -6,11 +6,11 @@
  * snake_case (`modes.ts`). Validation mirrors `modes::validate_mode` so a bad draft is caught on
  * blur before Rust refuses it.
  */
-import { MODIFIER_MAX, NOVELTY_MODE_ID, PRESET_MODES, effectiveOf, feedbackFor, isBuiltinMode, type Curiosity, type DispatchPolicy, type EffectiveMode, type ModeOverrides, type TonyMode, type TtsInterrupt, type Verbosity } from "./modes";
+import { MODIFIER_MAX, NOVELTY_MODE_ID, PRESET_MODES, SWITCHBOARD_LIST_MAX, canonAgent, effectiveOf, feedbackFor, isAlwaysLiveServer, isBuiltinMode, type Curiosity, type DispatchPolicy, type EffectiveMode, type ModeOverrides, type TonyMode, type TtsInterrupt, type Verbosity } from "./modes";
 import type { SegmentOption } from "@/components/segmented";
 
 /** The icon names the pickers offer (lucide). Anything else (an emoji) renders as text. */
-export const MODE_ICON_NAMES = ["message-circle", "lightbulb", "hammer", "briefcase", "flame", "graduation-cap", "sparkles"] as const;
+export const MODE_ICON_NAMES = ["message-circle", "lightbulb", "hammer", "clipboard-list", "briefcase", "flame", "graduation-cap", "sparkles"] as const;
 export type ModeIconName = (typeof MODE_ICON_NAMES)[number];
 export const isModeIconName = (s: string): s is ModeIconName => (MODE_ICON_NAMES as readonly string[]).includes(s);
 
@@ -126,7 +126,7 @@ export function bannedWord(s: string): string | null {
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 /** The UI's copy of `modes::validate_mode` for a draft (null = OK). */
-export function validateModeDraft(m: Pick<TonyMode, "name" | "prompt_modifier"> & Partial<Pick<TonyMode, "icon" | "is_novelty">>): string | null {
+export function validateModeDraft(m: Pick<TonyMode, "name" | "prompt_modifier"> & Partial<Pick<TonyMode, "icon" | "is_novelty" | "switchboard">>): string | null {
   const name = m.name.trim();
   if (chars(name) === 0 || chars(name) > NAME_MAX || CONTROL.test(name)) return `Name: 1–${NAME_MAX} characters`;
   if (m.icon !== undefined) {
@@ -144,7 +144,51 @@ export function validateModeDraft(m: Pick<TonyMode, "name" | "prompt_modifier"> 
       if (w) return `${what} can't contain “${w}” (it would change how Tony's prompt is handled)`;
     }
   }
+  return validateSwitchboard(m.switchboard);
+}
+
+const AGENT_ID = /^[a-z][a-z0-9_-]{0,31}$/;
+const SERVER_ID = /^[A-Za-z0-9_-]{1,48}$/;
+
+/** The UI's copy of the switchboard part of `modes::validate_mode` (null = OK). */
+export function validateSwitchboard(sb: TonyMode["switchboard"]): string | null {
+  if (!sb) return null;
+  if (sb.agents.length > SWITCHBOARD_LIST_MAX || sb.tools.length > SWITCHBOARD_LIST_MAX) return `Switchboard: at most ${SWITCHBOARD_LIST_MAX} agents and ${SWITCHBOARD_LIST_MAX} tools`;
+  const agent = sb.agents.find((a) => !AGENT_ID.test(a) || canonAgent(a) === "general" || bannedWord(a));
+  if (agent !== undefined) return `Switchboard agent “${agent}”: a sub-agent id, never Tony`;
+  const tool = sb.tools.find((t) => !SERVER_ID.test(t));
+  if (tool !== undefined) return `Switchboard tool “${tool}”: an MCP server id`;
   return null;
+}
+
+// ── Switchboard overlay editing (custom modes only; presets are re-seeded by Rust) ─────────
+
+/** Turn a custom mode's overlay on (starting from `all`, so nothing changes until an item is
+ * unticked; the always-live servers need no entry; each list capped like Rust's) or off (`null`:
+ * no overlay, everything live). */
+export function withOverlay(m: TonyMode, on: boolean, all: { agents: readonly string[]; tools: readonly string[] }): TonyMode {
+  if (!on) return { ...m, switchboard: null };
+  const agents = all.agents.filter((a) => canonAgent(a) !== "general").slice(0, SWITCHBOARD_LIST_MAX);
+  const tools = all.tools.filter((t) => !isAlwaysLiveServer(t)).slice(0, SWITCHBOARD_LIST_MAX);
+  return { ...m, switchboard: { agents, tools } };
+}
+
+/** Flip one agent or tool server in a custom mode's overlay (no overlay: unchanged). */
+export function toggleOverlayItem(m: TonyMode, kind: "agents" | "tools", id: string): TonyMode {
+  const sb = m.switchboard;
+  if (!sb) return m;
+  const list = sb[kind];
+  const next = list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+  return { ...m, switchboard: { ...sb, [kind]: next } };
+}
+
+/** "3 agents · 8 tools on duty" / "everything live" for a mode row. */
+export function switchboardSummary(m: Pick<TonyMode, "switchboard">): string {
+  const sb = m.switchboard;
+  if (!sb) return "No switchboard: every agent and tool stays live";
+  const n = (k: number, one: string) => `${k} ${one}${k === 1 ? "" : "s"}`;
+  if (sb.agents.length === 0 && sb.tools.length === 0) return "Tony only: no sub-agents, only the always-live tools";
+  return `${n(sb.agents.length, "agent")} · ${n(sb.tools.length, "tool")} on duty; the rest are frozen`;
 }
 
 /** "3/280" for the behaviour-rules counter. */

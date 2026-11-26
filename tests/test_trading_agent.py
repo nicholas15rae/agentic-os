@@ -324,5 +324,82 @@ class GatewayDeadlockTests(unittest.TestCase):
         self.assertEqual(bad, [], "use await asyncio.to_thread(...) in async routes")
 
 
+class AgentThinkReasoningTests(unittest.TestCase):
+    """POST /api/trading/agent/think through the real cca.llm_chat, with the HTTP call to LM Studio
+    captured. llm_chat turns reasoning off unless think=True, so the route must forward the opt-in
+    "thinking": true body flag to both of its calls (the first try and the JSON-only retry)."""
+
+    MODEL = "qwen/qwen3.5-9b"
+    PREFILL = "<think>\n\n</think>\n\n"
+
+    def setUp(self):
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import command_center_api as cca
+        import trading_api
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        self.sent = []
+        self.replies = []
+
+        def fake_http_json(url, payload=None, timeout=30, headers=None):
+            self.sent.append(json.loads(json.dumps(payload)))
+            return {"choices": [{"message": {"content": self.replies.pop(0)}}]}
+
+        patches = [
+            mock.patch.object(cca, "_http_json", fake_http_json),
+            mock.patch.object(cca, "llm_loaded_models", lambda *a, **k: [{"id": self.MODEL}]),
+            mock.patch.object(cca, "wait_gpu", lambda *a, **k: True),
+            mock.patch.object(cca, "gpu_busy", lambda *a, **k: False),
+            mock.patch.object(cca, "load_config", lambda: {"llm": {"baseUrl": "http://lm.invalid/v1", "model": "", "timeoutSecs": 5}}),
+            mock.patch.dict("os.environ", {"TRADING_AGENT_MODEL": self.MODEL}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        app = FastAPI()
+        app.include_router(trading_api.router)
+        self.client = TestClient(app, client=("127.0.0.1", 50000))  # the route is loopback-only
+
+    def think(self, **extra):
+        r = self.client.post("/api/trading/agent/think", json={"system": "You are the desk.", "prompt": "GLD?", **extra})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    def test_default_sends_reasoning_effort_none(self):
+        self.replies = ['{"market_view": "calm"}']
+        out = self.think()
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(self.sent), 1)
+        body = self.sent[0]
+        self.assertEqual(body["model"], self.MODEL)
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(body["messages"][-1], {"role": "assistant", "content": self.PREFILL})
+
+    def test_thinking_true_sends_no_reasoning_effort(self):
+        self.replies = ['{"market_view": "calm"}']
+        out = self.think(thinking=True)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(self.sent), 1)
+        body = self.sent[0]
+        self.assertNotIn("reasoning_effort", body)
+        self.assertNotIn("chat_template_kwargs", body)
+        self.assertNotEqual(body["messages"][-1].get("content"), self.PREFILL)  # no empty think block either
+
+    def test_json_retry_keeps_the_callers_choice(self):
+        for thinking, want in ((False, "none"), (True, None)):
+            with self.subTest(thinking=thinking):
+                self.sent.clear()
+                self.replies = ["no json here", '{"market_view": "calm"}']
+                out = self.think(thinking=thinking)
+                self.assertTrue(out["ok"], out)
+                self.assertTrue(out["retried"])
+                self.assertEqual(len(self.sent), 2)
+                self.assertEqual([b.get("reasoning_effort") for b in self.sent], [want, want])
+
+
 if __name__ == "__main__":
     unittest.main()

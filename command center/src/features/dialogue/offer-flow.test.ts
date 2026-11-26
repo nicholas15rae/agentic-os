@@ -32,7 +32,12 @@ const mode = vi.hoisted(() => ({ effective: null as unknown }));
 vi.mock("@/features/modes/modes-store", async () => {
   const m = await vi.importActual<typeof import("@/features/modes/modes")>("@/features/modes/modes");
   mode.effective = m.DEFAULT_EFFECTIVE;
-  return { useModes: { getState: () => ({ effective: mode.effective, load: async () => undefined }) } };
+  // Nothing frozen on the master switchboard; the live rule is the real one.
+  return {
+    useModes: { getState: () => ({ effective: mode.effective, load: async () => undefined }) },
+    currentFreeze: () => ({}),
+    isToolLiveNow: (s: string) => m.toolLive(mode.effective as import("@/features/modes/modes").EffectiveMode, s, {}),
+  };
 });
 
 vi.mock("@/lib/platform", () => ({ cmd: h.cmd, isTauri: () => env.tauri, onNativeEvent: async () => () => undefined, platform: "desktop" }));
@@ -151,6 +156,31 @@ describe("Tier 3 — the delegation offer card", () => {
     expect(p?.plan.summary).toMatch(/pipeline/);
     expect(h.cmd).not.toHaveBeenCalled();
     expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  // Regression: Tony's name beats a topic in `resolve`, so a brainstorm said TO Tony ("…, tony")
+  // lost its agent: the Tier-2 `agentKept` and the offer's own matrix read both came back "Self".
+  it("a brainstorm addressed to Tony ('…for the landing page, tony') still offers the Designer", async () => {
+    await handleInput("I've been thinking about a warmer color palette for the landing page, tony", text);
+    expect(osTurns()[0]).toMatchObject({ role: "general", routeKind: "Self", noDelegate: true });
+    expect(useDialogue.getState().active("auto")?.topicRole).toBe("designer");
+    await handleInput("maybe more orange", text);
+    h.cmd.mockClear();
+    await handleInput("ok let's do it", text);
+    const p = useVoice.getState().pending;
+    expect(p?.plan.offer).toBe("delegate");
+    expect(p?.plan.summary).toMatch(/Designer/);
+    expect(h.cmd).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it("…and so does one whose commit cue names Tony ('ok let's do it, tony')", async () => {
+    await handleInput("I've been thinking about a warmer color palette for the landing page, tony", text);
+    await handleInput("maybe more orange", text);
+    await handleInput("ok let's do it, tony", text);
+    const p = useVoice.getState().pending;
+    expect(p?.plan.offer).toBe("delegate");
+    expect(p?.plan.summary).toMatch(/Designer/);
   });
 
   it("the same cue with no brainstorm is just a turn for Tony (no card)", async () => {
@@ -532,5 +562,23 @@ describe("thoughtform hardening: the brainstorm survives a refused hand-off (reg
     await approve("tap");
     expect(texts().some((t) => /^Queued/.test(t))).toBe(false);
     expect(useVoice.getState().turns.some((t) => t.who === "system" && t.tone === "error")).toBe(true);
+  });
+});
+
+describe("addressing Tony beats a topic (the wake phrase is stripped before routing)", () => {
+  // voice-controller strips "Hey Tony," before routeFor, so the address must travel as a flag:
+  // without it this line is a Booking topic ("self-tape availability") and gets delegated.
+  // (Text channel: this harness has no voice playback; voice goes through the same handleInput routing.)
+  it("'Hey Tony, check my self-tape availability' is Tony's own turn", async () => {
+    await handleInput("Hey Tony, check my self-tape availability", text);
+    expect(osTurns()).toHaveLength(1);
+    expect(osTurns()[0]).toMatchObject({ role: "general", routeKind: "Self" });
+    expect(osTurns()[0].routeReason).toMatch(/addressed/i);
+  });
+
+  it("the same topic without the address still goes to the Booking Desk", async () => {
+    await handleInput("check my self-tape availability", text);
+    expect(osTurns()).toHaveLength(1);
+    expect(osTurns()[0]).toMatchObject({ role: "booking", routeKind: "Domain" });
   });
 });

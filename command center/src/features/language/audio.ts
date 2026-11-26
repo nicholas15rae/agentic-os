@@ -28,6 +28,8 @@ export function useRecorder(onAutoStop?: (wav: Uint8Array | null) => void) {
   const live = useRef<{ stream: MediaStream; nodes: AudioNode[]; chunks: Float32Array[]; rate: number; release: () => void; timer: ReturnType<typeof setTimeout> } | null>(null);
   const autoStop = useRef(onAutoStop);
   autoStop.current = onAutoStop;
+  // The mic opening (a second or two on a phone): a stop that arrives meanwhile waits for it.
+  const starting = useRef<Promise<void> | null>(null);
 
   const teardown = useCallback((): { chunks: Float32Array[]; rate: number } | null => {
     const l = live.current;
@@ -45,24 +47,27 @@ export function useRecorder(onAutoStop?: (wav: Uint8Array | null) => void) {
     return { chunks: l.chunks, rate: l.rate };
   }, []);
 
-  const stop = useCallback((): Promise<Uint8Array | null> => {
+  const stop = useCallback(async (): Promise<Uint8Array | null> => {
+    if (!live.current && starting.current) await starting.current.catch(() => undefined);
     const got = teardown();
-    if (!got) return Promise.resolve(null);
+    if (!got) return null;
     const total = got.chunks.reduce((n, c) => n + c.length, 0);
-    if (total < got.rate * 0.4 || !micEnabled()) return Promise.resolve(null);
+    if (total < got.rate * 0.4 || !micEnabled()) return null;
     const pcm = new Float32Array(total);
     let o = 0;
     for (const c of got.chunks) {
       pcm.set(c, o);
       o += c.length;
     }
-    return Promise.resolve(encodeWav16k(pcm, got.rate));
+    return encodeWav16k(pcm, got.rate);
   }, [teardown]);
 
   const start = useCallback(async (): Promise<void> => {
-    if (live.current) return;
+    if (live.current || starting.current) return;
     assertMicAllowed();
     setState("starting");
+    let done!: () => void;
+    starting.current = new Promise<void>((r) => (done = r));
     try {
       const ac = await audioContext();
       const stream = await openMic(useSettings.getState().micDeviceId);
@@ -92,6 +97,9 @@ export function useRecorder(onAutoStop?: (wav: Uint8Array | null) => void) {
       teardown();
       setState("idle");
       throw new Error(e instanceof MicLockedError ? MIC_LOCKED_MSG : micErrorMessage(e));
+    } finally {
+      starting.current = null;
+      done();
     }
   }, [stop, teardown]);
 

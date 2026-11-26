@@ -3648,7 +3648,7 @@ impl WorkerEnv for AppEnv {
         Box::pin(async move {
             use tauri::Manager;
             let bridge = self.app.state::<BridgeState>();
-            super::mcp::call_tool(self.st(), self.os(), &bridge, "web.search", &json!({ "query": query }), false, "librarian").await
+            super::mcp::call_tool_internal(self.st(), self.os(), &bridge, "web.search", &json!({ "query": query }), "librarian").await
         })
     }
 
@@ -3656,7 +3656,7 @@ impl WorkerEnv for AppEnv {
         Box::pin(async move {
             use tauri::Manager;
             let bridge = self.app.state::<BridgeState>();
-            super::mcp::call_tool(self.st(), self.os(), &bridge, "fetch.url", &json!({ "url": url }), false, "librarian").await
+            super::mcp::call_tool_internal(self.st(), self.os(), &bridge, "fetch.url", &json!({ "url": url }), "librarian").await
         })
     }
 
@@ -3697,6 +3697,12 @@ impl WorkerEnv for AppEnv {
 }
 
 /// The worker task (spawned once in `lib.rs`): one stage at a time, forever.
+/// The worker starts no queued pass under Learning, or while the switchboard froze a build
+/// pipeline agent (`modes::pipeline_frozen`); the queue is kept, never dropped (pure).
+pub(crate) fn worker_held(e: &super::modes::Effective, g: &super::os_core::SwitchboardConfig) -> bool {
+    super::modes::is_learning(e) || super::modes::pipeline_frozen(e, g).is_some()
+}
+
 pub async fn worker_loop(app: tauri::AppHandle) {
     use tauri::Manager;
     let env = AppEnv { app: app.clone() };
@@ -3715,11 +3721,12 @@ pub async fn worker_loop(app: tauri::AppHandle) {
         let store = app.state::<TaskStore>();
         let os = app.state::<super::os_core::OsState>();
         let enabled = os.snapshot().worker.enabled;
-        // Learning mode keeps the GPU for Tony: no queued build starts while Nic is training him
-        // (a pass already running finishes; the queue resumes when he switches modes).
-        let learning = super::modes::is_learning(&os.modes.effective());
+        // Learning mode keeps the GPU for Tony, and a mode that froze a pipeline agent (the
+        // switchboard) can't run its pass: no queued build starts meanwhile (a pass already
+        // running finishes; the queue is kept and resumes when Nic switches modes).
+        let held = worker_held(&os.modes.effective(), &os.snapshot().switchboard);
         // The remote failsafe (security hard lock) stops new work too.
-        if !enabled || learning || store.unavailable().is_some() || crate::security::commands::hard_locked() {
+        if !enabled || held || store.unavailable().is_some() || crate::security::commands::hard_locked() {
             let _ = tokio::time::timeout(Duration::from_secs(15), ws.notify.notified()).await;
             continue;
         }

@@ -2,6 +2,7 @@ import { Component, lazy, Suspense, useEffect, type ReactNode } from "react";
 import { PAGES, useSysMap } from "./sysmap-store";
 import { SchematicFlowchart } from "./SchematicFlowchart";
 import { DeepInspector } from "./DeepInspector";
+import { PHONE_LITE } from "@/lib/phone-lite";
 
 /** three.js + R3F for Page 3 live in their own chunk, fetched only when Page 3 opens. */
 const OrbitalEcosystem = lazy(() => import("./OrbitalEcosystem"));
@@ -76,7 +77,7 @@ export function SysMapCanvasPage({ page }: { page: 2 | 3 }) {
   useEffect(() => () => useSysMap.getState().close(), []);
   return (
     <div className="relative h-full min-h-[480px] overflow-hidden rounded-[14px] border border-holo/20 bg-[#03050a]">
-      {page === 2 ? (
+      {page === 2 || PHONE_LITE ? (
         <SchematicFlowchart />
       ) : (
         <GlBoundary>

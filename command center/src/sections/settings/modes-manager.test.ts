@@ -55,6 +55,13 @@ describe("ModeRow (Settings → Tony Modes)", () => {
     expect(html).not.toContain("Duplicate");
   });
 
+  it("every work mode shows its switchboard in one line (edited in the switchboard card)", () => {
+    expect(row({ mode: preset("builder"), deletable: false })).toContain("3 agents · 8 tools on duty; the rest are frozen");
+    expect(row({ mode: preset("learning"), deletable: false })).toContain("Tony only: no sub-agents, only the always-live tools");
+    expect(row({})).toContain("No switchboard: every agent and tool stays live");
+    expect(row({ mode: preset("gabagool"), deletable: false })).not.toContain("No switchboard");
+  });
+
   it("no backdrop or glass in a row", () => {
     for (const m of [preset("builder"), focus, preset("gabagool")]) expect(row({ mode: m })).not.toMatch(/backdrop|glass/);
   });

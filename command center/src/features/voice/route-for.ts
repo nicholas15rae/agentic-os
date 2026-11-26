@@ -2,6 +2,8 @@ import type { AgentRole } from "@/features/dispatcher/agents";
 import { roleLabel } from "@/features/dispatcher/roles";
 import { directTool, isSelfRoleId, resolve, type Route, type RouteKind } from "@/features/dispatcher/router";
 import type { RoutingConfig } from "@/lib/platform";
+import { agentGloballyFrozen, frozenAgentReason, type EffectiveMode, type SwitchboardFreeze } from "@/features/modes/modes";
+import { isAndroidApp } from "@/stores/settings";
 import { THREADS, type Channel, type ThreadId } from "./voice-store";
 
 /**
@@ -16,6 +18,12 @@ import { THREADS, type Channel, type ThreadId } from "./voice-store";
  *   other tab (Tony's or a sub-agent's) the line stays with Tony ("Self": Tony answers himself,
  *   so Rust never re-promotes it). Voice never yields "Tab".
  * - Typed text keeps today's rules: Domain overrides only in Auto, otherwise the open tab wins.
+ * - The phone (`phone`, the Android app): a Domain match never delegates, by voice or typed, on
+ *   any tab; it stays with Tony ("Self"). Only a Named agent or an explicit pick (a typed turn on
+ *   that agent's own tab) delegates — a delegated phone turn costs 20-70 s against Tony's 2-5 s.
+ * - Tony addressed by name (`addressed`: the caller stripped a "hey tony," wake phrase before
+ *   asking, or the line addresses him): a Domain match stays with Tony ("Self"), desktop and
+ *   phone alike; a Named agent still delegates.
  */
 export interface RouteForInput {
   utterance: string;
@@ -25,25 +33,37 @@ export interface RouteForInput {
   cfg: RoutingConfig;
   /** The configured OS name (a self name, like "tony"). */
   osName?: string;
+  /** The Android app: a topic (Domain) match stays with Tony. Defaults to `isAndroidApp()`, so the
+   * desktop's routing is unchanged. */
+  phone?: boolean;
+  /** The user addressed Tony by name: the wake phrase ("hey tony,") was stripped off `utterance`,
+   * so `resolve` can't see it. Tony's name beats a topic (Domain → Self). */
+  addressed?: boolean;
 }
 
 export type RoutedTurn = Route & { role: AgentRole };
 
-export function routeFor({ utterance, thread, channel, cfg, osName = "" }: RouteForInput): RoutedTurn {
+export function routeFor({ utterance, thread, channel, cfg, osName = "", phone = isAndroidApp(), addressed = false }: RouteForInput): RoutedTurn {
   const det = resolve(utterance, cfg, osName);
   if (det.kind === "Named" && det.role && !isSelfRoleId(det.role, osName)) return { ...det, role: det.role as AgentRole };
   const direct = directTool(utterance);
   if (direct) return { ...det, role: "general", kind: "Direct", reason: `live ${direct} tool` };
   if (det.kind === "Self" || (det.role && isSelfRoleId(det.role, osName))) return { ...det, role: "general", kind: "Self" };
+  const tony = osName || "Tony";
+  if (addressed && det.kind === "Domain") return { ...det, role: "general", kind: "Self", confidence: "high", reason: `you addressed ${tony}` };
   if (channel === "voice") {
-    if (thread !== "auto") return { ...det, role: "general", kind: "Self", reason: `voice stays with ${osName || "Tony"} on this tab` };
-    if (det.kind === "Domain" && det.role) return { ...det, role: det.role as AgentRole };
+    if (thread !== "auto") return { ...det, role: "general", kind: "Self", reason: `voice stays with ${tony} on this tab` };
+    if (det.kind === "Domain" && det.role) return phone ? phoneKeeps(det, tony) : { ...det, role: det.role as AgentRole };
     return { ...det, role: "general" };
   }
-  if (det.kind === "Domain" && det.role && thread === "auto") return { ...det, role: det.role as AgentRole };
+  if (det.kind === "Domain" && det.role && thread === "auto") return phone ? phoneKeeps(det, tony) : { ...det, role: det.role as AgentRole };
   if (thread !== "auto") return { ...det, role: thread as AgentRole, kind: "Tab", reason: "current tab" };
   return { ...det, role: "general" };
 }
+
+/** A phone turn's topic match: Tony answers it himself ("Self"; the plan, and so the desktop
+ * queue item, carries role `general`). */
+const phoneKeeps = (det: Route, tony: string): RoutedTurn => ({ ...det, role: "general", kind: "Self", reason: `on the phone a topic stays with ${tony}; name the agent to delegate` });
 
 /** The roles Solo (`surface_only`) keeps with Tony unless addressed by name (Rust `SOLO_HELD_ROLES`). */
 const SOLO_HELD_ROLES: readonly string[] = ["prompter", "designer", "coder", "director"];
@@ -59,6 +79,27 @@ export function soloHold(r: RoutedTurn, o: { explicit: boolean; dispatch: string
   const named = r.kind === "Named";
   if (r.kind === "Domain" || r.kind === "Default" || (named && r.confidence !== "high")) return { ...r, role: "general", kind: "Self", reason: "Solo mode: kept with Tony" };
   return r;
+}
+
+/**
+ * Rust's switchboard hold (agents.rs `route_for_turn`), mirrored beside `soloHold` so the webview
+ * never announces a delegation Rust will keep with Tony. A route to an agent that is not live
+ * (frozen by the active mode's overlay, or on the master switchboard) becomes Tony's own turn
+ * ("Self", reason "<Agent> is frozen in <Mode> mode"). The same rule as Solo for a DIRECT ask:
+ * the user typing on the agent's own tab (`explicit`) or naming it (a high-confidence Named route)
+ * goes through — EXCEPT a globally frozen agent (the Booking Desk), which never runs. Pure.
+ */
+export function frozenHold(
+  r: RoutedTurn,
+  o: { explicit: boolean; effective: (Pick<EffectiveMode, "name"> & Partial<Pick<EffectiveMode, "switchboard">>) | null | undefined; freeze?: SwitchboardFreeze | null; osName?: string },
+): RoutedTurn {
+  const osName = o.osName ?? "";
+  if (r.role === "general" || isSelfRoleId(r.role, osName)) return r;
+  const reason = frozenAgentReason(o.effective, r.role, o.freeze, osName);
+  if (!reason) return r;
+  const direct = o.explicit || r.kind === "Tab" || (r.kind === "Named" && r.confidence === "high");
+  if (direct && !agentGloballyFrozen(r.role, o.freeze, osName)) return r;
+  return { ...r, role: "general", kind: "Self", reason };
 }
 
 /**

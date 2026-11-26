@@ -3016,8 +3016,11 @@ pub(crate) fn tool_gate(cfg: &OsConfig, bridge: &BridgeState, name: &str, approv
     Ok(())
 }
 
-/// Pure part of `spotify_tool` before the permission gate (contract §4.6, in order).
-fn tool_precheck(cfg: &OsConfig, name: &str) -> Result<(), String> {
+/// Pure part of `spotify_tool` before the permission gate (contract §4.6, in order). `e`: the
+/// effective mode; a Spotify server the switchboard froze (the mode's overlay or the master
+/// switchboard) refuses every tool with `MODE_FROZEN: …`, the same text `mcp::call_tool` gives a
+/// turn's call (defence in depth: the webview's fast path and approval cards land here).
+fn tool_precheck(cfg: &OsConfig, e: &super::modes::Effective, name: &str) -> Result<(), String> {
     if !intent::ALL_TOOLS.contains(&name) {
         return Err("unknown Spotify tool".into());
     }
@@ -3027,6 +3030,9 @@ fn tool_precheck(cfg: &OsConfig, name: &str) -> Result<(), String> {
     let server = cfg.mcps.iter().find(|m| m.id == "spotify");
     if !server.is_some_and(|m| m.enabled) {
         return Err(SERVER_OFF.into());
+    }
+    if let Some(frozen) = super::modes::tool_frozen_error(e, &cfg.switchboard, "spotify") {
+        return Err(frozen);
     }
     if intent::is_write_tool(name) && server.is_some_and(|m| m.read_only) {
         return Err(SERVER_READ_ONLY.into());
@@ -3415,13 +3421,14 @@ pub async fn spotify_play_uri(state: State<'_, DispatchState>, os: State<'_, OsS
 }
 
 /// Any of the 23 Spotify tools by name (TS fast path, approval cards). Returns the speakable reply.
-/// Gate order (contract §4.6): unknown name; kill switch; server off; read-only server + write;
-/// read ⇒ `read_gate`; write ⇒ MCP tier, then the destructive gate; writes are logged.
+/// Gate order (contract §4.6): unknown name; kill switch; server off; switchboard (frozen this
+/// mode or on the master switchboard); read-only server + write; read ⇒ `read_gate`; write ⇒ MCP
+/// tier, then the destructive gate; writes are logged.
 #[tauri::command]
 pub async fn spotify_tool(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, name: String, args: Option<Value>, approved: Option<bool>) -> Result<String, String> {
     let name = intent::canonical(name.trim()).to_string();
     let cfg = os.snapshot();
-    tool_precheck(&cfg, &name)?;
+    tool_precheck(&cfg, &os.modes.effective(), &name)?;
     tool_gate(&cfg, &bridge, &name, approved.unwrap_or(false))?;
     let args = args.filter(Value::is_object).unwrap_or_else(|| json!({}));
     let out = tool(&state, &os, &name, &args).await;
@@ -4304,18 +4311,45 @@ mod suite_tests {
     fn spotify_tool_gate_order() {
         use super::super::os_core::McpServer;
         let mut cfg = OsConfig::default();
-        assert_eq!(tool_precheck(&cfg, "spotify.nope"), Err("unknown Spotify tool".into()));
-        assert_eq!(tool_precheck(&cfg, "spotify.pause"), Err(SERVER_OFF.into()), "no spotify server configured");
+        let open = mode("brainstorm");
+        let e = &open;
+        assert_eq!(tool_precheck(&cfg, e, "spotify.nope"), Err("unknown Spotify tool".into()));
+        assert_eq!(tool_precheck(&cfg, e, "spotify.pause"), Err(SERVER_OFF.into()), "no spotify server configured");
         cfg.mcps = vec![McpServer { id: "spotify".into(), name: "Spotify".into(), transport: "builtin".into(), enabled: false, ..Default::default() }];
-        assert_eq!(tool_precheck(&cfg, "spotify.now_playing"), Err(SERVER_OFF.into()));
+        assert_eq!(tool_precheck(&cfg, e, "spotify.now_playing"), Err(SERVER_OFF.into()));
         cfg.mcps[0].enabled = true;
-        assert_eq!(tool_precheck(&cfg, "spotify.pause"), Ok(()));
+        assert_eq!(tool_precheck(&cfg, e, "spotify.pause"), Ok(()));
         cfg.mcps[0].read_only = true;
-        assert_eq!(tool_precheck(&cfg, "spotify.like_track"), Err(SERVER_READ_ONLY.into()));
-        assert_eq!(tool_precheck(&cfg, "spotify.now_playing"), Ok(()), "reads still work");
+        assert_eq!(tool_precheck(&cfg, e, "spotify.like_track"), Err(SERVER_READ_ONLY.into()));
+        assert_eq!(tool_precheck(&cfg, e, "spotify.now_playing"), Ok(()), "reads still work");
         cfg.privacy.kill_switch = true;
-        assert!(tool_precheck(&cfg, "spotify.now_playing").unwrap_err().contains("kill switch"));
-        assert_eq!(tool_precheck(&cfg, "spotify.nope"), Err("unknown Spotify tool".into()), "unknown name is checked first");
+        assert!(tool_precheck(&cfg, e, "spotify.now_playing").unwrap_err().contains("kill switch"));
+        assert_eq!(tool_precheck(&cfg, e, "spotify.nope"), Err("unknown Spotify tool".into()), "unknown name is checked first");
+    }
+
+    fn mode(id: &str) -> super::super::modes::Effective {
+        super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default())
+    }
+
+    #[test]
+    fn spotify_tool_refuses_a_frozen_server() {
+        use super::super::os_core::McpServer;
+        let mut cfg = OsConfig::default();
+        cfg.mcps = vec![McpServer { id: "spotify".into(), name: "Spotify".into(), transport: "builtin".into(), enabled: true, ..Default::default() }];
+        // Builder lists Spotify; Operations doesn't, so every tool (reads too) is refused there.
+        assert_eq!(tool_precheck(&cfg, &mode("builder"), "spotify.pause"), Ok(()));
+        for name in ["spotify.pause", "spotify.now_playing", "spotify.play"] {
+            assert_eq!(tool_precheck(&cfg, &mode("operations"), name), Err("MODE_FROZEN: spotify is frozen in Operations mode".into()), "{name}");
+        }
+        // Frozen on the master switchboard: refused in every mode, even one with no overlay.
+        cfg.switchboard.frozen_tools = vec!["spotify".into()];
+        assert_eq!(tool_precheck(&cfg, &mode("brainstorm"), "spotify.now_playing"), Err("MODE_FROZEN: spotify is frozen on the master switchboard".into()));
+        // The earlier gates still come first: unknown name, kill switch, server off.
+        assert_eq!(tool_precheck(&cfg, &mode("operations"), "spotify.nope"), Err("unknown Spotify tool".into()));
+        cfg.mcps[0].enabled = false;
+        assert_eq!(tool_precheck(&cfg, &mode("operations"), "spotify.pause"), Err(SERVER_OFF.into()));
+        cfg.privacy.kill_switch = true;
+        assert!(tool_precheck(&cfg, &mode("operations"), "spotify.pause").unwrap_err().contains("kill switch"));
     }
 
     #[test]

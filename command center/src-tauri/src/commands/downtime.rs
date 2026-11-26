@@ -13,7 +13,9 @@
 //!   rows from unknown agents, a mesh workspace mapped to finance, the GPU slot stuck settling,
 //!   recent security flags. It writes one concise health line to the `observer` namespace.
 //! - **Booking** POSTs `{since}` to `roster.bookingScanWebhook` (n8n) and stores the returned
-//!   opportunities. No webhook: the node reads `IDLE / UNCONFIGURED`, nothing runs.
+//!   opportunities. No webhook: the node reads `IDLE / UNCONFIGURED`, nothing runs. Booking not
+//!   live (frozen on the master switchboard, or off duty in the active mode): the node reads
+//!   `FROZEN: …` and the scan never runs, whatever the webhook says (`booking_gate`).
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -91,19 +93,17 @@ pub async fn downtime_loop(app: tauri::AppHandle) {
         let cfg = os.snapshot();
         let r = cfg.roster.clone();
         let a = arbiter::get();
-        // Booking's status is shown even when nothing runs.
-        if r.booking_scan_webhook.trim().is_empty() {
-            a.set_status("booking", false, "IDLE / UNCONFIGURED: set roster.bookingScanWebhook (n8n) to enable the scan");
-        } else {
-            a.set_status("booking", true, &format!("scans every {} min", r.booking_scan_minutes.max(5)));
-        }
+        // Booking's status is shown even when nothing runs; a frozen Booking never scans.
+        let booking_frozen = super::modes::agent_frozen_reason(&os.modes.effective(), &cfg.switchboard, "booking");
+        let (booking_runs, booking_status) = booking_gate(&r.booking_scan_webhook, r.booking_scan_minutes, booking_frozen.as_deref());
+        a.set_status("booking", booking_runs, &booking_status);
         if cfg.privacy.kill_switch {
             continue;
         }
         let idle = user_idle(a.away(), a.idle_for(), clock.started.elapsed(), r.idle_minutes, os.slot.is_idle());
         let Some(dir) = config_dir(&app) else { continue };
 
-        if !r.booking_scan_webhook.trim().is_empty() && clock.due("booking", Duration::from_secs(r.booking_scan_minutes.max(5) as u64 * 60)) {
+        if booking_runs && clock.due("booking", Duration::from_secs(r.booking_scan_minutes.max(5) as u64 * 60)) {
             clock.last.insert("booking", Instant::now());
             let st = app.state::<super::dispatch::DispatchState>();
             let http = st.http.clone();
@@ -222,6 +222,19 @@ pub fn observer_pass(db: Option<&Path>, slot: &super::scheduler::SlotView, finan
 
 // ── Booking ─────────────────────────────────────────────────────────────────
 
+/// Booking's opportunity scan this tick (pure): `(may run when due, status line)`. `frozen`: why
+/// Booking isn't live (`modes::agent_frozen_reason`), checked first, so a frozen Booking never
+/// scans even with a webhook set; no webhook: `IDLE / UNCONFIGURED`.
+pub fn booking_gate(webhook: &str, minutes: u32, frozen: Option<&str>) -> (bool, String) {
+    if let Some(why) = frozen {
+        return (false, format!("FROZEN: {why}; the opportunity scan is off"));
+    }
+    if webhook.trim().is_empty() {
+        return (false, "IDLE / UNCONFIGURED: set roster.bookingScanWebhook (n8n) to enable the scan".into());
+    }
+    (true, format!("scans every {} min", minutes.max(5)))
+}
+
 async fn booking_scan(http: reqwest::Client, url: String) -> Result<usize, String> {
     let since = arbiter::now_ms().saturating_sub(24 * 3_600_000);
     let v: Value = http.post(url.trim()).timeout(Duration::from_secs(20)).json(&json!({ "since": since, "source": "agentic-os" })).send().await.map_err(|e| format!("booking webhook: {e}"))?.error_for_status().map_err(|e| format!("booking webhook: {e}"))?.json().await.map_err(|e| format!("booking webhook reply: {e}"))?;
@@ -262,5 +275,27 @@ mod tests {
         assert!(user_idle(false, Some(five), five, 5, true));
         assert!(!user_idle(false, Some(five), five, 5, false), "the GPU is busy");
         assert!(user_idle(false, None, five, 5, true), "no turn yet: time since launch");
+    }
+
+    #[test]
+    fn a_frozen_booking_never_scans_and_says_so() {
+        let hook = "http://127.0.0.1:5678/webhook/booking-scan";
+        // Live: configured scans; unconfigured idles.
+        assert_eq!(booking_gate(hook, 2, None), (true, "scans every 5 min".to_string()));
+        assert_eq!(booking_gate(hook, 30, None), (true, "scans every 30 min".to_string()));
+        assert!(!booking_gate("  ", 30, None).0);
+        assert!(booking_gate("", 30, None).1.starts_with("IDLE / UNCONFIGURED"));
+        // The default master switchboard freezes Booking: no scan, even with a webhook set.
+        let e = super::super::modes::effective(&super::super::modes::ModesFile::default(), &Default::default());
+        let why = super::super::modes::agent_frozen_reason(&e, &super::super::os_core::SwitchboardConfig::default(), "booking");
+        assert_eq!(why.as_deref(), Some("Booking Desk is frozen on the master switchboard"));
+        assert_eq!(booking_gate(hook, 30, why.as_deref()), (false, "FROZEN: Booking Desk is frozen on the master switchboard; the opportunity scan is off".to_string()));
+        assert!(booking_gate("", 30, why.as_deref()).1.starts_with("FROZEN: "), "frozen wins over unconfigured");
+        // Off duty in a mode's overlay counts too.
+        let builder = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "builder".into(), ..Default::default() }, &Default::default());
+        let thawed = super::super::os_core::SwitchboardConfig { version: 1, frozen_agents: vec![], frozen_tools: vec![] };
+        let why = super::super::modes::agent_frozen_reason(&builder, &thawed, "booking");
+        assert_eq!(booking_gate(hook, 30, why.as_deref()).1, "FROZEN: Booking Desk is frozen in Builder mode; the opportunity scan is off");
+        assert_eq!(super::super::modes::agent_frozen_reason(&e, &thawed, "booking"), None, "thawed, no overlay: live");
     }
 }

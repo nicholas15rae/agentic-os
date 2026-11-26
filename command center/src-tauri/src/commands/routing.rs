@@ -23,6 +23,20 @@ const VERBS_B: [&str; 20] = [
     "check", "draft", "find", "look", "search", "tell", "send", "book", "schedule", "fetch", "get", "read", "email", "call", "write", "create", "cancel", "update", "confirm", "fix",
 ];
 const NUMBER_WORDS: [&str; 10] = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+/// Interjections a leading self address may open with ("hey tony, …", "ok jarvis …"). Mirrors router.ts.
+const ADDRESS_LEADS: [&str; 6] = ["hey", "hi", "ok", "okay", "yo", "so"];
+/// After "ask / tell / have … <self name>", the words that keep it an address ("ask tony to …",
+/// "tell the dispatcher about …", "let tony know", "have jarvis check …", "tell tony I'm…", or the
+/// line's end). Any other word makes the name a noun modifier ("get the orchestrator react code
+/// working"): a mention, not an address. `VERBS_B` count too. Mirrors router.ts.
+const ADDRESS_NEXT: [&str; 31] = [
+    "to", "about", "for", "know", "please", "what", "whats", "how", "hows", "if", "whether", "when", "where", "who", "why", "which", "that", "i", "im", "ill", "we", "you", "my", "me", "it", "its", "the", "a", "an", "this", "and",
+];
+/// A trailing self name right after one of these is an object, not a vocative ("…availability for
+/// friday", "fix the bug in the orchestrator", "play something by tony"). Mirrors router.ts.
+const NOT_VOCATIVE_BEFORE: [&str; 36] = [
+    "the", "a", "an", "my", "our", "your", "his", "her", "their", "its", "this", "that", "next", "last", "every", "for", "to", "in", "into", "on", "of", "at", "by", "from", "with", "about", "until", "till", "before", "after", "since", "than", "like", "via", "and", "or",
+];
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteKind {
@@ -81,10 +95,63 @@ pub struct Route {
     pub task: String,
 }
 
-/// lowercase; strip punctuation except `&`; collapse whitespace; fix the
-/// three Whisper mangles the spec calls out ("whats up/app", "what sapp" →
-/// "whatsapp"); spell out number words 1..10 so "last five messages" matches
-/// the trigger phrase "last 5 messages".
+/// Whisper's "WhatsApp" → "what's up" is only the app when a word right before it names a place
+/// or a target ("on / my / check / open / from / via what's up") … No "in" / "the": "I'm in,
+/// what's up?" and "the what's up…" are as often a greeting.
+const WHATSUP_APP_BEFORE: [&str; 6] = ["on", "my", "check", "open", "from", "via"];
+/// … except "come on / hang on / hold on, what's up" (a greeting, not "on WhatsApp") …
+const WHATSUP_ON_IDIOM: [&str; 3] = ["come", "hang", "hold"];
+/// "…what's up with / on / in / at / for / about X": a question about X, not the app.
+const WHATSUP_ABOUT: [&str; 6] = ["with", "on", "in", "at", "for", "about"];
+/// … or a messaging noun follows it ("what's up messages"). Mirrors router.ts.
+const WHATSUP_APP_AFTER: [&str; 14] = ["message", "messages", "msg", "msgs", "text", "texts", "chat", "chats", "group", "groups", "dm", "dms", "notification", "notifications"];
+
+/// The word before "whats up" (at `i`) makes it the app: a before-cue, never "…what's up with X"
+/// (a question about X: "check what's up with the droplet") and never "come / hang / hold on".
+fn whatsup_before_cue(toks: &[&str], i: usize) -> bool {
+    let Some(before) = i.checked_sub(1).and_then(|j| tok_at(toks, j)) else { return false };
+    if !WHATSUP_APP_BEFORE.contains(&before) {
+        return false;
+    }
+    // "…what's up with / on / in / at / for / about X" is a question about X ("check what's up
+    // on my calendar"); a bare "check what's up" / "on whats up" is still the app. Mirrors router.ts.
+    // … unless a messaging noun comes later ("check whats up for new messages").
+    let after = tok_at(toks, i + 2);
+    let about = after == Some("with") || (after.is_some_and(|w| WHATSUP_ABOUT.contains(&w)) && tok_at(toks, i + 3).is_some());
+    if about && !toks[i + 2..].iter().any(|w| WHATSUP_APP_AFTER.contains(w)) {
+        return false;
+    }
+    !(before == "on" && i.checked_sub(2).and_then(|j| tok_at(toks, j)).is_some_and(|w| WHATSUP_ON_IDIOM.contains(&w)))
+}
+
+/// Whisper's WhatsApp mangles → "whatsapp", token by token: "whats app" / "what sapp" always;
+/// "whats up" only next to a WhatsApp cue (above) — "what's up", "hey tony what's up" and
+/// "what's up with the build" are greetings and stay as they are. Only the word right before
+/// "whats" counts ("…on my phone now hey tony what's up" is still a greeting).
+fn fix_whatsapp_mangles<'a>(toks: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    while i < toks.len() {
+        let (w, next) = (toks[i], tok_at(toks, i + 1));
+        let app = (w == "whats" && next == Some("app"))
+            || (w == "what" && next == Some("sapp"))
+            || (w == "whats" && next == Some("up") && (whatsup_before_cue(toks, i) || tok_at(toks, i + 2).is_some_and(|a| WHATSUP_APP_AFTER.contains(&a))));
+        if app {
+            out.push("whatsapp");
+            i += 2;
+        } else {
+            out.push(w);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// lowercase; strip punctuation except `&`; collapse whitespace; fix
+/// Whisper's WhatsApp mangles ("whats app", "what sapp", and "whats up" only
+/// when it is clearly the app — `fix_whatsapp_mangles`) → "whatsapp"; spell
+/// out number words 1..10 so "last five messages" matches the trigger phrase
+/// "last 5 messages".
 ///
 /// NOTE: this is a normalization for MATCHING only — `Route::task` is built
 /// from this normalized text (lower-case, punctuation-stripped), not the
@@ -101,14 +168,9 @@ pub fn normalize(text: &str) -> String {
         // any other punctuation is dropped entirely (not replaced by a space),
         // so "what's" normalizes to "whats", not "what s".
     }
-    let mut s = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    for (from, to) in [(" whats up ", " whatsapp "), (" whats app ", " whatsapp "), (" what sapp ", " whatsapp ")] {
-        let padded = format!(" {s} ");
-        if padded.contains(from) {
-            s = padded.replace(from, to).trim().to_string();
-        }
-    }
-    s.split(' ')
+    let toks: Vec<&str> = cleaned.split_whitespace().collect();
+    fix_whatsapp_mangles(&toks)
+        .into_iter()
         .map(|w| match NUMBER_WORDS.iter().position(|n| *n == w) {
             Some(i) => (i + 1).to_string(),
             None => w.to_string(),
@@ -240,6 +302,78 @@ fn match_name_anywhere(toks: &[&str], names: &[(String, String)]) -> Option<Stri
     best.map(|(r, _)| r)
 }
 
+/// "tell/ask/… (it)? (to)? (my/the/our)? NAME": the position NAME would start at after the verb at `i`.
+fn verb_target(toks: &[&str], i: usize) -> usize {
+    let mut j = i + 1;
+    if tok_at(toks, j) == Some("it") {
+        j += 1;
+    }
+    if tok_at(toks, j) == Some("to") {
+        j += 1;
+    }
+    if matches!(tok_at(toks, j), Some("my") | Some("the") | Some("our")) {
+        j += 1;
+    }
+    j
+}
+
+/// The word at `k` (right after a self name a `VERBS_A` verb points at) keeps it an address.
+fn address_follows(toks: &[&str], k: usize) -> bool {
+    match tok_at(toks, k) {
+        None => true,
+        Some(w) => ADDRESS_NEXT.contains(&w) || VERBS_B.contains(&w),
+    }
+}
+
+/// The line opens with a self name, optionally after "hey / hi / ok / yo / so".
+fn leads_with_self(toks: &[&str], self_names: &[(String, String)]) -> bool {
+    let p = toks.iter().take_while(|w| ADDRESS_LEADS.contains(*w)).count();
+    match_name_at(toks, p, self_names).is_some()
+}
+
+/// The line ends with a self name ("…, tony", "… tony please") that isn't an object (`NOT_VOCATIVE_BEFORE`).
+fn trailing_vocative(toks: &[&str], self_names: &[(String, String)]) -> bool {
+    let end = if toks.last() == Some(&"please") { toks.len() - 1 } else { toks.len() };
+    self_names.iter().any(|(_, phrase)| {
+        let p = tokenize(phrase);
+        if p.is_empty() || p.len() > end {
+            return false;
+        }
+        let start = end - p.len();
+        if toks[start..end] != p[..] {
+            return false;
+        }
+        start.checked_sub(1).and_then(|j| tok_at(toks, j)).is_none_or(|prev| !NOT_VOCATIVE_BEFORE.contains(&prev))
+    })
+}
+
+/// "ask / tell / have … <self name> to / about / …" anywhere in the line.
+fn asks_self(toks: &[&str], all: &[(String, String)]) -> bool {
+    (0..toks.len()).filter(|&i| VERBS_A.contains(&toks[i])).any(|i| {
+        let j = verb_target(toks, i);
+        matches!(match_name_at(toks, j, all), Some((role, nlen)) if role == "general" && address_follows(toks, j + nlen))
+    })
+}
+
+/// The line ADDRESSES Tony by a self name (`SELF_NAMES`, `cfg.os_name`) in a real address
+/// position: it opens with the name ("hey tony, …"), asks him ("ask tony to …", "tell the
+/// dispatcher about …"), or ends on it as a vocative ("…, tony"). A mention anywhere else ("fix
+/// the bug in the orchestrator react code", "my availability for friday") is not an address.
+/// Mirrors `selfAddressed` / `addressesSelf` in router.ts.
+fn self_addressed(toks: &[&str], all: &[(String, String)], self_names: &[(String, String)]) -> bool {
+    // "dispatcher" / "orchestrator" are everyday nouns here ("fix the rust dispatcher"): they
+    // address Tony only when asked ("ask the dispatcher to …"), not by opening or ending a line.
+    let proper: Vec<(String, String)> = self_names
+        .iter()
+        .filter(|(_, p)| !COMMON_SELF_NOUNS.contains(&p.strip_prefix("the ").unwrap_or(p)))
+        .cloned()
+        .collect();
+    leads_with_self(toks, &proper) || asks_self(toks, all) || trailing_vocative(toks, &proper)
+}
+
+/// Self names that are also everyday nouns in this codebase. Mirrors `COMMON_SELF_NOUNS` in router.ts.
+const COMMON_SELF_NOUNS: [&str; 2] = ["dispatcher", "orchestrator"];
+
 /// Does `phrase` occur as a contiguous run of whole tokens anywhere in `toks`?
 fn contains_phrase(toks: &[&str], phrase: &str) -> bool {
     let p = tokenize(phrase);
@@ -256,8 +390,11 @@ fn domain_score(toks: &[&str], t: &AgentTriggers) -> usize {
 /// Resolve one utterance against the routing matrix. Priority:
 ///  (a) explicit delegation pattern → Named, high
 ///  (b) any name trigger mentioned anywhere → Named, medium
-///  (c) domain trigger score (longest phrases win; ties → `DOMAIN_TIEBREAK`) → Domain
-///  (d) only Tony himself was addressed / matched → `Own` ("Self", role general)
+///  (c) domain trigger score (longest phrases win; ties → `DOMAIN_TIEBREAK`) → Domain,
+///      unless Tony was ADDRESSED by a self name (`self_addressed`: the line opens with it, "ask
+///      tony to …", or a trailing "…, tony"): then `Own` (his name beats a topic). A mere mention
+///      ("the orchestrator react code", "for friday") never beats a topic.
+///  (d) only Tony himself was addressed / mentioned / matched → `Own` ("Self", role general)
 ///  (e) nothing → Default (the caller decides: keep the current tab, or `general`)
 ///
 /// Tony (`general`, any self alias, `SELF_NAMES`, `cfg.os_name`) is never a delegation target:
@@ -275,16 +412,7 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         if !VERBS_A.contains(&toks[i]) {
             continue;
         }
-        let mut j = i + 1;
-        if tok_at(&toks, j) == Some("it") {
-            j += 1;
-        }
-        if tok_at(&toks, j) == Some("to") {
-            j += 1;
-        }
-        if matches!(tok_at(&toks, j), Some("my") | Some("the") | Some("our")) {
-            j += 1;
-        }
+        let j = verb_target(&toks, i);
         if let Some((role, nlen)) = match_name_at(&toks, j, &all) {
             if role == "general" {
                 self_hit = true; // "ask tony to …": keep scanning for a real agent
@@ -340,8 +468,11 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
     if match_name_anywhere(&toks, &self_names).is_some() {
         self_hit = true;
     }
-    // (c) domain triggers (Tony's own topics only mark a self hit).
+    // A self name in an address position (beats a topic below); any other mention is step (d) only.
+    let self_address = self_addressed(&toks, &all, &self_names);
+    // (c) domain triggers (Tony's own topics only mark a self topic).
     let mut best: Option<(&str, usize)> = None;
+    let mut self_topic = false;
     for role in DOMAIN_TIEBREAK.iter().copied() {
         let Some(t) = cfg.routing.agents.get(role) else { continue };
         let score = domain_score(&toks, t);
@@ -349,12 +480,17 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
             continue;
         }
         if role == "general" {
-            self_hit = true;
+            self_topic = true;
             continue;
         }
         if best.map(|(_, bs)| score > bs).unwrap_or(true) {
             best = Some((role, score));
         }
+    }
+    // Tony's name beats a topic: a line that ADDRESSES him by a self name ("hey tony, check my
+    // availability", "…, tony") is his to answer; only naming an agent (above) delegates.
+    if best.is_some() && self_address {
+        return Route { role: Some("general".into()), reason: "you addressed the OS by name".into(), confidence: "high".into(), kind: RouteKind::Own, task: original };
     }
     if let Some((role, score)) = best {
         return Route {
@@ -366,7 +502,7 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         };
     }
     // (d) only Tony himself.
-    if self_hit {
+    if self_hit || self_address || self_topic {
         return Route { role: Some("general".into()), reason: "you addressed the OS itself".into(), confidence: "high".into(), kind: RouteKind::Own, task: original };
     }
     // (e) nothing matched.
@@ -456,6 +592,9 @@ mod tests {
         /// `direct_tool`'s answer; missing = None.
         #[serde(default)]
         direct: Option<String>,
+        /// `cfg.os_name` for this case; missing = the default ("Tony").
+        #[serde(default)]
+        os_name: Option<String>,
     }
 
     fn kind_str(k: RouteKind) -> &'static str {
@@ -499,19 +638,122 @@ mod tests {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
         }
-        // A sub-agent topic still wins over a mere self address.
-        let r = resolve("tony check my whatsapp messages", &OsConfig::default());
+        // Tony's name beats a topic (it used to be: a sub-agent topic wins over a self address).
+        let cfg = OsConfig::default();
+        for text in ["tony check my whatsapp messages", "hey tony, check my self-tape availability", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("general"), RouteKind::Own, "high"), "{text}");
+        }
+        let mut friday = OsConfig::default();
+        friday.os_name = "Friday".into();
+        let r = resolve("friday, check my wardrobe for the shoot", &friday);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own));
+        // Without his name the same topic still delegates; his own topic alone doesn't beat it.
+        let r = resolve("check my self-tape availability", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Domain));
+        let r = resolve("friday, check my wardrobe for the shoot", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Domain));
+        let r = resolve("system status of the droplet", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
+        // A Named agent still wins over Tony's name.
+        let r = resolve("hey tony, ask the booking desk to check my availability", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.task.as_str()), (Some("booking"), RouteKind::Named, "high", "check my availability"));
+        let r = resolve("tony, my booking agent hasn't replied about the wardrobe", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named));
+    }
+
+    /// Regression: the override fired for a self name ANYWHERE in the line, so the common nouns in
+    /// `SELF_NAMES` ("dispatcher", "orchestrator") and a renamed OS name ("Friday") beat every
+    /// topic — in `route_for_turn` too. Mirrors router.test.ts.
+    #[test]
+    fn only_a_real_address_beats_a_topic() {
+        let cfg = OsConfig::default();
+        let mut friday = OsConfig::default();
+        friday.os_name = "Friday".into();
+        // A mention (a noun, an object) leaves the topic's agent in charge.
+        for (text, c, role) in [
+            ("fix bug in the orchestrator react code", &cfg, "coder"),
+            ("refactor the dispatcher rust code", &cfg, "coder"),
+            ("check my self-tape availability for friday", &friday, "booking"),
+            ("book the wardrobe fitting before friday", &friday, "booking"),
+            ("fix bug in the orchestrator", &cfg, "coder"),
+            ("get the orchestrator react code working", &cfg, "coder"),
+            ("the dispatcher keeps timing out, is the droplet healthy", &cfg, "ops"),
+        ] {
+            let r = resolve(text, c);
+            assert_eq!((r.role.as_deref(), r.kind), (Some(role), RouteKind::Domain), "{text}");
+        }
+        // A mention with no topic is still Tony's (step (d)).
+        for text in ["refactor the dispatcher", "so I'm on my phone now hey tony what's up"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
+        }
+        // An address — leading (after an interjection), "ask/tell <self> to/about …", trailing vocative.
+        for (text, c) in [
+            ("hey tony, check my self-tape availability", &cfg),
+            ("ok jarvis, redo the color palette for the landing page", &cfg),
+            ("so tony, is the droplet healthy", &cfg),
+            ("yo tony check my calendar", &cfg),
+            ("friday, check my wardrobe for the shoot", &friday),
+            ("ask tony to check my self-tape availability", &cfg),
+            ("tell the dispatcher about the wardrobe fitting", &cfg),
+            ("have jarvis check the droplet", &cfg),
+            ("let tony know my availability changed", &cfg),
+            ("check my self-tape availability, tony", &cfg),
+            ("is the droplet healthy tony please", &cfg),
+            ("check my self-tape availability, friday", &friday),
+        ] {
+            let r = resolve(text, c);
+            assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.reason.as_str()), (Some("general"), RouteKind::Own, "high", "you addressed the OS by name"), "{text}");
+        }
+    }
+
+    #[test]
+    fn self_addressed_positions() {
+        let cfg = OsConfig::default();
+        let addressed = |text: &str| {
+            let norm = normalize(text);
+            let toks = tokenize(&norm);
+            let all = name_pairs(&cfg);
+            let self_names: Vec<_> = all.iter().filter(|(r, _)| r == "general").cloned().collect();
+            self_addressed(&toks, &all, &self_names)
+        };
+        for text in ["tony", "hey tony", "ok so jarvis check it", "ask tony", "send it to tony", "what do you think, tony", "thanks tony"] {
+            assert!(addressed(text), "{text}");
+        }
+        for text in ["fix bug in the orchestrator react code", "get the orchestrator react code working", "play something by tony", "the dispatcher keeps timing out", "", "please"] {
+            assert!(!addressed(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn whatsapp_and_messages_are_not_booking_topics() {
+        let cfg = OsConfig::default();
+        let d = &cfg.routing.agents["booking"].domains;
+        assert!(!d.iter().any(|x| x == "whatsapp" || x == "messages"), "{d:?}");
+        assert!(d.iter().any(|x| x == "last 5 messages"));
+        for text in ["check my whatsapp", "any whatsapp updates", "what's up", "check my what's up messages"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default), "{text}");
+        }
     }
 
     #[test]
     fn shared_fixtures() {
         let raw = include_str!("../../../src/features/dispatcher/router.fixtures.json");
         let fixtures: Vec<Fixture> = serde_json::from_str(raw).expect("fixtures parse");
-        let cfg = OsConfig::default();
+        let default_cfg = OsConfig::default();
         assert!(fixtures.len() >= 10, "expected a decent fixture set");
         for f in &fixtures {
-            let r = resolve(&f.text, &cfg);
+            let mut named = OsConfig::default();
+            let cfg = match &f.os_name {
+                Some(n) => {
+                    named.os_name = n.clone();
+                    &named
+                }
+                None => &default_cfg,
+            };
+            let r = resolve(&f.text, cfg);
             assert_eq!(r.role, f.role, "role mismatch for {:?}", f.text);
             assert_eq!(kind_str(r.kind), f.kind, "kind mismatch for {:?}", f.text);
             if let Some(needle) = &f.task_contains {
@@ -572,11 +814,57 @@ mod tests {
 
     #[test]
     fn normalize_handles_mangles_and_numbers() {
-        assert_eq!(normalize("what's up"), "whatsapp");
         assert_eq!(normalize("whats app"), "whatsapp");
         assert_eq!(normalize("what sapp"), "whatsapp");
+        assert_eq!(normalize("hey tony what's new on whats app"), "hey tony whats new on whatsapp");
         assert_eq!(normalize("last five messages"), "last 5 messages");
         assert_eq!(normalize("B&Co"), "b&co");
+        assert_eq!(normalize(""), "");
+    }
+
+    /// Regression: every "what's up" greeting became "whatsapp" (a Booking domain) and was
+    /// delegated to the Booking Desk (20-70 s instead of 2-5 s). Mirrors router.test.ts.
+    #[test]
+    fn normalize_whats_up_is_whatsapp_only_next_to_an_app_cue() {
+        for (text, out) in [
+            ("what's up", "whats up"),
+            ("Hey Tony, what's up?", "hey tony whats up"),
+            ("what's up tony", "whats up tony"),
+            ("hey what's up tony", "hey whats up tony"),
+            ("what's up with the build", "whats up with the build"),
+            ("so I'm on my phone now hey tony what's up", "so im on my phone now hey tony whats up"),
+            ("what's up, any updates?", "whats up any updates"),
+            // "…what's up with X" asks about X, even after a before-cue word.
+            ("check what's up with the droplet", "check whats up with the droplet"),
+            ("on what's up with the build", "on whats up with the build"),
+            // "come / hang / hold on, what's up" is an idiom, not "on WhatsApp".
+            ("come on, what's up", "come on whats up"),
+            ("hang on what's up", "hang on whats up"),
+            ("hold on, what's up?", "hold on whats up"),
+            // "in" / "the" are no longer before-cues.
+            ("I'm in, what's up?", "im in whats up"),
+            ("anything new in what's up", "anything new in whats up"),
+            ("the what's up", "the whats up"),
+        ] {
+            assert_eq!(normalize(text), out, "a greeting is not WhatsApp: {text}");
+        }
+        for (text, out) in [
+            ("check my whats up messages", "check my whatsapp messages"),
+            ("any whats up messages", "any whatsapp messages"),
+            ("open whats up", "open whatsapp"),
+            ("on whats up", "on whatsapp"),
+            ("anything new on what's up", "anything new on whatsapp"),
+            ("read it from whats up", "read it from whatsapp"),
+            ("send it via what's up", "send it via whatsapp"),
+            ("check the what's up group", "check the whatsapp group"),
+            ("what's up texts from sam", "whatsapp texts from sam"),
+            ("any what's up DMs", "any whatsapp dms"),
+            ("clear my what's up notifications", "clear my whatsapp notifications"),
+            ("what's up msgs", "whatsapp msgs"),
+            ("any what's up chats", "any whatsapp chats"),
+        ] {
+            assert_eq!(normalize(text), out, "clearly the app: {text}");
+        }
     }
 
     #[test]
@@ -614,7 +902,8 @@ mod tests {
     #[test]
     fn domain_tie_break_prefers_booking_over_ops() {
         let cfg = OsConfig::default();
-        let r = resolve("schedule a reminder about my messages", &cfg);
+        // booking "wardrobe" (8) vs ops "schedule" (8).
+        let r = resolve("schedule a wardrobe fitting", &cfg);
         assert_eq!(r.role, Some("booking".to_string()));
         assert_eq!(r.kind, RouteKind::Domain);
     }

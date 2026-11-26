@@ -35,11 +35,11 @@ const group = (html: string) => {
 };
 
 describe("ModePanelView", () => {
-  it("{3,2}: one Tony mode radiogroup of 6 work radios, one checked, the novelty as a switch outside it, no dials", () => {
+  it("{3,2}: one Tony mode radiogroup of 7 work radios (Operations included), one checked, the novelty as a switch outside it, no dials", () => {
     const html = render(props());
     expect(count(html, /aria-label="Tony mode"/g)).toBe(1);
     const g = group(html);
-    expect(count(g, /role="radio"/g)).toBe(6);
+    expect(count(g, /role="radio"/g)).toBe(7);
     expect(count(g, /aria-checked="true"/g)).toBe(1);
     expect(g).toContain('aria-label="Brainstorming"');
     expect(g).not.toContain("Gabagool");
@@ -69,7 +69,7 @@ describe("ModePanelView", () => {
   it("w=2: icons only, every button still has an accessible name", () => {
     const html = render(props({ size: { w: 2, h: 2 } }));
     const buttons = html.match(/<button[^>]*>/g) ?? [];
-    expect(buttons.length).toBe(7);
+    expect(buttons.length).toBe(8);
     for (const b of buttons) expect(b).toMatch(/aria-label="[^"]+"/);
     expect(group(html)).not.toMatch(/<span class="truncate">/);
   });

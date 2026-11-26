@@ -58,18 +58,118 @@
     "kind": "Domain"
   },
   {
-    "desc": "domain trigger via whisper mangle 'what sapp' -> whatsapp",
+    "desc": "whisper mangle 'what sapp' -> whatsapp: a WhatsApp read is Tony's live tool (whatsapp / messages left Booking's domains)",
     "text": "what sapp messages came in today",
-    "role": "booking",
-    "kind": "Domain",
+    "role": null,
+    "kind": "Default",
     "direct": "whatsapp"
   },
   {
-    "desc": "domain trigger via whisper mangle 'whats up' -> whatsapp",
+    "desc": "whisper mangle 'whats up' -> whatsapp after 'check': Tony's live WhatsApp read, no Booking domain",
     "text": "check whats up for new messages",
-    "role": "booking",
-    "kind": "Domain",
+    "role": null,
+    "kind": "Default",
     "direct": "whatsapp"
+  },
+  {
+    "desc": "'whats up' -> whatsapp after 'my' + a messaging noun",
+    "text": "check my what's up messages",
+    "role": null,
+    "kind": "Default",
+    "direct": "whatsapp"
+  },
+  {
+    "desc": "'whats up' -> whatsapp before a messaging noun",
+    "text": "any whats up messages",
+    "role": null,
+    "kind": "Default",
+    "direct": "whatsapp"
+  },
+  {
+    "desc": "'whats up' -> whatsapp after 'on'",
+    "text": "anything new on whats up",
+    "role": null,
+    "kind": "Default",
+    "direct": "whatsapp"
+  },
+  {
+    "desc": "greeting: 'hey tony, what's up?' is Tony's, never the Booking Desk",
+    "text": "Hey Tony, what's up?",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "greeting: 'what's up tony'",
+    "text": "what's up tony",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "greeting: 'hey what's up tony'",
+    "text": "hey what's up tony",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "greeting: only the word right before 'whats' counts (an earlier 'on my' doesn't make it the app)",
+    "text": "so I'm on my phone now hey tony what's up",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "greeting: 'what's up with the build' is not WhatsApp",
+    "text": "what's up with the build",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "'check what's up with the droplet' is a droplet question, never a WhatsApp read ('with' after 'up' blocks the before-cue)",
+    "text": "check what's up with the droplet",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "'check what's up on the droplet' is a droplet question ('on' + more words after 'up' blocks the before-cue)",
+    "text": "check what's up on the droplet",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "'check what's up on my calendar' is a calendar question, not a WhatsApp read",
+    "text": "check what's up on my calendar",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "greeting: 'come on, what's up' ('on' after come / hang / hold is no WhatsApp cue)",
+    "text": "come on, what's up",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "greeting: 'hang on what's up'",
+    "text": "hang on what's up",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "greeting: \"I'm in, what's up?\" ('in' is no WhatsApp cue)",
+    "text": "I'm in, what's up?",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "'on whats up' is still the app",
+    "text": "on whats up",
+    "role": null,
+    "kind": "Default",
+    "direct": "whatsapp"
+  },
+  {
+    "desc": "'open whats up' is still the app (no read word: not a Direct read)",
+    "text": "open whats up",
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "number-word normalization feeding a multi-word domain phrase",
@@ -78,9 +178,15 @@
     "kind": "Domain"
   },
   {
-    "desc": "domain score tie broken by role order (booking before ops)",
-    "text": "schedule a reminder about my messages",
+    "desc": "domain score tie broken by role order (booking 'wardrobe' 8 = ops 'schedule' 8 → booking)",
+    "text": "schedule a wardrobe fitting",
     "role": "booking",
+    "kind": "Domain"
+  },
+  {
+    "desc": "'messages' alone is no longer a Booking topic: 'schedule' makes it ops",
+    "text": "schedule a reminder about my messages",
+    "role": "ops",
     "kind": "Domain"
   },
   {
@@ -133,24 +239,24 @@
     "kind": "Default"
   },
   {
-    "desc": "direct: a WhatsApp 'updates' question is Tony's live tool, whatever the domain match says",
+    "desc": "direct: a WhatsApp 'updates' question is Tony's live tool (no Booking domain match)",
     "text": "any whatsapp updates",
-    "role": "booking",
-    "kind": "Domain",
+    "role": null,
+    "kind": "Default",
     "direct": "whatsapp"
   },
   {
     "desc": "direct: 'what's new on whats app' (Whisper split)",
     "text": "what's new on whats app",
-    "role": "booking",
-    "kind": "Domain",
+    "role": null,
+    "kind": "Default",
     "direct": "whatsapp"
   },
   {
     "desc": "direct: 'anything on WhatsApp today'",
     "text": "Anything on WhatsApp today?",
-    "role": "booking",
-    "kind": "Domain",
+    "role": null,
+    "kind": "Default",
     "direct": "whatsapp"
   },
   {
@@ -189,16 +295,16 @@
     "direct": "whatsapp"
   },
   {
-    "desc": "not direct: a write aimed at WhatsApp",
+    "desc": "not direct: a write aimed at WhatsApp (Tony's; 'whatsapp' is no Booking domain)",
     "text": "reply to Sam on WhatsApp that I'm running late",
-    "role": "booking",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "not direct: 'message him' is a write",
     "text": "message him on whatsapp that the shoot moved",
-    "role": "booking",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "not direct: drafting an email",
@@ -213,10 +319,10 @@
     "kind": "Default"
   },
   {
-    "desc": "not direct: 'what's up' alone is a greeting (Whisper still maps it to whatsapp for the domain)",
+    "desc": "not direct: 'what's up' alone is a greeting (no WhatsApp rewrite, no Booking domain)",
     "text": "what's up",
-    "role": "booking",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "not direct: 'chat with' an agent",
@@ -227,8 +333,8 @@
   {
     "desc": "not direct: 'what's up, any updates?' is a greeting, not a WhatsApp read",
     "text": "hey what's up, any updates?",
-    "role": "booking",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "not direct: a write that mentions the weather",
@@ -286,11 +392,141 @@
     "kind": "Self"
   },
   {
-    "desc": "self: a sub-agent topic still wins over a bare self address",
+    "desc": "self: Tony addressed by name with a WhatsApp read (was booking/Domain while 'whatsapp' was a Booking domain; his live tool answers it)",
     "text": "tony check my whatsapp messages",
-    "role": "booking",
-    "kind": "Domain",
+    "role": "general",
+    "kind": "Self",
     "direct": "whatsapp"
+  },
+  {
+    "desc": "self: Tony's name beats a sub-agent topic (booking self-tape + availability) — changed: this used to delegate to Booking",
+    "text": "hey tony, check my self-tape availability for friday",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: Tony's name beats an ops topic",
+    "text": "tony, how's the droplet doing",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "self: Tony's own topic alone does not beat another agent's topic (only his name does)",
+    "text": "system status of the droplet",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "named: an explicit delegation through Tony still delegates",
+    "text": "hey tony, ask the booking desk to check my availability",
+    "role": "booking",
+    "kind": "Named",
+    "taskContains": "check my availability"
+  },
+  {
+    "desc": "named: a bare agent-name mention next to Tony's name still delegates (Named, not Domain)",
+    "text": "tony, my booking agent hasn't replied about the wardrobe",
+    "role": "booking",
+    "kind": "Named"
+  },
+  {
+    "desc": "regression: a self name used as a noun ('the orchestrator react code') is a mention, not an address — the coder topic wins",
+    "text": "fix bug in the orchestrator react code",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "regression: 'the dispatcher rust code' is a mention — the coder topic wins",
+    "text": "refactor the dispatcher rust code",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "regression: the OS renamed Friday — 'for friday' is a date, not a vocative; the booking topic wins",
+    "text": "check my self-tape availability for friday",
+    "osName": "Friday",
+    "role": "booking",
+    "kind": "Domain"
+  },
+  {
+    "desc": "a trailing self name after a preposition is an object, not a vocative ('in the orchestrator')",
+    "text": "fix bug in the orchestrator",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "'get the orchestrator react code…': a VERBS_A verb before a self name used as a noun is no address",
+    "text": "get the orchestrator react code working",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "regression: 'the rust dispatcher' at the end is a noun, not a vocative ('dispatcher' / 'orchestrator' address Tony only when asked)",
+    "text": "fix the rust dispatcher",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "regression: 'the react orchestrator' at the end is a noun, not a vocative",
+    "text": "refactor the react orchestrator",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "regression: a line opening with 'orchestrator' (a noun) is not an address; the coder topic wins",
+    "text": "orchestrator react code has a bug",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "a self name mid-line (no address position) does not beat a topic",
+    "text": "the dispatcher keeps timing out, is the droplet healthy",
+    "role": "ops",
+    "kind": "Domain"
+  },
+  {
+    "desc": "address: the line opens with a self name after an interjection ('ok jarvis')",
+    "text": "ok jarvis, redo the color palette for the landing page",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "address: the renamed OS name leads the line",
+    "text": "friday, check my wardrobe for the shoot",
+    "osName": "Friday",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "address: 'ask tony to …' (VERBS_A + self name + to)",
+    "text": "ask tony to check my self-tape availability",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "address: 'tell the dispatcher about …'",
+    "text": "tell the dispatcher about the wardrobe fitting",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "address: a trailing vocative ('…, tony')",
+    "text": "check my self-tape availability, tony",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "address: a trailing vocative before 'please'",
+    "text": "is the droplet healthy tony please",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "address: the renamed OS as a trailing vocative",
+    "text": "check my self-tape availability, friday",
+    "osName": "Friday",
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "director vocative address (non-VERBS_B verb falls to a bare name mention)",

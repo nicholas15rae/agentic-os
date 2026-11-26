@@ -30,7 +30,9 @@ pub const TASKS_MAX: usize = 12;
 const FIELD_MAX: usize = 600;
 const LIST_MAX: usize = 12;
 
-/// Appended to Tony's system prompt (Tony's own turns, not Learning, not the novelty overlay).
+/// The contract with EVERY target live (no overlay, nothing frozen). [`contract`] is the per-turn
+/// text, naming only the targets the switchboard leaves live this turn; this is exactly what it
+/// returns when all of them are (`contract_with_everyone_live_is_the_full_text`).
 pub const CONTRACT: &str = "\n\nOUTPUT CONTRACT (overrides the STYLE format rules): reply with ONE object and nothing else, no code fences, in this exact shape:
 {\"spoken_reply\": \"...\", \"requires_dispatch\": false, \"priority\": \"normal\", \"tasks\": []}
 - spoken_reply: 1-3 short plain sentences for speech; no markdown, lists or code.
@@ -40,6 +42,80 @@ pub const CONTRACT: &str = "\n\nOUTPUT CONTRACT (overrides the STYLE format rule
 - Each task: {\"task_id\": \"short_snake_case\", \"target_agent\": \"librarian|prompter|coder|designer|director|financer|observer|security\", \"action\": \"imperative verb + exact deliverable\", \"inputs\": [\"exact paths, keys or output:task_id\"], \"constraints\": [\"hard limits\"], \"acceptance_criteria\": [\"at least one objective pass/fail check\"], \"depends_on\": [\"earlier task_id\"]}. Blunt and specific, no chatter.
 - Chain with depends_on: librarian stages context, prompter locks the spec, coder or designer builds, observer verifies, security audits and purges.
 - librarian finds and stages files, docs and memory; prompter writes specs and acceptance tests; coder writes and runs code; designer does UI/UX; director plans video and photo edits (self-tapes, YouTube, shorts, headshots): shot lists and edit plans; financer tracks budgets and spend; observer checks outputs against acceptance_criteria; security enforces boundaries and purges scratch data.";
+
+/// The contract's fixed opening (the same in every mode).
+const CONTRACT_HEAD: &str = "\n\nOUTPUT CONTRACT (overrides the STYLE format rules): reply with ONE object and nothing else, no code fences, in this exact shape:
+{\"spoken_reply\": \"...\", \"requires_dispatch\": false, \"priority\": \"normal\", \"tasks\": []}
+- spoken_reply: 1-3 short plain sentences for speech; no markdown, lists or code.
+- Chat, a question, or a missing critical detail: requires_dispatch false, tasks empty; ask one direct question if something is missing.
+- Never do heavy coding, file analysis or multi-step builds in spoken_reply: dispatch them. Never say a task is finished; say it is queued or staged.
+- priority: low, normal or urgent.
+";
+
+/// What each target does (the contract's last line), in `AGENTS` order.
+const DUTIES: [&str; 8] = [
+    "librarian finds and stages files, docs and memory",
+    "prompter writes specs and acceptance tests",
+    "coder writes and runs code",
+    "designer does UI/UX",
+    "director plans video and photo edits (self-tapes, YouTube, shorts, headshots): shot lists and edit plans",
+    "financer tracks budgets and spend",
+    "observer checks outputs against acceptance_criteria",
+    "security enforces boundaries and purges scratch data",
+];
+
+/// The targets that stage, spec or build (everyone but Finance and the two checkers).
+const BUILDERS: [&str; 5] = ["librarian", "prompter", "coder", "designer", "director"];
+
+/// Added when none of `BUILDERS` is live (e.g. Operations, Executive): Tony must not dispatch a
+/// build to a checker or promise it was queued.
+pub const NO_BUILDERS_LINE: &str = "- Nobody who stages, specs or builds is on duty now: keep builds out of tasks and never say one is queued.";
+
+/// The dispatch targets the switchboard leaves live this turn (`modes::agent_live`: the mode's
+/// overlay and the master switchboard), in `AGENTS` order. Observer and Security are system
+/// scripts, so they are always live (pure).
+pub fn live_targets(e: &super::modes::Effective, g: &super::os_core::SwitchboardConfig) -> Vec<&'static str> {
+    AGENTS.iter().copied().filter(|a| super::modes::agent_live(e, g, a)).collect()
+}
+
+/// Tony's output contract for this turn: its `target_agent` list, its chain line and its duty
+/// line name only the live targets, so Tony is never told to start a chain with a frozen agent.
+/// It sits in the prompt tail (after the cached prefix, before the MODE block), so a mode switch
+/// or a switchboard change never breaks the cache. Deterministic (pure).
+pub fn contract(e: &super::modes::Effective, g: &super::os_core::SwitchboardConfig) -> String {
+    let live = live_targets(e, g);
+    let on = |a: &str| live.contains(&a);
+    let builds = match (on("coder"), on("designer")) {
+        (true, true) => Some("coder or designer builds"),
+        (true, false) => Some("coder builds"),
+        (false, true) => Some("designer builds"),
+        (false, false) => None,
+    };
+    let chain: Vec<&str> = [
+        on("librarian").then_some("librarian stages context"),
+        on("prompter").then_some("prompter locks the spec"),
+        builds,
+        on("observer").then_some("observer verifies"),
+        on("security").then_some("security audits and purges"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let duties: Vec<&str> = AGENTS.iter().zip(DUTIES).filter(|(a, _)| on(**a)).map(|(_, d)| d).collect();
+    let mut s = format!(
+        "{CONTRACT_HEAD}- Each task: {{\"task_id\": \"short_snake_case\", \"target_agent\": \"{}\", \"action\": \"imperative verb + exact deliverable\", \"inputs\": [\"exact paths, keys or output:task_id\"], \"constraints\": [\"hard limits\"], \"acceptance_criteria\": [\"at least one objective pass/fail check\"], \"depends_on\": [\"earlier task_id\"]}}. Blunt and specific, no chatter.\n",
+        live.join("|")
+    );
+    if !chain.is_empty() {
+        s.push_str(&format!("- Chain with depends_on: {}.\n", chain.join(", ")));
+    }
+    if !BUILDERS.iter().any(|a| on(a)) {
+        s.push_str(NO_BUILDERS_LINE);
+        s.push('\n');
+    }
+    s.push_str(&format!("- {}.", duties.join("; ")));
+    s
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TaskPacket {
@@ -225,40 +301,51 @@ pub fn route(app: Option<&tauri::AppHandle>, os: &super::os_core::OsState, d: &T
         }),
         AskBeforeDispatch => {
             pending().lock().unwrap().insert(id.clone(), d.clone());
-            let st = d.tasks.iter().map(|t| (t.task_id.clone(), ("pending".to_string(), String::new()))).collect();
+            // A frozen target shows as held already: a yes won't run it (`execute`).
+            let frozen = frozen_targets(d, &e, &os.snapshot().switchboard);
+            let st = d.tasks.iter().map(|t| (t.task_id.clone(), frozen.get(&t.target_agent).map_or_else(|| ("pending".to_string(), String::new()), |w| ("held".to_string(), w.clone())))).collect();
             Some(DispatchView { id, state: "pending".into(), priority: d.priority.clone(), reason: "Waiting for your yes".into(), tasks: task_rows(d, &st) })
         }
         AutoDispatch => Some(execute(app, &id, d, true)),
     }
 }
 
-/// Run a packet now (Builder mode, or Nic approved it in Ask mode).
+/// The packet's targets the switchboard froze this turn (target agent → "<Agent> is frozen in
+/// <Mode> mode"). Their tasks are held, never run; tasks that depend on them are blocked (pure).
+pub fn frozen_targets(d: &TonyDispatch, e: &super::modes::Effective, g: &super::os_core::SwitchboardConfig) -> BTreeMap<String, String> {
+    d.tasks.iter().filter_map(|t| super::modes::agent_frozen_reason(e, g, &t.target_agent).map(|why| (t.target_agent.clone(), why))).collect()
+}
+
+/// One task's row when the packet is dispatched (`refused`: the mode gate said no) (pure).
+fn dispatch_row(refused: Option<&str>, frozen: &BTreeMap<String, String>, target: &str) -> (String, String) {
+    match (refused, target) {
+        (Some(e), _) => ("refused".to_string(), super::envelope::clip(e, 160)),
+        (None, "financer") => ("held".to_string(), "Finance is a sealed vault: unlock it to act on this".to_string()),
+        (None, a) if frozen.contains_key(a) => ("held".to_string(), frozen[a].clone()),
+        (None, a) => ("queued".to_string(), if super::packet_queue::is_gpu(a) { "waits for the GPU relay".to_string() } else { "CPU lane".to_string() }),
+    }
+}
+
 /// Run a packet now (Builder mode, or Nic approved it in Ask mode): the packet queue
-/// dispatcher takes it in the background (`packet_queue::spawn`); this returns at once.
+/// dispatcher takes it in the background (`packet_queue::spawn`); this returns at once. A task
+/// whose target the switchboard froze is held (shown, never run).
 pub fn execute(app: Option<&tauri::AppHandle>, id: &str, d: &TonyDispatch, auto: bool) -> DispatchView {
-    let gate = app.map(|a| {
-        use tauri::Manager;
-        super::modes::check_dispatch(a.state::<super::os_core::OsState>().modes.effective().dispatch, super::modes::DispatchKind::BuildPipeline { auto })
-    });
+    use tauri::Manager;
+    let gate = app.map(|a| super::modes::check_dispatch(a.state::<super::os_core::OsState>().modes.effective().dispatch, super::modes::DispatchKind::BuildPipeline { auto }));
     let refused = match gate {
         Some(Err(e)) => Some(e),
         None => Some("no app handle".to_string()),
         Some(Ok(())) => None,
     };
-    let st: BTreeMap<String, (String, String)> = d
-        .tasks
-        .iter()
-        .map(|t| {
-            let row = match (&refused, t.target_agent.as_str()) {
-                (Some(e), _) => ("refused".to_string(), super::envelope::clip(e, 160)),
-                (None, "financer") => ("held".to_string(), "Finance is a sealed vault: unlock it to act on this".to_string()),
-                (None, a) => ("queued".to_string(), if super::packet_queue::is_gpu(a) { "waits for the GPU relay".to_string() } else { "CPU lane".to_string() }),
-            };
-            (t.task_id.clone(), row)
+    let frozen = app
+        .map(|a| {
+            let os = a.state::<super::os_core::OsState>();
+            frozen_targets(d, &os.modes.effective(), &os.snapshot().switchboard)
         })
-        .collect();
+        .unwrap_or_default();
+    let st: BTreeMap<String, (String, String)> = d.tasks.iter().map(|t| (t.task_id.clone(), dispatch_row(refused.as_deref(), &frozen, &t.target_agent))).collect();
     if let (None, Some(app)) = (&refused, app) {
-        for t in &d.tasks {
+        for t in d.tasks.iter().filter(|t| !frozen.contains_key(&t.target_agent)) {
             super::arbiter::get().handoff("tony", &t.target_agent.replace("financer", "finance"), &t.action);
         }
         super::packet_queue::spawn(app.clone(), id.to_string(), d.clone());
@@ -357,10 +444,116 @@ mod tests {
         assert_eq!(order(&[pkt("b2", "coder", &["a1"]), pkt("a1", "librarian", &[])]).unwrap()[0].task_id, "a1");
     }
 
+    fn eff(id: &str) -> super::super::modes::Effective {
+        super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default())
+    }
+
+    fn global(frozen: &[&str]) -> super::super::os_core::SwitchboardConfig {
+        super::super::os_core::SwitchboardConfig { version: 1, frozen_agents: frozen.iter().map(|s| s.to_string()).collect(), frozen_tools: vec![] }
+    }
+
+    /// The `target_agent` list of a contract.
+    fn targets_of(c: &str) -> Vec<String> {
+        let (_, rest) = c.split_once("\"target_agent\": \"").unwrap();
+        rest.split('"').next().unwrap().split('|').map(str::to_string).collect()
+    }
+
+    fn chain_of(c: &str) -> String {
+        c.lines().find_map(|l| l.strip_prefix("- Chain with depends_on: ")).unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn contract_with_everyone_live_is_the_full_text() {
+        // No overlay and nothing frozen: every target is live, the text is the full contract.
+        assert_eq!(contract(&eff("brainstorm"), &global(&[])), CONTRACT);
+        assert_eq!(live_targets(&eff("brainstorm"), &global(&[])), AGENTS.to_vec());
+        // Booking isn't a packet target, so freezing it changes nothing here.
+        assert_eq!(contract(&eff("surface"), &global(&["booking"])), CONTRACT);
+    }
+
+    #[test]
+    fn the_contract_names_only_live_agents_and_never_starts_a_chain_with_a_frozen_one() {
+        let g = super::super::os_core::SwitchboardConfig::default();
+        // Builder: the pipeline and the checkers; the Librarian (master switchboard), the Director
+        // and Finance (off duty) are never named, so the chain starts with the Prompter.
+        let b = contract(&eff("builder"), &g);
+        assert_eq!(targets_of(&b), vec!["prompter", "coder", "designer", "observer", "security"]);
+        assert_eq!(chain_of(&b), "prompter locks the spec, coder or designer builds, observer verifies, security audits and purges.");
+        for frozen in ["librarian", "director", "financer"] {
+            assert!(!b.contains(frozen), "{frozen}: {b}");
+        }
+        assert!(!b.contains(NO_BUILDERS_LINE));
+        // No overlay, the default master switchboard: everyone but the Librarian.
+        let s = contract(&eff("brainstorm"), &g);
+        assert!(!s.contains("librarian"), "{s}");
+        assert_eq!(chain_of(&s), "prompter locks the spec, coder or designer builds, observer verifies, security audits and purges.");
+        assert!(s.contains("director plans video") && s.contains("financer tracks budgets"));
+        // Thawed on the master switchboard: the Librarian leads the chain again.
+        assert!(chain_of(&contract(&eff("brainstorm"), &global(&["booking"]))).starts_with("librarian stages context, "));
+        // Operations / Executive: nobody stages, specs or builds; only live targets are named.
+        let o = contract(&eff("operations"), &g);
+        assert_eq!(targets_of(&o), vec!["observer", "security"]);
+        assert_eq!(chain_of(&o), "observer verifies, security audits and purges.");
+        assert!(o.contains(NO_BUILDERS_LINE));
+        let x = contract(&eff("executive"), &g);
+        assert_eq!(targets_of(&x), vec!["financer", "observer", "security"]);
+        assert!(x.contains(NO_BUILDERS_LINE) && !x.contains("librarian") && !x.contains("coder"));
+        // One builder only: the chain says so.
+        let coder_only = super::super::modes::Effective { switchboard: Some(super::super::modes::ModeSwitchboard { agents: vec!["coder".into()], tools: vec![] }), ..eff("builder") };
+        assert_eq!(chain_of(&contract(&coder_only, &g)), "coder builds, observer verifies, security audits and purges.");
+        // Every preset: each named target is live, and so is the agent the chain starts with.
+        for m in super::super::modes::presets() {
+            let e = eff(&m.id);
+            let c = contract(&e, &g);
+            for t in targets_of(&c) {
+                assert!(super::super::modes::agent_live(&e, &g, &t), "{}: {t}", m.id);
+            }
+            let first = chain_of(&c).split(' ').next().unwrap().to_string();
+            assert!(super::super::modes::agent_live(&e, &g, &first), "{}: the chain starts with {first}", m.id);
+            assert_eq!(contract(&e, &g), c, "deterministic");
+        }
+    }
+
+    #[test]
+    fn a_frozen_target_is_held_never_queued() {
+        // The Librarian thawed on the master switchboard (Booking alone frozen).
+        let g = global(&["booking"]);
+        let d = TonyDispatch {
+            spoken_reply: "ok".into(),
+            requires_dispatch: true,
+            priority: "normal".into(),
+            tasks: vec![pkt("stage", "librarian", &[]), pkt("spec", "prompter", &["stage"]), pkt("build", "coder", &["spec"]), pkt("audit", "security", &["build"]), pkt("cut", "director", &[])],
+        };
+        // Builder: the Librarian and the Director are frozen; the pipeline and Security are not.
+        let f = frozen_targets(&d, &eff("builder"), &g);
+        assert_eq!(f.keys().map(String::as_str).collect::<Vec<_>>(), vec!["director", "librarian"]);
+        assert_eq!(f["librarian"], "Librarian is frozen in Builder mode");
+        assert_eq!(dispatch_row(None, &f, "librarian"), ("held".to_string(), "Librarian is frozen in Builder mode".to_string()));
+        assert_eq!(dispatch_row(None, &f, "coder").0, "queued");
+        assert_eq!(dispatch_row(None, &f, "security").0, "queued", "system scripts are never frozen");
+        // Operations: the whole pipeline is held; Finance stays its own sealed-vault hold.
+        let f = frozen_targets(&d, &eff("operations"), &g);
+        for a in ["librarian", "prompter", "coder", "director"] {
+            assert_eq!(dispatch_row(None, &f, a).0, "held", "{a}");
+        }
+        assert!(dispatch_row(None, &f, "financer").1.contains("sealed vault"));
+        // No overlay: nothing frozen; a refusal still wins over everything.
+        assert!(frozen_targets(&d, &eff("brainstorm"), &g).is_empty());
+        assert_eq!(dispatch_row(Some("MODE_SURFACE_ONLY: x"), &f, "coder").0, "refused");
+        // The default master switchboard freezes the Librarian in every mode.
+        let f = frozen_targets(&d, &eff("brainstorm"), &super::super::os_core::SwitchboardConfig::default());
+        assert_eq!(f.keys().map(String::as_str).collect::<Vec<_>>(), vec!["librarian"]);
+        assert_eq!(f["librarian"], "Librarian is frozen on the master switchboard");
+    }
+
     #[test]
     fn the_contract_never_names_the_format_word() {
-        let l = CONTRACT.to_lowercase();
-        assert!(!l.contains("json") && !l.contains("/no_think") && !l.contains("gabagool"));
+        let mut texts = vec![CONTRACT.to_string()];
+        texts.extend(super::super::modes::presets().iter().map(|m| contract(&eff(&m.id), &super::super::os_core::SwitchboardConfig::default())));
+        for c in &texts {
+            let l = c.to_lowercase();
+            assert!(!l.contains("json") && !l.contains("/no_think") && !l.contains("gabagool"), "{c}");
+        }
         for a in AGENTS {
             assert!(CONTRACT.contains(a), "{a}");
         }

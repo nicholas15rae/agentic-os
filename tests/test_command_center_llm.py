@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -223,6 +225,60 @@ class LlmGatewayTests(GatewayCase):
     def test_gpu_put_validates(self):
         self.assertEqual(self.api("PUT", "/api/os/gpu", {"busy": "yes"})[0], 400)
         self.assertEqual(self.api("GET", "/api/os/gpu")[0], 200)
+
+    def test_llm_chat_turns_thinking_off_by_default(self):
+        # Qwen3.5 on this server honours only reasoning_effort; other servers read enable_thinking.
+        out = cc.llm_chat([{"role": "user", "content": "hi"}], gpu_wait=0)
+        self.assertIn("Stubbed", out)
+        body = self.stub.calls[-1]
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertFalse(body["stream"])
+
+    def test_llm_chat_think_opt_in_sends_no_flags(self):
+        cc.llm_chat([{"role": "user", "content": "hi"}], gpu_wait=0, think=True)
+        body = self.stub.calls[-1]
+        self.assertNotIn("reasoning_effort", body)
+        self.assertNotIn("chat_template_kwargs", body)
+
+    def test_llm_routes_send_thinking_off(self):
+        s, d = self.api("POST", "/api/cc/llm/json", {"system": "Return JSON", "prompt": "hello"})
+        self.assertEqual(s, 200, d)
+        s, note = self.api("POST", "/api/cc/c/notes", {"title": "dump", "rawText": "call the vet tomorrow"})
+        self.assertEqual(s, 200, note)
+        s, d = self.api("POST", "/api/cc/brainstorm/organize", {"id": note["id"]})
+        self.assertEqual(s, 200, d)
+        self.assertEqual(d["organized"]["title"], "Stubbed")
+        chats = [b for b in self.stub.calls if "messages" in b]
+        self.assertEqual(len(chats), 2)
+        for b in chats:
+            self.assertEqual((b.get("reasoning_effort"), b.get("chat_template_kwargs")), ("none", {"enable_thinking": False}))
+
+    def _upload(self, filename, mime, content):
+        boundary = "----cctestboundary"
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                f"Content-Type: {mime}\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(self.h.base_url + "/api/cc/files", data=body, method="POST",
+                                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"null")
+
+    def test_upload_then_ocr_sends_thinking_off(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        s, f = self._upload("receipt.png", "image/png", png)
+        self.assertEqual(s, 200, f)
+        self.assertEqual((f["name"], f["mime"], f["size"]), ("receipt.png", "image/png", len(png)))
+        self.assertEqual(self.iso.sql("SELECT size FROM files WHERE id=?", (f["id"],)), [{"size": len(png)}])
+        self.assertEqual(self.api("GET", f"/api/cc/files/{f['id']}")[0], 200)
+        s, d = self.api("POST", "/api/cc/ocr", {"fileId": f["id"], "kind": "receipt"})
+        self.assertEqual(s, 200, d)
+        self.assertEqual((d["engine"], d["fields"]), ("vision-llm", {"title": "Stubbed"}))
+        body = [b for b in self.stub.calls if "messages" in b][-1]
+        self.assertEqual((body["reasoning_effort"], body["chat_template_kwargs"]), ("none", {"enable_thinking": False}))
+        self.assertEqual(self._upload("x.exe", "application/x-msdownload", b"MZ")[0], 415)
 
     def test_llm_chat_waits_then_proceeds(self):
         cc.gpu_set(True, "x", time.time() + 60)

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { isTauri, native } from "@/lib/platform";
 import type { NodeDef } from "./types";
+import { PHONE_LITE } from "@/lib/phone-lite";
 import type { ArbiterNode, Handoff } from "@/features/arbiter/api";
 
 /** Page ids are stable (1 Blueprint · 2 Schematic · 3 Orbital); the TAB ORDER lives in `PAGES`. */
@@ -10,11 +11,18 @@ export type SysPage = 1 | 2 | 3;
 export const DEFAULT_PAGE: SysPage = 2;
 
 /** Tab order (operational view first). Ids stay stable; the pill number is the tab POSITION. */
-export const PAGES: readonly { id: SysPage; label: string; hint: string }[] = [
+const ALL_PAGES: readonly { id: SysPage; label: string; hint: string }[] = [
   { id: 2, label: "Schematic Flowchart", hint: "Architectural wiring, live diagnostics & orchestration mode" },
   { id: 1, label: "Gabagool Blueprint", hint: "Agent blueprint: hardware & telemetry deck" },
   { id: 3, label: "Orbital Ecosystem", hint: "3D planetary star map" },
 ];
+
+/** The phone app has no Orbital Ecosystem: a full 3D WebGL scene it doesn't need (and its chunk,
+ * the only one with three.js, is then never downloaded there). */
+export const PAGES: readonly { id: SysPage; label: string; hint: string }[] = PHONE_LITE ? ALL_PAGES.filter((p) => p.id !== 3) : ALL_PAGES;
+
+/** A page this build offers (the phone: never 3). */
+export const allowedPage = (p: SysPage): SysPage => (PAGES.some((x) => x.id === p) ? p : DEFAULT_PAGE);
 
 const HUD_KEY = "cc.sysmap.hud";
 
@@ -59,7 +67,7 @@ export const useSysMap = create<SysMapStore>((set) => ({
   inspect: null,
   focus: "rag",
   hud: read<"minimal" | "full">(HUD_KEY, (v) => v === "minimal" || v === "full", "minimal", (v) => v as "minimal" | "full"),
-  setPage: (page) => set({ page }),
+  setPage: (page) => set({ page: allowedPage(page) }),
   open: (inspect, focus = "rag") => set({ inspect, focus }),
   close: () => set({ inspect: null }),
   setHud: (hud) => {

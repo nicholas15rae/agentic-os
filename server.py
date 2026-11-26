@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 _scheduler_instance = None
 
@@ -36,6 +37,16 @@ async def lifespan(app: FastAPI):
         print("Event-driven scheduler started")
     except Exception as e:
         print(f"Scheduler not available: {e}")
+    if __name__ == "__main__":
+        # Gateway Tony (gateway_tony.py) answers phone turns while no desktop app works the inbox.
+        # Only the real gateway process (`python server.py`, as every launcher runs it) starts it:
+        # an imported app (the test harness) never claims a phone turn.
+        try:
+            import gateway_tony
+            gateway_tony.start()
+            print("Gateway Tony started")
+        except Exception as e:
+            print(f"Gateway Tony not available: {e}")
     yield
     if _scheduler_instance:
         try:
@@ -1194,6 +1205,13 @@ async def chat_upload(
     if ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(400, f"File type .{ext} not allowed")
 
+    # The agent CLI runs for up to ~180 s, and the upload/history/audit writes block too. :8080 and
+    # :8443 share one event loop, so doing this inline stalled every gateway request: use a worker thread.
+    return await run_in_threadpool(_chat_upload_run, agent, message, filename, raw)
+
+
+def _chat_upload_run(agent: str, message: str, filename: str, raw: bytes) -> dict:
+    """The blocking half of /api/chat/upload (validated input): store, ask the agent, log."""
     _cleanup_uploads()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
@@ -1966,6 +1984,11 @@ def service_worker():
 
 # ─── Main ─────────────────────────────────────────────────────────
 
+# A clean stop waits this long for open requests, then cancels them. Without a cap uvicorn waits
+# for every one, and the inbox long-polls hold requests open up to 25 s (os_api.WAIT_MAX_SECS).
+# A long-poll cut here reads to its client like any gateway restart.
+GRACEFUL_SHUTDOWN_SECS = 3
+
 if __name__ == "__main__":
     import uvicorn
     parser = argparse.ArgumentParser()
@@ -2013,12 +2036,12 @@ if __name__ == "__main__":
         print(f"[gateway] {trading_api.autostart_bridge()}")
     except Exception as _e:  # never let the trading bridge block the gateway
         print(f"[gateway] trading bridge autostart failed: {_e}")
-    config = uvicorn.Config(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
+    config = uvicorn.Config(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECS)
     if not tls_socks:
         uvicorn.Server(config).run(sockets=socks)
     else:
         import asyncio
-        tls = uvicorn.Config(app, host=args.host, port=args.https_port, ssl_certfile=str(crt), ssl_keyfile=str(key), lifespan="off")
+        tls = uvicorn.Config(app, host=args.host, port=args.https_port, ssl_certfile=str(crt), ssl_keyfile=str(key), lifespan="off", timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECS)
 
         async def _serve_both():
             await asyncio.gather(uvicorn.Server(config).serve(sockets=socks), uvicorn.Server(tls).serve(sockets=tls_socks))

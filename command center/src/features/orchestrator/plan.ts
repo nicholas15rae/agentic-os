@@ -6,7 +6,11 @@ import { parseDraftEmail, type DraftParse } from "@/features/orchestrator/draft-
 import { parseInstagramIntent, type InstagramIntent } from "@/features/orchestrator/instagram-intent";
 import { isOsControlPhrase } from "@/features/os/os-intent-parse";
 import { isCommitCue, parseDefer } from "@/features/dialogue/tier";
+import { roleLabel } from "@/features/dispatcher/roles";
+import { frozenToolReason, toolGloballyFrozen } from "@/features/modes/modes";
+import { currentFreeze, isToolLiveNow, useModes } from "@/features/modes/modes-store";
 import { useOs } from "@/features/os/os-store";
+import { ownsServer } from "@/features/os/switchboard";
 import { useSettings } from "@/stores/settings";
 import type { ThreadId } from "@/features/voice/voice-store";
 
@@ -213,6 +217,37 @@ export function heuristicPlan(utterance: string, role?: AgentRole): ActionPlan {
   return plan;
 }
 
+/**
+ * Why the planning agent can't take an approved action on tool server `server` this turn (Tony's
+ * reply), or null when it can. Frozen: the mode's switchboard or the master one froze the server,
+ * so Rust would refuse the call. Owned elsewhere: os.json `mcps[].agents` grants it to other
+ * agents (Tony respects grants too). Either way no card is raised for an action that can't run.
+ * Ownership is only read once the OS config has loaded; without it Rust's own gate decides.
+ */
+export function actionBlockedReply(server: string, label: string, role: AgentRole): string | null {
+  if (!isToolLiveNow(server)) {
+    const freeze = currentFreeze();
+    const reason = frozenToolReason(useModes.getState().effective, server, freeze, label) ?? `${label} is frozen`;
+    const thaw = toolGloballyFrozen(server, freeze) ? "Turn it back on in the switchboard and I can use it." : "Switch modes and I can use it.";
+    return `${reason}, so I left it alone. ${thaw}`;
+  }
+  const entry = useOs.getState().cfg?.mcps?.find((m) => m.id === server);
+  if (!entry || ownsServer(entry.agents, role)) return null;
+  const owner = entry.agents?.find((a) => a !== "all");
+  if (!owner) return null;
+  const who = roleLabel(owner);
+  return `That's ${who}'s job — ask ${who} to do it.`;
+}
+
+/** A plan that only answers (no card, no tool call): `text` is the reply. */
+function replyOnly(plan: ActionPlan, text: string, meta: string): ActionPlan {
+  plan.mutating = false;
+  plan.target = { kind: "agent" };
+  plan.payload = {};
+  plan.run = async () => ({ text, meta });
+  return plan;
+}
+
 /** A Gmail draft: a mutating plan bound to `gmail.create_draft`, or a read-only follow-up question. */
 function draftPlan(utterance: string, role: AgentRole, intent: string, d: DraftParse): ActionPlan {
   const plan: ActionPlan = {
@@ -235,6 +270,11 @@ function draftPlan(utterance: string, role: AgentRole, intent: string, d: DraftP
     plan.summary = "Gmail draft";
     plan.run = async () => ({ text, meta: "gmail · draft" });
     return plan;
+  }
+  const blocked = actionBlockedReply("gmail", "Gmail", role);
+  if (blocked) {
+    plan.summary = "Gmail draft";
+    return replyOnly(plan, blocked, "gmail · not available");
   }
   const args = { to: d.to, subject: d.subject, body: d.body };
   plan.mutating = true;
@@ -268,6 +308,8 @@ function instagramPlan(utterance: string, role: AgentRole, intent: string, ig: I
     plan.run = async () => ({ text, meta: "instagram" });
     return plan;
   }
+  const blocked = actionBlockedReply("instagram", "Instagram", role);
+  if (blocked) return replyOnly(plan, blocked, "instagram · not available");
   plan.mutating = true;
   if (ig.kind === "publish") {
     const args = { caption: ig.caption, ...(ig.videoUrl ? { videoUrl: ig.videoUrl } : { imageUrl: ig.imageUrl }) };

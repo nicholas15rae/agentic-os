@@ -629,6 +629,10 @@ export interface DispatchResult {
   latencyMs: number;
   /** The prompt left the machine through the privacy diffuser. */
   redacted?: boolean;
+  /** Phone only: the text the gateway streamed ahead of the answer and never repeats in
+   * `content` (gateway_tony.py's cold-start "One sec, Nic — waking up. "), so the phone's speech
+   * lines the final answer up with what it already said. Absent / "" when nothing led it. */
+  streamPrefix?: string;
 }
 
 export interface DockerContainer {

@@ -68,6 +68,10 @@ export const useOs = create<OsStore>((set) => ({
   },
 }));
 
+/** os.json's master switchboard (`cfg.switchboard`; see ./switchboard). */
+export type { OsSwitchboard } from "./switchboard";
+export { osSwitchboard } from "./switchboard";
+
 /** "Tony" (or whatever the user called their OS). */
 export const useOsName = () => useSettings((s) => s.osName || "Tony");
 export const osName = () => useSettings.getState().osName || "Tony";

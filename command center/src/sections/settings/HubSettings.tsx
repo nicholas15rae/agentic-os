@@ -256,7 +256,7 @@ export function ModelLibraryCard() {
   return (
     <Card
       title="Local model library (D:\ drive)"
-      hint="Scans D:\AI Models Productivity, D:\AI Models Media and Vision and D:\ai model voices. GGUF folders can be linked into Bionic (a directory junction — nothing is copied) and then show up in every model dropdown."
+      hint="Scans D:\AI Models Productivity, D:\AI Models Media and Vision and D:\ai model voices. GGUF folders can be linked into Bionic's models folder, C:\Users\nicho\.lmstudio\models (the D:\ models are junctioned in — nothing is copied), and then show up in every model dropdown."
       action={
         <>
           <button onClick={() => void rescan()} disabled={!!busy} className="pill-glass !h-8 text-xs">

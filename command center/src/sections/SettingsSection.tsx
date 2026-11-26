@@ -17,6 +17,7 @@ import { CueStudio } from "./settings/CueStudio";
 import { VoiceDetectionCard } from "./settings/VadSettings";
 import { RoutingSettings } from "./settings/RoutingSettings";
 import { ModesManagerCard } from "./settings/ModesManager";
+import { SwitchboardCard } from "./settings/SwitchboardSettings";
 import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
 import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
@@ -26,7 +27,7 @@ type Tab = "services" | "voice" | "modes" | "integrations" | "business" | "appea
 const TABS: { id: Tab; label: string }[] = [
   { id: "services", label: "Services" },
   { id: "voice", label: "Voice & Triggers" },
-  { id: "modes", label: "Tony Modes" },
+  { id: "modes", label: "Modes & Switchboard" },
   { id: "integrations", label: "Integrations" },
   { id: "business", label: "Business" },
   { id: "appearance", label: "Appearance" },
@@ -105,7 +106,13 @@ export function SettingsSection() {
           <CueStudio />
         </>
       )}
-      {tab === "modes" && (desktop ? <ModesManagerCard onOpenVoice={() => go("voice")} /> : <DesktopOnly what="Creating and editing Tony's modes" />)}
+      {tab === "modes" && (
+        <>
+          {/* The master switchboard: the desktop edits it, the phone shows the desktop's read-only. */}
+          <SwitchboardCard />
+          {desktop ? <ModesManagerCard onOpenVoice={() => go("voice")} /> : <DesktopOnly what="Creating and editing Tony's modes and the switchboard" />}
+        </>
+      )}
       {tab === "integrations" && (
         <>
           {desktop && (

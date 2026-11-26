@@ -444,7 +444,7 @@ pub(crate) fn offered_to_router(name: &str, tony: bool) -> bool {
 }
 
 /// A read-only server (`McpServer.read_only`) never lists its mutating tools.
-fn visible_tools(s: &McpServer, tools: Vec<ToolInfo>) -> Vec<ToolInfo> {
+pub(crate) fn visible_tools(s: &McpServer, tools: Vec<ToolInfo>) -> Vec<ToolInfo> {
     if s.read_only {
         tools.into_iter().filter(|t| !changes_data(&t.name)).collect()
     } else {
@@ -478,17 +478,31 @@ pub(crate) const ROLE_PREFIX: &str = "PERMISSION_ROLE:";
 /// tool that changes data for a read-only role).
 pub(crate) const READ_ONLY_ROLE_PREFIX: &str = "PERMISSION_READ_ONLY_ROLE:";
 
-/// Part 4 role gate (`roles::policy_for`), run by `call_tool_with` before anything else. Tony
-/// (and a missing agent) is never refused here. Every other agent id must be valid, must be
-/// granted the tool's server (`McpServer.grants`; `skills.read` checks its own grants) and the
-/// tool must pass its role policy: the Librarian's exact allowlist, and no data-changing tool
-/// for any read-only role (everyone but Tony).
 /// Tony's own mode switch (local, reversible, Tony only): never an MCP permission card.
 pub(crate) const TONY_SET_MODE: &str = "tony.set_mode";
 
+/// Part 4 role gate (`roles::policy_for`), run by `call_tool_with` before anything else. Every
+/// agent, Tony included, must be granted the tool's server (`McpServer.grants`, the tool-owner
+/// split; `skills.read` checks its own grants, `tony.set_mode` is Tony's alone). Tony has no
+/// role policy beyond that; every other agent id must be valid and the tool must pass its role
+/// policy: the Librarian's exact allowlist, and no data-changing tool for any read-only role.
 pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> Option<String> {
+    role_refusal_with(cfg, name, agent, true)
+}
+
+/// `role_refusal`; `grants: false` skips the grant lists (Nic's own UI acting as Tony, and the
+/// worker's scripted calls), never the role policy.
+fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: bool) -> Option<String> {
+    let ungranted = |a: &str, who: &str| -> Option<String> {
+        if !grants || name == "skills.read" || name == TONY_SET_MODE {
+            return None;
+        }
+        let sid = server_of_tool(name);
+        let s = cfg.mcps.iter().find(|m| m.id == sid)?;
+        (!s.grants(a)).then(|| format!("{ROLE_PREFIX}{a} — {who} is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name))
+    };
     if is_tony(agent) {
-        return None;
+        return ungranted("general", &cfg.os_name);
     }
     if name == TONY_SET_MODE {
         return Some(format!("{ROLE_PREFIX}{agent} — only Tony switches Tony's mode"));
@@ -497,13 +511,8 @@ pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> 
     let Some(policy) = super::roles::policy_for(&a) else {
         return Some(format!("{ROLE_PREFIX}unknown — {name} was requested for an invalid agent id, so it is blocked"));
     };
-    let sid = server_of_tool(name);
-    if name != "skills.read" {
-        if let Some(s) = cfg.mcps.iter().find(|m| m.id == sid) {
-            if !s.grants(&a) {
-                return Some(format!("{ROLE_PREFIX}{a} — the {a} agent is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name));
-            }
-        }
+    if let Some(e) = ungranted(&a, &format!("the {a} agent")) {
+        return Some(e);
     }
     if !policy.allows_tool(name, changes_data(name)) {
         let why = if policy.tool_allowlist.is_some_and(|l| !l.contains(&name)) {
@@ -555,20 +564,20 @@ pub struct ToolSet {
 }
 
 /// Tools `agent` is actually allowed to use: every enabled server it is
-/// granted (`McpServer.grants`); `offered` drops tools the router may not be
-/// offered (`offered_to_router`). Tony (`"general"` or `"tony"`) always gets
-/// every enabled server, regardless of its grant list (Part 2 spec). A sub-agent's
-/// `all` is further cut by its role policy (`role_filter`, the same rule
-/// `role_refusal` enforces at call time). Servers
-/// are queried concurrently with a short per-server timeout so one dead
-/// external server can't stall the whole listing.
+/// granted (`McpServer.grants`; Tony respects his grants like everyone else, the
+/// tool-owner split) that the switchboard leaves live this turn (`modes::tool_live`:
+/// the active mode's overlay and the master switchboard). `offered` drops tools the
+/// router may not be offered (`offered_to_router`). A sub-agent's `all` is further
+/// cut by its role policy (`role_filter`, the same rule `role_refusal` enforces at
+/// call time). Servers are queried concurrently with a short per-server timeout so
+/// one dead external server can't stall the whole listing.
 pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolSet {
     let cfg = os.snapshot();
     let is_tony = is_tony(agent);
     if !is_tony && super::roles::policy_for(agent).is_none() {
         return ToolSet { all: vec![], offered: vec![] };
     }
-    let servers: Vec<McpServer> = cfg.mcps.iter().filter(|s| s.enabled && (is_tony || s.grants(agent))).cloned().collect();
+    let servers = servers_for(&cfg, &os.modes.effective(), agent);
     // A cold server costs a turn at most `CHAT_LIST_WAIT`: its listing keeps going in the
     // background and lands in the cache for the next turn. The outer timeout is only a
     // backstop and never writes FAILED.
@@ -581,12 +590,26 @@ pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolS
         }
     }))
     .await;
-    let mut all: Vec<ToolInfo> = results.into_iter().flatten().collect();
+    assemble_tools(&cfg, agent, results.into_iter().flatten().collect())
+}
+
+/// Pure part of `tool_set`: the enabled, granted servers `agent` may list this turn (a frozen
+/// server is not offered; its settings and cached listing are left as they are).
+pub(crate) fn servers_for(cfg: &OsConfig, e: &super::modes::Effective, agent: &str) -> Vec<McpServer> {
+    let who = if is_tony(agent) { "general" } else { agent };
+    cfg.mcps.iter().filter(|s| s.enabled && s.grants(who) && super::modes::tool_live(e, &cfg.switchboard, &s.id)).cloned().collect()
+}
+
+/// Pure tail of `tool_set`: the listed tools of `servers_for`, plus the synthetic ones, cut by
+/// the role policy, and the router-visible subset.
+pub(crate) fn assemble_tools(cfg: &OsConfig, agent: &str, listed: Vec<ToolInfo>) -> ToolSet {
+    let is_tony = is_tony(agent);
+    let mut all = listed;
     if cfg.skills.grants.values().any(|a| os_core::agent_matches(a, agent)) {
         all.push(t("skills", "skills.read", "Read the full instructions of one of your attached skills.", &["name"]));
     }
     if is_tony {
-        all.push(t("tony", TONY_SET_MODE, "Switch your own work mode when the user asks for a different way of working (\"act like my coach\" → coach, \"high-level strategy\" → executive, \"let's just chat\" → surface). mode: surface|builder|coach|brainstorm|executive|learning.", &["mode"]));
+        all.push(t("tony", TONY_SET_MODE, "Switch your own work mode when the user asks for a different way of working (\"act like my coach\" → coach, \"high-level strategy\" → executive, \"let's just chat\" → surface). mode: surface|builder|operations|coach|brainstorm|executive|learning.", &["mode"]));
     }
     let all = role_filter(all, agent);
     let offered = router_filter(&all, is_tony);
@@ -922,8 +945,15 @@ pub async fn mcp_list_tools(state: State<'_, DispatchState>, os: State<'_, OsSta
 /// the first chat turn finds their tools cached. HTTP servers are left alone (no network
 /// on boot — a token-gated one would only be refused anyway).
 pub async fn warm(app: tauri::AppHandle) {
-    use tauri::Manager;
     tokio::time::sleep(Duration::from_secs(5)).await;
+    warm_live(&app).await;
+}
+
+/// Start listing every enabled stdio server the switchboard leaves live in the current mode
+/// (boot, and after a mode switch, so the first turn in the new mode isn't "starting"). A frozen
+/// server is left alone: its settings and cached listing are kept, it just isn't spawned.
+pub(crate) async fn warm_live(app: &tauri::AppHandle) {
+    use tauri::Manager;
     let state = app.state::<DispatchState>();
     let os = app.state::<OsState>();
     let cfg = os.snapshot();
@@ -931,7 +961,8 @@ pub async fn warm(app: tauri::AppHandle) {
     if cfg.permissions.mcp == super::bridge::Tier::Deny || cfg.privacy.kill_switch {
         return;
     }
-    for s in cfg.mcps.iter().filter(|s| s.enabled && s.transport == "stdio") {
+    let e = os.modes.effective();
+    for s in cfg.mcps.iter().filter(|s| s.enabled && s.transport == "stdio" && super::modes::tool_live(&e, &cfg.switchboard, &s.id)) {
         let _ = tools_of(&state, &os, s, false, Duration::ZERO).await;
     }
 }
@@ -1001,7 +1032,33 @@ pub(crate) fn cached_statuses(state: &DispatchState, os: &OsState) -> Vec<Value>
 /// Run one tool from Settings ("Test") — same gates as when Tony calls it.
 #[tauri::command]
 pub async fn mcp_call(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, name: String, args: Value, approved: Option<bool>, agent: Option<String>) -> Result<String, String> {
-    call_tool(&state, &os, &bridge, &name, &args, approved.unwrap_or(false), agent.as_deref().unwrap_or("tony")).await
+    call_tool_from(&state, &os, &bridge, &name, &args, approved.unwrap_or(false), agent.as_deref().unwrap_or("tony"), None, CallOrigin::Ui).await
+}
+
+/// Who started a tool call, which decides the grant and switchboard gates (the role policy,
+/// kill switch, read-only servers and permission cards apply to all of them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallOrigin {
+    /// A turn's own call (the router, a deterministic plan, a phone turn): grants, and a server
+    /// the switchboard froze is refused (`MODE_FROZEN:`).
+    Turn,
+    /// An app command acting for Nic (Comms page, Director Suite): grants; no switchboard.
+    Direct,
+    /// Nic's own UI (`mcp_call`: Settings testers): a call as Tony skips his grants; a
+    /// sub-agent id keeps them; no switchboard.
+    Ui,
+    /// The worker's scripted calls (the Librarian's research for a build): not delegation, so
+    /// neither grants nor the switchboard; the role policy still applies.
+    Internal,
+}
+
+/// Grant lists apply to this call (`CallOrigin`).
+pub(crate) fn origin_checks_grants(origin: CallOrigin, agent: &str) -> bool {
+    match origin {
+        CallOrigin::Turn | CallOrigin::Direct => true,
+        CallOrigin::Ui => !is_tony(agent),
+        CallOrigin::Internal => false,
+    }
 }
 
 // ── Calling ─────────────────────────────────────────────────────────────────
@@ -1016,18 +1073,40 @@ pub async fn mcp_call(state: State<'_, DispatchState>, os: State<'_, OsState>, b
 /// tool name (a deterministic plan, the webview) can no longer reach past the
 /// agent's grants; `tool_set` applies the same rule to what is *offered*.
 pub async fn call_tool(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str) -> Result<String, String> {
-    call_tool_with(state, os, bridge, name, args, approved, agent, None).await
+    call_tool_from(state, os, bridge, name, args, approved, agent, None, CallOrigin::Direct).await
 }
 
-/// `call_tool`, choosing how long to wait for an external stdio server that is still
-/// starting (`None` = its full startup timeout). A chat turn passes a few seconds and
-/// gets a "… is still starting" error instead of blocking; the start carries on and the
-/// next call reuses the running server.
+/// The worker's own scripted call (`CallOrigin::Internal`): the Librarian's research runs with
+/// its role policy (its exact allowlist) but outside its grants and the switchboard.
+pub async fn call_tool_internal(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, agent: &str) -> Result<String, String> {
+    call_tool_from(state, os, bridge, name, args, false, agent, None, CallOrigin::Internal).await
+}
+
+/// A turn's tool call (`CallOrigin::Turn`), choosing how long to wait for an external stdio
+/// server that is still starting (`None` = its full startup timeout). A chat turn passes a few
+/// seconds and gets a "… is still starting" error instead of blocking; the start carries on and
+/// the next call reuses the running server.
 #[allow(clippy::too_many_arguments)]
 pub async fn call_tool_with(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str, start_wait: Option<Duration>) -> Result<String, String> {
+    call_tool_from(state, os, bridge, name, args, approved, agent, start_wait, CallOrigin::Turn).await
+}
+
+/// The switchboard's call-time gate (a turn's calls only): `MODE_FROZEN: <server> is frozen in
+/// <Mode> mode` for a server the active mode or the master switchboard froze (pure).
+pub(crate) fn frozen_refusal(cfg: &OsConfig, e: &super::modes::Effective, name: &str, origin: CallOrigin) -> Option<String> {
+    (origin == CallOrigin::Turn).then(|| super::modes::tool_frozen_error(e, &cfg.switchboard, server_of_tool(name))).flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str, start_wait: Option<Duration>, origin: CallOrigin) -> Result<String, String> {
     let cfg = os.snapshot();
-    // Role gate first (Part 4): a sub-agent's ungranted server / off-allowlist or mutating tool.
-    if let Some(e) = role_refusal(&cfg, name, agent) {
+    // Role gate first (Part 4): an ungranted server (Tony included) / an off-allowlist or mutating tool.
+    if let Some(e) = role_refusal_with(&cfg, name, agent, origin_checks_grants(origin, agent)) {
+        trace_tool(state, os, name, 0, Some(&e));
+        return Err(e);
+    }
+    // The switchboard: a turn never reaches a frozen server, even with a known tool name.
+    if let Some(e) = frozen_refusal(&cfg, &os.modes.effective(), name, origin) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
     }
@@ -1580,19 +1659,108 @@ pub struct SkillInfo {
 
 fn frontmatter(text: &str) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
-    let mut lines = text.lines();
+    let mut lines = text.lines().peekable();
     if lines.next().map(str::trim) != Some("---") {
         return m;
     }
-    for l in lines {
+    while let Some(l) = lines.next() {
         if l.trim() == "---" {
             break;
         }
+        if l.starts_with([' ', '\t']) {
+            continue;
+        }
         if let Some((k, v)) = l.split_once(':') {
-            m.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
+            let v = v.trim();
+            // A YAML block scalar (`>-`, `>`, `|`, `|-`): its indented lines, joined with spaces.
+            let v = if matches!(v, ">" | ">-" | ">+" | "|" | "|-" | "|+") {
+                let mut parts = vec![];
+                while let Some(next) = lines.peek().filter(|n| n.starts_with([' ', '\t']) || n.trim().is_empty()) {
+                    parts.push(next.trim().to_string());
+                    lines.next();
+                }
+                parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ")
+            } else {
+                v.trim_matches('"').to_string()
+            };
+            m.insert(k.trim().to_string(), v);
         }
     }
     m
+}
+
+/// A skill file's body (everything after its frontmatter).
+fn skill_body(text: &str) -> &str {
+    let t = text.trim_start_matches('\u{feff}');
+    if !t.trim_start().starts_with("---") {
+        return t;
+    }
+    let after = &t[t.find("---").map(|i| i + 3).unwrap_or(0)..];
+    match after.find("\n---") {
+        Some(i) => after[i + 4..].trim_start_matches(['-', '\r', '\n']).trim_start(),
+        None => t,
+    }
+}
+
+/// Words too common to say a task matches a skill.
+const SKILL_STOPWORDS: [&str; 48] = [
+    "the", "and", "for", "with", "that", "this", "you", "your", "use", "used", "using", "when", "what", "from", "into", "are", "not", "any", "can", "all", "its", "our", "one",
+    "how", "who", "why", "was", "but", "has", "have", "had", "will", "would", "should", "could", "about", "just", "make", "makes", "made", "user", "users", "skill", "only", "than", "then", "also", "more",
+];
+
+/// Lowercase content words (3+ chars, a trailing plural `s` dropped) of `s`.
+fn skill_words(s: &str) -> std::collections::BTreeSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3 && !SKILL_STOPWORDS.contains(w))
+        .map(|w| if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") { w[..w.len() - 1].to_string() } else { w.to_string() })
+        .collect()
+}
+
+/// A task must share this many distinct trigger words with a skill (its name parts and its
+/// description) before the skill's body is injected.
+pub const SKILL_MATCH_MIN: usize = 2;
+/// Total skill text one delegated task may carry (~1,500 tokens).
+pub const SKILL_BUDGET: usize = 6000;
+
+/// How many of `skill`'s trigger words (`name` split on `-`/`_`, plus its `description`) the
+/// task names; a word of the skill's own name counts double (pure).
+pub(crate) fn skill_score(name: &str, description: &str, task: &str) -> usize {
+    let task = skill_words(task);
+    let name_words = skill_words(&name.replace(['-', '_'], " "));
+    let desc = skill_words(description);
+    name_words.iter().filter(|w| task.contains(*w)).count() * 2 + desc.iter().filter(|w| !name_words.contains(*w) && task.contains(*w)).count()
+}
+
+/// The skills attached to `agent` whose triggers the task matches (`SKILL_MATCH_MIN`), best
+/// first: their names and one block with each body (frontmatter dropped), within `budget`
+/// chars. No match: nothing at all (no always-on summary list).
+pub struct SkillPick {
+    pub names: Vec<String>,
+    pub block: String,
+}
+
+pub fn relevant_skills(cfg: &OsConfig, agent: &str, task: &str, budget: usize) -> SkillPick {
+    let attached: Vec<&String> = cfg.skills.grants.iter().filter(|(_, a)| os_core::agent_matches(a, agent)).map(|(n, _)| n).collect();
+    let mut pick = SkillPick { names: vec![], block: String::new() };
+    if attached.is_empty() || task.trim().is_empty() {
+        return pick;
+    }
+    let all = scan(Path::new(&cfg.skills.dir));
+    let mut scored: Vec<(usize, &(String, String, PathBuf, String))> = all.iter().filter(|s| attached.contains(&&s.0)).map(|s| (skill_score(&s.0, &s.1, task), s)).filter(|(n, _)| *n >= SKILL_MATCH_MIN).collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    for (_, s) in scored {
+        let head = format!("\n\nSKILL {} (attached to you; follow it where it applies):\n", s.0);
+        let room = budget.saturating_sub(pick.block.chars().count() + head.chars().count());
+        if room < 400 {
+            break;
+        }
+        let Ok(text) = std::fs::read_to_string(&s.2) else { continue };
+        pick.block.push_str(&head);
+        pick.block.extend(skill_body(&text).chars().take(room));
+        pick.names.push(s.0.clone());
+    }
+    pick
 }
 
 fn scan(dir: &Path) -> Vec<(String, String, PathBuf, String)> {
@@ -2468,6 +2636,105 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_reads_yaml_block_descriptions() {
+        let fm = frontmatter("---\nname: design-taste-frontend\ndescription: >-\n  tasteskill 2.5.1, the anti-slop frontend skill.\n  Builds websites.\nversion: 1\n---\nbody");
+        assert_eq!(fm.get("description").map(String::as_str), Some("tasteskill 2.5.1, the anti-slop frontend skill. Builds websites."));
+        assert_eq!(fm.get("version").map(String::as_str), Some("1"));
+        let fm = frontmatter("---\nname: x\ndescription: |\n  line one\n\n  line two\n---\n");
+        assert_eq!(fm.get("description").map(String::as_str), Some("line one line two"));
+        assert_eq!(skill_body("---\nname: x\ndescription: y\n---\n\n# Title\nText"), "# Title\nText");
+        assert_eq!(skill_body("# No frontmatter"), "# No frontmatter");
+    }
+
+    #[test]
+    fn a_skill_is_injected_only_when_the_task_matches_it() {
+        let dir = std::env::temp_dir().join(format!("cc-skill-pick-{}-{}", std::process::id(), os_core::now_secs()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let write = |n: &str, desc: &str, body: &str| {
+            std::fs::create_dir_all(dir.join(n)).unwrap();
+            std::fs::write(dir.join(n).join("SKILL.md"), format!("---\nname: {n}\ndescription: {desc}\n---\n{body}")).unwrap();
+        };
+        write("impeccable", "\"Use to design, redesign, critique, audit, polish or animate a frontend: websites, landing pages, dashboards, app UI, components.\"", "IMPECCABLE BODY");
+        write("design-taste-frontend", ">-\n  The anti-slop frontend skill. Builds professional company websites, landing pages and hero sections.", &"TASTE ".repeat(3000));
+        write("animation-vocabulary", "Reverse-lookup glossary that turns a vague description of a web animation or motion effect into its exact term.", "VOCAB BODY");
+        let mut cfg = OsConfig::default();
+        cfg.skills.dir = dir.display().to_string();
+        cfg.skills.grants.clear();
+        for (n, a) in [("impeccable", "designer"), ("design-taste-frontend", "designer"), ("animation-vocabulary", "director")] {
+            cfg.skills.grants.insert(n.into(), vec![a.into()]);
+        }
+        // A design task: both design skills match, best first, within the budget.
+        let p = relevant_skills(&cfg, "designer", "redesign the landing page hero and polish the website layout", SKILL_BUDGET);
+        assert_eq!(p.names, vec!["impeccable", "design-taste-frontend"], "{}", p.block.chars().count());
+        assert!(p.block.contains("IMPECCABLE BODY") && p.block.contains("TASTE TASTE"));
+        assert!(p.block.chars().count() <= SKILL_BUDGET && p.block.contains("SKILL design-taste-frontend (attached to you"), "{}", p.block.chars().count());
+        assert!(!p.block.contains("description:"), "frontmatter is dropped");
+        // A task that matches nothing: nothing at all (no summary list).
+        let none = relevant_skills(&cfg, "designer", "what's the status of the build", SKILL_BUDGET);
+        assert!(none.names.is_empty() && none.block.is_empty());
+        // Only the agent's own grants; Tony has none.
+        let d = relevant_skills(&cfg, "director", "what's that bouncy animation effect called, the motion when a popover opens", SKILL_BUDGET);
+        assert_eq!(d.names, vec!["animation-vocabulary"]);
+        assert!(d.block.contains("VOCAB BODY"));
+        assert!(relevant_skills(&cfg, "tony", "redesign the landing page website", SKILL_BUDGET).names.is_empty());
+        assert!(relevant_skills(&cfg, "director", "redesign the landing page website", SKILL_BUDGET).names.is_empty());
+        // One weak word is below the threshold.
+        assert!(skill_score("impeccable", "Use to design websites", "design") < SKILL_MATCH_MIN);
+        assert!(skill_score("impeccable", "Use to design websites", "design my websites") >= SKILL_MATCH_MIN);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn servers_follow_the_grants_and_the_switchboard() {
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut() {
+            m.enabled = true;
+        }
+        let eff = |id: &str| super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default());
+        let ids_in = |cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str| servers_for(cfg, e, agent).into_iter().map(|s| s.id).collect::<Vec<_>>();
+        let ids = |e: &super::super::modes::Effective, agent: &str| ids_in(&cfg, e, agent);
+        // No overlay: Tony gets exactly his own servers (never the Director's media servers).
+        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "whatsapp"]);
+        assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
+        assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
+        // Builder: gmail / WhatsApp are frozen for Tony; the Coder keeps its three.
+        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "spotify"]);
+        assert_eq!(ids(&eff("builder"), "coder"), ["fetch", "filesystem", "git"]);
+        assert_eq!(ids(&eff("builder"), "director"), ["filesystem"], "the media servers are frozen in Builder");
+        // Learning: only the always-live clock.
+        assert_eq!(ids(&eff("learning"), "general"), ["time"]);
+        // A globally frozen server is gone in every mode; a disabled one stays off whatever the mode.
+        let mut cfg = cfg.clone();
+        cfg.switchboard.frozen_tools = vec!["spotify".into()];
+        cfg.mcps.iter_mut().find(|m| m.id == "weather").unwrap().enabled = false;
+        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "whatsapp"]);
+        // Synthetic tools: the mode switch is always Tony's; skills.read follows skill grants.
+        let set = assemble_tools(&cfg, "general", vec![]);
+        assert_eq!(set.all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [TONY_SET_MODE]);
+        assert!(set.all[0].description.contains("surface|builder|operations|coach|brainstorm|executive|learning"));
+    }
+
+    #[test]
+    fn a_turn_never_reaches_a_frozen_server_but_the_ui_does() {
+        let cfg = OsConfig::default();
+        let builder = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "builder".into(), ..Default::default() }, &Default::default());
+        assert_eq!(frozen_refusal(&cfg, &builder, "gmail.recent", CallOrigin::Turn).as_deref(), Some("MODE_FROZEN: gmail is frozen in Builder mode"));
+        assert_eq!(frozen_refusal(&cfg, &builder, "whatsapp.list_messages", CallOrigin::Turn).as_deref(), Some("MODE_FROZEN: whatsapp is frozen in Builder mode"));
+        // Builtin prefixes map to their servers.
+        assert!(frozen_refusal(&cfg, &builder, "fs.read", CallOrigin::Turn).is_none());
+        assert!(frozen_refusal(&cfg, &builder, "web.search", CallOrigin::Turn).is_none());
+        // Always live: the clock, a skill's text, the mode switch.
+        for name in ["time.now", "skills.read", TONY_SET_MODE] {
+            let learning = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "learning".into(), ..Default::default() }, &Default::default());
+            assert!(frozen_refusal(&cfg, &learning, name, CallOrigin::Turn).is_none(), "{name}");
+        }
+        // Widgets and Settings testers (mcp_call), app commands and the worker are not gated.
+        for o in [CallOrigin::Ui, CallOrigin::Direct, CallOrigin::Internal] {
+            assert!(frozen_refusal(&cfg, &builder, "gmail.recent", o).is_none(), "{o:?}");
+        }
+    }
+
+    #[test]
     fn frontmatter_parsed() {
         let fm = frontmatter("---\nname: animate\ndescription: \"Make it move\"\n---\nbody");
         assert_eq!(fm.get("name").map(String::as_str), Some("animate"));
@@ -2641,24 +2908,50 @@ mod tests {
             ("unknown.foo", READ_ONLY_ROLE_PREFIX),
             ("git.status", ROLE_PREFIX),
             ("time.now", ROLE_PREFIX),
+            // The tool-owner split: the Librarian owns the knowledge graph and the filesystem only.
+            ("fetch.url", ROLE_PREFIX),
+            ("web.search", ROLE_PREFIX),
+            ("weather.current", ROLE_PREFIX),
         ] {
             let e = role_refusal(&cfg, tool, "librarian").unwrap_or_else(|| panic!("{tool} must be refused"));
             assert!(e.starts_with(prefix), "{tool}: {e}");
             assert!(e.contains(tool), "{e}");
         }
-        for tool in ["fs.read", "fs.list", "kg.search", "sqlite.read_query", "sqlite.list_tables", "sqlite.describe_table", "fetch.url", "web.search", "weather.current", "skills.read"] {
+        for tool in ["fs.read", "fs.list", "kg.search", "sqlite.read_query", "sqlite.list_tables", "sqlite.describe_table", "skills.read"] {
             assert_eq!(role_refusal(&cfg, tool, "librarian"), None, "{tool}");
             assert_eq!(role_refusal(&cfg, tool, " Librarian "), None, "{tool} (case / spaces)");
         }
+        // The worker's scripted research (CallOrigin::Internal) isn't gated by grants, only by
+        // the Librarian's exact allowlist.
+        assert!(!origin_checks_grants(CallOrigin::Internal, "librarian"));
+        for tool in ["web.search", "fetch.url"] {
+            assert_eq!(role_refusal_with(&cfg, tool, "librarian", false), None, "{tool}");
+        }
+        assert!(role_refusal_with(&cfg, "git.status", "librarian", false).unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "the allowlist still applies");
     }
 
     #[test]
-    fn role_gate_spares_tony_and_scopes_every_sub_agent() {
-        let cfg = role_cfg();
+    fn role_gate_holds_tony_to_his_grants_and_scopes_every_sub_agent() {
+        let mut cfg = role_cfg();
         for agent in ["tony", "general", "", "Tony", "dispatcher"] {
-            for tool in ["github.merge_pull_request", "sqlite.write_query", "git.status", "serena.replace_symbol_body", "whatsapp.send_message", "unknown.foo"] {
+            // No role policy limits Tony on a server he owns ("all" here, or his own)…
+            for tool in ["github.merge_pull_request", "sqlite.write_query", "serena.replace_symbol_body", "whatsapp.send_message", "unknown.foo", "kg.search", "weather.current"] {
                 assert_eq!(role_refusal(&cfg, tool, agent), None, "{agent:?} {tool}");
             }
+            // …but he respects grants: the Coder's git, the Director's media servers are not his.
+            for tool in ["git.status", "fs.read", "fetch.url", "shotcut.start_render", "media-forge.probe_media", "maps.route", "instagram.get_profile"] {
+                let e = role_refusal(&cfg, tool, agent).unwrap_or_else(|| panic!("{agent:?} {tool} must be refused"));
+                assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony is not granted"), "{e}");
+            }
+            assert_eq!(role_refusal(&cfg, TONY_SET_MODE, agent), None);
+        }
+        // Nic's own UI (Settings testers) acting as Tony isn't held to Tony's grants.
+        assert!(!origin_checks_grants(CallOrigin::Ui, "tony") && origin_checks_grants(CallOrigin::Ui, "coder"));
+        assert!(origin_checks_grants(CallOrigin::Turn, "tony") && origin_checks_grants(CallOrigin::Direct, "tony"));
+        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false), None);
+        assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder")).is_some());
+        for m in cfg.mcps.iter_mut().filter(|m| m.id == "spotify") {
+            m.agents = Some(vec!["all".into()]);
         }
         // Coder: its granted reads run; no MCP mutation; ungranted servers refused.
         assert_eq!(role_refusal(&cfg, "git.status", "coder"), None);

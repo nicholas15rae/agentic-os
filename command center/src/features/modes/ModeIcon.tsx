@@ -1,10 +1,11 @@
-import { Briefcase, Flame, GraduationCap, Hammer, Lightbulb, MessageCircle, Sparkles, type LucideIcon } from "lucide-react";
+import { Briefcase, ClipboardList, Flame, GraduationCap, Hammer, Lightbulb, MessageCircle, Sparkles, type LucideIcon } from "lucide-react";
 import type { ModeIconName } from "./mode-ui";
 
 const ICONS: Record<ModeIconName, LucideIcon> = {
   "message-circle": MessageCircle,
   lightbulb: Lightbulb,
   hammer: Hammer,
+  "clipboard-list": ClipboardList,
   briefcase: Briefcase,
   flame: Flame,
   "graduation-cap": GraduationCap,

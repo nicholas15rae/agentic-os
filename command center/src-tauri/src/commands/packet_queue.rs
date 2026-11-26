@@ -88,6 +88,9 @@ pub trait Exec: Send + Sync {
 pub struct Gates {
     pub roots: Vec<PathBuf>,
     pub known: Vec<String>,
+    /// Targets the switchboard froze when the packet started (agent → why): their tasks are
+    /// held, never run (`tony_dispatch::frozen_targets`).
+    pub frozen: BTreeMap<String, String>,
 }
 
 // ── Observer ────────────────────────────────────────────────────────────────
@@ -191,6 +194,10 @@ pub async fn run_dag(d: &TonyDispatch, exec: &dyn Exec, gates: &Gates) -> Vec<Ta
         }
         if t.target_agent == "financer" {
             results.push(mk(Status::Held, 0, Some("Finance is a sealed vault: it acts only on your unlock or a validated ledger write".into())));
+            continue;
+        }
+        if let Some(why) = gates.frozen.get(&t.target_agent) {
+            results.push(mk(Status::Held, 0, Some(why.clone())));
             continue;
         }
         // Security, before: every path the task names.
@@ -412,11 +419,12 @@ pub fn spawn(app: tauri::AppHandle, id: String, d: TonyDispatch) {
         roots.push(d.join("packets"));
     }
     let known = super::devqueue::known_secrets(app.state::<super::dispatch::DispatchState>().inner(), os.inner());
+    let frozen = super::tony_dispatch::frozen_targets(&d, &os.modes.effective(), &cfg.switchboard);
     registry().lock().unwrap().running.insert(id.clone(), d.tasks.len());
     tauri::async_runtime::spawn(async move {
         use tauri::Emitter;
         let exec = LiveExec { app: app.clone(), roots: roots.clone(), known: known.clone() };
-        let results = run_dag(&d, &exec, &Gates { roots, known }).await;
+        let results = run_dag(&d, &exec, &Gates { roots, known, frozen }).await;
         // Scratch: the outputs for this packet's lifetime only.
         if let Some(dir) = &dir {
             let s = dir.join("packets").join(&id);
@@ -579,13 +587,23 @@ mod tests {
             let mut t = pkt("read", "librarian", &[], &["x"]);
             t.inputs = vec![r"C:\Users\nic\AppData\Roaming\os.agentic.commandcenter\vault\finance\ledger.aosv".into()];
             let s = Script::new(&[("read", vec![Ok("[PASS] x: y")])]);
-            let r = run_dag(&packet(vec![t]), &s, &Gates { roots: vec![PathBuf::from(r"C:\Users\nic\AppData\Roaming\os.agentic.commandcenter")], known: vec![] }).await;
+            let r = run_dag(&packet(vec![t]), &s, &Gates { roots: vec![PathBuf::from(r"C:\Users\nic\AppData\Roaming\os.agentic.commandcenter")], known: vec![], ..Default::default() }).await;
             assert_eq!(r[0].status, Status::Refused);
             assert_eq!(s.calls.load(Ordering::SeqCst), 0);
             // Financer is held, never run.
             let s = Script::new(&[]);
             let r = run_dag(&packet(vec![pkt("budget", "financer", &[], &["x"])]), &s, &Gates::default()).await;
             assert_eq!(r[0].status, Status::Held);
+            // A target the switchboard froze is held (never run) and its dependents are blocked;
+            // an unrelated live task still runs.
+            let s = Script::new(&[("ok", vec![Ok("[PASS] staged files listed")])]);
+            let gates = Gates { frozen: [("coder".to_string(), "Coder is frozen in Operations mode".to_string())].into_iter().collect(), ..Default::default() };
+            let r = run_dag(&packet(vec![pkt("build", "coder", &[], &["x"]), pkt("check", "designer", &["build"], &["x"]), pkt("ok", "librarian", &[], &["staged files listed"])]), &s, &gates).await;
+            let by = |id: &str| r.iter().find(|x| x.task_id == id).unwrap().clone();
+            assert_eq!((by("build").status, by("build").error.as_deref().map(String::from)), (Status::Held, Some("Coder is frozen in Operations mode".to_string())));
+            assert_eq!(by("check").status, Status::Blocked);
+            assert_eq!(by("ok").status, Status::Done);
+            assert_eq!(s.calls.load(Ordering::SeqCst), 1, "only the live task ran");
         });
     }
 

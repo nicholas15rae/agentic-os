@@ -4,7 +4,7 @@ import { Card, Input } from "@/components/ui";
 import { Segmented } from "@/components/segmented";
 import { useModes } from "@/features/modes/modes-store";
 import { ModeIcon } from "@/features/modes/ModeIcon";
-import { CURIOSITY_OPTS, DISPATCH_OPTS, MODE_ICON_NAMES, TTS_OPTS, VERBOSITY_OPTS, canDelete, duplicateMode, isModeIconName, isOverridden, modifierCount, newModeDraft, validateModeDraft } from "@/features/modes/mode-ui";
+import { CURIOSITY_OPTS, DISPATCH_OPTS, MODE_ICON_NAMES, TTS_OPTS, VERBOSITY_OPTS, canDelete, duplicateMode, isModeIconName, isOverridden, modifierCount, newModeDraft, switchboardSummary, validateModeDraft } from "@/features/modes/mode-ui";
 import { MODIFIER_MAX, isBuiltinMode, type TonyMode } from "@/features/modes/modes";
 import { CfgError } from "./os-ui";
 
@@ -157,6 +157,10 @@ export function ModeRow({ mode, isActive, deletable, onUse, onDuplicate, onDelet
           </Field2>
           <Field2 label="Narration">
             <Segmented size="sm" label="Narration" value={mode.tts_interrupt_level} options={TTS_OPTS} onChange={(v) => save({ tts_interrupt_level: v })} disabled={preset} />
+          </Field2>
+          <Field2 label="Switchboard">
+            {/* Edited in the Master switchboard card above (on-duty agents and tools). */}
+            <span className="text-xs text-ink-2">{switchboardSummary(mode)}</span>
           </Field2>
           <label className="block pt-1">
             <span className="label-caps text-ink-3">Behaviour rules (injected into Tony's prompt)</span>

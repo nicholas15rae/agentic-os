@@ -693,10 +693,10 @@ fn router_keyword_ok(server: &str, norm: &str) -> bool {
     match server {
         "maps" => MAPS
             .get_or_init(|| {
-                regex::Regex::new(r"(maps?|route|routes|directions?|drive|driving|commute|eta|navigate|navigation|how far|distance (to|from|between)|how long (will it take|does it take|to get|to drive|is the drive)|get (to|there)|address (of|for)|where is|coordinates|lat(itude)?|plot)").unwrap()
+                regex::Regex::new(r"\b(maps?|route|routes|directions?|drive|driving|commute|eta|navigate|navigation|how far|distance (to|from|between)|how long (will it take|does it take|to get|to drive|is the drive)|get (to|there)|address (of|for)|where is|coordinates|lat(itude)?|plot)\b").unwrap()
             })
             .is_match(norm),
-        "instagram" => INSTAGRAM.get_or_init(|| regex::Regex::new(r"(instagram|insta|ig|reels?|followers?)").unwrap()).is_match(norm),
+        "instagram" => INSTAGRAM.get_or_init(|| regex::Regex::new(r"\b(instagram|insta|ig|reels?|followers?)\b").unwrap()).is_match(norm),
         "gmail" => GMAIL.get_or_init(|| regex::Regex::new(r"\b(gmail|e ?mails?|inbox|mails?)\b").unwrap()).is_match(norm),
         "calendar" => CALENDAR
             .get_or_init(|| regex::Regex::new(r"\b(calendar|agenda|schedule|appointments?|meetings?|events?|busy|am i free|whats on|what do i have)\b").unwrap())
@@ -875,6 +875,15 @@ fn booking_mail_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(
 /// (`routing::direct_tool` "calendar"): "add the shoot to my calendar" is the card's job.
 fn calendar_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String, Value)> {
     calendar_plan_on(original, tools, chrono::Local::now().date_naive())
+}
+
+/// Is this turn a use of Calendar (a calendar read `calendar_plan` would answer, by `agent`, on a
+/// server that is switched on, granted and live in this mode)? Only then may the AnythingLLM
+/// credential import run (`calendar::ensure_creds`). Pure.
+fn calendar_first_use(text: &str, cfg: &OsConfig, mode: &super::modes::Effective, agent: &str) -> bool {
+    cfg.mcps.iter().any(|m| m.id == "calendar" && m.enabled && m.grants(agent))
+        && super::modes::tool_live(mode, &cfg.switchboard, "calendar")
+        && calendar_plan(text, &planner_tools("calendar")).is_some()
 }
 
 /// `calendar_plan` against `today` (pure).
@@ -1361,6 +1370,12 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     if cfg.permissions.mcp == super::bridge::Tier::Deny {
         return out;
     }
+    // Calendar's first use: a calendar ask with no credentials set imports AnythingLLM's
+    // deployment now (on the blocking pool), so this turn's listing can offer the calendar
+    // tools. Any other turn's listing never imports (`calendar::has_creds`).
+    if calendar_first_use(text, cfg, &os.modes.effective(), agent) {
+        let _ = super::calendar::ensure_creds(state).await;
+    }
     let mut tools = turn_tools(state, os, cfg, agent).await.offered;
     // Cue precedence (G20): "volume 30" while Gabagool plays is the cue's — neither the grammar
     // nor the router may turn it into a Spotify volume change.
@@ -1477,6 +1492,13 @@ pub struct OsTurnRequest {
     /// from the text, and ask if that isn't exactly one.
     #[serde(default)]
     pub(crate) active_business_id: Option<String>,
+    /// Learning mode: the proposal ids on the card of this conversation's newest Tony reply
+    /// (skipping Rust's failed-save replies, which ask again about the same batch). A spoken /
+    /// typed yes or no then answers that card's batch only (`Proposals::take_spoken_for`): the
+    /// spoken batch is app-wide, and another conversation may have proposed since. Missing (an
+    /// older webview / phone) = the spoken batch alone decides, as before.
+    #[serde(default)]
+    pub(crate) answering: Option<Vec<String>>,
 }
 
 /// `(delegation gate approved, Ask-tier tools approved)` for a turn. `approved` (the turn's own
@@ -1535,8 +1557,31 @@ pub struct OsTurnResult {
     pub(crate) dispatch: Option<super::tony_dispatch::DispatchView>,
     /// This turn's booking-mail scan (`gmail.booking_scan`), one entry per thread read: the
     /// calendar-add card takes its fields from here (plus Nic's words), never from the model.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) bookings: Vec<super::gmail::Booking>,
+    /// `None` (absent on the wire): no scan this turn, the remembered list stands. `Some([])`
+    /// (`[]`): a scan ran and found nothing, so the phone clears its list as the desktop's
+    /// `LAST_BOOKINGS` was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bookings: Option<Vec<super::gmail::Booking>>,
+    /// Learning mode: this turn was Rust's answer to a spoken / typed yes / no, and these are the
+    /// proposals it took (`approved`: saved, else discarded). The webview ends exactly the card
+    /// holding these ids. `None` on every other turn, and on a failed save (the proposals stay
+    /// pending under the same ids).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) answered_memory: Option<AnsweredMemory>,
+}
+
+/// Which proposals a spoken / typed yes / no answered (`OsTurnResult.answeredMemory`).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnsweredMemory {
+    pub(crate) ids: Vec<String>,
+    pub(crate) approved: bool,
+}
+
+/// `OsTurnRequest.answering`, kept to well-formed proposal ids (at most `PROPOSALS_MAX`). Pure.
+fn answering_ids(v: Option<&Vec<String>>) -> Option<Vec<String>> {
+    let ok = |id: &&String| !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    v.map(|ids| ids.iter().filter(ok).take(super::learning::PROPOSALS_MAX).cloned().collect())
 }
 
 pub(crate) fn step(kind: &str, from: &str, to: &str, text: impl Into<String>, ok: bool, ms: u128) -> OsStep {
@@ -1564,6 +1609,71 @@ pub async fn os_turn(app: tauri::AppHandle, state: State<'_, DispatchState>, os:
 
 /// Error text of a turn stopped by `os_turn_cancel` (the webview stays silent on it).
 pub(crate) const TURN_CANCELLED: &str = "turn cancelled";
+
+/// Tony's answer while a model test holds the GPU: gateway_tony.py `MAINTENANCE_LINE`, word for word.
+pub(crate) const MAINTENANCE_LINE: &str = "Hang on, Nic, I'm testing a model on the GPU right now. I'll be right back in a few minutes, so ask me again then.";
+
+/// A GPU slot holder that means a model TEST (gateway_tony.py `testing_holder`): "maintenance", a
+/// separator, then "model compare" (`modellab::compare::HOLDER`) or "bench" (modellab.rs), any
+/// case. A short JIT reload ("maintenance · reload …") is not one. Pure.
+pub(crate) fn testing_holder(label: &str) -> bool {
+    let h = label.trim().to_lowercase();
+    let Some(rest) = h.strip_prefix("maintenance") else { return false };
+    let rest = rest.trim_start_matches([' ', '\t', '\u{b7}', ':', '-', '\u{2013}', '\u{2014}', '|']);
+    rest.starts_with("model compare") || rest.starts_with("bench")
+}
+
+/// A model test holds (or, for a compare, has claimed) the GPU: a Model Lab compare is running
+/// (`modellab::compare::running`, from its start until Tony's model is back, which covers its wait
+/// for the slot) or a slot holder is a test (`testing_holder`). Pure.
+pub(crate) fn model_test_running(compare_running: bool, holders: &[String]) -> bool {
+    compare_running || holders.iter().any(|h| testing_holder(h))
+}
+
+/// Every GPU slot label a model test can sit under: the holders, then the callers queued for a
+/// permit. A bench still collecting its permits (`GpuSlot::acquire_maintenance`) is a waiter, and
+/// the permit queue is first come first served, so a turn arriving then would wait behind the
+/// whole bench. Pure.
+pub(crate) fn slot_labels(v: &super::scheduler::SlotView) -> Vec<String> {
+    v.active.iter().chain(v.waiting.iter()).cloned().collect()
+}
+
+/// Would a turn generate on the local GPU, and so wait behind a model test for the slot? A
+/// delegation does (`delegates`: an AnythingLLM workspace generates on the GPU, `workspace_chat_t`).
+/// Tony's own reply does when his chat chain starts on a local provider: streamed (`streamed`: a
+/// desktop turn's `tony-token` events, an inbox sink), `run_chat_streamed` /
+/// `run_chat_streamed_into` start on the FIRST chain provider whenever it survives shaping and is
+/// local, whatever the compute mode; otherwise, and for a plain turn, `run_chat` shapes the whole
+/// chain (`os_core::shape_chain`: Cloud mode, Hybrid offload at the VRAM threshold or a heavy
+/// context put remote providers first; the kill switch, LOCAL ONLY, cloud Deny / Ask drop them).
+/// The gateway (Agentic OS) is skipped there, as the tool router's JSON calls skip it. A remote
+/// first provider takes no slot: that turn answers as usual. Pure.
+pub(crate) fn turn_uses_gpu(osc: &OsConfig, chain: Vec<super::dispatch::Provider>, vram_pct: Option<f32>, chars: usize, streamed: bool, delegates: bool) -> bool {
+    use super::dispatch::Kind;
+    if delegates {
+        return true;
+    }
+    if streamed {
+        let first = chain.first().map(|p| os_core::shape_chain(osc, vec![p.clone()], vram_pct, chars, false).0).unwrap_or_default();
+        if first.first().is_some_and(|p| p.kind == Kind::Local && p.id != "anythingllm" && !os_core::is_remote(p)) {
+            return true;
+        }
+    }
+    let (shaped, _) = os_core::shape_chain(osc, chain, vram_pct, chars, false);
+    shaped.iter().find(|p| p.kind != Kind::AgenticOs).is_some_and(|p| !os_core::is_remote(p))
+}
+
+/// `turn_uses_gpu` for this turn, from the live provider chain. VRAM is read only in Hybrid mode
+/// (the only mode that offloads on it), and only while a model test runs. `chars`: the request
+/// plus its history (capped as the hot path caps it), a floor for what `run_chat` measures (it
+/// adds Tony's system prompt).
+async fn this_turn_uses_gpu(state: &DispatchState, osc: &OsConfig, role: &str, chars: usize, stream: TonyStream) -> bool {
+    let cfg = state.snapshot();
+    let chain = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat()).cloned()).collect();
+    let delegates = role != "general" && (matches!(role, "bizops" | "finance") || osc.anythingllm.workspaces.get(role).is_some_and(|s| !s.is_empty()));
+    let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
+    turn_uses_gpu(osc, chain, vram, chars, !matches!(stream, TonyStream::Off), delegates)
+}
 
 /// streamId → cancel signal. A cancel that arrives before its turn registers leaves a stored
 /// permit (`Notify::notify_one`), so the turn ends as soon as it starts.
@@ -1803,7 +1913,10 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     let asked = || super::learning::asked_core_question(req.history.iter().rev().find(|m| m.role == "assistant").map(|m| m.content.as_str()));
     if let (true, Some(yes)) = (learning, super::learning::parse_answer(&text, &cfg.os_name).filter(|_| asked())) {
         let known = super::devqueue::known_secrets(state, os);
-        if let Some((answer, learned, reason)) = answer_proposal(app, pathways.as_deref(), yes, &known, super::compaction::now_ms()) {
+        let answering = answering_ids(req.answering.as_ref());
+        if let Some((answer, learned, reason, answered_memory)) = answer_proposal(os, app, pathways.as_deref(), yes, answering.as_deref(), &known, super::compaction::now_ms()) {
+            // Only a reply that asks again (a failed save) leaves a spoken retry open.
+            os.proposals.settle_spoken(&answer);
             // Spoken like a streamed answer (one `tony-token` chunk), as a Spotify verbatim reply.
             if let (Some(app), Some(sid)) = (app, req.stream_id.as_deref()) {
                 use tauri::Emitter;
@@ -1827,17 +1940,54 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                 learned,
                 pending_memory: vec![],
                 dispatch: None,
-                bookings: vec![],
+                bookings: None,
+                answered_memory,
             };
             log_turn(bridge, &role, &text, &res, &known);
             return Ok(res);
         }
     }
     // Not a spoken answer: a later yes / no is about this turn, not an earlier proposal (its card
-    // still answers it by id). Outside Learning nothing is answered by voice, and a turn there
-    // leaves its own reply as the history's last one, which never asked (`asked_core_question`).
-    if learning {
-        super::learning::proposals().close_spoken();
+    // still answers it by id). Every mode: a caller that sends no history (`asked_core_question`
+    // can't check it) relies on this marker alone, so a non-Learning turn in between ends it too.
+    os.proposals.close_spoken();
+
+    // ── A model test holds the GPU ── a Model Lab compare (from its start until Tony's model is
+    // back) or a bench, holding the slot or queued for it: a turn that generates on the GPU would
+    // wait for up to 30 minutes, so Tony says so at once, as gateway Tony does on the phone. A
+    // turn whose chain starts on a remote provider (Cloud mode, Hybrid offload) never waits, so it
+    // runs as usual. A short "maintenance · reload" just waits.
+    let gpu_test = model_test_running(super::modellab::compare::running(), &slot_labels(&os.slot.view()));
+    let prompt_floor = text.len() + req.history.iter().map(|m| m.content.len()).sum::<usize>().min(cfg.memory.hot_path.history_chars as usize);
+    if gpu_test && this_turn_uses_gpu(state, &cfg, &role, prompt_floor, tony_stream(app.is_some(), req.stream_id.is_some(), sink.is_some())).await {
+        if let (Some(app), Some(sid)) = (app, req.stream_id.as_deref()) {
+            use tauri::Emitter;
+            let _ = app.emit("tony-token", json!({ "streamId": sid, "delta": MAINTENANCE_LINE }));
+        }
+        emit(Hop::Model, "GPU busy testing a model → maintenance line", true, started.elapsed().as_millis(), None);
+        let res = OsTurnResult {
+            answer: MAINTENANCE_LINE.into(),
+            steps: vec![],
+            provider_id: "maintenance".into(),
+            delegated_to: None,
+            tool: None,
+            latency_ms: started.elapsed().as_millis(),
+            reason: "gpu-maintenance".into(),
+            redacted: false,
+            comms_thread: None,
+            routed_role: role.clone(),
+            route_reason: route_reason.clone(),
+            route_kind: route_kind.clone(),
+            pending_spotify: None,
+            answered_by: "os".into(),
+            learned: vec![],
+            pending_memory: vec![],
+            dispatch: None,
+            bookings: None,
+            answered_memory: None,
+        };
+        log_turn(bridge, &role, &text, &res, &super::devqueue::known_secrets(state, os));
+        return Ok(res);
     }
 
     let mut steps: Vec<OsStep> = Vec::new();
@@ -1904,7 +2054,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                 learned: vec![],
                 pending_memory: vec![],
                 dispatch: None,
-                bookings: vec![],
+                bookings: None,
+                answered_memory: None,
             };
             emit(Hop::Router, "business lock → clarification", true, started.elapsed().as_millis(), None);
             log_turn(bridge, &role, &text, &res, &super::devqueue::known_secrets(state, os));
@@ -1965,7 +2116,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             learned: vec![],
             pending_memory: vec![],
             dispatch: None,
-            bookings: vec![],
+            bookings: None,
+            answered_memory: None,
         };
         if let Some(p) = pre.pending_spotify {
             let res = spotify_turn(String::new(), Some(p.name.clone()), "spotify approval card", Some(p), steps);
@@ -2076,7 +2228,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             learned: vec![],
             pending_memory: vec![],
             dispatch: None,
-            bookings: vec![],
+            bookings: None,
+            answered_memory: None,
         };
         log_turn(bridge, &role, &text, &res, &known);
         return Ok(res);
@@ -2204,7 +2357,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                             learned: vec![],
                             pending_memory: vec![],
                             dispatch: None,
-                            bookings: vec![],
+                            bookings: None,
+                            answered_memory: None,
                         };
                         log_turn(bridge, &role, &text, &out, &known);
                         return Ok(out);
@@ -2237,7 +2391,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                     learned: vec![],
                     pending_memory: vec![],
                     dispatch: None,
-                    bookings: vec![],
+                    bookings: None,
+                    answered_memory: None,
                 };
                 log_turn(bridge, &role, &text, &out, &known);
                 return Ok(out);
@@ -2284,18 +2439,21 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // Tony's reply ends with the core-memories question (added here when the model left it out).
     let (answer_text, pending_memory) = match (&pathways, learning && !drafts.is_empty()) {
         (Some(_), true) => {
-            let pending = propose_lessons(&drafts, &known);
+            let pending = propose_lessons(os, &drafts, &known);
             (super::learning::with_core_question(&answer_text, pending.first()), pending)
         }
         _ => (answer_text, vec![]),
     };
+    // A reply that didn't ask the core-memories question never leaves a spoken answer open.
+    os.proposals.settle_spoken(&answer_text);
     // Tier-1 memory: never a Learning turn (an unapproved fact must not persist and resurface), and
     // never a Gmail / Calendar turn (decision 4: mail and calendar text stay out of memory).
     if role == "general" && !learning && private_turn(&role, &text, None).is_none() && private_tools(tool_used.as_deref(), &steps).is_none() && !answer_text.trim().is_empty() {
         let digest = format!("Nic: {} | Tony: {}", super::envelope::clip(&super::envelope::one_line(&text), 180), super::envelope::clip(&super::envelope::one_line(&answer_text), 220));
         super::memtier::put("tony", "tony", &super::devqueue::scrub(&digest, &known), &["turn"]);
     }
-    let bookings = if booking_scan && role == "general" { super::gmail::bookings_since(started_ms) } else { vec![] };
+    // `Some` only when this turn's scan replaced the remembered list (`[]`: it found nothing).
+    let bookings = if booking_scan && role == "general" { super::gmail::scan_since(started_ms) } else { None };
     let out = OsTurnResult {
         answer: answer_text,
         steps,
@@ -2315,6 +2473,7 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         pending_memory,
         dispatch: dispatch_view,
         bookings,
+        answered_memory: None,
     };
     log_turn(bridge, &role, &text, &out, &known);
     Ok(out)
@@ -2322,37 +2481,44 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
 
 /// Learning mode: park a reply's lessons (scrubbed of secrets: the card and the phone show them)
 /// as one pending batch. Nothing is written.
-fn propose_lessons(drafts: &[super::learning::Draft], known: &[String]) -> Vec<super::learning::PendingMemory> {
+fn propose_lessons(os: &OsState, drafts: &[super::learning::Draft], known: &[String]) -> Vec<super::learning::PendingMemory> {
     use super::trace::{emit, Hop};
     let scrub = |s: &str| super::devqueue::scrub(s, known);
     let clean: Vec<super::learning::Draft> = drafts.iter().map(|d| super::learning::Draft { trigger: scrub(&d.trigger), directive: scrub(&d.directive), ..d.clone() }).collect();
-    let pending = super::learning::proposals().propose(&clean, super::compaction::now_ms());
+    let pending = os.proposals.propose(&clean, super::compaction::now_ms());
     emit(Hop::Memory, &format!("learning · {} proposal(s) waiting for your yes", pending.len()), true, 0, None);
     pending
 }
 
+/// The fixed reply, what was saved, the turn's reason, and which proposals the answer took.
+type ProposalAnswer = (String, Vec<super::learning::Saved>, &'static str, Option<AnsweredMemory>);
+
 /// Nic's whole-line yes / no (`learning::parse_answer`) to the batch Tony's immediately preceding
-/// reply proposed (`Proposals::take_spoken`): yes saves it as core memories, no drops it. `None`:
-/// no such batch (a normal turn runs). Returns the fixed reply (`learning::saved_reply`: what the
-/// save really did), what was saved, and the turn's reason. No model call.
-fn answer_proposal(app: Option<&tauri::AppHandle>, path: Option<&std::path::Path>, yes: bool, known: &[String], now: u64) -> Option<(String, Vec<super::learning::Saved>, &'static str)> {
+/// reply proposed (`Proposals::take_spoken_for`; `answering`: the ids on that conversation's card,
+/// so a batch another conversation proposed since is never taken): yes saves it as core memories,
+/// no drops it. `None`: no such batch (a normal turn runs). Returns the fixed reply
+/// (`learning::saved_reply`: what the save really did), what was saved, the turn's reason and the
+/// ids it answered (none on a failed save: they stay pending). No model call.
+fn answer_proposal(os: &OsState, app: Option<&tauri::AppHandle>, path: Option<&std::path::Path>, yes: bool, answering: Option<&[String]>, known: &[String], now: u64) -> Option<ProposalAnswer> {
     use super::trace::{emit, Hop};
     let path = path?;
-    let taken = super::learning::proposals().take_spoken(now);
+    let taken = os.proposals.take_spoken_for(answering, now);
     if taken.is_empty() {
         return None;
     }
+    let answered = |approved: bool| Some(AnsweredMemory { ids: taken.iter().map(|p| p.id.clone()).collect(), approved });
     if !yes {
         emit(Hop::Memory, &format!("learning · {} proposal(s) discarded", taken.len()), true, 0, None);
-        return Some((super::learning::DISCARDED_REPLY.into(), vec![], "core memory discarded"));
+        return Some((super::learning::DISCARDED_REPLY.into(), vec![], "core memory discarded", answered(false)));
     }
     let drafts: Vec<super::learning::Draft> = taken.iter().map(|p| p.draft.clone()).collect();
     match commit_lessons(app, path, &drafts, known) {
-        Ok(saved) => Some((super::learning::saved_reply(&saved), saved, "core memory approved")),
+        Ok(saved) => Some((super::learning::saved_reply(&saved), saved, "core memory approved", answered(true))),
         Err(_) => {
-            // Still pending, same ids: the card (or a yes right after this reply) can try again.
-            super::learning::proposals().restore(taken, true);
-            Some(("I couldn't save that to my core memories just now. Try again in a moment.".into(), vec![], "core memory save failed"))
+            // Still pending, same ids: the card (or a yes right after this reply, which asks
+            // again) can try again.
+            os.proposals.restore(taken, true);
+            Some((super::learning::SAVE_FAILED_REPLY.into(), vec![], "core memory save failed", None))
         }
     }
 }
@@ -2360,7 +2526,7 @@ fn answer_proposal(app: Option<&tauri::AppHandle>, path: Option<&std::path::Path
 /// Approve (`approve`) or discard one pending proposal by id: the desktop card
 /// (`learning_approve` / `learning_discard`) and the phone's `memoryApprove` / `memoryDiscard`
 /// inbox commands. An unknown or expired id is an error.
-pub(crate) fn resolve_proposal(app: Option<&tauri::AppHandle>, path: Option<&std::path::Path>, id: &str, approve: bool, known: &[String]) -> Result<Vec<super::learning::Saved>, String> {
+pub(crate) fn resolve_proposal(os: &OsState, app: Option<&tauri::AppHandle>, path: Option<&std::path::Path>, id: &str, approve: bool, known: &[String]) -> Result<Vec<super::learning::Saved>, String> {
     if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err("bad memory proposal id".into());
     }
@@ -2368,13 +2534,13 @@ pub(crate) fn resolve_proposal(app: Option<&tauri::AppHandle>, path: Option<&std
     if approve && path.is_none() {
         return Err("no memory folder is set (Settings → Memory)".into());
     }
-    let taken = super::learning::proposals().take(id, now).ok_or("that memory proposal expired or was already answered")?;
+    let taken = os.proposals.take(id, now).ok_or("that memory proposal expired or was already answered")?;
     if !approve {
         return Ok(vec![]);
     }
     commit_lessons(app, path.unwrap_or(std::path::Path::new("")), std::slice::from_ref(&taken.draft), known).inspect_err(|_| {
         // Still pending under the same id, so the card's Save can try again.
-        super::learning::proposals().restore(vec![taken.clone()], false);
+        os.proposals.restore(vec![taken.clone()], false);
     })
 }
 
@@ -2387,13 +2553,17 @@ fn live_store_path(state: &DispatchState, os: &OsState) -> Option<std::path::Pat
 #[tauri::command]
 pub fn learning_approve(app: tauri::AppHandle, state: State<'_, DispatchState>, os: State<'_, OsState>, id: String) -> Result<Vec<super::learning::Saved>, String> {
     let known = super::devqueue::known_secrets(&state, &os);
-    resolve_proposal(Some(&app), live_store_path(&state, &os).as_deref(), &id, true, &known)
+    resolve_proposal(&os, Some(&app), live_store_path(&state, &os).as_deref(), &id, true, &known)
 }
 
 /// Desktop card: drop one pending proposal. `false`: it had already gone.
 #[tauri::command]
-pub fn learning_discard(id: String) -> bool {
-    resolve_proposal(None, None, &id, false, &[]).is_ok()
+pub fn learning_discard(os: State<'_, OsState>, id: String) -> bool {
+    discard_proposal(&os, &id)
+}
+
+fn discard_proposal(os: &OsState, id: &str) -> bool {
+    resolve_proposal(os, None, None, id, false, &[]).is_ok()
 }
 
 /// The phone's inbox command (`memoryApprove` / `memoryDiscard`: a proposal id), applied by
@@ -2405,7 +2575,7 @@ pub(crate) fn memory_inbox_command(app: &tauri::AppHandle, state: &DispatchState
         (None, None) => return None,
     };
     let known = super::devqueue::known_secrets(state, os);
-    Some(resolve_proposal(Some(app), live_store_path(state, os).as_deref(), id, approve, &known).map(|saved| json!({ "id": id, "approved": approve, "saved": saved })))
+    Some(resolve_proposal(os, Some(app), live_store_path(state, os).as_deref(), id, approve, &known).map(|saved| json!({ "id": id, "approved": approve, "saved": saved })))
 }
 
 /// Nic's yes: save the lessons as core memories (memory trace hop for the System Map), then
@@ -2770,6 +2940,25 @@ pub(crate) fn private_tools(tool: Option<&str>, steps: &[OsStep]) -> Option<&'st
     tool.and_then(kind).or_else(|| steps.iter().filter(|s| s.kind == "tool").find_map(|s| kind(&s.to)))
 }
 
+/// Decision 4 by the request's own words: a Gmail / Google Calendar read (`routing::direct_tool`),
+/// or a line about Nic's own inbox / calendar ("add the shoot to my calendar"), is private
+/// ("email" / "calendar") even when no mail or calendar tool ran: a model test on the GPU
+/// answered first (the maintenance line), or the chain failed before the tool. Pure.
+pub(crate) fn private_words(text: &str) -> Option<&'static str> {
+    static MAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CALENDAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    match super::routing::direct_tool(text) {
+        Some("gmail") => return Some("email"),
+        Some("calendar") => return Some("calendar"),
+        _ => {}
+    }
+    let n = super::routing::normalize(text);
+    if MAIL.get_or_init(|| regex::Regex::new(r"\b(?:gmail|inbox|my (?:e ?mails?|mail))\b").unwrap()).is_match(&n) {
+        return Some("email");
+    }
+    CALENDAR.get_or_init(|| regex::Regex::new(r"\b(?:my (?:google )?calendar|google calendar|my agenda)\b").unwrap()).is_match(&n).then_some("calendar")
+}
+
 /// The text fields of a turn record: scrubbed of known secrets, or replaced by a length marker
 /// for a private turn (which is also flagged so memory harvest never turns it into a pair).
 fn turn_text(private: Option<&str>, text: &str, known: &[String]) -> Value {
@@ -2781,7 +2970,7 @@ fn turn_text(private: Option<&str>, text: &str, known: &[String]) -> Value {
 
 /// The audit-log record of a turn that produced no answer (its steps still count).
 fn log_failed_turn(bridge: &BridgeState, role: &str, text: &str, steps: &[OsStep], err: &str, known: &[String]) {
-    let private = private_turn(role, text, None).or_else(|| private_tools(None, steps));
+    let private = private_turn(role, text, None).or_else(|| private_tools(None, steps)).or_else(|| private_words(text));
     let mut rec = json!({
         "type": "os-turn",
         "role": role,
@@ -2830,7 +3019,7 @@ fn log_turn(bridge: &BridgeState, role: &str, text: &str, r: &OsTurnResult, know
 
 /// The `os-turn` training-log record. Pure (tests read it).
 fn turn_record(role: &str, text: &str, r: &OsTurnResult, known: &[String]) -> Value {
-    let private = private_turn(role, text, r.delegated_to.as_deref()).or_else(|| private_tools(r.tool.as_deref(), &r.steps));
+    let private = private_turn(role, text, r.delegated_to.as_deref()).or_else(|| private_tools(r.tool.as_deref(), &r.steps)).or_else(|| private_words(text));
     let mut rec = json!({
         "type": "os-turn",
         "role": role,
@@ -3201,7 +3390,8 @@ mod tests {
             learned: vec![],
             pending_memory: vec![],
             dispatch: None,
-            bookings: vec![],
+            bookings: None,
+            answered_memory: None,
         }
     }
 
@@ -3385,6 +3575,35 @@ mod tests {
         assert_eq!(calendar_plan_on("check my calendar", &gmail_tools(), today), None);
     }
 
+    /// Review note (A2): the AnythingLLM credential import runs on Calendar's first USE (a
+    /// calendar ask), never on another turn's tool listing.
+    #[test]
+    fn only_a_calendar_ask_may_import_the_calendar_credentials() {
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut().filter(|m| m.id == "calendar") {
+            m.enabled = true;
+        }
+        let eff = |id: &str| super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default());
+        let brainstorm = eff("brainstorm");
+        for t in ["what's on my calendar tomorrow", "check my calendar", "Hey Tony, anything on my calendar Friday?"] {
+            assert!(calendar_first_use(t, &cfg, &brainstorm, "general"), "{t}");
+        }
+        for t in ["what's the weather", "check my gmail for bookings", "tell me a joke", "add the shoot to my calendar"] {
+            assert!(!calendar_first_use(t, &cfg, &brainstorm, "general"), "{t}");
+        }
+        // Not Tony's, frozen in the mode, or switched off: no import either.
+        assert!(!calendar_first_use("check my calendar", &cfg, &brainstorm, "coder"));
+        assert!(!calendar_first_use("check my calendar", &cfg, &eff("builder"), "general"));
+        assert!(calendar_first_use("check my calendar", &cfg, &eff("operations"), "general"), "Calendar mirrors Gmail: live in Operations");
+        for m in cfg.mcps.iter_mut().filter(|m| m.id == "calendar") {
+            m.enabled = false;
+        }
+        assert!(!calendar_first_use("check my calendar", &cfg, &brainstorm, "general"));
+        // The import itself sits behind that check in the prefetch, never in the listing.
+        let src = include_str!("agents.rs");
+        assert!(src.contains("if calendar_first_use(text, cfg, &os.modes.effective(), agent) {\n        let _ = super::calendar::ensure_creds(state).await;") || src.contains("if calendar_first_use(text, cfg, &os.modes.effective(), agent) {\r\n        let _ = super::calendar::ensure_creds(state).await;"));
+    }
+
     /// Decision 4: a Gmail / Calendar turn is private (training_logs, Drive sync, the Tier-1
     /// digest), whether it answered from the tool or the tool step failed.
     #[test]
@@ -3403,14 +3622,52 @@ mod tests {
         assert_eq!(private_tools(None, &[step("reply", "gmail", "os", "x", true, 1)]), None, "only tool steps count");
     }
 
+    /// FX3 review: a turn that ran no mail / calendar tool (the maintenance line during a model
+    /// test, a failed chain) was logged with Nic's words verbatim; its words alone now make it
+    /// private, in the answered record and the failed one.
+    #[test]
+    fn mail_and_calendar_words_alone_make_a_turn_private() {
+        for (text, kind) in [
+            ("is my appointment with Dr. Patel on my calendar tomorrow?", "calendar"),
+            ("add the Netflix shoot to my calendar for Friday", "calendar"),
+            ("put it on Google Calendar", "calendar"),
+            ("any audition emails?", "email"),
+            ("check gmail for booking emails", "email"),
+            ("forward my e-mails from Sam", "email"),
+            ("what's in my inbox", "email"),
+        ] {
+            assert_eq!(private_words(text), Some(kind), "{text}");
+            let rec = turn_record("general", text, &turn(MAINTENANCE_LINE, None), &[]);
+            assert_eq!(rec["private"], kind, "{text}");
+            assert!(!rec.to_string().contains(text), "{text}");
+        }
+        for text in ["tell me a joke", "fix the calendar widget", "what's the weather in Toronto", "email templates for the landing page"] {
+            assert_eq!(private_words(text), None, "{text}");
+            assert!(turn_record("general", text, &turn("ok", None), &[])["private"].is_null(), "{text}");
+        }
+        // The failed-turn record (no answer) follows the same rule.
+        let dir = std::env::temp_dir().join(format!("fx3-failed-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+        let bridge = BridgeState::default();
+        bridge.init(&dir, dir.join("logs"));
+        let ask = "anything on my calendar for Dr. Patel?";
+        log_failed_turn(&bridge, "general", ask, &[], &format!("all providers failed for: {ask}"), &[]);
+        let logged: String = std::fs::read_dir(dir.join("logs")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect();
+        assert!(logged.contains("\"private\":\"calendar\"") && !logged.contains("Patel"), "{logged}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn bookings_ride_on_the_turn_result_for_the_card() {
         let mut r = turn("One booking.", None);
-        assert!(serde_json::to_value(&r).unwrap().get("bookings").is_none(), "absent when empty");
-        r.bookings = vec![super::super::gmail::Booking { thread_id: "t1".into(), subject: "CONFIRMED".into(), date: Some("2026-11-28".into()), ..Default::default() }];
+        assert!(serde_json::to_value(&r).unwrap().get("bookings").is_none(), "absent when no scan ran");
+        r.bookings = Some(vec![super::super::gmail::Booking { thread_id: "t1".into(), subject: "CONFIRMED".into(), date: Some("2026-11-28".into()), ..Default::default() }]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["bookings"][0]["threadId"], "t1");
         assert_eq!(v["bookings"][0]["date"], "2026-11-28");
+        // Review note (A2): a scan that found nothing is `[]` on the wire (the phone clears its
+        // remembered list, as the desktop's was), not absent like a turn with no scan.
+        r.bookings = Some(vec![]);
+        assert_eq!(serde_json::to_value(&r).unwrap()["bookings"], json!([]));
     }
 
     #[test]
@@ -3434,6 +3691,24 @@ mod tests {
         assert!(router_keyword_ok("whatsapp", &n("any new messages")));
         assert!(!router_keyword_ok("whatsapp", &n("what's the weather")));
         assert!(router_keyword_ok("weather", &n("anything")));
+    }
+
+    /// The maps and instagram patterns once held literal backspace bytes (0x08) where `\b` was
+    /// meant, so the router was never offered maps.* or instagram.* tools.
+    #[test]
+    fn maps_and_instagram_lines_offer_their_servers() {
+        let n = super::super::routing::normalize;
+        assert!(router_keyword_ok("maps", &n("directions to the airport")));
+        assert!(router_keyword_ok("maps", &n("how far is it to Pinewood Studios?")));
+        assert!(router_keyword_ok("instagram", &n("check my instagram followers")));
+        assert!(router_keyword_ok("instagram", &n("any new reels on insta")));
+        // Still word-bounded: "big" / "eta" inside other words wake nothing.
+        assert!(!router_keyword_ok("instagram", &n("that's a big theta")));
+        assert!(!router_keyword_ok("maps", &n("tell me a joke about zeta")));
+        assert!(!router_keyword_ok("maps", &n("what's the weather")));
+        // No source file of the router tables carries a raw control byte.
+        let src = include_str!("agents.rs");
+        assert!(!src.contains('\u{8}'), "agents.rs holds a backspace byte");
     }
 
     #[test]
@@ -4688,7 +4963,7 @@ mod core_memory_tests {
     /// question (the history's last reply didn't ask) is a normal turn; a correction's reply names
     /// the memory it replaced; the next prompt carries the CORE MEMORIES block; a no drops a
     /// proposal with no model call; the card path (`resolve_proposal`) too.
-    /// One test: the proposal store is the app's (global) one.
+    /// The proposal store is the OsState's (one per app), so parallel tests never share it.
     #[test]
     fn learning_proposes_and_a_spoken_yes_saves_a_core_memory_without_a_model_call() {
         tauri::async_runtime::block_on(async {
@@ -4727,7 +5002,7 @@ mod core_memory_tests {
             let before = chats();
             let r = run_os_turn(&state, &os, &bridge, turn_after("yes, but only on weekdays", &asked_first), None).await.unwrap();
             assert_eq!((chats(), r.answer.as_str()), (before + 1, "Weekdays only, got it."));
-            assert!(learning::proposals().any(super::super::compaction::now_ms()));
+            assert!(os.proposals.any(super::super::compaction::now_ms()));
 
             // 3. Review regression: a yes AFTER that turn is not an answer to the stale proposal: a
             // normal model turn, nothing saved, whether the history shows Tony's last reply (it
@@ -4764,7 +5039,7 @@ mod core_memory_tests {
                 assert_eq!((chats(), r.answer.as_str()), (before + 1, "Sure."), "{last}");
             }
             assert_eq!(learning::load(&path).pathways.len(), 1);
-            assert!(learning::proposals().any(super::super::compaction::now_ms()), "the older batch waits for its card");
+            assert!(os.proposals.any(super::super::compaction::now_ms()), "the older batch waits for its card");
 
             // 6. The next prompt carries the block (and doesn't recall the same entry twice).
             set("Hey Nic.");
@@ -4818,22 +5093,340 @@ mod core_memory_tests {
 
             // 11. The card / phone path: approve and discard by id; bad, unknown and spent ids fail.
             let known: Vec<String> = vec![];
-            let p = learning::proposals().propose(&[learning::Draft { category: "persona".into(), trigger: "always".into(), directive: "call me Nic".into(), confidence: "provisional".into(), core: false }], super::super::compaction::now_ms());
-            assert!(resolve_proposal(None, Some(path.as_path()), "../etc", true, &known).is_err());
-            assert!(resolve_proposal(None, Some(path.as_path()), "mem-0-0", true, &known).is_err());
-            let saved = resolve_proposal(None, Some(path.as_path()), &p[0].id, true, &known).unwrap();
+            let p = os.proposals.propose(&[learning::Draft { category: "persona".into(), trigger: "always".into(), directive: "call me Nic".into(), confidence: "provisional".into(), core: false }], super::super::compaction::now_ms());
+            assert!(resolve_proposal(&os, None, Some(path.as_path()), "../etc", true, &known).is_err());
+            assert!(resolve_proposal(&os, None, Some(path.as_path()), "mem-0-0", true, &known).is_err());
+            let saved = resolve_proposal(&os, None, Some(path.as_path()), &p[0].id, true, &known).unwrap();
             assert_eq!(saved.len(), 1);
-            assert!(resolve_proposal(None, Some(path.as_path()), &p[0].id, true, &known).is_err(), "answered once");
+            assert!(resolve_proposal(&os, None, Some(path.as_path()), &p[0].id, true, &known).is_err(), "answered once");
             let f = learning::load(&path);
             assert_eq!((f.pathways.len(), f.pathways.iter().all(|p| p.core && p.confidence == "confirmed")), (2, true));
-            let q = learning::proposals().propose(&[learning::Draft { category: "rule".into(), trigger: "x".into(), directive: "y".into(), confidence: "confirmed".into(), core: false }], super::super::compaction::now_ms());
-            assert!(learning_discard(q[0].id.clone()));
-            assert!(!learning_discard(q[0].id.clone()));
+            let q = os.proposals.propose(&[learning::Draft { category: "rule".into(), trigger: "x".into(), directive: "y".into(), confidence: "confirmed".into(), core: false }], super::super::compaction::now_ms());
+            assert!(discard_proposal(&os, &q[0].id));
+            assert!(!discard_proposal(&os, &q[0].id));
             // The older batches the voice could no longer answer are still the card's.
             for id in [first, follow_up] {
-                assert!(learning_discard(id.clone()), "{id}");
+                assert!(discard_proposal(&os, &id), "{id}");
             }
             assert_eq!(learning::load(&path).pathways.len(), 2);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// Review note (A1): a caller that sends NO history relies on the spoken-answer marker alone.
+    /// A non-Learning turn in between used to leave it set, so a "yes" many turns later (back in
+    /// Learning) still approved the stale proposal. Now every turn ends it, in any mode.
+    #[test]
+    fn a_non_learning_turn_ends_the_spoken_answer_for_a_caller_without_history() {
+        tauri::async_runtime::block_on(async {
+            let reply: Arc<Mutex<String>> = Arc::default();
+            let r2 = reply.clone();
+            let srv = start(move |r| {
+                if r.path.ends_with("/chat/completions") {
+                    Resp::json(json!({ "choices": [{ "message": { "role": "assistant", "content": r2.lock().unwrap().clone() }, "finish_reason": "stop" }] }))
+                } else {
+                    Resp::status(404, json!({}))
+                }
+            })
+            .await;
+            let dir = std::env::temp_dir().join(format!("a1-marker-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (state, os, bridge) = learning_env(&srv.base, &dir);
+            let path = learning::live_path(&os.snapshot(), &state.snapshot().gateway.workdir).expect("store path");
+            let chats = || srv.count("POST", "/chat/completions");
+            let set = |s: &str| *reply.lock().unwrap() = s.to_string();
+
+            // Proposed in Learning: the marker is open.
+            set("Got it.\n[[LEARN rule | always | never book Mondays | confirmed]]");
+            let r = run_os_turn(&state, &os, &bridge, turn_req("I never take bookings on Mondays"), None).await.unwrap();
+            assert_eq!(r.pending_memory.len(), 1);
+            assert!(os.proposals.spoken_open());
+            // A turn in another mode (no history sent) ends it. Hermetic: no tools are listed, and
+            // the money mention makes it private, so it writes no Tier-1 digest (the app-wide
+            // memtier store other tests count).
+            os.update(|c| {
+                c.permissions.mcp = super::super::bridge::Tier::Deny;
+                Ok(())
+            })
+            .unwrap();
+            os.modes.set_active(super::super::modes::DEFAULT_MODE_ID).unwrap();
+            set("Why did the scarecrow win an award?");
+            let joke = "tell me a joke about a $5 coffee";
+            assert!(private_turn("general", joke, None).is_some(), "a private turn: no Tier-1 write");
+            run_os_turn(&state, &os, &bridge, turn_req(joke), None).await.unwrap();
+            assert!(!os.proposals.spoken_open(), "a non-Learning turn ends the spoken answer");
+            // Back in Learning, a bare "yes" with no history is an ordinary model turn: nothing saved.
+            os.modes.set_active(super::super::modes::LEARNING_ID).unwrap();
+            set("Yes what, Nic?");
+            let before = chats();
+            let r = run_os_turn(&state, &os, &bridge, turn_req("yes"), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), chats()), ("Yes what, Nic?", before + 1));
+            assert!(r.learned.is_empty() && !path.exists(), "the stale proposal is never saved by voice");
+            assert!(os.proposals.any(super::super::compaction::now_ms()), "still the card's to answer");
+            // Right after a proposing reply, a no-history yes still answers it.
+            set("Okay.\n[[LEARN rule | always | keep it short | confirmed]]");
+            run_os_turn(&state, &os, &bridge, turn_req("keep it short when I'm driving"), None).await.unwrap();
+            let before = chats();
+            let r = run_os_turn(&state, &os, &bridge, turn_req("yes"), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), chats()), (learning::SAVED_REPLY, before));
+            assert!(!os.proposals.spoken_open(), "answered: closed");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// FX2 review finding 2: the spoken batch is app-wide. Conversation 1 ("auto") proposes A,
+    /// conversation 2 ("general", or the phone) proposes B; a yes back in conversation 1 meant A,
+    /// and used to commit B, a core memory Nic never confirmed. With `answering` (the ids on the
+    /// card of that conversation's newest reply) it is an ordinary turn and B stays pending; a yes
+    /// that carries B's ids commits B and says which ids it answered (`answeredMemory`).
+    #[test]
+    fn a_spoken_yes_commits_only_the_batch_of_the_card_its_conversation_shows() {
+        tauri::async_runtime::block_on(async {
+            let reply: Arc<Mutex<String>> = Arc::default();
+            let r2 = reply.clone();
+            let srv = start(move |r| {
+                if r.path.ends_with("/chat/completions") {
+                    Resp::json(json!({ "choices": [{ "message": { "role": "assistant", "content": r2.lock().unwrap().clone() }, "finish_reason": "stop" }] }))
+                } else {
+                    Resp::status(404, json!({}))
+                }
+            })
+            .await;
+            let dir = std::env::temp_dir().join(format!("fx-answering-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (state, os, bridge) = learning_env(&srv.base, &dir);
+            let path = learning::live_path(&os.snapshot(), &state.snapshot().gateway.workdir).expect("store path");
+            let chats = || srv.count("POST", "/chat/completions");
+            let set = |s: &str| *reply.lock().unwrap() = s.to_string();
+            let answering = |text: &str, last: &str, ids: &[String]| -> OsTurnRequest {
+                serde_json::from_value(json!({ "text": text, "role": "general", "history": [{ "role": "user", "content": "earlier" }, { "role": "assistant", "content": last }], "answering": ids })).unwrap()
+            };
+
+            set("Got it.\n[[LEARN preference | someone asks my name | call me Nic | confirmed]]");
+            let a = run_os_turn(&state, &os, &bridge, turn_req("call me Nic"), None).await.unwrap();
+            let a_ids: Vec<String> = a.pending_memory.iter().map(|m| m.id.clone()).collect();
+            set("Okay.\n[[LEARN rule | I'm driving | keep it short | confirmed]]");
+            let b = run_os_turn(&state, &os, &bridge, turn_req("when I'm driving keep it short"), None).await.unwrap();
+            let b_ids: Vec<String> = b.pending_memory.iter().map(|m| m.id.clone()).collect();
+            assert_eq!((a_ids.len(), b_ids.len()), (1, 1));
+
+            // The yes in conversation 1 (its last reply asked about A): a normal turn, nothing saved.
+            set("Sure thing.");
+            let before = chats();
+            let r = run_os_turn(&state, &os, &bridge, answering("yes", &a.answer, &a_ids), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), chats()), ("Sure thing.", before + 1));
+            assert!(r.answered_memory.is_none() && r.learned.is_empty() && !path.exists(), "B is never committed by A's yes");
+            let now = super::super::compaction::now_ms();
+            assert!(os.proposals.take(&b_ids[0], now).is_some(), "B still waits for its card");
+            assert!(os.proposals.take(&a_ids[0], now).is_some(), "and so does A");
+
+            // In the conversation that proposed it, a yes carrying B's ids commits B and names them.
+            set("Okay.\n[[LEARN rule | I'm driving | keep it short | confirmed]]");
+            let b = run_os_turn(&state, &os, &bridge, turn_req("when I'm driving keep it short"), None).await.unwrap();
+            let b_ids: Vec<String> = b.pending_memory.iter().map(|m| m.id.clone()).collect();
+            let before = chats();
+            let r = run_os_turn(&state, &os, &bridge, answering("yes", &b.answer, &b_ids), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), chats()), (learning::SAVED_REPLY, before));
+            assert_eq!(r.answered_memory, Some(AnsweredMemory { ids: b_ids.clone(), approved: true }));
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(v["answeredMemory"], json!({ "ids": b_ids, "approved": true }));
+            assert_eq!(learning::load(&path).pathways.len(), 1);
+
+            // A no names the batch it dropped; an ordinary turn has no answeredMemory on the wire.
+            set("Got it.\n[[LEARN rule | always | never book Mondays | confirmed]]");
+            let c = run_os_turn(&state, &os, &bridge, turn_req("I never take bookings on Mondays"), None).await.unwrap();
+            assert!(serde_json::to_value(&c).unwrap().get("answeredMemory").is_none());
+            let c_ids: Vec<String> = c.pending_memory.iter().map(|m| m.id.clone()).collect();
+            let r = run_os_turn(&state, &os, &bridge, answering("nope", &c.answer, &c_ids), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), r.answered_memory.map(|m| (m.ids, m.approved))), (learning::DISCARDED_REPLY, Some((c_ids, false))));
+            // Malformed ids are dropped: a yes that names none of the batch takes nothing.
+            assert_eq!(answering_ids(Some(&vec!["../x".into(), "mem-1-2".into()])), Some(vec!["mem-1-2".to_string()]));
+            assert_eq!(answering_ids(None), None);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// Review note (A2/A3): while a model test holds the GPU (a Model Lab compare or a bench), a
+    /// desktop Tony turn answers at once with gateway Tony's line instead of waiting up to 30 min
+    /// for the slot; a short reload is not a test.
+    #[test]
+    fn a_model_test_on_the_gpu_answers_at_once_with_the_maintenance_line() {
+        for h in ["maintenance · model compare", "Maintenance · bench qwen/qwen3.5-9b", "maintenance: bench x", "maintenance - model compare", super::super::modellab::compare::HOLDER] {
+            assert!(testing_holder(h), "{h}");
+        }
+        for h in ["maintenance · reload qwen/qwen3.5-9b", "maintenance · unload", "lmstudio · Tony (streaming)", "bench qwen", "anythingllm · bench-notes", ""] {
+            assert!(!testing_holder(h), "{h}");
+        }
+        assert!(model_test_running(true, &[]), "a compare counts from its start, before it holds the slot");
+        assert!(!model_test_running(false, &["maintenance · reload x".into(), "lmstudio · Tony".into()]));
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r| {
+                if r.path.ends_with("/chat/completions") {
+                    Resp::json(json!({ "choices": [{ "message": { "role": "assistant", "content": "Why did the scarecrow win an award?" }, "finish_reason": "stop" }] }))
+                } else {
+                    Resp::status(404, json!({}))
+                }
+            })
+            .await;
+            let dir = std::env::temp_dir().join(format!("a3-maint-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (state, os, bridge) = learning_env(&srv.base, &dir);
+            let chats = || srv.count("POST", "/chat/completions");
+            // A bench holds the GPU: the maintenance line, no model call, nothing waits.
+            let bench = os.slot.acquire_maintenance("bench qwen/qwen3.5-9b", 50).await;
+            let before = chats();
+            let t0 = Instant::now();
+            let r = run_os_turn(&state, &os, &bridge, turn_req("tell me a joke"), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), r.reason.as_str(), r.provider_id.as_str(), chats()), (MAINTENANCE_LINE, "gpu-maintenance", "maintenance", before));
+            assert!(t0.elapsed() < Duration::from_secs(5), "answered at once");
+            drop(bench);
+            // The GPU is free again: an ordinary turn.
+            let r = run_os_turn(&state, &os, &bridge, turn_req("tell me a joke"), None).await.unwrap();
+            assert_eq!((r.answer.as_str(), chats()), ("Why did the scarecrow win an award?", before + 1));
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// FX3 review: the maintenance line answered EVERY turn during a model test, though a chain
+    /// that starts on a remote provider (Cloud mode, Hybrid offload) never waits for the GPU slot.
+    /// Only a turn that would generate on the GPU gets it, mirroring how `run_chat` and the
+    /// streamed paths pick their provider.
+    #[test]
+    fn only_a_turn_that_would_generate_on_the_gpu_waits_for_a_model_test() {
+        use super::super::bridge::Tier;
+        let providers = DispatchState::default().snapshot().providers;
+        let get = |id: &str| providers.iter().find(|p| p.id == id).cloned().unwrap();
+        let (local, gateway, droplet) = (get("lmstudio"), get("agentic-os"), get("droplet"));
+        assert!(!os_core::is_remote(&local) && os_core::is_remote(&droplet));
+        let chain = || vec![local.clone(), gateway.clone(), droplet.clone()];
+        let with = |f: &dyn Fn(&mut OsConfig)| {
+            let mut c = OsConfig::default();
+            c.privacy.kill_switch = false;
+            c.permissions.cloud = Tier::Allow;
+            c.droplet.enabled = true;
+            f(&mut c);
+            c
+        };
+        let local_mode = with(&|c| c.compute.mode = os_core::ComputeMode::Local);
+        let cloud = with(&|c| c.compute.mode = os_core::ComputeMode::Cloud);
+        let hybrid = with(&|c| c.compute.mode = os_core::ComputeMode::Hybrid);
+        // LOCAL ONLY: always the GPU.
+        assert!(turn_uses_gpu(&local_mode, chain(), None, 500, false, false));
+        assert!(turn_uses_gpu(&local_mode, chain(), None, 500, true, false));
+        // Cloud mode: a plain turn starts on the droplet and never waits …
+        assert!(!turn_uses_gpu(&cloud, chain(), None, 500, false, false));
+        // … but a streamed turn still streams from a local FIRST chain provider (it waits) …
+        assert!(turn_uses_gpu(&cloud, chain(), None, 500, true, false));
+        // … unless the chain starts remote.
+        assert!(!turn_uses_gpu(&cloud, vec![droplet.clone(), local.clone()], None, 500, true, false));
+        // Hybrid offloads at the VRAM threshold or on a heavy context, else stays local.
+        assert!(!turn_uses_gpu(&hybrid, chain(), Some(95.0), 500, false, false));
+        assert!(turn_uses_gpu(&hybrid, chain(), Some(50.0), 500, false, false));
+        assert!(turn_uses_gpu(&hybrid, chain(), None, 500, false, false));
+        assert!(!turn_uses_gpu(&hybrid, chain(), None, 30_000, false, false));
+        // Remote blocked (kill switch, cloud Ask / Deny, droplet off): back on the GPU.
+        assert!(turn_uses_gpu(&with(&|c| { c.compute.mode = os_core::ComputeMode::Cloud; c.privacy.kill_switch = true; }), chain(), None, 500, false, false));
+        assert!(turn_uses_gpu(&with(&|c| { c.compute.mode = os_core::ComputeMode::Cloud; c.permissions.cloud = Tier::Ask; }), chain(), None, 500, false, false));
+        assert!(turn_uses_gpu(&with(&|c| { c.compute.mode = os_core::ComputeMode::Cloud; c.permissions.cloud = Tier::Deny; }), chain(), None, 500, false, false));
+        assert!(turn_uses_gpu(&with(&|c| { c.compute.mode = os_core::ComputeMode::Cloud; c.droplet.enabled = false; }), chain(), None, 500, false, false));
+        // A delegation generates in AnythingLLM, on the GPU, in any mode.
+        assert!(turn_uses_gpu(&cloud, chain(), None, 500, false, true));
+        // The gateway is skipped (the router's JSON calls skip it): the next provider decides.
+        assert!(turn_uses_gpu(&local_mode, vec![gateway.clone(), local.clone()], None, 500, false, false));
+        assert!(!turn_uses_gpu(&cloud, vec![gateway.clone(), droplet.clone()], None, 500, false, false));
+        assert!(!turn_uses_gpu(&local_mode, vec![], None, 500, true, false), "no chain: nothing to wait for");
+    }
+
+    /// FX3 review, end to end: in Cloud mode a turn during a bench goes to its remote provider
+    /// (here one that refuses at once, "0.0.0.0" being no loopback host) instead of the line, and
+    /// never touches the local model.
+    #[test]
+    fn a_cloud_first_turn_is_not_held_by_a_model_test() {
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r| {
+                if r.path.ends_with("/chat/completions") {
+                    Resp::json(json!({ "choices": [{ "message": { "role": "assistant", "content": "local" }, "finish_reason": "stop" }] }))
+                } else {
+                    Resp::status(404, json!({}))
+                }
+            })
+            .await;
+            let dir = std::env::temp_dir().join(format!("fx3-cloud-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (state, os, bridge) = learning_env(&srv.base, &dir);
+            state
+                .update(|c| {
+                    let mut remote = c.providers.iter().find(|p| p.id == "lmstudio").unwrap().clone();
+                    remote.id = "remote-test".into();
+                    remote.base_url = "http://0.0.0.0:1/v1".into();
+                    c.providers.push(remote);
+                    c.policy.chain = vec!["remote-test".into()];
+                    Ok(())
+                })
+                .unwrap();
+            os.update(|c| {
+                c.compute.mode = os_core::ComputeMode::Cloud;
+                c.permissions.cloud = super::super::bridge::Tier::Allow;
+                c.privacy.kill_switch = false;
+                Ok(())
+            })
+            .unwrap();
+            let chats = || srv.count("POST", "/chat/completions");
+            let bench = os.slot.acquire_maintenance("bench qwen/qwen3.5-9b", 50).await;
+            let before = chats();
+            let r = tokio::time::timeout(Duration::from_secs(30), run_os_turn(&state, &os, &bridge, turn_req("tell me a joke"), None)).await.expect("a remote-first turn never waits for the bench's slot");
+            match r {
+                Ok(res) => assert_ne!(res.answer, MAINTENANCE_LINE),
+                Err(e) => assert!(e.contains("remote-test"), "it tried the remote provider: {e}"),
+            }
+            assert_eq!(chats(), before, "the local model was never called");
+            drop(bench);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// FX3 review: a bench still collecting its permits is a slot WAITER (later turns queue
+    /// behind it), so it counts like a holder; and the maintenance turn's log record of a calendar
+    /// ask is private (no tool ran, so only its words can say so).
+    #[test]
+    fn a_bench_queued_for_the_slot_answers_at_once_and_a_calendar_ask_stays_private() {
+        use futures_util::FutureExt;
+        tauri::async_runtime::block_on(async {
+            let srv = start(|r| {
+                if r.path.ends_with("/chat/completions") {
+                    Resp::json(json!({ "choices": [{ "message": { "role": "assistant", "content": "local" }, "finish_reason": "stop" }] }))
+                } else {
+                    Resp::status(404, json!({}))
+                }
+            })
+            .await;
+            let dir = std::env::temp_dir().join(format!("fx3-waiter-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (state, os, bridge) = learning_env(&srv.base, &dir);
+            bridge.init(&dir, dir.join("logs"));
+            let chats = || srv.count("POST", "/chat/completions");
+            // Another caller holds the GPU; the bench queues for it (one poll registers it).
+            let held = os.slot.acquire("lmstudio · Tony", true, 90).await;
+            let ask = "is my appointment with Dr. Patel on my calendar tomorrow?";
+            {
+                let mut bench = std::pin::pin!(os.slot.acquire_maintenance("bench qwen/qwen3.5-9b", 50));
+                assert!(bench.as_mut().now_or_never().is_none(), "the bench waits for the held permit");
+                let v = os.slot.view();
+                assert!(!v.active.iter().any(|h| testing_holder(h)) && v.waiting.iter().any(|w| testing_holder(w)), "{:?} / {:?}", v.active, v.waiting);
+                let before = chats();
+                let t0 = Instant::now();
+                let r = tokio::time::timeout(Duration::from_secs(20), run_os_turn(&state, &os, &bridge, turn_req(ask), None)).await.expect("answered without queueing behind the bench").unwrap();
+                assert_eq!((r.answer.as_str(), r.reason.as_str(), chats()), (MAINTENANCE_LINE, "gpu-maintenance", before));
+                assert!(t0.elapsed() < Duration::from_secs(5), "answered at once");
+            }
+            // The record written for it: private, none of the ask's words.
+            let logged: String = std::fs::read_dir(dir.join("logs")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect();
+            let line = logged.lines().find(|l| l.contains("\"provider\":\"maintenance\"")).expect("the maintenance turn is logged");
+            let rec: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(rec["private"], "calendar", "{line}");
+            assert!(!line.contains("Patel") && !line.contains("appointment"), "{line}");
+            assert_eq!(rec["upstream"], format!("[private calendar turn: {} chars]", ask.chars().count()));
+            drop(held);
             let _ = std::fs::remove_dir_all(&dir);
         });
     }
@@ -4864,11 +5457,19 @@ mod core_memory_tests {
         let end = start + lines[start..].iter().position(|l| *l == "}").unwrap();
         let body = lines[start..=end].join("\n");
         let check = body.find("learning::parse_answer(&text, &cfg.os_name).filter(|_| asked())").expect("the answer check, only when the last reply asked");
-        // Every Learning turn that isn't the spoken answer ends spoken answers, before any call.
-        let close = body.find("super::learning::proposals().close_spoken();").expect("close_spoken");
+        // Every turn (any mode) that isn't the spoken answer ends spoken answers, before any call.
+        let close = body.find("\n    os.proposals.close_spoken();").expect("close_spoken, unconditional");
         assert!(close > check);
+        // A reply that didn't ask the question never leaves one open.
+        let settle = body.find("os.proposals.settle_spoken(&answer_text);").expect("settle_spoken");
+        assert!(settle > body.find("propose_lessons(os, &drafts, &known)").unwrap());
+        // A model test on the GPU answers before anything that would wait for the slot.
+        // Holders AND waiters count, and only a turn that would generate on the GPU gets the line.
+        let test = body.find("let gpu_test = model_test_running(super::modellab::compare::running(), &slot_labels(&os.slot.view()));").expect("the model-test check");
+        let maint = body.find("if gpu_test && this_turn_uses_gpu(state, &cfg, &role, prompt_floor, tony_stream(app.is_some(), req.stream_id.is_some(), sink.is_some())).await {").expect("the maintenance check");
+        assert!(test > close && maint > test);
         for call in ["run_chat(", "prefetch_tools(", "workspace_chat(", "comms_search("] {
-            assert!(body.find(call).is_some_and(|i| i > close), "{call} must come after the answer check");
+            assert!(body.find(call).is_some_and(|i| i > close && i > maint), "{call} must come after the answer and maintenance checks");
         }
         assert!(body.contains("if role == \"general\" && !learning && private_turn(&role, &text, None).is_none()"), "Tier 1 skips Learning turns");
     }

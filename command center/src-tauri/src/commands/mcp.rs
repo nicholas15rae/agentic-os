@@ -133,7 +133,7 @@ fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: imp
 
 /// A builtin's tools, or an error when its backend isn't configured, so the
 /// registry never shows a false "ok" for a server that can't answer. `has_calendar`: Google
-/// Calendar's Apps Script pair is set (or was just imported from AnythingLLM on first use).
+/// Calendar's Apps Script pair is set (a listing never imports it; Calendar's first use does).
 fn builtin_listing_with(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: impl Fn() -> bool, spotify: impl Fn() -> Result<(), String>, has_instagram_token: impl Fn() -> bool, has_calendar: impl Fn() -> bool) -> Result<Vec<ToolInfo>, String> {
     match id {
         "gmail" => match gmail() {
@@ -169,7 +169,8 @@ fn listing(state: &DispatchState, id: &str) -> Result<Vec<ToolInfo>, String> {
         || brave_key(state).is_some(),
         || super::spotify::readiness(state),
         || super::envfile::os_key(state, super::instagram::SECRET).is_some(),
-        || super::calendar::ensure_creds(state).is_some(),
+        // Never the AnythingLLM import: that waits for Calendar's first use (`calendar::ensure_creds`).
+        || super::calendar::has_creds(state),
     )
 }
 

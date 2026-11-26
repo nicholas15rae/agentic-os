@@ -302,6 +302,53 @@ const twelve = (hhmm: string) => {
   return `${h % 12 || 12}:${pad(m)} ${h < 12 ? "AM" : "PM"}`;
 };
 
+/** The event starts before `now` (an all-day one: on a day before today). Rust still refuses a start
+ * more than a day in the past (`calendar::create_body`); the card says so for any past start. */
+export function startsInPast(a: Pick<CalendarArgs, "date" | "startTime" | "allDay">, now: Date): boolean {
+  const [y, m, d] = a.date.split("-").map(Number);
+  if (a.allDay || !a.startTime) return new Date(y, m - 1, d) < new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const [h, min] = a.startTime.split(":").map(Number);
+  return new Date(y, m - 1, d, h, min) < now;
+}
+
+/**
+ * The fields an add carries besides its title and time, for the card's "From the email" box
+ * (`fromEmail` false: the box is the label) and the spoken read-back: `From the email: location
+ * "…"; note: …` when they came from a booking email (untrusted data, so Nic sees every word
+ * before approving, not only in the collapsed Payload); "" when there are none.
+ */
+export function extraFields(a: Pick<CalendarArgs, "location" | "description">, fromEmail: boolean): string {
+  const parts = [a.location ? `location "${a.location}"` : "", a.description ? `note: ${a.description}` : ""].filter(Boolean);
+  if (!parts.length) return "";
+  return `${fromEmail ? "From the email: " : ""}${parts.join("; ")}`;
+}
+
+/**
+ * An email-supplied title as the card's headline and the read-back quote it: double quotes
+ * (straight or curly) become single ones and "·" a dash, so a subject can't close the quote early
+ * or pose as the card's own separators ('X" to Google Calendar: Sat Nov 28, 6:30 AM · …' would
+ * otherwise read as the headline's time). Whitespace collapsed. The event's own title is unchanged.
+ * Pure.
+ */
+export function cardText(s: string): string {
+  return s.replace(/["“”]/g, "'").replace(/[·•]/g, "-").replace(/\s+/g, " ").trim();
+}
+
+const HHMM = /^\d{2}:\d{2}$/;
+
+/**
+ * The card's "When" line for an approved-only calendar add, from the plan's own args (what Rust
+ * creates), never from text an email supplied: "Fri Dec 4, 3:00 AM". null for any other plan, or
+ * args without a valid date. Pure.
+ */
+export function cardWhen(target: { kind: string; tool?: string; args?: Record<string, unknown> }): string | null {
+  if (target.kind !== "tool" || target.tool !== "calendar.create_event") return null;
+  const a = target.args ?? {};
+  if (typeof a.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(a.date)) return null;
+  const time = (k: string) => (typeof a[k] === "string" && HHMM.test(a[k] as string) ? (a[k] as string) : undefined);
+  return describeWhen({ date: a.date, startTime: time("startTime"), endTime: time("endTime"), allDay: a.allDay === true });
+}
+
 /** "Sat Nov 28, 6:30 AM – 7:30 AM" / "Sat Nov 28 (all day)" for the card and the read-back. */
 export function describeWhen(a: Pick<CalendarArgs, "date" | "startTime" | "endTime" | "allDay">): string {
   const [y, m, d] = a.date.split("-").map(Number);

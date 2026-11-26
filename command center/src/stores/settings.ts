@@ -85,7 +85,9 @@ export interface SettingsState {
    * (-70..-10; on desktop it mirrors os.json `voice.activationDb`), `bargeMarginDb` the extra a
    * barge-in over Tony needs, then the pause that ends an utterance and the hard cap.
    * `partialMs`: live captions while you speak, one every this many ms of speech (300-3000; 0 =
-   * off, which also turns the phone's streamed STT off). Only on a GPU STT (features/voice/stt-partials.ts).
+   * off, which also turns the phone's streamed STT off). Only on a GPU STT (features/voice/stt-partials.ts),
+   * and only for listens that ask for captions (Tony's; not Brainstorm / System Map dictation).
+   * Settings → Activation threshold → Live captions.
    */
   vad: { activationDb: number; bargeMarginDb: number; endSilenceMs: number; maxUtteranceMs: number; partialMs?: number };
   /**

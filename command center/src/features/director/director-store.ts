@@ -24,6 +24,9 @@ export interface ChatMsg {
   errors?: string[];
   /** Short notes of what its valid actions changed. */
   applied?: string[];
+  /** Learning mode: the ids of the lessons this reply proposed (`OsTurnResult.pendingMemory`), so a
+   * yes typed next answers this chat's own batch only (`directorAnswering`). */
+  memoryIds?: string[];
 }
 
 export type Selection = { kind: "asset" | "clip" | "render"; id: string } | null;

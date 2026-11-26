@@ -169,7 +169,7 @@ describe("switchboard overlay editing (custom modes)", () => {
   it("duplicating a preset keeps its switchboard; a new mode has none", () => {
     expect(duplicateMode(PRESET_MODES, preset("operations")).switchboard).toEqual(preset("operations").switchboard);
     expect(newModeDraft(PRESET_MODES).switchboard ?? null).toBeNull();
-    expect(switchboardSummary(preset("operations"))).toBe("2 agents · 9 tools on duty; the rest are frozen");
+    expect(switchboardSummary(preset("operations"))).toBe("2 agents · 10 tools on duty; the rest are frozen");
     expect(switchboardSummary(custom({ switchboard: { agents: ["coder"], tools: [] } }))).toBe("1 agent · 0 tools on duty; the rest are frozen");
   });
 });

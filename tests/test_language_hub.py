@@ -442,6 +442,18 @@ class EnglishStt(unittest.TestCase):
         self.assertEqual((len(self.spawned), lh._fw["backoff"]), (2, lh.FW_BACKOFF[0] * 2))
         self.assertEqual(wc.hits, 5)
 
+    def test_a_model_argparse_would_read_as_an_option_is_not_passed(self):
+        # `--model -h` makes fw_server's argparse exit (code 2) before it binds the port.
+        wc = self.stub(reply={"text": "Cut it."})
+        for bad in ("-h", "--port", ".."):
+            lh._fw.update(next_spawn=0.0, down_until=0.0)
+            self.spawned.clear()
+            port = closed_port()
+            self.config(f"http://127.0.0.1:{port}/v1", wc.base)
+            lh._providers()["providers"][1]["model"] = bad
+            lh._transcribe(b"x" * 2048, "en")
+            self.assertEqual(self.spawned[0][0][1:], [str(lh.FW_SCRIPT), "--port", str(port)], bad)
+
     def test_a_turn_fw_server_forwarded_to_whisper_cpp_is_labelled_so(self):
         # :8177 up without a GPU model answers through its own whisper.cpp fallback: one round trip.
         fw, wc = self.stub(reply={"text": "Cut it."}, headers={"X-STT-Backend": "whispercpp", "X-Fallback-Reason": "not_ready"}), self.stub()
@@ -815,10 +827,17 @@ class SttStream(unittest.TestCase):
     def test_local_agreement_matches_fw_server(self):
         import fw_server as fws
 
-        seq = ("Play", "Play Bill", "Play Bilmuri on", "play, Bilmuri on Spotify.", "Pay Bilmuri on Spotify now", "")
-        a, b = lh.LocalAgreement(), fws.LocalAgreement()
-        for s in seq:
-            self.assertEqual(a.push(s), b.push(s), s)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_fw_server import LA_CASES, la_random_sequences  # the table stt-partials.test.ts has too
+
+        for seq, want in LA_CASES:  # incl. revisions that change the word count
+            a, b = lh.LocalAgreement(), fws.LocalAgreement()
+            self.assertEqual([a.push(s) for s in seq], want, seq)
+            self.assertEqual([b.push(s) for s in seq], want, seq)
+        for seq in la_random_sequences():
+            a, b = lh.LocalAgreement(), fws.LocalAgreement()
+            for s in seq:
+                self.assertEqual(a.push(s), b.push(s), seq)
 
 
 class EchoGuardParity(unittest.TestCase):
@@ -840,6 +859,36 @@ class EchoGuardParity(unittest.TestCase):
                    "so they know it's coming. Make the colors warm."):
             self.assertFalse(lh.echoes_prompt(ok, self.P), ok)
         self.assertFalse(lh.echoes_prompt("take it ease cut it", "cut it"))
+
+    def test_fw_server_has_the_same_echo_guard(self):
+        # fw_server (its own venv, can't import this module) keeps a copy for relay-mode partials.
+        import fw_server as fws
+
+        for line in ("Tony, Gabagool mode. Take it easy.", "prompter designer coder booking desk", "WhatsApp, Gmail, Spotify, Tauri",
+                     "uh BOOKING-DESK, librarian and ops!", "Tony, Gabagool mode. Take it easy. Cut it. Whoa.", "Cut it.", "take it easy",
+                     "Tony, take it easy", "Hey Tony, take it easy, cut it", "play Bilmuri on Spotify", "tell the Booking Desk to check WhatsApp",
+                     "take it ease cut it", "Spotify Gmail WhatsApp Tauri", "Nic, Gabagool mode", "it's Nic"):
+            self.assertEqual(fws.echoes_prompt(line, self.P), lh.echoes_prompt(line, self.P), line)
+        self.assertEqual(fws._REFLEX_PHRASES, lh.REFLEX_PHRASES)
+
+    def test_the_vocabulary_has_nic_and_lines_about_nic_pass(self):
+        # Whisper wrote "Nick" (4 of turbo's 9 benchmark word errors): "Nic" is in the prompt now,
+        # kept short, and the benchmark sends the same prompt the phone path does.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "stt" / "bench"))
+        import bench
+
+        self.assertIn("nic", lh._prompt_words(self.P))
+        self.assertLessEqual(len(self.P), 220)
+        self.assertEqual(bench.PROMPT, self.P)
+        for ok in ("Tony, it's Nic", "Hey Tony, Nic here", "Tell Nic the booking desk called", "Nic, take it easy", "Tony, gabagool mode on"):
+            self.assertFalse(lh.echoes_prompt(ok, self.P), ok)
+        self.assertTrue(lh.echoes_prompt("Tony, Nic, Gabagool mode. Take it easy.", self.P))
+
+    def test_the_desktop_default_prompt_is_the_same_text(self):
+        # dispatch.rs DEFAULT_STT_PROMPT is the desktop's default (Settings shows it until edited);
+        # the phone path, the benchmark and the desktop must bias Whisper with the same words.
+        rs = (Path(__file__).resolve().parent.parent / "command center" / "src-tauri" / "src" / "commands" / "dispatch.rs").read_text(encoding="utf-8")
+        self.assertIn(f'pub const DEFAULT_STT_PROMPT: &str = "{self.P}";', rs)
 
     def test_effective_prompt(self):
         self.assertEqual(lh.effective_stt_prompt({}), self.P)

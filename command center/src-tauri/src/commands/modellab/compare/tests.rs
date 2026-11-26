@@ -25,6 +25,10 @@ struct Fake {
     /// B never answers a guardrail case: its guard chat turn streams only reasoning (no content)
     /// and its guard router call fails (HTTP 500), like a model thinking past the time caps.
     mute_b_guards: bool,
+    /// Like the real card: an unloaded model's VRAM frees this long after its unload answers, and
+    /// a load takes twice that (`freed` records each unload).
+    vram_lag_ms: Option<u64>,
+    freed: Vec<(String, Instant)>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -121,6 +125,9 @@ async fn fake_bionic(shared: Shared, cancel_after: Option<(usize, Arc<AtomicBool
             ("POST", "/api/v1/models/unload") => {
                 let id = r.body["instance_id"].as_str().unwrap_or("").to_string();
                 f.events.push(format!("unload {id}"));
+                if f.vram_lag_ms.is_some() && f.loaded.iter().any(|l| l.0 == id) {
+                    f.freed.push((id.clone(), Instant::now()));
+                }
                 f.loaded.retain(|l| l.0 != id);
                 Resp::json(json!({ "instance_id": id }))
             }
@@ -133,7 +140,7 @@ async fn fake_bionic(shared: Shared, cancel_after: Option<(usize, Arc<AtomicBool
                 }
                 let (ctx, par) = (r.body["context_length"].as_u64().unwrap_or(4096), r.body["parallel"].as_u64().unwrap_or(1));
                 f.loaded.push((model.clone(), ctx, par));
-                Resp::json(json!({ "status": "loaded", "instance_id": model }))
+                Resp::json(json!({ "status": "loaded", "instance_id": model })).delayed(f.vram_lag_ms.map_or(0, |l| l * 2))
             }
             ("POST", "/v1/chat/completions") => {
                 let model = r.body["model"].as_str().unwrap_or("").to_string();
@@ -207,7 +214,8 @@ static T_ROUTER: &[RouterCase] = &[
         args: &["query"],
         then: Some(Then { result: "The Doras are at the Elgin Theatre, 189 Yonge St, Toronto.", expect: &[Some("weather.current")], args: &["place"] }),
     },
-    // agents.rs never offers maps today (MAPS_NOT_OFFERED): unfair, and maps.route is unoffered.
+    // A maps line: the router is offered maps.route for it (agents.rs router_keyword_ok's `\b`),
+    // so it is a fair case and naming maps.route is an exact, offered pick.
     RouterCase { id: "r-drive", text: "how long is the drive to Pearson airport?", expect: &[Some("maps.route")], args: &["destination"], then: None },
 ];
 static T_GUARD_ROUTER: &[GuardRouterCase] = &[GuardRouterCase {
@@ -352,8 +360,9 @@ fn one_slot_abba_tonys_prompts_then_tony_back_alone() {
         assert_eq!(a["router"]["argsOk"], 1.0);
         assert_eq!(a["router"]["jsonFirst"], 1.0);
         assert_eq!(a["router"]["twoStep"], 1.0);
-        assert_eq!(a["router"]["unfairCases"], json!(["r-drive"]), "an unofferable case is reported, not scored");
-        assert_eq!(a["router"]["unoffered"], 1, "naming the never-offered maps.route still counts as unoffered");
+        assert_eq!(a["router"]["unfairCases"], json!([]), "the maps line is offered maps.route: a fair case");
+        assert_eq!(a["router"]["unoffered"], 0, "maps.route was offered for the drive line");
+        assert!(report["settings"]["knownGaps"].as_array().unwrap().is_empty());
         assert_eq!(b["router"]["jsonFirst"], 0.0);
         assert_eq!(b["router"]["jsonAfterRetry"], 1.0);
         assert!(b["router"]["argsOk"].as_f64().unwrap() < 1.0, "B left out the place");
@@ -731,6 +740,195 @@ fn the_standard_cases_fit_the_router() {
     assert!(ROUTER.iter().filter(|c| c.expect == [None]).count() >= 8, "lines that must pick no tool");
     let media: Vec<&str> = ROUTER.iter().filter(|c| agents::media_command(c.text, &cfg.os_name)).map(|c| c.id).collect();
     assert_eq!(media, vec!["r-sp-play", "r-sp-pause", "r-sp-next", "r-sp-volume"], "only these are media commands");
+}
+
+/// VRAM per model on the fake card: Tony's 7 GB, Huihui's 9.5 GB, plus 0.5 GB for everything else;
+/// a model unloaded less than `vram_lag_ms` ago is still resident (the card frees it late).
+fn fake_vram(shared: Shared) -> Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync> {
+    Arc::new(move || {
+        let f = shared.lock().unwrap();
+        let lag = Duration::from_millis(f.vram_lag_ms.unwrap_or(0));
+        let foot = |k: &str| if k == TONY { 7_000 } else { 9_500 };
+        let resident: u64 = f.loaded.iter().map(|l| foot(&l.0)).sum::<u64>() + f.freed.iter().filter(|(_, at)| at.elapsed() < lag).map(|(k, _)| foot(k)).sum::<u64>();
+        Some((500 + resident, 12_288))
+    })
+}
+
+#[test]
+fn the_vram_peak_is_the_blocks_own_model_not_the_one_being_unloaded() {
+    tauri::async_runtime::block_on(async {
+        // Each block starts with the previous model resident; its memory frees 150 ms after the
+        // unload, and the load takes 300 ms. A block's peak must be its own model's 7.5 / 10 GB,
+        // never the 14.5-17 GB the card shows while one model goes and the next arrives.
+        let shared: Shared = Arc::default();
+        shared.lock().unwrap().vram_lag_ms = Some(150);
+        let srv = fake_bionic(shared.clone(), None).await;
+        let (st, os) = env(&srv, &shared);
+        let mut d = deps(Arc::default(), Arc::default());
+        d.vram = fake_vram(shared.clone());
+        let report = run(&st, &os, &plan(1), &d).await;
+        let own = |m: &str| if m == TONY { 7_500 } else { 10_000 };
+        let blocks = report["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 4);
+        for b in blocks {
+            let m = b["model"].as_str().unwrap();
+            assert_eq!(b["vramAfterLoadMb"].as_u64(), Some(own(m)), "{b}");
+            assert_eq!(b["vramPeakMb"].as_u64(), Some(own(m)), "block {} ({m}): the previous model's samples are out of its peak", b["index"]);
+            assert!(b["peakFromMs"].as_u64().unwrap() > b["startedMs"].as_u64().unwrap(), "the window opens after the load, not at the block's start");
+        }
+        let s = &report["summary"];
+        assert_eq!((s["A"]["load"]["vramPeakMb"].as_u64(), s["B"]["load"]["vramPeakMb"].as_u64()), (Some(7_500), Some(10_000)), "the row shows which model uses more");
+        assert!(report["vramPeakMb"].as_u64().unwrap() > 10_000, "the run-wide peak still sees the swaps (it is not a per-model figure)");
+    });
+}
+
+#[test]
+fn block_peak_ignores_samples_before_the_load_was_confirmed() {
+    // (ms, used, total): the previous model at 16 GB until 250 ms, this one at 9 GB after.
+    let samples = [(100, 16_000, 24_000), (240, 15_900, 24_000), (260, 9_000, 24_000), (900, 9_200, 24_000), (1_500, 12_000, 24_000)];
+    assert_eq!(block_peak(&samples, 250, 1_000, Some(9_000)), Some(9_200));
+    assert_eq!(block_peak(&samples, 0, 1_000, None), Some(16_000), "what the old window (block start) reported");
+    assert_eq!(block_peak(&[], 250, 1_000, Some(9_000)), Some(9_000), "no samples: the after-load reading");
+    assert_eq!(block_peak(&[], 250, 1_000, None), None);
+}
+
+fn router_row(case: &str, side: Side, exact: bool, skipped: bool) -> RouterRun {
+    RouterRun {
+        block: 0,
+        side,
+        model: "m".into(),
+        variant: Variant::Base,
+        suite: Suite::Router,
+        two_step: case.ends_with("#2"),
+        case: case.into(),
+        skipped,
+        fair: true,
+        ms: if skipped { 0 } else { 900 },
+        attempts: if skipped { 0 } else { 1 },
+        offered: 4,
+        verdict: checks::RouterVerdict { json_first: !skipped, json_after_retry: !skipped, exact, args_ok: true, ..Default::default() },
+        guard_pass: None,
+        reasoning_chars: 0,
+        reasoning_tokens: 0,
+        error: None,
+        reply: String::new(),
+    }
+}
+
+#[test]
+fn a_skipped_second_pass_is_not_a_wrong_pick() {
+    // B misses the first step of a two-step lookup, so its second pass is never asked. That is
+    // one miss in exactTool / argsOk (not two), and a failed chain in twoStep.
+    let runs = Runs {
+        chat: vec![],
+        router: vec![
+            router_row("r-rain", Side::A, true, false),
+            router_row("r-2step", Side::A, true, false),
+            router_row("r-2step#2", Side::A, true, false),
+            router_row("r-rain", Side::B, true, false),
+            router_row("r-2step", Side::B, false, false),
+            router_row("r-2step#2", Side::B, false, true),
+        ],
+    };
+    let s = summarize(&plan(1), &[], &runs);
+    let (a, b) = (&s["A"]["variants"]["base"]["router"], &s["B"]["variants"]["base"]["router"]);
+    assert_eq!((a["exactTool"].as_f64(), a["argsOk"].as_f64(), a["twoStep"].as_f64()), (Some(1.0), Some(1.0), Some(1.0)), "{a}");
+    assert_eq!(b["exactTool"].as_f64(), Some(0.5), "1 of the 2 picks B was asked for (the skipped pass is not a third): {b}");
+    assert_eq!(b["argsOk"].as_f64(), Some(0.5), "{b}");
+    assert_eq!(b["twoStep"].as_f64(), Some(0.0), "the chain did not complete: {b}");
+    assert_eq!((b["skippedSecondPasses"].as_u64(), a["skippedSecondPasses"].as_u64()), (Some(1), Some(0)));
+    assert_eq!(b["jsonFirst"].as_f64(), Some(1.0), "the skipped pass is not a JSON failure either");
+    assert_eq!(b["runs"].as_u64(), Some(3));
+}
+
+/// The streamed chunks Bionic sent for one tiny live request on 2026-11-26 (qwen/qwen3.5-9b,
+/// max_tokens 8, reasoning_effort none, stream_options.include_usage): usage in a last
+/// `choices: []` chunk, no llama.cpp `timings`, no cached-token count.
+const BIONIC_STREAM: &[&str] = &[
+    r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1795722871,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"logprobs":null,"finish_reason":null}]}"#,
+    r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1795722871,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{"content":"!"},"logprobs":null,"finish_reason":null}]}"#,
+    r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1795722871,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}]}"#,
+    r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1795722871,"model":"qwen/qwen3.5-9b","system_fingerprint":"qwen/qwen3.5-9b","choices":[],"usage":{"prompt_tokens":15,"completion_tokens":3,"total_tokens":18,"completion_tokens_details":{"reasoning_tokens":0}}}"#,
+];
+
+#[test]
+fn bionics_streamed_usage_is_read_and_prefill_says_what_it_counts() {
+    tauri::async_runtime::block_on(async {
+        let srv = serve(|_r: &Req| {
+            let mut lines: Vec<String> = BIONIC_STREAM.iter().map(|c| format!("data: {c}\n\n")).collect();
+            lines.push("data: [DONE]\n\n".into());
+            Resp { status: 200, body: String::new(), sse: Some(lines), delay_ms: 20, abort: false }
+        })
+        .await;
+        let st = DispatchState::default();
+        let out = stream_chat(&st, &format!("{}/v1/chat/completions", srv.base), &json!({ "model": TONY, "messages": [], "stream": true })).await;
+        assert!(out.error.is_none() && out.finished, "{out:?}");
+        assert_eq!(out.content, "OK!");
+        assert!(out.timings.is_null(), "Bionic sends no timings");
+        let t = token_metrics(&out);
+        assert!(!t.approx, "usage came back: exact counts, not chunk counts");
+        assert_eq!((t.completion, t.prompt, t.cached, t.reasoning), (Some(3), Some(15), None, 0));
+        assert_eq!(t.prefill_basis, "prompt", "no cache count: all prompt tokens over the first delta");
+        assert_eq!(t.prefill_tps, round_tps(15, out.ttfd_s.unwrap()));
+        assert!(t.gen_tps.is_some_and(|g| g > 0.0), "completion tokens over the time after the first delta: {t:?}");
+    });
+}
+
+#[test]
+fn token_metrics_use_whatever_the_server_sends() {
+    let base = || StreamOut { ttfd_ms: Some(500), ttfd_s: Some(0.5), total_ms: 1_500, content_chunks: 40, reasoning_chunks: 0, ..Default::default() };
+    // llama.cpp server: its own timings win, and cache_n gives the cached count.
+    let mut o = base();
+    o.usage = json!({ "prompt_tokens": 2400, "completion_tokens": 42 });
+    o.timings = json!({ "prompt_per_second": 1834.5, "predicted_per_second": 48.2, "cache_n": 2000 });
+    let t = token_metrics(&o);
+    assert_eq!((t.prefill_tps, t.prefill_basis, t.gen_tps, t.cached), (Some(1834.5), "server", Some(48.2), Some(2000)));
+    // OpenAI-style cached_tokens: only the uncached part was prefilled.
+    let mut o = base();
+    o.usage = json!({ "prompt_tokens": 2400, "completion_tokens": 50, "prompt_tokens_details": { "cached_tokens": 2000 } });
+    let t = token_metrics(&o);
+    assert_eq!((t.prefill_tps, t.prefill_basis, t.gen_tps), (Some(800.0), "uncached", Some(50.0)));
+    // No usage at all: streamed chunks stand in for tokens, timed from our own first delta.
+    let mut o = base();
+    o.reasoning_chunks = 10;
+    let t = token_metrics(&o);
+    assert!(t.approx);
+    assert_eq!((t.completion, t.reasoning, t.prompt, t.prefill_tps, t.prefill_basis, t.gen_tps), (Some(50), 10, None, None, "none", Some(50.0)));
+    // The summary names the basis its timing runs share.
+    assert_eq!(prefill_basis(["prompt", "prompt", "none"].into_iter()), "prompt");
+    assert_eq!(prefill_basis(["prompt", "server"].into_iter()), "mixed");
+    assert_eq!(prefill_basis(std::iter::empty()), "none");
+}
+
+#[test]
+fn the_compare_holder_and_running_accessor() {
+    tauri::async_runtime::block_on(async {
+        let os = OsState::default();
+        let slot = os.slot.acquire_maintenance(SLOT_LABEL, 50).await;
+        assert_eq!(os.slot.view().active, vec![HOLDER.to_string()], "HOLDER is exactly what the slot (and the gateway lease) shows");
+        drop(slot);
+    });
+    // `running()` is RUNNING, read only: this test never sets the process-wide flag (agents.rs's
+    // Tony-turn tests, running in parallel, would get the "testing a model" line while it is true).
+    assert_eq!(running(), RUNNING.load(Ordering::SeqCst));
+    // The guard clears the flag and the live status it was given when the run task ends, also on a
+    // panic, on a pair of its own.
+    let flag = AtomicBool::new(true);
+    let st: Status = Arc::new(Mutex::new(Some(Progress { run_id: "r1".into(), model_a: "a".into(), model_b: "b".into(), started_at: 1, phase: "starting".into(), done: 0, total: 1, est_minutes: 1 })));
+    drop(RunningGuard { flag: &flag, status: &st });
+    assert!(!flag.load(Ordering::SeqCst), "cleared when the run task ends");
+    assert!(st.lock().unwrap().is_none(), "the live status too");
+    flag.store(true, Ordering::SeqCst);
+    *st.lock().unwrap() = Some(Progress { run_id: "r2".into(), model_a: "a".into(), model_b: "b".into(), started_at: 1, phase: "blocks".into(), done: 0, total: 1, est_minutes: 1 });
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _g = RunningGuard { flag: &flag, status: &st };
+        panic!("the run task crashed");
+    }));
+    assert!(r.is_err());
+    assert!(!flag.load(Ordering::SeqCst) && st.lock().unwrap_or_else(|p| p.into_inner()).is_none(), "and after a panic");
+    // `live()` is the pair `start` claims: RUNNING and the status `model_compare_status` shows.
+    let g = std::mem::ManuallyDrop::new(RunningGuard::live());
+    assert!(std::ptr::eq(g.flag, &RUNNING) && std::ptr::eq(g.status, status()));
 }
 
 /// The bits copied from agents.rs stay verbatim (its router retry and tool data block).

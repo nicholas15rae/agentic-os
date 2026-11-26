@@ -121,9 +121,58 @@ pub async fn stt_transcribe(state: State<'_, DispatchState>, request: Request<'_
     transcribe_bytes(state.inner(), bytes.clone()).await
 }
 
+/// How long the one retry waits for a just-started STT server's port to open.
+const RETRY_PORT_WAIT: Duration = Duration::from_secs(5);
+
+/// What the STT retry needs from outside. Live: `services::stt_ensure` / `services::port_open`;
+/// tests pass fakes (and a test build's real spawner refuses anyway).
+pub(crate) struct SttRecovery<'a> {
+    /// Start the configured STT servers that are down (within their start limits); its notes.
+    pub ensure: &'a (dyn Fn(&super::dispatch::Config) -> Vec<String> + Send + Sync),
+    pub port_open: &'a (dyn Fn(u16) -> bool + Send + Sync),
+    /// How long to wait for the retry target's port after `ensure` started it.
+    pub port_wait: Duration,
+}
+
+impl SttRecovery<'static> {
+    fn live() -> Self {
+        SttRecovery { ensure: &super::services::stt_ensure, port_open: &super::services::port_open, port_wait: RETRY_PORT_WAIT }
+    }
+}
+
+/// Why one transcription POST failed: only a server that is down (port closed, connect refused)
+/// or answered 5xx is worth one retry; a 4xx is about the clip or the request, never retried.
+#[derive(Debug)]
+enum SttFail {
+    Down(String),
+    Server(String),
+    Client(String),
+    Other(String),
+}
+
+impl SttFail {
+    fn retryable(&self) -> bool {
+        matches!(self, SttFail::Down(_) | SttFail::Server(_))
+    }
+
+    fn msg(&self) -> &str {
+        match self {
+            SttFail::Down(m) | SttFail::Server(m) | SttFail::Client(m) | SttFail::Other(m) => m,
+        }
+    }
+}
+
 /// One WAV → text. Refuses while the mic is locked off (before any provider lookup or HTTP),
 /// and drops the transcript of a request that was in flight when the mic was locked.
 pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> Result<String, String> {
+    transcribe_with(state, audio, &SttRecovery::live()).await
+}
+
+/// `transcribe_bytes` with its recovery injected. A local whisper server (faster-whisper or
+/// whisper.cpp on this PC) that is down is started again (`ensure`) and the clip gets ONE retry:
+/// faster-whisper's on its whisper.cpp fallback (:8178, `services::stt_fallback`), whisper.cpp's
+/// on itself. The port is looked at first, so a dead server costs no ~2 s refused connect.
+pub(crate) async fn transcribe_with(state: &DispatchState, audio: Vec<u8>, rec: &SttRecovery<'_>) -> Result<String, String> {
     if !mic_enabled() {
         return Err(MIC_DISABLED.into());
     }
@@ -131,12 +180,54 @@ pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> R
         return Err("audio too short or too long".into());
     }
     let p = stt_provider(state)?;
-    let key = state.key_for(&p)?;
+    let local = super::services::SttEngine::of(&p).and(super::services::local_port(&p));
+    let first = match local {
+        Some(port) if !(rec.port_open)(port) => Err(SttFail::Down(format!("{} isn't listening on :{port}", p.label))),
+        _ => post_transcription(state, &p, audio.clone()).await,
+    };
+    let fail = match first {
+        Ok(text) => return Ok(text),
+        Err(f) if local.is_some() && f.retryable() => f,
+        Err(f) => return Err(f.msg().to_string()),
+    };
+    // Locked off meanwhile: nothing more is sent, nothing heard reaches Tony.
+    if !mic_enabled() {
+        return Ok(String::new());
+    }
+    let cfg = state.snapshot();
+    for note in (rec.ensure)(&cfg) {
+        eprintln!("[stt] {note}");
+    }
+    let target = match super::services::SttEngine::of(&p) {
+        Some(super::services::SttEngine::FasterWhisper) => super::services::stt_fallback(&cfg, &p),
+        _ => Some(p.clone()),
+    };
+    let Some(target) = target else { return Err(fail.msg().to_string()) };
+    if let Some(port) = super::services::local_port(&target) {
+        let until = Instant::now() + rec.port_wait;
+        while !(rec.port_open)(port) {
+            if Instant::now() >= until {
+                return Err(format!("{}; {} isn't up yet (starting), try again in a few seconds", fail.msg(), target.label));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if !mic_enabled() {
+        return Ok(String::new());
+    }
+    eprintln!("[stt] {} failed ({}): one retry on {}", p.id, fail.msg(), target.id);
+    post_transcription(state, &target, audio).await.map_err(|again| format!("{} (retried on {}: {})", fail.msg(), target.label, again.msg()))
+}
+
+/// One POST of the clip to `p`, its transcript cleaned (junk, a read-back prompt, a mute that
+/// came while the server worked: empty).
+async fn post_transcription(state: &DispatchState, p: &Provider, audio: Vec<u8>) -> Result<String, SttFail> {
+    let key = state.key_for(p).map_err(SttFail::Other)?;
     // Vocabulary biasing (Phase 2 §1). whisper.cpp's server reads the `prompt` multipart
     // field on every inference route (incl. `--inference-path /v1/audio/transcriptions`),
     // as does the OpenAI-style API; servers that don't know it ignore the extra field.
-    let prompt = effective_stt_prompt(&p);
-    let form = stt_form(stt_fields(&p, prompt.as_deref(), None), audio)?;
+    let prompt = effective_stt_prompt(p);
+    let form = stt_form(stt_fields(p, prompt.as_deref(), None), audio).map_err(SttFail::Other)?;
 
     let mut rb = state
         .http
@@ -148,7 +239,9 @@ pub(crate) async fn transcribe_bytes(state: &DispatchState, audio: Vec<u8>) -> R
     if let Some(k) = key {
         rb = rb.bearer_auth(k);
     }
-    let body: serde_json::Value = rb.send().await.map_err(short)?.error_for_status().map_err(short)?.json().await.map_err(short)?;
+    let r = rb.send().await.map_err(|e| if e.is_connect() { SttFail::Down(short(e)) } else { SttFail::Other(short(e)) })?;
+    let r = r.error_for_status().map_err(|e| if e.status().is_some_and(|s| s.is_server_error()) { SttFail::Server(short(e)) } else { SttFail::Client(short(e)) })?;
+    let body: serde_json::Value = r.json().await.map_err(|e| SttFail::Other(short(e)))?;
     // Locked off while Whisper was working: nothing heard before the mute reaches Tony.
     if !mic_enabled() {
         return Ok(String::new());
@@ -363,14 +456,80 @@ pub(crate) fn echoes_prompt(text: &str, prompt: &str) -> bool {
 }
 
 /// Whisper selector: model variant + language. whisper.cpp loads the new
-/// model immediately (POST /load) when `modelsDir` holds ggml-<variant>.bin.
+/// model immediately (POST /load) when `modelsDir` holds ggml-<variant>.bin;
+/// faster-whisper hot-swaps it through its own POST /load ({"model"}).
 #[tauri::command]
 pub async fn stt_configure(state: State<'_, DispatchState>, model: Option<String>, language: Option<String>) -> Result<String, String> {
-    let p = stt_provider(&state)?;
+    configure_stt(&state, model, language).await
+}
+
+/// faster-whisper's POST {origin}/load waits for the load (+ warm-up, ~5-13 s; longer from a cold disk).
+const FW_LOAD_SECS: u64 = 120;
+
+/// fw_server's name for a model, for comparing two of them (pure): the last path part (its /load
+/// keeps only the folder name of a path), any case, and the CT2 folder names folded to their alias
+/// the way fw_server's resolve_model / alias_of map them ("faster-whisper-large-v3-turbo" and
+/// "large-v3-turbo"; "faster-distil-whisper-large-v3" and "distil-large-v3"; "faster-whisper-small"
+/// and "small").
+fn fw_model_key(m: &str) -> String {
+    let leaf = m.trim().rsplit(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase();
+    let s = leaf.strip_prefix("faster-").unwrap_or(&leaf);
+    let s = match s.strip_prefix("distil-whisper-") {
+        Some(rest) => format!("distil-{rest}"),
+        None => s.to_string(),
+    };
+    s.strip_prefix("whisper-").map(str::to_string).unwrap_or(s)
+}
+
+/// The same faster-whisper model by fw_server's naming (see `fw_model_key`).
+pub(crate) fn fw_same_model(a: &str, b: &str) -> bool {
+    !a.trim().is_empty() && fw_model_key(a) == fw_model_key(b)
+}
+
+/// Did fw_server's POST /load answer that it now runs `wanted`? (pure). fw_server answers 200
+/// with `ready: true` both for a load that worked AND for one that failed while it put its previous
+/// model back: then `error` says "load X/… failed, kept Y: why" and `model` is Y. Only a 2xx with
+/// no error and `model` (when given) the requested one is a swap; anything else is Err(why).
+pub(crate) fn fw_load_outcome(code: u16, body: &serde_json::Value, wanted: &str) -> Result<(), String> {
+    let error = body["error"]["message"].as_str().or(body["error"].as_str()).map(str::trim).filter(|e| !e.is_empty());
+    let running = body["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
+    let clip = |s: &str| s.chars().take(200).collect::<String>();
+    if (200..300).contains(&code) && body["ready"] != false && error.is_none() && running.is_none_or(|r| fw_same_model(r, wanted)) {
+        return Ok(());
+    }
+    match (body["ready"] == true, running) {
+        (true, Some(r)) if !fw_same_model(r, wanted) => Err(format!("faster-whisper couldn't load {wanted} and kept {r}: {}", clip(error.unwrap_or("it didn't say why")))),
+        _ => Err(format!("faster-whisper couldn't load {wanted} (HTTP {code}: {})", clip(error.unwrap_or("not ready")))),
+    }
+}
+
+/// faster-whisper: hot-swap the server to `m`. A refused load (fw_server keeps or retries its
+/// previous model) returns Err, so `configure_stt` saves nothing. Ok(note) also when the server
+/// isn't running: whoever starts it next (the keep-alive, the gateway, boot step 0b with
+/// services.rs `fw_model_sync` after it) runs the saved model.
+async fn fw_hot_swap(state: &DispatchState, p: &Provider, m: &str) -> Result<String, String> {
+    let r = match state.http.post(format!("{}/load", origin(&p.base_url))).json(&serde_json::json!({ "model": m })).timeout(Duration::from_secs(FW_LOAD_SECS)).send().await {
+        Ok(r) => r,
+        Err(e) if e.is_connect() => return Ok(format!("saved — faster-whisper isn't running; it starts on {m}")),
+        Err(e) => return Err(format!("faster-whisper didn't load {m}: {}", short(e))),
+    };
+    let code = r.status().as_u16();
+    let body: serde_json::Value = r.json().await.unwrap_or_default();
+    fw_load_outcome(code, &body, m).map(|()| format!("loaded {m} on faster-whisper")).map_err(|e| format!("{e}; the STT model setting is unchanged"))
+}
+
+/// `stt_configure`'s body: validate, hot-swap the running server, then save (all-or-nothing:
+/// a refused load saves nothing). Only the STT provider's model / language change; policy.stt
+/// and the provider's engine are never touched here.
+pub(crate) async fn configure_stt(state: &DispatchState, model: Option<String>, language: Option<String>) -> Result<String, String> {
+    let p = stt_provider(state)?;
     let mut note = "saved".to_string();
     if let Some(m) = model.as_deref().filter(|m| !m.is_empty()) {
         if !m.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c)) {
             return Err("bad model name".into());
+        }
+        if p.engine.as_deref() == Some("fasterwhisper") && m != p.model {
+            note = fw_hot_swap(state, &p, m).await?;
         }
         if p.engine.as_deref() == Some("whispercpp") {
             if let Some(dir) = p.models_dir.as_deref() {
@@ -1667,6 +1826,290 @@ pub(crate) mod mic_gate_tests {
             let r = job.await.expect("join");
             MIC_ENABLED.store(true, Ordering::SeqCst);
             assert_eq!(r, Ok(String::new()));
+        });
+    }
+
+    // ── STT recovery and the faster-whisper settings (B1): fakes only, nothing is started ──
+
+    use std::collections::HashSet;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A loopback port nothing listens on.
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    fn port_of(base: &str) -> u16 {
+        url::Url::parse(base).unwrap().port().unwrap()
+    }
+
+    /// policy.stt = faster-whisper at `fw` (an origin like http://127.0.0.1:N), its whisper.cpp
+    /// fallback ("whisper") at `cpp`: the live layout.
+    fn fw_cpp_state(fw: &str, cpp: &str) -> DispatchState {
+        let st = state_at(cpp);
+        st.update(|c| {
+            let mut f = c.providers.iter().find(|p| p.id == "whisper").expect("whisper").clone();
+            f.id = "faster-whisper".into();
+            f.label = "faster-whisper (GPU)".into();
+            f.base_url = format!("{fw}/v1");
+            f.model = "large-v3-turbo".into();
+            f.engine = Some("fasterwhisper".into());
+            f.models_dir = None;
+            f.custom = true;
+            c.providers.push(f);
+            c.policy.stt = "faster-whisper".into();
+            Ok(())
+        })
+        .expect("add faster-whisper");
+        st
+    }
+
+    /// `transcribe_with` with a fake recovery: ports in `closed` are down, `ensure` only counts.
+    async fn transcribe_fake(st: &DispatchState, closed: &[u16], wait: Duration) -> (Result<String, String>, usize) {
+        let ensures = AtomicUsize::new(0);
+        let closed: HashSet<u16> = closed.iter().copied().collect();
+        let ensure = |_c: &crate::commands::dispatch::Config| {
+            ensures.fetch_add(1, Ordering::SeqCst);
+            vec!["started (fake)".to_string()]
+        };
+        let port_open = |p: u16| !closed.contains(&p);
+        let rec = SttRecovery { ensure: &ensure, port_open: &port_open, port_wait: wait };
+        let r = transcribe_with(st, wav(), &rec).await;
+        (r, ensures.load(Ordering::SeqCst))
+    }
+
+    fn answer(code: u16, text: &'static str) -> impl Fn(&crate::commands::allm::mock::Req) -> Resp + Send + Sync + 'static {
+        move |_| if code == 200 { Resp::json(serde_json::json!({ "text": text })) } else { Resp::status(code, serde_json::json!({ "error": { "message": "nope" } })) }
+    }
+
+    const TX: &str = "/v1/audio/transcriptions";
+
+    #[test]
+    fn a_dead_faster_whisper_is_restarted_and_the_clip_goes_to_whisper_cpp() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let cpp = start(answer(200, " hello tony ")).await;
+            let dead = closed_port();
+            let st = fw_cpp_state(&format!("http://127.0.0.1:{dead}"), &cpp.base);
+            let t = Instant::now();
+            let (r, ensures) = transcribe_fake(&st, &[dead], T).await;
+            assert_eq!(r, Ok("hello tony".to_string()));
+            assert_eq!(ensures, 1, "the dead server is started again");
+            assert_eq!(cpp.count("POST", TX), 1, "one retry, on whisper.cpp");
+            assert!(t.elapsed() < Duration::from_millis(1500), "no refused-connect stall on the dead port: {:?}", t.elapsed());
+        });
+    }
+
+    #[test]
+    fn a_5xx_from_faster_whisper_gets_one_retry_on_whisper_cpp() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let fw = start(answer(503, "")).await;
+            let cpp = start(answer(200, "cut it")).await;
+            let st = fw_cpp_state(&fw.base, &cpp.base);
+            let (r, ensures) = transcribe_fake(&st, &[], T).await;
+            assert_eq!(r, Ok("cut it".to_string()));
+            assert_eq!((fw.count("POST", TX), cpp.count("POST", TX), ensures), (1, 1, 1));
+        });
+    }
+
+    #[test]
+    fn a_4xx_is_never_retried() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let fw = start(answer(400, "")).await;
+            let cpp = start(answer(200, "never")).await;
+            let st = fw_cpp_state(&fw.base, &cpp.base);
+            let (r, ensures) = transcribe_fake(&st, &[], T).await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("400")), "{r:?}");
+            assert_eq!((fw.count("POST", TX), cpp.count("POST", TX), ensures), (1, 0, 0), "the clip was the problem: no restart, no retry");
+        });
+    }
+
+    #[test]
+    fn the_retry_happens_once() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let fw = start(answer(503, "")).await;
+            let cpp = start(answer(500, "")).await;
+            let st = fw_cpp_state(&fw.base, &cpp.base);
+            let (r, ensures) = transcribe_fake(&st, &[], T).await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("retried on")), "{r:?}");
+            assert_eq!((fw.count("POST", TX), cpp.count("POST", TX), ensures), (1, 1, 1));
+        });
+    }
+
+    #[test]
+    fn whisper_cpp_alone_gets_one_retry_on_itself() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let n = Arc::new(AtomicUsize::new(0));
+            let n2 = n.clone();
+            let cpp = start(move |_| if n2.fetch_add(1, Ordering::SeqCst) == 0 { Resp::status(500, serde_json::json!({})) } else { Resp::json(serde_json::json!({ "text": "whoa" })) }).await;
+            let st = state_at(&cpp.base);
+            let (r, ensures) = transcribe_fake(&st, &[], T).await;
+            assert_eq!(r, Ok("whoa".to_string()));
+            assert_eq!((cpp.count("POST", TX), ensures), (2, 1));
+        });
+    }
+
+    #[test]
+    fn a_retry_waits_only_so_long_for_a_server_that_is_still_starting() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let cpp = start(answer(200, "never")).await;
+            let dead = closed_port();
+            let st = fw_cpp_state(&format!("http://127.0.0.1:{dead}"), &cpp.base);
+            let t = Instant::now();
+            let (r, ensures) = transcribe_fake(&st, &[dead, port_of(&cpp.base)], Duration::from_millis(300)).await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("isn't up yet")), "{r:?}");
+            assert_eq!((cpp.count("POST", TX), ensures), (0, 1), "nothing is sent to a port that isn't open yet");
+            assert!(t.elapsed() >= Duration::from_millis(300) && t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        });
+    }
+
+    #[test]
+    fn a_cloud_stt_is_neither_restarted_nor_retried() {
+        let _g = lock();
+        tauri::async_runtime::block_on(async {
+            MIC_ENABLED.store(true, Ordering::SeqCst);
+            let srv = start(answer(503, "")).await;
+            let st = state_at(&srv.base);
+            st.update(|c| {
+                c.providers.iter_mut().find(|p| p.id == "whisper").unwrap().engine = Some("openai".into());
+                Ok(())
+            })
+            .unwrap();
+            let (r, ensures) = transcribe_fake(&st, &[], T).await;
+            assert!(r.is_err());
+            assert_eq!((srv.count("POST", TX), ensures), (1, 0));
+        });
+    }
+
+    /// A fake fw_server for POST /load, answering as stt/fw_server.py does (tests/test_fw_server.py
+    /// pins these shapes): "ok" loads it; "kept" is the usual refusal (the VRAM pre-flight or a CUDA
+    /// error): 200, ready, the PREVIOUS model and an error; "lost" is the rare one where putting the
+    /// previous model back failed too: 503, not ready.
+    async fn fw_load_mock(mode: &'static str) -> crate::commands::allm::mock::Server {
+        start(move |r| match (r.path.as_str(), mode) {
+            ("/load", "ok") => Resp::json(serde_json::json!({ "ready": true, "loading": false, "model": r.body["model"], "device": "cuda", "error": null })),
+            ("/load", "kept") => Resp::json(serde_json::json!({ "ready": true, "loading": false, "model": "large-v3-turbo", "device": "cuda",
+                "error": "load distil-large-v3/int8_float16 failed, kept large-v3-turbo: RuntimeError: only 900 MB VRAM free (< 1850 MB): not loading on the GPU" })),
+            ("/load", _) => Resp::status(503, serde_json::json!({ "ready": false, "loading": false, "model": "distil-large-v3", "device": "cpu-unavailable",
+                "error": "RuntimeError: out of memory; restoring large-v3-turbo failed too: out of memory" })),
+            _ => Resp::json(serde_json::json!({ "text": "" })),
+        })
+        .await
+    }
+
+    #[test]
+    fn fw_load_outcome_reads_fw_servers_answers() {
+        use serde_json::json as j;
+        // A swap: 2xx, ready, no error, the model asked for (by alias or CT2 folder name, any path).
+        assert_eq!(fw_load_outcome(200, &j!({ "ready": true, "model": "distil-large-v3", "error": null }), "distil-large-v3"), Ok(()));
+        assert_eq!(fw_load_outcome(200, &j!({ "ready": true, "model": "distil-large-v3" }), "faster-distil-whisper-large-v3"), Ok(()));
+        assert_eq!(fw_load_outcome(200, &j!({ "ready": true, "model": "faster-whisper-small" }), r"C:\models\stt\faster-whisper-small"), Ok(()));
+        assert_eq!(fw_load_outcome(200, &j!({ "ready": true }), "small"), Ok(()), "no model in the answer: the status decides");
+        // The usual refusal: 200 + ready, but the previous model and an error.
+        let kept = j!({ "ready": true, "model": "large-v3-turbo", "error": "load distil-large-v3/int8_float16 failed, kept large-v3-turbo: only 900 MB VRAM free" });
+        let e = fw_load_outcome(200, &kept, "distil-large-v3").unwrap_err();
+        assert!(e.contains("kept large-v3-turbo") && e.contains("900 MB VRAM free"), "{e}");
+        // An error alone, or another model alone, is no swap either.
+        assert!(fw_load_outcome(200, &j!({ "ready": true, "model": "distil-large-v3", "error": "late warning" }), "distil-large-v3").is_err());
+        assert!(fw_load_outcome(200, &j!({ "ready": true, "model": "large-v3-turbo" }), "distil-large-v3").is_err());
+        // Not ready / an HTTP error (a 400 for a model that isn't on disk).
+        assert!(fw_load_outcome(503, &j!({ "ready": false, "error": "out of memory" }), "distil-large-v3").unwrap_err().contains("HTTP 503: out of memory"));
+        assert!(fw_load_outcome(400, &j!({ "error": { "message": "model 'x' not found", "type": "invalid_request" } }), "x").unwrap_err().contains("HTTP 400: model 'x' not found"));
+        assert!(fw_load_outcome(200, &j!({ "ready": false }), "x").is_err());
+    }
+
+    #[test]
+    fn fw_model_names_compare_the_way_fw_server_resolves_them() {
+        for (a, b) in [("large-v3-turbo", "faster-whisper-large-v3-turbo"), ("distil-large-v3", "faster-distil-whisper-large-v3"), ("distil-large-v3", "distil-whisper-large-v3"), ("small", "faster-whisper-small"), ("small", "whisper-small"), ("Large-V3-Turbo", "large-v3-turbo"), ("large-v3-turbo", "C:/models/stt/faster-whisper-large-v3-turbo")] {
+            assert!(fw_same_model(a, b), "{a} = {b}");
+        }
+        for (a, b) in [("large-v3-turbo", "distil-large-v3"), ("large-v3", "large-v3-turbo"), ("small", "small.en"), ("", "")] {
+            assert!(!fw_same_model(a, b), "{a} != {b}");
+        }
+    }
+
+    fn stt_model(st: &DispatchState) -> String {
+        st.provider(&st.snapshot().policy.stt).unwrap().model
+    }
+
+    #[test]
+    fn a_faster_whisper_model_change_hot_swaps_the_server() {
+        tauri::async_runtime::block_on(async {
+            let fw = fw_load_mock("ok").await;
+            let st = fw_cpp_state(&fw.base, "http://127.0.0.1:9");
+            assert_eq!(configure_stt(&st, Some("distil-large-v3".into()), None).await, Ok("loaded distil-large-v3 on faster-whisper".to_string()));
+            let loads: Vec<serde_json::Value> = fw.reqs().into_iter().filter(|r| r.method == "POST" && r.path == "/load").map(|r| r.body).collect();
+            assert_eq!(loads, vec![serde_json::json!({ "model": "distil-large-v3" })], "POST {{origin}}/load, the model by name");
+            assert_eq!(stt_model(&st), "distil-large-v3");
+            // The same model again (a language change, a re-pick): no reload of the GPU model.
+            assert_eq!(configure_stt(&st, Some("distil-large-v3".into()), Some("en".into())).await, Ok("saved".to_string()));
+            assert_eq!(fw.count("POST", "/load"), 1);
+        });
+    }
+
+    #[test]
+    fn a_refused_faster_whisper_load_saves_nothing() {
+        tauri::async_runtime::block_on(async {
+            // The usual refusal, as the real fw_server sends it: HTTP 200, ready, the previous model
+            // and an error (before: read as a swap, and distil-large-v3 was saved while :8177 ran turbo).
+            let fw = fw_load_mock("kept").await;
+            let st = fw_cpp_state(&fw.base, "http://127.0.0.1:9");
+            let r = configure_stt(&st, Some("distil-large-v3".into()), None).await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("kept large-v3-turbo") && e.contains("VRAM free") && e.contains("setting is unchanged")), "{r:?}");
+            assert_eq!(stt_model(&st), "large-v3-turbo", "the server still runs it, so the setting stays");
+            assert_eq!(fw.count("POST", "/load"), 1);
+            // Both models lost (503, not ready; fw_server retries its previous one): nothing saved either.
+            let fw = fw_load_mock("lost").await;
+            let st = fw_cpp_state(&fw.base, "http://127.0.0.1:9");
+            let r = configure_stt(&st, Some("distil-large-v3".into()), None).await;
+            assert!(r.as_ref().is_err_and(|e| e.contains("HTTP 503") && e.contains("out of memory")), "{r:?}");
+            assert_eq!(stt_model(&st), "large-v3-turbo");
+            // A server that isn't running: saved, and the keep-alive starts it on the new model.
+            let st = fw_cpp_state(&format!("http://127.0.0.1:{}", closed_port()), "http://127.0.0.1:9");
+            let r = configure_stt(&st, Some("distil-large-v3".into()), None).await;
+            assert!(r.as_ref().is_ok_and(|n| n.contains("isn't running")), "{r:?}");
+            assert_eq!(stt_model(&st), "distil-large-v3");
+        });
+    }
+
+    #[test]
+    fn saving_stt_settings_keeps_policy_stt_on_faster_whisper() {
+        tauri::async_runtime::block_on(async {
+            // providers.json as it is live: policy.stt = faster-whisper, both STT providers.
+            let fw = fw_load_mock("ok").await;
+            let dir = std::env::temp_dir().join(format!("stt-roundtrip-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let live = fw_cpp_state(&fw.base, "http://127.0.0.1:8178");
+            std::fs::write(dir.join("providers.json"), serde_json::to_string_pretty(&live.snapshot()).unwrap()).unwrap();
+            let st = DispatchState::default();
+            st.load_or_init(&dir);
+            assert_eq!(st.snapshot().policy.stt, "faster-whisper", "loaded as written");
+            // Saves from the STT card: the model (hot-swapped), the language; then any other save.
+            configure_stt(&st, Some("distil-large-v3".into()), None).await.unwrap();
+            configure_stt(&st, None, Some("en".into())).await.unwrap();
+            st.update(|_| Ok(())).unwrap();
+            let again = DispatchState::default();
+            again.load_or_init(&dir);
+            let cfg = again.snapshot();
+            assert_eq!(cfg.policy.stt, "faster-whisper", "never rewritten to whisper");
+            let f = cfg.providers.iter().find(|p| p.id == "faster-whisper").expect("the faster-whisper provider survives");
+            assert_eq!((f.engine.as_deref(), f.model.as_str(), f.language.as_deref()), (Some("fasterwhisper"), "distil-large-v3", Some("en")));
+            assert!(cfg.providers.iter().any(|p| p.id == "whisper" && p.engine.as_deref() == Some("whispercpp")), "its whisper.cpp fallback too");
+            let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("providers.json")).unwrap()).unwrap();
+            assert_eq!(raw["policy"]["stt"], "faster-whisper");
+            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 }

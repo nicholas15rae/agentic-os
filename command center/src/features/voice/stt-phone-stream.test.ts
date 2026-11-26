@@ -131,10 +131,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function listen() {
+/** A listen that shows captions (they are opt-in). */
+async function listen(opts: Parameters<WhisperStt["start"]>[1] = { partials: () => true }) {
   const hh = handlers();
   const stt = new WhisperStt();
-  stt.start(hh);
+  stt.start(hh, opts);
   await flush();
   const worklet = fake.worklets.at(-1)!;
   const push = (rms: number, n = 1) => {
@@ -169,6 +170,25 @@ describe("the phone streams its STT", () => {
     expect(hh.onFinal).toHaveBeenCalledWith("Tony, cut it.");
     expect(h.langStt).not.toHaveBeenCalled();
     expect(ws.closed).toBe(true);
+  });
+
+  it("without `partials` (captions are opt-in) the stream asks for none and still delivers the final", async () => {
+    const { hh, push } = await listen({ maxSilenceStartMs: 8000 });
+    push(LOUD, 30);
+    expect(fake.sockets).toHaveLength(1);
+    const ws = fake.sockets[0];
+    ws.onopen?.({});
+    expect(ws.json()[0]).toMatchObject({ type: "start", partials: false });
+    ws.reply({ type: "partial", partial: "stray", stable: "" }); // the gateway shouldn't send one; never shown
+    push(QUIET, 40);
+    await flush();
+    expect(ws.json().filter((m) => m.type === "config" && m.partials)).toEqual([]); // never turned on
+    expect(ws.json().at(-1)).toEqual({ type: "end" });
+    ws.reply({ type: "final", final: "Note: call Sam." });
+    await flush();
+    expect(hh.onFinal).toHaveBeenCalledWith("Note: call Sam.");
+    expect(hh.onPartial).not.toHaveBeenCalled();
+    expect(h.langStt).not.toHaveBeenCalled(); // the stream saved the upload
   });
 
   it("streams exactly the audio the upload would carry (pre-roll to the ending frame)", async () => {

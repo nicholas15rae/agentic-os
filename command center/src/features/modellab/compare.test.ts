@@ -83,6 +83,17 @@ describe("model compare table", () => {
     expect(compareRows(null, "base")).toEqual([]);
   });
 
+  it("says when prefill counts every prompt token (Bionic reports no cache hits)", () => {
+    const bionic = variant({ timing: { ...variant().timing, prefillBasis: "prompt" } });
+    const r: CompareReport = { ...report, summary: { A: side("qwen/qwen3.5-9b", 13_500, { base: bionic }), B: side("huihui", 15_000, { base: bionic }) } };
+    const labels = compareRows(r, "base").map((x) => x.label);
+    expect(labels).toContain("Prefill (all prompt tokens ÷ first delta; cache not reported)");
+    expect(labels).not.toContain("Prefill");
+    const server = variant({ timing: { ...variant().timing, prefillBasis: "server" } });
+    const s: CompareReport = { ...report, summary: { A: side("a", 1, { base: server }), B: side("b", 1, { base: server }) } };
+    expect(compareRows(s, "base").map((x) => x.label)).toContain("Prefill");
+  });
+
   it("lists the variants either side ran", () => {
     expect(reportVariants(report)).toEqual(["base", "a", "b"]);
     expect(reportVariants({ runId: "x" })).toEqual([]);

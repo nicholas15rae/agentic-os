@@ -6,6 +6,7 @@
  */
 import { cmd, onNativeEvent, type ChatMessage, type OsTurnRequest } from "@/lib/platform";
 import { gated } from "@/features/bridge/gate";
+import { MEMORY_ID_RE, SAVE_FAILED_REPLY } from "@/features/modes/learning";
 import { api } from "./api";
 import { parseDirectorActions } from "./actions";
 import { buildDirectorContext } from "./context";
@@ -21,8 +22,24 @@ export function chatHistory(chat: ChatMsg[]): ChatMessage[] {
     .map((m) => ({ role: m.role === "nic" ? "user" : "assistant", content: m.text }));
 }
 
-export function directorRequest(text: string, history: ChatMessage[], context: string, streamId: string): OsTurnRequest {
-  return { text, role: "director", explicit: true, routeKind: "Tab", history, context, streamId, noDelegate: true, askCards: false };
+/**
+ * `OsTurnRequest.answering` for this chat (pure): the lesson ids on its newest Director reply (past
+ * Rust's failed-save reply, which asks again about the same batch), else `[]`. In Learning mode a
+ * Director-chat turn is Tony's, and Rust's spoken batch is app-wide: without ids a yes typed here
+ * would commit whatever Tony's thread (or the phone) proposed last. A reply read back from the
+ * chat log has no ids, so it answers nothing.
+ */
+export function directorAnswering(chat: ChatMsg[]): string[] {
+  for (let i = chat.length - 1; i >= 0; i--) {
+    const m = chat[i];
+    if (m.role !== "director" || m.streaming || m.text.trim() === SAVE_FAILED_REPLY) continue;
+    return (m.memoryIds ?? []).filter((id) => MEMORY_ID_RE.test(id));
+  }
+  return [];
+}
+
+export function directorRequest(text: string, history: ChatMessage[], context: string, streamId: string, answering: string[] = []): OsTurnRequest {
+  return { text, role: "director", explicit: true, routeKind: "Tab", history, context, streamId, noDelegate: true, askCards: false, answering };
 }
 
 const st = () => useDirector.getState();
@@ -36,6 +53,7 @@ export async function sendDirectorTurn(text: string): Promise<void> {
   if (!body || !slug || !project || !manifest || chatBusy) return;
 
   const history = chatHistory(chat);
+  const answering = directorAnswering(chat);
   const now = new Date().toISOString();
   const userMsg: ChatMsg = { id: crypto.randomUUID(), role: "nic", text: body, at: now };
   const streamId = crypto.randomUUID();
@@ -52,7 +70,7 @@ export async function sendDirectorTurn(text: string): Promise<void> {
     patchMsg(replyId, { text: cut >= 0 ? buffered.slice(0, cut).trimEnd() : buffered });
   });
 
-  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest), streamId);
+  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest), streamId, answering);
   try {
     const r = await gated({ action: "os-turn", summary: "Let the Director answer", detail: { role: "director" }, silent: true }, (approved) => cmd("os_turn", { req: { ...req, approved } }), (x) => x.answer);
     const answer = (r?.answer || buffered).trim();
@@ -62,7 +80,8 @@ export async function sendDirectorTurn(text: string): Promise<void> {
     }
     if (st().slug !== slug) return;
     const parsed = parseDirectorActions(answer, { assets: st().assets });
-    patchMsg(replyId, { text: parsed.prose || "(actions only)", streaming: false, errors: parsed.errors.length ? parsed.errors : undefined });
+    const memoryIds = (r?.pendingMemory ?? []).map((p) => p.id).filter((id) => MEMORY_ID_RE.test(id));
+    patchMsg(replyId, { text: parsed.prose || "(actions only)", streaming: false, errors: parsed.errors.length ? parsed.errors : undefined, memoryIds: memoryIds.length ? memoryIds : undefined });
     log(slug, "director", answer);
     if (parsed.actions.length) {
       const applied = await applyDirectorActions(parsed.actions);

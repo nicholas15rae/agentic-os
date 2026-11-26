@@ -10,10 +10,20 @@ import { startTranscriptFeed } from "@/features/transcript/transcript-store";
 /**
  * What decides a re-push: the turn count, plus the id / revision / meta of the newest turns, so
  * an answer that streams into its bubble in place (`updateTurn`) is pushed again once it is
- * whole (the key used to be count + last id only, and the mirror kept the first 1.5 s). Pure.
+ * whole (the key used to be count + last id only, and the mirror kept the first 1.5 s). The
+ * count of ended memory cards and the sum of every turn's revision are in it too: a card that a
+ * restart (`endCardsBefore`), a spoken answer (`settleAnsweredCard`) or its own Save / Skip
+ * (`afterDecision`, no `memoryEnd`) changes further back than the newest 6 turns reaches the
+ * phone at once, not with the next new turn. Pure.
  */
 export function syncKey(turns: readonly VoiceTurn[]): string {
-  return `${turns.length}|${turns
+  let ended = 0;
+  let revs = 0;
+  for (const t of turns) {
+    if (t.memoryEnd) ended++;
+    revs += t.rev ?? 0;
+  }
+  return `${turns.length}|${ended}|${revs}|${turns
     .slice(-6)
     .map((t) => `${t.id}:${t.rev ?? 0}:${t.meta ?? ""}`)
     .join(",")}`;

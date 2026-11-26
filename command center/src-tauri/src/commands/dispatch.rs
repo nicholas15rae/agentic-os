@@ -373,7 +373,69 @@ impl Default for Config {
 pub struct DispatchState {
     config: RwLock<Config>,
     path: RwLock<Option<PathBuf>>,
+    /// What this process knows about providers.json on disk (`Disk`). `update` re-reads a file
+    /// someone else changed since (a hand edit, a script) before saving, so a Settings save never
+    /// puts back an old in-memory copy over it. Keys this build doesn't know are not kept, and a
+    /// file it can't parse is copied aside before a save replaces it. The write lock is also held
+    /// across a whole `update`, so two saves never interleave.
+    disk: RwLock<Disk>,
     pub(crate) http: reqwest::Client,
+}
+
+/// (modified time, length) of providers.json.
+type DiskStamp = (std::time::SystemTime, u64);
+
+#[derive(Default)]
+struct Disk {
+    /// providers.json's stamp when this process last read or wrote it.
+    stamp: Option<DiskStamp>,
+    /// providers.json exists but could not be loaded (unreadable, invalid), so memory holds only
+    /// the defaults: a save would put them over Nic's whole config. `update` refuses with this
+    /// message until the file is fixed (it is then reloaded) or deleted. Never set for a 0-byte
+    /// file (nothing to lose: the next save repairs it).
+    unloaded: Option<String>,
+}
+
+fn disk_stamp(path: &Path) -> Option<DiskStamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// Copy a providers.json this process could not load to `providers.json.invalid-<ms>` beside it,
+/// before anything can replace it. The copy's path, or None when the copy failed.
+fn keep_invalid_copy(path: &Path) -> Option<PathBuf> {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let to = path.with_file_name(format!("providers.json.invalid-{ms}"));
+    std::fs::copy(path, &to).ok().map(|_| to)
+}
+
+/// The refusal `update` gives while providers.json can't be loaded (`Disk::unloaded`).
+fn unloaded_note(path: &Path, why: &str, copy: Option<&Path>) -> String {
+    let copy = copy.map(|c| format!(" A copy is at {}.", c.display())).unwrap_or_default();
+    format!("{} is {why}, so the app is running on defaults and won't save over it. Fix or delete it, then try again.{copy}", path.display())
+}
+
+/// Parse providers.json and bring it up to date the way every load does: the hermes label
+/// migration, any default provider the file lacks, and an empty chain filled in. `Err` = invalid.
+fn parse_providers(text: &str) -> Result<Config, String> {
+    // A UTF-8 BOM (Windows PowerShell 5.1 `Set-Content -Encoding UTF8`): serde_json rejects it.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut cfg = serde_json::from_str::<Config>(text).map_err(|e| format!("unreadable ({e})"))?;
+    validate(&cfg).map_err(|e| format!("invalid ({e})"))?;
+    // The hermes CLI is gone: rewrite the stale "Agentic OS (hermes)" label
+    // (and a hermes model) so Settings stops advertising it. Saved by the caller.
+    if migrate_hermes(&mut cfg) {
+        eprintln!("[dispatch] migrated stale hermes provider label/model");
+    }
+    for d in &Config::default().providers {
+        if !cfg.providers.iter().any(|p| p.id == d.id) {
+            cfg.providers.push(d.clone());
+        }
+    }
+    if cfg.policy.chain.is_empty() {
+        cfg.policy.chain = vec![cfg.policy.primary_local.clone(), cfg.policy.fallback_cloud.clone()];
+    }
+    Ok(cfg)
 }
 
 impl Default for DispatchState {
@@ -381,6 +443,7 @@ impl Default for DispatchState {
         Self {
             config: RwLock::new(Config::default()),
             path: RwLock::new(None),
+            disk: RwLock::new(Disk::default()),
             // Long-lived pooled connections: the first TLS handshake to ElevenLabs/Claude costs
             // ~1 s, so keep sockets alive between turns (the TTS warm loop pings every 60 s).
             http: reqwest::Client::builder()
@@ -395,44 +458,45 @@ impl Default for DispatchState {
 
 impl DispatchState {
     /// Load `providers.json`, writing defaults if missing and appending any new
-    /// default providers on upgrade. Invalid files are reported and ignored
-    /// (defaults stay active) rather than crashing the app.
+    /// default providers on upgrade. Invalid or unreadable files are reported and
+    /// never written over (defaults stay active, saves are refused, a copy is kept)
+    /// rather than crashing the app. Only a missing file gets the defaults written.
     pub fn load_or_init(&self, dir: &Path) {
         let path = dir.join("providers.json");
         *self.path.write().unwrap() = Some(path.clone());
-        let defaults = Config::default();
-        let cfg = match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str::<Config>(&text) {
-                Ok(mut cfg) if validate(&cfg).is_ok() => {
-                    // The hermes CLI is gone: rewrite the stale "Agentic OS (hermes)" label
-                    // (and a hermes model) so Settings stops advertising it. Saved below.
-                    if migrate_hermes(&mut cfg) {
-                        eprintln!("[dispatch] migrated stale hermes provider label/model");
-                    }
-                    for d in &defaults.providers {
-                        if !cfg.providers.iter().any(|p| p.id == d.id) {
-                            cfg.providers.push(d.clone());
+        let mut disk = self.disk.write().unwrap();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(None),
+            // Not UTF-8 (a UTF-16 `Out-File`), a sharing violation...: there, just not readable.
+            Err(e) => Err(Some(format!("unreadable ({e})"))),
+        };
+        let cfg = match text {
+            Ok(text) => {
+                disk.stamp = disk_stamp(&path);
+                match parse_providers(&text) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        eprintln!("[dispatch] {} {e} — using defaults", path.display());
+                        if !text.is_empty() {
+                            disk.unloaded = Some(unloaded_note(&path, &e, keep_invalid_copy(&path).as_deref()));
                         }
+                        return;
                     }
-                    if cfg.policy.chain.is_empty() {
-                        cfg.policy.chain = vec![cfg.policy.primary_local.clone(), cfg.policy.fallback_cloud.clone()];
-                    }
-                    cfg
                 }
-                Ok(c) => {
-                    eprintln!("[dispatch] {} invalid ({}) — using defaults", path.display(), validate(&c).unwrap_err());
-                    return;
-                }
-                Err(e) => {
-                    eprintln!("[dispatch] {} unreadable ({e}) — using defaults", path.display());
-                    return;
-                }
-            },
-            Err(_) => defaults,
+            }
+            Err(None) => Config::default(),
+            Err(Some(e)) => {
+                eprintln!("[dispatch] {} {e} — using defaults", path.display());
+                disk.stamp = disk_stamp(&path);
+                disk.unloaded = Some(unloaded_note(&path, &e, keep_invalid_copy(&path).as_deref()));
+                return;
+            }
         };
         *self.config.write().unwrap() = cfg;
-        if let Err(e) = self.persist() {
-            eprintln!("[dispatch] {e}");
+        match self.write_file() {
+            Ok(stamp) => disk.stamp = stamp.or(disk.stamp),
+            Err(e) => eprintln!("[dispatch] {e}"),
         }
     }
 
@@ -441,24 +505,83 @@ impl DispatchState {
     }
 
     /// Apply a change, validate the result, and write providers.json. All-or-nothing.
+    ///
+    /// When providers.json changed on disk since this process last read or wrote it, it is
+    /// re-read first (with the same upgrades a load makes), so the change lands on what is on
+    /// disk now rather than on a stale copy: a Settings save in an app started before a hand
+    /// edit (B1's switch to faster-whisper, FX1's sttPrompt) no longer reverts that edit.
+    /// While providers.json can't be loaded at all (`Disk::unloaded`: memory holds only the
+    /// defaults), a save is refused instead of putting the defaults over it.
     pub(crate) fn update(&self, f: impl FnOnce(&mut Config) -> Result<(), String>) -> Result<Config, String> {
+        let mut disk = self.disk.write().unwrap();
+        self.reload_if_changed(&mut disk);
+        if let Some(why) = &disk.unloaded {
+            return Err(why.clone());
+        }
         let mut next = self.snapshot();
         f(&mut next)?;
         validate(&next)?;
         *self.config.write().unwrap() = next.clone();
-        self.persist()?;
+        if let Some(stamp) = self.write_file()? {
+            disk.stamp = Some(stamp);
+        }
         Ok(next)
     }
 
-    fn persist(&self) -> Result<(), String> {
-        let Some(path) = self.path.read().unwrap().clone() else { return Ok(()) };
+    /// Re-read providers.json when its stamp differs from the one recorded. A file that can't be
+    /// loaded is copied aside (`keep_invalid_copy`) and logged; then memory decides. A loaded
+    /// config stays in memory and the save that follows replaces the file; defaults standing in
+    /// for an unloadable file (`Disk::unloaded`) never do. A deleted file ends `unloaded`. While
+    /// `unloaded`, the file is re-read on every save even unchanged (a read that failed on a
+    /// passing sharing violation loads once it is free); it is copied only when it changed.
+    fn reload_if_changed(&self, disk: &mut Disk) {
+        let Some(path) = self.path.read().unwrap().clone() else { return };
+        let now = disk_stamp(&path);
+        if now.is_none() {
+            if matches!(std::fs::metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+                disk.unloaded = None;
+            }
+            return;
+        }
+        let changed = now != disk.stamp;
+        if !changed && disk.unloaded.is_none() {
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            // 0 bytes: nothing to keep, the save that follows repairs it.
+            Ok(t) if t.is_empty() => disk.unloaded = None,
+            read => match read.map_err(|e| format!("unreadable ({e})")).and_then(|t| parse_providers(&t)) {
+                Ok(cfg) => {
+                    *self.config.write().unwrap() = cfg;
+                    disk.unloaded = None;
+                    eprintln!("[dispatch] providers.json changed on disk: reloaded before saving");
+                }
+                Err(e) if changed => {
+                    let copy = keep_invalid_copy(&path);
+                    eprintln!("[dispatch] providers.json changed on disk but is {e}: copied to {}", copy.as_deref().map_or("(copy failed)".into(), |c| c.display().to_string()));
+                    if disk.unloaded.is_some() {
+                        disk.unloaded = Some(unloaded_note(&path, &e, copy.as_deref()));
+                    }
+                }
+                // Still the file `unloaded` names (and its copy): nothing new.
+                Err(_) => {}
+            },
+        }
+        disk.stamp = now;
+    }
+
+    /// Write the in-memory config to providers.json; `Ok(Some(stamp))` = written, `Ok(None)` =
+    /// no file (a test state) or the stamp could not be read back.
+    fn write_file(&self) -> Result<Option<DiskStamp>, String> {
+        let Some(path) = self.path.read().unwrap().clone() else { return Ok(None) };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let json = serde_json::to_string_pretty(&*self.config.read().unwrap()).map_err(|e| e.to_string())?;
         // Atomic (temp + fsync + rename): a plain write truncates first, so a crash or a second
         // app instance mid-write left a 0-byte providers.json and every launch fell back to defaults.
-        super::staging::atomic_write(&path, json.as_bytes()).map_err(|e| format!("could not write {}: {e}", path.display()))
+        super::staging::atomic_write(&path, json.as_bytes()).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        Ok(disk_stamp(&path))
     }
 
     pub(crate) fn config_dir(&self) -> Option<PathBuf> {
@@ -607,7 +730,9 @@ pub struct ProviderPatch {
 /// Whisper treats the prompt as preceding transcript, so it biases spelling best this way.
 /// "Take it easy." (P5: the hold / stand-down family) stays its own sentence, never right after
 /// "Tony"/"Hey", so a real 4-word "Tony, take it easy" can't match a prompt run in `echoes_prompt`.
-pub const DEFAULT_STT_PROMPT: &str = "Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
+/// "Nic" is in it so Whisper stops writing "Nick"; it must equal language_hub_api.DEFAULT_STT_PROMPT
+/// and stt/bench/bench.py PROMPT (tests/test_language_hub.py pins all three).
+pub const DEFAULT_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
 
 /// Switch model / voice / URL etc. for one provider (Settings dropdowns).
 #[tauri::command]
@@ -1805,8 +1930,186 @@ mod persist_tests {
     fn empty_providers_file_is_not_overwritten_with_defaults() {
         let d = dir();
         std::fs::write(d.join("providers.json"), "").unwrap();
-        DispatchState::default().load_or_init(&d);
+        let st = DispatchState::default();
+        st.load_or_init(&d);
         assert_eq!(std::fs::metadata(d.join("providers.json")).unwrap().len(), 0);
+        // Nothing to lose in 0 bytes: the next save repairs it, and no copy is kept.
+        st.update(|c| {
+            c.policy.local_timeout_secs = 45;
+            Ok(())
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<Config>(&std::fs::read_to_string(d.join("providers.json")).unwrap()).is_ok());
+        assert!(std::fs::read_dir(&d).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with("providers.json.invalid-")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// providers.json as someone outside this process left it: policy.stt switched to a custom
+    /// faster-whisper provider (B1's 09:49 switch, made while the app was running).
+    fn edited_on_disk(d: &Path) {
+        let mut cfg = Config::default();
+        let mut fw = cfg.providers.iter().find(|p| p.id == "whisper").expect("built-in whisper").clone();
+        fw.id = "faster-whisper".into();
+        fw.label = "faster-whisper (GPU)".into();
+        fw.base_url = "http://127.0.0.1:8177/v1".into();
+        fw.model = "large-v3-turbo".into();
+        fw.engine = Some("fasterwhisper".into());
+        fw.custom = true;
+        fw.stt_prompt = Some("Tony, Nic.".into());
+        cfg.providers.push(fw);
+        cfg.policy.stt = "faster-whisper".into();
+        std::fs::write(d.join("providers.json"), serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    }
+
+    fn on_disk(d: &Path) -> Config {
+        serde_json::from_str(&std::fs::read_to_string(d.join("providers.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_save_never_puts_a_stale_copy_over_an_outside_edit() {
+        let d = dir();
+        let st = DispatchState::default();
+        st.load_or_init(&d); // the app starts: defaults (policy.stt "whisper") in memory and on disk
+        assert_eq!(st.snapshot().policy.stt, "whisper");
+        edited_on_disk(&d);
+        st.update(|c| {
+            c.policy.local_timeout_secs = 45; // any Settings save
+            Ok(())
+        })
+        .unwrap();
+        let saved = on_disk(&d);
+        assert_eq!(saved.policy.stt, "faster-whisper", "the outside switch survives the save");
+        let fw = saved.providers.iter().find(|p| p.id == "faster-whisper").expect("the faster-whisper provider is kept");
+        assert_eq!((fw.engine.as_deref(), fw.stt_prompt.as_deref()), (Some("fasterwhisper"), Some("Tony, Nic.")));
+        assert_eq!(saved.policy.local_timeout_secs, 45, "and the save itself landed");
+        assert_eq!(st.snapshot().policy.stt, "faster-whisper", "memory follows the file");
+        // Defaults the file lacked are merged in as a load would.
+        assert!(Config::default().providers.iter().all(|p| saved.providers.iter().any(|q| q.id == p.id)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn its_own_saves_are_not_reloaded_and_a_broken_file_keeps_the_memory_copy() {
+        let d = dir();
+        let st = DispatchState::default();
+        st.load_or_init(&d);
+        st.update(|c| {
+            c.policy.local_timeout_secs = 33;
+            Ok(())
+        })
+        .unwrap();
+        st.update(|c| {
+            c.policy.cloud_timeout_secs = 77;
+            Ok(())
+        })
+        .unwrap();
+        let saved = on_disk(&d);
+        assert_eq!((saved.policy.local_timeout_secs, saved.policy.cloud_timeout_secs), (33, 77));
+        // A half-written or hand-broken file: the save goes on from memory and repairs it, and
+        // the broken edit is kept beside it first.
+        std::fs::write(d.join("providers.json"), "{ not json").unwrap();
+        st.update(|c| {
+            c.policy.local_timeout_secs = 34;
+            Ok(())
+        })
+        .unwrap();
+        let saved = on_disk(&d);
+        assert_eq!((saved.policy.local_timeout_secs, saved.policy.cloud_timeout_secs), (34, 77));
+        assert_eq!(invalid_copies(&d), vec![b"{ not json".to_vec()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The bytes of every `providers.json.invalid-*` copy in `d`.
+    fn invalid_copies(d: &Path) -> Vec<Vec<u8>> {
+        let mut out: Vec<_> = std::fs::read_dir(d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("providers.json.invalid-")).map(|e| std::fs::read(e.path()).unwrap()).collect();
+        out.sort();
+        out
+    }
+
+    fn bump(c: &mut Config) -> Result<(), String> {
+        c.policy.local_timeout_secs = 45; // any Settings save (providers_update, n8n_discover adopt...)
+        Ok(())
+    }
+
+    #[test]
+    fn a_bom_prefixed_file_loads() {
+        let d = dir();
+        edited_on_disk(&d);
+        let text = std::fs::read_to_string(d.join("providers.json")).unwrap();
+        std::fs::write(d.join("providers.json"), format!("\u{feff}{text}")).unwrap(); // PS 5.1 Set-Content -Encoding UTF8
+        let st = DispatchState::default();
+        st.load_or_init(&d);
+        assert_eq!(st.snapshot().policy.stt, "faster-whisper", "the BOM is not a reason to fall back to defaults");
+        st.update(bump).unwrap();
+        assert_eq!(on_disk(&d).policy.stt, "faster-whisper");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_invalid_file_is_never_replaced_by_the_defaults() {
+        let d = dir();
+        edited_on_disk(&d);
+        let good = std::fs::read_to_string(d.join("providers.json")).unwrap();
+        // A hand edit that left a trailing comma.
+        let broken = format!("{},\n}}", good.trim_end().trim_end_matches('}').trim_end());
+        assert!(serde_json::from_str::<Value>(&broken).is_err());
+        std::fs::write(d.join("providers.json"), &broken).unwrap();
+        let st = DispatchState::default();
+        st.load_or_init(&d);
+        assert_eq!(st.snapshot().policy.stt, "whisper", "defaults in memory");
+        // The first Settings save used to write defaults + that one change over the whole file.
+        let err = st.update(bump).unwrap_err();
+        assert!(err.contains("Fix or delete it") && err.contains("providers.json.invalid-"), "{err}");
+        assert_eq!(std::fs::read_to_string(d.join("providers.json")).unwrap(), broken, "the file is untouched");
+        assert_eq!(invalid_copies(&d), vec![broken.clone().into_bytes()], "one copy, however many saves are refused");
+        assert!(st.update(bump).is_err());
+        assert_eq!(invalid_copies(&d).len(), 1);
+        // Nic fixes the file: it is reloaded and the save lands on it.
+        std::fs::write(d.join("providers.json"), &good).unwrap();
+        st.update(bump).unwrap();
+        let saved = on_disk(&d);
+        assert_eq!((saved.policy.stt.as_str(), saved.policy.local_timeout_secs), ("faster-whisper", 45));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_not_overwritten_at_load_and_deleting_it_resets() {
+        let d = dir();
+        edited_on_disk(&d);
+        // UTF-16 LE with a BOM (Windows PowerShell 5.1 `Out-File` / `>`): not UTF-8.
+        let text = std::fs::read_to_string(d.join("providers.json")).unwrap();
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+        std::fs::write(d.join("providers.json"), &utf16).unwrap();
+        let st = DispatchState::default();
+        st.load_or_init(&d);
+        assert_eq!(std::fs::read(d.join("providers.json")).unwrap(), utf16, "not replaced by the defaults at startup");
+        assert_eq!(invalid_copies(&d), vec![utf16.clone()]);
+        assert!(st.update(bump).is_err());
+        assert_eq!(std::fs::read(d.join("providers.json")).unwrap(), utf16);
+        // Deleting it is the way back to defaults.
+        std::fs::remove_file(d.join("providers.json")).unwrap();
+        st.update(bump).unwrap();
+        assert_eq!((on_disk(&d).policy.stt.as_str(), on_disk(&d).policy.local_timeout_secs), ("whisper", 45));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_another_process_held_at_load_is_loaded_once_it_is_free() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = dir();
+        edited_on_disk(&d);
+        // A sharing violation (an editor or a backup tool holding it, no sharing) at startup.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(d.join("providers.json")).unwrap();
+        let st = DispatchState::default();
+        st.load_or_init(&d);
+        assert_eq!(st.snapshot().policy.stt, "whisper", "unreadable at load: defaults in memory");
+        assert!(st.update(bump).is_err(), "and never saved over it");
+        drop(held);
+        // Same file, same stamp: re-read anyway, and the save lands on Nic's config.
+        st.update(bump).unwrap();
+        let saved = on_disk(&d);
+        assert_eq!((saved.policy.stt.as_str(), saved.policy.local_timeout_secs), ("faster-whisper", 45));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

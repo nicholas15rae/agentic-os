@@ -43,10 +43,21 @@ The answer
     them (`needs_desktop_tools`) is answered with DESKTOP_TOOLS_LINE in Tony's voice: no model
     call, no CLI, never a guessed inbox or schedule.
   * Maintenance window (A3): while the desktop's GPU lease says model maintenance
-    (`cc.gpu_maintenance`: a Model Lab compare, a bench, a reload) the loaded model may be one
-    under test, so gateway Tony never loads, generates or hands back: an eligible phone turn is
-    claimed at POST (and by the watchdog) even with the desktop present, and answered at once
-    with MAINTENANCE_LINE in persona. The desktop's own turns wait for its GPU slot meanwhile.
+    (`cc.gpu_maintenance`: any holder starting "maintenance") gateway Tony never loads or
+    generates. Two kinds:
+      - A model test (`testing_window`: the Model Lab compare, holder "maintenance · model
+        compare" = compare.rs HOLDER, or a bench, "maintenance · bench …"): it holds the GPU for
+        minutes and the loaded model may be one under test, so an eligible phone turn is claimed
+        at POST (and by the watchdog) even with the desktop present, and answered at once with
+        MAINTENANCE_LINE in persona, never handed back.
+      - Any other holder (a short reload: services.rs "maintenance · local fit", a JIT re-fit):
+        the desktop keeps its turns (claimed at POST only when it is absent, as without a
+        window), and a turn gateway Tony does hold waits up to MAINTENANCE_WAIT_SECS for the
+        window to clear, then answers normally; if it doesn't clear, HOLD_LINE. A reload may
+        leave Tony's model unloaded (its load failed), so after a wait the model's state is read
+        again and a model that isn't loaded gets the cold load (LOAD_CONTEXT), never a generation
+        that would JIT-load it at Bionic's saved defaults.
+    The desktop's own turns wait for its GPU slot meanwhile.
 
 Never imports `server` (under `python server.py` that module is __main__, so the import would run
 server.py twice) or `os_api` (it imports this module): os_api hands over its callbacks (`configure`).
@@ -148,8 +159,13 @@ _DT_OWN = re.compile(r"\bmy (?:gmail|inbox|calendar|agenda|schedule)\b")
 _DT_SCHEDULE = re.compile(r"\b(?:whats on|what do i have) (?:for )?(?:today|tonight|tomorrow|this week|next week|this weekend)\b|\bam i (?:free|busy) (?:today|tonight|tomorrow|this|next|on)\b")
 FAIL_LINE = "Sorry Nic, my model didn't come up. Give me a minute and try again."
 RESTART_LINE = "Sorry Nic, I got cut off there. Ask me that again?"
-# A3: the desktop holds the GPU for model maintenance (cc.gpu_maintenance). Fixed, in persona, no model call.
+# A3: the desktop is testing a model on the GPU (`testing_window`). Fixed, in persona, no model call.
 MAINTENANCE_LINE = "Hang on, Nic, I'm testing a model on the GPU right now. I'll be right back in a few minutes, so ask me again then."
+# A short maintenance window (a reload) that didn't clear within MAINTENANCE_WAIT_SECS. Fixed, in persona.
+HOLD_LINE = "One moment, Nic, I'm still getting set up on the PC. Ask me that again in a few seconds."
+# The holders that mean a model TEST (minutes on the GPU), after "maintenance" and its separator:
+# compare.rs HOLDER "maintenance · model compare" and modellab.rs's bench "maintenance · bench <model>".
+TESTING_HOLDERS = ("model compare", "bench")
 
 DEFAULT_TONY_MODEL = "qwen/qwen3.5-9b"
 # services.rs local_fit_once's body (FIT_CTX): the shape the desktop keeps Tony's model in.
@@ -167,6 +183,9 @@ UNREACHABLE_WAIT_SECS = 30.0  # Bionic not answering at all (still starting at l
 POLL_SECS = 1.0  # cold-load poll of /api/v0/models
 FIRST_TOKEN_SECS = 20.0
 TOTAL_GEN_SECS = 60.0
+# A short maintenance window (not a model test): wait this long for it to clear, polling this often.
+MAINTENANCE_WAIT_SECS = 20.0
+MAINTENANCE_POLL_SECS = 0.25
 WATCHDOG_TICK_SECS = 1.0
 WATCHDOG_MIN_AGE_SECS = 3.0
 MIN_LEFT_TO_START_SECS = 30.0  # the watchdog never starts a turn with less than this left before the deadline
@@ -310,14 +329,15 @@ def _claim_row(c, qid: str, token: str, now: float) -> bool:
 def take_on_post(c, qid: str, kind: str, payload: Any, now: float, absent: Callable[[], bool]) -> bool:
     """Inside inbox_post's transaction (cc._db_lock held, `c` its connection), right after the INSERT:
     claim the new item for the gateway when it is eligible, the worker is idle and `absent()` (the
-    desktop isn't working the inbox) or a maintenance window holds the GPU (the desktop would only
-    queue it behind the window; the worker answers MAINTENANCE_LINE at once). True: the caller
-    answers 'running' and calls `kick()` after the commit."""
+    desktop isn't working the inbox) or a model test holds the GPU (`testing_window`: the desktop
+    would only queue it behind minutes of testing; the worker answers MAINTENANCE_LINE at once).
+    A short maintenance window (a reload) leaves the turn to a desktop that is here. True: the
+    caller answers 'running' and calls `kick()` after the commit."""
     global _busy, _assigned
     if not _started or not eligible(kind, payload) or not enabled():
         return False
     with _lock:
-        if _busy is not None or _assigned is not None or _queued or not (absent() or cc.gpu_maintenance()):
+        if _busy is not None or _assigned is not None or _queued or not (absent() or testing_window()):
             return False
         token = _new_token()
         if not _claim_row(c, qid, token, now):
@@ -423,14 +443,14 @@ def _assigned_waiting() -> bool:
 
 def _watchdog_claim() -> Optional[tuple[str, str]]:
     """The oldest pending eligible turn at least WATCHDOG_MIN_AGE_SECS old, with time left to answer,
-    while the desktop is absent (or a maintenance window holds the GPU) and the worker idle."""
+    while the desktop is absent (or a model test holds the GPU: `testing_window`) and the worker idle."""
     global _busy
     if not enabled() or not _idle():
         return None
     job: Optional[tuple[str, str]] = None
     try:
         _ensure_schema()
-        if not (_absent() or cc.gpu_maintenance()):
+        if not (_absent() or testing_window()):
             return None
         now = _clock()
         # Under cc._db_lock, like take_on_post (inside inbox_post's transaction): the two claims never
@@ -873,12 +893,63 @@ def cold_limit(now: float, deadline: float) -> float:
     return min(now + COLD_LOAD_MAX_SECS, deadline - GEN_RESERVE_SECS)
 
 
+def testing_holder(holder: Any) -> bool:
+    """A GPU lease holder that means a model TEST: "maintenance", a separator, then one of
+    TESTING_HOLDERS ("maintenance · model compare", "maintenance · bench qwen/…"), any case. Pure."""
+    h = str(holder or "").strip().lower()
+    if not h.startswith(cc.GPU_MAINTENANCE_PREFIX):
+        return False
+    rest = h[len(cc.GPU_MAINTENANCE_PREFIX):].lstrip(" \t·:-–—|")
+    return rest.startswith(TESTING_HOLDERS)
+
+
+def testing_window() -> bool:
+    """The desktop holds the GPU to TEST a model (a Model Lab compare or bench: minutes, and the
+    loaded model may be the one under test). Any other maintenance holder (a short reload) is not
+    one. Never raises: take_on_post calls it inside inbox_post's transaction."""
+    try:
+        s = cc.gpu_state()
+        return bool(s.get("maintenance")) and testing_holder(s.get("holder"))
+    except Exception:  # noqa: BLE001 — a lease read never blocks a phone turn
+        return False
+
+
 def _maintenance(turn: _Turn) -> bool:
-    """A maintenance window holds the GPU: the turn's answer is MAINTENANCE_LINE (no load, no model call)."""
-    if not cc.gpu_maintenance():
+    """A model test holds the GPU: the turn's answer is MAINTENANCE_LINE (no load, no model call)."""
+    if not testing_window():
         return False
     turn.answer, turn.reason = MAINTENANCE_LINE, "gpu-maintenance"
     return True
+
+
+# `_wait_out_maintenance`'s go-ons (both truthy; a stop is None): no window at all, or one that
+# cleared while the turn waited. After WAITED, whatever model_state said before is stale: the window
+# was a reload (services.rs local_fit_once unloads Tony's model, and its reload can fail).
+NO_WINDOW = "no-window"
+WAITED = "waited"
+
+
+def _wait_out_maintenance(turn: _Turn, deadline: float) -> Optional[str]:
+    """A short maintenance window (not a model test: a reload) holds the GPU: wait up to
+    MAINTENANCE_WAIT_SECS (never past MIN_GEN_SECS before the deadline) for it to clear, with no load
+    request and no model call meanwhile. NO_WINDOW / WAITED: go on (after WAITED, read the model's
+    state again before using it). None: the answer is set: MAINTENANCE_LINE when a model test took
+    over, HOLD_LINE when the window outlasted the wait. A desktop that is here gets the turn back
+    while nothing was streamed (it queues it behind its slot)."""
+    if not cc.gpu_maintenance():
+        return NO_WINDOW
+    end = min(_clock() + MAINTENANCE_WAIT_SECS, deadline - MIN_GEN_SECS)
+    while True:
+        if _maintenance(turn):
+            return None
+        if not cc.gpu_maintenance():
+            return WAITED
+        turn.hand_back_if_desktop()
+        if _clock() >= end:
+            turn.answer, turn.reason = HOLD_LINE, "gpu-maintenance-wait"
+            return None
+        turn.renew()
+        _sleep(MAINTENANCE_POLL_SECS)
 
 
 def _cold_load(turn: _Turn, root: str, model: str, deadline: float, state: Optional[str]) -> bool:
@@ -887,8 +958,13 @@ def _cold_load(turn: _Turn, root: str, model: str, deadline: float, state: Optio
     loader: Optional[_Loader] = None
     while True:
         now = _clock()
-        if _maintenance(turn):  # never request a load while the desktop swaps / tests models
+        if _maintenance(turn):  # never request a load while the desktop tests models
             return False
+        if cc.gpu_maintenance():  # a short window (a reload): no load request, and "loaded" isn't final yet
+            if not _wait_out_maintenance(turn, deadline):
+                return False
+            now = reachable_at = _clock()
+            state = model_state(root, model)  # what the reload left; the checks below go on from it
         if state == "loaded":
             return True
         if state == "absent":
@@ -1206,6 +1282,20 @@ def needs_desktop_tools(text: Any) -> bool:
     return bool(_DT_CAL.search(n) and _DT_CAL_READ.search(n) and not _DT_CAL_WRITE.search(n))
 
 
+# The gateway has no LIVE DASHBOARD, so without this Tony guesses the time ("just past noon" at
+# 5 p.m., measured 2026-11-26). It rides in the LAST user message, never the system prompt: Bionic's
+# Qwen3.5 reuses its prompt cache only up to the first changed token (a changing line inside the
+# system prompt cost ~1.4 s of re-prefill per turn; in the user message ~0). History never carries it.
+CLOCK_PREFIX = "(Nic's local time: "
+
+
+def clock_note(now: Optional[float] = None) -> str:
+    t = time.localtime(_clock() if now is None else now)
+    hour = t.tm_hour % 12 or 12
+    ampm = "a.m." if t.tm_hour < 12 else "p.m."
+    return f"{CLOCK_PREFIX}{time.strftime('%A, %B', t)} {t.tm_mday}, {t.tm_year}, {hour}:{t.tm_min:02d} {ampm})"
+
+
 def build_messages(payload: dict) -> list[dict]:
     os_cfg = _read_json(_app_dir() / "os.json") or {}
     os_state = _read_json(Path(cc.CC_DIR) / "os-state.json") or {}
@@ -1214,7 +1304,7 @@ def build_messages(payload: dict) -> list[dict]:
     history = _chat_history(payload.get("history")) or thread_history(keep)
     text = clip(str(payload.get("text") or "").strip(), USER_TEXT_MAX)
     note = role_note(payload.get("role"), os_name(os_cfg))
-    user = f"{text}\n\n{note}" if note else text
+    user = f"{text}\n\n{clock_note()}" + (f"\n\n{note}" if note else "")
     return [{"role": "system", "content": system}, *cap_history(history, keep, total, per), {"role": "user", "content": user}]
 
 
@@ -1224,7 +1314,7 @@ def _answer(turn: _Turn, payload: dict, deadline: float) -> None:
     model, base = tony_model()
     turn.model = model
     root = bionic_root(base)
-    # A3: a maintenance window answers at once, before any hand-back (the desktop would only queue it).
+    # A3: a model test answers at once, before any hand-back (the desktop would only queue it).
     if _maintenance(turn):
         return
     turn.hand_back_if_desktop()
@@ -1232,21 +1322,35 @@ def _answer(turn: _Turn, payload: dict, deadline: float) -> None:
     if needs_desktop_tools(payload.get("text")):
         turn.answer, turn.reason = DESKTOP_TOOLS_LINE, "needs-desktop-tools"
         return
+    # A short maintenance window (a reload): wait it out (bounded), then answer normally.
+    if not _wait_out_maintenance(turn, deadline):
+        return
     messages = build_messages(payload)
     state = model_state(root, model)
-    if state == "absent":
-        turn.reason = "model-missing"
-        return
-    if state != "loaded":
-        turn.cold = True
-        turn.wake()
-        if not _cold_load(turn, root, model, deadline, state):
+    while True:
+        if state == "absent":
+            turn.reason = "model-missing"
             return
+        if state != "loaded":
+            if not turn.cold:
+                turn.cold = True
+                turn.wake()
+            if not _cold_load(turn, root, model, deadline, state):
+                return
+        if _maintenance(turn):  # a model test that began meanwhile: never generate on a model under test
+            return
+        went = _wait_out_maintenance(turn, deadline)  # a reload that began meanwhile: never generate during it
+        if not went:
+            return
+        if went == NO_WINDOW:
+            break
+        # The reload is over, but it may have left Tony's model unloaded (its reload failed): a
+        # generation then JIT-loads it at Bionic's saved defaults (123k x 4, past the 12 GB card).
+        # Read the state again; a model that isn't loaded goes through the cold load (LOAD_CONTEXT).
+        state = model_state(root, model)
     left = deadline - _clock()
     if left < MIN_GEN_SECS:
         turn.reason = "no-time"
-        return
-    if _maintenance(turn):  # a window that began meanwhile: never generate on a model under test
         return
     turn.hand_back_if_desktop()  # warm: the last moment the desktop can still take it
     turn.renew(force=True)

@@ -122,7 +122,7 @@ class Base(unittest.TestCase):
 
     def make_worker(self, **kw):
         """A worker on the fake loader; load retries are off unless a test asks for them."""
-        w = fw.Worker(self.loader, self.tmp, gpu=lambda: self.gpu[0], min_free_mb=1500, **{"retry_backoff": (0.0, 0.0), **kw})
+        w = fw.Worker(self.loader, self.tmp, gpu=lambda: self.gpu[0], **{"min_free_mb": 1500, "retry_backoff": (0.0, 0.0), **kw})
         self.workers.append(w)
         return w
 
@@ -248,6 +248,46 @@ class CudaFailure(Base):
         self.assertEqual((st["ready"], st["device"]), (False, "cpu-unavailable"))
         self.assertIn("1200 MB VRAM free", st["error"])
         self.assertEqual(self.loads, [])
+
+    def test_the_pre_flight_keeps_the_500_mb_floor_through_a_decode(self):
+        # resident (turbo int8_float16 ~1.2 GB) + beam-5 decode peak (~150 MB) + the 500 MB floor.
+        self.assertEqual(fw.vram_needed_mb("large-v3-turbo", "int8_float16"), 1850)
+        self.assertEqual(fw.vram_needed_mb("faster-whisper-large-v3-turbo", "float16"), 2150 + 650)
+        self.assertEqual(fw.vram_needed_mb("distil-large-v3", "int8_float16"), 1030 + 650)
+        self.assertEqual(fw.vram_needed_mb("large-v3-turbo", "int8"), 2150 + 650)  # never measured: the biggest
+        # 1700 MB free passed the old 1500 MB check, but turbo would leave ~350 MB at a decode's peak.
+        self.gpu = [(10400, 1700)]
+        st = self.start(model="large-v3-turbo")
+        self.assertEqual((st["ready"], st["device"]), (False, "cpu-unavailable"))
+        self.assertIn("only 1700 MB VRAM free (< 1850 MB", st["error"])
+        self.assertEqual(self.loads, [])
+        wc = WhisperCppStub()
+        self.addCleanup(wc.close)
+        self.c = TestClient(fw.create_app(self.worker, fallback=fw.Fallback(wc.url)))
+        r = self.post()  # the final goes to whisper.cpp instead
+        self.assertEqual((r.status_code, r.json()["text"], r.headers["x-stt-backend"]), (200, "Play Bilmuri.", "whispercpp"))
+        # float16 turbo needs 2800 MB: refused at 2500 free; int8_float16 loads at 1900.
+        self.gpu = [(9600, 2500)]
+        self.assertFalse(self.worker.load("large-v3-turbo", "cuda", "float16").result(5)["ready"])
+        self.gpu = [(10200, 1900)]
+        self.assertTrue(self.worker.load("large-v3-turbo", "cuda", "int8_float16").result(5)["ready"])
+        self.assertEqual(self.loads, [("faster-whisper-large-v3-turbo", "cuda", "int8_float16")])
+
+    def test_min_free_mb_only_raises_the_pre_flight(self):
+        w = self.make_worker(min_free_mb=3000)
+        self.gpu = [(9100, 2900)]
+        self.assertIn("< 3000 MB", w.load("large-v3-turbo", "cuda", "int8_float16").result(5)["error"])
+        w = self.make_worker(min_free_mb=1000)  # can't take it under the floor's arithmetic
+        self.gpu = [(10200, 1800)]
+        self.assertIn("< 1850 MB", w.load("large-v3-turbo", "cuda", "int8_float16").result(5)["error"])
+
+    def test_a_load_that_leaves_less_than_the_floor_after_warm_up_is_released(self):
+        seq = iter([(9000, 2000), (10600, 400)])  # bigger than measured: 400 MB left after the warm-up
+        self.worker.gpu = lambda: next(seq, (9000, 2000))
+        st = self.start(model="large-v3-turbo")
+        self.assertEqual((st["ready"], st["device"]), (False, "cpu-unavailable"))
+        self.assertIn("after the load and warm-up", st["error"])
+        self.assertIsNone(self.worker.backend)
 
     def test_no_vram_reading_is_not_loaded_blind(self):
         self.gpu = [None]  # nvidia-smi failed or timed out
@@ -613,6 +653,34 @@ class Stream(Base):
             self.assertEqual(ws.receive_json()["type"], "final")
         self.assertEqual([o.partial for _, o in self.calls[warm:]], [True, False])
 
+    def test_relay_partials_that_read_back_the_prompt_never_become_stable(self):
+        # Relay mode: the gateway proxies the phone onto this WebSocket with the vocabulary prompt.
+        # Early partials (mostly pre-roll) can come back as the prompt read back; two in a row used
+        # to commit it, so every later caption started with it.
+        prompt = "Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops."
+        echo = "Tony, Gabagool mode. Take it easy. Cut it. Whoa."
+        self.start()
+        self.script(lambda secs, o: "Play Bilmuri on Spotify." if not o.partial else echo if secs < 1.5 else "Play Bilmuri" if secs < 2.1 else "Play Bilmuri on Spotify")
+        warm = len(self.calls)
+        with self.c.websocket_connect("/v1/stream") as ws:
+            self.assertTrue(self.begin(ws, prompt=prompt)["partials"])
+            for i in range(2):  # 0.6 s and 1.2 s: both partials echo the prompt
+                ws.send_bytes(pcm16(0.6))
+                self.wait_for(lambda i=i: self.worker.requests >= i + 1, f"echo partial {i + 1} to be decoded")
+                time.sleep(0.05)  # let its task finish, so the next chunk gets its own partial
+            ws.send_bytes(pcm16(0.6))  # 1.8 s
+            first = ws.receive_json()
+            ws.send_bytes(pcm16(0.6))  # 2.4 s
+            second = ws.receive_json()
+            ws.send_text(json.dumps({"type": "end"}))
+            final = ws.receive_json()
+        self.assertEqual((first["type"], first["partial"], first["stable"]), ("partial", "Play Bilmuri", ""), "an echoed partial was sent or committed")
+        self.assertEqual((second["partial"], second["stable"]), ("Play Bilmuri on Spotify", "Play Bilmuri"))
+        self.assertEqual(final["final"], "Play Bilmuri on Spotify.")
+        self.assertGreaterEqual(sum(1 for _, o in self.calls[warm:] if o.partial), 3)  # the echoes WERE decoded, then dropped
+        self.assertTrue(fw.echoes_prompt(echo, prompt))
+        self.assertFalse(fw.echoes_prompt("Play Bilmuri on Spotify", prompt))
+
     def test_without_a_gpu_model_whisper_cpp_answers_the_final(self):
         wc = WhisperCppStub()
         self.addCleanup(wc.close)
@@ -679,16 +747,60 @@ class Stream(Base):
             self.assertEqual(self.begin(ws)["type"], "ready")
 
 
+# Hypothesis sequences -> (shown, stable) after each push. The SAME table is in
+# command center/src/features/voice/stt-partials.test.ts (LA_CASES) and tests/test_language_hub.py
+# checks the gateway's copy against it: the desktop, fw_server and the gateway caption alike.
+LA_CASES = [
+    (["Play", "Play Bill", "Play Bilmuri on", "play, Bilmuri on Spotify.", "Pay Bilmuri on Spotify now", ""],
+     [("Play", ""), ("Play Bill", "Play"), ("Play Bilmuri on", "Play"), ("Play Bilmuri on Spotify.", "Play Bilmuri on"), ("Pay Bilmuri on Spotify now", ""), ("", "")]),
+    # Whisper revises a committed word AND the word count changes ("want to" -> "wanna").
+    (["I want to", "I want to go", "I wanna go home", "I wanna go home now"],
+     [("I want to", ""), ("I want to go", "I want to"), ("I wanna go home", "I"), ("I wanna go home now", "I wanna go home")]),
+    (["Play Bill", "Play Bill", "Play Bilmuri on Spotify", "Play Bilmuri on Spotify"],
+     [("Play Bill", ""), ("Play Bill", "Play Bill"), ("Play Bilmuri on Spotify", "Play"), ("Play Bilmuri on Spotify", "Play Bilmuri on Spotify")]),
+    (["Tony cut", "Tony cut", "Tony, can you cut it", "Tony, can you cut it out please"],
+     [("Tony cut", ""), ("Tony cut", "Tony cut"), ("Tony, can you cut it", "Tony,"), ("Tony, can you cut it out please", "Tony, can you cut it")]),
+    # A shorter hypothesis shrinks the stable words to it; an empty one changes nothing.
+    (["Play Bilmuri on", "Play Bilmuri on", "Play Bilmuri", "", "Play Bilmuri now"],
+     [("Play Bilmuri on", ""), ("Play Bilmuri on", "Play Bilmuri on"), ("Play Bilmuri", "Play Bilmuri"), ("Play Bilmuri", "Play Bilmuri"), ("Play Bilmuri now", "Play Bilmuri")]),
+]
+
+
+def la_random_sequences(runs=300, steps=8, seed=11):
+    """Successive whole-clip partials: grow, revise one word, or drop the tail (the TS test's walk)."""
+    import random
+
+    rnd = random.Random(seed)
+    vocab = ["I", "want", "wanna", "to", "go", "home", "Tony,", "tony", "cut", "it", "Play", "Bill", "Bilmuri"]
+    for _ in range(runs):
+        cur, seq = [], []
+        for _ in range(steps):
+            op = rnd.randrange(3)
+            if op == 0 or not cur:
+                cur = cur + [rnd.choice(vocab)]
+            elif op == 1:
+                i = rnd.randrange(len(cur))
+                cur = [rnd.choice(vocab) if j == i else w for j, w in enumerate(cur)]
+            else:
+                cur = cur[:max(1, len(cur) - 1 - rnd.randrange(2))]
+            seq.append(" ".join(cur))
+        yield seq
+
+
 class Pure(unittest.TestCase):
-    def test_local_agreement_commits_the_agreed_prefix_and_never_retracts(self):
-        la = fw.LocalAgreement()
-        self.assertEqual(la.push("Play"), ("Play", ""))
-        self.assertEqual(la.push("Play Bill"), ("Play Bill", "Play"))
-        self.assertEqual(la.push("Play Bilmuri on"), ("Play Bilmuri on", "Play"))  # "Bill" was never agreed on
-        self.assertEqual(la.push("play, Bilmuri on Spotify."), ("Play Bilmuri on Spotify.", "Play Bilmuri on"))
-        # A hypothesis that rewrites committed words commits nothing more and retracts nothing.
-        self.assertEqual(la.push("Pay Bilmuri on Spotify now"), ("Play Bilmuri on Spotify now", "Play Bilmuri on"))
-        self.assertEqual(la.push(""), ("Play Bilmuri on", "Play Bilmuri on"))
+    def test_local_agreement_commits_the_agreed_prefix_and_shows_a_revision_whole(self):
+        for seq, want in LA_CASES:
+            la = fw.LocalAgreement()
+            self.assertEqual([la.push(s) for s in seq], want, seq)
+
+    def test_local_agreement_never_shows_words_the_newest_hypothesis_lacks(self):
+        words = lambda s: [fw._norm_word(w) for w in s.split()]  # noqa: E731
+        for seq in la_random_sequences():
+            la = fw.LocalAgreement()
+            for s in seq:
+                shown, stable = la.push(s)
+                self.assertEqual(words(shown), words(s), seq)
+                self.assertEqual(words(shown)[:len(words(stable))], words(stable), seq)
 
     def test_wav16k_wraps_raw_pcm(self):
         raw = pcm16(0.25)
@@ -740,6 +852,29 @@ class Pure(unittest.TestCase):
             for bad in ("..", "a/b", "", "distil-large-v3"):
                 with self.assertRaises(ValueError):
                     fw.resolve_model(bad, tmp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_missing_start_model_starts_on_one_that_is_on_disk(self):
+        # The Settings model's folder was deleted (or never downloaded): boot, the app's keep-alive
+        # and the gateway all pass that name to --model. A first load has nothing to keep, so it
+        # would leave :8177 with no model all session (POST /load refuses the name; turbo stays).
+        tmp = Path(tempfile.mkdtemp(prefix="fw-m-"))
+        try:
+            (tmp / "faster-whisper-large-v3-turbo").mkdir()
+            (tmp / "faster-whisper-large-v3-turbo" / "model.bin").write_bytes(b"x")
+            self.assertEqual(fw.startup_model("large-v3-turbo", tmp), "large-v3-turbo")
+            self.assertEqual(fw.startup_model("faster-whisper-large-v3-turbo", tmp), "faster-whisper-large-v3-turbo")
+            for gone in ("distil-large-v3", "medium", "..", "a b"):
+                self.assertEqual(fw.startup_model(gone, tmp), "large-v3-turbo", gone)
+            empty = Path(tempfile.mkdtemp(prefix="fw-m-"))
+            try:
+                self.assertEqual(fw.startup_model("distil-large-v3", empty), "distil-large-v3")  # nothing on disk: as before
+            finally:
+                shutil.rmtree(empty, ignore_errors=True)
+            # main() loads that model, never the missing one.
+            src = (Path(__file__).resolve().parent.parent / "stt" / "fw_server.py").read_text(encoding="utf-8")
+            self.assertIn("worker.load(model, a.device, a.compute_type)", src)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

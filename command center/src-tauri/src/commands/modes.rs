@@ -165,11 +165,14 @@ pub const LEARNING_NOTES: &str = "Be curious: ask Nic what he's doing, how and w
 pub const BUILDER_AGENTS: [&str; 3] = ["prompter", "designer", "coder"];
 pub const BUILDER_TOOLS: [&str; 8] = ["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"];
 pub const OPERATIONS_AGENTS: [&str; 2] = ["ops", "bizops"];
-pub const OPERATIONS_TOOLS: [&str; 9] = ["gmail", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"];
+/// Google Calendar mirrors Gmail (A2): wherever Gmail reads are live, so are `calendar.*` reads
+/// and the approved-only `calendar.create_event` card; where Gmail is frozen (Builder, Learning),
+/// Calendar is too.
+pub const OPERATIONS_TOOLS: [&str; 10] = ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"];
 /// The Librarian is not on Executive duty: it runs only as its scheduled script (frozen on the
 /// master switchboard by default, `os_core::default_frozen_agents`).
 pub const EXECUTIVE_AGENTS: [&str; 2] = ["bizops", "finance"];
-pub const EXECUTIVE_TOOLS: [&str; 5] = ["knowledge-graph", "gmail", "brave-search", "time", "weather"];
+pub const EXECUTIVE_TOOLS: [&str; 6] = ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"];
 
 /// The eight presets (spec §2 + Operations + Learning), in `BUILTIN_IDS` order.
 pub fn presets() -> Vec<TonyMode> {

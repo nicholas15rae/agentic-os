@@ -28,6 +28,13 @@ export function partialMsFrom(v: unknown): number {
   return Math.round(Math.min(PARTIAL_MAX_MS, Math.max(PARTIAL_MIN_MS, v)));
 }
 
+/** Settings → Voice detection's "Live captions" choices (ms; 0 = off), plus the saved value when
+ * it is none of them (set by hand), so the select always shows what is in effect. Pure. */
+export function partialMsChoices(current: unknown): number[] {
+  const set = new Set([0, 300, 450, 600, 800, 1000, 1500, 2000, 3000, partialMsFrom(current)]);
+  return [...set].sort((a, b) => a - b);
+}
+
 /** Tony's reply is being generated (thinking, or a "streaming…" bubble still growing): his model
  * has the GPU then, and a caption pass would slow both. A bubble older than 2 min never counts (a
  * stuck one must not switch captions off for good). Pure. */
@@ -47,9 +54,12 @@ export interface Agreed {
 
 /**
  * LocalAgreement-2 over whole-clip hypotheses: the words the last two hypotheses agree on, from the
- * start, are committed (stable) and never retracted; the rest of the newest is tentative. Words
- * compare case- and edge-punctuation-insensitively. Same rule as fw_server.LocalAgreement and the
- * gateway's (language_hub_api.py), so the phone and the desktop caption alike.
+ * start, are committed (stable); the rest of the newest is tentative. Words compare case- and
+ * edge-punctuation-insensitively. When Whisper revises a committed word (the newest hypothesis no
+ * longer starts with the committed words), the newest is shown whole and the committed words shrink
+ * to the prefix the two still share: never a splice of old words with the new tail. An empty
+ * hypothesis changes nothing. Same rule as fw_server.LocalAgreement and the gateway's
+ * (language_hub_api.py), so the phone and the desktop caption alike.
  */
 export class LocalAgreement {
   private prev: string[] = [];
@@ -57,13 +67,20 @@ export class LocalAgreement {
 
   push(hypothesis: string): Agreed {
     const cur = hypothesis.split(/\s+/).filter(Boolean);
-    const c = this.committed.length;
-    if (cur.length >= c && this.committed.every((w, i) => normWord(w) === normWord(cur[i]))) {
-      let n = c;
-      while (n < Math.min(this.prev.length, cur.length) && normWord(this.prev[n]) === normWord(cur[n])) n++;
-      this.committed.push(...cur.slice(c, n));
+    if (cur.length) {
+      const c = this.committed.length;
+      if (cur.length >= c && this.committed.every((w, i) => normWord(w) === normWord(cur[i]))) {
+        let n = c;
+        while (n < Math.min(this.prev.length, cur.length) && normWord(this.prev[n]) === normWord(cur[n])) n++;
+        this.committed.push(...cur.slice(c, n));
+      } else {
+        // A revision: keep only the common prefix, spelled as the newest (which is shown whole).
+        let k = 0;
+        while (k < Math.min(c, cur.length) && normWord(this.committed[k]) === normWord(cur[k])) k++;
+        this.committed = cur.slice(0, k);
+      }
+      this.prev = cur;
     }
-    this.prev = cur;
     const rest = cur.slice(this.committed.length);
     const stable = this.committed.join(" ");
     const tentative = rest.join(" ");

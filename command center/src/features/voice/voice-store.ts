@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { LearnedPathway, PendingMemory } from "@/features/modes/learning";
+import { settleAnsweredCard, withCardExpiry, type AnsweredMemory, type LearnedPathway, type MemoryCardEnd, type PendingMemory } from "@/features/modes/learning";
 import type { DispatchView, PacketResult } from "@/features/arbiter/api";
 import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
@@ -79,6 +79,15 @@ export interface VoiceTurn {
   learned?: LearnedPathway[];
   /** Learning mode: lessons Tony proposed on this reply, waiting for Nic's yes (the memory card). */
   pendingMemory?: PendingMemory[];
+  /** Learning mode: when this card's proposals stop waiting (Rust's 10-minute TTL from when they
+   * were made), set once when the card arrives (`withCardExpiry`). Past it the card is "No longer pending". */
+  memoryExpiresAt?: number;
+  /** Learning mode: how the card ended without its own buttons: a later spoken / typed yes / no
+   * answered it (`settleAnsweredCard`), or the desktop app restarted (`endCardsBefore`). */
+  memoryEnd?: MemoryCardEnd;
+  /** Learning mode, on Rust's answer to a spoken / typed yes / no: the proposals it took, so
+   * `settleAnsweredCard` ends exactly the card holding them (`OsTurnResult.answeredMemory`). */
+  answeredMemory?: AnsweredMemory;
   /** Tony's dispatch packet under his reply (held / pending approval / queued). */
   dispatch?: DispatchView;
   /** A dispatched packet's outcome (per task: status, attempts, output). */
@@ -185,13 +194,16 @@ export const useVoice = create<VoiceStore>()(
       setConsoleVisible: (consoleVisible) => set({ consoleVisible }),
       setPartial: (partial) => set({ partial }),
       setActiveThread: (activeThread) => set({ activeThread }),
+      // A memory card gets its expiry when it arrives, and Rust's answer to a spoken / typed yes / no
+      // ends the card it answered (decision 5: a card never outlives its proposals with live buttons).
       pushTurn: (t) => {
         // No thread given ⇒ Tony's thread, never whichever sub-agent tab happens to be open.
-        const turn: VoiceTurn = { ...t, thread: t.thread ?? tonyThreadFor(sectionSource(), get().activeThread, HUD_VIEW), id: crypto.randomUUID(), at: Date.now() };
-        set((s) => ({ turns: cap([...s.turns, turn]) }));
+        const at = Date.now();
+        const turn: VoiceTurn = withCardExpiry({ ...t, thread: t.thread ?? tonyThreadFor(sectionSource(), get().activeThread, HUD_VIEW), id: crypto.randomUUID(), at }, at);
+        set((s) => ({ turns: cap(settleAnsweredCard([...s.turns, turn], turn.id)) }));
         return turn;
       },
-      updateTurn: (id, patch) => set((s) => ({ turns: s.turns.map((t) => (t.id === id ? { ...t, ...patch, rev: (t.rev ?? 0) + 1 } : t)) })),
+      updateTurn: (id, patch) => set((s) => ({ turns: settleAnsweredCard(s.turns.map((t) => (t.id === id ? withCardExpiry({ ...t, ...patch, rev: (t.rev ?? 0) + 1 }, Date.now()) : t)), id) })),
       setPending: (pending) => set({ pending }),
       setError: (error) => set({ error, state: error ? "error" : "idle" }),
       clear: (thread) => {

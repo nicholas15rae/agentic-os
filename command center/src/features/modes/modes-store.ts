@@ -2,8 +2,9 @@ import { create } from "zustand";
 import { useOs } from "@/features/os/os-store";
 import { isDesktopApp } from "@/stores/settings";
 import type { FeedbackLevel } from "@/lib/platform";
-import { osSwitchboard } from "@/features/os/switchboard";
-import { DEFAULT_EFFECTIVE, DEFAULT_MODE_ID, NOVELTY_MODE_ID, PRESET_MODES, BUILTIN_MODE_IDS, agentLive, toolLive, viewFromMirror, type Curiosity, type DispatchPolicy, type EffectiveMode, type ModeMirror, type ModeOverrides, type ModesView, type SwitchboardFreeze, type TonyMode, type Verbosity } from "./modes";
+import { osSwitchboard, ownsServer } from "@/features/os/switchboard";
+import { tonyModeTools } from "@/features/os/tool-load";
+import { DEFAULT_EFFECTIVE, DEFAULT_MODE_ID, NOVELTY_MODE_ID, PRESET_MODES, BUILTIN_MODE_IDS, agentLive, isAlwaysLiveServer, toolGloballyFrozen, toolLive, viewFromMirror, type Curiosity, type DispatchPolicy, type EffectiveMode, type ModeMirror, type ModeOverrides, type ModesView, type SwitchboardFreeze, type TonyMode, type Verbosity } from "./modes";
 
 /**
  * Tony's modes in the webview (Phase 2 Part C). Not persisted here: Rust owns modes.json and the
@@ -198,6 +199,18 @@ export function currentFreeze(): SwitchboardFreeze {
 
 /** Is `agent` live this turn (the active mode's overlay + the master switchboard)? */
 export const isAgentLiveNow = (agent: string, osName = ""): boolean => agentLive(useModes.getState().effective, agent, currentFreeze(), osName);
+
+/** Is `server` live for TONY this turn (section pass, Rust `modes::tony_server_live`)? His base
+ * (the servers he owns) is on in every mode; the mode's extras (os.json `tonyModeTools`) in that
+ * mode; only the master switchboard takes one away. Before the config loads: the mode rule. */
+export function isTonyToolLiveNow(server: string): boolean {
+  const cfg = useOs.getState().cfg;
+  if (!cfg) return isToolLiveNow(server);
+  if (isAlwaysLiveServer(server)) return true;
+  if (toolGloballyFrozen(server, currentFreeze())) return false;
+  const own = cfg.mcps?.some((m) => m.id === server && ownsServer(m.agents, "general"));
+  return !!own || (tonyModeTools(cfg)[useModes.getState().effective.mode_id] ?? []).includes(server);
+}
 
 /** Is the tool server `server` live this turn? */
 export const isToolLiveNow = (server: string): boolean => toolLive(useModes.getState().effective, server, currentFreeze());

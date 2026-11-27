@@ -49,7 +49,7 @@ describe("heuristicPlan — Gmail draft binding", () => {
 describe("heuristicPlan — Instagram writes are gated tool plans", () => {
   it("a publish request is a mutating instagram.publish_post plan with a live-post read-back", () => {
     desktop();
-    const p = heuristicPlan("Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "general");
+    const p = heuristicPlan("Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "bizops");
     expect(p.mutating).toBe(true);
     expect(p.target).toEqual({ kind: "tool", tool: "instagram.publish_post", args: { caption: "New headshots", imageUrl: "https://cdn.example.com/headshot.jpg" } });
     expect(p.readBack).toMatch(/publish a photo to Instagram with the caption "New headshots".*goes live.*Proceed\?$/);
@@ -58,9 +58,19 @@ describe("heuristicPlan — Instagram writes are gated tool plans", () => {
 
   it("a comment reply is a mutating instagram.reply_comment plan", () => {
     desktop();
-    const p = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "general");
+    const p = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "bizops");
     expect(p.mutating).toBe(true);
     expect(p.target).toEqual({ kind: "tool", tool: "instagram.reply_comment", args: { commentId: "17890012345", message: "thank you!" } });
+  });
+
+  it("Tony only reads Instagram: a post or a reply from him is Biz Ops' job, never a card (Section 21.1)", async () => {
+    desktop();
+    for (const text of ["Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "reply to Instagram comment 17890012345 saying thank you!"]) {
+      const p = heuristicPlan(text, "general");
+      expect(p.mutating, text).toBe(false);
+      expect(p.target.kind).toBe("agent");
+      expect((await p.run!()).text).toMatch(/Biz Ops' job/);
+    }
   });
 
   it("no media link → Tony asks, nothing is planned", async () => {
@@ -78,22 +88,25 @@ describe("heuristicPlan — an approved-action card only for a live tool its age
   const withCfg = (mcps: McpServer[], frozenTools: string[] = []) => useOs.setState({ cfg: { mcps, switchboard: { version: 1, frozenAgents: [], frozenTools } } as unknown as OsConfig });
   const replyOf = async (p: ReturnType<typeof heuristicPlan>) => (await p.run!()).text;
 
-  it("a mode that freezes Gmail: no card, Tony gives the frozen reason", async () => {
+  it("Gmail is in Tony's base: a mode never freezes it, only the master switchboard does", async () => {
     desktop();
     useModes.setState({ effective: effectiveOf(PRESET_MODES, "builder") });
+    withCfg([server("gmail", ["general"])]);
+    expect(heuristicPlan(DRAFT, "general").mutating).toBe(true);
+    withCfg([server("gmail", ["general"])], ["gmail"]);
     const p = heuristicPlan(DRAFT, "general");
     expect(p.mutating).toBe(false);
     expect(p.target.kind).toBe("agent");
-    expect(await replyOf(p)).toBe("Gmail is frozen in Builder mode, so I left it alone. Switch modes and I can use it.");
+    expect(await replyOf(p)).toBe("Gmail is frozen on the master switchboard, so I left it alone. Turn it back on in the switchboard and I can use it.");
   });
 
   it("Instagram frozen on the master switchboard: no card, the master reason", async () => {
     desktop();
     withCfg([server("instagram", null)], ["instagram"]);
-    const p = heuristicPlan(POST, "general");
+    const p = heuristicPlan(POST, "bizops");
     expect(p.mutating).toBe(false);
     expect(await replyOf(p)).toBe("Instagram is frozen on the master switchboard, so I left it alone. Turn it back on in the switchboard and I can use it.");
-    const reply = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "general");
+    const reply = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "bizops");
     expect(reply.mutating).toBe(false);
     expect(reply.target.kind).toBe("agent");
   });
@@ -197,12 +210,13 @@ describe("heuristicPlan — the calendar-add card (A2)", () => {
     expect((await pwa.run!()).text).toBe("Calendar adds go through the app — ask me there.");
   });
 
-  it("a mode that freezes the calendar: no card, the frozen reason", async () => {
+  it("the calendar frozen on the master switchboard: no card, the frozen reason (a mode never freezes Tony's base)", async () => {
     desktop();
     useModes.setState({ effective: effectiveOf(PRESET_MODES, "builder") });
+    useOs.setState({ cfg: { mcps: [{ id: "calendar", name: "calendar", agents: ["general"], enabled: true, transport: "builtin", builtin: true }], switchboard: { version: 1, frozenAgents: [], frozenTools: ["calendar"] } } as unknown as OsConfig });
     const p = heuristicPlan("add it to my calendar", "general", { bookings: [NETFLIX], now: NOW });
     expect(p.mutating).toBe(false);
-    expect((await p.run!()).text).toMatch(/^Google Calendar is frozen in Builder mode, so I left it alone\./);
+    expect((await p.run!()).text).toMatch(/^Google Calendar is frozen on the master switchboard, so I left it alone\./);
   });
 
   it("a calendar read is never an action", () => {

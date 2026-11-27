@@ -1,19 +1,28 @@
 import { useCallback, useState } from "react";
 import { AlertTriangle, CheckCircle2, Copy, Loader2, RotateCcw, Save } from "lucide-react";
-import { Card, Chip, Field, Input, Select } from "@/components/ui";
+import { Card, Chip, Field, Input } from "@/components/ui";
 import { CameraCapture } from "@/features/finance/CameraCapture";
-import { CATEGORIES, type Check, type Receipt } from "@/features/finance/types";
+import { CATEGORIES, PAY_METHODS, type Check, type Receipt } from "@/features/finance/types";
 import { cc, collections, type OcrResult } from "@/lib/cc-api";
 import { useSettings } from "@/stores/settings";
+import { useProfiles } from "@/features/business/profiles-store";
+import { localIso } from "@/features/finance/areas";
+import { commissionCalc } from "@/features/finance/commission";
+import { SCAN_KINDS, scanTarget, suggestFromScan, type ScanKind } from "@/features/finance/scan-suggest";
+import { ActingFields, emptyActing, prefillPct, type ActingValue } from "./ActingFields";
+import { AreaSelect, SelectOther } from "./fields";
+import { areaTaxRate } from "./LedgerPanels";
+import { bookIncome } from "./book";
 
-type Kind = "receipt" | "invoice" | "check";
+type Kind = ScanKind;
+type SavedTo = "receipts" | "checks" | "income";
 type Stage = { s: "capture" } | { s: "working"; msg: string; preview: string } | { s: "review"; preview: string; fileId: string; ocr: OcrResult | null; error?: string } | { s: "saved"; msg: string };
 
 /**
  * Camera → gateway (stored locally) → local vision LLM (or Tesseract) →
  * editable review with HST/GST validation → saved to the tax table / cheque vault.
  */
-export function ScanPanel({ onSaved }: { onSaved?: (where: "receipts" | "checks") => void }) {
+export function ScanPanel({ onSaved }: { onSaved?: (where: SavedTo) => void }) {
   const [mode, setMode] = useState<"document" | "qr">("document");
   const [kind, setKind] = useState<Kind>("receipt");
   const [stage, setStage] = useState<Stage>({ s: "capture" });
@@ -44,10 +53,10 @@ export function ScanPanel({ onSaved }: { onSaved?: (where: "receipts" | "checks"
     <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
       <Card title="Capture" action={<div className="flex gap-1.5"><Chip active={mode === "document"} onClick={() => setMode("document")}>Document</Chip><Chip active={mode === "qr"} onClick={() => setMode("qr")} tone="teal">QR code</Chip></div>}>
         {mode === "document" && (
-          <div className="mb-3 flex gap-1.5">
-            {(["receipt", "invoice", "check"] as Kind[]).map((k) => (
-              <Chip key={k} active={kind === k} onClick={() => setKind(k)}>
-                {k === "check" ? "Cheque" : k === "invoice" ? "Bill / invoice" : "Receipt"}
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {SCAN_KINDS.map((k) => (
+              <Chip key={k.id} active={kind === k.id} onClick={() => setKind(k.id)}>
+                {k.label}
               </Chip>
             ))}
           </div>
@@ -85,10 +94,10 @@ export function ScanPanel({ onSaved }: { onSaved?: (where: "receipts" | "checks"
       ) : (
         <Card title="How it works" hint="Everything stays on your machine.">
           <ol className="list-decimal space-y-2 pl-5 text-sm text-ink-2">
-            <li>Capture a receipt, bill or cheque (or upload a photo). The image is stored by your local gateway.</li>
-            <li>Your local vision model (LM Studio) reads the vendor, date, subtotal, GST/HST/PST and total. No cloud OCR.</li>
+            <li>Capture a receipt, bill, cheque, e-Transfer notice or pay stub (or upload a photo). The image is stored by your local gateway and stays attached.</li>
+            <li>Your local vision model (LM Studio) reads the amount, date, payer / vendor and HST. No cloud OCR.</li>
             <li>The tax math is checked (13% ON HST, 15% Atlantic HST, 5% GST) and anything odd is flagged.</li>
-            <li>You confirm or fix the fields, then it lands in the searchable, exportable tax table and the vault.</li>
+            <li>It suggests the area, category and agent from the names on it. Nothing is saved until you check it and tap Save.</li>
           </ol>
         </Card>
       )}
@@ -129,12 +138,19 @@ function QrResult({ text, onClear }: { text: string; onClear: () => void }) {
 const num = (v: string) => (v.trim() === "" ? null : Math.round(Number(v.replace(/[$,\s]/g, "")) * 100) / 100);
 const str = (v: number | null | undefined) => (v == null ? "" : String(v));
 
-function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: string; ocr: OcrResult | null; error?: string; onSaved: (where: "receipts" | "checks", msg: string) => void }) {
+function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: string; ocr: OcrResult | null; error?: string; onSaved: (where: SavedTo, msg: string) => void }) {
   const f = ocr?.fields ?? {};
   const currency = useSettings((s) => s.business.currency);
+  const target = scanTarget(kind);
+  // A suggestion from fixed name rules only; the scanned text never drives anything else.
+  const [sug] = useState(() => suggestFromScan(kind, f, { agencies: useProfiles.getState().doc.profiles.acting?.agencies, profiles: useProfiles.getState().doc }));
+  const [area, setArea] = useState(sug.area ?? "");
+  const [acting, setActing] = useState<ActingValue>(() => (sug.agentId ? { ...emptyActing(), agentId: sug.agentId, union: !!sug.union, pct: prefillPct(sug.agentId, !!sug.union) } : { ...emptyActing(), union: !!sug.union }));
+  const [alsoIncome, setAlsoIncome] = useState(true);
+  const [method, setMethod] = useState(kind === "paystub" ? "direct deposit" : kind === "check" ? "cheque" : "e-transfer");
   const [d, setD] = useState({
     vendor: f.vendor ?? f.payer ?? "",
-    date: f.date ?? new Date().toISOString().slice(0, 10),
+    date: f.date ?? localIso(Date.now()),
     subtotal: str(f.subtotal),
     gst: str(f.gst),
     hst: str(f.hst),
@@ -142,13 +158,35 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
     qst: str(f.qst),
     tip: str(f.tip),
     total: str(f.total),
-    category: f.category && CATEGORIES.includes(f.category) ? f.category : "other",
+    category: sug.category ?? (f.category && CATEGORIES.includes(f.category) ? f.category : "other"),
     chequeNumber: f.chequeNumber ?? "",
     memo: f.memo ?? "",
     notes: "",
   });
   const [saving, setSaving] = useState(false);
   const up = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setD({ ...d, [k]: e.target.value });
+  const moneyIn = target !== "receipts";
+  // Money in: the pre-tax amount is the subtotal, else the total less the HST printed on it. With
+  // no HST printed and an HST-registered area, the amount received is taken to include it.
+  const rate = areaTaxRate(area || undefined);
+  const noTaxShown = d.hst === "" && d.gst === "" && d.subtotal === "";
+  const received = num(d.total) ?? 0;
+  const inGross = noTaxShown && rate > 0 ? Math.round((received / (1 + rate / 100)) * 100) / 100 : (num(d.subtotal) ?? Math.max(0, Math.round((received - (num(d.hst) ?? 0) - (num(d.gst) ?? 0)) * 100) / 100));
+  const inHst = noTaxShown && rate > 0 ? Math.round((received - inGross) * 100) / 100 : (num(d.hst) ?? 0) + (num(d.gst) ?? 0);
+  const book = (imageNote: string) =>
+    bookIncome(
+      {
+        date: d.date,
+        client: d.vendor || "Unknown payer",
+        description: [imageNote, d.memo, d.notes].filter(Boolean).join(" · "),
+        amount: inGross,
+        taxCollected: inHst,
+        method,
+        area: area || undefined,
+        imageFileId: fileId,
+      },
+      area === "acting" ? acting : null,
+    );
 
   // Live re-check as fields are corrected.
   const sub = num(d.subtotal) ?? 0;
@@ -160,6 +198,7 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
     setSaving(true);
     try {
       if (kind === "check") {
+        const inc = alsoIncome ? await book(`Cheque${d.chequeNumber ? ` #${d.chequeNumber}` : ""}`) : null;
         await collections.create<Check>("checks", {
           payer: d.vendor || "Unknown payer",
           amount: num(d.total) ?? 0,
@@ -169,8 +208,13 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
           deposited: false,
           imageFileId: fileId,
           notes: d.notes || undefined,
+          area: area || undefined,
+          incomeId: inc?.id,
         });
-        onSaved("checks", `Cheque from ${d.vendor || "payer"} logged in the vault.`);
+        onSaved("checks", `Cheque from ${d.vendor || "payer"} logged in the vault${inc ? " and in Income" : ""}.`);
+      } else if (moneyIn) {
+        await book(kind === "paystub" ? "Pay stub" : "e-Transfer");
+        onSaved("income", `${kind === "paystub" ? "Pay stub" : "e-Transfer"} from ${d.vendor || "payer"} saved to Income.`);
       } else {
         await collections.create<Receipt>("receipts", {
           vendor: d.vendor || "Unknown vendor",
@@ -192,6 +236,8 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
           confidence: f.confidence,
           verified: true,
           notes: [kind === "invoice" ? "Bill / supplier invoice" : "", d.notes].filter(Boolean).join(" · ") || undefined,
+          area: area || undefined,
+          source: "scan",
         });
         onSaved("receipts", `${d.vendor || "Receipt"} saved to the tax table.`);
       }
@@ -202,7 +248,7 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
 
   return (
     <Card
-      title={kind === "check" ? "Review cheque" : "Review & confirm"}
+      title={kind === "check" ? "Review cheque" : moneyIn ? "Review payment" : "Review & confirm"}
       hint={ocr ? `Read by ${ocr.engine}${f.confidence != null ? ` · confidence ${Math.round(f.confidence * 100)}%` : ""}. Check every number against the paper.` : undefined}
     >
       {error && (
@@ -224,6 +270,11 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
           ))}
         </div>
       )}
+      {sug.reasons.length > 0 && (
+        <p className="mb-3 rounded-[12px] border border-teal/30 bg-teal/[0.06] p-2.5 text-xs text-ink-2">
+          <span className="text-teal">Suggested</span> from the names on it: {sug.reasons.join(" · ")}. Check the area{moneyIn ? " and agent" : " and category"} below before saving.
+        </p>
+      )}
       <form
         className="grid grid-cols-2 gap-2.5"
         onSubmit={(e) => {
@@ -231,32 +282,48 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
           void save();
         }}
       >
-        <Field label={kind === "check" ? "Payer" : "Vendor"} className="col-span-2">
+        <Field label={moneyIn ? "Payer" : "Vendor"} className="col-span-2">
           <Input value={d.vendor} onChange={up("vendor")} required />
         </Field>
         <Field label="Date">
           <Input type="date" value={d.date} onChange={up("date")} />
         </Field>
-        {kind === "check" ? (
+        <Field label="Area">
+          <AreaSelect value={area || undefined} onChange={setArea} className="" />
+        </Field>
+        {moneyIn ? (
           <>
-            <Field label="Amount">
+            <Field label={kind === "paystub" ? "Gross pay" : "Amount"}>
               <Input inputMode="decimal" value={d.total} onChange={up("total")} className="font-mono" />
             </Field>
-            <Field label="Cheque #">
-              <Input value={d.chequeNumber} onChange={up("chequeNumber")} className="font-mono" />
+            <Field label="HST on it (if any)">
+              <Input inputMode="decimal" value={d.hst} onChange={up("hst")} className="font-mono" placeholder="—" />
             </Field>
-            <Field label="Memo">
+            {kind === "check" && (
+              <Field label="Cheque #">
+                <Input value={d.chequeNumber} onChange={up("chequeNumber")} className="font-mono" />
+              </Field>
+            )}
+            <Field label={kind === "paystub" ? "Pay period" : "Memo / message"}>
               <Input value={d.memo} onChange={up("memo")} />
             </Field>
+            <Field label="How paid">
+              <SelectOther label="How paid" value={method} options={PAY_METHODS} onChange={setMethod} className="" />
+            </Field>
+            {kind === "check" && (
+              <label className="col-span-2 flex items-center gap-1.5 text-[12px] text-ink-2">
+                <input type="checkbox" checked={alsoIncome} onChange={(e) => setAlsoIncome(e.target.checked)} className="accent-teal" /> Also log it as income (and any agent commission)
+              </label>
+            )}
+            {area === "acting" && (kind !== "check" || alsoIncome) && <ActingFields gross={inGross} value={acting} onChange={setActing} currency={currency} />}
+            <p className="col-span-2 font-mono text-[11px] text-ink-3">
+              Books {inGross.toFixed(2)} before tax + {inHst.toFixed(2)} HST{area === "acting" && acting.agentId ? ` · commission on ${inGross.toFixed(2)}: ${commissionCalc(inGross, acting.pct, acting.off).commission.toFixed(2)}` : ""}
+            </p>
           </>
         ) : (
           <>
             <Field label="Category">
-              <Select value={d.category} onChange={up("category")}>
-                {CATEGORIES.map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
-              </Select>
+              <SelectOther label="Category" value={d.category} options={CATEGORIES} onChange={(category) => setD({ ...d, category })} className="" />
             </Field>
             {(["subtotal", "gst", "hst", "pst", "qst", "tip", "total"] as const).map((k) => (
               <Field key={k} label={k.toUpperCase()}>
@@ -269,7 +336,7 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
           <Input value={d.notes} onChange={up("notes")} placeholder="Client / project, what it was for…" />
         </Field>
         <button className="pill-primary col-span-2" disabled={saving}>
-          {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save {kind === "check" ? "to cheque vault" : "to tax table"}
+          {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save {kind === "check" ? "to cheque vault" : moneyIn ? "to income" : "to tax table"}
         </button>
       </form>
     </Card>

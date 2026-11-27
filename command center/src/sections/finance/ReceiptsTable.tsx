@@ -1,14 +1,36 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { AlertTriangle, Download, Image as ImageIcon, Search, Sparkles, Trash2 } from "lucide-react";
 import { Card, Input, Select, downloadText, money, toCsv } from "@/components/ui";
 import { cc, useCollection, type Item } from "@/lib/cc-api";
 import { CATEGORIES, quarterOf, receiptItc, type Receipt } from "@/features/finance/types";
 import { useSettings } from "@/stores/settings";
+import { applyFilter } from "@/features/finance/areas";
+import { useAreas, useFinanceFilter } from "@/features/finance/filter-store";
+import { AreaTag, EditButton, EditFields, QuestionMark, SelectOther, type FieldSpec } from "./fields";
+
+const RECEIPT_FIELDS: FieldSpec[] = [
+  { key: "date", label: "Date", type: "date" },
+  { key: "vendor", label: "Vendor", type: "text" },
+  { key: "category", label: "Category", type: "select", options: CATEGORIES },
+  { key: "area", label: "Area", type: "area" },
+  { key: "subtotal", label: "Subtotal", type: "number" },
+  { key: "gst", label: "GST", type: "number" },
+  { key: "hst", label: "HST", type: "number" },
+  { key: "pst", label: "PST", type: "number" },
+  { key: "qst", label: "QST", type: "number" },
+  { key: "tip", label: "Tip", type: "number" },
+  { key: "total", label: "Total", type: "number" },
+  { key: "inReturn", label: "In HST return", type: "check" },
+  { key: "notes", label: "Notes", type: "text" },
+];
 
 /** The HST/GST tax table: searchable, filterable by quarter/category, exportable. */
 export function ReceiptsTable() {
   const { items, remove, update, error } = useCollection<Receipt>("receipts");
   const currency = useSettings((s) => s.business.currency);
+  const filter = useFinanceFilter((s) => s.filter);
+  const { label } = useAreas();
+  const [editing, setEditing] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [quarter, setQuarter] = useState("all");
   const [cat, setCat] = useState("all");
@@ -16,7 +38,7 @@ export function ReceiptsTable() {
   const [searching, setSearching] = useState(false);
 
   const quarters = useMemo(() => [...new Set(items.map((r) => quarterOf(r.date)))].sort().reverse(), [items]);
-  const rows = items
+  const rows = applyFilter(items, filter)
     .filter((r) => quarter === "all" || quarterOf(r.date) === quarter)
     .filter((r) => cat === "all" || r.category === cat)
     .filter((r) => (semantic ? semantic.has(r.id) : !q || `${r.vendor} ${r.category} ${r.notes ?? ""} ${r.total ?? ""}`.toLowerCase().includes(q.toLowerCase())))
@@ -39,8 +61,9 @@ export function ReceiptsTable() {
   const exportCsv = () =>
     downloadText(
       `tax-table-${quarter === "all" ? "all" : quarter.replace(" ", "-")}.csv`,
-      toCsv(rows as unknown as Record<string, unknown>[], [
+      toCsv(rows.map((r) => ({ ...r, areaName: label(r.area), inReturnText: r.inReturn === false ? "no" : "yes" })) as unknown as Record<string, unknown>[], [
         { key: "date", label: "Date" },
+        { key: "areaName", label: "Area" },
         { key: "vendor", label: "Vendor" },
         { key: "category", label: "Category" },
         { key: "subtotal", label: "Subtotal" },
@@ -53,6 +76,8 @@ export function ReceiptsTable() {
         { key: "currency", label: "Currency" },
         { key: "regime", label: "Tax regime" },
         { key: "notes", label: "Notes" },
+        { key: "inReturnText", label: "In HST return" },
+        { key: "question", label: "Question for accountant" },
       ]),
     );
 
@@ -121,7 +146,16 @@ export function ReceiptsTable() {
           </thead>
           <tbody className="font-mono tabular">
             {rows.map((r) => (
-              <Row key={r.id} r={r} currency={currency} onDelete={() => void remove(r.id)} onCat={(category) => void update(r.id, { category })} />
+              <Fragment key={r.id}>
+                <Row r={r} currency={currency} onDelete={() => void remove(r.id)} onPatch={(p) => void update(r.id, p)} onEdit={() => setEditing(editing === r.id ? null : r.id)} />
+                {editing === r.id && (
+                  <tr>
+                    <td colSpan={9} className="font-sans">
+                      <EditFields spec={RECEIPT_FIELDS} value={{ ...r, inReturn: r.inReturn !== false } as unknown as Record<string, unknown>} onPatch={(p) => void update(r.id, p as Partial<Receipt>)} onClose={() => setEditing(null)} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
             {!rows.length && (
               <tr>
@@ -152,23 +186,22 @@ export function ReceiptsTable() {
   );
 }
 
-function Row({ r, currency, onDelete, onCat }: { r: Item<Receipt>; currency: string; onDelete: () => void; onCat: (c: string) => void }) {
+function Row({ r, currency, onDelete, onPatch, onEdit }: { r: Item<Receipt>; currency: string; onDelete: () => void; onPatch: (p: Partial<Receipt>) => void; onEdit: () => void }) {
   const flagged = (r.flags?.length ?? 0) > 0;
   return (
     <tr className="group border-t border-white/[0.05] [&>td]:px-2 [&>td]:py-1.5">
       <td className="text-ink-2">{r.date}</td>
-      <td className="max-w-[200px] truncate font-sans text-ink" title={r.notes}>
+      <td className="max-w-[260px] truncate font-sans text-ink" title={r.notes}>
         {flagged && <AlertTriangle size={12} className="mr-1 inline text-alert" aria-label={r.flags!.join("; ")} />}
-        {r.vendor}
+        {r.vendor} <QuestionMark q={r.question} />
+        <span className="ml-1.5">
+          <AreaTag area={r.area} onAssign={(area) => onPatch({ area })} />
+        </span>
       </td>
       <td className="font-sans">
-        <select value={r.category} onChange={(e) => onCat(e.target.value)} className="rounded-md bg-transparent text-[12px] text-ink-2 outline-none hover:text-ink" aria-label="Category">
-          {CATEGORIES.map((c) => (
-            <option key={c} className="bg-card">
-              {c}
-            </option>
-          ))}
-        </select>
+        <span className="block w-32">
+          <SelectOther label="Category" value={r.category} options={CATEGORIES} onChange={(category) => onPatch({ category })} className="!h-7 !py-0 text-[12px]" />
+        </span>
       </td>
       <td className="text-right text-ink-2">{money(r.subtotal, currency)}</td>
       <td className="text-right text-ink-2">{r.gst ? money(r.gst, currency) : "—"}</td>
@@ -176,6 +209,9 @@ function Row({ r, currency, onDelete, onCat }: { r: Item<Receipt>; currency: str
       <td className="text-right text-ink-2">{r.pst || r.qst ? money((r.pst ?? 0) + (r.qst ?? 0), currency) : "—"}</td>
       <td className="text-right text-ink">{money(r.total, currency)}</td>
       <td className="whitespace-nowrap text-right">
+        <span className="inline-block align-middle">
+          <EditButton onClick={onEdit} label={`Edit ${r.vendor}`} />
+        </span>
         {r.imageFileId && (
           <a href={cc.fileUrl(r.imageFileId)} target="_blank" rel="noreferrer" aria-label="View scan" className="inline-grid size-7 place-items-center rounded-full text-ink-3 hover:text-teal">
             <ImageIcon size={13} />

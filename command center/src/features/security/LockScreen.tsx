@@ -22,7 +22,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState<"pin" | "bio" | "companion" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [waiting, setWaiting] = useState<{ id: string; expiresAt: number } | null>(null);
+  const [waiting, setWaiting] = useState<{ id: string; expiresAt: number; code: string } | null>(null);
   const [, tick] = useState(0);
   const pinRef = useRef<HTMLInputElement>(null);
   const s = status.session;
@@ -30,6 +30,8 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
   const lockoutLeft = s.lockoutUntil ? Math.max(0, Math.ceil(s.lockoutUntil - Date.now() / 1000)) : 0;
   const secondDone = !!s.secondFactor;
   const needSecond = s.needsSecondFactor && !secondDone;
+  // Phone approval login: offered whenever a paired phone can log in on its own (desktop side).
+  const phoneLogin = !!status.companionUnlocks && status.companionEnabled && status.companionPaired && !status.companionDevice && !secondDone;
 
   useEffect(() => {
     if (!lockoutLeft) return;
@@ -146,6 +148,22 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
               </ol>
             ) : null}
 
+            {/* Phone approval login (like IB Key): the main way in when a phone is paired; the PIN below is the fallback. */}
+            {phoneLogin && (
+              <div className="mt-4 flex flex-col gap-1.5">
+                <button className="pill-primary w-full justify-center" disabled={!!busy || lockoutLeft > 0} onClick={() => void companion()}>
+                  {busy === "companion" ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
+                  {waiting ? "Approve on your phone…" : "Log in with my phone"}
+                </button>
+                {waiting ? (
+                  <p className="text-[11px] text-ink-2">
+                    On your phone, type <b className="font-mono text-base text-amber-light">{waiting.code}</b> and confirm with your fingerprint.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-ink-3">Or use your PIN below.</p>
+                )}
+              </div>
+            )}
             {(needSecond || (s.reason === "startup" && !secondDone)) && (
               <div className="mt-3 flex flex-col gap-2">
                 {status.biometricAvailable && (
@@ -154,7 +172,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
                     {status.platform === "windows" ? "Windows Hello" : "Fingerprint"}
                   </button>
                 )}
-                {needSecond && status.companionEnabled && status.companionPaired && (
+                {needSecond && !phoneLogin && status.companionEnabled && status.companionPaired && (
                   <button className="pill-glass w-full justify-center" disabled={!!busy || lockoutLeft > 0} onClick={() => void companion()}>
                     {busy === "companion" ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
                     {waiting ? "Waiting for your phone…" : "Approve on my phone"}

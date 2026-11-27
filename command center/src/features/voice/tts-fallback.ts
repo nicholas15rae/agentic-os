@@ -1,5 +1,8 @@
 import type { SpeakOpts, TtsEngine } from "./tts-types";
 
+/** Rust refused because the speaker is frozen on the master switchboard (Section 20.3). */
+export const isFrozenVoice = (e: unknown): boolean => String(e instanceof Error ? e.message : e).includes("FROZEN_VOICE");
+
 /** Primary TTS with automatic fallback to the system voice if Kokoro/ElevenLabs is
  * down. The fallback is per CALL, not a permanent switch: a transient failure (one
  * offline request, a quota blip) no longer strands the rest of the session on the
@@ -17,6 +20,8 @@ export class FallbackTts implements TtsEngine {
       try {
         return await this.primary.speak(text, opts);
       } catch (e) {
+        // A frozen agent has no voice at all (Rust FROZEN_VOICE): silence, not the system voice.
+        if (isFrozenVoice(e)) return;
         // A cue's voice that the current engine doesn't have: retry without it
         // (still the primary engine) before giving up on this one call. The retry keeps
         // the reply's `utteranceId` (P1), so it stays in the same breaker scope.

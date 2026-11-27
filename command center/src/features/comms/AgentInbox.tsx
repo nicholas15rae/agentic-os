@@ -16,8 +16,9 @@ const time = (ms: number) => {
  * Comms → Agents: every agent report, newest first — who sent it, when, the text and a replay
  * button. Unread until opened (clicked) or heard in full. Desktop: the reports are made here.
  */
-export function AgentInbox() {
-  const messages = useAgentInbox((s) => s.messages);
+export function AgentInbox({ agent, compact = false }: { agent?: string; compact?: boolean } = {}) {
+  const all = useAgentInbox((s) => s.messages);
+  const messages = agent ? all.filter((m) => m.agent === agent) : all;
   const read = useAgentInbox((s) => s.read);
   const clearRead = useAgentInbox((s) => s.clearRead);
   const [playing, setPlaying] = useState<string | null>(null);
@@ -34,12 +35,12 @@ export function AgentInbox() {
 
   return (
     <Card
-      title="Agent messages"
-      hint={unread ? inboxLine(messages) : "Reports from your agents when a background job finishes. Tony tells you what's waiting when you ask for your messages."}
+      title={agent ? `${roleLabel(agent)} reports` : "Agent messages"}
+      hint={compact ? undefined : unread ? inboxLine(messages) : "Reports from your agents when a background job finishes. Ask Tony for your agent reports and he tells you what's waiting."}
       action={
         <div className="flex items-center gap-3">
           {unread > 0 && (
-            <button onClick={() => read({})} className="inline-flex items-center gap-1 text-xs text-ink-3 hover:text-ink" title="Mark every message read">
+            <button onClick={() => read(agent ? { agent } : {})} className="inline-flex items-center gap-1 text-xs text-ink-3 hover:text-ink" title="Mark every message read">
               <CheckCheck size={13} /> Mark all read
             </button>
           )}
@@ -52,7 +53,7 @@ export function AgentInbox() {
       }
     >
       {!messages.length && <Empty>No agent messages yet.</Empty>}
-      <ul className="max-h-[65vh] space-y-1.5 overflow-y-auto">
+      <ul className={`${compact ? "max-h-[30vh]" : "max-h-[65vh]"} space-y-1.5 overflow-y-auto`}>
         {messages.map((m) => (
           <li key={m.id}>
             <div

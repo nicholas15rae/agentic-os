@@ -733,7 +733,15 @@ def _ws_token_ok(ws: Any, sent: Any) -> bool:
         token = ""
     hdr = ws.headers.get("authorization", "")
     cand = hdr[7:].strip() if hdr.lower().startswith("bearer ") else (sent if isinstance(sent, str) else "")
-    return bool(token) and hmac.compare_digest(cand.encode(), token.encode())
+    if token and cand and hmac.compare_digest(cand.encode(), token.encode()):
+        return True
+    # Section pass: a per-device token (device_registry) works here too.
+    import device_registry
+    dev = device_registry.match(cand) if cand else None
+    if dev is None:
+        return False
+    device_registry.seen(dev["id"], ws.client.host if getattr(ws, "client", None) else "", ws.headers.get("user-agent", ""))
+    return True
 
 
 def _ws_json(msg: dict) -> Optional[dict]:

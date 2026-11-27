@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import { Library, Loader2, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Library, Loader2, Snowflake, Trash2, X } from "lucide-react";
 import { isTauri } from "@/lib/platform";
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { THREADS, useVoice, type ThreadId } from "@/features/voice/voice-store";
@@ -7,6 +7,15 @@ import { CommandInput, MicButton, Transcript } from "@/features/voice/VoiceParts
 import { useOsName } from "@/features/os/os-store";
 import { HandoffChip, HandoffToggle } from "@/features/voice/HandoffToggle";
 import { AgentConversationToggle } from "@/features/transcript/AgentConversationCard";
+import { useModes } from "@/features/modes/modes-store";
+import { frozenAgentReason } from "@/features/modes/modes";
+import { useOs } from "@/features/os/os-store";
+import { osSwitchboard } from "@/features/os/switchboard";
+import { useAgentInbox } from "@/features/comms/agent-inbox";
+import { AgentInbox } from "@/features/comms/AgentInbox";
+import { HelpDeskButton } from "@/features/helpdesk/HelpDesk";
+import { splitFrozen } from "@/features/modes/frozen-tabs";
+
 
 /**
  * The Dispatcher. Each tab is its own isolated thread: Auto-route, every
@@ -28,33 +37,67 @@ export function AgentsSection() {
   const name = useOsName();
   const n = Object.fromEntries(THREADS.map((t, i) => [t, Number(counts.split(",")[i])])) as Record<ThreadId, number>;
   const label = (t: ThreadId) => (t === "auto" ? "Auto-route" : t === "general" ? name : SUB_AGENTS[t as AgentRole].label);
+  // Frozen agents (master switchboard or the active mode) are tucked into their own group.
+  const effective = useModes((s) => s.effective);
+  const mirror = useModes((s) => s.frozen);
+  const cfg = useOs((s) => s.cfg);
+  const sb = osSwitchboard(cfg);
+  const freeze = mirror ? { frozenAgents: mirror.agents, frozenTools: mirror.tools } : { frozenAgents: sb.frozenAgents, frozenTools: sb.frozenTools };
+  const { live, frozen } = splitFrozen(THREADS, (t) => frozenAgentReason(effective, t, freeze, name));
+  const [showFrozen, setShowFrozen] = useState(false);
+  // Unread agent reports per tab (the Comms inbox, filtered by agent).
+  const inbox = useAgentInbox((s) => s.messages);
+  const unreadOf = (t: ThreadId) => inbox.reduce((k, m) => k + (!m.read && m.agent === t ? 1 : 0), 0);
+  const hasReports = thread !== "auto" && inbox.some((m) => m.agent === thread);
+
+  const tab = (t: ThreadId, why?: string) => {
+    const Icon = t === "auto" ? null : SUB_AGENTS[t as AgentRole].icon;
+    const unread = unreadOf(t);
+    return (
+      <button
+        key={t}
+        role="tab"
+        aria-selected={thread === t}
+        onClick={() => setThread(t)}
+        title={why}
+        className={`flex h-9 items-center gap-2 rounded-full border px-3.5 text-[13px] transition-colors ${
+          thread === t ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.45)] text-ink-2 backdrop-blur-md hover:text-ink"
+        } ${why ? "opacity-50" : ""}`}
+      >
+        {Icon && <Icon size={14} />}
+        {label(t)}
+        {n[t] > 0 && <span className="rounded-full bg-white/10 px-1.5 font-mono text-[10px] text-ink-2">{n[t]}</span>}
+        {unread > 0 && (
+          <span className="rounded-full bg-amber px-1.5 font-mono text-[10px] text-canvas" aria-label={`${unread} unread report${unread === 1 ? "" : "s"}`}>
+            {unread}
+          </span>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-4 pb-28 md:px-6 md:pb-6">
       <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Conversation threads">
-        {THREADS.map((t) => {
-          const Icon = t === "auto" ? null : SUB_AGENTS[t as AgentRole].icon;
-          return (
-            <button
-              key={t}
-              role="tab"
-              aria-selected={thread === t}
-              onClick={() => setThread(t)}
-              className={`flex h-9 items-center gap-2 rounded-full border px-3.5 text-[13px] transition-colors ${
-                thread === t ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.45)] text-ink-2 backdrop-blur-md hover:text-ink"
-              }`}
-            >
-              {Icon && <Icon size={14} />}
-              {label(t)}
-              {n[t] > 0 && <span className="rounded-full bg-white/10 px-1.5 font-mono text-[10px] text-ink-2">{n[t]}</span>}
-            </button>
-          );
-        })}
+        {live.map((t) => tab(t))}
+        {frozen.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowFrozen((v) => !v)}
+            aria-expanded={showFrozen}
+            className="flex h-9 items-center gap-1.5 rounded-full border border-dashed border-white/10 px-3 text-[12px] text-ink-3 hover:text-ink-2"
+            title={frozen.map((f) => f.why).join("\n")}
+          >
+            <Snowflake size={12} /> Frozen ({frozen.length}) {showFrozen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+        )}
+        {(showFrozen ? frozen : frozen.filter((f) => f.t === thread)).map((f) => tab(f.t, f.why))}
         {/* Thought-to-Product Phase 5: the routing chip + the Vocal Handoffs switch. */}
         <div className="ml-auto flex items-center gap-2">
           <HandoffChip />
           <HandoffToggle />
           <AgentConversationToggle />
+          <HelpDeskButton thread={thread} />
         </div>
         {isTauri() && (
           <button onClick={() => setDrawer(true)} className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[13px] text-ink-2 hover:text-ink" title="Skills & MCP library">
@@ -68,8 +111,13 @@ export function AgentsSection() {
         )}
       </div>
 
-      <div className="glass flex min-h-0 flex-1 flex-col rounded-[20px]">
+      <div className="glass-chat flex min-h-0 flex-1 flex-col rounded-[20px]">
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
+          {hasReports && (
+            <div className="mb-4">
+              <AgentInbox agent={thread} compact />
+            </div>
+          )}
           {n[thread] === 0 && (
             <p className="max-w-prose text-sm leading-relaxed text-ink-3">
               {thread === "auto"

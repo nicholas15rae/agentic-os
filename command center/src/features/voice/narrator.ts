@@ -26,6 +26,12 @@ export const QUIET_GAP_MS = 1500;
 const TTL_MS: Record<EventSeverity, number> = { verbose: 30_000, handoff: 30_000, milestone: 120_000, critical: Number.POSITIVE_INFINITY };
 const SPOKEN_MAX = 240;
 
+/** Agent Chatter (`routing.vocalHandoffs`) off: internal agent back-and-forth (handoff / verbose
+ * events) is never spoken — milestones and critical lines still are. Pure. */
+export function chatterMuted(severity: string, chatterOn: boolean): boolean {
+  return !chatterOn && (severity === "handoff" || severity === "verbose");
+}
+
 /** Mirrors Rust `events::narrates`: is an event of `severity` spoken at feedback `level`? */
 export function narrates(severity: string, level: number): boolean {
   switch (severity) {

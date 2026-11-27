@@ -621,7 +621,16 @@ pub(crate) async fn create_event_approved(state: &DispatchState, os: &OsState, b
     if !approved {
         return Err(PERMISSION.into());
     }
-    use_gates(&os.snapshot(), os, bridge, CREATE, true)?;
+    // Tony's approved add: main's rule (a Tony base tool answers to the master switchboard only),
+    // unlike the background read above, which follows the mode overlay.
+    let cfg = os.snapshot();
+    os_core::gate(bridge, cfg.permissions.mcp, "mcp", true, json!({ "tool": CREATE }))?;
+    if !cfg.mcps.iter().any(|m| m.id == "calendar" && m.enabled) {
+        return Err("Google Calendar is switched off — enable it in Settings → Skills & MCP Library".into());
+    }
+    if let Some(e) = super::mcp::tony_frozen_reason(&cfg, &os.modes.effective(), "calendar", "calendar").map(|r| format!("{}: {r}", super::modes::MODE_FROZEN)) {
+        return Err(e);
+    }
     let out = tool(state, os, CREATE, args, true).await;
     bridge.log(json!({ "type": "os-tool", "tool": CREATE, "ok": out.is_ok(), "via": via }));
     out
@@ -846,13 +855,15 @@ mod tests {
             assert!(run(off, true).await.unwrap_err().contains("Google Calendar is switched off"));
             let master = gate_env(|c| c.switchboard.frozen_tools = vec!["calendar".into()]);
             assert_eq!(run(master, true).await.unwrap_err(), "MODE_FROZEN: calendar is frozen on the master switchboard");
-            let learning = gate_env(|_| {});
-            learning.modes.set_active(super::super::modes::LEARNING_ID).unwrap();
-            assert_eq!(run(learning, true).await.unwrap_err(), "MODE_FROZEN: calendar is frozen in Learning mode");
             // The master kill switch: refused by the tool itself, still before any call.
             let e = run(gate_env(|c| c.privacy.kill_switch = true), true).await.unwrap_err();
             assert!(e.starts_with("kill switch is on"), "{e}");
             assert_eq!(ensure_calls(), before, "no gate reached the credentials or the bridge");
+            // Calendar is in Tony's always-on base (section pass): a mode never freezes it, Learning
+            // included, so this one gets past the gates (to the missing test backend).
+            let learning = gate_env(|_| {});
+            learning.modes.set_active(super::super::modes::LEARNING_ID).unwrap();
+            assert!(!run(learning, true).await.unwrap_err().starts_with("MODE_FROZEN"));
             // The kill-switch refusal is logged (tool, ok, via) without the event's text.
             let dir = std::env::temp_dir().join(format!("gcal-gate-{}-{}", std::process::id(), super::super::compaction::now_ms()));
             std::fs::create_dir_all(&dir).unwrap();

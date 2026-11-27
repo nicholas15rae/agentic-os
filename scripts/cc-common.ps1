@@ -163,10 +163,13 @@ function Get-HttpCode([string]$url, [int]$timeoutSec = 4) {
 }
 
 # TWS is an install4j launcher: its processes run from the install folder (tws.exe, or its bundled JRE).
+# A tws.exe started elevated (or from another folder) hides its ExecutablePath from a non-elevated caller,
+# so tws.exe is also matched by name: an open-but-not-logged-in TWS must never get a second instance.
 function Get-TwsProcess {
     $dir = Split-Path $TWS_EXE -Parent
+    $exe = Split-Path $TWS_EXE -Leaf
     @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) -and
+        ($_.Name -eq $exe -or ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase))) -and
         $_.Name -notmatch '^(uninstall|i4jdel|updater|restarter)'
     })
 }

@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { RotateCcw, Sparkles, X } from "lucide-react";
+import { AlertTriangle, RotateCcw, Sparkles, X } from "lucide-react";
 import { Card, Field, Input } from "@/components/ui";
 import { ROLE_IDS, roleLabel } from "@/features/dispatcher/roles";
-import { DEFAULT_ROUTING_CONFIG, resolve } from "@/features/dispatcher/router";
+import { DEFAULT_ROUTING_CONFIG, matchingAgents, overlappingPhrases, resolve } from "@/features/dispatcher/router";
+import { osSwitchboard } from "@/features/os/switchboard";
 import type { AgentTriggers, FeedbackConfig, FeedbackLevel } from "@/lib/platform";
 import { feedbackLevel } from "@/features/voice/narrator";
 import { CfgError, Toggle, useOsCfg } from "./os-ui";
@@ -89,7 +90,7 @@ export function NarrationControl({
   modeName?: string;
 }) {
   const level = feedbackLevel(feedback ? { feedback: { sensitivity: feedback.sensitivity, narrationEngine: feedback.narrationEngine } } : null);
-  const engine = feedback?.narrationEngine ?? "roster";
+  const engine = feedback?.narrationEngine ?? "kokoro";
   return (
     <div className="border-b border-white/5 py-2.5">
       <div className="flex flex-wrap items-center gap-3">
@@ -153,7 +154,12 @@ export function RoutingSettings() {
   const osName = useSettings((st) => st.osName || "Tony");
   const modeName = useModes((st) => st.effective.name);
   // Same inputs as the live resolver (Rust reads `os_name`): "thanks <OS name>" is Self.
-  const result = useMemo(() => (routing && testPhrase.trim() ? resolve(testPhrase, routing, osName) : null), [routing, testPhrase, osName]);
+  // The router skips agents frozen on the master switchboard (Section 20.1).
+  const frozen = useMemo(() => osSwitchboard(cfg).frozenAgents, [cfg]);
+  const result = useMemo(() => (routing && testPhrase.trim() ? resolve(testPhrase, routing, osName, { frozen }) : null), [routing, testPhrase, osName, frozen]);
+  // Section 20.2: every agent the phrase matches, when it is more than one.
+  const matches = useMemo(() => (routing && testPhrase.trim() ? matchingAgents(testPhrase, routing, osName, frozen) : []), [routing, testPhrase, osName, frozen]);
+  const overlaps = useMemo(() => (routing ? overlappingPhrases(routing, osName, frozen) : []), [routing, osName, frozen]);
   if (!cfg || !routing) return null;
 
   const saveAgents = (agents: Record<string, AgentTriggers>) => save({ routing: { agents } });
@@ -161,7 +167,7 @@ export function RoutingSettings() {
   return (
     <Card
       title="Agent routing & triggers"
-      hint="Name an agent directly (“tell my booking agent to…”) and it always wins. Otherwise a topic trigger below routes Auto-route's requests to the right specialist."
+      hint="Name an agent directly (“tell the coder to…”) and it always wins. Otherwise a topic trigger below routes Auto-route's requests to the right specialist. Agents frozen on the master switchboard never route."
       action={
         <button onClick={() => save({ routing: DEFAULT_ROUTING_CONFIG })} className="pill-glass !h-8 text-xs">
           <RotateCcw size={13} /> Reset to defaults
@@ -193,7 +199,7 @@ export function RoutingSettings() {
         <p className="label-caps mb-1.5 flex items-center gap-1.5 text-amber-soft">
           <Sparkles size={12} /> Test a phrase
         </p>
-        <Input value={testPhrase} onChange={(e) => setTestPhrase(e.target.value)} placeholder="tell my booking agent to check my last 5 whatsapp messages" className="!text-[13px]" />
+        <Input value={testPhrase} onChange={(e) => setTestPhrase(e.target.value)} placeholder="tell the coder to fix the build" className="!text-[13px]" />
         {result && (
           <p className="mt-2 text-xs text-ink-2">
             → <span className="font-mono text-ink">{result.role ? roleLabel(result.role) : "no agent (default)"}</span>
@@ -206,6 +212,38 @@ export function RoutingSettings() {
             )}
           </p>
         )}
+        {matches.length > 1 && (
+          <p className="mt-2 flex gap-1.5 text-xs text-amber-soft" role="status">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" aria-hidden />
+            <span>
+              This phrase matches {matches.length} agents' triggers:{" "}
+              {matches.map((m, i) => (
+                <span key={m.role}>
+                  {i > 0 && "; "}
+                  <span className="text-ink">{roleLabel(m.role)}</span>
+                  {m.frozen && <span className="text-ink-3"> (frozen, never routed)</span>} <span className="font-mono text-ink-3">{m.phrases.join(", ")}</span>
+                </span>
+              ))}
+              . The longest match wins; ties go by role order.
+            </span>
+          </p>
+        )}
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-ink-2">
+            Triggers that match more than one agent <span className="font-mono text-ink-3">({overlaps.length})</span>
+          </summary>
+          {overlaps.length === 0 ? (
+            <p className="mt-1 text-xs text-ink-3">None: every trigger belongs to one agent.</p>
+          ) : (
+            <ul className="mt-1 space-y-0.5">
+              {overlaps.map((o) => (
+                <li key={o.phrase} className="text-xs text-ink-2">
+                  <span className="font-mono text-ink">{o.phrase}</span> → {o.roles.map((r) => roleLabel(r)).join(", ")}
+                </li>
+              ))}
+            </ul>
+          )}
+        </details>
       </div>
       <CfgError error={error} />
     </Card>

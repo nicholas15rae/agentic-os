@@ -70,7 +70,10 @@ describe("Switchboard → mode presets", () => {
     const builder = block(h, "data-mode", "builder");
     for (const l of ["Prompter", "Designer", "Coder"]) expect(builder).toContain(`>${l}</span>`);
     expect(builder).not.toContain(">Biz Ops<");
-    expect(builder).not.toContain("<button");
+    // The preset's own overlay is read-only; only Tony's per-mode extras (os.json) are toggles.
+    const [overlay, tonyExtras] = builder.split("adds in this mode");
+    expect(overlay).not.toContain("<button");
+    expect(tonyExtras).toContain('title="Take Git from Tony in Builder"');
     expect(builder).toContain("3 agents · 8 tools on duty");
     expect(builder).toContain(">Active<");
     const ops = block(h, "data-mode", "operations");
@@ -161,7 +164,7 @@ describe("switchboard helpers", () => {
   it("osSwitchboard: an older desktop without it freezes nothing; fields are normalised", () => {
     expect(osSwitchboard(null)).toEqual({ version: 0, frozenAgents: [], frozenTools: [] });
     expect(osSwitchboard({ switchboard: { frozenAgents: ["booking"] } })).toEqual({ version: 0, frozenAgents: ["booking"], frozenTools: [] });
-    expect(DEFAULT_OS_SWITCHBOARD).toEqual({ version: 1, frozenAgents: ["booking", "librarian"], frozenTools: [] });
+    expect(DEFAULT_OS_SWITCHBOARD).toEqual({ version: 1, frozenAgents: ["booking", "librarian", "ops"], frozenTools: [] });
   });
 
   it("DEFAULT_OS_SWITCHBOARD freezes exactly what Rust seeds (os_core.rs DEFAULT_FROZEN_AGENTS)", () => {
@@ -170,7 +173,11 @@ describe("switchboard helpers", () => {
     expect(m, "os_core.rs DEFAULT_FROZEN_AGENTS").not.toBeNull();
     const rust = [...m![2].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
     expect(rust).toHaveLength(Number(m![1]));
-    expect(DEFAULT_OS_SWITCHBOARD.frozenAgents).toEqual(rust);
+    // Plus the placeholders frozen until they get a job (FROZEN_PLACEHOLDER_AGENTS: Ops).
+    const ph = rs.match(/pub const FROZEN_PLACEHOLDER_AGENTS: \[&str; \d+\] = \[([^\]]*)\];/);
+    expect(ph, "os_core.rs FROZEN_PLACEHOLDER_AGENTS").not.toBeNull();
+    const placeholders = [...ph![1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+    expect(DEFAULT_OS_SWITCHBOARD.frozenAgents).toEqual([...rust, ...placeholders]);
   });
 
   it("toggleFrozen flips one id", () => {

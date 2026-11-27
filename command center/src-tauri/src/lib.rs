@@ -17,14 +17,46 @@ use commands::{agents, allm, allm_audit, bridge, calendar, claude_fix, clihub, d
 pub const VOICE_TOGGLE_EVENT: &str = "voice-toggle";
 
 /// Tray menu ids.
+const TRAY_STATUS: &str = "tray-status";
 const TRAY_SHOW: &str = "tray-show";
+const TRAY_STANDBY: &str = "tray-standby";
 const TRAY_AWAY: &str = "tray-away";
 const TRAY_QUIT: &str = "tray-quit";
+
+/// Shown when Exit is chosen from the tray (the webview's Exit says the same).
+const EXIT_WARNING: &str = "Exit shuts Tony down completely. Your phone loses Tony until the Command Center starts again: the gateway stays up, but phone turns wait for this app.\n\nTo hide the window and keep everything running, choose Standby instead.";
 
 /// Keeps the tray's Away Mode check item in step with the UI toggle. Desktop only: mobile
 /// builds have no tray (tauri::menu is configured out there).
 #[cfg(desktop)]
 static TRAY_AWAY_ITEM: std::sync::OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+
+/// The tray's disabled first line ("Tony: running · gateway ok"), kept current by the heartbeat.
+#[cfg(desktop)]
+static TRAY_STATUS_ITEM: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+
+/// Update the tray's status line and tooltip (lifecycle heartbeat). No-op on mobile / before the tray exists.
+pub fn tray_set_status(_app: &tauri::AppHandle, _line: &str) {
+    #[cfg(desktop)]
+    if let Some(item) = TRAY_STATUS_ITEM.get() {
+        if item.text().ok().as_deref() != Some(_line) {
+            let _ = item.set_text(_line);
+            if let Some(t) = _app.tray_by_id("engine") {
+                let _ = t.set_tooltip(Some(format!("Agentic OS engine · {_line}")));
+            }
+        }
+    }
+}
+
+/// Standby: hide the main window to the tray (the window's X does the same). The engine keeps
+/// running: gateway, model, STT, trading, backups, scheduled jobs and phone turns.
+pub fn standby(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    match app.get_webview_window("main") {
+        Some(w) => w.hide().map_err(|e| e.to_string()),
+        None => Err("no main window".into()),
+    }
+}
 
 /// The tray check mark follows Away Mode (called from `arbiter_set_away`). No-op on mobile.
 pub fn tray_set_away(_app: &tauri::AppHandle, _on: bool) {
@@ -77,25 +109,32 @@ fn dev_server_up(url: &url::Url) -> bool {
     addrs.into_iter().any(|a| TcpStream::connect_timeout(&a, std::time::Duration::from_millis(500)).is_ok())
 }
 
-/// System tray: closing the window hides it here and the engine keeps running (scheduled
-/// workers, Booking, Garbage, Observer). "Quit Engine Completely" is the only real exit.
+/// System tray: closing the window (X) is Standby: it hides here and the engine keeps running
+/// (scheduled workers, Booking, Garbage, Observer, phone turns). Menu: a live status line,
+/// Reopen, Standby, Away Mode, and Exit, the only real shutdown (asks first: the phone loses Tony).
 #[cfg(desktop)]
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use tauri::Manager;
     let away_on = app.state::<os_core::OsState>().snapshot().scheduler.away_mode;
-    let show = MenuItem::with_id(app, TRAY_SHOW, "Show Command Center", true, None::<&str>)?;
+    let status = MenuItem::with_id(app, TRAY_STATUS, "Tony: running · gateway checking…", false, None::<&str>)?;
+    let show = MenuItem::with_id(app, TRAY_SHOW, "Reopen Command Center", true, None::<&str>)?;
+    let standby = MenuItem::with_id(app, TRAY_STANDBY, "Standby (hide the window, Tony keeps running)", true, None::<&str>)?;
     let away = CheckMenuItem::with_id(app, TRAY_AWAY, "Away Mode (background gets the GPU)", true, away_on, None::<&str>)?;
-    let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit Engine Completely", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &away, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT, "Exit (shuts Tony down; the phone loses him)…", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &show, &standby, &away, &PredefinedMenuItem::separator(app)?, &quit])?;
     let _ = TRAY_AWAY_ITEM.set(away);
+    let _ = TRAY_STATUS_ITEM.set(status);
     let mut b = TrayIconBuilder::with_id("engine").tooltip("Tony · Agentic OS engine").menu(&menu).show_menu_on_left_click(false);
     if let Some(icon) = app.default_window_icon() {
         b = b.icon(icon.clone());
     }
     b.on_menu_event(|app, ev| match ev.id().as_ref() {
         TRAY_SHOW => show_main(app),
+        TRAY_STANDBY => {
+            let _ = crate::standby(app);
+        }
         TRAY_AWAY => {
             use tauri::Emitter;
             let os = app.state::<os_core::OsState>();
@@ -106,8 +145,19 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             }
         }
         TRAY_QUIT => {
-            QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
-            app.exit(0);
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+            let h = app.clone();
+            app.dialog()
+                .message(EXIT_WARNING)
+                .title("Exit the Command Center?")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom("Exit completely".into(), "Cancel".into()))
+                .show(move |exit| {
+                    if exit {
+                        QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+                        h.exit(0);
+                    }
+                });
         }
         _ => {}
     })
@@ -120,7 +170,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Set by "Quit Engine Completely": the next close really exits.
+/// Set by the tray's Exit: the next close really exits.
 static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Where every panic is appended (`install_panic_log`): `<APPDATA>\os.agentic.commandcenter\logs\panic.log`.
@@ -295,6 +345,8 @@ pub fn run() {
                 }
                 // Play Place staging hub: <config dir>/build-hub.json (Thought-to-Product Phases 2–4).
                 app.state::<buildhub::HubState>().init(&dir);
+                // Section pass: widgets dropped into <config>/library-import join the library.
+                buildhub::import_library_drops(&app.state::<buildhub::HubState>(), &dir);
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
                 audio::ducker::recover(&dir);
             }
@@ -308,6 +360,8 @@ pub fn run() {
                 // MCP: start listing enabled stdio servers ~5 s after launch (into the cache, in
                 // the background). No HTTP / token-gated server is contacted.
                 tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
+                // Section pass: the Librarian workspace is kept on Query mode (checked once at start).
+                tauri::async_runtime::spawn(mcp::librarian_lock_at_start(app.handle().clone()));
                 tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
                 tauri::async_runtime::spawn(commands::hygiene::lifecycle_loop(app.handle().clone()));
                 // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).
@@ -376,7 +430,7 @@ pub fn run() {
             register_voice_hotkey(app)?;
             Ok(())
         })
-        // Close → hide to the tray (the engine keeps running); "Quit Engine Completely" exits.
+        // X = Standby: hide to the tray (the engine keeps running); Exit (rail / tray) shuts down.
         // Hide, minimise and restore also switch WebView2 rendering off / on (webview_visibility).
         .on_window_event(|w, ev| {
             use tauri::Manager;
@@ -420,6 +474,9 @@ pub fn run() {
             security::commands::security_audit_recent,
             security::commands::security_companion_sign,
             security::commands::security_companion_store_key,
+            security::commands::security_set_timeouts,
+            security::commands::security_companion_pair_qr,
+            security::commands::security_session_set,
             security::commands::security_companion_check_alerts,
             security::commands::security_pin_setup,
             system::system_stats,
@@ -682,6 +739,7 @@ pub fn run() {
             lifecycle::gateway_health,
             lifecycle::gateway_reconnect,
             lifecycle::app_exit_check,
+            lifecycle::app_standby,
             lifecycle::app_exit,
             buildhub::build_hub_view,
             buildhub::build_runtime_config,
@@ -693,6 +751,7 @@ pub fn run() {
             buildhub::build_steer,
             buildhub::build_to_repair,
             buildhub::build_set_max_iterations,
+            buildhub::build_archive,
             buildhub::build_requeue,
             buildhub::build_rework,
             buildhub::build_smoke,
@@ -706,6 +765,9 @@ pub fn run() {
             buildhub::delete_build_job,
             buildhub::clear_failed_jobs,
             buildhub::runner_dismiss,
+            buildhub::trash_list,
+            buildhub::trash_restore,
+            buildhub::trash_purge,
             buildhub::build_widget_url,
             buildhub::build_peek_status,
             buildhub::build_open_window,

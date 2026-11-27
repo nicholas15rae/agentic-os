@@ -12,8 +12,8 @@ import { transcribeWav } from "@/features/voice/engines";
 
 /**
  * `vad.partialMs`: live captions while you speak, one Whisper pass on the clip so far every this
- * many ms of speech (GPU STT only); 0 turns them off, and with them the phone's audio stream (it
- * then uploads the clip when you stop).
+ * many ms of speech (GPU STT only); 0 (the default since Section 20.5) turns them off. The phone
+ * still streams its audio with captions off, so the gateway's final needs no upload.
  */
 export function LiveCaptionsField({ value, onChange }: { value: number | undefined; onChange: (ms: number) => void }) {
   const ms = partialMsFrom(value);
@@ -24,13 +24,13 @@ export function LiveCaptionsField({ value, onChange }: { value: number | undefin
         <Select value={String(ms)} onChange={(e) => onChange(Number(e.target.value))} className="!h-9 !w-60 !py-0 !text-xs" aria-label="Live captions">
           {partialMsChoices(value).map((v) => (
             <option key={v} value={v}>
-              {v === 0 ? "Off (and no phone stream)" : `every ${v} ms of speech${v === DEFAULT_PARTIAL_MS ? " (default)" : ""}`}
+              {v === 0 ? `Off${v === DEFAULT_PARTIAL_MS ? " (default)" : ""}` : `every ${v} ms of speech${v === DEFAULT_PARTIAL_MS ? " (default)" : ""}`}
             </option>
           ))}
         </Select>
       </label>
       <p className="mt-1 text-[11px] text-ink-3">
-        What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. Off also stops the phone streaming its audio (it uploads the clip when you stop).
+        What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. The final transcript is the same either way.
       </p>
     </div>
   );

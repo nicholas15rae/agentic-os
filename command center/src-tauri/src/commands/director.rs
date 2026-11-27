@@ -22,9 +22,13 @@ use super::os_core::{self, OsState};
 pub(crate) const DIRECTOR_CRAFT: &str = include_str!("director_craft.md");
 
 /// Budgets. Hybrid mode moves a prompt of `compute.heavyContextChars` (24 000 by default) to
-/// the droplet, so a Director turn stays well under that and keeps running locally.
+/// the droplet, so a Director turn stays under that and keeps running locally
+/// (`whole_prompt_stays_under_the_hybrid_heavy_context_threshold` holds the worst case to it).
 pub(crate) const MAX_TEXT_CHARS: usize = 2_000;
-pub(crate) const MAX_CONTEXT_CHARS: usize = 9_000;
+/// The page's STUDIO STATE, TRANSCRIPT section included. MIRRORS context.ts CONTEXT_BUDGET (the page
+/// keeps its context under it, so this clip, which cuts from the end where the ACTION CONTRACT is,
+/// never bites). Raised from 9 000 for the TRANSCRIPT section (run 9 issue 1).
+pub(crate) const MAX_CONTEXT_CHARS: usize = 11_500;
 pub(crate) const MAX_IDENTITY_CHARS: usize = 1_200;
 pub(crate) const MAX_HISTORY_TURNS: usize = 10;
 pub(crate) const MAX_HISTORY_MSG_CHARS: usize = 600;
@@ -211,9 +215,20 @@ mod tests {
             context: "c".repeat(50_000),
             stream_id: None,
         };
-        let m = director_messages(&r, Some(&"i".repeat(10_000))).unwrap();
+        let mut m = director_messages(&r, Some(&"i".repeat(10_000))).unwrap();
+        // director_turn appends /no_think to the system message on a thinking model.
+        m[0].content = super::super::agent_prompts::with_no_think(&m[0].content);
         let chars: usize = m.iter().map(|x| x.content.chars().count()).sum();
         assert!(chars < 24_000, "{chars} chars would overflow to the droplet in hybrid mode");
+        // The context really is MAX_CONTEXT_CHARS of it (the TRANSCRIPT section's room is used).
+        assert!(m.last().unwrap().content.chars().count() > MAX_CONTEXT_CHARS);
+        eprintln!("worst-case Director prompt: {chars} chars (headroom {})", 24_000 - chars);
+    }
+
+    #[test]
+    fn the_context_cap_mirrors_the_page_budget() {
+        let ts = include_str!("../../../src/features/director/context.ts");
+        assert!(ts.contains(&format!("export const CONTEXT_BUDGET = {}_{:03};", MAX_CONTEXT_CHARS / 1000, MAX_CONTEXT_CHARS % 1000)), "context.ts CONTEXT_BUDGET must equal MAX_CONTEXT_CHARS ({MAX_CONTEXT_CHARS})");
     }
 
     #[test]

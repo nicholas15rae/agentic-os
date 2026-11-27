@@ -3071,6 +3071,10 @@ pub(crate) fn cached_bars(state: &MediaState, forge: &dyn Forge, a: &MediaAsset,
 pub(crate) const MIN_CLIP_SEC: f64 = 1.0;
 /// An out point this close to its sentence's end runs on to the end.
 const SNAP_SEGMENT_END_SEC: f64 = 0.6;
+/// An in point this close after its sentence's start moves back to the start (run 9: an in point
+/// at 24 s snapped to "he" at 23.85 and dropped "Doesn't" at 23.61, so the captions opened
+/// mid-sentence on "HE A SPOTLIGHT?").
+const SNAP_SEGMENT_START_SEC: f64 = 1.2;
 
 /// `media_plan_check`'s clips: TimelineClip with every field but asset/in/out optional (no id is fine).
 #[derive(Deserialize, Clone, Debug, PartialEq)]
@@ -3212,10 +3216,28 @@ pub(crate) fn parse_speech(json_text: &str) -> Option<Speech> {
 }
 
 /// An in point inside a word moves back to the word's start (a transcript without word times:
-/// to its segment's start). In a pause it stays.
+/// to its segment's start). In a pause it stays. Then, if it lies inside a segment that started at
+/// most 1.2 s earlier, it moves back to the segment's start (so a clip opens on the sentence, not
+/// mid-sentence). See `snap_in_why`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn snap_in(t: f64, sp: &Speech) -> f64 {
+    snap_in_why(t, sp).0
+}
+
+/// `snap_in` without the move back to the sentence's start: inside a word, the word's start
+/// (no word times: the segment's start); in a pause, `t` itself.
+pub(crate) fn snap_in_word(t: f64, sp: &Speech) -> f64 {
     let spans = if sp.words.is_empty() { &sp.segments } else { &sp.words };
     spans.iter().find(|(s, e)| *s <= t && t < *e).map_or(t, |(s, _)| *s)
+}
+
+/// `snap_in` and whether it went back to the sentence's start (true) or only to a word's start.
+pub(crate) fn snap_in_why(t: f64, sp: &Speech) -> (f64, bool) {
+    let w = snap_in_word(t, sp);
+    match sp.segments.iter().find(|(s, e)| *s <= t && t < *e) {
+        Some((s, _)) if *s < w - 0.0005 && t - s <= SNAP_SEGMENT_START_SEC + 1e-9 => (*s, true),
+        _ => (w, false),
+    }
 }
 
 /// An out point inside a word moves on to the word's end; then, if its segment ends within 0.6 s,
@@ -3248,7 +3270,7 @@ pub(crate) fn plan_check_core_with(clips: Vec<TimelineClip>, assets: &[MediaAsse
     let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
     let (mut warnings, mut refusals) = (vec![], vec![]);
     let mut cache: HashMap<String, Option<Speech>> = HashMap::new();
-    let mut out = vec![];
+    let mut out: Vec<TimelineClip> = vec![];
     for (k, mut c) in clips.into_iter().enumerate() {
         let n = k + 1;
         let Some(a) = assets.iter().find(|a| a.id == c.asset_id) else {
@@ -3264,10 +3286,18 @@ pub(crate) fn plan_check_core_with(clips: Vec<TimelineClip>, assets: &[MediaAsse
             if !(c.in_sec.is_finite() && c.out_sec.is_finite() && c.in_sec >= 0.0 && c.out_sec <= dur + 0.05 && c.in_sec < c.out_sec) {
                 refusals.push(format!("clip {n} ({}): {}–{} s is outside the clip (0–{} s)", a.name, secs(c.in_sec), secs(c.out_sec), secs(dur)));
             } else if let Some(sp) = cache.entry(a.id.clone()).or_insert_with(|| speech(a)).as_ref() {
-                let (i, o) = (r3(snap_in(c.in_sec, sp).max(0.0)), r3(snap_out(c.out_sec, sp).min(dur)));
+                let (mut si, mut sentence) = snap_in_why(c.in_sec, sp);
+                // The move back to the sentence's start must not replay audio an earlier clip of
+                // this asset already plays (a jump cut inside a sentence, or a take split around a
+                // cutaway): then only the word's start.
+                if sentence && out.iter().any(|p| p.asset_id == c.asset_id && p.out_sec > si + 0.0005 && p.in_sec < c.in_sec) {
+                    (si, sentence) = (snap_in_word(c.in_sec, sp), false);
+                }
+                let (i, o) = (r3(si.max(0.0)), r3(snap_out(c.out_sec, sp).min(dur)));
                 if o > i {
                     if (i - c.in_sec).abs() > 0.0005 {
-                        warnings.push(format!("clip {n}: in {} → {} s (start of the word)", c.in_sec, i));
+                        let why = if sentence { "start of the sentence, so the clip doesn't open mid-sentence" } else { "start of the word" };
+                        warnings.push(format!("clip {n}: in {} → {} s ({why})", c.in_sec, i));
                         c.in_sec = i;
                     }
                     if (o - c.out_sec).abs() > 0.0005 {
@@ -3344,7 +3374,151 @@ fn unchanged_since_render(state: &MediaState, slug: &str, notes: &[Note], resolv
         .filter_map(|rid| renders.iter().find(|r| &r.id == rid))
         .filter_map(|r| plan_snapshot(state, &r.plan_id))
         .collect();
-    (!snaps.is_empty()).then(|| snaps.iter().any(|s| plans_equivalent(s, next)))
+    let framing = notes.iter().filter(|n| resolves.contains(&n.id)).any(|n| note_is_about_framing(&n.text));
+    (!snaps.is_empty()).then(|| snaps.iter().any(|s| plans_equivalent_as(s, next, framing)))
+}
+
+// ── Transcript lines for the Director (run 9 issue 1) ─────────────────────────
+
+/// One transcript segment as the Director reads it: a whole segment (never cut mid-word), in
+/// asset time (2 decimals), its text with the whitespace collapsed.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TranscriptLine {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+/// contract.ts `AssetTranscriptLines`: one video asset's lines, in time order. `more` = lines
+/// left out by the per-asset char cap (whole lines only; lines near the asset's moments and its
+/// timeline clips are kept first, then the rest in time order: `cap_transcript_lines_near`).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetTranscriptLines {
+    pub asset_id: String,
+    pub lines: Vec<TranscriptLine>,
+    pub more: u32,
+}
+
+/// Per-asset text cap of `media_transcript_lines` (the page picks what fits its own budget).
+pub(crate) const TRANSCRIPT_LINES_DEFAULT_CHARS: usize = 6_000;
+const TRANSCRIPT_LINES_MAX_CHARS: usize = 20_000;
+
+/// The lines of a transcribe .json (`{segments: [{start, end, text, words?: [{w, s, e}]}]}`).
+/// A segment without text takes its words; empty or broken segments are skipped. Pure.
+pub(crate) fn transcript_lines_of(json_text: &str) -> Option<Vec<TranscriptLine>> {
+    let v: Value = serde_json::from_str(json_text).ok()?;
+    let r2 = |x: f64| (x * 100.0).round() / 100.0;
+    let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(
+        v["segments"]
+            .as_array()?
+            .iter()
+            .filter_map(|s| {
+                let (st, en) = (s["start"].as_f64()?, s["end"].as_f64()?);
+                if !(st.is_finite() && en.is_finite() && en > st) {
+                    return None;
+                }
+                let text = s["text"].as_str().map(squash).filter(|t| !t.is_empty()).or_else(|| {
+                    let ws: Vec<&str> = s["words"].as_array()?.iter().filter_map(|w| w["w"].as_str()).collect();
+                    Some(squash(&ws.join(" "))).filter(|t| !t.is_empty())
+                })?;
+                Some(TranscriptLine { start: r2(st), end: r2(en), text })
+            })
+            .collect(),
+    )
+}
+
+/// The first lines whose text fits `max_chars` (each line also costs ~16 chars of "[a–b] "), and
+/// how many were left out. Whole lines only. Pure.
+pub(crate) fn cap_transcript_lines(lines: Vec<TranscriptLine>, max_chars: usize) -> (Vec<TranscriptLine>, u32) {
+    cap_transcript_lines_near(lines, max_chars, &[])
+}
+
+/// How far around a window (a moment, a timeline clip) a line still counts as near it. Same as
+/// context.ts `TRANSCRIPT_WINDOW_PAD_SEC`.
+const TRANSCRIPT_WINDOW_PAD_SEC: f64 = 1.5;
+
+/// `cap_transcript_lines`, but the lines within ±1.5 s of a window (`(in, out)` in asset seconds:
+/// the asset's moments and its timeline clips) are kept first, then the rest in time order while
+/// they fit, so a long take's later moments still reach the page (which picks what fits its own
+/// budget the same way). The kept lines come back in time order. Pure.
+pub(crate) fn cap_transcript_lines_near(lines: Vec<TranscriptLine>, max_chars: usize, windows: &[(f64, f64)]) -> (Vec<TranscriptLine>, u32) {
+    let total = lines.len();
+    let near = |l: &TranscriptLine| windows.iter().any(|(s, e)| l.end > s - TRANSCRIPT_WINDOW_PAD_SEC && l.start < e + TRANSCRIPT_WINDOW_PAD_SEC);
+    let cost = |l: &TranscriptLine| l.text.chars().count() + 16;
+    let mut keep = vec![false; total];
+    let mut used = 0usize;
+    // Pass 1: near lines (in time order) while they fit; pass 2: the rest, in time order, up to the
+    // first that doesn't fit.
+    for (k, l) in lines.iter().enumerate() {
+        if near(l) && used + cost(l) <= max_chars {
+            used += cost(l);
+            keep[k] = true;
+        }
+    }
+    for (k, l) in lines.iter().enumerate() {
+        if keep[k] || near(l) {
+            continue;
+        }
+        if used + cost(l) > max_chars {
+            break;
+        }
+        used += cost(l);
+        keep[k] = true;
+    }
+    let kept: Vec<TranscriptLine> = lines.into_iter().zip(keep).filter(|(_, k)| *k).map(|(l, _)| l).collect();
+    let more = (total - kept.len()) as u32;
+    (kept, more)
+}
+
+/// Parsed transcript files by path, kept while the file's mtime and size stay the same.
+type LineCache = HashMap<String, (Option<std::time::SystemTime>, u64, Vec<TranscriptLine>)>;
+static TRANSCRIPT_LINE_CACHE: std::sync::OnceLock<Mutex<LineCache>> = std::sync::OnceLock::new();
+
+fn cached_transcript_lines(path: &str) -> Option<Vec<TranscriptLine>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let (mtime, len) = (meta.modified().ok(), meta.len());
+    let cache = TRANSCRIPT_LINE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((m, l, lines)) = cache.lock().unwrap().get(path) {
+        if *m == mtime && *l == len && mtime.is_some() {
+            return Some(lines.clone());
+        }
+    }
+    let lines = transcript_lines_of(&std::fs::read_to_string(path).ok()?)?;
+    let mut c = cache.lock().unwrap();
+    if c.len() > 256 {
+        c.clear();
+    }
+    c.insert(path.to_string(), (mtime, len, lines.clone()));
+    Some(lines)
+}
+
+/// `media_transcript_lines`: every video asset's transcript as timed lines (each asset's
+/// `transcript.path`, a file inside the project), each asset capped at `max_chars` of text
+/// (default 6000, at most 20000; the lines near its moments and saved timeline clips first).
+/// Assets without a transcript file are left out. Reads only.
+pub(crate) fn transcript_lines(state: &MediaState, slug: &str, max_chars: Option<usize>) -> Result<Vec<AssetTranscriptLines>, String> {
+    load_project(state, slug)?;
+    let root = project_root(state, slug)?;
+    let max = max_chars.unwrap_or(TRANSCRIPT_LINES_DEFAULT_CHARS).clamp(200, TRANSCRIPT_LINES_MAX_CHARS);
+    let canon_root = dunce_canon(&root).unwrap_or(root.clone());
+    let saved = load_manifest(&root, slug);
+    Ok(list_assets(state, slug)?
+        .into_iter()
+        .filter(|a| a.kind == "video")
+        .filter_map(|a| {
+            let f = transcript_file(&a, &root)?;
+            // Only a transcript inside this project (transcribe_asset stores it there).
+            if !Path::new(&f).starts_with(&canon_root) {
+                return None;
+            }
+            // The lines near the asset's moments and its saved timeline clips are kept first.
+            let windows: Vec<(f64, f64)> = a.moments.iter().map(|m| (m.in_sec, m.out_sec)).chain(saved.clips.iter().filter(|c| c.asset_id == a.id).map(|c| (c.in_sec, c.out_sec))).collect();
+            let (lines, more) = cap_transcript_lines_near(cached_transcript_lines(&f)?, max, &windows);
+            Some(AssetTranscriptLines { asset_id: a.id, lines, more })
+        })
+        .collect())
 }
 
 // ── Revisions that change nothing (E2E finding 3) ─────────────────────────────
@@ -3358,8 +3532,55 @@ fn plan_manifest_key(plan_id: &str) -> String {
 /// output's file name, who saved it and when are not (a model re-sending the same clips with new
 /// ids changed nothing).
 pub(crate) fn plans_equivalent(a: &TimelineManifest, b: &TimelineManifest) -> bool {
+    plans_equivalent_as(a, b, true)
+}
+
+/// Words that make a review note about framing (whole words, lowercase), plus "punch in" and the
+/// aspect ratios (`note_is_about_framing`). MIRRORED in src/features/director/plan-check.ts
+/// (`FRAMING_NOTE_WORDS`): change both lists together.
+pub(crate) const FRAMING_NOTE_WORDS: &[&str] = &[
+    "frame", "frames", "framed", "framing", "reframe", "reframed", "fit", "fits", "crop", "crops", "cropped", "cropping", "bars", "letterbox", "letterboxed", "letterboxing",
+    "pillarbox", "pillarboxed", "pillarboxing", "blur", "blurred", "blurry", "fill", "zoom", "zoomed", "zooming", "vertical", "aspect", "punchin",
+    "pad", "padded", "padding", "portrait", "landscape", "widescreen", "squished", "squashed", "stretched", "closeup", "headroom", "center", "centre", "centered", "centred",
+];
+/// Aspect ratios a framing note may name ("make it 9:16"). Mirrored in plan-check.ts.
+const FRAMING_NOTE_RATIOS: &[&str] = &["9:16", "16:9", "4:5", "1:1"];
+
+/// Is this review note about framing (fit, crop, bars, zoom, aspect…)? Pure; plan-check.ts
+/// `noteIsAboutFraming` is the same rule.
+pub(crate) fn note_is_about_framing(text: &str) -> bool {
+    let low = text.to_lowercase();
+    let toks: Vec<&str> = low.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).collect();
+    toks.iter().any(|t| FRAMING_NOTE_WORDS.contains(t)) || toks.windows(2).any(|w| FRAMING_NOTE_PAIRS.contains(&[w[0], w[1]])) || FRAMING_NOTE_RATIOS.iter().any(|r| has_ratio(&low, r))
+}
+
+/// Two-word framing phrases ("punch in", "close up"). Mirrored in plan-check.ts.
+const FRAMING_NOTE_PAIRS: &[[&str; 2]] = &[["punch", "in"], ["close", "up"]];
+
+/// `r` ("1:1") stands alone in `low`: no digit or ':' right before or after it, so timestamps
+/// ("at 1:12", "4:55", "0:09:16") are not aspect ratios.
+fn has_ratio(low: &str, r: &str) -> bool {
+    let near = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit() || c == ':');
+    low.match_indices(r).any(|(i, _)| !near(low[..i].chars().next_back()) && !near(low[i + r.len()..].chars().next()))
+}
+
+/// `plans_equivalent`, with `framing` = whether the framing-only clip fields count.
+///
+/// The rule for resolving revision notes (run 9: round 2 kept every in/out point and only changed
+/// fit fill → auto, and that resolved "Tighten the middle and end on a stronger beat"): a clip's
+/// `fit` and `punch_in` are framing-only fields. They count as a change only when one of the notes
+/// being resolved is about framing (`note_is_about_framing`); otherwise a revision that changes
+/// nothing but them changes nothing the notes ask for, and is refused as UNCHANGED_PLAN (here and
+/// in plan-check.ts `planChangesNothing`, which feeds the one auto-fix). Nic's manual Resolve skips
+/// the check entirely.
+pub(crate) fn plans_equivalent_as(a: &TimelineManifest, b: &TimelineManifest, framing: bool) -> bool {
     let q = |x: f64| (x * 1000.0).round() as i64;
-    let clips = |m: &TimelineManifest| m.clips.iter().map(|c| (c.asset_id.clone(), q(c.in_sec), q(c.out_sec), c.fade_ms, c.transition_in.clone(), q(c.punch_in), c.fit.clone())).collect::<Vec<_>>();
+    let clips = |m: &TimelineManifest| {
+        m.clips
+            .iter()
+            .map(|c| (c.asset_id.clone(), q(c.in_sec), q(c.out_sec), c.fade_ms, c.transition_in.clone(), if framing { q(c.punch_in) } else { 0 }, if framing { c.fit.clone() } else { String::new() }))
+            .collect::<Vec<_>>()
+    };
     let audio = |m: &TimelineManifest| m.audio.iter().map(|l| (l.asset_id.clone(), q(l.start_sec), q(l.in_sec), q(l.out_sec), q(l.volume), l.fade_in_ms, l.fade_out_ms, l.duck_under_voice)).collect::<Vec<_>>();
     let out = |m: &TimelineManifest| (m.output.aspect.clone(), m.output.loudness_lufs, m.output.max_size_mb.map(q));
     clips(a) == clips(b) && audio(a) == audio(b) && q(a.clip_audio_volume) == q(b.clip_audio_volume) && a.captions == b.captions && a.color == b.color && a.outputs == b.outputs && out(a) == out(b)
@@ -3391,6 +3612,9 @@ pub(crate) fn check_revision_changed(state: &MediaState, slug: &str, note: &Note
     let Some(new_plan) = latest_used_plan(state, slug).filter(|p| *p != old_plan) else { return Ok(()) };
     match (plan_snapshot(state, &old_plan), plan_snapshot(state, &new_plan)) {
         (Some(a), Some(b)) if plans_equivalent(&a, &b) => Err("UNCHANGED_PLAN: the revised cut is the same as the one this note is on (same clips, audio, captions, colour and outputs), so the note stays open. Change the edit for it, then render again.".into()),
+        (Some(a), Some(b)) if !note_is_about_framing(&note.text) && plans_equivalent_as(&a, &b, false) => Err(
+            "UNCHANGED_PLAN: the revised cut only changes framing (fit or punch-in) and this note isn't about framing, so it changes nothing the note asks for and the note stays open. Change the edit for it, then render again.".into(),
+        ),
         _ => Ok(()),
     }
 }
@@ -3931,6 +4155,13 @@ pub async fn media_note_resolve(app: tauri::AppHandle, slug: String, note_id: St
 #[tauri::command]
 pub async fn media_plan_check(app: tauri::AppHandle, slug: String, clips: Vec<CheckClip>, plan: Option<CheckPlan>) -> Result<PlanCheck, String> {
     blocking(move || plan_check_with(&app.state::<MediaState>(), &slug, clips, plan)).await
+}
+
+/// Every video asset's transcript as timed lines, for the Director's TRANSCRIPT section (run 9
+/// issue 1). Reads only.
+#[tauri::command]
+pub async fn media_transcript_lines(app: tauri::AppHandle, slug: String, max_chars: Option<usize>) -> Result<Vec<AssetTranscriptLines>, String> {
+    blocking(move || transcript_lines(&app.state::<MediaState>(), &slug, max_chars)).await
 }
 
 /// The review rounds and open decisions, as stored in project.json (contract §5).
@@ -5447,9 +5678,12 @@ mod framing_tests {
     fn speech_snapping() {
         let sp = parse_speech(&transcript_json()).unwrap();
         assert_eq!((sp.words.len(), sp.segments.len()), (7, 2));
-        assert_eq!(snap_in(2.5, &sp), 2.4); // mid "been" → its start
-        assert_eq!(snap_in(3.45, &sp), 3.45); // in a pause: stays
-        assert_eq!(snap_in(2.4, &sp), 2.4);
+        assert_eq!(snap_in(2.5, &sp), 2.0); // mid "been" → 2.4, and the sentence started 0.5 s before → 2.0
+        assert_eq!(snap_in_why(2.5, &sp), (2.0, true));
+        assert_eq!(snap_in_why(6.3, &sp), (6.0, false)); // mid "years": the sentence started 1.3 s before → the word's start
+        assert_eq!(snap_in(3.45, &sp), 3.45); // in a pause (between segments): stays
+        assert_eq!(snap_in(2.4, &sp), 2.0);
+        assert_eq!(snap_in_why(2.0, &sp), (2.0, false)); // already on the sentence's start
         assert_eq!(snap_out(6.2, &sp), 6.6); // mid "years" → its end (1.4 s from the sentence's end: stays there)
         assert_eq!(snap_out(7.5, &sp), 8.0); // mid "now." → 7.9, then the sentence ends within 0.6 s → 8.0
         assert_eq!(snap_out(3.2, &sp), 3.5); // → 3.4, then the segment end
@@ -5466,15 +5700,19 @@ mod framing_tests {
         let speech = |a: &MediaAsset| a.id.starts_with('v').then(|| parse_speech(&transcript_json()).unwrap());
         let mut base = default_manifest("p");
         base.outputs = vec![preset("reels", "9:16", Some(90.0))];
-        // v: 2.5–7.5 → 2.4–8.0 (mid-word in, out runs to the sentence's end); w has no transcript.
-        let r = plan_check_core(vec![clip("", "v", 2.5, 7.5), clip("c2", "w", 10.0, 13.0), clip("c3", "i", 0.0, 2.0)], &assets, &speech, &base, Some(15.0));
-        assert_eq!(r.clips.iter().map(|c| (c.id.as_str(), c.in_sec, c.out_sec)).collect::<Vec<_>>(), [("", 2.4, 8.0), ("c2", 10.0, 13.0), ("c3", 0.0, 2.0)]);
-        assert_eq!(r.warnings, ["clip 1: in 2.5 → 2.4 s (start of the word)", "clip 1: out 7.5 → 8 s (end of the word or sentence)"]);
-        assert_eq!((r.total_sec, r.target_sec), (10.6, Some(15.0)));
-        assert_eq!(r.refusals, ["the cut is 10.6 s but the brief asks for 15 s: add about 4.4 s (anything from 13.5 to 16.5 s is fine)"]);
+        // v: 6.3–7.5 → 6.0–8.0 (mid-word in, out runs to the sentence's end); w has no transcript.
+        let r = plan_check_core(vec![clip("", "v", 6.3, 7.5), clip("c2", "w", 10.0, 13.0), clip("c3", "i", 0.0, 2.0)], &assets, &speech, &base, Some(15.0));
+        assert_eq!(r.clips.iter().map(|c| (c.id.as_str(), c.in_sec, c.out_sec)).collect::<Vec<_>>(), [("", 6.0, 8.0), ("c2", 10.0, 13.0), ("c3", 0.0, 2.0)]);
+        assert_eq!(r.warnings, ["clip 1: in 6.3 → 6 s (start of the word)", "clip 1: out 7.5 → 8 s (end of the word or sentence)"]);
+        assert_eq!((r.total_sec, r.target_sec), (7.0, Some(15.0)));
+        assert_eq!(r.refusals, ["the cut is 7 s but the brief asks for 15 s: add about 8 s (anything from 13.5 to 16.5 s is fine)"]);
+        // An in point just after a sentence's start goes back to it (and the warning says so).
+        let r = plan_check_core(vec![clip("c1", "v", 2.5, 7.5)], &assets, &speech, &base, None);
+        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec), (2.0, 8.0));
+        assert_eq!(r.warnings[0], "clip 1: in 2.5 → 2 s (start of the sentence, so the clip doesn't open mid-sentence)");
         // The sentence end past the asset's end: clamped to it (never crossing the asset's bounds).
         let r = plan_check_core(vec![clip("c1", "vc", 2.5, 7.5)], &assets, &speech, &base, None);
-        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec), (2.4, 7.95));
+        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec), (2.0, 7.95));
         // A 0.3 s clip is refused; too long for the brief and the platform cap too.
         let r = plan_check_core(vec![clip("c1", "w", 0.0, 0.3), clip("c2", "w", 1.0, 29.0)], &assets, &speech, &base, Some(15.0));
         assert_eq!(r.refusals[0], "clip 1 is 0.3 s; keep every clip ≥ 1 s");
@@ -5511,7 +5749,7 @@ mod framing_tests {
         project_update(&st, &p.slug, None, Some(brief), None, None).unwrap();
         let clips: Vec<CheckClip> = serde_json::from_value(json!([{ "assetId": "v", "inSec": 2.5, "outSec": 7.5 }])).unwrap();
         let r = plan_check(&st, &p.slug, clips).unwrap();
-        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec, r.total_sec, r.target_sec), (2.4, 8.0, 5.6, Some(5.0)));
+        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec, r.total_sec, r.target_sec), (2.0, 8.0, 6.0, Some(5.0)));
         assert!(r.refusals.is_empty(), "{:?}", r.refusals);
         let wire = serde_json::to_value(&r).unwrap();
         assert!(wire["totalSec"].is_number() && wire["targetSec"] == 5.0 && wire["refusals"].is_array() && wire["clips"][0]["assetId"] == "v");
@@ -5676,6 +5914,252 @@ mod framing_tests {
         mark_plan_used(&st, &p4.plan_id);
         assert!(note_resolve(&st, &p.slug, &n3.id).unwrap_err().starts_with("UNCHANGED_PLAN"));
         note_resolve_as(&st, &p.slug, &n3.id, true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// e2e-demo-reel-9's real transcript around its three clips (working/captions/a-mwyfgu751.json).
+    fn run9_transcript() -> String {
+        let seg = |s: f64, e: f64, text: &str, words: &[(&str, f64, f64)]| json!({ "start": s, "end": e, "text": format!(" {text}"), "words": words.iter().map(|(w, s, e)| json!({ "w": w, "s": s, "e": e, "p": 0.9 })).collect::<Vec<_>>() });
+        json!({ "language": "en", "duration": 140.0, "segments": [
+            seg(23.61, 24.51, "Doesn't he a spotlight?", &[("Doesn't", 23.61, 23.85), ("he", 23.85, 24.03), ("a", 24.03, 24.19), ("spotlight?", 24.19, 24.51)]),
+            seg(25.11, 26.27, "He never forgets the boys.", &[("He", 25.11, 25.19), ("never", 25.19, 25.39), ("forgets", 25.39, 25.71), ("the", 25.71, 25.95), ("boys.", 25.95, 26.27)]),
+            seg(40.57, 45.07, "most valuable provider of beverages.", &[("most", 40.57, 41.93), ("valuable", 41.93, 42.73), ("provider", 42.73, 43.41), ("of", 43.41, 44.43), ("beverages.", 44.43, 45.07)]),
+            seg(45.07, 50.21, "Think in the head to keeping the boys alive out there to our real one.", &[("Think", 45.07, 45.61), ("in", 45.61, 45.85), ("the", 45.85, 46.05), ("head", 46.05, 46.45), ("to", 46.45, 46.81), ("keeping", 46.81, 47.01), ("the", 47.01, 47.25), ("boys", 47.25, 47.43), ("alive", 47.43, 47.83), ("out", 47.83, 48.11), ("there", 48.11, 48.57), ("to", 48.57, 48.95), ("our", 48.95, 49.47), ("real", 49.47, 49.83), ("one.", 49.83, 50.21)]),
+            seg(94.75, 99.31, "And for the world's first ever chocolate-covered raisins, they choose raisins.", &[("And", 94.75, 94.93), ("for", 94.93, 95.09), ("the", 95.09, 95.27), ("world's", 95.27, 95.73), ("first", 95.73, 96.01), ("ever", 96.01, 96.35), ("chocolate", 96.35, 96.65), ("-covered", 96.65, 96.97), ("raisins,", 96.97, 97.47), ("they", 97.79, 97.97), ("choose", 97.97, 98.89), ("raisins.", 98.89, 99.31)]),
+            seg(99.31, 103.43, "That's the name reason that's comes from the idea that they're kind of small and", &[("That's", 99.31, 99.71), ("the", 99.71, 99.99), ("name", 99.99, 100.25), ("reason", 100.25, 100.47)]),
+        ] })
+        .to_string()
+    }
+
+    #[test]
+    fn run9_in_points_open_on_the_sentence_not_mid_sentence() {
+        // Run 9's plan: 24–26.5, 45–50, 95–100. The old snap gave 23.85 ("he": "Doesn't" dropped, so
+        // the captions opened on "HE A SPOTLIGHT?") and 94.93 ("for": "And" dropped).
+        let assets = vec![asset("a-mwyfgu751", "video", Some(140.0), 1920, 1080)];
+        let speech = |_: &MediaAsset| parse_speech(&run9_transcript());
+        let base = default_manifest("p");
+        let r = plan_check_core(vec![clip("", "a-mwyfgu751", 24.0, 26.5), clip("", "a-mwyfgu751", 45.0, 50.0), clip("", "a-mwyfgu751", 95.0, 100.0)], &assets, &speech, &base, Some(15.0));
+        assert_eq!(r.clips.iter().map(|c| (c.in_sec, c.out_sec)).collect::<Vec<_>>(), [(23.61, 26.5), (44.43, 50.21), (94.75, 100.25)]);
+        assert_eq!(
+            r.warnings,
+            [
+                "clip 1: in 24 → 23.61 s (start of the sentence, so the clip doesn't open mid-sentence)",
+                // 45 s is 4.4 s into "most valuable provider of beverages.": too far back, so the word's start.
+                "clip 2: in 45 → 44.43 s (start of the word)",
+                "clip 2: out 50 → 50.21 s (end of the word or sentence)",
+                "clip 3: in 95 → 94.75 s (start of the sentence, so the clip doesn't open mid-sentence)",
+                "clip 3: out 100 → 100.25 s (end of the word or sentence)",
+            ]
+        );
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        // The window is 1.2 s: a point 1.2 s in still goes back, 1.3 s in stays on its word.
+        let sp = parse_speech(&run9_transcript()).unwrap();
+        assert_eq!(snap_in_why(95.95, &sp), (94.75, true));
+        assert_eq!(snap_in_why(96.05, &sp), (96.01, false));
+    }
+
+    #[test]
+    fn the_sentence_snap_never_replays_an_earlier_clip_of_the_same_take() {
+        let assets = vec![asset("a-mwyfgu751", "video", Some(140.0), 1920, 1080), asset("broll", "video", Some(30.0), 1920, 1080)];
+        let speech = |a: &MediaAsset| if a.id == "a-mwyfgu751" { parse_speech(&run9_transcript()) } else { None };
+        let base = default_manifest("p");
+        let ins = |clips: Vec<TimelineClip>| plan_check_core(clips, &assets, &speech, &base, None).clips.iter().map(|c| (c.in_sec, c.out_sec)).collect::<Vec<_>>();
+        // A jump cut inside "Think in the head to…" that drops "the": clip 2 stays on "head".
+        assert_eq!(ins(vec![clip("", "a-mwyfgu751", 40.57, 45.85), clip("", "a-mwyfgu751", 46.05, 50.21)]), [(40.57, 45.85), (46.05, 50.21)]);
+        // A take split around a cutaway: B opens on "spotlight?" (its word), not back on "Doesn't".
+        assert_eq!(ins(vec![clip("", "a-mwyfgu751", 20.0, 24.2), clip("", "broll", 0.0, 3.0), clip("", "a-mwyfgu751", 24.2, 30.0)]), [(20.0, 24.51), (0.0, 3.0), (24.19, 30.0)]);
+        // A clip of another part of the take, or another asset, doesn't stop the snap.
+        assert_eq!(ins(vec![clip("", "a-mwyfgu751", 95.0, 100.0), clip("", "broll", 23.0, 25.0), clip("", "a-mwyfgu751", 24.0, 26.5)]), [(94.75, 100.25), (23.0, 25.0), (23.61, 26.5)]);
+    }
+
+    #[test]
+    fn transcript_lines_are_whole_timed_segments() {
+        let lines = transcript_lines_of(&run9_transcript()).unwrap();
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0], TranscriptLine { start: 23.61, end: 24.51, text: "Doesn't he a spotlight?".into() });
+        // A segment without text takes its words; broken or empty segments are skipped.
+        let odd = json!({ "segments": [
+            { "start": 1.0, "end": 2.0, "text": "  ", "words": [{ "w": " hi", "s": 1.0, "e": 1.2 }, { "w": "there", "s": 1.3, "e": 1.9 }] },
+            { "start": 3.0, "end": 2.0, "text": "backwards" },
+            { "start": 4.0, "end": 5.004, "text": "  spaced \n  out  " },
+            { "start": 6.0, "end": 7.0, "text": "" },
+        ] });
+        let l = transcript_lines_of(&odd.to_string()).unwrap();
+        assert_eq!(l.iter().map(|x| (x.start, x.end, x.text.as_str())).collect::<Vec<_>>(), [(1.0, 2.0, "hi there"), (4.0, 5.0, "spaced out")]);
+        assert!(transcript_lines_of("nope").is_none() && transcript_lines_of("{}").is_none());
+        // The cap keeps whole lines from the start and counts the rest.
+        let (kept, more) = cap_transcript_lines(lines.clone(), 16 + 23 + 16 + 26);
+        assert_eq!((kept.len(), more), (2, 4));
+        assert_eq!(kept[1].text, "He never forgets the boys.");
+        assert_eq!(cap_transcript_lines(lines, 10), (vec![], 6));
+    }
+
+    #[test]
+    fn the_transcript_cap_keeps_lines_near_moments_and_clips_of_a_long_take() {
+        // A 12-minute take: 240 lines of ~60 chars at 3 s each, far over the 6000-char cap.
+        let lines: Vec<TranscriptLine> = (0..240).map(|k| TranscriptLine { start: k as f64 * 3.0, end: k as f64 * 3.0 + 2.8, text: format!("line {k:03} {}", "x".repeat(50)) }).collect();
+        let (time_only, _) = cap_transcript_lines(lines.clone(), TRANSCRIPT_LINES_DEFAULT_CHARS);
+        assert!(time_only.last().unwrap().start < 300.0, "the plain cap only reaches the opening minutes");
+        // A moment at 7:30 and a timeline clip at 550–556 s.
+        let (kept, more) = cap_transcript_lines_near(lines.clone(), TRANSCRIPT_LINES_DEFAULT_CHARS, &[(450.0, 452.0), (550.0, 556.0)]);
+        let starts: Vec<f64> = kept.iter().map(|l| l.start).collect();
+        for t in [450.0, 549.0, 552.0, 555.0] {
+            assert!(starts.contains(&t), "{t} missing");
+        }
+        assert!(!starts.contains(&444.0) && !starts.contains(&558.0), "only ±1.5 s around a window");
+        assert!(starts.windows(2).all(|w| w[0] < w[1]), "kept in time order");
+        assert_eq!(kept.len() + more as usize, 240);
+        assert!(kept.iter().map(|l| l.text.chars().count() + 16).sum::<usize>() <= TRANSCRIPT_LINES_DEFAULT_CHARS);
+        // The opening lines still fill the rest of the room.
+        assert_eq!(kept[0].start, 0.0);
+        // No windows: the same as the plain cap.
+        assert_eq!(cap_transcript_lines_near(lines.clone(), 2000, &[]), cap_transcript_lines(lines, 2000));
+    }
+
+    #[test]
+    fn media_transcript_lines_reads_each_video_assets_file_inside_the_project() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Lines", None).unwrap();
+        let caps = Path::new(&p.root).join("working").join("captions");
+        std::fs::create_dir_all(&caps).unwrap();
+        let tpath = caps.join("v.json");
+        std::fs::write(&tpath, run9_transcript()).unwrap();
+        let t = |path: &Path| AssetTranscript { path: path.to_string_lossy().to_string(), lang: "en".into(), words: 40, first_speech_sec: Some(23.61), last_speech_sec: Some(103.43) };
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), transcript: Some(t(&tpath)), ..asset("v", "video", Some(140.0), 1920, 1080) }).unwrap();
+        // No transcript, an audio asset, and a transcript outside the project: left out.
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), ..asset("w", "video", Some(10.0), 1920, 1080) }).unwrap();
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), transcript: Some(t(&tpath)), ..asset("m", "audio", Some(30.0), 0, 0) }).unwrap();
+        let outside = root.join("outside.json");
+        std::fs::write(&outside, run9_transcript()).unwrap();
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), transcript: Some(t(&outside)), ..asset("x", "video", Some(140.0), 1920, 1080) }).unwrap();
+        let r = transcript_lines(&st, &p.slug, None).unwrap();
+        assert_eq!(r.iter().map(|a| (a.asset_id.as_str(), a.lines.len(), a.more)).collect::<Vec<_>>(), [("v", 6, 0)]);
+        let wire = serde_json::to_value(&r).unwrap();
+        assert_eq!(wire[0]["assetId"], "v");
+        assert_eq!(wire[0]["lines"][0], json!({ "start": 23.61, "end": 24.51, "text": "Doesn't he a spotlight?" }));
+        // maxChars caps each asset (whole lines; floor 200).
+        let capped = transcript_lines(&st, &p.slug, Some(1)).unwrap();
+        assert!(capped[0].lines.len() < 6 && capped[0].more as usize + capped[0].lines.len() == 6);
+        // An edited file is re-read (the cache is by mtime and size).
+        std::fs::write(&tpath, json!({ "segments": [{ "start": 1.0, "end": 2.0, "text": "New take." }] }).to_string()).unwrap();
+        assert_eq!(transcript_lines(&st, &p.slug, None).unwrap()[0].lines[0].text, "New take.");
+        assert!(transcript_lines(&st, "no-such-project", None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn framing_notes_are_recognised() {
+        // Run 9's note is about timing, not framing.
+        assert!(!note_is_about_framing("Tighten the middle and end on a stronger beat."));
+        assert!(!note_is_about_framing("Punch up the ending; it feels flat"));
+        assert!(!note_is_about_framing("Barely any energy in the first two seconds"));
+        // Timestamps are not aspect ratios.
+        for t in ["Cut the dead air at 1:12", "tighten 1:15-1:18", "the pause at 4:55 drags", "trim from 0:09:16", "at 11:10 it drags"] {
+            assert!(!note_is_about_framing(t), "{t}");
+        }
+        for t in [
+            "The black bars look bad",
+            "Fill the frame",
+            "crop tighter on my face",
+            "too much letterboxing",
+            "Punch in on the laugh",
+            "make it 9:16",
+            "make it 1:1.",
+            "(16:9) please",
+            "Zoomed in too far",
+            "the blur background is distracting",
+            "Doesn't fit vertically",
+            "FIT it",
+            "My head is cut off at the top, use pad",
+            "it looks squished in portrait",
+            "go to a close up on the laugh",
+            "keep me centered",
+        ] {
+            assert!(note_is_about_framing(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn framing_words_mirror_plan_check_ts() {
+        let ts = include_str!("../../../src/features/director/plan-check.ts");
+        let block = |name: &str| {
+            let start = ts.find(&format!("export const {name} = [")).unwrap_or_else(|| panic!("{name} missing from plan-check.ts"));
+            let rest = &ts[start..];
+            let body = &rest[rest.find('[').unwrap() + 1..rest.find(']').unwrap()];
+            body.split(',').map(|w| w.trim().trim_matches('"').to_string()).filter(|w| !w.is_empty()).collect::<Vec<_>>()
+        };
+        assert_eq!(block("FRAMING_NOTE_WORDS"), FRAMING_NOTE_WORDS.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(block("FRAMING_NOTE_RATIOS"), FRAMING_NOTE_RATIOS.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_framing_only_change_counts_only_when_framing_counts() {
+        let mut a = default_manifest("p");
+        a.clips = vec![TimelineClip { fit: "fill".into(), punch_in: 1.2, ..clip("c1", "v", 23.85, 26.5) }, TimelineClip { fit: "fill".into(), ..clip("c2", "v", 44.43, 50.21) }];
+        let mut b = a.clone();
+        b.clips[0].fit = "auto".into();
+        b.clips[1].fit = "auto".into();
+        b.clips[0].punch_in = 1.0;
+        assert!(!plans_equivalent(&a, &b));
+        assert!(!plans_equivalent_as(&a, &b, true));
+        assert!(plans_equivalent_as(&a, &b, false));
+        // Anything else still counts.
+        let mut c = b.clone();
+        c.clips[1].out_sec = 49.0;
+        assert!(!plans_equivalent_as(&a, &c, false));
+        let mut d = b.clone();
+        d.captions.enabled = !d.captions.enabled;
+        assert!(!plans_equivalent_as(&a, &d, false));
+    }
+
+    #[test]
+    fn run9_a_fit_only_revision_resolves_no_timing_note() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Fit only", None).unwrap();
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), ..asset("v", "video", Some(140.0), 1920, 1080) }).unwrap();
+        let fill = |id: &str, i: f64, o: f64| TimelineClip { fit: "fill".into(), punch_in: 1.2, ..clip(id, "v", i, o) };
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![fill("c1", 23.85, 26.5), fill("c2", 44.43, 50.21), fill("c3", 94.93, 100.25)];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let p1 = build_plan(&st, &p.slug, "director").unwrap();
+        mark_plan_used(&st, &p1.plan_id);
+        let f = Path::new(&p.root).join("renders").join("r-1.mp4");
+        std::fs::write(&f, b"x").unwrap();
+        record_render(&st, &VerifiedRender { id: "r-1".into(), project: p.slug.clone(), plan_id: p1.plan_id.clone(), path: f.to_string_lossy().to_string(), duration_sec: 15.0, width: 1080, height: 1920, size_bytes: 1, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() }, Some("custom")).unwrap();
+        on_verified_render(&st, &p.slug, "r-1");
+        let note = |text: &str| note_add(&st, &p.slug, NoteInput { render_id: Some("r-1".into()), at_sec: None, text: text.into(), by: "nic".into(), via_voice: false }).unwrap();
+        let timing = note("Tighten the middle and end on a stronger beat.");
+        let framing = note("The vertical crop cuts off my face: fit it instead of fill.");
+        // media_plan_check: the same in/out points with fit fill → auto.
+        let check = |resolves: Vec<String>| {
+            let clips: Vec<CheckClip> = serde_json::from_value(json!([
+                { "assetId": "v", "inSec": 23.85, "outSec": 26.5, "punchIn": 1.2, "fit": "auto" },
+                { "assetId": "v", "inSec": 44.43, "outSec": 50.21, "punchIn": 1.2, "fit": "auto" },
+                { "assetId": "v", "inSec": 94.93, "outSec": 100.25, "punchIn": 1.2, "fit": "auto" },
+            ]))
+            .unwrap();
+            plan_check_with(&st, &p.slug, clips, Some(CheckPlan { resolves, ..Default::default() })).unwrap().unchanged_since_render
+        };
+        assert_eq!(check(vec![timing.id.clone()]), Some(true), "a fit-only change answers no timing note");
+        assert_eq!(check(vec![framing.id.clone()]), Some(false), "a fit change answers a framing note");
+        assert_eq!(check(vec![timing.id.clone(), framing.id.clone()]), Some(false));
+        // The approval path: the fit-only revision is approved, then resolving the timing note is refused.
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        for c in &mut m.clips {
+            c.fit = "auto".into();
+        }
+        manifest_save(&st, &p.slug, m).unwrap();
+        let p2 = build_plan(&st, &p.slug, "director").unwrap();
+        mark_plan_used(&st, &p2.plan_id);
+        let e = note_resolve(&st, &p.slug, &timing.id).unwrap_err();
+        assert!(e.starts_with("UNCHANGED_PLAN") && e.contains("only changes framing"), "{e}");
+        assert!(!load_manifest(Path::new(&p.root), &p.slug).notes.iter().find(|n| n.id == timing.id).unwrap().resolved);
+        // The framing note is answered by it; Nic's own Resolve closes the timing note anyway.
+        note_resolve(&st, &p.slug, &framing.id).unwrap();
+        note_resolve_as(&st, &p.slug, &timing.id, true).unwrap();
+        assert!(load_manifest(Path::new(&p.root), &p.slug).notes.iter().all(|n| n.resolved));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

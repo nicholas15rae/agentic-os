@@ -8,7 +8,7 @@ import { useToasts } from "@/features/reminders/notify";
 import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
 import { api, onDirectorEvent } from "./api";
 import { revisePlanBody, stripActionBlocks } from "./actions";
-import { briefIdeaFor, checkPlanFor, noopRevisionRefusal, planChangesNothing, planCheck, withCheckedClips, type PlanCheckResult } from "./plan-check";
+import { briefIdeaFor, checkPlanFor, noopRevisionReason, notesResolved, planChangesNothing, planCheck, revisionSummary, withCheckedClips, type PlanCheckResult } from "./plan-check";
 import {
   addSlot,
   applyEditPlan,
@@ -564,18 +564,21 @@ export async function applyDirectorActionsReport(actions: DirectorAction[], forS
         // A revision that changes nothing answers no note: refused, and the notes stay open. "Nothing"
         // is measured against the render the notes are on (Rust's plan snapshot), so a revision
         // that keeps Nic's own edits since that render still counts; without a snapshot, against
-        // the current cut.
-        const unchanged = checked.check?.unchangedSinceRender ?? (cur ? planChangesNothing(cur, body) : false);
+        // the current cut. Framing-only changes (fit, punchIn) count only for notes about framing
+        // (plan-check.ts planChangesNothing; Rust's unchangedSinceRender applies the same rule).
+        const unchanged = checked.check?.unchangedSinceRender ?? (cur ? planChangesNothing(cur, body, notesResolved(cur, a.resolves)) : false);
         if (cur && unchanged) {
           notes.push("Revision not applied: it changes nothing, so your notes stay open");
-          report.refusals.push(noopRevisionRefusal(cur, a.resolves));
+          report.refusals.push(noopRevisionReason(cur, body, a.resolves, checked.check?.unchangedSinceRender === true));
           report.refusedTypes.push(a.type);
           break;
         }
+        // The stored summary never claims clip changes that didn't happen (app-written prefix).
+        const summary = cur ? revisionSummary(cur, body, a.summary) : a.summary;
         if (await applyPlan(body, slug, snap)) {
-          set({ revision: { round: a.round, resolves: a.resolves, summary: a.summary } });
-          // The Director's "what changed" lands on the round it answers (text only).
-          if (a.summary.trim() && alive()) await writeReview({ round: a.round, summary: a.summary });
+          set({ revision: { round: a.round, resolves: a.resolves, summary } });
+          // The "what changed" lands on the round it answers (text only).
+          if (summary.trim() && alive()) await writeReview({ round: a.round, summary: summary.slice(0, 2000) });
           notes.push(`Round ${a.round} revision: ${plural(body.clips.length, "clip")}, answers ${plural(a.resolves.length, "note")} (resolved when you approve the render)`);
           if (alive()) await requestPlan("director");
         }
@@ -807,7 +810,9 @@ export async function resolveNote(noteId: string, opts: { manual?: boolean } = {
     if (get().slug === slug) set((s) => ({ manifest: s.manifest ? withNoteResolved(s.manifest, noteId) : s.manifest }));
     return true;
   } catch (e) {
-    if (!opts.manual && /UNCHANGED|changes nothing|same cut/i.test(errText(e))) toast("Note left open", "The approved cut is the same as the one this note is on.", "warn");
+    const why = errText(e);
+    if (!opts.manual && /only changes framing/i.test(why)) toast("Note left open", "The approved cut only changes framing (fit or punch-in), and this note isn't about framing.", "warn");
+    else if (!opts.manual && /UNCHANGED|changes nothing|same cut/i.test(why)) toast("Note left open", "The approved cut is the same as the one this note is on.", "warn");
     else toast("Couldn't resolve the note", errText(e), "error");
     return false;
   }

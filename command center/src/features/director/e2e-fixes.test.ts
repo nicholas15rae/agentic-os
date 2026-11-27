@@ -553,7 +553,7 @@ describe("review fixes: plan check gets the plan's own outputs, and revisions co
     m.planCheck.mockImplementationOnce(async (a: { clips: PlanCheckResult["clips"] }) => ({ ...(await passCheck(a)), unchangedSinceRender: true }));
     const r = await store.applyDirectorActionsReport([revise(5)]);
     expect(r.refusedTypes).toEqual(["revise_edit"]);
-    expect(r.refusals[0]).toMatch(/as the cut Nic's notes are on/);
+    expect(r.refusals[0]).toMatch(/compared with the render the notes are on/);
     expect(st().revision).toBeNull();
   });
   it("planCheck keeps unchangedSinceRender only when Rust sent a boolean", async () => {

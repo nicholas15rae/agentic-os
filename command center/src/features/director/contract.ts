@@ -128,8 +128,8 @@ export interface ClipFraming { crop: CropRect | null; contentW: number | null; c
  * may be left out. A `crop` is accepted and ignored (framing is measured by media_render_plan). */
 export type PlanCheckClip = Pick<TimelineClip, "assetId" | "inSec" | "outSec"> & Partial<Omit<TimelineClip, "assetId" | "inSec" | "outSec">> & { crop?: unknown };
 /** media_plan_check's answer. `clips`: the same clips in order, video in/out snapped to the transcript
- * (in → start of the word it falls in; out → end of its word, or its sentence's end when that is
- * within 0.6 s; never past the asset); a clip sent without an id comes back without one.
+ * (in → start of the word it falls in, or its sentence's start when that is within 1.2 s before;
+ * out → end of its word, or its sentence's end when that is within 0.6 s; never past the asset); a clip sent without an id comes back without one.
  * `refusals` (a Director plan must not apply): clip < 1 s, total outside the brief's lengthSec ±10%
  * (at least ±1.5 s), total over an output's maxSec, a clip outside its asset or not in the project.
  * The 1 s minimum is for video clips only (a still holds 0.2–60 s). A revision (`plan.resolves`)
@@ -138,6 +138,11 @@ export type PlanCheckClip = Pick<TimelineClip, "assetId" | "inSec" | "outSec"> &
  * `unchangedSinceRender` (revisions only): true = the same cut as the render its notes are on;
  * absent = no snapshot to compare with. */
 export interface PlanCheck { clips: (Omit<TimelineClip, "id"> & { id?: string })[]; totalSec: number; targetSec: number | null; warnings: string[]; refusals: string[]; unchangedSinceRender?: boolean }
+/** media_transcript_lines: one transcript segment (whole, asset time, 2 decimals). */
+export interface TranscriptLine { start: number; end: number; text: string }
+/** One video asset's timed lines, in time order; `more` = lines Rust's per-asset cap left out
+ * (it keeps the lines near the asset's moments and saved timeline clips first, then the rest in time order). */
+export interface AssetTranscriptLines { assetId: string; lines: TranscriptLine[]; more: number }
 /** media_plan_check's optional `plan`: the rest of the plan as it would apply (the manifest with
  * the plan merged in), so the checks use the plan's own outputs (maxSec), captions, color and
  * audio rather than the saved ones. `resolves`: a revise_edit's note ids. */
@@ -277,6 +282,8 @@ export interface DirectorCommands {
   media_note_resolve: { args: { slug: string; noteId: string; manual?: boolean }; result: void };
   /** Snap a plan's clips to speech and check clip / total length against the brief and the outputs. Reads only. */
   media_plan_check: { args: { slug: string; clips: PlanCheckClip[]; plan?: PlanCheckPlan }; result: PlanCheck };
+  /** Every video asset's transcript as timed lines (reads only; `maxChars` per asset, default 6000). */
+  media_transcript_lines: { args: { slug: string; maxChars?: number }; result: AssetTranscriptLines[] };
   media_review_get: { args: { slug: string }; result: ProjectReview };
   /** The Director's words on the review, stored in project.json: a round's summary (≤ 2000 chars;
    * the round must exist) and/or the open decisions (≤ 12, each ≤ 300 chars; replaced whole). Text only. */

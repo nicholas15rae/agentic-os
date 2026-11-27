@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MediaAsset, Note, ShotSlot, TimelineClip } from "./contract";
 import { asset, gen, manifest, project } from "./fixtures.test-util";
-import { ACTION_CONTRACT, CONTEXT_BUDGET, buildDirectorContext } from "./context";
+import { ACTION_CONTRACT, CONTEXT_BUDGET, TRANSCRIPT_BUDGET, buildDirectorContext } from "./context";
 import { BRIEF_FIELDS, parseDirectorActions, validateAction } from "./actions";
 
 const FRAMINGS = ["wide", "medium", "mcu", "closeup", "insert"] as const;
@@ -90,6 +90,21 @@ describe("buildDirectorContext v2", () => {
     const { p, assets, m, review } = typical();
     const c = buildDirectorContext(p, assets, m, review);
     expect(c.length).toBeLessThan(CONTEXT_BUDGET);
+    // Without transcripts it stays near the old 9000 ceiling (CONTEXT_BUDGET - TRANSCRIPT_BUDGET),
+    // so growth past it takes at most 200 chars of the TRANSCRIPT section's room. An explicit ceiling.
+    expect(c.length).toBeLessThan(CONTEXT_BUDGET - TRANSCRIPT_BUDGET + 200);
+  });
+
+  it("with every video's transcript it stays under CONTEXT_BUDGET, the section capped at TRANSCRIPT_BUDGET", () => {
+    const { p, assets, m, review } = typical();
+    const lines = assets.filter((a) => a.kind === "video").map((a) => ({ assetId: a.id, more: 0, lines: Array.from({ length: 30 }, (_, k) => ({ start: k * 0.4, end: k * 0.4 + 0.35, text: `Five six seven eight, line ${k}.` })) }));
+    const c = buildDirectorContext(p, assets, m, review, lines);
+    expect(c.length).toBeLessThan(CONTEXT_BUDGET);
+    const section = c.slice(c.indexOf("TRANSCRIPT ("), c.indexOf("\n\nLENGTH:"));
+    expect(section.length).toBeGreaterThan(200);
+    expect(section.length).toBeLessThanOrEqual(TRANSCRIPT_BUDGET);
+    expect(section).toMatch(/more lines not shown/);
+    expect(c.endsWith(ACTION_CONTRACT)).toBe(true);
   });
 
   it("names each generated asset's template and seed on its own line, and nothing for filmed media", () => {

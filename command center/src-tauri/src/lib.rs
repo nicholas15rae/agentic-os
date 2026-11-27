@@ -640,6 +640,7 @@ pub fn run() {
             media::media_note_add,
             media::media_note_resolve,
             media::media_plan_check,
+            media::media_transcript_lines,
             media::media_review_get,
             media::media_review_write,
             media::media_approve_final,

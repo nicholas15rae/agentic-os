@@ -227,6 +227,8 @@ impl Run {
             "manifest": load_manifest_strict(&self.root, &self.slug)?,
             "review": p.review,
             "renders": list_renders(&self.st, &self.slug)?,
+            // What the page's media_transcript_lines gives its TRANSCRIPT section.
+            "transcripts": transcript_lines(&self.st, &self.slug, None).unwrap_or_default(),
         }))
     }
 

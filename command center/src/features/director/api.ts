@@ -56,6 +56,8 @@ export const api = {
   noteResolve: (a: Args<"media_note_resolve">): Promise<Result<"media_note_resolve">> => xcmd("media_note_resolve", a),
   /** Snap clips to speech + clip / total length checks (reads only; nothing is saved). */
   planCheck: (a: Args<"media_plan_check">): Promise<Result<"media_plan_check">> => xcmd("media_plan_check", a),
+  /** Timed transcript lines per video asset, for the Director's TRANSCRIPT section (reads only). */
+  transcriptLines: (a: Args<"media_transcript_lines">): Promise<Result<"media_transcript_lines">> => xcmd("media_transcript_lines", a),
   reviewGet: (a: Args<"media_review_get">): Promise<Result<"media_review_get">> => xcmd("media_review_get", a),
   /** Stores the Director's round summary / open decisions (text only: nothing renders or resolves). */
   reviewWrite: (a: Args<"media_review_write">): Promise<Result<"media_review_write">> => xcmd("media_review_write", a),

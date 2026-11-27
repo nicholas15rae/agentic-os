@@ -8,7 +8,7 @@
  * Also here, pure: the revision no-op test (a `revise_edit` that changes nothing is refused and
  * resolves no notes) and the "keep Nic's idea word for word" helpers for a drafted brief.
  */
-import type { EditPlanBody, MediaProject, PlanCheck, PlanCheckClip, PlanCheckPlan, TimelineClip, TimelineManifest } from "./contract";
+import type { EditPlanBody, MediaProject, Note, PlanCheck, PlanCheckClip, PlanCheckPlan, TimelineClip, TimelineManifest } from "./contract";
 import { api } from "./api";
 import { applyEditPlan, CLIP_FITS } from "./manifest";
 
@@ -85,19 +85,132 @@ function canon(v: unknown): unknown {
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
 
-/** True when applying `body` leaves clips, audio, captions, color, outputs and the output spec as
- * they are (the output's file name aside). Pure. */
-export function planChangesNothing(m: TimelineManifest, body: EditPlanBody): boolean {
-  const next = applyEditPlan(m, body);
-  const spec = (o: TimelineManifest["output"]) => ({ ...o, name: "" });
-  return same(next.clips, m.clips) && same(next.audio, m.audio) && same(next.captions, m.captions) && same(next.color, m.color) && same(next.outputs, m.outputs) && same(spec(next.output), spec(m.output));
+/**
+ * Words that make a review note about framing (whole words, lowercase), plus "punch in" and the
+ * aspect ratios. MIRRORED in src-tauri/src/commands/media.rs (`FRAMING_NOTE_WORDS`,
+ * `FRAMING_NOTE_RATIOS`, `note_is_about_framing`): change both together (a Rust test checks it).
+ */
+export const FRAMING_NOTE_WORDS = [
+  "frame", "frames", "framed", "framing", "reframe", "reframed", "fit", "fits", "crop", "crops", "cropped", "cropping", "bars", "letterbox", "letterboxed", "letterboxing",
+  "pillarbox", "pillarboxed", "pillarboxing", "blur", "blurred", "blurry", "fill", "zoom", "zoomed", "zooming", "vertical", "aspect", "punchin",
+  "pad", "padded", "padding", "portrait", "landscape", "widescreen", "squished", "squashed", "stretched", "closeup", "headroom", "center", "centre", "centered", "centred",
+] as const;
+export const FRAMING_NOTE_RATIOS = ["9:16", "16:9", "4:5", "1:1"] as const;
+/** Two-word framing phrases. Mirrored in media.rs (`FRAMING_NOTE_PAIRS`). */
+const FRAMING_NOTE_PAIRS: readonly (readonly [string, string])[] = [["punch", "in"], ["close", "up"]];
+const FRAMING_WORD_SET = new Set<string>(FRAMING_NOTE_WORDS);
+
+/** `r` stands alone in `low` (no digit or ':' right before or after it), so a timestamp such as
+ * "at 1:12", "4:55" or "0:09:16" is not an aspect ratio. Rust's `has_ratio`. */
+function hasRatio(low: string, r: string): boolean {
+  const near = (c: string | undefined) => c !== undefined && /[0-9:]/.test(c);
+  for (let i = low.indexOf(r); i !== -1; i = low.indexOf(r, i + 1)) {
+    if (!near(low[i - 1]) && !near(low[i + r.length])) return true;
+  }
+  return false;
 }
 
-/** What the Director hears when its revision is a no-op (pure). */
-export function noopRevisionRefusal(m: Pick<TimelineManifest, "notes">, resolves: string[]): string {
-  const notes = resolves.map((id) => m.notes.find((n) => n.id === id)).filter((n) => !!n);
+/** Is this review note about framing (fit, crop, bars, zoom, aspect…)? Pure; Rust's
+ * `note_is_about_framing` is the same rule. */
+export function noteIsAboutFraming(text: string): boolean {
+  const low = text.toLowerCase();
+  const toks = low.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return (
+    toks.some((t) => FRAMING_WORD_SET.has(t)) ||
+    toks.some((t, i) => FRAMING_NOTE_PAIRS.some(([a, b]) => t === a && toks[i + 1] === b)) ||
+    FRAMING_NOTE_RATIOS.some((r) => hasRatio(low, r))
+  );
+}
+
+/** A clip without its framing-only fields (fit, punchIn). */
+const unframed = (c: Partial<TimelineClip>) => {
+  const { fit: _f, punchIn: _p, ...rest } = c;
+  return rest;
+};
+
+/**
+ * True when applying `body` leaves clips, audio, captions, color, outputs and the output spec as
+ * they are (the output's file name aside). Pure.
+ *
+ * The rule for resolving revision notes (run 9: round 2 kept every in/out point and only changed
+ * fit fill → auto, and that resolved "Tighten the middle and end on a stronger beat"): a clip's
+ * `fit` and `punchIn` are framing-only fields. Given the notes being resolved, they count as a
+ * change only when one of them is about framing (`noteIsAboutFraming`); otherwise a revision that
+ * changes nothing but them changes nothing the notes ask for. Without `notes` every field counts.
+ * Rust's `plans_equivalent_as` (media_plan_check's unchangedSinceRender, media_note_resolve's
+ * UNCHANGED_PLAN) is the same rule; Nic's manual Resolve skips both.
+ */
+export function planChangesNothing(m: TimelineManifest, body: EditPlanBody, notes?: Pick<Note, "text">[]): boolean {
+  const next = applyEditPlan(m, body);
+  const spec = (o: TimelineManifest["output"]) => ({ ...o, name: "" });
+  const framingCounts = !notes || notes.some((n) => noteIsAboutFraming(n.text));
+  const clipsSame = framingCounts ? same(next.clips, m.clips) : same(next.clips.map(unframed), m.clips.map(unframed));
+  return clipsSame && same(next.audio, m.audio) && same(next.captions, m.captions) && same(next.color, m.color) && same(next.outputs, m.outputs) && same(spec(next.output), spec(m.output));
+}
+
+/** Only framing changed (fit / punchIn), everything else as it is (pure). */
+export function planChangesOnlyFraming(m: TimelineManifest, body: EditPlanBody): boolean {
+  return !planChangesNothing(m, body) && planChangesNothing(m, body, []);
+}
+
+/** The notes a revision resolves, as the manifest has them (pure). */
+export const notesResolved = (m: Pick<TimelineManifest, "notes">, resolves: string[]): Note[] => resolves.map((id) => m.notes.find((n) => n.id === id)).filter((n): n is Note => !!n);
+
+/** What the Director hears when its revision is a no-op (pure). `framingOnly`: it changed only
+ * framing, which none of the notes ask for. */
+export function noopRevisionRefusal(m: Pick<TimelineManifest, "notes">, resolves: string[], framingOnly = false): string {
+  const notes = notesResolved(m, resolves);
   const quoted = notes.length ? notes.map((n) => `${n.id} "${n.text.length > 200 ? `${n.text.slice(0, 199)}…` : n.text}"`).join("; ") : resolves.join(", ");
-  return `revise_edit refused: that revision changes nothing (same clips, audio, captions, color and outputs as the cut Nic's notes are on), so its notes stay open. Nic's notes: ${quoted}. Change the cut so it answers them.`;
+  const what = framingOnly
+    ? "that revision only changes framing (fit or punchIn) and keeps every clip's in and out points, which none of Nic's notes ask for"
+    : "that revision changes nothing (same clips, audio, captions, color and outputs as the cut Nic's notes are on)";
+  return `revise_edit refused: ${what}, so its notes stay open. Nic's notes: ${quoted}. Change the cut so it answers them.`;
+}
+
+/**
+ * The no-op refusal for a revision found unchanged (pure). `fromRender` = Rust's
+ * unchangedSinceRender said so: Rust compared with the noted render's snapshot (not the current
+ * cut, which may hold edits made since), and ignored fit / punchIn unless a note is about
+ * framing, so the reason says exactly that rather than guessing from the current cut. Otherwise
+ * (the page's own check, against the current cut) `noopRevisionRefusal` as before.
+ */
+export function noopRevisionReason(m: TimelineManifest, body: EditPlanBody, resolves: string[], fromRender: boolean): string {
+  if (!fromRender) return noopRevisionRefusal(m, resolves, planChangesOnlyFraming(m, body));
+  const notes = notesResolved(m, resolves);
+  if (notes.some((n) => noteIsAboutFraming(n.text))) return noopRevisionRefusal(m, resolves);
+  const quoted = notes.length ? notes.map((n) => `${n.id} "${n.text.length > 200 ? `${n.text.slice(0, 199)}…` : n.text}"`).join("; ") : resolves.join(", ");
+  const what =
+    "that revision changes nothing Nic's notes ask for: compared with the render the notes are on, it has the same clips and in/out points, audio, captions, color and outputs (a fit or punchIn change doesn't count, since none of the notes are about framing)";
+  return `revise_edit refused: ${what}, so its notes stay open. Nic's notes: ${quoted}. Change the cut so it answers them.`;
+}
+
+/**
+ * The round summary the app stores for an applied revision (pure). The Director's own summary may
+ * claim clip changes that never happened (run 9: "Extended the middle B-Roll clip" with every
+ * in/out point unchanged), so when the revision's clips (footage, order, in/out, fades,
+ * transitions) are the same as the cut it replaces, a factual prefix written by the app comes
+ * first: "Clips unchanged (…); changed: framing, captions. The Director wrote: …". Otherwise, or
+ * when the Director wrote no summary (no claim to correct), the Director's words as they are.
+ * Compared with the cut the revision replaces (the page has no copy of the noted render's plan):
+ * when nothing at all differs from it, Rust has already said the revision differs from the noted
+ * render, so the difference is the edits made since, and the prefix says that.
+ */
+export function revisionSummary(m: TimelineManifest, body: EditPlanBody, summary: string): string {
+  const next = applyEditPlan(m, body);
+  const text = summary.trim();
+  if (!text || !same(next.clips.map(unframed), m.clips.map(unframed))) return text;
+  const spec = (o: TimelineManifest["output"]) => ({ ...o, name: "" });
+  const changed = [
+    !same(next.clips, m.clips) ? "framing (fit or punch-in)" : "",
+    !same(next.audio, m.audio) ? "audio" : "",
+    !same(next.captions, m.captions) ? "captions" : "",
+    !same(next.color, m.color) ? "color" : "",
+    !same(next.outputs, m.outputs) || !same(spec(next.output), spec(m.output)) ? "outputs" : "",
+  ].filter(Boolean);
+  const prefix = changed.length
+    ? `Clips unchanged (same footage and in/out points); changed: ${changed.join(", ")}.`
+    : "Clips unchanged (same footage and in/out points as the current cut, which keeps the edits made since the noted render).";
+  return `${prefix} The Director wrote: ${text}`;
 }
 
 /** A trailing (or leading) "draft the brief"-style instruction, and its leftover punctuation. */

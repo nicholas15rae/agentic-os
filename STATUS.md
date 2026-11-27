@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 10:46. One page for every Claude Code session and branch.
+Updated 2026-11-27 11:30. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -177,6 +177,10 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| Live app (10:41 build, main 0418649), the system.status session's own check | 2 phone-style inbox turns, both answered by the desktop: "Tony, is the droplet up?" -> "Yeah, the Droplet is up and running, Nic..." (system.status 382 ms; droplet 61 ms, from the app's own 15-second check 2 s earlier); "is Docker running?" -> "Yeah, Docker is running good." First words 1.8 s and 1.2 s | 11-27 11:01 |
+| main 8647df7 (+ kill switch / options guard hardening) | tsc clean; vitest 3,352/3,352; cargo 1,694 (+2 known CRLF; Edge tests passed) | 11-27 11:30 |
+| main 4e69152 (+ section-pass-batch3 overnight batch) | tsc clean; vitest 3,321/3,321; cargo 1,693 (+2 known CRLF; 1 Edge test timed out under load, passes alone) | 11-27 11:20 |
+| main e547863 (Director Parts 1-5 + Tony live-test fixes + system.status) | tsc clean; vitest 3,211/3,211; cargo 1,682 (+2 known CRLF; 2 Edge tests timed out under load, pass alone) | 11-27 10:50 |
 | claude/tony-live-test-fixes-5d85d5 (+ barge-in) | tsc clean; vitest 2,931/2,931; cargo 1,624 (+2 known CRLF: allm, buildhub; 2 Edge browser tests timed out under load, pass alone); pytest not re-run (no Python changed since the 1,733 run below) | 11-27 02:50 |
 | claude/tony-live-test-fixes-5d85d5 (Tony live-test fixes) | tsc clean; vitest 2,925/2,925; cargo 1,625 (+2 known CRLF: allm, buildhub; 1 Edge browser test timed out under load, passes alone); pytest 1,733 (embed flake + 1 socket abort under load, both pass alone; language hub 41/41 after the last prompt change). Not checked in the running app (no rebuild) | 11-27 02:20 |
 | claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
@@ -225,27 +229,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 11:06 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 11:16 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 21 | `82f1331` 2026-11-27 docs(status): fill in the inventory commit id | clean |
-| `section-pass` | 23 | `febc6e9` 2026-11-27 fix(section-pass): build checks catch an animation that never shows | 297 files |
-| `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | no worktree |
+| `claude/unruffled-mayer-1247f9` | 1 | `5da4100` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined m... | no worktree |
+| `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
+| `section-26-engine` | 21 | `82f1331` 2026-11-27 docs(status): fill in the inventory commit id | 1 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
-| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
+| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
 - `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
 - `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
 - `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
 - `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
 - `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
-- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
 <!-- /AUTO:BRANCHES -->

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Loader2, OctagonX, ShieldCheck, ShieldAlert } from "lucide-react";
+import { Loader2, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
-import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killButtonProps, killStageLabel, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
+import { KillButton } from "@/features/trading/KillButton";
+import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -60,9 +61,6 @@ export function TradingDesk() {
     setPressed(0);
     void kill(false);
   };
-  const remaining = KILL_PRESSES - pressed;
-  // ARM → CONFIRM → EXECUTE KILL: the label names what the next click does.
-  const killLabel = !armed ? "KILL SWITCH · ARM" : killStageLabel(pressed);
 
   const locked = !!data?.lock;
 
@@ -84,13 +82,7 @@ export function TradingDesk() {
               Cancel
             </button>
           )}
-          <button
-            {...killButtonProps({ pressed, busy: busy === "kill", onPress: pressKill })} // onClick, the held-Enter guard, labels
-            className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 text-[13px] font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
-          >
-            {busy === "kill" ? <Loader2 size={16} className="animate-spin" /> : <OctagonX size={16} />}
-            {killLabel}
-          </button>
+          <KillButton pressed={pressed} busy={busy === "kill"} onPress={pressKill} />
         </div>
       }
     >

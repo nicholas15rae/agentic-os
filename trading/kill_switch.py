@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import uuid
@@ -65,16 +66,83 @@ def is_locked(d: Path | None = None) -> bool:
     return read_lock(d) is not None
 
 
+STAMP_LOCK_TIMEOUT_S = 1.0  # the kill stamp never makes the E-stop wait longer than this
+
+
 def write_lock(reason: str, actor: str, incident_id: str, d: Path | None = None) -> dict[str, Any]:
+    """Lock for a kill-switch incident (which then cancels everything and flattens at market). An existing lock
+    keeps its first incident as the cause and is stamped `killedAt`, so the options guard knows a flatten ran and
+    stands down (allows_risk_reducing). The stamp is best-effort and never raises: it must not stop the E-stop."""
     p = lock_path(d)
     existing = read_lock(d)
     if existing and existing.get("incidentId"):
-        return existing  # already locked — keep the first incident as the cause
-    data = {"locked": True, "at": time.time(), "reason": reason, "actor": actor, "incidentId": incident_id}
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(p)
+        return _stamp_killed(p, d, existing, incident_id, reason)
+    now = time.time()
+    data = {"locked": True, "at": now, "reason": reason, "actor": actor, "incidentId": incident_id, "killedAt": now}
+    _write_json(p, data)  # as before; if this raises, execute_kill records it and still cancels / flattens
     return data
+
+
+def _stamp_killed(p: Path, d: Path | None, existing: dict[str, Any], incident_id: str, reason: str) -> dict[str, Any]:
+    """Mark an already-held lock as flattened by the kill switch, under desk_lock's file lock (so a concurrent
+    breaker write can't drop it), waiting at most STAMP_LOCK_TIMEOUT_S. Any failure: the lock is returned as it was,
+    with `stampFailed` (the bridge's in-process stand-down still stops the guard: Desk.kill)."""
+    if existing.get("killedAt"):
+        return existing
+    try:
+        from ledger import file_lock
+
+        with file_lock(p.with_name(LOCK_NAME + ".lock"), timeout=STAMP_LOCK_TIMEOUT_S):
+            cur = read_lock(d) or existing
+            if not cur.get("killedAt"):
+                now = time.time()
+                cur.update(killedAt=now, killIncidentId=incident_id, killReason=reason[:300], updatedAt=now)
+                _write_json(p, cur)
+            return cur
+    except Exception as e:  # noqa: BLE001 — never let the stamp stop the E-stop
+        return {**existing, "stampFailed": f"{type(e).__name__}: {e}"}
+
+
+def _write_json(p: Path, data: dict[str, Any]) -> None:
+    tmp = p.with_name(p.name + f".{uuid.uuid4().hex[:6]}.tmp")
+    tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    tmp.replace(p)
+
+
+# Automatic overseer / desk-cli breakers whose only action is "lock": nothing is being flattened or liquidated
+# under them, so the options guard's risk-reducing exits (premium stop, expiry flatten) must keep running, or a
+# lock (e.g. a REJECTION_STORM the guard's own retries caused) would leave options unguarded into expiry.
+# Anything else (the kill switch, the security / gateway failsafes, KILL, DAILY_LOSS, dead-man's-switch breakers,
+# an operator's MANUAL_LOCK / HALT, an unreadable lock) stands the guard down, as before.
+LOCK_ONLY_BREAKERS = frozenset({"REJECTION_STORM", "STATE_DRIFT", "POLICY_INVALID", "LIMITS_INVALID"})
+
+
+def allows_risk_reducing(d: Path | None = None) -> bool:
+    """True when the options guard may send risk-reducing exits: unlocked, or locked only by LOCK_ONLY_BREAKERS
+    (an overseer / desk-cli lock, desk_lock.lock) with no kill-switch flatten since (killedAt) and no security
+    hard lock (the remote / Rust failsafe sever execution, and don't overwrite a lock that is already held)."""
+    lk = read_lock(d)
+    if lk is None:
+        return True
+    if lk.get("killedAt") or lk.get("source") not in ("overseer", "desk-cli") or security_hard_locked(d):
+        return False
+    codes = {str(b.get("code")) for b in lk.get("breakers") or [] if isinstance(b, dict)}
+    return bool(codes) and codes <= LOCK_ONLY_BREAKERS
+
+
+def security_hard_locked(d: Path | None = None) -> bool:
+    """The security layer's hard lock (data/security/state.json "hardLocked", AGENTIC_OS_SECURITY_DIR overrides; the
+    security dir sits next to the trading data dir). Written by both failsafes (security_api.hard_lock, Rust
+    security::shared::hard_lock). Unreadable = locked, like security_api.read_state."""
+    env = os.environ.get("AGENTIC_OS_SECURITY_DIR", "").strip()
+    p = (Path(env) if env else (d or data_dir()).parent / "security") / "state.json"
+    if not p.exists():
+        return False
+    try:
+        s = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    return bool(s.get("hardLocked")) if isinstance(s, dict) else True
 
 
 def reset_lock(confirm: str, actor: str, audit: AuditLog, d: Path | None = None) -> dict[str, Any]:
@@ -142,8 +210,16 @@ async def execute_kill(
         except OSError as e:
             step("lock", False, f"dry run: lock path not writable: {e}")
     else:
-        inc["lock"] = write_lock(reason, actor, incident_id, d)
-        step("lock", True, f"TRADING_LOCKED written ({lock_path(d)})")
+        # A lock-step failure is recorded, never fatal: cancelling and flattening still run below.
+        try:
+            inc["lock"] = write_lock(reason, actor, incident_id, d)
+            stamp = inc["lock"].get("stampFailed")
+            step("lock", True, f"TRADING_LOCKED written ({lock_path(d)})" + (f"; kill stamp failed: {stamp}" if stamp else ""))
+            if stamp:
+                inc["errors"].append(f"lock stamp: {stamp}")
+        except Exception as e:  # noqa: BLE001
+            step("lock", False, f"{type(e).__name__}: {e}")
+            inc["errors"].append(f"lock: {e}")
 
     ib = None
     try:

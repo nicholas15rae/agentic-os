@@ -6,9 +6,11 @@ Stdlib only; market data, quotes and the executor are fakes. NOW = 2026-11-24 01
 import asyncio
 import json
 import math
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -441,6 +443,31 @@ class AckTests(unittest.TestCase):
         self.assertEqual(ib.cancelled, [])                                      # the stop protects the whole bracket
         self.assertFalse(any(w.startswith("NO STOP") for w in ib.warnings))
 
+    def test_an_execution_reported_before_its_order_status_counts_as_filled(self):
+        """ib_async records execDetails in trade.fills before (or without) an orderStatus Filled."""
+        trades = self.bracket(parent="Submitted", stop="PreSubmitted", tp="PreSubmitted", t=[self.RO])
+        trades[0].fills = [NS(execution=NS(shares=1))]                              # orderStatus.filled still 0
+        ib = self.run_ack(trades)
+        self.assertEqual(ib.cancelled, [])
+        self.assertTrue(any(w.startswith("entry filled") for w in ib.warnings), ib.warnings)
+
+    def test_a_cancel_that_cannot_be_sent_is_not_reported_as_cancelled(self):
+        import executor as ex
+
+        trades = self.bracket()
+
+        def down(_o):
+            raise ConnectionError("Not connected")
+        with self.assertRaises(ex.ExecutionRefused) as cm:
+            asyncio.run(ex.await_ack(NS(cancelOrder=down), trades, timeout=0.05, sleep=self._noop_sleep, settle=0.05))
+        msg = str(cm.exception)
+        self.assertIn("could NOT be sent, so it may still be working", msg)
+        self.assertNotIn("cancelled to avoid an orphan", msg)
+
+    @staticmethod
+    async def _noop_sleep(_s):
+        return None
+
     def test_nothing_left_to_cancel_means_no_settle_wait(self):
         import executor as ex
 
@@ -499,6 +526,113 @@ class AckTests(unittest.TestCase):
         self.assertEqual([(o["type"], o["status"]) for o in res["orders"]], [("LMT", "Filled"), ("STP", "PreSubmitted"), ("LMT", "PreSubmitted")])
         self.assertIn("Warning 399", res["ackWarnings"][0])
         self.assertEqual(cancels, [])                                           # a filled entry's legs are never cancelled
+
+
+class LockPolicyTests(unittest.TestCase):
+    """Which locks let the options guard keep sending risk-reducing exits (kill_switch.allows_risk_reducing)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        root = Path(self.td.name)
+        self.d = root / "trading"  # the security dir is its sibling, as data/trading and data/security
+        self.d.mkdir()
+        self.sec = root / "security"
+        self.env = mock.patch.dict(os.environ, {"AGENTIC_OS_SECURITY_DIR": ""})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.td.cleanup()
+
+    def test_a_security_hard_lock_stands_the_guard_down_even_over_a_lock_only_breaker(self):
+        """The remote / Rust failsafe never overwrites a held lock; their hard lock is the signal."""
+        import desk_lock
+        import kill_switch as ks
+
+        desk_lock.lock(self.d, "storm", "overseer", source="overseer", breaker="REJECTION_STORM")
+        self.assertTrue(ks.allows_risk_reducing(self.d))
+        self.sec.mkdir()
+        for state, allowed in (('{"hardLocked": true}', False), ('{"hardLocked": false}', True), ("{broken", False)):
+            (self.sec / "state.json").write_text(state, encoding="utf-8")
+            self.assertEqual(ks.allows_risk_reducing(self.d), allowed, state)
+
+    def test_kill_stamp_never_blocks_or_raises(self):
+        import desk_lock
+        import kill_switch as ks
+        import time as _t
+
+        first = desk_lock.lock(self.d, "storm", "overseer", source="overseer", breaker="REJECTION_STORM")
+        with mock.patch("ledger.file_lock", side_effect=TimeoutError("held by another process")):
+            t0 = _t.monotonic()
+            out = ks.write_lock("E-stop", "ui", "inc-1", self.d)
+        self.assertLess(_t.monotonic() - t0, 0.5)
+        self.assertEqual(out["incidentId"], first["incidentId"])
+        self.assertIn("TimeoutError", out["stampFailed"])
+
+    def test_a_failing_lock_step_never_stops_the_e_stop(self):
+        import kill_switch as ks
+        from audit import AuditLog
+
+        connected = []
+
+        async def connect(readonly):  # never a real TWS in tests
+            connected.append(readonly)
+            raise ConnectionError("no TWS in tests")
+        with mock.patch.object(ks, "write_lock", side_effect=PermissionError("replace denied")):
+            inc = asyncio.run(ks.execute_kill(reason="t", actor="t", dry_run=False, connect=connect, audit=AuditLog(self.d / "a.db"), d=self.d))
+        self.assertEqual((inc["steps"][0]["step"], inc["steps"][0]["ok"]), ("lock", False))
+        self.assertEqual(connected, [False])                                          # it still went on to cancel / flatten
+        self.assertIn("lock: replace denied", inc["errors"])
+
+    def test_matrix(self):
+        import desk_lock
+        import kill_switch as ks
+
+        self.assertTrue(ks.allows_risk_reducing(self.d))                           # unlocked
+        cases = [
+            (lambda: desk_lock.lock(self.d, "overseer: REJECTION_STORM", "overseer", source="overseer", breaker="REJECTION_STORM"), True),
+            (lambda: desk_lock.lock(self.d, "drift", "cli", breaker="STATE_DRIFT"), True),                     # desk-cli source
+            (lambda: desk_lock.lock(self.d, "manual", "cli", breaker="MANUAL_LOCK"), False),                  # operator's lock
+            (lambda: desk_lock.lock(self.d, "overseer: DMS_CC", "overseer", source="overseer", breaker="DMS_CC"), False),  # liquidates
+            (lambda: desk_lock.lock(self.d, "kill", "cli", breaker="KILL"), False),
+            (lambda: ks.write_lock("E-stop", "ui", "inc", self.d), False),                                    # the kill switch
+            (lambda: ks.lock_path(self.d).write_text(json.dumps({"locked": True, "source": "security-failsafe", "incidentId": "x"})), False),
+            (lambda: ks.lock_path(self.d).write_text("{not json"), False),                                    # unreadable
+        ]
+        for make, allowed in cases:
+            ks.lock_path(self.d).unlink(missing_ok=True)
+            make()
+            self.assertEqual(ks.allows_risk_reducing(self.d), allowed, ks.read_lock(self.d))
+        ks.lock_path(self.d).unlink()
+        desk_lock.lock(self.d, "storm", "overseer", source="overseer", breaker="REJECTION_STORM")
+        desk_lock.lock(self.d, "dms", "overseer", source="overseer", breaker="DMS_CC")                      # widened
+        self.assertFalse(ks.allows_risk_reducing(self.d))
+
+    def test_kill_on_top_of_a_breaker_lock_stamps_it_and_keeps_the_first_cause(self):
+        import desk_lock
+        import kill_switch as ks
+
+        first = desk_lock.lock(self.d, "overseer: REJECTION_STORM", "overseer", source="overseer", breaker="REJECTION_STORM")
+        out = ks.write_lock("E-stop from the phone", "webhook", "inc-9", self.d)
+        self.assertEqual((out["incidentId"], out["breakers"], out["reason"]), (first["incidentId"], first["breakers"], first["reason"]))
+        self.assertEqual((out["killIncidentId"], out["killReason"]), ("inc-9", "E-stop from the phone"))
+        self.assertGreaterEqual(out["updatedAt"], out["killedAt"])                 # invalidates an older reconcile
+        self.assertEqual(ks.read_lock(self.d), out)
+        self.assertFalse(ks.allows_risk_reducing(self.d))
+
+    def test_executor_guard_lets_only_risk_reducing_calls_through_a_breaker_lock(self):
+        import desk_lock
+        import executor as ex
+
+        desk_lock.lock(self.d, "storm", "overseer", source="overseer", breaker="REJECTION_STORM")
+        e = ex.Executor(lock_dir=self.d)
+        e._guard(risk_reducing=True)                                               # options guard exit: allowed
+        with self.assertRaises(ex.ExecutionRefused):
+            e._guard()                                                             # a new entry: refused
+        import kill_switch as ks
+        ks.write_lock("E-stop", "ui", "inc", self.d)
+        with self.assertRaises(ex.ExecutionRefused):
+            e._guard(risk_reducing=True)                                           # after a kill: refused too
 
 
 class CloseOptionAckTests(unittest.TestCase):
@@ -581,6 +715,18 @@ class CloseOptionAckTests(unittest.TestCase):
                                        evolve=lambda n, tr: setattr(tr.orderStatus, "status", "PreSubmitted") if n == 1 else None)
         self.assertEqual((cancelled, t.orderStatus.status), ([], "PreSubmitted"))
         self.assertTrue(out["ackWarnings"][0].startswith("TWS warning (order not cancelled): Warning 399"), out)
+
+    def test_warning_after_the_live_status_does_not_cancel_a_live_exit(self):
+        """ib_async's error() sets status = ValidationError for a 399 even on a PreSubmitted order. If TWS then says
+        nothing more, the exit is still live: it must not be cancelled as 'not acknowledged'."""
+        def evolve(n, t):
+            if n == 1:
+                AckTests.tws_status(t, "PreSubmitted")
+                t.log.append(AckTests.W399)
+                t.orderStatus.status = "ValidationError"
+        out, cancelled, t = self.close(evolve=evolve, ack_timeout=0.05)
+        self.assertEqual((cancelled, t.orderStatus.status), ([], "ValidationError"))
+        self.assertIn("Warning 399", out["ackWarnings"][0])
 
     def test_filled_exit_is_never_cancelled(self):
         out, cancelled, _ = self.close(status="Filled", filled=1, log=[AckTests.RO])
@@ -698,7 +844,7 @@ class GuardExecutor(FakeExecutor):
         self.calls.append(("close", contract.conId if hasattr(contract, "conId") else contract, qty, limit, action, ref))
         return {"orderId": 77, "status": "Submitted"}
 
-    async def _ensure(self):
+    async def _ensure(self, **_kw):
         return object()
 
     async def _contract(self, ib, intent, factories):
@@ -817,7 +963,10 @@ class DeskEngineTests(unittest.TestCase):
         failed = dk.audit.tail(10, kinds=("options_premium_stop",))[0]
         self.assertEqual((failed["verdict"], failed["ref"]), ("FAILED", "opt-000001"))
         self.assertIn("Read-Only", failed["payload"]["error"])
-        rep2 = asyncio.run(dk.options_guard())                                     # next pass: retried
+        self.assertEqual(asyncio.run(dk.options_guard())["waiting"][0]["key"], "stop:opt-000001")  # backing off
+        self.assertEqual(tries, ["GUARD-STOP-opt-000001"])
+        dk.clock = lambda: NOW + 61                                                  # past the first backoff
+        rep2 = asyncio.run(dk.options_guard())                                     # retried
         self.assertEqual(len(rep2["stops"]), 1, rep2)
         self.assertEqual(dk._row("opt-000001")["status"], "closed_stop")
         self.assertEqual(tries, ["GUARD-STOP-opt-000001"] * 2)
@@ -840,9 +989,115 @@ class DeskEngineTests(unittest.TestCase):
         self.assertEqual(rep["flatten"], [])
         row = dk.audit.tail(10, kinds=("options_expiry_flatten",))[0]
         self.assertEqual((row["verdict"], row["ref"]), ("FAILED", "1"))
+        dk.clock = lambda: NOW + 61                                                  # past the first backoff
         rep2 = asyncio.run(dk.options_guard(contract_factory=lambda **kw: NS(**kw)))
         self.assertEqual(len(rep2["flatten"]), 1)
         self.assertEqual(tries, ["GUARD-EXP-1"] * 2)
+
+    HELD = [{"conId": 1, "symbol": "SPY 730C", "underlying": "SPY", "secType": "OPT", "position": 2, "expiry": exp(30),
+             "strike": 730.0, "right": "C", "currency": "USD"}]
+
+    def _failing_close(self, exc_text, fail_times=99):
+        from executor import ExecutionRefused
+
+        real, tries = self.ex.close_option, []
+
+        async def close(*a, **kw):
+            tries.append(a[3])
+            if len(tries) <= fail_times:
+                raise ExecutionRefused(exc_text)
+            return await real(*a, **kw)
+        self.ex.close_option = close
+        return tries
+
+    def test_guard_premium_stop_never_doubles_an_exit_still_working(self):
+        """close_option raised, but the exit lived on at TWS (lost ack / dropped socket): the next pass must see it
+        working in the bridge's snapshot and not send a second full-size SELL."""
+        dk = self._premium_stop_desk()
+        tries = self._failing_close("TWS didn't acknowledge the order within 15s; the cancel for #77 could NOT be sent, so it may still be working")
+        asyncio.run(dk.options_guard())
+        working = {"orderRef": "GUARD-STOP-opt-000001", "conId": 1, "action": "SELL", "quantity": 1.0, "remaining": 1.0, "status": "Submitted"}
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[working])
+        dk.clock = lambda: NOW + 600                                               # well past any backoff
+        rep = asyncio.run(dk.options_guard())
+        self.assertEqual(tries, ["GUARD-STOP-opt-000001"])                        # not sent again
+        self.assertIn("already working", rep["waiting"][0]["why"])
+        self.assertEqual(dk._row("opt-000001")["status"], "submitted")
+
+    def test_guard_retries_back_off_and_count_once_toward_the_rejection_storm(self):
+        import desk_sources
+
+        dk = self._premium_stop_desk()
+        tries = self._failing_close("TWS rejected the order: Error 201: no trading permissions")
+        verdicts = []
+        for t, expect_try in ((0, 1), (30, 1), (61, 2), (100, 2), (182, 3)):     # backoff 60 s, then 120 s
+            dk.clock = lambda t=t: NOW + t
+            asyncio.run(dk.options_guard())
+            self.assertEqual(len(tries), expect_try, t)
+        verdicts = [r["verdict"] for r in reversed(dk.audit.tail(10, kinds=("options_premium_stop",)))]
+        self.assertEqual(verdicts, ["FAILED", "RETRY_FAILED", "RETRY_FAILED"])
+        self.assertEqual(desk_sources.audit_failures_since(self.d, 0), 1)      # what the overseer's storm check counts
+
+    def test_guard_keeps_exiting_under_a_lock_only_breaker_but_not_after_a_kill(self):
+        import desk_lock
+        import kill_switch
+
+        dk = self._premium_stop_desk()
+        desk_lock.lock(self.d, "overseer: REJECTION_STORM", "overseer", source="overseer", breaker="REJECTION_STORM")
+        rep = asyncio.run(dk.options_guard())
+        self.assertEqual(rep.get("underLock"), ["REJECTION_STORM"])
+        self.assertEqual(len(rep["stops"]), 1, rep)                                 # the premium stop still ran
+        kill_switch.write_lock("E-stop", "ui", "inc-1", self.d)                    # E-stop on top: it flattens everything
+        self.assertTrue(kill_switch.read_lock(self.d).get("killedAt"))
+        self.assertIn("skipped", asyncio.run(dk.options_guard()))                  # so the guard stands down
+
+    def test_a_kill_stands_the_guard_down_in_process_even_if_the_lock_stamp_failed(self):
+        import kill_switch
+
+        dk = self._premium_stop_desk()
+
+        async def no_tws(_readonly):  # never a real TWS in tests: this kill must not touch the network
+            raise ConnectionError("no TWS in tests")
+        dk._kill_connect = no_tws
+        asyncio.run(dk.kill("E-stop", "ui"))
+        self.assertTrue(dk._killed and self.ex.stand_down)
+        with mock.patch.object(kill_switch, "allows_risk_reducing", return_value=True):  # as if the stamp had failed
+            self.assertIn("skipped", asyncio.run(dk.options_guard()))
+        self.assertFalse([c for c in self.ex.calls if c[0] == "close"])
+        dk.reset("RESET", "ui")
+        self.assertFalse(dk._killed or self.ex.stand_down)
+
+    def test_premium_stop_yields_to_the_expiry_flatten_inside_its_window(self):
+        """Inside the expiry window step 1 owns the legs; a premium stop as well would stack a second SELL."""
+        import desk as desk_mod
+
+        dk = self._premium_stop_desk()
+        with mock.patch.object(desk_mod.opt, "must_flatten", return_value=True):
+            rep = asyncio.run(dk.options_guard())
+        self.assertEqual(rep["stops"], [])
+        self.assertFalse([c for c in self.ex.calls if c[0] == "close" and str(c[5]).startswith("GUARD-STOP")])
+        self.assertEqual(dk._row("opt-000001")["status"], "submitted")
+
+    def test_guard_stands_down_under_an_operator_lock(self):
+        import desk_lock
+
+        dk = self._premium_stop_desk()
+        desk_lock.lock(self.d, "manual", "cli", breaker="MANUAL_LOCK")
+        self.assertIn("skipped", asyncio.run(dk.options_guard()))
+        self.assertFalse([c for c in self.ex.calls if c[0] == "close"])
+
+    def test_expiry_flatten_never_sells_the_long_leg_after_a_failed_short_buy_back(self):
+        pos = [{"conId": 1, "symbol": "SPY 730C", "underlying": "SPY", "secType": "OPT", "position": 2, "expiry": exp(1), "currency": "USD"},
+               {"conId": 2, "symbol": "SPY 740C", "underlying": "SPY", "secType": "OPT", "position": -2, "expiry": exp(1), "currency": "USD"},
+               {"conId": 3, "symbol": "QQQ 500C", "underlying": "QQQ", "secType": "OPT", "position": 1, "expiry": exp(1), "currency": "USD"}]
+        dk = self.desk(bridge=big_bridge(positions=pos), md=FakeMD())
+        tries = self._failing_close("TWS rejected the order: Error 201", fail_times=1)  # the first close (SPY short buy-back) fails
+        rep = asyncio.run(dk.options_guard(contract_factory=lambda **kw: NS(**kw)))
+        self.assertEqual(tries, ["GUARD-EXP-2", "GUARD-EXP-3"])                   # SPY long not sold; QQQ unaffected
+        self.assertTrue(any("buying back the short leg on SPY" in e for e in rep["errors"]), rep["errors"])
+        dk.clock = lambda: NOW + 30                                                # still backing off: the long stays held too
+        asyncio.run(dk.options_guard(contract_factory=lambda **kw: NS(**kw)))
+        self.assertNotIn("GUARD-EXP-1", tries)
 
     def test_guard_skips_when_locked(self):
         import kill_switch

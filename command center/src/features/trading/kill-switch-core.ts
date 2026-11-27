@@ -95,6 +95,15 @@ export function killButtonProps({ pressed, busy, onPress }: { pressed: number; b
   };
 }
 
+/** Registers the kill-switch keydown listener on `target` (the window) in the capture phase; returns the uninstall.
+ *  useKillSwitchHotkey is exactly useEffect(() => installKillHotkey(window, …)). */
+export function installKillHotkey(target: Pick<EventTarget, "addEventListener" | "removeEventListener">,
+  deps: Parameters<typeof createKillKeyListener>[0]): () => void {
+  const onKey = createKillKeyListener(deps) as unknown as EventListener;
+  target.addEventListener("keydown", onKey, { capture: true });
+  return () => target.removeEventListener("keydown", onKey, { capture: true });
+}
+
 export type KillToast = { title: string; body: string; tone: "info" | "warn" | "error" };
 type KillKeyEvent = Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "key" | "repeat" | "preventDefault" | "stopPropagation">;
 

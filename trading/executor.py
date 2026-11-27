@@ -78,10 +78,14 @@ async def await_ack(ib: Any, trades: list[Any], timeout: float = ACK_TIMEOUT_S, 
 
     sleep = sleep or asyncio.sleep
     pending = PENDING if refuse_warnings else PENDING | {"ValidationError"}
+    # Exits: once TWS has given the order a live status it is acknowledged, even if a later warning (ib_async sets
+    # status = ValidationError for 399/404/2100-2199 on a live order) left that as the last word.
+    acked = (lambda t: t.orderStatus.status not in pending) if refuse_warnings else \
+        (lambda t: t.orderStatus.status not in pending or _was_live(t))
     deadline = time.monotonic() + timeout
     while True:
         bad = [r for r in (rejection(t, refuse_warnings) for t in trades) if r]
-        if not bad and all(t.orderStatus.status not in pending for t in trades):
+        if not bad and all(acked(t) for t in trades):
             return [f"TWS warning (order not cancelled): {m}" for m in _warnings_logged(trades)]
         timed_out = time.monotonic() >= deadline
         if bad or timed_out:
@@ -89,13 +93,26 @@ async def await_ack(ib: Any, trades: list[Any], timeout: float = ACK_TIMEOUT_S, 
             if _filled(trades):
                 return _fill_warnings(problems, trades, what, _trim_unprotected(ib, trades))
             seen = "; ".join(_describe(t) for t in trades)
-            sent = _cancel_live(ib, trades)
+            failed: list[Any] = []
+            sent = _cancel_live(ib, trades, failed)
             if await _filled_after_cancel(sent, trades, settle, sleep):
                 return _fill_warnings(problems + [f"the {what} filled before the cancel landed"], trades, what)
+            # Say what really happened to the cancel: if it couldn't be sent (e.g. the socket dropped), the order
+            # may still be working at TWS and the caller must not assume it's gone.
+            unsent = (f"; the cancel for {', '.join(f'#{t.order.orderId}' for t in failed)} could NOT be sent, so it may "
+                      f"still be working [{seen}]") if failed else ""
             if bad:
-                raise ExecutionRefused("TWS rejected the order: " + "; ".join(problems))
-            raise ExecutionRefused(f"{problems[0]}; cancelled to avoid an orphan [{seen}]")
+                raise ExecutionRefused("TWS rejected the order: " + "; ".join(problems) + unsent)
+            raise ExecutionRefused(f"{problems[0]}{unsent or f'; cancelled to avoid an orphan [{seen}]'}")
         await sleep(0.2)
+
+
+LIVE = {"PreSubmitted", "Submitted", "Filled"}
+
+
+def _was_live(t: Any) -> bool:
+    """TWS reported this order working (or filled) at some point: a live status in its log or right now."""
+    return t.orderStatus.status in LIVE or any(getattr(e, "status", "") in LIVE for e in (getattr(t, "log", []) or []))
 
 
 def _warnings_logged(trades: list[Any]) -> list[str]:
@@ -157,11 +174,11 @@ def _describe(t: Any) -> str:
     return f"#{t.order.orderId} {getattr(t.order, 'orderType', '')} {t.orderStatus.status or 'no status'}{msg}"
 
 
-def _cancel_live(ib: Any, trades: list[Any]) -> list[Any]:
+def _cancel_live(ib: Any, trades: list[Any], failed: list[Any] | None = None) -> list[Any]:
     """Cancel an unfilled bracket by its parent: TWS cancels the attached children with it. A child whose
     parent is still live is never cancelled directly, so if the parent fills just as the cancel goes out
     (the cancel then fails), its stop / take-profit stay working. A child with no live parent is cancelled.
-    Returns the trades a cancel was sent for."""
+    Returns the trades a cancel was sent for; ones whose cancel raised (e.g. disconnected) go in `failed`."""
     live = lambda t: t.orderStatus.status not in REJECTED and not t.isDone()  # noqa: E731
     live_parents = {t.order.orderId for t in trades if not _is_child(t) and live(t)}
     sent = []
@@ -172,7 +189,8 @@ def _cancel_live(ib: Any, trades: list[Any]) -> list[Any]:
             ib.cancelOrder(t.order)
             sent.append(t)
         except Exception:  # noqa: BLE001
-            pass
+            if failed is not None:
+                failed.append(t)
     return sent
 
 
@@ -215,6 +233,7 @@ class Executor:
         self._ib_factory = ib_factory
         self._lock_dir = lock_dir
         self.ib: Any = None
+        self.stand_down = False  # Desk.kill sets it, Desk.reset clears it: no risk-reducing (guard) orders meanwhile
 
     def _new_ib(self) -> Any:
         if self._ib_factory:
@@ -223,8 +242,13 @@ class Executor:
 
         return IB()
 
-    def _guard(self) -> Any:
-        if kill_switch.is_locked(self._lock_dir):
+    def _guard(self, risk_reducing: bool = False) -> Any:
+        """Entries: refused under any lock. Risk-reducing exits (options guard): refused only under a lock that
+        flattens or forbids them (kill_switch.allows_risk_reducing), or while this process's desk ran a kill
+        (stand_down, set by Desk.kill). The paper-endpoint check applies to both."""
+        if risk_reducing and self.stand_down:
+            raise ExecutionRefused("standing down: the kill switch ran (reset it to resume the options guard)")
+        if kill_switch.is_locked(self._lock_dir) and not (risk_reducing and kill_switch.allows_risk_reducing(self._lock_dir)):
             raise ExecutionRefused("trading is LOCKED by the kill switch")
         cfg = load_config()
         ep = resolve_endpoint(cfg)
@@ -232,8 +256,8 @@ class Executor:
             raise ExecutionRefused("endpoint LOCKED: " + "; ".join(ep.reasons))
         return cfg, ep
 
-    async def _ensure(self) -> Any:
-        cfg, ep = self._guard()
+    async def _ensure(self, risk_reducing: bool = False) -> Any:
+        cfg, ep = self._guard(risk_reducing)
         if self.ib is not None and self.ib.isConnected():
             return self.ib
         self.ib = self._new_ib()
@@ -292,8 +316,9 @@ class Executor:
 
         Waits for TWS to acknowledge the exit, like an entry, but a TWS warning alone doesn't cancel it (it's still
         working, and cancelling would undo the risk reduction). A refusal, or no acknowledgement, cancels it and raises
-        ExecutionRefused, so the options guard doesn't record a stop that isn't there and retries on its next pass."""
-        ib = await self._ensure()
+        ExecutionRefused, so the options guard doesn't record a stop that isn't there and retries on its next pass.
+        Allowed under a lock-only circuit breaker (kill_switch.allows_risk_reducing), never after a kill-switch flatten."""
+        ib = await self._ensure(risk_reducing=True)
         if factories is None:
             from ib_async import LimitOrder, MarketOrder
 
@@ -305,7 +330,7 @@ class Executor:
         order.orderRef = ref
         if getattr(contract, "secType", "") != "BAG" and not getattr(contract, "exchange", ""):
             contract.exchange = "SMART"
-        self._guard()
+        self._guard(risk_reducing=True)  # last look, right before the socket call
         t = ib.placeOrder(contract, order)
         warnings = await await_ack(ib, [t], timeout=ack_timeout, sleep=sleep, refuse_warnings=False, what="exit")
         res = {"orderId": t.order.orderId, "type": t.order.orderType, "qty": qty, "limit": limit, "status": t.orderStatus.status}
@@ -316,8 +341,9 @@ class Executor:
 
     async def cancel_working(self, *, ref: str | None = None, con_ids: set[int] | None = None, symbol: str | None = None) -> int:
         """Cancel working orders by orderRef, by contract conId, or (combos) by underlying symbol.
-        Used before a guard exit so a resting take-profit can't fill afterwards and open a short."""
-        ib = await self._ensure()
+        Used before a guard exit so a resting take-profit can't fill afterwards and open a short. Cancel-only, so
+        allowed wherever the guard's exits are (kill_switch.allows_risk_reducing)."""
+        ib = await self._ensure(risk_reducing=True)
         await ib.reqAllOpenOrdersAsync()
         n = 0
         for t in ib.openTrades():

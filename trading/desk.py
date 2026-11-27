@@ -62,6 +62,8 @@ AUTONOMOUS_SOURCES = ("trading_agent", "rule_engine")
 LLM_REFUSAL = "LLM-sourced intents never reach the broker: the model is an analyst only (Engine R executes rules)"
 MONITOR_S = 10.0
 OPTIONS_GUARD_S = 60.0
+GUARD_RETRY_BASE_S = 60.0  # options guard: first retry of a failed exit after this long, doubling...
+GUARD_RETRY_MAX_S = 300.0  # ...up to this (expiry day leaves no room for longer)
 
 DESK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS intents (
@@ -156,6 +158,8 @@ class Desk:
         self.last_scoring: dict[str, Any] | None = None
         # Background-loop heartbeats (name -> last iteration, epoch s) for the health check.
         self.heartbeats: dict[str, float] = {}
+        self._guard_fails: dict[str, tuple[int, float]] = {}  # options-guard exit key -> (failures in a row, retry at)
+        self._killed = False  # set by a live kill(), cleared by reset(): the options guard stands down meanwhile
         self._lock = asyncio.Lock()
         self._db = self.d / "desk.db"
         with self._conn() as c:
@@ -456,7 +460,11 @@ class Desk:
 
     async def kill(self, reason: str, actor: str, dry_run: bool = False) -> dict[str, Any]:
         if not dry_run:
-            # Sever the agent BEFORE the network steps so nothing new is queued meanwhile.
+            # Sever the agent BEFORE the network steps so nothing new is queued meanwhile. The options guard and the
+            # executor's risk-reducing path stand down too, in-process, so even a failed lock stamp can't let a guard
+            # exit race the kill's flatten (kill_switch.allows_risk_reducing is the cross-process signal).
+            self._killed = True
+            self.executor.stand_down = True
             self._save_state(mode="ADVISORY", agentHalted=True)
             with self._conn() as c:
                 c.execute("UPDATE intents SET status='expired', updated=? WHERE status='pending_approval'", (self.clock(),))
@@ -465,6 +473,8 @@ class Desk:
 
     def reset(self, confirm: str, actor: str) -> dict[str, Any]:
         out = kill_switch.reset_lock(confirm, actor, self.audit, self.d)
+        self._killed = False
+        self.executor.stand_down = False
         self._save_state(agentHalted=False)  # mode stays ADVISORY; re-arming is a separate, confirmed step
         return out
 
@@ -624,10 +634,13 @@ class Desk:
     # ── options guard: premium stops + never hold into expiry ────────
     async def options_guard(self, contract_factory: Callable[..., Any] | None = None) -> dict[str, Any]:
         """One pass. Expiry flatten for every held option line; premium stop for desk-opened structures."""
-        report: dict[str, Any] = {"at": self.clock(), "flatten": [], "stops": [], "errors": []}
-        if kill_switch.is_locked(self.d):
-            report["skipped"] = "locked (the kill switch already flattened)"
+        report: dict[str, Any] = {"at": self.clock(), "flatten": [], "stops": [], "errors": [], "waiting": []}
+        if self._killed or not kill_switch.allows_risk_reducing(self.d):
+            report["skipped"] = "locked (the kill switch flattened, or the lock forbids exits)"
             return report
+        lk = kill_switch.read_lock(self.d)
+        if lk:  # a lock-only circuit breaker: entries are locked, but risk-reducing exits keep running
+            report["underLock"] = sorted({str(b.get("code")) for b in lk.get("breakers") or []})
         snap = self.bridge.snapshot()
         if snap.get("state") != "CONNECTED":
             report["skipped"] = "bridge not connected"
@@ -635,26 +648,43 @@ class Desk:
         olim = self.option_limits()
         positions, orders = snap.get("positions") or [], snap.get("openOrders") or []
         guard_working = [o for o in orders if (o.get("orderRef") or "").startswith("GUARD-")]
+        under = lambda con_id, sym: next((x.get("underlying") or x.get("symbol") for x in positions if x.get("conId") == con_id), sym)  # noqa: E731
         # 1. Expiry flatten (shorts bought back before longs are sold).
         plan = flatten_plan(positions, guard_working, self.clock(), olim)
         if plan:
             if contract_factory is None:
                 from ib_async import Contract as contract_factory  # noqa: N813
-            unders = {next((x.get("underlying") or x.get("symbol") for x in positions if x.get("conId") == st["conId"]), st["symbol"]) for st in plan}
-            for u in unders:
+            for u in {under(st["conId"], st["symbol"]) for st in plan}:
                 try:
                     await self.executor.cancel_working(symbol=u)  # resting take-profits must not fill after we exit
                 except Exception as e:  # noqa: BLE001
                     report["errors"].append(f"cancel {u}: {e}")
+            uncovered: set[str] = set()  # underlyings whose short leg wasn't bought back this pass
             for st in plan:
+                u, key = under(st["conId"], st["symbol"]), f"exp:{st['conId']}"
+                if st["action"] == "SELL" and u in uncovered:
+                    # A vertical's long leg is its cover: selling it with the short still open leaves a naked short.
+                    report["errors"].append(f"flatten {st['symbol']}: not sold, because buying back the short leg on {u} didn't go through this pass")
+                    continue
+                wait = self._guard_backoff(key)
+                if wait:
+                    report["waiting"].append({"key": key, "symbol": st["symbol"], "retryAt": wait})
+                    if st["action"] == "BUY":
+                        uncovered.add(u)
+                    continue
                 try:
                     res = await self.executor.close_option(contract_factory(conId=st["conId"], exchange="SMART"), st["qty"], None,
                                                            f"GUARD-EXP-{st['conId']}", action=st["action"])
+                    self._guard_ok(key)
                     report["flatten"].append({**st, **res})
                     self.audit.append("options_expiry_flatten", {**st, **res}, ref=str(st["conId"]), verdict="SUBMITTED", actor="options_guard")
-                except Exception as e:  # noqa: BLE001 — e.g. TWS refused / never acknowledged the exit; the next pass re-plans it
+                except Exception as e:  # noqa: BLE001 — e.g. TWS refused / never acknowledged the exit; a later pass re-plans it
+                    if st["action"] == "BUY":
+                        uncovered.add(u)
+                    verdict, n, retry_at = self._guard_failed(key)
                     report["errors"].append(f"flatten {st['symbol']}: {e}")
-                    self.audit.append("options_expiry_flatten", {**st, "error": str(e)}, ref=str(st["conId"]), verdict="FAILED", actor="options_guard")
+                    self.audit.append("options_expiry_flatten", {**st, "error": str(e), "attempt": n, "retryAt": retry_at},
+                                      ref=str(st["conId"]), verdict=verdict, actor="options_guard")
         # 2. Premium stops for structures the desk opened.
         with self._conn() as c:
             ids = [r[0] for r in c.execute("SELECT intent_id FROM intents WHERE status='submitted'").fetchall()]
@@ -664,6 +694,8 @@ class Desk:
             if not intent.is_option:
                 continue
             lg = intent.legs[0]
+            if opt.must_flatten(lg["expiry"], self.clock(), olim):
+                continue  # inside the expiry window step 1 owns these legs: a premium stop now would stack a second SELL
             held = [p for p in positions if p.get("secType") == "OPT" and (p.get("underlying") or "") == intent.symbol
                     and (p.get("position") or 0) > 0 and (p.get("expiry") or "").startswith(lg["expiry"])
                     and p.get("right") == lg["right"] and abs((p.get("strike") or 0) - lg["strike"]) < 1e-6]
@@ -677,24 +709,55 @@ class Desk:
             m = opt.mid(quote or {})
             if m is None or m > intent.stop_loss:
                 continue
-            qty = min(int(held[0]["position"]), row["decision"]["quantity"] or intent.quantity)
+            ref, key = f"GUARD-STOP-{iid}", f"stop:{iid}"
+            # An exit from an earlier pass may still be working at TWS (close_option raised, e.g. its ack wait timed out
+            # or the socket dropped, but the order lived on). Net it out, so a retry never doubles the close.
+            working = sum(float(o.get("remaining") if o.get("remaining") is not None else o.get("quantity") or 0)
+                          for o in orders if o.get("orderRef") == ref)
+            qty = int(min(int(held[0]["position"]), row["decision"]["quantity"] or intent.quantity) - working)
+            if qty <= 0:
+                report["waiting"].append({"key": key, "intentId": iid, "why": f"stop exit {ref} already working ({working:g})"})
+                continue
+            wait = self._guard_backoff(key)
+            if wait:
+                report["waiting"].append({"key": key, "intentId": iid, "retryAt": wait})
+                continue
             try:
                 await self.executor.cancel_working(ref=iid)  # the resting take-profit
-                ib = await self.executor._ensure()
+                ib = await self.executor._ensure(risk_reducing=True)
                 contract = await self.executor._contract(ib, intent, {})
                 limit = opt.tick(max(quote["bid"], 0.01))
                 # close_option waits for TWS to acknowledge the exit and raises if it was refused, so "closed_stop"
                 # (which this pass never looks at again) is only recorded for an exit TWS has really taken.
-                res = await self.executor.close_option(contract, qty, limit, f"GUARD-STOP-{iid}", action="SELL")
+                res = await self.executor.close_option(contract, qty, limit, ref, action="SELL")
+                self._guard_ok(key)
                 self._set_status(iid, "closed_stop", {"exit": res, "mid": m})
                 report["stops"].append({"intentId": iid, "mid": m, "stop": intent.stop_loss, **res})
                 self.audit.append("options_premium_stop", {"mid": m, "stop": intent.stop_loss, **res}, ref=iid, verdict="SUBMITTED", actor="options_guard")
-            except Exception as e:  # noqa: BLE001 — the intent stays "submitted", so the next pass retries the stop
+            except Exception as e:  # noqa: BLE001 — the intent stays "submitted", so a later pass retries the stop
+                verdict, n, retry_at = self._guard_failed(key)
                 report["errors"].append(f"stop {iid}: {e}")
-                self.audit.append("options_premium_stop", {"mid": m, "stop": intent.stop_loss, "error": str(e)}, ref=iid, verdict="FAILED", actor="options_guard")
+                self.audit.append("options_premium_stop", {"mid": m, "stop": intent.stop_loss, "error": str(e), "attempt": n, "retryAt": retry_at},
+                                  ref=iid, verdict=verdict, actor="options_guard")
         self._save_state(optionsGuard={"at": report["at"], "flattened": len(report["flatten"]), "stopped": len(report["stops"]),
                                        "errors": report["errors"][:5]})
         return report
+
+    # Retry backoff for the guard's exits (per premium-stop intent / expiry line): 60 s, doubling, capped at 5 min, so a
+    # stuck exit is retried steadily without hammering TWS. Only the first failure of a streak is verdict FAILED (the
+    # overseer's REJECTION_STORM counts those); repeats are RETRY_FAILED, so one stuck stop can't trip the storm lock.
+    def _guard_backoff(self, key: str) -> float | None:
+        n, retry_at = self._guard_fails.get(key, (0, 0.0))
+        return retry_at if n and self.clock() < retry_at else None
+
+    def _guard_failed(self, key: str) -> tuple[str, int, float]:
+        n = self._guard_fails.get(key, (0, 0.0))[0] + 1
+        retry_at = self.clock() + min(GUARD_RETRY_BASE_S * 2 ** (n - 1), GUARD_RETRY_MAX_S)
+        self._guard_fails[key] = (n, retry_at)
+        return ("FAILED" if n == 1 else "RETRY_FAILED"), n, retry_at
+
+    def _guard_ok(self, key: str) -> None:
+        self._guard_fails.pop(key, None)
 
     async def options_guard_loop(self) -> None:
         while True:

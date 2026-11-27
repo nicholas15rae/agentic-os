@@ -4,6 +4,7 @@ import {
   classifyKillKey,
   createKillArm,
   createKillKeyListener,
+  installKillHotkey,
   isKillHotkey,
   isRepeatActivation,
   KILL_PRESSES,
@@ -54,6 +55,21 @@ describe("kill-switch hotkey listener (what useKillSwitchHotkey registers)", () 
     const plain = h.ev("x", { ctrl: true });
     h.onKey(plain);
     expect(plain.preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("installKillHotkey (what the hook's effect does)", () => {
+  it("adds the listener in the capture phase and removes the same one", () => {
+    const calls: [string, string, unknown, unknown][] = [];
+    const target = {
+      addEventListener: (t: string, fn: unknown, o: unknown) => calls.push(["add", t, fn, o]),
+      removeEventListener: (t: string, fn: unknown, o: unknown) => calls.push(["remove", t, fn, o]),
+    };
+    const trip = vi.fn(async () => ({ incidentId: "i", ok: true, dryRun: false, cancelled: [], flatten: [], errors: [], steps: [] }));
+    const off = installKillHotkey(target, { trip, notify: () => undefined });
+    off();
+    expect(calls.map(([k, t, , o]) => [k, t, o])).toEqual([["add", "keydown", { capture: true }], ["remove", "keydown", { capture: true }]]);
+    expect(calls[0][2]).toBe(calls[1][2]);
   });
 });
 

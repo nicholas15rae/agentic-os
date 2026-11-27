@@ -560,10 +560,29 @@ pub(crate) fn is_secret_name(name: &str) -> bool {
         || n.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| WORDS.contains(&w))
 }
 
+/// Local-only data that never goes to Google Drive or any cloud sync, whatever folder is tracked
+/// (Nic, 11-27): the AnythingLLM export (`allm-export`), everything under the built-in engine's
+/// `data/engine` (doc store, exports, benchmarks), and archives inside a `backups` folder (local
+/// backups now include the export).
+pub(crate) fn never_syncs(path: &Path) -> bool {
+    let parts: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+    if parts.iter().any(|p| p == "allm-export") || parts.windows(2).any(|w| w[0] == "data" && w[1] == "engine") {
+        return true;
+    }
+    let name = parts.last().map(String::as_str).unwrap_or("");
+    let archive = [".zip", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".rar"].iter().any(|e| name.ends_with(e));
+    archive && parts[..parts.len().saturating_sub(1)].iter().any(|p| p == "backups")
+}
+
 /// Collect the files under `root` (or `root` itself) that may sync; `held` counts what was left
 /// out because its name (or its folder's) marks it as secret, so the result can say so.
 fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize, held: &mut usize) {
     if out.len() >= MAX_FILES || depth > 8 {
+        return;
+    }
+    if never_syncs(root) {
+        // Local-only (the AnythingLLM export, the engine's data, backup archives): held back.
+        *held += 1;
         return;
     }
     if root.file_name().is_some_and(|f| is_secret_name(&f.to_string_lossy())) {
@@ -827,6 +846,30 @@ async fn join_all<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_sync_never_uploads_the_allm_export_engine_data_or_backup_archives() {
+        for p in [r"G:\agentic os\data\engine\allm-export\20261127-101548\anythingllm.db", r"G:\agentic os\data\engine\docstore.db",
+                  r"D:\elsewhere\allm-export", r"G:\agentic os\backups\agentic-os-20261127.tar.gz", r"G:\agentic os\Backups\snap.zip"] {
+            assert!(never_syncs(Path::new(p)), "{p} must never sync");
+        }
+        for p in [r"G:\agentic os\brain\memory.md", r"G:\agentic os\backups\README.md", r"G:\agentic os\data\settings.json",
+                  r"G:\agentic os\memory\engine-notes.md", r"G:\agentic os\training_logs\run.zip"] {
+            assert!(!never_syncs(Path::new(p)), "{p} should still sync");
+        }
+        // walk() holds them back and counts them
+        let tmp = std::env::temp_dir().join(format!("never-syncs-{}", std::process::id()));
+        let exp = tmp.join("data").join("engine").join("allm-export");
+        std::fs::create_dir_all(&exp).unwrap();
+        std::fs::write(exp.join("anythingllm.db"), b"x").unwrap();
+        std::fs::write(tmp.join("notes.md"), b"ok").unwrap();
+        let (mut out, mut held) = (Vec::new(), 0usize);
+        walk(&tmp, &mut out, 0, &mut held);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].ends_with("notes.md"));
+        assert_eq!(held, 1);
+    }
 
     #[test]
     fn drive_sync_never_uploads_secret_files() {

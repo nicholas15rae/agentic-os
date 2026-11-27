@@ -36,7 +36,7 @@ Updated 2026-11-27 02:50. One page for every Claude Code session and branch.
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
 | Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | **No**, not merged, not pushed, app not rebuilt |
-| Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | see Branches | **No**, not merged, not pushed, app not rebuilt |
+| Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | **No**, not merged, not pushed, app not rebuilt |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
 
 ## 2. In progress
@@ -161,14 +161,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 01:57 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 09:42 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/tony-live-test-fixes-5d85d5` | 1 | `1318759` 2026-11-27 fix(tony): live-test fixes: Gmail Primary scope, Comms setting, STT... | clean |
-| `section-pass-batch3` | 3 | `f138a9b` 2026-11-27 feat(vault): second backup copies, vault password prompt, Tony sear... | clean |
+| `claude/tony-live-test-fixes-5d85d5` | 3 | `e802ad3` 2026-11-27 fix(voice): barge-in stops Tony at once; "hold on" is a hard stop | clean |
+| `director-suite` | 20 | `1b71fdf` 2026-11-27 docs(status): overnight Director summary, run 15 passed, items waiting | clean |
+| `section-pass-batch3` | 6 | `5c9d089` 2026-11-27 docs(status): overnight batch on section-pass-batch3 (15, 14.6-14.7... | 173 files |
 | `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | clean |
 | `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
 | `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
@@ -176,7 +177,6 @@ _Refreshed 2026-11-27 01:57 by `python scripts/update_status.py`._
 | `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
 | `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
-| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | 15 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 

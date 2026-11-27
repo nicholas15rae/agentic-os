@@ -2,7 +2,7 @@
  * Section pass: the widget drawer's catalogue (pure). Every widget belongs to one category; a
  * widget without an entry here is "Other", so a new widget folder shows up without editing this.
  */
-export const CATEGORIES = ["Your builds", "At a glance", "Work & business", "Media & Tony", "Other"] as const;
+export const CATEGORIES = ["This page", "Your builds", "At a glance", "Work & business", "Media & Tony", "Other"] as const;
 export type Category = (typeof CATEGORIES)[number];
 
 const BY_ID: Record<string, Category> = {

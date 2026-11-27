@@ -64,7 +64,8 @@ export interface LayoutState extends PagesState, VariantState {
   editing: boolean;
   setEditing: (v: boolean) => void;
   /** Lands on the start page (default: active) if it fits, else a later page, else a new page. */
-  add: (widgetId: string, config?: Record<string, unknown>, opts?: { pageId?: string }) => AddResult;
+  /** `noNewPage`: refuse instead of making a new page (a page with no page switcher). */
+  add: (widgetId: string, config?: Record<string, unknown>, opts?: { pageId?: string; noNewPage?: boolean }) => AddResult;
   /** Safety controls are never removed. */
   remove: (instanceId: string) => void;
   /** Moves / resizes, pushing covered neighbours aside; false (nothing changes) when off the board or there is no room. */
@@ -188,6 +189,7 @@ export function createLayoutStore(spec: SurfaceSpec) {
             const s = get();
             const r = placeWidget(s, { widgetId, sizes, config: { ...def.defaultConfig, ...config }, pageId: opts?.pageId }, shortId);
             if (!r.ok) return { ok: false, reason: r.reason };
+            if (r.created && opts?.noNewPage) return { ok: false, reason: "No room on this page: hide or shrink a panel first" };
             set(r.state);
             return { ok: true, pageId: r.pageId, created: r.created };
           },

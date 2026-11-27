@@ -22,6 +22,23 @@ export interface UiFile {
   layouts?: Record<string, unknown>;
 }
 
+/** Layouts saved by pages not opened this session (their store isn't made yet). */
+function savedLayouts(): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i) ?? "";
+      const surface = k.startsWith("cc.layout.") ? k.slice("cc.layout.".length) : "";
+      if (!SURFACE_ID.test(surface)) continue;
+      const state = (JSON.parse(localStorage.getItem(k) ?? "null") as { state?: unknown } | null)?.state;
+      if (state && typeof state === "object") out[surface] = state;
+    }
+  } catch {
+    /* storage blocked: the live stores still export */
+  }
+  return out;
+}
+
 /** Everything as it is now. */
 export function buildUiFile(now = new Date()): UiFile {
   const a = useAppearance.getState();
@@ -30,7 +47,7 @@ export function buildUiFile(now = new Date()): UiFile {
     version: 1,
     exportedAt: now.toISOString(),
     appearance: { themes: a.themes, activeTheme: a.activeTheme, app: a.app, pages: a.pages },
-    layouts: Object.fromEntries(allSurfaceStores().map((st) => [st.getState().surface, st.getState().exportLayout()])),
+    layouts: { ...savedLayouts(), ...Object.fromEntries(allSurfaceStores().map((st) => [st.getState().surface, st.getState().exportLayout()])) },
   };
 }
 

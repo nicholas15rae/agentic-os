@@ -22,7 +22,7 @@ export function LayoutSurface({ store, label }: { store: LayoutStore; label?: st
     <SurfaceContext.Provider value={store}>
       <div className="flex h-full min-h-0 flex-col" data-surface={store.getState().surface} aria-label={label}>
         <SurfaceEditBar />
-        <div className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto md:overflow-visible">
           <WidgetGrid />
         </div>
       </div>
@@ -54,9 +54,10 @@ function SurfaceEditBar() {
         <WidgetDrawer
           surface={surface}
           promoted={[]}
+          exclude={useL.getState().pages.flatMap((p) => p.items.map((i) => i.widgetId))}
           onClose={() => setDrawer(false)}
           onAdd={(id, title, config) => {
-            const r = useL.getState().add(id, config);
+            const r = useL.getState().add(id, config, { noNewPage: true });
             setMsg(r.ok ? `Added “${title}”.` : (r.reason ?? null));
             setDrawer(false);
           }}

@@ -39,6 +39,11 @@ export interface WidgetDefinition<C = Record<string, unknown>> {
   compactOrder?: number;
   /** Draw without a glass card (e.g. the mantra hero that sits directly on the wallpaper). */
   chromeless?: boolean;
+  /**
+   * A page's own panel (Play Place staging hub, Trading desk…): it draws its own card, so it sits
+   * frameless, scrolls instead of shrinking to fit, and a tap doesn't focus it.
+   */
+  panel?: boolean;
   /** Shared layout system: the pages this can be placed on (default: ["home"]). */
   surfaces?: string[];
   /**

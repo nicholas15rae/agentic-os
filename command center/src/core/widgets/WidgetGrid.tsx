@@ -252,7 +252,7 @@ function WidgetCell({
   }
 
   const icon = inst.display === "icon";
-  const frame = frameOf(inst, !!def.chromeless, defaultFrame);
+  const frame = frameOf(inst, !!def.chromeless || !!def.panel, defaultFrame);
   const alpha = opacityFor(inst.look, wallpaperId);
   const restingFrame = focused ? "solid" : frame;
   const frameless = restingFrame === "frameless";
@@ -355,8 +355,8 @@ function WidgetCell({
           data-widget={inst.instanceId}
           data-safety={locked ? "panel" : undefined}
           aria-label={def.title}
-          onClickCapture={() => !editing && !focused && setFocused(inst.instanceId)}
-          onFocusCapture={() => !editing && !focused && setFocused(inst.instanceId)}
+          onClickCapture={() => !editing && !focused && !def.panel && setFocused(inst.instanceId)}
+          onFocusCapture={() => !editing && !focused && !def.panel && setFocused(inst.instanceId)}
           className={[
             // Clipped: a widget's content never spills over its neighbours (it scales to fit instead).
             "group relative min-h-0 overflow-hidden",
@@ -369,7 +369,7 @@ function WidgetCell({
         >
           <div className={`h-full ${frameless ? "" : "p-4 xl:p-5"} ${editing || focused ? "pt-11 xl:pt-11" : ""}`}>
             {/* #12: one live copy only: a widget opened larger lives in its window meanwhile. */}
-            {windowed ? <div className="grid h-full place-items-center text-xs text-ink-3">Open in a window</div> : <WidgetBody inst={inst} def={def} legible={!focused && restingFrame !== "solid"} />}
+            {windowed ? <div className="grid h-full place-items-center text-xs text-ink-3">Open in a window</div> : <WidgetBody inst={inst} def={def} legible={!focused && !def.panel && restingFrame !== "solid"} />}
           </div>
           {focused && !editing && (
             <div className="absolute right-2 top-2 z-20 flex gap-1">
@@ -436,7 +436,8 @@ function WidgetBody({ inst, def, legible, forceFull }: { inst: WidgetInstance; d
       const i = inner.current;
       if (!i || document.hidden) return;
       const r = overflowRatio(i);
-      if (r > 1.02) setFit((f) => Math.max(FIT_MIN, f / r));
+      // A page panel scrolls instead (its lists are long by design).
+      if (r > 1.02 && !def.panel) setFit((f) => Math.max(FIT_MIN, f / r));
     };
     check();
     // Content that arrives later (a list loading) is caught too; cheap, and paused while hidden.
@@ -520,7 +521,7 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
   const look = inst.look ?? {};
-  const frame = frameOf(inst, !!def.chromeless, useDefaultFrame());
+  const frame = frameOf(inst, !!def.chromeless || !!def.panel, useDefaultFrame());
   const seg = (on: boolean) => `rounded-full border px-2.5 py-1 fs-11 ${on ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`;
   // Floats above the page (a widget clips its own content), next to the widget, kept on screen.
   const W = 256;

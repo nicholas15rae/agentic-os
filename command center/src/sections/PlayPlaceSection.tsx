@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Archive, BookMarked, Code2, Copy, Eye, Hammer, Lightbulb, Loader2, Maximize2, OctagonX, Play, RotateCcw, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { useCollection } from "@/lib/cc-api";
@@ -16,7 +17,9 @@ import { runTruth } from "@/features/buildhub/build-truth";
 import { useHub } from "@/features/buildhub/hub-store";
 import { devFixMode } from "@/features/memmap/format";
 import { useModes } from "@/features/modes/modes-store";
-import { StagingHub } from "@/features/buildhub/StagingHub";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { usePlayPlaceLayout } from "./playplace/panels";
+import { useMyApps } from "@/features/myapps/store";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
 import { PinButton } from "@/features/myapps/PinButton";
@@ -39,17 +42,33 @@ type LedgerTab = "ideas" | "fixes";
 export function PlayPlaceSection() {
   const clearUnseen = usePipelines((s) => s.clearUnseen);
   useEffect(() => clearUnseen(), [clearUnseen]);
-  return (
-    <div className="mx-auto h-full w-full max-w-7xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      {/* Thought-to-Product Phase 3: the universal staging hub (desktop; renders nothing on the phone). */}
-      <StagingHub />
-      <PipelineBars />
-      <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
-        <PlayCards />
-        <IdeasLedger />
-      </div>
-    </div>
-  );
+  // "Edit in Play Place" / a card link: the panel that holds it is shown (its page, its window, or
+  // put back when hidden), so the link never lands on nothing.
+  const card = useFocus((s) => s.card);
+  const build = useMyApps((s) => s.focusBuild);
+  useEffect(() => {
+    if (card) revealPanel("pp-play-cards");
+  }, [card]);
+  useEffect(() => {
+    if (build) revealPanel("pp-staging-hub");
+  }, [build]);
+  // Shared layout system: the staging hub, runners, play cards and ledger are panels on the same
+  // grid as the home page (move, resize, hide, add back, per mode, Reset to default).
+  return <LayoutSurface store={usePlayPlaceLayout} label="Play Place" />;
+}
+
+/** Show the panel `widgetId` on the Play Place: switch to its page, open an icon's window, or add it back. */
+function revealPanel(widgetId: string) {
+  const s = usePlayPlaceLayout.getState();
+  const page = s.pages.find((p) => p.items.some((i) => i.widgetId === widgetId));
+  const inst = page?.items.find((i) => i.widgetId === widgetId);
+  if (!page || !inst) {
+    const r = s.add(widgetId, undefined, { noNewPage: true });
+    if (!r.ok) useToasts.getState().push({ title: "Play Place", body: `That panel is hidden and there's no room for it: ${r.reason ?? "hide or shrink a panel"}, or Reset this page.`, tone: "info" });
+    return;
+  }
+  if (page.id !== s.activePage) s.setActivePage(page.id);
+  if (inst.display === "icon") usePlayPlaceLayout.getState().openWindow(inst.instanceId);
 }
 
 const OWNER_LABEL: Record<string, string> = { tony: "Tony", prompter: "Prompter", librarian: "Librarian", designer: "Designer", coder: "Coder", staging: "Staging", system: "Checks" };
@@ -81,14 +100,19 @@ function StagingLink({ slug }: { slug: string | null }) {
 }
 
 /** Builds in flight (TaskEnvelopes: status, who has it, iteration n/max), plus the latest finished ones. */
-export function PipelineBars() {
+export function PipelineBars({ showEmpty = false }: { showEmpty?: boolean } = {}) {
   const runs = Object.values(usePipelines((s) => s.runs)).sort((a, b) => a.at - b.at);
   const recent = Object.values(usePipelines((s) => s.recent))
     .sort((a, b) => b.at - a.at)
     .slice(0, 3);
   const builds = useHub((s) => s.view?.builds) ?? [];
   const [clearing, setClearing] = useState(false);
-  if (!runs.length && !recent.length) return null;
+  if (!runs.length && !recent.length)
+    return showEmpty ? (
+      <Card title="Build runners" hint="Nothing running">
+        <Empty>No builds in flight. Stage one from the Ideas ledger, a brainstorm or “Describe a widget”.</Empty>
+      </Card>
+    ) : null;
   // Finished runs whose Staging Hub build has settled: the hub card is their truth now.
   const stale = recent.filter((r) => runTruth(r, builds).stale);
   const clearStale = async () => {
@@ -313,7 +337,8 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
   const boxRef = useRef<HTMLElement>(null);
   // "Edit in Play Place" from a mounted page: bring this card into view with its Tweak box focused.
   useEffect(() => {
-    if (!focused) return;
+    // Not when this copy is hidden (an icon's live badge copy): the visible one takes the focus.
+    if (!focused || !boxRef.current?.offsetParent) return;
     boxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     boxRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
   }, [focused]);
@@ -430,8 +455,9 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
       )}
       {card.vaultPath && <p className="mt-2 font-mono fs-11 text-ink-3">Vault: {card.vaultPath}</p>}
 
-      {full && (
-        <div className="fixed inset-0 z-[85] flex flex-col bg-black/80 p-3" role="dialog" aria-modal="true" aria-label={`${card.title} full screen`}>
+      {full &&
+        createPortal(
+        <div className="fixed inset-0 z-[85] flex flex-col bg-black/80 p-3" role="dialog" aria-modal="true" aria-label={`${card.title} full screen`} onKeyDown={(e) => e.key === "Escape" && setFull(false)}>
           <div className="mb-2 flex items-center">
             <span className="text-sm text-ink">{card.title}</span>
             <button onClick={() => setFull(false)} className="pill-glass ml-auto !h-8 text-xs">
@@ -439,8 +465,9 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
             </button>
           </div>
           <iframe src={src} title={`Prototype full screen: ${card.title}`} sandbox="allow-scripts allow-forms allow-modals allow-popups" className="w-full flex-1 r-12 border-0 bg-white" />
-        </div>
-      )}
+        </div>,
+          document.body,
+        )}
     </section>
   );
 }

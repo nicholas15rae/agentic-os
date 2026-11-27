@@ -13,7 +13,7 @@ export interface PromotedItem {
  * Section pass: "Add widget" as a searchable drawer grouped by category (replaces the sideways
  * scrolling Add row, which got cut off). Your Play Place builds come first.
  */
-export function WidgetDrawer({ promoted, onAdd, onClose, surface = "home" }: { promoted: readonly PromotedItem[]; onAdd: (widgetId: string, title: string, config?: Record<string, unknown>) => void; onClose: () => void; surface?: string }) {
+export function WidgetDrawer({ promoted, onAdd, onClose, surface = "home", exclude = [] }: { promoted: readonly PromotedItem[]; onAdd: (widgetId: string, title: string, config?: Record<string, unknown>) => void; onClose: () => void; surface?: string; exclude?: readonly string[] }) {
   const [q, setQ] = useState("");
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.focus(), []);
@@ -23,11 +23,13 @@ export function WidgetDrawer({ promoted, onAdd, onClose, surface = "home" }: { p
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const defs = availableWidgets(surface).filter((w) => w.id !== "custom" && w.id !== "staged-build");
+  // A page's panels are one of each: those already placed aren't offered again.
+  const defs = availableWidgets(surface).filter((w) => !(w.panel && exclude.includes(w.id))).filter((w) => w.id !== "custom" && w.id !== "staged-build");
   const items = useMemo<DrawerItem[]>(
     () => [
       ...promoted.map((b) => ({ key: `staged-build:${b.buildId}`, title: b.title, description: b.buildTitle ? `Promoted from the Play Place build “${b.buildTitle}”` : "Promoted from the Play Place", category: "Your builds" as const })),
-      ...defs.map((w) => ({ key: w.id, title: w.title, description: w.description, category: categoryOf(w.id), keywords: w.keywords })),
+      // A page's own panels group as "This page"; home widgets by kind.
+      ...defs.map((w) => ({ key: w.id, title: w.title, description: w.description, category: w.panel ? ("This page" as const) : categoryOf(w.id), keywords: w.keywords })),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [promoted, defs.length],

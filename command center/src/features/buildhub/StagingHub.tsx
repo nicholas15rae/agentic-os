@@ -130,7 +130,8 @@ function BuildCard({ b }: { b: BuildView }) {
   const boxRef = useRef<HTMLElement>(null);
   const focusReq = useMyApps((s) => s.focusBuild);
   useEffect(() => {
-    if (focusReq?.id !== id) return;
+    // A hidden copy (an icon's badge copy) never uses up the request: the visible one handles it.
+    if (focusReq?.id !== id || !boxRef.current?.offsetParent) return;
     boxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     boxRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
     useMyApps.getState().clearFocus();

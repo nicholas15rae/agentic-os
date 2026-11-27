@@ -410,8 +410,10 @@ Say "  Logs: $CC_LOG_DIR" 'DarkGray'
 # --------------------------------------------------------------- desktop app ---
 if ($WithDesktopApp -and -not $DryRun) {
     if (Get-Process -Name 'command-center' -ErrorAction SilentlyContinue) { Say '  Desktop app is already open.' }
-    elseif (Test-Path $CC_APP_EXE) { Start-Process -FilePath $CC_APP_EXE -WorkingDirectory (Split-Path $CC_APP_EXE); Say "  Opened the desktop app ($CC_APP_EXE)" 'Green' }
-    else { Say "  Desktop app not built: $CC_APP_EXE is missing" 'Yellow'; $failed++ }
+    elseif (-not (Test-Path $CC_APP_EXE)) { Say "  Desktop app not built: $CC_APP_EXE is missing" 'Yellow'; $failed++ }
+    # The last instance's WebView2 may still be exiting (a stop just before this): wait, or it can abort at start-up.
+    elseif (-not (Wait-CcAppGone)) { Say '  Desktop app NOT opened: the last instance''s WebView2 would not exit (see Task Manager, msedgewebview2)' 'Red'; $failed++ }
+    else { Start-Process -FilePath $CC_APP_EXE -WorkingDirectory (Split-Path $CC_APP_EXE); Say "  Opened the desktop app ($CC_APP_EXE)" 'Green' }
 }
 
 if ($DryRun) { $down = @($svcs | Where-Object State -eq 'down').Count; Say "  Dry run: $down service(s) would be started." 'Cyan'; exit 0 }

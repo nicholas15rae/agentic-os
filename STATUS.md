@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
+Updated 2026-11-27 (overnight, section-pass-batch3). One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -28,6 +28,12 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Sections 19 + 24 power, standby, security | section-pass-batch3 | 0a59105 | Yes (6d1084b) |
 | Sections 20-21 safe defaults, routing ownership | section-pass-batch3 | af2d427, 7f151c2 | Yes (6d1084b) |
 | Review fixes: profiles sync safely, PIN step-up for business + finance | section-pass-batch3 | cebcdbf | Yes (6d1084b) |
+| Section 12 Phone book (grouped by area, linked to pending, invoices, agencies, auditions, messages; .vcf import) | section-pass-batch3 | 3fe3468 | Yes (6d1084b) |
+| Section 11.10 Tony reads Finance (`finance.ask`, read-only, Tony only) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed to origin |
+| Section 15 part: spaced-repetition flashcards, Today's lesson, curveball setting (off, not wired to Tony) | section-pass-batch3 | 763dab0, 4520f35 | **No** (overnight) |
+| Section 14.6 + 14.7: Discord rankings need 30 calls (Wilson bands); paper track record beside the backtest + SPY (display only) | section-pass-batch3 | 55030dd | **No** (overnight) |
+| Section 16.2 + 16.3 + 16.6: backup mirrors to a second drive (verified, keep-all), vault password banner + checklist, Tony's read-only `vault.search` | section-pass-batch3 | f138a9b, 4520f35 | **No** (overnight) |
+| S20.10 instant cues: time / date / weather / reminders with no model call; your own fast cues in Voice & Triggers | section-pass-batch3 | 5c80888 | **No** (overnight) |
 | Merge fixes: Ops' contracting phrases go to Tony (Ops stays frozen); settings migrations v8-v10; TS router starts with Ops frozen | merge/section-pass-into-main | 6d1084b | Yes, pushed to origin |
 | Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | No |
 | Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | No |
@@ -37,7 +43,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Session | Working on | Current step |
 |---|---|---|
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
-| Gabagoul functional pass (section-pass-batch3) | Next: 11.10 Tony reads Finance, Section 12 | All committed work is in main (conflicts resolved there). Next: merge main into the branch |
+| Gabagoul functional pass (section-pass-batch3) | Overnight 11-27: 15, 14.6-14.7, 16.2/16.3/16.6, S20.10 | Done and committed on the branch (5 commits after eefaf0a), each reviewed and fixed. Not merged or pushed. Waiting on Nic: merge to main |
 | Director suite build | Part 1 quality fixes (clip length, framing, no-op revisions) | Reviewers running. Next: live E2E rerun, merge main, live SDXL test. Uncommitted |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
@@ -47,6 +53,9 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 ## 3. Waiting on you
 
 **Decisions**
+- Overnight batch (section-pass-batch3, 763dab0..5c80888): OK to merge into main and push? Full suites green (below).
+- Parked overnight (safety or hardware): 14.5 Full auto gate (needs PIN + phone approval, live-trading control), 14.8 IBKR data everywhere, 14.9; 15.2 camera translate (phone), 15.3 pronunciation (GPU Whisper), 15.4 accents (Scene Reader), 15.7 vocabulary images (ComfyUI); 16.3 recovery key (would change the vault encryption); wiring language curveballs into Tony's turn (latency path).
+- Instant cues: "what's pending" deliberately stays Tony's Finance read (live data), only reminders / to-do are instant.
 - OK to merge `director-suite` into main? (section-pass and batch3 are merged.)
 - Check after the next app rebuild: pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
@@ -58,6 +67,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.
 
 **Manual steps**
+- After the next restart: set a mirror folder on another drive (Vault, Second copies) and press Re-index vault so brainstorm notes index their summary and tags; re-run the Engine R evaluation so the track record gets its spread (stdR).
 - Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
@@ -79,13 +89,10 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 - 8: native Android bridge, notification capture, tabs UI, official Meta API, taint/injection guards
 - 9: Talk-it-through mode, send-to after wrap-up, one-tap mode switch, E46 clock build
 - 10.4 Maps: saved routes, phone "Open in Maps", widget UI and phone hand-off
-- 11.10 Tony reads Finance
-- 12 Phone book
-- 14.5-14.9 Trading (needs IBKR connected)
-- 15 Language
-- 16.2, 16.3, 16.6: off-machine copy, vault password, vault search
+- 14.5, 14.8, 14.9 Trading (parked: safety / needs IBKR)
+- 15.2, 15.3, 15.4, 15.7 Language (parked: phone, GPU, Scene Reader)
 - 17 Wallpapers, 18 Flowchart/Blueprint/Orbital, 23 Appearance (held until Section 6)
-- S20.10 instant-cue fast path
+- 21 setup walkthroughs: Instagram reconnect + expiry, n8n key and webhooks, Maps home in settings, Calendar route pick
 
 Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S20.10, and the Tony-Rust parts of 8 and 9.
 
@@ -116,7 +123,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | claude/vibrant-davinci-742cf7 (recall fix) | cargo 1,419 (+2 known CRLF; 1 Edge timeout under load passes alone) on the 4073bd9 base; memtier + turn_context 24/24 after the rebase onto e0f7ee7 | 11-26 22:20 |
 | Tony recall parrot probe (Bionic, 4 reps) | parroted 21/60 -> **0/60** (six test lines 10/24 -> 0/24); planted facts recalled 24/28 -> 28/28 | 11-26 22:10 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
-| section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
+| section-pass-batch3 (5c80888, overnight) | tsc clean; vitest 2,831/2,831; Python run_all 870 OK; Rust 1,491 (+2 known CRLF; real-browser tests pass alone) | 11-27 overnight |
 | director-suite | vitest 2,595, Rust 1,445 + 67 browser, media-forge 116 | 11-26 20:47 |
 | Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
@@ -134,28 +141,31 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 22:46 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 02:32 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/upbeat-wing-e87be0` | 2 | `3fdea38` 2026-11-26 docs(status): test gate 28c60f3 (every module, parallel), its test ... | clean |
-| `merge/section-pass-into-main` | 21 | `37ba367` 2026-11-26 Merge branch 'main' into merge/section-pass-into-main | 1 files |
-| `section-pass` | 10 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | clean |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | clean |
-| `section-pass-batch3` | 15 | `e0419ee` 2026-11-26 Merge main (recall fix fa69ab2) into section-pass-batch3 | 69 files |
-| `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 12 files |
-| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 18 files |
+| `section-pass-batch3` | 5 | `5c80888` 2026-11-27 feat(voice): instant cues answer common read-only requests with no ... | 1 files |
+| `director-suite` | 7 | `f5934d4` 2026-11-27 docs(status): E2E run 10 results, Part 3 in progress | 18 files |
+| `claude/tony-live-test-fixes-5d85d5` | 2 | `2ff21d9` 2026-11-27 docs(status): Tony live-test fixes landed on claude/tony-live-test-... | clean |
+| `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | clean |
+| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
+| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
+| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
+| `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
+| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `66df342` 2026-11-26 docs(status): main pushed to origin (3ee3dd6): crash hardening and recall fix
-- `3ee3dd6` 2026-11-26 docs(status): record the recall fix merge into main (8278f76)
-- `8278f76` 2026-11-26 Merge fa69ab2: Tony recall stops parroting old replies
-- `e0f7ee7` 2026-11-26 docs(status): crash hardening 1cd5333, 4073bd9 timing, sessions
-- `4bc4e2d` 2026-11-26 Merge main (STATUS.md + update_status.py) into feat/language-hub
-- `1cd5333` 2026-11-26 fix(command-center): log panics to a file, never start the app over a dying WebView2
+- `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
+- `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
+- `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
+- `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
+- `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
+- `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
 <!-- /AUTO:BRANCHES -->

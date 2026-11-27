@@ -256,6 +256,8 @@ pub fn run() {
                 }
                 // Play Place staging hub: <config dir>/build-hub.json (Thought-to-Product Phases 2–4).
                 app.state::<buildhub::HubState>().init(&dir);
+                // Section pass: widgets dropped into <config>/library-import join the library.
+                buildhub::import_library_drops(&app.state::<buildhub::HubState>(), &dir);
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
                 audio::ducker::recover(&dir);
             }
@@ -269,6 +271,8 @@ pub fn run() {
                 // MCP: start listing enabled stdio servers ~5 s after launch (into the cache, in
                 // the background). No HTTP / token-gated server is contacted.
                 tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
+                // Section pass: the Librarian workspace is kept on Query mode (checked once at start).
+                tauri::async_runtime::spawn(mcp::librarian_lock_at_start(app.handle().clone()));
                 tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
                 tauri::async_runtime::spawn(commands::hygiene::lifecycle_loop(app.handle().clone()));
                 // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).
@@ -378,6 +382,7 @@ pub fn run() {
             security::commands::security_audit_recent,
             security::commands::security_companion_sign,
             security::commands::security_companion_store_key,
+            security::commands::security_set_timeouts,
             security::commands::security_companion_check_alerts,
             security::commands::security_pin_setup,
             system::system_stats,
@@ -648,6 +653,7 @@ pub fn run() {
             buildhub::build_steer,
             buildhub::build_to_repair,
             buildhub::build_set_max_iterations,
+            buildhub::build_archive,
             buildhub::build_requeue,
             buildhub::build_rework,
             buildhub::build_smoke,
@@ -661,6 +667,9 @@ pub fn run() {
             buildhub::delete_build_job,
             buildhub::clear_failed_jobs,
             buildhub::runner_dismiss,
+            buildhub::trash_list,
+            buildhub::trash_restore,
+            buildhub::trash_purge,
             buildhub::build_widget_url,
             buildhub::build_peek_status,
             buildhub::build_open_window,

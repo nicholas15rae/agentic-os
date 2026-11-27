@@ -124,3 +124,13 @@ describe("settings v8 (top-bar clock + weather effects)", () => {
     expect(partial.effects).toEqual({ enabled: false, intensity: "normal" });
   });
 });
+
+describe("v9: Agent Chatter off by default", () => {
+  it("is off for a fresh install and reset once for an existing one", () => {
+    expect(useSettings.getInitialState?.().routing.vocalHandoffs ?? false).toBe(false);
+    const s = migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 8);
+    expect(s.routing).toEqual({ announcerHandoff: true, vocalHandoffs: false });
+    // Turned back on after v9: kept.
+    expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 9).routing.vocalHandoffs).toBe(true);
+  });
+});

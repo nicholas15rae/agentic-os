@@ -1595,7 +1595,7 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             // Frozen by the switchboard first ("Gmail is frozen in Builder mode"), then switched
             // off / no backend; an enabled stdio WhatsApp server that listed nothing is a bridge
             // that isn't running.
-            let frozen = super::modes::tool_frozen_reason(&mode, &cfg.switchboard, id, &server.name);
+            let frozen = if super::mcp::is_tony(agent) { super::mcp::tony_frozen_reason(cfg, &mode, id, &server.name) } else { super::modes::tool_frozen_reason(&mode, &cfg.switchboard, id, &server.name) };
             if let Some(reason) = frozen.or_else(|| super::mcp::unavailable_reason(state, cfg, id)).or_else(|| (id == "whatsapp").then(|| WHATSAPP_DOWN.to_string())) {
                 out.steps.push(step("tool", "os", id, format!("failed: {reason}"), false, 0));
                 out.failure = Some((id.into(), reason));
@@ -4437,7 +4437,10 @@ mod tests {
         assert_eq!(hold(r("coder", "Named"), false, "tell the coder to write a timer script", "operations").role, "coder");
         // On-duty agents and modes with no overlay are untouched; Tony's own turns too.
         assert_eq!(hold(r("coder", "Domain"), false, "write code", "builder"), r("coder", "Domain"));
-        assert_eq!(hold(r("ops", "Domain"), false, "check the droplet", "brainstorm"), r("ops", "Domain"));
+        assert_eq!(hold(r("bizops", "Domain"), false, "how is Corner Bakery doing", "brainstorm"), r("bizops", "Domain"));
+        // Ops is a frozen placeholder (section pass): a droplet question stays with Tony.
+        let h = hold(r("ops", "Domain"), false, "check the droplet", "brainstorm");
+        assert_eq!((h.role.as_str(), h.reason.as_str()), ("general", "Ops is frozen on the master switchboard"));
         assert_eq!(hold(r("general", "Self"), false, "hi", "operations"), r("general", "Self"));
         // Booking is frozen on the master switchboard: never runs, not even from its tab.
         for (kind, explicit, text) in [("Tab", true, "book a table"), ("Named", false, "hey booking desk, check my availability"), ("Domain", false, "casting call availability")] {

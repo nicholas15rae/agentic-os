@@ -191,7 +191,7 @@ const defaults: Omit<SettingsState, "set"> = {
   gatewayToken: "",
   vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 600 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
-  routing: { announcerHandoff: true, vocalHandoffs: true },
+  routing: { announcerHandoff: true, vocalHandoffs: false },
   reminders: { osFallback: true },
   chat: { showAgentConversation: true },
   systemMapMode: "streamlined",
@@ -273,6 +273,10 @@ export function migrateSettings(persisted: unknown, from: number): SettingsState
   // line, the clock's effects dot) keeps any later manual pick visible. `effects` / `clock` are new
   // nested objects, backfilled by `merge`.
   if (from < 8 && s.weatherMode !== undefined) s.weatherMode = "auto";
+  // v9 (section pass): Agent Chatter is off by default — internal agent back-and-forth is never
+  // spoken unless Nic turns it back on (saves ElevenLabs credits). Reset once for existing installs.
+  // (Was v8 on the section-pass branch; main's v8 weather reset already shipped, so this moved up.)
+  if (from < 9 && isPlainObject(s.routing)) s.routing = { ...s.routing, vocalHandoffs: false };
   // `merge` (below) backfills any still-missing fields right after this runs.
   return s as unknown as SettingsState;
 }
@@ -285,7 +289,7 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: "cc.settings",
-      version: 8,
+      version: 9,
       migrate: migrateSettings,
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults

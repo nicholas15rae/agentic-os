@@ -249,7 +249,7 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
       .catch((e) => useToasts.getState().push({ title: "Instant Send not changed", body: String(e), tone: "error" }));
 
   return (
-    <section className="glass flex min-h-[420px] flex-col rounded-[20px]">
+    <section className="glass-chat flex min-h-[420px] flex-col rounded-[20px]">
       <header className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
         {onBack && (
           <button onClick={onBack} aria-label="Back" className="text-ink-2">

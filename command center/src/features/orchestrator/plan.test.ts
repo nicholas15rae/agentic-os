@@ -78,13 +78,16 @@ describe("heuristicPlan — an approved-action card only for a live tool its age
   const withCfg = (mcps: McpServer[], frozenTools: string[] = []) => useOs.setState({ cfg: { mcps, switchboard: { version: 1, frozenAgents: [], frozenTools } } as unknown as OsConfig });
   const replyOf = async (p: ReturnType<typeof heuristicPlan>) => (await p.run!()).text;
 
-  it("a mode that freezes Gmail: no card, Tony gives the frozen reason", async () => {
+  it("Gmail is in Tony's base: a mode never freezes it, only the master switchboard does", async () => {
     desktop();
     useModes.setState({ effective: effectiveOf(PRESET_MODES, "builder") });
+    withCfg([server("gmail", ["general"])]);
+    expect(heuristicPlan(DRAFT, "general").mutating).toBe(true);
+    withCfg([server("gmail", ["general"])], ["gmail"]);
     const p = heuristicPlan(DRAFT, "general");
     expect(p.mutating).toBe(false);
     expect(p.target.kind).toBe("agent");
-    expect(await replyOf(p)).toBe("Gmail is frozen in Builder mode, so I left it alone. Switch modes and I can use it.");
+    expect(await replyOf(p)).toBe("Gmail is frozen on the master switchboard, so I left it alone. Turn it back on in the switchboard and I can use it.");
   });
 
   it("Instagram frozen on the master switchboard: no card, the master reason", async () => {
@@ -197,12 +200,13 @@ describe("heuristicPlan — the calendar-add card (A2)", () => {
     expect((await pwa.run!()).text).toBe("Calendar adds go through the app — ask me there.");
   });
 
-  it("a mode that freezes the calendar: no card, the frozen reason", async () => {
+  it("the calendar frozen on the master switchboard: no card, the frozen reason (a mode never freezes Tony's base)", async () => {
     desktop();
     useModes.setState({ effective: effectiveOf(PRESET_MODES, "builder") });
+    useOs.setState({ cfg: { mcps: [{ id: "calendar", name: "calendar", agents: ["general"], enabled: true, transport: "builtin", builtin: true }], switchboard: { version: 1, frozenAgents: [], frozenTools: ["calendar"] } } as unknown as OsConfig });
     const p = heuristicPlan("add it to my calendar", "general", { bookings: [NETFLIX], now: NOW });
     expect(p.mutating).toBe(false);
-    expect((await p.run!()).text).toMatch(/^Google Calendar is frozen in Builder mode, so I left it alone\./);
+    expect((await p.run!()).text).toMatch(/^Google Calendar is frozen on the master switchboard, so I left it alone\./);
   });
 
   it("a calendar read is never an action", () => {

@@ -61,11 +61,11 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   // `general` (Tony) has no name triggers: addressing him is `SELF_NAMES` → kind "Self".
   autoSwitch: true,
   agents: {
-    // No bare "whatsapp" / "messages": a WhatsApp read is Tony's own live tool (`directTool`), and
-    // "messages" alone pulled every chat-ish line (and Whisper's "what's up" greeting) to Booking.
+    // No "whatsapp" / "messages" / "texts" at all: reading messages is Tony's own live tool
+    // (`directTool`), never the Booking Desk.
     booking: {
       names: ["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-      domains: ["last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
+      domains: ["casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
     },
     prompter: {
       names: ["prompter", "prompt builder", "spec writer", "architect prompt"],
@@ -532,6 +532,10 @@ const DIRECT_CALENDAR_READ = /\b(?:check|read|any|anything|whats|what is|what do
 const DIRECT_WEATHER = /\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$/;
 /** Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read. */
 const DIRECT_NOT_LIVE = /\b(?:widget|server|config|api|bug|code|app|script|dashboard|spreadsheet|sheet|sales|revenue|budget|quarter|q[1-4]|filter|settings?)\b/;
+/** A bare messages read ("check my messages", "any new texts", "last 5 messages"): WhatsApp, read by
+ * Tony himself — never the agent-report inbox, recent chats or the Booking Desk. Only plain filler
+ * words may sit between the read word and the noun, so "my agent messages" never matches. */
+const DIRECT_MESSAGES = /\b(?:check|read|any|show|see|new|unread|latest|last|recent|did i get|have i got|got any)\b(?: (?:me|my|the|new|unread|latest|last|recent|\d{1,2}))* (?:messages?|texts?)\b/;
 const DIRECT_SPOTIFY = /\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b/;
 
 export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify";
@@ -555,5 +559,6 @@ export function directTool(text: string): DirectTool | null {
   if (!work && DIRECT_CALENDAR.test(n) && DIRECT_CALENDAR_READ.test(n) && !DIRECT_CALENDAR_WRITE.test(n)) return "calendar";
   if (!work && DIRECT_WEATHER.test(n)) return "weather";
   if (DIRECT_SPOTIFY.test(n)) return "spotify";
+  if (!work && DIRECT_MESSAGES.test(n)) return "whatsapp";
   return null;
 }

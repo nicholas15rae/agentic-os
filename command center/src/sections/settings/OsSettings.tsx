@@ -376,7 +376,7 @@ export function OverseerCard() {
   return (
     <Card
       title="Overseer escalation"
-      hint={`“Ask Overseer” on any message sends that exchange (privacy-diffused) for a second opinion. Claude API calls use ${o.claudeModel} with server-side refusal fallbacks enabled.`}
+      hint={`The Overseer reviews escalated turns and manual-mode cards (privacy-diffused). The Agents tab’s “Something’s off” help desk always uses the Claude CLI. Claude API calls use ${o.claudeModel} with server-side refusal fallbacks enabled.`}
       action={
         <button
           className="pill-glass !h-8 text-xs"

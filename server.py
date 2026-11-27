@@ -88,6 +88,11 @@ import language_hub_api  # noqa: E402
 
 app.include_router(language_hub_api.router)
 
+# Where Nic is logged in: per-device gateway tokens, listed and signed out from the desktop app.
+import device_registry  # noqa: E402
+
+app.include_router(device_registry.router)
+
 # NetBird path: is the phone's link direct (P2P) or relayed? Read-only `netbird status --json`.
 import net_api  # noqa: E402
 
@@ -172,6 +177,9 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
         # The remote failsafe authenticates with its own HMAC signature (security_api.py), so a
         # phone shortcut / n8n over NetBird needs only the remote-kill secret, not the gateway token.
         capability = capability or (request.method == "POST" and path == "/api/security/emergency-kill")
+        ua = request.headers.get("user-agent", "")
+        if loopback and path.startswith("/api"):
+            device_registry.note_local(ua)
         if loopback or capability or request.method == "OPTIONS" or not path.startswith("/api") or not self.TOKEN_FILE.exists():
             return await call_next(request)
         try:
@@ -180,8 +188,14 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
             token = ""
         sent = request.headers.get("authorization", "")
         sent = sent[7:].strip() if sent.lower().startswith("bearer ") else request.headers.get("x-gateway-token", "")
-        if not token or not hmac.compare_digest(sent.encode(), token.encode()):
+        if token and sent and hmac.compare_digest(sent.encode(), token.encode()):
+            device_registry.note_shared(host, ua)
+            return await call_next(request)
+        # Section pass: a per-device token (desktop Settings → Security → Where you're logged in).
+        dev = device_registry.match(sent)
+        if dev is None:
             return JSONResponse({"detail": "Gateway token required (network lock is on)."}, status_code=401)
+        device_registry.seen(dev["id"], host, ua)
         return await call_next(request)
 
 

@@ -922,6 +922,8 @@ export interface LibrarianGuard {
 }
 
 export interface OsConfig {
+  /** Section pass: servers each mode adds to Tony's always-on base (Rust `tony_mode_tools`). */
+  tonyModeTools?: Record<string, string[]>;
   osName: string;
   wakeWords: string[];
   identityPath: string;

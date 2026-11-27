@@ -5,7 +5,7 @@
  */
 import { isTauri, native } from "@/lib/platform";
 import type { HealthSnapshot } from "@/features/lifecycle/health";
-import type { BuildEnvelope, BuildHubView, DeleteReport, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport } from "@/features/buildhub/types";
+import type { BuildEnvelope, BuildHubView, DeleteReport, IntakeQuestion, PeekStatus, RuntimeConfig, SmokeReport, TrashEntry } from "@/features/buildhub/types";
 import type { TranscriptConversation, TranscriptMessage, TranscriptPage } from "@/features/transcript/types";
 import type { DirectorCommands } from "@/features/director/contract";
 import type { CloudCommands } from "@/features/cloud/contract";
@@ -46,10 +46,18 @@ export interface ExtCommands extends DirectorJsonCommands, CloudCommands {
   /** Fix from the dashboard: a promoted internal widget goes back into Play Place staging with the directive. */
   build_rework: { args: { buildId: string; directive: string }; result: BuildEnvelope };
   build_remove: { args: { buildId: string }; result: BuildHubView };
+  /** Archive a build out of the Staging hub list (or bring it back); card and files kept. */
+  build_archive: { args: { buildId: string; archived: boolean }; result: BuildHubView };
   /** Hard stop (distinct from Pause): abort the in-flight step, release the GPU slot, kill a Claude run. */
   cancel_build_job: { args: { jobId: string }; result: BuildEnvelope };
-  /** Permanently delete a build (aborting it first): hub record, previews, steer copies and its output folder. */
+  /** Delete a build (aborting it first) into the Trash: card, steer copies, promoted copy and output folder, kept 30 days. */
   delete_build_job: { args: { jobId: string; purgeFiles?: boolean }; result: DeleteReport };
+  /** The Trash, newest first (expired entries swept first). */
+  trash_list: { args: undefined; result: TrashEntry[] };
+  /** Undo a delete: folders back in place, the card back in the hub / the run back on the list. */
+  trash_restore: { args: { trashId: string }; result: TrashEntry };
+  /** Delete one Trash entry for good. */
+  trash_purge: { args: { trashId: string }; result: void };
   /** Delete every Repair Queue and cancelled build. */
   clear_failed_jobs: { args: { purgeFiles?: boolean }; result: DeleteReport[] };
   /** Build Runners row: cancel if live, hide from the runner list (audit log kept), optionally purge staging/<slug>. */

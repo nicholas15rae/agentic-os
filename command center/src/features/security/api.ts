@@ -39,6 +39,8 @@ export interface SecurityStatus {
   biometricAvailable: boolean;
   companionEnabled: boolean;
   companionPaired: boolean;
+  /** Section pass: the paired phone's approval logs in on its own (PIN = fallback). */
+  companionUnlocks?: boolean;
   companionDevice: boolean;
   platform: "windows" | "macos" | "linux" | "android" | "ios";
   deviceId: string;
@@ -48,6 +50,8 @@ export interface SecurityStatus {
   reauthMinutes: number;
   elevationIdleMinutes: number;
   elevationMaxMinutes: number;
+  /** Section pass: an unlocked session survives an app restart (desktop). */
+  persistAcrossRestarts?: boolean;
   /** Rust's clock (unix seconds) when this status was taken. */
   now: number;
 }
@@ -64,7 +68,7 @@ export const securityApi = {
   unlockPin: (pin: string) => native<SecurityStatus>("security_unlock_pin", { pin }),
   biometric: () => native<SecurityStatus>("security_biometric"),
   /** No module: approve an unlock. A module: approve a step-up on the paired phone. */
-  companionRequest: (module?: string) => native<{ id: string; expiresAt: number }>("security_companion_request", module ? { module } : {}),
+  companionRequest: (module?: string) => native<{ id: string; expiresAt: number; code: string }>("security_companion_request", module ? { module } : {}),
   companionPoll: (id: string) => native<{ state: "pending" | "approved" | "denied" | "expired"; grant?: ElevationGrant }>("security_companion_poll", { id }),
   lock: () => native<SecurityStatus>("security_lock"),
   elevate: (module: string, pin: string) => native<ElevationGrant>("security_elevate", { module, pin }),
@@ -72,11 +76,24 @@ export const securityApi = {
   dropElevation: (module: string) => native<SecurityStatus>("security_drop_elevation", { module }),
   lockdownEngage: (source: string) => native<OsConfig>("security_lockdown_engage", { source }),
   auditRecent: (limit = 50) => native<AuditEntry[]>("security_audit_recent", { limit }),
-  companionSign: (id: string, nonce: string, desktop: string, purpose: string) => native<{ sig: string; deviceId: string }>("security_companion_sign", { id, nonce, desktop, purpose }),
+  /** `code`: the 2-digit number the desktop shows (the signature covers it). */
+  companionSign: (id: string, nonce: string, desktop: string, purpose: string, code: string) => native<{ sig: string; deviceId: string }>("security_companion_sign", { id, nonce, desktop, purpose, code }),
   companionCheckAlerts: (alerts: InboxAlert[]) => native<boolean[]>("security_companion_check_alerts", { alerts }),
   pinSetup: (pin: string) => native<SecurityStatus>("security_pin_setup", { pin }),
   companionStoreKey: (key: string) => native<SecurityStatus>("security_companion_store_key", { key }),
+  /** Settings → Security: the session timeouts, in minutes (needs a settings step-up). */
+  setTimeouts: (timeouts: SessionTimeouts) => native<SecurityStatus>("security_set_timeouts", { timeouts }),
 };
+
+/** Rust `commands::Timeouts` (minutes). Clamped there: idle lock 1–120, re-verify 5–240, step-up idle 1–30, step-up max 1–60. */
+export interface SessionTimeouts {
+  idleLockMinutes: number;
+  reauthMinutes: number;
+  elevationIdleMinutes: number;
+  elevationMaxMinutes: number;
+  /** Stay unlocked across app restarts (omit to leave it as it is). */
+  persistAcrossRestarts?: boolean;
+}
 
 /** A desktop alert waiting in the gateway's companion inbox (`sig` empty = raised by the gateway). */
 export interface InboxAlert {

@@ -594,6 +594,9 @@ const DIRECT_CALENDAR_READ: &str = r"\b(?:check|read|any|anything|whats|what is|
 const DIRECT_WEATHER: &str = r"\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$";
 /// Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read.
 const DIRECT_NOT_LIVE: &str = r"\b(?:widget|server|config|api|bug|code|app|script|dashboard|spreadsheet|sheet|sales|revenue|budget|quarter|q[1-4]|filter|settings?)\b";
+/// A bare messages read ("check my messages", "last 5 messages"): WhatsApp, read by Tony himself.
+/// Mirrors router.ts `DIRECT_MESSAGES`.
+const DIRECT_MESSAGES: &str = r"\b(?:check|read|any|show|see|new|unread|latest|last|recent|did i get|have i got|got any)\b(?: (?:me|my|the|new|unread|latest|last|recent|\d{1,2}))* (?:messages?|texts?)\b";
 const DIRECT_SPOTIFY: &str = r"\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b";
 
 fn direct_re(slot: &'static std::sync::OnceLock<regex::Regex>, pat: &str) -> &'static regex::Regex {
@@ -617,6 +620,7 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     static SPOTIFY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static UPDATE_NOUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static NOT_LIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static MESSAGES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let n = normalize(text);
     if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&direct_re(&UPDATE_NOUN, DIRECT_UPDATE_NOUN).replace_all(&n, " ")) {
         return None;
@@ -641,6 +645,9 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     }
     if direct_re(&SPOTIFY, DIRECT_SPOTIFY).is_match(&n) {
         return Some("spotify");
+    }
+    if !work && direct_re(&MESSAGES, DIRECT_MESSAGES).is_match(&n) {
+        return Some("whatsapp");
     }
     None
 }
@@ -801,7 +808,13 @@ mod tests {
         let cfg = OsConfig::default();
         let d = &cfg.routing.agents["booking"].domains;
         assert!(!d.iter().any(|x| x == "whatsapp" || x == "messages"), "{d:?}");
-        assert!(d.iter().any(|x| x == "last 5 messages"));
+        assert!(!d.iter().any(|x| x.contains("message") || x.contains("text")), "{d:?}");
+        // A plain messages read is Tony's WhatsApp tool, never the Booking Desk or the agent inbox.
+        for text in ["check my messages", "any new messages", "read my last five messages", "check my texts"] {
+            assert_eq!(direct_tool(text), Some("whatsapp"), "{text}");
+        }
+        assert_eq!(direct_tool("check my agent messages"), None);
+        assert_eq!(direct_tool("check my last five gmail messages"), Some("gmail"));
         for text in ["check my whatsapp", "any whatsapp updates", "what's up", "check my what's up messages"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default), "{text}");

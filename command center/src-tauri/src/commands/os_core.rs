@@ -114,7 +114,7 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "booking".to_string(),
         trig(
             &["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-            &["last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
+            &["casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
         ),
     );
     m.insert(
@@ -319,11 +319,11 @@ pub fn agent_matches(list: &[String], agent: &str) -> bool {
 pub fn default_mcp_grants(id: &str) -> Vec<String> {
     let list: &[&str] = match id {
         "weather" | "spotify" | "brave-search" => &["general"],
-        "gmail" | "whatsapp" | "time" => &["general", "booking"],
+        "gmail" | "whatsapp" | "time" => &["general"],
         // Google Calendar: Tony's own (reads, and the calendar-add card).
         "calendar" => &["general"],
-        "knowledge-graph" => &["general", "librarian", "prompter", "booking"],
-        "filesystem" => &["coder", "designer", "director", "librarian", "prompter", "booking"],
+        "knowledge-graph" => &["general", "librarian", "prompter"],
+        "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
         "fetch" => &["coder", "prompter"],
         "maps" => &["ops"],
@@ -368,9 +368,12 @@ pub struct SwitchboardConfig {
 /// Librarian, which runs only as its scheduled script (internal / scheduled Librarian calls are
 /// not switchboard turns and stay ungated).
 pub const DEFAULT_FROZEN_AGENTS: [&str; 2] = ["booking", "librarian"];
+/// Section pass: Ops is an unused placeholder (no schedule, never dispatched, only a Maps tool),
+/// so it starts frozen too until Nic gives it a job. Thaw it on the master switchboard.
+pub const FROZEN_PLACEHOLDER_AGENTS: [&str; 1] = ["ops"];
 
 fn default_frozen_agents() -> Vec<String> {
-    DEFAULT_FROZEN_AGENTS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_FROZEN_AGENTS.iter().chain(FROZEN_PLACEHOLDER_AGENTS.iter()).map(|s| s.to_string()).collect()
 }
 
 impl Default for SwitchboardConfig {
@@ -860,7 +863,8 @@ pub struct WorkerConfig {
 }
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { enabled: true, max_iterations: 3, verify: false, offload_code: true, librarian_audit: true }
+        // Section pass: Prompter → Designer → Coder, max two revision rounds, no Librarian audit.
+        Self { enabled: true, max_iterations: 2, verify: false, offload_code: true, librarian_audit: false }
     }
 }
 
@@ -938,6 +942,24 @@ pub struct OsConfig {
     /// on disk = a config saved before it (version 0: the tool-owner migration runs once).
     #[serde(default = "SwitchboardConfig::legacy")]
     pub switchboard: SwitchboardConfig,
+    /// Tony's tools by mode (section pass): the servers each mode ADDS to his always-on base
+    /// (his own grants in `mcps[].agents`, live in every mode unless frozen on the master
+    /// switchboard). Keyed by mode id; a mode not listed adds nothing. Edited as pills in
+    /// Settings → Master switchboard, like every other agent's.
+    #[serde(default = "default_tony_mode_tools")]
+    pub tony_mode_tools: BTreeMap<String, Vec<String>>,
+}
+
+/// Tony's per-mode extras: Builder adds Git and the filesystem, Operations the business tools,
+/// Executive web page reads. Learning and the conversational modes add nothing (his base stays on).
+pub fn default_tony_mode_tools() -> BTreeMap<String, Vec<String>> {
+    let m: [(&str, &[&str]); 3] = [("builder", &["git", "filesystem"]), ("operations", &["maps", "instagram", "fetch"]), ("executive", &["fetch"])];
+    m.into_iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect()
+}
+
+/// The servers mode `mode_id` adds to Tony's base. Pure.
+pub fn tony_mode_extras<'a>(cfg: &'a OsConfig, mode_id: &str) -> &'a [String] {
+    cfg.tony_mode_tools.get(mode_id).map(Vec::as_slice).unwrap_or(&[])
 }
 
 impl Default for OsConfig {
@@ -967,6 +989,7 @@ impl Default for OsConfig {
             gmail: GmailConfig::default(),
             migrations: vec![],
             switchboard: SwitchboardConfig::default(),
+            tony_mode_tools: default_tony_mode_tools(),
         }
     }
 }
@@ -1004,6 +1027,14 @@ impl Default for ReviewConfig {
 
 /// Migration id: WhatsApp became read-only by default.
 const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
+/// Section pass: the frozen Booking Desk loses every tool pill and skill, and its "messages" /
+/// "texts" routing phrases (Tony reads Gmail and WhatsApp himself).
+const MIGRATE_BOOKING_NO_TOOLS: &str = "booking-no-tools";
+/// Section pass: freeze the Ops placeholder once on an existing install (a later thaw sticks).
+const MIGRATE_FREEZE_OPS: &str = "freeze-ops";
+/// Section pass: the build chain drops the Librarian (no audit stage) and gets two revision
+/// rounds; a saved 3 (the old default) becomes 2, any other choice is kept.
+const MIGRATE_BUILD_CHAIN: &str = "build-chain-no-librarian";
 /// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
@@ -1060,6 +1091,53 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
             cfg.routing.agents.entry(role).or_insert(t);
         }
         cfg.migrations.push(MIGRATE_BIZOPS_SPLIT.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BOOKING_NO_TOOLS) {
+        strip_booking_tools(cfg);
+        cfg.migrations.push(MIGRATE_BOOKING_NO_TOOLS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_FREEZE_OPS) {
+        for a in FROZEN_PLACEHOLDER_AGENTS {
+            if !cfg.switchboard.frozen_agents.iter().any(|f| f == a) {
+                cfg.switchboard.frozen_agents.push(a.into());
+            }
+        }
+        cfg.migrations.push(MIGRATE_FREEZE_OPS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BUILD_CHAIN) {
+        cfg.worker.librarian_audit = false;
+        if cfg.worker.max_iterations == 3 {
+            cfg.worker.max_iterations = 2;
+        }
+        cfg.migrations.push(MIGRATE_BUILD_CHAIN.into());
+    }
+}
+
+/// The Booking Desk gets no tools: off every server's grant list and every skill grant, and its
+/// messages / texts phrases leave its routing row. A list naming ONLY Booking becomes `["none"]`
+/// (an empty list would mean everyone); `"all"` stays `"all"`, and `servers_for` gives a frozen
+/// agent nothing anyway.
+pub(crate) fn strip_booking_tools(cfg: &mut OsConfig) {
+    let booking = |a: &String| a.trim().eq_ignore_ascii_case("booking");
+    for m in cfg.mcps.iter_mut() {
+        if let Some(v) = m.agents.as_mut() {
+            if v.iter().any(booking) {
+                v.retain(|a| !booking(a));
+                if v.is_empty() {
+                    v.push("none".into());
+                }
+            }
+        }
+    }
+    for agents in cfg.skills.grants.values_mut() {
+        agents.retain(|a| !booking(a));
+    }
+    cfg.skills.grants.retain(|_, a| !a.is_empty());
+    if let Some(b) = cfg.routing.agents.get_mut("booking") {
+        b.domains.retain(|d| {
+            let n = super::routing::normalize(d);
+            !(n.contains("message") || n.contains("text"))
+        });
     }
 }
 
@@ -2206,8 +2284,9 @@ mod tests {
         let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "memory": { "storage": "local" } })).unwrap();
         assert_eq!(old.feedback.sensitivity, 1);
         assert_eq!(old.feedback.narration_engine, "roster");
-        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && old.worker.librarian_audit);
-        assert_eq!(old.worker.max_iterations, 3);
+        // Section pass: Prompter -> Designer -> Coder (no Librarian), two revision rounds.
+        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && !old.worker.librarian_audit);
+        assert_eq!(old.worker.max_iterations, 2);
         assert_eq!((old.memory.notes_dir.as_str(), old.memory.staging_dir.as_str()), ("", ""));
         let hot: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": 7 }, "worker": { "maxIterations": 99 } })).unwrap();
         assert_eq!((hot.feedback.sensitivity, hot.worker.max_iterations), (3, 15));
@@ -2221,7 +2300,7 @@ mod tests {
         assert!(validate(&next).is_ok());
         let v = serde_json::to_value(&next).unwrap();
         assert_eq!(v["feedback"]["narrationEngine"], "roster");
-        assert_eq!(v["worker"]["librarianAudit"], true);
+        assert_eq!(v["worker"]["librarianAudit"], false, "section pass: no Librarian in the build chain");
         let mut bad = OsConfig::default();
         bad.feedback.narration_engine = "elevenlabs".into();
         assert!(validate(&bad).is_err());
@@ -2271,7 +2350,8 @@ mod tests {
         // Booking through these two: neither is a Booking topic any more.
         assert!(!agents["booking"].domains.contains(&"whatsapp".to_string()));
         assert!(!agents["booking"].domains.contains(&"messages".to_string()));
-        assert!(agents["booking"].domains.contains(&"last 5 messages".to_string()));
+        // Nor is any messages / texts read: Tony reads Gmail and WhatsApp himself (section pass).
+        assert!(!agents["booking"].domains.iter().any(|d| d.contains("message") || d.contains("text")));
         // Casting logistics stay with Booking; editing a tape is the Director's.
         assert!(agents["booking"].domains.contains(&"self-tape".to_string()));
         assert!(!agents["director"].domains.contains(&"self-tape".to_string()));
@@ -2291,11 +2371,11 @@ mod tests {
             ("calendar", &["general"]),
             ("spotify", &["general"]),
             ("brave-search", &["general"]),
-            ("gmail", &["general", "booking"]),
-            ("whatsapp", &["general", "booking"]),
-            ("time", &["general", "booking"]),
-            ("knowledge-graph", &["general", "librarian", "prompter", "booking"]),
-            ("filesystem", &["coder", "designer", "director", "librarian", "prompter", "booking"]),
+            ("gmail", &["general"]),
+            ("whatsapp", &["general"]),
+            ("time", &["general"]),
+            ("knowledge-graph", &["general", "librarian", "prompter"]),
+            ("filesystem", &["coder", "designer", "director", "librarian", "prompter"]),
             ("git", &["coder"]),
             ("fetch", &["coder", "prompter"]),
             ("maps", &["ops"]),
@@ -2350,7 +2430,7 @@ mod tests {
     fn default_mcps_carry_exact_grants() {
         let mcps = default_mcps();
         let whatsapp = mcps.iter().find(|m| m.id == "whatsapp").unwrap();
-        assert_eq!(whatsapp.agents, Some(vec!["general".to_string(), "booking".to_string()]));
+        assert_eq!(whatsapp.agents, Some(vec!["general".to_string()]));
         let weather = mcps.iter().find(|m| m.id == "weather").unwrap();
         assert_eq!(weather.agents, Some(vec!["general".to_string()]));
         let spotify = mcps.iter().find(|m| m.id == "spotify").unwrap();
@@ -2384,7 +2464,7 @@ mod tests {
                 m.agents = Some(default_mcp_grants(&m.id));
             }
         }
-        assert_eq!(cfg.mcps[0].agents, Some(vec!["general".to_string(), "booking".to_string()]));
+        assert_eq!(cfg.mcps[0].agents, Some(vec!["general".to_string()]));
         assert_eq!(cfg.mcps[1].agents, Some(vec!["booking".to_string()])); // untouched: user-edited value kept
     }
 
@@ -2404,7 +2484,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string()]);
     }
 
     #[test]
@@ -2556,13 +2636,13 @@ mod tests {
     #[test]
     fn switchboard_defaults_legacy_and_camel_case() {
         let d = OsConfig::default();
-        // Booking and the Librarian (scheduled script only) are frozen on a fresh install.
-        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // Booking, the Librarian (scheduled script only) and the Ops placeholder are frozen on a fresh install.
+        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
-        // An os.json saved before the switchboard: both frozen, migration still to run.
+        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian", "ops"], "frozenTools": [] }));
+        // An os.json saved before the switchboard: all three frozen, migration still to run.
         let old: OsConfig = serde_json::from_str(r#"{"osName":"Tony"}"#).unwrap();
-        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         // A saved choice is kept as is (Nic thawed Booking).
         let thawed: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":[],"frozenTools":["instagram"]}}"#).unwrap();
         assert_eq!((thawed.switchboard.frozen_agents.len(), thawed.switchboard.frozen_tools.clone()), (0, vec!["instagram".to_string()]));
@@ -2668,11 +2748,11 @@ mod tests {
             assert!(!cfg.skills.grants.contains_key(n), "{n}");
         }
         assert_eq!(who("daily-standup"), vec!["ops"], "Tony's grant is dropped, Ops keeps its own");
-        // 4. Booking and the Librarian frozen, version set, saved.
-        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // 4. Booking, the Librarian and the Ops placeholder frozen, version set, saved.
+        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         let on_disk: OsConfig = serde_json::from_str(&std::fs::read_to_string(dir.join("os.json")).unwrap()).unwrap();
         assert_eq!(on_disk.switchboard.version, 1);
-        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string()]);
+        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string(), "ops".to_string()]);
         // 5. Never twice: Nic re-grants git to Tony and re-enables maps; a restart keeps both, no new backup.
         os.update(|c| {
             c.mcps.iter_mut().find(|m| m.id == "git").unwrap().agents = Some(vec!["coder".into(), "general".into()]);
@@ -2688,6 +2768,32 @@ mod tests {
         let n = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-tool-owners")).count();
         assert_eq!(n, 1, "the migration never runs twice");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_build_chain_drops_the_librarian_and_an_old_default_of_3_becomes_2_once() {
+        let mut cfg: OsConfig = serde_json::from_value(json!({ "worker": { "maxIterations": 3, "librarianAudit": true } })).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!((cfg.worker.max_iterations, cfg.worker.librarian_audit), (2, false));
+        // A deliberate choice is kept, and a later change sticks.
+        let mut picked: OsConfig = serde_json::from_value(json!({ "worker": { "maxIterations": 5 } })).unwrap();
+        apply_migrations(&mut picked);
+        assert_eq!(picked.worker.max_iterations, 5);
+        cfg.worker.librarian_audit = true;
+        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut again);
+        assert!(again.worker.librarian_audit);
+    }
+
+    #[test]
+    fn ops_is_frozen_once_and_a_later_thaw_sticks() {
+        let mut cfg: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":["booking"],"frozenTools":[]}}"#).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.switchboard.frozen_agents, vec!["booking".to_string(), "ops".to_string()]);
+        cfg.switchboard.frozen_agents.retain(|a| a != "ops"); // Nic gives Ops a job and thaws it
+        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut again);
+        assert_eq!(again.switchboard.frozen_agents, vec!["booking".to_string()]);
     }
 
     #[test]

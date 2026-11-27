@@ -517,19 +517,21 @@ pub(crate) const TONY_SET_MODE: &str = "tony.set_mode";
 /// role policy beyond that; every other agent id must be valid and the tool must pass its role
 /// policy: the Librarian's exact allowlist, and no data-changing tool for any read-only role.
 pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> Option<String> {
-    role_refusal_with(cfg, name, agent, true)
+    role_refusal_with(cfg, name, agent, true, &[])
 }
 
 /// `role_refusal`; `grants: false` skips the grant lists (Nic's own UI acting as Tony, and the
 /// worker's scripted calls), never the role policy.
-fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: bool) -> Option<String> {
+/// `tony_extra`: the active mode's extra servers for Tony (`os_core::tony_mode_extras`).
+fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: bool, tony_extra: &[String]) -> Option<String> {
     let ungranted = |a: &str, who: &str| -> Option<String> {
         if !grants || name == "skills.read" || name == TONY_SET_MODE {
             return None;
         }
         let sid = server_of_tool(name);
         let s = cfg.mcps.iter().find(|m| m.id == sid)?;
-        (!s.grants(a)).then(|| format!("{ROLE_PREFIX}{a} — {who} is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name))
+        let extra = a == "general" && tony_extra.iter().any(|x| x == &s.id);
+        (!s.grants(a) && !extra).then(|| format!("{ROLE_PREFIX}{a} — {who} is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name))
     };
     if is_tony(agent) {
         return ungranted("general", &cfg.os_name);
@@ -674,8 +676,21 @@ fn last_good_listing(state: &DispatchState, os: &OsState, s: &McpServer, err: &s
 /// Pure part of `tool_set`: the enabled, granted servers `agent` may list this turn (a frozen
 /// server is not offered; its settings and cached listing are left as they are).
 pub(crate) fn servers_for(cfg: &OsConfig, e: &super::modes::Effective, agent: &str) -> Vec<McpServer> {
-    let who = if is_tony(agent) { "general" } else { agent };
-    cfg.mcps.iter().filter(|s| s.enabled && s.grants(who) && super::modes::tool_live(e, &cfg.switchboard, &s.id)).cloned().collect()
+    if is_tony(agent) {
+        // Tony: his base (always on) plus the active mode's extras (os.json `tonyModeTools`).
+        let extra = os_core::tony_mode_extras(cfg, &e.mode_id);
+        return cfg
+            .mcps
+            .iter()
+            .filter(|s| s.enabled && super::modes::tony_server_live(&cfg.switchboard, &s.id, s.grants("general"), extra))
+            .cloned()
+            .collect();
+    }
+    // A frozen agent (master switchboard or the mode) gets no tools at all.
+    if !super::modes::agent_live(e, &cfg.switchboard, agent) {
+        return vec![];
+    }
+    cfg.mcps.iter().filter(|s| s.enabled && s.grants(agent) && super::modes::tool_live(e, &cfg.switchboard, &s.id)).cloned().collect()
 }
 
 /// Pure tail of `tool_set`: the listed tools of `servers_for`, plus the synthetic ones, cut by
@@ -1040,7 +1055,8 @@ pub(crate) async fn warm_live(app: &tauri::AppHandle) {
         return;
     }
     let e = os.modes.effective();
-    for s in cfg.mcps.iter().filter(|s| s.enabled && s.transport == "stdio" && super::modes::tool_live(&e, &cfg.switchboard, &s.id)) {
+    let tony = servers_for(&cfg, &e, "general");
+    for s in cfg.mcps.iter().filter(|s| s.enabled && s.transport == "stdio" && (super::modes::tool_live(&e, &cfg.switchboard, &s.id) || tony.iter().any(|t| t.id == s.id))) {
         let _ = tools_of(&state, &os, s, false, Duration::ZERO).await;
     }
 }
@@ -1175,16 +1191,41 @@ pub(crate) fn frozen_refusal(cfg: &OsConfig, e: &super::modes::Effective, name: 
     (origin == CallOrigin::Turn).then(|| super::modes::tool_frozen_error(e, &cfg.switchboard, server_of_tool(name))).flatten()
 }
 
+/// `frozen_refusal` for `agent`: Tony's base and his mode extras are never mode-frozen (only the
+/// master switchboard freezes them); everyone else follows the mode's overlay.
+pub(crate) fn frozen_refusal_for(cfg: &OsConfig, e: &super::modes::Effective, name: &str, origin: CallOrigin, agent: &str) -> Option<String> {
+    if origin != CallOrigin::Turn {
+        return None;
+    }
+    let sid = server_of_tool(name);
+    if is_tony(agent) {
+        return tony_frozen_reason(cfg, e, sid, sid).map(|r| format!("{}: {r}", super::modes::MODE_FROZEN));
+    }
+    super::modes::tool_frozen_error(e, &cfg.switchboard, sid)
+}
+
+/// Why server `sid` is frozen for TONY this turn (`label` names it), or `None`. His base and
+/// the mode's extras answer only to the master switchboard; anything else follows the overlay.
+pub(crate) fn tony_frozen_reason(cfg: &OsConfig, e: &super::modes::Effective, sid: &str, label: &str) -> Option<String> {
+    let base = cfg.mcps.iter().any(|m| m.id == sid && m.grants("general"));
+    if base || os_core::tony_mode_extras(cfg, &e.mode_id).iter().any(|x| x == sid) {
+        let master = super::modes::Effective { switchboard: None, ..e.clone() };
+        return super::modes::tool_frozen_reason(&master, &cfg.switchboard, sid, label);
+    }
+    super::modes::tool_frozen_reason(e, &cfg.switchboard, sid, label)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str, start_wait: Option<Duration>, origin: CallOrigin) -> Result<String, String> {
     let cfg = os.snapshot();
     // Role gate first (Part 4): an ungranted server (Tony included) / an off-allowlist or mutating tool.
-    if let Some(e) = role_refusal_with(&cfg, name, agent, origin_checks_grants(origin, agent)) {
+    let eff = os.modes.effective();
+    if let Some(e) = role_refusal_with(&cfg, name, agent, origin_checks_grants(origin, agent), os_core::tony_mode_extras(&cfg, &eff.mode_id)) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
     }
     // The switchboard: a turn never reaches a frozen server, even with a known tool name.
-    if let Some(e) = frozen_refusal(&cfg, &os.modes.effective(), name, origin) {
+    if let Some(e) = frozen_refusal_for(&cfg, &eff, name, origin, agent) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
     }
@@ -2265,8 +2306,41 @@ pub(crate) async fn librarian_preflight_run(state: &DispatchState, cfg: &OsConfi
     let slug = cfg.anythingllm.workspaces.get("librarian").filter(|s| !s.is_empty()).cloned().ok_or("no AnythingLLM workspace is mapped to the Librarian (Settings → Services)")?;
     let writable = anythingllm_mcp_path().and_then(|p| parse_allm_file(std::fs::read_to_string(p)).ok()).map(|v| merge_allm_servers(&v, &cfg.mcps).1.kept_writable).unwrap_or_default();
     let reader = super::allm::AllmReader::new(super::allm::AllmConn::local(state, cfg)?);
-    Ok(librarian_guard_with(&reader, &slug, writable).await)
+    let g = librarian_guard_with(&reader, &slug, writable.clone()).await;
+    if !g.agent_capable {
+        return Ok(g);
+    }
+    // Section pass: the Librarian is read-only, so an agent-capable chat mode (automatic /
+    // agent: AnythingLLM's own agent skills and MCP servers, some of which write files, git or
+    // SQLite) is switched straight back to Query — the one field changed, then re-read.
+    let writer = super::allm::AllmWriter::for_librarian_lock(super::allm::AllmConn::local(state, cfg)?);
+    match writer.update_workspace(&slug, json!({ "chatMode": LIBRARIAN_CHAT_MODE }), 10).await {
+        Ok(_) => {
+            eprintln!("[librarian] \"{slug}\" was in chatMode {:?}; switched to {LIBRARIAN_CHAT_MODE}", g.chat_mode);
+            super::events::publish_note("librarian", "discrepancy", "milestone", "The Librarian workspace was in an agent-capable chat mode; it is back on Query.", None);
+            Ok(librarian_guard_with(&reader, &slug, writable).await)
+        }
+        Err(e) => {
+            eprintln!("[librarian] couldn't switch \"{slug}\" to {LIBRARIAN_CHAT_MODE}: {e}");
+            Ok(g)
+        }
+    }
 }
+
+/// Startup: one quiet guard pass 20 s in (AnythingLLM may still be starting), so an
+/// agent-capable Librarian workspace goes back to Query without opening Settings.
+pub async fn librarian_lock_at_start(app: tauri::AppHandle) {
+    use tauri::Manager;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let state = app.state::<DispatchState>();
+    let os = app.state::<OsState>();
+    if let Err(e) = librarian_preflight_run(&state, &os.snapshot()).await {
+        eprintln!("[librarian] start-up Query check skipped: {e}");
+    }
+}
+
+/// The Librarian workspace's only allowed AnythingLLM chat mode (no agent skills, no MCP).
+pub(crate) const LIBRARIAN_CHAT_MODE: &str = "query";
 
 /// Settings → Skills & MCP Library "Librarian guard" line.
 #[tauri::command]
@@ -2793,12 +2867,13 @@ mod tests {
         assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "calendar", "whatsapp"]);
         assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
         assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
-        // Builder: gmail / WhatsApp are frozen for Tony; the Coder keeps its three.
-        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "spotify"]);
+        // Builder (section pass): Tony keeps his whole base and gains filesystem + git; the Coder keeps its three.
+        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "calendar", "whatsapp"]);
         assert_eq!(ids(&eff("builder"), "coder"), ["fetch", "filesystem", "git"]);
-        assert_eq!(ids(&eff("builder"), "director"), ["filesystem"], "the media servers are frozen in Builder");
-        // Learning: only the always-live clock.
-        assert_eq!(ids(&eff("learning"), "general"), ["time"]);
+        // The Director is off duty in Builder: a frozen agent gets no tools at all (section pass).
+        assert!(ids(&eff("builder"), "director").is_empty(), "off duty in Builder");
+        // Learning: Tony's base stays on (section pass); nothing extra.
+        assert_eq!(ids(&eff("learning"), "general"), ids(&eff("brainstorm"), "general"));
         // A globally frozen server is gone in every mode; a disabled one stays off whatever the mode.
         let mut cfg = cfg.clone();
         cfg.switchboard.frozen_tools = vec!["spotify".into()];
@@ -3021,9 +3096,9 @@ mod tests {
         // the Librarian's exact allowlist.
         assert!(!origin_checks_grants(CallOrigin::Internal, "librarian"));
         for tool in ["web.search", "fetch.url"] {
-            assert_eq!(role_refusal_with(&cfg, tool, "librarian", false), None, "{tool}");
+            assert_eq!(role_refusal_with(&cfg, tool, "librarian", false, &[]), None, "{tool}");
         }
-        assert!(role_refusal_with(&cfg, "git.status", "librarian", false).unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "the allowlist still applies");
+        assert!(role_refusal_with(&cfg, "git.status", "librarian", false, &[]).unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "the allowlist still applies");
     }
 
     #[test]
@@ -3044,8 +3119,8 @@ mod tests {
         // Nic's own UI (Settings testers) acting as Tony isn't held to Tony's grants.
         assert!(!origin_checks_grants(CallOrigin::Ui, "tony") && origin_checks_grants(CallOrigin::Ui, "coder"));
         assert!(origin_checks_grants(CallOrigin::Turn, "tony") && origin_checks_grants(CallOrigin::Direct, "tony"));
-        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false), None);
-        assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder")).is_some());
+        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false, &[]), None);
+        assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder"), &[]).is_some());
         for m in cfg.mcps.iter_mut().filter(|m| m.id == "spotify") {
             m.agents = Some(vec!["all".into()]);
         }
@@ -3078,8 +3153,9 @@ mod tests {
             let refused = role_refusal(&cfg, "whatsapp.send_message", agent).or_else(|| read_only_refusal(&cfg, "whatsapp.send_message"));
             assert!(refused.is_some_and(|e| e.starts_with("PERMISSION_")), "{agent}");
         }
-        // Booking / Ops still read WhatsApp; the Librarian is not granted it at all.
-        assert_eq!(role_refusal(&cfg, "whatsapp.list_messages", "booking"), None);
+        // Tony reads WhatsApp; the frozen Booking Desk and the Librarian are not granted it at all.
+        assert_eq!(role_refusal(&cfg, "whatsapp.list_messages", "general"), None);
+        assert!(role_refusal(&cfg, "whatsapp.list_messages", "booking").unwrap().starts_with(ROLE_PREFIX));
         assert_eq!(read_only_refusal(&cfg, "whatsapp.list_messages"), None);
         assert!(role_refusal(&cfg, "whatsapp.list_messages", "librarian").unwrap().starts_with(ROLE_PREFIX));
     }
@@ -3352,5 +3428,92 @@ mod tony_mode_tool_tests {
         let cfg = os_core::OsConfig::default();
         assert!(role_refusal(&cfg, TONY_SET_MODE, "general").is_none());
         assert!(role_refusal(&cfg, TONY_SET_MODE, "coder").is_some_and(|e| e.starts_with(ROLE_PREFIX)));
+    }
+
+    // ── Section pass: Tony's tools by mode, frozen agents get none ──────────────
+
+    fn mode_eff(id: &str) -> super::super::modes::Effective {
+        super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default())
+    }
+
+    fn tony_ids(cfg: &OsConfig, mode: &str) -> Vec<String> {
+        let mut v: Vec<String> = servers_for(cfg, &mode_eff(mode), "general").into_iter().map(|s| s.id).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn tonys_base_is_on_in_every_mode_and_each_mode_adds_its_own() {
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut() {
+            m.enabled = true;
+        }
+        let base = ["brave-search", "calendar", "gmail", "knowledge-graph", "spotify", "time", "weather", "whatsapp"];
+        for mode in ["surface", "brainstorm", "coach", "learning", "builder", "operations", "executive"] {
+            let ids = tony_ids(&cfg, mode);
+            for b in base {
+                assert!(ids.iter().any(|i| i == b), "{mode}: base {b} missing from {ids:?}");
+            }
+        }
+        let extras = |mode: &str| tony_ids(&cfg, mode).into_iter().filter(|i| !base.contains(&i.as_str())).collect::<Vec<_>>();
+        assert_eq!(extras("builder"), ["filesystem", "git"]);
+        assert_eq!(extras("operations"), ["fetch", "instagram", "maps"]);
+        assert_eq!(extras("executive"), ["fetch"]);
+        assert!(extras("learning").is_empty() && extras("brainstorm").is_empty());
+        // The master switchboard still wins.
+        cfg.switchboard.frozen_tools = vec!["gmail".into(), "git".into()];
+        let b = tony_ids(&cfg, "builder");
+        assert!(!b.contains(&"gmail".to_string()) && !b.contains(&"git".to_string()), "{b:?}");
+        // Editable: a mode Nic gives Tony more tools in.
+        cfg.switchboard.frozen_tools.clear();
+        cfg.tony_mode_tools.insert("coach".into(), vec!["fetch".into()]);
+        assert!(tony_ids(&cfg, "coach").contains(&"fetch".to_string()));
+    }
+
+    #[test]
+    fn tonys_mode_tools_pass_the_call_time_gates() {
+        let cfg = OsConfig::default();
+        let builder = mode_eff("builder");
+        let extra = os_core::tony_mode_extras(&cfg, "builder");
+        assert_eq!(role_refusal_with(&cfg, "git.status", "tony", true, extra), None, "Builder gives Tony git");
+        assert!(role_refusal_with(&cfg, "git.status", "tony", true, &[]).is_some(), "not his outside Builder");
+        // His base is never frozen by a mode (Builder's overlay doesn't list gmail)…
+        assert_eq!(frozen_refusal_for(&cfg, &builder, "gmail.recent", CallOrigin::Turn, "tony"), None);
+        assert_eq!(frozen_refusal_for(&cfg, &mode_eff("learning"), "web.search", CallOrigin::Turn, "general"), None);
+        // …but a sub-agent's call still is.
+        assert!(frozen_refusal_for(&cfg, &builder, "gmail.recent", CallOrigin::Turn, "coder").is_some());
+    }
+
+    #[test]
+    fn a_frozen_agent_gets_no_tools() {
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut() {
+            m.enabled = true;
+            m.agents = Some(vec!["all".into()]);
+        }
+        // Booking is frozen on the master switchboard by default: nothing, even with "all".
+        assert!(servers_for(&cfg, &mode_eff("brainstorm"), "booking").is_empty());
+        // Ops is off duty in Builder mode: nothing either.
+        assert!(servers_for(&cfg, &mode_eff("builder"), "ops").is_empty());
+        assert!(!servers_for(&cfg, &mode_eff("builder"), "coder").is_empty());
+    }
+
+    #[test]
+    fn booking_loses_every_pill_once() {
+        let mut cfg = OsConfig::default();
+        cfg.mcps.iter_mut().find(|m| m.id == "gmail").unwrap().agents = Some(vec!["general".into(), "booking".into()]);
+        cfg.mcps.iter_mut().find(|m| m.id == "maps").unwrap().agents = Some(vec!["Booking".into()]);
+        cfg.skills.grants.insert("x".into(), vec!["booking".into()]);
+        cfg.routing.agents.get_mut("booking").unwrap().domains = vec!["last 5 messages".into(), "check my texts".into(), "self-tape".into()];
+        os_core::strip_booking_tools(&mut cfg);
+        assert_eq!(cfg.mcps.iter().find(|m| m.id == "gmail").unwrap().agents.as_deref(), Some(&["general".to_string()][..]));
+        assert_eq!(cfg.mcps.iter().find(|m| m.id == "maps").unwrap().agents.as_deref(), Some(&["none".to_string()][..]), "never [] (= everyone)");
+        assert!(!cfg.mcps.iter().any(|m| m.grants("booking") && m.agents.as_ref().is_some_and(|a| !a.iter().any(|x| x == "all"))));
+        assert!(!cfg.skills.grants.contains_key("x"));
+        assert_eq!(cfg.routing.agents["booking"].domains, ["self-tape"]);
+        // And the defaults never give it anything.
+        for id in os_core::TOOL_OWNER_SERVERS {
+            assert!(!os_core::default_mcp_grants(id).iter().any(|a| a == "booking"), "{id}");
+        }
     }
 }

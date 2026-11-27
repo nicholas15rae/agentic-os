@@ -54,7 +54,7 @@ pub struct LedgerInput {
     /// The ledger partition (a registry `financeLedgerTag`). Missing = [`UNTAGGED`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_tag: Option<String>,
-    /// The business event this came from (`invoice`, `receipt`…), for Ops hand-offs.
+    /// The business event this came from (`invoice`, `receipt`…), for Biz Ops hand-offs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_type: Option<String>,
     /// A reference to a supporting file inside the business's own folder (never its content).
@@ -409,7 +409,7 @@ pub async fn finance_ledger_write(entry: Value, delegated: Option<bool>) -> Resu
     write_input(input, delegated == Some(true), "tony").await.map(|e| summary(&e))
 }
 
-/// The one ledger write path (the command above and the Ops -> Finance hand-off). Sealed vault:
+/// The one ledger write path (the command above and the Biz Ops -> Finance hand-off). Sealed vault:
 /// only `delegated`, which opens, writes and re-seals in one step.
 pub(crate) async fn write_input(input: LedgerInput, delegated: bool, from: &'static str) -> Result<LedgerEntry, String> {
     let input = validate(&input)?;
@@ -494,8 +494,8 @@ mod tests {
         assert!(librarian_rows("", "x", 5).is_err(), "the Finance Librarian needs a tag");
         // Only finance → finance is allowed.
         let ws = |pairs: &[(&str, &str)]| pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<std::collections::BTreeMap<_, _>>();
-        assert!(!finance_mapping_anomaly(&ws(&[("finance", "finance"), ("ops", "ops")])));
-        for bad in [&[("finance_librarian", "finance-rag")][..], &[("finance", "finance-ledger")], &[("ops", "finance")], &[("financer", "x")]] {
+        assert!(!finance_mapping_anomaly(&ws(&[("finance", "finance"), ("coder", "coder")])));
+        for bad in [&[("finance_librarian", "finance-rag")][..], &[("finance", "finance-ledger")], &[("coder", "finance")], &[("financer", "x")]] {
             assert!(finance_mapping_anomaly(&ws(bad)), "{bad:?}");
         }
     }

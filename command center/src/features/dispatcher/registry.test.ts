@@ -27,7 +27,7 @@ describe("data-driven agent registry", () => {
   it("known agents are unchanged and enumeration lists only them", () => {
     expect(agentFor("coder")).toBe(SUB_AGENTS.coder);
     expect(SUB_AGENTS.booking.label).toBe("Booking Desk");
-    expect(Object.keys(SUB_AGENTS).sort()).toEqual(["bizops", "booking", "coder", "designer", "director", "finance", "general", "librarian", "ops", "prompter"]);
+    expect(Object.keys(SUB_AGENTS).sort()).toEqual(["bizops", "booking", "coder", "designer", "director", "finance", "general", "librarian", "prompter"]);
     // An invalid id never becomes an agent: it falls back to Tony.
     expect(agentFor("../etc").role).toBe("general");
     expect(SUB_AGENTS["Not An Id"]).toBeUndefined();

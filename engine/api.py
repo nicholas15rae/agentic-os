@@ -247,13 +247,22 @@ def run_agent(request: Request, agent: str, body: dict):
             raise ar.AgentRefused("gateway agents are off (engine.json route_agents=false)")
         if Engine(s).health() != "ok":
             raise ar.AgentRefused("the built-in engine isn't running")
+        from engine.threads import ThreadStore
+        store = ThreadStore()
+        tid = str(body.get("threadId") or "")
+        th = store.thread(tid) if tid else None
+        if tid and (not th or th["agent"] != agent or th["source"] != "gateway"):
+            raise ar.AgentRefused("that thread isn't a live gateway thread of this agent")
+        tid = tid or store.new_thread(agent, text[:60])
         r = ar.run(agent, text[:8000], table=ar.load_table(), os_cfg=ar.load_os(), chat=ar.openai_chat(s.base_url, s.alias),
-                   enabled=s.route_agents)
+                   enabled=s.route_agents, history=store.history(tid))
+        store.append(tid, "user", text[:8000])
+        store.append(tid, "assistant", r.answer)
     except ar.AgentRefused as e:
         raise HTTPException(409, str(e))
     except (OSError, ValueError) as e:
         raise HTTPException(502, str(e)[:300])
-    return {"agent": r.agent, "answer": r.answer, "calls": r.calls}
+    return {"agent": r.agent, "threadId": tid, "answer": r.answer, "calls": r.calls}
 
 
 _booted = False

@@ -249,7 +249,7 @@ def _audit(rec: dict, path: Path = AUDIT) -> None:
 
 def run(agent_id: str, text: str, *, table: dict, os_cfg: dict, chat: Callable[[list, list], dict],
         enabled: bool, run_tool: Callable[[str, dict], str] = execute, audit: Callable[[dict], None] = _audit,
-        max_rounds: int = MAX_ROUNDS) -> RunResult:
+        max_rounds: int = MAX_ROUNDS, history: Optional[list[dict]] = None) -> RunResult:
     """One turn for one agent. `chat(messages, tools)` returns an OpenAI chat message dict."""
     if not enabled:
         raise AgentRefused("gateway agents are off (engine.json route_agents=false)")
@@ -265,7 +265,8 @@ def run(agent_id: str, text: str, *, table: dict, os_cfg: dict, chat: Callable[[
     if not agent.get("prompt"):
         raise AgentRefused(f"{agent_id} has no prompt in the agent table ({agent.get('promptSource')})")
     tools = tool_schemas(agent, os_cfg)
-    messages: list[dict] = [{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": text}]
+    past = [{"role": m["role"], "content": m["content"]} for m in (history or []) if m.get("role") in ("user", "assistant")]
+    messages: list[dict] = [{"role": "system", "content": agent["prompt"]}, *past, {"role": "user", "content": text}]
     res = RunResult(agent_id)
     for _ in range(max_rounds + 1):
         msg = chat(messages, tools)

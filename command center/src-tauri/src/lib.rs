@@ -250,6 +250,8 @@ pub fn run() {
                 }
                 // Play Place staging hub: <config dir>/build-hub.json (Thought-to-Product Phases 2–4).
                 app.state::<buildhub::HubState>().init(&dir);
+                // Section pass: widgets dropped into <config>/library-import join the library.
+                buildhub::import_library_drops(&app.state::<buildhub::HubState>(), &dir);
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
                 audio::ducker::recover(&dir);
             }
@@ -639,6 +641,9 @@ pub fn run() {
             buildhub::delete_build_job,
             buildhub::clear_failed_jobs,
             buildhub::runner_dismiss,
+            buildhub::trash_list,
+            buildhub::trash_restore,
+            buildhub::trash_purge,
             buildhub::build_widget_url,
             buildhub::build_peek_status,
             buildhub::build_open_window,

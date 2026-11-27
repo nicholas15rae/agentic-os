@@ -11,6 +11,7 @@ import { requestBuild, requestPipeline } from "@/features/voice/voice-controller
 import { useFocus } from "@/features/os/focus-store";
 import { useOsName } from "@/features/os/os-store";
 import { useToasts } from "@/features/reminders/notify";
+import { deletedToast } from "@/features/buildhub/trash";
 import { devFixMode } from "@/features/memmap/format";
 import { useModes } from "@/features/modes/modes-store";
 import { StagingHub } from "@/features/buildhub/StagingHub";
@@ -160,13 +161,13 @@ function RunnerControls({ r, live }: { r: PipelineRun; live: boolean }) {
     setBusy(null);
   };
   const del = async () => {
-    const ask = live ? `“${r.title || "Prototype"}” is still running. Abort it and delete it from the runner list (and its staging folder)?` : `Delete “${r.title || "Prototype"}” from the runner list, with its staging folder?`;
-    if (!confirm(ask)) return;
+    // Into the Trash (30 days, Undo on the toast); only a live run asks first.
+    if (live && !confirm(`“${r.title || "Prototype"}” is still running. Abort it and move it to the Trash?`)) return;
     setBusy("delete");
     try {
       const rep = await xcmd("runner_dismiss", { taskId: r.id, purgeFiles: true });
       forgetRun(r.id);
-      toast({ title: "Runner deleted", body: [rep.aborted ? "aborted first" : null, rep.purged.length ? `${rep.purged.length} folder(s) removed` : null, rep.kept ? `kept ${rep.kept}` : null].filter(Boolean).join(" · ") || "removed", tone: "info" });
+      deletedToast(r.title || "Prototype", rep);
     } catch (e) {
       toast({ title: "Delete", body: e instanceof Error ? e.message : String(e), tone: "error" });
     }

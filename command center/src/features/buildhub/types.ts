@@ -125,4 +125,19 @@ export interface DeleteReport {
   purged: string[];
   /** A folder deliberately left alone (and why). */
   kept: string | null;
+  /** Section pass: the Trash entry holding the card and folders (restore with `trash_restore`). */
+  trashId?: string | null;
+  /** Folders that couldn't be moved (in use): left in place, untouched. */
+  left?: string[];
+}
+
+/** One Trash entry (Rust `trash::TrashEntry`): recoverable for 30 days. */
+export interface TrashEntry {
+  id: string;
+  kind: "build" | "runner";
+  title: string;
+  deletedAt: number;
+  expiresAt: number;
+  taskId?: string | null;
+  items: { from: string; stored: string }[];
 }

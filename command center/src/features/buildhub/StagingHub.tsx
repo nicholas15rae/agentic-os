@@ -8,15 +8,15 @@ import { useMyApps } from "@/features/myapps/store";
 import { isTauri } from "@/lib/platform";
 import { xcmd, type ExtCommands } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
-import { useLayout } from "@/core/widgets/layout-store";
 import { clearOnSuccess, errText, startHub, useHub } from "./hub-store";
 import { placePromotedTile } from "./promote-tile";
 import { currentMilestone, elapsedEta, hubCounts, RUNTIME_BADGE, smokeBadge, STATUS_LABEL, workerIndicator } from "./format";
 import { PeekView } from "./PeekView";
 import { SandboxView } from "./SandboxView";
-import type { BuildView, DeleteReport } from "./types";
+import type { BuildView } from "./types";
+import { deletedToast, expiresIn, forgetUi, rememberUi, removeBuildUi, restoreFromTrash, TRASH_DAYS, useTrash, type RemovedUi } from "./trash";
 
-type Tab = "staging" | "repair";
+type Tab = "staging" | "repair" | "trash";
 
 /**
  * Play Place universal staging hub (Phase 3): one status card per staged build, in queue order,
@@ -32,6 +32,8 @@ export function StagingHub() {
   const builds = view?.builds ?? [];
   const counts = hubCounts(builds);
   const shown = builds.filter((b) => (tab === "repair") === (b.envelope.status === "repair_queue"));
+  const trash = useTrash((s) => s.entries);
+  useEffect(() => void useTrash.getState().load(), []);
   const failed = builds.filter((b) => b.envelope.status === "repair_queue" || b.envelope.status === "cancelled").length;
   const tabs = (
     <div role="tablist" aria-label="Staging hub view" className="flex flex-wrap gap-1">
@@ -39,6 +41,7 @@ export function StagingHub() {
         [
           ["staging", `Staging (${counts.staging})`, FlaskConical],
           ["repair", `Repair Queue (${counts.repair})`, Wrench],
+          ["trash", `Trash (${trash.length})`, Trash2],
         ] as const
       ).map(([id, label, Icon]) => (
         <button
@@ -59,13 +62,17 @@ export function StagingHub() {
       title="Staging hub"
       action={tabs}
       hint={
-        tab === "staging"
+        tab === "trash"
+          ? `Deleted builds and runs, kept ${TRASH_DAYS} days before they go for good. Restore puts the card and its folders back.`
+          : tab === "staging"
           ? `Builds pushed from Brainstorming run one at a time per lane, in this order (Coder/Designer → the local pipeline; Claude → the Dev Fix Queue, which asks before running). Internal widgets land in ${view?.staging_root || "staging"}; external apps in ${view?.external_base || "G:\\ai-hub\\external-builds"}.`
           : "Builds that failed their smoke test twice (or that you sent here). Fix by hand in the output folder and re-run the check, or re-queue with a fix note."
       }
     >
       {error && <p className="mb-2 font-mono text-[11px] text-alert">{error}</p>}
-      {!view ? (
+      {tab === "trash" ? (
+        <TrashList />
+      ) : !view ? (
         <p className="py-3 text-center text-xs text-ink-3">Loading…</p>
       ) : !shown.length ? (
         <Empty>{tab === "staging" ? "Nothing staged. In Brainstorm, Select a few entries → Push to Play Place." : "No builds need repair."}</Empty>
@@ -277,17 +284,54 @@ const ACTIVE: readonly string[] = ["queued", "building", "smoke_testing", "pause
 
 /** Take a deleted build off the screen now (the `build-hub` event confirms it), plus its
  * promoted dashboard widget and its My Apps pin. */
-function forgetBuild(id: string) {
+function forgetBuild(id: string): RemovedUi {
   useHub.setState((s) => (s.view ? { view: { ...s.view, builds: s.view.builds.filter((b) => b.envelope.build_id !== id) } } : s));
-  useLayout.setState((s) => ({ pages: s.pages.map((p) => ({ ...p, items: p.items.filter((i) => (i.config as { buildId?: unknown } | undefined)?.buildId !== id) })) }));
-  const pin = useMyApps.getState().apps.find((a) => a.kind === "build" && a.ref === id);
-  if (pin) useMyApps.getState().unmount(pin.id);
+  return removeBuildUi(id);
 }
 
-function deleteSummary(r: DeleteReport): string {
-  const parts = [r.aborted ? "aborted, then deleted" : "deleted", r.purged.length ? `${r.purged.length} folder(s) removed from disk` : "no folders on disk"];
-  if (r.kept) parts.push(`kept ${r.kept}`);
-  return parts.join(" · ");
+/** Staging hub → Trash: restore, or delete one entry for good (asks first). */
+function TrashList() {
+  const entries = useTrash((s) => s.entries);
+  const loaded = useTrash((s) => s.loaded);
+  const error = useTrash((s) => s.error);
+  const [busy, setBusy] = useState<string | null>(null);
+  const purge = async (id: string, title: string) => {
+    if (!confirm(`Delete “${title}” for good? This can't be undone.`)) return;
+    setBusy(id);
+    await run("Delete for good", "trash_purge", { trashId: id });
+    forgetUi(id);
+    setBusy(null);
+    void useTrash.getState().load();
+  };
+  const restore = async (id: string) => {
+    setBusy(id);
+    await restoreFromTrash(id);
+    setBusy(null);
+  };
+  if (error) return <p className="font-mono text-[11px] text-alert">{error}</p>;
+  if (!loaded) return <p className="py-3 text-center text-xs text-ink-3">Loading…</p>;
+  if (!entries.length) return <Empty>The Trash is empty.</Empty>;
+  return (
+    <ul className="space-y-1.5">
+      {entries.map((e) => (
+        <li key={e.id} className="flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.06] px-3 py-2">
+          <span className="text-sm text-ink">{e.title}</span>
+          <span className="label-caps text-ink-3">{e.kind === "build" ? "build" : "runner"}</span>
+          <span className="text-[11px] text-ink-3">
+            deleted {new Date(e.deletedAt).toLocaleString()} · {e.items.length} folder(s) · gone for good {expiresIn(e)}
+          </span>
+          <span className="ml-auto flex gap-1.5">
+            <button disabled={busy === e.id} onClick={() => void restore(e.id)} className="pill-glass !h-7 !px-2.5 text-[11px]" title="Put it back">
+              {busy === e.id ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />} Restore
+            </button>
+            <button disabled={busy === e.id} onClick={() => void purge(e.id, e.title)} className="pill-glass !h-7 !px-2.5 text-[11px] hover:!border-alert/50 hover:!text-alert" title="Delete for good">
+              <Trash2 size={11} /> Delete for good
+            </button>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** Delete (trash): on every card. A running build gets a fast confirm, is aborted, then purged. */
@@ -295,19 +339,16 @@ function DeleteButton({ b, busy, setBusy }: { b: BuildView; busy: string | null;
   const e = b.envelope;
   const running = ACTIVE.includes(e.status);
   const onClick = async () => {
-    const ask = running
-      ? `“${e.title}” is ${STATUS_LABEL[e.status].toLowerCase()}. Abort it and delete it permanently (card, logs and its output folder)?`
-      : `Delete “${e.title}” permanently? The card, its logs and its output folder are removed.`;
-    if (!confirm(ask)) return;
+    // Not permanent any more: the card and its folders go to the Trash (30 days, Undo on the toast).
+    if (running && !confirm(`“${e.title}” is ${STATUS_LABEL[e.status].toLowerCase()}. Abort it and move it to the Trash?`)) return;
     setBusy("Delete");
     const r = await run("Delete", "delete_build_job", { jobId: e.build_id, purgeFiles: true });
     setBusy(null);
     if (!r) return;
-    forgetBuild(e.build_id);
-    useToasts.getState().push({ title: `Deleted “${e.title}”`, body: deleteSummary(r), tone: "info" });
+    deletedToast(e.title, r, forgetBuild(e.build_id));
   };
   return (
-    <button disabled={!!busy} onClick={() => void onClick()} className="pill-glass !h-7 !w-7 !p-0 hover:!border-alert/50 hover:!text-alert" aria-label={`Delete ${e.title}`} title={running ? "Abort and delete permanently" : "Delete permanently (card, logs, output folder)"}>
+    <button disabled={!!busy} onClick={() => void onClick()} className="pill-glass !h-7 !w-7 !p-0 hover:!border-alert/50 hover:!text-alert" aria-label={`Delete ${e.title}`} title={running ? "Abort and move to the Trash" : `Move to the Trash (kept ${TRASH_DAYS} days)`}>
       {busy === "Delete" ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
     </button>
   );
@@ -317,16 +358,20 @@ function DeleteButton({ b, busy, setBusy }: { b: BuildView; busy: string | null;
 function ClearFailed({ count }: { count: number }) {
   const [busy, setBusy] = useState(false);
   const onClick = async () => {
-    if (!confirm(`Delete all ${count} failed / cancelled build(s) permanently, with their output folders?`)) return;
+    if (!confirm(`Move all ${count} failed / cancelled build(s) to the Trash (kept ${TRASH_DAYS} days)?`)) return;
     setBusy(true);
     const r = await run("Clear failed", "clear_failed_jobs", { purgeFiles: true });
     setBusy(false);
     if (!r) return;
-    r.forEach((x) => forgetBuild(x.buildId));
-    useToasts.getState().push({ title: "Cleared", body: `${r.length} build(s) deleted · ${r.reduce((n, x) => n + x.purged.length, 0)} folder(s) removed`, tone: "info" });
+    r.forEach((x) => {
+      const ui = forgetBuild(x.buildId);
+      if (x.trashId) rememberUi(x.trashId, ui);
+    });
+    void useTrash.getState().load();
+    useToasts.getState().push({ title: "Cleared", body: `${r.length} build(s) moved to the Trash for ${TRASH_DAYS} days (Staging hub → Trash to restore)`, tone: "info" });
   };
   return (
-    <button disabled={busy} onClick={() => void onClick()} className="label-caps flex h-6 items-center gap-1 rounded-full border border-alert/30 px-2 !text-[9px] text-alert hover:border-alert/60" title="Delete every Repair Queue and cancelled build">
+    <button disabled={busy} onClick={() => void onClick()} className="label-caps flex h-6 items-center gap-1 rounded-full border border-alert/30 px-2 !text-[9px] text-alert hover:border-alert/60" title="Move every Repair Queue and cancelled build to the Trash">
       {busy ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />} Clear failed ({count})
     </button>
   );

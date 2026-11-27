@@ -2434,24 +2434,13 @@ pub async fn cancel_build_job(app: AppHandle, job_id: String) -> Result<TaskEnve
 pub struct DeleteReport {
     pub build_id: String,
     pub aborted: bool,
+    /// Folders moved into the Trash (section pass: nothing is erased on delete).
     pub purged: Vec<String>,
     pub kept: Option<String>,
-}
-
-/// Remove a folder, retrying briefly (Windows: a preview server or Explorer may hold a handle).
-fn remove_dir_retry(t: &Path) -> Result<(), String> {
-    let mut last = String::new();
-    for _ in 0..5 {
-        match std::fs::remove_dir_all(t) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => {
-                last = e.to_string();
-                std::thread::sleep(Duration::from_millis(150));
-            }
-        }
-    }
-    Err(last)
+    /// The Trash entry holding the card and its folders (`trash_restore` brings it back).
+    pub trash_id: Option<String>,
+    /// Folders that couldn't be moved (a file held open): left in place, untouched.
+    pub left: Vec<String>,
 }
 
 /// Delete one build for good: abort it first if it runs, take it out of `build-hub.json`, stop
@@ -2482,30 +2471,47 @@ async fn delete_one(app: &AppHandle, build_id: &str, purge_files: bool) -> Resul
     if let Ok(d) = app.path().app_config_dir() {
         targets.push(d.join("promoted").join(build_id));
     }
+    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    let out_dir = PathBuf::from(&removed.envelope.output_directory);
+    let already = targets.iter().any(|t| norm(t) == norm(&out_dir));
     if purge_files {
         match staging_root_of(app).ok().and_then(|root| purgeable_dir(&removed.envelope, &root, &external_base_of(app))) {
             Some(dir) => targets.push(dir),
+            None if already => {}
             None => report.kept = Some(format!("{} (not inside the hub's own folders — left alone)", removed.envelope.output_directory)),
         }
-    } else {
+    } else if !already {
         report.kept = Some(removed.envelope.output_directory.clone());
     }
-    report.purged = blocking(move || {
-        let mut out = Vec::new();
-        for t in targets.into_iter().filter(|t| t.exists()) {
-            match remove_dir_retry(&t) {
-                Ok(()) => out.push(t.display().to_string()),
-                Err(e) => eprintln!("[hub] delete: couldn't remove {}: {e}", t.display()),
-            }
+    // Section pass: into the Trash (card + folders), recoverable for 30 days — never erased here.
+    let cfg_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let card = serde_json::to_value(&removed).ok();
+    let (title, id) = (removed.envelope.title.clone(), build_id.to_string());
+    match blocking(move || super::trash::put(&cfg_dir, "build", &title, &id, card, None, &targets, now_ms())).await {
+        Ok((entry, left)) => {
+            report.purged = entry.items.iter().map(|i| i.from.clone()).collect();
+            report.trash_id = Some(entry.id);
+            report.left = left;
         }
-        Ok(out)
-    })
-    .await?;
+        Err(e) => {
+            // Nothing was moved: put the card back so the build is never lost.
+            let a = app.clone();
+            let _ = blocking(move || a.state::<HubState>().with(|f| {
+                if f.get(&removed.envelope.build_id).is_none() {
+                    f.builds.push(removed);
+                }
+                Ok(())
+            }))
+            .await;
+            changed(app);
+            return Err(format!("couldn't move it to the Trash ({e}); nothing was deleted"));
+        }
+    }
     changed(app);
     Ok(report)
 }
 
-/// Delete a build permanently (aborting it first if it is running).
+/// Delete a build into the Trash (aborting it first if it is running); `trash_restore` undoes it.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_build_job(app: AppHandle, job_id: String, purge_files: Option<bool>) -> Result<DeleteReport, String> {
     delete_one(&app, &job_id, purge_files.unwrap_or(true)).await
@@ -2548,19 +2554,29 @@ pub async fn runner_dismiss(app: AppHandle, task_id: String, purge_files: Option
     }
     let (a, t) = (app.clone(), task_id.clone());
     blocking(move || a.state::<TaskStore>().with(|c| envelope::meta_set(c, &format!("dismissed:{t}"), &now_ms().to_string()))).await?;
+    // Always a Trash entry, so Undo works even when no folder moves.
+    let mut dirs = Vec::new();
+    let slug = e.project_slug.as_deref().filter(|s| !s.is_empty() && !s.contains(['/', '\\', ':', '.'])).map(str::to_string);
     if purge_files.unwrap_or(false) {
-        if let Some(slug) = e.project_slug.as_deref().filter(|s| !s.is_empty() && !s.contains(['/', '\\', ':', '.'])) {
+        if let Some(slug) = slug.as_deref() {
             let used = app.state::<HubState>().snapshot().builds.iter().any(|b| b.envelope.project_slug == slug);
             if used {
                 report.kept = Some(format!("staging/{slug} (a Staging Hub build still uses it)"));
             } else if let Ok(root) = staging_root_of(&app) {
-                let dir = root.join(slug);
-                let shown = dir.display().to_string();
-                if blocking(move || remove_dir_retry(&dir)).await.is_ok() {
-                    report.purged.push(shown);
-                }
+                dirs.push(root.join(slug));
             }
         }
+    }
+    let cfg_dir = app.path().app_config_dir().map_err(|er| er.to_string())?;
+    let title = if e.title.is_empty() { slug.clone().unwrap_or_else(|| task_id.clone()) } else { e.title.clone() };
+    let t = task_id.clone();
+    match blocking(move || super::trash::put(&cfg_dir, "runner", &title, &t, None, Some(t.clone()), &dirs, now_ms())).await {
+        Ok((entry, left)) => {
+            report.purged = entry.items.iter().map(|i| i.from.clone()).collect();
+            report.trash_id = Some(entry.id);
+            report.left = left;
+        }
+        Err(er) => eprintln!("[hub] runner {task_id}: no Trash entry ({er}); its folder was left in place"),
     }
     let _ = app.emit("runner-dismissed", &task_id);
     Ok(report)
@@ -2840,4 +2856,222 @@ pub async fn build_intake_questions(app: AppHandle, notes: Vec<IntakeNote>) -> R
         }
         None => IntakeResult { questions: fallback_questions(), source: "fallback".into() },
     })
+}
+
+// ── Trash (section pass) ────────────────────────────────────────────────────
+
+/// Everything in the Trash, newest first (expired entries are swept first).
+#[tauri::command]
+pub async fn trash_list(app: AppHandle) -> Result<Vec<super::trash::TrashEntry>, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    blocking(move || {
+        super::trash::sweep(&dir, now_ms());
+        Ok(super::trash::list(&dir))
+    })
+    .await
+}
+
+/// Undo a delete: folders back where they were, the card back in the hub (a build) or the run
+/// back on the Build Runners list (a runner).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn trash_restore(app: AppHandle, trash_id: String) -> Result<super::trash::TrashEntry, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let peek = super::trash::get(&dir, &trash_id)?;
+    if let Some(card) = &peek.build {
+        let b: Build = serde_json::from_value(card.clone()).map_err(|e| format!("the trashed card is unreadable ({e})"))?;
+        restore_conflict(&app.state::<HubState>().snapshot(), &b)?;
+    }
+    let (d2, id) = (dir.clone(), trash_id.clone());
+    let entry = blocking(move || super::trash::restore_files(&d2, &id)).await?;
+    if let Some(card) = entry.build.clone() {
+        let b: Build = serde_json::from_value(card).map_err(|e| e.to_string())?;
+        let a = app.clone();
+        blocking(move || {
+            a.state::<HubState>().with(|f| {
+                restore_conflict(f, &b)?;
+                f.next_seq = f.next_seq.max(b.seq);
+                f.builds.push(b);
+                Ok(())
+            })
+        })
+        .await?;
+    }
+    // Only now, with the card (or the run) back, does the entry go.
+    let (d3, id) = (dir.clone(), trash_id.clone());
+    let _ = blocking(move || {
+        super::trash::drop_entry(&d3, &id);
+        Ok(())
+    })
+    .await;
+    if let Some(t) = entry.task_id.clone() {
+        let a = app.clone();
+        blocking(move || a.state::<TaskStore>().with(|c| envelope::meta_del(c, &format!("dismissed:{t}")))).await?;
+        let _ = app.emit("runner-restored", entry.task_id.clone());
+    }
+    changed(&app);
+    Ok(entry)
+}
+
+/// Why a trashed card can't go back into the hub right now (pure): its id is there again, or
+/// another unfinished build uses its slug (the hub's one-in-flight-per-slug rule).
+pub fn restore_conflict(f: &HubFile, b: &Build) -> Result<(), String> {
+    if f.get(&b.envelope.build_id).is_some() {
+        return Err("that build is already back in the hub".into());
+    }
+    if b.envelope.status != Status::Deployed && f.builds.iter().any(|x| x.envelope.project_slug == b.envelope.project_slug && x.envelope.status != Status::Deployed) {
+        return Err(format!("“{}” is staged again — finish or remove that build before restoring this one", b.envelope.project_slug));
+    }
+    Ok(())
+}
+
+/// Delete one Trash entry for good (the UI asks first).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn trash_purge(app: AppHandle, trash_id: String) -> Result<(), String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    blocking(move || super::trash::purge(&dir, &trash_id)).await
+}
+
+// ── Library import (section pass) ───────────────────────────────────────────
+
+/// Drop folder: every `<config>/library-import/*.html` becomes a Deployed internal-widget build
+/// (in the Widgets "From Play Place" library) with a frozen promoted copy, once; the file then
+/// moves to `library-import/imported/`. How a recovered or hand-made widget gets back in.
+pub const LIBRARY_IMPORT: &str = "library-import";
+
+/// `<title>` of a page, else the file stem, cleaned. Pure.
+pub fn import_title(html: &str, stem: &str) -> String {
+    clean(&html_title(html).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| stem.replace(['-', '_'], " ")), 80)
+}
+
+/// A slug from a file stem: lowercase letters, digits and `-`, ≤ 40. Pure.
+pub fn import_slug(stem: &str) -> String {
+    let s: String = stem.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let s = s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    s.chars().take(40).collect::<String>().trim_end_matches('-').to_string()
+}
+
+impl HubFile {
+    /// Add an imported widget as a Deployed build (pure; the caller writes its promoted copy).
+    pub fn import_widget(&mut self, slug: &str, title: &str, promoted_dir: &Path, now: i64) -> Result<String, String> {
+        let id = format!("b-lib-{slug}");
+        if slug.is_empty() || !valid_build_id(&id) {
+            return Err(format!("bad widget name {slug}"));
+        }
+        if self.get(&id).is_some() {
+            return Err(format!("{id} is already in the library"));
+        }
+        let e = TaskEnvelope {
+            build_id: id.clone(),
+            project_slug: format!("lib-{slug}"),
+            title: title.into(),
+            target_runtime: Runtime::InternalWidget,
+            output_directory: promoted_dir.display().to_string(),
+            spec_summary: "Imported into the widget library (library-import).".into(),
+            milestones: vec![],
+            acceptance_criteria: vec![],
+            assigned_worker: AssignedWorker::Coder,
+            preview_url: None,
+            status: Status::Queued,
+            human_override: vec![],
+        };
+        self.enqueue(e, String::new(), vec![], now)?;
+        let b = self.get_mut(&id)?;
+        b.envelope.status = Status::Deployed;
+        b.promoted_at = Some(now);
+        b.finished_at = Some(now);
+        b.progress = 100;
+        push_log(b, now, "event", "Imported into the widget library".into());
+        Ok(id)
+    }
+}
+
+/// Run the drop folder once (start-up). Errors are logged, never fatal.
+pub fn import_library_drops(hub: &HubState, config_dir: &Path) {
+    let drop = config_dir.join(LIBRARY_IMPORT);
+    let Ok(rd) = std::fs::read_dir(&drop) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("html")) != Some(true) {
+            continue;
+        }
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("widget").to_string();
+        let slug = import_slug(&stem);
+        let id = format!("b-lib-{slug}");
+        if slug.is_empty() || !valid_build_id(&id) || hub.snapshot().get(&id).is_some() {
+            eprintln!("[hub] library import of {} skipped: {id} is invalid or already in the library", p.display());
+            continue;
+        }
+        let Ok(html) = std::fs::read_to_string(&p) else { continue };
+        let title = import_title(&html, &stem);
+        let promoted = config_dir.join("promoted").join(format!("b-lib-{slug}"));
+        let r = std::fs::create_dir_all(&promoted).map_err(|e| e.to_string()).and_then(|_| atomic_write(&promoted.join(smoke::ENTRY), html.as_bytes())).and_then(|_| hub.with(|f| f.import_widget(&slug, &title, &promoted, now_ms())));
+        match r {
+            Ok(id) => {
+                let done = drop.join("imported");
+                let _ = std::fs::create_dir_all(&done);
+                let _ = std::fs::rename(&p, done.join(p.file_name().unwrap_or_default()));
+                eprintln!("[hub] imported {} into the widget library as {id}", p.display());
+            }
+            Err(e) => eprintln!("[hub] library import of {} skipped: {e}", p.display()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod library_import_tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_page_becomes_a_deployed_library_widget_once() {
+        assert_eq!(import_slug("E46 Clock_Faces!!"), "e46-clock-faces");
+        assert_eq!(import_title("<html><title>Clock Faces Widget</title></html>", "x"), "Clock Faces Widget");
+        assert_eq!(import_title("<html></html>", "e46-clock-faces"), "e46 clock faces");
+        let mut f = HubFile::default();
+        let id = f.import_widget("e46-clock-faces", "Clock Faces Widget", Path::new("C:/promoted/b-lib-e46-clock-faces"), 7).unwrap();
+        assert_eq!(id, "b-lib-e46-clock-faces");
+        let b = f.get(&id).unwrap();
+        assert_eq!(b.envelope.status, Status::Deployed);
+        assert_eq!(b.promoted_at, Some(7));
+        assert_eq!(b.envelope.target_runtime, Runtime::InternalWidget);
+        assert!(f.import_widget("e46-clock-faces", "again", Path::new("x"), 8).is_err(), "never twice");
+    }
+
+    #[test]
+    fn a_restore_never_duplicates_a_card_or_breaks_one_in_flight_per_slug() {
+        let mut f = HubFile::default();
+        f.import_widget("clock", "Clock", Path::new("x"), 1).unwrap();
+        let card = f.get("b-lib-clock").unwrap().clone();
+        assert!(restore_conflict(&f, &card).unwrap_err().contains("already back"));
+        let mut gone = HubFile::default();
+        assert!(restore_conflict(&gone, &card).is_ok());
+        // An unfinished card whose slug is staged again by another unfinished build waits.
+        let mut busy = card.clone();
+        busy.envelope.status = Status::Queued;
+        gone.import_widget("other", "Other", Path::new("y"), 2).unwrap();
+        let other = gone.get_mut("b-lib-other").unwrap();
+        other.envelope.status = Status::Building;
+        other.envelope.project_slug = busy.envelope.project_slug.clone();
+        assert!(restore_conflict(&gone, &busy).unwrap_err().contains("staged again"));
+    }
+
+    #[test]
+    fn library_drops_are_imported_with_their_promoted_copy() {
+        let dir = std::env::temp_dir().join(format!("cc-libimport-{}-{}", std::process::id(), now_ms()));
+        let drop = dir.join(LIBRARY_IMPORT);
+        std::fs::create_dir_all(&drop).unwrap();
+        std::fs::write(drop.join("e46-clock-faces.html"), "<!DOCTYPE html><html><head><title>Clock Faces Widget</title></head><body>e46</body></html>").unwrap();
+        std::fs::write(drop.join("notes.txt"), "ignored").unwrap();
+        let hub = HubState::default();
+        hub.init(&dir);
+        import_library_drops(&hub, &dir);
+        let f = hub.snapshot();
+        assert_eq!(f.builds.len(), 1);
+        assert!(dir.join("promoted").join("b-lib-e46-clock-faces").join(smoke::ENTRY).is_file());
+        assert!(drop.join("imported").join("e46-clock-faces.html").is_file(), "moved aside after import");
+        assert!(drop.join("notes.txt").is_file());
+        // A second start finds nothing new.
+        import_library_drops(&hub, &dir);
+        assert_eq!(hub.snapshot().builds.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

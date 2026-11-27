@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dev-dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.local
+*.tsbuildinfo
+
+# Local voice tooling (not part of the app)
+whisper.cpp/
+*.mp3
+src-tauri/target-langhub/
+
+# Playwright (npm run test:ui)
+test-results/
+playwright-report/

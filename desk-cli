@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# desk-cli launcher for Git Bash / POSIX shells: ./desk-cli status --json
+here="$(cd "$(dirname "$0")" && pwd)"
+py="$here/trading/.venv/Scripts/python.exe"
+[ -x "$py" ] || py="$here/trading/.venv/bin/python"
+[ -x "$py" ] || py="python"
+exec "$py" "$here/trading/desk_cli.py" "$@"

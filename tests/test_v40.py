@@ -2,7 +2,10 @@
 
 Run with: python3 tests/run_all.py  (or: python3 tests/test_v40.py)
 """
+import asyncio
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,7 +50,7 @@ class ChatHistoryTests(unittest.TestCase):
 
     def test_history_search_filters(self):
         self._seed_message("terraform plan complete", "opencode")
-        self._seed_message("pod restart completed", "hermes")
+        self._seed_message("pod restart completed", "agy")
         status, data = self.h.api("GET", "/api/chat/history?q=terraform")
         self.assertEqual(status, 200)
         self.assertEqual(data["total"], 1)
@@ -55,11 +58,11 @@ class ChatHistoryTests(unittest.TestCase):
 
     def test_history_agent_filter(self):
         self._seed_message("deploy the cluster", "opencode")
-        self._seed_message("schedule the job", "hermes")
-        status, data = self.h.api("GET", "/api/chat/history?agent=hermes")
+        self._seed_message("schedule the job", "agy")
+        status, data = self.h.api("GET", "/api/chat/history?agent=agy")
         self.assertEqual(status, 200)
         self.assertEqual(data["total"], 1)
-        self.assertEqual(data["messages"][0]["agent"], "hermes")
+        self.assertEqual(data["messages"][0]["agent"], "agy")
 
     def test_history_limit(self):
         for i in range(5):
@@ -132,6 +135,110 @@ class ChatUploadTests(unittest.TestCase):
             "..%2F..%2Fevil.txt",
             b"x",
         )
+        self.assertEqual(status, 400)
+
+
+class ChatUploadOffTheEventLoop(unittest.TestCase):
+    """POST /api/chat/upload used to run the agent CLI (up to ~180 s) and its file writes on the
+    event loop that :8080 and :8443 share, stalling every gateway request. It now runs them on a
+    worker thread."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.h = Harness()
+        cls.h.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.h.stop()
+
+    def test_execute_agent_runs_on_a_worker_thread(self):
+        seen = {}
+
+        def fake_agent(agent, message):
+            seen["thread"] = threading.get_ident()
+            try:
+                asyncio.get_running_loop()
+                seen["loop"] = True
+            except RuntimeError:
+                seen["loop"] = False
+            seen["message"] = message
+            return "worker reply"
+
+        with mock.patch.object(server, "execute_agent", side_effect=fake_agent):
+            status, data = self.h.upload("/api/chat/upload", {"agent": "opencode", "message": "look"}, "a.txt", b"hello")
+        self.assertEqual(status, 200, data)
+        self.assertNotEqual(seen["thread"], self.h._server_thread.ident, "execute_agent ran on the event-loop thread")
+        self.assertFalse(seen["loop"], "execute_agent ran inside a running event loop")
+        self.assertEqual(seen["message"], "--- File: a.txt ---\nhello\n--- End a.txt ---\n\nlook")
+        # Response shape unchanged.
+        self.assertEqual(set(data), {"status", "response", "file", "saved_as"})
+        self.assertEqual((data["status"], data["file"]), ("ok", "a.txt"))
+        self.assertEqual(data["response"]["content"], "worker reply")
+        self.assertTrue(data["saved_as"].endswith("_a.txt"))
+
+    def test_other_requests_are_served_while_the_agent_runs(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow_agent(agent, message):
+            started.set()
+            release.wait(6)  # the CLI is "busy" until the test lets it go (or 6 s pass)
+            return "slow reply"
+
+        result = {}
+        with mock.patch.object(server, "execute_agent", side_effect=slow_agent):
+            t = threading.Thread(target=lambda: result.update(r=self.h.upload(
+                "/api/chat/upload", {"agent": "opencode", "message": ""}, "b.txt", b"x", timeout=20)))
+            t.start()
+            try:
+                self.assertTrue(started.wait(10), "the upload never reached execute_agent")
+                t0 = time.monotonic()
+                status, _ = self.h.api("GET", "/api/chat/history?limit=1", timeout=20)
+                elapsed = time.monotonic() - t0
+            finally:
+                release.set()
+                t.join(20)
+        self.assertEqual(status, 200)
+        self.assertLess(elapsed, 3.0, "the gateway stalled while the agent ran")
+        self.assertEqual(result["r"][0], 200, result["r"])
+        self.assertEqual(result["r"][1]["response"]["content"], "slow reply")
+
+
+class AgentNotInstalledTests(unittest.TestCase):
+    """A missing CLI must be an HTTP 503 failure, never a 200 "reply" (chain poisoning)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.h = Harness()
+        cls.h.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.h.stop()
+
+    def test_chat_missing_cli_is_503(self):
+        with mock.patch.object(server, "resolve_cli", return_value=None):
+            status, data = self.h.api("POST", "/api/chat", {"agent": "opencode", "message": "hi"})
+        self.assertEqual(status, 503)
+        self.assertIn("not installed", data["detail"])
+        # Nothing is logged as a conversation turn.
+        _, hist = self.h.api("GET", "/api/chat/history?q=hi")
+        self.assertEqual(hist["total"], 0)
+
+    def test_upload_missing_cli_is_503(self):
+        with mock.patch.object(server, "resolve_cli", return_value=None):
+            status, data = self.h.upload("/api/chat/upload", {"agent": "agy", "message": "x"}, "n.txt", b"x")
+        self.assertEqual(status, 503)
+        self.assertIn("not installed", data["detail"])
+
+    def test_skill_run_missing_cli_is_503(self):
+        with mock.patch.object(server, "resolve_cli", return_value=None):
+            status, data = self.h.api("POST", "/api/skills/heartbeat/run", {"agent": "opencode", "input": ""})
+        self.assertEqual(status, 503)
+        self.assertIn("not installed", data["detail"])
+
+    def test_hermes_is_rejected(self):
+        status, _ = self.h.api("POST", "/api/chat", {"agent": "hermes", "message": "hi"})
         self.assertEqual(status, 400)
 
 

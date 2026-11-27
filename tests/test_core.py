@@ -26,10 +26,20 @@ class CoreEndpointTests(unittest.TestCase):
         self.assertEqual(data.get("status"), "healthy")
         self.assertIn("agents", data)
 
+    def test_ping_is_tiny_and_ok(self):
+        # The Command Center heartbeat (Thought-to-Product Phase 1) probes this every 10 s.
+        status, data = self.h.api("GET", "/api/ping")
+        self.assertEqual(status, 200)
+        self.assertIs(data.get("ok"), True)
+        self.assertIsInstance(data.get("t"), float)
+
     def test_three_agents_present(self):
         _, data = self.h.api("GET", "/api/status")
         names = {a.get("name") for a in data.get("agents", [])}
-        self.assertEqual(names, {"opencode", "hermes", "agy"})
+        # The core agents must always be reported; v5's CLI hub adds claude / gemini / llm.
+        self.assertTrue({"opencode", "agy"} <= names, names)
+        self.assertNotIn("hermes", names, "the hermes CLI was removed")
+        self.assertEqual(len(names), len(data.get("agents", [])), "duplicate agent names")
 
     def test_skills_list(self):
         status, data = self.h.api("GET", "/api/skills")

@@ -14,10 +14,61 @@ audit/*
 data/settings.json
 data/chat-history.json
 data/cost-history.json
-data/scheduler-history.json
+data/scheduler-history*
 data/error-log.json
 data/circuit-breaker.json
 data/memory.db
 data/kanban/*.json
 data/uploads/
 scheduler/*.pyc
+
+# Command Center: personal data (finance, scans, notes) and its backups never leave this machine
+data/command-center/
+backups/command-center/
+
+
+# Synaptic fine-tuning logs (personal automation history)
+training_logs/
+
+# System Map session briefs (dev task queue exports)
+memory/session_handoffs/
+
+# Instagram webhook event log (may contain user data)
+data/instagram/
+
+# Claude Code fix queue (P6): queue file + live-run logs (local paths, scrubbed error text)
+.agenticos/
+# Live-run worktrees junction node_modules to the main tree; never track the link
+command center/node_modules
+
+# TaskEnvelope pipeline: staged builds and Tony's notes / prompt backups stay local (never `git add -A`)
+staging/
+memory/tony/
+
+# Memory Scrolls (Phase 3): cold archive fallback root and local compaction state / scroll history
+/archive/
+/data/memory-scrolls/
+
+# IBKR bridge runtime logs
+data/trading/
+
+# Language Hub phrase library (personal data)
+data/language-hub/
+
+# Local HTTPS for the phone (private keys)
+data/certs/
+
+# Command Center security layer: keys, PIN-hash fallback, audit trail, runtime state (never commit)
+data/security/
+
+# Command Center launcher: service stdout/stderr logs + PID file (scripts/start-command-center.ps1)
+/logs/
+
+# Local build output, backups and agent scratch (never committed)
+/command center/src-tauri/target-*/
+/command center/dist.bak-*/
+/.claude/worktrees/
+/.agentic/
+
+# STT benchmark clips and results (stt/bench; synthetic now, real voice recordings later)
+data/stt-bench/

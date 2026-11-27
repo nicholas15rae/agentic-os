@@ -1,0 +1,80 @@
+[
+  {
+    "input": "key sk-proj-ABCDEFGHIJKLMNOPQRSTUV12 end",
+    "known": [],
+    "expected": "key [redacted] end"
+  },
+  {
+    "input": "ant sk-ant-api03-AAAAAAAAAAAAAAAA here",
+    "known": [],
+    "expected": "ant [redacted] here"
+  },
+  {
+    "input": "Authorization: Bearer abcdefghijklmnop",
+    "known": [],
+    "expected": "Authorization: [redacted] [redacted]"
+  },
+  {
+    "input": "curl -H 'X: Bearer abcdefghijklmnop'",
+    "known": [],
+    "expected": "curl -H 'X: Bearer [redacted]'"
+  },
+  {
+    "input": "OPENROUTER_API_KEY=zzzzzzzzzz9 and password = hunter22",
+    "known": [],
+    "expected": "OPENROUTER_API_KEY=[redacted] and password = [redacted]"
+  },
+  {
+    "input": "connect postgresql://user:hunter22@db.local/app failed",
+    "known": [],
+    "expected": "connect postgresql://user:[redacted]@db.local/app failed"
+  },
+  {
+    "input": "random Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zQ7Rt5W here",
+    "known": [],
+    "expected": "random [redacted] here"
+  },
+  {
+    "input": "sha 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 stays",
+    "known": [],
+    "expected": "sha 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 stays"
+  },
+  {
+    "input": "path C:\\ai-hub\\memory\\scrolls\\projects\\agentic-os.md stays",
+    "known": [],
+    "expected": "path C:\\ai-hub\\memory\\scrolls\\projects\\agentic-os.md stays"
+  },
+  {
+    "input": "note at C:/Users/someone/AppData/Local/x.md written",
+    "known": [],
+    "expected": "note at C:/Users/someone/AppData/Local/x.md written"
+  },
+  {
+    "input": "C:/x/Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z/y.md",
+    "known": [],
+    "expected": "C:/x/[redacted]/y.md"
+  },
+  {
+    "input": "got s3cr3t-value-123 back; abc stays",
+    "known": [
+      "s3cr3t-value-123",
+      "abc"
+    ],
+    "expected": "got [redacted] back; abc stays"
+  },
+  {
+    "input": "GitHub: token was rejected (HTTP 401)",
+    "known": [],
+    "expected": "GitHub: token was rejected (HTTP 401)"
+  },
+  {
+    "input": "Whisper STT runs on port 8178; LM Studio on :1235",
+    "known": [],
+    "expected": "Whisper STT runs on port 8178; LM Studio on :1235"
+  },
+  {
+    "input": "gh token ghp_ABCDEFGHIJKLMNOPQRSTUV12 and AIzaSyA1234567890abcdefghijklmnopqrstu",
+    "known": [],
+    "expected": "gh token [redacted] and [redacted]"
+  }
+]

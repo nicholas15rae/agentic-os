@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "csp": {
+        "img-src": "'self' data: blob: https://100.84.91.149:8443 https://mortadella.netbird.cloud:8443 https://i.scdn.co https://*.scdn.co https://*.spotifycdn.com https://tiles.openfreemap.org asset: http://asset.localhost",
+        "media-src": "'self' blob: mediastream: https://100.84.91.149:8443 https://mortadella.netbird.cloud:8443 asset: http://asset.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost https://100.84.91.149:8443 wss://100.84.91.149:8443 https://mortadella.netbird.cloud:8443 wss://mortadella.netbird.cloud:8443 https://api.open-meteo.com https://tiles.openfreemap.org",
+        "frame-src": "https://s.tradingview.com https://www.tradingview-widget.com https://s3.tradingview.com https://www.tradingview.com https://*.tradingview.com https://100.84.91.149:8443 https://mortadella.netbird.cloud:8443 https://open.spotify.com"
+      },
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": ["$APPDATA/media/**"],
+          "deny": []
+        }
+      }
+    }
+  }
+}

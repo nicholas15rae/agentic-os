@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The gateway's HTTPS listener (8443, over NetBird) uses a certificate signed by the private
+  "Agentic OS Local CA". The app ships that CA's public certificate (res/raw/agentic_os_ca.crt,
+  a copy of data/certs/agentic-os-ca.crt; valid until 2036-11-21) and trusts it only for the
+  gateway's addresses. Everything else uses the system CAs alone. The WebView follows this config.
+  If the CA is ever re-issued, replace res/raw/agentic_os_ca.crt and rebuild.
+-->
+<network-security-config>
+    <domain-config>
+        <domain includeSubdomains="false">100.84.91.149</domain>
+        <domain includeSubdomains="false">mortadella.netbird.cloud</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/agentic_os_ca" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

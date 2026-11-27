@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Agentic OS — FastAPI Backend
-Multi-agent orchestration server for opencode, Hermes, agy CLI
+Multi-agent orchestration server for opencode, agy, claude, gemini and llm CLIs
 """
 import argparse
 import json
@@ -18,11 +18,12 @@ from typing import Optional
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 _scheduler_instance = None
 
@@ -36,6 +37,16 @@ async def lifespan(app: FastAPI):
         print("Event-driven scheduler started")
     except Exception as e:
         print(f"Scheduler not available: {e}")
+    if __name__ == "__main__":
+        # Gateway Tony (gateway_tony.py) answers phone turns while no desktop app works the inbox.
+        # Only the real gateway process (`python server.py`, as every launcher runs it) starts it:
+        # an imported app (the test harness) never claims a phone turn.
+        try:
+            import gateway_tony
+            gateway_tony.start()
+            print("Gateway Tony started")
+        except Exception as e:
+            print(f"Gateway Tony not available: {e}")
     yield
     if _scheduler_instance:
         try:
@@ -45,35 +56,42 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Agentic OS", version="4.0", lifespan=lifespan)
 
-def hermes_home() -> Path:
-    """Hermes data dir: $HERMES_HOME, else %LOCALAPPDATA%\\hermes for the
-    native Windows install, else ~/.hermes (Linux/macOS/WSL)."""
-    if os.environ.get("HERMES_HOME"):
-        return Path(os.environ["HERMES_HOME"])
-    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
-        native = Path(os.environ["LOCALAPPDATA"]) / "hermes"
-        if native.exists():
-            return native
-    return Path.home() / ".hermes"
+# Command Center security layer: step-up (read-only by default) for trading / finance / settings
+# writes, the remote failsafe webhook and the companion mailbox (security_api.py). Added BEFORE
+# CORS so it sits inside it: a 423 still carries the CORS headers the webview needs to read it.
+import security_api  # noqa: E402
 
-# Load OpenRouter API key from Hermes .env
-HERMES_ENV = hermes_home() / ".env"
-if HERMES_ENV.exists():
-    for line in HERMES_ENV.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            if k == "OPENROUTER_API_KEY":
-                os.environ[k] = v  # last value wins (matches shell sourcing)
+app.add_middleware(security_api.StepUpMiddleware)
+app.include_router(security_api.router)
 
-# CORS for local dev
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Command Center gateway: shared store (phone ↔ desktop sync), vault, OCR, backups.
+import command_center_api  # noqa: E402
+
+app.include_router(command_center_api.router)
+app.include_router(command_center_api.os_router)
+command_center_api.start()
+
+# Phase 2: Play Place, Ideas pipeline, Comms hub, phone → desktop queue.
+import os_api  # noqa: E402
+
+os_api.init()
+for _r in (os_api.play_router, os_api.pipeline_router, os_api.comms_router, os_api.inbox_router, os_api.tasks_router, os_api.models_router, os_api.spotify_router):
+    app.include_router(_r)
+
+# IBKR paper trading: proxies the separate trading/ibkr_bridge.py process (loopback only).
+import trading_api  # noqa: E402
+
+app.include_router(trading_api.router)
+
+# Language Hub: the phone's path to the local phrase library + Whisper/Kokoro (self-contained store).
+import language_hub_api  # noqa: E402
+
+app.include_router(language_hub_api.router)
+
+# NetBird path: is the phone's link direct (P2P) or relayed? Read-only `netbird status --json`.
+import net_api  # noqa: E402
+
+app.include_router(net_api.router)
 
 # No-cache for dashboard assets — SPA JS is loaded on demand and updated
 # frequently during development (v4.0). Prevents stale-cached pages.
@@ -90,6 +108,84 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(NoCacheMiddleware)
+
+
+def _in_mesh(host: str) -> bool:
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host) in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return host == "testclient"  # starlette TestClient
+
+
+def mesh_ip() -> str | None:
+    """This machine's NetBird (CGNAT 100.64.0.0/10) address, if the mesh is up."""
+    import socket, ipaddress
+    net = ipaddress.ip_network("100.64.0.0/10")
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ipaddress.ip_address(ip) in net:
+                return ip
+    except OSError:
+        pass
+    try:  # fall back to the NetBird CLI
+        import subprocess
+        out = subprocess.run(["netbird", "status"], capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            if "NetBird IP" in line:
+                ip = line.split(":", 1)[1].strip().split("/")[0]
+                if ipaddress.ip_address(ip) in net:
+                    return ip
+    except Exception:
+        pass
+    return None
+
+
+class ZeroTrustMiddleware(BaseHTTPMiddleware):
+    """Network lock: the desktop (loopback) is trusted; anything else — the phone
+    over NetBird — must send `Authorization: Bearer <token>` for /api routes.
+    Active only while the desktop app's network lock has written the token file
+    (data/command-center/gateway.token, gitignored)."""
+
+    TOKEN_FILE = Path(__file__).parent / "data" / "command-center" / "gateway.token"
+
+    async def dispatch(self, request, call_next):
+        from starlette.responses import JSONResponse
+        import hmac
+        path = request.url.path
+        host = (request.client.host if request.client else "") or ""
+        loopback = host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
+        # Tunnels (ngrok etc.) connect from loopback but carry forwarding headers. Such traffic
+        # is the public internet: confine it to the public webhook endpoints only.
+        proxied = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"))
+        if proxied:
+            if path.startswith("/webhook/"):
+                return await call_next(request)
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        # Defense in depth: besides loopback, only the NetBird mesh (100.64.0.0/10) may talk to the gateway.
+        if not loopback and not _in_mesh(host):
+            return JSONResponse({"detail": "Only localhost and the NetBird mesh may reach this gateway."}, status_code=403)
+        # Stored files and Play Place previews are loaded by <img>/<iframe> (no headers possible);
+        # their random ids act as capability URLs.
+        capability = request.method == "GET" and (path.startswith("/api/cc/files/") or (path.startswith("/api/play-place/") and path.endswith("/preview")))
+        # The remote failsafe authenticates with its own HMAC signature (security_api.py), so a
+        # phone shortcut / n8n over NetBird needs only the remote-kill secret, not the gateway token.
+        capability = capability or (request.method == "POST" and path == "/api/security/emergency-kill")
+        if loopback or capability or request.method == "OPTIONS" or not path.startswith("/api") or not self.TOKEN_FILE.exists():
+            return await call_next(request)
+        try:
+            token = self.TOKEN_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            token = ""
+        sent = request.headers.get("authorization", "")
+        sent = sent[7:].strip() if sent.lower().startswith("bearer ") else request.headers.get("x-gateway-token", "")
+        if not token or not hmac.compare_digest(sent.encode(), token.encode()):
+            return JSONResponse({"detail": "Gateway token required (network lock is on)."}, status_code=401)
+        return await call_next(request)
+
+
+app.add_middleware(ZeroTrustMiddleware)
 
 BASE_DIR = Path(__file__).parent.resolve()
 
@@ -179,16 +275,31 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
                 headers = message.get("headers", [])
+                path = scope.get("path", "")
+                # Play Place previews are meant to be framed (sandboxed) by the OS; their own CSP limits who.
+                framable = path.startswith("/api/play-place/") and path.endswith("/preview")
                 extra = [
                     (b"x-content-type-options", b"nosniff"),
-                    (b"x-frame-options", b"DENY"),
+                ] + ([] if framable else [(b"x-frame-options", b"DENY")]) + [
                     (b"x-xss-protection", b"1; mode=block"),
                     (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                 ]
                 # Only add CSP for non-API routes (dashboard HTML)
-                path = scope.get("path", "")
-                if not path.startswith("/api/"):
+                if path.startswith("/cc"):
+                    # Command Center PWA: TradingView embed, Open-Meteo, live WebSocket, sandboxed previews.
+                    extra.append((b"content-security-policy", (
+                        b"default-src 'self'; "
+                        b"script-src 'self' 'unsafe-inline' https://s3.tradingview.com; "
+                        b"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                        b"font-src 'self' data: https://fonts.gstatic.com; "
+                        b"img-src 'self' data: blob: https:; "
+                        b"media-src 'self' blob: mediastream:; "
+                        b"connect-src 'self' ws: wss: https://api.open-meteo.com https://geocoding-api.open-meteo.com; "
+                        b"frame-src 'self' https://*.tradingview.com https://www.tradingview-widget.com; "
+                        b"worker-src 'self'; frame-ancestors 'none'"
+                    )))
+                elif not path.startswith("/api/"):
                     csp = (
                         b"default-src 'self'; "
                         b"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
@@ -206,31 +317,74 @@ class SecurityHeadersMiddleware:
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+# CORS, registered last so it is the OUTERMOST middleware (Starlette runs the last-added
+# first): every response, including ZeroTrust's 401/403 and StepUp's 423, carries the CORS
+# headers, so the webview / phone app can read the real status instead of a bare "CORS error".
+DEV_ORIGIN_RE = r"^http://(localhost|127\.0\.0\.1):14[23][0-9]$"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:8080", "http://localhost:8080",
+        # Command Center ("command center/"): Vite dev, Tauri webview (Windows / macOS+Linux), PWA preview.
+        # The phone loads the PWA from this server at /cc/ (same origin), so it needs no entry here.
+        "http://localhost:1420", "http://tauri.localhost", "tauri://localhost", "http://localhost:4173",
+    ],
+    # Extra Vite dev ports on loopback (1420-1439): a second checkout or worktree runs its dev
+    # server on 1422, 1430… and its window was silently cut off from every view while the Rust
+    # heartbeat (no CORS) still said "Connected". Loopback only, this port band only.
+    allow_origin_regex=DEV_ORIGIN_RE,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ─── Agent Discovery (instant filesystem checks) ────────────────────
+
+# CLI agents the gateway can run. claude / gemini / llm added in v5 (Phase 2 CLI hub).
+# (A CLI that is not installed makes /api/chat return 503, never a fake 200 reply.)
+AGENT_NAMES = ["opencode", "agy", "claude", "gemini", "llm"]
+
+
+class AgentNotInstalled(Exception):
+    """The requested agent's CLI isn't on this machine. Callers map this to HTTP 503 so
+    clients (and the Command Center provider chain) treat it as a failure, never a reply."""
+
+    def __init__(self, agent: str):
+        self.agent = agent
+        super().__init__(f"⚠ Agent '{agent}' CLI not installed. Install it and try again.")
+
+
+def resolve_cli(name: str) -> str | None:
+    """Full path to a CLI, including npm/uv shims (opencode.cmd, ~/.local/bin/llm.exe)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    home = Path.home()
+    for cand in (home / "AppData" / "Roaming" / "npm" / f"{name}.cmd", home / ".local" / "bin" / f"{name}.exe", home / ".local" / "bin" / name):
+        if cand.exists():
+            return str(cand)
+    return None
+
 
 def check_agent(name: str) -> dict:
     """Instant filesystem-based check. No subprocess needed."""
     try:
-        if name == "opencode":
-            exists = shutil.which("opencode") is not None
-            status = "online" if exists else "offline"
-        elif name == "hermes":
-            exists = shutil.which("hermes") is not None
-            status = "online" if exists else "offline"
-        elif name == "agy":
-            exists = shutil.which("agy") is not None
-            status = "online" if exists else "offline"
-        else:
-            status = "offline"
+        status = "online" if name in AGENT_NAMES and resolve_cli(name) else "offline"
     except Exception:
         status = "offline"
     return {"name": name, "status": status}
 
 # ─── Routes: Status ───────────────────────────────────────────────
 
+@app.get("/api/ping")
+def ping():
+    """Heartbeat for the Command Center's gateway-health indicator: no I/O, constant time."""
+    return {"ok": True, "t": time.time()}
+
+
 @app.get("/api/status")
 def get_status():
-    agents = [check_agent(a) for a in ["opencode", "hermes", "agy"]]
+    agents = [check_agent(a) for a in AGENT_NAMES]
     skills_dir = BASE_DIR / "skills"
     skills = [d.name for d in skills_dir.iterdir()
               if d.is_dir() and not d.name.startswith("_")] if skills_dir.exists() else []
@@ -342,7 +496,7 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
                 line = line.strip()
                 if "Primary:" in line:
                     candidate = line.split(":")[-1].strip().lower()
-                    if candidate in ("opencode", "hermes", "agy"):
+                    if candidate in tuple(AGENT_NAMES):
                         agent_choice = candidate
                         break
             if agent_choice == "auto":
@@ -364,8 +518,9 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
         response_text = execute_agent(agent_choice, prompt)
     except subprocess.TimeoutExpired:
         response_text = f"⏱ Skill '{name}' timed out on agent '{agent_choice}'."
-    except FileNotFoundError:
-        response_text = f"⚠ Agent '{agent_choice}' CLI not installed. Install it and try again."
+    except AgentNotInstalled as e:
+        # 503, and nothing is written to learnings.md: a missing CLI is not a skill run.
+        raise HTTPException(503, str(e))
     except Exception as e:
         response_text = f"⚠ Error executing skill: {str(e)}"
 
@@ -598,6 +753,59 @@ def webhook_receiver(data: dict):
     append_audit({"action": "webhook_received", "event": event_type})
     return {"status": "received", "event": event_type}
 
+# ─── Instagram Webhooks (Meta Graph API) ─────────────────────────
+# Public via an ngrok tunnel; ZeroTrustMiddleware confines tunnelled traffic to /webhook/*.
+
+def _dotenv_value(key: str) -> str:
+    """Read a key from the environment, falling back to the project .env (read per call)."""
+    if os.environ.get(key):
+        return os.environ[key]
+    env_file = BASE_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    return ""
+
+
+@app.get("/webhook/instagram")
+def instagram_webhook_verify(request: Request):
+    """Meta verification handshake: echo hub.challenge when the verify token matches."""
+    import hmac
+    q = request.query_params
+    expected = _dotenv_value("INSTAGRAM_VERIFY_TOKEN")
+    sent = q.get("hub.verify_token", "")
+    if q.get("hub.mode") == "subscribe" and expected and hmac.compare_digest(sent.encode(), expected.encode()):
+        append_audit({"action": "instagram_webhook_verified"})
+        return Response(content=q.get("hub.challenge", ""), media_type="text/plain", status_code=200)
+    return Response(content="Forbidden", media_type="text/plain", status_code=403)
+
+
+@app.post("/webhook/instagram")
+async def instagram_webhook_event(request: Request):
+    """Receive Instagram webhook events, log them, and ack with 200."""
+    import hmac, hashlib
+    body = await request.body()
+    # If INSTAGRAM_APP_SECRET is set, require a valid X-Hub-Signature-256 from Meta.
+    secret = _dotenv_value("INSTAGRAM_APP_SECRET")
+    if secret:
+        sig = request.headers.get("x-hub-signature-256", "")
+        good = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig.encode(), good.encode()):
+            return Response(content="Invalid signature", media_type="text/plain", status_code=403)
+    try:
+        payload = json.loads(body or b"{}")
+    except ValueError:
+        payload = {"raw": body.decode("utf-8", "replace")[:4000]}
+    log_dir = BASE_DIR / "data" / "instagram"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with open(log_dir / "webhook-events.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"received_at": get_timestamp(), "payload": payload}) + "\n")
+    print(f"[instagram webhook] {json.dumps(payload)[:500]}")
+    append_audit({"action": "instagram_webhook_event", "object": payload.get("object") if isinstance(payload, dict) else None})
+    return Response(content="EVENT_RECEIVED", media_type="text/plain", status_code=200)
+
 @app.get("/api/scheduler/events")
 def get_scheduler_events(limit: int = Query(50, le=200)):
     from scheduler.scheduler import get_history
@@ -763,7 +971,7 @@ def get_circuit_breaker():
 @app.post("/api/circuit-breaker/trip")
 def trip_circuit_breaker(data: dict):
     agent = data.get("agent", "")
-    if agent not in ["opencode", "hermes", "agy"]:
+    if agent not in AGENT_NAMES:
         raise HTTPException(400, "Invalid agent")
     state = _get_circuit_state()
     if agent not in state["agents"]:
@@ -780,7 +988,7 @@ def trip_circuit_breaker(data: dict):
 @app.post("/api/circuit-breaker/reset")
 def reset_circuit_breaker(data: dict):
     agent = data.get("agent", "")
-    if agent not in ["opencode", "hermes", "agy"]:
+    if agent not in AGENT_NAMES:
         raise HTTPException(400, "Invalid agent")
     state = _get_circuit_state()
     state["agents"][agent] = {"state": "closed", "failures": 0, "opened_at": None}
@@ -832,7 +1040,7 @@ def save_chat_message(msg: dict):
         history["messages"] = history["messages"][-200:]
     CHAT_HISTORY_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
-def resolve_cli(args: list) -> list:
+def safe_argv(args: list) -> list:
     """Turn ["opencode", ...] into an argv that is safe to exec on this OS.
 
     On Windows, CreateProcess only finds `.exe` files, so npm-installed CLIs
@@ -865,41 +1073,29 @@ def resolve_cli(args: list) -> list:
         "install a native .exe build of it instead"
     )
 
-def run_cli(args: list, timeout: int = 30) -> tuple:
-    r = subprocess.run(resolve_cli(args), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=timeout)
+def run_cli(args: list, timeout: int = 30, stdin_text: str | None = None) -> tuple:
+    # stdin=DEVNULL: CLIs that hit a first-run prompt must fail fast,
+    # not hang or read EOF mid-prompt. UTF-8 with replace: Windows consoles
+    # default to cp1252 and choke on box-drawing glyphs.
+    # Windows: CreateProcess ignores PATHEXT, so "opencode" (really opencode.cmd) raised
+    # FileNotFoundError → "CLI not installed". Resolve the real path first.
+    # safe_argv: an npm .cmd shim runs as `node <script>`, never through cmd.exe (which would
+    # re-parse prompt text with & | % in it); other batch files are refused.
+    exe = resolve_cli(args[0]) or args[0]
+    r = subprocess.run(safe_argv([exe, *args[1:]]), capture_output=True, text=True, timeout=timeout,
+                       input=stdin_text, stdin=None if stdin_text is not None else subprocess.DEVNULL,
+                       encoding="utf-8", errors="replace")
     return r.returncode, r.stdout, r.stderr
 
-def clean_hermes_output(raw: str) -> str:
-    """Strip CLI metadata from Hermes output, returning only the AI response."""
-    if not raw:
-        return ""
-    lines = raw.split('\n')
-    in_box = False
-    content_lines = []
-    for line in lines:
-        if '╭─' in line:
-            in_box = True
-            continue
-        if '╰─' in line:
-            in_box = False
-            continue
-        if in_box:
-            # Remove ANSI escape codes and leading whitespace
-            cleaned = line.strip()
-            if cleaned:
-                content_lines.append(cleaned)
-    if content_lines:
-        return '\n'.join(content_lines)
-    # Fallback: if no box found, return last non-metadata line
-    non_meta = [l.strip() for l in lines if l.strip() and not l.startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:', 'Duration:', 'Messages:'))]
-    return '\n'.join(non_meta[-5:]) or raw
-
 def execute_agent(agent: str, message: str) -> str:
+    """Run one CLI agent. Raises AgentNotInstalled when its CLI is missing (never returns
+    that as text: a 200 "⚠ Agent … not installed" body used to be shown as a real reply)."""
+    if agent in AGENT_NAMES and not resolve_cli(agent):
+        raise AgentNotInstalled(agent)
     try:
         if agent == "opencode":
             try:
-                code, out, err = run_cli(["opencode", "run", "--format", "json", message], timeout=30)
+                code, out, err = run_cli(["opencode", "run", "--format", "json", message], timeout=180)
             except subprocess.TimeoutExpired:
                 return f"⏱ Agent 'opencode' timed out.\n\nOpenCode's model is taking too long. Try running `opencode run \"{message[:60]}\"` directly in your terminal.\n\n**Message:** {message[:100]}"
             if code == 0:
@@ -922,22 +1118,6 @@ def execute_agent(agent: str, message: str) -> str:
             err_msg = (err or "").strip()
             return err_msg or f"opencode returned exit code {code}"
 
-        elif agent == "hermes":
-            try:
-                code, out, err = run_cli(["hermes", "chat", "-q", message], timeout=180)
-            except subprocess.TimeoutExpired:
-                return f"⏱ Hermes timed out.\n\nThe model took too long to respond. Try a shorter query or check your OpenRouter rate limits.\n\n**Message:** {message[:100]}"
-            if code == 0:
-                cleaned = clean_hermes_output(out or "")
-                if cleaned:
-                    return cleaned
-                # Empty response from model - return useful fallback
-                return f"**Hermes**\n\nReceived your message but the model returned an empty response. Try rephrasing your query.\n\n**Message:** {message}"
-            err_msg = (err or "").strip()
-            if "invalid choice" in err_msg or "usage:" in err_msg:
-                return f"**Hermes needs setup**\n\nRun `hermes setup` or check your config.\n\n**Details:** {err_msg[:200]}"
-            return err_msg or f"hermes returned exit code {code}"
-
         elif agent == "agy":
             try:
                 code, out, err = run_cli(["agy", "--print", message], timeout=60)
@@ -950,20 +1130,30 @@ def execute_agent(agent: str, message: str) -> str:
                 return f"**agy needs auth**\n\nRun `agy login` to authenticate.\n\n**Details:** {combined[:200]}"
             return combined or f"agy returned exit code {code}"
 
+        elif agent in ("claude", "gemini", "llm"):
+            # Prompt goes on stdin (never the command line); plain-text output.
+            cmd = {"claude": ["claude", "-p", "--output-format", "text"], "gemini": ["gemini"], "llm": ["llm", "prompt"]}[agent]
+            code, out, err = run_cli(cmd, timeout=240, stdin_text=message)
+            if code == 0 and (out or "").strip():
+                return out.strip()
+            detail = ((err or "") + " " + (out or "")).strip()
+            hint = {"claude": "Run `claude` once to sign in.", "gemini": "Run `gemini` once to sign in.", "llm": "Set a key: `llm keys set anthropic` (or gemini), or pick a model with `llm models default`."}[agent]
+            return f"**{agent} failed** (exit {code}). {hint} — {detail[:300]}"
+
         else:
             return f"Unknown agent: {agent}"
     except subprocess.TimeoutExpired:
         return f"⏱ Agent '{agent}' timed out.\n\nRun `{agent} --help` in your terminal for CLI usage.\n\n**Message:** {message[:100]}"
     except FileNotFoundError:
-        return f"⚠ Agent '{agent}' CLI not installed. Install it and try again."
+        raise AgentNotInstalled(agent)
     except Exception as e:
         return f"⚠ Error communicating with {agent}: {str(e)}"
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     agent = req.agent.lower().strip()
-    if agent not in ["opencode", "hermes", "agy"]:
-        raise HTTPException(400, "Agent must be one of: opencode, hermes, agy")
+    if agent not in AGENT_NAMES:
+        raise HTTPException(400, f"Agent must be one of: {', '.join(AGENT_NAMES)}")
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(400, "Message cannot be empty")
@@ -977,9 +1167,12 @@ def chat(req: ChatRequest):
         "content": message,
         "timestamp": get_timestamp(),
     }
+    try:
+        response_text = execute_agent(agent, message)
+    except AgentNotInstalled as e:
+        # 503 (not 200): the Command Center chain must fall through, not speak this.
+        raise HTTPException(503, str(e))
     save_chat_message(user_msg)
-
-    response_text = execute_agent(agent, message)
 
     agent_msg = {
         "id": str(uuid.uuid4())[:8],
@@ -1039,8 +1232,8 @@ async def chat_upload(
 ):
     """Chat with an optional file attachment (multipart/form-data, v4.0)."""
     agent = agent.lower().strip()
-    if agent not in ["opencode", "hermes", "agy"]:
-        raise HTTPException(400, "Agent must be one of: opencode, hermes, agy")
+    if agent not in AGENT_NAMES:
+        raise HTTPException(400, f"Agent must be one of: {', '.join(AGENT_NAMES)}")
 
     raw = await file.read(UPLOAD_MAX_BYTES + 1)
     if len(raw) > UPLOAD_MAX_BYTES:
@@ -1052,6 +1245,13 @@ async def chat_upload(
     if ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(400, f"File type .{ext} not allowed")
 
+    # The agent CLI runs for up to ~180 s, and the upload/history/audit writes block too. :8080 and
+    # :8443 share one event loop, so doing this inline stalled every gateway request: use a worker thread.
+    return await run_in_threadpool(_chat_upload_run, agent, message, filename, raw)
+
+
+def _chat_upload_run(agent: str, message: str, filename: str, raw: bytes) -> dict:
+    """The blocking half of /api/chat/upload (validated input): store, ask the agent, log."""
     _cleanup_uploads()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
@@ -1076,8 +1276,11 @@ async def chat_upload(
         "content": full_message,
         "timestamp": get_timestamp(),
     }
+    try:
+        response_text = execute_agent(agent, full_message)
+    except AgentNotInstalled as e:
+        raise HTTPException(503, str(e))
     save_chat_message(user_msg)
-    response_text = execute_agent(agent, full_message)
     agent_msg = {
         "id": str(uuid.uuid4())[:8],
         "role": "assistant",
@@ -1501,7 +1704,7 @@ def search_journal(q: str = Query("")):
 def get_agent_health():
     try:
         agents = []
-        for name in ["opencode", "hermes", "agy"]:
+        for name in AGENT_NAMES:
             info = check_agent(name)
             info["uptime"] = 0
             info["success_rate"] = 100
@@ -1514,7 +1717,7 @@ def get_agent_health():
 @app.get("/api/agents/{name}/stats")
 def get_agent_stats(name: str):
     try:
-        if name not in ["opencode", "hermes", "agy"]:
+        if name not in AGENT_NAMES:
             raise HTTPException(400, "Invalid agent")
         info = check_agent(name)
         return {
@@ -1535,7 +1738,7 @@ def get_agent_stats(name: str):
 def refresh_agent_health():
     try:
         agents = []
-        for name in ["opencode", "hermes", "agy"]:
+        for name in AGENT_NAMES:
             info = check_agent(name)
             agents.append(info)
         append_audit({"action": "agent_health_refreshed"})
@@ -1547,7 +1750,6 @@ def refresh_agent_health():
 
 ROUTER_RULES = {
     "opencode": ["code", "devops", "deploy", "git", "file", "terraform", "docker", "test", "build", "infra", "script"],
-    "hermes": ["memory", "schedule", "channel", "skill", "cron", "reminder", "brain", "plugin", "backup"],
     "agy": ["research", "analyze", "search", "compare", "explain", "study", "learn", "document", "report", "review"],
 }
 
@@ -1573,7 +1775,7 @@ def router_suggest(data: RouterSuggest):
 def router_route(data: RouterRoute):
     try:
         agent = data.agent.lower()
-        if agent not in ["opencode", "hermes", "agy"]:
+        if agent not in AGENT_NAMES:
             return {"status": "error", "message": f"Invalid agent: {agent}"}
         append_audit({"action": "task_routed", "agent": agent, "task_preview": data.task[:50]})
         return {
@@ -1646,15 +1848,6 @@ def list_sessions():
                     "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
                     "source": "opencode",
                 })
-        hermes_sessions = hermes_home() / "sessions.json"
-        if hermes_sessions.exists():
-            sessions.append({
-                "id": "hermes-sessions",
-                "name": "Hermes Session Archive",
-                "size": hermes_sessions.stat().st_size,
-                "modified": datetime.fromtimestamp(hermes_sessions.stat().st_mtime).isoformat(),
-                "source": "hermes",
-            })
         return {"sessions": sessions}
     except Exception as e:
         return {"sessions": [], "error": str(e)}
@@ -1720,6 +1913,37 @@ def get_diff(file: str = Query(""), ref: str = Query("HEAD")):
 dashboard_dir = BASE_DIR / "dashboard"
 if dashboard_dir.exists():
     app.mount("/dashboard", StaticFiles(directory=str(dashboard_dir)), name="dashboard")
+
+# Command Center PWA for phones: `npm run build` in "command center/", then open
+# http://<desktop NetBird or LAN IP>:8080/cc/ and "Add to Home screen".
+@app.get("/mobile-hud", include_in_schema=False)
+def mobile_hud(request: Request):
+    """Galaxy S22 Lockdown Command Center → the PWA's HUD view (keeps ?mode=lockdown etc.)."""
+    from starlette.responses import RedirectResponse
+    q = request.url.query
+    return RedirectResponse(f"/cc/?view=hud{'&' + q if q else ''}", status_code=307)
+
+
+# Phone HTTPS (mic/camera need a secure origin): the gateway also listens on HTTPS_PORT with
+# data/certs/gateway.{crt,key} when those exist. The phone trusts the local CA once, fetched here.
+CERT_DIR = BASE_DIR / "data" / "certs"
+HTTPS_PORT = 8443
+
+
+@app.get("/agentic-os-ca.crt", include_in_schema=False)
+def local_ca_cert():
+    """The local CA's PUBLIC certificate, so the phone can install it (Settings → Security →
+    Install a certificate → CA certificate). Never the private key."""
+    from starlette.responses import FileResponse, PlainTextResponse
+    ca = CERT_DIR / "agentic-os-ca.crt"
+    if not ca.is_file():
+        return PlainTextResponse("No local CA yet.", status_code=404)
+    return FileResponse(ca, media_type="application/x-x509-ca-cert", filename="agentic-os-ca.crt")
+
+
+cc_dist = BASE_DIR / "command center" / "dist"
+if cc_dist.exists():
+    app.mount("/cc", StaticFiles(directory=str(cc_dist), html=True), name="command-center")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -1800,10 +2024,66 @@ def service_worker():
 
 # ─── Main ─────────────────────────────────────────────────────────
 
+# A clean stop waits this long for open requests, then cancels them. Without a cap uvicorn waits
+# for every one, and the inbox long-polls hold requests open up to 25 s (os_api.WAIT_MAX_SECS).
+# A long-poll cut here reads to its client like any gateway restart.
+GRACEFUL_SHUTDOWN_SECS = 3
+
 if __name__ == "__main__":
     import uvicorn
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--host", type=str, default="127.0.0.1")
+    # Phones only allow mic/camera on HTTPS: serve the /cc PWA with a cert
+    # (e.g. mkcert for your NetBird IP) via --ssl-certfile/--ssl-keyfile.
+    parser.add_argument("--ssl-certfile", type=str, default=None)
+    parser.add_argument("--ssl-keyfile", type=str, default=None)
+    parser.add_argument("--no-mesh", action="store_true", help="Don't also listen on the NetBird (100.64.x.x) address")
+    parser.add_argument("--https-port", type=int, default=HTTPS_PORT, help="Also serve HTTPS here when data/certs/gateway.{crt,key} exist (0 = off)")
     args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
+    # Strict binding: loopback + (if NetBird is up) the mesh address — never 0.0.0.0.
+    import socket as _socket
+    hosts = [args.host]
+    mip = None if args.no_mesh or args.host not in ("127.0.0.1", "localhost") else mesh_ip()
+    if mip:
+        hosts.append(mip)
+    socks = []
+    for h in hosts:
+        sk = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sk.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sk.bind((h, args.port))
+        socks.append(sk)
+    print(f"[gateway] listening on {', '.join(f'{h}:{args.port}' for h in hosts)}")
+    # Second listener: HTTPS on the same hosts when the local cert exists (phone mic needs it).
+    # Same app; lifespan off so the scheduler doesn't start twice. A failure here never
+    # takes the plain-HTTP gateway down.
+    tls_socks = []
+    crt, key = CERT_DIR / "gateway.crt", CERT_DIR / "gateway.key"
+    if not args.ssl_certfile and args.https_port and crt.is_file() and key.is_file():
+        try:
+            for h in hosts:
+                sk = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                sk.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                sk.bind((h, args.https_port))
+                tls_socks.append(sk)
+            print(f"[gateway] HTTPS on {', '.join(f'{h}:{args.https_port}' for h in hosts)}")
+        except OSError as _e:
+            for sk in tls_socks:
+                sk.close()
+            tls_socks = []
+            print(f"[gateway] HTTPS listener skipped: {_e}")
+    try:
+        print(f"[gateway] {trading_api.autostart_bridge()}")
+    except Exception as _e:  # never let the trading bridge block the gateway
+        print(f"[gateway] trading bridge autostart failed: {_e}")
+    config = uvicorn.Config(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECS)
+    if not tls_socks:
+        uvicorn.Server(config).run(sockets=socks)
+    else:
+        import asyncio
+        tls = uvicorn.Config(app, host=args.host, port=args.https_port, ssl_certfile=str(crt), ssl_keyfile=str(key), lifespan="off", timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECS)
+
+        async def _serve_both():
+            await asyncio.gather(uvicorn.Server(config).serve(sockets=socks), uvicorn.Server(tls).serve(sockets=tls_socks))
+
+        asyncio.run(_serve_both())

@@ -17,7 +17,32 @@ import test_core  # noqa: E402
 import test_security  # noqa: E402
 import test_kanban_journal  # noqa: E402
 import test_memory_scheduler  # noqa: E402
+import test_scheduler_history  # noqa: E402
 import test_v40  # noqa: E402
+import test_command_center_extract_json  # noqa: E402
+import test_spotify_callback  # noqa: E402
+import test_os_inbox  # noqa: E402
+import test_vault_finance_scope  # noqa: E402
+import test_cors  # noqa: E402
+import test_command_center_llm  # noqa: E402
+import test_task_mirror  # noqa: E402
+import test_memory_scrolls  # noqa: E402
+import test_memory_scrolls_offload  # noqa: E402
+import test_memory_scrolls_privacy  # noqa: E402
+import test_memory_scrolls_hub  # noqa: E402
+import test_memory_scrolls_guards  # noqa: E402
+import test_memory_scrolls_curated  # noqa: E402
+import test_memory_scrolls_fidelity  # noqa: E402
+import test_memory_scrolls_v6  # noqa: E402
+import test_memory_scrolls_v7  # noqa: E402
+import test_memory_scrolls_v8  # noqa: E402
+import test_trading_bridge  # noqa: E402
+import test_trading_desk  # noqa: E402
+import test_trading_signals  # noqa: E402
+import test_trading_engines  # noqa: E402
+import test_trading_intel  # noqa: E402
+import test_trading_health  # noqa: E402
+import test_trading_agent  # noqa: E402
 import test_windows  # noqa: E402
 
 
@@ -25,7 +50,12 @@ def main() -> int:
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for module in (test_core, test_security, test_kanban_journal,
-                   test_memory_scheduler, test_v40, test_windows):
+                   test_memory_scheduler, test_scheduler_history, test_v40, test_command_center_extract_json,
+                   test_spotify_callback, test_os_inbox, test_vault_finance_scope, test_cors, test_command_center_llm,
+                   test_task_mirror, test_memory_scrolls, test_memory_scrolls_offload,
+                   test_memory_scrolls_privacy, test_memory_scrolls_hub, test_memory_scrolls_guards,
+                   test_memory_scrolls_curated, test_memory_scrolls_fidelity, test_memory_scrolls_v6,
+                   test_memory_scrolls_v7, test_memory_scrolls_v8, test_trading_bridge, test_trading_desk, test_trading_signals, test_trading_engines, test_trading_intel, test_trading_health, test_trading_agent, test_windows):
         suite.addTests(loader.loadTestsFromModule(module))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

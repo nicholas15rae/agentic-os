@@ -318,6 +318,48 @@ Your role is to act as the **kernel** of this system: route tasks to the right a
 
 ---
 
+## Hardware Constraints (hard limits — never exceed)
+
+### Cloud droplet: 1 vCPU / 2 GB RAM / 70 GB NVMe (DigitalOcean TOR1, Ubuntu 24.04 LTS)
+
+Current droplet: `ubuntu-s-1vcpu-2gb-70gb-intel-tor1` (Premium Intel, Ubuntu 24.04 "noble"), rebuilt
+2026-11-24 with `scripts/droplet-bootstrap.sh`. Its NetBird mesh IP is assigned at bootstrap; the old
+`100.84.1.36` is gone.
+
+The previous droplet (Nov 2026) was **bricked**: its 10 GB disk was already 84% full of leftovers
+(Docker n8n image 1.8 GB, Go toolchain 828 MB, Python venv 725 MB, uncapped journal), then model
+downloads left old GGUFs on disk, swap filled and RAM ran out (20 leaked whatsapp-mcp processes +
+llama-server ~905 MB). `droplet-agent` died, and SSH and the web console were both lost. It was destroyed.
+Its hostname said `512mb` from before a resize; the real RAM is **2 GB** (`free -m` total 1963).
+
+| Field | Value |
+|-------|-------|
+| **Role** | Lightweight overflow only: the last fallback in the provider chain. Never a primary model host |
+| **Disk budget** | Total used **< 6.5 GB** (a deliberately lean target even on the 70 GB disk, so a runaway download or log is caught early); free disk must **never drop below 2 GB** |
+| **RAM budget** | MemAvailable must stay **> 300 MB** after any service starts |
+| **Model** | Exactly **one** GGUF on disk: `Qwen2.5-0.5B-Instruct-IQ4_XS.gguf` (349 MB, sha256-pinned), `-c 2048`, alias `qwen2.5-0.5b-instruct` |
+| **Provisioning** | `scripts/droplet-bootstrap.sh` only (idempotent). `droplet-llm-install.sh` is retired |
+
+Non-negotiable rules for every agent:
+- **Every deploy or download runs a pre-flight** (`df -h`, `free -m`) and **aborts** if free disk
+  would drop below 2 GB, used disk would reach 6.5 GB, or available RAM would drop below 300 MB.
+  `preflight()` in `droplet-bootstrap.sh` is the reference implementation.
+- **Delete old or partial model files *before* downloading a replacement.** Never keep two GGUFs.
+- **Logs are capped:** journald 100 MB with 2 GB kept free, rsyslog off, Docker `json-file` 3 × 10 MB.
+- **Swap is guarded:** 1 GB (swappiness 10), created only if ≥ 3.5 GB of disk stays free afterwards.
+- **SSH key verified before password login is disabled:** `authorized_keys` must contain a key
+  that `ssh-keygen -l` can parse; its fingerprint is printed to compare with the PC's key, and the
+  new config must pass `sshd -t` or it is rolled back.
+- **Keep the way back in:** `sshd`, `droplet-agent` and `netbird` get `OOMScoreAdjust=-900`.
+  earlyoom kills `llama-server` first. The model unit has `MemoryMax` and a start limit (3 in
+  5 minutes), so it can never OOM-loop.
+- **Size models by KV cache too, not just file size.** Qwen3-0.6B at `-c 4096` used ~905 MB RSS.
+  Anything heavier runs on the desktop RTX 3060.
+- Don't put build toolchains (Go, Python venvs), n8n or whatsapp-mcp back on the droplet unless
+  the user asks. The desktop runs its own n8n and WhatsApp MCP.
+
+---
+
 ## Setup Instructions for New AI Agents
 
 When you (an AI agent) are dropped into this directory for the first time:

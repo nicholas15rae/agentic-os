@@ -1,4 +1,4 @@
-"""Windows-specific behaviour: CLI resolution and UTF-8 file handling."""
+"""Windows-specific behaviour: cmd.exe-safe CLI argv (safe_argv) and UTF-8 file handling."""
 import os
 import shutil
 import sys
@@ -32,7 +32,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_
 
 
 @unittest.skipUnless(os.name == "nt", "Windows-only")
-class TestResolveCli(unittest.TestCase):
+class TestSafeArgv(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="aos-win-"))
         self.old_path = os.environ["PATH"]
@@ -47,7 +47,7 @@ class TestResolveCli(unittest.TestCase):
         script.parent.mkdir(parents=True)
         script.write_text("// js", encoding="utf-8")
         (self.tmp / "fakecli.cmd").write_text(NPM_SHIM, encoding="utf-8")
-        argv = server.resolve_cli(["fakecli", "run", "a & b | %PATH%"])
+        argv = server.safe_argv(["fakecli", "run", "a & b | %PATH%"])
         self.assertTrue(argv[0].lower().endswith("node.exe"))
         self.assertEqual(Path(argv[1]), script)
         self.assertEqual(argv[2:], ["run", "a & b | %PATH%"])
@@ -55,41 +55,11 @@ class TestResolveCli(unittest.TestCase):
     def test_unknown_batch_file_refused(self):
         (self.tmp / "otherbat.cmd").write_text("@echo %*\n", encoding="utf-8")
         with self.assertRaises(FileNotFoundError):
-            server.resolve_cli(["otherbat", "x"])
+            server.safe_argv(["otherbat", "x"])
 
     def test_missing_cli_raises(self):
         with self.assertRaises(FileNotFoundError):
-            server.resolve_cli(["definitely-not-a-real-cli-xyz"])
-
-
-class TestHermesHome(unittest.TestCase):
-    def setUp(self):
-        self.saved = {k: os.environ.get(k) for k in ("HERMES_HOME", "LOCALAPPDATA")}
-        self.tmp = Path(tempfile.mkdtemp(prefix="aos-hermes-"))
-
-    def tearDown(self):
-        for k, v in self.saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_env_override_wins(self):
-        os.environ["HERMES_HOME"] = str(self.tmp / "custom")
-        self.assertEqual(server.hermes_home(), self.tmp / "custom")
-
-    @unittest.skipUnless(os.name == "nt", "Windows-only")
-    def test_native_windows_location(self):
-        os.environ.pop("HERMES_HOME", None)
-        os.environ["LOCALAPPDATA"] = str(self.tmp)
-        (self.tmp / "hermes").mkdir()
-        self.assertEqual(server.hermes_home(), self.tmp / "hermes")
-
-    def test_falls_back_to_dot_hermes(self):
-        os.environ.pop("HERMES_HOME", None)
-        os.environ["LOCALAPPDATA"] = str(self.tmp)  # no hermes\ inside
-        self.assertEqual(server.hermes_home(), Path.home() / ".hermes")
+            server.safe_argv(["definitely-not-a-real-cli-xyz"])
 
 
 class TestUtf8Files(unittest.TestCase):

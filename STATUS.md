@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 22:21. One page for every Claude Code session and branch.
+Updated 2026-11-26 22:30. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -10,7 +10,7 @@ Updated 2026-11-26 22:21. One page for every Claude Code session and branch.
 | Tony latency: byte-stable system msg, TURN CONTEXT block | feat/language-hub | 35e30e5 | Yes (4073bd9) |
 | App crash hardening: panic.log, restarts wait for WebView2 to exit, scripts\restart-desktop-app.ps1 | feat/language-hub | 1cd5333 | **No**: Nic approved; main fast-forward to 4bc4e2d pending |
 | Engine R stops reporting refused orders as trades | claude/practical-elbakyan | 8bd7990 | Yes (3fe4835) |
-| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | **No**: needs your OK to merge |
+| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), not pushed; live after the next app rebuild + restart |
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
@@ -47,7 +47,6 @@ Updated 2026-11-26 22:21. One page for every Claude Code session and branch.
 
 **Decisions**
 - OK to merge `section-pass`, `section-pass-batch3`, `director-suite` into main? Each session asks first.
-- OK to merge `claude/vibrant-davinci-742cf7` (fa69ab2, Tony recall fix) into main? It takes effect on the next app rebuild and restart.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
 - `hermes-output-cleanup` (15f2ceb, Nov 18): rebase and merge, or drop?
 - Approve the run_all.py commit once the 9-min answer is in.
@@ -131,16 +130,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 22:22 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 22:27 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/vibrant-davinci-742cf7` | 1 | `fa69ab2` 2026-11-26 fix(tony): stop recall parroting old replies | 1 files |
-| `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | clean |
-| `section-pass-batch3` | 13 | `7166d26` 2026-11-26 feat(tony): Tony reads Finance with one read-only tool (section 11.10) | 158 files |
-| `claude/sections-8-10-m2` | 2 | `07cc8ef` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | clean |
+| `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 3 files |
+| `section-pass-batch3` | 13 | `7166d26` 2026-11-26 feat(tony): Tony reads Finance with one read-only tool (section 11.10) | 159 files |
+| `claude/sections-8-10-m2` | 2 | `07cc8ef` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 1 files |
 | `section-pass` | 8 | `b5b98ee` 2026-11-26 feat(section-pass): home grid part 1 (section 6): push-aside, drawe... | 13 files |
 | `merge/section-pass-into-main` | 8 | `76e04da` 2026-11-26 Merge section-pass (sections 1-5) into main | 146 files |
 | `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 18 files |
@@ -149,10 +147,10 @@ _Refreshed 2026-11-26 22:22 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `8278f76` 2026-11-26 Merge fa69ab2: Tony recall stops parroting old replies
 - `e0f7ee7` 2026-11-26 docs(status): crash hardening 1cd5333, 4073bd9 timing, sessions
 - `4bc4e2d` 2026-11-26 Merge main (STATUS.md + update_status.py) into feat/language-hub
 - `1cd5333` 2026-11-26 fix(command-center): log panics to a file, never start the app over a dying WebView2
 - `4073bd9` 2026-11-26 Merge feat/language-hub (35e30e5: Tony latency fixes) into main
 - `3fe4835` 2026-11-26 Merge 8bd7990: Engine R stops reporting desk-refused orders as trades
-- `ae86c7b` 2026-11-26 fix(gateway): report a launcher safe_argv refuses as unsafe, not "not installed"
 <!-- /AUTO:BRANCHES -->

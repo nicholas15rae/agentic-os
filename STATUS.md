@@ -35,7 +35,7 @@ Updated 2026-11-27 02:20. One page for every Claude Code session and branch.
 | Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
-| Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | see Branches | **No**, not merged, not pushed, app not rebuilt |
+| Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | **No**, not merged, not pushed, app not rebuilt |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
 
 ## 2. In progress
@@ -159,25 +159,31 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 00:32 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 01:57 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-pass` | 8 | `675571e` 2026-11-27 feat(section-pass): Play Place on the shared layout (layout step 4,... | 2 files |
-| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | clean |
-| `claude/upbeat-wing-e87be0` | 8 | `1139cc6` 2026-11-26 Merge main (0add160: Sections 8-10 milestone 2) into claude/upbeat-... | clean |
-| `claude/practical-elbakyan-0f96f1` | 8 | `3215d66` 2026-11-26 fix(trading): kill stand-down clears after any unlock; stop retries... | 16 files |
+| `claude/tony-live-test-fixes-5d85d5` | 1 | `1318759` 2026-11-27 fix(tony): live-test fixes: Gmail Primary scope, Comms setting, STT... | clean |
+| `section-pass-batch3` | 3 | `f138a9b` 2026-11-27 feat(vault): second backup copies, vault password prompt, Tony sear... | clean |
+| `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | clean |
+| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
+| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
+| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
+| `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
+| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
+| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | 15 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
 - `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
 - `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
 - `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
 - `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
 - `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
-- `d62333d` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main
 <!-- /AUTO:BRANCHES -->

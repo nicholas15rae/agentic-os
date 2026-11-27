@@ -11,7 +11,7 @@ const src = (p: string) => readFileSync(resolve(__dirname, "..", p), "utf8");
 const MARKED: [file: string, id: string][] = [
   ["features/os/OsControls.tsx", "kill-switch"],
   ["features/hud/MobileHud.tsx", "kill-switch"],
-  ["features/trading/TradingDesk.tsx", "trading-estop"],
+  ["features/trading/KillButton.tsx", "trading-estop"],
   ["features/voice/VoiceHUD.tsx", "tony-stop"],
   ["features/voice/MicLockBadge.tsx", "tony-stop"],
   ["features/orchestrator/ConfirmCard.tsx", "confirm-card"],

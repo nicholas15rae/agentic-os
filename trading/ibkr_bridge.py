@@ -114,6 +114,7 @@ class Bridge:
         # Authoritative open-order list from the last reqAllOpenOrders: client 11 never hears about
         # cancels made by other clients (executor 13, kill 19), so its openTrades() keeps dead orders.
         self._open_trades: list[Any] | None = None
+        self._open_trades_at: float | None = None
         self._stop = asyncio.Event()
         self.attempts = 0
         self.state: dict[str, Any] = {
@@ -237,6 +238,7 @@ class Bridge:
         try:
             trades = await asyncio.wait_for(self.ib.reqAllOpenOrdersAsync(), 5)
             self._open_trades = list(trades or [])
+            self._open_trades_at = time.time()  # published as openOrdersAt: consumers can tell a stale list
         except Exception as e:  # noqa: BLE001 — orders are best-effort telemetry
             log.debug("open orders refresh failed: %s", e)
 
@@ -249,6 +251,8 @@ class Bridge:
             pnl=pnl_block(self._pnl),
             positions=positions_block(ib.portfolio(account)),
             openOrders=orders_block(self._open_trades if self._open_trades is not None else ib.openTrades()),
+            # When reqAllOpenOrders last succeeded (None: never this session, so openOrders is only this client's view).
+            openOrdersAt=self._open_trades_at if self._open_trades is not None else None,
             fills=fills_block(ib.fills()),
         )
 
@@ -261,6 +265,7 @@ class Bridge:
         self.ib = None
         self._pnl = None
         self._open_trades = None
+        self._open_trades_at = None
 
 
 # ── HTTP surface (loopback only; the gateway proxies /api/trading/*) ──────

@@ -50,3 +50,14 @@ describe("tvWidgetConfig", () => {
     expect(c).toMatchObject({ symbol: "AMEX:GLD", interval: "15", autosize: true, theme: "dark" });
   });
 });
+
+describe("approve toast: a failed approval whose cancel couldn't be sent isn't 'Not sent'", () => {
+  it("titles each outcome honestly", async () => {
+    const { approveToastTitle, mayStillBeWorking } = await import("./ibkr");
+    expect(approveToastTitle({ ok: true })).toBe("Order sent to paper");
+    expect(approveToastTitle({ ok: false, status: "failed", error: "TWS didn't acknowledge the order within 15s; the cancel for #4 could NOT be sent, so it may still be working" }))
+      .toBe("Order may still be working at TWS");
+    expect(approveToastTitle({ ok: false, status: "failed", failure: { label: "Rejected by IBKR", detail: "TWS rejected the order: Error 201" } })).toBe("Not sent: Rejected by IBKR");
+    expect(mayStillBeWorking(null)).toBe(false);
+  });
+});

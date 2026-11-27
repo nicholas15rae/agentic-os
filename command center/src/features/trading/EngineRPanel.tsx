@@ -22,11 +22,10 @@ import {
   type SetMetrics,
 } from "@/features/trading/EngineRPanel.contract";
 import { DRIFT_TONE, TRACK_ROWS, isTrackRecord, rText, spyText, trackCell, trackRecordApi, type SpyBaseline, type TrackRecord, type TrackSet } from "@/features/trading/track-record";
-import { METRIC_ROWS, PARAM_ORDER, VERDICT, compareTone, diffLines, diffText, errorText, logLine, metricText, paramValue, viewErrorText, type Tone } from "@/features/trading/engine-r-format";
+import { METRIC_ROWS, PARAM_ORDER, VERDICT, compareTone, diffLines, diffText, errorText, logLine, metricText, paramValue, scanRowView, viewErrorText, type Tone } from "@/features/trading/engine-r-format";
 
 const TONE_TEXT: Record<"teal" | "alert" | "amber", string> = { teal: "text-teal-soft", alert: "text-alert", amber: "text-amber-light" };
 const CELL_TONE: Record<Exclude<Tone, null>, string> = { better: "text-teal-soft", worse: "text-alert", same: "text-ink-2" };
-const SCAN_TONE: Record<string, string> = { submitted: "text-teal-soft", would_submit: "text-teal-soft", limit_block: "text-alert", no_signal: "text-ink-3", skip: "text-ink-3" };
 const when = (s: number) => new Date(s * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const empty = "r-12 border border-dashed border-white/[0.08] px-3 py-4 text-center fs-12 text-ink-3";
 
@@ -475,7 +474,8 @@ function EvaluationSection({ ev, activeVersion, error }: { ev: EvaluationReport 
   );
 }
 
-function ScanSection({ scan }: { scan: RuleScan | null }) {
+/** Exported for its render test (engine-r-scan.test.ts). */
+export function ScanSection({ scan }: { scan: RuleScan | null }) {
   return (
     <section className="mt-4" aria-label="Last scan">
       <p className="label-caps mb-1.5 text-ink-3">Last scan{scan ? ` · ${scan.kind}${scan.submit ? "" : " dry run"} · ${when(scan.at)}` : ""}</p>
@@ -486,14 +486,24 @@ function ScanSection({ scan }: { scan: RuleScan | null }) {
           </p>
           {scan.rows.length > 0 && (
             <ul className="mt-1 space-y-0.5 fs-11.5">
-              {scan.rows.map((r) => (
-                <li key={r.symbol} className="flex min-w-0 flex-wrap gap-x-2">
-                  <span className="w-12 font-mono text-ink">{r.symbol}</span>
-                  <span className={SCAN_TONE[r.action] ?? "text-ink-3"}>{r.action.replace("_", " ")}</span>
-                  {r.intent && <span className="font-mono text-ink-2">BUY {r.intent.quantity} @ {r.intent.limit_price} · stop {r.intent.stop_loss} · tp {r.intent.take_profit}</span>}
-                  {r.why && <span className="min-w-0 break-words text-ink-3">{r.why}</span>}
-                </li>
-              ))}
+              {scan.rows.map((r) => {
+                const v = scanRowView(r); // a desk-refused row says so, in the alert tone, and its order line reads "not sent"
+                return (
+                  <li key={r.symbol} className="flex min-w-0 flex-wrap gap-x-2">
+                    <span className="w-12 font-mono text-ink">{r.symbol}</span>
+                    <span className={v.tone}>{v.label}</span>
+                    {r.intent && (
+                      <span
+                        className={`font-mono ${v.refused ? "text-ink-3 line-through" : "text-ink-2"}`}
+                        title={v.refused ? "Not sent: the desk refused it" : v.unsure ? "The cancel couldn't be sent: this order may still be working at TWS" : undefined}
+                      >
+                        BUY {r.intent.quantity} @ {r.intent.limit_price} · stop {r.intent.stop_loss} · tp {r.intent.take_profit}
+                      </span>
+                    )}
+                    {r.why && <span className="min-w-0 break-words text-ink-3">{r.why}</span>}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </>

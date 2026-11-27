@@ -188,6 +188,35 @@ class BridgeStateTests(unittest.TestCase):
         run_bridge(b, 2)
         self.assertEqual([o["orderId"] for o in b.state["openOrders"]], [20])
 
+    def test_open_orders_at_says_when_the_tws_list_was_last_read(self):
+        """The desk's kill stand-down trusts openOrders only when openOrdersAt is fresh: it must move only on a
+        successful reqAllOpenOrders, and go back to None when the session drops."""
+        from unittest import mock
+
+        import ibkr_bridge
+
+        ib = FakeIB()
+        b = Bridge(config_loader=cfg, ib_factory=lambda: ib)
+        b.ib = ib
+        b._collect("DU1")
+        self.assertIsNone(b.state["openOrdersAt"])                                  # never read this session
+        with mock.patch.object(ibkr_bridge.time, "time", return_value=100.0):
+            asyncio.run(b._refresh_orders())
+        b._collect("DU1")
+        self.assertEqual(b.state["openOrdersAt"], 100.0)
+
+        async def refused():
+            raise TimeoutError("TWS slow")
+        ib.reqAllOpenOrdersAsync = refused
+        with mock.patch.object(ibkr_bridge.time, "time", return_value=200.0):
+            asyncio.run(b._refresh_orders())
+        b._collect("DU1")
+        self.assertEqual(b.state["openOrdersAt"], 100.0)                            # a failed read keeps the old time
+        b._disconnect()
+        b.ib = ib
+        b._collect("DU1")
+        self.assertIsNone(b.state["openOrdersAt"])                                  # a new session starts unproven
+
     def test_drop_goes_to_reconnecting_and_retries(self):
         made = []
         b = Bridge(config_loader=cfg, ib_factory=lambda: made.append(FakeIB(live_ticks=1)) or made[-1])

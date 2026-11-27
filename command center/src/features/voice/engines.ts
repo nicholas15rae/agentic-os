@@ -4,7 +4,7 @@ import { micLevel, useVoice, voiceLevel } from "./voice-store";
 import { speechStarted } from "./speech-start";
 import { SileroStream, preloadSilero } from "./silero";
 import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, isQuietFrame, thresholdFor } from "./vad-gate";
-import { PARTIAL_QUIET_MS, PartialLoop, newCaptureId, partialMsFrom, replyStreaming, sttPartial, type SpeechTick } from "./stt-partials";
+import { PARTIAL_MIN_MS, PARTIAL_QUIET_MS, PartialLoop, newCaptureId, partialMsFrom, replyStreaming, sttPartial, type SpeechTick } from "./stt-partials";
 import { PhoneSttStream, streamFinalMs, streamUrl } from "./stt-stream";
 import { MIC_LOCKED_MSG, MicLockedError, assertMicAllowed, captureClosed, captureOpened, micEnabled, publishMeter, registerCapture, unpublishMeter, type MeterSnapshot } from "./mic-gate";
 import { perSentenceOpts, sentences, stripForSpeech, synthArgs } from "./tts-text";
@@ -503,8 +503,12 @@ export class WhisperStt implements SttEngine {
   private liveHooks(h: SttHandlers, current: () => boolean, partials?: () => boolean): Pick<CaptureOpts, "onSpeechTick" | "onSpeechAudio"> {
     const { vad, gatewayUrl } = useSettings.getState();
     const everyMs = partialMsFrom(vad?.partialMs);
-    if (everyMs <= 0) return {};
-    const wanted = () => partials?.() ?? false;
+    // Captions off: the desktop runs no caption loop; the phone still streams (partials off) so
+    // the gateway's final comes from audio it already has instead of a WAV upload over NetBird.
+    // Captions are opt-in per listen (`opts.partials`, default no).
+    const captionsOff = everyMs <= 0;
+    if (captionsOff && !isAndroidApp()) return {};
+    const wanted = () => !captionsOff && (partials?.() ?? false);
     const caption = (t: string, stable: string) => {
       if (current() && micEnabled() && wanted()) h.onPartial(t, stable);
     };
@@ -523,7 +527,7 @@ export class WhisperStt implements SttEngine {
               token: () => useSettings.getState().gatewayToken.trim(),
               inRate: rate,
               partials: !pausedNow(),
-              partialMs: everyMs,
+              partialMs: captionsOff ? PARTIAL_MIN_MS * 4 : everyMs,
               onPartial: caption,
             });
           }

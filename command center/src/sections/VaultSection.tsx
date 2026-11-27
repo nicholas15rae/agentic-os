@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Archive, Database, HardDriveDownload, Loader2, RefreshCw, Search } from "lucide-react";
 import { Card, Chip, Field, Input, Stat } from "@/components/ui";
-import { cc, type BackupInfo, type CcConfig, type Collection, type VaultResults } from "@/lib/cc-api";
+import { backupSummary, cc, type BackupList, type CcConfig, type Collection, type VaultResults } from "@/lib/cc-api";
 import { useNav } from "@/stores/nav";
 import { isTauri } from "@/lib/platform";
 import { MemoryLifecycleCard } from "@/sections/settings/MemorySettings";
@@ -111,7 +111,7 @@ export function VaultSection() {
 
 function BackupCard() {
   const [cfg, setCfg] = useState<CcConfig | null>(null);
-  const [list, setList] = useState<{ dir: string; last: BackupInfo | null; backups: { name: string; size: number; at: number }[] } | null>(null);
+  const [list, setList] = useState<BackupList | null>(null);
   const [health, setHealth] = useState<Awaited<ReturnType<typeof cc.health>> | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -147,6 +147,40 @@ function BackupCard() {
         </button>
       }
     >
+      {list?.failure && (
+        <div role="alert" className="mb-4 rounded-xl border border-alert/40 bg-alert/10 px-3 py-2 text-xs text-ink">
+          <p className="font-semibold text-alert">The last backup failed its self-check ({new Date(list.failure.at * 1000).toLocaleString()})</p>
+          <ul className="mt-1 list-disc pl-4 text-ink-2">
+            {(list.failure.verified?.problems ?? []).map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+          <p className="mt-1 text-ink-3">
+            Kept aside as {list.failure.file.split(/[\\/]/).pop()}; older good backups were not rotated out.
+            {list.lastGood ? ` Last good backup: ${new Date(list.lastGood.at * 1000).toLocaleString()}.` : ""}
+          </p>
+          <button
+            className="pill-glass !h-8 mt-2 text-xs"
+            disabled={!!busy}
+            title="Only if you really removed that much (deleted scans, a cleared vault): this backup becomes the good one and the new size baseline."
+            onClick={async () => {
+              const name = list.failure?.file.split(/[\\/]/).pop() ?? "";
+              setBusy("accept");
+              try {
+                await cc.acceptBackup(name);
+                setMsg(`Accepted ${name} as a good backup.`);
+                await load();
+              } catch (e) {
+                setMsg(String(e));
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            It's right, I removed that data
+          </button>
+        </div>
+      )}
       {health && (
         <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
           <Stat label="Items" value={Object.values(health.counts).reduce((a, b) => a + b, 0)} sub={Object.entries(health.counts).map(([k, v]) => `${k} ${v}`).join(" · ") || "—"} />
@@ -163,7 +197,7 @@ function BackupCard() {
             setBusy("backup");
             try {
               const b = await cc.backupNow();
-              setMsg(`Backed up to ${b.file}`);
+              setMsg(backupSummary(b));
               await load();
             } catch (e) {
               setMsg(String(e));

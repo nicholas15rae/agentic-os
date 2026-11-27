@@ -56,3 +56,33 @@ export function meshPathChip(p: unknown): MeshPathChip | null {
   const tag = relayTag(n.relayHost);
   return { text: `RELAY${tag ? ` ${tag}` : ""}${ms}`, tone: "relay", title: `NetBird: relayed${n.relayHost ? ` via ${n.relayHost}` : ""}${ice}${lazy}` };
 }
+
+/** One NetBird peer in the desktop's Gateway & Network panel. */
+export interface MeshPeerRow {
+  name: string;
+  ip: string | null;
+  /** "P2P 31 ms" / "RELAY chi1 92 ms" when connected, else NetBird's status ("Idle", "Connecting", …). */
+  text: string;
+  tone: "direct" | "relay" | "off";
+  title: string;
+}
+
+/**
+ * The desktop's view of `GET /api/net/path`: a loopback caller gets every peer
+ * (`{lazy, peers: [...]}`), i.e. the phone(s) this PC knows. Connected peers first, then by name.
+ * Null for any other shape (a failed call, the phone's single-peer answer), so the panel can
+ * say "unavailable" instead of guessing.
+ */
+export function desktopMeshRows(resp: unknown, max = 6): MeshPeerRow[] | null {
+  if (!resp || typeof resp !== "object" || !Array.isArray((resp as { peers?: unknown }).peers)) return null;
+  const peers = (resp as { peers: unknown[] }).peers.filter((p): p is Partial<NetPath> => !!p && typeof p === "object");
+  const rows = peers.map((p): MeshPeerRow => {
+    const name = (typeof p.peer === "string" && p.peer) || (typeof p.ip === "string" && p.ip) || "peer";
+    const chip = meshPathChip(p);
+    if (chip) return { name, ip: p.ip ?? null, text: chip.text, tone: chip.tone, title: chip.title };
+    const status = typeof p.status === "string" && p.status ? p.status : "unknown";
+    return { name, ip: p.ip ?? null, text: status, tone: "off", title: `NetBird: ${status.toLowerCase()} (no live tunnel to this peer right now)` };
+  });
+  rows.sort((a, b) => Number(a.tone === "off") - Number(b.tone === "off") || a.name.localeCompare(b.name));
+  return rows.slice(0, max);
+}

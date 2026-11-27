@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Power, RotateCw, Activity } from "lucide-react";
+import { Loader2, Moon, Power, RotateCw, Activity } from "lucide-react";
 import { GatewayPopover } from "./GatewayPopover";
 import { isTauri } from "@/lib/platform";
 import { xcmd } from "@/lib/native-ext";
@@ -10,10 +10,11 @@ import { hardRefresh, registerBusyProbe, softRefresh, useRefresh, type SoftOutco
 import { useDictation } from "@/features/memmap/dictation";
 import { useBrainstorm } from "@/features/brainstorm/capture";
 import { cueActive } from "@/features/voice/handoff-cues";
+import { EXIT_TITLE, STANDBY_TITLE, exitConfirmText } from "./power";
 
 const railBtn = "relative grid size-11 place-items-center rounded-[14px] text-ink-2 transition-all duration-200 hover:bg-white/5 hover:text-ink";
 
-/** Bottom of the left rail: gateway heartbeat, Refresh / Hard Reload, Exit (Phase 1). */
+/** Bottom of the left rail: gateway heartbeat, Refresh / Hard Reload, Standby, Exit (Phase 1, Section 19). */
 /** Mics under `<main>` (a re-mount would drop them) and audio a hard reload would cut. */
 function useBusyProbes() {
   useEffect(() => {
@@ -38,6 +39,7 @@ export function LifecycleRail() {
     <div className="mt-auto flex flex-col items-center gap-2.5 pt-2">
       <HealthButton />
       <RefreshButton />
+      {isTauri() && <StandbyButton />}
       {isTauri() && <ExitButton />}
     </div>
   );
@@ -106,13 +108,28 @@ function RefreshButton() {
   );
 }
 
+function StandbyButton() {
+  const standby = async () => {
+    try {
+      await xcmd("app_standby");
+    } catch (e) {
+      useToasts.getState().push({ title: "Couldn't go to standby", body: e instanceof Error ? e.message : String(e), tone: "error" });
+    }
+  };
+  return (
+    <button type="button" onClick={() => void standby()} aria-label="Standby (hide to the tray; Tony keeps running)" title={STANDBY_TITLE} className={railBtn}>
+      <Moon size={17} />
+    </button>
+  );
+}
+
 function ExitButton() {
   const [busy, setBusy] = useState(false);
   const exit = async () => {
     setBusy(true);
     try {
       const { busy: labels } = await xcmd("app_exit_check");
-      if (labels.length && !confirm(`Quit now? This would interrupt:\n\n• ${labels.join("\n• ")}\n\nInterrupted builds resume from their last checkpoint next launch.`)) return;
+      if (!confirm(exitConfirmText(labels))) return;
       await xcmd("app_exit", { force: labels.length > 0 });
     } catch (e) {
       useToasts.getState().push({ title: "Couldn't exit", body: e instanceof Error ? e.message : String(e), tone: "error" });
@@ -121,7 +138,7 @@ function ExitButton() {
     }
   };
   return (
-    <button type="button" onClick={() => void exit()} disabled={busy} aria-label="Exit Command Center" title="Exit (closes the app cleanly)" className={`${railBtn} hover:!bg-alert/10 hover:!text-alert`}>
+    <button type="button" onClick={() => void exit()} disabled={busy} aria-label="Exit Command Center (full shutdown)" title={EXIT_TITLE} className={`${railBtn} hover:!bg-alert/10 hover:!text-alert`}>
       {busy ? <Loader2 size={17} className="animate-spin" /> : <Power size={17} />}
     </button>
   );

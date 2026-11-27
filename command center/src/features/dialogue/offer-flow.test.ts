@@ -576,9 +576,9 @@ describe("addressing Tony beats a topic (the wake phrase is stripped before rout
     expect(osTurns()[0].routeReason).toMatch(/addressed/i);
   });
 
-  it("the same topic without the address still goes to the Booking Desk", async () => {
-    await handleInput("check my self-tape availability", text);
+  it("an agent's topic without the address still delegates (self-tape scheduling is Tony's own topic now)", async () => {
+    await handleInput("render the reel for the shoot", text);
     expect(osTurns()).toHaveLength(1);
-    expect(osTurns()[0]).toMatchObject({ role: "booking", routeKind: "Domain" });
+    expect(osTurns()[0]).toMatchObject({ role: "director", routeKind: "Domain" });
   });
 });

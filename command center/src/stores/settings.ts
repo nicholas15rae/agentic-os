@@ -189,7 +189,7 @@ const defaults: Omit<SettingsState, "set"> = {
   glassOpacity: 8,
   calmWhenIdle: true,
   gatewayToken: "",
-  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 600 },
+  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 0 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true, vocalHandoffs: false },
   reminders: { osFallback: true },
@@ -277,6 +277,10 @@ export function migrateSettings(persisted: unknown, from: number): SettingsState
   // spoken unless Nic turns it back on (saves ElevenLabs credits). Reset once for existing installs.
   // (Was v8 on the section-pass branch; main's v8 weather reset already shipped, so this moved up.)
   if (from < 9 && isPlainObject(s.routing)) s.routing = { ...s.routing, vocalHandoffs: false };
+  // v10 (section pass, 20.5): live captions off by default — each one is an extra Whisper pass on
+  // the GPU competing with Tony. Only the old 600 ms default is reset; a spacing Nic chose stays.
+  // (Was v9 on section-pass-batch3; renumbered when both branches merged into main.)
+  if (from < 10 && isPlainObject(s.vad) && (s.vad as { partialMs?: unknown }).partialMs === 600) s.vad = { ...s.vad, partialMs: 0 };
   // `merge` (below) backfills any still-missing fields right after this runs.
   return s as unknown as SettingsState;
 }
@@ -289,7 +293,7 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: "cc.settings",
-      version: 9,
+      version: 10,
       migrate: migrateSettings,
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults

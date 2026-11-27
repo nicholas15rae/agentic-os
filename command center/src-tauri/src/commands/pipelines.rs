@@ -544,8 +544,31 @@ fn resolve_tracked(state: &DispatchState, paths: &[String]) -> Vec<(String, Path
     out
 }
 
-fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+/// A file name that holds secrets and never leaves the machine (Section 21.9): any dotfile
+/// (`.env`, `.env.local`, `.npmrc`…), `*.env`, key / certificate stores, and credential / token /
+/// secret files. Checked for tracked roots that are themselves files too. Pure.
+pub(crate) fn is_secret_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    const EXT: [&str; 10] = [".env", ".pem", ".key", ".p12", ".pfx", ".kdbx", ".keystore", ".jks", ".ppk", ".asc"];
+    // Whole words of the name ("gmail-token.json", "client_secret.json"), so "tokenizer.json" syncs.
+    const WORDS: [&str; 10] = ["credential", "credentials", "secret", "secrets", "token", "tokens", "password", "passwords", "keychain", "apikey"];
+    const SSH: [&str; 3] = ["id_rsa", "id_ed25519", "id_ecdsa"];
+    n.starts_with('.')
+        || n.contains(".env.")
+        || EXT.iter().any(|e| n.ends_with(e))
+        || SSH.iter().any(|s| n.starts_with(s))
+        || n.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| WORDS.contains(&w))
+}
+
+/// Collect the files under `root` (or `root` itself) that may sync; `held` counts what was left
+/// out because its name (or its folder's) marks it as secret, so the result can say so.
+fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize, held: &mut usize) {
     if out.len() >= MAX_FILES || depth > 8 {
+        return;
+    }
+    if root.file_name().is_some_and(|f| is_secret_name(&f.to_string_lossy())) {
+        // A tracked root (file or folder) or a nested folder like `.ssh` / `secrets/`.
+        *held += 1;
         return;
     }
     if root.is_file() {
@@ -555,11 +578,24 @@ fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     let Ok(rd) = std::fs::read_dir(root) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || name == "node_modules" || name == "target" || name == "__pycache__" {
+        if name == "node_modules" || name == "target" || name == "__pycache__" {
             continue;
         }
-        walk(&e.path(), out, depth + 1);
+        walk(&e.path(), out, depth + 1, held);
     }
+}
+
+/// File bytes that must not be uploaded: text carrying an API key / token shape. UTF-8, UTF-16
+/// (Windows PowerShell's `>` / Out-File) and ANSI files are all read; binary rarely matches. Pure.
+pub(crate) fn content_has_secret(bytes: &[u8]) -> bool {
+    let utf16 = bytes.starts_with(&[0xFF, 0xFE]) || (bytes.len() >= 4 && bytes[1] == 0 && bytes[3] == 0);
+    let text = if utf16 {
+        let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    super::devqueue::has_key_shape(&text)
 }
 
 fn manifest_path(state: &DispatchState) -> Option<PathBuf> {
@@ -624,6 +660,7 @@ async fn sync_inner(state: &DispatchState, cfg: &PipelinesConfig, trigger: &str)
     let mut entries = Vec::new();
     let mut next = old.clone();
     let mut inline_total = 0u64;
+    let mut secret_skipped = 0usize;
     let mut missing = Vec::new();
     for (label, root) in &roots {
         if !root.exists() {
@@ -631,7 +668,7 @@ async fn sync_inner(state: &DispatchState, cfg: &PipelinesConfig, trigger: &str)
             continue;
         }
         let mut files = Vec::new();
-        walk(root, &mut files, 0);
+        walk(root, &mut files, 0, &mut secret_skipped);
         for f in files {
             let Ok(meta) = std::fs::metadata(&f) else { continue };
             let key = f.to_string_lossy().into_owned();
@@ -644,6 +681,11 @@ async fn sync_inner(state: &DispatchState, cfg: &PipelinesConfig, trigger: &str)
             let mut entry = serde_json::json!({ "root": label, "path": rel, "size": meta.len(), "modified": mtime });
             if meta.len() <= MAX_FILE_INLINE && inline_total + meta.len() <= MAX_PAYLOAD_INLINE {
                 if let Ok(bytes) = std::fs::read(&f) {
+                    if content_has_secret(&bytes) {
+                        // Never uploaded, not even as metadata; re-checked on the next sync.
+                        secret_skipped += 1;
+                        continue;
+                    }
                     inline_total += meta.len();
                     entry["encoding"] = "base64".into();
                     entry["content"] = base64::engine::general_purpose::STANDARD.encode(&bytes).into();
@@ -659,6 +701,9 @@ async fn sync_inner(state: &DispatchState, cfg: &PipelinesConfig, trigger: &str)
     if entries.is_empty() {
         result.status = "up-to-date".into();
         result.detail = if missing.is_empty() { "nothing changed since the last backup".into() } else { format!("nothing changed · missing: {}", missing.join(", ")) };
+        if secret_skipped > 0 {
+            result.detail.push_str(&format!(" · {secret_skipped} held back as secrets (secret-looking name or a key inside)"));
+        }
         return result;
     }
 
@@ -678,7 +723,13 @@ async fn sync_inner(state: &DispatchState, cfg: &PipelinesConfig, trigger: &str)
                 let _ = std::fs::write(p, serde_json::to_string(&next).unwrap_or_default());
             }
             result.status = "synced".into();
-            result.detail = format!("{} files ({} KB) accepted by n8n{}", result.files, inline_total / 1024, if result.skipped_large > 0 { format!(", {} over 1 MB sent as metadata only", result.skipped_large) } else { String::new() });
+            result.detail = format!(
+                "{} files ({} KB) accepted by n8n{}{}",
+                result.files,
+                inline_total / 1024,
+                if result.skipped_large > 0 { format!(", {} over 1 MB sent as metadata only", result.skipped_large) } else { String::new() },
+                if secret_skipped > 0 { format!(", {secret_skipped} held back as secrets (secret-looking name or a key inside)") } else { String::new() }
+            );
         }
         Ok(r) => {
             result.detail = format!("webhook answered HTTP {}", r.status().as_u16());
@@ -776,6 +827,47 @@ async fn join_all<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_sync_never_uploads_secret_files() {
+        for name in [".env", ".env.local", "prod.env", "app.env.bak", "server.pem", "tls.key", "id_rsa", "id_ed25519.pub", "gmail-token.json", "client_secret.json", "credentials.json", "Passwords.kdbx", "spotify_tokens.json"] {
+            assert!(is_secret_name(name), "{name} must never sync");
+        }
+        for name in ["providers.json", "tokenizer.json", "config.json", "settings.json", "2026-11-26.md", "keyboard-notes.md", "monkey.txt"] {
+            assert!(!is_secret_name(name), "{name} should sync");
+        }
+        assert!(content_has_secret(b"ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz"));
+        assert!(content_has_secret(b"{\"token\": \"ghp_abcdefghijklmnopqrstuvwxyz0123\"}"));
+        assert!(!content_has_secret(b"# notes\nLM Studio serves on :1235\n"));
+        // UTF-16LE (PowerShell `>`) and ANSI files are read too.
+        let utf16: Vec<u8> = "\u{feff}$env:ANTHROPIC_API_KEY='sk-ant-api03-abcdefghijklmnopqrstuvwxyz'".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert!(content_has_secret(&utf16));
+        let mut ansi = b"caf\xe9 ".to_vec();
+        ansi.extend_from_slice(b"ghp_abcdefghijklmnopqrstuvwxyz0123");
+        assert!(content_has_secret(&ansi), "one non-UTF-8 byte must not hide a key");
+        assert!(!content_has_secret(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]), "a JPEG header is no key");
+
+        // A tracked root that is itself a secret file is skipped too; a folder walk skips them
+        // (and secret folders), and every one is counted.
+        let d = std::env::temp_dir().join(format!("cc-gdrive-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("memory").join("secrets")).unwrap();
+        std::fs::create_dir_all(d.join(".ssh")).unwrap();
+        for f in ["memory/notes.md", "memory/.env", "memory/gmail-token.json", "memory/secrets/a.txt", ".ssh/config", "keep.json"] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        let (mut out, mut held) = (Vec::new(), 0);
+        walk(&d, &mut out, 0, &mut held);
+        let mut names: Vec<_> = out.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["keep.json", "notes.md"]);
+        assert_eq!(held, 4, ".env, gmail-token.json, secrets/, .ssh/");
+        let (mut solo, mut h2) = (Vec::new(), 0);
+        walk(&d.join("memory").join("gmail-token.json"), &mut solo, 0, &mut h2);
+        assert!(solo.is_empty());
+        assert_eq!(h2, 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn rfc3339_to_ms() {

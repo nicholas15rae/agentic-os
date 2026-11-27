@@ -435,6 +435,11 @@ fn scrub_run(c: &regex::Captures) -> String {
     format!("{drive}{body}")
 }
 
+/// Does `text` carry a well-known API key / token shape (sk-ant-, sk-, ghp_, xox…, AIza…, a JWT)?
+pub(crate) fn has_key_shape(text: &str) -> bool {
+    secret_patterns()[0].is_match(text)
+}
+
 /// Remove secrets from `text`: every `known` value (keychain / .env / header values, at
 /// least 6 chars), well-known key shapes, `key=value` style assignments and random-looking runs.
 pub fn scrub(text: &str, known: &[String]) -> String {

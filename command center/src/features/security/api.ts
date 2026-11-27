@@ -80,12 +80,18 @@ export const securityApi = {
   companionSign: (id: string, nonce: string, desktop: string, purpose: string, code: string) => native<{ sig: string; deviceId: string }>("security_companion_sign", { id, nonce, desktop, purpose, code }),
   companionCheckAlerts: (alerts: InboxAlert[]) => native<boolean[]>("security_companion_check_alerts", { alerts }),
   pinSetup: (pin: string) => native<SecurityStatus>("security_pin_setup", { pin }),
+  /** Phone: a plain key from `gabagool-cli pair-companion`, or the desktop's pairing-QR text (`gbgpair1|…`). */
   companionStoreKey: (key: string) => native<SecurityStatus>("security_companion_store_key", { key }),
   /** Settings → Security: the session timeouts, in minutes (needs a settings step-up). */
   setTimeouts: (timeouts: SessionTimeouts) => native<SecurityStatus>("security_set_timeouts", { timeouts }),
+  /** Desktop: a NEW pairing key as a one-time QR payload (replaces the current pairing). Settings step-up. */
+  companionPairQr: () => native<{ payload: string; expiresAt: number }>("security_companion_pair_qr"),
+  /** Idle lock (5–120 min) and hard re-auth (30–720 min) only → security.config.json. Settings step-up.
+   *  (The Security card uses `setTimeouts`, which also covers the step-up windows and restart persistence.) */
+  sessionSet: (idleLockMinutes: number, reauthMinutes: number) => native<SecurityStatus>("security_session_set", { idleLockMinutes, reauthMinutes }),
 };
 
-/** Rust `commands::Timeouts` (minutes). Clamped there: idle lock 1–120, re-verify 5–240, step-up idle 1–30, step-up max 1–60. */
+/** Rust `commands::Timeouts` (minutes). Clamped there: idle lock 5–120, re-verify 30–720, step-up idle 1–30, step-up max 1–60. */
 export interface SessionTimeouts {
   idleLockMinutes: number;
   reauthMinutes: number;
@@ -155,6 +161,10 @@ export function describeSecurityError(e: unknown): string {
       return "No phone is paired. Run `gabagool-cli pair-companion` and enter the key on the phone.";
     case "COMPANION_OFFLINE":
       return "Can't reach the gateway mailbox for your phone. Use the PIN.";
+    case "PAIR_QR_EXPIRED":
+      return "That pairing code has expired. Show a new QR on the desktop (Settings → Security).";
+    case "PAIR_QR_BAD":
+      return "That pairing code is damaged. Show a new QR on the desktop.";
     default:
       return p.message || p.code;
   }
@@ -163,8 +173,9 @@ export function describeSecurityError(e: unknown): string {
 /** Which protected module a gateway path belongs to (a hint; the gateway decides). */
 export function gatewayModule(path: string): ProtectedModule | null {
   if (path.startsWith("/api/trading/")) return "trading";
-  if (/^\/api\/cc\/c\/(income|goals|invoices|checks|receipts)\b/.test(path)) return "finance";
-  if (path.startsWith("/api/cc/config")) return "settings";
+  if (/^\/api\/cc\/c\/(income|goals|invoices|checks|receipts|commissions|mileage|pending|statement_lines)\b/.test(path)) return "finance";
+  if (path.startsWith("/api/cc/finance/statement-import")) return "finance";
+  if (path.startsWith("/api/cc/config") || path.startsWith("/api/cc/business/profiles")) return "settings";
   return null;
 }
 

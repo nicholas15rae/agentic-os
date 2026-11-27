@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { McpServer, ServerTools } from "@/lib/platform";
-import { agentServers, DEFAULT_TONY_MODE_TOOLS, loadOf, sharedKey, sharedServers, TOOL_WARN, tonyModeTools, toggleTonyModeTool } from "./tool-load";
+import { agentServers, DEFAULT_TONY_MODE_TOOLS, INTENDED_SHARED, loadOf, sharedKey, sharedServers, TONY_SPOTIFY_CORE, TOOL_WARN, tonyModeTools, toggleTonyModeTool } from "./tool-load";
 
 const srv = (id: string, agents: string[] | null, enabled = true) => ({ id, name: id, enabled, agents }) as unknown as McpServer;
 const listing = (id: string, n: number) => ({ id, name: id, enabled: true, ok: true, error: null, status: "ok", auth: null, tools: Array.from({ length: n }, (_, i) => ({ name: `${id}.t${i}`, description: "x".repeat(40), server: id, args: ["a"] })) }) as ServerTools;
@@ -42,5 +42,25 @@ describe("tool load", () => {
     // The clock is always shared and never flagged; a frozen agent doesn't count.
     expect(sharedServers(mcps, ["general", "coder"])).toEqual([]);
     expect(sharedKey({ server: "fs", owners: ["b", "a"] })).toBe("fs:a,b");
+  });
+
+  it("never flags the intended pairs (Maps: Tony + Ops; Instagram: Biz Ops + Tony read-only)", () => {
+    expect(INTENDED_SHARED).toEqual({ maps: ["general", "ops"], instagram: ["general", "bizops"] });
+    const m = [srv("maps", ["general", "ops"]), srv("instagram", ["bizops", "general"]), srv("gmail", ["general", "ops"])];
+    expect(sharedServers(m, ["general", "ops", "bizops"])).toEqual([{ server: "gmail", owners: ["general", "ops"] }]);
+    // A third owner on an intended server is flagged again.
+    expect(sharedServers([srv("maps", ["general", "ops", "coder"])], ["general", "ops", "coder"])).toEqual([{ server: "maps", owners: ["general", "ops", "coder"] }]);
+  });
+
+  it("Tony's Spotify load is the core five plus one spotify.more (Section 20.11)", () => {
+    const names = ["now_playing", "get_queue", "recently_played", "top_items", "list_playlists", "get_playlist_tracks", "play", "pause", "resume", "next", "previous", "seek", "restart_track", "volume", "shuffle", "repeat", "transfer_device", "queue_add", "create_playlist", "add_to_playlist", "remove_from_playlist", "like_track", "unlike_track"];
+    const spotify = { ...listing("spotify", 0), tools: names.map((n) => ({ name: `spotify.${n}`, description: "x".repeat(60), server: "spotify", args: [] })) } as ServerTools;
+    expect(TONY_SPOTIFY_CORE).toHaveLength(5);
+    const tony = loadOf("general", ["spotify"], [spotify]);
+    expect(tony.tools).toBe(6);
+    expect(tony.warn).toBe(false);
+    // Anyone else's estimate counts the listing as it is.
+    expect(loadOf("director", ["spotify"], [spotify]).tools).toBe(23);
+    expect(tony.tokens).toBeLessThan(loadOf("director", ["spotify"], [spotify]).tokens);
   });
 });

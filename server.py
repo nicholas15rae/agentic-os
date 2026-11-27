@@ -170,6 +170,7 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "Not found"}, status_code=404)
         # Defense in depth: besides loopback, only the NetBird mesh (100.64.0.0/10) may talk to the gateway.
         if not loopback and not _in_mesh(host):
+            await run_in_threadpool(security_api.note_unknown_device, host, "outside the NetBird mesh", path)
             return JSONResponse({"detail": "Only localhost and the NetBird mesh may reach this gateway."}, status_code=403)
         # Stored files and Play Place previews are loaded by <img>/<iframe> (no headers possible);
         # their random ids act as capability URLs.
@@ -194,6 +195,7 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
         # Section pass: a per-device token (desktop Settings → Security → Where you're logged in).
         dev = device_registry.match(sent)
         if dev is None:
+            await run_in_threadpool(security_api.note_unknown_device, host, "on the mesh without a valid gateway token" if sent else "on the mesh with no gateway token", path)
             return JSONResponse({"detail": "Gateway token required (network lock is on)."}, status_code=401)
         device_registry.seen(dev["id"], host, ua)
         return await call_next(request)

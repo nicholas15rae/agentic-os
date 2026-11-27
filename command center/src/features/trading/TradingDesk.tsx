@@ -3,7 +3,7 @@ import { Loader2, OctagonX, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
-import { tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
+import { failureText, tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
 import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killStageLabel, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
@@ -178,7 +178,7 @@ export function TradingDesk() {
               {data.pending.map((p) => (
                 <TradeCard key={p.intentId} p={p} busy={busy === p.intentId} onApprove={() => void run(p.intentId, async () => {
                   const r = await tradingApi.approve(p.intentId);
-                  toast({ title: r.ok ? "Order sent to paper" : `Not sent: ${r.status ?? "error"}`, body: r.error ?? r.decision?.reasons.join(" · ") ?? "", tone: r.ok ? "info" : "warn" });
+                  toast({ title: r.ok ? "Order sent to paper" : `Not sent: ${r.failure?.label ?? r.status ?? "error"}`, body: r.failure?.detail ?? r.error ?? r.decision?.reasons.join(" · ") ?? "", tone: r.ok ? "info" : "warn" });
                 })} onReject={() => void run(p.intentId, () => tradingApi.reject(p.intentId))} />
               ))}
             </div>
@@ -192,14 +192,21 @@ export function TradingDesk() {
           <p className="label-caps mb-1.5 text-ink-3">Recent Security Detail decisions</p>
           {data?.recent.length ? (
             <ul className="space-y-1 text-[12px]">
-              {data.recent.map((r) => (
-                <li key={r.intentId} className="rounded-[10px] border border-white/[0.05] px-2.5 py-1.5" title={r.decision.reasons.join("\n") || "all checks passed"}>
-                  <span className={`font-mono text-[11px] ${VERDICT_TONE[r.decision.verdict] ?? ""}`}>{r.decision.verdict}</span>{" "}
-                  <span className="font-mono">{r.intent.action} {r.decision.quantity || r.intent.quantity} {r.intent.symbol}</span>{" "}
-                  <span className="text-ink-3">· {r.status.replace("_", " ")} · {new Date(r.updated * 1000).toLocaleTimeString()}</span>
-                  {r.decision.reasons.length > 0 && <p className="truncate text-[11px] text-ink-3">{r.decision.reasons[0]}</p>}
-                </li>
-              ))}
+              {data.recent.map((r) => {
+                const why = failureText(r);
+                return (
+                  <li key={r.intentId} className="rounded-[10px] border border-white/[0.05] px-2.5 py-1.5" title={why ?? (r.decision.reasons.join("\n") || "all checks passed")}>
+                    <span className={`font-mono text-[11px] ${VERDICT_TONE[r.decision.verdict] ?? ""}`}>{r.decision.verdict}</span>{" "}
+                    <span className="font-mono">{r.intent.action} {r.decision.quantity || r.intent.quantity} {r.intent.symbol}</span>{" "}
+                    <span className="text-ink-3">· {r.status.replace("_", " ")} · {new Date(r.updated * 1000).toLocaleTimeString()}</span>
+                    {why ? (
+                      <p className="truncate text-[11px] text-alert">{why}</p>
+                    ) : (
+                      r.decision.reasons.length > 0 && <p className="truncate text-[11px] text-ink-3">{r.decision.reasons[0]}</p>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">No intents evaluated yet.</p>

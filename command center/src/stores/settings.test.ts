@@ -134,3 +134,12 @@ describe("v9: Agent Chatter off by default", () => {
     expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 9).routing.vocalHandoffs).toBe(true);
   });
 });
+
+describe("v10: live captions off by default", () => {
+  it("resets only the old 600 ms default, once", () => {
+    expect(migrateSettings({ vad: { partialMs: 600, endSilenceMs: 700 } }, 9).vad.partialMs).toBe(0);
+    expect(migrateSettings({ vad: { partialMs: 600, endSilenceMs: 700 } }, 9).vad.endSilenceMs).toBe(700);
+    expect(migrateSettings({ vad: { partialMs: 400 } }, 9).vad.partialMs).toBe(400); // Nic's own spacing stays
+    expect(migrateSettings({ vad: { partialMs: 600 } }, 10).vad.partialMs).toBe(600); // already migrated
+  });
+});

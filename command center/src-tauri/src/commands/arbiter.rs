@@ -170,7 +170,7 @@ impl Default for RosterConfig {
             booking_scan_webhook: String::new(),
             booking_scan_minutes: 60,
             idle_minutes: 5,
-            garbage_minutes: 30,
+            garbage_minutes: super::garbage::MIN_EVERY_MINUTES,
             security_minutes: 10,
             observer_min_minutes: 20,
             observer_max_minutes: 60,
@@ -591,7 +591,7 @@ pub fn agent_inspect(os: tauri::State<'_, super::os_core::OsState>, node: String
         "lifecycle": {
             "graduateAfterDays": roster.graduate_after_days,
             "dumpKeepDays": roster.dump_keep_days,
-            "garbageEveryMinutes": roster.garbage_minutes,
+            "garbageEveryMinutes": super::garbage::every_minutes(roster.garbage_minutes),
             "lastPurgeAt": g.last_purge_at,
             "vaultIdleMinutes": roster.vault_idle_minutes,
         },
@@ -624,7 +624,7 @@ pub fn system_health(app: tauri::AppHandle, os: tauri::State<'_, super::os_core:
     }
     let slot = os.slot.view();
     let g = super::garbage::snapshot();
-    let garbage_ok = g.running && g.heartbeat_at.map(|t| now_ms().saturating_sub(t) < 2 * super::garbage::TICK.as_millis() as u64 + 60_000).unwrap_or(false);
+    let garbage_ok = g.running && g.heartbeat_at.map(|t| now_ms().saturating_sub(t) < 2 * super::garbage::every(cfg.roster.garbage_minutes).as_millis() as u64 + 60_000).unwrap_or(false);
     let vault = super::finance_vault::isolation_check(&cfg, &roots);
     json!({
         "at": now_ms(),

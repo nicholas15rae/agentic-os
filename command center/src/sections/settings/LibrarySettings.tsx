@@ -236,6 +236,21 @@ export function McpRegistryCard() {
                   ; <span className="text-alert">unrestricted in AnythingLLM</span> (not removed): <span className="font-mono text-ink">{sync.report!.keptWritable!.join(", ")}</span>
                 </>
               )}
+              {(sync.report!.parked?.length ?? 0) > 0 && (
+                <>
+                  ; parked (no AnythingLLM agent is granted them, auto-start off, nothing deleted): <span className="font-mono text-ink">{sync.report!.parked!.join(", ")}</span>
+                </>
+              )}
+              {(sync.report!.readOnly?.length ?? 0) > 0 && (
+                <>
+                  ; read-only in Tony (not auto-started): <span className="font-mono text-ink">{sync.report!.readOnly!.join(", ")}</span>
+                </>
+              )}
+              {(sync.report!.unparked?.length ?? 0) > 0 && (
+                <>
+                  ; needed again (auto-start back on): <span className="font-mono text-ink">{sync.report!.unparked!.join(", ")}</span>
+                </>
+              )}
             </>
           )}
         </p>

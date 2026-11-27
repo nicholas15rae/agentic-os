@@ -742,7 +742,10 @@ pub fn with_timeouts(text: &str, t: &Timeouts) -> Result<(String, Timeouts), Str
     elev["idleMinutes"] = json!(t.elevation_idle_minutes);
     elev["maxMinutes"] = json!(t.elevation_max_minutes);
     let c: config::SecurityConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
-    let c = c.clamped();
+    let mut c = c.clamped();
+    // What Settings → Security may set (Section 24); the file loader alone stays a little wider.
+    c.session.idle_lock_minutes = c.session.idle_lock_minutes.round().clamp(config::IDLE_LOCK_RANGE.0, config::IDLE_LOCK_RANGE.1);
+    c.session.reauth_minutes = c.session.reauth_minutes.round().clamp(config::REAUTH_RANGE.0, config::REAUTH_RANGE.1);
     let applied = Timeouts { idle_lock_minutes: c.session.idle_lock_minutes, reauth_minutes: c.session.reauth_minutes, elevation_idle_minutes: c.elevation.idle_minutes, elevation_max_minutes: c.elevation.max_minutes, persist_across_restarts: t.persist_across_restarts.map(|_| c.session.persist_across_restarts) };
     // Store the clamped values, so the file says what is actually in force.
     v["session"]["idleLockMinutes"] = json!(applied.idle_lock_minutes);
@@ -755,13 +758,7 @@ pub fn with_timeouts(text: &str, t: &Timeouts) -> Result<(String, Timeouts), Str
 /// Settings → Security: change the session timeouts (needs a settings step-up). Hot-reloaded.
 #[tauri::command]
 pub fn security_set_timeouts(app: AppHandle, timeouts: Timeouts) -> Result<Status, String> {
-    if rt().is_hard() {
-        return Err(hard_err());
-    }
-    let p = policy();
-    if rt().sessions().use_elevation("settings", &p, super::now()).is_none() {
-        return Err("STEP_UP_REQUIRED:settings: confirm with your PIN to change the timeouts".into());
-    }
+    require_settings_step_up("change the timeouts")?;
     let path = super::dir().join(config::FILE);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let (out, applied) = with_timeouts(&text, &timeouts)?;
@@ -776,19 +773,82 @@ pub fn security_set_timeouts(app: AppHandle, timeouts: Timeouts) -> Result<Statu
     Ok(status(&app))
 }
 
-/// Companion phone: store the pairing key shown by `gabagool-cli pair-companion` (needs a
-/// settings step-up on this device).
-#[tauri::command]
-pub fn security_companion_store_key(app: AppHandle, key: String) -> Result<Status, String> {
+/// A live session with a live `settings` elevation (the same gate pairing and every other
+/// settings change uses), or the refusal to show.
+fn require_settings_step_up(what: &str) -> Result<(), String> {
     if rt().is_hard() {
         return Err(hard_err());
     }
     let p = policy();
-    if rt().sessions().use_elevation("settings", &p, super::now()).is_none() {
-        return Err("STEP_UP_REQUIRED:settings: confirm with your PIN to pair this device".into());
+    let now = super::now();
+    let mut s = rt().sessions();
+    s.tick(&p, now);
+    if !s.is_live() {
+        return Err(Refusal::NoSession.message());
     }
+    if s.use_elevation("settings", &p, now).is_none() {
+        return Err(format!("STEP_UP_REQUIRED:settings: confirm with your PIN to {what}"));
+    }
+    Ok(())
+}
+
+/// Companion phone: store the pairing key shown by `gabagool-cli pair-companion`, or the text of
+/// the desktop's pairing QR (`gbgpair1|…`, refused once expired). Needs a settings step-up on
+/// this device.
+#[tauri::command]
+pub fn security_companion_store_key(app: AppHandle, key: String) -> Result<Status, String> {
+    require_settings_step_up("pair this device")?;
+    let (key, desktop) = companion::parse_pair_input(&key, super::now())?;
     let place = companion::device_store(&super::dir(), &key)?;
-    audit::log("companion_paired", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "stored": place }));
+    audit::log("companion_paired", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "stored": place, "via": if desktop.is_some() { "qr" } else { "key" }, "desktop": desktop }));
+    emit(&app);
+    Ok(status(&app))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingQr {
+    /// The QR text (`gbgpair1|key|expires|desktop`); shown once, never stored by the webview.
+    pub payload: String,
+    pub expires_at: f64,
+}
+
+/// Desktop: pair a phone with a QR code. Generates a NEW pairing key, held as PENDING
+/// (`companion::pair_begin_qr`): it replaces the current pairing only when the phone first uses it
+/// (its first signed approval) within `PAIR_QR_TTL_S`, and is then bound to that phone; unused, it
+/// expires and the current pairing stays. `gabagool-cli pair-companion` still pairs directly.
+/// Needs a settings step-up.
+#[tauri::command]
+pub fn security_companion_pair_qr(app: AppHandle) -> Result<PairingQr, String> {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return Err("PAIR_QR_DESKTOP: the pairing QR is shown on the desktop; scan it with this phone".into());
+    }
+    require_settings_step_up("pair a phone")?;
+    let dir = super::dir();
+    let was_paired = companion::pair_key(&dir).is_some();
+    let (key, expires_at) = companion::pair_begin_qr(super::now());
+    let payload = companion::pair_payload(&key, expires_at, &super::device_id(&dir));
+    audit::log("companion_pair_qr", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "replaced": was_paired, "expiresAt": expires_at }));
+    emit(&app);
+    Ok(PairingQr { payload, expires_at })
+}
+
+/// Settings → Security: the idle lock (5–120 min) and hard re-auth (30–720 min) timers, written to
+/// `security.config.json` (hot-reloaded). Needs a settings step-up; the values are clamped here.
+#[tauri::command]
+pub fn security_session_set(app: AppHandle, idle_lock_minutes: f64, reauth_minutes: f64) -> Result<Status, String> {
+    require_settings_step_up("change the lock timers")?;
+    let next = config::session_from_ui(idle_lock_minutes, reauth_minutes)?;
+    let before = config::get().session;
+    config::set_session_in(&super::dir(), &next)?;
+    audit::log(
+        "session_config_changed",
+        Severity::Warn,
+        Outcome::Success,
+        Some("settings"),
+        "desktop-ui",
+        json!({ "idleLockMinutes": [before.idle_lock_minutes, next.idle_lock_minutes], "reauthMinutes": [before.reauth_minutes, next.reauth_minutes] }),
+    );
     emit(&app);
     Ok(status(&app))
 }
@@ -850,7 +910,7 @@ mod timeout_tests {
         assert_eq!(v["session"]["persistAcrossRestarts"], false);
         let wild = Timeouts { idle_lock_minutes: 999.0, reauth_minutes: 1.0, elevation_idle_minutes: 90.0, elevation_max_minutes: 5.0, persist_across_restarts: None };
         let (out, applied) = with_timeouts(text, &wild).unwrap();
-        assert_eq!((applied.idle_lock_minutes, applied.reauth_minutes, applied.elevation_idle_minutes), (120.0, 5.0, 30.0));
+        assert_eq!((applied.idle_lock_minutes, applied.reauth_minutes, applied.elevation_idle_minutes), (120.0, 30.0, 30.0));
         assert!(applied.elevation_max_minutes >= applied.elevation_idle_minutes);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["session"]["idleLockMinutes"], 120.0);

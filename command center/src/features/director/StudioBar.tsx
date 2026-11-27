@@ -25,7 +25,12 @@ export function readinessPill(r: Readiness | null, err: string | null): { tone: 
   const off = servers.filter(([, s]) => !s.enabled || s.tools === 0).map(([n]) => n);
   if (off.length) return { tone: "amber", label: `${off.join(" + ")} off`, detail: "Enable it in Settings → Integrations" };
   if (!r.ffmpegFound) return { tone: "amber", label: "ffmpeg not found", detail: "Install ffmpeg (on PATH) to render" };
-  return { tone: "green", label: `MCP ready · ${r.shotcut.tools + r.mediaForge.tools} tools`, detail: null };
+  // The count is the two media servers' listings, not the Director's tool set: it lives in the tooltip.
+  return {
+    tone: "green",
+    label: "MCP ready · Shotcut + MediaForge",
+    detail: `${r.shotcut.tools + r.mediaForge.tools} tools listed (Shotcut ${r.shotcut.tools}, MediaForge ${r.mediaForge.tools}). These are the media servers' tools, not the Director's full tool set.`,
+  };
 }
 
 const TONE: Record<PillTone, string> = {

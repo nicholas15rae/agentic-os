@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 00:05. One page for every Claude Code session and branch.
+Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -10,7 +10,7 @@ Updated 2026-11-27 00:05. One page for every Claude Code session and branch.
 | Tony latency: byte-stable system msg, TURN CONTEXT block | feat/language-hub | 35e30e5 | Yes (4073bd9) |
 | App crash hardening: panic.log, restarts wait for WebView2 to exit, scripts\restart-desktop-app.ps1 | feat/language-hub | 1cd5333 | Yes (4bc4e2d), pushed to origin; live since the 22:26 restart |
 | Engine R stops reporting refused orders as trades | claude/practical-elbakyan | 8bd7990 | Yes (3fe4835) |
-| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), pushed to origin; live after the next app rebuild + restart |
+| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), pushed to origin; live since the 23:19 rebuild + restart (built from 66df342, so without the section-pass merges) |
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
@@ -30,16 +30,19 @@ Updated 2026-11-27 00:05. One page for every Claude Code session and branch.
 | Sections 20-21 safe defaults, routing ownership | section-pass-batch3 | af2d427, 7f151c2 | Yes (6d1084b) |
 | Review fixes: profiles sync safely, PIN step-up for business + finance | section-pass-batch3 | cebcdbf | Yes (6d1084b) |
 | Merge fixes: Ops' contracting phrases go to Tony (Ops stays frozen); settings migrations v8-v10; TS router starts with Ops frozen | merge/section-pass-into-main | 6d1084b | Yes, pushed to origin |
-| Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | No |
-| Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | No |
+| Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | Yes (76df04f) |
+| Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | Yes (76df04f) |
+| Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
+| 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
+| Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
 
 ## 2. In progress
 
 | Session | Working on | Current step |
 |---|---|---|
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
-| Gabagoul functional pass (section-pass-batch3) | Next: 11.10 Tony reads Finance, Section 12 | All committed work is in main (conflicts resolved there). Next: merge main into the branch |
-| Director suite build | Part 1 quality fixes (clip length, framing, no-op revisions) | Reviewers running. Next: live E2E rerun, merge main, live SDXL test. Uncommitted |
+| Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
+| Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | PR #8 merged to main. Next: Tony-Rust track (Comms 4, Brainstorm 2/4/6), then M3 |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
@@ -48,7 +51,7 @@ Updated 2026-11-27 00:05. One page for every Claude Code session and branch.
 ## 3. Waiting on you
 
 **Decisions**
-- OK to merge `director-suite` into main? (section-pass and batch3 are merged.)
+- The running app (23:19) is built from 66df342: recall fix and crash hardening, but not main's 26 newer commits (section-pass, batch3). Rebuild from main? `feat/language-hub` in the base checkout would need main merged in first.
 - Check after the next app rebuild: pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
@@ -116,10 +119,12 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
 | claude/vibrant-davinci-742cf7 (recall fix) | cargo 1,419 (+2 known CRLF; 1 Edge timeout under load passes alone) on the 4073bd9 base; memtier + turn_context 24/24 after the rebase onto e0f7ee7 | 11-26 22:20 |
 | Tony recall parrot probe (Bionic, 4 reps) | parroted 21/60 -> **0/60** (six test lines 10/24 -> 0/24); planted facts recalled 24/28 -> 28/28 | 11-26 22:10 |
+| Live app after the 23:19 restart | 3 phone turns: fresh greeting and dinner answers (no stored reply copied), Joelle Bandits -> Chris recalled; first words 4.5 s cold, then 1.6 s and 1.0 s | 11-26 23:21 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
 | section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
-| director-suite | vitest 2,595, Rust 1,445 + 67 browser, media-forge 116 | 11-26 20:47 |
-| Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
+| main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
+| director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
+| Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
 | sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
@@ -136,13 +141,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:43 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:44 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/sections-8-10-m2` | 5 | `b38b87c` 2026-11-26 Merge origin/main (section-pass, section-pass-batch3) into Sections... | clean |
+| `claude/sections-8-10-m2` | 6 | `24669ec` 2026-11-26 docs(status): refresh branch table | 89 files |
 | `claude/elated-kare-67e4c4` | 1 | `0dcc440` 2026-11-26 refactor(command-center): remove the Ops agent; its work is Tony's | clean |
 | `claude/upbeat-wing-e87be0` | 7 | `aec8c6d` 2026-11-26 Merge main (e46d0c7: director-suite) into claude/upbeat-wing-e87be0 | clean |
 | `director-suite` | 2 | `351dd2c` 2026-11-26 perf(director): keep the Director's system message byte-stable | 2 files |

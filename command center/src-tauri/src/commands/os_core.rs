@@ -390,6 +390,9 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         "gmail" | "whatsapp" | "time" => &["general"],
         // Google Calendar: Tony's own (reads, and the calendar-add card).
         "calendar" => &["general"],
+        // Finance (read-only `finance.ask`, Section 11.10): Tony's alone. The finance role may
+        // also read it if Nic grants it; `mcp::finance_reader_refusal` refuses everyone else.
+        "finance" => &["general"],
         "knowledge-graph" => &["general", "librarian", "prompter"],
         "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
@@ -532,6 +535,7 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("maps", "Maps / OpenStreetMap", true, "Geocoding (Nominatim), driving routes and ETAs (OSRM, no live traffic) and the Route Map widget. No key needed."),
         builtin("instagram", "Instagram", true, "Your Instagram Professional account: profile stats, recent posts and insights, comments. Replies and publishing only after the confirmation card (needs INSTAGRAM_ACCESS_TOKEN)."),
         builtin("calendar", "Google Calendar", true, "Your upcoming events through the Google Apps Script deployment AnythingLLM's Calendar agent uses (imported on first use). Adding an event only after the confirmation card; never invites."),
+        builtin("finance", "Finance (read-only)", true, "Tony answers money questions from the Finance records on the local gateway: what you owe an agent, income and expenses by area, pending money, unpaid invoices, HST dates. Read-only summaries, never raw rows; changes stay on the Finance screens."),
         McpServer {
             id: "whatsapp".into(),
             name: "WhatsApp Bridge".into(),
@@ -1166,6 +1170,9 @@ pub(crate) const MIGRATE_INTEGRATION_OWNERS: &str = "integration-owners";
 /// Migration id: the Booking Desk's own names came back (`BOOKING_NAMES`, none of its topics), so
 /// addressing the frozen desk is Named and held with Tony's FROZEN note (`restore_booking_names`).
 pub(crate) const MIGRATE_BOOKING_NAMES: &str = "booking-names";
+/// Migration id: Tony's read-only Finance tool (Section 11.10): the `finance` server is granted to
+/// Tony only, once (`grant_finance_read`).
+pub(crate) const MIGRATE_FINANCE_READ: &str = "finance-read";
 /// Migration id: contracting phrases left the frozen Ops for Tony (`ops_phrases_to_tony`), for a
 /// config that already ran an earlier `routing-resplit` which put them on Ops.
 pub(crate) const MIGRATE_OPS_PHRASES_TO_TONY: &str = "ops-phrases-to-tony";
@@ -1258,6 +1265,19 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_PHRASES_TO_TONY) {
         ops_phrases_to_tony(cfg);
         cfg.migrations.push(MIGRATE_OPS_PHRASES_TO_TONY.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_FINANCE_READ) {
+        grant_finance_read(cfg);
+        cfg.migrations.push(MIGRATE_FINANCE_READ.into());
+    }
+}
+
+/// Once (Section 11.10): the `finance` server (back-filled from `default_mcps` on load) is granted
+/// to Tony only, so a row saved under that id earlier (or with "all") never hands the books to
+/// another agent. `enabled` is left as saved. Afterwards Nic's own grant edits stand.
+pub(crate) fn grant_finance_read(cfg: &mut OsConfig) {
+    for m in cfg.mcps.iter_mut().filter(|m| m.id == "finance") {
+        m.agents = Some(vec!["general".into()]);
     }
 }
 
@@ -2681,6 +2701,30 @@ mod tests {
         assert_eq!(grants(&cfg, "maps"), ["ops"]);
     }
 
+    /// Section 11.10: the read-only Finance server is a builtin, on, Tony's alone, by default and
+    /// by the one-time migration (a saved "all" is narrowed once; a later edit stands).
+    #[test]
+    fn finance_read_server_is_tonys_once() {
+        let grants = |c: &OsConfig| c.mcps.iter().find(|m| m.id == "finance").and_then(|m| m.agents.clone()).unwrap_or_default();
+        let fresh = OsConfig::default();
+        let f = fresh.mcps.iter().find(|m| m.id == "finance").expect("finance builtin");
+        assert!(f.enabled && f.builtin && f.transport == "builtin");
+        assert_eq!(grants(&fresh), ["general"]);
+        assert_eq!(default_mcp_grants("finance"), ["general"]);
+        let mut cfg = OsConfig::default();
+        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into(), MIGRATE_BOOKING_NAMES.into()];
+        cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["all".into()]);
+        cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().enabled = false;
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general"]);
+        assert!(!cfg.mcps.iter().find(|m| m.id == "finance").unwrap().enabled, "a server Nic switched off stays off");
+        assert_eq!(cfg.migrations.last().map(String::as_str), Some(MIGRATE_FINANCE_READ));
+        // Once: Nic grants the finance role too; the migration never takes it back.
+        cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["general".into(), "finance".into()]);
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general", "finance"]);
+    }
+
     /// Section 20.8: live delegation never reaches the Librarian / Booking workspaces; the mapping
     /// stays for the scheduled Librarian scripts.
     #[test]
@@ -2820,7 +2864,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_OPS_PHRASES_TO_TONY.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_OPS_PHRASES_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string()]);
     }
 
     #[test]

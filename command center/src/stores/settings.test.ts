@@ -91,26 +91,6 @@ describe("settings v6 migration (P4: spotifyDuck → mediaDuck)", () => {
   });
 });
 
-describe("v9: Agent Chatter off by default", () => {
-  it("is off for a fresh install and reset once for an existing one", () => {
-    expect(useSettings.getInitialState?.().routing.vocalHandoffs ?? false).toBe(false);
-    const s = migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 7);
-    expect(s.routing).toEqual({ announcerHandoff: true, vocalHandoffs: false });
-    // Also for an install already on main's v8 (weather) migration.
-    expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 8).routing.vocalHandoffs).toBe(false);
-    // Turned back on after v9: kept.
-    expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 9).routing.vocalHandoffs).toBe(true);
-  });
-});
-
-describe("v10: live captions off", () => {
-  it("resets only the old 600 ms default, once", () => {
-    expect(migrateSettings({ vad: { partialMs: 600 } } as never, 9).vad?.partialMs).toBe(0);
-    expect(migrateSettings({ vad: { partialMs: 1500 } } as never, 9).vad?.partialMs).toBe(1500);
-    expect(migrateSettings({ vad: { partialMs: 600 } } as never, 10).vad?.partialMs).toBe(600);
-  });
-});
-
 describe("settings v8 (top-bar clock + weather effects)", () => {
   it("resets a saved manual atmosphere to Live once, for any older snapshot", () => {
     expect(migrateSettings({ weatherMode: "rain" }, 7).weatherMode).toBe("auto");
@@ -142,5 +122,24 @@ describe("settings v8 (top-bar clock + weather effects)", () => {
     const partial = deepMergeDefaults({ clock: { hourCycle: "h23" }, effects: { enabled: false } } as never, useSettings.getState());
     expect(partial.clock).toEqual({ hourCycle: "h23", showDate: true, showTemp: true });
     expect(partial.effects).toEqual({ enabled: false, intensity: "normal" });
+  });
+});
+
+describe("v9: Agent Chatter off by default", () => {
+  it("is off for a fresh install and reset once for an existing one", () => {
+    expect(useSettings.getInitialState?.().routing.vocalHandoffs ?? false).toBe(false);
+    const s = migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 8);
+    expect(s.routing).toEqual({ announcerHandoff: true, vocalHandoffs: false });
+    // Turned back on after v9: kept.
+    expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 9).routing.vocalHandoffs).toBe(true);
+  });
+});
+
+describe("v10: live captions off by default", () => {
+  it("resets only the old 600 ms default, once", () => {
+    expect(migrateSettings({ vad: { partialMs: 600, endSilenceMs: 700 } }, 9).vad.partialMs).toBe(0);
+    expect(migrateSettings({ vad: { partialMs: 600, endSilenceMs: 700 } }, 9).vad.endSilenceMs).toBe(700);
+    expect(migrateSettings({ vad: { partialMs: 400 } }, 9).vad.partialMs).toBe(400); // Nic's own spacing stays
+    expect(migrateSettings({ vad: { partialMs: 600 } }, 10).vad.partialMs).toBe(600); // already migrated
   });
 });

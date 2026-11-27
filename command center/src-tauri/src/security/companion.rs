@@ -130,8 +130,8 @@ pub enum ApprovalKey {
 /// is promoted, the same QR key is the active key bound to the first phone: another device
 /// using that payload is refused). An expired, unused one never replaces the active pairing.
 #[allow(clippy::too_many_arguments)]
-pub fn approval_verdict(active: Option<&[u8]>, bound: Option<&str>, pending: Option<&PendingPair>, now: f64, id: &str, nonce: &str, device: &str, sig: &str) -> Result<ApprovalKey, String> {
-    let ok = |k: &[u8]| super::token::companion_verify(k, id, nonce, device, sig);
+pub fn approval_verdict(active: Option<&[u8]>, bound: Option<&str>, pending: Option<&PendingPair>, now: f64, id: &str, nonce: &str, device: &str, code: &str, sig: &str) -> Result<ApprovalKey, String> {
+    let ok = |k: &[u8]| super::token::companion_verify(k, id, nonce, device, code, sig);
     if active.is_some_and(|k| ok(k)) {
         if bound.is_some_and(|b| b != device) {
             return Err("COMPANION_OTHER_DEVICE: that pairing code was already used by another phone; show a new one on the desktop".into());
@@ -148,12 +148,13 @@ pub fn approval_verdict(active: Option<&[u8]>, bound: Option<&str>, pending: Opt
 }
 
 /// Desktop: check a phone approval's signature (`approval_verdict`), and on the first valid use
-/// of a pending QR key make it the active pairing key, bound to `device`.
-pub fn verify_approval(dir: &Path, id: &str, nonce: &str, device: &str, sig: &str) -> Result<(), String> {
+/// of a pending QR key make it the active pairing key, bound to `device`. `code`: the 2-digit
+/// matching number the desktop showed (part of the signed message).
+pub fn verify_approval(dir: &Path, id: &str, nonce: &str, device: &str, code: &str, sig: &str) -> Result<(), String> {
     let now = super::now();
     let pending = PAIR_PENDING.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let active = pair_key(dir);
-    let verdict = approval_verdict(active.as_deref(), bound_device(dir).as_deref(), pending.as_ref(), now, id, nonce, device, sig);
+    let verdict = approval_verdict(active.as_deref(), bound_device(dir).as_deref(), pending.as_ref(), now, id, nonce, device, code, sig);
     // An expired pending key is gone either way (the active pairing stays as it was).
     let _ = pending_pair(now);
     match verdict? {
@@ -207,6 +208,20 @@ struct Pending {
     nonce: String,
     expires: f64,
     purpose: String,
+    /// The matching number shown on the desktop; the phone's signature covers it.
+    code: String,
+}
+
+/// A fresh 2-digit matching code (10–99). Pure given the random byte.
+pub fn matching_code(byte: u8) -> String {
+    format!("{}", 10 + (byte as u32 % 90))
+}
+
+/// Refuse a new request while another of the same kind (unlock / a step-up) is still waiting:
+/// no stream of prompts to approve by mistake. Pure.
+pub fn busy(pending: &[(String, f64)], purpose: &str, now: f64) -> bool {
+    let unlock = |p: &str| !p.starts_with("step_up:");
+    pending.iter().any(|(p, exp)| *exp > now && (p == purpose || (unlock(p) && unlock(purpose))))
 }
 
 static PENDING: Mutex<Option<HashMap<String, Pending>>> = Mutex::new(None);
@@ -240,11 +255,19 @@ pub fn phone_recent(seen: f64, now: f64) -> bool {
     seen > 0.0 && now - seen <= PHONE_SEEN_WITHIN_S
 }
 
-/// Post a new approval request; returns `(id, expiresAt)`.
-pub async fn request(gateway: &str, dir: &Path, device: &str, purpose: &str, ttl: f64) -> Result<(String, f64), String> {
+/// Post a new approval request; returns `(id, expiresAt, matching code)`.
+pub async fn request(gateway: &str, dir: &Path, device: &str, purpose: &str, ttl: f64) -> Result<(String, f64, String), String> {
     if !pairing_possible(dir) {
         return Err("COMPANION_UNPAIRED: run `gabagool-cli pair-companion` and enter the key on the phone".into());
     }
+    {
+        let g = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+        let waiting: Vec<(String, f64)> = g.as_ref().map(|m| m.values().map(|p| (p.purpose.clone(), p.expires)).collect()).unwrap_or_default();
+        if busy(&waiting, purpose, super::now()) {
+            return Err("COMPANION_BUSY: a phone approval is already waiting; answer it on the phone or let it expire".into());
+        }
+    }
+    let code = matching_code(super::unhex(&super::token::random_hex(1)).and_then(|b| b.first().copied()).unwrap_or(42));
     let id = super::token::random_hex(12);
     let nonce = super::token::random_hex(16);
     let expires = super::now() + ttl;
@@ -262,8 +285,8 @@ pub async fn request(gateway: &str, dir: &Path, device: &str, purpose: &str, ttl
     let m = g.get_or_insert_with(HashMap::new);
     let now = super::now();
     m.retain(|_, p| p.expires > now);
-    m.insert(id.clone(), Pending { nonce, expires, purpose: purpose.to_string() });
-    Ok((id, expires))
+    m.insert(id.clone(), Pending { nonce, expires, purpose: purpose.to_string(), code: code.clone() });
+    Ok((id, expires, code))
 }
 
 #[derive(Debug, PartialEq)]
@@ -301,7 +324,7 @@ pub async fn poll(gateway: &str, dir: &Path, id: &str) -> Result<PollState, Stri
                 return Err("COMPANION_BAD_SIGNATURE: the approval was not signed by the paired phone".into());
             }
             // The active key, or the first use of a pending pairing QR (which then becomes active).
-            verify_approval(dir, id, &p.nonce, &device, sig)?;
+            verify_approval(dir, id, &p.nonce, &device, &p.code, sig)?;
             Ok(PollState::Approved { device, purpose: p.purpose })
         }
         Some("denied") => {
@@ -323,14 +346,28 @@ fn forget(id: &str) {
 }
 
 /// Phone side: sign an approval (after its own biometric check, done by the caller).
-pub fn sign(dir: &Path, id: &str, nonce: &str, device: &str) -> Result<String, String> {
+pub fn sign(dir: &Path, id: &str, nonce: &str, device: &str, code: &str) -> Result<String, String> {
     let key = device_key(dir).ok_or("COMPANION_UNPAIRED: enter the pairing key from `gabagool-cli pair-companion` first")?;
-    Ok(super::token::companion_sign(&key, id, nonce, device))
+    Ok(super::token::companion_sign(&key, id, nonce, device, code))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matching_codes_are_two_digits_and_one_request_waits_at_a_time() {
+        for b in [0u8, 1, 89, 90, 255] {
+            let c = matching_code(b);
+            assert_eq!(c.len(), 2, "{c}");
+        }
+        let now = 100.0;
+        let waiting = vec![("unlock".to_string(), 150.0)];
+        assert!(busy(&waiting, "idle", now), "a second unlock prompt waits");
+        assert!(!busy(&waiting, "step_up:trading", now), "a step-up is its own lane");
+        assert!(!busy(&[("unlock".into(), 90.0)], "unlock", now), "an expired one doesn't count");
+        assert!(busy(&[("step_up:trading".into(), 150.0)], "step_up:trading", now));
+    }
 
     #[test]
     fn pairing_qr_round_trips_and_expires() {
@@ -350,28 +387,28 @@ mod tests {
     /// is refused. The CLI pairing (no binding) accepts any device, as before.
     #[test]
     fn pairing_qr_is_pending_until_first_use_within_its_ttl() {
-        let sign = |k: &[u8], dev: &str| super::super::token::companion_sign(k, "req1", "n1", dev);
+        let sign = |k: &[u8], dev: &str| super::super::token::companion_sign(k, "req1", "n1", dev, "42");
         let old = vec![7u8; 32];
         let qr = PendingPair { key: vec![9u8; 32], expires_at: 1_120.0 };
         // Used within the TTL → promoted (the caller makes it active, bound to phone-A).
-        assert_eq!(approval_verdict(Some(&old), None, Some(&qr), 1_060.0, "req1", "n1", "phone-A", &sign(&qr.key, "phone-A")), Ok(ApprovalKey::Promote));
+        assert_eq!(approval_verdict(Some(&old), None, Some(&qr), 1_060.0, "req1", "n1", "phone-A", "42", &sign(&qr.key, "phone-A")), Ok(ApprovalKey::Promote));
         // …the old pairing keeps working until then.
-        assert_eq!(approval_verdict(Some(&old), None, Some(&qr), 1_060.0, "req1", "n1", "phone-A", &sign(&old, "phone-A")), Ok(ApprovalKey::Active));
+        assert_eq!(approval_verdict(Some(&old), None, Some(&qr), 1_060.0, "req1", "n1", "phone-A", "42", &sign(&old, "phone-A")), Ok(ApprovalKey::Active));
         // Expired and unused → refused; the old pairing is still the active one.
-        let e = approval_verdict(Some(&old), None, Some(&qr), 1_121.0, "req1", "n1", "phone-A", &sign(&qr.key, "phone-A")).unwrap_err();
+        let e = approval_verdict(Some(&old), None, Some(&qr), 1_121.0, "req1", "n1", "phone-A", "42", &sign(&qr.key, "phone-A")).unwrap_err();
         assert!(e.starts_with("PAIR_QR_EXPIRED"), "{e}");
-        assert_eq!(approval_verdict(Some(&old), None, Some(&qr), 1_121.0, "req1", "n1", "phone-A", &sign(&old, "phone-A")), Ok(ApprovalKey::Active));
+        assert_eq!(approval_verdict(Some(&old), None, Some(&qr), 1_121.0, "req1", "n1", "phone-A", "42", &sign(&old, "phone-A")), Ok(ApprovalKey::Active));
         // After the first use: the QR key is active and bound to phone-A; a second use of the same
         // payload by another phone is refused (and no pending key is left to promote).
-        assert_eq!(approval_verdict(Some(&qr.key), Some("phone-A"), None, 1_070.0, "req1", "n1", "phone-A", &sign(&qr.key, "phone-A")), Ok(ApprovalKey::Active));
-        let e = approval_verdict(Some(&qr.key), Some("phone-A"), None, 1_070.0, "req1", "n1", "phone-B", &sign(&qr.key, "phone-B")).unwrap_err();
+        assert_eq!(approval_verdict(Some(&qr.key), Some("phone-A"), None, 1_070.0, "req1", "n1", "phone-A", "42", &sign(&qr.key, "phone-A")), Ok(ApprovalKey::Active));
+        let e = approval_verdict(Some(&qr.key), Some("phone-A"), None, 1_070.0, "req1", "n1", "phone-B", "42", &sign(&qr.key, "phone-B")).unwrap_err();
         assert!(e.starts_with("COMPANION_OTHER_DEVICE"), "{e}");
         // CLI pairing: no binding, any device; a bad signature is refused.
-        assert_eq!(approval_verdict(Some(&old), None, None, 0.0, "req1", "n1", "phone-B", &sign(&old, "phone-B")), Ok(ApprovalKey::Active));
-        let e = approval_verdict(Some(&old), None, None, 0.0, "req1", "n1", "phone-B", &sign(&[1u8; 32], "phone-B")).unwrap_err();
+        assert_eq!(approval_verdict(Some(&old), None, None, 0.0, "req1", "n1", "phone-B", "42", &sign(&old, "phone-B")), Ok(ApprovalKey::Active));
+        let e = approval_verdict(Some(&old), None, None, 0.0, "req1", "n1", "phone-B", "42", &sign(&[1u8; 32], "phone-B")).unwrap_err();
         assert!(e.starts_with("COMPANION_BAD_SIGNATURE"), "{e}");
         // First-ever pairing by QR (nothing active yet) works the same way.
-        assert_eq!(approval_verdict(None, None, Some(&qr), 1_000.0, "req1", "n1", "phone-A", &sign(&qr.key, "phone-A")), Ok(ApprovalKey::Promote));
+        assert_eq!(approval_verdict(None, None, Some(&qr), 1_000.0, "req1", "n1", "phone-A", "42", &sign(&qr.key, "phone-A")), Ok(ApprovalKey::Promote));
         // The in-memory pending key: valid within the TTL, discarded after it.
         let (hex, exp) = pair_begin_qr(5_000.0);
         assert_eq!(exp, 5_000.0 + PAIR_QR_TTL_S);

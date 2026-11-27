@@ -55,6 +55,9 @@ pub struct SessionCfg {
     /// Hard re-verification window: after this long since the last verification the session
     /// locks regardless of activity.
     pub reauth_minutes: f64,
+    /// Section pass: an unlocked session survives an app restart (signed snapshot, desktop only;
+    /// the idle / re-verify windows and any lock or revocation still apply).
+    pub persist_across_restarts: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -104,6 +107,10 @@ pub struct BiometricCfg {
 #[serde(rename_all = "camelCase", default)]
 pub struct CompanionCfg {
     pub enabled: bool,
+    /// Section pass ("like IB Key"): a signed approval from the paired phone (after its own
+    /// fingerprint check) unlocks on its own, at start and after a lock; the PIN stays the
+    /// fallback. Off: the phone only counts as the second factor before the PIN.
+    pub unlocks_alone: bool,
     /// Gateway the companion phone polls (desktop posts approval requests here).
     pub gateway_url: String,
     pub approval_timeout_seconds: f64,
@@ -292,7 +299,7 @@ impl Default for SecurityConfig {
 }
 impl Default for SessionCfg {
     fn default() -> Self {
-        Self { idle_lock_minutes: 15.0, reauth_minutes: 60.0 }
+        Self { idle_lock_minutes: 15.0, reauth_minutes: 60.0, persist_across_restarts: true }
     }
 }
 impl Default for PinCfg {
@@ -312,7 +319,8 @@ impl Default for ResumeCfg {
 }
 impl Default for ElevationCfg {
     fn default() -> Self {
-        Self { idle_minutes: 5.0, max_minutes: 10.0, allow_companion: true }
+        // Section pass: 15 min unused / 60 min max (was 5 / 10, which read as a logout every 5 min).
+        Self { idle_minutes: 15.0, max_minutes: 60.0, allow_companion: true }
     }
 }
 impl Default for BiometricCfg {
@@ -322,7 +330,7 @@ impl Default for BiometricCfg {
 }
 impl Default for CompanionCfg {
     fn default() -> Self {
-        Self { enabled: true, gateway_url: "http://127.0.0.1:8080".into(), approval_timeout_seconds: 90.0 }
+        Self { enabled: true, unlocks_alone: true, gateway_url: "http://127.0.0.1:8080".into(), approval_timeout_seconds: 90.0 }
     }
 }
 impl Default for AlertsCfg {
@@ -371,6 +379,11 @@ fn clampf(v: f64, lo: f64, hi: f64, dflt: f64) -> f64 {
 }
 
 impl SecurityConfig {
+    /// Sessions survive a restart: on in the config, the lock layer on, and a desktop build.
+    pub fn persist_enabled(&self) -> bool {
+        self.enabled && self.session.persist_across_restarts && !cfg!(any(target_os = "android", target_os = "ios"))
+    }
+
     /// Bound every tunable to a sane range (pure).
     pub fn clamped(mut self) -> Self {
         let d = SecurityConfig::default();
@@ -422,6 +435,9 @@ pub fn session_from_ui(idle_lock_minutes: f64, reauth_minutes: f64) -> Result<Se
     Ok(SessionCfg {
         idle_lock_minutes: idle_lock_minutes.round().clamp(IDLE_LOCK_RANGE.0, IDLE_LOCK_RANGE.1),
         reauth_minutes: reauth_minutes.round().clamp(REAUTH_RANGE.0, REAUTH_RANGE.1),
+        // Not part of the timers form; `with_session` writes only the two timer keys, so the saved
+        // restart setting is never touched by this value.
+        ..SessionCfg::default()
     })
 }
 
@@ -583,17 +599,17 @@ mod tests {
 
     #[test]
     fn security_card_session_timers_are_validated_and_saved_in_place() {
-        assert_eq!(session_from_ui(1.0, 1.0).unwrap(), SessionCfg { idle_lock_minutes: 5.0, reauth_minutes: 30.0 });
-        assert_eq!(session_from_ui(500.0, 5000.0).unwrap(), SessionCfg { idle_lock_minutes: 120.0, reauth_minutes: 720.0 });
-        assert_eq!(session_from_ui(20.4, 90.0).unwrap(), SessionCfg { idle_lock_minutes: 20.0, reauth_minutes: 90.0 });
+        assert_eq!(session_from_ui(1.0, 1.0).unwrap(), SessionCfg { idle_lock_minutes: 5.0, reauth_minutes: 30.0, ..SessionCfg::default() });
+        assert_eq!(session_from_ui(500.0, 5000.0).unwrap(), SessionCfg { idle_lock_minutes: 120.0, reauth_minutes: 720.0, ..SessionCfg::default() });
+        assert_eq!(session_from_ui(20.4, 90.0).unwrap(), SessionCfg { idle_lock_minutes: 20.0, reauth_minutes: 90.0, ..SessionCfg::default() });
         assert!(session_from_ui(f64::NAN, 60.0).is_err());
         // Defaults are untouched by the new limits.
-        assert_eq!(SessionCfg::default(), SessionCfg { idle_lock_minutes: 15.0, reauth_minutes: 60.0 });
+        assert_eq!(SessionCfg::default(), SessionCfg { idle_lock_minutes: 15.0, reauth_minutes: 60.0, ..SessionCfg::default() });
         // A 12-hour re-auth set from the card survives the loader's clamp.
         let long: SecurityConfig = serde_json::from_str(r#"{"session":{"idleLockMinutes":30,"reauthMinutes":720}}"#).unwrap();
         assert_eq!(long.clamped().session.reauth_minutes, 720.0);
         // Only the two keys change; unknown keys and other sections stay.
-        let s = SessionCfg { idle_lock_minutes: 30.0, reauth_minutes: 240.0 };
+        let s = SessionCfg { idle_lock_minutes: 30.0, reauth_minutes: 240.0, ..SessionCfg::default() };
         let out = with_session(Some(r#"{"enabled":true,"custom":{"x":1},"session":{"idleLockMinutes":15,"note":"keep"},"pin":{"minLength":8}}"#), &s).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["session"]["idleLockMinutes"], 30.0);

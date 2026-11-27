@@ -127,13 +127,21 @@
     "desc": "'check what's up with the droplet' is a droplet question, never a WhatsApp read ('with' after 'up' blocks the before-cue)",
     "text": "check what's up with the droplet",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
     "desc": "'check what's up on the droplet' is a droplet question ('on' + more words after 'up' blocks the before-cue)",
     "text": "check what's up on the droplet",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
     "desc": "'check what's up on my calendar' is a calendar question (Tony's topic and his live read), not WhatsApp",
@@ -417,7 +425,11 @@
     "desc": "self: Tony's own topic alone does not beat another agent's topic (only his name does)",
     "text": "system status of the droplet",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
     "desc": "frozen Booking Desk: named through Tony is Named; the switchboard keeps it with Tony",
@@ -485,7 +497,11 @@
     "desc": "a self name mid-line (no address position) does not beat a topic",
     "text": "the dispatcher keeps timing out, is the droplet healthy",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
     "desc": "address: the line opens with a self name after an interjection ('ok jarvis')",
@@ -571,7 +587,17 @@
     "desc": "ops stays infrastructure",
     "text": "is the droplet healthy and is docker up",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
+  },
+  {
+    "desc": "Ops starts frozen (an unused placeholder), so an infra question is Tony's until Nic thaws it",
+    "text": "is the droplet healthy and is docker up",
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "A2: a Gmail booking read stays with Tony (no name, booking words only)",
@@ -616,10 +642,10 @@
     "direct": "gmail"
   },
   {
-    "desc": "A2 + section 20: 'tell booking to…' names the frozen Booking Desk (Named; the switchboard holds it with Tony's FROZEN note)",
+    "desc": "A2: 'tell booking to…' no longer delegates (frozen, no names); callback is Tony's topic",
     "text": "tell booking to check my email for the callback",
-    "role": "booking",
-    "kind": "Named",
+    "role": "general",
+    "kind": "Self",
     "taskContains": "check my email",
     "direct": "gmail"
   },
@@ -656,16 +682,116 @@
     "taskContains": "check the layout"
   },
   {
-    "desc": "Section 20.2: contracting, job quotes and subcontractors are Ops (the future Job Desk)",
+    "desc": "contracting, job quotes and subcontractors are Tony's while Ops is frozen (the future Job Desk)",
     "text": "send the masonry quote to the subcontractor",
-    "role": "ops",
-    "kind": "Domain"
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "Section 20.2: Instagram is Biz Ops' ('instagram' 9 beats the Director's 'reel' 4)",
     "text": "post the new reel to instagram",
     "role": "bizops",
     "kind": "Domain"
+  },
+  {
+    "desc": "A2 review: a mail read that opens with 'booking' (a topic word, no pause) stays with Tony",
+    "text": "booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'audition' opening a mail read is a topic, not the Booking Desk",
+    "text": "audition email check",
+    "role": "general",
+    "kind": "Self",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'Booking confirmations in my gmail?' is Tony's booking scan",
+    "text": "Booking confirmations in my gmail?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'hey <desk name>' addresses the desk, even in a mail read",
+    "text": "hey booking agent, any emails?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: the desk name followed by a pause addresses it",
+    "text": "Booking desk: any emails today?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'NAME email <someone>' is still a command to the desk ('email' the verb, not the mail noun)",
+    "text": "booking desk email Sam about the shoot",
+    "role": "booking",
+    "kind": "Named",
+    "taskContains": "about the shoot",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: a filler lead ('Okay,') never makes a booking word an address in a mail read",
+    "text": "Okay, booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'so' is a filler too",
+    "text": "so booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'ok' before 'audition' in a mail read is still Tony's read",
+    "text": "ok audition emails this week?",
+    "role": "general",
+    "kind": "Self",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'So, audition email check' is the mail noun after a filler",
+    "text": "So, audition email check",
+    "role": "general",
+    "kind": "Self",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: even 'hey' does not address a booking word used as a topic ('booking emails')",
+    "text": "hey booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: a filler, then the desk name and a pause, addresses the desk",
+    "text": "Okay, booking desk: any emails today?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'hey <desk name>' plus an address word still addresses the desk, with no comma",
+    "text": "hey booking agent any emails?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'hey <desk name> email <someone>' is a command to the desk",
+    "text": "hey booking agent email Sam about the shoot",
+    "role": "booking",
+    "kind": "Named",
+    "taskContains": "about the shoot",
+    "direct": "gmail"
   },
   {
     "desc": "Section 20.2: money, HST and commissions are Finance's",
@@ -708,166 +834,5 @@
     "text": "find document about the lease",
     "role": null,
     "kind": "Default"
-  },
-  {
-    "desc": "Section 11.10: what Nic owes an acting agent is Tony's own Finance read",
-    "text": "what do I owe ML Talent?",
-    "role": null,
-    "kind": "Default",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: an area's income this month is a Finance read",
-    "text": "how much did contracting make this month?",
-    "role": "ops",
-    "kind": "Domain",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: what's still pending (money owed to Nic)",
-    "text": "what's still pending?",
-    "role": null,
-    "kind": "Default",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: HST dates are a Finance read, not the Finance agent",
-    "text": "when is HST due?",
-    "role": "finance",
-    "kind": "Domain",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: unpaid invoices are a Finance read",
-    "text": "any unpaid invoices?",
-    "role": "finance",
-    "kind": "Domain",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: a Finance name merely mentioned in a money read is a topic, not an address",
-    "text": "what do I owe my accountant?",
-    "role": null,
-    "kind": "Default",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: opening the line with the Finance agent's name still addresses it",
-    "text": "bookkeeper, what do I owe ML Talent?",
-    "role": "finance",
-    "kind": "Named",
-    "direct": "finance"
-  },
-  {
-    "desc": "Section 11.10: a commission write stays on the Finance screens",
-    "text": "mark the ML Talent commission as paid",
-    "role": "finance",
-    "kind": "Domain"
-  },
-  {
-    "desc": "Section 11.10: pending store orders are Biz Ops', not a money read",
-    "text": "what orders are pending on the online store",
-    "role": "bizops",
-    "kind": "Domain"
-  },
-  {
-    "desc": "A2 review: a mail read that opens with 'booking' (a topic word, no pause) stays with Tony",
-    "text": "booking emails from today?",
-    "role": null,
-    "kind": "Default",
-    "direct": "gmail"
-  },
-  {
-    "desc": "A2 review: 'audition' opening a mail read is a topic, not the Booking Desk (audition is Tony's own topic since the Section 20 re-split)",
-    "text": "audition email check",
-    "role": "general",
-    "kind": "Self",
-    "direct": "gmail"
-  },
-  {
-    "desc": "A2 review: 'Booking confirmations in my gmail?' is Tony's booking scan",
-    "text": "Booking confirmations in my gmail?",
-    "role": null,
-    "kind": "Default",
-    "direct": "gmail"
-  },
-  {
-    "desc": "A2 review: 'hey <desk name>' addresses the desk, even in a mail read",
-    "text": "hey booking agent, any emails?",
-    "role": "booking",
-    "kind": "Named",
-    "direct": "gmail"
-  },
-  {
-    "desc": "A2 review: the desk name followed by a pause addresses it",
-    "text": "Booking: any emails today?",
-    "role": "booking",
-    "kind": "Named",
-    "direct": "gmail"
-  },
-  {
-    "desc": "A2 review: 'NAME email <someone>' is still a command to the desk ('email' the verb, not the mail noun)",
-    "text": "booking email Sam about the shoot",
-    "role": "booking",
-    "kind": "Named",
-    "taskContains": "about the shoot",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: a filler lead ('Okay,') never makes a booking word an address in a mail read",
-    "text": "Okay, booking emails from today?",
-    "role": null,
-    "kind": "Default",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: 'so' is a filler too",
-    "text": "so booking emails from today?",
-    "role": null,
-    "kind": "Default",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: 'ok' before 'audition' in a mail read is still Tony's read (audition is Tony's own topic since the Section 20 re-split)",
-    "text": "ok audition emails this week?",
-    "role": "general",
-    "kind": "Self",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: 'So, audition email check' is the mail noun after a filler (audition is Tony's own topic since the Section 20 re-split)",
-    "text": "So, audition email check",
-    "role": "general",
-    "kind": "Self",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: even 'hey' does not address a booking word used as a topic ('booking emails')",
-    "text": "hey booking emails from today?",
-    "role": null,
-    "kind": "Default",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: a filler, then the desk name and a pause, addresses the desk",
-    "text": "Okay, booking: any emails today?",
-    "role": "booking",
-    "kind": "Named",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: 'hey <desk name>' plus an address word still addresses the desk, with no comma",
-    "text": "hey booking agent any emails?",
-    "role": "booking",
-    "kind": "Named",
-    "direct": "gmail"
-  },
-  {
-    "desc": "FX3 review: 'hey <desk name> email <someone>' is a command to the desk",
-    "text": "hey booking email Sam about the shoot",
-    "role": "booking",
-    "kind": "Named",
-    "taskContains": "about the shoot",
-    "direct": "gmail"
   }
 ]

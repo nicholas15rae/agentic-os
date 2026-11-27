@@ -273,12 +273,13 @@ export function migrateSettings(persisted: unknown, from: number): SettingsState
   // line, the clock's effects dot) keeps any later manual pick visible. `effects` / `clock` are new
   // nested objects, backfilled by `merge`.
   if (from < 8 && s.weatherMode !== undefined) s.weatherMode = "auto";
-  // v9 (section pass; was v8 on section-pass before main's v8 landed): Agent Chatter is off by
-  // default — internal agent back-and-forth is never spoken unless Nic turns it back on (saves
-  // ElevenLabs credits). Reset once for existing installs.
+  // v9 (section pass): Agent Chatter is off by default — internal agent back-and-forth is never
+  // spoken unless Nic turns it back on (saves ElevenLabs credits). Reset once for existing installs.
+  // (Was v8 on the section-pass branch; main's v8 weather reset already shipped, so this moved up.)
   if (from < 9 && isPlainObject(s.routing)) s.routing = { ...s.routing, vocalHandoffs: false };
   // v10 (section pass, 20.5): live captions off by default — each one is an extra Whisper pass on
   // the GPU competing with Tony. Only the old 600 ms default is reset; a spacing Nic chose stays.
+  // (Was v9 on section-pass-batch3; renumbered when both branches merged into main.)
   if (from < 10 && isPlainObject(s.vad) && (s.vad as { partialMs?: unknown }).partialMs === 600) s.vad = { ...s.vad, partialMs: 0 };
   // `merge` (below) backfills any still-missing fields right after this runs.
   return s as unknown as SettingsState;

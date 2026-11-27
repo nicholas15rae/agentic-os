@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addressesSelf, DEFAULT_ROUTING_CONFIG, directTool, isFrozenRole, isSelfRoleId, matchingAgents, normalize, originalTail, overlappingPhrases, resetRouterFrozenAgents, resolve, setRouterFrozenAgents } from "./router";
 import fixtures from "./router.fixtures.json";
 
@@ -12,6 +12,8 @@ interface Fixture {
   direct?: string;
   /** The configured OS name (Rust: `cfg.os_name`); missing = the default ("Tony" is built in). */
   osName?: string;
+  /** The master switchboard's frozen agents for this case; missing = the default set. */
+  frozen?: string[];
 }
 
 describe("resolve (shared fixtures)", () => {
@@ -21,7 +23,7 @@ describe("resolve (shared fixtures)", () => {
   });
   for (const f of list) {
     it(`${f.desc} — ${JSON.stringify(f.text)}`, () => {
-      const r = resolve(f.text, DEFAULT_ROUTING_CONFIG, f.osName);
+      const r = resolve(f.text, DEFAULT_ROUTING_CONFIG, f.osName, f.frozen ? { frozen: f.frozen } : {});
       expect(r.role).toBe(f.role);
       expect(r.kind).toBe(f.kind);
       if (f.taskContains) expect(r.task).toContain(f.taskContains);
@@ -96,6 +98,10 @@ describe("whole-word boundaries", () => {
 });
 
 describe("domain tie-break", () => {
+  // These check routing priority with Ops as "another agent's topic", so Ops is thawed here
+  // (it starts frozen as a placeholder; the shared fixtures cover the frozen default).
+  beforeEach(() => setRouterFrozenAgents(["booking", "librarian"]));
+  afterEach(() => resetRouterFrozenAgents());
   it("follows the role order on an equal score; Tony's topic never steals one", () => {
     // bizops "inventory" (9) vs designer "animation" (9).
     expect(resolve("inventory animation", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "bizops", kind: "Domain" });
@@ -106,7 +112,7 @@ describe("domain tie-break", () => {
 // Section 20.1: the router never picks an agent frozen on the master switchboard.
 describe("frozen agents: named, never by topic", () => {
   it("the Booking Desk keeps only its names; a frozen agent addressed by name is Named, its topics never fire", () => {
-    expect(DEFAULT_ROUTING_CONFIG.agents.booking).toEqual({ names: ["booking", "booking desk", "booking agent", "B&Co"], domains: [] });
+    expect(DEFAULT_ROUTING_CONFIG.agents.booking).toEqual({ names: ["booking desk", "booking agent", "B&Co"], domains: [] });
     expect(isFrozenRole("librarian") && isFrozenRole("booking") && !isFrozenRole("general") && !isFrozenRole("coder")).toBe(true);
     for (const [text, role] of [
       ["ask the librarian to search vault for the contract", "librarian"],
@@ -180,6 +186,10 @@ describe("default matrix: WhatsApp is not a Booking topic", () => {
 });
 
 describe("Tony's name beats a topic", () => {
+  // These check routing priority with Ops as "another agent's topic", so Ops is thawed here
+  // (it starts frozen as a placeholder; the shared fixtures cover the frozen default).
+  beforeEach(() => setRouterFrozenAgents(["booking", "librarian"]));
+  afterEach(() => resetRouterFrozenAgents());
   it("a self address + a Domain-only hit is Self", () => {
     for (const text of ["hey tony, check my self-tape availability", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"]) {
       expect(resolve(text, DEFAULT_ROUTING_CONFIG), text).toMatchObject({ role: "general", kind: "Self", confidence: "high" });
@@ -208,6 +218,10 @@ describe("Tony's name beats a topic", () => {
 // Regression: the override fired for a self name ANYWHERE in the line, so the common nouns in
 // SELF_NAMES ("dispatcher", "orchestrator") and a renamed OS name ("Friday") beat every topic.
 describe("only a real address beats a topic (not a mention)", () => {
+  // These check routing priority with Ops as "another agent's topic", so Ops is thawed here
+  // (it starts frozen as a placeholder; the shared fixtures cover the frozen default).
+  beforeEach(() => setRouterFrozenAgents(["booking", "librarian"]));
+  afterEach(() => resetRouterFrozenAgents());
   const cfg = DEFAULT_ROUTING_CONFIG;
   it("a self name used as a noun or an object leaves the topic's agent in charge", () => {
     expect(resolve("fix bug in the orchestrator react code", cfg)).toMatchObject({ role: "coder", kind: "Domain" });

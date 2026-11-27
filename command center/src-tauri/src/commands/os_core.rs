@@ -141,11 +141,12 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "librarian".to_string(),
         trig(&["librarian", "memory", "vault", "researcher"], &["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"]),
     );
-    // Section 20.2, one owner per topic. Ops = infrastructure plus the contracting work (masonry,
-    // job sites, subcontractors, job quotes / estimates: the future Job Desk); Biz Ops = BF
+    // Section 20.2, one owner per topic. Ops = infrastructure (Ops is a frozen placeholder, so
+    // contracting work — masonry, job sites, subcontractors, job quotes / estimates, the future
+    // Job Desk — is Tony's until a Job Desk exists; `OPS_PHRASES_TO_TONY`); Biz Ops = BF
     // Supplements / the Born Fortuna store / Instagram / e-commerce; money is Finance's; the
     // calendar, schedule and reminders are Tony's.
-    m.insert("ops".to_string(), trig(&["ops", "infra", "infrastructure", "job desk"], OPS_DOMAINS));
+    m.insert("ops".to_string(), trig(&["ops", "infra", "infrastructure"], OPS_DOMAINS));
     m.insert("bizops".to_string(), trig(&["bizops", "operations manager", "ops manager", "business manager", "operations", "business"], BIZOPS_DOMAINS));
     m.insert("finance".to_string(), trig(&["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"], FINANCE_DOMAINS));
     // Tony has no name triggers: addressing him ("thanks tony", "ask the dispatcher…") is
@@ -156,23 +157,28 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
 }
 
 /// The Booking Desk's own names (no topic words: "casting", "audition", "talent agent" are Tony's).
-pub(crate) const BOOKING_NAMES: &[&str] = &["booking", "booking desk", "booking agent", "B&Co"];
+pub(crate) const BOOKING_NAMES: &[&str] = &["booking desk", "booking agent", "B&Co"];
 /// Director topics (media); the self-tape recording / editing phrases came from Booking.
 const DIRECTOR_DOMAINS: &[&str] = &[
     "edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll",
     "record a self-tape", "record my self-tape", "film a self-tape", "film my self-tape", "self-tape recording", "edit my self-tape", "edit the self-tape",
 ];
-/// Ops: infra + contracting (Section 20.2).
-const OPS_DOMAINS: &[&str] = &["droplet", "docker", "n8n", "server status", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates"];
+/// Ops: infra only (Section 20.2). Contracting is Tony's while Ops is frozen (`OPS_PHRASES_TO_TONY`).
+const OPS_DOMAINS: &[&str] = &["droplet", "docker", "n8n", "server status"];
+/// Contracting phrases (the future Job Desk). Section 20.2 gave them to Ops, but Ops is a frozen
+/// placeholder (Section 3), so they are Tony's topics until a Job Desk agent exists.
+const OPS_PHRASES_TO_TONY: &[&str] = &["job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates"];
 /// Biz Ops: the store and the brand (Section 20.2).
 const BIZOPS_DOMAINS: &[&str] = &["inventory", "fulfillment", "open orders", "bf supplements", "supplements", "born fortuna", "instagram", "ecommerce", "online store"];
 /// Finance: money (Section 20.2; commissions are acting money).
 const FINANCE_DOMAINS: &[&str] = &["ledger", "expenses", "receipt", "receipts", "invoice", "invoices", "cheque", "cheques", "money", "hst", "commission", "commissions", "cash flow", "profit", "p&l", "my books"];
-/// Tony: his calendar / schedule / reminders and, for now, acting (auditions, bookings, the agency).
+/// Tony: his calendar / schedule / reminders and, for now, acting (auditions, bookings, the agency)
+/// and contracting (while Ops is frozen).
 const GENERAL_DOMAINS: &[&str] = &[
     "system status", "switch model", "calendar", "schedule", "reminder", "reminders", "remind me",
     "audition", "auditions", "casting", "casting call", "casting email", "casting emails", "self-tape", "self tape", "callback", "wardrobe", "availability",
     "bookings", "talent agent", "my agent", "agency", "imperious", "draft email to agent",
+    "job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates",
 ];
 
 /// Section 20.1 / 20.2 one-time re-split: (old owner, phrase) pairs removed from a saved config,
@@ -183,7 +189,8 @@ const ROUTING_MOVED_OFF: &[(&str, &str)] = &[
 ];
 /// …and the (new owner, phrase) pairs added once, names marked `n:`.
 const ROUTING_ADDED: &[(&str, &str)] = &[
-    ("ops", "n:job desk"), ("ops", "contracting"), ("ops", "masonry"), ("ops", "job site"), ("ops", "job sites"), ("ops", "subcontractor"), ("ops", "subcontractors"), ("ops", "quote"), ("ops", "quotes"), ("ops", "estimate"), ("ops", "estimates"),
+    // Contracting goes to Tony, not the frozen Ops (`OPS_PHRASES_TO_TONY`).
+    ("general", "job desk"), ("general", "contracting"), ("general", "masonry"), ("general", "job site"), ("general", "job sites"), ("general", "subcontractor"), ("general", "subcontractors"), ("general", "quote"), ("general", "quotes"), ("general", "estimate"), ("general", "estimates"),
     ("bizops", "born fortuna"), ("bizops", "instagram"), ("bizops", "online store"),
     ("finance", "invoice"), ("finance", "invoices"), ("finance", "cheque"), ("finance", "cheques"), ("finance", "money"), ("finance", "hst"), ("finance", "commission"), ("finance", "commissions"),
     ("director", "record a self-tape"), ("director", "record my self-tape"), ("director", "film a self-tape"), ("director", "film my self-tape"), ("director", "self-tape recording"), ("director", "edit my self-tape"), ("director", "edit the self-tape"),
@@ -476,9 +483,12 @@ pub struct SwitchboardConfig {
 /// Librarian, which runs only as its scheduled script (internal / scheduled Librarian calls are
 /// not switchboard turns and stay ungated).
 pub const DEFAULT_FROZEN_AGENTS: [&str; 2] = ["booking", "librarian"];
+/// Section pass: Ops is an unused placeholder (no schedule, never dispatched, only a Maps tool),
+/// so it starts frozen too until Nic gives it a job. Thaw it on the master switchboard.
+pub const FROZEN_PLACEHOLDER_AGENTS: [&str; 1] = ["ops"];
 
 fn default_frozen_agents() -> Vec<String> {
-    DEFAULT_FROZEN_AGENTS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_FROZEN_AGENTS.iter().chain(FROZEN_PLACEHOLDER_AGENTS.iter()).map(|s| s.to_string()).collect()
 }
 
 impl Default for SwitchboardConfig {
@@ -972,7 +982,8 @@ pub struct WorkerConfig {
 }
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { enabled: true, max_iterations: 3, verify: false, offload_code: true, librarian_audit: true }
+        // Section pass: Prompter → Designer → Coder, max two revision rounds, no Librarian audit.
+        Self { enabled: true, max_iterations: 2, verify: false, offload_code: true, librarian_audit: false }
     }
 }
 
@@ -1138,6 +1149,11 @@ const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
 /// Section pass: the frozen Booking Desk loses every tool pill and skill, and its "messages" /
 /// "texts" routing phrases (Tony reads Gmail and WhatsApp himself).
 const MIGRATE_BOOKING_NO_TOOLS: &str = "booking-no-tools";
+/// Section pass: freeze the Ops placeholder once on an existing install (a later thaw sticks).
+const MIGRATE_FREEZE_OPS: &str = "freeze-ops";
+/// Section pass: the build chain drops the Librarian (no audit stage) and gets two revision
+/// rounds; a saved 3 (the old default) becomes 2, any other choice is kept.
+const MIGRATE_BUILD_CHAIN: &str = "build-chain-no-librarian";
 /// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
@@ -1157,6 +1173,9 @@ pub(crate) const MIGRATE_BOOKING_NAMES: &str = "booking-names";
 /// Migration id: Tony's read-only Finance tool (Section 11.10): the `finance` server is granted to
 /// Tony only, once (`grant_finance_read`).
 pub(crate) const MIGRATE_FINANCE_READ: &str = "finance-read";
+/// Migration id: contracting phrases left the frozen Ops for Tony (`ops_phrases_to_tony`), for a
+/// config that already ran an earlier `routing-resplit` which put them on Ops.
+pub(crate) const MIGRATE_OPS_PHRASES_TO_TONY: &str = "ops-phrases-to-tony";
 /// The `ops` triggers that moved to `bizops` / `finance` (removed once from a saved config).
 const MOVED_OFF_OPS: [&str; 8] = ["operations", "business", "finance", "invoice", "receipt", "bf supplements", "contracting", "quote"];
 
@@ -1212,6 +1231,21 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
         strip_booking_tools(cfg);
         cfg.migrations.push(MIGRATE_BOOKING_NO_TOOLS.into());
     }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_FREEZE_OPS) {
+        for a in FROZEN_PLACEHOLDER_AGENTS {
+            if !cfg.switchboard.frozen_agents.iter().any(|f| f == a) {
+                cfg.switchboard.frozen_agents.push(a.into());
+            }
+        }
+        cfg.migrations.push(MIGRATE_FREEZE_OPS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BUILD_CHAIN) {
+        cfg.worker.librarian_audit = false;
+        if cfg.worker.max_iterations == 3 {
+            cfg.worker.max_iterations = 2;
+        }
+        cfg.migrations.push(MIGRATE_BUILD_CHAIN.into());
+    }
     if !cfg.migrations.iter().any(|m| m == MIGRATE_LOCAL_SAFE_DEFAULTS) {
         apply_local_safe_defaults(cfg);
         cfg.migrations.push(MIGRATE_LOCAL_SAFE_DEFAULTS.into());
@@ -1228,6 +1262,10 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
         restore_booking_names(cfg);
         cfg.migrations.push(MIGRATE_BOOKING_NAMES.into());
     }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_PHRASES_TO_TONY) {
+        ops_phrases_to_tony(cfg);
+        cfg.migrations.push(MIGRATE_OPS_PHRASES_TO_TONY.into());
+    }
     if !cfg.migrations.iter().any(|m| m == MIGRATE_FINANCE_READ) {
         grant_finance_read(cfg);
         cfg.migrations.push(MIGRATE_FINANCE_READ.into());
@@ -1240,6 +1278,23 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
 pub(crate) fn grant_finance_read(cfg: &mut OsConfig) {
     for m in cfg.mcps.iter_mut().filter(|m| m.id == "finance") {
         m.agents = Some(vec!["general".into()]);
+    }
+}
+
+/// Once: the contracting phrases (`OPS_PHRASES_TO_TONY`) leave Ops' names and topics and become
+/// Tony's topics (deduped, case-insensitive). Ops' infra triggers and anything else stay.
+pub(crate) fn ops_phrases_to_tony(cfg: &mut OsConfig) {
+    let norm = super::routing::normalize;
+    let moved = |p: &String| OPS_PHRASES_TO_TONY.iter().any(|k| norm(k) == norm(p));
+    if let Some(o) = cfg.routing.agents.get_mut("ops") {
+        o.names.retain(|n| !moved(n));
+        o.domains.retain(|d| !moved(d));
+    }
+    let g = cfg.routing.agents.entry("general".to_string()).or_default();
+    for p in OPS_PHRASES_TO_TONY {
+        if !g.domains.iter().any(|x| norm(x) == norm(p)) {
+            g.domains.push(p.to_string());
+        }
     }
 }
 
@@ -2448,8 +2503,9 @@ mod tests {
         let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "memory": { "storage": "local" } })).unwrap();
         assert_eq!(old.feedback.sensitivity, 1);
         assert_eq!(old.feedback.narration_engine, "kokoro");
-        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && old.worker.librarian_audit);
-        assert_eq!(old.worker.max_iterations, 3);
+        // Section pass: Prompter -> Designer -> Coder (no Librarian), two revision rounds.
+        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && !old.worker.librarian_audit);
+        assert_eq!(old.worker.max_iterations, 2);
         assert_eq!((old.memory.notes_dir.as_str(), old.memory.staging_dir.as_str()), ("", ""));
         let hot: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": 7 }, "worker": { "maxIterations": 99 } })).unwrap();
         assert_eq!((hot.feedback.sensitivity, hot.worker.max_iterations), (3, 15));
@@ -2463,7 +2519,7 @@ mod tests {
         assert!(validate(&next).is_ok());
         let v = serde_json::to_value(&next).unwrap();
         assert_eq!(v["feedback"]["narrationEngine"], "kokoro");
-        assert_eq!(v["worker"]["librarianAudit"], true);
+        assert_eq!(v["worker"]["librarianAudit"], false, "section pass: no Librarian in the build chain");
         let mut bad = OsConfig::default();
         bad.feedback.narration_engine = "elevenlabs".into();
         assert!(validate(&bad).is_err());
@@ -2511,7 +2567,7 @@ mod tests {
             assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
         }
         assert_eq!(agents["booking"], trig(BOOKING_NAMES, &[]), "Booking has its names and no topics");
-        for topic in ["casting", "audition", "talent agent"] {
+        for topic in ["booking", "casting", "audition", "talent agent"] {
             assert!(!agents["booking"].names.iter().any(|n| n == topic), "{topic} is not a Booking name");
         }
         // A WhatsApp read is Tony's live tool, and Whisper's "what's up" greeting used to land on
@@ -2530,6 +2586,28 @@ mod tests {
     /// owners (a phrase of the user's own stays), empties Booking, adds the new owners' phrases,
     /// runs once, and leaves a fresh config equal to the defaults.
     #[test]
+    fn contracting_moves_off_a_frozen_ops_to_tony_once() {
+        use super::super::routing::{resolve, RouteKind};
+        let mut cfg = OsConfig::default();
+        // A config that already ran the older resplit, which put contracting on Ops.
+        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_FREEZE_OPS.into(), MIGRATE_BUILD_CHAIN.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into(), MIGRATE_BOOKING_NAMES.into()];
+        cfg.routing.agents.insert("ops".into(), trig(&["ops", "infra", "job desk"], &["droplet", "grafana", "masonry", "Quote", "estimates", "subcontractor"]));
+        cfg.routing.agents.get_mut("general").unwrap().domains.retain(|d| d != "masonry" && d != "quote");
+        apply_migrations(&mut cfg);
+        let a = &cfg.routing.agents;
+        assert_eq!(a["ops"], trig(&["ops", "infra"], &["droplet", "grafana"]), "infra and the user's own phrase stay on Ops");
+        for p in OPS_PHRASES_TO_TONY {
+            assert_eq!(a["general"].domains.iter().filter(|d| d.eq_ignore_ascii_case(p)).count(), 1, "{p} is Tony's once");
+        }
+        let r = resolve("send the masonry quote to the subcontractor", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own));
+        // Once: putting a phrase back on Ops by hand sticks.
+        cfg.routing.agents.get_mut("ops").unwrap().domains.push("masonry".into());
+        apply_migrations(&mut cfg);
+        assert!(cfg.routing.agents["ops"].domains.contains(&"masonry".to_string()));
+    }
+
+    #[test]
     fn routing_resplit_moves_exactly_the_moved_phrases_once() {
         use super::super::routing::resolve;
         let mut cfg = OsConfig::default();
@@ -2543,14 +2621,16 @@ mod tests {
         // Booking keeps only its own names (the topic-ish "booking" / "casting" / "audition" go).
         assert_eq!(a["booking"], trig(BOOKING_NAMES, &[]));
         assert!(a["ops"].domains.contains(&"grafana".to_string()) && !a["ops"].domains.iter().any(|d| d == "schedule" || d == "calendar"));
-        assert!(a["ops"].domains.contains(&"masonry".to_string()) && a["ops"].names.contains(&"job desk".to_string()));
+        // Contracting is Tony's while Ops is frozen, not Ops'.
+        assert!(!a["ops"].domains.iter().any(|d| d == "masonry") && !a["ops"].names.iter().any(|n| n == "job desk"));
+        assert!(a["general"].domains.contains(&"masonry".to_string()) && a["general"].domains.contains(&"job desk".to_string()));
         assert!(a["bizops"].domains.contains(&"shopify".to_string()) && a["bizops"].domains.contains(&"instagram".to_string()));
         for gone in ["invoice", "quote", "job site", "subcontractor", "contracting", "masonry"] {
             assert!(!a["bizops"].domains.iter().any(|d| d == gone), "{gone} left bizops");
         }
         assert!(a["finance"].domains.contains(&"invoice".to_string()) && a["finance"].domains.contains(&"commissions".to_string()));
         assert!(a["general"].domains.contains(&"calendar".to_string()) && a["general"].domains.contains(&"audition".to_string()));
-        for (text, role) in [("send the masonry quote to the subcontractor", "ops"), ("how many bf supplements orders on instagram", "bizops"), ("log the hst on that invoice", "finance"), ("edit my self-tape for the audition", "director")] {
+        for (text, role) in [("send the masonry quote to the subcontractor", "general"), ("how many bf supplements orders on instagram", "bizops"), ("log the hst on that invoice", "finance"), ("edit my self-tape for the audition", "director")] {
             assert_eq!(resolve(text, &cfg).role.as_deref(), Some(role), "{text}");
         }
         for text in ["check the casting call availability", "schedule the audition", "did imperious send the bookings"] {
@@ -2784,7 +2864,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_FINANCE_READ.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_OPS_PHRASES_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string()]);
     }
 
     #[test]
@@ -2981,13 +3061,13 @@ mod tests {
     #[test]
     fn switchboard_defaults_legacy_and_camel_case() {
         let d = OsConfig::default();
-        // Booking and the Librarian (scheduled script only) are frozen on a fresh install.
-        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // Booking, the Librarian (scheduled script only) and the Ops placeholder are frozen on a fresh install.
+        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
-        // An os.json saved before the switchboard: both frozen, migration still to run.
+        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian", "ops"], "frozenTools": [] }));
+        // An os.json saved before the switchboard: all three frozen, migration still to run.
         let old: OsConfig = serde_json::from_str(r#"{"osName":"Tony"}"#).unwrap();
-        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         // A saved choice is kept as is (Nic thawed Booking).
         let thawed: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":[],"frozenTools":["instagram"]}}"#).unwrap();
         assert_eq!((thawed.switchboard.frozen_agents.len(), thawed.switchboard.frozen_tools.clone()), (0, vec!["instagram".to_string()]));
@@ -3093,11 +3173,11 @@ mod tests {
             assert!(!cfg.skills.grants.contains_key(n), "{n}");
         }
         assert_eq!(who("daily-standup"), vec!["ops"], "Tony's grant is dropped, Ops keeps its own");
-        // 4. Booking and the Librarian frozen, version set, saved.
-        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // 4. Booking, the Librarian and the Ops placeholder frozen, version set, saved.
+        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         let on_disk: OsConfig = serde_json::from_str(&std::fs::read_to_string(dir.join("os.json")).unwrap()).unwrap();
         assert_eq!(on_disk.switchboard.version, 1);
-        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string()]);
+        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string(), "ops".to_string()]);
         // 5. Never twice: Nic re-grants git to Tony and re-enables maps; a restart keeps both, no new backup.
         os.update(|c| {
             c.mcps.iter_mut().find(|m| m.id == "git").unwrap().agents = Some(vec!["coder".into(), "general".into()]);
@@ -3113,6 +3193,32 @@ mod tests {
         let n = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-tool-owners")).count();
         assert_eq!(n, 1, "the migration never runs twice");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_build_chain_drops_the_librarian_and_an_old_default_of_3_becomes_2_once() {
+        let mut cfg: OsConfig = serde_json::from_value(json!({ "worker": { "maxIterations": 3, "librarianAudit": true } })).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!((cfg.worker.max_iterations, cfg.worker.librarian_audit), (2, false));
+        // A deliberate choice is kept, and a later change sticks.
+        let mut picked: OsConfig = serde_json::from_value(json!({ "worker": { "maxIterations": 5 } })).unwrap();
+        apply_migrations(&mut picked);
+        assert_eq!(picked.worker.max_iterations, 5);
+        cfg.worker.librarian_audit = true;
+        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut again);
+        assert!(again.worker.librarian_audit);
+    }
+
+    #[test]
+    fn ops_is_frozen_once_and_a_later_thaw_sticks() {
+        let mut cfg: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":["booking"],"frozenTools":[]}}"#).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.switchboard.frozen_agents, vec!["booking".to_string(), "ops".to_string()]);
+        cfg.switchboard.frozen_agents.retain(|a| a != "ops"); // Nic gives Ops a job and thaws it
+        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut again);
+        assert_eq!(again.switchboard.frozen_agents, vec!["booking".to_string()]);
     }
 
     #[test]

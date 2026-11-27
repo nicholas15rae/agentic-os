@@ -3655,12 +3655,14 @@ mod tests {
     #[test]
     fn allm_agents_are_the_live_mapped_roles() {
         let cfg = OsConfig::default();
-        assert_eq!(allm_agents(&cfg), ["bizops", "coder", "designer", "director", "finance", "ops", "prompter"]);
+        // Ops starts frozen (a placeholder), so it is not AnythingLLM-backed until thawed.
+        assert_eq!(allm_agents(&cfg), ["bizops", "coder", "designer", "director", "finance", "prompter"]);
         let mut c = OsConfig::default();
         c.switchboard.frozen_agents.push("designer".into());
         assert!(!allm_agents(&c).contains(&"designer".to_string()));
         // Default grants: what those agents need (Tony-only servers never ride along).
         let mut d = OsConfig::default();
+        d.switchboard.frozen_agents.retain(|a| a != "ops"); // Ops holds the Maps grant once thawed
         for m in d.mcps.iter_mut() {
             m.enabled = true;
         }

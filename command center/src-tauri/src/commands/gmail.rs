@@ -830,8 +830,7 @@ pub(crate) async fn create_draft_approved(state: &DispatchState, os: &OsState, b
     if !cfg.mcps.iter().any(|m| m.id == "gmail" && m.enabled) {
         return Err("Gmail is switched off — enable it in Settings → Skills & MCP Library".into());
     }
-    // Gmail is part of Tony's always-on base (Section 2): only the master switchboard freezes it,
-    // like calendar's approved add.
+    // Gmail is in Tony's always-on base (section pass): only the master switchboard freezes it.
     if let Some(e) = super::mcp::tony_frozen_reason(&cfg, &os.modes.effective(), "gmail", "gmail").map(|r| format!("{}: {r}", super::modes::MODE_FROZEN)) {
         return Err(e);
     }

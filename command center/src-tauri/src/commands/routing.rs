@@ -704,6 +704,9 @@ mod tests {
         /// `cfg.os_name` for this case; missing = the default ("Tony").
         #[serde(default)]
         os_name: Option<String>,
+        /// `switchboard.frozen_agents` for this case; missing = the default set.
+        #[serde(default)]
+        frozen: Option<Vec<String>>,
     }
 
     fn kind_str(k: RouteKind) -> &'static str {
@@ -730,7 +733,7 @@ mod tests {
 
     #[test]
     fn tony_is_never_a_delegation_target() {
-        let cfg = OsConfig::default();
+        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
         let r = resolve("ask tony to ask the coder to fix it", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
         assert!(r.task.contains("fix"));
@@ -748,7 +751,7 @@ mod tests {
             assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
         }
         // Tony's name beats a topic (it used to be: a sub-agent topic wins over a self address).
-        let cfg = OsConfig::default();
+        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
         for text in ["tony check my whatsapp messages", "hey tony, render the reel", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("general"), RouteKind::Own, "high"), "{text}");
@@ -819,7 +822,7 @@ mod tests {
     /// topic — in `route_for_turn` too. Mirrors router.test.ts.
     #[test]
     fn only_a_real_address_beats_a_topic() {
-        let cfg = OsConfig::default();
+        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
         let mut friday = OsConfig::default();
         friday.os_name = "Friday".into();
         // A mention (a noun, an object) leaves the topic's agent in charge.
@@ -896,6 +899,14 @@ mod tests {
         }
     }
 
+    /// The default config with the Ops placeholder thawed, for priority tests that use Ops' infra
+    /// topics as "another agent's topic".
+    fn ops_thawed() -> OsConfig {
+        let mut c = OsConfig::default();
+        c.switchboard.frozen_agents.retain(|a| a != "ops");
+        c
+    }
+
     #[test]
     fn shared_fixtures() {
         let raw = include_str!("../../../src/features/dispatcher/router.fixtures.json");
@@ -904,12 +915,17 @@ mod tests {
         assert!(fixtures.len() >= 10, "expected a decent fixture set");
         for f in &fixtures {
             let mut named = OsConfig::default();
-            let cfg = match &f.os_name {
-                Some(n) => {
-                    named.os_name = n.clone();
+            let cfg = match (&f.os_name, &f.frozen) {
+                (None, None) => &default_cfg,
+                (n, fz) => {
+                    if let Some(n) = n {
+                        named.os_name = n.clone();
+                    }
+                    if let Some(fz) = fz {
+                        named.switchboard.frozen_agents = fz.clone();
+                    }
                     &named
                 }
-                None => &default_cfg,
             };
             let r = resolve(&f.text, cfg);
             assert_eq!(r.role, f.role, "role mismatch for {:?}", f.text);
@@ -1122,6 +1138,19 @@ mod tests {
             assert_ne!(r.kind, RouteKind::Named, "{text}: {r:?}");
             assert!(matches!(direct_tool(text), Some("gmail" | "calendar")), "{text}");
         }
+        // Addressing the (frozen) Booking Desk still names it in a mail read (A2 review); the
+        // switchboard then holds it with Tony and adds the FROZEN note.
+        for (text, conf) in [
+            ("booking desk, any new emails about the shoot?", "medium"),
+            ("tell the booking desk to check my email for the callback", "high"),
+            ("booking desk check my inbox", "high"),
+            ("hey booking agent, any emails?", "medium"),
+            ("hey booking desk any new emails", "medium"),
+            ("Booking desk: any emails today?", "medium"),
+        ] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("booking"), RouteKind::Named, conf), "{text}");
+        }
         // Addressing a desk still hands a mail read over (a frozen one is then held with Tony).
         for (text, conf) in [("director, any new emails about the shoot?", "medium"), ("tell the director to check my email for the callback", "high"), ("director check my inbox", "high"), ("hey director, any emails?", "medium")] {
             let r = resolve(text, &cfg);
@@ -1146,11 +1175,13 @@ mod tests {
         let cfg = OsConfig::default();
         for text in ["Okay, booking emails from today?", "okay booking emails from today?", "so booking emails from today?", "ok audition emails this week?", "So, audition email check", "hey booking emails from today?", "Hey, audition email check"] {
             let r = resolve(text, &cfg);
-            // Tony's: by default, or (audition is his own topic since the Section 20 re-split) Own.
-            assert!(matches!((r.role.as_deref(), r.kind), (None, RouteKind::Default) | (Some("general"), RouteKind::Own)), "{text}: {r:?}");
+            // Tony's: nothing matched, or (since the section 20-21 re-split) his own acting topic.
+            assert!(r.kind != RouteKind::Named && matches!(r.role.as_deref(), None | Some("general")), "{text}: {r:?}");
             assert_eq!(direct_tool(text), Some("gmail"), "{text}");
         }
-        for text in ["Okay, booking: any emails today?", "so, booking desk, any new emails?", "hey booking agent any emails?", "hey booking any new emails", "hi booking agent did I get any emails?", "hey booking email Sam about the shoot"] {
+        // The Booking Desk's names are "booking desk" / "booking agent" / "B&Co" (bare "booking" /
+        // "casting" are Tony's topics now).
+        for text in ["Okay, booking desk: any emails today?", "so, booking desk, any new emails?", "hey booking agent any emails?", "hey booking desk any new emails", "hi booking agent did I get any emails?", "hey booking agent email Sam about the shoot", "yo booking desk check my inbox"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named), "{text}: {r:?}");
         }
@@ -1158,7 +1189,7 @@ mod tests {
 
     #[test]
     fn domain_tie_break_follows_role_order() {
-        let cfg = OsConfig::default();
+        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
         // bizops "inventory" (9) vs designer "animation" (9): bizops comes first.
         let r = resolve("inventory animation", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("bizops"), RouteKind::Domain));

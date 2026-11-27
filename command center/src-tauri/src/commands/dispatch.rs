@@ -1557,6 +1557,7 @@ pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messa
     let cfg = state.snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
+    // Tony's turn never auto-overflows (section 20-21 safe defaults: `shape_tony_turn`).
     let shaped = first.clone().map(|p| os_core::shape_tony_turn(&osc, vec![p]).0).unwrap_or_default();
     // An AnythingLLM shim (any id: `is_allm_shim`) never streams: only `call` folds Tony's turn
     // context out of the last user message, which the shim embeds as its search query.

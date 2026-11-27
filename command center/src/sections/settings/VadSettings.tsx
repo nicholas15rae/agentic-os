@@ -13,7 +13,7 @@ import { transcribeWav } from "@/features/voice/engines";
 /**
  * `vad.partialMs`: live captions while you speak, one Whisper pass on the clip so far every this
  * many ms of speech (GPU STT only); 0 (the default since Section 20.5) turns them off. The phone
- * keeps streaming its audio either way, so the gateway's final needs no WAV upload.
+ * still streams its audio with captions off, so the gateway's final needs no upload.
  */
 export function LiveCaptionsField({ value, onChange }: { value: number | undefined; onChange: (ms: number) => void }) {
   const ms = partialMsFrom(value);
@@ -30,7 +30,7 @@ export function LiveCaptionsField({ value, onChange }: { value: number | undefin
         </Select>
       </label>
       <p className="mt-1 text-[11px] text-ink-3">
-        What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. Off is the default: the phone still streams its audio for a quick final, just without captions.
+        What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. The final transcript is the same either way.
       </p>
     </div>
   );

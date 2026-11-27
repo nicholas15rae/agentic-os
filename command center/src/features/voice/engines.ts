@@ -505,6 +505,7 @@ export class WhisperStt implements SttEngine {
     const everyMs = partialMsFrom(vad?.partialMs);
     // Captions off: the desktop runs no caption loop; the phone still streams (partials off) so
     // the gateway's final comes from audio it already has instead of a WAV upload over NetBird.
+    // Captions are opt-in per listen (`opts.partials`, default no).
     const captionsOff = everyMs <= 0;
     if (captionsOff && !isAndroidApp()) return {};
     const wanted = () => !captionsOff && (partials?.() ?? false);

@@ -10,9 +10,9 @@ import { useToasts } from "@/features/reminders/notify";
 import { isDesktopApp } from "@/stores/settings";
 import { AgentInbox } from "@/features/comms/AgentInbox";
 import { unreadCount, useAgentInbox } from "@/features/comms/agent-inbox";
+import { UNTRUSTABLE_CHANNELS, canSkipCard, isPermissionRequired, whatsappSend, type CommsContactBody, type CommsSendBody, type SendOrigin } from "@/features/comms/send-contract";
 import { PhoneBook } from "@/features/contacts/PhoneBookPanel";
 import { linkOrCreate } from "@/features/contacts/phonebook-store";
-import { UNTRUSTABLE_CHANNELS, canSkipCard, isPermissionRequired, whatsappSend, type CommsContactBody, type CommsSendBody, type SendOrigin } from "@/features/comms/send-contract";
 
 interface Thread {
   thread: string;
@@ -240,21 +240,6 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
     }
   };
 
-  const name = thread.contactName || thread.contact;
-  const [filing, setFiling] = useState(false);
-  const file = async () => {
-    setFiling(true);
-    try {
-      await linkOrCreate({ name: thread.contact !== thread.address ? thread.contact : "", phone: thread.address, source: "messages" });
-      useToasts.getState().push({ title: "Added to the phone book", body: "Set its group, company and notes in Phone book.", tone: "info" });
-      onChange();
-    } catch (e) {
-      useToasts.getState().push({ title: "Not added", body: String(e), tone: "error" });
-    } finally {
-      setFiling(false);
-    }
-  };
-
   const trustable = !UNTRUSTABLE_CHANNELS.includes(thread.channel.toLowerCase());
   const setTrust = (trusted: boolean, confirmed: boolean) => {
     const req: CommsContactBody = { address: thread.address, name: thread.contact, trusted, confirmed, channel: thread.channel };
@@ -272,6 +257,21 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
     )
       .then(onChange)
       .catch((e) => useToasts.getState().push({ title: "Instant Send not changed", body: String(e), tone: "error" }));
+
+  const name = thread.contactName || thread.contact;
+  const [filing, setFiling] = useState(false);
+  const file = async () => {
+    setFiling(true);
+    try {
+      await linkOrCreate({ name: thread.contact !== thread.address ? thread.contact : "", phone: thread.address, source: "messages" });
+      useToasts.getState().push({ title: "Added to the phone book", body: "Set its group, company and notes in Phone book.", tone: "info" });
+      onChange();
+    } catch (e) {
+      useToasts.getState().push({ title: "Not added", body: String(e), tone: "error" });
+    } finally {
+      setFiling(false);
+    }
+  };
 
   return (
     <section className="glass-chat flex min-h-[420px] flex-col rounded-[20px]">

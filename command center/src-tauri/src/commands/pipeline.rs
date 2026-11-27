@@ -2528,11 +2528,10 @@ mod tests {
                 assert!(e.contains("is switched off"), "{tool}: {e}");
                 let e = run(env(&|c| c.switchboard.frozen_tools = vec![server.into()]), p.clone(), false).await.unwrap_err();
                 assert_eq!(e, format!("MODE_FROZEN: {server} is frozen on the master switchboard"), "{tool}");
-                // Section 2: Gmail and Calendar are Tony's always-on base: a mode never freezes them.
                 let builder = env(&|_| {});
                 builder.modes.set_active("builder").unwrap();
-                let e = run(builder, p.clone(), false).await.err().unwrap_or_default();
-                assert!(!e.starts_with("MODE_FROZEN"), "{tool}: {e}");
+                // Gmail and Calendar are Tony's always-on base (section pass): Builder never freezes them.
+                assert!(!run(builder, p.clone(), false).await.unwrap_err().starts_with("MODE_FROZEN"), "{tool}");
                 let e = run(env(&|c| c.privacy.kill_switch = true), p.clone(), false).await.unwrap_err();
                 assert!(e.starts_with("kill switch is on"), "{tool}: {e}");
             }

@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, QrCode, RefreshCw, ScanLine, ShieldCheck, TimerReset } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { isTauri } from "@/lib/platform";
-import { describeSecurityError, parseSecurityError, securityApi, type AuditEntry, type SecurityStatus } from "./api";
+import { describeSecurityError, parseSecurityError, securityApi, type AuditEntry, type SessionTimeouts } from "./api";
 import { StepUpCancelled, useSecurity } from "./store";
 import { useCompanionInbox } from "./SecurityGate";
+import { DevicesCard } from "./Devices";
 import { AUDIT_FILTERS, clampMinutes, filterAudit, IDLE_LOCK_LIMITS, REAUTH_LIMITS, type AuditFilter } from "./audit-filter";
 import { encodeQr, qrSvgPath } from "./qr";
 import { CameraCapture } from "@/features/finance/CameraCapture";
@@ -64,7 +65,7 @@ export function SecurityCard() {
   return (
     <Card
       title="Security"
-      hint={`App lock after ${status.idleLockMinutes} min idle and every ${status.reauthMinutes} min regardless; Trading, Finance and Settings are read-only until a PIN step-up (${status.elevationIdleMinutes} min idle, ${status.elevationMaxMinutes} min max). Tunables: data/security/security.config.json. Admin: gabagool-cli.`}
+      hint={`App lock after ${status.idleLockMinutes} min without input (talking to Tony counts) and every ${status.reauthMinutes} min regardless; Trading, Finance and Settings are read-only until a PIN step-up, which stays open while you're active (${status.elevationIdleMinutes} min unused, ${status.elevationMaxMinutes} min max). Admin: gabagool-cli.`}
       action={
         <button className="pill-glass !h-8 text-[11px]" onClick={load} aria-label="Refresh audit">
           <RefreshCw size={12} />
@@ -78,7 +79,12 @@ export function SecurityCard() {
         <span className="font-mono text-ink-3">{status.deviceId}</span>
       </div>
 
-      <LockTimers status={status} onSaved={setStatus} />
+      {!phone && !status.companionDevice && <DevicesCard />}
+
+      <TimeoutEditor
+        current={{ idleLockMinutes: status.idleLockMinutes, reauthMinutes: status.reauthMinutes, elevationIdleMinutes: status.elevationIdleMinutes, elevationMaxMinutes: status.elevationMaxMinutes, persistAcrossRestarts: status.persistAcrossRestarts ?? false }}
+        onSaved={setStatus}
+      />
 
       {!phone && <PairingQr paired={status.companionPaired} />}
 
@@ -163,24 +169,30 @@ export function SecurityCard() {
   );
 }
 
-/** Idle lock (5–120 min) and hard re-auth (30–720 min); saving needs a Settings step-up. */
-function LockTimers({ status, onSaved }: { status: SecurityStatus; onSaved: (s: SecurityStatus) => void }) {
-  const [idle, setIdle] = useState(String(status.idleLockMinutes));
-  const [reauth, setReauth] = useState(String(status.reauthMinutes));
+const TIMEOUT_FIELDS: { key: Exclude<keyof SessionTimeouts, "persistAcrossRestarts">; label: string; min: number; max: number; hint: string }[] = [
+  { key: "idleLockMinutes", label: "Lock after idle", min: IDLE_LOCK_LIMITS.min, max: IDLE_LOCK_LIMITS.max, hint: "No input (or talk with Tony) for this long locks the app" },
+  { key: "reauthMinutes", label: "Re-verify every", min: REAUTH_LIMITS.min, max: REAUTH_LIMITS.max, hint: "Locks after this long since you last unlocked, even while active" },
+  { key: "elevationIdleMinutes", label: "Step-up unused", min: 1, max: 30, hint: "Trading / Finance / Settings go back to read-only after this long without activity" },
+  { key: "elevationMaxMinutes", label: "Step-up max", min: 1, max: 60, hint: "…and after this long in any case" },
+];
+
+/** The four timeouts plus restart persistence, editable (a Settings PIN step-up confirms the
+ *  change; Rust clamps it). Idle lock 5–120 min and hard re-auth 30–720 min (Section 24). */
+function TimeoutEditor({ current, onSaved }: { current: SessionTimeouts; onSaved: (s: Awaited<ReturnType<typeof securityApi.setTimeouts>>) => void }) {
+  const [draft, setDraft] = useState<SessionTimeouts>(current);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
-  useEffect(() => {
-    setIdle(String(status.idleLockMinutes));
-    setReauth(String(status.reauthMinutes));
-  }, [status.idleLockMinutes, status.reauthMinutes]);
-  const i = clampMinutes(Number(idle), IDLE_LOCK_LIMITS);
-  const r = clampMinutes(Number(reauth), REAUTH_LIMITS);
-  const dirty = i !== status.idleLockMinutes || r !== status.reauthMinutes;
+  useEffect(() => setDraft(current), [current.idleLockMinutes, current.reauthMinutes, current.elevationIdleMinutes, current.elevationMaxMinutes, current.persistAcrossRestarts]);
+  // What will actually be saved: every field rounded and clamped to its range.
+  const next: SessionTimeouts = { ...draft };
+  for (const f of TIMEOUT_FIELDS) next[f.key] = clampMinutes(Number(draft[f.key]), f);
+  const dirty = TIMEOUT_FIELDS.some((f) => next[f.key] !== current[f.key]) || draft.persistAcrossRestarts !== current.persistAcrossRestarts;
+  const adjusted = TIMEOUT_FIELDS.some((f) => Number(draft[f.key]) !== next[f.key]);
   const save = async () => {
     setBusy(true);
     setNote(null);
     try {
-      const s = await withStepUp(() => securityApi.sessionSet(i, r));
+      const s = await withStepUp(() => securityApi.setTimeouts(next));
       onSaved(s);
       setNote(`Saved: lock after ${s.idleLockMinutes} min idle, re-verify every ${s.reauthMinutes} min.`);
     } catch (e) {
@@ -189,22 +201,36 @@ function LockTimers({ status, onSaved }: { status: SecurityStatus; onSaved: (s: 
       setBusy(false);
     }
   };
-  const field = "w-20 font-mono";
   return (
-    <div className="mt-3 flex flex-wrap items-end gap-3 text-[11px] text-ink-2">
-      <label className="flex flex-col gap-1">
-        Idle lock (min, {IDLE_LOCK_LIMITS.min}–{IDLE_LOCK_LIMITS.max})
-        <Input type="number" min={IDLE_LOCK_LIMITS.min} max={IDLE_LOCK_LIMITS.max} value={idle} onChange={(e) => setIdle(e.target.value)} className={field} aria-label="Idle lock minutes" />
+    <div className="mt-3 rounded-[12px] border border-white/[0.06] p-3" aria-label="Session timeouts">
+      <p className="label-caps mb-2 text-ink-3">Timeouts (minutes)</p>
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+        {TIMEOUT_FIELDS.map((f) => (
+          <label key={f.key} className="text-[11px] text-ink-2" title={f.hint}>
+            {f.label} ({f.min}–{f.max})
+            <Input
+              type="number"
+              min={f.min}
+              max={f.max}
+              value={draft[f.key]}
+              onChange={(e) => setDraft({ ...draft, [f.key]: Number(e.target.value) })}
+              aria-label={f.label}
+              className="mt-1 font-mono"
+            />
+          </label>
+        ))}
+      </div>
+      <label className="mt-2 flex items-center gap-2 text-[11px] text-ink-2" title="An unlocked session comes back after the app restarts, if it is still inside the idle and re-verify windows and nothing locked it in between. Step-ups never carry over.">
+        <input type="checkbox" checked={!!draft.persistAcrossRestarts} onChange={(e) => setDraft({ ...draft, persistAcrossRestarts: e.target.checked })} />
+        Stay unlocked across app restarts
       </label>
-      <label className="flex flex-col gap-1">
-        Hard re-auth (min, {REAUTH_LIMITS.min}–{REAUTH_LIMITS.max})
-        <Input type="number" min={REAUTH_LIMITS.min} max={REAUTH_LIMITS.max} value={reauth} onChange={(e) => setReauth(e.target.value)} className={field} aria-label="Hard re-auth minutes" />
-      </label>
-      <button className="pill-glass !h-8 text-[11px]" disabled={busy || !dirty} onClick={() => void save()} title="Needs your PIN (Settings step-up)">
-        {busy ? <Loader2 size={12} className="animate-spin" /> : <TimerReset size={12} />} Save timers
-      </button>
-      {dirty && (Number(idle) !== i || Number(reauth) !== r) && <span className="text-ink-3">Will save as {i} / {r} min.</span>}
-      {note && <span className="w-full text-ink-3">{note}</span>}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button className="pill-glass !h-8 text-[11px]" disabled={busy || !dirty} onClick={() => void save()} title="Needs your PIN (Settings step-up)">
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <TimerReset size={12} />} Save timeouts
+        </button>
+        {dirty && adjusted && <span className="text-[11px] text-ink-3">Will save as {TIMEOUT_FIELDS.map((f) => next[f.key]).join(" / ")} min.</span>}
+        {note && <span className="text-[11px] text-ink-3">{note}</span>}
+      </div>
     </div>
   );
 }

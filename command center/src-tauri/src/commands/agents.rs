@@ -3069,6 +3069,7 @@ pub(crate) async fn run_chat_streamed_into(state: &DispatchState, os: &OsState, 
     let cfg = state.snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
+    // Tony's turn never auto-overflows (`shape_tony_turn`); an AnythingLLM shim never streams.
     let shaped = first.map(|p| os_core::shape_tony_turn(&osc, vec![p]).0).unwrap_or_default();
     let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && !super::dispatch::is_allm_shim(p) && !os_core::is_remote(p)) else {
         return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
@@ -4607,7 +4608,10 @@ mod tests {
         assert_eq!(hold(r("coder", "Named"), false, "tell the coder to write a timer script", "operations").role, "coder");
         // On-duty agents and modes with no overlay are untouched; Tony's own turns too.
         assert_eq!(hold(r("coder", "Domain"), false, "write code", "builder"), r("coder", "Domain"));
-        assert_eq!(hold(r("ops", "Domain"), false, "check the droplet", "brainstorm"), r("ops", "Domain"));
+        assert_eq!(hold(r("bizops", "Domain"), false, "how is Corner Bakery doing", "brainstorm"), r("bizops", "Domain"));
+        // Ops is a frozen placeholder (section pass): a droplet question stays with Tony.
+        let h = hold(r("ops", "Domain"), false, "check the droplet", "brainstorm");
+        assert_eq!((h.role.as_str(), h.reason.as_str()), ("general", "Ops is frozen on the master switchboard"));
         assert_eq!(hold(r("general", "Self"), false, "hi", "operations"), r("general", "Self"));
         // Booking is frozen on the master switchboard: never runs, not even from its tab.
         for (kind, explicit, text) in [("Tab", true, "book a table"), ("Named", false, "hey booking desk, check my availability"), ("Domain", false, "casting call availability")] {

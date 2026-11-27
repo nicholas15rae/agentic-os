@@ -62,7 +62,7 @@ describe("STT Engine select", () => {
 });
 
 describe("Live captions (vad.partialMs)", () => {
-  it("sits with the other voice-detection settings, off by default (Section 20.5)", () => {
+  it("sits with the other voice-detection settings, off by default", () => {
     h.vad.partialMs = undefined; // an older settings file: the default applies
     const html = renderToStaticMarkup(<VoiceDetectionCard />);
     expect(html).toContain("Live captions");

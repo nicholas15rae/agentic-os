@@ -64,7 +64,7 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
     // Section 20.1: the frozen Booking Desk has no topics; acting logistics are Tony's, recording /
     // editing a self-tape the Director's. Its own names stay, so addressing it is Named and the
     // switchboard holds the turn with Tony's FROZEN note (mirrors os_core.rs `BOOKING_NAMES`).
-    booking: { names: ["booking", "booking desk", "booking agent", "B&Co"], domains: [] },
+    booking: { names: ["booking desk", "booking agent", "B&Co"], domains: [] },
     prompter: {
       names: ["prompter", "prompt builder", "spec writer", "architect prompt"],
       domains: ["write a prompt", "build a prompt", "break it into phases", "master prompt", "prompt for claude"],
@@ -88,11 +88,12 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
       names: ["librarian", "memory", "vault", "researcher"],
       domains: ["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"],
     },
-    // Section 20.2: ops = infra + contracting (the future Job Desk); bizops = the store / brand;
-    // money = finance; calendar, schedule, reminders and (for now) acting = Tony.
+    // Section 20.2: ops = infra; bizops = the store / brand; money = finance; calendar, schedule,
+    // reminders and (for now) acting = Tony. Contracting (the future Job Desk) is Tony's too while
+    // Ops is a frozen placeholder (mirrors os_core.rs `OPS_PHRASES_TO_TONY`).
     ops: {
-      names: ["ops", "infra", "infrastructure", "job desk"],
-      domains: ["droplet", "docker", "n8n", "server status", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates"],
+      names: ["ops", "infra", "infrastructure"],
+      domains: ["droplet", "docker", "n8n", "server status"],
     },
     bizops: {
       names: ["bizops", "operations manager", "ops manager", "business manager", "operations", "business"],
@@ -108,13 +109,14 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
         "system status", "switch model", "calendar", "schedule", "reminder", "reminders", "remind me",
         "audition", "auditions", "casting", "casting call", "casting email", "casting emails", "self-tape", "self tape", "callback", "wardrobe", "availability",
         "bookings", "talent agent", "my agent", "agency", "imperious", "draft email to agent",
+        "job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates",
       ],
     },
   },
 };
 
-/** What Rust seeds a fresh master switchboard with (os_core.rs `DEFAULT_FROZEN_AGENTS`). */
-const DEFAULT_ROUTER_FROZEN: readonly string[] = ["booking", "librarian"];
+/** What Rust seeds a fresh master switchboard with (os_core.rs `DEFAULT_FROZEN_AGENTS` + `FROZEN_PLACEHOLDER_AGENTS`). */
+const DEFAULT_ROUTER_FROZEN: readonly string[] = ["booking", "librarian", "ops"]; // + FROZEN_PLACEHOLDER_AGENTS
 /** The master switchboard's frozen agents the router skips (Section 20.1). The os store keeps it
  * in sync with os.json (`setRouterFrozenAgents`); until the config loads it is Rust's default. */
 let routerFrozen: readonly string[] = DEFAULT_ROUTER_FROZEN;

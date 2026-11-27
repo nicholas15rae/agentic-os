@@ -232,6 +232,7 @@ function CalmCard() {
     </Card>
   );
 }
+
 function WaveCard() {
   const s = useSettings();
   return (

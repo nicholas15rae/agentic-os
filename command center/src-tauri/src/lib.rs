@@ -345,6 +345,8 @@ pub fn run() {
                 }
                 // Play Place staging hub: <config dir>/build-hub.json (Thought-to-Product Phases 2–4).
                 app.state::<buildhub::HubState>().init(&dir);
+                // Section pass: widgets dropped into <config>/library-import join the library.
+                buildhub::import_library_drops(&app.state::<buildhub::HubState>(), &dir);
                 // Undo a Spotify session duck a crash left behind (<config dir>/media-duck.json).
                 audio::ducker::recover(&dir);
             }
@@ -469,6 +471,7 @@ pub fn run() {
             security::commands::security_audit_recent,
             security::commands::security_companion_sign,
             security::commands::security_companion_store_key,
+            security::commands::security_set_timeouts,
             security::commands::security_companion_pair_qr,
             security::commands::security_session_set,
             security::commands::security_companion_check_alerts,
@@ -742,6 +745,7 @@ pub fn run() {
             buildhub::build_steer,
             buildhub::build_to_repair,
             buildhub::build_set_max_iterations,
+            buildhub::build_archive,
             buildhub::build_requeue,
             buildhub::build_rework,
             buildhub::build_smoke,
@@ -755,6 +759,9 @@ pub fn run() {
             buildhub::delete_build_job,
             buildhub::clear_failed_jobs,
             buildhub::runner_dismiss,
+            buildhub::trash_list,
+            buildhub::trash_restore,
+            buildhub::trash_purge,
             buildhub::build_widget_url,
             buildhub::build_peek_status,
             buildhub::build_open_window,

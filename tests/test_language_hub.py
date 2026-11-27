@@ -71,6 +71,53 @@ class LanguageHubApi(unittest.TestCase):
         self.assertEqual((len(t), t[0]["level"], t[0]["got"]), (1, "intermediate", 5))
         self.assertEqual(self.c.put("/api/cc/lang/tracks/la", json={"level": "fluent"}).status_code, 400)
 
+    def test_srs_schedule_roundtrip_and_cleanup(self):
+        a = self.c.post("/api/cc/lang/entries", json=self.entry()).json()
+        self.assertIsNone(a["srs"])
+        listed = self.c.get("/api/cc/lang/entries").json()["entries"][0]
+        self.assertIsNone(listed["srs"])  # new card: due since it was saved
+        self.assertFalse(any(k.startswith("srs_") for k in listed))
+        s = {"ease": 2.5, "interval_days": 1, "due_at": 1_800_000_000_000, "reps": 1, "lapses": 0, "last_review": 1_799_913_600_000}
+        u = self.c.patch(f"/api/cc/lang/entries/{a['id']}", json={"srs": s, "mastery_status": "learning"})
+        self.assertEqual(u.status_code, 200, u.text)
+        self.assertEqual((u.json()["srs"]["reps"], u.json()["mastery_status"]), (1, "learning"))
+        self.c.patch(f"/api/cc/lang/entries/{a['id']}", json={"srs": {**s, "reps": 2, "interval_days": 6}})
+        got = self.c.get("/api/cc/lang/entries").json()["entries"][0]["srs"]
+        self.assertEqual((got["reps"], got["interval_days"], got["due_at"]), (2, 6, 1_800_000_000_000))
+        # A patch without srs keeps the schedule.
+        self.assertEqual(self.c.patch(f"/api/cc/lang/entries/{a['id']}", json={"favorite": True}).json()["srs"]["reps"], 2)
+        with lh.db() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM srs").fetchone()[0], 1)
+        self.c.post("/api/cc/lang/entries/delete", json={"ids": [a["id"]]})
+        with lh.db() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM srs").fetchone()[0], 0)
+
+    def test_srs_validation(self):
+        a = self.c.post("/api/cc/lang/entries", json=self.entry()).json()
+        url = f"/api/cc/lang/entries/{a['id']}"
+        clamped = self.c.patch(url, json={"srs": {"ease": 0.4, "interval_days": 99999, "due_at": 5, "reps": -3, "lapses": 2}}).json()["srs"]
+        self.assertEqual(clamped, {"ease": 1.3, "interval_days": 3650.0, "due_at": 5.0, "reps": 0, "lapses": 2, "last_review": None})
+        for bad in ({"ease": 2.5}, {"due_at": "soon"}, {"due_at": -1}, "x", {"due_at": 1, "ease": "nan"}):
+            self.assertEqual(self.c.patch(url, json={"srs": bad}).status_code, 400, bad)
+
+    def test_srs_migration_is_additive_on_an_old_library(self):
+        import sqlite3
+        old = lh.SCHEMA.split("CREATE TABLE IF NOT EXISTS srs(")[0]
+        conn = sqlite3.connect(lh.DB_PATH)
+        conn.executescript(old)
+        conn.execute("INSERT INTO phrases(id,timestamp,source_lang,target_lang,source_text,translated_text,category) VALUES('old',1,'it','en','Ciao','Hi','public_capture')")
+        conn.commit()
+        conn.close()
+        entries = self.c.get("/api/cc/lang/entries").json()["entries"]
+        self.assertEqual([(e["id"], e["srs"]) for e in entries], [("old", None)])
+        self.assertEqual(self.c.patch("/api/cc/lang/entries/old", json={"srs": {"due_at": 9}}).json()["srs"]["due_at"], 9.0)
+
+    def test_srs_ddl_matches_rust(self):
+        # Same file, two writers: the srs DDL must be byte-identical on both sides.
+        rs = (Path(__file__).resolve().parent.parent / "command center" / "src-tauri" / "src" / "commands" / "language_hub.rs").read_text(encoding="utf-8").replace("\r\n", "\n")
+        py = lh.SCHEMA[lh.SCHEMA.index("CREATE TABLE IF NOT EXISTS srs("):].strip()
+        self.assertIn(py, rs)
+
     def test_tts_unsupported_language_falls_back(self):
         r = self.c.post("/api/cc/lang/tts", json={"text": "Salve", "lang": "la"})
         self.assertEqual((r.status_code, r.json()["detail"]), (422, "UNSUPPORTED_LANG"))

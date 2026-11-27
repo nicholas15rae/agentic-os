@@ -67,7 +67,23 @@ CREATE TABLE IF NOT EXISTS settings(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS srs(
+  phrase_id TEXT PRIMARY KEY,
+  ease REAL NOT NULL DEFAULT 2.5,
+  interval_days REAL NOT NULL DEFAULT 0,
+  due_at REAL NOT NULL,
+  reps INTEGER NOT NULL DEFAULT 0,
+  lapses INTEGER NOT NULL DEFAULT 0,
+  last_review REAL
+);
+CREATE INDEX IF NOT EXISTS srs_due ON srs(due_at);
 ";
+
+/// Phrases joined with their spaced-repetition row (absent until the first review).
+const ENTRY_SELECT: &str = "SELECT p.*, s.ease AS srs_ease, s.interval_days AS srs_interval_days, s.due_at AS srs_due_at, s.reps AS srs_reps, s.lapses AS srs_lapses, s.last_review AS srs_last_review FROM phrases p LEFT JOIN srs s ON s.phrase_id = p.id";
+pub const SRS_MIN_EASE: f64 = 1.3;
+pub const SRS_MAX_EASE: f64 = 3.0;
+pub const SRS_MAX_INTERVAL_DAYS: f64 = 3650.0;
 
 // ── Types (snake_case on the wire = the column names) ───────────────────────
 
@@ -84,6 +100,20 @@ pub struct LangEntry {
     pub category: String,
     pub favorite: bool,
     pub mastery_status: String,
+    /// SM-2 schedule (table `srs`). The webview's srs.ts computes it; this side validates + stores.
+    #[serde(default)]
+    pub srs: Option<SrsState>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SrsState {
+    pub ease: f64,
+    pub interval_days: f64,
+    pub due_at: f64,
+    pub reps: i64,
+    pub lapses: i64,
+    #[serde(default)]
+    pub last_review: Option<f64>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -115,6 +145,9 @@ pub struct LangEntryPatch {
     pub translated_text: Option<String>,
     #[serde(default)]
     pub phonetic_guide: Option<String>,
+    /// Upsert the phrase's review schedule.
+    #[serde(default)]
+    pub srs: Option<SrsState>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -201,6 +234,23 @@ pub fn validate_new(e: &NewLangEntry) -> Result<(), String> {
     Ok(())
 }
 
+/// Clamp a schedule from the webview (same bounds as srs.ts `normalizeSrs` and the gateway).
+pub fn validate_srs(s: SrsState) -> Result<SrsState, String> {
+    let finite = [s.ease, s.interval_days, s.due_at].iter().all(|v| v.is_finite()) && s.last_review.map_or(true, f64::is_finite);
+    // ms since epoch, before year ~2200.
+    if !finite || s.due_at < 0.0 || s.due_at > 7.3e12 {
+        return Err("bad srs".into());
+    }
+    Ok(SrsState {
+        ease: ((s.ease.clamp(SRS_MIN_EASE, SRS_MAX_EASE)) * 100.0).round() / 100.0,
+        interval_days: s.interval_days.clamp(0.0, SRS_MAX_INTERVAL_DAYS),
+        due_at: s.due_at,
+        reps: s.reps.clamp(0, 1_000_000),
+        lapses: s.lapses.clamp(0, 1_000_000),
+        last_review: s.last_review.filter(|v| *v >= 0.0),
+    })
+}
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> f64 {
@@ -239,17 +289,28 @@ fn row_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<LangEntry> {
         category: r.get("category")?,
         favorite: r.get::<_, i64>("favorite")? != 0,
         mastery_status: r.get("mastery_status")?,
+        srs: match r.get::<_, Option<f64>>("srs_due_at")? {
+            None => None,
+            Some(due_at) => Some(SrsState {
+                ease: r.get("srs_ease")?,
+                interval_days: r.get("srs_interval_days")?,
+                due_at,
+                reps: r.get("srs_reps")?,
+                lapses: r.get("srs_lapses")?,
+                last_review: r.get("srs_last_review")?,
+            }),
+        },
     })
 }
 
 pub fn list(c: &Connection) -> Result<Vec<LangEntry>, String> {
-    let mut st = c.prepare("SELECT * FROM phrases ORDER BY timestamp DESC LIMIT 10000").map_err(|e| e.to_string())?;
+    let mut st = c.prepare(&format!("{ENTRY_SELECT} ORDER BY p.timestamp DESC LIMIT 10000")).map_err(|e| e.to_string())?;
     let rows = st.query_map([], row_entry).map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 pub fn get(c: &Connection, id: &str) -> Result<Option<LangEntry>, String> {
-    c.query_row("SELECT * FROM phrases WHERE id=?1", [id], row_entry).optional().map_err(|e| e.to_string())
+    c.query_row(&format!("{ENTRY_SELECT} WHERE p.id=?1"), [id], row_entry).optional().map_err(|e| e.to_string())
 }
 
 pub fn save(c: &Connection, e: NewLangEntry) -> Result<LangEntry, String> {
@@ -266,6 +327,7 @@ pub fn save(c: &Connection, e: NewLangEntry) -> Result<LangEntry, String> {
         category: e.category,
         favorite: e.favorite.unwrap_or(false),
         mastery_status: e.mastery_status.unwrap_or_else(|| "new".into()),
+        srs: None,
     };
     c.execute(
         "INSERT INTO phrases(id,timestamp,source_lang,target_lang,source_text,translated_text,phonetic_guide,context_note,category,favorite,mastery_status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
@@ -299,11 +361,24 @@ pub fn update(c: &Connection, id: &str, p: LangEntryPatch) -> Result<LangEntry, 
     if let Some(ph) = p.phonetic_guide {
         e.phonetic_guide = clip_opt(Some(ph), MAX_TEXT);
     }
-    c.execute(
+    if let Some(s) = p.srs {
+        e.srs = Some(validate_srs(s)?);
+    }
+    let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "UPDATE phrases SET context_note=?2, favorite=?3, mastery_status=?4, translated_text=?5, phonetic_guide=?6 WHERE id=?1",
         params![e.id, e.context_note, e.favorite as i64, e.mastery_status, e.translated_text, e.phonetic_guide],
     )
     .map_err(|e| e.to_string())?;
+    if let Some(s) = &e.srs {
+        tx.execute(
+            "INSERT INTO srs(phrase_id,ease,interval_days,due_at,reps,lapses,last_review) VALUES(?1,?2,?3,?4,?5,?6,?7) \
+             ON CONFLICT(phrase_id) DO UPDATE SET ease=?2,interval_days=?3,due_at=?4,reps=?5,lapses=?6,last_review=?7",
+            params![e.id, s.ease, s.interval_days, s.due_at, s.reps, s.lapses, s.last_review],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(e)
 }
 
@@ -316,6 +391,7 @@ pub fn delete(c: &mut Connection, ids: &[String]) -> Result<usize, String> {
     let mut n = 0;
     for id in ids {
         n += tx.execute("DELETE FROM phrases WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM srs WHERE phrase_id=?1", [id]).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(n)
@@ -881,6 +957,72 @@ mod tests {
         assert_eq!(first_json_object("<think>hmm {no}</think>```json\n{\"a\":1}\n```").unwrap()["a"], 1);
         assert_eq!(first_json_object("Sure! {\"translation\":\"Ciao {amico}\"} trailing").unwrap()["translation"], "Ciao {amico}");
         assert!(first_json_object("no json here").is_none());
+    }
+
+    #[test]
+    fn srs_schedule_roundtrip_and_cleanup() {
+        let mut c = mem();
+        let a = save(&c, entry("Buongiorno")).unwrap();
+        assert_eq!(a.srs, None);
+        assert_eq!(list(&c).unwrap()[0].srs, None, "a new card has no row: due since it was saved");
+        let s = SrsState { ease: 2.5, interval_days: 1.0, due_at: 1_800_000_000_000.0, reps: 1, lapses: 0, last_review: Some(1_799_913_600_000.0) };
+        let u = update(&c, &a.id, LangEntryPatch { srs: Some(s.clone()), mastery_status: Some("learning".into()), ..Default::default() }).unwrap();
+        assert_eq!(u.srs.as_ref(), Some(&s));
+        assert_eq!(get(&c, &a.id).unwrap().unwrap().srs, Some(s.clone()));
+        // Upsert, not a second row; other fields untouched by a schedule-only patch.
+        let s2 = SrsState { interval_days: 6.0, reps: 2, ..s.clone() };
+        let u2 = update(&c, &a.id, LangEntryPatch { srs: Some(s2.clone()), ..Default::default() }).unwrap();
+        assert_eq!((u2.srs, u2.mastery_status.as_str()), (Some(s2), "learning"));
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM srs", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        // A patch without srs keeps the schedule.
+        let u3 = update(&c, &a.id, LangEntryPatch { favorite: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(u3.srs.map(|x| x.reps), Some(2));
+        delete(&mut c, &[a.id.clone()]).unwrap();
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM srs", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn srs_validation_clamps_and_rejects() {
+        let base = SrsState { ease: 0.5, interval_days: 99_999.0, due_at: 5.0, reps: -2, lapses: 3, last_review: None };
+        let v = validate_srs(base.clone()).unwrap();
+        assert_eq!((v.ease, v.interval_days, v.reps, v.lapses), (SRS_MIN_EASE, SRS_MAX_INTERVAL_DAYS, 0, 3));
+        assert_eq!(validate_srs(SrsState { ease: 9.0, ..base.clone() }).unwrap().ease, SRS_MAX_EASE);
+        assert!(validate_srs(SrsState { due_at: f64::NAN, ..base.clone() }).is_err());
+        assert!(validate_srs(SrsState { due_at: -1.0, ..base.clone() }).is_err());
+        assert!(validate_srs(SrsState { ease: f64::INFINITY, ..base }).is_err());
+        let c = mem();
+        let a = save(&c, entry("Ciao")).unwrap();
+        let bad = SrsState { ease: 2.5, interval_days: 1.0, due_at: f64::NAN, reps: 1, lapses: 0, last_review: None };
+        assert!(update(&c, &a.id, LangEntryPatch { srs: Some(bad), ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn srs_migration_is_additive_on_an_old_library() {
+        // A library.db from before the srs table: rows survive, the table is added, re-running is a no-op.
+        let c = Connection::open_in_memory().unwrap();
+        let old = SCHEMA.split("CREATE TABLE IF NOT EXISTS srs(").next().unwrap();
+        c.execute_batch(old).unwrap();
+        c.execute(
+            "INSERT INTO phrases(id,timestamp,source_lang,target_lang,source_text,translated_text,category) VALUES('old',1,'it','en','Ciao','Hi','public_capture')",
+            [],
+        )
+        .unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let l = list(&c).unwrap();
+        assert_eq!((l.len(), l[0].id.as_str(), l[0].srs.is_none()), (1, "old", true));
+    }
+
+    #[test]
+    fn srs_entry_serializes_for_the_webview() {
+        let c = mem();
+        let a = save(&c, entry("Grazie")).unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("srs").unwrap().is_null());
+        let p: LangEntryPatch = serde_json::from_value(serde_json::json!({"srs": {"ease": 2.5, "interval_days": 1, "due_at": 10, "reps": 1, "lapses": 0, "last_review": null}})).unwrap();
+        assert_eq!(p.srs.unwrap().due_at, 10.0);
     }
 
     #[test]

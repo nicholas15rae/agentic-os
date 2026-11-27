@@ -101,3 +101,10 @@ One JSON file (`agentic-os-ui.json`): `{ version, themes, activeTheme, surfaces 
 - Safety controls: `[data-safety]` re-declares every default token, so no theme restyles them.
 - Motion Off / Reduced also drives the canvas loops (`lib/motion.ts`).
 - Export / import `agentic-os-ui.json` (`ui-file.ts`): layouts of every surface and mode + themes; desktop saves through a native Save dialog (`ui_file_save`, Rust writes only where you pick); import is validated, drops unknown widgets, keeps safety controls, backs up first ("Restore what was there before").
+
+## Step 3 as built (widget builder)
+
+- "Describe a widget" (home tray): an interactive or multi-point description becomes an editable checklist (`features/buildhub/brief-points.ts`, `BriefChecklistCard.tsx`) on the desktop; "Build it" stages an internal-widget Play Place build behind the confirmation card, every point an acceptance criterion; "Quick card instead" keeps the template generator.
+- Rust (`taskworker.rs`): `contract_criteria` / `build_criteria` pin the brief's points first for the Coder, the audit and the verifier (each must be proven in a real browser); the spec's own criteria fill what is left.
+- Style kit: `STYLE_KIT` in the design and code prompts of dashboard widgets (CSS variables + a `cc-theme` listener); `SandboxFrame` posts the live theme (`styleKitVars`) into the widget, `--cc-page` transparent on the dashboard tile, dark in previews.
+- Fortune cookie: checklist split, envelope and pinned verify plan tested; the five points probed in a real headless Edge (a correct page passes all five, a broken one fails exactly its two broken points). A live build with the models is still to run (needs the app rebuilt from this branch).

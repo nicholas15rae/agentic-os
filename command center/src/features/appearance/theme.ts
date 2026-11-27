@@ -226,3 +226,29 @@ export const BUILTIN_THEMES: Theme[] = [
   { id: "outline", name: "Clean outline", tokens: { cardStyle: "outline", borderWidth: 1.5, borderAlpha: 0.4, shadow: 0, radius: 12, font: "system" }, builtin: true },
   { id: "large", name: "Large and roomy", tokens: { fontScale: 1.15, density: 1.15, radius: 24, iconStroke: 2.25 }, builtin: true },
 ];
+
+/**
+ * The style kit generated dashboard widgets use (Rust `taskworker::STYLE_KIT` tells the Designer
+ * and Coder these names and defaults; appearance.test.ts keeps the two in step). The dashboard
+ * posts the live values into each widget's iframe: `{ type: "cc-theme", vars }`.
+ */
+export function styleKitVars(t: ThemeTokens): Record<string, string> {
+  const card = tokensToCss(t)["--cc-card-bg"];
+  return {
+    "--cc-accent": t.accent,
+    "--cc-accent-2": t.accent2,
+    "--cc-card": card,
+    "--cc-text": t.ink,
+    "--cc-text-2": t.ink2,
+    "--cc-text-3": t.ink3,
+    "--cc-radius": `${t.radius}px`,
+    "--cc-font": FONT_STACK[t.font] === FONT_STACK.jakarta ? "ui-sans-serif, system-ui, sans-serif" : FONT_STACK[t.font],
+    "--cc-font-scale": String(r3(t.fontScale)),
+    "--cc-border": `rgba(255, 255, 255, ${r3(t.cardStyle === "outline" ? Math.max(0.35, t.borderAlpha) : t.borderAlpha)})`,
+    // The widget's own page: dark in a preview / My Apps; the dashboard tile posts "transparent".
+    "--cc-page": "#10131a",
+  };
+}
+
+/** The defaults a generated widget declares in :root (= styleKitVars(DEFAULT_TOKENS)). */
+export const STYLE_KIT_DEFAULTS = styleKitVars(DEFAULT_TOKENS);

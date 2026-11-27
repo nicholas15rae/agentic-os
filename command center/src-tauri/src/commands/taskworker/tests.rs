@@ -2390,7 +2390,8 @@ fn the_verify_prompt_is_de_primed_and_stays_in_budget_with_checks() {
     assert!(p.contains("NEVER from the page's own code or formula") && p.contains("implausible in the real world"), "{p}");
     assert!(p.contains("a number matches only as a whole number") && p.contains("counts as met ONLY when its probe runs and passes"));
     let mut e = new_task(&TaskStore::in_memory(), &format!("I'm 165 lbs, default 165 lb, lb/kg toggle, per-meal split (3-5 meals). {}", "word ".repeat(1500)));
-    e.prompt_spec = json!({ "acceptance_criteria": vec!["a".repeat(300); 40] });
+    // 40 distinct long criteria (identical ones are deduped since the widget builder pinned points).
+    e.prompt_spec = json!({ "acceptance_criteria": (0..40).map(|i| format!("{i} {}", "a".repeat(296))).collect::<Vec<_>>() });
     let fb = vec!["f".repeat(300); 20];
     let p = prompt_verify(&e, &"x".repeat(40_000), &json!({ "a": "b".repeat(5000) }), true, &fb);
     assert!(p.contains("13. The choices for Nic's \"3-5 meals\"") && p.contains("Your last answer gave no working probe"), "{}", &p[..2000]);
@@ -3879,4 +3880,70 @@ fn a_preempted_stage_parks_and_resumes_without_failing() {
     let e = get(store, &t.task_id);
     assert_eq!(e.status, "review_ready", "{:?}", e.error);
     assert_eq!(fake.calls_for("triage").len(), 2, "re-run once, from the start of the stage");
+}
+
+// ── Widget builder (section pass): every point of the brief is checked ─────────────────────
+
+/// The fortune cookie as the dashboard's widget builder compiles it (brief-points.ts): five
+/// points of Nic's, then the three standing checks.
+fn fortune_contract() -> String {
+    use crate::commands::buildhub::{contract_block, AssignedWorker, Runtime, Status, TaskEnvelope};
+    let e = TaskEnvelope {
+        build_id: "b-fortune".into(),
+        project_slug: "fortune-cookie".into(),
+        title: "Fortune cookie".into(),
+        target_runtime: Runtime::InternalWidget,
+        output_directory: r"C:\staging\fortune-cookie".into(),
+        spec_summary: "Fortune cookie. Tap the cookie to crack it open…".into(),
+        milestones: vec!["Spec locked from the interview".into(), "Smoke test passes".into()],
+        acceptance_criteria: [
+            "Tap the cookie to crack it open",
+            "Show a random fortune",
+            "A button for a new fortune",
+            "Keep a history of the last 5 fortunes",
+            "Show 6 lucky numbers",
+            "Renders with no console errors",
+            "No secrets, no calls to private hosts",
+            "Runs inside a sandboxed iframe (no parent / top access)",
+        ]
+        .map(String::from)
+        .to_vec(),
+        assigned_worker: AssignedWorker::Coder,
+        preview_url: None,
+        status: Status::Queued,
+        human_override: vec![],
+    };
+    format!("{}\n\nIntake interview:\nQ: What must it do?\nA: tap the cookie…", contract_block(&e))
+}
+
+const FORTUNE_POINTS: [&str; 5] = ["Tap the cookie to crack it open", "Show a random fortune", "A button for a new fortune", "Keep a history of the last 5 fortunes", "Show 6 lucky numbers"];
+
+#[test]
+fn every_point_of_a_widget_brief_is_pinned_for_the_verifier() {
+    assert_eq!(contract_criteria(&fortune_contract()), FORTUNE_POINTS.map(String::from).to_vec(), "the standing checks stay with the smoke test");
+    let store = leak_store();
+    let mut t = new_task(store, &fortune_contract());
+    // The spec writer drops one point and rewords another: Nic's points are still all checked, first.
+    t.prompt_spec = json!({ "acceptance_criteria": ["Show a random fortune", "Cookie has a crack animation", "Lucky numbers are 1-49"] });
+    let (c, needs) = verify_plan(&t);
+    assert_eq!(&c[..5], &FORTUNE_POINTS.map(String::from)[..]);
+    assert_eq!(c[5..].to_vec(), vec!["Cookie has a crack animation".to_string(), "Lucky numbers are 1-49".into()], "the spec's own extras follow, deduped");
+    assert_eq!(needs.len(), c.len());
+    assert!(build_criteria(&t).len() <= quality::MAX_CRITERIA);
+    // The Coder is told every point too.
+    assert!(prompt_code(&t, &[]).contains("Keep a history of the last 5 fortunes"));
+}
+
+#[test]
+fn dashboard_widgets_get_the_style_kit_and_other_builds_do_not() {
+    let store = leak_store();
+    let w = new_task(store, &fortune_contract());
+    assert!(is_dashboard_widget(&w));
+    for p in [prompt_design(&w, &[]), prompt_code(&w, &[])] {
+        assert!(p.contains("STYLE KIT") && p.contains("--cc-accent: #ff7a2f") && p.contains("'cc-theme'"), "{}", &p[..200.min(p.len())]);
+    }
+    let plain = new_task(store, "Build me a tip calculator");
+    assert!(!is_dashboard_widget(&plain));
+    assert!(!prompt_code(&plain, &[]).contains("STYLE KIT"));
+    assert!(contract_criteria("BUILD CONTRACT (fake)\nno list here").is_empty());
 }

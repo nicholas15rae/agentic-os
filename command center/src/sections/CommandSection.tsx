@@ -11,6 +11,9 @@ import { promotedWidgets } from "@/features/buildhub/promoted";
 import { GENERATOR_SYSTEM, validateSpec, type CustomSpec } from "@/widgets/custom/spec";
 import { WidgetDrawer } from "@/core/widgets/WidgetDrawer";
 import { LayoutControls } from "@/core/widgets/LayoutSurface";
+import { BriefChecklistCard } from "@/features/buildhub/BriefChecklistCard";
+import { briefPoints, needsPipeline, type BriefChecklist } from "@/features/buildhub/brief-points";
+import { isTauri } from "@/lib/platform";
 
 export function CommandSection() {
   const editing = useLayout((s) => s.editing);
@@ -60,6 +63,8 @@ function WidgetTray() {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  /** Widget builder: an interactive description waits here as a checklist before anything is built. */
+  const [checklist, setChecklist] = useState<{ text: string; list: BriefChecklist } | null>(null);
   // Promoted Play Place builds stay addable after their tile is removed (desktop; the hub is Tauri-only).
   useEffect(startHub, []);
   const promoted = promotedWidgets(useHub((s) => s.view));
@@ -75,8 +80,8 @@ function WidgetTray() {
 
   const addCustom = (spec: CustomSpec) => addAndReport("custom", spec.title, { spec });
 
-  const generate = async () => {
-    const p = prompt.trim();
+  const generate = async (opts: { quick?: boolean; text?: string } = {}) => {
+    const p = (opts.text ?? prompt).trim();
     if (!p) return;
     setMsg(null);
     // A built-in widget named in the prompt ("spotify") is added directly — no LLM round trip.
@@ -86,6 +91,13 @@ function WidgetTray() {
       setPrompt("");
       return;
     }
+    // Interactive or several things to do: the build pipeline (desktop; the hub is Tauri-only),
+    // shown first as a checklist Nic can edit. The quick card generator only fills templates.
+    const list = briefPoints(p);
+    if (!opts.quick && isTauri() && needsPipeline(p, list.points)) {
+      setChecklist({ text: p, list });
+      return;
+    }
     setBusy(true);
     try {
       const raw = await cc.llmJson<unknown>(GENERATOR_SYSTEM, `${p}\n(Current date: ${new Date().toISOString()})`);
@@ -93,6 +105,7 @@ function WidgetTray() {
       if (!spec) throw new Error("The model's widget didn't validate — try rephrasing, or pick a template.");
       addCustom(spec);
       setPrompt("");
+      setChecklist(null);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -141,6 +154,18 @@ function WidgetTray() {
       </div>
 
       {msg && <p className="px-2 text-xs text-ink-2">{msg}</p>}
+      {checklist && (
+        <BriefChecklistCard
+          key={checklist.text}
+          text={checklist.text}
+          initial={checklist.list}
+          onQuick={() => void generate({ quick: true, text: checklist.text })}
+          onClose={() => {
+            setChecklist(null);
+            setPrompt("");
+          }}
+        />
+      )}
       {drawer && (
         <WidgetDrawer
           promoted={promoted.map((b) => ({ buildId: b.buildId, title: b.title, buildTitle: b.buildTitle }))}

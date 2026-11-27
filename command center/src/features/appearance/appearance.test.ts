@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { BUILTIN_THEMES, DEFAULT_TOKENS, contrast, resolveTokens, sanitizePatch, tokensToCss } from "./theme";
+import { BUILTIN_THEMES, DEFAULT_TOKENS, STYLE_KIT_DEFAULTS, contrast, resolveTokens, sanitizePatch, styleKitVars, tokensToCss } from "./theme";
 import { diffFromDefault, resolvedFor, sanitizeAppearance, useAppearance } from "./appearance-store";
 import { applyUiFile, buildUiFile, parseUiFile } from "./ui-file";
 import { useLayout } from "@/core/widgets/layout-store";
@@ -181,5 +181,20 @@ describe("export / import file", () => {
     const page = useLayout.getState().pages[0];
     expect(page.name).toBe("Imported");
     expect(page.items.map((i) => i.widgetId)).toEqual(["weather"]);
+  });
+});
+
+describe("style kit for generated widgets", () => {
+  const rust = readFileSync(resolve(__dirname, "../../../src-tauri/src/commands/taskworker.rs"), "utf8");
+  const kit = rust.slice(rust.indexOf("pub const STYLE_KIT"), rust.indexOf(String.fromCharCode(10), rust.indexOf("pub const STYLE_KIT")));
+
+  it("the Designer / Coder are told exactly the names and defaults the dashboard posts", () => {
+    for (const [k, v] of Object.entries(STYLE_KIT_DEFAULTS)) expect(kit).toContain(`${k}: ${v};`.replace(/;$/, ""));
+    expect(kit).toContain("'cc-theme'");
+  });
+
+  it("follows the theme", () => {
+    const v = styleKitVars(resolveTokens({ accent: "#3b82f6", radius: 12, fontScale: 1.2 }));
+    expect([v["--cc-accent"], v["--cc-radius"], v["--cc-font-scale"]]).toEqual(["#3b82f6", "12px", "1.2"]);
   });
 });

@@ -54,8 +54,20 @@ class TestSafeArgv(unittest.TestCase):
 
     def test_unknown_batch_file_refused(self):
         (self.tmp / "otherbat.cmd").write_text("@echo %*\n", encoding="utf-8")
-        with self.assertRaises(FileNotFoundError):
+        # UnsafeLauncher (a FileNotFoundError): callers report the reason, not "not installed".
+        with self.assertRaises(server.UnsafeLauncher):
             server.safe_argv(["otherbat", "x"])
+
+    def test_node_beside_the_shim_is_preferred(self):
+        """The npm shim itself runs %dp0%\\node.exe first when it exists; so does safe_argv."""
+        script = self.tmp / "node_modules" / "fake-cli" / "bin" / "fakecli"
+        script.parent.mkdir(parents=True)
+        script.write_text("// js", encoding="utf-8")
+        (self.tmp / "fakecli.cmd").write_text(NPM_SHIM, encoding="utf-8")
+        (self.tmp / "node.exe").write_bytes(b"")
+        argv = server.safe_argv(["fakecli", "x"])
+        self.assertEqual(Path(argv[0]), self.tmp / "node.exe")
+        self.assertEqual(Path(argv[1]), script)
 
     def test_missing_cli_raises(self):
         with self.assertRaises(FileNotFoundError):

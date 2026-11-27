@@ -14,9 +14,10 @@ describe("extract", () => {
     const r = parseDirectorActions("Sounds good, send me the clips.", ctx);
     expect(r).toEqual({ actions: [], errors: [], prose: "Sounds good, send me the clips." });
   });
-  it("ignores other fences (```json, ```ts)", () => {
-    const t = "```json\n{\"type\":\"execute_verified_render\"}\n```";
-    expect(extractActionBlocks(t)).toEqual([]);
+  it("ignores other fences (```ts, ```json that names no action); a ```json action is a block (live E2E run 6)", () => {
+    expect(extractActionBlocks("```ts\nconst type = \"execute_verified_render\";\n```")).toEqual([]);
+    expect(extractActionBlocks("```json\n{\"type\":\"some_config\"}\n```")).toEqual([]);
+    expect(extractActionBlocks("```json\n{\"type\":\"execute_verified_render\"}\n```")).toEqual(['{"type":"execute_verified_render"}']);
   });
   it("finds multiple blocks in order, CRLF tolerated, and strips them from the prose", () => {
     const t = `Here's the plan.\n\n${block({ type: "execute_verified_render" })}\n\nAnd slots:\r\n\`\`\`director-action\r\n{"type":"populate_shot_list","slots":[{"id":"s1","label":"Hook","instructions":"","kind":"video","targetSec":5}]}\r\n\`\`\``;

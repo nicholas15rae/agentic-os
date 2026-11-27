@@ -188,7 +188,7 @@ export function ReviewPanel() {
         const t = noteTarget(n, useDirector.getState().manifest);
         if (t) seekTo(t.sel, t.sec);
       }}
-      onResolve={(id) => void resolveNote(id)}
+      onResolve={(id) => void resolveNote(id, { manual: true })}
       onApproveRevision={() => void approvePlan()}
       onShowPlan={() => void requestPlan("director")}
       onDiscardRevision={discardRevision}

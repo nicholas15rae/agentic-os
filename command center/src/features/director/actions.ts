@@ -29,10 +29,10 @@ import {
   clampRange,
   cleanOutputName,
   snapLufs,
+  CLIP_FITS,
 } from "./manifest";
 
 export const ACTION_FENCE = "director-action";
-const FENCE_RE = /```director-action[^\S\r\n]*\r?\n([\s\S]*?)```/g;
 export const MAX_SLOTS = 24;
 export const MAX_CLIPS = 64;
 export const MAX_AUDIO = 16;
@@ -58,13 +58,30 @@ export interface ParsedActions {
 /** A leading line a model copies from a format example ("{json}", "json"), not JSON itself. */
 const PLACEHOLDER_LINE = /^(?:\{\s*json\s*\}|json)[^\S\r\n]*\r?\n/i;
 
-/** The raw JSON text of every ```director-action block, in order (a copied placeholder line dropped). */
+/** A ```director-action fence, or a ```json one (live E2E run 6: Qwen often fences its action as
+ * json, which was silently ignored, so no card and no auto-fix). A json fence only counts when its
+ * object names a known action type; other json stays prose. No bare ``` fence: a code block's
+ * closing fence would read as an opening one. */
+const ANY_FENCE_RE = /```(director-action|json)[^\S\r\n]*\r?\n([\s\S]*?)```/gi;
+const NAMES_ACTION = /^\{[\s\S]*?"type"\s*:\s*"(?:draft_brief|populate_shot_list|match_footage|propose_edit_plan|revise_edit|report_open_decisions|execute_verified_render)"/;
+
+/** Every action fence: the whole fence and its raw JSON (a copied placeholder line dropped). */
+function actionFences(text: string): { whole: string; raw: string }[] {
+  return [...text.matchAll(ANY_FENCE_RE)].flatMap((m) => {
+    const raw = m[2].trim().replace(PLACEHOLDER_LINE, "").trim();
+    return m[1].toLowerCase() === ACTION_FENCE || NAMES_ACTION.test(raw) ? [{ whole: m[0], raw }] : [];
+  });
+}
+
+/** The raw JSON text of every action block (```director-action, or ```json naming an action type), in order. */
 export function extractActionBlocks(text: string): string[] {
-  return [...text.matchAll(FENCE_RE)].map((m) => m[1].trim().replace(PLACEHOLDER_LINE, "").trim());
+  return actionFences(text).map((f) => f.raw);
 }
 
 export function stripActionBlocks(text: string): string {
-  return text.replace(FENCE_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  let out = text;
+  for (const f of actionFences(text)) out = out.replace(f.whole, "");
+  return out.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** Extract + parse + validate every block. A bad block is reported, never half-applied. */
@@ -272,6 +289,7 @@ function matchFootage(o: Record<string, unknown>, ctx: ActionContext): Extract<D
     onlyKeys(m, ["assetId", "inSec", "outSec", "label", "score"], where);
     const a = asset(m.assetId, where);
     if (a.kind === "image") fail(`${where}: "${a.id}" is a still; moments are for video or audio`);
+    startsInside(a, num(m, "inSec", where), where);
     const r = clampRange(a, num(m, "inSec", where), num(m, "outSec", where));
     return { assetId: a.id, ...r, label: str(m, "label", where, 120, false), score: round3(clamp(m.score === undefined ? 0.5 : num(m, "score", where), 0, 1)) };
   });
@@ -283,6 +301,16 @@ function matchFootage(o: Record<string, unknown>, ctx: ActionContext): Extract<D
 
 const PLAN_KEYS = ["clips", "audio", "output", "captions", "color", "outputs", "note"];
 
+/** A video / audio range must start inside its asset. clampRange would squeeze an inSec past the
+ * end into the last 0.1 s, and the model (live E2E run 7: "145" meaning 1:45 in a 123.7 s reel)
+ * then only heard "clip 3 is 0.1 s", so its fixes repeated the mistake. Say what's wrong instead. */
+function startsInside(a: MediaAsset, inSec: number, where: string): void {
+  const dur = a.durationSec;
+  if (a.kind !== "image" && typeof dur === "number" && dur > 0 && inSec >= dur) {
+    fail(`${where}: inSec ${inSec} is past the end of ${a.name} (${round1(dur)} s long; times are seconds from its start, not m:ss)`);
+  }
+}
+
 function editPlanBody(o: Record<string, unknown>, ctx: ActionContext, where0: string): EditPlanBody {
   const asset = assetLookup(ctx);
 
@@ -291,14 +319,16 @@ function editPlanBody(o: Record<string, unknown>, ctx: ActionContext, where0: st
   const clips: Omit<TimelineClip, "id">[] = rawClips.map((c, i) => {
     const where = `clip ${i + 1}`;
     if (!isObj(c)) return fail(`${where}: must be an object`);
-    onlyKeys(c, ["assetId", "inSec", "outSec", "fadeMs", "transitionIn", "punchIn"], where);
+    onlyKeys(c, ["assetId", "inSec", "outSec", "fadeMs", "transitionIn", "punchIn", "fit"], where);
     const a = asset(c.assetId, where);
     if (a.kind === "audio") fail(`${where}: "${a.id}" is audio — put it in "audio"`);
     // Stills: inSec is ignored (0) and outSec is the hold length (default 3 s, clamped 0.2–60).
+    if (a.kind !== "image") startsInside(a, num(c, "inSec", where), where);
     const r = a.kind === "image" ? clampRange(a, 0, c.outSec === undefined ? STILL_DEFAULT : num(c, "outSec", where)) : clampRange(a, num(c, "inSec", where), num(c, "outSec", where));
-    const fadeMs = c.fadeMs === undefined ? 0 : Math.round(clamp(num(c, "fadeMs", where), 0, FADE_MAX));
+    // null = left at its default, like "fit" (live E2E run 6: `"punchIn": null` blocked a plan twice).
+    const fadeMs = c.fadeMs == null ? 0 : Math.round(clamp(num(c, "fadeMs", where), 0, FADE_MAX));
     let transitionIn: TimelineClip["transitionIn"] = { kind: "cut", ms: 0 };
-    if (c.transitionIn !== undefined) {
+    if (c.transitionIn != null) {
       if (!isObj(c.transitionIn)) return fail(`${where}: "transitionIn" must be an object`);
       const t = c.transitionIn;
       onlyKeys(t, ["kind", "ms"], `${where} transitionIn`);
@@ -306,8 +336,10 @@ function editPlanBody(o: Record<string, unknown>, ctx: ActionContext, where0: st
       const ms = kind === "cut" || t.ms === undefined ? 0 : Math.round(clamp(num(t, "ms", `${where} transitionIn`), 0, TRANSITION_MAX));
       transitionIn = { kind, ms: kind === "cut" ? 0 : ms };
     }
-    const punchIn = c.punchIn === undefined ? 1 : round3(clamp(num(c, "punchIn", where), PUNCH_MIN, PUNCH_MAX));
-    return { assetId: a.id, ...r, fadeMs, transitionIn, punchIn };
+    const punchIn = c.punchIn == null ? 1 : round3(clamp(num(c, "punchIn", where), PUNCH_MIN, PUNCH_MAX));
+    // Framing in the output aspect: absent / "auto" = the plan check picks it from the detected bars.
+    const fit = c.fit === undefined || c.fit === null ? "auto" : oneOf(c, "fit", where, CLIP_FITS);
+    return { assetId: a.id, ...r, fadeMs, transitionIn, punchIn, ...(fit !== "auto" ? { fit } : {}) };
   });
 
   const rawAudio = o.audio === undefined ? [] : arr(o, "audio", where0, MAX_AUDIO);

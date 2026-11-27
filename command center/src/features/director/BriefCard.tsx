@@ -9,6 +9,14 @@ import { PLATFORM_LABEL } from "./review-ui";
 
 export const DRAFT_BRIEF_PROMPT = "Draft a creative brief for this project as one draft_brief action. Keep my idea in my own words, and list every field you filled with a default in guessed.";
 
+/** The turn "Draft a brief" sends (pure): the ask plus Nic's idea, quoted as written. */
+export function draftBriefLine(idea: string): string {
+  const t = idea.trim();
+  return t ? `${DRAFT_BRIEF_PROMPT}
+
+My idea, in my words: ${t}` : DRAFT_BRIEF_PROMPT;
+}
+
 type BriefKey = keyof BriefPatch;
 const FIELDS: { key: BriefKey; label: string }[] = [
   { key: "idea", label: "Idea" },
@@ -76,14 +84,21 @@ export interface BriefViewProps {
   onApprove: () => void;
   onAcceptDraft: () => void;
   onRejectDraft: () => void;
-  onDraft: () => void;
+  /** Ask the Director to draft the brief from Nic's idea (kept word for word as brief.idea). */
+  onDraft: (idea: string) => void;
+  /** The idea box's starting text ("Draft a brief" asks for the idea first): the handoff brief, if any. */
+  ideaSeed?: string;
   /** Start editing straight away (tests / a fresh hand-written brief). */
   initialEditing?: boolean;
+  /** Open the "your idea" box straight away (tests). */
+  initialAsking?: boolean;
 }
 
 /** The creative brief: guessed chips, inline edit, Nic's approval, and a held Director draft. Props only. */
-export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, onAcceptDraft, onRejectDraft, onDraft, initialEditing = false }: BriefViewProps) {
+export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, onAcceptDraft, onRejectDraft, onDraft, ideaSeed = "", initialEditing = false, initialAsking = false }: BriefViewProps) {
   const [editing, setEditing] = useState(initialEditing);
+  const [asking, setAsking] = useState(initialAsking);
+  const [idea, setIdea] = useState(ideaSeed);
   const [form, setForm] = useState<BriefForm>(() => toForm(brief ?? starter));
   const [busy, setBusy] = useState(false);
   const base = brief ?? starter;
@@ -134,7 +149,7 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
             {FIELDS.filter((f) => !brief || briefValue(draft, f.key) !== briefValue(brief, f.key)).map((f) => (
               <div key={f.key} className="flex gap-1.5">
                 <dt className="w-16 shrink-0 text-ink-3">{f.label}</dt>
-                <dd className="min-w-0 flex-1 break-words text-ink-2">{briefValue(draft, f.key) || "â€”"}</dd>
+                <dd className="min-w-0 flex-1 break-words text-ink-2">{briefValue(draft, f.key) || "—"}</dd>
               </div>
             ))}
           </dl>
@@ -149,11 +164,36 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
         </div>
       )}
 
-      {!brief && !editing ? (
+      {!brief && !editing && asking ? (
+        <form
+          className="space-y-2"
+          aria-label="Your idea for the brief"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!idea.trim() || chatBusy) return;
+            setAsking(false);
+            onDraft(idea.trim());
+          }}
+        >
+          <label className="block space-y-1">
+            <span className="label-caps text-ink-3">Your idea, in your words</span>
+            <textarea value={idea} onChange={(e) => setIdea(e.target.value)} rows={4} placeholder="What are you making, for whom, and how should it feel?" className="field min-h-[80px] resize-y text-[12px]" aria-label="Your idea" />
+          </label>
+          <p className="text-[11px] text-ink-3">The brief keeps this exactly as you wrote it; the Director fills in the rest and marks what it guessed.</p>
+          <div className="flex gap-1.5">
+            <button type="submit" disabled={!idea.trim() || chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
+              {chatBusy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Ask the Director
+            </button>
+            <button type="button" onClick={() => setAsking(false)} className="pill-glass !h-8 !px-3 text-xs">
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : !brief && !editing ? (
         <div className="space-y-2 text-center">
           <p className="text-[12px] text-ink-2">No brief yet. The Director can draft one from your idea, or you can write it.</p>
           <div className="flex flex-wrap justify-center gap-1.5">
-            <button onClick={onDraft} disabled={chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
+            <button onClick={() => setAsking(true)} disabled={chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
               {chatBusy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Draft a brief
             </button>
             <button onClick={begin} className="pill-glass !h-8 !px-3 text-xs">
@@ -279,7 +319,8 @@ export function BriefCard() {
       onApprove={() => void approveBrief()}
       onAcceptDraft={() => void acceptBriefDraft()}
       onRejectDraft={rejectBriefDraft}
-      onDraft={() => void sendDirectorTurn(DRAFT_BRIEF_PROMPT)}
+      ideaSeed={project.source.brief ?? ""}
+      onDraft={(idea) => void sendDirectorTurn(draftBriefLine(idea), { briefIdea: idea, nicLine: idea })}
     />
   );
 }

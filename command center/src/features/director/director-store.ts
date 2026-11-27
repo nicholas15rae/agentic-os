@@ -8,6 +8,7 @@ import { useToasts } from "@/features/reminders/notify";
 import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
 import { api, onDirectorEvent } from "./api";
 import { revisePlanBody, stripActionBlocks } from "./actions";
+import { briefIdeaFor, checkPlanFor, noopRevisionRefusal, planChangesNothing, planCheck, withCheckedClips, type PlanCheckResult } from "./plan-check";
 import {
   addSlot,
   applyEditPlan,
@@ -43,7 +44,18 @@ export interface ChatMsg {
   applied?: string[];
   /** This reply changed the timeline / shot list: the undo point that puts it back (while current). */
   undoId?: string;
+  /** media_plan_check warnings on this reply's plan (it still applied). */
+  warnings?: string[];
+  /** A page-sent corrective follow-up ("[auto-fix]"), not a line Nic typed. */
+  autoFix?: boolean;
 }
+
+/** The tag every page-sent corrective line starts with. */
+export const AUTO_FIX_TAG = "[auto-fix]";
+/** The start of the short auto-fix line the chat shows and logs (director-chat autoFixLine). */
+export const AUTO_FIX_SHOWN = `${AUTO_FIX_TAG} Asked the Director to fix:`;
+/** Is a logged "nic" line really the page's auto-fix line? (The log only has nic / director roles.) */
+export const isAutoFixLine = (role: ChatRole, text: string): boolean => role === "nic" && text.startsWith(AUTO_FIX_SHOWN);
 
 export type Selection = { kind: "asset" | "clip" | "render"; id: string } | null;
 
@@ -120,6 +132,10 @@ export interface DirectorState {
   seek: { sec: number; n: number } | null;
   /** The edit before the Director's last timeline / shot-list change, so Nic can put it back. */
   undo: DirectorUndo | null;
+  /** Nic's idea, word for word, for the brief the Director is drafting (BriefCard's "Draft a brief"). */
+  briefIdea: string | null;
+  /** Reply ids that already had their one automatic corrective turn (director-chat.ts). */
+  autoFixed: string[];
 }
 
 /** What a Director reply replaced (clips, audio, shot list, looks, outputs), for one-click undo. */
@@ -185,6 +201,8 @@ const initial: DirectorState = {
   previewTime: 0,
   seek: null,
   undo: null,
+  briefIdea: null,
+  autoFixed: [],
 };
 
 export const useDirector = create<DirectorState>(() => ({ ...initial }));
@@ -233,7 +251,7 @@ export async function openProject(slug: string): Promise<void> {
       manifest: upgradeManifest(data.manifest),
       renders: data.renders,
       loading: false,
-      chat: log.map((m, i) => ({ id: `log-${i}`, role: m.role, text: m.role === "director" ? stripActionBlocks(m.text) || "(actions only)" : m.text, at: m.at })),
+      chat: log.map((m, i) => ({ id: `log-${i}`, role: m.role, text: m.role === "director" ? stripActionBlocks(m.text) || "(actions only)" : m.text, at: m.at, ...(isAutoFixLine(m.role, m.text) ? { autoFix: true } : {}) })),
     });
   } catch (e) {
     if (get().slug !== slug) return;
@@ -249,7 +267,7 @@ export function closeProject() {
 }
 
 /** Per-project v2 state, cleared when another project opens. */
-const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null };
+const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null, briefIdea: null, autoFixed: [] };
 
 /** media_review_get, never throwing (an older backend or a missing project.json review is null). */
 async function loadReview(slug: string): Promise<ProjectReview | null> {
@@ -415,13 +433,52 @@ export function reviseRefusal(round: 1 | 2, review: ProjectReview | null, pendin
   return null;
 }
 
+/** What one reply's actions did: notes for the bubble, plan-check warnings, and refusals the
+ * Director can fix (they feed the one automatic corrective turn). */
+export interface ApplyReport {
+  notes: string[];
+  warnings: string[];
+  /** Plan-check refusals and no-op revisions, worded for the Director. */
+  refusals: string[];
+  /** The action types those refusals were for. */
+  refusedTypes: DirectorAction["type"][];
+}
+
+export interface ApplyOptions {
+  /** The line Nic typed for this turn (a drafted brief keeps its idea from it when there's no brief). */
+  nicLine?: string;
+}
+
 /** Apply validated Director actions to the UI. Nothing renders, posts or deletes: at most the
- * plan card opens, and matches / held brief drafts wait for Nic's click. */
-export async function applyDirectorActions(actions: DirectorAction[], forSlug?: string): Promise<string[]> {
-  const notes: string[] = [];
+ * plan card opens, and matches / held brief drafts wait for Nic's click. Returns the bubble notes. */
+export async function applyDirectorActions(actions: DirectorAction[], forSlug?: string, opts: ApplyOptions = {}): Promise<string[]> {
+  return (await applyDirectorActionsReport(actions, forSlug, opts)).notes;
+}
+
+/** Plan check for a Director plan body (snapped clips, with the check's answer), or null when it
+ * was refused (pushed to `report`). The check gets the plan merged into the current manifest, so
+ * it uses the plan's own outputs / captions / color / audio (and Nic's unsaved edits). */
+async function checkedBody(body: EditPlanBody, type: "propose_edit_plan" | "revise_edit", slug: string, report: ApplyReport, resolves?: string[]): Promise<{ body: EditPlanBody; check: PlanCheckResult | null } | null> {
+  const cur = get().manifest;
+  const r = await planCheck(slug, body.clips, cur ? checkPlanFor(cur, body, resolves) : undefined);
+  if (!r) return { body, check: null };
+  for (const w of r.warnings) report.warnings.push(w);
+  if (r.refusals.length) {
+    report.notes.push(`${type === "revise_edit" ? "Revision" : "Edit plan"} not applied: ${r.refusals.join("; ")}`);
+    for (const x of r.refusals) report.refusals.push(`${type} refused by the plan check: ${x}`);
+    report.refusedTypes.push(type);
+    return null;
+  }
+  return { body: withCheckedClips(body, r), check: r };
+}
+
+/** applyDirectorActions with the full report (director-chat.ts reads the refusals for its auto-fix turn). */
+export async function applyDirectorActionsReport(actions: DirectorAction[], forSlug?: string, opts: ApplyOptions = {}): Promise<ApplyReport> {
+  const report: ApplyReport = { notes: [], warnings: [], refusals: [], refusedTypes: [] };
+  const notes = report.notes;
   // Every action is for the project the reply was about: stop as soon as another one opens.
   const slug = forSlug ?? get().slug;
-  if (!slug) return notes;
+  if (!slug) return report;
   const alive = () => get().slug === slug;
   // One undo point per reply: the manifest before its first timeline / shot-list change.
   let snapped = false;
@@ -441,11 +498,14 @@ export async function applyDirectorActions(actions: DirectorAction[], forSlug?: 
         const p = get().project;
         if (!p) break;
         const prev = p.brief;
-        // The idea stays in Nic's words: an existing brief's idea is never rewritten by a draft.
+        // The idea stays in Nic's words: an existing brief's idea is never rewritten by a draft, and
+        // a first brief takes Nic's own idea (the BriefCard textarea, else Nic's line, else the
+        // handoff text) over the model's paraphrase.
+        const nicIdea = briefIdeaFor(p, get().briefIdea, opts.nicLine);
         const brief: CreativeBrief = {
           ...a.brief,
-          idea: prev?.idea || a.brief.idea,
-          guessed: prev?.idea ? a.brief.guessed.filter((g) => g !== "idea") : a.brief.guessed,
+          idea: nicIdea || a.brief.idea,
+          guessed: nicIdea ? a.brief.guessed.filter((g) => g !== "idea") : a.brief.guessed,
           approved: false,
           updatedBy: "director",
           updatedAt: new Date().toISOString(),
@@ -481,19 +541,37 @@ export async function applyDirectorActions(actions: DirectorAction[], forSlug?: 
         if (bits.length) notes.push(`Suggested ${bits.join(" and ")}: accept or reject each`);
         break;
       }
-      case "propose_edit_plan":
-        if (await applyPlan(a, slug, snap)) {
-          notes.push(`Edit plan: ${plural(a.clips.length, "clip")}, ${plural(a.audio.length, "audio layer")}`);
+      case "propose_edit_plan": {
+        const checked = await checkedBody(a, a.type, slug, report);
+        if (!checked || !alive()) break;
+        const body = checked.body;
+        if (await applyPlan(body, slug, snap)) {
+          notes.push(`Edit plan: ${plural(body.clips.length, "clip")}, ${plural(body.audio.length, "audio layer")}`);
           if (alive()) await requestPlan("director");
         }
         break;
+      }
       case "revise_edit": {
         const refusal = reviseRefusal(a.round, get().review, get().revision);
         if (refusal) {
           notes.push(`Revision not applied: ${refusal}`);
           break;
         }
-        const body = revisePlanBody(a);
+        const checked = await checkedBody(revisePlanBody(a), a.type, slug, report, a.resolves);
+        if (!checked || !alive()) break;
+        const body = checked.body;
+        const cur = get().manifest;
+        // A revision that changes nothing answers no note: refused, and the notes stay open. "Nothing"
+        // is measured against the render the notes are on (Rust's plan snapshot), so a revision
+        // that keeps Nic's own edits since that render still counts; without a snapshot, against
+        // the current cut.
+        const unchanged = checked.check?.unchangedSinceRender ?? (cur ? planChangesNothing(cur, body) : false);
+        if (cur && unchanged) {
+          notes.push("Revision not applied: it changes nothing, so your notes stay open");
+          report.refusals.push(noopRevisionRefusal(cur, a.resolves));
+          report.refusedTypes.push(a.type);
+          break;
+        }
         if (await applyPlan(body, slug, snap)) {
           set({ revision: { round: a.round, resolves: a.resolves, summary: a.summary } });
           // The Director's "what changed" lands on the round it answers (text only).
@@ -520,8 +598,11 @@ export async function applyDirectorActions(actions: DirectorAction[], forSlug?: 
       }
     }
   }
-  return notes;
+  return report;
 }
+
+/** Record Nic's idea for the brief the Director is about to draft (cleared once a brief exists). */
+export const setBriefIdea = (idea: string | null) => set({ briefIdea: idea?.trim() ? idea.trim().slice(0, 8000) : null });
 
 /** media_review_write for the open project (the Director's round summary / open decisions). The
  * stored review replaces the local one; a failure keeps the local copy and says so. */
@@ -551,7 +632,7 @@ export async function updateProject(fields: ProjectFields): Promise<boolean> {
   if (!slug) return false;
   try {
     const p = upgradeProject(await api.projectUpdate({ slug, ...fields }));
-    if (get().slug === slug) set((s) => ({ project: p, projects: s.projects.map((x) => (x.slug === slug ? p : x)) }));
+    if (get().slug === slug) set((s) => ({ project: p, projects: s.projects.map((x) => (x.slug === slug ? p : x)), ...(p.brief ? { briefIdea: null } : {}) }));
     return true;
   } catch (e) {
     toast("Couldn't update the project", errText(e), "error");
@@ -716,15 +797,18 @@ export async function addNote(text: string, opts: { renderId?: string | null; at
   }
 }
 
-export async function resolveNote(noteId: string): Promise<boolean> {
+/** Resolve a note. `manual` = Nic's own Resolve click; without it (a revision's notes, on the
+ * Approve & Render click) Rust refuses when the approved cut is the same one the note was on. */
+export async function resolveNote(noteId: string, opts: { manual?: boolean } = {}): Promise<boolean> {
   const slug = get().slug;
   if (!slug) return false;
   try {
-    await api.noteResolve({ slug, noteId });
+    await api.noteResolve(opts.manual ? { slug, noteId, manual: true } : { slug, noteId });
     if (get().slug === slug) set((s) => ({ manifest: s.manifest ? withNoteResolved(s.manifest, noteId) : s.manifest }));
     return true;
   } catch (e) {
-    toast("Couldn't resolve the note", errText(e), "error");
+    if (!opts.manual && /UNCHANGED|changes nothing|same cut/i.test(errText(e))) toast("Note left open", "The approved cut is the same as the one this note is on.", "warn");
+    else toast("Couldn't resolve the note", errText(e), "error");
     return false;
   }
 }

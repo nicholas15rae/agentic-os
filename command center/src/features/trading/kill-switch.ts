@@ -3,7 +3,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { tradingApi, type KillIncident } from "@/features/trading/ibkr";
 import { installKillHotkey } from "@/features/trading/kill-switch-core";
 
-export { classifyKillKey, createKillArm, createKillKeyListener, guardKillButtonKeydown, installKillHotkey, isKillHotkey, isRepeatActivation, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, KILL_STAGES, killButtonProps, killStageLabel, summarizeIncident } from "@/features/trading/kill-switch-core";
+export { advanceKillPress, classifyKillKey, createKillArm, createKillKeyListener, guardKillButtonKeydown, installKillHotkey, isKillHotkey, isRepeatActivation, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, KILL_STAGES, killButtonBusy, killButtonProps, killStageLabel, summarizeIncident } from "@/features/trading/kill-switch-core";
 
 export async function tripKillSwitch(reason: string, dryRun = false): Promise<KillIncident & { note?: string }> {
   return tradingApi.kill(reason, dryRun);

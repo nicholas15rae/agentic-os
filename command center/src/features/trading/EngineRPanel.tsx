@@ -436,7 +436,10 @@ export function ScanSection({ scan }: { scan: RuleScan | null }) {
                     <span className="w-12 font-mono text-ink">{r.symbol}</span>
                     <span className={v.tone}>{v.label}</span>
                     {r.intent && (
-                      <span className={`font-mono ${v.refused ? "text-ink-3 line-through" : "text-ink-2"}`} title={v.refused ? "Not sent: the desk refused it" : undefined}>
+                      <span
+                        className={`font-mono ${v.refused ? "text-ink-3 line-through" : "text-ink-2"}`}
+                        title={v.refused ? "Not sent: the desk refused it" : v.unsure ? "The cancel couldn't be sent: this order may still be working at TWS" : undefined}
+                      >
                         BUY {r.intent.quantity} @ {r.intent.limit_price} · stop {r.intent.stop_loss} · tp {r.intent.take_profit}
                       </span>
                     )}

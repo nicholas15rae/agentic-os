@@ -355,6 +355,20 @@ class Executor:
                 n += 1
         return n
 
+    async def working_qty(self, ref: str) -> float:
+        """How much of orderRef `ref` TWS has working right now (a fresh reqAllOpenOrders, not the bridge's polled
+        snapshot). A not-done order without a positive `remaining` yet (no orderStatus) counts as quantity - filled.
+        Read-only, so allowed wherever the guard's exits are."""
+        ib = await self._ensure(risk_reducing=True)
+        await ib.reqAllOpenOrdersAsync()
+        total = 0.0
+        for t in ib.openTrades():
+            if (getattr(t.order, "orderRef", "") or "") != ref or t.isDone():
+                continue
+            rem = float(t.orderStatus.remaining or 0)
+            total += rem if rem > 0 else max(float(t.order.totalQuantity or 0) - float(t.orderStatus.filled or 0), 0.0)
+        return total
+
     async def cancel_ids(self, order_ids: list[int], wait_s: float = 10.0, sleep: Any = None) -> list[dict[str, Any]]:
         """Cancel THIS client's (13) working orders by id — for desk-cli / the overseer, which can't cancel
         another client id's orders. Risk-reducing, so allowed while LOCKED (the endpoint gate still applies;

@@ -73,32 +73,41 @@ def write_lock(reason: str, actor: str, incident_id: str, d: Path | None = None)
     """Lock for a kill-switch incident (which then cancels everything and flattens at market). An existing lock
     keeps its first incident as the cause and is stamped `killedAt`, so the options guard knows a flatten ran and
     stands down (allows_risk_reducing). The stamp is best-effort and never raises: it must not stop the E-stop."""
+    from contextlib import ExitStack
+
     p = lock_path(d)
-    existing = read_lock(d)
-    if existing and existing.get("incidentId"):
-        return _stamp_killed(p, d, existing, incident_id, reason)
-    now = time.time()
-    data = {"locked": True, "at": now, "reason": reason, "actor": actor, "incidentId": incident_id, "killedAt": now}
-    _write_json(p, data)  # as before; if this raises, execute_kill records it and still cancels / flattens
-    return data
+    with ExitStack() as held:
+        # desk_lock's file lock, so a concurrent breaker write (overseer / desk-cli) can't overwrite the kill's lock or
+        # drop its stamp. Best-effort, at most STAMP_LOCK_TIMEOUT_S: the E-stop never waits on it.
+        no_lock = ""
+        try:
+            from ledger import file_lock
+
+            held.enter_context(file_lock(p.with_name(LOCK_NAME + ".lock"), timeout=STAMP_LOCK_TIMEOUT_S))
+        except Exception as e:  # noqa: BLE001
+            no_lock = f"{type(e).__name__}: {e}"
+        existing = read_lock(d)
+        if existing and existing.get("incidentId"):
+            return _stamp_killed(p, existing, incident_id, reason, no_lock)
+        now = time.time()
+        data = {"locked": True, "at": now, "reason": reason, "actor": actor, "incidentId": incident_id, "killedAt": now}
+        _write_json(p, data)  # with or without the file lock; if this raises, execute_kill records it and still cancels / flattens
+        return data
 
 
-def _stamp_killed(p: Path, d: Path | None, existing: dict[str, Any], incident_id: str, reason: str) -> dict[str, Any]:
-    """Mark an already-held lock as flattened by the kill switch, under desk_lock's file lock (so a concurrent
-    breaker write can't drop it), waiting at most STAMP_LOCK_TIMEOUT_S. Any failure: the lock is returned as it was,
-    with `stampFailed` (the bridge's in-process stand-down still stops the guard: Desk.kill)."""
-    if existing.get("killedAt"):
+def _stamp_killed(p: Path, existing: dict[str, Any], incident_id: str, reason: str, no_lock: str) -> dict[str, Any]:
+    """Mark an already-held lock as flattened by the kill switch (the caller holds desk_lock's file lock unless
+    `no_lock` says why not). Never raises: on any failure the lock is returned as it was, with `stampFailed` (the
+    bridge's in-process stand-down still stops the guard: Desk.kill)."""
+    if "killedAt" in existing:
         return existing
+    if no_lock:
+        return {**existing, "stampFailed": no_lock}  # unlocked read-modify-write could lose a breaker: don't
     try:
-        from ledger import file_lock
-
-        with file_lock(p.with_name(LOCK_NAME + ".lock"), timeout=STAMP_LOCK_TIMEOUT_S):
-            cur = read_lock(d) or existing
-            if not cur.get("killedAt"):
-                now = time.time()
-                cur.update(killedAt=now, killIncidentId=incident_id, killReason=reason[:300], updatedAt=now)
-                _write_json(p, cur)
-            return cur
+        now = time.time()
+        cur = {**existing, "killedAt": now, "killIncidentId": incident_id, "killReason": reason[:300], "updatedAt": now}
+        _write_json(p, cur)
+        return cur
     except Exception as e:  # noqa: BLE001 — never let the stamp stop the E-stop
         return {**existing, "stampFailed": f"{type(e).__name__}: {e}"}
 
@@ -124,10 +133,12 @@ def allows_risk_reducing(d: Path | None = None) -> bool:
     lk = read_lock(d)
     if lk is None:
         return True
-    if lk.get("killedAt") or lk.get("source") not in ("overseer", "desk-cli") or security_hard_locked(d):
+    if "killedAt" in lk or lk.get("source") not in ("overseer", "desk-cli") or security_hard_locked(d):
         return False
-    codes = {str(b.get("code")) for b in lk.get("breakers") or [] if isinstance(b, dict)}
-    return bool(codes) and codes <= LOCK_ONLY_BREAKERS
+    breakers = lk.get("breakers")
+    # Fail closed on anything malformed: every entry must be a breaker dict whose code is lock-only.
+    return (isinstance(breakers, list) and bool(breakers)
+            and all(isinstance(b, dict) and str(b.get("code")) in LOCK_ONLY_BREAKERS for b in breakers))
 
 
 def security_hard_locked(d: Path | None = None) -> bool:

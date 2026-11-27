@@ -25,12 +25,21 @@ const sent = (symbol: string, status: string, why = "trend breakout"): RuleScanR
 describe("scan rows: a desk-refused order never reads as a trade", () => {
   it("labels refused rows with the desk's verdict, in the alert tone", () => {
     for (const st of ["failed", "rejected", "expired", "dismissed"])
-      expect(scanRowView(sent("SPY", st))).toEqual({ label: `desk ${st}`, tone: "text-alert", refused: true });
+      expect(scanRowView(sent("SPY", st))).toEqual({ label: `desk ${st}`, tone: "text-alert", refused: true, unsure: false });
     for (const st of ["submitted", "hypothetical", "pending_approval"])
-      expect(scanRowView(sent("SPY", st))).toEqual({ label: "submitted", tone: "text-teal-soft", refused: false });
-    expect(scanRowView({ action: "would_submit" })).toEqual({ label: "would submit", tone: "text-teal-soft", refused: false });
+      expect(scanRowView(sent("SPY", st))).toEqual({ label: "submitted", tone: "text-teal-soft", refused: false, unsure: false });
+    expect(scanRowView({ action: "would_submit" })).toEqual({ label: "would submit", tone: "text-teal-soft", refused: false, unsure: false });
     expect(scanRowView({ action: "limit_block" }).tone).toBe("text-alert");
     expect(scanRowView({ action: "submitted" }).refused).toBe(false); // no desk result yet: not called refused
+  });
+
+  it("a failed order whose cancel couldn't be sent is 'may still be working', never 'not sent'", () => {
+    const row = { ...sent("SPY", "failed"), desk: { status: "failed", reasons: [], error: "TWS didn't acknowledge the order within 15s; the cancel for #77 could NOT be sent, so it may still be working" } };
+    expect(scanRowView(row)).toEqual({ label: "desk failed · may still be working", tone: "text-amber-light", refused: false, unsure: true });
+    const html = renderToStaticMarkup(createElement(ScanSection, { scan: { scanId: "s", kind: "slot", at: 1, version: 1, submit: true, status: "done", detail: "", finished: 2, rows: [row] } }));
+    expect(html).toContain("may still be working at TWS");
+    expect(html).not.toContain("line-through");
+    expect(html).not.toContain("Not sent");
   });
 
   it("matches the Python side's list of no-trade desk statuses", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { isEditingShortcut } from "@/lib/editing-keys";
 import {
+  advanceKillPress,
   classifyKillKey,
   createKillArm,
   createKillKeyListener,
@@ -8,6 +9,7 @@ import {
   isKillHotkey,
   isRepeatActivation,
   KILL_PRESSES,
+  killButtonBusy,
   killButtonProps,
   summarizeIncident,
   type KillToast,
@@ -83,6 +85,20 @@ describe("the kill chord gets past the text-editing guard", () => {
           expect(isKillHotkey(e)).toBe(true);
           expect(isEditingShortcut(e)).toBe(false); // else installEditingKeyGuard swallows it before the kill listener
         }
+  });
+});
+
+describe("red button: press counting and busy (TradingDesk.pressKill / KillButton busy)", () => {
+  it("trips only on the KILL_PRESSES-th deliberate click, then starts over", () => {
+    expect(KILL_PRESSES).toBe(3);
+    expect(advanceKillPress(0)).toEqual({ pressed: 1, fire: false });
+    expect(advanceKillPress(1)).toEqual({ pressed: 2, fire: false });
+    expect(advanceKillPress(2)).toEqual({ pressed: 0, fire: true });
+    expect(advanceKillPress(0, 2)).toEqual({ pressed: 1, fire: false });
+  });
+  it("stays usable during a dry run or a reset; only a live kill in flight disables it", () => {
+    expect(killButtonBusy("kill")).toBe(true);
+    for (const b of [null, "dry", "reset", "mode"]) expect(killButtonBusy(b)).toBe(false);
   });
 });
 

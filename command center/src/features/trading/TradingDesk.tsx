@@ -5,7 +5,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { failureText, tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
 import { KillButton } from "@/features/trading/KillButton";
-import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
+import { advanceKillPress, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killButtonBusy, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -56,10 +56,9 @@ export function TradingDesk() {
     return () => window.clearTimeout(t);
   }, [armed, pressed]);
   const pressKill = () => {
-    const next = pressed + 1;
-    if (next < KILL_PRESSES) return setPressed(next);
-    setPressed(0);
-    void kill(false);
+    const r = advanceKillPress(pressed);
+    setPressed(r.pressed);
+    if (r.fire) void kill(false);
   };
 
   const locked = !!data?.lock;
@@ -82,7 +81,7 @@ export function TradingDesk() {
               Cancel
             </button>
           )}
-          <KillButton pressed={pressed} busy={busy === "kill"} onPress={pressKill} />
+          <KillButton pressed={pressed} busy={killButtonBusy(busy)} onPress={pressKill} />
         </div>
       }
     >

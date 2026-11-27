@@ -117,12 +117,16 @@ export interface ScanRowView {
   tone: string;
   /** The desk refused it: the order line is shown struck through, as "not sent". */
   refused: boolean;
+  /** Failed, but its cancel couldn't be sent: the order may still be working at TWS (never shown as "not sent"). */
+  unsure: boolean;
 }
 
 export function scanRowView(r: Pick<RuleScanRow, "action" | "desk">): ScanRowView {
   const st = r.desk?.status;
-  if (r.action === "submitted" && st && DESK_REFUSED.has(st)) return { label: `desk ${st}`, tone: "text-alert", refused: true };
-  return { label: r.action.replace("_", " "), tone: SCAN_TONE[r.action] ?? "text-ink-3", refused: false };
+  if (r.action === "submitted" && st === "failed" && /may still be working/i.test(r.desk?.error ?? ""))
+    return { label: "desk failed · may still be working", tone: "text-amber-light", refused: false, unsure: true };
+  if (r.action === "submitted" && st && DESK_REFUSED.has(st)) return { label: `desk ${st}`, tone: "text-alert", refused: true, unsure: false };
+  return { label: r.action.replace("_", " "), tone: SCAN_TONE[r.action] ?? "text-ink-3", refused: false, unsure: false };
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" ? String(v) : "");

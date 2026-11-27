@@ -71,6 +71,16 @@ export function isRepeatActivation(e: Pick<KeyboardEvent, "key" | "repeat">): bo
   return e.repeat && (e.key === "Enter" || e.key === " ");
 }
 
+/** One deliberate click on the red button: the next count, and whether this click trips it (the last of KILL_PRESSES).
+ *  TradingDesk's 4 s timer resets `pressed` to 0 between clicks. */
+export function advanceKillPress(pressed: number, presses = KILL_PRESSES): { pressed: number; fire: boolean } {
+  const next = pressed + 1;
+  return next < presses ? { pressed: next, fire: false } : { pressed: 0, fire: true };
+}
+
+/** Only a live kill in flight disables the E-stop: it stays usable during a dry run or a reset. */
+export const killButtonBusy = (busy: string | null): boolean => busy === "kill";
+
 /** The red button's onKeyDown: a held Enter / Space must not click it again. */
 export function guardKillButtonKeydown(e: Pick<KeyboardEvent, "key" | "repeat" | "preventDefault">): void {
   if (isRepeatActivation(e)) e.preventDefault();

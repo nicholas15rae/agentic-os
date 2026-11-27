@@ -556,6 +556,43 @@ class LockPolicyTests(unittest.TestCase):
             (self.sec / "state.json").write_text(state, encoding="utf-8")
             self.assertEqual(ks.allows_risk_reducing(self.d), allowed, state)
 
+    def test_malformed_locks_fail_closed(self):
+        import kill_switch as ks
+
+        base = {"locked": True, "source": "overseer", "incidentId": "i"}
+        for lk in ({**base, "breakers": [{"code": "REJECTION_STORM"}, "junk"]},          # a non-dict entry
+                   {**base, "breakers": [{"code": "REJECTION_STORM"}], "killedAt": None},  # killed, however stamped
+                   {**base, "breakers": {"code": "REJECTION_STORM"}},                   # not a list
+                   {**base, "breakers": []}):
+            ks.lock_path(self.d).write_text(json.dumps(lk), encoding="utf-8")
+            self.assertFalse(ks.allows_risk_reducing(self.d), lk)
+
+    def test_kill_stamp_waits_at_most_a_second_for_a_lock_another_process_holds(self):
+        """The real file lock, held by another process (as the overseer would): the E-stop's stamp gives up in ~1 s."""
+        import subprocess
+        import desk_lock
+        import kill_switch as ks
+        import time as _t
+
+        desk_lock.lock(self.d, "storm", "overseer", source="overseer", breaker="REJECTION_STORM")
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import sys, time; sys.path.insert(0, sys.argv[1]); from ledger import file_lock\n"
+             "with file_lock(__import__('pathlib').Path(sys.argv[2])):\n print('held', flush=True); time.sleep(8)",
+             str(Path(__file__).resolve().parent.parent / "trading"), str(ks.lock_path(self.d).with_name(ks.LOCK_NAME + ".lock"))],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            t0 = _t.monotonic()
+            out = ks.write_lock("E-stop", "ui", "inc-2", self.d)
+            took = _t.monotonic() - t0
+        finally:
+            holder.kill()
+            holder.wait()
+        self.assertGreaterEqual(took, 0.9)
+        self.assertLess(took, 3.0)
+        self.assertIn("TimeoutError", out["stampFailed"])
+        self.assertNotIn("killedAt", ks.read_lock(self.d))                          # not stamped without the lock
+
     def test_kill_stamp_never_blocks_or_raises(self):
         import desk_lock
         import kill_switch as ks
@@ -633,6 +670,107 @@ class LockPolicyTests(unittest.TestCase):
         ks.write_lock("E-stop", "ui", "inc", self.d)
         with self.assertRaises(ex.ExecutionRefused):
             e._guard(risk_reducing=True)                                           # after a kill: refused too
+
+
+class RiskReducingExecutorTests(unittest.TestCase):
+    """The real Executor's risk-reducing calls (close_option, cancel_working, working_qty) under each lock state."""
+
+    DONE = AckTests.DONE
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        root = Path(self.td.name)
+        self.d = root / "trading"  # its sibling root/"security" (absent) is the security dir
+        self.d.mkdir()
+        self.env = mock.patch.dict(os.environ, {"AGENTIC_OS_SECURITY_DIR": ""})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.td.cleanup()
+
+    def executor(self, open_trades=()):
+        import executor as ex
+
+        placed, cancelled, done = [], [], self.DONE
+
+        def trade(o, status="Submitted", filled=0.0, remaining=None):
+            t = NS(order=o, orderStatus=NS(status=status, filled=filled, remaining=remaining if remaining is not None else o.totalQuantity), log=[])
+            t.isDone = lambda: t.orderStatus.status in done
+            return t
+
+        class IB:
+            def isConnected(self):
+                return True
+
+            def placeOrder(self, _c, o):
+                o.orderId = 77
+                placed.append(o)
+                return trade(o, status="PreSubmitted")
+
+            def cancelOrder(self, o):
+                cancelled.append(o.orderId)
+
+            async def reqAllOpenOrdersAsync(self):
+                return []
+
+            def openTrades(self):
+                return [trade(NS(orderId=i, orderRef=ref, totalQuantity=q), filled=f, remaining=r) for i, ref, q, f, r in open_trades] + \
+                       [NS(order=NS(orderId=9, orderRef="other"), orderStatus=NS(status="Submitted", filled=0, remaining=5),
+                           contract=NS(conId=1, secType="OPT", symbol="SPY"), isDone=lambda: False)]
+
+        e = ex.Executor(lock_dir=self.d)
+        e.ib = IB()
+        return e, placed, cancelled
+
+    F = {"limit": lambda a, q, p: NS(orderType="LMT", action=a, totalQuantity=q, lmtPrice=p),
+         "market": lambda a, q: NS(orderType="MKT", action=a, totalQuantity=q)}
+
+    def close(self, e):
+        async def sleep(_s):
+            return None
+        return asyncio.run(e.close_option(NS(conId=1, secType="OPT", exchange="SMART"), 1, 1.7, "GUARD-STOP-x", factories=self.F, sleep=sleep, ack_timeout=0.05))
+
+    def test_exits_go_out_under_a_lock_only_breaker_and_stop_after_a_kill(self):
+        import desk_lock
+        import executor as ex
+        import kill_switch
+
+        desk_lock.lock(self.d, "storm", "overseer", source="overseer", breaker="REJECTION_STORM")
+        e, placed, _ = self.executor()
+        self.assertEqual(self.close(e)["status"], "PreSubmitted")
+        self.assertEqual(len(placed), 1)
+        kill_switch.write_lock("E-stop", "ui", "inc", self.d)
+        with self.assertRaises(ex.ExecutionRefused):
+            self.close(e)
+        with self.assertRaises(ex.ExecutionRefused):
+            asyncio.run(e.cancel_working(ref="x"))
+        self.assertEqual(len(placed), 1)
+
+    def test_cancel_working_runs_under_a_lock_only_breaker(self):
+        import desk_lock
+
+        desk_lock.lock(self.d, "drift", "cli", breaker="STATE_DRIFT")
+        e, _, cancelled = self.executor(open_trades=[(5, "opt-1", 1.0, 0.0, 1.0)])
+        self.assertEqual(asyncio.run(e.cancel_working(ref="opt-1")), 1)
+        self.assertEqual(cancelled, [5])
+
+    def test_stand_down_refuses_risk_reducing_calls_but_not_the_entry_guard(self):
+        import executor as ex
+
+        e, placed, _ = self.executor()
+        e.stand_down = True
+        with self.assertRaises(ex.ExecutionRefused) as cm:
+            self.close(e)
+        self.assertIn("standing down", str(cm.exception))
+        with self.assertRaises(ex.ExecutionRefused):
+            e._guard(risk_reducing=True)
+        e._guard()                                                                  # entries: only the lock file decides
+        self.assertEqual(placed, [])
+
+    def test_working_qty_counts_an_order_without_a_status_yet_in_full(self):
+        e, _, _ = self.executor(open_trades=[(5, "GUARD-STOP-x", 2.0, 0.0, 0.0), (6, "GUARD-STOP-x", 3.0, 1.0, 2.0), (7, "GUARD-STOP-y", 4.0, 0.0, 4.0)])
+        self.assertEqual(asyncio.run(e.working_qty("GUARD-STOP-x")), 4.0)          # 2 (no status: in full) + 2 remaining
 
 
 class CloseOptionAckTests(unittest.TestCase):
@@ -835,10 +973,14 @@ class GuardExecutor(FakeExecutor):
     def __init__(self):
         super().__init__()
         self.calls = []
+        self.working = {}  # orderRef -> qty TWS still has working (Executor.working_qty)
 
     async def cancel_working(self, **kw):
         self.calls.append(("cancel", kw))
         return 1
+
+    async def working_qty(self, ref):
+        return self.working.get(ref, 0.0)
 
     async def close_option(self, contract, qty, limit, ref, action="SELL"):
         self.calls.append(("close", contract.conId if hasattr(contract, "conId") else contract, qty, limit, action, ref))
@@ -1021,7 +1163,7 @@ class DeskEngineTests(unittest.TestCase):
         dk.clock = lambda: NOW + 600                                               # well past any backoff
         rep = asyncio.run(dk.options_guard())
         self.assertEqual(tries, ["GUARD-STOP-opt-000001"])                        # not sent again
-        self.assertIn("already working", rep["waiting"][0]["why"])
+        self.assertIn("already done or working (filled 0, working 1)", rep["waiting"][0]["why"])
         self.assertEqual(dk._row("opt-000001")["status"], "submitted")
 
     def test_guard_retries_back_off_and_count_once_toward_the_rejection_storm(self):
@@ -1077,6 +1219,77 @@ class DeskEngineTests(unittest.TestCase):
         self.assertEqual(rep["stops"], [])
         self.assertFalse([c for c in self.ex.calls if c[0] == "close" and str(c[5]).startswith("GUARD-STOP")])
         self.assertEqual(dk._row("opt-000001")["status"], "submitted")
+
+    def _kill(self, dk, write_lock_fails=False):
+        import kill_switch
+
+        async def no_tws(_readonly):  # never a real TWS in tests: this kill must not touch the network
+            raise ConnectionError("no TWS in tests")
+        dk._kill_connect = no_tws
+        if write_lock_fails:
+            with mock.patch.object(kill_switch, "write_lock", side_effect=PermissionError("replace denied")):
+                asyncio.run(dk.kill("E-stop", "ui"))
+        else:
+            asyncio.run(dk.kill("E-stop", "ui"))
+
+    def test_stand_down_clears_after_an_unlock_elsewhere_and_the_settle(self):
+        """desk-cli unlock runs in another process: Desk.reset never runs. The guard must not stay silently off
+        once trading is unlocked and re-armed."""
+        import desk as desk_mod
+        import desk_lock
+
+        dk = self._premium_stop_desk()
+        self._kill(dk)
+        desk_lock.write_reconcile_stamp(self.d, True, {})                           # a passing reconcile after the kill...
+        desk_lock.unlock(self.d, "cli", 1e9)                                       # ...then desk-cli unlock (wall clock, as the lock)
+        self.assertIn("skipped", asyncio.run(dk.options_guard()))                 # the flatten is still settling
+        with self.assertRaises(PermissionError):
+            dk.set_mode("FULL_AUTO", "t", confirm=True)
+        dk.clock = lambda: NOW + desk_mod.KILL_SETTLE_S + 1
+        rep = asyncio.run(dk.options_guard())
+        self.assertNotIn("skipped", rep)
+        self.assertEqual(len(rep["stops"]), 1, rep)                                 # the premium stop is back
+        self.assertFalse(dk._killed or self.ex.stand_down)
+        self.assertEqual(dk.audit.tail(5, kinds=("kill_stand_down_cleared",))[0]["verdict"], "OK")
+        dk.set_mode("FULL_AUTO", "t", confirm=True)                                # re-arming works again
+
+    def test_stand_down_clears_after_a_kill_whose_lock_step_failed(self):
+        import desk as desk_mod
+        import kill_switch
+
+        dk = self._premium_stop_desk()
+        self._kill(dk, write_lock_fails=True)
+        self.assertFalse(kill_switch.is_locked(self.d))
+        self.assertIn("skipped", asyncio.run(dk.options_guard()))
+        dk.clock = lambda: NOW + desk_mod.KILL_SETTLE_S + 1
+        self.assertEqual(len(asyncio.run(dk.options_guard())["stops"]), 1)
+
+    def test_premium_stop_retry_nets_out_what_an_earlier_attempt_filled(self):
+        """The line holds 2, the intent owns 1. A first exit raised but filled at TWS: a retry must not sell the
+        other contract. The fill is kept on the intent row, so the next day (no fill in the snapshot) still knows."""
+        dk = self._premium_stop_desk()
+        tries = self._failing_close("TWS didn't acknowledge the order within 15s; the cancel for #77 could NOT be sent, so it may still be working")
+        asyncio.run(dk.options_guard())
+        held_after = [{**self.HELD[0], "position": 1}]                             # the exit filled: 2 -> 1
+        fill = {"execId": "0001.01", "orderRef": "GUARD-STOP-opt-000001", "conId": 1, "side": "SLD", "shares": 1.0}
+        dk.bridge = big_bridge(positions=held_after, fills=[fill])
+        dk.clock = lambda: NOW + 600
+        rep = asyncio.run(dk.options_guard())
+        self.assertEqual(tries, ["GUARD-STOP-opt-000001"])                        # not sent again
+        self.assertIn("already done or working (filled 1", rep["waiting"][0]["why"])
+        self.assertEqual(dk._row("opt-000001")["result"]["exitFills"], {"0001.01": 1.0})
+        dk.bridge = big_bridge(positions=held_after, fills=[])                     # next day: today's fills are empty
+        dk.clock = lambda: NOW + 86_400
+        asyncio.run(dk.options_guard())
+        self.assertEqual(tries, ["GUARD-STOP-opt-000001"])
+
+    def test_premium_stop_checks_tws_itself_for_a_working_exit(self):
+        """The bridge snapshot is polled; the executor's fresh reqAllOpenOrders is the last word."""
+        dk = self._premium_stop_desk()
+        self.ex.working["GUARD-STOP-opt-000001"] = 1.0
+        rep = asyncio.run(dk.options_guard())
+        self.assertFalse([c for c in self.ex.calls if c[0] == "close"])
+        self.assertIn("still working at TWS", rep["waiting"][0]["why"])
 
     def test_guard_stands_down_under_an_operator_lock(self):
         import desk_lock

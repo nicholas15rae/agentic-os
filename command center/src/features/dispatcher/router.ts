@@ -27,7 +27,7 @@ export interface Route {
 
 /** Tie-break order for domain scoring. `general` sits last (its own topic
  * triggers are mostly intercepted earlier by the OS-control intent layer). */
-export const DOMAIN_TIEBREAK = ["booking", "bizops", "finance", "ops", "coder", "designer", "director", "librarian", "prompter", "general"] as const;
+export const DOMAIN_TIEBREAK = ["booking", "bizops", "finance", "coder", "designer", "director", "librarian", "prompter", "general"] as const;
 
 /** Role ids that ARE Tony (the OS itself): never a delegation target. The OS name (lower-cased)
  * counts too (`isSelfRoleId(id, osName)`). Mirrors `SELF_ROLE_IDS` in routing.rs. */
@@ -88,13 +88,9 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
       names: ["librarian", "memory", "vault", "researcher"],
       domains: ["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"],
     },
-    // Section 20.2: ops = infra; bizops = the store / brand; money = finance; calendar, schedule,
-    // reminders and (for now) acting = Tony. Contracting (the future Job Desk) is Tony's too while
-    // Ops is a frozen placeholder (mirrors os_core.rs `OPS_PHRASES_TO_TONY`).
-    ops: {
-      names: ["ops", "infra", "infrastructure"],
-      domains: ["droplet", "docker", "n8n", "server status"],
-    },
+    // Section 20.2: bizops = the store / brand; money = finance; calendar, schedule, reminders,
+    // infrastructure and (for now) acting = Tony. Contracting (the future Job Desk) is Tony's too
+    // until a Job Desk exists (mirrors os_core.rs `CONTRACTING_TO_TONY`).
     bizops: {
       names: ["bizops", "operations manager", "ops manager", "business manager", "operations", "business"],
       domains: ["inventory", "fulfillment", "open orders", "bf supplements", "supplements", "born fortuna", "instagram", "ecommerce", "online store"],
@@ -106,7 +102,7 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
     general: {
       names: [],
       domains: [
-        "system status", "switch model", "calendar", "schedule", "reminder", "reminders", "remind me",
+        "system status", "switch model", "droplet", "docker", "n8n", "server status", "calendar", "schedule", "reminder", "reminders", "remind me",
         "audition", "auditions", "casting", "casting call", "casting email", "casting emails", "self-tape", "self tape", "callback", "wardrobe", "availability",
         "bookings", "talent agent", "my agent", "agency", "imperious", "draft email to agent",
         "job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates",
@@ -115,8 +111,8 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   },
 };
 
-/** What Rust seeds a fresh master switchboard with (os_core.rs `DEFAULT_FROZEN_AGENTS` + `FROZEN_PLACEHOLDER_AGENTS`). */
-const DEFAULT_ROUTER_FROZEN: readonly string[] = ["booking", "librarian", "ops"]; // + FROZEN_PLACEHOLDER_AGENTS
+/** What Rust seeds a fresh master switchboard with (os_core.rs `DEFAULT_FROZEN_AGENTS`). */
+const DEFAULT_ROUTER_FROZEN: readonly string[] = ["booking", "librarian"];
 /** The master switchboard's frozen agents the router skips (Section 20.1). The os store keeps it
  * in sync with os.json (`setRouterFrozenAgents`); until the config loads it is Rust's default. */
 let routerFrozen: readonly string[] = DEFAULT_ROUTER_FROZEN;

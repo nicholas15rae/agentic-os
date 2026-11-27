@@ -12,7 +12,7 @@ import type { SnapAgent, SnapBus, SnapSkill } from "@/lib/platform";
 
 // ── Buses ─────────────────────────────────────────────────────────────────────
 
-export type BusId = "core" | "build" | "media" | "memory" | "vault" | "ops" | "security" | "trading";
+export type BusId = "core" | "build" | "media" | "memory" | "vault" | "business" | "security" | "trading";
 
 export interface BusLook {
   label: string;
@@ -28,13 +28,13 @@ export const BUSES: Readonly<Record<BusId, BusLook>> = {
   media: { label: "Media / edit", color: "#e879f9", rgb: "232,121,249" },
   memory: { label: "RAG / memory", color: "#34d399", rgb: "52,211,153" },
   vault: { label: "Finance vault", color: "#a78bfa", rgb: "167,139,250" },
-  ops: { label: "Ops / booking", color: "#60a5fa", rgb: "96,165,250" },
+  business: { label: "Business / booking", color: "#60a5fa", rgb: "96,165,250" },
   security: { label: "Security / garbage", color: "#f43f5e", rgb: "244,63,94" },
   trading: { label: "Trading (isolated)", color: "#84cc16", rgb: "132,204,22" },
 };
 
 /** The roster (arbiter node ids), Tony first. */
-export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "bizops", "trading", "observer", "security", "garbage"] as const;
+export const ROSTER = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "bizops", "trading", "observer", "security", "garbage"] as const;
 export type RosterId = (typeof ROSTER)[number];
 
 export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
@@ -45,9 +45,8 @@ export const NODE_BUS: Readonly<Record<RosterId, BusId>> = {
   director: "media",
   librarian: "memory",
   finance: "vault",
-  booking: "ops",
-  ops: "ops",
-  bizops: "ops",
+  booking: "business",
+  bizops: "business",
   trading: "trading",
   observer: "security",
   security: "security",
@@ -63,7 +62,6 @@ export const NODE_LABEL: Readonly<Record<RosterId, string>> = {
   librarian: "Librarian",
   finance: "Financer",
   booking: "Booking Agent",
-  ops: "Ops",
   bizops: "Biz Ops",
   trading: "Trading Agent",
   observer: "Observer",
@@ -116,7 +114,7 @@ export const SURFACE_TONE: Readonly<Record<Surface, string>> = {
 // ── Introspect joins ───────────────────────────────────────────────────────
 
 /** AnythingLLM role behind a roster node (`SnapAgent.role`; "general" = Tony). */
-const INTROSPECT_ROLE: Partial<Record<RosterId, string>> = { tony: "general", prompter: "prompter", coder: "coder", designer: "designer", director: "director", librarian: "librarian", ops: "ops", booking: "booking", finance: "finance" };
+const INTROSPECT_ROLE: Partial<Record<RosterId, string>> = { tony: "general", prompter: "prompter", coder: "coder", designer: "designer", director: "director", librarian: "librarian", booking: "booking", finance: "finance" };
 
 export function agentFor(id: RosterId, agents: readonly SnapAgent[] | undefined): SnapAgent | undefined {
   // Biz Ops has one workspace per business (`bizops_<id>`): show the first one's model.
@@ -147,7 +145,6 @@ export const HOOKUP_HINTS: Readonly<Record<RosterId, readonly string[]>> = {
   librarian: ["memory", "knowledge", "anythingllm", "filesystem", "documenter"],
   finance: ["market", "trading", "finance"],
   booking: ["n8n", "gmail", "calendar", "instagram"],
-  ops: ["n8n", "scheduler", "services"],
   bizops: ["gmail", "calendar", "time", "knowledge"],
   trading: ["ibkr", "trading"],
   observer: ["trace", "telemetry"],
@@ -174,7 +171,6 @@ export const BOUNDARY: Readonly<Record<RosterId, string>> = {
   librarian: "Read-only over every non-vault namespace + cold archives; writes `librarian`",
   finance: "SEALED vault: AES-GCM ledger, opens only on your explicit unlock; never in shared memory. The Finance agent answers from one ledger's rows; its workspace holds no documents",
   booking: "Outbound via the n8n webhook only; writes `booking`",
-  ops: "AnythingLLM workspace (on demand); no direct filesystem access",
   bizops: "One business per turn: reads / writes only memory/ops/<business> (jailed), RAG only its bizops_<id> workspace; money only through the approved Finance hand-off",
   trading:
     "Isolated: talks only to the Financer. Proposes OrderIntents; every one passes the Security Detail (deterministic risk + sizing gate) before the paper bridge at 127.0.0.1:7497 (localhost-only)",
@@ -245,10 +241,9 @@ export const FLOW_NODES: Readonly<Record<Exclude<RosterId, "tony">, FlowNode>> =
   librarian: { x: 1310, y: 400, col: "right" },
   finance: { x: 1310, y: 570, col: "right" },
   booking: { x: 1310, y: 740, col: "right" },
-  ops: { x: 1310, y: 910, col: "right" },
-  bizops: { x: 1310, y: 1080, col: "right" },
+  bizops: { x: 1310, y: 910, col: "right" },
   // Off Tony's spine (isolated): under Biz Ops, joined only to the Financer by a side link.
-  trading: { x: 1310, y: 1250, col: "right" },
+  trading: { x: 1310, y: 1080, col: "right" },
   // The bottom row sits left of the Trading card.
   observer: { x: 360, y: 1280, col: "bottom" },
   security: { x: 690, y: 1280, col: "bottom" },
@@ -256,7 +251,7 @@ export const FLOW_NODES: Readonly<Record<Exclude<RosterId, "tony">, FlowNode>> =
 };
 
 /** Each bus drops off the spine on its own lane, so parallel traces never overlap. */
-export const BUS_LANE: Readonly<Record<BusId, number>> = { core: 0, build: -36, media: -18, memory: 30, vault: 54, ops: 78, security: 0, trading: 0 };
+export const BUS_LANE: Readonly<Record<BusId, number>> = { core: 0, build: -36, media: -18, memory: 30, vault: 54, business: 78, security: 0, trading: 0 };
 
 /** The 90°-routed trace from Tony's spine to a node's card (SVG path). Pure. */
 export function busPath(id: Exclude<RosterId, "tony">): string {
@@ -326,7 +321,6 @@ export const ORBITS: Readonly<Record<RosterId, Orbit>> = {
   designer: { radius: 12, speed: 0.045, phase: 4.1, tilt: 0.06, size: 0.7, palette: ["#3b0d2e", "#c2417d", "#ffb4d2"], atmosphere: "#f472b6", kind: "planet" },
   director: { radius: 13.5, speed: 0.04, phase: 0.2, tilt: -0.03, size: 0.64, palette: ["#2a0a2e", "#a3389a", "#f5c2ec"], atmosphere: "#e879f9", kind: "planet" },
   librarian: { radius: 15, speed: 0.036, phase: 1.1, tilt: -0.07, size: 0.95, palette: ["#062b22", "#1f8a6b", "#a7f3d0"], atmosphere: "#34d399", kind: "planet" },
-  ops: { radius: 18, speed: 0.03, phase: 5.3, tilt: 0.05, size: 0.74, palette: ["#0b1f3a", "#2f6fb4", "#bfdbfe"], atmosphere: "#60a5fa", kind: "planet" },
   bizops: { radius: 19.5, speed: 0.027, phase: 1.7, tilt: -0.02, size: 0.72, palette: ["#062a2e", "#1b8a96", "#a5f3fc"], atmosphere: "#22d3ee", kind: "planet" },
   booking: { radius: 21, speed: 0.025, phase: 3.0, tilt: -0.05, size: 0.66, palette: ["#2a2410", "#8f7a3a", "#e9dca2"], atmosphere: "#facc15", kind: "planet" },
   observer: { radius: 24, speed: 0.021, phase: 0.9, tilt: 0.08, size: 0.6, palette: ["#1d2130", "#5b6378", "#cfd6e6"], atmosphere: "#93c5fd", kind: "planet" },

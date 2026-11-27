@@ -5,7 +5,7 @@ import { agentServers, DEFAULT_TONY_MODE_TOOLS, INTENDED_SHARED, loadOf, sharedK
 const srv = (id: string, agents: string[] | null, enabled = true) => ({ id, name: id, enabled, agents }) as unknown as McpServer;
 const listing = (id: string, n: number) => ({ id, name: id, enabled: true, ok: true, error: null, status: "ok", auth: null, tools: Array.from({ length: n }, (_, i) => ({ name: `${id}.t${i}`, description: "x".repeat(40), server: id, args: ["a"] })) }) as ServerTools;
 
-const mcps = [srv("time", ["general"]), srv("gmail", ["general"]), srv("git", ["coder"]), srv("filesystem", ["coder", "prompter"]), srv("maps", ["ops"]), srv("knowledge-graph", ["general", "prompter"])];
+const mcps = [srv("time", ["general"]), srv("gmail", ["general"]), srv("git", ["coder"]), srv("filesystem", ["coder", "prompter"]), srv("maps", ["director"]), srv("knowledge-graph", ["general", "prompter"])];
 const base = { modeTools: null, frozenTools: [] as string[], frozen: false };
 
 describe("tool load", () => {
@@ -20,7 +20,7 @@ describe("tool load", () => {
     expect(agentServers({ mcps }, "general", { ...base, modeId: "learning", modeTools: [] })).toEqual(["time", "gmail", "knowledge-graph"]);
     expect(agentServers({ mcps }, "general", { ...base, modeId: "builder" })).toEqual(["time", "gmail", "git", "filesystem", "knowledge-graph"]);
     expect(agentServers({ mcps }, "general", { ...base, modeId: "builder", frozenTools: ["gmail"] })).toEqual(["time", "git", "filesystem", "knowledge-graph"]);
-    expect(agentServers({ mcps }, "ops", { ...base, modeId: "x", frozen: true })).toEqual([]);
+    expect(agentServers({ mcps }, "coder", { ...base, modeId: "x", frozen: true })).toEqual([]);
     expect(agentServers({ mcps }, "coder", { ...base, modeId: "builder", modeTools: ["git"] })).toEqual(["git"]);
   });
 
@@ -44,12 +44,13 @@ describe("tool load", () => {
     expect(sharedKey({ server: "fs", owners: ["b", "a"] })).toBe("fs:a,b");
   });
 
-  it("never flags the intended pairs (Maps: Tony + Ops; Instagram: Biz Ops + Tony read-only)", () => {
-    expect(INTENDED_SHARED).toEqual({ maps: ["general", "ops"], instagram: ["general", "bizops"] });
-    const m = [srv("maps", ["general", "ops"]), srv("instagram", ["bizops", "general"]), srv("gmail", ["general", "ops"])];
-    expect(sharedServers(m, ["general", "ops", "bizops"])).toEqual([{ server: "gmail", owners: ["general", "ops"] }]);
-    // A third owner on an intended server is flagged again.
-    expect(sharedServers([srv("maps", ["general", "ops", "coder"])], ["general", "ops", "coder"])).toEqual([{ server: "maps", owners: ["general", "ops", "coder"] }]);
+  it("never flags the intended pair (Instagram: Biz Ops + Tony read-only)", () => {
+    expect(INTENDED_SHARED).toEqual({ instagram: ["general", "bizops"] });
+    const m = [srv("maps", ["general"]), srv("instagram", ["bizops", "general"]), srv("gmail", ["general", "bizops"])];
+    expect(sharedServers(m, ["general", "bizops"])).toEqual([{ server: "gmail", owners: ["general", "bizops"] }]);
+    // A third owner on an intended server is flagged again; Maps shared with anyone is flagged.
+    expect(sharedServers([srv("instagram", ["general", "bizops", "coder"])], ["general", "bizops", "coder"])).toEqual([{ server: "instagram", owners: ["general", "bizops", "coder"] }]);
+    expect(sharedServers([srv("maps", ["general", "coder"])], ["general", "coder"])).toEqual([{ server: "maps", owners: ["general", "coder"] }]);
   });
 
   it("counts Tony's one read-only Finance tool; no other agent is ever handed it (Section 11.10)", () => {

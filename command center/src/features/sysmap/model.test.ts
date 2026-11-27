@@ -57,9 +57,9 @@ describe("tracesFor / liveTraces", () => {
   it("only keeps hand-offs inside the window (nothing lit while idle)", () => {
     const p = [
       { from: "tony", to: "coder", kind: "handoff" as const, at: 1000 },
-      { from: "tony", to: "ops", kind: "handoff" as const, at: 9000 },
+      { from: "tony", to: "bizops", kind: "handoff" as const, at: 9000 },
     ];
-    expect([...liveTraces(p, 10_000, 1600).keys()]).toEqual(["bus:ops"]);
+    expect([...liveTraces(p, 10_000, 1600).keys()]).toEqual(["bus:bizops"]);
     expect(liveTraces(p, 50_000, 1600).size).toBe(0);
   });
 });

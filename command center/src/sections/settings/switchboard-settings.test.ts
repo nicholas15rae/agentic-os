@@ -76,9 +76,9 @@ describe("Switchboard → mode presets", () => {
     expect(tonyExtras).toContain('title="Take Git from Tony in Builder"');
     expect(builder).toContain("3 agents · 8 tools on duty");
     expect(builder).toContain(">Active<");
-    const ops = block(h, "data-mode", "operations");
-    expect(ops).toContain(">Ops</span>");
-    expect(ops).toContain(">Biz Ops</span>");
+    const operations = block(h, "data-mode", "operations");
+    expect(operations).not.toContain(">Ops</span>");
+    expect(operations).toContain(">Biz Ops</span>");
     expect(block(h, "data-mode", "learning")).toContain("Night training");
     expect(block(h, "data-mode", "learning")).toContain("Tony only");
     expect(block(h, "data-mode", "brainstorm")).toContain("No switchboard: every agent and tool stays live");
@@ -109,7 +109,7 @@ describe("Switchboard → mode presets", () => {
     const toggle = elements(SwitchboardView(p)).filter((e) => (e.props as { label?: string }).label === "Use a switchboard in this mode");
     expect(toggle).toHaveLength(2);
     (toggle[1].props as { onChange: (v: boolean) => void }).onChange(true);
-    expect(onMode).toHaveBeenLastCalledWith({ ...loose, switchboard: { agents: ["booking", "coder", "prompter", "designer", "director", "librarian", "ops", "bizops", "finance"], tools: ["gmail", "git", "shotcut", "weather"] } });
+    expect(onMode).toHaveBeenLastCalledWith({ ...loose, switchboard: { agents: ["booking", "coder", "prompter", "designer", "director", "librarian", "bizops", "finance"], tools: ["gmail", "git", "shotcut", "weather"] } });
     (toggle[0].props as { onChange: (v: boolean) => void }).onChange(false);
     expect(onMode).toHaveBeenLastCalledWith({ ...focus, switchboard: null });
   });
@@ -122,7 +122,7 @@ describe("Switchboard → tool ownership", () => {
     expect(gmail).toMatch(/aria-pressed="true"[^>]*title="Tony is the last owner"/);
     expect(gmail).toMatch(/aria-pressed="false"[^>]*title="Give Gmail to Coder"/);
     const weather = block(h, "data-server", "weather");
-    expect((weather.match(/aria-pressed="true"/g) ?? []).length).toBe(10); // Tony + 9 sub-agents
+    expect((weather.match(/aria-pressed="true"/g) ?? []).length).toBe(9); // Tony + 8 sub-agents
     expect(block(h, "data-server", "shotcut")).toContain(">off<");
     expect(block(h, "data-server", "shotcut")).toContain("frozen");
   });
@@ -133,7 +133,7 @@ describe("Switchboard → tool ownership", () => {
     byTitle(p, "Give Gmail to Coder").onClick!();
     expect(onMcps.mock.calls[0][0].find((s: McpServer) => s.id === "gmail").agents).toEqual(["general", "coder"]);
     byTitle(p, "Take Weather from Tony").onClick!();
-    expect(onMcps.mock.calls[1][0].find((s: McpServer) => s.id === "weather").agents).toEqual(["booking", "coder", "prompter", "designer", "director", "librarian", "ops", "bizops", "finance"]);
+    expect(onMcps.mock.calls[1][0].find((s: McpServer) => s.id === "weather").agents).toEqual(["booking", "coder", "prompter", "designer", "director", "librarian", "bizops", "finance"]);
     expect(byTitle(p, "Tony is the last owner")).toMatchObject({ disabled: true, onClick: undefined });
   });
 });
@@ -164,7 +164,7 @@ describe("switchboard helpers", () => {
   it("osSwitchboard: an older desktop without it freezes nothing; fields are normalised", () => {
     expect(osSwitchboard(null)).toEqual({ version: 0, frozenAgents: [], frozenTools: [] });
     expect(osSwitchboard({ switchboard: { frozenAgents: ["booking"] } })).toEqual({ version: 0, frozenAgents: ["booking"], frozenTools: [] });
-    expect(DEFAULT_OS_SWITCHBOARD).toEqual({ version: 1, frozenAgents: ["booking", "librarian", "ops"], frozenTools: [] });
+    expect(DEFAULT_OS_SWITCHBOARD).toEqual({ version: 1, frozenAgents: ["booking", "librarian"], frozenTools: [] });
   });
 
   it("DEFAULT_OS_SWITCHBOARD freezes exactly what Rust seeds (os_core.rs DEFAULT_FROZEN_AGENTS)", () => {
@@ -173,11 +173,7 @@ describe("switchboard helpers", () => {
     expect(m, "os_core.rs DEFAULT_FROZEN_AGENTS").not.toBeNull();
     const rust = [...m![2].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
     expect(rust).toHaveLength(Number(m![1]));
-    // Plus the placeholders frozen until they get a job (FROZEN_PLACEHOLDER_AGENTS: Ops).
-    const ph = rs.match(/pub const FROZEN_PLACEHOLDER_AGENTS: \[&str; \d+\] = \[([^\]]*)\];/);
-    expect(ph, "os_core.rs FROZEN_PLACEHOLDER_AGENTS").not.toBeNull();
-    const placeholders = [...ph![1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
-    expect(DEFAULT_OS_SWITCHBOARD.frozenAgents).toEqual([...rust, ...placeholders]);
+    expect(DEFAULT_OS_SWITCHBOARD.frozenAgents).toEqual(rust);
   });
 
   it("toggleFrozen flips one id", () => {

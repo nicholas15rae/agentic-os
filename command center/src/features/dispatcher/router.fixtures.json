@@ -16,8 +16,8 @@
   },
   {
     "desc": "explicit delegation verb (send) + single-word name, no agent/desk suffix",
-    "text": "send it to the ops team for a status check",
-    "role": "ops",
+    "text": "send it to the finance team for a status check",
+    "role": "finance",
     "kind": "Named"
   },
   {
@@ -124,24 +124,16 @@
     "kind": "Default"
   },
   {
-    "desc": "'check what's up with the droplet' is a droplet question, never a WhatsApp read ('with' after 'up' blocks the before-cue)",
+    "desc": "'check what's up with the droplet' is a droplet question (Tony's own topic), never a WhatsApp read ('with' after 'up' blocks the before-cue)",
     "text": "check what's up with the droplet",
-    "role": "ops",
-    "kind": "Domain",
-    "frozen": [
-      "booking",
-      "librarian"
-    ]
+    "role": "general",
+    "kind": "Self"
   },
   {
-    "desc": "'check what's up on the droplet' is a droplet question ('on' + more words after 'up' blocks the before-cue)",
+    "desc": "'check what's up on the droplet' is a droplet question (Tony's own topic; 'on' + more words after 'up' blocks the before-cue)",
     "text": "check what's up on the droplet",
-    "role": "ops",
-    "kind": "Domain",
-    "frozen": [
-      "booking",
-      "librarian"
-    ]
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "'check what's up on my calendar' is a calendar question (Tony's topic and his live read), not WhatsApp",
@@ -219,7 +211,7 @@
     "kind": "Domain"
   },
   {
-    "desc": "invoices are Finance's ('invoice' 7 beats the ops job-quote 'quote' 5)",
+    "desc": "invoices are Finance's (Tony's job-quote topic never beats an agent's topic)",
     "text": "pull up the invoice and the quote",
     "role": "finance",
     "kind": "Domain"
@@ -416,20 +408,16 @@
     "kind": "Self"
   },
   {
-    "desc": "self: Tony's name beats an ops topic",
+    "desc": "self: Tony addressed by name (the droplet is his own topic anyway)",
     "text": "tony, how's the droplet doing",
     "role": "general",
     "kind": "Self"
   },
   {
-    "desc": "self: Tony's own topic alone does not beat another agent's topic (only his name does)",
+    "desc": "self: infrastructure is Tony's own topic (no agent takes it)",
     "text": "system status of the droplet",
-    "role": "ops",
-    "kind": "Domain",
-    "frozen": [
-      "booking",
-      "librarian"
-    ]
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "frozen Booking Desk: named through Tony is Named; the switchboard keeps it with Tony",
@@ -495,13 +483,9 @@
   },
   {
     "desc": "a self name mid-line (no address position) does not beat a topic",
-    "text": "the dispatcher keeps timing out, is the droplet healthy",
-    "role": "ops",
-    "kind": "Domain",
-    "frozen": [
-      "booking",
-      "librarian"
-    ]
+    "text": "the dispatcher keeps timing out, fix bug in the retry loop",
+    "role": "coder",
+    "kind": "Domain"
   },
   {
     "desc": "address: the line opens with a self name after an interjection ('ok jarvis')",
@@ -584,20 +568,10 @@
     "kind": "Named"
   },
   {
-    "desc": "ops stays infrastructure",
+    "desc": "infrastructure (droplet, Docker) is Tony's own topic",
     "text": "is the droplet healthy and is docker up",
-    "role": "ops",
-    "kind": "Domain",
-    "frozen": [
-      "booking",
-      "librarian"
-    ]
-  },
-  {
-    "desc": "Ops starts frozen (an unused placeholder), so an infra question is Tony's until Nic thaws it",
-    "text": "is the droplet healthy and is docker up",
-    "role": null,
-    "kind": "Default"
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "A2: a Gmail booking read stays with Tony (no name, booking words only)",
@@ -682,8 +656,14 @@
     "taskContains": "check the layout"
   },
   {
-    "desc": "contracting, job quotes and subcontractors are Tony's while Ops is frozen (the future Job Desk)",
+    "desc": "contracting, job quotes and subcontractors are Tony's (the future Job Desk)",
     "text": "send the masonry quote to the subcontractor",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "job estimates are Tony's too",
+    "text": "how many estimates are still out",
     "role": "general",
     "kind": "Self"
   },

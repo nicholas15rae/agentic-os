@@ -13,7 +13,10 @@ EBU R128 loudnorm (unless lufs is null), CPU libx264, size cap, ffprobe verify.
 
 Spec v2 = v1 plus (every new key optional, defaults shown; a v1 spec must not carry them):
     clips[]:  "transition_in": {"kind": "cut"|"crossfade"|"fade_black", "ms": 0-1500} ({"cut", 0}),
-              "punch_in": 1.0-1.5 (1.0), "transcript": abs path to a transcribe_clip JSON | null (null)
+              "punch_in": 1.0-1.5 (1.0), "transcript": abs path to a transcribe_clip JSON | null (null),
+              "crop": {"x", "y", "w", "h"} | null (null): all four, even integers ≥ 0, w/h ≥ 16, inside
+                      the probed (rotation-applied) source frame; cut first, before punch-in / fit,
+              "fit": "pad"|"fill"|"blur" ("pad")
     audio[]:  "fade_in_ms": 0-10000 (0), "fade_out_ms": 0-10000 (0), "duck_under_voice": bool (false)
     "captions": {"enabled": bool, "style": "clean"|"bold_pop"|"karaoke"|"minimal",
                  "position": "lower"|"middle", "max_words_per_line": 1-12} ({false, clean, lower, 5})
@@ -27,6 +30,13 @@ usual letterbox scale. Ducked layers are side-chain compressed under the clip au
 are built from word timestamps re-timed onto the output (captions.py) and burned with `ass`; the
 colour look (eq / colorbalance / curves / hue) goes on before the captions so text stays neutral.
 v1 specs keep the exact v1 graph (`_graph`).
+
+Framing (added to v2 2026-11; a v2 spec without crop/fit renders byte-for-byte the same graph):
+  pad  = [crop] → punch-in centre crop → scale to fit → black pad (the original v2 behaviour)
+  fill = [crop] → scale to COVER W·z × H·z (z = punch_in) → centre-crop W×H (no bars, edges lost)
+  blur = [crop] → punch-in → split: background cover-scaled at ¼ size, box-blurred, scaled back up
+         and darkened; foreground scaled to fit; overlaid centred (the Reels look for 16:9 in 9:16)
+Pair `crop` with detect_bars' content rect for pillarboxed / letterboxed sources.
 """
 
 from __future__ import annotations
@@ -54,7 +64,13 @@ AFMT = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
 SPEC_VERSIONS = (1, 2)
 TOP_KEYS_V2 = TOP_KEYS | {"captions", "color"}
-CLIP_KEYS_V2 = CLIP_KEYS | {"transition_in", "punch_in", "transcript"}
+CLIP_KEYS_V2 = CLIP_KEYS | {"transition_in", "punch_in", "transcript", "crop", "fit"}
+CROP_KEYS = {"x", "y", "w", "h"}
+CROP_MIN = 16
+FITS = ("pad", "fill", "blur")
+# blur fit: the background is cover-scaled at a quarter size, blurred, scaled back up and darkened.
+BLUR_BG = "boxblur=8:2"
+BLUR_DARKEN = "eq=brightness=-0.08:saturation=0.85"
 AUDIO_KEYS_V2 = AUDIO_KEYS | {"fade_in_ms", "fade_out_ms", "duck_under_voice"}
 TRANSITIONS = ("cut", "crossfade", "fade_black")
 TRANSITION_MAX_MS = 1500
@@ -149,7 +165,7 @@ def load_spec(s: Settings, spec_path: Path) -> dict:
         item = {"index": i, "path": str(path), "kind": kind, "in": round(t_in, 3), "out": round(t_out, 3),
                 "duration": round(dur, 3), "fade_s": min(fade, dur / 3), "has_audio": has_audio}
         if v2:
-            item.update(_clip_v2(s, c, where, kind, i))
+            item.update(_clip_v2(s, c, where, kind, i, info["video"]))
         clips.append(item)
 
     audio_in = spec.get("audio", [])
@@ -209,7 +225,32 @@ def _obj(v, where: str, allowed: set[str]) -> dict:
     return v
 
 
-def _clip_v2(s: Settings, c: dict, where: str, kind: str, i: int) -> dict:
+def _crop_v2(c: dict, where: str, src: dict) -> dict | None:
+    crop = c.get("crop")
+    if crop is None:
+        return None
+    crop = _obj(crop, f"{where} crop", CROP_KEYS)
+    missing = sorted(CROP_KEYS - set(crop))
+    if missing:
+        raise PolicyError(f"{where}: crop needs x, y, w and h (missing {', '.join(missing)})")
+    for k in ("x", "y", "w", "h"):
+        v = crop[k]
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise PolicyError(f"{where}: crop.{k} must be an integer number of source pixels (got {v!r})")
+        if v % 2:
+            raise PolicyError(f"{where}: crop.{k} must be even (got {v})")
+        if v < 0:
+            raise PolicyError(f"{where}: crop.{k} must be ≥ 0 (got {v})")
+    if crop["w"] < CROP_MIN or crop["h"] < CROP_MIN:
+        raise PolicyError(f"{where}: crop must be at least {CROP_MIN}x{CROP_MIN} (got {crop['w']}x{crop['h']})")
+    W, H = src["width"], src["height"]
+    if crop["x"] + crop["w"] > W or crop["y"] + crop["h"] > H:
+        raise PolicyError(f"{where}: crop {crop['w']}x{crop['h']} at {crop['x']},{crop['y']} runs outside "
+                          f"the {W}x{H} source")
+    return {"x": crop["x"], "y": crop["y"], "w": crop["w"], "h": crop["h"]}
+
+
+def _clip_v2(s: Settings, c: dict, where: str, kind: str, i: int, src: dict) -> dict:
     tr = c.get("transition_in")
     tr = _obj(tr, f"{where} transition_in", {"kind", "ms"}) if tr is not None else {}
     t_kind = tr.get("kind", "cut")
@@ -232,7 +273,11 @@ def _clip_v2(s: Settings, c: dict, where: str, kind: str, i: int) -> dict:
             raise PolicyError(f"{where}: transcript must be a transcribe_clip .json file")
         cap_mod.load_words(tp)  # strict parse now, not halfway through a render
         transcript = str(tp)
-    return {"transition": t_kind, "transition_s": ms / 1000, "punch_in": punch, "transcript": transcript}
+    fit = c.get("fit", "pad")
+    if fit not in FITS:
+        raise PolicyError(f"{where}: fit must be pad, fill or blur (got {fit!r})")
+    return {"transition": t_kind, "transition_s": ms / 1000, "punch_in": punch, "transcript": transcript,
+            "crop": _crop_v2(c, where, src), "fit": fit}
 
 
 def _layer_v2(a: dict, where: str, length: float) -> dict:
@@ -371,6 +416,38 @@ def _graph(plan: dict, video: bool, out_label: str) -> tuple[list[str], str]:
     return inputs, ";".join(parts)
 
 
+def _even_up(v: float) -> int:
+    return int(math.ceil(v / 2 - 1e-9)) * 2
+
+
+def _frame_v2(c: dict, vf: str, W: int, H: int, fps: float) -> tuple[list[str], str]:
+    """Crop + fit a trimmed clip chain to W×H. Returns (finished side chains, the main chain so far,
+    which ends conformed: setsar=1, fps, yuv420p). Without crop / fit this is exactly the old pad."""
+    i = c["index"]
+    z = c["punch_in"]
+    if c.get("crop"):
+        r = c["crop"]
+        vf += f",crop={r['w']}:{r['h']}:{r['x']}:{r['y']}"
+    tail = f",setsar=1,fps={fps:g},format=yuv420p"
+    fit = c.get("fit", "pad")
+    if fit == "fill":
+        # Cover the output (punch_in zooms the covered frame), centre-crop to W×H. One resample.
+        zw, zh = (W, H) if z <= 1.0 else (_even_up(W * z), _even_up(H * z))
+        return [], vf + f",scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={W}:{H}" + tail
+    if z > 1.0:
+        zs = f"{z:g}"
+        vf += f",crop=trunc(iw/{zs}/2)*2:trunc(ih/{zs}/2)*2"
+    if fit == "blur":
+        bw, bh = max(2, W // 4 // 2 * 2), max(2, H // 4 // 2 * 2)
+        side = [vf + f",split=2[bg{i}][fg{i}]",
+                f"[bg{i}]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},{BLUR_BG},"
+                f"scale={W}:{H},{BLUR_DARKEN}[bb{i}]",
+                f"[fg{i}]scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2[fs{i}]"]
+        return side, f"[bb{i}][fs{i}]overlay=(W-w)/2:(H-h)/2" + tail
+    return [], vf + (f",scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black") + tail
+
+
 def _graph_v2(plan: dict, video: bool, out_label: str, ass_name: str | None = None) -> tuple[list[str], str]:
     """Spec v2 graph: per-clip punch-in and fades, joined by concat (runs of cuts) and xfade +
     acrossfade (crossfades); layers faded, optionally ducked under the clip audio, then mixed.
@@ -408,11 +485,8 @@ def _graph_v2(plan: dict, video: bool, out_label: str, ass_name: str | None = No
             vf = (f"[{k}:v]trim=start={c['in']}:end={c['out']}" if c["kind"] == "video"
                   else f"[{k}:v]trim=duration={d:.3f}")
             vf += ",setpts=PTS-STARTPTS"
-            if c["punch_in"] > 1.0:
-                z = f"{c['punch_in']:g}"
-                vf += f",crop=trunc(iw/{z}/2)*2:trunc(ih/{z}/2)*2"
-            vf += (f",scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                   f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={fps:g},format=yuv420p")
+            pre, vf = _frame_v2(c, vf, W, H, fps)
+            parts.extend(pre)
             if f:
                 vf += f",fade=t=in:st=0:d={f:.3f},fade=t=out:st={d - f:.3f}:d={f:.3f}"
             if b_in:
@@ -527,7 +601,9 @@ def _render_v2(s: Settings, ctx: Ctx, plan: dict, out: Path, spec_path: Path) ->
     res.update(spec_version=2, crossfades=sum(c["transition"] == "crossfade" for c in plan["clips"]),
                captions={"enabled": bool(ass_name), "style": plan["captions"]["style"], "lines": lines,
                          "ass_path": str(sidecar) if sidecar else None},
-               color=plan["color"], ducked_layers=sum(a["duck"] for a in plan["audio"]))
+               color=plan["color"], ducked_layers=sum(a["duck"] for a in plan["audio"]),
+               fits={f: sum(c["fit"] == f for c in plan["clips"]) for f in FITS},
+               cropped_clips=sum(bool(c["crop"]) for c in plan["clips"]))
     return res
 
 

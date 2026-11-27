@@ -15,7 +15,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from media_forge import analyze, config, ff, photos, timeline, video
+from media_forge import analyze, bars, config, ff, photos, timeline, video
 from media_forge.config import PolicyError, next_version, project_dir, readable, writable
 from media_forge.jobs import JobManager
 
@@ -120,6 +120,19 @@ async def detect_silence(path: str, threshold_db: float = -35.0, min_duration: f
 
 
 @mcp.tool()
+async def detect_bars(path: str, sample_s: float | None = None, start_s: float = 0.0, samples: int = 8) -> dict:
+    """Find black bars (letterbox / pillarbox, e.g. vertical footage inside a 16:9 file) with ffmpeg
+    cropdetect on `samples` (1-24, default 8) fast-seeked points spread over [start_s, start_s +
+    sample_s] (default: the whole clip; pass a clip's in and out-in to measure just that range).
+    CPU only, a second or two. All-black samples are ignored and the content rect is the union of
+    the rest, so dark scenes never shrink it. Returns {content: {x, y, w, h} (even source pixels,
+    ready for a render_timeline clip "crop"), source: {w, h}, confidence: 0-1, letterboxed,
+    pillarboxed, window: {start_s, end_s}, samples: [...], regions: [{x, y, w, h, count}]}; more
+    than one region means the framing changes inside the window (measure each clip's own range)."""
+    return await _guard(lambda: bars.detect(S, readable(S, path), sample_s, start_s, samples))
+
+
+@mcp.tool()
 async def verify_output(path: str, max_size_mb: float | None = None, width: int | None = None,
                         height: int | None = None, min_duration: float | None = None,
                         require_audio: bool = True) -> dict:
@@ -183,6 +196,10 @@ async def render_timeline(spec_path: str, output: str | None = None, project: st
     {"enabled", "style": clean|bold_pop|karaoke|minimal, "position": lower|middle,
     "max_words_per_line": 1-12} (burned from the word timestamps, re-timed to each clip's in/out);
     "color": {"preset": none|warm|cool|punchy|film|bw, "strength": 0-1}. Still CPU libx264 only.
+    Framing (v2, optional per clip): "crop": {"x", "y", "w", "h"} (even source pixels inside the
+    frame, e.g. detect_bars' content) is cut first; "fit": "pad" (default: scale to fit + black
+    bars, as before) | "fill" (scale to cover W x H and centre-crop; punch_in zooms the output) |
+    "blur" (fit over a blurred, darkened, cover-scaled copy of itself: the Reels look).
     """
     def prep() -> tuple[dict, Path, Path]:
         ff.refuse_gpu_args(S, "x264")

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, CloudUpload, LifeBuoy, Loader2, X } from "lucide-react";
 import { cmd, isTauri } from "@/lib/platform";
 import { useVoice } from "@/features/voice/voice-store";
@@ -56,7 +57,8 @@ export function HelpDeskButton({ thread }: { thread: string }) {
           {cost}
         </span>
       </button>
-      {open && (
+      {open &&
+        createPortal(
         <div className="fixed inset-0 z-[75] flex justify-end bg-black/40" onClick={() => setOpen(false)}>
           <aside className="glass-chat h-full w-full max-w-xl space-y-4 overflow-y-auto rounded-none p-5" onClick={(e) => e.stopPropagation()} aria-label="Help desk">
             <div className="flex items-center justify-between">
@@ -97,8 +99,9 @@ export function HelpDeskButton({ thread }: { thread: string }) {
               </Suspense>
             </div>
           </aside>
-        </div>
-      )}
+        </div>,
+        document.body,
+        )}
     </>
   );
 }

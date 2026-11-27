@@ -19,6 +19,7 @@ import { devFixMode } from "@/features/memmap/format";
 import { useModes } from "@/features/modes/modes-store";
 import { LayoutSurface } from "@/core/widgets/LayoutSurface";
 import { usePlayPlaceLayout } from "./playplace/panels";
+import { revealPanel } from "@/core/widgets/reveal";
 import { useMyApps } from "@/features/myapps/store";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
@@ -47,28 +48,14 @@ export function PlayPlaceSection() {
   const card = useFocus((s) => s.card);
   const build = useMyApps((s) => s.focusBuild);
   useEffect(() => {
-    if (card) revealPanel("pp-play-cards");
+    if (card) revealPanel(usePlayPlaceLayout, "pp-play-cards", "Play Place");
   }, [card]);
   useEffect(() => {
-    if (build) revealPanel("pp-staging-hub");
+    if (build) revealPanel(usePlayPlaceLayout, "pp-staging-hub", "Play Place");
   }, [build]);
   // Shared layout system: the staging hub, runners, play cards and ledger are panels on the same
   // grid as the home page (move, resize, hide, add back, per mode, Reset to default).
   return <LayoutSurface store={usePlayPlaceLayout} label="Play Place" />;
-}
-
-/** Show the panel `widgetId` on the Play Place: switch to its page, open an icon's window, or add it back. */
-function revealPanel(widgetId: string) {
-  const s = usePlayPlaceLayout.getState();
-  const page = s.pages.find((p) => p.items.some((i) => i.widgetId === widgetId));
-  const inst = page?.items.find((i) => i.widgetId === widgetId);
-  if (!page || !inst) {
-    const r = s.add(widgetId, undefined, { noNewPage: true });
-    if (!r.ok) useToasts.getState().push({ title: "Play Place", body: `That panel is hidden and there's no room for it: ${r.reason ?? "hide or shrink a panel"}, or Reset this page.`, tone: "info" });
-    return;
-  }
-  if (page.id !== s.activePage) s.setActivePage(page.id);
-  if (inst.display === "icon") usePlayPlaceLayout.getState().openWindow(inst.instanceId);
 }
 
 const OWNER_LABEL: Record<string, string> = { tony: "Tony", prompter: "Prompter", librarian: "Librarian", designer: "Designer", coder: "Coder", staging: "Staging", system: "Checks" };

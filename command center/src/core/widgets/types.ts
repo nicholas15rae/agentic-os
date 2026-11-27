@@ -44,6 +44,8 @@ export interface WidgetDefinition<C = Record<string, unknown>> {
    * frameless, scrolls instead of shrinking to fit, and a tap doesn't focus it.
    */
   panel?: boolean;
+  /** Phone column: the panel's height (CSS), for a panel that scrolls inside itself (a chat). */
+  compactHeight?: string;
   /** Shared layout system: the pages this can be placed on (default: ["home"]). */
   surfaces?: string[];
   /**

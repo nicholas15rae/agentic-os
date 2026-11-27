@@ -1,4 +1,8 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { panelShown, revealPanel } from "@/core/widgets/reveal";
+import { createPortal } from "react-dom";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { AGENTS_SURFACE, useAgentsLayout } from "./agents/panels";
 import { ChevronDown, ChevronRight, Library, Loader2, Snowflake, Trash2, X } from "lucide-react";
 import { isTauri } from "@/lib/platform";
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
@@ -26,17 +30,36 @@ import { splitFrozen } from "@/features/modes/frozen-tabs";
 const McpRegistryCard = lazy(() => import("@/sections/settings/LibrarySettings").then((m) => ({ default: m.McpRegistryCard })));
 const SkillsLibraryCard = lazy(() => import("@/sections/settings/LibrarySettings").then((m) => ({ default: m.SkillsLibraryCard })));
 
-export function AgentsSection() {
-  const [drawer, setDrawer] = useState(false);
+/** Thread names, counts and the frozen split, shared by the tab bar and the conversation. */
+function useThreads() {
   const thread = useVoice((s) => s.activeThread);
-  const setThread = useVoice((s) => s.setActiveThread);
-  const state = useVoice((s) => s.state);
   // Agent Conversation cards count as part of a thread (they are system turns with a convId).
   const counts = useVoice((s) => THREADS.map((t) => s.turns.filter((x) => x.thread === t && (x.who !== "system" || !!x.convId)).length).join(","));
-  const clear = useVoice((s) => s.clear);
   const name = useOsName();
   const n = Object.fromEntries(THREADS.map((t, i) => [t, Number(counts.split(",")[i])])) as Record<ThreadId, number>;
   const label = (t: ThreadId) => (t === "auto" ? "Auto-route" : t === "general" ? name : SUB_AGENTS[t as AgentRole].label);
+  return { thread, n, name, label };
+}
+
+/**
+ * The Agents page on the shared layout system: the thread tabs, the conversation, the agent's
+ * reports and the Skills & MCP library are panels (move, resize, hide, add back, per mode, Reset).
+ */
+export function AgentsSection() {
+  // A thread link (or a tab) always lands on a visible conversation.
+  const thread = useVoice((s) => s.activeThread);
+  useEffect(() => {
+    if (!panelShown(useAgentsLayout.getState(), "ag-chat")) revealPanel(useAgentsLayout, "ag-chat", "Agents");
+  }, [thread]);
+  return <LayoutSurface store={useAgentsLayout} label="Agents" />;
+}
+
+/** The thread tabs (frozen ones grouped), the routing switches, the library and Clear. */
+export function AgentThreadsBar() {
+  const [drawer, setDrawer] = useState(false);
+  const { thread, n, name, label } = useThreads();
+  const setThread = useVoice((s) => s.setActiveThread);
+  const clear = useVoice((s) => s.clear);
   // Frozen agents (master switchboard or the active mode) are tucked into their own group.
   const effective = useModes((s) => s.effective);
   const mirror = useModes((s) => s.frozen);
@@ -48,7 +71,6 @@ export function AgentsSection() {
   // Unread agent reports per tab (the Comms inbox, filtered by agent).
   const inbox = useAgentInbox((s) => s.messages);
   const unreadOf = (t: ThreadId) => inbox.reduce((k, m) => k + (!m.read && m.agent === t ? 1 : 0), 0);
-  const hasReports = thread !== "auto" && inbox.some((m) => m.agent === thread);
 
   const tab = (t: ThreadId, why?: string) => {
     const Icon = t === "auto" ? null : SUB_AGENTS[t as AgentRole].icon;
@@ -77,8 +99,8 @@ export function AgentsSection() {
   };
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-4 pb-28 md:px-6 md:pb-6">
-      <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Conversation threads">
+    <>
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Conversation threads">
         {live.map((t) => tab(t))}
         {frozen.length > 0 && (
           <button
@@ -110,53 +132,89 @@ export function AgentsSection() {
           </button>
         )}
       </div>
+      {drawer &&
+        createPortal(
+          <div className="fixed inset-0 z-[75] flex justify-end bg-black/40" onClick={() => setDrawer(false)}>
+            <aside className="h-full w-full max-w-2xl space-y-4 overflow-y-auto p-4" onClick={(e) => e.stopPropagation()} aria-label="Skills and MCP library">
+              <div className="flex justify-end">
+                <button onClick={() => setDrawer(false)} className="glass-thin grid size-9 place-items-center rounded-full text-ink-2 hover:text-ink" aria-label="Close library">
+                  <X size={16} />
+                </button>
+              </div>
+              <AgentLibrary />
+            </aside>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
 
-      <div className="glass-chat flex min-h-0 flex-1 flex-col r-20">
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">
-          {hasReports && (
-            <div className="mb-4">
-              <AgentInbox agent={thread} compact />
-            </div>
-          )}
-          {n[thread] === 0 && (
-            <p className="max-w-prose text-sm leading-relaxed text-ink-3">
-              {thread === "auto"
-                ? `Speak or type — ${name} routes it. Say “ask my booking agent for the last 5 messages” and the exchange with the Booking agent shows up in its own tab.`
-                : thread === "general"
-                  ? `Talk to ${name} directly: live dashboard context, its own tools (weather, files, git, web) and your identity file.`
-                  : `This thread is only you and the ${label(thread)} agent (its AnythingLLM workspace), plus anything ${name} asked it on your behalf.`}{" "}
-              Anything that would change something — send, book, pay, delete — is read back on a confirmation card first.
-            </p>
-          )}
-          <Transcript thread={thread} max={120} />
-          {(state === "thinking" || state === "transcribing") && (
-            <p className="mt-3 flex items-center gap-2 font-mono text-xs text-amber-soft">
-              <Loader2 size={13} className="animate-spin" /> {state === "transcribing" ? "transcribing…" : "dispatching…"}
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2 border-t border-white/5 p-3">
-          <MicButton size={40} />
-          <div className="flex-1">
-            <CommandInput thread={thread} placeholder={thread === "auto" ? `Message ${name}…` : `Message ${label(thread)}…`} />
+/** The conversation of the selected thread: transcript, status, mic and input. */
+export function AgentChat() {
+  const { thread, n, name, label } = useThreads();
+  const state = useVoice((s) => s.state);
+  const inbox = useAgentInbox((s) => s.messages);
+  // The agent's reports show here too unless the Agent reports panel is on the page.
+  const reportsPanel = useAgentsLayout((s) => panelShown(s, "ag-reports"));
+  const hasReports = thread !== "auto" && !reportsPanel && inbox.some((m) => m.agent === thread);
+  return (
+    <div className="glass-chat flex h-full min-h-0 flex-col r-20">
+      <div className="min-h-0 flex-1 overflow-y-auto p-5" data-no-hold>
+        {hasReports && (
+          <div className="mb-4">
+            <AgentInbox agent={thread} compact />
           </div>
+        )}
+        {n[thread] === 0 && (
+          <p className="max-w-prose text-sm leading-relaxed text-ink-3">
+            {thread === "auto"
+              ? `Speak or type — ${name} routes it. Say “ask my booking agent for the last 5 messages” and the exchange with the Booking agent shows up in its own tab.`
+              : thread === "general"
+                ? `Talk to ${name} directly: live dashboard context, its own tools (weather, files, git, web) and your identity file.`
+                : `This thread is only you and the ${label(thread)} agent (its AnythingLLM workspace), plus anything ${name} asked it on your behalf.`}{" "}
+            Anything that would change something — send, book, pay, delete — is read back on a confirmation card first.
+          </p>
+        )}
+        <Transcript thread={thread} max={120} />
+        {(state === "thinking" || state === "transcribing") && (
+          <p className="mt-3 flex items-center gap-2 font-mono text-xs text-amber-soft">
+            <Loader2 size={13} className="animate-spin" /> {state === "transcribing" ? "transcribing…" : "dispatching…"}
+          </p>
+        )}
+      </div>
+      <div className="flex items-center gap-2 border-t border-white/5 p-3">
+        <MicButton size={40} />
+        <div className="flex-1">
+          <CommandInput thread={thread} placeholder={thread === "auto" ? `Message ${name}…` : `Message ${label(thread)}…`} />
         </div>
       </div>
-      {drawer && (
-        <div className="fixed inset-0 z-[75] flex justify-end bg-black/40" onClick={() => setDrawer(false)}>
-          <aside className="h-full w-full max-w-2xl space-y-4 overflow-y-auto p-4" onClick={(e) => e.stopPropagation()} aria-label="Skills and MCP library">
-            <div className="flex justify-end">
-              <button onClick={() => setDrawer(false)} className="glass-thin grid size-9 place-items-center rounded-full text-ink-2 hover:text-ink" aria-label="Close library">
-                <X size={16} />
-              </button>
-            </div>
-            <Suspense fallback={<p className="text-sm text-ink-3">Loading…</p>}>
-              <McpRegistryCard />
-              <SkillsLibraryCard />
-            </Suspense>
-          </aside>
-        </div>
-      )}
     </div>
   );
 }
+
+/** Reports from the selected agent (every agent's on Auto-route and the OS thread). */
+export function AgentReports({ compact = false }: { compact?: boolean }) {
+  const { thread } = useThreads();
+  const agent = thread === "auto" || thread === "general" ? undefined : thread;
+  // The inbox draws its own card ("Booking reports" / "Agent messages"); a long-press selects text.
+  return (
+    <div data-no-hold>
+      <AgentInbox agent={agent} compact={compact} />
+    </div>
+  );
+}
+
+/** The Skills & MCP library (desktop). */
+export function AgentLibrary() {
+  return (
+    <Suspense fallback={<p className="text-sm text-ink-3">Loading…</p>}>
+      <div className="space-y-4">
+        <McpRegistryCard />
+        <SkillsLibraryCard />
+      </div>
+    </Suspense>
+  );
+}
+
+export { AGENTS_SURFACE };

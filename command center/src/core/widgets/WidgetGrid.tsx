@@ -365,7 +365,7 @@ function WidgetCell({
             compact ? (frameless ? "" : "min-h-40") : "",
             editing ? "ring-1 ring-amber/40" : focused ? "ring-1 ring-teal/50" : "",
           ].join(" ")}
-          style={{ ...(compact ? {} : area(inst)), ...(focused ? {} : glassStyle(frame, alpha)) }}
+          style={{ ...(compact ? (def.compactHeight ? { height: def.compactHeight } : {}) : area(inst)), ...(focused ? {} : glassStyle(frame, alpha)) }}
         >
           <div className={`h-full ${frameless ? "" : "p-4 xl:p-5"} ${editing || focused ? "pt-11 xl:pt-11" : ""}`}>
             {/* #12: one live copy only: a widget opened larger lives in its window meanwhile. */}

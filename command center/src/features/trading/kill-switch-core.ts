@@ -56,6 +56,21 @@ export function isKillHotkey(e: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shi
   return (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "x";
 }
 
+/** What a keydown means to the kill switch. "repeat" = OS autorepeat from a held chord: swallow it, but never
+ *  count it, or holding Ctrl+Shift+X for ~0.5 s would stand in for three deliberate presses. */
+export type KillKey = "none" | "repeat" | "press";
+
+export function classifyKillKey(e: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "key" | "repeat">): KillKey {
+  if (!isKillHotkey(e)) return "none";
+  return e.repeat ? "repeat" : "press";
+}
+
+/** A held Enter on the focused red button: the browser fires a click on every autorepeat keydown, so one
+ *  held key could complete the 3-click sequence. Its default must be prevented. (Space clicks on keyup: once.) */
+export function isRepeatActivation(e: Pick<KeyboardEvent, "key" | "repeat">): boolean {
+  return e.repeat && (e.key === "Enter" || e.key === " ");
+}
+
 export function summarizeIncident(r: KillIncident & { note?: string }): string {
   if (r.failsafe) return r.note ?? "Lock written by the gateway; cancel/flatten started.";
   const bad = r.steps?.filter((s) => !s.ok).map((s) => `${s.step}: ${s.detail}`) ?? [];

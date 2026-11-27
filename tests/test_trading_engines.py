@@ -219,61 +219,188 @@ class BracketOptionTests(unittest.TestCase):
 
 class AckTests(unittest.TestCase):
     """The executor must not call an order 'submitted' until TWS acknowledges it (seen live:
-    error 321 'The API interface is currently in Read-Only mode' arrived after placeOrder returned)."""
+    error 321 'The API interface is currently in Read-Only mode' arrived after placeOrder returned),
+    and it must never strip the stop of an entry that has already filled."""
 
-    def trade(self, oid, status="PendingSubmit", log=()):
-        t = NS(order=NS(orderId=oid), orderStatus=NS(status=status, filled=0), log=list(log))
-        t.isDone = lambda: t.orderStatus.status in ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+    DONE = ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+    RO = NS(status="ValidationError", errorCode=321, message="Warning 321: The API interface is currently in Read-Only mode.")
+    W399 = NS(status="ValidationError", errorCode=399, message="Warning 399: Order Message: your order will not be placed at the exchange until 09:30")
+
+    def trade(self, oid, status="PendingSubmit", log=(), parent=0, otype="LMT", filled=0):
+        t = NS(order=NS(orderId=oid, parentId=parent, orderType=otype), orderStatus=NS(status=status, filled=filled), log=list(log))
+        t.isDone = lambda: t.orderStatus.status in self.DONE
         return t
 
-    def run_ack(self, trades, timeout=1.0, evolve=None):
+    def bracket(self, parent="PendingSubmit", stop="PendingSubmit", tp="PendingSubmit", **logs):
+        """Parent #4 (LMT entry) with a STP child #5 and a take-profit LMT child #6, as build_bracket makes them."""
+        return [self.trade(4, parent, logs.get("p", ())), self.trade(5, stop, logs.get("s", ()), parent=4, otype="STP"),
+                self.trade(6, tp, logs.get("t", ()), parent=4)]
+
+    def run_ack(self, trades, timeout=1.0, evolve=None, fill_on_cancel=False):
+        """Fake TWS: cancelling a parent cancels its attached children, confirmed asynchronously (on the next
+        tick, as TWS does), so a loop that also cancels the children would be seen doing it. fill_on_cancel: the
+        parent fills before the cancel lands (TWS refuses the cancel; the children stay working).
+        self.ib stays readable after a raise."""
         import executor as ex
 
-        ib = NS(cancelled=[])
-        ib.cancelOrder = lambda o: ib.cancelled.append(o.orderId)
+        self.ib = ib = NS(cancelled=[], warnings=None)
+        pending = []
+
+        def cancel(o):
+            ib.cancelled.append(o.orderId)
+            pending.append(o.orderId)
+
+        def land():
+            for oid in pending:
+                for t in trades:
+                    if t.isDone() or (t.order.orderId != oid and t.order.parentId != oid):
+                        continue
+                    if fill_on_cancel:
+                        if t.order.orderId == oid:
+                            t.orderStatus.status, t.orderStatus.filled = "Filled", 1
+                    else:
+                        t.orderStatus.status = "Cancelled"
+            pending.clear()
+        ib.cancelOrder = cancel
         ticks = {"n": 0}
 
         async def sleep(_s):
             ticks["n"] += 1
+            land()
             if evolve:
                 evolve(ticks["n"], trades)
-        asyncio.run(ex.await_ack(ib, trades, timeout=timeout, sleep=sleep))
+        ib.warnings = asyncio.run(ex.await_ack(ib, trades, timeout=timeout, sleep=sleep, settle=0.05))
         return ib
 
-    def test_read_only_rejection_raises_and_cancels_the_rest(self):
+    def statuses(self, trades):
+        return [t.orderStatus.status for t in trades]
+
+    def test_read_only_rejection_raises_and_cancels_by_the_parent(self):
         import executor as ex
 
-        ro = NS(status="ValidationError", errorCode=321, message="Warning 321: The API interface is currently in Read-Only mode.")
-        trades = [self.trade(4, log=[ro]), self.trade(5), self.trade(6)]
+        trades = self.bracket(p=[self.RO])
         with self.assertRaises(ex.ExecutionRefused) as cm:
             self.run_ack(trades)
         self.assertIn("Read-Only", str(cm.exception))
+        self.assertEqual(self.ib.cancelled, [4])                                # the children go with the parent
+        self.assertEqual(self.statuses(trades), ["Cancelled"] * 3)
 
     def test_accepted_bracket_returns(self):
         def evolve(n, ts):
             if n == 2:
                 for t, s in zip(ts, ("Submitted", "PreSubmitted", "PreSubmitted")):
                     t.orderStatus.status = s
-        ib = self.run_ack([self.trade(4), self.trade(5), self.trade(6)], evolve=evolve)
-        self.assertEqual(ib.cancelled, [])
+        ib = self.run_ack(self.bracket(), evolve=evolve)
+        self.assertEqual((ib.cancelled, ib.warnings), ([], []))
 
     def test_one_leg_cancelled_kills_the_bracket(self):
         import executor as ex
 
         def evolve(n, ts):
-            ts[0].orderStatus.status = "Submitted"
-            ts[1].orderStatus.status = "Cancelled"
+            if n == 1:
+                ts[0].orderStatus.status = "Submitted"
+                ts[1].orderStatus.status = "Cancelled"
+        trades = self.bracket()
         with self.assertRaises(ex.ExecutionRefused):
-            self.run_ack([self.trade(4), self.trade(5), self.trade(6)], evolve=evolve)
+            self.run_ack(trades, evolve=evolve)
+        self.assertEqual(self.ib.cancelled, [4])
+        self.assertEqual(self.statuses(trades), ["Cancelled"] * 3)
 
     def test_no_acknowledgement_times_out_and_cancels(self):
         import executor as ex
 
-        trades = [self.trade(4), self.trade(5)]
+        trades = self.bracket()
         with self.assertRaises(ex.ExecutionRefused) as cm:
-            ib = self.run_ack(trades, timeout=0.05)
+            self.run_ack(trades, timeout=0.05)
         self.assertIn("didn't acknowledge", str(cm.exception))
+        self.assertIn("cancelled to avoid an orphan [#4 LMT PendingSubmit", str(cm.exception))
+        self.assertEqual(self.ib.cancelled, [4])
 
+    def test_rejected_child_of_a_live_unfilled_parent_cancels_only_the_parent(self):
+        """A child is never cancelled directly while its parent is live: if the parent fills just as the
+        cancel goes out, the stop and take-profit must still be there."""
+        import executor as ex
+
+        e201 = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: invalid stop price")
+        trades = self.bracket(parent="Submitted", stop="Cancelled", tp="PreSubmitted", s=[e201])
+        with self.assertRaises(ex.ExecutionRefused) as cm:
+            self.run_ack(trades)
+        self.assertIn("Error 201", str(cm.exception))
+        self.assertEqual(self.ib.cancelled, [4])
+        self.assertEqual(self.statuses(trades), ["Cancelled"] * 3)
+
+    def test_late_warning_on_a_filled_entry_keeps_its_protection(self):
+        """ib_async logs TWS warnings (here 399) as ValidationError while the order stays live. Once the entry
+        has filled, cancelling would strip its stop and leave a naked position that the desk records as 'failed'."""
+        trades = self.bracket(parent="Filled", stop="PreSubmitted", tp="PreSubmitted", s=[self.W399])
+        trades[0].orderStatus.filled = 1
+        ib = self.run_ack(trades)
+        self.assertEqual(ib.cancelled, [])
+        self.assertEqual(self.statuses(trades), ["Filled", "PreSubmitted", "PreSubmitted"])
+        self.assertTrue(ib.warnings[0].startswith("entry filled, so nothing was cancelled: Warning 399"), ib.warnings)
+
+    def test_filled_entry_with_an_unacknowledged_child_is_not_cancelled_on_timeout(self):
+        trades = self.bracket(parent="Filled", stop="PreSubmitted", tp="PendingSubmit")
+        trades[0].orderStatus.filled = 1
+        ib = self.run_ack(trades, timeout=0.05)
+        self.assertEqual(ib.cancelled, [])
+        self.assertIn("didn't acknowledge", ib.warnings[0])
+        self.assertIn("#6 LMT PendingSubmit", ib.warnings[-1])
+
+    def test_partial_fill_counts_as_a_position(self):
+        trades = self.bracket(parent="Submitted", stop="PreSubmitted", tp="PreSubmitted", t=[self.RO])
+        trades[0].orderStatus.filled = 1  # 1 share of N filled, the rest still working
+        ib = self.run_ack(trades)
+        self.assertEqual(ib.cancelled, [])
+        self.assertIn("Read-Only", ib.warnings[0])
+
+    def test_entry_that_fills_before_the_cancel_lands_is_a_trade_not_a_failure(self):
+        trades = self.bracket(parent="Submitted", stop="PreSubmitted", tp="PendingSubmit", t=[self.RO])
+        ib = self.run_ack(trades, fill_on_cancel=True)
+        self.assertEqual(ib.cancelled, [4])                                     # only the parent was sent a cancel
+        self.assertEqual(self.statuses(trades), ["Filled", "PreSubmitted", "PendingSubmit"])
+        self.assertIn("filled before the cancel landed", " ".join(ib.warnings))
+
+    def test_place_reports_ack_warnings_on_the_result(self):
+        import executor as ex
+        from test_trading_desk import raw_intent
+
+        w399 = self.W399
+        done = self.DONE
+
+        class IB:
+            client = NS(getReqId=lambda: 4)
+
+            def __init__(self):
+                self.n = 0
+
+            def isConnected(self):
+                return True
+
+            async def qualifyContractsAsync(self, _c):
+                return [NS(conId=756733)]
+
+            def placeOrder(self, _contract, o):
+                self.n += 1  # 1 = entry (fills at once), 2 = stop (a 399 warning), 3 = take-profit
+                o.orderId = getattr(o, "orderId", 0) or 3 + self.n  # ib_async gives children their own ids here
+                st, filled, log = {1: ("Filled", 1, []), 2: ("PreSubmitted", 0, [w399])}.get(self.n, ("PreSubmitted", 0, []))
+                t = NS(order=o, orderStatus=NS(status=st, filled=filled), log=list(log))
+                t.isDone = lambda: t.orderStatus.status in done
+                return t
+
+            def cancelOrder(self, _o):
+                raise AssertionError("a filled entry's legs must not be cancelled")
+
+        f = {"limit": lambda a, q, p: NS(orderType="LMT", action=a, totalQuantity=q, lmtPrice=p),
+             "market": lambda a, q: NS(orderType="MKT", action=a, totalQuantity=q),
+             "stop": lambda a, q, p: NS(orderType="STP", action=a, totalQuantity=q, auxPrice=p),
+             "stock": lambda s, e, c: NS(symbol=s)}
+        with tempfile.TemporaryDirectory() as td:
+            e = ex.Executor(lock_dir=Path(td))
+            e.ib = IB()
+            res = asyncio.run(e.place(parse_intent(raw_intent()), 1, factories=f))
+        self.assertEqual([(o["type"], o["status"]) for o in res["orders"]], [("LMT", "Filled"), ("STP", "PreSubmitted"), ("LMT", "PreSubmitted")])
+        self.assertIn("Warning 399", res["ackWarnings"][0])
 
 class EngineATests(unittest.TestCase):
     def test_signal_and_intent(self):

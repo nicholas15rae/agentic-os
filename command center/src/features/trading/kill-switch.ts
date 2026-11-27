@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { useToasts } from "@/features/reminders/notify";
 import { tradingApi, type KillIncident } from "@/features/trading/ibkr";
-import { createKillArm, isKillHotkey, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, summarizeIncident } from "@/features/trading/kill-switch-core";
+import { classifyKillKey, createKillArm, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, summarizeIncident } from "@/features/trading/kill-switch-core";
 
-export { createKillArm, isKillHotkey, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, KILL_STAGES, killStageLabel, summarizeIncident } from "@/features/trading/kill-switch-core";
+export { classifyKillKey, createKillArm, isKillHotkey, isRepeatActivation, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, KILL_STAGES, killStageLabel, summarizeIncident } from "@/features/trading/kill-switch-core";
 
 export async function tripKillSwitch(reason: string, dryRun = false): Promise<KillIncident & { note?: string }> {
   return tradingApi.kill(reason, dryRun);
@@ -21,9 +21,11 @@ export function useKillSwitchHotkey() {
         toast({ title: "Kill switch disarmed", body: "Nothing was sent.", tone: "info" });
         return;
       }
-      if (!isKillHotkey(e)) return;
+      const k = classifyKillKey(e);
+      if (k === "none") return;
       e.preventDefault();
       e.stopPropagation();
+      if (k === "repeat") return; // a held chord's autorepeat is not a deliberate press
       const r = arm.press(Date.now());
       if (r.kind === "arming") {
         toast({

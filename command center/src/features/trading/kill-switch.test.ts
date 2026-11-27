@@ -1,7 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { createKillArm, isKillHotkey, KILL_PRESSES, summarizeIncident } from "./kill-switch-core";
+import { classifyKillKey, createKillArm, isKillHotkey, isRepeatActivation, KILL_PRESSES, summarizeIncident } from "./kill-switch-core";
 
-const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey", boolean>> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...mods });
+const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "repeat", boolean>> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, repeat: false, ...mods });
+
+describe("kill-switch key repeat", () => {
+  const chord = (repeat = false) => key("X", { ctrlKey: true, shiftKey: true, repeat });
+  it("classifies a held chord's autorepeat apart from a deliberate press", () => {
+    expect(classifyKillKey(chord())).toBe("press");
+    expect(classifyKillKey(chord(true))).toBe("repeat");
+    expect(classifyKillKey(key("x", { ctrlKey: true, repeat: true }))).toBe("none");
+  });
+  it("holding Ctrl+Shift+X never trips it; three separate presses still do", () => {
+    // What useKillSwitchHotkey does with each keydown: count only "press".
+    const feed = (events: { e: ReturnType<typeof chord>; at: number }[]) => {
+      const arm = createKillArm();
+      return events.map(({ e, at }) => (classifyKillKey(e) === "press" ? arm.press(at).kind : "ignored"));
+    };
+    // OS autorepeat: ~500 ms delay, then ~30 Hz, for 2 s
+    const held = [{ e: chord(), at: 0 }, ...Array.from({ length: 45 }, (_, i) => ({ e: chord(true), at: 500 + i * 33 }))];
+    expect(feed(held)).not.toContain("fire");
+    expect(feed([{ e: chord(), at: 0 }, { e: chord(), at: 400 }, { e: chord(), at: 800 }]).at(-1)).toBe("fire");
+  });
+  it("a held Enter or Space on the red button is a repeat activation; a single press is not", () => {
+    expect(isRepeatActivation(key("Enter", { repeat: true }))).toBe(true);
+    expect(isRepeatActivation(key(" ", { repeat: true }))).toBe(true);
+    expect(isRepeatActivation(key("Enter"))).toBe(false);
+    expect(isRepeatActivation(key("Tab", { repeat: true }))).toBe(false);
+  });
+});
 
 describe("kill-switch hotkey", () => {
   it("fires on Ctrl/Cmd+Shift+X only", () => {

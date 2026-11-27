@@ -296,3 +296,20 @@ describe("run 9 round 2: a fit-only revision of a timing note", () => {
     expect(st().revision?.summary).toMatch(/^Length \d+\.\d s → \d+\.\d s\. The Director wrote: Extended the middle B-Roll clip/);
   });
 });
+
+describe("run 11: the length bands are in the context before the Director revises", () => {
+  it("lengthBands mirrors media.rs (plan ±10% ≥ 1.5 s, revision ±30% ≥ 3 s)", async () => {
+    const ctx = await import("./context");
+    expect(ctx.lengthBands(15)).toEqual({ plan: [13.5, 16.5], revision: [10.5, 19.5] });
+    expect(ctx.lengthBands(5)).toEqual({ plan: [3.5, 6.5], revision: [2, 8] });
+    expect(ctx.lengthBands(60).revision).toEqual([42, 78]);
+  });
+  it("the revision band shows only while a note is open", async () => {
+    const ctx = await import("./context");
+    const p = { brief: { lengthSec: 15, guessed: [] } } as never;
+    const open = manifest({ clips: ROUND1_CLIPS, notes: [{ id: "n-1", renderId: "r-1", atSec: 1, text: "Tighten", viaVoice: false, resolved: false }] as never });
+    expect(ctx.lengthLine(p, open)).toMatch(/· a plan must total 13\.5–16\.5s · a revise_edit 10\.5–19\.5s$/);
+    const done = manifest({ clips: ROUND1_CLIPS, notes: [] });
+    expect(ctx.lengthLine(p, done)).toMatch(/· a plan must total 13\.5–16\.5s$/);
+  });
+});

@@ -6270,6 +6270,12 @@ mod framing_tests {
     }
 
     #[test]
+    fn revision_tolerance_mirrors_context_ts() {
+        let ts = include_str!("../../../src/features/director/context.ts");
+        assert!(ts.contains(&format!("export const REVISION_LENGTH_TOLERANCE = {REVISION_LENGTH_TOLERANCE};")), "context.ts REVISION_LENGTH_TOLERANCE must equal media.rs ({REVISION_LENGTH_TOLERANCE})");
+    }
+
+    #[test]
     fn framing_words_mirror_plan_check_ts() {
         let ts = include_str!("../../../src/features/director/plan-check.ts");
         let block = |name: &str| {

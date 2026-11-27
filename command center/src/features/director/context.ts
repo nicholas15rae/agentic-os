@@ -49,7 +49,23 @@ export function lengthLine(p: MediaProject, m: TimelineManifest, assets?: Pick<M
     return !a || a.kind === "video";
   };
   const short = m.clips.filter((c) => c.outSec - c.inSec < 1 && isVideo(c.assetId)).length;
-  return `LENGTH: target ${b ? `${b.lengthSec}s${b.guessed.includes("lengthSec") ? " (guessed)" : ""}` : "none (no brief)"} · cut ${total}s${short ? ` · ${short} clip${short === 1 ? "" : "s"} under 1s` : ""}`;
+  // The bands media.rs plan_check_core_with refuses outside of, stated up front (live E2E run 11:
+  // six revisions missed a band the model only saw in refusals).
+  const bands = b ? lengthBands(b.lengthSec) : null;
+  const open = (m.notes ?? []).some((n) => !n.resolved);
+  const band = bands ? ` · a plan must total ${bands.plan[0]}–${bands.plan[1]}s${open ? ` · a revise_edit ${bands.revision[0]}–${bands.revision[1]}s` : ""}` : "";
+  return `LENGTH: target ${b ? `${b.lengthSec}s${b.guessed.includes("lengthSec") ? " (guessed)" : ""}` : "none (no brief)"} · cut ${total}s${short ? ` · ${short} clip${short === 1 ? "" : "s"} under 1s` : ""}${band}`;
+}
+
+/** Mirrors media.rs REVISION_LENGTH_TOLERANCE (keep the two equal). */
+export const REVISION_LENGTH_TOLERANCE = 0.3;
+
+/** The lengths media.rs plan_check_core_with accepts for a brief of `t` seconds (pure): a plan
+ * within ±10% (at least 1.5 s), a revision within ±30% (at least 3 s). */
+export function lengthBands(t: number): { plan: [number, number]; revision: [number, number] } {
+  const tol = Math.max(t * 0.1, 1.5);
+  const rev = Math.max(t * REVISION_LENGTH_TOLERANCE, 3, tol);
+  return { plan: [r2(Math.max(0, t - tol)), r2(t + tol)], revision: [r2(Math.max(0, t - rev)), r2(t + rev)] };
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;

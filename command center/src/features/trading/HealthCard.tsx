@@ -3,7 +3,8 @@ import { ChevronDown, Loader2, Stethoscope } from "lucide-react";
 import { Card } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
-import { healthApi, type HealthResult, type HealthStatus } from "@/features/trading/ibkr";
+import { healthApi, tradingApi, type HealthResult, type HealthStatus, type IbkrStatus } from "@/features/trading/ibkr";
+import { reconcileHealth } from "@/features/trading/health-live";
 
 const TONE: Record<HealthStatus, string> = {
   PASS: "border-teal/50 bg-teal/15 text-teal-soft",
@@ -13,14 +14,16 @@ const TONE: Record<HealthStatus, string> = {
 };
 const STAGE_ORDER = ["safety", "broker", "data", "gate", "kill_switch", "engines", "intel", "runtime"];
 
-/** Pipeline health: read-only, stage-by-stage. Runs on demand and every weekday 09:00 New York. */
+/** Pipeline health: read-only, stage-by-stage. Runs on demand and every trading day 09:00 New York.
+ *  The connection row is the LIVE bridge state (same poll + hudLevel as the paper-account card). */
 export function HealthCard() {
   const { data, refresh } = usePoll<HealthResult>(healthApi.last, 60_000);
+  const live = usePoll<IbkrStatus>(tradingApi.status, 2_000);
   const toast = useToasts((s) => s.push);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [fresh, setFresh] = useState<HealthResult | null>(null);
-  const res = fresh ?? data;
+  const res = reconcileHealth(fresh ?? data, live.data, live.error);
   const problems = res?.checks.filter((c) => c.status === "FAIL" || c.status === "WARN") ?? [];
 
   const run = async () => {
@@ -54,6 +57,11 @@ export function HealthCard() {
             {problems[0] ? <span className={problems[0].status === "FAIL" ? " text-alert" : " text-amber-light"}> · {problems[0].name}: {problems[0].detail}</span> : null}
           </span>
         )}
+        {res?.stale && (
+          <span className="rounded-full border border-amber/50 bg-amber/10 px-2 py-0.5 text-[10px] text-amber-light" title={res.staleReason}>
+            stale · as of {res.asOfNy ?? res.atNy}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           {res?.checks.length ? (
             <button className="pill-glass !h-8 text-[11px]" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -65,6 +73,7 @@ export function HealthCard() {
           </button>
         </div>
       </div>
+      {open && res?.stale && res.staleReason && <p className="mt-2 text-[11px] text-amber-light">{res.staleReason}</p>}
       {open && res && (
         <div className="mt-3 overflow-x-auto rounded-[12px] border border-white/[0.06]">
           <table className="w-full text-[12px]">
@@ -73,7 +82,7 @@ export function HealthCard() {
                 <tr key={`${c.stage}.${c.name}`} className="border-t border-white/[0.04] first:border-t-0">
                   <td className="px-2.5 py-1.5"><span className={`rounded-full border px-1.5 py-0.5 font-mono text-[10px] ${TONE[c.status]}`}>{c.status}</span></td>
                   <td className="whitespace-nowrap px-2.5 py-1.5 text-ink-3">{c.stage.replace("_", " ")}</td>
-                  <td className="whitespace-nowrap px-2.5 py-1.5 font-mono">{c.name}</td>
+                  <td className="whitespace-nowrap px-2.5 py-1.5 font-mono">{c.name}{c.live ? <span className="ml-1 text-[10px] text-teal-soft">live</span> : null}</td>
                   <td className="px-2.5 py-1.5 text-ink-2">{c.detail}</td>
                   <td className="px-2.5 py-1.5 text-right font-mono text-[10px] text-ink-3">{c.ms}ms</td>
                 </tr>

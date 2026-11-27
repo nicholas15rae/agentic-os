@@ -1,52 +1,81 @@
 import { useState } from "react";
 import { Image as ImageIcon, PiggyBank, Plus, Trash2 } from "lucide-react";
-import { Card, Input, Select, money } from "@/components/ui";
+import { Card, Input, money } from "@/components/ui";
 import { cc, collections, useCollection, type Item } from "@/lib/cc-api";
-import type { Check, Goal, Income } from "@/features/finance/types";
+import { PAY_METHODS, type Check, type Commission, type Goal, type Income } from "@/features/finance/types";
 import type { Reminder } from "@/features/reminders/types";
 import { useToasts } from "@/features/reminders/notify";
 import { useSettings } from "@/stores/settings";
+import { profileFor } from "@/features/business/profiles-store";
+import { printableHst } from "@/features/business/profiles";
+import { applyFilter, localIso } from "@/features/finance/areas";
+import { commissionCalc } from "@/features/finance/commission";
+import { useAreas, useFinanceFilter } from "@/features/finance/filter-store";
+import { ActingFields, emptyActing, type ActingValue } from "./ActingFields";
+import { AreaSelect, AreaTag, EditButton, EditFields, QuestionMark, SelectOther, type FieldSpec } from "./fields";
+import { bookIncome } from "./book";
+
+const small = "!h-9 !py-1 text-[13px]";
+
+/** The HST rate an area charges: its profile rate once its HST number is confirmed, else 0. */
+export function areaTaxRate(area: string | undefined): number {
+  if (!area || area === "personal") return 0;
+  const p = profileFor(area);
+  return printableHst(p) ? p.taxRate : 0;
+}
 
 // ── Cheques ──────────────────────────────────────────────────────────────────
 
+const CHEQUE_FIELDS: FieldSpec[] = [
+  { key: "payer", label: "Payer", type: "text" },
+  { key: "amount", label: "Amount", type: "number" },
+  { key: "chequeNumber", label: "Cheque #", type: "text" },
+  { key: "area", label: "Area", type: "area" },
+  { key: "memo", label: "Memo", type: "text" },
+  { key: "invoiceNumber", label: "Invoice #", type: "text" },
+  { key: "notes", label: "Notes", type: "text" },
+];
+
 export function ChequesPanel() {
   const { items, update, remove, create } = useCollection<Check>("checks");
+  const filter = useFinanceFilter((s) => s.filter);
   const currency = useSettings((s) => s.business.currency);
-  const [d, setD] = useState({ payer: "", amount: "", date: new Date().toISOString().slice(0, 10), chequeNumber: "" });
-  const pending = items.filter((c) => !c.deposited);
+  const [d, setD] = useState({ payer: "", amount: "", date: localIso(Date.now()), chequeNumber: "", area: "" });
+  const [editing, setEditing] = useState<string | null>(null);
+  const rows = applyFilter(items, filter).sort((a, b) => b.receivedAt - a.receivedAt);
+  const pending = rows.filter((c) => !c.deposited);
   return (
     <Card title="Cheque vault" hint={`${pending.length} to deposit · ${money(pending.reduce((s, c) => s + c.amount, 0), currency)}. Scan a cheque in the Scan tab to attach its photo.`}>
       <form
-        className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-[1.4fr_1fr_1fr_1fr_auto]"
+        className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-[1.4fr_1fr_1fr_1fr_1.2fr_auto]"
         onSubmit={async (e) => {
           e.preventDefault();
           if (!d.payer || !d.amount) return;
-          await create({ payer: d.payer, amount: Number(d.amount), receivedAt: Date.parse(d.date + "T12:00:00"), chequeNumber: d.chequeNumber || undefined, deposited: false });
+          await create({ payer: d.payer, amount: Number(d.amount), receivedAt: Date.parse(d.date + "T12:00:00"), chequeNumber: d.chequeNumber || undefined, deposited: false, area: d.area || undefined });
           setD({ ...d, payer: "", amount: "", chequeNumber: "" });
         }}
       >
-        <Input value={d.payer} onChange={(e) => setD({ ...d, payer: e.target.value })} placeholder="Payer" className="!h-9 !py-1 text-[13px]" aria-label="Payer" />
-        <Input inputMode="decimal" value={d.amount} onChange={(e) => setD({ ...d, amount: e.target.value })} placeholder="Amount" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Amount" />
-        <Input type="date" value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} className="!h-9 !py-1 text-[13px]" aria-label="Received" />
-        <Input value={d.chequeNumber} onChange={(e) => setD({ ...d, chequeNumber: e.target.value })} placeholder="Cheque #" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Cheque number" />
+        <Input value={d.payer} onChange={(e) => setD({ ...d, payer: e.target.value })} placeholder="Payer" className={small} aria-label="Payer" />
+        <Input inputMode="decimal" value={d.amount} onChange={(e) => setD({ ...d, amount: e.target.value })} placeholder="Amount" className={`${small} font-mono`} aria-label="Amount" />
+        <Input type="date" value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} className={small} aria-label="Received" />
+        <Input value={d.chequeNumber} onChange={(e) => setD({ ...d, chequeNumber: e.target.value })} placeholder="Cheque #" className={`${small} font-mono`} aria-label="Cheque number" />
+        <AreaSelect value={d.area || undefined} onChange={(area) => setD({ ...d, area })} />
         <button className="pill-primary !h-9 text-xs">
           <Plus size={13} /> Log
         </button>
       </form>
       <ul className="space-y-1.5">
-        {items.map((c) => (
+        {rows.map((c) => (
           <li key={c.id} className="group flex flex-wrap items-center gap-3 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
             <span className="font-mono text-[12px] text-ink-3">{new Date(c.receivedAt).toLocaleDateString()}</span>
-            <span className="min-w-0 flex-1 truncate text-ink">{c.payer}</span>
+            <AreaTag area={c.area} onAssign={(area) => void update(c.id, { area })} />
+            <span className="min-w-0 flex-1 truncate text-ink">
+              {c.payer} <QuestionMark q={c.question} />
+            </span>
             {c.chequeNumber && <span className="font-mono text-[11px] text-ink-3">#{c.chequeNumber}</span>}
             <span className="font-mono text-ink tabular">{money(c.amount, currency)}</span>
             <label className="flex items-center gap-1.5 text-xs text-ink-2">
-              <input
-                type="checkbox"
-                checked={c.deposited}
-                onChange={(e) => void update(c.id, { deposited: e.target.checked, depositedAt: e.target.checked ? Date.now() : undefined })}
-                className="accent-teal"
-              />
+              <input type="checkbox" checked={c.deposited} onChange={(e) => void update(c.id, { deposited: e.target.checked, depositedAt: e.target.checked ? Date.now() : undefined })} className="accent-teal" />
               deposited
             </label>
             {c.imageFileId && (
@@ -54,12 +83,14 @@ export function ChequesPanel() {
                 <ImageIcon size={14} />
               </a>
             )}
+            <EditButton onClick={() => setEditing(editing === c.id ? null : c.id)} label={`Edit cheque from ${c.payer}`} />
             <button aria-label={`Delete cheque from ${c.payer}`} onClick={() => void remove(c.id)} className="text-ink-3 opacity-100 hover:text-alert md:opacity-0 md:group-hover:opacity-100">
               <Trash2 size={13} />
             </button>
+            {editing === c.id && <EditFields spec={CHEQUE_FIELDS} value={c as unknown as Record<string, unknown>} onPatch={(p) => void update(c.id, p as Partial<Check>)} onClose={() => setEditing(null)} />}
           </li>
         ))}
-        {!items.length && <li className="py-6 text-center text-sm text-ink-3">No cheques logged.</li>}
+        {!rows.length && <li className="py-6 text-center text-sm text-ink-3">{items.length ? "Nothing matches the filters." : "No cheques logged."}</li>}
       </ul>
     </Card>
   );
@@ -67,67 +98,111 @@ export function ChequesPanel() {
 
 // ── Income ───────────────────────────────────────────────────────────────────
 
+const INCOME_FIELDS: FieldSpec[] = [
+  { key: "date", label: "Date", type: "date" },
+  { key: "client", label: "Paid by", type: "text" },
+  { key: "description", label: "What for", type: "text" },
+  { key: "amount", label: "Amount (pre-tax)", type: "number" },
+  { key: "taxCollected", label: "HST collected", type: "number" },
+  { key: "method", label: "How paid", type: "select", options: PAY_METHODS },
+  { key: "area", label: "Area", type: "area" },
+  { key: "invoiceNumber", label: "Invoice #", type: "text" },
+  { key: "commissionPct", label: "Commission %", type: "number" },
+  { key: "commissionOff", label: "No commission", type: "check" },
+  { key: "union", label: "Union", type: "check" },
+  { key: "inReturn", label: "In HST return", type: "check" },
+];
+
 export function IncomePanel() {
-  const { items, create, remove } = useCollection<Income>("income");
+  const { items, update, remove } = useCollection<Income>("income");
+  const commissions = useCollection<Commission>("commissions");
   const goals = useCollection<Goal>("goals").items;
-  const { currency, hstRate } = useSettings((s) => s.business);
-  const [d, setD] = useState({ date: new Date().toISOString().slice(0, 10), client: "", description: "", amount: "", tax: "", method: "e-transfer" as Income["method"] });
-  const ytd = items.filter((i) => i.date.startsWith(String(new Date().getFullYear())));
+  const filter = useFinanceFilter((s) => s.filter);
+  const { label } = useAreas();
+  const currency = useSettings((s) => s.business.currency);
+  const [d, setD] = useState({ date: localIso(Date.now()), client: "", description: "", amount: "", tax: "", method: "e-transfer", area: filter.area !== "all" && filter.area !== "untagged" ? filter.area : "" });
+  const [acting, setActing] = useState<ActingValue>(emptyActing());
+  const [editing, setEditing] = useState<string | null>(null);
+  const rows = applyFilter(items, filter).sort((a, b) => b.date.localeCompare(a.date));
+  const rate = areaTaxRate(d.area || undefined);
 
   const add = async () => {
     const amount = Number(d.amount);
     if (!d.client || !amount) return;
-    const taxCollected = d.tax === "" ? Math.round(amount * hstRate) / 100 : Number(d.tax);
-    await create({ date: d.date, client: d.client, description: d.description, amount, taxCollected, method: d.method });
+    const taxCollected = d.tax === "" ? Math.round(amount * rate) / 100 : Number(d.tax);
+    await bookIncome({ date: d.date, client: d.client, description: d.description, amount, taxCollected, method: d.method, area: d.area || undefined }, d.area === "acting" ? acting : null);
     setD({ ...d, client: "", description: "", amount: "", tax: "" });
+    setActing(emptyActing());
     suggestAllocations(amount, goals);
   };
 
+  /** Edits keep the linked (unpaid) commission in step. */
+  const patch = async (i: Item<Income>, p: Partial<Income>) => {
+    await update(i.id, p);
+    const next = { ...i, ...p };
+    const linked = commissions.items.find((c) => c.incomeId === i.id && !c.paid);
+    if (linked && ("amount" in p || "commissionPct" in p || "commissionOff" in p)) {
+      const { commission, pct } = commissionCalc(next.amount, next.commissionPct, next.commissionOff);
+      await commissions.update(linked.id, { gross: next.amount, pct, amount: commission });
+    }
+  };
+
   return (
-    <Card title="Income" hint={`YTD ${money(ytd.reduce((s, i) => s + i.amount, 0), currency)} · tax collected ${money(ytd.reduce((s, i) => s + i.taxCollected, 0), currency)}. Logging income suggests your savings set-asides.`}>
+    <Card title="Income" hint={`${rows.length} entries · ${money(rows.reduce((s, i) => s + i.amount, 0), currency)} · HST collected ${money(rows.reduce((s, i) => s + i.taxCollected, 0), currency)}. Logging income suggests your savings set-asides.`}>
       <form
-        className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1.2fr_1.4fr_1fr_0.8fr_1fr_auto]"
+        className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1.1fr_1.2fr_1.3fr_1fr_0.8fr_1fr_auto]"
         onSubmit={(e) => {
           e.preventDefault();
           void add();
         }}
       >
-        <Input type="date" value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} className="!h-9 !py-1 text-[13px]" aria-label="Date" />
-        <Input value={d.client} onChange={(e) => setD({ ...d, client: e.target.value })} placeholder="Client" className="!h-9 !py-1 text-[13px]" aria-label="Client" />
-        <Input value={d.description} onChange={(e) => setD({ ...d, description: e.target.value })} placeholder="What for" className="!h-9 !py-1 text-[13px]" aria-label="Description" />
-        <Input inputMode="decimal" value={d.amount} onChange={(e) => setD({ ...d, amount: e.target.value })} placeholder="Amount (pre-tax)" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Amount" />
-        <Input inputMode="decimal" value={d.tax} onChange={(e) => setD({ ...d, tax: e.target.value })} placeholder={`Tax (${hstRate}%)`} className="!h-9 !py-1 font-mono text-[13px]" aria-label="Tax collected" />
-        <Select value={d.method} onChange={(e) => setD({ ...d, method: e.target.value as Income["method"] })} className="!h-9 !py-1 text-[13px]" aria-label="Method">
-          {["e-transfer", "cheque", "cash", "card", "other"].map((m) => (
-            <option key={m}>{m}</option>
-          ))}
-        </Select>
+        <Input type="date" value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} className={small} aria-label="Date" />
+        <AreaSelect value={d.area || undefined} onChange={(area) => setD({ ...d, area })} />
+        <Input value={d.client} onChange={(e) => setD({ ...d, client: e.target.value })} placeholder="Paid by" className={small} aria-label="Paid by" />
+        <Input value={d.description} onChange={(e) => setD({ ...d, description: e.target.value })} placeholder="What for" className={small} aria-label="Description" />
+        <Input inputMode="decimal" value={d.amount} onChange={(e) => setD({ ...d, amount: e.target.value })} placeholder="Amount (pre-tax)" className={`${small} font-mono`} aria-label="Amount" />
+        <Input inputMode="decimal" value={d.tax} onChange={(e) => setD({ ...d, tax: e.target.value })} placeholder={`HST (${rate}%)`} className={`${small} font-mono`} aria-label="HST collected" />
+        <SelectOther label="How paid" value={d.method} options={PAY_METHODS} onChange={(method) => setD({ ...d, method })} />
         <button className="pill-primary !h-9 text-xs">
           <Plus size={13} /> Add
         </button>
+        {d.area === "acting" && <ActingFields gross={Number(d.amount) || 0} value={acting} onChange={setActing} currency={currency} />}
       </form>
       <ul className="space-y-1.5">
-        {[...items].sort((a, b) => b.date.localeCompare(a.date)).map((i) => (
+        {rows.map((i) => (
           <li key={i.id} className="group flex flex-wrap items-center gap-3 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
             <span className="font-mono text-[12px] text-ink-3">{i.date}</span>
+            <AreaTag area={i.area} onAssign={(area) => void patch(i, { area })} />
             <span className="min-w-0 flex-1 truncate text-ink">
-              {i.client} <span className="text-ink-3">· {i.description}</span>
+              {i.client} <span className="text-ink-3">· {i.description || i.method}</span> <QuestionMark q={i.question} />
             </span>
-            <span className="font-mono text-[11px] text-ink-3">+{money(i.taxCollected, currency)} tax</span>
+            {i.agentId && (
+              <span className="text-[11px] text-ink-3">
+                {i.union ? "union" : "non-union"} · {i.commissionOff ? "no commission" : `${i.commissionPct ?? 0}%`}
+              </span>
+            )}
+            <span className="font-mono text-[11px] text-ink-3">+{money(i.taxCollected, currency)} HST</span>
             <span className="font-mono text-teal-soft tabular">{money(i.amount, currency)}</span>
+            {i.imageFileId && (
+              <a href={cc.fileUrl(i.imageFileId)} target="_blank" rel="noreferrer" aria-label="View scan" className="text-ink-3 hover:text-teal">
+                <ImageIcon size={14} />
+              </a>
+            )}
+            <EditButton onClick={() => setEditing(editing === i.id ? null : i.id)} label={`Edit income from ${i.client}`} />
             <button aria-label="Delete income entry" onClick={() => void remove(i.id)} className="text-ink-3 opacity-100 hover:text-alert md:opacity-0 md:group-hover:opacity-100">
               <Trash2 size={13} />
             </button>
+            {editing === i.id && <EditFields spec={INCOME_FIELDS} value={{ ...i, inReturn: i.inReturn !== false } as unknown as Record<string, unknown>} onPatch={(p) => void patch(i, p as Partial<Income>)} onClose={() => setEditing(null)} />}
           </li>
         ))}
-        {!items.length && <li className="py-6 text-center text-sm text-ink-3">No income logged yet.</li>}
+        {!rows.length && <li className="py-6 text-center text-sm text-ink-3">{items.length ? `Nothing matches the filters${filter.area !== "all" ? ` (${label(filter.area)})` : ""}.` : "No income logged yet."}</li>}
       </ul>
     </Card>
   );
 }
 
 /** "You were paid $X → set aside $Y for Taxes (25%) …" with one-tap apply. */
-function suggestAllocations(amount: number, goals: Item<Goal>[]) {
+export function suggestAllocations(amount: number, goals: Item<Goal>[]) {
   const alloc = goals.filter((g) => g.percentOfIncome > 0).map((g) => ({ g, amt: Math.round(amount * g.percentOfIncome) / 100 }));
   if (!alloc.length) return;
   const currency = useSettings.getState().business.currency;

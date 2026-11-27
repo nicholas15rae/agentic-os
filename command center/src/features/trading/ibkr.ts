@@ -49,6 +49,32 @@ export interface IbkrOrder {
   remaining: number | null;
 }
 
+/** trading/market_calendar.py market_status(): the static NYSE holiday / half-day table. */
+export interface MarketStatus {
+  open: boolean;
+  reason: "open" | "holiday" | "weekend" | "pre_market" | "after_hours";
+  label: string;
+  date: string;
+  holiday: string | null;
+  earlyClose: boolean;
+  earlyCloseReason: string | null;
+  closeEt: string | null;
+  nextOpen: number;
+  nextOpenNy: string;
+  known: boolean;
+}
+
+/** ibkr_bridge.down_alert(): down/locked for more than ~2 min during the regular session. */
+export interface BridgeAlert {
+  level: "critical";
+  code: "bridge_down";
+  since: number;
+  sinceNy: string;
+  minutes: number;
+  reason: string;
+  message: string;
+}
+
 export interface IbkrStatus {
   state: BridgeState;
   mode: "PAPER" | "LIVE" | string;
@@ -59,6 +85,12 @@ export interface IbkrStatus {
   reasons: string[];
   lastError: string | null;
   connectedSince: number | null;
+  /** First moment off CONNECTED (null while connected). */
+  downSince?: number | null;
+  /** Why it isn't connected, with the TWS API settings it needs. */
+  downReason?: string | null;
+  market?: MarketStatus | null;
+  alert?: BridgeAlert | null;
   updatedAt: number;
   account: IbkrAccount | null;
   pnl: { daily: number | null; unrealized: number | null; realized: number | null };
@@ -112,6 +144,15 @@ export interface OrderIntent {
 
 export type IntentStatus = "hypothetical" | "pending_approval" | "submitting" | "submitted" | "rejected" | "failed" | "expired" | "dismissed";
 
+/** trading/failures.py: why a rejected / failed intent didn't trade. */
+export type FailureCode = "rejected_by_ibkr" | "no_quote" | "market_closed" | "bridge_down" | "risk_limit" | "kill_switch" | "schema" | "policy" | "other";
+
+export interface IntentFailure {
+  code: FailureCode | string;
+  label: string;
+  detail: string;
+}
+
 export interface DeskIntent {
   intentId: string;
   status: IntentStatus;
@@ -120,6 +161,36 @@ export interface DeskIntent {
   result: unknown;
   created: number;
   updated: number;
+  /** Set on rejected / failed rows (derived server-side for rows stored before it existed). */
+  failure?: IntentFailure | null;
+}
+
+const FAILURE_LABELS: Record<FailureCode, string> = {
+  rejected_by_ibkr: "Rejected by IBKR",
+  no_quote: "No quote",
+  market_closed: "Market closed",
+  bridge_down: "Bridge down",
+  risk_limit: "Risk limit",
+  kill_switch: "Kill switch",
+  schema: "Invalid intent",
+  policy: "Refused by policy",
+  other: "Failed",
+};
+
+/** "Rejected by IBKR: TWS rejected the order: ..." for a rejected / failed row; null otherwise.
+ *  Old rows without `failure` fall back to their stored error text or first failing check. */
+export function failureText(r: Pick<DeskIntent, "status" | "failure" | "result" | "decision">): string | null {
+  if (r.status !== "rejected" && r.status !== "failed") return null;
+  const f = r.failure;
+  if (f && (f.label || f.code)) {
+    const label = f.label || FAILURE_LABELS[f.code as FailureCode] || f.code;
+    return f.detail ? `${label}: ${f.detail}` : label;
+  }
+  const res = r.result as { error?: unknown } | null | undefined;
+  if (res && typeof res === "object" && typeof res.error === "string" && res.error) return `${r.status === "failed" ? "Failed" : "Rejected"}: ${res.error}`;
+  const why = r.decision?.reasons?.[0];
+  if (why) return `Rejected: ${why}`;
+  return r.status === "failed" ? "Failed: no reason recorded" : "Rejected: no reason recorded";
 }
 
 export interface KillLock {
@@ -299,12 +370,27 @@ export const intelApi = {
 
 export type HealthStatus = "PASS" | "WARN" | "FAIL" | "SKIP";
 
+export interface HealthCheckRow {
+  stage: string;
+  name: string;
+  status: HealthStatus;
+  detail: string;
+  ms: number;
+  /** The connection row comes from the live bridge state, not the stored run. */
+  live?: boolean;
+}
+
 export interface HealthResult {
   at: number;
   atNy: string;
   overall: HealthStatus | null;
   counts?: Record<HealthStatus, number>;
-  checks: { stage: string; name: string; status: HealthStatus; detail: string; ms: number }[];
+  checks: HealthCheckRow[];
+  /** "HH:MM" New York of the stored run (set when the bridge overlays the live connection row). */
+  asOfNy?: string;
+  /** The connection changed since the run: its other rows are as of then. */
+  stale?: boolean;
+  staleReason?: string;
 }
 
 export const healthApi = {
@@ -340,7 +426,7 @@ export const tradingApi = {
   status: () => gateway<IbkrStatus>("/api/trading/status", { timeoutMs: 6_000 }),
   desk: () => gateway<DeskView>("/api/trading/desk", { timeoutMs: 8_000 }),
   setMode: (mode: ExecMode, confirm: boolean) => post<{ ok: boolean }>("/api/trading/mode", { mode, confirm }),
-  approve: (id: string) => post<{ ok: boolean; status?: string; error?: string; decision?: Decision }>(`/api/trading/intents/${encodeURIComponent(id)}/approve`, {}, 35_000),
+  approve: (id: string) => post<{ ok: boolean; status?: string; error?: string; decision?: Decision; failure?: IntentFailure | null }>(`/api/trading/intents/${encodeURIComponent(id)}/approve`, {}, 35_000),
   reject: (id: string) => post<{ ok: boolean }>(`/api/trading/intents/${encodeURIComponent(id)}/reject`),
   kill: (reason: string, dryRun = false) => post<KillIncident & { lock?: KillLock; note?: string }>("/api/trading/kill-switch", { reason, dryRun }, 50_000),
   reset: (confirm: string) => post<{ locked: boolean }>("/api/trading/kill-switch/reset", { confirm }),
@@ -378,6 +464,12 @@ export function hudLevel(s: IbkrStatus | null, nowS: number = Date.now() / 1000)
   if (s.state === "CONNECTING" || s.state === "RECONNECTING") return { level: "reconnecting", label: s.state === "CONNECTING" ? "Connecting" : "Reconnecting" };
   if (nowS - s.updatedAt > STALE_AFTER_S) return { level: "reconnecting", label: "Stale" };
   return { level: "connected", label: "Connected" };
+}
+
+/** Chip tone for the market line: open, a half day (early close today), or closed. */
+export function marketTone(m: MarketStatus): "open" | "early" | "closed" {
+  if (m.earlyClose && (m.open || m.reason === "pre_market")) return "early";
+  return m.open ? "open" : "closed";
 }
 
 export function money(v: number | null | undefined, currency?: string | null): string {

@@ -1,5 +1,6 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { CandlestickChart, Cloud, Cpu, FlaskConical, Languages, Layers, Lock, MessagesSquare, MicOff, Network, Phone, ShieldCheck, ShieldOff } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { CandlestickChart, Cloud, Cpu, FlaskConical, Languages, Layers, Lock, MessagesSquare, MicOff, Network, Phone, ShieldCheck, ShieldOff, X } from "lucide-react";
 import { gateway } from "@/lib/gateway";
 import { cc, type MarketData } from "@/lib/cc-api";
 import { cmd, isTauri, type ComputeMode } from "@/lib/platform";
@@ -24,8 +25,13 @@ import { hudMicChips } from "@/features/voice/mic-indicator";
 import { applyOptimistic, type HudCommand, type OsStatus } from "./hud-status";
 import { MESH_PATH_POLL_MS, meshPathChip, type MeshPathChip } from "./mesh-path";
 import { safety } from "@/lib/safety";
+import { useSettings } from "@/stores/settings";
+import { useWeather } from "@/features/weather/weather-store";
+import { formatClock, useMinuteTick } from "@/shell/TopBarClock";
+import { popoverTakesEscape } from "@/shell/useAnchoredPopover";
 
 const LanguageHub = lazy(() => import("@/features/language/LanguageHub").then((m) => ({ default: m.LanguageHub })));
+const RemindersPanel = lazy(() => import("@/features/reminders/RemindersPanel").then((m) => ({ default: m.RemindersPanel })));
 
 /**
  * Galaxy S22 "Lockdown Command Center" — /mobile-hud (→ /cc/?view=hud).
@@ -191,6 +197,7 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
   const kill = status?.privacy.killSwitch ?? false;
   return (
     <header className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-[calc(env(safe-area-inset-top)+0.5rem)]">
+      <ClockChip />
       {lockdown && (
         <span className="flex items-center gap-1 rounded-full bg-amber/20 px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-amber-light">
           <Lock size={10} /> LOCKDOWN
@@ -261,6 +268,78 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
       </div>
       {!status && <span className="w-full text-[10px] text-ink-3">Desktop status unavailable — check the gateway token in Settings.</span>}
     </header>
+  );
+}
+
+/**
+ * Clock + temperature chip (decision 35): lockdown full screen hides the Android status-bar clock. Tapping it
+ * opens Alarms & key dates in a bottom sheet (z-80, under the ConfirmCard). The temperature comes from the
+ * HudApp's useWeatherRefresh (the Android app needs a saved location). No particles in the HUD (decision 36).
+ */
+export function hudClockText(time: string, dayPeriod: string | null, tempC: number | null): string {
+  return `${time}${dayPeriod ? ` ${dayPeriod}` : ""}${tempC !== null ? ` · ${tempC}°` : ""}`;
+}
+
+function ClockChip() {
+  const now = useMinuteTick();
+  const clock = useSettings((s) => s.clock);
+  const weatherNow = useWeather((s) => s.now);
+  const [open, setOpen] = useState(false);
+  const chipRef = useRef<HTMLButtonElement>(null);
+  const { time, dayPeriod, a11y } = formatClock(now, clock.hourCycle);
+  const tempC = clock.showTemp && weatherNow ? Math.round(weatherNow.tempC) : null;
+  const close = useCallback(() => {
+    setOpen(false);
+    chipRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!popoverTakesEscape(e.key, !!useVoice.getState().pending)) return;
+      e.stopPropagation();
+      close();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, close]);
+  return (
+    <>
+      <button
+        ref={chipRef}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`${a11y}${tempC !== null ? `, ${tempC} degrees` : ""}. Open alarms and key dates`}
+        onClick={() => setOpen(true)}
+        className="rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] text-ink tabular"
+      >
+        {hudClockText(time, dayPeriod, tempC)}
+      </button>
+      {open &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Alarms & key dates"
+            className="fixed inset-0 z-[80] flex items-end bg-black/60"
+            onPointerDown={(e) => {
+              if (e.target === e.currentTarget) close();
+            }}
+          >
+            <div className="relative max-h-[80dvh] w-full overflow-y-auto rounded-t-[18px] border-t border-white/10 bg-[rgb(11,13,17)] px-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] pt-3">
+              <button type="button" aria-label="Close alarms" onClick={close} className="absolute right-2 top-2 z-[1] grid size-8 place-items-center rounded-full text-ink-3 hover:bg-white/10">
+                <X size={14} />
+              </button>
+              <Suspense fallback={<p className="p-3 font-mono text-xs text-ink-3">loading…</p>}>
+                <div className="pr-8">
+                  <RemindersPanel variant="popover" onDone={close} />
+                </div>
+              </Suspense>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 

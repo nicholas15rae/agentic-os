@@ -13,10 +13,24 @@ use std::time::SystemTime;
 
 pub const FILE: &str = "security.config.json";
 
+/// Migration id: `unknown_device` (Section 24) appended once to an explicit `alerts.events`
+/// list. Mirrored by `security_api.alert_events` (Python reads the same file).
+pub const MIGRATE_UNKNOWN_DEVICE_ALERT: &str = "alerts-unknown-device";
+/// Every migration a freshly written file already reflects.
+pub const MIGRATIONS: [&str; 2] = [MIGRATE_UNKNOWN_DEVICE_ALERT, MIGRATE_FINANCE_RULES];
+
+/// What Settings → Security may set (Section 24): idle lock 5–120 min, hard re-auth 30–720 min.
+/// The file loader (`clamped`) stays a little wider so a hand edit isn't silently rejected.
+pub const IDLE_LOCK_RANGE: (f64, f64) = (5.0, 120.0);
+pub const REAUTH_RANGE: (f64, f64) = (30.0, 720.0);
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SecurityConfig {
     pub version: u32,
+    /// One-time file migrations already applied (`migrate_value`), so a later deliberate edit
+    /// (e.g. removing "unknown_device" from `alerts.events`) sticks. Fresh files carry them all.
+    pub migrations: Vec<String>,
     /// Master switch. Off = the IPC gate and gateway checks allow everything (audited on start).
     pub enabled: bool,
     pub session: SessionCfg,
@@ -186,10 +200,11 @@ fn default_modules() -> BTreeMap<String, ModulePolicy> {
             ],
         },
     );
-    let fin: Vec<HttpRule> = ["income", "goals", "invoices", "checks", "receipts"]
+    let mut fin: Vec<HttpRule> = FINANCE_COLLECTIONS
         .iter()
         .flat_map(|c| ["POST", "PATCH", "DELETE"].map(|m| rule(m, &format!("/api/cc/c/{c}*"))))
         .collect();
+    fin.push(rule("POST", FINANCE_STATEMENT_IMPORT));
     m.insert(
         "finance".into(),
         ModulePolicy { read_only_by_default: true, commands: vec!["finance_ledger_write".into(), "bizops_finance_handoff".into()], guarded_args: BTreeMap::new(), gateway: fin },
@@ -228,16 +243,45 @@ fn default_modules() -> BTreeMap<String, ModulePolicy> {
                 // `gmail` holds the booking check's instruction-file path (read into Tony's prompt).
                 ["privacy", "mcps", "permissions", "skills", "fsRoots", "routing", "overseer", "identityPath", "rootDirective", "anythingllm", "droplet", "gmail"].map(|k| format!("/patch/{k}")).to_vec(),
             )]),
-            gateway: vec![rule("PUT", "/api/cc/config")],
+            gateway: vec![rule("PUT", "/api/cc/config"), rule("PUT", BUSINESS_PROFILES)],
         },
     );
     m
+}
+
+/// Gateway finance collections whose writes need a Finance step-up (Section 11 added the last
+/// four). Keep in step with `security_api.py` DEFAULT_RULES and `command_center_api.py`.
+pub const FINANCE_COLLECTIONS: [&str; 9] = ["income", "goals", "invoices", "checks", "receipts", "commissions", "mileage", "pending", "statement_lines"];
+pub const FINANCE_STATEMENT_IMPORT: &str = "/api/cc/finance/statement-import";
+/// Business profiles (HST numbers, addresses, agencies, area tax settings): a Settings step-up.
+pub const BUSINESS_PROFILES: &str = "/api/cc/business/profiles";
+pub const MIGRATE_FINANCE_RULES: &str = "rules-finance-v2";
+
+/// `rules-finance-v2`: a saved file that lists module gateway rules explicitly gets the Section 11
+/// finance collections + statement import (finance) and the business profiles PUT (settings)
+/// appended once. A module or list the file doesn't carry already gets them from the defaults.
+fn add_finance_rules(root: &mut serde_json::Map<String, serde_json::Value>) {
+    let mut want: Vec<(&str, String, String)> = FINANCE_COLLECTIONS[5..]
+        .iter()
+        .flat_map(|c| ["POST", "PATCH", "DELETE"].map(|m| ("finance", m.to_string(), format!("/api/cc/c/{c}*"))))
+        .collect();
+    want.push(("finance", "POST".into(), FINANCE_STATEMENT_IMPORT.into()));
+    want.push(("settings", "PUT".into(), BUSINESS_PROFILES.into()));
+    let Some(mods) = root.get_mut("modules").and_then(|m| m.as_object_mut()) else { return };
+    for (module, method, path) in want {
+        let Some(list) = mods.get_mut(module).and_then(|m| m.get_mut("gateway")).and_then(|g| g.as_array_mut()) else { continue };
+        let has = list.iter().any(|r| r["method"].as_str() == Some(method.as_str()) && r["path"].as_str() == Some(path.as_str()));
+        if !has {
+            list.push(serde_json::json!({ "method": method, "path": path }));
+        }
+    }
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             version: 1,
+            migrations: MIGRATIONS.map(String::from).to_vec(),
             enabled: true,
             session: SessionCfg::default(),
             pin: PinCfg::default(),
@@ -307,6 +351,7 @@ impl Default for AlertsCfg {
                 "kill_switch",
                 "trading_kill_switch",
                 "pin_changed",
+                "unknown_device",
             ]
             .map(String::from)
             .to_vec(),
@@ -343,7 +388,7 @@ impl SecurityConfig {
     pub fn clamped(mut self) -> Self {
         let d = SecurityConfig::default();
         self.session.idle_lock_minutes = clampf(self.session.idle_lock_minutes, 1.0, 120.0, d.session.idle_lock_minutes);
-        self.session.reauth_minutes = clampf(self.session.reauth_minutes, 5.0, 240.0, d.session.reauth_minutes);
+        self.session.reauth_minutes = clampf(self.session.reauth_minutes, 5.0, REAUTH_RANGE.1, d.session.reauth_minutes);
         self.pin.min_length = self.pin.min_length.clamp(4, 12);
         self.pin.max_attempts = self.pin.max_attempts.clamp(3, 20);
         self.pin.lockout_seconds = clampf(self.pin.lockout_seconds, 30.0, 3600.0, d.pin.lockout_seconds);
@@ -381,14 +426,104 @@ impl SecurityConfig {
     }
 }
 
+/// The Security card's session timers, validated and clamped to the UI ranges (pure). Whole
+/// minutes; a non-number is refused rather than guessed.
+pub fn session_from_ui(idle_lock_minutes: f64, reauth_minutes: f64) -> Result<SessionCfg, String> {
+    if !idle_lock_minutes.is_finite() || !reauth_minutes.is_finite() {
+        return Err("BAD_SESSION_CONFIG: the lock timers must be numbers of minutes".into());
+    }
+    Ok(SessionCfg {
+        idle_lock_minutes: idle_lock_minutes.round().clamp(IDLE_LOCK_RANGE.0, IDLE_LOCK_RANGE.1),
+        reauth_minutes: reauth_minutes.round().clamp(REAUTH_RANGE.0, REAUTH_RANGE.1),
+        // Not part of the timers form; `with_session` writes only the two timer keys, so the saved
+        // restart setting is never touched by this value.
+        ..SessionCfg::default()
+    })
+}
+
+/// `text` (the current file, or None when it doesn't exist yet) with only `session.idleLockMinutes`
+/// and `session.reauthMinutes` replaced: every other key, known or not, is kept as it is (pure).
+/// An unparsable file is refused, never overwritten with the defaults.
+pub fn with_session(text: Option<&str>, s: &SessionCfg) -> Result<String, String> {
+    let mut v = match text {
+        Some(t) => serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).map_err(|e| format!("BAD_SESSION_CONFIG: {FILE} isn't valid JSON ({e}); fix it by hand first"))?,
+        None => serde_json::to_value(SecurityConfig::default()).map_err(|e| e.to_string())?,
+    };
+    let root = v.as_object_mut().ok_or_else(|| format!("BAD_SESSION_CONFIG: {FILE} isn't a JSON object"))?;
+    let session = root.entry("session").or_insert_with(|| serde_json::json!({}));
+    if !session.is_object() {
+        *session = serde_json::json!({});
+    }
+    session["idleLockMinutes"] = serde_json::json!(s.idle_lock_minutes);
+    session["reauthMinutes"] = serde_json::json!(s.reauth_minutes);
+    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+}
+
+/// Write the session timers into `dir`'s config file (atomic; the mtime check hot-reloads it).
+pub fn set_session_in(dir: &Path, s: &SessionCfg) -> Result<(), String> {
+    let path = dir.join(FILE);
+    let text = std::fs::read_to_string(&path).ok();
+    let next = with_session(text.as_deref(), s)?;
+    super::shared::write_atomic(&path, next.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// One-time, versioned upgrades of a saved file, on the raw JSON so every other key (known or
+/// not) is kept as it is (pure). Returns true when `v` changed (the caller writes it back).
+/// `alerts-unknown-device`: an explicit `alerts.events` list gets "unknown_device" appended once
+/// (a file without the list already gets it from the defaults); the id is recorded in
+/// `migrations`, so removing the event afterwards sticks.
+pub fn migrate_value(v: &mut serde_json::Value) -> bool {
+    let Some(root) = v.as_object_mut() else { return false };
+    let done = |root: &serde_json::Map<String, serde_json::Value>, id: &str| root.get("migrations").and_then(|m| m.as_array()).is_some_and(|a| a.iter().any(|x| x.as_str() == Some(id)));
+    let mark = |root: &mut serde_json::Map<String, serde_json::Value>, id: &str| {
+        let m = root.entry("migrations").or_insert_with(|| serde_json::json!([]));
+        if !m.is_array() {
+            *m = serde_json::json!([]);
+        }
+        if let Some(a) = m.as_array_mut() {
+            a.push(serde_json::json!(id));
+        }
+    };
+    let mut changed = false;
+    if !done(root, MIGRATE_UNKNOWN_DEVICE_ALERT) {
+        if let Some(events) = root.get_mut("alerts").and_then(|a| a.get_mut("events")).and_then(|e| e.as_array_mut()) {
+            if !events.iter().any(|e| e.as_str() == Some("unknown_device")) {
+                events.push(serde_json::json!("unknown_device"));
+            }
+        }
+        mark(root, MIGRATE_UNKNOWN_DEVICE_ALERT);
+        changed = true;
+    }
+    if !done(root, MIGRATE_FINANCE_RULES) {
+        add_finance_rules(root);
+        mark(root, MIGRATE_FINANCE_RULES);
+        changed = true;
+    }
+    changed
+}
+
 /// Read (and clamp) the config at `path`; a missing file is written with the defaults; an
-/// unparsable one falls back to the defaults (the strict posture) and says so.
+/// unparsable one falls back to the defaults (the strict posture) and says so. A pending
+/// one-time migration (`migrate_value`) is applied and written back atomically first.
 pub fn load(path: &Path) -> (SecurityConfig, Option<String>) {
     match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<SecurityConfig>(text.trim_start_matches('\u{feff}')) {
-            Ok(c) => (c.clamped(), None),
-            Err(e) => (SecurityConfig::default(), Some(format!("{}: {e}; using the defaults", path.display()))),
-        },
+        Ok(text) => {
+            let mut v = match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) {
+                Ok(v) => v,
+                Err(e) => return (SecurityConfig::default(), Some(format!("{}: {e}; using the defaults", path.display()))),
+            };
+            let mut warn = None;
+            if migrate_value(&mut v) {
+                let written = serde_json::to_string_pretty(&v).map_err(|e| e.to_string()).and_then(|s| super::shared::write_atomic(path, s.as_bytes()).map_err(|e| e.to_string()));
+                if let Err(e) = written {
+                    warn = Some(format!("{}: couldn't save the one-time migration ({e}); applied in memory", path.display()));
+                }
+            }
+            match serde_json::from_value::<SecurityConfig>(v) {
+                Ok(c) => (c.clamped(), warn),
+                Err(e) => (SecurityConfig::default(), Some(format!("{}: {e}; using the defaults", path.display()))),
+            }
+        }
         Err(_) => {
             let c = SecurityConfig::default();
             if let Some(p) = path.parent() {
@@ -460,6 +595,105 @@ mod tests {
         assert_eq!(w.module_for_invoke("secret_set", None), Some("settings"));
         assert_eq!(w.module_for_command("finance_ledger_write"), Some("finance"));
         assert_eq!(w.module_for_command("system_stats"), None);
+    }
+
+    #[test]
+    fn security_card_session_timers_are_validated_and_saved_in_place() {
+        assert_eq!(session_from_ui(1.0, 1.0).unwrap(), SessionCfg { idle_lock_minutes: 5.0, reauth_minutes: 30.0, ..SessionCfg::default() });
+        assert_eq!(session_from_ui(500.0, 5000.0).unwrap(), SessionCfg { idle_lock_minutes: 120.0, reauth_minutes: 720.0, ..SessionCfg::default() });
+        assert_eq!(session_from_ui(20.4, 90.0).unwrap(), SessionCfg { idle_lock_minutes: 20.0, reauth_minutes: 90.0, ..SessionCfg::default() });
+        assert!(session_from_ui(f64::NAN, 60.0).is_err());
+        // Defaults are untouched by the new limits.
+        assert_eq!(SessionCfg::default(), SessionCfg { idle_lock_minutes: 15.0, reauth_minutes: 60.0, ..SessionCfg::default() });
+        // A 12-hour re-auth set from the card survives the loader's clamp.
+        let long: SecurityConfig = serde_json::from_str(r#"{"session":{"idleLockMinutes":30,"reauthMinutes":720}}"#).unwrap();
+        assert_eq!(long.clamped().session.reauth_minutes, 720.0);
+        // Only the two keys change; unknown keys and other sections stay.
+        let s = SessionCfg { idle_lock_minutes: 30.0, reauth_minutes: 240.0, ..SessionCfg::default() };
+        let out = with_session(Some(r#"{"enabled":true,"custom":{"x":1},"session":{"idleLockMinutes":15,"note":"keep"},"pin":{"minLength":8}}"#), &s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["session"]["idleLockMinutes"], 30.0);
+        assert_eq!(v["session"]["reauthMinutes"], 240.0);
+        assert_eq!(v["session"]["note"], "keep");
+        assert_eq!(v["custom"]["x"], 1);
+        assert_eq!(v["pin"]["minLength"], 8);
+        assert!(with_session(Some("{ broken"), &s).is_err(), "a bad file is never overwritten");
+        let fresh: SecurityConfig = serde_json::from_str(&with_session(None, &s).unwrap()).unwrap();
+        assert_eq!(fresh.session, s);
+        assert_eq!(fresh.modules, SecurityConfig::default().modules);
+        // Through the file + hot reload.
+        let dir = std::env::temp_dir().join(format!("cc-sec-sess-{}", super::super::token::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(get_in(&dir).session, SessionCfg::default());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_session_in(&dir, &s).unwrap();
+        assert_eq!(get_in(&dir).session, s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Section 11 / 22: a saved file listing module rules explicitly gets the new finance
+    /// collections, the statement import and the business profiles PUT once; defaults carry them.
+    #[test]
+    fn finance_and_profile_rules_reach_saved_files_once() {
+        let d = SecurityConfig::default();
+        let has = |c: &SecurityConfig, m: &str, method: &str, path: &str| c.modules[m].gateway.iter().any(|r| r.method == method && r.path == path);
+        for c in ["commissions", "mileage", "pending", "statement_lines"] {
+            assert!(has(&d, "finance", "PATCH", &format!("/api/cc/c/{c}*")), "{c}");
+        }
+        assert!(has(&d, "finance", "POST", FINANCE_STATEMENT_IMPORT));
+        assert!(has(&d, "settings", "PUT", BUSINESS_PROFILES));
+        // An older saved file: its own explicit rule lists.
+        let mut v = serde_json::to_value(&d).unwrap();
+        v["migrations"] = serde_json::json!(["alerts-unknown-device"]);
+        v["modules"]["finance"]["gateway"] = serde_json::json!([{ "method": "POST", "path": "/api/cc/c/income*" }]);
+        v["modules"]["settings"]["gateway"] = serde_json::json!([{ "method": "PUT", "path": "/api/cc/config" }]);
+        assert!(migrate_value(&mut v));
+        let c: SecurityConfig = serde_json::from_value(v.clone()).unwrap();
+        assert!(has(&c, "finance", "DELETE", "/api/cc/c/statement_lines*"));
+        assert!(has(&c, "finance", "POST", FINANCE_STATEMENT_IMPORT));
+        assert!(has(&c, "settings", "PUT", BUSINESS_PROFILES));
+        assert!(has(&c, "finance", "POST", "/api/cc/c/income*"), "existing rules kept");
+        // Once: a rule removed afterwards stays removed.
+        v["modules"]["settings"]["gateway"] = serde_json::json!([]);
+        assert!(!migrate_value(&mut v));
+        assert_eq!(v["modules"]["settings"]["gateway"], serde_json::json!([]));
+    }
+
+    /// Section 24: an existing file with an explicit `alerts.events` list gets "unknown_device"
+    /// once (written back, every other key kept); a later removal sticks; fresh files are already
+    /// migrated; a file without the list keeps the defaults (which include it).
+    #[test]
+    fn unknown_device_alert_is_migrated_into_saved_event_lists_once() {
+        let dir = std::env::temp_dir().join(format!("cc-sec-mig-{}", super::super::token::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(FILE);
+        std::fs::write(&p, r#"{"version":1,"custom":{"keep":true},"alerts":{"enabled":true,"events":["hard_lock","login_failure"]}}"#).unwrap();
+        let (c, w) = load(&p);
+        assert!(w.is_none(), "{w:?}");
+        assert_eq!(c.alerts.events, ["hard_lock", "login_failure", "unknown_device"]);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(saved["alerts"]["events"], serde_json::json!(["hard_lock", "login_failure", "unknown_device"]));
+        assert_eq!(saved["migrations"], serde_json::json!([MIGRATE_UNKNOWN_DEVICE_ALERT, MIGRATE_FINANCE_RULES]));
+        assert_eq!(saved["custom"]["keep"], true, "unknown keys survive");
+        // A deliberate removal afterwards sticks.
+        std::fs::write(&p, r#"{"version":1,"migrations":["alerts-unknown-device","rules-finance-v2"],"alerts":{"events":["hard_lock"]}}"#).unwrap();
+        let before = std::fs::read_to_string(&p).unwrap();
+        let (c, _) = load(&p);
+        assert_eq!(c.alerts.events, ["hard_lock"]);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before, "nothing rewritten");
+        // Pure: already listed → only the marker; no list → only the marker (defaults have it).
+        let mut v = serde_json::json!({"alerts": {"events": ["unknown_device"]}});
+        assert!(migrate_value(&mut v));
+        assert_eq!(v["alerts"]["events"], serde_json::json!(["unknown_device"]));
+        assert!(!migrate_value(&mut v), "once");
+        let mut v = serde_json::json!({"alerts": {"enabled": false}});
+        assert!(migrate_value(&mut v));
+        let c: SecurityConfig = serde_json::from_value(v).unwrap();
+        assert!(c.alerts.events.iter().any(|e| e == "unknown_device"));
+        // A fresh default file is already migrated.
+        let mut fresh = serde_json::to_value(SecurityConfig::default()).unwrap();
+        assert!(!migrate_value(&mut fresh));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

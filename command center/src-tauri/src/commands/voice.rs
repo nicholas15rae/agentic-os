@@ -753,6 +753,12 @@ pub(crate) fn local_voice_for(role: Option<&str>, roster: &std::collections::BTr
     default_agent_voice(role).map(str::to_string).or_else(own)
 }
 
+/// A frozen agent (master switchboard) never speaks: no live line, no report, no narration
+/// (Section 20.3). Tony ("general") is never frozen here. Pure.
+pub(crate) fn frozen_voice(role: &str, frozen_agents: &[String]) -> bool {
+    role != "general" && frozen_agents.iter().any(|a| canon_role(a) == role)
+}
+
 /// The roster entry to speak `agent` with: that agent's own entry; else, when Kokoro is
 /// configured (`kokoro`), the agent's built-in Kokoro default (auto-speak off) — also with
 /// an empty roster, so every agent keeps a distinct voice; else Tony's ("general"); else `None`. Only consulted when
@@ -1116,6 +1122,9 @@ pub async fn tts_synthesize(
     // ("general"), else nothing (today's single `policy.tts` provider).
     let cfg = state.snapshot();
     let role = agent.as_deref().map(canon_role);
+    if let Some(r) = role.as_deref().filter(|r| frozen_voice(r, &os.snapshot().switchboard.frozen_agents)) {
+        return Err(format!("FROZEN_VOICE: {r} is frozen on the master switchboard and has no voice"));
+    }
     let kokoro = cfg.providers.iter().any(|x| x.kind == Kind::Tts && x.engine.as_deref() == Some("kokoro"));
     let roster = roster_entry_for(&cfg.agent_voices, role.as_deref(), kokoro);
     // The local voice for this speaker on whichever local engine answers (fallbacks below).
@@ -1303,6 +1312,35 @@ mod stt_prompt_tests {
 mod part3_tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn frozen_agents_have_no_voice_and_tony_always_does() {
+        let frozen = vec!["booking".to_string(), "Librarian".to_string()];
+        assert!(frozen_voice("booking", &frozen));
+        assert!(frozen_voice("librarian", &frozen));
+        assert!(!frozen_voice("designer", &frozen));
+        assert!(!frozen_voice("general", &["general".to_string(), "tony".to_string()]));
+    }
+
+    #[test]
+    fn only_tony_keeps_auto_speak_after_the_migration_once() {
+        use super::super::dispatch::{apply_provider_migrations, Config, MIGRATE_AUTOSPEAK_TONY_ONLY};
+        let mut cfg = Config::default();
+        cfg.migrations.clear();
+        for (role, on) in [("general", true), ("prompter", true), ("designer", true), ("coder", false)] {
+            cfg.agent_voices.insert(role.into(), AgentVoice { engine: "elevenlabs".into(), voice: None, model: None, auto_speak: on, own_voice: None });
+        }
+        assert!(apply_provider_migrations(&mut cfg));
+        let speaking: Vec<_> = cfg.agent_voices.iter().filter(|(_, v)| v.auto_speak).map(|(k, _)| k.as_str()).collect();
+        assert_eq!(speaking, vec!["general"]);
+        assert_eq!(cfg.migrations, vec![MIGRATE_AUTOSPEAK_TONY_ONLY.to_string()]);
+        // Once: turning a specialist back on afterwards sticks.
+        cfg.agent_voices.get_mut("designer").unwrap().auto_speak = true;
+        assert!(!apply_provider_migrations(&mut cfg));
+        assert!(cfg.agent_voices["designer"].auto_speak);
+        // A fresh install has nothing to migrate.
+        assert!(!apply_provider_migrations(&mut Config::default()));
+    }
 
     fn av(engine: &str, voice: &str) -> AgentVoice {
         AgentVoice { engine: engine.into(), voice: Some(voice.into()), model: None, auto_speak: false, own_voice: None }

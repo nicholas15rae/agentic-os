@@ -414,6 +414,9 @@ function instagramPlan(utterance: string, role: AgentRole, intent: string, ig: I
     plan.run = async () => ({ text, meta: "instagram" });
     return plan;
   }
+  // One owner per integration (Section 21.1): Tony only reads Instagram; posting and replying are
+  // Biz Ops' (Rust `TONY_READ_ONLY_SERVERS` refuses the same writes for Tony).
+  if (role === "general") return replyOnly(plan, "Posting and replying on Instagram is Biz Ops' job. Ask Biz Ops and it will raise the card.", "instagram · Biz Ops only");
   const blocked = actionBlockedReply("instagram", "Instagram", role);
   if (blocked) return replyOnly(plan, blocked, "instagram · not available");
   plan.mutating = true;

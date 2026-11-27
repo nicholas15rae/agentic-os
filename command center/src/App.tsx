@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from "react";
 import { WallpaperSlideshow } from "@/features/wallpaper/WallpaperSlideshow";
 import { WeatherCanvas } from "@/features/weather/WeatherCanvas";
+import { useWeatherRefresh } from "@/features/weather/weather-store";
 import { VoiceHUD } from "@/features/voice/VoiceHUD";
 import { ConfirmCard } from "@/features/orchestrator/ConfirmCard";
 import { useReminderScheduler } from "@/features/reminders/scheduler";
@@ -73,6 +74,8 @@ export default function App() {
 /** Galaxy S22 Lockdown Command Center (/mobile-hud → /cc/?view=hud). */
 function HudApp() {
   useOsBoot();
+  // The HUD clock chip's temperature (decision 35). No WeatherCanvas here: particles stay off on the phone (decision 36).
+  useWeatherRefresh();
   useCueScheduler();
   return (
     <>
@@ -91,6 +94,8 @@ function MainApp() {
   // Phase 1 Refresh: a new epoch re-mounts only the section view (audio lives outside <main>).
   const epoch = useRefresh((s) => s.epoch);
   useReminderScheduler();
+  // Weather data for the canvas, wallpapers, clock and widget: 15 min, on wake, and at once on a new saved location.
+  useWeatherRefresh();
   useOsBoot();
   useCueScheduler();
   useConfigSnapshot();

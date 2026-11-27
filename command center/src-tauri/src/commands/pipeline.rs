@@ -443,24 +443,75 @@ pub async fn comms_whatsapp(state: State<'_, DispatchState>, os: State<'_, OsSta
     super::mcp::call_tool(&state, &os, &bridge, tool, &args, true, "tony").await
 }
 
-/// Send a WhatsApp message. Requires `approved` (the confirmation card), unless
-/// the contact is marked trusted in Comms (Instant Send).
+/// The gateway's contact key (`os_api._thread_key`, sms/whatsapp): a JID or email lowercased, a
+/// phone number's last 10 digits. Trust is matched on this key exactly, never by substring.
+pub(crate) fn comms_contact_key(address: &str) -> String {
+    let a = address.trim();
+    if a.contains('@') {
+        return a.to_lowercase();
+    }
+    let digits: String = a.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 10 {
+        digits[digits.len() - 10..].to_string()
+    } else if !digits.is_empty() {
+        digits
+    } else if !a.is_empty() {
+        a.to_lowercase()
+    } else {
+        "unknown".into()
+    }
+}
+
+/// Is `recipient` an Instant Send contact? Only a contact whose normalized key equals the
+/// recipient's key exactly, and is marked trusted, counts (the gateway's `?q=` search is a LIKE,
+/// so a trusted "4165551234" also comes back for a recipient "1234" — that must not count).
+pub(crate) fn is_trusted_exact(contacts: &[Value], recipient: &str) -> bool {
+    let key = comms_contact_key(recipient);
+    if key == "unknown" {
+        return false;
+    }
+    contacts.iter().any(|x| x["trusted"].as_i64() == Some(1) && x["address"].as_str().is_some_and(|a| comms_contact_key(a) == key))
+}
+
+/// The send's origin, normalized: kebab-case, lowercase (`ui_typed` → `ui-typed`).
+pub(crate) fn comms_send_origin(origin: Option<&str>) -> String {
+    origin.map(|o| o.trim().to_ascii_lowercase().replace('_', "-")).filter(|o| !o.is_empty()).unwrap_or_else(|| "agent".into())
+}
+
+/// Instant Send rule (decision 5): only a reply typed by hand in the Chat box (`ui-typed`) to an
+/// exactly trusted contact may skip the card. Every other origin (a UI card, voice, Tony, an agent,
+/// or none) needs `approved` from the confirmation card.
+pub(crate) fn comms_send_allowed(approved: bool, origin: &str, trusted: bool) -> Result<(), String> {
+    if approved || (origin == "ui-typed" && trusted) {
+        Ok(())
+    } else {
+        Err("PERMISSION_REQUIRED:send".into())
+    }
+}
+
+/// Send a WhatsApp message. Requires `approved` (the confirmation card), unless `origin` is
+/// `ui-typed` (typed by hand in the Chat box) and the contact is exactly trusted (Instant Send).
 #[tauri::command]
-pub async fn comms_whatsapp_send(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, recipient: String, message: String, approved: Option<bool>) -> Result<String, String> {
+pub async fn comms_whatsapp_send(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, recipient: String, message: String, approved: Option<bool>, origin: Option<String>) -> Result<String, String> {
     let cfg = os.snapshot();
     if cfg.privacy.kill_switch {
         return Err("kill switch is on — WhatsApp is outbound traffic".into());
     }
-    let trusted = gw(&state, &cfg, reqwest::Method::GET, &format!("/api/comms/contacts?q={}", urlenc(&recipient)), None)
-        .await
-        .ok()
-        .and_then(|v| v["contacts"].as_array().cloned())
-        .is_some_and(|c| c.iter().any(|x| x["trusted"].as_i64() == Some(1)));
-    if !approved.unwrap_or(false) && !trusted {
-        return Err("PERMISSION_REQUIRED:send".into());
-    }
+    let approved = approved.unwrap_or(false);
+    let origin = comms_send_origin(origin.as_deref());
+    // Only look trust up when it could matter (an unapproved hand-typed reply).
+    let trusted = if !approved && origin == "ui-typed" {
+        gw(&state, &cfg, reqwest::Method::GET, &format!("/api/comms/contacts?q={}", urlenc(&comms_contact_key(&recipient))), None)
+            .await
+            .ok()
+            .and_then(|v| v["contacts"].as_array().cloned())
+            .is_some_and(|c| is_trusted_exact(&c, &recipient))
+    } else {
+        false
+    };
+    comms_send_allowed(approved, &origin, trusted)?;
     let out = super::mcp::call_tool(&state, &os, &bridge, "whatsapp.send_message", &json!({ "recipient": recipient, "message": message }), true, "tony").await?;
-    bridge.log(json!({ "type": "comms-send", "channel": "whatsapp", "trusted": trusted, "chars": message.len() }));
+    bridge.log(json!({ "type": "comms-send", "channel": "whatsapp", "trusted": trusted, "origin": origin, "approved": approved, "chars": message.len() }));
     let _ = gw(&state, &cfg, reqwest::Method::POST, "/api/comms/sms", Some(json!({ "address": recipient, "body": message, "direction": "out", "channel": "whatsapp" }))).await;
     Ok(out)
 }
@@ -1606,6 +1657,54 @@ pub fn looks_like_idea(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Comms step 1: trust is an exact match on the gateway's normalized key, never a substring
+    /// (the gateway's `?q=` is a LIKE, so it hands back near-misses that must not count).
+    #[test]
+    fn whatsapp_trust_is_an_exact_key_match() {
+        assert_eq!(comms_contact_key("+1 (416) 555-1234"), "4165551234");
+        assert_eq!(comms_contact_key("14165551234@S.WhatsApp.net"), "14165551234@s.whatsapp.net");
+        assert_eq!(comms_contact_key("  "), "unknown");
+        let contacts = vec![
+            json!({ "address": "4165551234", "name": "Mom", "trusted": 1 }),
+            json!({ "address": "14165559999@s.whatsapp.net", "name": "Sam", "trusted": 1 }),
+            json!({ "address": "6475550000", "name": "Stranger", "trusted": 0 }),
+        ];
+        // Exact (after normalizing the formatting / country code / JID case).
+        assert!(is_trusted_exact(&contacts, "+1 416-555-1234"));
+        assert!(is_trusted_exact(&contacts, "4165551234"));
+        assert!(is_trusted_exact(&contacts, "14165559999@S.WHATSAPP.NET"));
+        // A substring of a trusted number, or a longer string containing one, is not trusted.
+        assert!(!is_trusted_exact(&contacts, "1234"));
+        assert!(!is_trusted_exact(&contacts, "555"));
+        assert!(!is_trusted_exact(&contacts, "4165551234@s.whatsapp.net"), "a JID is not the SMS number");
+        assert!(!is_trusted_exact(&contacts, "16475551234"), "different number, same tail digits elsewhere");
+        // An untrusted exact match, an empty recipient, or no contacts at all.
+        assert!(!is_trusted_exact(&contacts, "647-555-0000"));
+        assert!(!is_trusted_exact(&contacts, ""));
+        assert!(!is_trusted_exact(&[], "4165551234"));
+        // The old bug: any trusted row in the LIKE result counted, even for an unrelated recipient.
+        let like_result = vec![json!({ "address": "4165551234", "trusted": 1 }), json!({ "address": "4165551299", "trusted": 0 })];
+        assert!(!is_trusted_exact(&like_result, "4165551299"));
+    }
+
+    /// Decision 5: only a hand-typed reply (`ui-typed`) to an exactly trusted contact skips the card;
+    /// voice, Tony, agents, a UI card and a missing origin all need `approved`.
+    #[test]
+    fn whatsapp_send_needs_the_card_unless_typed_by_hand_to_a_trusted_contact() {
+        assert_eq!(comms_send_origin(Some("ui_typed")), "ui-typed");
+        assert_eq!(comms_send_origin(Some(" UI-Typed ")), "ui-typed");
+        assert_eq!(comms_send_origin(None), "agent");
+        assert_eq!(comms_send_origin(Some("")), "agent");
+        assert!(comms_send_allowed(false, "ui-typed", true).is_ok());
+        assert_eq!(comms_send_allowed(false, "ui-typed", false).unwrap_err(), "PERMISSION_REQUIRED:send");
+        for o in ["ui-card", "voice", "tony", "agent", "something-else"] {
+            assert_eq!(comms_send_allowed(false, o, true).unwrap_err(), "PERMISSION_REQUIRED:send", "{o} to a trusted contact");
+            assert!(comms_send_allowed(true, o, true).is_ok(), "{o} approved on the card");
+            assert!(comms_send_allowed(true, o, false).is_ok(), "{o} approved on the card");
+        }
+        assert_eq!(comms_send_allowed(false, &comms_send_origin(None), true).unwrap_err(), "PERMISSION_REQUIRED:send");
+    }
 
     #[test]
     fn inbox_backs_off_when_idle_or_down() {

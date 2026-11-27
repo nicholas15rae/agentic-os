@@ -258,12 +258,44 @@ export function sanitizePages(raw: unknown, defaults: WidgetInstance[]): PagesSt
   return { pages, activePage, ...(startupPage ? { startupPage } : {}) };
 }
 
+/** The Maps widget (id kept as "route-map" so saved layouts still load). */
+export const MAPS_WIDGET_ID = "route-map";
+export const TRAVEL_PAGE_NAME = "Travel";
+/** Where the one-time Travel page puts the Maps widget. */
+export const TRAVEL_SLOT = { col: 1, row: 1, w: 6, h: 5 } as const;
+
+/** First page holding `widgetId`, or null. */
+export const pageWithWidget = (pages: LayoutPage[], widgetId: string): LayoutPage | null => pages.find((p) => p.items.some((i) => i.widgetId === widgetId)) ?? null;
+
 /**
- * Persisted `cc.layout` → the v5 pages shape, from any older version. Zustand calls
- * this once with the stored version, so every branch must end in `{pages, activePage}`.
- * `pipelines` is the desktop-only n8n slot (null on the PWA).
+ * Layout v6: append a "Travel" page holding the Maps widget, once. A no-op when Maps is
+ * already on any page or a page is already called "Travel" (so re-running never duplicates).
+ * Existing pages, their items and `activePage` are left exactly as they were.
  */
-export function migrateLayout(persisted: unknown, version: number, defaults: WidgetInstance[], pipelines: WidgetInstance | null): PagesState {
+export function addTravelPage(s: PagesState): PagesState {
+  if (pageWithWidget(s.pages, MAPS_WIDGET_ID) || s.pages.some((p) => p.name.trim().toLowerCase() === TRAVEL_PAGE_NAME.toLowerCase())) return s;
+  const pageIds = new Set(s.pages.map((p) => p.id));
+  let id = "travel";
+  for (let n = 2; pageIds.has(id); n++) id = `travel-${n}`;
+  const taken = allIds(s.pages);
+  let instanceId = `${MAPS_WIDGET_ID}-travel`;
+  for (let n = 2; taken.has(instanceId); n++) instanceId = `${MAPS_WIDGET_ID}-travel-${n}`;
+  const item: WidgetInstance = { instanceId, widgetId: MAPS_WIDGET_ID, ...TRAVEL_SLOT, config: {} };
+  return { pages: [...s.pages, { id, name: TRAVEL_PAGE_NAME, items: [item] }], activePage: s.activePage };
+}
+
+/**
+ * Persisted `cc.layout` → the v6 pages shape, from any older version. Zustand calls
+ * this once with the stored version, so every branch must end in `{pages, activePage}`.
+ * `pipelines` is the desktop-only n8n slot (null on the PWA). `travel` adds the one-time
+ * Travel page (v5 → v6); off on the PWA, where the Maps widget can't run.
+ */
+export function migrateLayout(persisted: unknown, version: number, defaults: WidgetInstance[], pipelines: WidgetInstance | null, travel = false): PagesState {
+  const v5 = migrateToV5(persisted, version, defaults, pipelines);
+  return travel && version < 6 ? addTravelPage(v5) : v5;
+}
+
+function migrateToV5(persisted: unknown, version: number, defaults: WidgetInstance[], pipelines: WidgetInstance | null): PagesState {
   if (version >= 5) return sanitizePages(persisted, defaults);
   const old = ((persisted as { instances?: unknown } | null)?.instances ?? []) as WidgetInstance[];
   let instances: WidgetInstance[];

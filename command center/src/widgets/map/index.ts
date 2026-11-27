@@ -8,13 +8,14 @@ import { listenForRoutes } from "@/features/maps/map-store";
 listenForRoutes();
 
 export default defineWidget({
+  // Shown as "Maps"; the id stays "route-map" so saved layouts keep loading it.
   id: "route-map",
-  title: "Route Map",
+  title: "Maps",
   description: "OpenStreetMap (OpenFreeMap tiles, no key). Shows the routes Tony plans — pins, the road-following line, ETA — plus your own route search and an Open in Maps hand-off to your phone. Desktop app.",
   icon: MapIcon,
   defaultSize: { w: 4, h: 3 },
   minSize: { w: 3, h: 3 },
-  keywords: ["map", "maps", "route", "directions", "eta", "drive", "navigation", "openstreetmap", "osm"],
+  keywords: ["map", "maps", "route map", "route", "travel", "commute", "trip", "directions", "eta", "drive", "navigation", "openstreetmap", "osm"],
   defaultConfig: {},
   component: lazy(() => import("./RouteMap")),
 });

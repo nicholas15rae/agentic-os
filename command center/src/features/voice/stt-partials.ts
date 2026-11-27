@@ -11,8 +11,9 @@
  * Everything here is pure (or takes its I/O as a parameter) so it runs under Vitest.
  */
 
-/** `vad.partialMs` default; 0 turns live captions (and the phone's stream) off. */
-export const DEFAULT_PARTIAL_MS = 600;
+/** `vad.partialMs` default: 0 = live captions (and the phone's stream) off (Section 20.5: each
+ * caption is an extra Whisper pass on the GPU competing with Tony). Settings → Live captions. */
+export const DEFAULT_PARTIAL_MS = 0;
 export const PARTIAL_MIN_MS = 300;
 export const PARTIAL_MAX_MS = 3000;
 /** No captions past one Whisper window of speech (a longer pass is slow); the final covers it all. */

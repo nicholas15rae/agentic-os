@@ -29,6 +29,13 @@ export interface Business {
   status: BusinessStatus;
   provision: ProvisionState;
   createdAt: number;
+  /** Mailboxes linked to this business (Rust `BusinessEmail`); absent / empty = the main account. */
+  emails?: BusinessEmail[];
+}
+
+export interface BusinessEmail {
+  label: string;
+  address: string;
 }
 
 /** What "Add Business" sends (Rust `NewBusiness`, deny_unknown_fields). */
@@ -41,7 +48,7 @@ export interface NewBusiness {
   crossDomainBlocklist: string[];
 }
 
-export type BusinessPatch = Partial<Pick<NewBusiness, "displayName" | "category" | "description" | "aliases" | "crossDomainBlocklist">>;
+export type BusinessPatch = Partial<Pick<NewBusiness, "displayName" | "category" | "description" | "aliases" | "crossDomainBlocklist">> & { emails?: BusinessEmail[] };
 
 export type TransactionType = "invoice" | "receipt" | "expense" | "quote" | "subcontractor_payout" | "ecom_order";
 

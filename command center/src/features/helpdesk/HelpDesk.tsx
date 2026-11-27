@@ -1,9 +1,11 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { AlertTriangle, CloudUpload, LifeBuoy, Loader2, X } from "lucide-react";
 import { cmd, isTauri } from "@/lib/platform";
 import { useVoice } from "@/features/voice/voice-store";
 import { queueFix } from "@/features/memmap/dev-queue";
 import { diagnosisTitle, HELPDESK_ENGINE, HELPDESK_QUESTION, HELPDESK_TURNS, helpdeskTranscript, noProblem, ticketBody } from "./helpdesk-review";
+import { formatReviewCost, overseerChars, reviewCost } from "./review-cost";
+import { useOs } from "@/features/os/os-store";
 
 const DevFixQueue = lazy(() => import("@/features/memmap/DevFixQueue").then((m) => ({ default: m.DevFixQueue })));
 
@@ -18,6 +20,10 @@ type Phase = { k: "idle" } | { k: "running" } | { k: "done"; answer: string; tic
 export function HelpDeskButton({ thread }: { thread: string }) {
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<Phase>({ k: "idle" });
+  // Section 20.15: the estimated cost of reviewing what this thread would send right now.
+  const turns = useVoice((s) => s.turns);
+  const model = useOs((s) => s.cfg?.overseer.claudeModel) ?? "claude-opus-5-5";
+  const cost = useMemo(() => formatReviewCost(reviewCost(overseerChars(HELPDESK_QUESTION, helpdeskTranscript(turns, thread)), model)), [turns, thread, model]);
   if (!isTauri()) return null;
 
   const review = async () => {
@@ -46,6 +52,9 @@ export function HelpDeskButton({ thread }: { thread: string }) {
         title="Something's off: have Claude review the last few turns and file a fix ticket"
       >
         <LifeBuoy size={13} /> Something's off
+        <span className="font-mono text-[10px] text-ink-3" title={`Estimate at ${model} API prices (input ~chars/4 + a ~500-token diagnosis)`}>
+          {cost}
+        </span>
       </button>
       {open && (
         <div className="fixed inset-0 z-[75] flex justify-end bg-black/40" onClick={() => setOpen(false)}>
@@ -60,7 +69,7 @@ export function HelpDeskButton({ thread }: { thread: string }) {
               <CloudUpload size={16} className="mt-0.5 shrink-0 text-amber-soft" aria-hidden />
               <span>
                 Sends the last {HELPDESK_TURNS} turns of this thread to <b>Claude (cloud)</b> through the Claude CLI, after the privacy diffuser. Blocked by the kill switch and LOCAL ONLY mode.
-                Runs only when you press the button below.
+                Runs only when you press the button below. Estimated {cost} at {model} API prices (on a Claude subscription through the CLI it isn't billed per token).
               </span>
             </p>
             <button type="button" onClick={() => void review()} disabled={phase.k === "running"} className="pill-primary !h-9 !px-4 text-sm">

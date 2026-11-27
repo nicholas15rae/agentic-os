@@ -2,9 +2,10 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getWidget, isLockedWidget } from "./registry";
 import { isTauri } from "@/lib/platform";
+import { PHONE_LITE } from "@/lib/phone-lite";
 import type { WidgetInstance } from "./types";
 import { mergeLook, type DisplayMode, type WidgetLook } from "./look";
-import { activeItems, addHomeView, allIds, duplicatePage, linkMode, migrateLayout, movePage, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, startupOf, type PagesState } from "./pages";
+import { activeItems, addHomeView, addTravelPage, allIds, duplicatePage, linkMode, migrateLayout, movePage, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, startupOf, type PagesState } from "./pages";
 import { canHide, canRemovePage, ensureLocked, lockedIn, resetItems, safeLook, withoutLockedOnPage } from "./locks";
 import { SHARED, backToShared, customize, sanitizeVariants, switchTo, type VariantState } from "./variants";
 
@@ -143,6 +144,8 @@ export interface SurfaceSpec {
   version?: number;
   /** Older saves → the pages shape (default: sanitize). */
   migrate?: (persisted: unknown, version: number) => PagesState;
+  /** First run / Reset all pages (default: one page holding `defaults`). */
+  initial?: PagesState;
 }
 
 const snapshot = (s: PagesState): PagesState => ({ pages: s.pages, activePage: s.activePage, startupPage: s.startupPage ?? null });
@@ -150,7 +153,7 @@ const snapshot = (s: PagesState): PagesState => ({ pages: s.pages, activePage: s
 /** One layout store per surface: the same engine, actions and safety locks on every page. */
 export function createLayoutStore(spec: SurfaceSpec) {
   const template = spec.defaults;
-  const seeded = (): PagesState => ensureLocked({ pages: [{ id: "p1", name: "Page 1", items: template }], activePage: "p1" }, template, isLockedWidget, shortId);
+  const seeded = (): PagesState => ensureLocked(spec.initial ?? { pages: [{ id: "p1", name: "Page 1", items: template }], activePage: "p1" }, template, isLockedWidget, shortId);
   return create<LayoutState>()(
     persist(
       (set, get) => {
@@ -364,13 +367,19 @@ export function createLayoutStore(spec: SurfaceSpec) {
 
 export type LayoutStore = ReturnType<typeof createLayoutStore>;
 
+/** First run: the default board, plus the Travel page (Maps) wherever the Maps widget can run. */
+const FIRST_PAGE: PagesState = { pages: [{ id: "p1", name: "Page 1", items: HOME_DEFAULT }], activePage: "p1" };
+const HOME_INITIAL: PagesState = isTauri() && !PHONE_LITE ? addTravelPage(FIRST_PAGE) : FIRST_PAGE;
+
 /** The home page (surface "home"), saved as `cc.layout` like before. */
 export const useLayout = createLayoutStore({
   surface: "home",
   defaults: HOME_DEFAULT,
+  initial: HOME_INITIAL,
   storageKey: "cc.layout",
-  version: 5,
-  migrate: (persisted, version) => migrateLayout(persisted, version, HOME_DEFAULT, isTauri() ? PIPELINES_SLOT : null),
+  // v6: one-time "Travel" page holding the Maps widget (desktop app only: the phone app's Open in Maps is not fixed yet).
+  version: 6,
+  migrate: (persisted, version) => migrateLayout(persisted, version, HOME_DEFAULT, isTauri() ? PIPELINES_SLOT : null, isTauri() && !PHONE_LITE),
 });
 
 const stores = new Map<string, LayoutStore>([["home", useLayout]]);

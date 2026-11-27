@@ -5,7 +5,7 @@ import { useSettings } from "@/stores/settings";
 import { useNav } from "@/stores/nav";
 import { useActiveSurface } from "@/core/widgets/surface-context";
 import { useLayout } from "@/core/widgets/layout-store";
-import { AtmosphereSwitch } from "@/widgets/weather/Weather";
+import { TopBarClock } from "./TopBarClock";
 import { STATE_LABEL, useVoice } from "@/features/voice/voice-store";
 import { STATE_DOT } from "@/features/voice/VoiceParts";
 import { headerSubtitle } from "@/features/voice/voice-status";
@@ -18,7 +18,6 @@ import { BusinessSwitcher } from "@/features/ops/BusinessSwitcher";
 
 export function TopBar() {
   const identity = useSettings((s) => s.identity);
-  const weatherMode = useSettings((s) => s.weatherMode);
   const section = useNav((s) => s.section);
   // The page on screen: home, or a page drawn with the shared LayoutSurface.
   const surface = useActiveSurface((s) => s.store);
@@ -48,9 +47,10 @@ export function TopBar() {
 
   return (
     <header className="flex items-center gap-3 px-4 pb-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] md:px-6 xl:px-8">
-      <div className="glass-thin flex h-11 min-w-0 items-center gap-3 rounded-full px-4">
+      {/* Below md the callsign keeps ~3 characters next to the clock and Widgets (it never pushes them off). */}
+      <div className="glass-thin flex h-11 min-w-0 items-center gap-3 rounded-full px-4 max-sm:min-w-[5.75rem]">
         {isMicOff(mic) ? <MicLockBadge variant="dot" /> : <span className={`size-2 shrink-0 rounded-full ${STATE_DOT[voiceState]}`} />}
-        <span className="truncate font-mono text-[13px] font-semibold tracking-wider text-ink">{identity.callsign}</span>
+        <span data-callsign className="truncate font-mono text-[13px] font-semibold tracking-wider text-ink">{identity.callsign}</span>
         <span className="hidden h-4 w-px bg-white/15 sm:block" />
         <span className="label-caps hidden text-teal sm:block">{status.text}</span>
         {status.chip && (
@@ -58,33 +58,30 @@ export function TopBar() {
         )}
       </div>
 
-      <button onClick={openCommand} className="glass-thin hidden h-11 items-center gap-2 rounded-full px-4 text-ink-2 transition-colors hover:text-ink md:flex">
+      {/* md–lg: icon only, so the clock and the callsign keep their room (the name stays as the aria-label). */}
+      <button onClick={openCommand} aria-label="Command (Ctrl K)" title="Command (Ctrl K)" className="glass-thin hidden h-11 shrink-0 items-center gap-2 rounded-full px-4 text-ink-2 transition-colors hover:text-ink md:flex">
         <Command size={14} />
-        <span className="label-caps">Command</span>
-        <kbd className="label-caps rounded border border-white/10 px-1.5 text-ink-3">Ctrl K</kbd>
+        <span className="label-caps hidden lg:inline">Command</span>
+        <kbd className="label-caps hidden rounded border border-white/10 px-1.5 text-ink-3 lg:inline">Ctrl K</kbd>
       </button>
 
-      <div className="ml-auto hidden md:flex md:items-center md:gap-2">
-        <BusinessSwitcher />
-        <AwayButton />
-        <ActiveSlotPill />
-        <ComputeModeSwitch compact />
-        <DropletBadge />
-        <ModePill />
-        <PrivacyPill />
-        <LockNowButton />
-        <KillSwitch />
-      </div>
-
-      <div className="hidden lg:block">
-        <AtmosphereSwitch mode={weatherMode} className="glass-thin !bg-[rgba(11,13,17,0.42)]" />
-      </div>
-
-      {(section === "command" || surface !== useLayout) && (
-        <div className="ml-auto md:ml-0">
-          <EditToggle editing={editing} setEditing={setEditing} />
+      {/* One right-side group: the OS pills (md+), the clock in the old atmosphere-picker slot (every width;
+          the picker now lives in the Living Weather widget), then Widgets on the Command page. */}
+      <div className="ml-auto flex shrink-0 items-center gap-3">
+        <div className="hidden md:flex md:items-center md:gap-2">
+          <BusinessSwitcher />
+          <AwayButton />
+          <ActiveSlotPill />
+          <ComputeModeSwitch compact />
+          <DropletBadge />
+          <ModePill />
+          <PrivacyPill />
+          <LockNowButton />
+          <KillSwitch />
         </div>
-      )}
+        <TopBarClock />
+        {(section === "command" || surface !== useLayout) && <EditToggle editing={editing} setEditing={setEditing} />}
+      </div>
     </header>
   );
 }
@@ -94,10 +91,13 @@ function EditToggle({ editing, setEditing }: { editing: boolean; setEditing: (v:
     <button
       onClick={() => setEditing(!editing)}
       aria-pressed={editing}
-      className={`flex h-11 items-center gap-2 rounded-full px-4 transition-colors ${editing ? "bg-amber text-canvas glow-amber" : "glass-thin text-ink-2 hover:text-ink"}`}
+      aria-label={editing ? "Done" : "Widgets"}
+      title={editing ? "Done editing widgets" : "Edit widgets"}
+      className={`flex h-11 shrink-0 items-center gap-2 rounded-full px-3.5 transition-colors sm:px-4 ${editing ? "bg-amber text-canvas glow-amber" : "glass-thin text-ink-2 hover:text-ink"}`}
     >
       {editing ? <Check size={15} /> : <LayoutGrid size={15} />}
-      <span className="label-caps">{editing ? "Done" : "Widgets"}</span>
+      {/* Icon-only on phones (the aria-label keeps the name). */}
+      <span className="label-caps hidden sm:inline">{editing ? "Done" : "Widgets"}</span>
     </button>
   );
 }

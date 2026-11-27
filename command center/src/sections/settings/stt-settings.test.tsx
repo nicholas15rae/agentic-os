@@ -62,12 +62,12 @@ describe("STT Engine select", () => {
 });
 
 describe("Live captions (vad.partialMs)", () => {
-  it("sits with the other voice-detection settings, at 600 ms by default", () => {
+  it("sits with the other voice-detection settings, off by default", () => {
     h.vad.partialMs = undefined; // an older settings file: the default applies
     const html = renderToStaticMarkup(<VoiceDetectionCard />);
     expect(html).toContain("Live captions");
-    expect(html).toContain('<option value="600" selected="">every 600 ms of speech (default)</option>');
-    expect(html).toContain('<option value="0">Off (and no phone stream)</option>');
+    expect(html).toContain('<option value="0" selected="">Off (default)</option>');
+    expect(html).toContain('<option value="600">every 600 ms of speech</option>');
   });
 
   it("shows off and a hand-set value as they are, and saves a number", () => {

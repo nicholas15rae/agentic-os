@@ -49,7 +49,7 @@ describe("heuristicPlan — Gmail draft binding", () => {
 describe("heuristicPlan — Instagram writes are gated tool plans", () => {
   it("a publish request is a mutating instagram.publish_post plan with a live-post read-back", () => {
     desktop();
-    const p = heuristicPlan("Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "general");
+    const p = heuristicPlan("Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "bizops");
     expect(p.mutating).toBe(true);
     expect(p.target).toEqual({ kind: "tool", tool: "instagram.publish_post", args: { caption: "New headshots", imageUrl: "https://cdn.example.com/headshot.jpg" } });
     expect(p.readBack).toMatch(/publish a photo to Instagram with the caption "New headshots".*goes live.*Proceed\?$/);
@@ -58,9 +58,19 @@ describe("heuristicPlan — Instagram writes are gated tool plans", () => {
 
   it("a comment reply is a mutating instagram.reply_comment plan", () => {
     desktop();
-    const p = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "general");
+    const p = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "bizops");
     expect(p.mutating).toBe(true);
     expect(p.target).toEqual({ kind: "tool", tool: "instagram.reply_comment", args: { commentId: "17890012345", message: "thank you!" } });
+  });
+
+  it("Tony only reads Instagram: a post or a reply from him is Biz Ops' job, never a card (Section 21.1)", async () => {
+    desktop();
+    for (const text of ["Tony, post https://cdn.example.com/headshot.jpg to Instagram with caption New headshots", "reply to Instagram comment 17890012345 saying thank you!"]) {
+      const p = heuristicPlan(text, "general");
+      expect(p.mutating, text).toBe(false);
+      expect(p.target.kind).toBe("agent");
+      expect((await p.run!()).text).toMatch(/Biz Ops' job/);
+    }
   });
 
   it("no media link → Tony asks, nothing is planned", async () => {
@@ -93,10 +103,10 @@ describe("heuristicPlan — an approved-action card only for a live tool its age
   it("Instagram frozen on the master switchboard: no card, the master reason", async () => {
     desktop();
     withCfg([server("instagram", null)], ["instagram"]);
-    const p = heuristicPlan(POST, "general");
+    const p = heuristicPlan(POST, "bizops");
     expect(p.mutating).toBe(false);
     expect(await replyOf(p)).toBe("Instagram is frozen on the master switchboard, so I left it alone. Turn it back on in the switchboard and I can use it.");
-    const reply = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "general");
+    const reply = heuristicPlan("reply to Instagram comment 17890012345 saying thank you!", "bizops");
     expect(reply.mutating).toBe(false);
     expect(reply.target.kind).toBe("agent");
   });

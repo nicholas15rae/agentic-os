@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { MESH_PATH_POLL_MS, meshPathChip, relayTag, type NetPath } from "./mesh-path";
+import { MESH_PATH_POLL_MS, desktopMeshRows, meshPathChip, relayTag, type NetPath } from "./mesh-path";
 
 const p2p: NetPath = {
   peer: "r0qcsx",
@@ -75,5 +75,22 @@ describe("the phone HUD's NetBird path chip", () => {
     // Phones show no tooltips: a tap on the chip reveals the ICE details line instead.
     expect(src).toMatch(/onClick=\{\(\) => setPathInfo\(\(v\) => !v\)\}/);
     expect(src).toMatch(/\{pathInfo && meshPath && <span[^>]*>\{meshPath\.title\}<\/span>\}/);
+  });
+});
+
+describe("the desktop's Gateway & Network NetBird rows", () => {
+  it("lists every peer, live tunnels first, with direct / relayed and ping", () => {
+    const rows = desktopMeshRows({ lazy: false, peers: [{ ...p2p, peer: "zz-idle", status: "Idle", path: null, latencyMs: null }, relayed, { ...p2p, peer: "aa-phone" }] });
+    expect(rows?.map((r) => [r.name, r.text, r.tone])).toEqual([
+      ["aa-phone", "P2P 31 ms", "direct"],
+      ["r0qcsx", "RELAY chi1 92 ms", "relay"],
+      ["zz-idle", "Idle", "off"],
+    ]);
+  });
+
+  it("is null for the phone's single-peer shape or a failed call", () => {
+    expect(desktopMeshRows(p2p)).toBeNull();
+    expect(desktopMeshRows(null)).toBeNull();
+    expect(desktopMeshRows({ peers: [] })).toEqual([]);
   });
 });

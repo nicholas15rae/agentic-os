@@ -170,6 +170,7 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "Not found"}, status_code=404)
         # Defense in depth: besides loopback, only the NetBird mesh (100.64.0.0/10) may talk to the gateway.
         if not loopback and not _in_mesh(host):
+            await run_in_threadpool(security_api.note_unknown_device, host, "outside the NetBird mesh", path)
             return JSONResponse({"detail": "Only localhost and the NetBird mesh may reach this gateway."}, status_code=403)
         # Stored files and Play Place previews are loaded by <img>/<iframe> (no headers possible);
         # their random ids act as capability URLs.
@@ -194,6 +195,7 @@ class ZeroTrustMiddleware(BaseHTTPMiddleware):
         # Section pass: a per-device token (desktop Settings → Security → Where you're logged in).
         dev = device_registry.match(sent)
         if dev is None:
+            await run_in_threadpool(security_api.note_unknown_device, host, "on the mesh without a valid gateway token" if sent else "on the mesh with no gateway token", path)
             return JSONResponse({"detail": "Gateway token required (network lock is on)."}, status_code=401)
         device_registry.seen(dev["id"], host, ua)
         return await call_next(request)
@@ -363,9 +365,13 @@ class AgentNotInstalled(Exception):
     """The requested agent's CLI isn't on this machine. Callers map this to HTTP 503 so
     clients (and the Command Center provider chain) treat it as a failure, never a reply."""
 
-    def __init__(self, agent: str):
+    def __init__(self, agent: str, reason: str | None = None):
         self.agent = agent
-        super().__init__(f"⚠ Agent '{agent}' CLI not installed. Install it and try again.")
+        self.reason = reason
+        if reason:
+            super().__init__(f"⚠ Agent '{agent}' CLI can't be started safely: {reason}")
+        else:
+            super().__init__(f"⚠ Agent '{agent}' CLI not installed. Install it and try again.")
 
 
 def resolve_cli(name: str) -> str | None:
@@ -381,12 +387,18 @@ def resolve_cli(name: str) -> str | None:
 
 
 def check_agent(name: str) -> dict:
-    """Instant filesystem-based check. No subprocess needed."""
+    """Instant filesystem-based check. No subprocess needed. A CLI whose launcher safe_argv
+    refuses (a batch file it can't unwrap) is offline with a `reason`, as /api/chat would 503."""
     try:
-        status = "online" if name in AGENT_NAMES and resolve_cli(name) else "offline"
+        path = resolve_cli(name) if name in AGENT_NAMES else None
+        if not path:
+            return {"name": name, "status": "offline"}
+        safe_argv([path])
+    except UnsafeLauncher as e:
+        return {"name": name, "status": "offline", "reason": str(e)}
     except Exception:
-        status = "offline"
-    return {"name": name, "status": status}
+        return {"name": name, "status": "offline"}
+    return {"name": name, "status": "online"}
 
 # ─── Routes: Status ───────────────────────────────────────────────
 
@@ -1054,6 +1066,11 @@ def save_chat_message(msg: dict):
         history["messages"] = history["messages"][-200:]
     CHAT_HISTORY_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
+class UnsafeLauncher(FileNotFoundError):
+    """The CLI exists, but only as a batch file safe_argv can't unwrap: running it would hand
+    the arguments (prompt text) to cmd.exe. Callers report this reason, not "not installed"."""
+
+
 def safe_argv(args: list) -> list:
     """Turn ["opencode", ...] into an argv that is safe to exec on this OS.
 
@@ -1079,10 +1096,15 @@ def safe_argv(args: list) -> list:
         if target.exists():
             if target.suffix.lower() == ".exe":
                 return [str(target)] + args[1:]
-            node = shutil.which("node")
+            # The npm shim's own order: a node.exe beside it first, then node on PATH.
+            beside = shim.parent / "node.exe"
+            node = str(beside) if beside.exists() else shutil.which("node")
             if node:
                 return [node, str(target)] + args[1:]
-    raise FileNotFoundError(
+            raise UnsafeLauncher(
+                f"{exe} is an npm launcher but node.exe was not found (beside it or on PATH)"
+            )
+    raise UnsafeLauncher(
         f"{args[0]} resolves to a batch file ({exe}) that cannot be run safely; "
         "install a native .exe build of it instead"
     )
@@ -1158,6 +1180,8 @@ def execute_agent(agent: str, message: str) -> str:
             return f"Unknown agent: {agent}"
     except subprocess.TimeoutExpired:
         return f"⏱ Agent '{agent}' timed out.\n\nRun `{agent} --help` in your terminal for CLI usage.\n\n**Message:** {message[:100]}"
+    except UnsafeLauncher as e:
+        raise AgentNotInstalled(agent, str(e))
     except FileNotFoundError:
         raise AgentNotInstalled(agent)
     except Exception as e:

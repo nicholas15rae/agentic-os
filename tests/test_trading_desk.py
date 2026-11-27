@@ -382,11 +382,20 @@ class DeskTests(unittest.TestCase):
             self.desk.set_mode("FULL_AUTO", "t", confirm=True)
         self.assertEqual(self.submit(intent_id="intent-0002", symbol="QQQ")["status"], "rejected")
         # The bridge shows a fresh open-order list with no KILL- order left, so the reset lifts the guard stand-down
-        # and re-arming works. (Without that proof, re-arming stays refused: Desk._stood_down fails closed.)
-        self.desk.bridge = FakeBridge(openOrdersAt=NOW)
+        # and re-arming works. (Without that proof, re-arming stays refused: Desk._stood_down fails closed.) The list
+        # must be newer than the kill's end: one from before it finished placing orders proves nothing.
+        self.desk.bridge = FakeBridge(openOrdersAt=NOW + 1)
         self.desk.reset("RESET", "t")
         self.desk.set_mode("FULL_AUTO", "t", confirm=True)
         self.assertEqual(self.desk.view()["audit"]["ok"], True)
+
+    def test_no_autonomous_entry_while_the_kill_stand_down_holds(self):
+        """Backstop: a kill whose halt write never landed can leave state.json at FULL_AUTO. While the kill's stand-down
+        holds (options guard off, its flatten maybe still working), no autonomous entry goes out."""
+        self.desk.set_mode("FULL_AUTO", "t", confirm=True)
+        self.desk._killed, self.desk._kill_done_at = True, NOW                       # settling, nothing locked
+        self.assertEqual(self.submit(source="rule_engine")["status"], "rejected")
+        self.assertEqual(self.ex.placed, [])
 
     def test_drawdown_trips_kill_from_submit(self):
         self.desk.bridge = FakeBridge(account={"netLiquidation": 97_000.0, "currency": "CAD"}, pnl={"daily": -3_000.0})

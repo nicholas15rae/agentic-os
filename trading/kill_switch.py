@@ -200,8 +200,11 @@ async def execute_kill(
     d: Path | None = None,
     market_order: Callable[[str, float], Any] | None = None,
     fill_wait_s: float = FILL_WAIT_S,
+    sever: Callable[[], str | None] | None = None,
 ) -> dict[str, Any]:
-    """Run the E-stop. `connect(readonly)` returns a connected ib_async.IB (kill client id)."""
+    """Run the E-stop. `connect(readonly)` returns a connected ib_async.IB (the kill client id; a read-only dry run
+    gets its own, kill_dry, so it can never hold the id a live kill needs). `sever()` (the desk's) halts the agent and
+    sets ADVISORY, returning None or why it couldn't; the sever_agent step records that truthfully."""
     d = d or data_dir()
     incident_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     inc: dict[str, Any] = {
@@ -245,64 +248,79 @@ async def execute_kill(
         inc["errors"].append(f"connect: {e}")
 
     if ib is not None:
-        # 2. Cancel every working order.
+        # Disconnect in a finally: a cancelled kill (CancelledError is a BaseException) must not leave the kill's
+        # client id bound at TWS, or every later kill fails to connect (326).
         try:
-            await asyncio.wait_for(ib.reqAllOpenOrdersAsync(), 8)
-            working = [t for t in ib.openTrades() if t.orderStatus.status not in ("Filled", "Cancelled", "ApiCancelled", "Inactive")]
-            inc["cancelled"] = [{"orderId": t.order.orderId, "permId": t.order.permId, "symbol": t.contract.symbol,
-                                 "action": t.order.action, "qty": t.order.totalQuantity, "type": t.order.orderType} for t in working]
-            if not dry_run:
-                ib.reqGlobalCancel()
-            step("global_cancel", True, f"{'would cancel' if dry_run else 'reqGlobalCancel sent for'} {len(working)} working order(s)")
-        except Exception as e:  # noqa: BLE001
-            step("global_cancel", False, f"{type(e).__name__}: {e}")
-            inc["errors"].append(f"global_cancel: {e}")
-
-        # 3. Flatten every position with a market order.
-        try:
-            positions = await asyncio.wait_for(ib.reqPositionsAsync(), 8)
-            # Buy back short option legs before selling longs: a vertical is never left as a naked short.
-            positions = sorted(positions, key=lambda p: (getattr(p.contract, "secType", "") != "OPT" or float(p.position) > 0))
-            trades = []
-            for p in positions:
-                qty = float(p.position)
-                if not qty:
-                    continue
-                side = "SELL" if qty > 0 else "BUY"
-                row = {"account": p.account, "symbol": p.contract.localSymbol or p.contract.symbol, "secType": p.contract.secType,
-                       "conId": p.contract.conId, "position": qty, "action": side, "qty": abs(qty)}
+            # 2. Cancel every working order.
+            try:
+                await asyncio.wait_for(ib.reqAllOpenOrdersAsync(), 8)
+                working = [t for t in ib.openTrades() if t.orderStatus.status not in ("Filled", "Cancelled", "ApiCancelled", "Inactive")]
+                inc["cancelled"] = [{"orderId": t.order.orderId, "permId": t.order.permId, "symbol": t.contract.symbol,
+                                     "action": t.order.action, "qty": t.order.totalQuantity, "type": t.order.orderType} for t in working]
                 if not dry_run:
-                    if market_order is None:
-                        from ib_async import MarketOrder
+                    ib.reqGlobalCancel()
+                step("global_cancel", True, f"{'would cancel' if dry_run else 'reqGlobalCancel sent for'} {len(working)} working order(s)")
+            except Exception as e:  # noqa: BLE001
+                step("global_cancel", False, f"{type(e).__name__}: {e}")
+                inc["errors"].append(f"global_cancel: {e}")
 
-                        order = MarketOrder(side, abs(qty))
-                    else:
-                        order = market_order(side, abs(qty))
-                    order.orderRef = f"KILL-{incident_id}"
-                    order.tif = "DAY"
-                    trade = ib.placeOrder(_flatten_contract(p.contract), order)
-                    trades.append((row, trade))
-                    row["orderId"] = trade.order.orderId
-                inc["flatten"].append(row)
-            if trades and fill_wait_s > 0:
-                deadline = time.monotonic() + fill_wait_s
-                while time.monotonic() < deadline and any(not t.isDone() for _, t in trades):
-                    await asyncio.sleep(0.25)
-                for row, t in trades:
-                    row["status"] = t.orderStatus.status
-                    row["filled"] = t.orderStatus.filled
-                    row["errors"] = [e.message for e in t.log if getattr(e, "errorCode", 0)]
-            step("flatten", True, f"{'would flatten' if dry_run else 'market orders sent for'} {len(inc['flatten'])} position(s)")
-        except Exception as e:  # noqa: BLE001
-            step("flatten", False, f"{type(e).__name__}: {e}")
-            inc["errors"].append(f"flatten: {e}")
-        try:
-            ib.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
+            # 3. Flatten every position with a market order.
+            try:
+                positions = await asyncio.wait_for(ib.reqPositionsAsync(), 8)
+                # Buy back short option legs before selling longs: a vertical is never left as a naked short.
+                positions = sorted(positions, key=lambda p: (getattr(p.contract, "secType", "") != "OPT" or float(p.position) > 0))
+                trades = []
+                for p in positions:
+                    qty = float(p.position)
+                    if not qty:
+                        continue
+                    side = "SELL" if qty > 0 else "BUY"
+                    row = {"account": p.account, "symbol": p.contract.localSymbol or p.contract.symbol, "secType": p.contract.secType,
+                           "conId": p.contract.conId, "position": qty, "action": side, "qty": abs(qty)}
+                    if not dry_run:
+                        if market_order is None:
+                            from ib_async import MarketOrder
 
-    # 4. Agent loop severance is applied by the caller (desk.halt_agent); recorded here.
-    step("sever_agent", True, "dry run: agent would be halted and mode set to ADVISORY" if dry_run else "agent halted, mode ADVISORY")
+                            order = MarketOrder(side, abs(qty))
+                        else:
+                            order = market_order(side, abs(qty))
+                        order.orderRef = f"KILL-{incident_id}"
+                        order.tif = "DAY"
+                        trade = ib.placeOrder(_flatten_contract(p.contract), order)
+                        trades.append((row, trade))
+                        row["orderId"] = trade.order.orderId
+                    inc["flatten"].append(row)
+                if trades and fill_wait_s > 0:
+                    deadline = time.monotonic() + fill_wait_s
+                    while time.monotonic() < deadline and any(not t.isDone() for _, t in trades):
+                        await asyncio.sleep(0.25)
+                    for row, t in trades:
+                        row["status"] = t.orderStatus.status
+                        row["filled"] = t.orderStatus.filled
+                        row["errors"] = [e.message for e in t.log if getattr(e, "errorCode", 0)]
+                step("flatten", True, f"{'would flatten' if dry_run else 'market orders sent for'} {len(inc['flatten'])} position(s)")
+            except Exception as e:  # noqa: BLE001
+                step("flatten", False, f"{type(e).__name__}: {e}")
+                inc["errors"].append(f"flatten: {e}")
+        finally:
+            try:
+                ib.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # 4. Agent loop severance is applied by the caller (the desk, through `sever`); recorded here.
+    if dry_run:
+        step("sever_agent", True, "dry run: agent would be halted and mode set to ADVISORY")
+    else:
+        sever_err = None
+        if sever is not None:
+            try:
+                sever_err = sever()
+            except Exception as e:  # noqa: BLE001
+                sever_err = f"{type(e).__name__}: {e}"
+        step("sever_agent", sever_err is None, sever_err or "agent halted, mode ADVISORY")
+        if sever_err:
+            inc["errors"].append(f"sever_agent: {sever_err}")
 
     # 5. Incident snapshot + audit.
     ok_chain, chain_note = audit.verify_chain()
@@ -318,7 +336,9 @@ async def execute_kill(
 
 
 def ib_connector(client_id: int | None = None) -> Callable[[bool], Awaitable[Any]]:
-    """Connect with the kill client id through the same paper-only endpoint gate."""
+    """Connect through the same paper-only endpoint gate: a live kill as the kill client id, a read-only dry run as
+    kill_dry. TWS refuses a duplicate client id (326), so a dry run (healthcheck, UI rehearsal) on the kill id would
+    make a live E-stop pressed meanwhile fail to connect."""
 
     async def connect(readonly: bool) -> Any:
         from ib_async import IB
@@ -328,7 +348,8 @@ def ib_connector(client_id: int | None = None) -> Callable[[bool], Awaitable[Any
         if ep.locked or ep.port is None:
             raise ConnectionError("endpoint LOCKED: " + "; ".join(ep.reasons))
         ib = IB()
-        await ib.connectAsync(ep.host, ep.port, clientId=client_id or cfg.client_ids["kill"], readonly=readonly, timeout=10)
+        cid = client_id or cfg.client_ids["kill_dry" if readonly else "kill"]
+        await ib.connectAsync(ep.host, ep.port, clientId=cid, readonly=readonly, timeout=10)
         return ib
 
     return connect

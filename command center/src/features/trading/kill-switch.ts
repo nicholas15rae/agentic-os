@@ -4,19 +4,26 @@ import { useToasts } from "@/features/reminders/notify";
 import { tradingApi, type KillIncident } from "@/features/trading/ibkr";
 import { installKillHotkey } from "@/features/trading/kill-switch-core";
 
-export { classifyKillKey, createKillArm, createKillKeyListener, guardKillButtonKeydown, installKillHotkey, isKillHotkey, isRepeatActivation, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, KILL_STAGES, killButtonProps, killStageLabel, summarizeIncident } from "@/features/trading/kill-switch-core";
+export { classifyKillKey, createKillArm, createKillKeyListener, guardKillButtonKeydown, installKillHotkey, isKillHotkey, isRepeatActivation, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, KILL_STAGES, killButtonProps, killStageLabel, killToastTitle, summarizeIncident } from "@/features/trading/kill-switch-core";
 
-/** One live kill in flight, whichever E-stop started it (red button or hotkey). The button reads it (disabled with a
- *  spinner meanwhile), so a dry run finishing, or the other E-stop, can't re-enable it mid-kill. */
-export const useKillInFlight = create<{ on: boolean }>(() => ({ on: false }));
+/** Live kills in flight, whichever E-stop started them (red button or hotkey). The button reads `on` (disabled with a
+ *  spinner meanwhile), so a dry run finishing, or the other E-stop, can't re-enable it mid-kill. A count, not a flag:
+ *  with the button and the hotkey both pressed, the first call to settle must not clear the other's. */
+export const useKillInFlight = create<{ n: number; on: boolean }>(() => ({ n: 0, on: false }));
+
+const inFlight = (d: 1 | -1) =>
+  useKillInFlight.setState((s) => {
+    const n = Math.max(0, s.n + d);
+    return { n, on: n > 0 };
+  });
 
 export async function tripKillSwitch(reason: string, dryRun = false): Promise<KillIncident & { note?: string }> {
   if (dryRun) return tradingApi.kill(reason, true);
-  useKillInFlight.setState({ on: true });
+  inFlight(1);
   try {
     return await tradingApi.kill(reason, false);
   } finally {
-    useKillInFlight.setState({ on: false });
+    inFlight(-1);
   }
 }
 

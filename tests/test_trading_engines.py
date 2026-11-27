@@ -532,7 +532,8 @@ class LockPolicyTests(unittest.TestCase):
     """Which locks let the options guard keep sending risk-reducing exits (kill_switch.allows_risk_reducing)."""
 
     def setUp(self):
-        self.td = tempfile.TemporaryDirectory()
+        # A killed lock-holder process can keep its .lock file open for a moment after wait() returns (Windows).
+        self.td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         root = Path(self.td.name)
         self.d = root / "trading"  # the security dir is its sibling, as data/trading and data/security
         self.d.mkdir()
@@ -663,6 +664,41 @@ class LockPolicyTests(unittest.TestCase):
         self.assertEqual((inc["steps"][0]["step"], inc["steps"][0]["ok"]), ("lock", False))
         self.assertEqual(connected, [False])                                          # it still went on to cancel / flatten
         self.assertIn("lock: replace denied", inc["errors"])
+
+    def test_a_cancelled_kill_still_disconnects(self):
+        """CancelledError is a BaseException: without the finally, the kill's client id stays bound at TWS (326)."""
+        import kill_switch as ks
+        from audit import AuditLog
+        from test_trading_desk import FakeKillIB
+
+        class Cancelled(FakeKillIB):
+            async def reqAllOpenOrdersAsync(self):
+                raise asyncio.CancelledError()
+        ib = Cancelled()
+
+        async def connect(_readonly):  # a fake: no network
+            return ib
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(ks.execute_kill(reason="t", actor="t", dry_run=True, connect=connect, audit=AuditLog(self.d / "a.db"), d=self.d))
+        self.assertIn("disconnect", ib.calls)
+
+    def test_dry_run_connects_as_kill_dry_never_the_kill_id(self):
+        """TWS refuses a duplicate client id (326): a rehearsal on 19 would make a live E-stop pressed meanwhile fail."""
+        import kill_switch as ks
+        from config import load_config, resolve_endpoint
+
+        seen = []
+
+        class FakeIB:  # no network: records what the connector asked for
+            async def connectAsync(self, host, port, clientId, readonly, timeout):
+                seen.append((host, port, clientId, readonly))
+        cfg = load_config(env={}, dotenv=self.d / "absent.env")
+        self.assertFalse(resolve_endpoint(cfg).locked)                              # 26 is distinct from every other id
+        with mock.patch.dict(sys.modules, {"ib_async": NS(IB=FakeIB)}), mock.patch.object(ks, "load_config", return_value=cfg):
+            asyncio.run(ks.ib_connector()(True))
+            asyncio.run(ks.ib_connector()(False))
+        self.assertEqual(seen, [("127.0.0.1", 7497, 26, True), ("127.0.0.1", 7497, 19, False)])
+        self.assertEqual(load_config(env={"IBKR_CLIENT_ID_KILL_DRY": "27"}, dotenv=self.d / "absent.env").client_ids["kill_dry"], 27)
 
     def test_matrix(self):
         import desk_lock
@@ -810,6 +846,19 @@ class RiskReducingExecutorTests(unittest.TestCase):
             e._guard(risk_reducing=True)
         e._guard()                                                                  # entries: only the lock file decides
         self.assertEqual(placed, [])
+
+    def test_exit_fills_reads_this_clients_executions_for_the_ref_and_leg(self):
+        e, _, _ = self.executor()
+
+        def fill(exec_id, ref, con, shares):
+            return NS(execution=NS(execId=exec_id, orderRef=ref, shares=shares), contract=NS(conId=con))
+
+        async def executions():
+            return [fill("0001.01.01", "GUARD-STOP-x", 1, 2.0), fill("0001.01.02", "GUARD-STOP-x", 1, 1.0),  # a correction replaces
+                    fill("0002.01.01", "GUARD-STOP-x", 1, 2.0), fill("0003.01.01", "GUARD-STOP-x", 2, 5.0),  # another leg
+                    fill("0004.01.01", "GUARD-STOP-y", 1, 7.0)]                                           # another ref
+        e.ib.reqExecutionsAsync = executions
+        self.assertEqual(asyncio.run(e.exit_fills("GUARD-STOP-x", 1)), {"0001.01": 1.0, "0002.01": 2.0})
 
     def test_working_qty_counts_an_order_without_a_status_yet_in_full(self):
         e, _, _ = self.executor(open_trades=[(5, "GUARD-STOP-x", 2.0, 0.0, 0.0), (6, "GUARD-STOP-x", 3.0, 1.0, 2.0), (7, "GUARD-STOP-y", 4.0, 0.0, 4.0)])
@@ -1067,8 +1116,12 @@ class DeskEngineTests(unittest.TestCase):
 
         async def quote(intent):  # same market as FakeMD
             return {"bid": 729.9, "ask": 730.1, "last": 730.0}, True
+
+        async def no_tws(_readonly):  # never a real TWS in tests: any kill that isn't given its own fake fails here
+            raise ConnectionError("no TWS in tests")
         return Desk(bridge or big_bridge(), executor=self.ex, quote_fn=quote, stats_fn=good_stats, fx_source=False,
                     option_quote_fn=option_quote, market_data=md or FakeMD(), d=self.d, clock=lambda: NOW,
+                    kill_connect=no_tws,
                     pretrade=False)  # engine flow only; the pre-trade gates are tested in test_trading_desk_pretrade.py
 
     def test_engine_a_scan_submits_through_the_gate(self):
@@ -1108,6 +1161,86 @@ class DeskEngineTests(unittest.TestCase):
         self.assertEqual([(c[1], c[4]) for c in closes], [(2, "BUY"), (1, "SELL")])
         self.assertEqual(self.ex.calls[0][0], "cancel")  # resting exits cancelled first
         self.assertEqual(len(rep["flatten"]), 2)
+
+    VERT = [{"conId": 1, "symbol": "SPY 730C", "underlying": "SPY", "secType": "OPT", "position": 2, "expiry": exp(1), "currency": "USD"},
+            {"conId": 2, "symbol": "SPY 740C", "underlying": "SPY", "secType": "OPT", "position": -2, "expiry": exp(1), "currency": "USD"}]
+    MANUAL_BUY = {"orderId": 812, "orderRef": "", "clientId": 7, "conId": 2, "action": "BUY", "quantity": 2.0, "remaining": 2.0,
+                  "filled": 0.0, "orderType": "LMT", "limitPrice": 0.05, "status": "Submitted"}
+
+    def _flatten(self, dk):
+        return asyncio.run(dk.options_guard(contract_factory=lambda **kw: NS(**kw)))
+
+    def _closes(self):
+        return [(c[1], c[2], c[4]) for c in self.ex.calls if c[0] == "close"]
+
+    def test_guard_keeps_the_long_when_only_a_foreign_resting_order_covers_the_short(self):
+        """Another client's resting BUY on the short leg is netted (the guard doesn't buy the line twice), but it may
+        never fill: selling the long, the vertical's cover, would leave a naked short. The order is named, audited once."""
+        dk = self.desk(bridge=big_bridge(positions=self.VERT, openOrders=[self.MANUAL_BUY]))
+        rep = self._flatten(dk)
+        self.assertEqual(self._closes(), [])
+        long_err = next(e for e in rep["errors"] if e.startswith("flatten SPY 730C"))
+        self.assertIn("not sold", long_err)
+        self.assertIn("BUY 2 LMT @0.05 (client 7, ref -, #812)", long_err)
+        short_err = next(e for e in rep["errors"] if e.startswith("flatten SPY 740C"))
+        self.assertIn("Cancel or replace it in TWS", short_err)                     # the operator is told what to do
+        why = next(w for w in rep["waiting"] if w["key"] == "exp:2")["why"]
+        self.assertIn("#812", why)
+        self._flatten(dk)
+        rows = dk.audit.tail(10, kinds=("options_expiry_flatten",))
+        self.assertEqual([r["verdict"] for r in rows], ["BLOCKED"])                 # once, not every pass
+
+    def test_guard_buys_the_rest_of_a_partly_foreign_covered_short_and_keeps_the_long(self):
+        dk = self.desk(bridge=big_bridge(positions=self.VERT, openOrders=[{**self.MANUAL_BUY, "quantity": 1.0, "remaining": 1.0}]))
+        rep = self._flatten(dk)
+        self.assertEqual(self._closes(), [(2, 1, "BUY")])                           # buying more back only reduces risk
+        self.assertTrue(any(e.startswith("flatten SPY 730C: not sold") for e in rep["errors"]), rep["errors"])
+
+    def test_guard_keeps_the_long_over_a_short_line_order_of_unknown_side(self):
+        for row in ({"orderId": 9, "clientId": 7, "conId": 2}, {"orderId": 9, "clientId": 19, "conId": 2, "orderRef": "KILL-x"}):
+            with self.subTest(ref=row.get("orderRef")):
+                self.ex.calls.clear()
+                dk = self.desk(bridge=big_bridge(positions=self.VERT, openOrders=[row]))
+                rep = self._flatten(dk)
+                self.assertEqual(self._closes(), [])                                # the short line fails closed, known ref or not
+                self.assertTrue(any("#9" in e and e.startswith("flatten SPY 730C: not sold") for e in rep["errors"]), rep["errors"])
+
+    def test_guard_counts_a_kill_or_overseer_flatten_as_cover(self):
+        for ref, cid in (("KILL-20261127-abc", 19), ("MSL-SPY-1", 21), ("GUARD-EXP-2", 13)):
+            with self.subTest(ref=ref):
+                self.ex.calls.clear()
+                row = {**self.MANUAL_BUY, "orderRef": ref, "clientId": cid, "orderType": "MKT", "limitPrice": None}
+                dk = self.desk(bridge=big_bridge(positions=self.VERT, openOrders=[row]))
+                rep = self._flatten(dk)
+                self.assertEqual(self._closes(), [(1, 2, "SELL")])                  # the short is being bought back now
+                self.assertEqual(rep["errors"], [])
+
+    def test_guard_reports_a_long_left_to_a_foreign_resting_sell(self):
+        """A manual GTC take-profit (client 0) on a due long is netted, so the guard doesn't sell it twice, but it may
+        never fill: the line would be held into exercise. That must be reported, naming the order."""
+        tp = {"orderId": 31, "permId": 5551, "orderRef": "", "clientId": 0, "conId": 1, "action": "SELL", "quantity": 2.0,
+              "remaining": 2.0, "filled": 0.0, "orderType": "LMT", "limitPrice": 9.0, "tif": "GTC"}
+        dk = self.desk(bridge=big_bridge(positions=self.VERT[:1], openOrders=[tp]))
+        rep = self._flatten(dk)
+        self.assertEqual(self._closes(), [])
+        self.assertEqual(len(rep["errors"]), 1)
+        self.assertIn("SELL 2 LMT @9.0 GTC (client 0, ref -, #31 perm 5551)", rep["errors"][0])
+        self.assertIn("held into expiry", rep["errors"][0])
+        self.assertEqual([r["verdict"] for r in dk.audit.tail(5, kinds=("options_expiry_flatten",))], ["BLOCKED"])
+
+    def test_guard_flatten_ignores_a_foreign_sell_on_the_short_line(self):
+        dk = self.desk(bridge=big_bridge(positions=self.VERT, openOrders=[{**self.MANUAL_BUY, "action": "SELL"}]))
+        self._flatten(dk)
+        self.assertEqual(self._closes(), [(2, 2, "BUY"), (1, 2, "SELL")])          # a SELL doesn't buy the short back
+
+    def test_guard_flatten_does_not_net_the_desks_own_take_profit(self):
+        """cancel_working takes the desk's resting take-profit out before the exit: netting it too would sell nothing."""
+        dk = self.desk()
+        tp = {"orderId": 5, "orderRef": "opt-000001", "clientId": dk._exec_client, "conId": 1, "action": "SELL",
+              "quantity": 2.0, "remaining": 2.0, "filled": 0.0}
+        dk.bridge = big_bridge(positions=self.VERT[:1], openOrders=[tp])
+        self._flatten(dk)
+        self.assertEqual(self._closes(), [(1, 2, "SELL")])
 
     def test_guard_premium_stop(self):
         async def fixed(intent):
@@ -1265,7 +1398,7 @@ class DeskEngineTests(unittest.TestCase):
         with mock.patch.object(kill_switch, "allows_risk_reducing", return_value=True):  # as if the stamp had failed
             self.assertIn("skipped", asyncio.run(dk.options_guard()))
         self.assertFalse([c for c in self.ex.calls if c[0] == "close"])
-        dk.bridge = big_bridge(positions=self.HELD, openOrdersAt=NOW)                # the flatten is visibly done
+        dk.bridge = big_bridge(positions=self.HELD, openOrdersAt=NOW + 1)            # the flatten is visibly done
         dk.reset("RESET", "ui")
         self.assertFalse(dk._killed or self.ex.stand_down)
 
@@ -1351,7 +1484,7 @@ class DeskEngineTests(unittest.TestCase):
         self.ex.working["GUARD-STOP-opt-000001"] = 1.0
         rep = asyncio.run(dk.options_guard())
         self.assertFalse([c for c in self.ex.calls if c[0] == "close"])
-        self.assertIn("already done or working at TWS (filled 0, working 1)", rep["waiting"][0]["why"])
+        self.assertIn("already done or working at TWS (filled 0, working 1, other exits 0)", rep["waiting"][0]["why"])
 
     KILL_ROW = {"orderRef": "KILL-20261127-abc", "conId": 1, "action": "SELL", "quantity": 2.0, "remaining": 2.0, "filled": 0.0,
                 "status": "PreSubmitted", "clientId": 19}
@@ -1426,12 +1559,160 @@ class DeskEngineTests(unittest.TestCase):
         self.assertTrue(any("halt state" in e for e in inc["errors"]))
         self.assertEqual(dk.audit.tail(5, kinds=("kill_preamble_failed",))[0]["verdict"], "ERROR")
 
-    def test_a_second_live_kill_while_one_runs_sends_nothing(self):
+    def _two_presses(self, dk, fail_first, ib=None):
+        """Two live kills, the second pressed while the first is still connecting. The connection is a fake (no
+        network); it records how many kills were connecting at once."""
+        from test_trading_desk import FakeKillIB
+
+        ib, connects, live = ib or FakeKillIB(), [], [0, 0]  # [connecting now, most at once]
+
+        async def connect(readonly):
+            connects.append(readonly)
+            live[0] += 1
+            live[1] = max(live)
+            await asyncio.sleep(0.05)
+            live[0] -= 1
+            if fail_first and len(connects) == 1:
+                raise ConnectionError("client id 19 already in use (326)")
+            return ib
+        dk._kill_connect = connect
+
+        async def run():
+            first = asyncio.create_task(dk.kill("E-stop", "ui"))
+            await asyncio.sleep(0)
+            self.assertTrue(dk._kill_running)                                       # the second press lands mid-kill
+            second = await dk.kill("E-stop again", "hotkey")
+            return await first, second
+        first, second = asyncio.run(run())
+        return first, second, ib, connects, live[1]
+
+    def test_a_second_press_during_a_kill_that_works_sends_nothing(self):
         dk = self._premium_stop_desk()
-        dk._kill_running = True
-        out = asyncio.run(dk.kill("E-stop again", "hotkey"))
-        self.assertTrue(out["alreadyRunning"])
+        first, second, ib, connects, _most = self._two_presses(dk, fail_first=False)
+        self.assertEqual(connects, [False])
+        self.assertEqual(ib.calls.count("reqGlobalCancel"), 1)
+        self.assertTrue(second["alreadyRunning"])
+        self.assertEqual(second["incidentId"], first["incidentId"])
         self.assertEqual(dk.audit.tail(5, kinds=("kill_already_running",))[0]["verdict"], "IGNORED")
+
+    def test_a_second_press_reruns_a_kill_that_never_reached_the_broker(self):
+        """The first kill couldn't connect (TWS refused client 19): the second press is the retry that works, run after
+        the first finished, never alongside it."""
+        dk = self._premium_stop_desk()
+        first, second, ib, connects, most = self._two_presses(dk, fail_first=True)
+        self.assertEqual(connects, [False, False])
+        self.assertEqual(most, 1)                                                   # one kill at a time
+        self.assertFalse(first["ok"])
+        self.assertNotIn("alreadyRunning", second)
+        self.assertEqual(ib.calls.count("reqGlobalCancel"), 1)
+        self.assertFalse(dk._kill_running)
+
+    def test_a_second_press_never_reruns_a_kill_that_connected_but_failed(self):
+        """Its KILL- market orders may still be queued: flattening again could double the exit. The press reports
+        that kill as it is, errors and all, and sends nothing."""
+        from test_trading_desk import FakeKillIB
+
+        class FlattenFails(FakeKillIB):
+            async def reqPositionsAsync(self):
+                raise TimeoutError("positions timed out")
+        dk = self._premium_stop_desk()
+        first, second, ib, connects, _most = self._two_presses(dk, fail_first=False, ib=FlattenFails())
+        self.assertEqual(connects, [False])
+        self.assertFalse(first["ok"])
+        self.assertTrue(second["alreadyRunning"])
+        self.assertFalse(second["ok"])                                              # the real incident, never a synthetic ok
+        self.assertIn("finished with errors", second["note"])
+        self.assertEqual(ib.calls.count("reqGlobalCancel"), 1)
+
+    def test_a_kill_that_raises_leaves_no_old_incident_behind(self):
+        """A second press must not answer with an earlier day's kill when the running one blew up."""
+        import kill_switch
+
+        dk = self._premium_stop_desk()
+        dk._last_kill = {"incidentId": "old", "ok": True, "steps": [{"step": "connect", "ok": True}]}
+        with mock.patch.object(kill_switch, "execute_kill", side_effect=RuntimeError("bug")):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(dk.kill("E-stop", "ui"))
+        self.assertIsNone(dk._last_kill)
+        self.assertFalse(dk._kill_running)
+
+    def _sever(self, inc):
+        return next(st for st in inc["steps"] if st["step"] == "sever_agent")
+
+    def test_a_halt_write_that_keeps_failing_fails_the_sever_step(self):
+        import desk_lock
+
+        dk = self._premium_stop_desk()
+        with mock.patch.object(dk, "_save_state", side_effect=PermissionError("state.json in use")), \
+                mock.patch.object(desk_lock, "halt_autonomy", side_effect=PermissionError("still in use")):
+            inc = asyncio.run(dk.kill("E-stop", "ui"))
+        self.assertFalse(self._sever(inc)["ok"])
+        self.assertIn("agent NOT halted", self._sever(inc)["detail"])
+        self.assertTrue(any(e.startswith("sever_agent: agent NOT halted") for e in inc["errors"]))
+        self.assertFalse(inc["ok"])
+
+    def test_a_halt_write_that_failed_once_is_retried_by_the_sever_step(self):
+        dk = self._premium_stop_desk()
+        real, calls = dk._save_state, []
+
+        def flaky(**kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                raise PermissionError("state.json in use")
+            return real(**kw)
+        with mock.patch.object(dk, "_save_state", side_effect=flaky):
+            inc = asyncio.run(dk.kill("E-stop", "ui"))
+        self.assertTrue(self._sever(inc)["ok"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((dk.state()["mode"], dk.state()["agentHalted"]), ("ADVISORY", True))
+
+    def test_the_sever_step_falls_back_to_desk_locks_halt(self):
+        dk = self._premium_stop_desk()
+        with mock.patch.object(dk, "_save_state", side_effect=PermissionError("state.json in use")):
+            inc = asyncio.run(dk.kill("E-stop", "ui"))
+        self.assertTrue(self._sever(inc)["ok"])
+        self.assertEqual((dk.state()["mode"], dk.state()["agentHalted"]), ("ADVISORY", True))
+
+    def test_reset_always_leaves_the_desk_advisory(self):
+        """If a kill's halt write failed, state.json can still say FULL_AUTO: a reset must never resume entries."""
+        import kill_switch
+
+        dk = self._premium_stop_desk()
+        self.assertEqual(dk.state()["mode"], "FULL_AUTO")
+        kill_switch.write_lock("E-stop", "ui", "inc", self.d)
+        dk.reset("RESET", "ui")
+        self.assertEqual((dk.state()["mode"], dk.state()["agentHalted"]), ("ADVISORY", False))
+
+    def test_reset_refuses_while_a_kill_runs(self):
+        import kill_switch
+
+        dk = self._premium_stop_desk()
+        kill_switch.write_lock("E-stop", "ui", "inc", self.d)
+        dk._kill_running = True
+        with self.assertRaises(PermissionError):
+            dk.reset("RESET", "ui")
+        self.assertTrue(kill_switch.is_locked(self.d))
+        dk._kill_running = False
+
+    def test_an_open_order_list_from_before_the_kill_finished_proves_nothing(self):
+        dk = self._premium_stop_desk()
+        dk._killed, dk._kill_done_at = True, NOW
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[], openOrdersAt=NOW)
+        self.assertIsNone(dk._kill_orders_working())
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[], openOrdersAt=NOW + 1)
+        self.assertIs(dk._kill_orders_working(), False)
+
+    def test_stand_down_holds_for_the_settle_even_when_nothing_is_working(self):
+        import desk as desk_mod
+
+        dk = self._premium_stop_desk()
+        dk._killed, dk._kill_done_at = True, NOW
+        dk.clock = lambda: NOW + desk_mod.KILL_SETTLE_S - 1
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[], openOrdersAt=NOW + desk_mod.KILL_SETTLE_S - 2)
+        self.assertTrue(dk._stood_down())
+        dk.clock = lambda: NOW + desk_mod.KILL_SETTLE_S + 1
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[], openOrdersAt=NOW + desk_mod.KILL_SETTLE_S)
+        self.assertFalse(dk._stood_down())
 
     def test_premium_stop_nets_out_other_closing_orders_on_the_leg(self):
         """The kill's (or the overseer's) SELL on the long leg is already closing it: the stop mustn't add another."""
@@ -1440,6 +1721,58 @@ class DeskEngineTests(unittest.TestCase):
         rep = asyncio.run(dk.options_guard())
         self.assertFalse([c for c in self.ex.calls if c[0] == "close"])
         self.assertIn("other exits 2", rep["waiting"][0]["why"])
+        self.assertNotIn("may never fill", rep["waiting"][0]["why"])                # the kill's flatten closes now
+        self.assertEqual(rep["errors"], [])
+
+    def test_premium_stop_names_a_foreign_order_it_nets(self):
+        dk = self._premium_stop_desk()
+        manual = {"orderId": 640, "orderRef": "", "clientId": 7, "conId": 1, "action": "SELL", "quantity": 2.0, "remaining": 2.0,
+                  "filled": 0.0, "orderType": "LMT", "limitPrice": 9.5, "status": "Submitted"}
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[manual])
+        rep = asyncio.run(dk.options_guard())
+        self.assertFalse([c for c in self.ex.calls if c[0] == "close"])            # selling on top could oversell
+        self.assertIn("may never fill: SELL 2 LMT @9.5 (client 7, ref -, #640)", rep["waiting"][0]["why"])
+        self.assertEqual(len(rep["errors"]), 1)
+        self.assertIn("triggered", rep["errors"][0])
+        self.assertIn("Cancel or replace it in TWS", rep["errors"][0])
+
+    def test_premium_stop_netting_ignores_its_own_take_profit_and_buys(self):
+        dk = self._premium_stop_desk()
+        tp = {"orderId": 5, "orderRef": "opt-000001", "clientId": dk._exec_client, "conId": 1, "action": "SELL",
+              "quantity": 2.0, "remaining": 2.0, "filled": 0.0}
+        buy = {"orderId": 6, "orderRef": "", "clientId": 7, "conId": 1, "action": "BUY", "quantity": 2.0, "remaining": 2.0, "filled": 0.0}
+        dk.bridge = big_bridge(positions=self.HELD, openOrders=[tp, buy])
+        rep = asyncio.run(dk.options_guard())
+        self.assertEqual(len(rep["stops"]), 1, rep)                                 # neither shrinks what the stop sells
+
+    def test_premium_stop_reads_working_size_before_fills(self):
+        """A fill landing between the two reads is then counted twice (sells too little), never missed (too much)."""
+        dk = self._premium_stop_desk()
+        order, real_w, real_f = [], self.ex.working_qty, self.ex.exit_fills
+
+        async def working(ref):
+            order.append("working")
+            return await real_w(ref)
+
+        async def fills(ref, con):
+            order.append("fills")
+            return await real_f(ref, con)
+        self.ex.working_qty, self.ex.exit_fills = working, fills
+        asyncio.run(dk.options_guard())
+        self.assertEqual(order, ["working", "fills"])
+
+    def test_premium_stop_records_todays_exit_fills_even_above_the_stop(self):
+        """The bridge only lists today's fills: they're kept on the intent row on every pass, not only once triggered."""
+        dk = self._premium_stop_desk()
+
+        async def fine(intent):
+            return {"bid": 3.9, "ask": 4.1}, []
+        dk._option_quote = fine
+        dk.bridge = big_bridge(positions=self.HELD, fills=[{"execId": "0001.01.01", "orderRef": "GUARD-STOP-opt-000001", "conId": 1,
+                                                            "shares": 1.0}])
+        rep = asyncio.run(dk.options_guard())
+        self.assertEqual(rep["stops"], [])
+        self.assertEqual(dk._row("opt-000001")["result"]["exitFills"], {"0001.01": 1.0})
 
     def test_premium_stop_reads_the_executors_own_fills(self):
         """The bridge (client 11) only sees the executor's fills as TWS's master client: the executor's reqExecutions

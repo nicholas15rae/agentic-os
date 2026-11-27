@@ -246,7 +246,8 @@ export interface KillIncident {
   flatten: { symbol: string; action: string; qty: number; status?: string }[];
   errors: string[];
   failsafe?: boolean;
-  /** Desk.kill: a live kill was already running, so this one sent nothing (never flatten twice at once). */
+  /** Desk.kill: a live kill was already running, so this press sent nothing (never flatten twice at once); the rest is
+   *  that kill's incident, its `ok` included. */
   alreadyRunning?: boolean;
 }
 

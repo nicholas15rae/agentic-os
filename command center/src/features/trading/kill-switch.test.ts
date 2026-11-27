@@ -9,6 +9,7 @@ import {
   isRepeatActivation,
   KILL_PRESSES,
   killButtonProps,
+  killToastTitle,
   summarizeIncident,
   type KillToast,
 } from "./kill-switch-core";
@@ -43,6 +44,13 @@ describe("kill-switch hotkey listener (what useKillSwitchHotkey registers)", () 
     [0, 400, 800].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
     expect(h.trip).toHaveBeenCalledTimes(1);
     expect(h.trip).toHaveBeenCalledWith("keyboard Ctrl+Shift+X x3 (confirmed)");
+  });
+  it("a press while a kill runs is toasted as that kill, not as a new lock", async () => {
+    const h = hotkey();
+    h.trip.mockResolvedValueOnce({ incidentId: "i", ok: false, dryRun: false, cancelled: [], flatten: [], errors: ["flatten: x"], steps: [], alreadyRunning: true } as never);
+    [0, 400, 800].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.toasts.at(-1)?.title).toBe("Kill switch already ran, with errors");
   });
   it("Esc disarms; other keys pass through untouched", () => {
     const h = hotkey();
@@ -194,6 +202,21 @@ describe("summarizeIncident", () => {
     expect(s).toContain("connect: refused");
     expect(summarizeIncident({ ...base, dryRun: false, steps: [], failsafe: true, note: "lock written by the gateway" })).toBe("lock written by the gateway");
   });
+  it("titles a live kill's toast by what happened", () => {
+    const inc = { ...base, dryRun: false, steps: [] };
+    expect(killToastTitle(inc)).toBe("Trading LOCKED");
+    expect(killToastTitle({ ...inc, ok: false })).toBe("Kill switch: locked with errors");
+    expect(killToastTitle({ ...inc, ok: false, failsafe: true })).toBe("Trading LOCKED");
+    expect(killToastTitle({ ...inc, alreadyRunning: true })).toBe("Kill switch already running");
+    expect(killToastTitle({ ...inc, ok: false, alreadyRunning: true })).toBe("Kill switch already ran, with errors");
+  });
+  it("a second press during a kill reports the running one, not a new one", () => {
+    const r = { ...base, dryRun: false, steps: [], alreadyRunning: true };
+    expect(summarizeIncident({ ...r, note: "A kill was already running and has cancelled and flattened: nothing more was sent." })).toBe(
+      "A kill was already running and has cancelled and flattened: nothing more was sent.",
+    );
+    expect(summarizeIncident(r)).toBe("A kill is already running: nothing more was sent.");
+  });
 });
 
 describe("tripKillSwitch sets the live-kill in-flight flag", () => {
@@ -212,6 +235,33 @@ describe("tripKillSwitch sets the live-kill in-flight flag", () => {
     expect(ks.useKillInFlight.getState().on).toBe(false);
     release();
     await dry;
+    vi.doUnmock("@/features/trading/ibkr");
+    vi.doUnmock("@/features/reminders/notify");
+  });
+  it("clears when a live kill call fails (timeout, gateway down)", async () => {
+    vi.resetModules();
+    vi.doMock("@/features/trading/ibkr", () => ({ tradingApi: { kill: vi.fn(async () => Promise.reject(new Error("timed out"))) } }));
+    vi.doMock("@/features/reminders/notify", () => ({ useToasts: () => () => undefined }));
+    const ks = await import("./kill-switch");
+    await expect(ks.tripKillSwitch("t", false)).rejects.toThrow("timed out");
+    expect(ks.useKillInFlight.getState()).toEqual({ n: 0, on: false });
+    vi.doUnmock("@/features/trading/ibkr");
+    vi.doUnmock("@/features/reminders/notify");
+  });
+  it("stays on until the last of two overlapping live kills settles (button + hotkey)", async () => {
+    vi.resetModules();
+    const releases: (() => void)[] = [];
+    vi.doMock("@/features/trading/ibkr", () => ({ tradingApi: { kill: vi.fn(() => new Promise((r) => releases.push(() => r({ ok: true })))) } }));
+    vi.doMock("@/features/reminders/notify", () => ({ useToasts: () => () => undefined }));
+    const ks = await import("./kill-switch");
+    const a = ks.tripKillSwitch("button", false);
+    const b = ks.tripKillSwitch("hotkey", false);
+    releases[0]();
+    await a;
+    expect(ks.useKillInFlight.getState().on).toBe(true); // the hotkey's kill is still in flight
+    releases[1]();
+    await b;
+    expect(ks.useKillInFlight.getState()).toEqual({ n: 0, on: false });
     vi.doUnmock("@/features/trading/ibkr");
     vi.doUnmock("@/features/reminders/notify");
   });

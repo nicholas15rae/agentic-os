@@ -142,9 +142,15 @@ export function createKillKeyListener(deps: {
     notify({ title: "KILL SWITCH", body: "Locking trading, cancelling orders, flattening positions…", tone: "error" });
     deps
       .trip(`keyboard ${KILL_HOTKEY_LABEL} x${KILL_PRESSES} (confirmed)`)
-      .then((res) => notify({ title: res.ok || res.failsafe ? "Trading LOCKED" : "Kill switch: locked with errors", body: summarizeIncident(res), tone: "error" }))
+      .then((res) => notify({ title: killToastTitle(res), body: summarizeIncident(res), tone: "error" }))
       .catch((err: Error) => notify({ title: "Kill switch call failed", body: `${err.message}. Use the red button or the bridge CLI.`, tone: "error" }));
   };
+}
+
+/** The toast title for a live kill's result. A second press while a kill ran reports that kill, as it went. */
+export function killToastTitle(r: KillIncident): string {
+  if (r.alreadyRunning) return r.ok ? "Kill switch already running" : "Kill switch already ran, with errors";
+  return r.ok || r.failsafe ? "Trading LOCKED" : "Kill switch: locked with errors";
 }
 
 export function summarizeIncident(r: KillIncident & { note?: string }): string {

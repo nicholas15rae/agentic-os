@@ -5,7 +5,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { approveToastTitle, failureText, tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
 import { KillButton } from "@/features/trading/KillButton";
-import { createKillArm, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, summarizeIncident, tripKillSwitch, useKillInFlight } from "@/features/trading/kill-switch";
+import { createKillArm, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killToastTitle, summarizeIncident, tripKillSwitch, useKillInFlight } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -52,7 +52,7 @@ export function TradingDesk() {
   const liveKill = async () => {
     try {
       const r = await tripKillSwitch("red button in Trading UI (confirmed)", false);
-      toast({ title: r.alreadyRunning ? "Kill switch already running" : "Trading LOCKED", body: summarizeIncident(r), tone: "error" });
+      toast({ title: killToastTitle(r), body: summarizeIncident(r), tone: "error" });
     } catch (e) {
       toast({ title: "Kill switch call failed", body: `${e instanceof Error ? e.message : String(e)}. Use Ctrl+Shift+X or the bridge CLI.`, tone: "error" });
     } finally {
@@ -125,7 +125,11 @@ export function TradingDesk() {
             }}
           >
             <Input value={resetText} onChange={(e) => setResetText(e.target.value)} placeholder='Type RESET to unlock' aria-label="Reset confirmation" className="!h-8 !w-48 !py-1 font-mono text-[12px]" />
-            <button className="pill-glass !h-8 text-[11px]" disabled={resetText !== "RESET" || !!busy}>
+            <button
+              className="pill-glass !h-8 text-[11px]"
+              disabled={resetText !== "RESET" || !!busy || killing}
+              title={killing ? "A kill is still running: unlock once it has finished" : undefined}
+            >
               Unlock
             </button>
           </form>

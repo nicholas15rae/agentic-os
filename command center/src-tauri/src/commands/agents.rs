@@ -513,7 +513,7 @@ pub(crate) fn tony_live_contract(packets: bool, mode: &super::modes::Effective, 
 
 /// The model of the first chat provider in the routing chain (the one Tony's turn tries first).
 fn tony_model(state: &DispatchState) -> Option<String> {
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().map(|p| p.model.clone())
 }
 
@@ -2114,7 +2114,7 @@ pub(crate) fn turn_uses_gpu(osc: &OsConfig, chain: Vec<super::dispatch::Provider
 /// plus its history (capped as the hot path caps it), a floor for what `run_chat` measures (it
 /// adds Tony's system prompt).
 async fn this_turn_uses_gpu(state: &DispatchState, osc: &OsConfig, role: &str, chars: usize, stream: TonyStream) -> bool {
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     let chain = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat()).cloned()).collect();
     let delegates = role != "general" && (matches!(role, "bizops" | "finance") || osc.anythingllm.workspaces.get(role).is_some_and(|s| !s.is_empty()));
     let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
@@ -3216,7 +3216,7 @@ impl SseAnswer {
 pub(crate) async fn run_chat_streamed_into(state: &DispatchState, os: &OsState, messages: Vec<ChatMessage>, max_secs: Option<u64>, sink: &AnswerSink) -> Result<super::dispatch::DispatchResult, String> {
     use super::dispatch::{stream_outcome, DispatchResult, Kind, CUT_OFF_MARK};
     use futures_util::StreamExt;
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
     // Tony's turn never auto-overflows (`shape_tony_turn`); an AnythingLLM shim never streams.

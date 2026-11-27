@@ -188,7 +188,8 @@ pub(crate) fn status_targets(cfg: &Config) -> Vec<Provider> {
 
 /// Run every check at once and render the report.
 pub(crate) async fn report(state: &DispatchState, os: &OsState) -> String {
-    let cfg = state.snapshot();
+    // Tony's model row follows the Section 26 engine switch (engine_route.rs).
+    let cfg = state.chat_snapshot();
     let osc = os.snapshot();
     let cached = os.runtime.lock().unwrap().get("droplet").cloned();
     let locals = futures_util::future::join_all(status_targets(&cfg).into_iter().map(|p| super::services::probe(state, &osc, p, LOCAL_TIMEOUT)));

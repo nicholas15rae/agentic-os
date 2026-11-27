@@ -529,6 +529,8 @@ pub fn run() {
             review_queue::review_webhook_set,
             review_queue::review_webhook_clear,
             review_queue::review_webhook_test,
+            commands::engine_route::engine_switch_get,
+            commands::engine_route::engine_switch_set,
             commands::tony_dispatch::tony_dispatch_approve,
             commands::tony_dispatch::tony_dispatch_discard,
             secrets::secret_set,

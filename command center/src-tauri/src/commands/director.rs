@@ -122,7 +122,7 @@ pub async fn director_turn(app: tauri::AppHandle, state: State<'_, DispatchState
     let mut msgs = director_messages(&req, identity.as_deref())?;
     // Same thinking rule as Tony's turns: `/no_think` on a thinking model unless Deep thinking is on.
     let model = {
-        let d = state.snapshot();
+        let d = state.chat_snapshot();
         d.policy.chain.iter().filter_map(|id| d.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().map(|p| p.model.clone())
     };
     if let Some(first) = msgs.first_mut() {

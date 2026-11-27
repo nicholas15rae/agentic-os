@@ -559,6 +559,31 @@ impl DispatchState {
         self.config.read().unwrap().clone()
     }
 
+    /// The config Tony's chat turns use: `snapshot` with the Section 26 engine switch applied
+    /// (engine_route.rs; OFF = identical to `snapshot`). Settings keep reading `snapshot`, and
+    /// providers.json is never rewritten by the switch.
+    pub(crate) fn chat_snapshot(&self) -> Config {
+        super::engine_route::effective(self.snapshot(), self.engine_route().as_ref())
+    }
+
+    /// engine.json beside providers.json (None: missing or unsafe = OFF).
+    pub(crate) fn engine_route(&self) -> Option<super::engine_route::EngineRoute> {
+        self.config_dir().and_then(|d| super::engine_route::read(&d))
+    }
+
+    /// Tony's local model provider: LM Studio, or the built-in engine while its switch is on.
+    /// OFF: exactly `provider("lmstudio")`, as before the switch existed.
+    pub(crate) fn tony_local(&self) -> Option<Provider> {
+        let on = self.engine_route().is_some_and(|r| r.tony_on());
+        let id = if on { super::engine_route::ENGINE_ID } else { super::engine_route::LMSTUDIO_ID };
+        self.chat_snapshot().providers.into_iter().find(|p| p.id == id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_path_for_tests(&self, path: PathBuf) {
+        *self.path.write().unwrap() = Some(path);
+    }
+
     /// Apply a change, validate the result, and write providers.json. All-or-nothing.
     ///
     /// When providers.json changed on disk since this process last read or wrote it, it is
@@ -1049,7 +1074,7 @@ pub(crate) async fn run_chat(
     if messages.is_empty() || messages.len() > 64 {
         return Err("1–64 messages required".into());
     }
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     let osc = os.snapshot();
     let find = |id: &str| cfg.providers.iter().find(|p| p.id == id && p.kind.is_chat()).cloned();
 
@@ -1575,7 +1600,7 @@ pub(crate) fn short(e: reqwest::Error) -> String {
 pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messages: Vec<ChatMessage>, max_secs: Option<u64>, app: &tauri::AppHandle, stream_id: &str) -> Result<DispatchResult, String> {
     use futures_util::StreamExt;
     use tauri::Emitter;
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
     // Tony's turn never auto-overflows (section 20-21 safe defaults: `shape_tony_turn`).

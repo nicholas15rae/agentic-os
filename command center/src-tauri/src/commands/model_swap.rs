@@ -18,6 +18,13 @@
 //!
 //! The base URL comes from the live providers config the way compare.rs gets it (the
 //! `lmstudio` provider's origin; chat at `<base_url>/chat/completions`).
+//!
+//! Section 26: while Tony runs on the built-in engine (engine.json `enabled && route_tony`,
+//! engine_route.rs), `Lm.engine` is set and the same calls drive the engine through the gateway's
+//! GPU baton instead: the engine counts as Tony's one loaded instance while it answers,
+//! `unload_all` also asks it to step aside (`POST /api/engine/yield`), and `restore_tony` /
+//! `verify_only_tony` bring it back (`POST /api/engine/reclaim`) and make sure LM Studio holds no
+//! second model next to it. OFF (`engine: None`), every call is exactly LM Studio's, as before.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -108,6 +115,22 @@ pub struct Lm {
     pub base: String,
     pub chat_url: String,
     pub tony: String,
+    /// Tony is on the built-in engine (Section 26). None = LM Studio only.
+    pub engine: Option<EngineCtl>,
+}
+
+/// The built-in engine and the gateway that starts and stops it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngineCtl {
+    /// `http://127.0.0.1:1238`
+    pub origin: String,
+    /// The gateway's origin (`/api/engine/yield`, `/api/engine/reclaim`).
+    pub gateway: String,
+}
+
+/// The engine as one loaded "instance" of Tony's model, for the batch's snapshot (pure).
+pub fn engine_inst(tony: &str) -> Inst {
+    Inst { key: tony.into(), id: "engine".into(), context: Some(CONTEXT), parallel: Some(PARALLEL), config: json!({ "server": "llama.cpp (built-in engine)" }) }
 }
 
 impl Lm {
@@ -116,11 +139,15 @@ impl Lm {
     pub fn from_dispatch(state: &DispatchState) -> Result<Lm, String> {
         let p = state.provider("lmstudio").ok_or("no lmstudio provider")?;
         let u = url::Url::parse(&p.base_url).map_err(|e| e.to_string())?;
+        let route = state.engine_route().filter(|r| r.tony_on());
+        let engine = route.as_ref().map(|r| EngineCtl { origin: r.origin(), gateway: state.snapshot().gateway.url.trim_end_matches('/').to_string() });
         Ok(Lm {
             http: state.http.clone(),
             base: u.origin().ascii_serialization(),
             chat_url: format!("{}/chat/completions", p.base_url.trim_end_matches('/')),
-            tony: p.model,
+            // On the engine, Tony's model is the engine's alias.
+            tony: route.map(|r| r.alias).unwrap_or(p.model),
+            engine,
         })
     }
 
@@ -129,9 +156,36 @@ impl Lm {
         r.error_for_status().map_err(short)?.json::<Value>().await.map_err(short)
     }
 
-    /// Every loaded LLM with its load config.
+    /// Every loaded LLM with its load config (LM Studio's, plus the engine while it answers).
     pub async fn snapshot_loaded(&self) -> Result<Vec<Inst>, String> {
+        let mut out = self.lm_loaded().await?;
+        if self.engine_up().await {
+            out.push(engine_inst(&self.tony));
+        }
+        Ok(out)
+    }
+
+    /// LM Studio's loaded LLMs only.
+    async fn lm_loaded(&self) -> Result<Vec<Inst>, String> {
         self.list().await.map(|l| loaded_llms(&l))
+    }
+
+    /// The engine answers `/health` (always false while Tony is on LM Studio).
+    pub async fn engine_up(&self) -> bool {
+        let Some(e) = &self.engine else { return false };
+        matches!(self.http.get(format!("{}/health", e.origin)).timeout(Duration::from_secs(3)).send().await, Ok(r) if r.status().is_success())
+    }
+
+    async fn engine_call(&self, path: &str, body: Value, secs: u64) -> Result<Value, String> {
+        let e = self.engine.as_ref().ok_or("Tony is not on the built-in engine")?;
+        let r = self.http.post(format!("{}/api/engine/{path}", e.gateway)).json(&body).timeout(Duration::from_secs(secs)).send().await.map_err(short)?;
+        let code = r.status();
+        let v = r.json::<Value>().await.unwrap_or(Value::Null);
+        if code.is_success() {
+            Ok(v)
+        } else {
+            Err(format!("engine {path}: HTTP {} {}", code.as_u16(), v["detail"].as_str().unwrap_or("")))
+        }
     }
 
     pub async fn unload(&self, instance: &str) -> Result<(), String> {
@@ -142,9 +196,16 @@ impl Lm {
     /// Unload every loaded LLM; returns what was loaded. Err: the listing failed (nothing done)
     /// or an unload failed (the rest were still tried).
     pub async fn unload_all(&self) -> Result<Vec<Inst>, String> {
-        let loaded = self.snapshot_loaded().await?;
+        let mut loaded = self.lm_loaded().await?;
         let mut err = None;
-        for i in &loaded {
+        // The engine steps aside through the gateway's baton (it remembers the model to reclaim).
+        if self.engine_up().await {
+            match self.engine_call("yield", json!({ "holder": "comfyui" }), 60).await {
+                Ok(_) => loaded.push(engine_inst(&self.tony)),
+                Err(e) => err = Some(format!("the built-in engine would not step aside: {e}")),
+            }
+        }
+        for i in loaded.iter().filter(|i| i.id != "engine") {
             if let Err(e) = self.unload(&i.id).await {
                 err.get_or_insert(format!("unload {} failed: {e}", i.id));
             }
@@ -188,6 +249,9 @@ impl Lm {
     }
 
     async fn verify_only_tony_with(&self, retry: Duration) -> Restore {
+        if self.engine.is_some() {
+            return self.verify_engine_with(retry).await;
+        }
         let t = Instant::now();
         let mut r = Restore { model: self.tony.clone(), ..Default::default() };
         let mut listed = Err(String::new());
@@ -249,6 +313,9 @@ impl Lm {
     }
 
     async fn restore_tony_with(&self, retry: Duration) -> Restore {
+        if self.engine.is_some() {
+            return self.verify_engine_with(retry).await;
+        }
         let t = Instant::now();
         let mut notes = vec![];
         // A failed unload_all (listing or an unload) means Tony may still be loaded: don't load
@@ -273,6 +340,50 @@ impl Lm {
         notes.append(&mut r.notes);
         r.notes = notes;
         r.load_ms = load_ms.or(r.load_ms);
+        r.ms = t.elapsed().as_millis() as u64;
+        r
+    }
+}
+
+impl Lm {
+    /// Tony on the built-in engine: LM Studio holds NO LLM (strays unloaded, never a load there),
+    /// and the engine answers; if it does not, ONE reclaim through the gateway (same model, warm).
+    async fn verify_engine_with(&self, retry: Duration) -> Restore {
+        let t = Instant::now();
+        let mut r = Restore { model: self.tony.clone(), context: Some(CONTEXT), parallel: Some(PARALLEL), ..Default::default() };
+        let mut listed = Err(String::new());
+        for n in 0..LIST_TRIES {
+            if n > 0 {
+                tokio::time::sleep(retry).await;
+            }
+            listed = self.lm_loaded().await;
+            if listed.is_ok() {
+                break;
+            }
+        }
+        match listed {
+            Ok(l) => {
+                for i in &l {
+                    r.notes.push(format!("unloaded {} from LM Studio (Tony is on the built-in engine)", i.id));
+                    let _ = self.unload(&i.id).await;
+                }
+            }
+            Err(e) => r.notes.push(format!("could not list LM Studio models ({e})")),
+        }
+        if !self.engine_up().await {
+            let t0 = Instant::now();
+            match self.engine_call("reclaim", json!({}), LOAD_SECS).await {
+                Ok(_) => {
+                    r.load_ms = Some(t0.elapsed().as_millis() as u64);
+                    r.notes.push("reclaimed the GPU: the built-in engine is back with Tony's model".into());
+                }
+                Err(e) => r.notes.push(e),
+            }
+        }
+        let lm_left = self.lm_loaded().await.unwrap_or_default();
+        let up = self.engine_up().await;
+        r.loaded_llms = lm_left.iter().map(|i| i.key.clone()).chain(up.then(|| format!("{} (built-in engine)", self.tony))).collect();
+        r.ok = up && lm_left.is_empty();
         r.ms = t.elapsed().as_millis() as u64;
         r
     }
@@ -419,6 +530,8 @@ mod tests {
         gpu: Vec<Value>,
         /// The next N `GET /api/v1/models` answer 503 (LM Studio busy / starting).
         fail_list: u32,
+        /// Section 26: the built-in engine answers /health (yield stops it, reclaim starts it).
+        engine_up: bool,
     }
     type Shared = Arc<Mutex<Fake>>;
 
@@ -475,6 +588,18 @@ mod tests {
                     f.gpu.push(r.body.clone());
                     Resp::json(json!({}))
                 }
+                ("GET", "/health") if f.engine_up => Resp::json(json!({ "status": "ok" })),
+                ("GET", "/health") => Resp::status(503, json!({ "error": "down" })),
+                ("POST", "/api/engine/yield") => {
+                    f.events.push(format!("engine yield {}", r.body["holder"].as_str().unwrap_or("")));
+                    f.engine_up = false;
+                    Resp::json(json!({ "yielded": true }))
+                }
+                ("POST", "/api/engine/reclaim") => {
+                    f.events.push("engine reclaim".into());
+                    f.engine_up = true;
+                    Resp::json(json!({ "reclaimed": true }))
+                }
                 _ => Resp::status(404, json!({})),
             }
         })
@@ -482,7 +607,7 @@ mod tests {
     }
 
     fn lm(srv: &Server) -> Lm {
-        Lm { http: reqwest::Client::new(), base: srv.base.clone(), chat_url: format!("{}/v1/chat/completions", srv.base), tony: TONY.into() }
+        Lm { http: reqwest::Client::new(), base: srv.base.clone(), chat_url: format!("{}/v1/chat/completions", srv.base), tony: TONY.into(), engine: None }
     }
 
     fn inst(key: &str, ctx: Option<u64>, par: Option<u64>) -> Inst {
@@ -677,5 +802,59 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert_eq!(none.stop().await, None);
         })
+    }
+
+    fn engine_lm(srv: &Server) -> Lm {
+        Lm { engine: Some(EngineCtl { origin: srv.base.clone(), gateway: srv.base.clone() }), ..lm(srv) }
+    }
+
+    #[tokio::test]
+    async fn off_never_touches_the_engine() {
+        let shared: Shared = Arc::new(Mutex::new(Fake { loaded: vec![(TONY.into(), 32768, 2)], engine_up: true, ..Default::default() }));
+        let srv = fake(shared.clone()).await;
+        let l = lm(&srv);
+        assert_eq!(l.snapshot_loaded().await.unwrap().len(), 1, "an engine answering is not counted while OFF");
+        assert!(!l.engine_up().await);
+        l.unload_all().await.unwrap();
+        assert!(!shared.lock().unwrap().events.iter().any(|e| e.starts_with("engine")));
+    }
+
+    #[tokio::test]
+    async fn on_the_engine_steps_aside_and_comes_back_without_any_lm_studio_load() {
+        let shared: Shared = Arc::new(Mutex::new(Fake { engine_up: true, ..Default::default() }));
+        let srv = fake(shared.clone()).await;
+        let l = engine_lm(&srv);
+        let snap = l.snapshot_loaded().await.unwrap();
+        assert_eq!(snap, vec![engine_inst(TONY)], "the engine is Tony's one instance");
+        let gone = l.unload_all().await.unwrap();
+        assert_eq!(gone, vec![engine_inst(TONY)]);
+        assert!(!shared.lock().unwrap().engine_up);
+        assert!(l.snapshot_loaded().await.unwrap().is_empty(), "the JIT watch sees nothing while yielded");
+        let r = l.restore_tony_with(Duration::from_millis(1)).await;
+        assert!(r.ok, "{r:?}");
+        assert!(r.load_ms.is_some());
+        let ev = shared.lock().unwrap().events.clone();
+        assert_eq!(ev, vec!["engine yield comfyui".to_string(), "engine reclaim".to_string()]);
+        assert!(!ev.iter().any(|e| e.starts_with("load ")), "never loads Tony in LM Studio while he is on the engine");
+    }
+
+    #[tokio::test]
+    async fn on_verify_unloads_lm_studio_strays_and_reclaims_once() {
+        let shared: Shared = Arc::new(Mutex::new(Fake { loaded: vec![(TONY.into(), 4096, 1)], engine_up: false, ..Default::default() }));
+        let srv = fake(shared.clone()).await;
+        let r = engine_lm(&srv).verify_only_tony_with(Duration::from_millis(1)).await;
+        assert!(r.ok, "{r:?}");
+        let ev = shared.lock().unwrap().events.clone();
+        assert!(ev.contains(&format!("unload {TONY}:0")), "{ev:?}");
+        assert_eq!(ev.iter().filter(|e| *e == "engine reclaim").count(), 1);
+        assert!(r.loaded_llms.iter().any(|k| k.contains("built-in engine")));
+    }
+
+    #[tokio::test]
+    async fn on_a_refused_yield_is_an_unload_error() {
+        let shared: Shared = Arc::new(Mutex::new(Fake { engine_up: true, ..Default::default() }));
+        let srv = fake(shared.clone()).await;
+        let l = Lm { engine: Some(EngineCtl { origin: srv.base.clone(), gateway: "http://127.0.0.1:9".into() }), ..lm(&srv) };
+        assert!(l.unload_all().await.unwrap_err().contains("would not step aside"));
     }
 }

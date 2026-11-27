@@ -9,6 +9,7 @@ import type {
   AssetRole,
   AudioLayer,
   CaptionTrack,
+  ClipFit,
   ColorLook,
   CreativeBrief,
   EditPlanBody,
@@ -46,6 +47,9 @@ export const CAPTION_WORDS_MAX = 12;
 export const FRAMINGS: readonly Framing[] = ["wide", "medium", "mcu", "closeup", "insert", "overhead", "pov"];
 export const SLOT_SOURCES: readonly ShotSlot["source"][] = ["film", "generate", "stock"];
 export const TRANSITIONS: readonly TimelineClip["transitionIn"]["kind"][] = ["cut", "crossfade", "fade_black"];
+/** Per-clip framing in the output aspect (contract ClipFit); "auto" (or absent) = media_render_plan
+ * picks it from the clip's detected black bars. */
+export const CLIP_FITS: readonly ClipFit[] = ["auto", "pad", "fill", "blur"];
 export const CAPTION_STYLES: readonly CaptionTrack["style"][] = ["clean", "bold_pop", "karaoke", "minimal"];
 export const COLOR_PRESETS: readonly ColorLook["preset"][] = ["none", "warm", "cool", "punchy", "film", "bw"];
 export const PLATFORMS: readonly Platform[] = ["reels", "tiktok", "ig_feed", "youtube", "shorts", "self_tape", "custom"];

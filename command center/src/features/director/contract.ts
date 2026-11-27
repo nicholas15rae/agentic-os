@@ -112,7 +112,36 @@ export interface TimelineClip {
   fadeMs: number;             // 0–2000
   transitionIn: { kind: "cut" | "crossfade" | "fade_black"; ms: number }; // v2, ms 0–1500 (v1: cut, 0)
   punchIn: number;            // v2, 1.0–1.5 zoom (v1: 1)
+  /** How the clip fills the output frame. Absent / "auto" = Rust picks it at media_render_plan from
+   * the black bars detect_bars measures over this clip's in..out (Rust never writes "auto" back). */
+  fit?: ClipFit;
 }
+
+export type ClipFit = "auto" | "pad" | "fill" | "blur";
+/** Even source pixels (media-forge detect_bars' content rect, render_timeline's clip "crop"). */
+export interface CropRect { x: number; y: number; w: number; h: number }
+/** One clip's framing in a RenderPlan: the crop (null = whole frame), the content size the fit was
+ * chosen from (after the crop; null = unknown) and the fit per output (manifest.outputs order). */
+export interface ClipFraming { crop: CropRect | null; contentW: number | null; contentH: number | null; fits: Exclude<ClipFit, "auto">[] }
+
+/** media_plan_check's clips: a TimelineClip whose id (and every field but assetId / inSec / outSec)
+ * may be left out. A `crop` is accepted and ignored (framing is measured by media_render_plan). */
+export type PlanCheckClip = Pick<TimelineClip, "assetId" | "inSec" | "outSec"> & Partial<Omit<TimelineClip, "assetId" | "inSec" | "outSec">> & { crop?: unknown };
+/** media_plan_check's answer. `clips`: the same clips in order, video in/out snapped to the transcript
+ * (in → start of the word it falls in; out → end of its word, or its sentence's end when that is
+ * within 0.6 s; never past the asset); a clip sent without an id comes back without one.
+ * `refusals` (a Director plan must not apply): clip < 1 s, total outside the brief's lengthSec ±10%
+ * (at least ±1.5 s), total over an output's maxSec, a clip outside its asset or not in the project.
+ * The 1 s minimum is for video clips only (a still holds 0.2–60 s). A revision (`plan.resolves`)
+ * off the brief's length gets a warning instead (Nic's note may ask for a new length).
+ * `warnings`: each snap made. `totalSec` = the render's length (crossfades overlap).
+ * `unchangedSinceRender` (revisions only): true = the same cut as the render its notes are on;
+ * absent = no snapshot to compare with. */
+export interface PlanCheck { clips: (Omit<TimelineClip, "id"> & { id?: string })[]; totalSec: number; targetSec: number | null; warnings: string[]; refusals: string[]; unchangedSinceRender?: boolean }
+/** media_plan_check's optional `plan`: the rest of the plan as it would apply (the manifest with
+ * the plan merged in), so the checks use the plan's own outputs (maxSec), captions, color and
+ * audio rather than the saved ones. `resolves`: a revise_edit's note ids. */
+export interface PlanCheckPlan { audio?: AudioLayer[]; clipAudioVolume?: number; output?: TimelineManifest["output"]; captions?: CaptionTrack; color?: ColorLook; outputs?: PlatformPreset[]; resolves?: string[] }
 
 export interface AudioLayer {
   id: string;
@@ -174,12 +203,18 @@ export interface RenderPlan {
   planId: string;             // "p-<base36>"
   project: string;
   manifestRevision: number;   // the manifest the plan was made from; stale → refused
-  sources: { assetId: string; name: string; inSec: number; outSec: number }[];
+  /** `framing`: the card's text for that clip ("fill 608×1080 (bars cropped)", or per output
+   * "reels blur · youtube fill · 1576×888"); absent on plans from older builds. */
+  sources: { assetId: string; name: string; inSec: number; outSec: number; framing?: string }[];
   audio: { assetId: string; name: string; startSec: number; volume: number }[];
   outputName: string;         // renders/<outputName>_vNNN.mp4
   outputSpec: string;         // "1920×1080 · H.264/AAC · −18 LUFS · ≤ 100 MB"
   renderMode: "cpu_only";
   proposedBy: "director" | "nic";
+  /** Per clip (manifest order): the crop / fit per output the approved render uses ([] or absent = pad, no crop). */
+  framing?: ClipFraming[];
+  /** For the card: e.g. "clip 2: couldn't measure black bars (…), so it pads with no crop". */
+  warnings?: string[];
 }
 
 export interface VerifiedRender {
@@ -236,7 +271,12 @@ export interface DirectorCommands {
   media_intake_status: { args: { slug: string }; result: { inbox: string; pending: number; processing: string | null; lastError: string | null } };
   media_transcribe: { args: { slug: string; assetIds: string[] }; result: { queued: number } };   // CPU, background
   media_note_add: { args: { slug: string; note: Omit<Note, "id" | "at" | "resolved"> }; result: Note };
-  media_note_resolve: { args: { slug: string; noteId: string }; result: void };
+  /** Without `manual` (a revision's notes, resolved by the Approve & Render click) Rust refuses with
+   * "UNCHANGED_PLAN: …" when the cut approved since is the same as the one the note is on.
+   * `manual: true` = Nic's own Resolve click (no check). */
+  media_note_resolve: { args: { slug: string; noteId: string; manual?: boolean }; result: void };
+  /** Snap a plan's clips to speech and check clip / total length against the brief and the outputs. Reads only. */
+  media_plan_check: { args: { slug: string; clips: PlanCheckClip[]; plan?: PlanCheckPlan }; result: PlanCheck };
   media_review_get: { args: { slug: string }; result: ProjectReview };
   /** The Director's words on the review, stored in project.json: a round's summary (≤ 2000 chars;
    * the round must exist) and/or the open decisions (≤ 12, each ≤ 300 chars; replaced whole). Text only. */

@@ -49,6 +49,7 @@ const ASPECTS: [&str; 4] = ["16:9", "9:16", "4:5", "1:1"];
 const FRAMINGS: [&str; 7] = ["wide", "medium", "mcu", "closeup", "insert", "overhead", "pov"];
 const SLOT_SOURCES: [&str; 3] = ["film", "generate", "stock"];
 const TRANSITIONS: [&str; 3] = ["cut", "crossfade", "fade_black"];
+const FITS: [&str; 4] = ["auto", "pad", "fill", "blur"];
 const CAPTION_STYLES: [&str; 4] = ["clean", "bold_pop", "karaoke", "minimal"];
 const COLOR_PRESETS: [&str; 6] = ["none", "warm", "cool", "punchy", "film", "bw"];
 const SPEEDS: [&str; 3] = ["rough", "polish", "full_ai"];
@@ -76,6 +77,12 @@ fn d_film() -> String {
 }
 fn d_one() -> f64 {
     1.0
+}
+fn d_auto() -> String {
+    "auto".into()
+}
+fn is_auto(s: &str) -> bool {
+    s == "auto"
 }
 
 /// contract.ts `CreativeBrief` (v2 §1).
@@ -286,6 +293,10 @@ pub struct TimelineClip {
     pub transition_in: Transition,
     #[serde(default = "d_one")]
     pub punch_in: f64,
+    /// How the clip fills the output frame: "auto" (Rust picks from the measured content, see
+    /// `auto_fit`) | "pad" | "fill" | "blur". Absent = auto (and auto isn't written back).
+    #[serde(default = "d_auto", skip_serializing_if = "is_auto")]
+    pub fit: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -430,6 +441,9 @@ pub struct PlanSource {
     pub name: String,
     pub in_sec: f64,
     pub out_sec: f64,
+    /// The clip's framing as the card shows it: "fill 608×1080", "reels fill · youtube pad · 1576×888".
+    #[serde(default)]
+    pub framing: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -453,6 +467,13 @@ pub struct RenderPlan {
     pub output_spec: String,
     pub render_mode: String,
     pub proposed_by: String,
+    /// Per clip (manifest order): the crop and fit per output the approved render will use.
+    /// Plans made before framing load with [] (= pad, no crop, as they rendered then).
+    #[serde(default)]
+    pub framing: Vec<ClipFraming>,
+    /// Things the card should say (e.g. black bars couldn't be measured, so a clip pads).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1494,6 +1515,9 @@ pub(crate) fn validate_manifest(m: &TimelineManifest, slug: &str, assets: &[Medi
         if !finite_in(c.punch_in, 1.0, 1.5) {
             return Err(format!("clip {}: punch-in must be 1.0–1.5", c.id));
         }
+        if !FITS.contains(&c.fit.as_str()) {
+            return Err(format!("clip {}: fit must be auto, pad, fill or blur", c.id));
+        }
         if a.kind == "image" {
             if c.in_sec != 0.0 || !finite_in(c.out_sec, 0.2, 60.0) {
                 return Err(format!("still {} must hold 0.2–60 s", c.id));
@@ -1809,12 +1833,23 @@ pub(crate) fn note_add(state: &MediaState, slug: &str, input: NoteInput) -> Resu
     Ok(note)
 }
 
+/// Resolve a note as a revision does (the render approval path): refused with UNCHANGED_PLAN when
+/// the cut approved since is the same as the one the note is on (`check_revision_changed`).
+#[cfg_attr(not(test), allow(dead_code))] // tests and the E2E harness
 pub(crate) fn note_resolve(state: &MediaState, slug: &str, note_id: &str) -> Result<(), String> {
+    note_resolve_as(state, slug, note_id, false)
+}
+
+/// `manual`: Nic's own Resolve click (no revision check: Nic can close a note by hand).
+pub(crate) fn note_resolve_as(state: &MediaState, slug: &str, note_id: &str, manual: bool) -> Result<(), String> {
     let _g = state.manifest_lock.lock().unwrap();
     load_project(state, slug)?;
     let root = project_root(state, slug)?;
     let mut m = load_manifest_strict(&root, slug)?;
     let n = m.notes.iter_mut().find(|n| n.id == note_id).ok_or_else(|| format!("no note {note_id:?}"))?;
+    if !manual {
+        check_revision_changed(state, slug, n)?;
+    }
     n.resolved = true;
     write_atomic(&manifest_path(&root), serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?.as_bytes())
 }
@@ -2606,7 +2641,18 @@ pub(crate) fn check_review_limit(review: &ProjectReview, proposed_by: &str) -> R
     Ok(())
 }
 
+/// `build_plan` without media-forge (tests, and callers that have no tool layer): every video
+/// clip falls back to pad with no crop, with a plan warning.
+#[cfg_attr(not(test), allow(dead_code))] // tests and the E2E harness
 pub(crate) fn build_plan(state: &MediaState, slug: &str, proposed_by: &str) -> Result<RenderPlan, String> {
+    build_plan_with(state, &NoForge, slug, proposed_by)
+}
+
+/// The Render Plan from the saved manifest. Each video clip's black bars are measured over its
+/// own in..out (media-forge `detect_bars`, cached in media.db kv) and its crop / fit per output
+/// decided here, so the card shows exactly what the approved render will do. Sync: the command
+/// runs it on a blocking thread.
+pub(crate) fn build_plan_with(state: &MediaState, forge: &dyn Forge, slug: &str, proposed_by: &str) -> Result<RenderPlan, String> {
     if !["director", "nic"].contains(&proposed_by) {
         return Err("proposedBy must be director or nic".into());
     }
@@ -2619,24 +2665,35 @@ pub(crate) fn build_plan(state: &MediaState, slug: &str, proposed_by: &str) -> R
     }
     let assets = list_assets(state, slug)?;
     validate_manifest(&m, slug, &assets)?;
+    let mut detect = |a: &MediaAsset, i: f64, o: f64| cached_bars(state, forge, a, i, o);
+    let (framing, warnings) = plan_framing(&m, &assets, &mut detect);
     // Every output's spec must build now (e.g. captions need transcripts), not after approval.
-    for o in &m.outputs {
-        render_spec(&m, &assets, o, &root)?;
+    for (k, o) in m.outputs.iter().enumerate() {
+        render_spec_with(&m, &assets, o, &root, &output_framing(&framing, k))?;
     }
     let name_of = |id: &str| assets.iter().find(|a| a.id == id).map(|a| a.name.clone()).unwrap_or_default();
     let plan = RenderPlan {
         plan_id: short_id("p"),
         project: slug.into(),
         manifest_revision: m.revision,
-        sources: m.clips.iter().map(|c| PlanSource { asset_id: c.asset_id.clone(), name: name_of(&c.asset_id), in_sec: c.in_sec, out_sec: c.out_sec }).collect(),
+        sources: m.clips.iter().enumerate().map(|(k, c)| PlanSource { asset_id: c.asset_id.clone(), name: name_of(&c.asset_id), in_sec: c.in_sec, out_sec: c.out_sec, framing: framing_label(&framing[k], &m.outputs) }).collect(),
         audio: m.audio.iter().map(|l| PlanAudio { asset_id: l.asset_id.clone(), name: name_of(&l.asset_id), start_sec: l.start_sec, volume: l.volume }).collect(),
         output_name: slugify(&m.output.name),
         output_spec: outputs_text(&m),
         render_mode: "cpu_only".into(),
         proposed_by: proposed_by.into(),
+        framing,
+        warnings,
     };
     let j = serde_json::to_string(&plan).map_err(|e| e.to_string())?;
-    state.with(|c| c.execute("INSERT INTO plan (id, project, json) VALUES (?1, ?2, ?3)", params![plan.plan_id, slug, j]).map(|_| ()).map_err(sql_err))?;
+    // What this plan renders (notes and shot list left out), for `plans_equivalent` when a
+    // revision's notes are resolved.
+    let snap = serde_json::to_string(&TimelineManifest { notes: vec![], shot_list: vec![], ..m.clone() }).map_err(|e| e.to_string())?;
+    state.with(|c| {
+        c.execute("INSERT INTO plan (id, project, json) VALUES (?1, ?2, ?3)", params![plan.plan_id, slug, j]).map_err(sql_err)?;
+        c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![plan_manifest_key(&plan.plan_id), snap]).map_err(sql_err)?;
+        Ok(())
+    })?;
     Ok(plan)
 }
 
@@ -2729,10 +2786,19 @@ fn transcript_file(a: &MediaAsset, root: &Path) -> Option<String> {
 /// the project's own assets; nothing from the model). Spec v2 (transitions, punch-in, layer fades
 /// and ducking, captions from each clip's transcript, colour) when the manifest uses any of it,
 /// else the v1 spec unchanged.
+#[cfg_attr(not(test), allow(dead_code))] // tests and the E2E harness
 pub(crate) fn render_spec(m: &TimelineManifest, assets: &[MediaAsset], out: &PlatformPreset, root: &Path) -> Result<Value, String> {
+    render_spec_with(m, assets, out, root, &[])
+}
+
+/// `render_spec` with this output's per-clip framing (crop in source pixels, fit). Framing that
+/// changes anything (a crop, or a fit other than pad) needs spec v2; pad without a crop adds no
+/// keys, so such a spec is exactly the one made before framing existed.
+pub(crate) fn render_spec_with(m: &TimelineManifest, assets: &[MediaAsset], out: &PlatformPreset, root: &Path, framing: &[(Option<CropRect>, String)]) -> Result<Value, String> {
     let by_id: HashMap<&str, &MediaAsset> = assets.iter().map(|a| (a.id.as_str(), a)).collect();
     let (w, h) = dims_for(&out.aspect);
-    let v2 = needs_spec_v2(m);
+    let framed = |k: usize| framing.get(k).filter(|(c, f)| c.is_some() || f != "pad");
+    let v2 = needs_spec_v2(m) || (0..m.clips.len()).any(|k| framed(k).is_some());
     let mut any_transcript = false;
     let mut clips = vec![];
     for (k, c) in m.clips.iter().enumerate() {
@@ -2746,6 +2812,12 @@ pub(crate) fn render_spec(m: &TimelineManifest, assets: &[MediaAsset], out: &Pla
             o.insert("transition_in".into(), json!({ "kind": kind, "ms": ms }));
             o.insert("punch_in".into(), json!(c.punch_in));
             o.insert("transcript".into(), json!(transcript));
+            if let Some((crop, fit)) = framed(k) {
+                if let Some(r) = crop {
+                    o.insert("crop".into(), json!({ "x": r.x, "y": r.y, "w": r.w, "h": r.h }));
+                }
+                o.insert("fit".into(), json!(fit));
+            }
         }
         clips.push(j);
     }
@@ -2811,6 +2883,516 @@ pub(crate) fn verify_render(pr: &Probe, size: u64, expect_sec: f64, w: u32, h: u
         check(size as f64 <= cap * 1024.0 * 1024.0, format!("{:.1} MB within the {cap} MB cap", size as f64 / 1048576.0));
     }
     VerifyInfo { ok, checks }
+}
+
+// ── Framing: black bars, crop and fit per clip (E2E finding 1) ───────────────
+
+/// A crop in even source pixels (media-forge detect_bars' `content`, render_timeline's clip `crop`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CropRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// One clip's framing in a plan: the crop (None = the whole frame), the content size the fit was
+/// chosen from (after the crop; None = unknown) and the fit per output, in `manifest.outputs` order.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipFraming {
+    pub crop: Option<CropRect>,
+    pub content_w: Option<u32>,
+    pub content_h: Option<u32>,
+    pub fits: Vec<String>,
+}
+
+/// What `detect_bars` measured over one clip's range (the part of its result the plan uses).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Bars {
+    pub content: CropRect,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub confidence: f64,
+    pub boxed: bool,
+    pub regions: u32,
+}
+
+/// Below this detect_bars confidence a clip isn't cropped (it pads as before, with a warning).
+const BARS_MIN_CONFIDENCE: f64 = 0.5;
+
+/// A Forge that is never there (`build_plan` without a tool layer): detection falls back.
+#[cfg_attr(not(test), allow(dead_code))] // tests and the E2E harness
+pub(crate) struct NoForge;
+
+impl Forge for NoForge {
+    fn call(&self, _tool: &str, _args: &Value) -> Result<Value, String> {
+        Err("media-forge isn't connected".into())
+    }
+}
+
+/// detect_bars' result → `Bars` (`{content: {x, y, w, h}, source: {w, h}, confidence,
+/// letterboxed, pillarboxed, regions: [...]}`).
+pub(crate) fn parse_bars(v: &Value) -> Result<Bars, String> {
+    let n = |x: &Value, k: &str| x[k].as_f64().filter(|f| f.is_finite() && *f >= 0.0 && *f <= 100_000.0).map(|f| f.round() as u32).ok_or_else(|| format!("detect_bars: no {k}"));
+    let c = &v["content"];
+    if !c.is_object() {
+        return Err(format!("detect_bars returned no content rect: {}", v.to_string().chars().take(200).collect::<String>()));
+    }
+    let content = CropRect { x: n(c, "x")?, y: n(c, "y")?, w: n(c, "w")?, h: n(c, "h")? };
+    let (src_w, src_h) = (n(&v["source"], "w")?, n(&v["source"], "h")?);
+    if content.w == 0 || content.h == 0 || src_w == 0 || src_h == 0 {
+        return Err("detect_bars: empty frame".into());
+    }
+    let boxed = v["letterboxed"].as_bool().unwrap_or(false) || v["pillarboxed"].as_bool().unwrap_or(false);
+    Ok(Bars { content, src_w, src_h, confidence: v["confidence"].as_f64().unwrap_or(0.0), boxed, regions: v["regions"].as_array().map_or(1, |r| r.len().max(1) as u32) })
+}
+
+/// The fit rule for `fit: "auto"` (content w/h into an output aspect): tall content into a
+/// vertical output fills it; landscape content into a vertical output goes over a blurred copy of
+/// itself; content within ±15% of the output's aspect fills; anything else pads.
+pub(crate) fn auto_fit(content_w: u32, content_h: u32, out_aspect: &str) -> &'static str {
+    if content_w == 0 || content_h == 0 {
+        return "pad";
+    }
+    let a = content_w as f64 / content_h as f64;
+    let (ow, oh) = dims_for(out_aspect);
+    let o = ow as f64 / oh as f64;
+    let vertical = matches!(out_aspect, "9:16" | "4:5");
+    if vertical && a <= 0.75 {
+        "fill"
+    } else if vertical && a >= 1.2 {
+        "blur"
+    } else if (a - o).abs() / o <= 0.15 {
+        "fill"
+    } else {
+        "pad"
+    }
+}
+
+/// Is `r` a usable crop of a `w`×`h` frame (even, ≥ 16 px, inside it, and not the whole frame)?
+fn usable_crop(r: &CropRect, w: u32, h: u32) -> bool {
+    [r.x, r.y, r.w, r.h].iter().all(|v| v % 2 == 0) && r.w >= 16 && r.h >= 16 && r.x + r.w <= w && r.y + r.h <= h && (r.w, r.h) != (w, h)
+}
+
+/// Every clip's framing (pure; `detect` measures one video clip's in..out). Explicit fits win;
+/// a failed detection pads (or keeps the explicit fit) with no crop and adds a warning.
+pub(crate) fn plan_framing(m: &TimelineManifest, assets: &[MediaAsset], detect: &mut dyn FnMut(&MediaAsset, f64, f64) -> Result<Bars, String>) -> (Vec<ClipFraming>, Vec<String>) {
+    let mut out = vec![];
+    let mut warnings = vec![];
+    for (k, c) in m.clips.iter().enumerate() {
+        let n = k + 1;
+        let a = assets.iter().find(|a| a.id == c.asset_id);
+        let (mut crop, mut size, mut measured) = (None, a.and_then(|a| a.width.zip(a.height)), true);
+        if let Some(a) = a.filter(|a| a.kind == "video") {
+            match detect(a, c.in_sec, c.out_sec) {
+                Ok(b) => {
+                    size = Some((b.src_w, b.src_h));
+                    // Mixed framing comes first: bars.py's content is the union of every lit
+                    // sample and confidence is the share of samples matching that union, so
+                    // two framings give confidence ~0. The union still holds every picture
+                    // measured, so cropping to it never cuts any of them.
+                    let mixed = b.boxed && b.regions > 1;
+                    if b.boxed && !mixed && b.confidence < BARS_MIN_CONFIDENCE {
+                        warnings.push(format!("clip {n}: the black-bar check was unsure (confidence {:.2}), so it isn't cropped", b.confidence));
+                    } else if b.boxed && usable_crop(&b.content, b.src_w, b.src_h) {
+                        crop = Some(b.content);
+                        size = Some((b.content.w, b.content.h));
+                        if mixed {
+                            warnings.push(format!("clip {n}: the framing changes inside this clip, so it's cropped to the widest picture ({}×{})", b.content.w, b.content.h));
+                        }
+                    }
+                }
+                Err(e) => {
+                    measured = false;
+                    warnings.push(format!("clip {n}: couldn't measure black bars ({}), so it pads with no crop", e.chars().take(160).collect::<String>()));
+                }
+            }
+        }
+        let fits = m
+            .outputs
+            .iter()
+            .map(|o| match c.fit.as_str() {
+                "auto" if !measured => "pad".to_string(),
+                "auto" => size.map_or("pad", |(w, h)| auto_fit(w, h, &o.aspect)).to_string(),
+                f => f.to_string(),
+            })
+            .collect();
+        out.push(ClipFraming { crop, content_w: size.map(|s| s.0), content_h: size.map(|s| s.1), fits });
+    }
+    (out, warnings)
+}
+
+/// One output's (crop, fit) per clip, for `render_spec_with`.
+pub(crate) fn output_framing(framing: &[ClipFraming], k: usize) -> Vec<(Option<CropRect>, String)> {
+    framing.iter().map(|f| (f.crop, f.fits.get(k).cloned().unwrap_or_else(|| "pad".into()))).collect()
+}
+
+/// The card's framing text for one clip: "fill 608×1080 (bars cropped)", or per output when they
+/// differ ("reels blur · youtube fill · 1576×888").
+pub(crate) fn framing_label(f: &ClipFraming, outputs: &[PlatformPreset]) -> String {
+    let size = f.content_w.zip(f.content_h).map(|(w, h)| format!("{w}×{h}"));
+    let fits: Vec<&str> = f.fits.iter().map(String::as_str).collect();
+    let same = fits.windows(2).all(|w| w[0] == w[1]);
+    let how = if same { fits.first().copied().unwrap_or("pad").to_string() } else { outputs.iter().zip(&fits).map(|(o, f)| format!("{} {f}", o.platform)).collect::<Vec<_>>().join(" · ") };
+    let crop = if f.crop.is_some() { " (bars cropped)" } else { "" };
+    match size {
+        Some(s) if same => format!("{how} {s}{crop}"),
+        Some(s) => format!("{how} · {s}{crop}"),
+        None => how,
+    }
+}
+
+fn bars_key(asset_id: &str, in_sec: f64, out_sec: f64) -> String {
+    format!("bars:{asset_id}:{in_sec:.3}:{out_sec:.3}")
+}
+
+/// detect_bars over one clip's in..out, cached in media.db kv by asset id + in + out (raw files
+/// never change, so a cached answer stays right). Failures aren't cached.
+pub(crate) fn cached_bars(state: &MediaState, forge: &dyn Forge, a: &MediaAsset, in_sec: f64, out_sec: f64) -> Result<Bars, String> {
+    let key = bars_key(&a.id, in_sec, out_sec);
+    let hit = state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get::<_, String>(0)).optional().map_err(sql_err)).ok().flatten();
+    if let Some(b) = hit.and_then(|j| serde_json::from_str::<Bars>(&j).ok()) {
+        return Ok(b);
+    }
+    let span = (out_sec - in_sec).max(0.1);
+    let args = json!({ "path": a.path, "start_s": in_sec, "sample_s": span, "samples": if span < 2.0 { 3 } else { 8 } });
+    let b = parse_bars(&forge.call("detect_bars", &args)?)?;
+    if let Ok(j) = serde_json::to_string(&b) {
+        let _ = state.with(|c| c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![key, j]).map(|_| ()).map_err(sql_err));
+    }
+    Ok(b)
+}
+
+// ── Plan check: snap to speech, clip and total length (E2E finding 2) ────────
+
+/// The shortest clip a Director plan may have.
+pub(crate) const MIN_CLIP_SEC: f64 = 1.0;
+/// An out point this close to its sentence's end runs on to the end.
+const SNAP_SEGMENT_END_SEC: f64 = 0.6;
+
+/// `media_plan_check`'s clips: TimelineClip with every field but asset/in/out optional (no id is fine).
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CheckClip {
+    #[serde(default)]
+    pub id: String,
+    pub asset_id: String,
+    pub in_sec: f64,
+    pub out_sec: f64,
+    #[serde(default)]
+    pub fade_ms: u32,
+    #[serde(default)]
+    pub transition_in: Transition,
+    #[serde(default = "d_one")]
+    pub punch_in: f64,
+    #[serde(default = "d_auto")]
+    pub fit: String,
+    /// Accepted and ignored: framing (crop and the auto fit) is measured by media_render_plan,
+    /// never taken from a model or the page.
+    #[serde(default)]
+    pub crop: Option<Value>,
+}
+
+impl From<CheckClip> for TimelineClip {
+    fn from(c: CheckClip) -> Self {
+        TimelineClip { id: c.id, asset_id: c.asset_id, in_sec: c.in_sec, out_sec: c.out_sec, fade_ms: c.fade_ms, transition_in: c.transition_in, punch_in: c.punch_in, fit: c.fit }
+    }
+}
+
+/// contract.ts `PlanCheck`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCheck {
+    /// The clips as given (snapped), in order; a clip sent without an id comes back without one.
+    #[serde(serialize_with = "ser_check_clips")]
+    pub clips: Vec<TimelineClip>,
+    pub total_sec: f64,
+    pub target_sec: Option<f64>,
+    pub warnings: Vec<String>,
+    pub refusals: Vec<String>,
+    /// A revision (`plan.resolves`): true when it renders the same cut as the render its notes
+    /// are on (that render's plan snapshot); absent when no snapshot could be compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unchanged_since_render: Option<bool>,
+}
+
+/// `media_plan_check`'s optional `plan`: the rest of the plan as the page would apply it (the
+/// saved manifest with the plan merged in), so the length and maxSec checks use the plan's own
+/// outputs, captions, colour and audio rather than the ones on disk. Left-out fields keep the
+/// saved ones. `resolves`: a revise_edit's note ids (a revision's length off the brief is a
+/// warning, not a refusal, and it is compared with the noted render's cut).
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CheckPlan {
+    #[serde(default)]
+    pub audio: Option<Vec<AudioLayer>>,
+    #[serde(default)]
+    pub clip_audio_volume: Option<f64>,
+    #[serde(default)]
+    pub output: Option<OutputSpec>,
+    #[serde(default)]
+    pub captions: Option<CaptionTrack>,
+    #[serde(default)]
+    pub color: Option<ColorLook>,
+    #[serde(default)]
+    pub outputs: Option<Vec<PlatformPreset>>,
+    #[serde(default)]
+    pub resolves: Vec<String>,
+}
+
+/// The saved manifest with a checked plan's fields in place (pure). Outputs naming an unknown
+/// platform are dropped (at most 4 kept); none left keeps the saved outputs.
+pub(crate) fn with_check_plan(base: TimelineManifest, plan: &CheckPlan) -> TimelineManifest {
+    let mut m = base;
+    if let Some(a) = &plan.audio {
+        m.audio = a.clone();
+    }
+    if let Some(v) = plan.clip_audio_volume.filter(|v| v.is_finite()) {
+        m.clip_audio_volume = v;
+    }
+    if let Some(o) = &plan.output {
+        m.output = o.clone();
+    }
+    if let Some(c) = &plan.captions {
+        m.captions = c.clone();
+    }
+    if let Some(c) = &plan.color {
+        m.color = c.clone();
+    }
+    if let Some(outs) = &plan.outputs {
+        let ok: Vec<PlatformPreset> = outs.iter().filter(|o| PLATFORMS.contains(&o.platform.as_str())).take(4).cloned().collect();
+        if !ok.is_empty() {
+            m.outputs = ok;
+        }
+    }
+    m
+}
+
+fn ser_check_clips<S: serde::Serializer>(clips: &[TimelineClip], s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(clips.len()))?;
+    for c in clips {
+        let mut v = serde_json::to_value(c).map_err(serde::ser::Error::custom)?;
+        if c.id.is_empty() {
+            v.as_object_mut().map(|o| o.remove("id"));
+        }
+        seq.serialize_element(&v)?;
+    }
+    seq.end()
+}
+
+/// Speech spans from a transcribe .json (`{segments: [{start, end, words?: [{w, s, e}]}]}`), in
+/// asset time: (start, end) of every word and of every segment.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Speech {
+    pub words: Vec<(f64, f64)>,
+    pub segments: Vec<(f64, f64)>,
+}
+
+pub(crate) fn parse_speech(json_text: &str) -> Option<Speech> {
+    let v: Value = serde_json::from_str(json_text).ok()?;
+    let mut sp = Speech::default();
+    let ok = |s: Option<f64>, e: Option<f64>| s.zip(e).filter(|(s, e)| s.is_finite() && e.is_finite() && e > s);
+    for s in v["segments"].as_array()? {
+        if let Some(span) = ok(s["start"].as_f64(), s["end"].as_f64()) {
+            sp.segments.push(span);
+        }
+        for w in s["words"].as_array().into_iter().flatten() {
+            if w["w"].as_str().is_some_and(|t| t.trim().is_empty()) {
+                continue;
+            }
+            if let Some(span) = ok(w["s"].as_f64().or(w["start"].as_f64()), w["e"].as_f64().or(w["end"].as_f64())) {
+                sp.words.push(span);
+            }
+        }
+    }
+    Some(sp)
+}
+
+/// An in point inside a word moves back to the word's start (a transcript without word times:
+/// to its segment's start). In a pause it stays.
+pub(crate) fn snap_in(t: f64, sp: &Speech) -> f64 {
+    let spans = if sp.words.is_empty() { &sp.segments } else { &sp.words };
+    spans.iter().find(|(s, e)| *s <= t && t < *e).map_or(t, |(s, _)| *s)
+}
+
+/// An out point inside a word moves on to the word's end; then, if its segment ends within 0.6 s,
+/// on to the segment's end (so a cut doesn't land mid-sentence).
+pub(crate) fn snap_out(t: f64, sp: &Speech) -> f64 {
+    let o = sp.words.iter().find(|(s, e)| *s < t && t < *e).map_or(t, |(_, e)| *e);
+    match sp.segments.iter().find(|(s, e)| *s < o && o < *e) {
+        Some((_, e)) if e - o <= SNAP_SEGMENT_END_SEC => *e,
+        _ => o,
+    }
+}
+
+/// "9.6", "15", "0.3" (seconds, one decimal, no trailing ".0").
+fn secs(x: f64) -> String {
+    let s = format!("{:.1}", (x * 10.0).round() / 10.0);
+    s.strip_suffix(".0").map(String::from).unwrap_or(s)
+}
+
+/// The plan check (pure): snap every video clip to speech, then the length rules. `speech` gives
+/// an asset's transcript spans (None = no transcript: the clip is left as it is). `base` gives the
+/// outputs (their maxSec); `target` is the brief's lengthSec.
+pub(crate) fn plan_check_core(clips: Vec<TimelineClip>, assets: &[MediaAsset], speech: &dyn Fn(&MediaAsset) -> Option<Speech>, base: &TimelineManifest, target: Option<f64>) -> PlanCheck {
+    plan_check_core_with(clips, assets, speech, base, target, false)
+}
+
+/// `plan_check_core`; `revision` = a revise_edit answering Nic's notes: a note may ask for a new
+/// length, so a total off the brief is a warning (the Director should suggest a brief change)
+/// rather than a refusal. Platform caps still refuse.
+pub(crate) fn plan_check_core_with(clips: Vec<TimelineClip>, assets: &[MediaAsset], speech: &dyn Fn(&MediaAsset) -> Option<Speech>, base: &TimelineManifest, target: Option<f64>, revision: bool) -> PlanCheck {
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let (mut warnings, mut refusals) = (vec![], vec![]);
+    let mut cache: HashMap<String, Option<Speech>> = HashMap::new();
+    let mut out = vec![];
+    for (k, mut c) in clips.into_iter().enumerate() {
+        let n = k + 1;
+        let Some(a) = assets.iter().find(|a| a.id == c.asset_id) else {
+            refusals.push(format!("clip {n} uses an asset that isn't in this project ({:?})", c.asset_id));
+            out.push(c);
+            continue;
+        };
+        if a.kind == "audio" {
+            refusals.push(format!("clip {n} ({}) is audio: put it on the audio lane", a.name));
+        }
+        if a.kind == "video" {
+            let dur = a.duration_sec.unwrap_or(0.0);
+            if !(c.in_sec.is_finite() && c.out_sec.is_finite() && c.in_sec >= 0.0 && c.out_sec <= dur + 0.05 && c.in_sec < c.out_sec) {
+                refusals.push(format!("clip {n} ({}): {}–{} s is outside the clip (0–{} s)", a.name, secs(c.in_sec), secs(c.out_sec), secs(dur)));
+            } else if let Some(sp) = cache.entry(a.id.clone()).or_insert_with(|| speech(a)).as_ref() {
+                let (i, o) = (r3(snap_in(c.in_sec, sp).max(0.0)), r3(snap_out(c.out_sec, sp).min(dur)));
+                if o > i {
+                    if (i - c.in_sec).abs() > 0.0005 {
+                        warnings.push(format!("clip {n}: in {} → {} s (start of the word)", c.in_sec, i));
+                        c.in_sec = i;
+                    }
+                    if (o - c.out_sec).abs() > 0.0005 {
+                        warnings.push(format!("clip {n}: out {} → {} s (end of the word or sentence)", c.out_sec, o));
+                        c.out_sec = o;
+                    }
+                }
+            }
+        }
+        let len = c.out_sec - c.in_sec;
+        // Video only: a still's hold may be 0.2–60 s (the action contract and validate_manifest).
+        if a.kind == "video" && len.is_finite() && len < MIN_CLIP_SEC - 0.0005 {
+            refusals.push(format!("clip {n} is {} s; keep every clip ≥ 1 s", secs(len.max(0.0))));
+        }
+        out.push(c);
+    }
+    let m = TimelineManifest { clips: out, ..base.clone() };
+    let total = r3(expected_duration(&m));
+    let target = target.filter(|t| t.is_finite() && *t > 0.0);
+    if let Some(t) = target {
+        let tol = (t * 0.1).max(1.5);
+        if (total - t).abs() > tol {
+            let (verb, by) = if total < t { ("add", t - total) } else { ("remove", total - t) };
+            if revision {
+                warnings.push(format!("the revised cut is {} s but the brief asks for {} s: kept, since it answers Nic's notes; if the notes ask for a new length, suggest that Nic change the brief's length to match", secs(total), secs(t)));
+            } else {
+                refusals.push(format!("the cut is {} s but the brief asks for {} s: {verb} about {} s (anything from {} to {} s is fine)", secs(total), secs(t), secs(by), secs(t - tol), secs(t + tol)));
+            }
+        }
+    }
+    for o in &m.outputs {
+        if let Some(max) = o.max_sec.filter(|x| total > *x + 0.05) {
+            refusals.push(format!("the cut is {} s, over the {} limit of {} s: remove at least {} s", secs(total), o.platform, secs(max), secs(total - max)));
+        }
+    }
+    PlanCheck { clips: m.clips, total_sec: total, target_sec: target, warnings, refusals, unchanged_since_render: None }
+}
+
+/// `media_plan_check`: the project's assets, transcripts (each asset's `transcript.path`), brief
+/// length and outputs, then `plan_check_core`. Reads only.
+pub(crate) fn plan_check(state: &MediaState, slug: &str, clips: Vec<CheckClip>) -> Result<PlanCheck, String> {
+    plan_check_with(state, slug, clips, None)
+}
+
+/// `plan_check` with the rest of the plan (`CheckPlan`): the outputs / captions / colour / audio
+/// the plan would apply, and a revision's note ids.
+pub(crate) fn plan_check_with(state: &MediaState, slug: &str, clips: Vec<CheckClip>, plan: Option<CheckPlan>) -> Result<PlanCheck, String> {
+    let p = load_project(state, slug)?;
+    let root = project_root(state, slug)?;
+    if clips.len() > 200 {
+        return Err("too many clips".into());
+    }
+    let plan = plan.unwrap_or_default();
+    let base = with_check_plan(load_manifest(&root, slug), &plan);
+    let assets = list_assets(state, slug)?;
+    let speech = |a: &MediaAsset| transcript_file(a, &root).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| parse_speech(&t));
+    let revision = !plan.resolves.is_empty();
+    let mut r = plan_check_core_with(clips.into_iter().map(TimelineClip::from).collect(), &assets, &speech, &base, p.brief.as_ref().map(|b| b.length_sec), revision);
+    if revision {
+        let next = TimelineManifest { clips: r.clips.clone(), ..base.clone() };
+        r.unchanged_since_render = unchanged_since_render(state, slug, &base.notes, &plan.resolves, &next);
+    }
+    Ok(r)
+}
+
+/// Does `next` render the same cut as a render these notes are on (its plan snapshot)? None when
+/// no noted render has a snapshot to compare with.
+fn unchanged_since_render(state: &MediaState, slug: &str, notes: &[Note], resolves: &[String], next: &TimelineManifest) -> Option<bool> {
+    let renders = list_renders(state, slug).ok()?;
+    let snaps: Vec<TimelineManifest> = notes
+        .iter()
+        .filter(|n| resolves.contains(&n.id))
+        .filter_map(|n| n.render_id.as_ref())
+        .filter_map(|rid| renders.iter().find(|r| &r.id == rid))
+        .filter_map(|r| plan_snapshot(state, &r.plan_id))
+        .collect();
+    (!snaps.is_empty()).then(|| snaps.iter().any(|s| plans_equivalent(s, next)))
+}
+
+// ── Revisions that change nothing (E2E finding 3) ─────────────────────────────
+
+fn plan_manifest_key(plan_id: &str) -> String {
+    format!("plan-manifest:{plan_id}")
+}
+
+/// Do two manifests render the same cut? Clips, audio, the camera-audio level, captions, colour,
+/// the output format and the outputs are compared; ids, revisions, notes, the shot list, the
+/// output's file name, who saved it and when are not (a model re-sending the same clips with new
+/// ids changed nothing).
+pub(crate) fn plans_equivalent(a: &TimelineManifest, b: &TimelineManifest) -> bool {
+    let q = |x: f64| (x * 1000.0).round() as i64;
+    let clips = |m: &TimelineManifest| m.clips.iter().map(|c| (c.asset_id.clone(), q(c.in_sec), q(c.out_sec), c.fade_ms, c.transition_in.clone(), q(c.punch_in), c.fit.clone())).collect::<Vec<_>>();
+    let audio = |m: &TimelineManifest| m.audio.iter().map(|l| (l.asset_id.clone(), q(l.start_sec), q(l.in_sec), q(l.out_sec), q(l.volume), l.fade_in_ms, l.fade_out_ms, l.duck_under_voice)).collect::<Vec<_>>();
+    let out = |m: &TimelineManifest| (m.output.aspect.clone(), m.output.loudness_lufs, m.output.max_size_mb.map(q));
+    clips(a) == clips(b) && audio(a) == audio(b) && q(a.clip_audio_volume) == q(b.clip_audio_volume) && a.captions == b.captions && a.color == b.color && a.outputs == b.outputs && out(a) == out(b)
+}
+
+/// The most recently executed (approved) plan of a project.
+fn latest_used_plan(state: &MediaState, slug: &str) -> Option<String> {
+    state
+        .with(|c| {
+            c.query_row("SELECT p.id FROM plan p JOIN kv ON kv.key = 'plan-used:' || p.id WHERE p.project = ?1 ORDER BY kv.value DESC, kv.rowid DESC LIMIT 1", [slug], |r| r.get::<_, String>(0))
+                .optional()
+                .map_err(sql_err)
+        })
+        .ok()
+        .flatten()
+}
+
+fn plan_snapshot(state: &MediaState, plan_id: &str) -> Option<TimelineManifest> {
+    let j = state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [plan_manifest_key(plan_id)], |r| r.get::<_, String>(0)).optional().map_err(sql_err)).ok().flatten()?;
+    serde_json::from_str(&j).ok()
+}
+
+/// A note on a render is resolved by a revision only when the cut approved since differs from the
+/// cut the note is on. No later approved plan (a plain resolve), or plans from before snapshots
+/// existed: no check.
+pub(crate) fn check_revision_changed(state: &MediaState, slug: &str, note: &Note) -> Result<(), String> {
+    let Some(render_id) = &note.render_id else { return Ok(()) };
+    let Some(old_plan) = list_renders(state, slug)?.into_iter().find(|r| &r.id == render_id).map(|r| r.plan_id) else { return Ok(()) };
+    let Some(new_plan) = latest_used_plan(state, slug).filter(|p| *p != old_plan) else { return Ok(()) };
+    match (plan_snapshot(state, &old_plan), plan_snapshot(state, &new_plan)) {
+        (Some(a), Some(b)) if plans_equivalent(&a, &b) => Err("UNCHANGED_PLAN: the revised cut is the same as the one this note is on (same clips, audio, captions, colour and outputs), so the note stays open. Change the edit for it, then render again.".into()),
+        _ => Ok(()),
+    }
 }
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────
@@ -2927,7 +3509,8 @@ pub async fn media_chat_log(app: tauri::AppHandle, slug: String, append: Option<
 
 #[tauri::command]
 pub async fn media_render_plan(app: tauri::AppHandle, slug: String, proposed_by: String) -> Result<RenderPlan, String> {
-    blocking(move || build_plan(&app.state::<MediaState>(), &slug, &proposed_by)).await
+    // Off the async runtime: detect_bars goes through the MCP layer and blocks on it.
+    blocking(move || build_plan_with(&app.state::<MediaState>(), &AppForge(app.clone()), &slug, &proposed_by)).await
 }
 
 fn tool_json(text: &str) -> Value {
@@ -2958,8 +3541,10 @@ pub(crate) struct RenderOut {
 pub(crate) fn prepare_outputs(m: &TimelineManifest, assets: &[MediaAsset], plan: &RenderPlan, root: &Path) -> Result<Vec<RenderOut>, String> {
     let many = m.outputs.len() > 1;
     let mut outs = vec![];
-    for o in &m.outputs {
-        let spec = render_spec(m, assets, o, root)?;
+    for (k, o) in m.outputs.iter().enumerate() {
+        // The framing Nic approved on the card (a plan from before framing has none: pad).
+        let framing = if plan.framing.len() == m.clips.len() { output_framing(&plan.framing, k) } else { vec![] };
+        let spec = render_spec_with(m, assets, o, root, &framing)?;
         let tag = if many { format!("_{}", o.platform) } else { String::new() };
         let spec_path = root.join("working").join(format!("render_{}{tag}.json", plan.plan_id));
         write_atomic(&spec_path, serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?.as_bytes())?;
@@ -3337,8 +3922,15 @@ pub async fn media_note_add(app: tauri::AppHandle, slug: String, note: NoteInput
 }
 
 #[tauri::command]
-pub async fn media_note_resolve(app: tauri::AppHandle, slug: String, note_id: String) -> Result<(), String> {
-    blocking(move || note_resolve(&app.state::<MediaState>(), &slug, &note_id)).await
+pub async fn media_note_resolve(app: tauri::AppHandle, slug: String, note_id: String, manual: Option<bool>) -> Result<(), String> {
+    blocking(move || note_resolve_as(&app.state::<MediaState>(), &slug, &note_id, manual == Some(true))).await
+}
+
+/// Snap clips to speech and check clip / total length against the brief and the outputs (E2E
+/// finding 2). Reads only: nothing is saved.
+#[tauri::command]
+pub async fn media_plan_check(app: tauri::AppHandle, slug: String, clips: Vec<CheckClip>, plan: Option<CheckPlan>) -> Result<PlanCheck, String> {
+    blocking(move || plan_check_with(&app.state::<MediaState>(), &slug, clips, plan)).await
 }
 
 /// The review rounds and open decisions, as stored in project.json (contract §5).
@@ -3451,7 +4043,7 @@ mod tests {
     }
 
     fn clip(id: &str, asset: &str, i: f64, o: f64) -> TimelineClip {
-        TimelineClip { id: id.into(), asset_id: asset.into(), in_sec: i, out_sec: o, fade_ms: 0, transition_in: Transition::default(), punch_in: 1.0 }
+        TimelineClip { id: id.into(), asset_id: asset.into(), in_sec: i, out_sec: o, fade_ms: 0, transition_in: Transition::default(), punch_in: 1.0, fit: "auto".into() }
     }
 
     #[test]
@@ -4650,6 +5242,440 @@ mod tests {
         assert_eq!(load_project(&st, &p.slug).unwrap().review.rounds[0].status, "approved");
         std::fs::remove_file(&out[0].path).unwrap();
         assert!(deliverables_get(&st, &p.slug).unwrap().is_empty(), "a deliverable that's gone is dropped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// E2E findings 1–3: framing per clip (detect_bars → crop / fit), the plan check (snap to speech,
+/// clip and total length) and revisions that change nothing (temp dirs only, a mock forge).
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn tmp_root() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("media-framing-{}", short_id("t")));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn asset(id: &str, kind: &str, dur: Option<f64>, w: u32, h: u32) -> MediaAsset {
+        MediaAsset { id: id.into(), project: "p".into(), kind: kind.into(), role: "clip".into(), name: format!("{id}.x"), path: format!("C:/x/{id}"), read_only: true, size_bytes: 1, duration_sec: dur, width: Some(w), height: Some(h), thumb_path: None, added_at: now_iso(), ..Default::default() }
+    }
+
+    fn clip(id: &str, asset: &str, i: f64, o: f64) -> TimelineClip {
+        TimelineClip { id: id.into(), asset_id: asset.into(), in_sec: i, out_sec: o, fade_ms: 0, transition_in: Transition::default(), punch_in: 1.0, fit: "auto".into() }
+    }
+
+    fn preset(platform: &str, aspect: &str, max_sec: Option<f64>) -> PlatformPreset {
+        PlatformPreset { platform: platform.into(), aspect: aspect.into(), loudness_lufs: -14, max_size_mb: None, max_sec }
+    }
+
+    /// The demo reel's two framings: vertical pillarbox before 60 s, a landscape window after.
+    fn reel_bars(in_sec: f64) -> Value {
+        if in_sec < 60.0 {
+            json!({ "content": { "x": 656, "y": 0, "w": 608, "h": 1080 }, "source": { "w": 1920, "h": 1080 }, "confidence": 0.95, "letterboxed": false, "pillarboxed": true, "regions": [{ "x": 656, "y": 0, "w": 608, "h": 1080, "count": 8 }] })
+        } else {
+            json!({ "content": { "x": 172, "y": 96, "w": 1576, "h": 888 }, "source": { "w": 1920, "h": 1080 }, "confidence": 0.9, "letterboxed": true, "pillarboxed": true, "regions": [{ "x": 172, "y": 96, "w": 1576, "h": 888, "count": 8 }] })
+        }
+    }
+
+    struct BarsForge {
+        calls: RefCell<Vec<Value>>,
+    }
+
+    impl Forge for BarsForge {
+        fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+            assert_eq!(tool, "detect_bars");
+            self.calls.borrow_mut().push(args.clone());
+            Ok(reel_bars(args["start_s"].as_f64().unwrap()))
+        }
+    }
+
+    #[test]
+    fn fit_rule_and_old_manifests() {
+        // ≤ 0.75 into vertical → fill; landscape into vertical → blur; ±15% of the output → fill.
+        assert_eq!(auto_fit(608, 1080, "9:16"), "fill");
+        assert_eq!(auto_fit(608, 1080, "4:5"), "fill");
+        assert_eq!(auto_fit(1576, 888, "9:16"), "blur");
+        assert_eq!(auto_fit(1920, 1080, "4:5"), "blur");
+        assert_eq!(auto_fit(1576, 888, "16:9"), "fill");
+        assert_eq!(auto_fit(1080, 1080, "1:1"), "fill");
+        assert_eq!(auto_fit(1440, 1080, "16:9"), "pad"); // 4:3 is 25% off 16:9
+        assert_eq!(auto_fit(608, 1080, "16:9"), "pad");
+        assert_eq!(auto_fit(1080, 1350, "9:16"), "pad"); // 0.8: neither tall enough nor within 15%
+        assert_eq!(auto_fit(0, 1080, "9:16"), "pad");
+        // A clip without "fit" loads as auto and isn't written back; explicit fits round-trip.
+        let c: TimelineClip = serde_json::from_value(json!({ "id": "c1", "assetId": "v", "inSec": 0.0, "outSec": 2.0, "fadeMs": 0 })).unwrap();
+        assert_eq!(c.fit, "auto");
+        assert!(serde_json::to_value(&c).unwrap().get("fit").is_none());
+        let f = TimelineClip { fit: "blur".into(), ..c.clone() };
+        assert_eq!(serde_json::to_value(&f).unwrap()["fit"], "blur");
+        let assets = vec![asset("v", "video", Some(10.0), 1920, 1080)];
+        let mut m = default_manifest("p");
+        m.clips = vec![c];
+        assert_eq!(validate_manifest(&m, "p", &assets), Ok(()));
+        m.clips[0].fit = "stretch".into();
+        assert!(validate_manifest(&m, "p", &assets).unwrap_err().contains("fit must be"));
+    }
+
+    #[test]
+    fn framing_per_clip_from_its_own_range() {
+        let assets = vec![asset("v", "video", Some(120.0), 1920, 1080), asset("i", "image", None, 1080, 1920)];
+        let mut m = default_manifest("p");
+        m.outputs = vec![preset("reels", "9:16", None), preset("youtube", "16:9", None)];
+        m.clips = vec![clip("c1", "v", 10.0, 14.0), clip("c2", "v", 70.0, 75.0), clip("c3", "i", 0.0, 2.0), TimelineClip { fit: "pad".into(), ..clip("c4", "v", 20.0, 22.0) }];
+        let mut seen = vec![];
+        let (fr, warns) = plan_framing(&m, &assets, &mut |a, i, o| {
+            seen.push((a.id.clone(), i, o));
+            parse_bars(&reel_bars(i))
+        });
+        // Measured per video clip over its own in..out (the still isn't measured).
+        assert_eq!(seen, [("v".to_string(), 10.0, 14.0), ("v".to_string(), 70.0, 75.0), ("v".to_string(), 20.0, 22.0)]);
+        assert!(warns.is_empty(), "{warns:?}");
+        let pillar = CropRect { x: 656, y: 0, w: 608, h: 1080 };
+        assert_eq!(fr[0], ClipFraming { crop: Some(pillar), content_w: Some(608), content_h: Some(1080), fits: vec!["fill".into(), "pad".into()] });
+        assert_eq!((fr[1].crop, fr[1].fits.clone()), (Some(CropRect { x: 172, y: 96, w: 1576, h: 888 }), vec!["blur".to_string(), "fill".to_string()]));
+        assert_eq!((fr[2].crop, fr[2].content_w, fr[2].fits.clone()), (None, Some(1080), vec!["fill".to_string(), "pad".to_string()]));
+        assert_eq!(fr[3].fits, ["pad", "pad"]); // explicit fit wins (still cropped to the picture)
+        assert_eq!(fr[3].crop, Some(pillar));
+        assert_eq!(framing_label(&fr[0], &m.outputs), "reels fill · youtube pad · 608×1080 (bars cropped)");
+        assert_eq!(framing_label(&fr[3], &m.outputs), "pad 608×1080 (bars cropped)");
+        assert_eq!(output_framing(&fr, 0)[1], (Some(CropRect { x: 172, y: 96, w: 1576, h: 888 }), "blur".to_string()));
+        // detect_bars fails → pad, no crop, a warning (an explicit fit is kept); unsure → no crop.
+        m.clips[1].fit = "fill".into();
+        let (fr, warns) = plan_framing(&m, &assets, &mut |_, i, _| if i < 60.0 { Err("Media Forge is off".into()) } else { Ok(Bars { confidence: 0.2, ..parse_bars(&reel_bars(i)).unwrap() }) });
+        assert_eq!((fr[0].crop, fr[0].fits.clone()), (None, vec!["pad".to_string(), "pad".to_string()]));
+        assert_eq!((fr[1].crop, fr[1].fits.clone()), (None, vec!["fill".to_string(), "fill".to_string()]));
+        assert!(warns[0].starts_with("clip 1: couldn't measure black bars (Media Forge is off)"), "{warns:?}");
+        assert!(warns[1].starts_with("clip 2: the black-bar check was unsure"), "{warns:?}");
+        // A full frame (no bars) isn't cropped; bad results are errors.
+        let full = parse_bars(&json!({ "content": { "x": 0, "y": 0, "w": 1920, "h": 1080 }, "source": { "w": 1920, "h": 1080 }, "confidence": 1.0, "letterboxed": false, "pillarboxed": false, "regions": [] })).unwrap();
+        assert!(!full.boxed);
+        assert!(parse_bars(&json!({ "raw": "Error: not a video" })).is_err());
+        // Two framings inside one clip: the union is kept, with a warning. bars.py reports such a
+        // clip with confidence ~0 (no sample matches the union), which must not read as "unsure".
+        let union = json!({ "content": { "x": 172, "y": 0, "w": 1576, "h": 1080 }, "source": { "w": 1920, "h": 1080 }, "confidence": 0.0, "letterboxed": false, "pillarboxed": true,
+            "regions": [{ "x": 656, "y": 0, "w": 608, "h": 1080, "count": 4 }, { "x": 172, "y": 96, "w": 1576, "h": 888, "count": 4 }] });
+        let (fr, warns) = plan_framing(&m, &assets, &mut |_, _, _| parse_bars(&union));
+        assert_eq!(fr[0].crop, Some(CropRect { x: 172, y: 0, w: 1576, h: 1080 }));
+        assert!(warns.iter().any(|w| w.starts_with("clip 1: the framing changes inside this clip, so it's cropped to the widest picture (1576×1080)")), "{warns:?}");
+        assert!(!warns.iter().any(|w| w.contains("unsure")), "{warns:?}");
+        // One framing with low confidence (mostly black samples) is still unsure: no crop.
+        let (fr, warns) = plan_framing(&m, &assets, &mut |_, _, _| Ok(Bars { confidence: 0.25, ..parse_bars(&reel_bars(70.0)).unwrap() }));
+        assert_eq!(fr[0].crop, None);
+        assert!(warns[0].contains("unsure"), "{warns:?}");
+    }
+
+    #[test]
+    fn framed_specs_carry_crop_and_fit() {
+        let root = tmp_root();
+        let assets = vec![asset("v", "video", Some(120.0), 1920, 1080)];
+        let mut m = default_manifest("p");
+        m.outputs = vec![preset("reels", "9:16", None)];
+        m.clips = vec![clip("c1", "v", 10.0, 14.0), clip("c2", "v", 20.0, 24.0)];
+        let plain = render_spec(&m, &assets, &m.outputs[0], &root).unwrap();
+        assert_eq!(plain["version"], 1);
+        // Pad with no crop changes nothing: the same spec as before framing.
+        let padded = render_spec_with(&m, &assets, &m.outputs[0], &root, &[(None, "pad".into()), (None, "pad".into())]).unwrap();
+        assert_eq!(padded, plain);
+        let crop = CropRect { x: 656, y: 0, w: 608, h: 1080 };
+        let s = render_spec_with(&m, &assets, &m.outputs[0], &root, &[(Some(crop), "fill".into()), (None, "pad".into())]).unwrap();
+        assert_eq!(s["version"], 2);
+        assert_eq!(s["clips"][0]["crop"], json!({ "x": 656, "y": 0, "w": 608, "h": 1080 }));
+        assert_eq!(s["clips"][0]["fit"], "fill");
+        assert!(s["clips"][1].get("crop").is_none() && s["clips"][1].get("fit").is_none());
+        assert_eq!((s["clips"][1]["punch_in"].as_f64(), s["clips"][1]["transition_in"]["kind"].as_str()), (Some(1.0), Some("cut")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_measures_once_and_the_render_uses_the_approved_framing() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Framing", None).unwrap();
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), ..asset("v", "video", Some(120.0), 1920, 1080) }).unwrap();
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.outputs = vec![preset("reels", "9:16", None)];
+        m.clips = vec![clip("c1", "v", 10.0, 14.0), clip("c2", "v", 70.0, 75.0)];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let forge = BarsForge { calls: RefCell::new(vec![]) };
+        let plan = build_plan_with(&st, &forge, &p.slug, "director").unwrap();
+        let args = forge.calls.borrow().clone();
+        assert_eq!(args.len(), 2);
+        assert_eq!((args[1]["start_s"].as_f64(), args[1]["sample_s"].as_f64(), args[1]["path"].as_str()), (Some(70.0), Some(5.0), Some("C:/x/v")));
+        assert_eq!(plan.sources.iter().map(|s| s.framing.as_str()).collect::<Vec<_>>(), ["fill 608×1080 (bars cropped)", "blur 1576×888 (bars cropped)"]);
+        assert!(plan.warnings.is_empty());
+        // Cached by asset + in + out: a second plan doesn't measure again.
+        let plan2 = build_plan_with(&st, &forge, &p.slug, "director").unwrap();
+        assert_eq!((forge.calls.borrow().len(), plan2.framing.clone()), (2, plan.framing.clone()));
+        // The stored plan carries the framing to execute time: the spec has the crop and fit.
+        let m = load_manifest(Path::new(&p.root), &p.slug);
+        let outs = prepare_outputs(&m, &list_assets(&st, &p.slug).unwrap(), &load_plan(&st, &plan.plan_id).unwrap(), Path::new(&p.root)).unwrap();
+        let spec: Value = serde_json::from_str(&std::fs::read_to_string(&outs[0].spec_path).unwrap()).unwrap();
+        assert_eq!((spec["version"].as_u64(), spec["clips"][0]["fit"].as_str(), spec["clips"][1]["fit"].as_str()), (Some(2), Some("fill"), Some("blur")));
+        assert_eq!(spec["clips"][1]["crop"]["w"], 1576);
+        // Without media-forge: pad, no crop, one warning per video clip.
+        let fallback = build_plan(&st, &p.slug, "nic").unwrap();
+        assert_eq!(fallback.warnings.len(), 0); // cached answers still count
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips[0].out_sec = 15.0;
+        manifest_save(&st, &p.slug, m).unwrap();
+        let fallback = build_plan(&st, &p.slug, "nic").unwrap();
+        assert_eq!((fallback.warnings.len(), fallback.framing[0].fits[0].as_str(), fallback.framing[0].crop), (1, "pad", None));
+        assert!(fallback.warnings[0].contains("media-forge isn't connected"));
+        // A plan stored before framing existed still loads (no framing: pad, as it rendered then).
+        let mut old: Value = serde_json::to_value(&plan).unwrap();
+        old.as_object_mut().unwrap().remove("framing");
+        old.as_object_mut().unwrap().remove("warnings");
+        old["sources"][0].as_object_mut().unwrap().remove("framing");
+        let old: RenderPlan = serde_json::from_value(old).unwrap();
+        assert!(old.framing.is_empty() && old.sources[0].framing.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Speech in asset time: "I've been acting" 2.0–3.4 (segment to 3.5), "for ten years now." 5.0–7.9.
+    fn transcript_json() -> String {
+        json!({ "language": "en", "segments": [
+            { "start": 2.0, "end": 3.5, "text": "I've been acting", "words": [{ "w": "I've", "s": 2.0, "e": 2.3 }, { "w": "been", "s": 2.4, "e": 2.7 }, { "w": "acting", "s": 2.8, "e": 3.4 }] },
+            { "start": 5.0, "end": 8.0, "text": "for ten years now.", "words": [{ "w": "for", "s": 5.0, "e": 5.3 }, { "w": "ten", "s": 5.4, "e": 5.8 }, { "w": "years", "s": 6.0, "e": 6.6 }, { "w": "now.", "s": 7.0, "e": 7.9 }] },
+        ] })
+        .to_string()
+    }
+
+    #[test]
+    fn speech_snapping() {
+        let sp = parse_speech(&transcript_json()).unwrap();
+        assert_eq!((sp.words.len(), sp.segments.len()), (7, 2));
+        assert_eq!(snap_in(2.5, &sp), 2.4); // mid "been" → its start
+        assert_eq!(snap_in(3.45, &sp), 3.45); // in a pause: stays
+        assert_eq!(snap_in(2.4, &sp), 2.4);
+        assert_eq!(snap_out(6.2, &sp), 6.6); // mid "years" → its end (1.4 s from the sentence's end: stays there)
+        assert_eq!(snap_out(7.5, &sp), 8.0); // mid "now." → 7.9, then the sentence ends within 0.6 s → 8.0
+        assert_eq!(snap_out(3.2, &sp), 3.5); // → 3.4, then the segment end
+        assert_eq!(snap_out(4.0, &sp), 4.0); // between sentences: stays
+        // Without word times the segment is the unit.
+        let segs = parse_speech(&json!({ "segments": [{ "start": 2.0, "end": 3.5, "text": "I've been acting" }] }).to_string()).unwrap();
+        assert_eq!((snap_in(2.9, &segs), snap_out(3.1, &segs), snap_out(2.5, &segs)), (2.0, 3.5, 2.5));
+        assert!(parse_speech("not json").is_none());
+    }
+
+    #[test]
+    fn plan_check_snaps_and_refuses_short_clips_and_wrong_length() {
+        let assets = vec![asset("v", "video", Some(8.5), 1920, 1080), asset("vc", "video", Some(7.95), 1920, 1080), asset("w", "video", Some(30.0), 1920, 1080), asset("i", "image", None, 1080, 1920)];
+        let speech = |a: &MediaAsset| a.id.starts_with('v').then(|| parse_speech(&transcript_json()).unwrap());
+        let mut base = default_manifest("p");
+        base.outputs = vec![preset("reels", "9:16", Some(90.0))];
+        // v: 2.5–7.5 → 2.4–8.0 (mid-word in, out runs to the sentence's end); w has no transcript.
+        let r = plan_check_core(vec![clip("", "v", 2.5, 7.5), clip("c2", "w", 10.0, 13.0), clip("c3", "i", 0.0, 2.0)], &assets, &speech, &base, Some(15.0));
+        assert_eq!(r.clips.iter().map(|c| (c.id.as_str(), c.in_sec, c.out_sec)).collect::<Vec<_>>(), [("", 2.4, 8.0), ("c2", 10.0, 13.0), ("c3", 0.0, 2.0)]);
+        assert_eq!(r.warnings, ["clip 1: in 2.5 → 2.4 s (start of the word)", "clip 1: out 7.5 → 8 s (end of the word or sentence)"]);
+        assert_eq!((r.total_sec, r.target_sec), (10.6, Some(15.0)));
+        assert_eq!(r.refusals, ["the cut is 10.6 s but the brief asks for 15 s: add about 4.4 s (anything from 13.5 to 16.5 s is fine)"]);
+        // The sentence end past the asset's end: clamped to it (never crossing the asset's bounds).
+        let r = plan_check_core(vec![clip("c1", "vc", 2.5, 7.5)], &assets, &speech, &base, None);
+        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec), (2.4, 7.95));
+        // A 0.3 s clip is refused; too long for the brief and the platform cap too.
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 0.3), clip("c2", "w", 1.0, 29.0)], &assets, &speech, &base, Some(15.0));
+        assert_eq!(r.refusals[0], "clip 1 is 0.3 s; keep every clip ≥ 1 s");
+        assert_eq!(r.refusals[1], "the cut is 28.3 s but the brief asks for 15 s: remove about 13.3 s (anything from 13.5 to 16.5 s is fine)");
+        let mut capped = base.clone();
+        capped.outputs[0].max_sec = Some(20.0);
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 25.0)], &assets, &speech, &capped, None);
+        assert_eq!((r.target_sec, r.refusals.clone()), (None, vec!["the cut is 25 s, over the reels limit of 20 s: remove at least 5 s".to_string()]));
+        // Inside the window (±10%, at least ±1.5 s): fine. Short briefs get the 1.5 s floor.
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 13.6)], &assets, &speech, &base, Some(15.0));
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 6.4)], &assets, &speech, &base, Some(5.0));
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        // Bounds and unknown assets are refusals, not snaps.
+        let r = plan_check_core(vec![clip("c1", "w", 25.0, 31.0), clip("c2", "ghost", 0.0, 2.0)], &assets, &speech, &base, None);
+        assert!(r.refusals[0].starts_with("clip 1 (w.x): 25–31 s is outside the clip (0–30 s)"), "{:?}", r.refusals);
+        assert!(r.refusals[1].starts_with("clip 2 uses an asset that isn't in this project"));
+        // Crossfades shorten the total as the render does.
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 8.0), TimelineClip { transition_in: Transition { kind: "crossfade".into(), ms: 1000 }, ..clip("c2", "w", 10.0, 18.0) }], &assets, &speech, &base, Some(15.0));
+        assert_eq!(r.total_sec, 15.0);
+    }
+
+    #[test]
+    fn plan_check_reads_the_project_transcript_and_brief() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Check", None).unwrap();
+        let tpath = Path::new(&p.root).join("working").join("captions").join("v.json");
+        std::fs::create_dir_all(tpath.parent().unwrap()).unwrap();
+        std::fs::write(&tpath, transcript_json()).unwrap();
+        let t = AssetTranscript { path: tpath.to_string_lossy().to_string(), lang: "en".into(), words: 7, first_speech_sec: Some(2.0), last_speech_sec: Some(7.9) };
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), transcript: Some(t), ..asset("v", "video", Some(10.0), 1920, 1080) }).unwrap();
+        let brief = CreativeBrief { idea: "x".into(), goal: "g".into(), platform: "reels".into(), length_sec: 5.0, aspect: "9:16".into(), tone: "t".into(), references: vec![], guessed: vec![], approved: true, updated_by: "nic".into(), updated_at: now_iso() };
+        project_update(&st, &p.slug, None, Some(brief), None, None).unwrap();
+        let clips: Vec<CheckClip> = serde_json::from_value(json!([{ "assetId": "v", "inSec": 2.5, "outSec": 7.5 }])).unwrap();
+        let r = plan_check(&st, &p.slug, clips).unwrap();
+        assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec, r.total_sec, r.target_sec), (2.4, 8.0, 5.6, Some(5.0)));
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        let wire = serde_json::to_value(&r).unwrap();
+        assert!(wire["totalSec"].is_number() && wire["targetSec"] == 5.0 && wire["refusals"].is_array() && wire["clips"][0]["assetId"] == "v");
+        assert!(wire["clips"][0].get("id").is_none() && wire["clips"][0].get("crop").is_none());
+        assert!(serde_json::from_value::<Vec<CheckClip>>(json!([{ "assetId": "v", "inSec": 0, "outSec": 1, "evil": 1 }])).is_err());
+        // A page-sent crop is accepted and dropped (framing is Rust's, at plan time).
+        let with_crop: Vec<CheckClip> = serde_json::from_value(json!([{ "id": "c1", "assetId": "v", "inSec": 2.5, "outSec": 7.5, "fit": "fill", "crop": { "x": 0, "y": 0, "w": 16, "h": 16 } }])).unwrap();
+        let wire = serde_json::to_value(plan_check(&st, &p.slug, with_crop).unwrap()).unwrap();
+        assert_eq!((wire["clips"][0]["id"].as_str(), wire["clips"][0]["fit"].as_str(), wire["clips"][0].get("crop")), (Some("c1"), Some("fill"), None));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_check_holds_the_plan_to_its_own_outputs_stills_and_revisions() {
+        let assets = vec![asset("w", "video", Some(120.0), 1920, 1080), asset("i", "image", None, 1080, 1920)];
+        let speech = |_: &MediaAsset| None;
+        let mut base = default_manifest("p");
+        base.outputs = vec![preset("youtube", "16:9", None)];
+        // A still's short hold is fine (contract: 0.2–60 s); a short video clip is not.
+        let r = plan_check_core(vec![clip("c1", "i", 0.0, 0.5), clip("c2", "w", 0.0, 5.0)], &assets, &speech, &base, None);
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 0.5)], &assets, &speech, &base, None);
+        assert_eq!(r.refusals, ["clip 1 is 0.5 s; keep every clip ≥ 1 s"]);
+        // The plan's own outputs: saved youtube (no cap), plan → tiktok (60 s) refuses a 75 s cut…
+        let tiktok = CheckPlan { outputs: Some(vec![preset("tiktok", "9:16", Some(60.0))]), ..Default::default() };
+        let m = with_check_plan(base.clone(), &tiktok);
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 75.0)], &assets, &speech, &m, None);
+        assert_eq!(r.refusals, ["the cut is 75 s, over the tiktok limit of 60 s: remove at least 15 s"]);
+        // …and a plan that drops a capped output isn't held to it.
+        let mut reels = base.clone();
+        reels.outputs = vec![preset("reels", "9:16", Some(90.0))];
+        let yt = CheckPlan { outputs: Some(vec![preset("youtube", "16:9", None)]), ..Default::default() };
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 100.0)], &assets, &speech, &with_check_plan(reels.clone(), &yt), None);
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        assert_eq!(with_check_plan(reels.clone(), &CheckPlan { outputs: Some(vec![preset("myspace", "9:16", None)]), ..Default::default() }).outputs, reels.outputs);
+        // The plan's crossfades and captions count (spec v2 accounting) from the plan, not the disk.
+        let cap = CheckPlan { captions: Some(CaptionTrack { enabled: true, ..base.captions.clone() }), ..Default::default() };
+        assert!(with_check_plan(base.clone(), &cap).captions.enabled);
+        // Page JSON (the merged manifest's fields) deserializes; unknown keys don't.
+        let wire: CheckPlan = serde_json::from_value(json!({ "outputs": [{ "platform": "tiktok", "aspect": "9:16", "loudnessLufs": -14, "maxSizeMb": null, "maxSec": 60 }], "resolves": ["n-1"] })).unwrap();
+        assert_eq!((wire.outputs.unwrap()[0].max_sec, wire.resolves), (Some(60.0), vec!["n-1".to_string()]));
+        assert!(serde_json::from_value::<CheckPlan>(json!({ "evil": 1 })).is_err());
+        // A revision answering notes may change the length: a warning, not a refusal. Caps still refuse.
+        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 60.0)], &assets, &speech, &base, Some(30.0), true);
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        assert!(r.warnings[0].starts_with("the revised cut is 60 s but the brief asks for 30 s: kept, since it answers Nic's notes"), "{:?}", r.warnings);
+        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 75.0)], &assets, &speech, &m, Some(30.0), true);
+        assert_eq!(r.refusals, ["the cut is 75 s, over the tiktok limit of 60 s: remove at least 15 s"]);
+        let r = plan_check_core(vec![clip("c1", "w", 0.0, 60.0)], &assets, &speech, &base, Some(30.0));
+        assert!(r.refusals[0].starts_with("the cut is 60 s but the brief asks for 30 s"), "{:?}", r.refusals);
+    }
+
+    #[test]
+    fn plan_check_compares_a_revision_with_the_noted_render() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Noted", None).unwrap();
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), ..asset("v", "video", Some(10.0), 1920, 1080) }).unwrap();
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![clip("c1", "v", 0.0, 3.0)];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let p1 = build_plan(&st, &p.slug, "director").unwrap();
+        mark_plan_used(&st, &p1.plan_id);
+        let f = Path::new(&p.root).join("renders").join("r-1.mp4");
+        std::fs::write(&f, b"x").unwrap();
+        record_render(&st, &VerifiedRender { id: "r-1".into(), project: p.slug.clone(), plan_id: p1.plan_id.clone(), path: f.to_string_lossy().to_string(), duration_sec: 3.0, width: 1920, height: 1080, size_bytes: 1, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() }, Some("custom")).unwrap();
+        on_verified_render(&st, &p.slug, "r-1");
+        let n = note_add(&st, &p.slug, NoteInput { render_id: Some("r-1".into()), at_sec: Some(1.0), text: "tighter".into(), by: "nic".into(), via_voice: false }).unwrap();
+        // Nic trims by hand since that render (cut B, saved).
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips[0].out_sec = 2.5;
+        manifest_save(&st, &p.slug, m).unwrap();
+        let check = |out: f64, resolves: Vec<String>| {
+            let clips: Vec<CheckClip> = serde_json::from_value(json!([{ "assetId": "v", "inSec": 0.0, "outSec": out }])).unwrap();
+            plan_check_with(&st, &p.slug, clips, Some(CheckPlan { resolves, ..Default::default() })).unwrap()
+        };
+        // A revision equal to Nic's edit B still changes the noted cut A; one equal to A doesn't.
+        assert_eq!(check(2.5, vec![n.id.clone()]).unchanged_since_render, Some(false));
+        assert_eq!(check(3.0, vec![n.id.clone()]).unchanged_since_render, Some(true));
+        // Not a revision (or no noted render): nothing to compare, and the field stays off the wire.
+        let r = check(3.0, vec![]);
+        assert_eq!(r.unchanged_since_render, None);
+        assert!(serde_json::to_value(&r).unwrap().get("unchangedSinceRender").is_none());
+        assert_eq!(check(3.0, vec!["n-ghost".into()]).unchanged_since_render, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn equivalent_plans_ignore_ids_notes_and_bookkeeping() {
+        let mut a = default_manifest("p");
+        a.clips = vec![clip("c1", "v", 1.0, 3.0), clip("c2", "v", 5.0, 7.0)];
+        let mut b = a.clone();
+        b.clips[0].id = "c-new".into();
+        b.revision = 9;
+        b.updated_by = "director".into();
+        b.notes = vec![Note { id: "n1".into(), render_id: None, at_sec: None, text: "x".into(), by: "nic".into(), via_voice: false, resolved: false, at: now_iso() }];
+        b.output.name = "other".into();
+        assert!(plans_equivalent(&a, &b));
+        let diff = |f: &dyn Fn(&mut TimelineManifest)| {
+            let mut x = a.clone();
+            f(&mut x);
+            !plans_equivalent(&a, &x)
+        };
+        assert!(diff(&|x| x.clips[1].out_sec = 6.5));
+        assert!(diff(&|x| x.clips.swap(0, 1)));
+        assert!(diff(&|x| x.clips[0].fit = "blur".into()));
+        assert!(diff(&|x| x.captions.enabled = true));
+        assert!(diff(&|x| x.color.preset = "warm".into()));
+        assert!(diff(&|x| x.outputs.push(preset("youtube", "16:9", None))));
+        assert!(diff(&|x| x.clip_audio_volume = 0.5));
+        assert!(diff(&|x| x.audio.push(AudioLayer { id: "l1".into(), asset_id: "m".into(), start_sec: 0.0, in_sec: 0.0, out_sec: 2.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, duck_under_voice: false })));
+    }
+
+    #[test]
+    fn an_identical_revision_never_resolves_notes() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Revise", None).unwrap();
+        save_asset(&st, &MediaAsset { project: p.slug.clone(), ..asset("v", "video", Some(10.0), 1920, 1080) }).unwrap();
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![clip("c1", "v", 0.0, 3.0)];
+        manifest_save(&st, &p.slug, m).unwrap();
+        let renders = Path::new(&p.root).join("renders");
+        let render = |id: &str, plan: &str| {
+            let f = renders.join(format!("{id}.mp4"));
+            std::fs::write(&f, b"x").unwrap();
+            record_render(&st, &VerifiedRender { id: id.into(), project: p.slug.clone(), plan_id: plan.into(), path: f.to_string_lossy().to_string(), duration_sec: 3.0, width: 1920, height: 1080, size_bytes: 1, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() }, Some("custom")).unwrap();
+            on_verified_render(&st, &p.slug, id);
+        };
+        // Round 1, and Nic's note on it.
+        let p1 = build_plan(&st, &p.slug, "director").unwrap();
+        mark_plan_used(&st, &p1.plan_id);
+        render("r-1", &p1.plan_id);
+        let note = |text: &str| note_add(&st, &p.slug, NoteInput { render_id: Some("r-1".into()), at_sec: Some(1.0), text: text.into(), by: "nic".into(), via_voice: false }).unwrap();
+        let n1 = note("tighter");
+        let n2 = note("warmer");
+        // No revision approved since: a plain resolve works as before.
+        note_resolve(&st, &p.slug, &n2.id).unwrap();
+        // The Director's revision re-sends the same clips (new ids): approved, but nothing changed.
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips[0].id = "c-again".into();
+        manifest_save(&st, &p.slug, m).unwrap();
+        let p2 = build_plan(&st, &p.slug, "director").unwrap();
+        mark_plan_used(&st, &p2.plan_id);
+        let e = note_resolve(&st, &p.slug, &n1.id).unwrap_err();
+        assert!(e.starts_with("UNCHANGED_PLAN"), "{e}");
+        assert!(!load_manifest(Path::new(&p.root), &p.slug).notes.iter().find(|n| n.id == n1.id).unwrap().resolved);
+        // A revision that changes the cut resolves it.
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips[0].out_sec = 2.5;
+        manifest_save(&st, &p.slug, m).unwrap();
+        let p3 = build_plan(&st, &p.slug, "director").unwrap();
+        mark_plan_used(&st, &p3.plan_id);
+        note_resolve(&st, &p.slug, &n1.id).unwrap();
+        assert!(load_manifest(Path::new(&p.root), &p.slug).notes.iter().all(|n| n.resolved));
+        // Nic's own Resolve click skips the check.
+        let n3 = note("louder");
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips[0].out_sec = 3.0;
+        manifest_save(&st, &p.slug, m).unwrap();
+        let p4 = build_plan(&st, &p.slug, "nic").unwrap();
+        mark_plan_used(&st, &p4.plan_id);
+        assert!(note_resolve(&st, &p.slug, &n3.id).unwrap_err().starts_with("UNCHANGED_PLAN"));
+        note_resolve_as(&st, &p.slug, &n3.id, true).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

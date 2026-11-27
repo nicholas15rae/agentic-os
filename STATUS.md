@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 23:09. One page for every Claude Code session and branch.
+Updated 2026-11-26 23:12. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -121,7 +121,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
-| Test gate PR #9 (2d60807 on main a0e730c) | run_all 1,571 OK in 115 s, 62 modules, 8 workers; trading venv group 645 OK (3 skipped) | 11-26 23:05 |
+| Test gate PR #9 (f98ade8, main eefaf0a merged in) | run_all 1,585 OK in 83 s, 63 modules, 8 workers; trading venv group 645 OK (3 skipped) | 11-26 23:12 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
@@ -135,18 +135,18 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:09 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:12 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/practical-elbakyan-0f96f1` | 5 | `5a1ce1a` 2026-11-26 fix(trading): guard retries can't double an exit, survive lock-only... | clean |
+| `claude/upbeat-wing-e87be0` | 5 | `f98ade8` 2026-11-26 Merge main (eefaf0a) into claude/upbeat-wing-e87be0 | 1 files |
 | `director-suite` | 19 | `8532c7b` 2026-11-26 docs(status): Director Part 1 fixes, run 9 E2E, main merged (4e986f1) | clean |
-| `claude/upbeat-wing-e87be0` | 3 | `2d60807` 2026-11-26 test(device_registry): put the repo root on sys.path before importi... | 1 files |
 | `merge/director-suite-into-main` | 18 | `76df04f` 2026-11-26 Merge director-suite (Director Parts 1-2) into main | clean |
 | `section-pass` | 3 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | 25 files |
 | `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 206 files |
-| `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 12 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 

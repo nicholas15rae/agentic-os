@@ -2,8 +2,9 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getWidget } from "./registry";
 import { isTauri } from "@/lib/platform";
+import { PHONE_LITE } from "@/lib/phone-lite";
 import type { WidgetInstance } from "./types";
-import { activeItems, allIds, fits, migrateLayout, moveToPage, nextPageName, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
+import { activeItems, addTravelPage, allIds, fits, migrateLayout, moveToPage, nextPageName, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
 
 export { GRID_COLS, GRID_ROWS, activeItems, fits, type LayoutPage } from "./pages";
 
@@ -32,6 +33,10 @@ const DEFAULT_LAYOUT: WidgetInstance[] = [
   // Browser / phone: Tony's mode panel takes that band instead.
   ...(isTauri() ? [PIPELINES_SLOT] : [TONY_MODE_SLOT]),
 ];
+
+/** First run: the default board, plus the Travel page (Maps) wherever the Maps widget can run. */
+const FIRST_PAGE: PagesState = { pages: [{ id: "p1", name: "Page 1", items: DEFAULT_LAYOUT }], activePage: "p1" };
+const INITIAL_PAGES: PagesState = isTauri() && !PHONE_LITE ? addTravelPage(FIRST_PAGE) : FIRST_PAGE;
 
 export interface AddResult {
   ok: boolean;
@@ -71,8 +76,7 @@ export const useLayout = create<LayoutState>()(
       const updateActive = (fn: (items: WidgetInstance[]) => WidgetInstance[]) =>
         set((s) => ({ pages: s.pages.map((p) => (p.id === s.activePage ? { ...p, items: fn(p.items) } : p)) }));
       return {
-        pages: [{ id: "p1", name: "Page 1", items: DEFAULT_LAYOUT }],
-        activePage: "p1",
+        ...INITIAL_PAGES,
         editing: false,
         setEditing: (editing) => set({ editing }),
         add: (widgetId, config, opts) => {
@@ -141,9 +145,10 @@ export const useLayout = create<LayoutState>()(
     },
     {
       name: "cc.layout",
-      version: 5,
+      // v6: one-time "Travel" page holding the Maps widget (desktop app only: the phone app's Open in Maps is not fixed yet).
+      version: 6,
       partialize: (s) => ({ pages: s.pages, activePage: s.activePage }),
-      migrate: (persisted, version) => migrateLayout(persisted, version, DEFAULT_LAYOUT, isTauri() ? PIPELINES_SLOT : null),
+      migrate: (persisted, version) => migrateLayout(persisted, version, DEFAULT_LAYOUT, isTauri() ? PIPELINES_SLOT : null, isTauri() && !PHONE_LITE),
       merge: (persisted, current) => (persisted == null ? current : { ...current, ...sanitizePages(persisted, DEFAULT_LAYOUT) }),
     },
   ),

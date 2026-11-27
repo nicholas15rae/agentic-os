@@ -15,7 +15,11 @@ indexed into the vault as collection "comms" for the Librarian.
 Security: the gateway binds 127.0.0.1 (+ the NetBird address), ZeroTrustMiddleware
 requires the bearer token from anything that isn't loopback, and sending a text
 or placing a call needs an explicit `confirmed: true` (the UI's confirmation
-card) unless the contact is marked trusted ("Instant Send").
+card). The one exception is Instant Send: a text with `origin: "ui-typed"`
+(typed by hand in the Chat box) to a contact whose key is trusted exactly.
+Turning trust on needs `confirmed: true` too and is audit-logged; Instagram,
+Messenger and RCS contacts can never be trusted. (The origin is a claim the
+gateway can't verify: the token is the real boundary.)
 """
 from __future__ import annotations
 
@@ -470,18 +474,59 @@ def comms_contacts(q: str = ""):
     return {"contacts": [dict(r) for r in rows]}
 
 
+# Instant Send (decision 5): read-only / notification-captured channels can never be trusted, and
+# only a reply typed by hand in the Chat box may use trust to skip the card.
+UNTRUSTABLE_CHANNELS = frozenset({"instagram", "messenger", "rcs"})
+INSTANT_SEND_ORIGIN = "ui-typed"
+AUDIT_FILE = Path(__file__).resolve().parent / "audit" / "audit.log"  # server.append_audit's file
+
+
+def _audit(entry: dict) -> None:
+    """One JSON line in audit/audit.log (the same format as server.append_audit)."""
+    row = {**entry, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "id": uuid.uuid4().hex[:8]}
+    log.warning("audit: %s", json.dumps(entry))
+    try:
+        AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except OSError:
+        log.exception("audit log write failed")
+
+
+def _send_origin(v: Any) -> str:
+    """The send's origin, normalized (`ui_typed` → `ui-typed`); missing = an agent."""
+    o = str(v or "").strip().lower().replace("_", "-")
+    return o or "agent"
+
+
+def _confirmed(data: dict) -> bool:
+    return data.get("confirmed") is True
+
+
 @comms_router.post("/contacts")
 def comms_contact_put(data: dict = Body(...)):
-    address = _thread_key(str(data.get("address") or ""))
-    if not address:
+    raw = str(data.get("address") or "").strip()
+    if not raw:
         raise HTTPException(400, "address required")
     _ensure_contacts_schema()
+    address = _thread_key(raw)
+    trusted = bool(data.get("trusted"))
+    channel = str(data.get("channel") or "sms").strip().lower()
+    if trusted:
+        if channel in UNTRUSTABLE_CHANNELS:
+            raise HTTPException(400, f"{channel} contacts can't be trusted for Instant Send")
+        if not _confirmed(data):
+            # Turning Instant Send on is itself a confirmation-card action.
+            raise HTTPException(428, "Confirmation required to turn on Instant Send")
     with cc._db_lock, cc.db() as c:
+        prev = c.execute("SELECT trusted FROM comms_contacts WHERE address=?", (address,)).fetchone()
         c.execute(
             "INSERT INTO comms_contacts(address,name,trusted) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET "
             "name=CASE WHEN contact_id IS NULL THEN COALESCE(excluded.name,name) ELSE name END, trusted=excluded.trusted",
-            (address, data.get("name"), 1 if data.get("trusted") else 0),
+            (address, data.get("name"), 1 if trusted else 0),
         )
+    if bool(prev and prev["trusted"]) != trusted:
+        _audit({"action": "comms_trust_on" if trusted else "comms_trust_off", "address": address, "channel": channel})
     return {"ok": True}
 
 
@@ -717,9 +762,19 @@ def comms_phonebook_delete(cid: str):
 
 
 def _trusted(address: str) -> bool:
+    """Exact match on the normalized contact key (never a LIKE / substring)."""
+    key = _thread_key(address)
+    if not str(address or "").strip() or key == "unknown":
+        return False
     with cc.db() as c:
-        r = c.execute("SELECT trusted FROM comms_contacts WHERE address=?", (_thread_key(address),)).fetchone()
+        r = c.execute("SELECT trusted FROM comms_contacts WHERE address=?", (key,)).fetchone()
     return bool(r and r["trusted"])
+
+
+def _instant_send_ok(kind: str, data: dict, address: str) -> bool:
+    """Only a hand-typed text (origin ui-typed) to an exactly trusted contact skips the card."""
+    channel = str(data.get("channel") or "sms").strip().lower()
+    return kind == "sms" and _send_origin(data.get("origin")) == INSTANT_SEND_ORIGIN and channel not in UNTRUSTABLE_CHANNELS and _trusted(address)
 
 
 def _queue_out(kind: str, data: dict) -> dict:
@@ -728,9 +783,10 @@ def _queue_out(kind: str, data: dict) -> dict:
         raise HTTPException(400, "address required")
     if kind == "sms" and not str(data.get("body") or "").strip():
         raise HTTPException(400, "body required")
-    if not data.get("confirmed") and not (kind == "sms" and _trusted(address)):
-        # The 30-second confirmation card in the UI sets confirmed:true. Never auto-send.
-        raise HTTPException(428, "Confirmation required (or mark the contact trusted for Instant Send)")
+    if not _confirmed(data) and not _instant_send_ok(kind, data, address):
+        # The 30-second confirmation card in the UI sets confirmed:true. Never auto-send: voice,
+        # Tony and agents always need the card, even to a trusted contact.
+        raise HTTPException(428, "Confirmation required (Instant Send covers only replies typed by hand to a trusted contact)")
     oid = uuid.uuid4().hex
     now = time.time()
     row = {"id": oid, "kind": kind, "address": address, "contact": data.get("contact") or address, "body": str(data.get("body") or "")[:2000], "channel": data.get("channel") or "sms", "status": "pending", "created": now, "updated": now, "detail": ""}

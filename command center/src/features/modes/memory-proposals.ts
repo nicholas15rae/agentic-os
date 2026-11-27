@@ -5,18 +5,20 @@
  * proposals): an inbox `command` (`memoryApprove` / `memoryDiscard`) the desktop applies. A spoken
  * "yes" / "no" needs none of this: it reaches Rust's `os_turn` like any line.
  */
-import { native } from "@/lib/platform";
+import { native, type AppUptime } from "@/lib/platform";
 import { isDesktopApp } from "@/stores/settings";
 import { sendMemoryDecision } from "@/features/dispatcher/dispatch";
-import { learnedOf, MEMORY_ID_RE, type LearnedPathway, type PendingMemory } from "./learning";
-import type { VoiceTurn } from "@/features/voice/voice-store";
+import { useVoice, type VoiceTurn } from "@/features/voice/voice-store";
+import { endCardsBefore, learnedOf, MEMORY_ID_RE, type LearnedPathway, type PendingMemory } from "./learning";
 
-export const MEMORY_NO_DESKTOP = "The desktop app didn't answer, so nothing was saved. Try again with it open.";
+/** The phone's decision never reached a desktop app and was taken back (`sendMemoryDecision` null). */
+export const MEMORY_NO_DESKTOP = "The desktop app didn't pick that up, so nothing was saved. Try again in a moment with it open.";
 /** Skip on a proposal Rust no longer holds (`learning_discard` false). */
 export const MEMORY_GONE = "That memory proposal expired or was already answered.";
 
 /** Save (`approve`) or Skip one proposal. Resolves with what was saved (Skip: []). Throws when
- * Rust refuses (expired / already answered) or, on the phone, when no desktop answered. */
+ * Rust refuses (expired / already answered) or, on the phone, when no desktop answered (nothing
+ * was saved) or the desktop may still apply it (`sendMemoryDecision`'s messages). */
 export async function decideMemory(id: string, approve: boolean): Promise<LearnedPathway[]> {
   if (!MEMORY_ID_RE.test(id)) throw new Error("bad memory proposal id");
   if (isDesktopApp()) {
@@ -37,4 +39,33 @@ export function afterDecision(turn: Pick<VoiceTurn, "pendingMemory" | "learned">
   const left: PendingMemory[] = (turn.pendingMemory ?? []).filter((p) => p.id !== id);
   const learned = [...(turn.learned ?? []), ...saved.filter((s) => !(turn.learned ?? []).some((l) => l.id === s.id && l.outcome === s.outcome))];
   return { pendingMemory: left.length ? left : undefined, learned: learned.length ? learned : undefined };
+}
+
+let restartCheck: Promise<void> | null = null;
+
+/**
+ * Desktop app, once per load (the first live card that renders asks): the cards proposed before
+ * this run of the app are "No longer pending", since Rust keeps proposals in memory only and the
+ * restart emptied them (`app_uptime` says when this run started). A webview-only Hard Reload keeps
+ * Rust and its proposals, so those cards stay live. The phone has no such check (reloading it never
+ * restarts the desktop); its cards end at their expiry, and the desktop's own are mirrored to it.
+ */
+export function settleCardsAfterRestart(): Promise<void> {
+  if (!isDesktopApp()) return Promise.resolve();
+  restartCheck ??= native<AppUptime>("app_uptime").then(
+    (u) => {
+      if (typeof u?.startedAt !== "number" || !(u.startedAt > 0)) return;
+      const turns = useVoice.getState().turns;
+      const next = endCardsBefore(turns, u.startedAt);
+      if (next !== turns) useVoice.setState({ turns: next });
+    },
+    () => {
+      restartCheck = null; // asked again by the next card
+    },
+  );
+  return restartCheck;
+}
+
+export function resetRestartCheckForTests(): void {
+  restartCheck = null;
 }

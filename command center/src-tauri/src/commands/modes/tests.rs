@@ -75,9 +75,18 @@ fn presets_carry_the_switchboard_spec() {
     let p = presets();
     let row = |id: &str| p.iter().find(|m| m.id == id).unwrap().clone();
     assert_eq!(row("builder").switchboard, board(&["prompter", "designer", "coder"], &["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"]));
-    assert_eq!(row("operations").switchboard, board(&["ops", "bizops"], &["gmail", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]));
-    assert_eq!(row("executive").switchboard, board(&["bizops", "finance"], &["knowledge-graph", "gmail", "brave-search", "time", "weather"]));
+    assert_eq!(row("operations").switchboard, board(&["ops", "bizops"], &["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]));
+    assert_eq!(row("executive").switchboard, board(&["bizops", "finance"], &["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"]));
     assert!(!EXECUTIVE_AGENTS.contains(&"librarian"), "the Librarian runs only as its scheduled script");
+    // A2: Google Calendar mirrors Gmail in every preset: live where Gmail is, frozen where it is.
+    let sb = SwitchboardConfig::default();
+    for id in BUILTIN_IDS {
+        let e = eff(id);
+        assert_eq!(tool_live(&e, &sb, "calendar"), tool_live(&e, &sb, "gmail"), "{id}");
+        assert_eq!(tool_frozen_error(&e, &sb, "calendar").is_some(), tool_frozen_error(&e, &sb, "gmail").is_some(), "{id}");
+    }
+    assert!(tool_live(&eff("operations"), &sb, "calendar") && tool_live(&eff("executive"), &sb, "calendar"));
+    assert!(!tool_live(&eff("builder"), &sb, "calendar") && !tool_live(&eff(LEARNING_ID), &sb, "calendar"));
     assert_eq!(row("learning").switchboard, board(&[], &[]));
     for id in ["surface", "brainstorm", "coach", "gabagool"] {
         assert_eq!(row(id).switchboard, None, "{id}: no overlay, today's behaviour");
@@ -439,7 +448,7 @@ fn mirror_and_view_carry_the_mode() {
     // The gateway's end-of-prompt text and the switchboard's inputs.
     assert_eq!(m["mode"]["promptTail"], json!(mode_block(&os.modes.effective())));
     assert!(m["mode"]["promptTail"].as_str().unwrap().contains("ON DUTY: Finance, Operations Manager; every other agent is frozen this mode."));
-    assert_eq!(m["mode"]["switchboard"], json!({ "agents": ["bizops", "finance"], "tools": ["knowledge-graph", "gmail", "brave-search", "time", "weather"], "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
+    assert_eq!(m["mode"]["switchboard"], json!({ "agents": ["bizops", "finance"], "tools": ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"], "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
     assert_eq!(m["mode"]["nightTraining"], false);
     switch_mode(&os, "surface").unwrap();
     let m = os.mirror_value(&os.snapshot());

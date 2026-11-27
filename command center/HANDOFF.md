@@ -135,6 +135,13 @@ Seven areas from a live-test report. All checks pass: `npm run typecheck`, `npx 
 - Generated widgets stay data-only: extend `CustomSpec` and `validateSpec`, never `eval`.
 - No secrets in TypeScript, localStorage, logs, error strings or backups (the keychain stays out of backup zips).
 - Respect `prefers-reduced-motion`. Every canvas loop pauses when hidden.
+- GPU budget: the UI shares the RTX 3060 with STT and the LLM, and WebView2 redraws the whole frame
+  (every glass blur) for any damage, so cost follows distinct frames per second. Canvas loops use
+  `frameLoop()` from `src/lib/motion.ts` (frame cap on a shared grid, parks when calm / hidden);
+  infinite CSS animations step at a low rate and join the `[data-motion]` pause list in
+  `styles/index.css`. Hidden / minimised windows switch WebView2 rendering off in Rust
+  (`src-tauri/src/webview_visibility.rs`); keep `--disable-background-timer-throttling` in
+  `tauri.conf.json` with it, or hidden-page timers drop to 1 Hz and voice timing breaks.
 - `npm run typecheck`, `cargo check` and `python tests/run_all.py` must pass before you commit.
 
 ## 9. Phase 2 — voice reflexes (cut / hold / resume) + Whisper vocabulary biasing

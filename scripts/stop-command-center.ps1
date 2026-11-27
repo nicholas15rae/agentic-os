@@ -42,7 +42,10 @@ if (-not $KeepDesktopApp) {
         Start-Sleep -Seconds 3
         $app = @(Get-Process -Name 'command-center' -ErrorAction SilentlyContinue)
         foreach ($p in $app) { [void](Stop-Target $p.Id 'app') }
-        Add-Row 'Desktop app' 'closed' 'Green'
+        # Its WebView2 processes outlive it briefly; a start before they are gone can abort (cc-common).
+        if ($DryRun) { Add-Row 'Desktop app' 'closed' 'Green' }
+        elseif (Wait-CcAppGone) { Add-Row 'Desktop app' 'closed (and its WebView2)' 'Green' }
+        else { Add-Row 'Desktop app' 'still running or its WebView2 would not exit - check Task Manager' 'Red' }
     } else { Add-Row 'Desktop app' 'not running' 'DarkGray' }
 }
 

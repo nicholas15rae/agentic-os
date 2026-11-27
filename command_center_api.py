@@ -29,9 +29,11 @@ import os
 import queue
 import re
 import shutil
+import socket
 import sqlite3
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -670,27 +672,103 @@ def extract_json(text: str) -> Optional[dict]:
     return None
 
 
-# A refused localhost connect costs ~2 s on Windows, so a down CPU embedder is remembered for
-# EMBED_DOWN_SECS instead of being re-probed by every vault write and search.
+# ── vault embeddings on the CPU embedder (:1237) ────────────────────────────
+#
+# Down: a refused localhost connect blocks ~2 s on Windows (the stack retries the SYN), so every
+# call first connects with a short timeout (EMBED_CONNECT_SECS on loopback, where a live server
+# accepts in well under a millisecond), and a down embedder is remembered: EMBED_DOWN_SECS after the
+# first failed probe, doubling while it stays down up to EMBED_DOWN_MAX_SECS. A good probe, or a
+# config change (put_config clears the cache), starts the back-off over.
+# The back-off spares the query path only. The indexer thread does the watching: its calls connect
+# first even inside the back-off (and probe at once when the embedder answers), and while it is
+# idle it re-checks a down embedder every EMBED_WATCH_SECS. So the embedder is used again within
+# seconds of coming back, never only after the back-off. A row the indexer could not embed because
+# the embedder was down waits in memory and is retried, instead of keeping vector NULL until a
+# reindex (only rows past INDEX_WAIT_MAX, or waiting through a gateway restart, still need one).
 EMBED_DOWN_SECS = 30.0
+EMBED_DOWN_MAX_SECS = 300.0
 EMBED_UP_SECS = 60.0
+EMBED_CONNECT_SECS = 0.3          # an embedder on this machine
+EMBED_CONNECT_REMOTE_SECS = 2.0   # one on another host
+EMBED_WATCH_SECS = 15.0           # the idle indexer's re-check / retry interval
+INDEX_WAIT_MAX = 10000            # rows kept for a retry while the embedder is down
+INDEX_FAIL_PAUSE_SECS = 2.0       # the indexer's pause after a failed row
 _embedder_cache: dict[str, tuple[float, Optional[list[str]]]] = {}
+_embedder_fails: dict[str, int] = {}  # failed probes in a row, per base (the back-off)
 # llama-server's answer to an input longer than its batch (Bionic truncates such inputs itself).
 _EMBED_TOO_LARGE = re.compile(r"input \((\d+) tokens\) is too large.*?batch size: (\d+)", re.S)
+# Too long: the start is kept, cut by the embedder's own token count (/tokenize) to
+# EMBED_TOKEN_MARGIN under its batch; the last resort, _hard_cut, needs no tokenizer and keeps
+# EMBED_HARD_MARGIN for special / prefix tokens. A cut costs at most EMBED_FIT_PROBES counts.
+EMBED_TOKEN_MARGIN = 4
+EMBED_HARD_MARGIN = 16
+EMBED_FIT_PROBES = 16
+# Busy: the embedder has one slot, and a 2k-token note takes ~2.2 s on the CPU (a query ~30 ms).
+# So the indexer embeds a text in pieces of EMBED_CHUNK_TOKENS (~0.4 s each; the row's vector is
+# their length-weighted mean) and, before each piece, waits while a query runs and for
+# EMBED_QUERY_GRACE_SECS after one (EMBED_BG_MAX_DEFER_SECS at most). A search then waits behind
+# one piece at most, never a whole note.
+EMBED_CHUNK_TOKENS = 512
+EMBED_QUERY_GRACE_SECS = 2.0
+EMBED_BG_MAX_DEFER_SECS = 30.0
 
 
-def _embedder_models(base: str) -> Optional[list[str]]:
+def _down_ttl(base: str) -> float:
+    fails = min(max(1, _embedder_fails.get(base, 1)), 16)
+    return min(EMBED_DOWN_MAX_SECS, EMBED_DOWN_SECS * 2 ** (fails - 1))
+
+
+def _mark_embedder(base: str, ids: Optional[list[str]]) -> None:
+    """Remember what a probe (or a failed request) found: up ends the back-off, down grows it."""
+    if ids is None:
+        _embedder_fails[base] = min(_embedder_fails.get(base, 0) + 1, 16)
+    else:
+        _embedder_fails.pop(base, None)
+    _embedder_cache[base] = (time.time(), ids)
+
+
+def _connect_ok(base: str) -> bool:
+    """A TCP connect to `base` within EMBED_CONNECT_SECS (loopback) or EMBED_CONNECT_REMOTE_SECS:
+    a closed loopback port answers this in 0.3 s instead of a request's ~2 s refused connect."""
+    u = urllib.parse.urlsplit(base)
+    host = u.hostname or ""
+    try:
+        port = u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        return False
+    loopback = host in ("localhost", "::1") or host.startswith("127.")
+    try:
+        with socket.create_connection((host, port), timeout=EMBED_CONNECT_SECS if loopback else EMBED_CONNECT_REMOTE_SECS):
+            return True
+    except OSError:
+        return False
+
+
+class EmbedderDown(RuntimeError):
+    """embed() found no embedder to use: the CPU one is down and LM Studio does not have the model
+    loaded (it is never JIT-loaded). The indexer keeps such a row for a retry."""
+
+
+def _embedder_models(base: str, recheck: bool = False) -> Optional[list[str]]:
     """The model ids the CPU embedder at `base` serves (GET /models), or None while it is down
-    (an embedder that lists no model counts as down too)."""
+    (an embedder that lists no model counts as down too). `recheck` is the indexer thread: inside a
+    down back-off it still connects (EMBED_CONNECT_SECS) and probes at once if the embedder answers,
+    so a row written just after the embedder came back embeds. The query path keeps the cached
+    answer and pays nothing inside the back-off."""
     now = time.time()
     hit = _embedder_cache.get(base)
-    if hit and now - hit[0] < (EMBED_UP_SECS if hit[1] is not None else EMBED_DOWN_SECS):
-        return hit[1]
-    try:
-        ids: Optional[list[str]] = [m.get("id", "") for m in _http_json(f"{base}/models", timeout=4).get("data", [])] or None
-    except Exception:
-        ids = None
-    _embedder_cache[base] = (now, ids)
+    if hit is None:
+        _embedder_fails.pop(base, None)  # a cleared cache (a config change) starts the back-off over
+    elif now - hit[0] < (EMBED_UP_SECS if hit[1] is not None else _down_ttl(base)):
+        if hit[1] is not None or not recheck or not _connect_ok(base):
+            return hit[1]  # (a failed re-check connect is not a probe: the back-off does not grow)
+    ids: Optional[list[str]] = None
+    if _connect_ok(base):
+        try:
+            ids = [m.get("id", "") for m in _http_json(f"{base}/models", timeout=4).get("data", [])] or None
+        except Exception:
+            ids = None
+    _mark_embedder(base, ids)
     return ids
 
 
@@ -699,9 +777,84 @@ def _embed_at(base: str, model: str, texts: list[str]) -> list[list[float]]:
     return [d["embedding"] for d in sorted(out["data"], key=lambda d: d.get("index", 0))]
 
 
+def _token_counter(base: str) -> Any:
+    """count(text) -> the embedder's token count for `text` as /embeddings counts it (special tokens
+    included), from llama-server's /tokenize, which sits at the root, not under /v1. Raises when
+    that route is missing or the embedder is down."""
+    url = f"{base[:-3] if base.endswith('/v1') else base}/tokenize"
+
+    def count(text: str) -> int:
+        toks = _http_json(url, {"content": text, "add_special": True}, timeout=10).get("tokens")
+        if not isinstance(toks, list):
+            raise ValueError("no token list from /tokenize")
+        return len(toks)
+
+    return count
+
+
+def _hard_cost(c: str) -> int:
+    """At least as many tokens as one character can become in any llama.cpp tokenizer: its UTF-8
+    bytes (byte-level BPE, SPM byte fallback: one token per byte at most), or those of its
+    compatibility decomposition when longer (WordPiece splits accents off before matching)."""
+    return max(len(c.encode("utf-8", "surrogatepass")), len(unicodedata.normalize("NFKD", c).encode("utf-8", "surrogatepass")))
+
+
+def _hard_cut(text: str, budget: int) -> str:
+    """The longest start of `text` that is sure to be at most `budget` tokens (_hard_cost) with no
+    tokenizer to ask: the last resort that always fits. ASCII keeps one character per token; a
+    CJK block keeps a third of that."""
+    total, budget = 0, max(1, budget)
+    for i, c in enumerate(text):
+        total += _hard_cost(c)
+        if total > budget:
+            return text[:i]
+    return text
+
+
+def _fit_prefix(count: Any, text: str, target: int, slack: float = 0.05) -> tuple[int, int]:
+    """(length, tokens) of a start of `text` that is at most `target` tokens by `count`: all of it
+    when it fits. Otherwise the probes alternate between interpolating on the token density seen so
+    far and halving, so a token-dense start (a base64 or CJK block before prose) costs a probe or
+    two more, never a failed embed. Stops within `slack` of the target, or after EMBED_FIT_PROBES
+    counts; (0, 0) when no probed start fits."""
+    n = count(text)
+    if n <= target:
+        return len(text), n
+    lo, lo_n, hi, hi_n = 0, 0, len(text), n
+    good = target - max(1, int(target * slack))
+    for i in range(EMBED_FIT_PROBES):
+        if hi - lo <= 1:
+            break
+        if i % 2 == 0:
+            k = lo + int((hi - lo) * (target - lo_n) / max(hi_n - lo_n, 1) * 0.95)
+        else:
+            k = (lo + hi) // 2
+        k = min(max(k, lo + 1), hi - 1)
+        kn = count(text[:k])
+        if kn <= target:
+            lo, lo_n = k, kn
+            if kn >= good:
+                break
+        else:
+            hi, hi_n = k, kn
+    return lo, lo_n
+
+
+def _fit_start(base: str, text: str, cap: int) -> str:
+    """The start of `text` that fits a `cap`-token batch by the embedder's own count (near the
+    longest); _hard_cut's when /tokenize is not there or finds nothing."""
+    try:
+        k, _ = _fit_prefix(_token_counter(base), text, cap - EMBED_TOKEN_MARGIN)
+    except Exception:
+        k = 0
+    return text[:k] if k else _hard_cut(text, cap - EMBED_HARD_MARGIN)
+
+
 def _embed_fit(base: str, model: str, texts: list[str]) -> list[list[float]]:
-    """_embed_at on llama-server, which refuses an input longer than its batch: cut the long texts
-    to fit (keeping their start, as Bionic's truncation does) and try again, twice at most."""
+    """_embed_at on llama-server, which refuses an input longer than its batch (Bionic truncates such
+    inputs itself). A too-long text keeps its start, as Bionic's truncation does: cut by the
+    embedder's own token count (/tokenize), then, should that still not fit, by the hard cut that
+    always does. So every text embeds, however dense its tokens."""
     for attempt in range(3):
         try:
             return _embed_at(base, model, texts)
@@ -713,39 +866,150 @@ def _embed_fit(base: str, model: str, texts: list[str]) -> list[list[float]]:
             m = _EMBED_TOO_LARGE.search(why)
             if not m or attempt == 2:
                 raise
-            tokens, cap = int(m.group(1)), int(m.group(2))
-            keep = max(1, int(max(len(t) for t in texts) * cap * 0.9 / max(tokens, 1)))
-            texts = [t[:keep] for t in texts]
+            cap = int(m.group(2))
+            if attempt == 0:
+                texts = [_fit_start(base, t, cap) for t in texts]
+            else:
+                texts = [_hard_cut(t, cap - EMBED_HARD_MARGIN) for t in texts]
     raise RuntimeError("unreachable")
 
 
-def embed(texts: list[str]) -> tuple[list[list[float]], str]:
+class _EmbedGate:
+    """Queries first on the one-slot CPU embedder. A query never waits here; a background
+    (indexing) piece waits while a query is running and for EMBED_QUERY_GRACE_SECS after the last
+    one, so a turn's searches run back to back instead of each queuing behind a note."""
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._running = 0
+        self._last = float("-inf")  # time.monotonic() when the last query finished
+
+    @contextmanager
+    def query(self) -> Iterator[None]:
+        with self._cv:
+            self._running += 1
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._running -= 1
+                self._last = time.monotonic()
+                self._cv.notify_all()
+
+    def wait_background(self) -> bool:
+        """Block a background piece until no query is running or recent: True. False = it waited
+        EMBED_BG_MAX_DEFER_SECS and goes ahead anyway, so indexing never starves."""
+        deadline = time.monotonic() + EMBED_BG_MAX_DEFER_SECS
+        with self._cv:
+            while True:
+                now = time.monotonic()
+                quiet_at = self._last + EMBED_QUERY_GRACE_SECS
+                if not self._running and now >= quiet_at:
+                    return True
+                if now >= deadline:
+                    return False
+                self._cv.wait(max(0.005, (deadline if self._running else min(deadline, quiet_at)) - now))
+
+
+_embed_gate = _EmbedGate()
+
+
+def _split_tokens(base: str, text: str, size: int) -> list[str]:
+    """`text` as consecutive pieces of at most `size` tokens by the embedder's own count, each cut
+    after a space where one is near. A piece _hard_cut vouches for needs no count, and without
+    /tokenize every piece is cut that way."""
+    count: Any = _token_counter(base)
+    pieces: list[str] = []
+    rest = text
+    while rest:
+        k = len(_hard_cut(rest, size - EMBED_HARD_MARGIN))
+        if k < len(rest) and count is not None:
+            try:
+                k = max(k, _fit_prefix(count, rest[: size * 8], size, slack=0.2)[0])
+            except Exception:
+                count = None  # no /tokenize: hard cuts from here on
+        if k < len(rest):
+            sp = max(rest.rfind(c, k - k // 8, k) for c in " \n\t")
+            if sp > 0:
+                k = sp + 1
+        k = max(1, k)
+        pieces.append(rest[:k])
+        rest = rest[k:]
+    return pieces
+
+
+def _mean_vector(vecs: list[list[float]], weights: list[int]) -> list[float]:
+    """The weighted mean of the pieces' vectors at unit length (llama-server's own are), so a long
+    text's vector stands for all of it."""
+    out = [0.0] * len(vecs[0])
+    for v, w in zip(vecs, weights):
+        for i, x in enumerate(v):
+            out[i] += w * x
+    norm = math.sqrt(sum(x * x for x in out)) or 1.0
+    return [x / norm for x in out]
+
+
+def _embed_background(base: str, model: str, text: str) -> list[float]:
+    """One indexer text on the CPU embedder: in pieces (_split_tokens), each behind any query
+    (_EmbedGate). A text of one piece gets the same vector as a query-path embed of it."""
+    pieces = _split_tokens(base, text, EMBED_CHUNK_TOKENS) or [text]
+    vecs: list[list[float]] = []
+    for p in pieces:
+        _embed_gate.wait_background()
+        vecs.extend(_embed_fit(base, model, [p]))
+    return vecs[0] if len(vecs) == 1 else _mean_vector(vecs, [len(p) for p in pieces])
+
+
+def embed(texts: list[str], background: bool = False) -> tuple[list[list[float]], str]:
     """Vault embeddings. They go to the CPU embedder (`llm.embeddingBaseUrl`) when it serves the
     configured model. While it is down, LM Studio is used only if that model is ALREADY loaded
     there: an embedding request never JIT-loads a model onto the GPU next to Tony's (with "unload
     previous JIT model" on, a JIT load could also swap out a JIT-loaded Tony). Otherwise this
     raises and the vault stays lexical. An empty `embeddingBaseUrl` is the old path (LM Studio),
-    and so is a configured model the CPU embedder does not serve (Nic picked an LM Studio one)."""
+    and so is a configured model the CPU embedder does not serve (Nic picked an LM Studio one).
+    `background` is the indexer: on the CPU embedder its texts go in pieces, behind any query, and a
+    remembered "down" is re-checked with a short connect (_embedder_models `recheck`). Raises
+    EmbedderDown when there is no embedder to use."""
     cfg = load_config()["llm"]
     llm_base = cfg["baseUrl"].rstrip("/")
     cpu_base = (cfg.get("embeddingBaseUrl") or "").strip().rstrip("/")
     if cpu_base and cpu_base != llm_base:
-        served = _embedder_models(cpu_base)
+        served = _embedder_models(cpu_base, recheck=background)
         model = cfg.get("embeddingModel") or (served[0] if served else DEFAULT_EMBED_MODEL)
+        if served is not None and model in served and not _connect_ok(cpu_base):
+            _mark_embedder(cpu_base, None)  # it went down since the last /models check
+            served = None
         if served is not None and model in served:
             try:
-                return _embed_fit(cpu_base, model, texts), model
+                if background:
+                    return [_embed_background(cpu_base, model, t) for t in texts], model
+                with _embed_gate.query():
+                    return _embed_fit(cpu_base, model, texts), model
             except urllib.error.HTTPError:
                 raise
-            except OSError:  # it went down since the last /models check
-                _embedder_cache[cpu_base] = (time.time(), None)
+            except OSError:  # it went down mid-request
+                _mark_embedder(cpu_base, None)
                 served = None
         if served is None:
             if any(m.get("id") == model for m in llm_loaded_models()):
                 return _embed_at(llm_base, model, texts), model
-            raise RuntimeError(f"CPU embedder {cpu_base} is down and {model} is not loaded in LM Studio (no GPU JIT load)")
+            raise EmbedderDown(f"CPU embedder {cpu_base} is down and {model} is not loaded in LM Studio (no GPU JIT load)")
     model = _pick_model(cfg.get("embeddingModel", ""), "embed")
     return _embed_at(llm_base, model, texts), model
+
+
+def _watch_embedder() -> None:
+    """The idle indexer's check: while the configured CPU embedder is remembered as down, a short
+    connect (and a /models probe only if it answers), so vault searches use it again within
+    EMBED_WATCH_SECS of it coming back instead of after the back-off. Off the query path."""
+    try:
+        cfg = load_config()["llm"]
+        base = (cfg.get("embeddingBaseUrl") or "").strip().rstrip("/")
+        hit = _embedder_cache.get(base)
+        if base and base != cfg["baseUrl"].rstrip("/") and hit is not None and hit[1] is None:
+            _embedder_models(base, recheck=True)
+    except Exception:
+        pass
 
 
 # ── vector vault ─────────────────────────────────────────────────────────────
@@ -780,22 +1044,71 @@ def _upsert_vault_text(item_id: str, collection: str, data: dict, deleted: bool)
     _index_q.put(item_id)
 
 
-def _index_worker() -> None:
-    """Embeds vault rows in the background; a missing embedding model just leaves lexical search."""
-    while True:
-        item_id = _index_q.get()
+def _index_one(item_id: str) -> bool:
+    """Embed one vault row and store its vector: True, or False when there is nothing to embed
+    (the row is gone or empty). Raises when the embed fails."""
+    with db() as c:
+        r = c.execute("SELECT text FROM vault WHERE item_id=?", (item_id,)).fetchone()
+    if not r or not r["text"]:
+        return False
+    wait_gpu(None, poll=2.0)  # defer while the desktop holds the GPU (the lease is bounded)
+    (vec,), model = embed([r["text"]], background=True)  # in pieces, behind any vault search
+    blob = array.array("f", vec).tobytes()
+    with _db_lock, db() as c:
+        c.execute("UPDATE vault SET vector=?, model=? WHERE item_id=?", (blob, model, item_id))
+    return True
+
+
+def _index_step(item_id: str, waiting: dict[str, None], q: "queue.Queue[str]") -> str:
+    """One indexer step: "done" (embedded), "skip" (nothing to embed), "waiting" (no embedder
+    could take it, EmbedderDown or a connection error: the row goes to the back of `waiting` for a
+    retry instead of being dropped) or "failed" (the embedder answered with an error: dropped, as
+    before, until a reindex). Once a row embeds, every waiting row goes back on `q`."""
+    try:
+        done = _index_one(item_id)
+    except urllib.error.HTTPError:  # an answer from the server (a URLError / OSError subclass), not an outage
+        waiting.pop(item_id, None)
+        return "failed"
+    except (EmbedderDown, OSError):
+        known = item_id in waiting
+        waiting.pop(item_id, None)
+        if known or len(waiting) < INDEX_WAIT_MAX:
+            waiting[item_id] = None  # to the back: the next retry tries another row
+        return "waiting"
+    except Exception:
+        waiting.pop(item_id, None)
+        return "failed"
+    waiting.pop(item_id, None)
+    if done and waiting:
+        for i in list(waiting):
+            q.put(i)
+        waiting.clear()
+    return "done" if done else "skip"
+
+
+def _index_worker(q: "Optional[queue.Queue[str]]" = None, stop: Optional[threading.Event] = None) -> None:
+    """Embeds vault rows in the background; a missing embedding model just leaves lexical search.
+    A row that found the embedder down waits instead of being dropped: after EMBED_WATCH_SECS
+    without new rows, the oldest waiting row is tried again (its embed re-checks the embedder with
+    a short connect), and once one embeds the others follow. With nothing waiting, the quiet
+    interval is _watch_embedder's. `q` / `stop` exist for tests (the default is the vault queue,
+    forever)."""
+    q = _index_q if q is None else q
+    waiting: dict[str, None] = {}  # insertion order: the next retry is the front
+    while stop is None or not stop.is_set():
         try:
-            with db() as c:
-                r = c.execute("SELECT text FROM vault WHERE item_id=?", (item_id,)).fetchone()
-            if not r or not r["text"]:
+            item_id = q.get(timeout=EMBED_WATCH_SECS)
+        except queue.Empty:
+            if not waiting:
+                _watch_embedder()
                 continue
-            wait_gpu(None, poll=2.0)  # defer while the desktop holds the GPU (the lease is bounded)
-            (vec,), model = embed([r["text"]])
-            blob = array.array("f", vec).tobytes()
-            with _db_lock, db() as c:
-                c.execute("UPDATE vault SET vector=?, model=? WHERE item_id=?", (blob, model, item_id))
+            item_id = next(iter(waiting))
+        try:
+            status = _index_step(item_id, waiting, q)
         except Exception:
-            time.sleep(2)  # embedding server down; stays lexical-only until reindex
+            status = "failed"
+        if status in ("waiting", "failed"):
+            time.sleep(INDEX_FAIL_PAUSE_SECS)
 
 
 def _cosine(a: array.array, b: array.array) -> float:

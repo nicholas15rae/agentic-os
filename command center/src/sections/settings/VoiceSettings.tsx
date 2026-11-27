@@ -19,6 +19,21 @@ const LANGS: [string, string][] = [
   ["ja", "Japanese"], ["ko", "Korean"], ["hi", "Hindi"], ["pa", "Punjabi"], ["ar", "Arabic"], ["tl", "Tagalog"],
 ];
 
+/** STT engines the Settings select offers, by providers.json `engine` id. "fasterwhisper" is
+ * stt/fw_server.py on :8177 (policy.stt since 2026-11-26): without it the select fell back to its
+ * first option and showed "whisper.cpp" for it. */
+export const STT_ENGINES: [string, string][] = [
+  ["whispercpp", "whisper.cpp server (hot-swap models)"],
+  ["fasterwhisper", "faster-whisper (GPU)"],
+  ["openai", "OpenAI-compatible (speaches / faster-whisper)"],
+];
+
+/** The select's options; an engine id it doesn't know is listed as itself, never shown as another. */
+export function sttEngineOptions(current: string | undefined): [string, string][] {
+  const id = current ?? "whispercpp";
+  return STT_ENGINES.some(([e]) => e === id) ? STT_ENGINES : [...STT_ENGINES, [id, id]];
+}
+
 /** Whisper STT: model variant, language and input device. */
 export function SttCard() {
   const { view, patch } = useProviders();
@@ -100,9 +115,13 @@ export function SttCard() {
           {!micOn && mics.some((m) => !m.label) && <p className="mt-1 text-[11px] text-ink-3">Unlock mic to see device names</p>}
         </Field>
         <Field label="Engine">
+          {/* Saved as providers.json `engine` (Rust providers_update stores the id as given). */}
           <Select value={stt.engine ?? "whispercpp"} onChange={(e) => void patch({ id: stt.id, engine: e.target.value })}>
-            <option value="whispercpp">whisper.cpp server (hot-swap models)</option>
-            <option value="openai">OpenAI-compatible (speaches / faster-whisper)</option>
+            {sttEngineOptions(stt.engine).map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
           </Select>
         </Field>
         <Field label="Endpoint">

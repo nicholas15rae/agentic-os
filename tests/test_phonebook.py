@@ -67,7 +67,7 @@ class PhoneBookTests(unittest.TestCase):
     def test_save_links_numbers_and_keeps_trust(self):
         # The bridge saw Sam first and he was marked Instant Send.
         os_api.comms_sms({"address": "+1 (416) 555-0100", "contact": "Sam C", "body": "on my way", "ts": 1_700_000_000})
-        os_api.comms_contact_put({"address": "+1 (416) 555-0100", "name": "Sam C", "trusted": True})
+        os_api.comms_contact_put({"address": "+1 (416) 555-0100", "name": "Sam C", "trusted": True, "confirmed": True})
         e = os_api.pb_save({
             "name": "Sam Carter", "company": "Northside Casting", "role": "Casting director", "group": "acting",
             "phones": [{"label": "mobile", "number": "416-555-0100"}, "905 555 0111"],
@@ -99,7 +99,7 @@ class PhoneBookTests(unittest.TestCase):
 
     def test_edit_drops_a_number_and_delete_unlinks_without_losing_rows(self):
         e = os_api.pb_save({"name": "Dana", "phones": ["416 555 0100", "416 555 0101"]})
-        os_api.comms_contact_put({"address": "4165550101", "trusted": True})
+        os_api.comms_contact_put({"address": "4165550101", "trusted": True, "confirmed": True})
         e2 = os_api.pb_save({**{k: e[k] for k in ("id", "name", "company", "role", "notes", "group", "emails")}, "phones": ["416 555 0100"]})
         self.assertEqual(e2["created"], e["created"])
         rows = {r["address"]: r for r in self.iso.sql("SELECT * FROM comms_contacts")}

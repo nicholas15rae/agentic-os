@@ -3,7 +3,7 @@ import { cc } from "@/lib/cc-api";
 import { cmd, type ChatMessage } from "@/lib/platform";
 import { SUB_AGENTS } from "@/features/dispatcher/agents";
 import { APPROVED_ACTION_TOOLS, dispatch, sendApprovedAction, type ApprovedActionTool } from "@/features/dispatcher/dispatch";
-import type { LearnedPathway, PendingMemory } from "@/features/modes/learning";
+import type { AnsweredMemory, LearnedPathway, PendingMemory } from "@/features/modes/learning";
 import { isDesktopApp } from "@/stores/settings";
 import { namesOwnCalendar, type CalendarArgs } from "./calendar-add";
 import type { ActionPlan } from "./plan";
@@ -15,6 +15,8 @@ export interface ExecutionResult {
    * card) and the core memories a yes saved (the pills), as `dispatch` returned them. */
   pendingMemory?: PendingMemory[];
   learned?: LearnedPathway[];
+  /** The desktop's answer to a typed yes / no named the proposals it took (`settleAnsweredCard`). */
+  answeredMemory?: AnsweredMemory;
 }
 
 /**
@@ -37,7 +39,7 @@ export interface ExecutionResult {
  *                      desktop inbox turn (`os_turn`) has no mutating tools,
  *                      so an approved action is never queued for Tony there.
  */
-export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise<ExecutionResult> {
+export async function execute(plan: ActionPlan, history: ChatMessage[], opts: { answering?: string[] } = {}): Promise<ExecutionResult> {
   const agent = SUB_AGENTS[plan.role];
 
   // Permission-Bridge actions carry their own (already approved) runner.
@@ -69,12 +71,13 @@ export async function execute(plan: ActionPlan, history: ChatMessage[]): Promise
     }
     // The plan's route kind goes along as `routeFor` decided it: a phone turn it kept with Tony
     // reaches the desktop as "Self" (never re-resolved); a plain no-match stays "Default".
-    const { result, pendingMemory, learned } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate, routeKind: plan.routeKind });
+    const { result, pendingMemory, learned, answeredMemory } = await dispatch(utterance, { role: plan.role, history, noDelegate: plan.noDelegate, routeKind: plan.routeKind, ...(opts.answering ? { answering: opts.answering } : {}) });
     return {
       text: result.content || "(no response)",
       meta: `${agent.label} · ${result.providerId}${result.fellBack ? " · fallback" : ""}${vaultNote} · ${result.latencyMs}ms`,
       ...(pendingMemory?.length ? { pendingMemory } : {}),
       ...(learned?.length ? { learned } : {}),
+      ...(answeredMemory ? { answeredMemory } : {}),
     };
   }
 

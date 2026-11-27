@@ -12,6 +12,7 @@ import { AgentInbox } from "@/features/comms/AgentInbox";
 import { unreadCount, useAgentInbox } from "@/features/comms/agent-inbox";
 import { PhoneBook } from "@/features/contacts/PhoneBookPanel";
 import { linkOrCreate } from "@/features/contacts/phonebook-store";
+import { UNTRUSTABLE_CHANNELS, canSkipCard, isPermissionRequired, whatsappSend, type CommsContactBody, type CommsSendBody, type SendOrigin } from "@/features/comms/send-contract";
 
 interface Thread {
   thread: string;
@@ -199,20 +200,34 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
     if (!body) return;
     setSending(true);
     try {
+      // Typed by hand in this box: the only origin Instant Send can apply to (send-contract.ts).
+      const origin: SendOrigin = "ui-typed";
       const doSend = async (confirmed: boolean) => {
         if (whatsapp) {
           if (!isTauri()) throw new Error("WhatsApp replies are sent from the desktop (WhatsApp MCP).");
-          return cmd("comms_whatsapp_send", { recipient: thread.address, message: body, approved: confirmed });
+          return whatsappSend({ recipient: thread.address, message: body, approved: confirmed, origin });
         }
-        return gateway("/api/comms/send", { method: "POST", body: JSON.stringify({ address: thread.address, contact: thread.contact, body, channel: "sms", confirmed }) });
+        const req: CommsSendBody = { address: thread.address, contact: thread.contact, body, channel: "sms", confirmed, origin };
+        return gateway("/api/comms/send", { method: "POST", body: JSON.stringify(req) });
       };
-      const r = thread.trusted
-        ? await doSend(false) // Instant Send: trusted contact, no card
-        : await confirmThen(
-            { action: "comms-send", summary: `Text ${thread.contact}: “${body.slice(0, 80)}”`, readBack: `Send this ${whatsapp ? "WhatsApp" : "text"} to ${thread.contact}: ${body.slice(0, 140)}. Send it?`, detail: { to: thread.address, channel: whatsapp ? "whatsapp" : "sms" } },
-            () => doSend(true),
-            () => (whatsapp ? "Sent on WhatsApp." : "Queued — your phone sends it."),
-          );
+      const withCard = () =>
+        confirmThen(
+          { action: "comms-send", summary: `Text ${thread.contact}: “${body.slice(0, 80)}”`, readBack: `Send this ${whatsapp ? "WhatsApp" : "text"} to ${thread.contact}: ${body.slice(0, 140)}. Send it?`, detail: { to: thread.address, channel: whatsapp ? "whatsapp" : "sms" } },
+          () => doSend(true),
+          () => (whatsapp ? "Sent on WhatsApp." : "Queued — your phone sends it."),
+        );
+      let r: unknown;
+      if (canSkipCard(origin, thread.trusted, thread.channel)) {
+        // Instant Send: the server re-checks exact trust; if it says no, fall back to the card.
+        try {
+          r = await doSend(false);
+        } catch (e) {
+          if (!isPermissionRequired(e)) throw e;
+          r = await withCard();
+        }
+      } else {
+        r = await withCard();
+      }
       if (r !== null) {
         setText("");
         load();
@@ -240,7 +255,23 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
     }
   };
 
-  const toggleTrust = () => void gateway("/api/comms/contacts", { method: "POST", body: JSON.stringify({ address: thread.address, name: thread.contact, trusted: !thread.trusted }) }).then(onChange);
+  const trustable = !UNTRUSTABLE_CHANNELS.includes(thread.channel.toLowerCase());
+  const setTrust = (trusted: boolean, confirmed: boolean) => {
+    const req: CommsContactBody = { address: thread.address, name: thread.contact, trusted, confirmed, channel: thread.channel };
+    return gateway("/api/comms/contacts", { method: "POST", body: JSON.stringify(req) });
+  };
+  // Turning Instant Send on is itself a card action (and audit-logged by the gateway); off needs no card.
+  const toggleTrust = () =>
+    void (thread.trusted
+      ? setTrust(false, false)
+      : confirmThen(
+          { action: "comms-trust", summary: `Turn on Instant Send for ${thread.contact}`, readBack: `Let replies you type to ${thread.contact} (${thread.address}) send without a confirmation card? Tony, voice and agents will still ask.`, detail: { to: thread.address, channel: thread.channel } },
+          () => setTrust(true, true),
+          () => `Instant Send is on for ${thread.contact}.`,
+        )
+    )
+      .then(onChange)
+      .catch((e) => useToasts.getState().push({ title: "Instant Send not changed", body: String(e), tone: "error" }));
 
   return (
     <section className="glass-chat flex min-h-[420px] flex-col rounded-[20px]">
@@ -266,9 +297,12 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
         <a href={`tel:${thread.address.replace(/[^\d+]/g, "")}`} className={`pill-glass !h-8 !w-8 !p-0 ${!thread.contactId && !whatsapp ? "" : "ml-auto"}`} aria-label={`Call ${name}`} title="Call">
           <Phone size={13} />
         </a>
-        <button onClick={toggleTrust} className={`pill-glass !h-8 text-[11px] ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies to this contact skip the confirmation card">
-          <Zap size={12} /> {thread.trusted ? "Instant Send on" : "Instant Send"}
-        </button>
+        {/* Untrustable channels never offer turning it on, but trust set before this rule can still be switched off. */}
+        {(trustable || thread.trusted) && (
+          <button onClick={toggleTrust} className={`pill-glass !h-8 text-[11px] ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies you type to this contact skip the confirmation card (Tony, voice and agents still ask)">
+            <Zap size={12} /> {thread.trusted ? "Instant Send on" : "Instant Send"}
+          </button>
+        )}
       </header>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4" style={{ maxHeight: "60vh" }}>
         {!msgs && <Loader2 size={14} className="animate-spin text-ink-3" />}
@@ -289,7 +323,7 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
           void send();
         }}
       >
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={thread.trusted ? "Message (Instant Send)…" : "Message — confirmed before sending…"} className="field !h-10 !rounded-full" aria-label="Reply" />
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={canSkipCard("ui-typed", thread.trusted, thread.channel) ? "Message (Instant Send)…" : "Message — confirmed before sending…"} className="field !h-10 !rounded-full" aria-label="Reply" />
         <button className="pill-primary !h-10 !w-10 shrink-0 !p-0" disabled={!text.trim() || sending} aria-label="Send">
           {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
         </button>
@@ -424,7 +458,7 @@ function WhatsAppPanel() {
           if (!to.trim() || !msg.trim()) return;
           void confirmThen(
             { action: "whatsapp-send", summary: `WhatsApp ${to}: “${msg.slice(0, 60)}”`, detail: { to } },
-            () => cmd("comms_whatsapp_send", { recipient: to.trim(), message: msg.trim(), approved: true }),
+            () => whatsappSend({ recipient: to.trim(), message: msg.trim(), approved: true, origin: "ui-card" }),
             () => "Sent on WhatsApp.",
           ).then((r) => r !== null && setMsg(""));
         }}

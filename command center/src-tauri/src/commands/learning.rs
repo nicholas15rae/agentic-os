@@ -18,8 +18,9 @@
 //!   [`CORE_QUESTION`]. Nic's whole-line yes ([`parse_answer`], spoken or typed, desktop or
 //!   phone) or the card's Save saves it with `core: true` and confirmed ([`commit_core`]); a no or
 //!   Skip drops it. A spoken / typed yes or no answers only the batch Tony's immediately
-//!   preceding reply proposed ([`Proposals::take_spoken`]); any other turn ends that, and older
-//!   batches are card-only (by id). [`core_block`] puts the confirmed core entries in EVERY Tony
+//!   preceding reply proposed ([`Proposals::take_spoken_for`]); any other turn (any mode) ends that,
+//!   as does a reply that didn't ask ([`Proposals::settle_spoken`]), and older batches are
+//!   card-only (by id). [`core_block`] puts the confirmed core entries in EVERY Tony
 //!   prompt, sorted by id and capped at [`CORE_MAX`] (gateway_tony.py renders the same block,
 //!   byte for byte).
 //! - An approved lesson is stored as Nic approved it ([`upsert_core`]): the same words again are
@@ -64,6 +65,9 @@ pub const SAVED_REPLY: &str = "Saved to my core memories.";
 pub const ALREADY_REPLY: &str = "That's already in my core memories.";
 /// The reply to Nic's no (no model call).
 pub const DISCARDED_REPLY: &str = "Okay, I won't save that.";
+/// The reply when a yes couldn't be saved: it asks again, so a yes right after it retries (and a
+/// reply that didn't ask never leaves a spoken answer open, [`Proposals::settle_spoken`]).
+pub const SAVE_FAILED_REPLY: &str = "I couldn't save that just now. Want me to try again and add it to my core memories?";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Superseded {
@@ -206,6 +210,56 @@ fn tokens(s: &str) -> std::collections::BTreeSet<String> {
     s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3 && !STOP.contains(w)).map(str::to_string).collect()
 }
 
+/// Light English stemming for keyword recall only ([`relevant`]): one suffix off a lowercase word
+/// ("bookings" / "booking" / "booked" / "books" → "book", "auditions" → "audition", "parties" →
+/// "party", "shipped" → "ship"), never leaving fewer than 3 letters. Not used by [`similarity`]
+/// (so what counts as the same lesson in [`upsert_core`] is unchanged) or the CORE block.
+fn stem(w: &str) -> String {
+    let n = w.chars().count();
+    let cut = |suffix: &str| -> Option<String> {
+        let base = w.strip_suffix(suffix)?;
+        (base.chars().count() >= 3).then(|| base.to_string())
+    };
+    // A doubled final consonant left by -ing / -ed ("shipp", "runn") is undoubled, except l / s / z
+    // ("fall", "pass", "buzz" stay whole).
+    let undouble = |b: String| -> String {
+        let c: Vec<char> = b.chars().collect();
+        match c.as_slice() {
+            [.., x, y] if c.len() >= 4 && x == y && !"aeioulsz".contains(*x) => c[..c.len() - 1].iter().collect(),
+            _ => b,
+        }
+    };
+    if n < 4 || !w.chars().all(|c| c.is_ascii_alphabetic()) {
+        return w.to_string();
+    }
+    if let Some(b) = w.strip_suffix("ies").filter(|b| b.chars().count() >= 2) {
+        return format!("{b}y");
+    }
+    if let Some(b) = w.strip_suffix("ied").filter(|b| b.chars().count() >= 2) {
+        return format!("{b}y");
+    }
+    if let Some(b) = cut("ings").or_else(|| cut("ing")) {
+        return undouble(b);
+    }
+    if let Some(b) = cut("ed") {
+        return undouble(b);
+    }
+    if let Some(b) = ["sses", "shes", "ches", "xes", "zes"].iter().find_map(|s| w.strip_suffix(s).map(|b| format!("{b}{}", &s[..s.len() - 2]))).filter(|b| b.chars().count() >= 3) {
+        return b;
+    }
+    if !w.ends_with("ss") && !w.ends_with("us") && !w.ends_with("is") {
+        if let Some(b) = cut("s") {
+            return b;
+        }
+    }
+    w.to_string()
+}
+
+/// [`tokens`], stemmed ([`stem`]): what recall matches on.
+fn recall_tokens(s: &str) -> std::collections::BTreeSet<String> {
+    tokens(s).iter().map(|w| stem(w)).collect()
+}
+
 /// Dice similarity of the two texts' content words, 0–1 (0 when either has none).
 pub fn similarity(a: &str, b: &str) -> f64 {
     let (x, y) = (tokens(a), tokens(b));
@@ -338,14 +392,15 @@ fn always_applies(p: &Pathway) -> bool {
 }
 
 /// The pathways that share words with `text` (or always apply), best first (ties: most recently
-/// updated). `skip`: ids already in the prompt (the CORE MEMORIES block).
+/// updated). Words match by their [`stem`] ("any bookings?" finds a lesson about getting
+/// booked). `skip`: ids already in the prompt (the CORE MEMORIES block).
 pub fn relevant<'a>(f: &'a PathwayFile, text: &str, max: usize, confirmed_only: bool, skip: &[String]) -> Vec<&'a Pathway> {
-    let q = tokens(text);
+    let q = recall_tokens(text);
     let mut scored: Vec<(usize, &Pathway)> = f
         .pathways
         .iter()
         .filter(|p| (!confirmed_only || p.confidence == "confirmed") && !skip.contains(&p.id))
-        .map(|p| (tokens(&format!("{} {}", p.trigger_or_context, p.directive_or_fact)).intersection(&q).count(), p))
+        .map(|p| (recall_tokens(&format!("{} {}", p.trigger_or_context, p.directive_or_fact)).intersection(&q).count(), p))
         .filter(|(n, p)| *n > 0 || always_applies(p))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.updated_at.cmp(&a.1.updated_at)));
@@ -461,7 +516,7 @@ pub struct PendingMemory {
     pub text: String,
 }
 
-/// One pending lesson (taken out by [`Proposals::take`] / [`Proposals::take_spoken`]; a failed
+/// One pending lesson (taken out by [`Proposals::take`] / [`Proposals::take_spoken_for`]; a failed
 /// save puts it back with [`Proposals::restore`], same id, so the card still answers it).
 #[derive(Clone, Debug)]
 pub struct Proposal {
@@ -482,7 +537,8 @@ struct Pending {
 }
 
 /// Learning mode's pending proposals: in memory only (an app restart drops them), each live for
-/// [`PROPOSAL_TTL_MS`], at most [`PROPOSALS_MAX`].
+/// [`PROPOSAL_TTL_MS`], at most [`PROPOSALS_MAX`]. The app holds one (`OsState::proposals`):
+/// desktop, phone and voice answer the same ones.
 #[derive(Default)]
 pub struct Proposals(std::sync::Mutex<Pending>);
 
@@ -534,21 +590,55 @@ impl Proposals {
         Some(g.list.remove(i))
     }
 
+    /// `take_spoken_for(None, now)` (the tests' shorthand).
+    #[cfg(test)]
+    pub fn take_spoken(&self, now: u64) -> Vec<Proposal> {
+        self.take_spoken_for(None, now)
+    }
+
     /// A spoken / typed yes or no: remove the batch Tony's immediately preceding reply proposed
     /// (what his question asked about) and end spoken answers until the next proposal. Empty:
     /// none (no proposal since the last other turn, or its rows were answered or expired).
-    pub fn take_spoken(&self, now: u64) -> Vec<Proposal> {
+    /// Only for the card the caller's conversation shows:
+    /// `ids` are the proposal ids on the card of that conversation's newest Tony reply
+    /// (`OsTurnRequest.answering`). The spoken batch is app-wide (the newest proposal, whichever
+    /// conversation made it), so a yes in one conversation could otherwise commit a batch another
+    /// one proposed. With `Some(ids)` the batch is taken only when one of its live rows has an id
+    /// in `ids`; otherwise nothing is taken and the rows stay pending (a normal turn runs, and its
+    /// `close_spoken` ends the marker). `None`: an older caller, today's rule.
+    pub fn take_spoken_for(&self, ids: Option<&[String]>, now: u64) -> Vec<Proposal> {
         let mut g = self.live(now);
-        let Some(b) = g.spoken.take() else { return vec![] };
+        let Some(b) = g.spoken else { return vec![] };
+        if let Some(ids) = ids {
+            if !g.list.iter().any(|p| p.batch == b && ids.contains(&p.id)) {
+                return vec![];
+            }
+        }
+        g.spoken = None;
         let (take, keep): (Vec<Proposal>, Vec<Proposal>) = g.list.drain(..).partition(|p| p.batch == b);
         g.list = keep;
         take
     }
 
-    /// Any turn that isn't a spoken answer: from now on a yes / no is about something else, so
-    /// the pending batches are answerable by id (the card) only.
+    /// Any turn that isn't a spoken answer (every non-Learning turn too): from now on a yes / no
+    /// is about something else, so the pending batches are answerable by id (the card) only.
     pub fn close_spoken(&self) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).spoken = None;
+    }
+
+    /// The end of a turn: Tony's `reply` didn't ask [`CORE_QUESTION`], so a yes next turn can't be
+    /// its answer: spoken answers end (a caller that sends no history relies on this marker
+    /// alone). A reply that asked keeps the batch it proposed.
+    pub fn settle_spoken(&self, reply: &str) {
+        if !asks_core(reply) {
+            self.close_spoken();
+        }
+    }
+
+    /// Is a spoken answer possible right now (a batch the last reply proposed)?
+    #[cfg(test)]
+    pub fn spoken_open(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).spoken.is_some()
     }
 
     /// Put taken proposals back after a failed save (same ids, same expiry). `spoken`: a yes can
@@ -575,12 +665,6 @@ pub fn asked_core_question(last_reply: Option<&str>) -> bool {
 fn asks_core(reply: &str) -> bool {
     let l = reply.to_lowercase();
     l.contains("add that to my core memories") || l.contains("add it to my core memories")
-}
-
-/// The app's proposals (one store: desktop, phone and voice answer the same ones).
-pub fn proposals() -> &'static Proposals {
-    static P: OnceLock<Proposals> = OnceLock::new();
-    P.get_or_init(Proposals::default)
 }
 
 /// Tony's Learning reply to a proposal: it ends with [`CORE_QUESTION`] (added when the model left
@@ -977,6 +1061,65 @@ mod tests {
         let two = [Saved { replaced: Some("When a: b.".into()), ..saved(&f.pathways[0], "superseded") }, Saved { replaced: Some("c".into()), ..saved(&f.pathways[0], "superseded") }];
         assert_eq!(saved_reply(&two), "Saved to my core memories. That replaces the old ones: \"When a: b\"; \"c\".");
         assert_eq!(saved_reply(&[]), SAVED_REPLY);
+    }
+
+    #[test]
+    fn recall_matches_word_forms_by_a_light_stem() {
+        for (w, s) in [("book", "book"), ("books", "book"), ("booking", "book"), ("bookings", "book"), ("booked", "book"), ("audition", "audition"), ("auditions", "audition"), ("auditioned", "audition"), ("parties", "party"), ("shipped", "ship"), ("running", "run"), ("classes", "class"), ("class", "class"), ("thing", "thing"), ("things", "thing"), ("added", "add"), ("falling", "fall"), ("bus", "bus"), ("analysis", "analysis"), ("ring", "ring")] {
+            assert_eq!(stem(w), s, "{w}");
+        }
+        let mut f = PathwayFile::default();
+        push_new(&mut f, &d("workflow", "Nic gets booked for a shoot", "add the call time to his calendar", "confirmed"), 1);
+        push_new(&mut f, &d("rule", "auditions", "remind him to print the sides", "confirmed"), 2);
+        push_new(&mut f, &d("rule", "exporting reports", "send them as PDFs", "confirmed"), 3);
+        let ids = |q: &str| relevant(&f, q, 5, true, &[]).iter().map(|p| p.trigger_or_context.clone()).collect::<Vec<_>>();
+        assert_eq!(ids("any bookings this week?"), ["Nic gets booked for a shoot"]);
+        assert_eq!(ids("did I book anything"), ["Nic gets booked for a shoot"]);
+        assert_eq!(ids("I have an audition tomorrow"), ["auditions"]);
+        assert!(ids("what's the weather").is_empty());
+        // The dedupe similarity (what counts as the same lesson) is not stemmed.
+        assert_eq!(similarity("bookings", "booked"), 0.0);
+    }
+
+    #[test]
+    fn a_reply_that_did_not_ask_ends_spoken_answers() {
+        let p = Proposals::default();
+        p.propose(&[d("rule", "naming files", "use kebab-case", "confirmed")], 1_000);
+        assert!(p.spoken_open());
+        p.settle_spoken(&format!("So kebab-case? {CORE_QUESTION}"));
+        assert!(p.spoken_open(), "the proposing reply asked: a yes next turn answers it");
+        p.settle_spoken("Sure, here's the weather.");
+        assert!(!p.spoken_open() && p.take_spoken(1_100).is_empty(), "a reply that didn't ask ends it");
+        assert!(p.any(1_100), "still pending for the card");
+        // A failed save asks again, so the retry stays open.
+        p.propose(&[d("rule", "x", "y", "confirmed")], 2_000);
+        let t = p.take_spoken(2_100);
+        p.restore(t, true);
+        p.settle_spoken(SAVE_FAILED_REPLY);
+        assert!(p.spoken_open());
+        for r in [SAVED_REPLY, ALREADY_REPLY, DISCARDED_REPLY] {
+            assert!(!asks_core(r), "{r}");
+        }
+    }
+
+    /// FX2 review finding 2: the spoken batch is app-wide, so a yes in the conversation that
+    /// proposed A, after another conversation proposed B, used to commit B. With the card's ids
+    /// a yes commits only the batch that card shows.
+    #[test]
+    fn a_spoken_answer_takes_only_the_batch_of_the_card_it_answers() {
+        let p = Proposals::default();
+        let a: Vec<String> = p.propose(&[d("preference", "someone asks my name", "call me Nic", "confirmed")], 1_000).into_iter().map(|m| m.id).collect();
+        let b: Vec<String> = p.propose(&[d("rule", "I'm driving", "keep it short", "confirmed")], 2_000).into_iter().map(|m| m.id).collect();
+        assert!(p.take_spoken_for(Some(&a), 2_100).is_empty(), "A's card can't take B, the spoken batch");
+        assert!(p.spoken_open(), "nothing taken: the turn's close_spoken ends the marker");
+        assert!(p.any(2_100));
+        assert!(p.take_spoken_for(Some(&[]), 2_150).is_empty(), "a conversation with no card takes nothing");
+        assert_eq!(directives(&p.take_spoken_for(Some(&b), 2_200)), ["keep it short"]);
+        assert!(!p.spoken_open());
+        assert!(p.take(&a[0], 2_300).is_some(), "A is still pending for its card");
+        // None (an older caller): today's rule, the spoken batch.
+        p.propose(&[d("rule", "x", "y", "confirmed")], 3_000);
+        assert_eq!(directives(&p.take_spoken_for(None, 3_100)), ["y"]);
     }
 
     #[test]

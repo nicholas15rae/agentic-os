@@ -18,7 +18,9 @@
 //!
 //! Cases (cases.rs) are posted straight to Bionic the way Tony sends them, with only the model
 //! name changed. Chat turns: Tony's real system message (`agents::system_prompt_with_core` →
-//! `tony_turn_system` → `tony_system`, with the live MODE block and output contract), stream true,
+//! `tony_turn_system` → `tony_system`, with the live MODE block and output contract) and his real
+//! last user message (the line, then `agents::turn_context_block` with the fixed DASHBOARD and the
+//! case's tool data), stream true,
 //! reasoning_effort none, plus `stream_options.include_usage` for token counts. Router turns:
 //! `agents::router_prompt(agents::router_offer(..))`, stream false, with run_tool_router's one
 //! "JSON only" retry. Variants: `a` adds `chat_template_kwargs.enable_thinking=false`; `b` sends
@@ -48,8 +50,12 @@ use crate::commands::os_core::{OsConfig, OsState};
 use crate::commands::{agents, learning, modes, tony_dispatch};
 
 pub const DEFAULT_CANDIDATE: &str = "huihui-qwen3.5-9b-abliterated";
-/// `acquire_maintenance` label; the slot (and the gateway lease) shows `maintenance · model compare`.
+/// `acquire_maintenance` label; the slot (and the gateway lease) shows `HOLDER`.
 pub const SLOT_LABEL: &str = "model compare";
+/// The slot holder (and gateway lease holder) of a running compare: `GpuSlot::acquire_maintenance`
+/// prefixes `maintenance · `. gateway_tony.py `testing_window` keys its "testing a model" line on
+/// this exact text (and on `maintenance · bench …`); a test keeps the two in step.
+pub const HOLDER: &str = "maintenance · model compare";
 /// Tony's production load (services.rs FIT_CTX, gateway_tony.py LOAD_CONTEXT / LOAD_PARALLEL).
 pub const CONTEXT: u64 = 32_768;
 pub const PARALLEL: u64 = 2;
@@ -272,13 +278,33 @@ fn cancel_flag() -> &'static Arc<AtomicBool> {
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Clears RUNNING and the live status when the run task ends (also on a panic).
-struct RunningGuard;
+/// A Model Lab compare is running: true from `start` (a request accepted) until its task ends,
+/// so it covers the wait for the GPU slot, the four blocks and putting Tony back (and a crash
+/// recovery). Stable accessor for other modules (Tony's desktop "I'm testing a model" line):
+/// read it instead of matching slot labels. The slot holder while it runs is `HOLDER`.
+pub(crate) fn running() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+}
 
-impl Drop for RunningGuard {
+/// Clears its running flag and live status when the run task ends (also on a panic). `live()` is
+/// the process-wide pair `start` claims; a test hands it its own pair, so it never flips RUNNING
+/// (agents.rs answers Tony's turns with the "testing a model" line while `running()` is true, and
+/// cargo runs those tests in parallel threads of the same process).
+struct RunningGuard<'a> {
+    flag: &'a AtomicBool,
+    status: &'a Status,
+}
+
+impl RunningGuard<'static> {
+    fn live() -> Self {
+        RunningGuard { flag: &RUNNING, status: status() }
+    }
+}
+
+impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {
-        *status().lock().unwrap_or_else(|p| p.into_inner()) = None;
-        RUNNING.store(false, Ordering::SeqCst);
+        *self.status.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -343,8 +369,12 @@ pub struct BlockOut {
     pub ctx_ok: bool,
     pub vram_before_mb: Option<u64>,
     pub vram_after_load_mb: Option<u64>,
+    /// The highest sample taken from `peak_from_ms` (the block's load confirmed) to `ended_ms`:
+    /// never one that started while the previous model was unloading or this one loading.
     pub vram_peak_mb: Option<u64>,
     pub vram_total_mb: Option<u64>,
+    /// Run-relative ms at which the load returned: the start of the VRAM peak window.
+    pub peak_from_ms: Option<u64>,
     /// Other LLMs loaded when the block ended (a just-in-time load by someone else).
     pub extra_loaded: Vec<String>,
     pub error: Option<String>,
@@ -376,6 +406,8 @@ pub struct ChatRun {
     pub cached_tokens: Option<u64>,
     /// Effective prefill speed (uncached prompt tokens / time to first delta, or the server's own).
     pub prefill_tps: Option<f64>,
+    /// How `prefill_tps` was worked out (`Tokens::prefill_basis`).
+    pub prefill_basis: &'static str,
     pub gen_tps: Option<f64>,
     /// No `usage` came back: token counts are streamed-chunk counts.
     pub tokens_approx: bool,
@@ -659,7 +691,7 @@ fn heartbeat(state: &DispatchState, os: &OsState, every: Duration) -> Task<u32> 
     let http = state.http.clone();
     let url = lease_url(state);
     let bearer = crate::commands::os_core::mesh_bearer(&os.snapshot());
-    let holder = format!("maintenance · {SLOT_LABEL}");
+    let holder = HOLDER.to_string();
     let stop = Arc::new(tokio::sync::Notify::new());
     let s2 = stop.clone();
     let handle = tauri::async_runtime::spawn(async move {
@@ -680,15 +712,18 @@ fn heartbeat(state: &DispatchState, os: &OsState, every: Duration) -> Task<u32> 
 
 type Samples = Arc<Mutex<Vec<(u64, u64, u64)>>>;
 
-/// VRAM every `every` ms: (ms since the run started, used MiB, total MiB).
+/// VRAM every `every` ms: (ms since the run started, used MiB, total MiB). The time is taken
+/// when the read STARTS (nvidia-smi takes ~100 ms), so a sample stamped after a block's load
+/// returned can't be one that began while the previous model was still resident.
 fn sampler(vram: Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync>, every: Duration, t0: Instant, samples: Samples) -> Task<()> {
     let stop = Arc::new(tokio::sync::Notify::new());
     let s2 = stop.clone();
     let handle = tauri::async_runtime::spawn(async move {
         loop {
             let f = vram.clone();
+            let at = t0.elapsed().as_millis() as u64;
             if let Ok(Some((used, total))) = tauri::async_runtime::spawn_blocking(move || f()).await {
-                samples.lock().unwrap_or_else(|p| p.into_inner()).push((t0.elapsed().as_millis() as u64, used, total));
+                samples.lock().unwrap_or_else(|p| p.into_inner()).push((at, used, total));
             }
             tokio::select! {
                 _ = tokio::time::sleep(every) => {}
@@ -702,6 +737,62 @@ fn sampler(vram: Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync>, every: Durat
 async fn vram_now(vram: &Arc<dyn Fn() -> Option<(u64, u64)> + Send + Sync>) -> Option<(u64, u64)> {
     let f = vram.clone();
     tauri::async_runtime::spawn_blocking(move || f()).await.ok().flatten()
+}
+
+/// A block's VRAM peak: the highest sample from `from_ms` (its load confirmed) to `to_ms`, and the
+/// reading right after the load. Samples before `from_ms` belong to the previous model's unload
+/// and this one's load, so they are left out (pure).
+fn block_peak(samples: &[(u64, u64, u64)], from_ms: u64, to_ms: u64, after_load: Option<u64>) -> Option<u64> {
+    samples.iter().filter(|s| s.0 >= from_ms && s.0 <= to_ms).map(|s| s.1).chain(after_load).max()
+}
+
+/// Token counts and speeds of one streamed turn, from whatever the server sent back.
+///
+/// Bionic (LM Studio's server, checked live on 2026-11-26 with stream_options.include_usage)
+/// sends `usage` {prompt_tokens, completion_tokens, total_tokens,
+/// completion_tokens_details.reasoning_tokens} in a last chunk with `choices: []`, and NO
+/// llama.cpp `timings` and no `prompt_tokens_details.cached_tokens`. So with Bionic the token
+/// counts are exact, generation speed is completion tokens over the time after the first delta,
+/// and prefill speed is ALL prompt tokens over the time to the first delta (`prompt` basis): a
+/// cached prefix (Bionic reuses it, unreported) makes that an effective rate, not a raw one.
+#[derive(Debug, Clone, PartialEq)]
+struct Tokens {
+    completion: Option<u64>,
+    reasoning: u64,
+    prompt: Option<u64>,
+    cached: Option<u64>,
+    prefill_tps: Option<f64>,
+    /// "server" (llama.cpp timings.prompt_per_second), "uncached" ((prompt − cached) ÷ first
+    /// delta), "prompt" (prompt ÷ first delta: no cache count came back) or "none".
+    prefill_basis: &'static str,
+    gen_tps: Option<f64>,
+    /// No `usage` came back: counts are streamed chunks (one token each, roughly).
+    approx: bool,
+}
+
+fn round_tps(n: u64, secs: f64) -> Option<f64> {
+    (n > 0 && secs > 0.0).then(|| (n as f64 / secs * 10.0).round() / 10.0)
+}
+
+fn token_metrics(out: &StreamOut) -> Tokens {
+    let usage = &out.usage;
+    let approx = !usage.is_object();
+    let completion = usage["completion_tokens"].as_u64().or(approx.then_some(out.content_chunks + out.reasoning_chunks));
+    let reasoning = usage["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0).max(out.reasoning_chunks);
+    let prompt = usage["prompt_tokens"].as_u64();
+    let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64().or(out.timings["cache_n"].as_u64());
+    let (prefill_tps, prefill_basis) = match out.timings["prompt_per_second"].as_f64() {
+        Some(s) => (Some(s), "server"),
+        None => match (prompt, out.ttfd_s) {
+            (Some(n), Some(s)) => match round_tps(n.saturating_sub(cached.unwrap_or(0)), s) {
+                Some(v) => (Some(v), if cached.is_some() { "uncached" } else { "prompt" }),
+                None => (None, "none"),
+            },
+            _ => (None, "none"),
+        },
+    };
+    let gen_tps = out.timings["predicted_per_second"].as_f64().or_else(|| round_tps(completion?, out.total_ms.saturating_sub(out.ttfd_ms?) as f64 / 1000.0));
+    Tokens { completion, reasoning, prompt, cached, prefill_tps, prefill_basis, gen_tps, approx }
 }
 
 // ── The run ─────────────────────────────────────────────────────────────────
@@ -745,15 +836,24 @@ impl Ctx<'_> {
         }
     }
 
-    /// Tony's system message for `text` exactly as his turn builds it (agents.rs os_turn), with
-    /// `model` as his model: persona + CORE MEMORIES + LIVE DASHBOARD + TOOLS line, the tool note,
-    /// then the output contract and the MODE block, `/no_think` last for a thinking model.
-    fn tony_system(&self, model: &str, text: &str, tool_note: &str, force_packets: bool) -> String {
+    /// Tony's system message exactly as his turn builds it (agents.rs os_turn), with `model` as his
+    /// model: persona + CORE MEMORIES + TOOLS line, then the output contract and the MODE block,
+    /// `/no_think` last for a thinking model. The same for every case of a suite (byte-stable, as
+    /// on Tony's real turns): the dashboard and tool data ride in the user message (`tony_user`).
+    fn tony_system(&self, model: &str, force_packets: bool) -> String {
         let cfg = &self.cfg;
-        let sys = agents::system_prompt_with_core(cfg, &self.core, DASHBOARD, &self.tools, agents::action_shaped(text, &cfg.os_name));
+        let sys = agents::system_prompt_with_core(cfg, &self.core, &self.tools);
         let contract = agents::tony_live_contract(force_packets || self.packets_live, &self.mode, &cfg.switchboard);
-        let tail = agents::tony_turn_tail("", "", &contract, &modes::mode_block(&self.mode));
-        agents::tony_system(agents::tony_turn_system(&sys, tool_note, "", &tail), Some(model), cfg.compute.deep_thinking)
+        agents::tony_system(agents::tony_turn_system(&sys, "", &contract, &modes::mode_block(&self.mode)), Some(model), cfg.compute.deep_thinking)
+    }
+
+    /// Tony's last user message for `text` as his turn builds it: Nic's words, then the turn-context
+    /// block with the fixed LIVE DASHBOARD, the TOOLS action lines (an action-shaped line only) and
+    /// the tool note.
+    fn tony_user(&self, text: &str, tool_note: &str) -> String {
+        let action = if agents::action_shaped(text, &self.cfg.os_name) { agents::tools_action_note(&self.tools) } else { String::new() };
+        let block = agents::turn_context_block(&agents::TurnContext { dashboard: DASHBOARD, action: &action, tool_note, ..Default::default() });
+        agents::turn_user_message(text, &block)
     }
 
     /// Tony's streamed body (agents.rs `run_chat_streamed_into`) + the variant + usage reporting.
@@ -774,16 +874,17 @@ impl Ctx<'_> {
     }
 }
 
-/// The `[LIVE MCP TOOL DATA - server]` block agents.rs `Prefetch::call` appends for a tool result.
+/// The `[LIVE MCP TOOL DATA - server]` block agents.rs `Prefetch::call` appends for a tool result,
+/// fenced the same way (`agents::fence_untrusted`), so a case is measured on the text a live turn sends.
 pub(crate) fn tool_block(server: &str, data: &str) -> String {
-    format!("\n\n[LIVE MCP TOOL DATA - {server} ({})]:\n{data}", agents::TOOL_DATA_LABEL)
+    format!("\n\n[LIVE MCP TOOL DATA - {server} ({})]:\n{}", agents::TOOL_DATA_LABEL, agents::fence_untrusted(data))
 }
 
 async fn chat_case(ctx: &Ctx<'_>, block: usize, side: Side, v: Variant, c: &'static ChatCase, rep: u32) -> ChatRun {
     let model = ctx.model(side).to_string();
     let note = c.data.map(|(server, data)| agents::tool_note(&ctx.cfg.os_name, &tool_block(server, data), None)).unwrap_or_default();
     let force = c.suite == Suite::Packet;
-    let msgs = vec![ChatMessage::new("system", ctx.tony_system(&model, c.text, &note, force)), ChatMessage::new("user", c.text)];
+    let msgs = vec![ChatMessage::new("system", ctx.tony_system(&model, force)), ChatMessage::new("user", ctx.tony_user(c.text, &note))];
     let out = stream_chat(ctx.state, &ctx.chat_url, &ctx.chat_body(&model, &msgs, v)).await;
     let visible = checks::visible_prose(&out.content);
     let parsed = tony_dispatch::parse(&visible);
@@ -795,22 +896,7 @@ async fn chat_case(ctx: &Ctx<'_>, block: usize, side: Side, v: Variant, c: &'sta
     };
     let spoken = checks::spoken_final(&out.content);
     let persona = checks::persona(&out.content, &spoken);
-    let usage = &out.usage;
-    let approx = !usage.is_object();
-    let completion = usage["completion_tokens"].as_u64().or(approx.then_some(out.content_chunks + out.reasoning_chunks));
-    let reasoning_tokens = usage["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0).max(out.reasoning_chunks);
-    let prompt = usage["prompt_tokens"].as_u64();
-    let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
-    let prefill = out.timings["prompt_per_second"].as_f64().or_else(|| {
-        let n = prompt?.saturating_sub(cached.unwrap_or(0));
-        let s = out.ttfd_s?;
-        (n > 0 && s > 0.0).then(|| (n as f64 / s * 10.0).round() / 10.0)
-    });
-    let gen = out.timings["predicted_per_second"].as_f64().or_else(|| {
-        let n = completion?;
-        let s = out.total_ms.saturating_sub(out.ttfd_ms?) as f64 / 1000.0;
-        (n > 0 && s > 0.0).then(|| (n as f64 / s * 10.0).round() / 10.0)
-    });
+    let tok = token_metrics(&out);
     let error = out.error.clone().or_else(|| (out.content.trim().is_empty()).then(|| "no content came back".to_string()));
     // An errored, timed-out or empty turn has nothing to judge: `no_answer`, never a pass.
     let guard = (c.suite == Suite::Guard).then(|| {
@@ -829,14 +915,15 @@ async fn chat_case(ctx: &Ctx<'_>, block: usize, side: Side, v: Variant, c: &'sta
         first_content_ms: out.first_content_ms,
         first_speakable_ms: out.first_speakable_ms,
         total_ms: out.total_ms,
-        reasoning_tokens,
+        reasoning_tokens: tok.reasoning,
         reasoning_chars: out.reasoning.chars().count(),
-        completion_tokens: completion,
-        prompt_tokens: prompt,
-        cached_tokens: cached,
-        prefill_tps: prefill,
-        gen_tps: gen,
-        tokens_approx: approx,
+        completion_tokens: tok.completion,
+        prompt_tokens: tok.prompt,
+        cached_tokens: tok.cached,
+        prefill_tps: tok.prefill_tps,
+        prefill_basis: tok.prefill_basis,
+        gen_tps: tok.gen_tps,
+        tokens_approx: tok.approx,
         finished: out.finished,
         error,
         packet,
@@ -1004,6 +1091,7 @@ async fn run_block(ctx: &Ctx<'_>, index: usize, side: Side, nth: usize, runs: &m
         vram_after_load_mb: None,
         vram_peak_mb: None,
         vram_total_mb: None,
+        peak_from_ms: None,
         extra_loaded: vec![],
         error: None,
         started_ms,
@@ -1016,14 +1104,20 @@ async fn run_block(ctx: &Ctx<'_>, index: usize, side: Side, nth: usize, runs: &m
         }
     }
     b.vram_before_mb = vram_now(&ctx.deps.vram).await.map(|v| v.0);
-    match load(ctx.state, &ctx.base, &model).await {
-        Ok(ms) => b.load_ms = Some(ms),
+    // The peak window opens once the load is confirmed: samples taken while the previous model
+    // was still resident (its unload) or this one was loading are not this model's peak.
+    let peak_from = match load(ctx.state, &ctx.base, &model).await {
+        Ok(ms) => {
+            b.load_ms = Some(ms);
+            ctx.ms()
+        }
         Err(e) => {
             b.error = Some(e);
             b.ended_ms = ctx.ms();
             return b;
         }
-    }
+    };
+    b.peak_from_ms = Some(peak_from);
     if let Some(v) = vram_now(&ctx.deps.vram).await {
         b.vram_after_load_mb = Some(v.0);
         b.vram_total_mb = Some(v.1);
@@ -1081,7 +1175,7 @@ async fn run_block(ctx: &Ctx<'_>, index: usize, side: Side, nth: usize, runs: &m
     }
     b.ended_ms = ctx.ms();
     let samples = ctx.samples.lock().unwrap_or_else(|p| p.into_inner());
-    b.vram_peak_mb = samples.iter().filter(|s| s.0 >= started_ms && s.0 <= b.ended_ms).map(|s| s.1).chain(b.vram_after_load_mb).max();
+    b.vram_peak_mb = block_peak(&samples, peak_from, b.ended_ms, b.vram_after_load_mb);
     if b.vram_total_mb.is_none() {
         b.vram_total_mb = samples.last().map(|s| s.2);
     }
@@ -1241,6 +1335,7 @@ pub(crate) async fn run(state: &DispatchState, os: &OsState, plan: &Plan, deps: 
         "settings": {
             "load": load_body("<model>"),
             "chat": "Tony's streamed body: model, messages, stream true, reasoning_effort none (Deep thinking off), stream_options.include_usage",
+            "tokens": "Bionic sends usage (prompt, completion, reasoning tokens) in a last choices:[] chunk, no timings and no cached-token count: generation = completion tokens over the time after the first delta; prefill = all prompt tokens over the time to the first delta (an effective rate when a prefix is cached)",
             "router": "model, messages, stream false, reasoning_effort none; one 'JSON only' retry; 15 s per call",
             "variants": { "base": {}, "a": { "chat_template_kwargs": { "enable_thinking": false } }, "b": { "temperature": 1.0, "top_k": 20, "top_p": 0.95, "presence_penalty": 1.5 } },
             "dashboard": DASHBOARD,
@@ -1264,6 +1359,19 @@ pub(crate) async fn run(state: &DispatchState, os: &OsState, plan: &Plan, deps: 
 
 fn round1(v: Option<f64>) -> Option<f64> {
     v.map(|x| (x * 10.0).round() / 10.0)
+}
+
+/// The one basis the timing runs' prefill speeds share ("mixed" when they differ; "none" for none).
+fn prefill_basis<'a>(it: impl Iterator<Item = &'a str>) -> &'a str {
+    let mut seen: Option<&str> = None;
+    for b in it.filter(|b| *b != "none") {
+        match seen {
+            None => seen = Some(b),
+            Some(s) if s != b => return "mixed",
+            _ => {}
+        }
+    }
+    seen.unwrap_or("none")
 }
 
 fn variant_summary(chat: &[&ChatRun], router: &[&RouterRun]) -> Value {
@@ -1294,6 +1402,7 @@ fn variant_summary(chat: &[&ChatRun], router: &[&RouterRun]) -> Value {
             "prefillTps": med(&|r| r.prefill_tps),
             "genTps": med(&|r| r.gen_tps),
             "tokensApprox": timing.iter().any(|r| r.tokens_approx),
+            "prefillBasis": prefill_basis(timing.iter().map(|r| r.prefill_basis)),
         },
         "reasoning": {
             "tokensMax": chat.iter().map(|r| r.reasoning_tokens).chain(router.iter().map(|r| r.reasoning_tokens)).max().unwrap_or(0),
@@ -1319,8 +1428,12 @@ fn variant_summary(chat: &[&ChatRun], router: &[&RouterRun]) -> Value {
             "runs": picks.len(),
             "jsonFirst": checks::rate(picks.iter().filter(|r| !r.skipped).map(|r| r.verdict.json_first)),
             "jsonAfterRetry": checks::rate(picks.iter().filter(|r| !r.skipped).map(|r| r.verdict.json_after_retry)),
-            "exactTool": checks::rate(fair.iter().map(|r| r.verdict.exact)),
-            "argsOk": checks::rate(fair.iter().map(|r| r.verdict.exact && r.verdict.args_ok)),
+            // A second pass skipped because the first pick was wrong was never asked: it is left
+            // out of exactTool / argsOk (the first pass already counts the miss once). It still
+            // counts against twoStep: that chain did not complete.
+            "exactTool": checks::rate(fair.iter().filter(|r| !r.skipped).map(|r| r.verdict.exact)),
+            "argsOk": checks::rate(fair.iter().filter(|r| !r.skipped).map(|r| r.verdict.exact && r.verdict.args_ok)),
+            "skippedSecondPasses": picks.iter().filter(|r| r.skipped).count(),
             "unoffered": picks.iter().filter(|r| r.verdict.unoffered).count(),
             "spotifyWriteOnNonMedia": picks.iter().filter(|r| r.verdict.spotify_write_bad).count(),
             "twoStep": checks::rate(fair.iter().filter(|r| r.two_step).map(|r| r.verdict.exact)),
@@ -1439,7 +1552,7 @@ pub async fn start(app: &tauri::AppHandle, req: CompareRequest) -> Result<Value,
     if RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("a model comparison is already running".into());
     }
-    let guard = RunningGuard;
+    let guard = RunningGuard::live();
     cancel_flag().store(false, Ordering::SeqCst);
     let (total, est) = workload(&plan, &Cases::standard());
     *status().lock().unwrap_or_else(|p| p.into_inner()) = Some(Progress { run_id: plan.run_id.clone(), model_a: plan.model_a.clone(), model_b: plan.model_b.clone(), started_at: now_ms(), phase: "starting".into(), done: 0, total, est_minutes: est });

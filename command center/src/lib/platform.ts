@@ -374,6 +374,8 @@ export interface TtsUnpinEvent {
 export type NativeEventName =
   /** Lock state / elevation / hard lock changed (security/commands.rs `Status`). */
   | "security-state"
+  /** Main window shown (`true`) or hidden / minimised (`false`): webview_visibility.rs; lib/motion.ts listens. */
+  | "window-visibility"
   | "voice-toggle"
   | "memory-progress"
   | "pipeline-step"
@@ -1585,6 +1587,9 @@ export interface OsTurnRequest {
   /** The Business Switcher's selection: Operations-Manager / Finance turns lock to it (Rust
    * `business_lock`); missing = resolve from the text, and Tony asks when that isn't one. */
   activeBusinessId?: string;
+  /** Learning mode: the proposal ids on the card of this thread's newest Tony reply (`answeringIds`):
+   * a spoken / typed yes / no answers that card's batch only (Rust `Proposals::take_spoken_for`). */
+  answering?: string[];
 }
 export interface OsStep {
   kind: "delegate" | "reply" | "tool" | "step-in" | "error" | "overseer" | "verify";
@@ -1674,8 +1679,13 @@ export interface OsTurnResult {
   pendingMemory?: import("@/features/modes/learning").PendingMemory[];
   /** Tony's dispatch packet (tony_dispatch.rs `DispatchView`): held / pending / queued / invalid. */
   dispatch?: import("@/features/arbiter/api").DispatchView;
-  /** This turn's booking-mail scan (Rust `gmail::Booking`), one per thread read: the calendar-add card's fields. */
+  /** This turn's booking-mail scan (Rust `gmail::Booking`), one per thread read: the calendar-add card's fields.
+   * Absent: no scan ran this turn (keep the remembered list). `[]`: a scan ran and found nothing (clear it,
+   * as the desktop's Rust list was). `bookings.ts` `scanOf` tells them apart. */
   bookings?: import("@/features/orchestrator/bookings").BookingRef[];
+  /** Learning mode: this turn was Rust's answer to a spoken / typed yes / no, and these are the
+   * proposals it took (`approved`: saved). Absent on every other turn and on a failed save. */
+  answeredMemory?: import("@/features/modes/learning").AnsweredMemory;
 }
 
 export interface ToolInfo {

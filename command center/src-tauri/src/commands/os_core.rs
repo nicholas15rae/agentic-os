@@ -156,7 +156,7 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
 }
 
 /// The Booking Desk's own names (no topic words: "casting", "audition", "talent agent" are Tony's).
-pub(crate) const BOOKING_NAMES: &[&str] = &["booking desk", "booking agent", "B&Co"];
+pub(crate) const BOOKING_NAMES: &[&str] = &["booking", "booking desk", "booking agent", "B&Co"];
 /// Director topics (media); the self-tape recording / editing phrases came from Booking.
 const DIRECTOR_DOMAINS: &[&str] = &[
     "edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll",
@@ -1455,6 +1455,9 @@ pub struct OsState {
     pub(crate) runtime: Mutex<serde_json::Map<String, serde_json::Value>>,
     /// Tony's modes (Phase 2 Part C): `modes.json` beside os.json + in-memory overrides.
     pub(crate) modes: super::modes::ModeStore,
+    /// Learning mode's pending core-memory proposals and the spoken-answer marker (decision 5):
+    /// one store per app, so desktop, phone and voice answer the same ones.
+    pub(crate) proposals: super::learning::Proposals,
 }
 
 impl OsState {
@@ -2508,7 +2511,7 @@ mod tests {
             assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
         }
         assert_eq!(agents["booking"], trig(BOOKING_NAMES, &[]), "Booking has its names and no topics");
-        for topic in ["booking", "casting", "audition", "talent agent"] {
+        for topic in ["casting", "audition", "talent agent"] {
             assert!(!agents["booking"].names.iter().any(|n| n == topic), "{topic} is not a Booking name");
         }
         // A WhatsApp read is Tony's live tool, and Whisper's "what's up" greeting used to land on

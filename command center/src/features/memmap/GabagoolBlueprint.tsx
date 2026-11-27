@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { motionLevel, subscribeMotion } from "@/lib/motion";
 import { useSettings } from "@/stores/settings";
 import {
   BLUEPRINT_YAW,
@@ -196,7 +197,8 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
       paint();
     };
     const start = () => {
-      if (reduced || raf || document.hidden || !inView) return;
+      // Ambient crank: runs only while the window is in use (lib/motion.ts: not calm, not hidden).
+      if (reduced || raf || document.hidden || motionLevel() !== "full" || !inView) return;
       last = 0;
       raf = requestAnimationFrame(tick);
     };
@@ -204,7 +206,7 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onVis = () => (document.hidden ? stop() : start());
+    const onVis = () => (document.hidden || motionLevel() !== "full" ? stop() : start());
     live.current.repaint = () => {
       if (!raf && w > 0) paint();
     };
@@ -236,6 +238,7 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
         : undefined;
     io?.observe(cv);
     document.addEventListener("visibilitychange", onVis);
+    const offMotion = subscribeMotion(onVis);
     start();
     return () => {
       stop();
@@ -244,6 +247,7 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
       ro?.disconnect();
       io?.disconnect();
       document.removeEventListener("visibilitychange", onVis);
+      offMotion();
     };
   }, [reduced]);
 

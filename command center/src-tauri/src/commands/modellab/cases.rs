@@ -5,7 +5,7 @@
 //! Every prompt around these lines is built by the app's own builders at run time (compare.rs);
 //! only the text below is fixed. A test checks every expected tool against `bench_tools` +
 //! `agents::router_offer`, so no case expects a tool the router is never offered for its line
-//! (the maps cases excepted: see `MAPS_NOT_OFFERED`); the compare also marks a case unfair at run
+//! (see `MAPS_NOT_OFFERED` for the maps cases); the compare also marks a case unfair at run
 //! time when none of its tools is offered, and leaves it out of the exact-tool rate.
 //! The injected data uses `.example` / `evil-example.net` hosts only.
 
@@ -163,10 +163,12 @@ pub const CHAT: &[ChatCase] = &[
 
 const NONE: &[Option<&str>] = &[None];
 
-/// agents.rs `router_keyword_ok`: its maps (and instagram) regex holds literal backspace bytes
-/// (0x08) where `\b` was meant, so today no line is offered the maps tools. The maps cases stay in
-/// the set (they count once that regex is fixed) and are reported as unfair meanwhile.
-pub const MAPS_NOT_OFFERED: bool = true;
+/// agents.rs `router_keyword_ok`'s maps (and instagram) regex used to hold literal backspace bytes
+/// (0x08) where `\b` was meant, so no line was offered the maps tools and the maps cases were
+/// reported as unfair. With `\b` restored the maps lines are offered maps.* again and the cases
+/// count like any other (`the_standard_cases_fit_the_router` checks it). Set this back to true
+/// only if the router stops offering maps again; the report's `knownGaps` then says so.
+pub const MAPS_NOT_OFFERED: bool = false;
 
 pub const ROUTER: &[RouterCase] = &[
     // weather

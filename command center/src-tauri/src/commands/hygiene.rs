@@ -807,9 +807,12 @@ pub async fn lifecycle_loop(app: tauri::AppHandle) {
     if let Ok(d) = app.path().app_config_dir() {
         init(&d);
     }
-    tokio::time::sleep(STARTUP_GRACE).await;
+    // The seed first, before the grace period (one directory walk + one file read on the
+    // blocking pool): Tony's system message carries it from his first turn, so it doesn't
+    // appear five minutes into a conversation and change that message mid-mode.
     let root = app.state::<super::os_core::OsState>().snapshot().memory.scrolls.scrolls_root();
     refresh_seed(root).await;
+    tokio::time::sleep(STARTUP_GRACE).await;
     let mut ticks: u64 = 0;
     loop {
         tokio::time::sleep(TICK).await;
@@ -876,6 +879,19 @@ mod tests {
 
     fn dt(s: &str) -> NaiveDateTime {
         NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    /// Tony's system message carries the LATEST MEMORY SCROLL (agents.rs `scroll_summary_block`
+    /// from `seed_text`), so the seed is read at launch, before the five-minute grace period: a
+    /// seed that only arrives after it would change that message in the middle of a conversation.
+    /// Source pin (the loop needs a running app).
+    #[test]
+    fn the_seed_is_read_before_the_startup_grace() {
+        let src = include_str!("hygiene.rs");
+        let body = &src[src.find("pub async fn lifecycle_loop(").unwrap()..];
+        let body = &body[..body.find("\n}\n").or_else(|| body.find("\n}\r\n")).unwrap()];
+        let (seed, grace) = (body.find("refresh_seed(root).await;").expect("startup seed"), body.find("tokio::time::sleep(STARTUP_GRACE).await;").expect("grace"));
+        assert!(seed < grace, "the seed must be read before the startup grace");
     }
 
     #[test]

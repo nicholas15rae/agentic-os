@@ -443,24 +443,75 @@ pub async fn comms_whatsapp(state: State<'_, DispatchState>, os: State<'_, OsSta
     super::mcp::call_tool(&state, &os, &bridge, tool, &args, true, "tony").await
 }
 
-/// Send a WhatsApp message. Requires `approved` (the confirmation card), unless
-/// the contact is marked trusted in Comms (Instant Send).
+/// The gateway's contact key (`os_api._thread_key`, sms/whatsapp): a JID or email lowercased, a
+/// phone number's last 10 digits. Trust is matched on this key exactly, never by substring.
+pub(crate) fn comms_contact_key(address: &str) -> String {
+    let a = address.trim();
+    if a.contains('@') {
+        return a.to_lowercase();
+    }
+    let digits: String = a.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 10 {
+        digits[digits.len() - 10..].to_string()
+    } else if !digits.is_empty() {
+        digits
+    } else if !a.is_empty() {
+        a.to_lowercase()
+    } else {
+        "unknown".into()
+    }
+}
+
+/// Is `recipient` an Instant Send contact? Only a contact whose normalized key equals the
+/// recipient's key exactly, and is marked trusted, counts (the gateway's `?q=` search is a LIKE,
+/// so a trusted "4165551234" also comes back for a recipient "1234" — that must not count).
+pub(crate) fn is_trusted_exact(contacts: &[Value], recipient: &str) -> bool {
+    let key = comms_contact_key(recipient);
+    if key == "unknown" {
+        return false;
+    }
+    contacts.iter().any(|x| x["trusted"].as_i64() == Some(1) && x["address"].as_str().is_some_and(|a| comms_contact_key(a) == key))
+}
+
+/// The send's origin, normalized: kebab-case, lowercase (`ui_typed` → `ui-typed`).
+pub(crate) fn comms_send_origin(origin: Option<&str>) -> String {
+    origin.map(|o| o.trim().to_ascii_lowercase().replace('_', "-")).filter(|o| !o.is_empty()).unwrap_or_else(|| "agent".into())
+}
+
+/// Instant Send rule (decision 5): only a reply typed by hand in the Chat box (`ui-typed`) to an
+/// exactly trusted contact may skip the card. Every other origin (a UI card, voice, Tony, an agent,
+/// or none) needs `approved` from the confirmation card.
+pub(crate) fn comms_send_allowed(approved: bool, origin: &str, trusted: bool) -> Result<(), String> {
+    if approved || (origin == "ui-typed" && trusted) {
+        Ok(())
+    } else {
+        Err("PERMISSION_REQUIRED:send".into())
+    }
+}
+
+/// Send a WhatsApp message. Requires `approved` (the confirmation card), unless `origin` is
+/// `ui-typed` (typed by hand in the Chat box) and the contact is exactly trusted (Instant Send).
 #[tauri::command]
-pub async fn comms_whatsapp_send(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, recipient: String, message: String, approved: Option<bool>) -> Result<String, String> {
+pub async fn comms_whatsapp_send(state: State<'_, DispatchState>, os: State<'_, OsState>, bridge: State<'_, BridgeState>, recipient: String, message: String, approved: Option<bool>, origin: Option<String>) -> Result<String, String> {
     let cfg = os.snapshot();
     if cfg.privacy.kill_switch {
         return Err("kill switch is on — WhatsApp is outbound traffic".into());
     }
-    let trusted = gw(&state, &cfg, reqwest::Method::GET, &format!("/api/comms/contacts?q={}", urlenc(&recipient)), None)
-        .await
-        .ok()
-        .and_then(|v| v["contacts"].as_array().cloned())
-        .is_some_and(|c| c.iter().any(|x| x["trusted"].as_i64() == Some(1)));
-    if !approved.unwrap_or(false) && !trusted {
-        return Err("PERMISSION_REQUIRED:send".into());
-    }
+    let approved = approved.unwrap_or(false);
+    let origin = comms_send_origin(origin.as_deref());
+    // Only look trust up when it could matter (an unapproved hand-typed reply).
+    let trusted = if !approved && origin == "ui-typed" {
+        gw(&state, &cfg, reqwest::Method::GET, &format!("/api/comms/contacts?q={}", urlenc(&comms_contact_key(&recipient))), None)
+            .await
+            .ok()
+            .and_then(|v| v["contacts"].as_array().cloned())
+            .is_some_and(|c| is_trusted_exact(&c, &recipient))
+    } else {
+        false
+    };
+    comms_send_allowed(approved, &origin, trusted)?;
     let out = super::mcp::call_tool(&state, &os, &bridge, "whatsapp.send_message", &json!({ "recipient": recipient, "message": message }), true, "tony").await?;
-    bridge.log(json!({ "type": "comms-send", "channel": "whatsapp", "trusted": trusted, "chars": message.len() }));
+    bridge.log(json!({ "type": "comms-send", "channel": "whatsapp", "trusted": trusted, "origin": origin, "approved": approved, "chars": message.len() }));
     let _ = gw(&state, &cfg, reqwest::Method::POST, "/api/comms/sms", Some(json!({ "address": recipient, "body": message, "direction": "out", "channel": "whatsapp" }))).await;
     Ok(out)
 }
@@ -678,7 +729,12 @@ pub(crate) fn approved_action_lock(hard_locked: bool) -> Result<(), String> {
 /// (hard lock, permission gate, kill switch, switched-on check, no content logged), answered as
 /// `answer`.
 async fn run_approved_action(st: &DispatchState, os: &OsState, bridge: &BridgeState, p: &Value) -> Result<Value, String> {
-    approved_action_lock(crate::security::commands::hard_locked())?;
+    run_approved_action_with(st, os, bridge, p, crate::security::commands::hard_locked()).await
+}
+
+/// `run_approved_action` with the remote failsafe's state passed in (tests).
+async fn run_approved_action_with(st: &DispatchState, os: &OsState, bridge: &BridgeState, p: &Value, hard_locked: bool) -> Result<Value, String> {
+    approved_action_lock(hard_locked)?;
     let (tool, args) = approved_action(p)?;
     let s = |k: &str| args[k].as_str().unwrap_or("").to_string();
     let answer = if tool == super::calendar::CREATE {
@@ -1602,6 +1658,54 @@ pub fn looks_like_idea(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Comms step 1: trust is an exact match on the gateway's normalized key, never a substring
+    /// (the gateway's `?q=` is a LIKE, so it hands back near-misses that must not count).
+    #[test]
+    fn whatsapp_trust_is_an_exact_key_match() {
+        assert_eq!(comms_contact_key("+1 (416) 555-1234"), "4165551234");
+        assert_eq!(comms_contact_key("14165551234@S.WhatsApp.net"), "14165551234@s.whatsapp.net");
+        assert_eq!(comms_contact_key("  "), "unknown");
+        let contacts = vec![
+            json!({ "address": "4165551234", "name": "Mom", "trusted": 1 }),
+            json!({ "address": "14165559999@s.whatsapp.net", "name": "Sam", "trusted": 1 }),
+            json!({ "address": "6475550000", "name": "Stranger", "trusted": 0 }),
+        ];
+        // Exact (after normalizing the formatting / country code / JID case).
+        assert!(is_trusted_exact(&contacts, "+1 416-555-1234"));
+        assert!(is_trusted_exact(&contacts, "4165551234"));
+        assert!(is_trusted_exact(&contacts, "14165559999@S.WHATSAPP.NET"));
+        // A substring of a trusted number, or a longer string containing one, is not trusted.
+        assert!(!is_trusted_exact(&contacts, "1234"));
+        assert!(!is_trusted_exact(&contacts, "555"));
+        assert!(!is_trusted_exact(&contacts, "4165551234@s.whatsapp.net"), "a JID is not the SMS number");
+        assert!(!is_trusted_exact(&contacts, "16475551234"), "different number, same tail digits elsewhere");
+        // An untrusted exact match, an empty recipient, or no contacts at all.
+        assert!(!is_trusted_exact(&contacts, "647-555-0000"));
+        assert!(!is_trusted_exact(&contacts, ""));
+        assert!(!is_trusted_exact(&[], "4165551234"));
+        // The old bug: any trusted row in the LIKE result counted, even for an unrelated recipient.
+        let like_result = vec![json!({ "address": "4165551234", "trusted": 1 }), json!({ "address": "4165551299", "trusted": 0 })];
+        assert!(!is_trusted_exact(&like_result, "4165551299"));
+    }
+
+    /// Decision 5: only a hand-typed reply (`ui-typed`) to an exactly trusted contact skips the card;
+    /// voice, Tony, agents, a UI card and a missing origin all need `approved`.
+    #[test]
+    fn whatsapp_send_needs_the_card_unless_typed_by_hand_to_a_trusted_contact() {
+        assert_eq!(comms_send_origin(Some("ui_typed")), "ui-typed");
+        assert_eq!(comms_send_origin(Some(" UI-Typed ")), "ui-typed");
+        assert_eq!(comms_send_origin(None), "agent");
+        assert_eq!(comms_send_origin(Some("")), "agent");
+        assert!(comms_send_allowed(false, "ui-typed", true).is_ok());
+        assert_eq!(comms_send_allowed(false, "ui-typed", false).unwrap_err(), "PERMISSION_REQUIRED:send");
+        for o in ["ui-card", "voice", "tony", "agent", "something-else"] {
+            assert_eq!(comms_send_allowed(false, o, true).unwrap_err(), "PERMISSION_REQUIRED:send", "{o} to a trusted contact");
+            assert!(comms_send_allowed(true, o, true).is_ok(), "{o} approved on the card");
+            assert!(comms_send_allowed(true, o, false).is_ok(), "{o} approved on the card");
+        }
+        assert_eq!(comms_send_allowed(false, &comms_send_origin(None), true).unwrap_err(), "PERMISSION_REQUIRED:send");
+    }
+
     #[test]
     fn inbox_backs_off_when_idle_or_down() {
         let s = Duration::from_secs;
@@ -2383,6 +2487,59 @@ mod tests {
         assert!(approved_action_lock(false).is_ok());
         // The live check reads the same runtime flag the background workers honour.
         assert_eq!(approved_action_lock(crate::security::commands::hard_locked()).is_ok(), !crate::security::commands::hard_locked());
+    }
+
+    /// Review notes (A2): the phone's approved card is refused at every gate, for both tools,
+    /// before any Apps Script call: HARD_LOCKED, no approval stamp, MCP Deny, the server switched
+    /// off, a mode / master-switchboard freeze (the Gmail draft used to skip it), the kill switch.
+    #[test]
+    fn the_phones_approved_action_refuses_at_every_gate() {
+        tauri::async_runtime::block_on(async {
+            let (st, bridge) = (DispatchState::default(), BridgeState::default());
+            let env = |f: &dyn Fn(&mut super::super::os_core::OsConfig)| {
+                let os = OsState::default();
+                os.update(|c| {
+                    for m in c.mcps.iter_mut().filter(|m| m.id == "calendar" || m.id == "gmail") {
+                        m.enabled = true;
+                    }
+                    c.privacy.kill_switch = false;
+                    f(c);
+                    Ok(())
+                })
+                .unwrap();
+                os
+            };
+            let cal = json!({ "tool": "calendar.create_event", "args": { "title": "zqx shoot", "startTime": "2030-01-02T09:00" }, "planId": "p1", "approvedAt": "2026-11-26T15:00:00Z" });
+            let draft = json!({ "tool": "gmail.create_draft", "args": { "to": "sam@agency.ca", "subject": "Hi", "body": "zqx" }, "planId": "p2", "approvedAt": "2026-11-26T15:00:00Z" });
+            let run = |os: OsState, p: Value, locked: bool| {
+                let (st, bridge) = (&st, &bridge);
+                async move { run_approved_action_with(st, &os, bridge, &p, locked).await }
+            };
+            for p in [&cal, &draft] {
+                let tool = p["tool"].as_str().unwrap();
+                assert!(run(env(&|_| {}), p.clone(), true).await.unwrap_err().starts_with("HARD_LOCKED"), "{tool}");
+                let mut unstamped = p.clone();
+                unstamped.as_object_mut().unwrap().remove("approvedAt");
+                assert_eq!(run(env(&|_| {}), unstamped, false).await.unwrap_err(), "the action wasn't approved on the card", "{tool}");
+                let e = run(env(&|c| c.permissions.mcp = super::super::bridge::Tier::Deny), p.clone(), false).await.unwrap_err();
+                assert!(e.starts_with("PERMISSION_DENIED:mcp"), "{tool}: {e}");
+                let server = if tool == "gmail.create_draft" { "gmail" } else { "calendar" };
+                let e = run(env(&|c| c.mcps.iter_mut().filter(|m| m.id == server).for_each(|m| m.enabled = false)), p.clone(), false).await.unwrap_err();
+                assert!(e.contains("is switched off"), "{tool}: {e}");
+                let e = run(env(&|c| c.switchboard.frozen_tools = vec![server.into()]), p.clone(), false).await.unwrap_err();
+                assert_eq!(e, format!("MODE_FROZEN: {server} is frozen on the master switchboard"), "{tool}");
+                // Section 2: Gmail and Calendar are Tony's always-on base: a mode never freezes them.
+                let builder = env(&|_| {});
+                builder.modes.set_active("builder").unwrap();
+                let e = run(builder, p.clone(), false).await.err().unwrap_or_default();
+                assert!(!e.starts_with("MODE_FROZEN"), "{tool}: {e}");
+                let e = run(env(&|c| c.privacy.kill_switch = true), p.clone(), false).await.unwrap_err();
+                assert!(e.starts_with("kill switch is on"), "{tool}: {e}");
+            }
+            // Only the two allowlisted tools ever run.
+            let send = json!({ "tool": "gmail.send", "args": {}, "approvedAt": "x" });
+            assert!(run(env(&|_| {}), send, false).await.unwrap_err().contains("can't be approved"));
+        });
     }
 
     /// The inbox's task path is a synchronous insert: it returns with the task `queued` and

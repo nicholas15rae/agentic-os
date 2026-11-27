@@ -2,6 +2,9 @@ mod audio;
 mod commands;
 mod exe_resolve;
 mod proc;
+/// Hidden / minimised window → WebView2 `IsVisible = false`, so the page stops rendering.
+#[cfg(desktop)]
+mod webview_visibility;
 /// Sovereign security layer (app lock, step-up, audit, alerts, failsafe). `pub` so the
 /// `gabagool-cli` binary (src/bin) shares the exact same code.
 pub mod security;
@@ -70,6 +73,9 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        // Rendering back on now, not at the next poll.
+        #[cfg(desktop)]
+        webview_visibility::apply(&w, true);
     }
 }
 
@@ -167,8 +173,47 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 /// Set by the tray's Exit: the next close really exits.
 static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Where every panic is appended (`install_panic_log`): `<APPDATA>\os.agentic.commandcenter\logs\panic.log`.
+fn panic_log_path(appdata: &std::path::Path) -> std::path::PathBuf {
+    appdata.join("os.agentic.commandcenter").join("logs").join("panic.log")
+}
+
+/// One panic.log line (pure): local time, pid, thread, then the panic itself (location + message).
+fn panic_log_line(when: &str, pid: u32, thread: &str, panic: &str) -> String {
+    format!("{when} pid={pid} thread={thread} {}", panic.replace(['\r', '\n'], " | "))
+}
+
+/// Log every panic to a file before the process dies. The release build is `panic = "abort"`
+/// and a windowed exe's stderr usually goes nowhere (a WMI or logon launch), so without this a
+/// start-up abort leaves only "0xc0000409" in the event log (2026-11-26 20:42: most likely Tauri's
+/// "Failed to setup app: ... WebView2 ..." while the last instance's WebView2 was still exiting).
+/// Diagnostic only: it runs once a panic is already under way, ignores every I/O error, touches no
+/// app state, and chains to the default hook (stderr output is unchanged).
+fn install_panic_log() {
+    let Some(appdata) = std::env::var_os("APPDATA") else { return };
+    let path = panic_log_path(std::path::Path::new(&appdata));
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            // One write per entry (line + newline): an append-mode write is atomic, so two threads
+            // panicking at once, or the abort right after, never leave a torn line.
+            let mut line = panic_log_line(&when, std::process::id(), std::thread::current().name().unwrap_or("?"), &info.to_string());
+            line.push('\n');
+            let _ = f.write_all(line.as_bytes());
+        }
+        prev(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything that can panic (plugins, Tauri's own window creation in setup).
+    install_panic_log();
     let builder = tauri::Builder::default();
     // First: a second launch hands over to this engine (one GPU arbiter per machine).
     #[cfg(desktop)]
@@ -371,17 +416,35 @@ pub fn run() {
                     let _ = n8n::n8n_discover(st, Some(true)).await;
                 });
             }
+            // The logon launcher starts this window hidden (SW_HIDE, no window event): the poll
+            // switches WebView2 rendering off within a second, and back on if anything outside
+            // show_main brings the window up.
+            #[cfg(desktop)]
+            webview_visibility::spawn_poll(app.handle().clone());
             #[cfg(desktop)]
             register_voice_hotkey(app)?;
             Ok(())
         })
         // X = Standby: hide to the tray (the engine keeps running); Exit (rail / tray) shuts down.
+        // Hide, minimise and restore also switch WebView2 rendering off / on (webview_visibility).
         .on_window_event(|w, ev| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
-                if w.label() == "main" && !QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+            use tauri::Manager;
+            if w.label() != "main" {
+                return;
+            }
+            match ev {
+                tauri::WindowEvent::CloseRequested { api, .. } if !QUITTING.load(std::sync::atomic::Ordering::SeqCst) => {
                     api.prevent_close();
                     let _ = w.hide();
+                    #[cfg(desktop)]
+                    if let Some(wv) = w.app_handle().get_webview_window("main") {
+                        webview_visibility::apply(&wv, false);
+                    }
                 }
+                // Minimise / restore arrive as a resize; focus covers an outside ShowWindow.
+                #[cfg(desktop)]
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(true) => webview_visibility::sync_main(w.app_handle()),
+                _ => {}
             }
         })
         // Keep this list in sync with `NativeCommands` in src/lib/platform.ts.
@@ -786,4 +849,28 @@ fn register_voice_hotkey(app: &mut tauri::App) -> Result<(), Box<dyn std::error:
         eprintln!("[hotkey] Ctrl+Shift+Space unavailable: {e}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod panic_log_tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_goes_to_one_line_in_the_apps_logs_folder() {
+        let p = panic_log_path(std::path::Path::new(r"C:\Users\nic\AppData\Roaming"));
+        assert_eq!(p, std::path::Path::new(r"C:\Users\nic\AppData\Roaming\os.agentic.commandcenter\logs\panic.log"));
+        let line = panic_log_line("2026-11-26 20:42:21.004", 41604, "main", "panicked at src\\app.rs:1443:7:\r\nFailed to setup app: error encountered during setup hook: WebView2 error");
+        assert_eq!(line, "2026-11-26 20:42:21.004 pid=41604 thread=main panicked at src\\app.rs:1443:7: |  | Failed to setup app: error encountered during setup hook: WebView2 error");
+        assert!(!line.contains('\n') && !line.contains('\r'));
+    }
+
+    /// `run()` installs the log before it builds anything, so a panic in plugin init or in Tauri's
+    /// own window creation (inside `.run()`) is logged too.
+    #[test]
+    fn run_installs_the_panic_log_first() {
+        let src = include_str!("lib.rs");
+        let body = &src[src.find("pub fn run() {").expect("run")..];
+        let (hook, builder) = (body.find("install_panic_log();").expect("hook"), body.find("tauri::Builder::default()").expect("builder"));
+        assert!(hook < builder);
+    }
 }

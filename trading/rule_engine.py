@@ -106,6 +106,11 @@ def size(lim: rl.HardLimits, *, risk_budget_base: float, entry: float, stop: flo
     return qty, f"{qty} sh (bound by {binding}: risk {by_risk}, shares cap {lim.max_position_shares}, notional cap {by_notional})"
 
 
+def desk_accepted(row: dict[str, Any]) -> bool:
+    """A 'submitted' scan row only counts as a trade if the desk didn't refuse it ('submitted' = handed to the desk)."""
+    return (row.get("desk") or {}).get("status") not in ENTRY_STATUSES_EXCLUDED
+
+
 def open_symbols(snap: dict[str, Any]) -> set[str]:
     """Symbols held, plus symbols with a working DAY entry order (bracket children are GTC)."""
     held = {p.get("symbol") for p in snap.get("positions") or [] if p.get("position")}
@@ -315,11 +320,16 @@ class RuleEngine:
                 dec = res.get("decision") or {}
                 row.update(action="submitted", desk={"status": res.get("status"), "verdict": dec.get("verdict"),
                                                      "reasons": dec.get("reasons", []), "error": res.get("error")})
+                if not desk_accepted(row):
+                    # Handed to the desk, which refused it (pre-trade gate / Security Detail) or recorded it as failed
+                    # (e.g. the executor's ack wait saw 321 Read-Only and cancelled the bracket). The row keeps
+                    # action "submitted" (locked panel contract); the desk's reason goes in `why` so it shows beside it.
+                    row["why"] = f"desk {res.get('status')}: {res.get('error') or '; '.join(dec.get('reasons') or []) or 'no reason given'}"
                 self.desk.audit.append("rule_trade", {"symbol": sym, "version": act["version"], "reason": raw["thesis"], "quantity": raw["quantity"],
                                                       "limit": raw["limit_price"], "stop": raw["stop_loss"], "target": raw["take_profit"],
                                                       "sizing": sizing, "desk": row["desk"]},
                                        ref=raw["intent_id"], verdict=str(res.get("status") or "").upper(), actor="rule_engine")
-                if res.get("status") not in ENTRY_STATUSES_EXCLUDED:
+                if desk_accepted(row):
                     entries += 1
                     held.add(sym)
             for row in rep["rows"]:
@@ -355,7 +365,8 @@ class RuleEngine:
         rep.update(status=status, detail=detail, finished=self.clock())
         self.last_scan = rep
         self.desk.audit.append("rule_scan", {k: rep.get(k) for k in ("kind", "version", "status", "detail", "submit")} |
-                               {"taken": [r["symbol"] for r in rep["rows"] if r.get("action") in ("submitted", "would_submit")]},
+                               {"taken": [r["symbol"] for r in rep["rows"]
+                                          if r.get("action") == "would_submit" or (r.get("action") == "submitted" and desk_accepted(r))]},
                                ref=rep["scanId"], verdict=status.upper(), actor="rule_engine")
         return rep
 

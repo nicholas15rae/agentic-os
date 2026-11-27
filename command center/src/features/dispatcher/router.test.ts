@@ -106,7 +106,7 @@ describe("domain tie-break", () => {
 // Section 20.1: the router never picks an agent frozen on the master switchboard.
 describe("frozen agents: named, never by topic", () => {
   it("the Booking Desk keeps only its names; a frozen agent addressed by name is Named, its topics never fire", () => {
-    expect(DEFAULT_ROUTING_CONFIG.agents.booking).toEqual({ names: ["booking desk", "booking agent", "B&Co"], domains: [] });
+    expect(DEFAULT_ROUTING_CONFIG.agents.booking).toEqual({ names: ["booking", "booking desk", "booking agent", "B&Co"], domains: [] });
     expect(isFrozenRole("librarian") && isFrozenRole("booking") && !isFrozenRole("general") && !isFrozenRole("coder")).toBe(true);
     for (const [text, role] of [
       ["ask the librarian to search vault for the contract", "librarian"],

@@ -51,9 +51,25 @@ export function bookingsOf(v: unknown): BookingRef[] {
   return out;
 }
 
+/**
+ * `OsTurnResult.bookings` → this turn's scan: `null` when no scan ran (the field is absent: Rust
+ * sends it only when this turn's scan replaced its own remembered list), else the valid entries
+ * (`[]`: the scan found nothing). Pure.
+ */
+export function scanOf(v: unknown): BookingRef[] | null {
+  return Array.isArray(v) ? bookingsOf(v) : null;
+}
+
 /** The phone: keep a queued turn's scan (an empty scan clears the last one). */
 export function rememberBookings(list: BookingRef[], now = Date.now()): void {
   last = { at: now, list };
+}
+
+/** The phone: apply a queued turn's `bookings` field (`scanOf`): no scan keeps the remembered
+ * list, a scan (even an empty one) replaces it, as the desktop's Rust list is replaced. */
+export function rememberScan(v: unknown, now = Date.now()): void {
+  const scan = scanOf(v);
+  if (scan) rememberBookings(scan, now);
 }
 
 /** The last scan while fresh (`BOOKINGS_TTL_MS`). */

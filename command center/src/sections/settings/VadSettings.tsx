@@ -1,23 +1,40 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square } from "lucide-react";
-import { Card } from "@/components/ui";
+import { Card, Select } from "@/components/ui";
 import { MicCapture, encodeWav16k } from "@/features/voice/engines";
 import { MicLockedError, onMicChange, useMic } from "@/features/voice/mic-gate";
 import { ThresholdMeter } from "@/features/voice/ThresholdMeter";
 import { SPEECH_PROB_OFF, SPEECH_PROB_ON } from "@/features/voice/vad-gate";
+import { DEFAULT_PARTIAL_MS, partialMsChoices, partialMsFrom } from "@/features/voice/stt-partials";
 import { isTauri } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { transcribeWav } from "@/features/voice/engines";
-import { partialMsFrom } from "@/features/voice/stt-partials";
 
-/** Live caption spacing choices (`vad.partialMs`; 0 = off, the default since Section 20.5). */
-const CAPTION_CHOICES = [
-  { ms: 0, label: "Off" },
-  { ms: 1000, label: "every 1 s" },
-  { ms: 1500, label: "every 1.5 s" },
-  { ms: 2000, label: "every 2 s" },
-  { ms: 3000, label: "every 3 s" },
-];
+/**
+ * `vad.partialMs`: live captions while you speak, one Whisper pass on the clip so far every this
+ * many ms of speech (GPU STT only); 0 (the default since Section 20.5) turns them off. The phone
+ * keeps streaming its audio either way, so the gateway's final needs no WAV upload.
+ */
+export function LiveCaptionsField({ value, onChange }: { value: number | undefined; onChange: (ms: number) => void }) {
+  const ms = partialMsFrom(value);
+  return (
+    <div className="text-sm text-ink-2">
+      <label className="flex items-center gap-3">
+        Live captions
+        <Select value={String(ms)} onChange={(e) => onChange(Number(e.target.value))} className="!h-9 !w-60 !py-0 !text-xs" aria-label="Live captions">
+          {partialMsChoices(value).map((v) => (
+            <option key={v} value={v}>
+              {v === 0 ? `Off${v === DEFAULT_PARTIAL_MS ? " (default)" : ""}` : `every ${v} ms of speech${v === DEFAULT_PARTIAL_MS ? " (default)" : ""}`}
+            </option>
+          ))}
+        </Select>
+      </label>
+      <p className="mt-1 text-[11px] text-ink-3">
+        What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. Off is the default: the phone still streams its audio for a quick final, just without captions.
+      </p>
+    </div>
+  );
+}
 
 /**
  * Settings → Voice & Triggers → Activation threshold (Phase 2 Part B). One absolute dBFS gate
@@ -161,23 +178,7 @@ export function VoiceDetectionCard() {
           <input type="range" min={5000} max={30000} step={1000} value={vad.maxUtteranceMs} onChange={(e) => up({ maxUtteranceMs: Number(e.target.value) })} className="flex-1 accent-amber" aria-label="Max utterance" />
           <span className="w-12 text-right font-mono text-ink">{vad.maxUtteranceMs / 1000}s</span>
         </label>
-        <label className="flex flex-wrap items-center gap-3 text-sm text-ink-2">
-          Live captions
-          <select
-            value={String(partialMsFrom(vad.partialMs))}
-            onChange={(e) => up({ partialMs: Number(e.target.value) })}
-            className="h-8 rounded-full border border-white/10 bg-white/[0.04] px-3 text-xs text-ink"
-            aria-label="Live captions while you speak"
-          >
-            {CAPTION_CHOICES.map((c) => (
-              <option key={c.ms} value={String(c.ms)}>
-                {c.label}
-              </option>
-            ))}
-            {!CAPTION_CHOICES.some((c) => c.ms === partialMsFrom(vad.partialMs)) && <option value={String(partialMsFrom(vad.partialMs))}>every {partialMsFrom(vad.partialMs)} ms</option>}
-          </select>
-          <span className="flex-1 text-[11px] text-ink-3">Each caption is an extra Whisper pass on the GPU while Tony is working; the final transcript is the same either way.</span>
-        </label>
+        <LiveCaptionsField value={vad.partialMs} onChange={(partialMs) => up({ partialMs })} />
 
         {testing && (
           <div>

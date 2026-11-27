@@ -855,7 +855,12 @@ fn router_keyword_ok(server: &str, norm: &str) -> bool {
     static MAPS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static INSTAGRAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static CALENDAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FINANCE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     match server {
+        // Tony's read-only Finance tool: only on a line about money.
+        "finance" => FINANCE
+            .get_or_init(|| regex::Regex::new(r"\b(owe|owes|owed|owing|commissions?|income|earn(ed|ings)?|made|make|revenue|profit|spen[dt]|expenses?|pending|invoices?|hst|gst|tax(es)?|cheques?|money|paid|unpaid)\b").unwrap())
+            .is_match(norm),
         "maps" => MAPS
             .get_or_init(|| {
                 regex::Regex::new(r"\b(maps?|route|routes|directions?|drive|driving|commute|eta|navigate|navigation|how far|distance (to|from|between)|how long (will it take|does it take|to get|to drive|is the drive)|get (to|there)|address (of|for)|where is|coordinates|lat(itude)?|plot)\b").unwrap()
@@ -1081,6 +1086,82 @@ fn calendar_plan_on(original: &str, tools: &[super::mcp::ToolInfo], today: chron
     Some(("calendar.upcoming".to_string(), json!({ "period": period })))
 }
 
+/// "What do I owe ML Talent?", "how much did contracting make this month?", "what's still
+/// pending?", "when is HST due?" → `finance.ask` (read-only), without a model round trip. Only a
+/// money READ (`routing::direct_tool` "finance"): writes stay on the Finance screens.
+fn finance_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String, Value)> {
+    finance_plan_on(original, tools, chrono::Local::now().date_naive())
+}
+
+/// `finance_plan` against `today` (pure): the question kind, plus the area / agent / period the
+/// line names (the gateway resolves area names; an unknown one comes back as its reason).
+pub(crate) fn finance_plan_on(original: &str, tools: &[super::mcp::ToolInfo], today: chrono::NaiveDate) -> Option<(String, Value)> {
+    use chrono::Datelike;
+    if !tools.iter().any(|t| t.name == super::mcp::FINANCE_ASK) || super::routing::direct_tool(original) != Some("finance") {
+        return None;
+    }
+    let n = super::routing::normalize(original);
+    let has = |re: &str| regex::Regex::new(re).map(|r| r.is_match(&n)).unwrap_or(false);
+    let kind = if has(r"\b(?:hst|gst)\b") {
+        "hst"
+    } else if has(r"\b(?:i|we) (?:still )?owe\b") && !has(r"\bowes? me\b") {
+        "owed_to_agent"
+    } else if has(r"\bhow much commission\b") {
+        if has(r"\b(?:paid|so far|total|altogether)\b") { "commissions" } else { "owed_to_agent" }
+    } else if has(r"\binvoices?\b|\bwho hasnt paid\b") {
+        "invoices_unpaid"
+    } else if has(r"\bpending\b|\bowes me\b|\bam i (?:still )?owed\b|\bis (?:still )?owed\b") {
+        "pending"
+    } else if has(r"\b(?:spend|spent|expenses?)\b") {
+        "expenses"
+    } else if has(r"\b(?:reminders?|to do|todo)\b") {
+        "reminders"
+    } else {
+        "income"
+    };
+    let mut args = json!({ "question_kind": kind });
+    const AREAS: [(&str, &str); 7] = [("bf supplements", "bf supplements"), ("supplements", "bf supplements"), ("the store", "bf supplements"), ("contracting", "contracting"), ("trades", "contracting"), ("acting", "acting"), ("personal", "personal")];
+    if let Some((_, a)) = AREAS.iter().find(|(w, _)| n.split(' ').collect::<Vec<_>>().windows(w.split(' ').count()).any(|win| win.join(" ") == *w)) {
+        args["area"] = json!(a);
+    }
+    // Period words; a bare month name is this year's (or last year's once it's still ahead).
+    const MONTHS: [&str; 12] = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+    let period = if n.contains("this month") {
+        Some("this_month".to_string())
+    } else if n.contains("last month") {
+        Some("last_month".into())
+    } else if n.contains("this quarter") || n.contains("so far this quarter") {
+        Some("this_quarter".into())
+    } else if n.contains("this year") || n.contains("so far this year") || n.contains("year to date") {
+        Some("this_year".into())
+    } else if let Some(i) = MONTHS.iter().position(|m| regex::Regex::new(&format!(r"\b(?:in|for|during|of) {m}\b")).map(|r| r.is_match(&n)).unwrap_or(false)) {
+        let m = i as u32 + 1;
+        let y = if m > today.month() { today.year() - 1 } else { today.year() };
+        Some(format!("{y}-{m:02}"))
+    } else {
+        None
+    };
+    if let Some(p) = period {
+        args["period"] = json!(p);
+    }
+    // "what do I owe ML Talent (for …)?" → the agent, from the raw line (its own spelling).
+    if kind == "owed_to_agent" {
+        static AGENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = AGENT.get_or_init(|| regex::Regex::new(r"(?i)\bowe\s+(?:to\s+)?([A-Za-z][\w&.'\- ]{1,40}?)(?:\s+(?:for|this|last|in|on|right|so|now|still|from|in total|altogether)\b|[?.!,]|$)").unwrap());
+        if let Some(c) = re.captures(original) {
+            let who = c[1].trim();
+            let lw = who.to_ascii_lowercase();
+            const NOT_AN_AGENT: [&str; 11] = ["anyone", "anybody", "people", "them", "him", "her", "my agents", "agents", "the agents", "my accountant", "everyone"];
+            const LEAD: [&str; 14] = ["for", "this", "last", "in", "on", "so", "right", "now", "still", "from", "altogether", "total", "commission", "commissions"];
+            let first = lw.split(' ').next().unwrap_or("");
+            if !NOT_AN_AGENT.contains(&lw.as_str()) && !LEAD.contains(&first) && !lw.starts_with("my agent") {
+                args["agent"] = json!(who);
+            }
+        }
+    }
+    Some((super::mcp::FINANCE_ASK.to_string(), args))
+}
+
 /// "read my last email", "latest 3 emails", "check my inbox", "any new
 /// emails", "unread mail" → `gmail.recent`; "emails from Sam" →
 /// `gmail.search {query: "from:Sam"}`. Checked before WhatsApp.
@@ -1223,6 +1304,7 @@ fn deterministic_plan(text: &str, tools: &[super::mcp::ToolInfo], os_name: &str)
     booking_mail_plan(text, tools)
         .or_else(|| gmail_plan(text, tools))
         .or_else(|| calendar_plan(text, tools))
+        .or_else(|| finance_plan(text, tools))
         .or_else(|| whatsapp_plan(text, tools))
         .or_else(|| spotify_plan(text, tools, os_name))
         .or_else(|| time_plan(text, tools))
@@ -1617,9 +1699,10 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // Asked for email / Spotify / WhatsApp but that server can't serve it (off / no
     // backend / not connected): say why instead of letting the model invent a refusal.
     type Planner = fn(&str, &[super::mcp::ToolInfo], &str) -> Option<(String, Value)>;
-    let planners: [(&str, Planner); 4] = [
+    let planners: [(&str, Planner); 5] = [
         ("gmail", |t, tools, _| booking_mail_plan(t, tools).or_else(|| gmail_plan(t, tools))),
         ("calendar", |t, tools, _| calendar_plan(t, tools)),
+        ("finance", |t, tools, _| finance_plan(t, tools)),
         ("spotify", spotify_plan),
         ("whatsapp", |t, tools, _| whatsapp_plan(t, tools)),
     ];
@@ -3177,6 +3260,8 @@ pub(crate) fn private_tools(tool: Option<&str>, steps: &[OsStep]) -> Option<&'st
     let kind = |n: &str| match n.split('.').next().unwrap_or(n) {
         "gmail" => Some("email"),
         "calendar" => Some("calendar"),
+        // Finance summaries never reach training_logs either (Section 11.10).
+        "finance" => Some("finance"),
         _ => None,
     };
     tool.and_then(kind).or_else(|| steps.iter().filter(|s| s.kind == "tool").find_map(|s| kind(&s.to)))
@@ -3820,6 +3905,55 @@ mod tests {
         }
         // No calendar tools listed: no plan (the failure note names the missing backend instead).
         assert_eq!(calendar_plan_on("check my calendar", &gmail_tools(), today), None);
+    }
+
+    /// Section 11.10: money reads become one `finance.ask` call with the kind / area / agent /
+    /// period the line names; writes and other subjects never do.
+    #[test]
+    fn finance_plan_reads_money_questions() {
+        let tools = super::super::mcp::builtin_tools("finance");
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let plan = |t: &str| finance_plan_on(t, &tools, today).map(|(n, a)| (n, a));
+        let ask = |a: Value| Some((super::super::mcp::FINANCE_ASK.to_string(), a));
+        assert_eq!(plan("what do I owe ML Talent?"), ask(json!({ "question_kind": "owed_to_agent", "agent": "ML Talent" })));
+        assert_eq!(plan("Hey Tony, how much do I still owe Imperious"), ask(json!({ "question_kind": "owed_to_agent", "agent": "Imperious" })));
+        assert_eq!(plan("what do I owe my accountant?"), ask(json!({ "question_kind": "owed_to_agent" })));
+        assert_eq!(plan("how much commission do I owe"), ask(json!({ "question_kind": "owed_to_agent" })));
+        assert_eq!(plan("how much did contracting make this month?"), ask(json!({ "question_kind": "income", "area": "contracting", "period": "this_month" })));
+        assert_eq!(plan("how much have I made this year"), ask(json!({ "question_kind": "income", "period": "this_year" })));
+        assert_eq!(plan("how much did acting make in october"), ask(json!({ "question_kind": "income", "area": "acting", "period": "2026-10" })));
+        assert_eq!(plan("how much did I spend in December"), ask(json!({ "question_kind": "expenses", "period": "2025-12" })));
+        assert_eq!(plan("how much did BF Supplements spend last month"), ask(json!({ "question_kind": "expenses", "area": "bf supplements", "period": "last_month" })));
+        assert_eq!(plan("what's still pending?"), ask(json!({ "question_kind": "pending" })));
+        assert_eq!(plan("who owes me money"), ask(json!({ "question_kind": "pending" })));
+        assert_eq!(plan("when is HST due?"), ask(json!({ "question_kind": "hst" })));
+        assert_eq!(plan("how much HST do I owe"), ask(json!({ "question_kind": "hst" })));
+        assert_eq!(plan("any unpaid invoices?"), ask(json!({ "question_kind": "invoices_unpaid" })));
+        assert_eq!(plan("what are my money reminders"), ask(json!({ "question_kind": "reminders" })));
+        for t in ["log the hst on the commission cheque", "mark the ML Talent commission as paid", "pay ML Talent what I owe them", "what's the weather", "what orders are pending on the online store"] {
+            assert_eq!(plan(t), None, "{t}");
+        }
+        // No Finance tool offered (server off / not granted): no plan, the failure note says why.
+        assert_eq!(finance_plan_on("when is HST due?", &gmail_tools(), today), None);
+        // A Finance turn is private like mail and calendar.
+        assert_eq!(private_tools(Some("finance.ask"), &[]), Some("finance"));
+    }
+
+    /// Section 11.10: a money read routed to the (frozen / held) Finance agent by topic stays
+    /// Tony's own Direct tool path; addressing the agent by name still routes to it.
+    #[test]
+    fn route_for_turn_money_reads_are_tonys_direct_tool() {
+        let cfg = OsConfig::default();
+        let rt = |role: &str, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit: false, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false, learning: false, stay_with_tony: false }, &cfg);
+        for (role, text, kind) in [("finance", "when is HST due?", Some("Domain")), ("general", "when is HST due?", None), ("general", "any unpaid invoices?", None), ("ops", "how much did contracting make this month?", Some("Domain")), ("general", "what do I owe ML Talent?", None), ("general", "what do I owe my accountant?", None)] {
+            let r = rt(role, text, kind);
+            assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Direct"), "{text}");
+            assert_eq!(r.reason, "live finance tool");
+        }
+        let r = rt("general", "bookkeeper, what do I owe ML Talent?", None);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("finance", "Named"));
+        // A write stays a Finance-agent topic (the UI handles writes; the agent is held / frozen).
+        assert_ne!(rt("general", "log the hst on the commission cheque", None).kind, "Direct");
     }
 
     /// Review note (A2): the AnythingLLM credential import runs on Calendar's first USE (a

@@ -153,6 +153,9 @@ pub struct WorkerSettings {
     pub offload_pct: u8,
     pub offload_engine: String,
     pub verify: bool,
+    /// The Librarian in the build chain (pre-flight condense + audit). Section pass: off by
+    /// default, so builds run Prompter → Designer → Coder and the Prompter reads shared storage
+    /// directly (the same gathered packet, no Librarian model call).
     pub librarian_audit: bool,
     pub staging_root: PathBuf,
     pub notes_root: Option<PathBuf>,
@@ -1303,10 +1306,12 @@ impl<'a> Worker<'a> {
                 }
             },
         };
-        let agent = stage_agent(stage);
+        let librarian = settings.as_ref().ok().is_some_and(|s| s.librarian_audit);
+        let agent = if stage == "preflight" && !librarian { "prompter" } else { stage_agent(stage) };
         // Claim: status/stage/owner + lease + a stage_started row, in one transaction.
         let next = Next::stage(stage).expect("known stage");
-        let claim_row = HandoffRow::new(agent, agent, "stage_started", "verbose", started_summary(stage));
+        let summary = if stage == "preflight" && !librarian { "Prompter is reading shared storage" } else { started_summary(stage) };
+        let claim_row = HandoffRow::new(agent, agent, "stage_started", "verbose", summary);
         let patch = Patch { lease_until: Some(Some(envelope::now_ms() + lease_ms(stage))), ..Default::default() };
         let cur = match self.store.transition(&claimed.task_id, expect_of(&claimed), next, &patch, &claim_row, &known) {
             Ok(e) => e,
@@ -1607,15 +1612,23 @@ impl<'a> Worker<'a> {
             r
         };
         let gathered: Vec<Value> = packet.items.iter().map(|i| json!({ "source": i.source, "type": i.kind, "chars": i.text.chars().count() })).collect();
-        // The Librarian condenses. A failure never stalls the task: the gathered packet stands in.
-        let (j, by) = match self.ask(e, "librarian", "preflight", prompt_preflight(e, &packet), s, None, None).await {
-            Ok(r) => (extract_json(&r.text), r.by),
-            Err(err) => (None, format!("unavailable: {}", clip(&err.msg, 120))),
+        // The Librarian condenses (only while it is in the chain). A failure never stalls the task:
+        // the gathered packet stands in. Section pass default: the Prompter reads it directly.
+        let (j, by) = if !s.librarian_audit {
+            (None, "shared storage (Prompter, direct)".to_string())
+        } else {
+            match self.ask(e, "librarian", "preflight", prompt_preflight(e, &packet), s, None, None).await {
+                Ok(r) => (extract_json(&r.text), r.by),
+                Err(err) => (None, format!("unavailable: {}", clip(&err.msg, 120))),
+            }
         };
         let mut brief = librarian_json(j.as_ref(), &packet);
         if j.is_none() {
             brief["value_add_brief"] = json!(clip(&packet.items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>().join(" | "), 900));
-            brief["fallback"] = json!(true);
+            // A fallback only when the Librarian was asked and failed (off: nothing failed).
+            if s.librarian_audit {
+                brief["fallback"] = json!(true);
+            }
         }
         brief["gathered"] = json!(gathered);
         brief["skipped"] = json!(packet.skipped);
@@ -1627,26 +1640,30 @@ impl<'a> Worker<'a> {
         let t_forensic = Instant::now();
         let (forensic, forensic_bytes) = self.forensic(j.as_ref(), &packet, &kws, s).await;
         let forensic_ms = (!forensic.is_empty()).then(|| t_forensic.elapsed().as_millis() as u64);
-        record_librarian_run(LibRunTiming {
-            task_id: &e.task_id,
-            stage: "preflight",
-            total: t_start.elapsed(),
-            retrieval: Some(retrieval),
-            research_ms,
-            forensic_ms,
-            stats: Some(&gather_stats),
-            extra_bytes: forensic_bytes,
-            packet: Some(&packet),
-            ok: j.is_some(),
-            by: &by,
-        });
+        // Profiled only when the Librarian is in the chain (no model call otherwise).
+        if s.librarian_audit {
+            record_librarian_run(LibRunTiming {
+                task_id: &e.task_id,
+                stage: "preflight",
+                total: t_start.elapsed(),
+                retrieval: Some(retrieval),
+                research_ms,
+                forensic_ms,
+                stats: Some(&gather_stats),
+                extra_bytes: forensic_bytes,
+                packet: Some(&packet),
+                ok: j.is_some(),
+                by: &by,
+            });
+        }
         let conflicts = brief["discrepancies_flagged"].as_array().map(|a| a.iter().filter(|d| d["severity"] == "conflict").count()).unwrap_or(0);
         let n = packet.items.len();
         let mut notes = json!({ "librarian_brief": brief, "audits": [] });
         if !forensic.is_empty() {
             notes["forensic"] = json!(forensic);
         }
-        let row = HandoffRow::new("librarian", "prompter", "handoff", "handoff", format!("Librarian sent {n} context item{}", if n == 1 { "" } else { "s" })).voice(voice(&j).as_deref()).payload(json!({ "items": n, "skipped": notes["librarian_brief"]["skipped"].as_array().map_or(0, |a| a.len()), "research": notes["librarian_brief"]["research"], "forensic": forensic.len() }));
+        let (from, sent) = if s.librarian_audit { ("librarian", format!("Librarian sent {n} context item{}", if n == 1 { "" } else { "s" })) } else { ("prompter", format!("Prompter read {n} context item{} from shared storage", if n == 1 { "" } else { "s" })) };
+        let row = HandoffRow::new(from, "prompter", "handoff", "handoff", sent).voice(voice(&j).as_deref()).payload(json!({ "items": n, "skipped": notes["librarian_brief"]["skipped"].as_array().map_or(0, |a| a.len()), "research": notes["librarian_brief"]["research"], "forensic": forensic.len() }));
         let mut extra = vec![];
         if conflicts > 0 {
             extra.push(HandoffRow::new("librarian", "prompter", "discrepancy", "milestone", format!("Librarian flagged {conflicts} conflict{} before the spec", if conflicts == 1 { "" } else { "s" })));

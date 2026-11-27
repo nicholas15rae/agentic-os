@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronsUp, Copy, Eye, EyeOff, FlaskConical, Loader2, OctagonX, Pause, Play, Rocket, RotateCcw, ShieldAlert, ShieldCheck, Terminal, Trash2, Wrench } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, ChevronsUp, Copy, Eye, EyeOff, FlaskConical, Loader2, OctagonX, Pause, Play, Rocket, RotateCcw, ShieldAlert, ShieldCheck, Terminal, Trash2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
@@ -14,9 +14,10 @@ import { currentMilestone, elapsedEta, hubCounts, RUNTIME_BADGE, smokeBadge, STA
 import { PeekView } from "./PeekView";
 import { SandboxView } from "./SandboxView";
 import type { BuildView } from "./types";
+import { showHubIteration } from "./build-truth";
 import { deletedToast, expiresIn, forgetUi, rememberUi, removeBuildUi, restoreFromTrash, TRASH_DAYS, useTrash, type RemovedUi } from "./trash";
 
-type Tab = "staging" | "repair" | "trash";
+type Tab = "staging" | "repair" | "archive" | "trash";
 
 /**
  * Play Place universal staging hub (Phase 3): one status card per staged build, in queue order,
@@ -30,17 +31,22 @@ export function StagingHub() {
   const [tab, setTab] = useState<Tab>("staging");
   if (!isTauri()) return null;
   const builds = view?.builds ?? [];
-  const counts = hubCounts(builds);
-  const shown = builds.filter((b) => (tab === "repair") === (b.envelope.status === "repair_queue"));
+
+  // Archived builds (promoted widgets live in the Widgets library) leave the staging lists.
+  const active = builds.filter((b) => !b.archived_at);
+  const archived = builds.filter((b) => !!b.archived_at);
+  const counts = hubCounts(active);
+  const shown = tab === "archive" ? archived : active.filter((b) => (tab === "repair") === (b.envelope.status === "repair_queue"));
   const trash = useTrash((s) => s.entries);
   useEffect(() => void useTrash.getState().load(), []);
-  const failed = builds.filter((b) => b.envelope.status === "repair_queue" || b.envelope.status === "cancelled").length;
+  const failed = active.filter((b) => b.envelope.status === "repair_queue" || b.envelope.status === "cancelled").length;
   const tabs = (
     <div role="tablist" aria-label="Staging hub view" className="flex flex-wrap gap-1">
       {(
         [
           ["staging", `Staging (${counts.staging})`, FlaskConical],
           ["repair", `Repair Queue (${counts.repair})`, Wrench],
+          ["archive", `Archive (${archived.length})`, Archive],
           ["trash", `Trash (${trash.length})`, Trash2],
         ] as const
       ).map(([id, label, Icon]) => (
@@ -49,7 +55,7 @@ export function StagingHub() {
           role="tab"
           aria-selected={tab === id}
           onClick={() => setTab(id)}
-          className={`label-caps flex h-6 items-center gap-1 rounded-full border px-2 !text-[9px] ${tab === id ? "border-amber/50 bg-amber/10 text-amber-soft" : "border-transparent text-ink-3 hover:text-ink-2"} ${id === "repair" && counts.repair ? "!text-alert" : ""}`}
+          className={`label-caps flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 !text-[10px] ${tab === id ? "border-amber/50 bg-amber/10 text-amber-soft" : "border-transparent text-ink-3 hover:text-ink-2"} ${id === "repair" && counts.repair ? "!text-alert" : ""}`}
         >
           <Icon size={10} /> {label}
         </button>
@@ -64,6 +70,8 @@ export function StagingHub() {
       hint={
         tab === "trash"
           ? `Deleted builds and runs, kept ${TRASH_DAYS} days before they go for good. Restore puts the card and its folders back.`
+          : tab === "archive"
+          ? "Finished builds, out of the way. Promoted widgets stay in the Widgets library (home page → Add); Back to staging puts a card on the list again."
           : tab === "staging"
           ? `Builds pushed from Brainstorming run one at a time per lane, in this order (Coder/Designer → the local pipeline; Claude → the Dev Fix Queue, which asks before running). Internal widgets land in ${view?.staging_root || "staging"}; external apps in ${view?.external_base || "G:\\ai-hub\\external-builds"}.`
           : "Builds that failed their smoke test twice (or that you sent here). Fix by hand in the output folder and re-run the check, or re-queue with a fix note."
@@ -75,7 +83,7 @@ export function StagingHub() {
       ) : !view ? (
         <p className="py-3 text-center text-xs text-ink-3">Loading…</p>
       ) : !shown.length ? (
-        <Empty>{tab === "staging" ? "Nothing staged. In Brainstorm, Select a few entries → Push to Play Place." : "No builds need repair."}</Empty>
+        <Empty>{tab === "staging" ? "Nothing staged. In Brainstorm, Select a few entries → Push to Play Place." : tab === "archive" ? "Nothing archived yet." : "No builds need repair."}</Empty>
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">
           {shown.map((b) => (tab === "repair" ? <RepairCard key={b.envelope.build_id} b={b} /> : <BuildCard key={b.envelope.build_id} b={b} />))}
@@ -164,7 +172,7 @@ function BuildCard({ b }: { b: BuildView }) {
           <span className={`size-1.5 rounded-full ${w.live ? "animate-pulse bg-teal" : "bg-ink-3"}`} /> {w.label}
         </span>
         <span className={`label-caps ${e.status === "paused" ? "text-amber-soft" : "text-ink-2"}`}>{STATUS_LABEL[e.status]}</span>
-        {b.max_iterations > 0 && b.iteration > 0 && <span className="font-mono text-ink-3">iter {b.iteration}/{b.max_iterations}</span>}
+        {showHubIteration(b) && <span className="font-mono text-ink-3">iter {b.iteration}/{b.max_iterations}</span>}
         <span className="ml-auto font-mono text-ink-3">{elapsedEta(b, now)}</span>
       </div>
       <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
@@ -232,6 +240,7 @@ function BuildCard({ b }: { b: BuildView }) {
           <Copy size={11} />
         </button>
         <PinButton target={{ kind: "build", ref: id, title: e.title }} />
+        <ArchiveButton b={b} busy={busy} setBusy={setBusy} />
         <DeleteButton b={b} busy={busy} setBusy={setBusy} />
       </div>
 
@@ -354,6 +363,25 @@ function DeleteButton({ b, busy, setBusy }: { b: BuildView; busy: string | null;
   );
 }
 
+/** Archive a settled build out of the staging list (or bring it back). Never a running one. */
+function ArchiveButton({ b, busy, setBusy }: { b: BuildView; busy: string | null; setBusy: (v: string | null) => void }) {
+  const e = b.envelope;
+  const archived = !!b.archived_at;
+  // Only a settled build: one still queued, paused or running would keep building out of sight.
+  if (!archived && ["queued", "paused", "building", "smoke_testing"].includes(e.status)) return null;
+  const onClick = async () => {
+    setBusy("Archive");
+    const r = await run(archived ? "Back to staging" : "Archive", "build_archive", { buildId: e.build_id, archived: !archived });
+    setBusy(null);
+    if (r) useHub.getState().set(r);
+  };
+  return (
+    <button disabled={!!busy} onClick={() => void onClick()} className="pill-glass !h-7 !w-7 !p-0" aria-label={archived ? `Put ${e.title} back in staging` : `Archive ${e.title}`} title={archived ? "Back to staging" : "Archive (out of the staging list; a promoted widget stays in the Widgets library)"}>
+      {busy === "Archive" ? <Loader2 size={11} className="animate-spin" /> : archived ? <ArchiveRestore size={11} /> : <Archive size={11} />}
+    </button>
+  );
+}
+
 /** Sweep every Repair Queue and cancelled build. */
 function ClearFailed({ count }: { count: number }) {
   const [busy, setBusy] = useState(false);
@@ -377,11 +405,11 @@ function ClearFailed({ count }: { count: number }) {
   );
 }
 
-const ITERATION_CHOICES = [3, 5, 10, 15] as const;
+const ITERATION_CHOICES = [2, 3, 5, 10, 15] as const;
 
 /** Max Iterations for one build: the worker's Designer/Coder loop budget (applies at once to a live run). */
 function MaxIterations({ b, busy, onPick }: { b: BuildView; busy: boolean; onPick: (max: number) => void }) {
-  const current = b.max_iter_override ?? (b.max_iterations || 3);
+  const current = b.max_iter_override ?? (b.max_iterations || 2);
   const choices = ITERATION_CHOICES.includes(current as (typeof ITERATION_CHOICES)[number]) ? ITERATION_CHOICES : [...ITERATION_CHOICES, current].sort((x, y) => x - y);
   return (
     <label className="flex h-6 items-center gap-1 rounded-full border border-white/10 px-2 font-mono text-[10px] text-ink-3" title="Max iterations: how many Designer/Coder fix loops this build may run before it stops (applies to the running pass too)">
@@ -469,6 +497,7 @@ function RepairCard({ b }: { b: BuildView }) {
         <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 text-[11px]">
           {peek ? <EyeOff size={11} /> : <Eye size={11} />} Peek
         </button>
+        <ArchiveButton b={b} busy={busy} setBusy={setBusy} />
         <DeleteButton b={b} busy={busy} setBusy={setBusy} />
       </div>
       <div className="mt-2">

@@ -863,7 +863,8 @@ pub struct WorkerConfig {
 }
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { enabled: true, max_iterations: 3, verify: false, offload_code: true, librarian_audit: true }
+        // Section pass: Prompter → Designer → Coder, max two revision rounds, no Librarian audit.
+        Self { enabled: true, max_iterations: 2, verify: false, offload_code: true, librarian_audit: false }
     }
 }
 
@@ -1031,6 +1032,9 @@ const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
 const MIGRATE_BOOKING_NO_TOOLS: &str = "booking-no-tools";
 /// Section pass: freeze the Ops placeholder once on an existing install (a later thaw sticks).
 const MIGRATE_FREEZE_OPS: &str = "freeze-ops";
+/// Section pass: the build chain drops the Librarian (no audit stage) and gets two revision
+/// rounds; a saved 3 (the old default) becomes 2, any other choice is kept.
+const MIGRATE_BUILD_CHAIN: &str = "build-chain-no-librarian";
 /// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
@@ -1099,6 +1103,13 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
             }
         }
         cfg.migrations.push(MIGRATE_FREEZE_OPS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BUILD_CHAIN) {
+        cfg.worker.librarian_audit = false;
+        if cfg.worker.max_iterations == 3 {
+            cfg.worker.max_iterations = 2;
+        }
+        cfg.migrations.push(MIGRATE_BUILD_CHAIN.into());
     }
 }
 
@@ -2273,8 +2284,9 @@ mod tests {
         let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "memory": { "storage": "local" } })).unwrap();
         assert_eq!(old.feedback.sensitivity, 1);
         assert_eq!(old.feedback.narration_engine, "roster");
-        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && old.worker.librarian_audit);
-        assert_eq!(old.worker.max_iterations, 3);
+        // Section pass: Prompter -> Designer -> Coder (no Librarian), two revision rounds.
+        assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && !old.worker.librarian_audit);
+        assert_eq!(old.worker.max_iterations, 2);
         assert_eq!((old.memory.notes_dir.as_str(), old.memory.staging_dir.as_str()), ("", ""));
         let hot: OsConfig = serde_json::from_value(json!({ "feedback": { "sensitivity": 7 }, "worker": { "maxIterations": 99 } })).unwrap();
         assert_eq!((hot.feedback.sensitivity, hot.worker.max_iterations), (3, 15));
@@ -2288,7 +2300,7 @@ mod tests {
         assert!(validate(&next).is_ok());
         let v = serde_json::to_value(&next).unwrap();
         assert_eq!(v["feedback"]["narrationEngine"], "roster");
-        assert_eq!(v["worker"]["librarianAudit"], true);
+        assert_eq!(v["worker"]["librarianAudit"], false, "section pass: no Librarian in the build chain");
         let mut bad = OsConfig::default();
         bad.feedback.narration_engine = "elevenlabs".into();
         assert!(validate(&bad).is_err());
@@ -2472,7 +2484,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string()]);
     }
 
     #[test]
@@ -2756,6 +2768,21 @@ mod tests {
         let n = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-tool-owners")).count();
         assert_eq!(n, 1, "the migration never runs twice");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_build_chain_drops_the_librarian_and_an_old_default_of_3_becomes_2_once() {
+        let mut cfg: OsConfig = serde_json::from_value(json!({ "worker": { "maxIterations": 3, "librarianAudit": true } })).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!((cfg.worker.max_iterations, cfg.worker.librarian_audit), (2, false));
+        // A deliberate choice is kept, and a later change sticks.
+        let mut picked: OsConfig = serde_json::from_value(json!({ "worker": { "maxIterations": 5 } })).unwrap();
+        apply_migrations(&mut picked);
+        assert_eq!(picked.worker.max_iterations, 5);
+        cfg.worker.librarian_audit = true;
+        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut again);
+        assert!(again.worker.librarian_audit);
     }
 
     #[test]

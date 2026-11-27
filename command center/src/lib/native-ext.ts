@@ -46,6 +46,8 @@ export interface ExtCommands extends DirectorJsonCommands, CloudCommands {
   /** Fix from the dashboard: a promoted internal widget goes back into Play Place staging with the directive. */
   build_rework: { args: { buildId: string; directive: string }; result: BuildEnvelope };
   build_remove: { args: { buildId: string }; result: BuildHubView };
+  /** Archive a build out of the Staging hub list (or bring it back); card and files kept. */
+  build_archive: { args: { buildId: string; archived: boolean }; result: BuildHubView };
   /** Hard stop (distinct from Pause): abort the in-flight step, release the GPU slot, kill a Claude run. */
   cancel_build_job: { args: { jobId: string }; result: BuildEnvelope };
   /** Delete a build (aborting it first) into the Trash: card, steer copies, promoted copy and output folder, kept 30 days. */

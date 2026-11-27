@@ -188,6 +188,10 @@ pub struct Build {
     /// Nic's Max Iterations pick for this build (None: Settings → worker budget).
     #[serde(default)]
     pub max_iter_override: Option<u32>,
+    /// Section pass: archived out of the Staging hub list (kept, restorable). A promoted internal
+    /// widget is archived on promotion: it lives in the Widgets library from then on.
+    #[serde(default)]
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -430,6 +434,7 @@ impl HubFile {
             preview_version: 0,
             max_iter_override: None,
             committing: false,
+            archived_at: None,
         };
         let line = format!("Queued #{} ({} · {:?})", b.seq, match b.envelope.target_runtime { Runtime::InternalWidget => "internal widget", Runtime::ExternalOs => "external app" }, b.envelope.assigned_worker);
         push_log(&mut b, now, "event", line);
@@ -656,6 +661,7 @@ impl HubFile {
         b.stage = None;
         b.last_log_seq = 0;
         let from = if b.envelope.status == Status::Cancelled { "after a cancel" } else { "from the Repair Queue" };
+        b.archived_at = None; // back in staging: never rebuilt out of sight
         b.envelope.status = Status::Queued;
         push_log(&mut b, now, "event", format!("Re-entered staging {from}"));
         self.builds.push(b);
@@ -692,6 +698,7 @@ impl HubFile {
         b.progress = 0;
         b.stage = None;
         b.finished_at = None;
+        b.archived_at = None; // back in staging: never rebuilt out of sight
         b.last_log_seq = 0;
         b.envelope.status = Status::Queued;
         push_log(&mut b, now, "event", format!("Reopened from the dashboard for rework: {}", steer_summary(&d)));
@@ -756,6 +763,8 @@ impl HubFile {
         }
         b.envelope.status = Status::Deployed;
         b.promoted_at = Some(now);
+        // Done: out of staging, into the Widgets library (an internal widget) / the archive.
+        b.archived_at = Some(now);
         push_log(b, now, "event", match b.envelope.target_runtime {
             Runtime::InternalWidget => "Promoted to the live dashboard".into(),
             Runtime::ExternalOs => format!("Marked deployed ({})", b.envelope.output_directory),
@@ -784,9 +793,22 @@ impl HubFile {
         Ok(bound)
     }
 
+    /// Archive (or bring back) a build in the Staging hub list. A running build can't be archived.
+    pub fn set_archived(&mut self, id: &str, archived: bool, now: i64) -> Result<(), String> {
+        let b = self.get_mut(id)?;
+        // Only a settled build: one still queued, paused or running would keep building out of sight.
+        if archived && matches!(b.envelope.status, Status::Queued | Status::Paused | Status::Building | Status::SmokeTesting) {
+            return Err("cancel it first, or wait for it to finish: this build is still in the queue".into());
+        }
+        b.archived_at = archived.then_some(now);
+        push_log(b, now, "event", if archived { "Archived".into() } else { "Back in staging".into() });
+        Ok(())
+    }
+
     /// Builds a "clear failed" sweep removes: the Repair Queue and cancelled builds.
     pub fn failed_ids(&self) -> Vec<String> {
-        self.builds.iter().filter(|b| matches!(b.envelope.status, Status::RepairQueue | Status::Cancelled)).map(|b| b.envelope.build_id.clone()).collect()
+        // Archived ones are kept on purpose: the sweep leaves them alone.
+        self.builds.iter().filter(|b| b.archived_at.is_none() && matches!(b.envelope.status, Status::RepairQueue | Status::Cancelled)).map(|b| b.envelope.build_id.clone()).collect()
     }
 
     pub fn remove(&mut self, id: &str) -> Result<Build, String> {
@@ -2304,6 +2326,15 @@ pub async fn build_promote(app: AppHandle, build_id: String) -> Result<TaskEnvel
     build_of(&app, &build_id)
 }
 
+/// Archive a build out of the Staging hub list, or bring it back (files and card kept).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn build_archive(app: AppHandle, build_id: String, archived: bool) -> Result<HubView, String> {
+    let id = build_id.clone();
+    mutate_bg(&app, move |f, now, _| f.set_archived(&id, archived, now)).await?;
+    changed(&app);
+    Ok(view(&app))
+}
+
 /// Remove from the hub (files stay). A live worker task is cancelled — never left running unowned.
 #[tauri::command]
 pub async fn build_remove(app: AppHandle, build_id: String) -> Result<HubView, String> {
@@ -2978,6 +3009,8 @@ impl HubFile {
         let b = self.get_mut(&id)?;
         b.envelope.status = Status::Deployed;
         b.promoted_at = Some(now);
+        // Done: out of staging, into the Widgets library (an internal widget) / the archive.
+        b.archived_at = Some(now);
         b.finished_at = Some(now);
         b.progress = 100;
         push_log(b, now, "event", "Imported into the widget library".into());
@@ -3073,5 +3106,31 @@ mod library_import_tests {
         import_library_drops(&hub, &dir);
         assert_eq!(hub.snapshot().builds.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn promotion_archives_and_archiving_needs_a_settled_build() {
+        let mut f = HubFile::default();
+        f.import_widget("clock", "Clock", Path::new("x"), 1).unwrap();
+        let id = "b-lib-clock";
+        assert!(f.set_archived(id, true, 5).is_ok());
+        assert_eq!(f.get(id).unwrap().archived_at, Some(5));
+        assert!(f.set_archived(id, false, 6).is_ok());
+        assert_eq!(f.get(id).unwrap().archived_at, None);
+        for st in [Status::Queued, Status::Paused, Status::Building, Status::SmokeTesting] {
+            f.get_mut(id).unwrap().envelope.status = st;
+            assert!(f.set_archived(id, true, 7).unwrap_err().contains("still in the queue"), "{st:?}");
+        }
+        // Promotion (ready for merge + a passing smoke) archives it into the library.
+        let b = f.get_mut(id).unwrap();
+        b.envelope.status = Status::ReadyForMerge;
+        b.smoke.last = Some(smoke::SmokeReport { passed: true, at: 1, ms: 0, checks: vec![], failed_assertions: vec![], trace: String::new() });
+        f.promote(id, 9).unwrap();
+        assert_eq!(f.get(id).unwrap().archived_at, Some(9));
     }
 }

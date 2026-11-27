@@ -80,6 +80,8 @@ export interface BuildView {
   preview_version: number;
   /** Max Iterations picked for this build (null: the Settings budget). */
   max_iter_override?: number | null;
+  /** Section pass: archived out of the Staging hub list (promoted widgets: in the Widgets library). */
+  archived_at?: number | null;
   committing: boolean;
   /** 1-based place among the builds still waiting (null once handed to an agent). */
   position: number | null;

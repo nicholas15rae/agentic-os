@@ -1,8 +1,7 @@
 import { useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { isTauri } from "@/lib/platform";
-import { onDirectorEvent } from "@/features/director/api";
-import { createProject, lastSlug, loadProjects, onIngestEvent, onRenderEvent, openProject, refreshAssets, useDirector } from "@/features/director/director-store";
+import { createProject, lastSlug, loadProjects, openProject, refreshAssets, startDirectorEvents, useDirector } from "@/features/director/director-store";
 import { onPullDone, startCloud } from "@/features/cloud/cloud-store";
 import { DesktopOnlyView, EmptyStateView } from "@/features/director/EmptyState";
 import { StudioBar } from "@/features/director/StudioBar";
@@ -13,11 +12,16 @@ import { MiniTimeline } from "@/features/director/MiniTimeline";
 import { DirectorChat } from "@/features/director/DirectorChat";
 import { RenderPlanCard } from "@/features/director/RenderPlanCard";
 import { VerifiedShelf } from "@/features/director/VerifiedShelf";
+import { BriefCard } from "@/features/director/BriefCard";
+import { ReviewPanel } from "@/features/director/ReviewPanel";
+import { OutputsCard } from "@/features/director/OutputsCard";
+import "@/features/director/director.css";
 
 /**
  * Director Suite: stage media, shape a timeline with the Director, approve a CPU render and get a
- * verified output. Four zones on desktop (Studio Bar · bin + shot list · preview + timeline ·
- * chat + render plan + verified shelf), stacked below `lg`. Desktop-only.
+ * verified output. Four zones on desktop (Studio Bar · brief + bin + shot list · preview + review +
+ * timeline + outputs · render plan + chat + verified shelf), stacked below `lg`. Desktop-only.
+ * `director-suite` scopes the readability tweaks in director.css to this page.
  */
 export function DirectorSuiteSection() {
   if (!isTauri()) return <DesktopOnlyView />;
@@ -36,21 +40,22 @@ function DirectorStudio() {
     void loadProjects();
     const last = lastSlug();
     if (last && !useDirector.getState().slug) void openProject(last);
-    const offs = [onDirectorEvent("media-render", onRenderEvent), onDirectorEvent("media-ingest", onIngestEvent)];
+    // render + ingest + intake (intake refreshes the bin and drives the one debounced auto-match turn).
+    const stopEvents = startDirectorEvents();
     // Google Drive: status/transfers for the shelf and bin; a finished pull into the open project refreshes the bin.
     const releaseCloud = startCloud();
     const offPull = onPullDone((t) => {
       if (t.project === useDirector.getState().slug) void refreshAssets(t.project);
     });
     return () => {
-      offs.forEach((p) => void p.then((off) => off()));
+      void stopEvents.then((off) => off());
       offPull();
       releaseCloud();
     };
   }, []);
 
   return (
-    <div className="mx-auto h-full w-full max-w-[1600px] space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
+    <div className="director-suite mx-auto h-full w-full max-w-[1600px] space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
       <StudioBar />
       {!slug ? (
         <EmptyStateView projects={projects} loaded={loaded} onQuickStart={(q, title) => createProject(title, q)} onOpen={(s) => void openProject(s)} />
@@ -63,12 +68,15 @@ function DirectorStudio() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-[minmax(240px,300px)_minmax(0,1fr)_minmax(280px,360px)]">
           <div className="min-w-0 space-y-4">
+            <BriefCard />
             <StagingBin />
             <ShotList />
           </div>
           <div className="min-w-0 space-y-4">
             <PreviewPlayer />
+            <ReviewPanel />
             <MiniTimeline />
+            <OutputsCard />
           </div>
           <div className="min-w-0 space-y-4">
             <RenderPlanCard />

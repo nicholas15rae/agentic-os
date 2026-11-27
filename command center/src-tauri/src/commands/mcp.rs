@@ -3071,7 +3071,7 @@ mod tests {
         assert!(role_refusal(&cfg, FINANCE_ASK, "finance").unwrap().starts_with(ROLE_PREFIX), "not granted by default");
         cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["all".into()]);
         assert!(role_refusal(&cfg, FINANCE_ASK, "finance").is_none(), "granted: the finance role may read");
-        for a in ["coder", "ops", "bizops", "librarian", "prompter", "director", "booking", "trader"] {
+        for a in ["coder", "bizops", "librarian", "prompter", "director", "booking", "trader"] {
             let e = role_refusal(&cfg, FINANCE_ASK, a).unwrap_or_default();
             assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony and the Finance agent only"), "{a}: {e}");
             // Even the worker's scripted path (grants skipped) is refused.
@@ -3708,11 +3708,13 @@ mod tests {
                 assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony is not granted"), "{e}");
             }
             assert_eq!(role_refusal(&cfg, TONY_SET_MODE, agent), None);
+            // Maps is his own (routes, ETAs, the Route Map).
+            assert_eq!(role_refusal(&cfg, "maps.route", agent), None, "{agent:?}");
         }
         // Nic's own UI (Settings testers) acting as Tony isn't held to Tony's grants.
         assert!(!origin_checks_grants(CallOrigin::Ui, "tony") && origin_checks_grants(CallOrigin::Ui, "coder"));
         assert!(origin_checks_grants(CallOrigin::Turn, "tony") && origin_checks_grants(CallOrigin::Direct, "tony"));
-        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false, &[]), None);
+        assert_eq!(role_refusal_with(&cfg, "git.status", "tony", false, &[]), None);
         assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder"), &[]).is_some());
         for m in cfg.mcps.iter_mut().filter(|m| m.id == "spotify") {
             m.agents = Some(vec!["all".into()]);
@@ -3742,7 +3744,7 @@ mod tests {
     #[test]
     fn whatsapp_writes_stay_refused_for_everyone() {
         let cfg = role_cfg();
-        for agent in ["tony", "general", "booking", "ops", "librarian"] {
+        for agent in ["tony", "general", "booking", "bizops", "librarian"] {
             let refused = role_refusal(&cfg, "whatsapp.send_message", agent).or_else(|| read_only_refusal(&cfg, "whatsapp.send_message"));
             assert!(refused.is_some_and(|e| e.starts_with("PERMISSION_")), "{agent}");
         }
@@ -3891,22 +3893,20 @@ mod tests {
     #[test]
     fn allm_agents_are_the_live_mapped_roles() {
         let cfg = OsConfig::default();
-        // Ops starts frozen (a placeholder), so it is not AnythingLLM-backed until thawed.
         assert_eq!(allm_agents(&cfg), ["bizops", "coder", "designer", "director", "finance", "prompter"]);
         let mut c = OsConfig::default();
         c.switchboard.frozen_agents.push("designer".into());
         assert!(!allm_agents(&c).contains(&"designer".to_string()));
         // Default grants: what those agents need (Tony-only servers never ride along).
         let mut d = OsConfig::default();
-        d.switchboard.frozen_agents.retain(|a| a != "ops"); // Ops holds the Maps grant once thawed
         for m in d.mcps.iter_mut() {
             m.enabled = true;
         }
         let needed = allm_needed(&d.mcps, &allm_agents(&d));
-        for id in ["filesystem", "git", "fetch", "knowledge-graph", "maps", "instagram", "shotcut", "media-forge"] {
+        for id in ["filesystem", "git", "fetch", "knowledge-graph", "instagram", "shotcut", "media-forge"] {
             assert!(needed.contains(id), "{id}");
         }
-        for id in ["whatsapp", "gmail", "spotify", "weather", "time", "calendar", "brave-search"] {
+        for id in ["whatsapp", "gmail", "spotify", "weather", "time", "calendar", "brave-search", "maps"] {
             assert!(!needed.contains(id), "{id} is Tony's alone");
         }
     }
@@ -4235,14 +4235,14 @@ mod tony_mode_tool_tests {
         let cfg = OsConfig::default();
         let ig = cfg.mcps.iter().find(|m| m.id == "instagram").cloned().expect("instagram server");
         let gmail = cfg.mcps.iter().find(|m| m.id == "gmail").cloned().expect("gmail server");
-        let ops = os_core::tony_mode_extras(&cfg, "operations");
-        assert!(ops.iter().any(|x| x == "instagram"));
+        let operations = os_core::tony_mode_extras(&cfg, "operations");
+        assert!(operations.iter().any(|x| x == "instagram"));
         let no_token = || Some(super::super::instagram::NO_TOKEN.to_string());
         assert!(!ig.grants("general"), "Instagram is a mode extra for Tony, not his base");
-        assert!(unconnected_extra(&ig, ops, no_token), "no token: Operations doesn't offer it");
-        assert!(!unconnected_extra(&ig, ops, || None), "connected: offered");
+        assert!(unconnected_extra(&ig, operations, no_token), "no token: Operations doesn't offer it");
+        assert!(!unconnected_extra(&ig, operations, || None), "connected: offered");
         assert!(!unconnected_extra(&ig, &[], no_token), "not an extra in this mode: not this rule's call");
-        assert!(!unconnected_extra(&gmail, ops, || Some("no backend".into())), "his base still reports a missing backend");
+        assert!(!unconnected_extra(&gmail, operations, || Some("no backend".into())), "his base still reports a missing backend");
     }
 
     #[test]
@@ -4254,8 +4254,8 @@ mod tony_mode_tool_tests {
         }
         // Booking is frozen on the master switchboard by default: nothing, even with "all".
         assert!(servers_for(&cfg, &mode_eff("brainstorm"), "booking").is_empty());
-        // Ops is off duty in Builder mode: nothing either.
-        assert!(servers_for(&cfg, &mode_eff("builder"), "ops").is_empty());
+        // Biz Ops is off duty in Builder mode: nothing either.
+        assert!(servers_for(&cfg, &mode_eff("builder"), "bizops").is_empty());
         assert!(!servers_for(&cfg, &mode_eff("builder"), "coder").is_empty());
     }
 

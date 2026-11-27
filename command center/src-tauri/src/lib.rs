@@ -10,7 +10,7 @@ mod webview_visibility;
 pub mod security;
 
 use commands::{buildhub, diagnostics, handoff_cues, language_hub, lifecycle};
-use commands::{arbiter, business_registry, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
+use commands::{arbiter, business_registry, director, finance_handoff, finance_vault, gdrive, integrity, media, memtier, ops_audit, ops_scope, quarantine, review_queue};
 use commands::{agents, allm, allm_audit, bridge, calendar, claude_fix, clihub, devqueue, envelope, events, introspect, instagram, modellab, modes, dispatch, gmail, maps, market, mcp, memory, n8n, os_core, pipeline, pipelines, secrets, services, spotify, system, taskworker, telemetry, voice};
 
 /// Event the webview listens for to start/stop a voice session.
@@ -285,6 +285,9 @@ pub fn run() {
                 // Model Lab A/B compare reports (<config dir>/telemetry/modellab) + its request.json loop.
                 #[cfg(desktop)]
                 modellab::compare::init(app.handle(), &dir);
+                // Director Part 2: the ComfyUI batch queue (<config dir>/comfy-queue.json) + its runner.
+                #[cfg(desktop)]
+                commands::comfy::init(app.handle(), &dir);
                 finance_vault::init(&dir);
                 // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
                 business_registry::init(&dir);
@@ -376,6 +379,8 @@ pub fn run() {
                 tauri::async_runtime::spawn(buildhub::hub_loop(app.handle().clone()));
                 // P6: pick up Claude Code's edits to <repo>/.agenticos/claude-fix-queue.json (10 s poll).
                 tauri::async_runtime::spawn(devqueue::queue_file_loop(app.handle().clone()));
+                // Director Suite v2 §3: the 10 s watched-inbox intake + CPU transcription thread.
+                media::spawn_intake(app.handle().clone());
                 // Renew the Instagram long-lived token before its 60 days run out.
                 tauri::async_runtime::spawn(instagram::refresh_loop(app.handle().clone()));
                 // GPU baton events → top-bar "ACTIVE GPU SLOT" pill; droplet auto-reconnect.
@@ -402,6 +407,9 @@ pub fn run() {
                 tauri::async_runtime::spawn(commands::garbage::daemon(app.handle().clone()));
                 // HITL review queue: Garbage's business sweep + the batched digest / webhook.
                 tauri::async_runtime::spawn(commands::review_queue::daemon(app.handle().clone()));
+                // Maps trips: recompute the next 48 h of calendar trips (~10 min) and publish the
+                // snapshot to the loopback gateway for the phone, widget on screen or not.
+                tauri::async_runtime::spawn(commands::trips::publisher_loop(app.handle().clone()));
                 #[cfg(desktop)]
                 if let Err(e) = build_tray(app) {
                     eprintln!("[tray] {e}");
@@ -607,6 +615,13 @@ pub fn run() {
             agents::learning_discard,
             agents::overseer_ask,
             mcp::mcp_list_tools,
+            director::director_turn,
+            commands::comfy::comfy_status,
+            commands::comfy::comfy_enqueue,
+            commands::comfy::comfy_cancel,
+            commands::comfy::comfy_run_now,
+            commands::comfy::comfy_queue_get,
+            commands::comfy::comfy_settings_set,
             media::media_projects,
             media::media_project_create,
             media::media_project_get,
@@ -622,6 +637,17 @@ pub fn run() {
             media::media_render_cancel,
             media::media_readiness,
             media::media_reveal,
+            media::media_project_update,
+            media::media_asset_update,
+            media::media_intake_status,
+            media::media_transcribe,
+            media::media_note_add,
+            media::media_note_resolve,
+            media::media_plan_check,
+            media::media_review_get,
+            media::media_review_write,
+            media::media_approve_final,
+            media::media_deliverables_get,
             gdrive::cloud_status,
             gdrive::cloud_connect,
             gdrive::cloud_disconnect,
@@ -652,6 +678,9 @@ pub fn run() {
             maps::map_reverse,
             maps::maps_status,
             maps::map_open_in_maps,
+            commands::trips::maps_trips,
+            commands::trips::maps_trip_words,
+            commands::trips::maps_trip_words_set,
             instagram::instagram_status,
             instagram::instagram_refresh_token,
             instagram::instagram_reply_comment,

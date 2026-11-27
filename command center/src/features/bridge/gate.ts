@@ -10,7 +10,7 @@ import type { ThreadId } from "@/features/voice/voice-store";
  */
 export function confirmThen<T>(opts: { action: string; summary: string; readBack?: string; detail?: Record<string, unknown> }, run: () => Promise<T>, describe: (r: T) => string): Promise<T | null> {
   return new Promise<T | null>((resolve, reject) => {
-    const plan = heuristicPlan(opts.summary, "ops");
+    const plan = heuristicPlan(opts.summary, "general");
     plan.mutating = true;
     plan.summary = opts.summary;
     plan.intent = opts.summary.charAt(0).toLowerCase() + opts.summary.slice(1);
@@ -61,7 +61,7 @@ export function gated<T>(
     if (!msg.startsWith("PERMISSION_REQUIRED:")) throw err;
     const scopes = msg.split(":")[1].split(",");
     return new Promise<T | null>((resolve, reject) => {
-      const plan = heuristicPlan(opts.summary, "ops");
+      const plan = heuristicPlan(opts.summary, "general");
       plan.mutating = true;
       plan.summary = opts.summary;
       plan.intent = opts.summary.charAt(0).toLowerCase() + opts.summary.slice(1);

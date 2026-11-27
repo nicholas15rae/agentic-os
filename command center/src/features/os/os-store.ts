@@ -93,8 +93,6 @@ export function agentBadge(id: string): string {
       return "CODER AGENT";
     case "librarian":
       return "LIBRARIAN";
-    case "ops":
-      return "OPS AGENT";
     case "prompter":
       return "PROMPTER";
     case "designer":

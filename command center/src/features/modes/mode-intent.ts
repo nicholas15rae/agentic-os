@@ -1,7 +1,7 @@
 /**
  * Deterministic fast path for Tony's work-mode switches (pure, unit-tested). Runs before any
  * model call, on typed AND spoken lines: "go into builder mode", "hey Tony, coaching mode",
- * "switch to exec mode and check the staging hub", "ops mode". Gabagool Mode (a toggle, not a
+ * "switch to exec mode and check the staging hub", "ops mode" (Operations). Gabagool Mode (a toggle, not a
  * work mode) stays with the OS-intent parser.
  *
  * Only an explicit command matches: a switch verb + "<alias> mode" at the start of the line, or
@@ -20,8 +20,8 @@ export const MODE_ALIASES: Readonly<Record<string, WorkModeId>> = {
   builder: "builder",
   build: "builder",
   building: "builder",
-  // "ops" / "operations" are also Biz Ops / Ops routing names: they only switch with "mode"
-  // (every form below requires it), so "ops, check the invoices" still routes to an agent.
+  // "operations" (and the "ops" of "ops manager") are Biz Ops routing words: they only switch with
+  // "mode" (every form below requires it), so "operations, check the invoices" still routes.
   "business operations": "operations",
   operations: "operations",
   operational: "operations",

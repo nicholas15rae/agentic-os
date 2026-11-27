@@ -152,7 +152,7 @@ const SUBAGENT_MARK = "anythingllm/";
 /** Rust's Learning-mode memory hops all start with this (`learning · …`). */
 export const LEARNING_HOP = "learning ·";
 /** The Sub-agents / Media nodes while Learning mode isolates Tony. */
-export const LEARNING_ISOLATED = "Isolated: Learning mode. Coder, Designer, Booking Desk and Ops are dormant; only Tony and memory are linked.";
+export const LEARNING_ISOLATED = "Isolated: Learning mode. Coder, Designer, Booking Desk and Biz Ops are dormant; only Tony and memory are linked.";
 
 /** Which edges one trace step lights. See docs/memory-map-plan.md §8 for the table. */
 export function edgesForStep(s: TraceStep): FlowHit {

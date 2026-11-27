@@ -8,8 +8,8 @@ Local media utilities for the Command Center **Director** agent, served over std
 | Group | Tools |
 |---|---|
 | Project | `media_status`, `ensure_project`, `import_to_raw` |
-| Inspect | `probe_media`, `detect_silence`, `verify_output` |
-| Video jobs | `render_timeline` (JSON timeline spec from the Command Center: video + image clips, letterbox to W×H, fades, voiceover/music layers, 2-pass EBU R128, size cap), `quick_assemble` (trim → 2-pass EBU R128 → concat → H.264/AAC, size cap), `reframe_and_caption` (9:16 / 4:5 / 1:1 / 16:9, crop / pad / blur, burned or soft captions) |
+| Inspect | `probe_media`, `detect_silence`, `detect_bars` (letterbox / pillarbox content rect via cropdetect), `verify_output` |
+| Video jobs | `render_timeline` (JSON timeline spec from the Command Center: video + image clips, per-clip crop and fit pad / fill / blur to W×H (v2), fades, voiceover/music layers, 2-pass EBU R128, size cap), `quick_assemble` (trim → 2-pass EBU R128 → concat → H.264/AAC, size cap), `reframe_and_caption` (9:16 / 4:5 / 1:1 / 16:9, crop / pad / blur, burned or soft captions) |
 | Analysis jobs | `transcribe_clip` (faster-whisper, CPU int8, VAD, word timestamps → .srt/.vtt/.json), `detect_scenes` (PySceneDetect + thumbnails) |
 | Stills | `process_photos` (auto-level, WB, exposure, sharpen, face-aware crop, watermark), `contact_sheet`, `make_thumbnail` |
 | Jobs | `job_status`, `job_cancel`, `job_list` |
@@ -62,6 +62,6 @@ uv --directory "<this folder>" run server.py   # what the gateway launches
 | `MEDIA_CPU_PCT` | `70` |
 | `MEDIA_ALLOW_GPU` | `0` |
 | `MEDIA_MAX_JOBS` | `1` |
-| `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE` / `WHISPER_MODEL_DIR` | `small.en` / `cpu` / `int8` / `C:\ai-hub\models\faster-whisper` |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` / `WHISPER_COMPUTE` / `WHISPER_MODEL_DIR` | `tiny.en` (on disk; `small.en` is a ~480 MB opt-in download) / `cpu` / `int8` / `C:\ai-hub\models\faster-whisper` |
 
 Smoke-test any stdio MCP the way the gateway talks to it: `python ..\mcp_smoke.py --call media_status "{}" -- uv --directory . run server.py`.

@@ -282,10 +282,10 @@ mod tests {
             { "slug": "librarian", "name": "Librarian ", "chatMode": "automatic", "chatProvider": null, "chatModel": null, "threads": t(1) },
             { "slug": "prompter-dispatcher", "name": "Prompter / Dispatcher", "chatMode": "chat", "chatProvider": "lmstudio", "chatModel": "qwen/qwen3.5-9b", "agentProvider": "lmstudio", "agentModel": "qwen/qwen3.5-9b", "threads": t(3) },
             { "slug": "booking", "name": "Booking", "chatMode": "chat", "chatProvider": null, "threads": t(12) },
-            { "slug": "ops", "name": "Ops", "chatMode": "chat", "chatProvider": null, "threads": [] },
+            { "slug": "director", "name": "Director", "chatMode": "chat", "chatProvider": null, "threads": [] },
             { "slug": "designer", "name": "Designer", "chatMode": "chat", "chatProvider": null, "threads": [] }
         ]});
-        let roles = [("booking", "booking"), ("coder", "coder"), ("designer", "designer"), ("general", "my-workspace"), ("librarian", "librarian"), ("ops", "ops"), ("prompter", "prompter-dispatcher")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let roles = [("booking", "booking"), ("coder", "coder"), ("designer", "designer"), ("general", "my-workspace"), ("director", "director"), ("librarian", "librarian"), ("prompter", "prompter-dispatcher")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         (ws, roles)
     }
 
@@ -307,10 +307,10 @@ mod tests {
         // general → "Booking".
         assert!(a.findings.iter().any(|f| f.kind == "name_mismatch" && f.role.as_deref() == Some("general") && f.detail.contains("booking name")));
         assert_eq!(a.findings.iter().filter(|f| f.kind == "name_mismatch").count(), 1, "{:#?}", a.findings);
-        // ops / designer unused.
-        assert!(has(&a, "unused", "ops") && has(&a, "unused", "designer"));
+        // director / designer unused.
+        assert!(has(&a, "unused", "director") && has(&a, "unused", "designer"));
         assert!(!has(&a, "unused", "booking"));
-        // No pinned provider: designer and librarian (warn), booking / ops (info).
+        // No pinned provider: designer and librarian (warn), booking / director (info).
         let np = |slug: &str| a.findings.iter().find(|f| f.kind == "no_pinned_provider" && f.slugs[0] == slug).map(|f| f.severity.clone());
         assert_eq!(np("designer").as_deref(), Some("warn"));
         assert_eq!(np("librarian").as_deref(), Some("warn"));
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn dead_shared_and_unmapped() {
         let ws = json!({ "workspaces": [{ "slug": "a", "name": "A", "threads": [{ "slug": "x" }] }, { "slug": "spare", "name": "Spare", "threads": [] }] });
-        let roles = [("coder", "a"), ("designer", "a"), ("ops", "gone"), ("booking", "")].iter().map(|(r, s)| (r.to_string(), s.to_string())).collect();
+        let roles = [("coder", "a"), ("designer", "a"), ("director", "gone"), ("booking", "")].iter().map(|(r, s)| (r.to_string(), s.to_string())).collect();
         let a = audit(&ws, &roles, "Tony", None, None, Some("host differs".into()));
         assert!(has(&a, "dead_slug", "gone"));
         assert!(has(&a, "shared_slug", "a"));
@@ -353,9 +353,9 @@ mod tests {
         let c = role_flags("coder", "coder", &infos, "Tony", &all, Some("qwen/qwen3.5-9b"));
         assert!(c["modelMismatch"].as_str().unwrap().contains("agent model"));
         assert_eq!(c["nameMismatch"], Value::Null);
-        assert_eq!(role_flags("ops", "ops", &infos, "Tony", &all, None)["unused"], json!(true));
+        assert_eq!(role_flags("director", "director", &infos, "Tony", &all, None)["unused"], json!(true));
         assert_eq!(role_flags("prompter", "prompter-dispatcher", &infos, "Tony", &all, None)["nameMismatch"], Value::Null);
-        assert_eq!(role_flags("ops", "missing", &infos, "Tony", &all, None)["unused"], Value::Null);
+        assert_eq!(role_flags("director", "missing", &infos, "Tony", &all, None)["unused"], Value::Null);
     }
 
     #[test]

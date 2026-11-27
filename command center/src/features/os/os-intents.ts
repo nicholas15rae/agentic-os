@@ -173,7 +173,14 @@ async function modelAction(query: string): Promise<OsIntentResult> {
     const models = await cmd("provider_models", { id: "lmstudio" });
     const id = resolveModel(query, models);
     if (!id) return { reply: `I couldn't find a model matching "${query}".` };
-    await cmd("model_use", { model: id });
+    try {
+      await cmd("model_use", { model: id });
+    } catch (e) {
+      // A tight / spilling model needs the Model Lab's explicit confirm; voice never forces it.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.startsWith("FIT_WARN:")) return { reply: `I didn't switch to ${id}: ${msg.replace(/^FIT_WARN:[a-z]+:\s*/, "")}. Confirm it in Settings → Model Lab if you still want it.` };
+      throw e;
+    }
     return { reply: `Switched the model to ${id}.` };
   } catch (e) {
     return { reply: `Couldn't switch models: ${e instanceof Error ? e.message : String(e)}` };

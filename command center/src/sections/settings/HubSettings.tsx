@@ -5,6 +5,7 @@ import { gateway } from "@/lib/gateway";
 import { cmd, type BenchResult, type CliStatus, type LabModel, type SchedulerConfig } from "@/lib/platform";
 import { gated } from "@/features/bridge/gate";
 import { ModelComparePanel } from "@/features/modellab/ModelComparePanel";
+import { fitBadge, fitConfirmText, parseFitWarning } from "@/features/modellab/brain-fit";
 import { CfgError, SecretRow, Toggle, useOsCfg } from "./os-ui";
 import { overseerFamilyOn, toggleOverseer, type OverseerFamily } from "./overseer-toggle";
 
@@ -343,7 +344,19 @@ export function ModelLabCard() {
   const use = async (m: LabModel) => {
     setBusy(m.key);
     try {
-      const notes = await cmd("model_use", { model: m.key });
+      let notes: string[];
+      try {
+        notes = await cmd("model_use", { model: m.key });
+      } catch (e) {
+        // Rust refuses a tight / spilling (or unverifiable) model until it is explicitly confirmed.
+        const w = parseFitWarning(e);
+        if (!w) throw e;
+        if (!confirm(fitConfirmText(w))) {
+          setMsg(`Kept Tony's current model. ${w.message}.`);
+          return;
+        }
+        notes = await cmd("model_use", { model: m.key, force: true });
+      }
       setMsg(`Tony now runs on ${m.name}. ${notes.slice(1).join(" · ")}`);
       load();
     } catch (e) {
@@ -390,9 +403,15 @@ export function ModelLabCard() {
                     </span>
                   </td>
                   <td className="py-2 font-mono text-ink-2">{m.sizeGb} GB</td>
-                  <td className={`py-2 ${m.fit === "fits" ? "text-teal" : m.fit === "tight" ? "text-amber-soft" : "text-alert"}`}>
-                    {m.fit} · {Math.round(m.context / 1024)}k
-                  </td>
+                  {(() => {
+                    const b = fitBadge(m.fit, m.context);
+                    return (
+                      <td className={`py-2 ${b.tone === "ok" ? "text-teal" : b.tone === "warn" ? "font-semibold text-amber-soft" : "font-semibold text-alert"}`} title={b.title}>
+                        {b.text}
+                        {b.tone === "bad" && <span className="block text-[10px] font-normal">spills to RAM — slow</span>}
+                      </td>
+                    );
+                  })()}
                   <td className="py-2 font-mono text-ink-2">
                     {r ? (r.error ? <span className="text-alert">{r.error.slice(0, 80)}</span> : `${(r.loadMs / 1000).toFixed(1)}s load · ${(r.firstTokenMs / 1000).toFixed(2)}s · ${r.tokensPerSec} tok/s · ${r.vramUsedGb}/${Math.round(r.vramTotalGb)} GB`) : "—"}
                     {r?.reply && (
@@ -406,8 +425,13 @@ export function ModelLabCard() {
                       <button disabled={!!busy} onClick={() => void bench(m)} className="pill-glass !h-7 !px-2.5 text-[11px]">
                         {busy === m.key ? <Loader2 size={11} className="animate-spin" /> : <PlugZap size={11} />} Benchmark
                       </button>
-                      <button disabled={!!busy || m.tony} onClick={() => void use(m)} className="pill-primary !h-7 !px-2.5 text-[11px]">
-                        Use for Tony
+                      <button
+                        disabled={!!busy || m.tony}
+                        onClick={() => void use(m)}
+                        className={`${m.fit === "fits" ? "pill-primary" : "pill-glass"} !h-7 !px-2.5 text-[11px]`}
+                        title={m.fit === "fits" ? "Make this Tony's brain" : "Doesn't fit the GPU comfortably: asks before switching"}
+                      >
+                        Use for Tony{m.fit === "fits" ? "" : "…"}
                       </button>
                     </div>
                   </td>

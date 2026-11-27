@@ -622,19 +622,81 @@ pub async fn security_companion_sign(app: AppHandle, id: String, nonce: String, 
     Ok(CompanionSignature { sig, device_id })
 }
 
-/// Companion phone: store the pairing key shown by `gabagool-cli pair-companion` (needs a
-/// settings step-up on this device).
-#[tauri::command]
-pub fn security_companion_store_key(app: AppHandle, key: String) -> Result<Status, String> {
+/// A live session with a live `settings` elevation (the same gate pairing and every other
+/// settings change uses), or the refusal to show.
+fn require_settings_step_up(what: &str) -> Result<(), String> {
     if rt().is_hard() {
         return Err(hard_err());
     }
     let p = policy();
-    if rt().sessions().use_elevation("settings", &p, super::now()).is_none() {
-        return Err("STEP_UP_REQUIRED:settings: confirm with your PIN to pair this device".into());
+    let now = super::now();
+    let mut s = rt().sessions();
+    s.tick(&p, now);
+    if !s.is_live() {
+        return Err(Refusal::NoSession.message());
     }
+    if s.use_elevation("settings", &p, now).is_none() {
+        return Err(format!("STEP_UP_REQUIRED:settings: confirm with your PIN to {what}"));
+    }
+    Ok(())
+}
+
+/// Companion phone: store the pairing key shown by `gabagool-cli pair-companion`, or the text of
+/// the desktop's pairing QR (`gbgpair1|…`, refused once expired). Needs a settings step-up on
+/// this device.
+#[tauri::command]
+pub fn security_companion_store_key(app: AppHandle, key: String) -> Result<Status, String> {
+    require_settings_step_up("pair this device")?;
+    let (key, desktop) = companion::parse_pair_input(&key, super::now())?;
     let place = companion::device_store(&super::dir(), &key)?;
-    audit::log("companion_paired", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "stored": place }));
+    audit::log("companion_paired", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "stored": place, "via": if desktop.is_some() { "qr" } else { "key" }, "desktop": desktop }));
+    emit(&app);
+    Ok(status(&app))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingQr {
+    /// The QR text (`gbgpair1|key|expires|desktop`); shown once, never stored by the webview.
+    pub payload: String,
+    pub expires_at: f64,
+}
+
+/// Desktop: pair a phone with a QR code. Generates a NEW pairing key (exactly like
+/// `gabagool-cli pair-companion`, so a previously paired phone must pair again) and returns it as a
+/// one-time payload that expires after `PAIR_QR_TTL_S`. Needs a settings step-up.
+#[tauri::command]
+pub fn security_companion_pair_qr(app: AppHandle) -> Result<PairingQr, String> {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return Err("PAIR_QR_DESKTOP: the pairing QR is shown on the desktop; scan it with this phone".into());
+    }
+    require_settings_step_up("pair a phone")?;
+    let dir = super::dir();
+    let was_paired = companion::pair_key(&dir).is_some();
+    let key = companion::pair_generate(&dir)?;
+    let expires_at = super::now() + companion::PAIR_QR_TTL_S;
+    let payload = companion::pair_payload(&key, expires_at, &super::device_id(&dir));
+    audit::log("companion_pair_qr", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "replaced": was_paired, "expiresAt": expires_at }));
+    emit(&app);
+    Ok(PairingQr { payload, expires_at })
+}
+
+/// Settings → Security: the idle lock (5–120 min) and hard re-auth (30–720 min) timers, written to
+/// `security.config.json` (hot-reloaded). Needs a settings step-up; the values are clamped here.
+#[tauri::command]
+pub fn security_session_set(app: AppHandle, idle_lock_minutes: f64, reauth_minutes: f64) -> Result<Status, String> {
+    require_settings_step_up("change the lock timers")?;
+    let next = config::session_from_ui(idle_lock_minutes, reauth_minutes)?;
+    let before = config::get().session;
+    config::set_session_in(&super::dir(), &next)?;
+    audit::log(
+        "session_config_changed",
+        Severity::Warn,
+        Outcome::Success,
+        Some("settings"),
+        "desktop-ui",
+        json!({ "idleLockMinutes": [before.idle_lock_minutes, next.idle_lock_minutes], "reauthMinutes": [before.reauth_minutes, next.reauth_minutes] }),
+    );
     emit(&app);
     Ok(status(&app))
 }

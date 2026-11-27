@@ -308,6 +308,7 @@ _LAST_ALERT: dict[str, float] = {}
 _TITLES = {
     "remote_kill": "REMOTE EMERGENCY KILL executed", "remote_kill_rejected": "Rejected remote kill attempt",
     "hard_lock": "HARD LOCK engaged", "trading_kill_switch": "Trading kill switch tripped", "kill_switch": "Kill switch engaged",
+    "unknown_device": "Unknown device tried to reach the gateway",
 }
 
 
@@ -315,7 +316,7 @@ def maybe_alert(entry: dict, d: Path | None = None) -> threading.Thread | None:
     cfg = load_config(d).get("alerts") or {}
     if cfg.get("enabled") is False:
         return None
-    events = cfg.get("events") or ["remote_kill", "remote_kill_rejected", "hard_lock", "trading_kill_switch", "kill_switch"]
+    events = cfg.get("events") or ["remote_kill", "remote_kill_rejected", "hard_lock", "trading_kill_switch", "kill_switch", "unknown_device"]
     if entry["event"] not in events:
         return None
     critical = entry["severity"] == "critical"
@@ -331,6 +332,34 @@ def maybe_alert(entry: dict, d: Path | None = None) -> threading.Thread | None:
     t = threading.Thread(target=deliver, args=(title, body, entry["event"], entry["severity"], cfg), daemon=True)
     t.start()
     return t
+
+
+# ── unknown devices at the gateway door (server.ZeroTrustMiddleware) ────────────
+UNKNOWN_DEVICE_EVERY_S = 600.0
+_UNKNOWN_SEEN: dict[str, float] = {}
+_UNKNOWN_LOCK = threading.Lock()
+
+
+def note_unknown_device(host: str, reason: str, path: str = "", d: Path | None = None, now: float | None = None) -> dict | None:
+    """Audit a request the gateway refused at the door (outside the NetBird mesh, or on the mesh
+    without a valid gateway token while the network lock is on) as `unknown_device`; the audit
+    raises the alert when `alerts.events` lists it (the default does). At most once per host per
+    10 min, so a phone with a stale token or a LAN scanner can't flood the trail. Never raises."""
+    now = _now() if now is None else now
+    host = (host or "?").strip()[:64] or "?"
+    with _UNKNOWN_LOCK:
+        if now - _UNKNOWN_SEEN.get(host, 0.0) < UNKNOWN_DEVICE_EVERY_S:
+            return None
+        if len(_UNKNOWN_SEEN) > 256:
+            for h, t in list(_UNKNOWN_SEEN.items()):
+                if now - t >= UNKNOWN_DEVICE_EVERY_S:
+                    del _UNKNOWN_SEEN[h]
+        _UNKNOWN_SEEN[host] = now
+    try:
+        return audit("unknown_device", "warn", "failure", None, f"gateway:{host}", {"reason": reason[:120], "path": (path or "").split("?", 1)[0][:80]}, d)
+    except Exception as e:  # alerting/auditing must never break the request path
+        print(f"[security] unknown_device audit failed: {e}")
+        return None
 
 
 class _Skip(Exception):

@@ -11,6 +11,12 @@
 //!   cleanup (Spotify duck restore, Drive sync); MCP servers and Claude fix runs live in kill-on-close
 //!   Job Objects (proc.rs), and the build hub's preview servers are tasks of this process, so
 //!   nothing is orphaned. The gateway is the phone's sync hub and is left running on purpose.
+//! - Standby (`app_standby`, the window's X, the tray's Standby) only hides the window: this
+//!   process keeps claiming phone turns, the GPU arbiter, STT keep-alive, schedulers and backups.
+//!   Exit is the full shutdown: the gateway stays up, but phone turns wait for this app, so the
+//!   phone loses Tony until the Command Center starts again (the webview and the tray both say so).
+//! - A webview crash or hard reload only reloads the page; nothing here or in `services` stops
+//!   the gateway (it is spawned DETACHED, outside any kill-on-close job) or the Rust loops.
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,7 +131,21 @@ async fn tick(app: &AppHandle) -> HealthSnapshot {
     let p = probe(&http, &url).await;
     let snap = app.state::<LifecycleState>().record(&p);
     let _ = app.emit(HEALTH_EVENT, &snap);
+    crate::tray_set_status(app, &tray_status_line(&snap));
     snap
+}
+
+/// The tray's first line (pure): this process is Tony's engine, so it is running whenever the
+/// tray exists; the gateway part follows the heartbeat.
+pub fn tray_status_line(h: &HealthSnapshot) -> String {
+    let gw = match h.state {
+        Health::Online => "gateway ok",
+        Health::Slow => "gateway slow",
+        Health::TimedOut => "gateway not answering",
+        Health::Offline => "gateway down",
+        Health::Unknown => "gateway checking…",
+    };
+    format!("Tony: running · {gw}")
 }
 
 /// The heartbeat (spawned once in `lib.rs`).
@@ -202,6 +222,14 @@ pub async fn app_exit_check(app: AppHandle) -> Result<ExitCheck, String> {
     exit_busy_bg(&app).await
 }
 
+/// Standby: hide the window to the tray, exactly like the window's X. Everything keeps running
+/// (gateway, model, STT, trading, backups, scheduled jobs, phone turns); the tray or a second
+/// launch brings the window back.
+#[tauri::command]
+pub fn app_standby(app: AppHandle) -> Result<(), String> {
+    crate::standby(&app)
+}
+
 /// Quit the app. Refuses with `BUSY:` when something is mid-commit, unless `force`.
 #[tauri::command]
 pub async fn app_exit(app: AppHandle, force: Option<bool>) -> Result<(), String> {
@@ -268,6 +296,29 @@ mod tests {
         // Port 9 (discard) is closed on a dev box; either a refusal or a timeout is fine.
         let p = tauri::async_runtime::block_on(probe(&http, "http://127.0.0.1:9"));
         assert!(matches!(p, Probe::Down(_) | Probe::Timeout), "{p:?}");
+    }
+
+    #[test]
+    fn tray_status_line_follows_the_heartbeat() {
+        let on = fold(&HealthSnapshot::default(), &Probe::Ok { latency_ms: 9 }, 1);
+        assert_eq!(tray_status_line(&on), "Tony: running · gateway ok");
+        let down = fold(&on, &Probe::Down("refused".into()), 2);
+        assert_eq!(tray_status_line(&down), "Tony: running · gateway down");
+        assert_eq!(tray_status_line(&HealthSnapshot::default()), "Tony: running · gateway checking…");
+    }
+
+    #[test]
+    fn exit_never_stops_the_gateway_and_standby_only_hides() {
+        // The gateway is the phone's hub: neither Exit nor Standby may stop it.
+        let src = include_str!("lifecycle.rs");
+        let body = src.split("pub async fn app_exit(").nth(1).unwrap().split("#[cfg(test)]").next().unwrap();
+        for bad in ["gateway_stop", "taskkill", "kill_gateway"] {
+            assert!(!body.contains(bad), "app_exit must leave the gateway running ({bad})");
+        }
+        let services = include_str!("services.rs");
+        let ensure = services.split("pub async fn gateway_ensure(").nth(1).unwrap().split("async fn tokio_sleep").next().unwrap();
+        assert!(ensure.contains("DETACHED_PROCESS"), "the gateway outlives the app");
+        assert!(!ensure.contains("kill_on_close"), "the gateway is never in a kill-on-close job");
     }
 
     #[test]

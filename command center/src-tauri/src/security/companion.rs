@@ -58,6 +58,30 @@ pub fn pair_generate(dir: &Path) -> Result<String, String> {
     Ok(k)
 }
 
+/// How long a pairing QR stays valid (the phone refuses an older one).
+pub const PAIR_QR_TTL_S: f64 = 120.0;
+const PAIR_QR_PREFIX: &str = "gbgpair1|";
+
+/// The QR text for a fresh pairing key (pure): `gbgpair1|<key hex>|<expires unix s>|<desktop id>`.
+pub fn pair_payload(key_hex: &str, expires_at: f64, desktop: &str) -> String {
+    format!("{PAIR_QR_PREFIX}{key_hex}|{}|{desktop}", expires_at.floor() as u64)
+}
+
+/// Phone side: what the pairing box (or a QR scan) holds → the key to store (pure). A plain hex key
+/// (from `gabagool-cli pair-companion`) passes through; a QR payload must not be expired. Returns
+/// the key and, for a QR, the desktop it came from.
+pub fn parse_pair_input(input: &str, now: f64) -> Result<(String, Option<String>), String> {
+    let t = input.trim();
+    let Some(rest) = t.strip_prefix(PAIR_QR_PREFIX) else { return Ok((t.to_string(), None)) };
+    let mut parts = rest.splitn(3, '|');
+    let (key, exp, desktop) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let exp: f64 = exp.parse().map_err(|_| "PAIR_QR_BAD: that pairing code is damaged; show a new one on the desktop".to_string())?;
+    if now > exp {
+        return Err("PAIR_QR_EXPIRED: that pairing code has expired; show a new one on the desktop".into());
+    }
+    Ok((key.to_string(), Some(desktop.chars().take(80).collect())))
+}
+
 /// Phone side: the key it signs approvals with.
 pub fn device_key(dir: &Path) -> Option<Vec<u8>> {
     load_key(DEVICE_ACCOUNT, dir, DEVICE_FILE)
@@ -195,6 +219,18 @@ pub fn sign(dir: &Path, id: &str, nonce: &str, device: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_qr_round_trips_and_expires() {
+        let key = "ab".repeat(32);
+        let p = pair_payload(&key, 1_000.9, "DESK-1a2b");
+        assert_eq!(p, format!("gbgpair1|{key}|1000|DESK-1a2b"));
+        assert_eq!(parse_pair_input(&format!("  {p}\n"), 999.0).unwrap(), (key.clone(), Some("DESK-1a2b".to_string())));
+        assert!(parse_pair_input(&p, 1_001.0).unwrap_err().starts_with("PAIR_QR_EXPIRED"));
+        assert!(parse_pair_input("gbgpair1|abcd|soon|x", 0.0).unwrap_err().starts_with("PAIR_QR_BAD"));
+        // The CLI's plain hex key still works.
+        assert_eq!(parse_pair_input(&key, 5.0).unwrap(), (key, None));
+    }
 
     #[test]
     fn companion_counts_only_when_the_phone_polled_recently() {

@@ -75,7 +75,12 @@ export const securityApi = {
   companionSign: (id: string, nonce: string, desktop: string, purpose: string) => native<{ sig: string; deviceId: string }>("security_companion_sign", { id, nonce, desktop, purpose }),
   companionCheckAlerts: (alerts: InboxAlert[]) => native<boolean[]>("security_companion_check_alerts", { alerts }),
   pinSetup: (pin: string) => native<SecurityStatus>("security_pin_setup", { pin }),
+  /** Phone: a plain key from `gabagool-cli pair-companion`, or the desktop's pairing-QR text (`gbgpair1|…`). */
   companionStoreKey: (key: string) => native<SecurityStatus>("security_companion_store_key", { key }),
+  /** Desktop: a NEW pairing key as a one-time QR payload (replaces the current pairing). Settings step-up. */
+  companionPairQr: () => native<{ payload: string; expiresAt: number }>("security_companion_pair_qr"),
+  /** Idle lock (5–120 min) and hard re-auth (30–720 min) → security.config.json. Settings step-up. */
+  sessionSet: (idleLockMinutes: number, reauthMinutes: number) => native<SecurityStatus>("security_session_set", { idleLockMinutes, reauthMinutes }),
 };
 
 /** A desktop alert waiting in the gateway's companion inbox (`sig` empty = raised by the gateway). */
@@ -138,6 +143,10 @@ export function describeSecurityError(e: unknown): string {
       return "No phone is paired. Run `gabagool-cli pair-companion` and enter the key on the phone.";
     case "COMPANION_OFFLINE":
       return "Can't reach the gateway mailbox for your phone. Use the PIN.";
+    case "PAIR_QR_EXPIRED":
+      return "That pairing code has expired. Show a new QR on the desktop (Settings → Security).";
+    case "PAIR_QR_BAD":
+      return "That pairing code is damaged. Show a new QR on the desktop.";
     default:
       return p.message || p.code;
   }

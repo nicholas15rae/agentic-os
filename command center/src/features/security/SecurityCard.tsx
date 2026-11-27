@@ -1,34 +1,62 @@
-import { useEffect, useState } from "react";
-import { Loader2, RefreshCw, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Loader2, QrCode, RefreshCw, ScanLine, ShieldCheck, TimerReset } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { isTauri } from "@/lib/platform";
-import { describeSecurityError, securityApi, type AuditEntry } from "./api";
-import { useSecurity } from "./store";
+import { describeSecurityError, parseSecurityError, securityApi, type AuditEntry, type SecurityStatus } from "./api";
+import { StepUpCancelled, useSecurity } from "./store";
 import { useCompanionInbox } from "./SecurityGate";
+import { AUDIT_FILTERS, clampMinutes, filterAudit, IDLE_LOCK_LIMITS, REAUTH_LIMITS, type AuditFilter } from "./audit-filter";
+import { encodeQr, qrSvgPath } from "./qr";
+import { CameraCapture } from "@/features/finance/CameraCapture";
+
+/** The desktop's pairing QR text (companion.rs `pair_payload`). */
+const isPairingCode = (t: string) => t.trim().startsWith("gbgpair1|");
 
 const TONE: Record<AuditEntry["severity"], string> = { info: "text-ink-3", warn: "text-amber-soft", critical: "text-alert" };
 
-/** Settings → Security: posture, companion pairing (phone) and the audit trail. */
+/** Security commands check their own step-up (the gate lets every `security_*` through), so a
+ *  `STEP_UP_REQUIRED:settings` refusal opens the PIN modal here and the call is retried once. */
+async function withStepUp<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    const p = parseSecurityError(e);
+    if (p?.code !== "STEP_UP_REQUIRED" || !p.arg) throw e;
+    await useSecurity.getState().requestStepUp(p.arg);
+    return run();
+  }
+}
+
+function errText(e: unknown): string {
+  return e instanceof StepUpCancelled ? "Cancelled: nothing changed." : describeSecurityError(e);
+}
+
+/** Settings → Security: posture, lock timers, companion pairing (QR on the desktop, key / QR text
+ *  on the phone) and the filterable audit trail. */
 export function SecurityCard() {
   const status = useSecurity((s) => s.status);
   const setStatus = useSecurity((s) => s.setStatus);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [filter, setFilter] = useState<AuditFilter>("all");
   const [key, setKey] = useState("");
+  const [scan, setScan] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const inbox = useCompanionInbox((s) => s.alerts);
-  const load = () => void securityApi.auditRecent(40).then(setAudit).catch(() => undefined);
+  const load = () => void securityApi.auditRecent(200).then(setAudit).catch(() => undefined);
   useEffect(load, []);
+  const shown = useMemo(() => filterAudit(audit, filter), [audit, filter]);
   if (!isTauri() || !status) return null;
-  const pair = async () => {
+  const phone = status.platform === "android" || status.platform === "ios";
+  const pair = async (code = key) => {
     setBusy(true);
     setMsg(null);
     try {
-      setStatus(await securityApi.companionStoreKey(key.trim()));
+      setStatus(await withStepUp(() => securityApi.companionStoreKey(code.trim())));
       setKey("");
       setMsg("Paired: this device can now approve desktop unlocks.");
     } catch (e) {
-      setMsg(describeSecurityError(e));
+      setMsg(errText(e));
     } finally {
       setBusy(false);
     }
@@ -50,12 +78,45 @@ export function SecurityCard() {
         <span className="font-mono text-ink-3">{status.deviceId}</span>
       </div>
 
-      {(status.platform === "android" || status.platform === "ios" || status.companionDevice) && (
+      <LockTimers status={status} onSaved={setStatus} />
+
+      {!phone && <PairingQr paired={status.companionPaired} />}
+
+      {(phone || status.companionDevice) && (
         <div className="mt-3 flex gap-2">
-          <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="Pairing key from `gabagool-cli pair-companion`" className="font-mono" autoComplete="off" aria-label="Companion pairing key" />
+          <Input
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder="Pairing code from the desktop's QR, or a key from `gabagool-cli pair-companion`"
+            className="font-mono"
+            autoComplete="off"
+            aria-label="Companion pairing key"
+          />
           <button className="pill-glass" disabled={busy || key.trim().length < 32} onClick={() => void pair()}>
             {busy ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />} Pair
           </button>
+          {phone && (
+            <button className="pill-glass" disabled={busy} onClick={() => setScan((s) => !s)} aria-pressed={scan}>
+              <ScanLine size={13} /> {scan ? "Stop" : "Scan QR"}
+            </button>
+          )}
+        </div>
+      )}
+      {phone && scan && (
+        <div className="mt-2">
+          <CameraCapture
+            mode="qr"
+            onCapture={() => undefined}
+            onQr={(t) => {
+              if (!isPairingCode(t)) {
+                if (t) setMsg("That QR isn't a Command Center pairing code. Show one on the desktop: Settings → Security → Pair phone with QR.");
+                return;
+              }
+              setScan(false);
+              void pair(t);
+            }}
+          />
         </div>
       )}
       {msg && <p className="mt-2 text-[11px] text-ink-2">{msg}</p>}
@@ -75,16 +136,131 @@ export function SecurityCard() {
         </>
       )}
 
-      <h3 className="label-caps mt-4 text-ink-3">Audit trail (security_audit.jsonl)</h3>
-      <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto font-mono text-[10.5px]">
-        {audit.map((e) => (
+      <div className="mt-4 flex flex-wrap items-center gap-1.5">
+        <h3 className="label-caps mr-1 text-ink-3">Audit trail (security_audit.jsonl)</h3>
+        {AUDIT_FILTERS.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            aria-pressed={filter === f.id}
+            onClick={() => setFilter(f.id)}
+            className={`rounded-full border px-2 py-0.5 text-[10.5px] ${filter === f.id ? "border-amber/50 bg-amber/15 text-amber-light" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+      <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto font-mono text-[10.5px]" data-testid="audit-list">
+        {shown.map((e) => (
           <li key={`${e.seq}-${e.ts}`} className={TONE[e.severity]}>
             {e.ts.slice(0, 19).replace("T", " ")} · {e.event}
             {e.module ? ` [${e.module}]` : ""} · {e.outcome} · {e.source}
           </li>
         ))}
-        {!audit.length && <li className="text-ink-3">No entries yet.</li>}
+        {!shown.length && <li className="text-ink-3">{audit.length ? "Nothing in the last 200 entries matches this filter." : "No entries yet."}</li>}
       </ul>
     </Card>
+  );
+}
+
+/** Idle lock (5–120 min) and hard re-auth (30–720 min); saving needs a Settings step-up. */
+function LockTimers({ status, onSaved }: { status: SecurityStatus; onSaved: (s: SecurityStatus) => void }) {
+  const [idle, setIdle] = useState(String(status.idleLockMinutes));
+  const [reauth, setReauth] = useState(String(status.reauthMinutes));
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    setIdle(String(status.idleLockMinutes));
+    setReauth(String(status.reauthMinutes));
+  }, [status.idleLockMinutes, status.reauthMinutes]);
+  const i = clampMinutes(Number(idle), IDLE_LOCK_LIMITS);
+  const r = clampMinutes(Number(reauth), REAUTH_LIMITS);
+  const dirty = i !== status.idleLockMinutes || r !== status.reauthMinutes;
+  const save = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const s = await withStepUp(() => securityApi.sessionSet(i, r));
+      onSaved(s);
+      setNote(`Saved: lock after ${s.idleLockMinutes} min idle, re-verify every ${s.reauthMinutes} min.`);
+    } catch (e) {
+      setNote(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const field = "w-20 font-mono";
+  return (
+    <div className="mt-3 flex flex-wrap items-end gap-3 text-[11px] text-ink-2">
+      <label className="flex flex-col gap-1">
+        Idle lock (min, {IDLE_LOCK_LIMITS.min}–{IDLE_LOCK_LIMITS.max})
+        <Input type="number" min={IDLE_LOCK_LIMITS.min} max={IDLE_LOCK_LIMITS.max} value={idle} onChange={(e) => setIdle(e.target.value)} className={field} aria-label="Idle lock minutes" />
+      </label>
+      <label className="flex flex-col gap-1">
+        Hard re-auth (min, {REAUTH_LIMITS.min}–{REAUTH_LIMITS.max})
+        <Input type="number" min={REAUTH_LIMITS.min} max={REAUTH_LIMITS.max} value={reauth} onChange={(e) => setReauth(e.target.value)} className={field} aria-label="Hard re-auth minutes" />
+      </label>
+      <button className="pill-glass !h-8 text-[11px]" disabled={busy || !dirty} onClick={() => void save()} title="Needs your PIN (Settings step-up)">
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <TimerReset size={12} />} Save timers
+      </button>
+      {dirty && (Number(idle) !== i || Number(reauth) !== r) && <span className="text-ink-3">Will save as {i} / {r} min.</span>}
+      {note && <span className="w-full text-ink-3">{note}</span>}
+    </div>
+  );
+}
+
+/** Desktop: show a one-time pairing QR for the phone (a NEW pairing key; 2-minute lifetime). */
+function PairingQr({ paired }: { paired: boolean }) {
+  const [qr, setQr] = useState<{ payload: string; expiresAt: number } | null>(null);
+  const [left, setLeft] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    if (!qr) return;
+    const tick = () => {
+      const s = Math.max(0, Math.round(qr.expiresAt - Date.now() / 1000));
+      setLeft(s);
+      if (s === 0) {
+        setQr(null); // drop the key from memory once it's expired
+        setNote("Pairing code expired. Show a new one if the phone didn't pair.");
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, [qr]);
+  const svg = useMemo(() => (qr ? qrSvgPath(encodeQr(qr.payload)) : null), [qr]);
+  const show = async () => {
+    if (paired && !confirm("Pair a phone with a QR code?\n\nThis makes a NEW pairing key: the phone paired now stops approving until it scans the new code.")) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      setQr(await withStepUp(() => securityApi.companionPairQr()));
+    } catch (e) {
+      setNote(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-3 text-[11px] text-ink-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <button className="pill-glass !h-8 text-[11px]" disabled={busy} onClick={() => void (qr ? (setQr(null), setNote(null)) : show())}>
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <QrCode size={12} />} {qr ? "Hide pairing code" : "Pair phone with QR"}
+        </button>
+        <span className="text-ink-3">Scan it in the phone app (Settings → Security). The code works once and expires after 2 minutes.</span>
+      </div>
+      {qr && svg && (
+        <div className="mt-2 flex items-center gap-3">
+          <svg viewBox={`0 0 ${svg.viewBox} ${svg.viewBox}`} className="size-48 rounded-md bg-white" role="img" aria-label="Companion pairing QR code" shapeRendering="crispEdges">
+            <path d={svg.path} fill="#000" />
+          </svg>
+          <span className="font-mono text-ink-3" aria-live="polite">
+            expires in {left}s
+          </span>
+        </div>
+      )}
+      {note && <p className="mt-1 text-ink-3">{note}</p>}
+    </div>
   );
 }

@@ -20,6 +20,8 @@ export interface ExtCommands extends DirectorJsonCommands, CloudCommands {
   gateway_health: { args: undefined; result: HealthSnapshot };
   gateway_reconnect: { args: undefined; result: HealthSnapshot };
   app_exit_check: { args: undefined; result: { busy: string[] } };
+  /** Hide the window to the tray (same as the X); everything keeps running. */
+  app_standby: { args: undefined; result: void };
   /** Refuses with `BUSY:<labels>` when something is mid-commit, unless `force`. */
   app_exit: { args: { force?: boolean }; result: void };
   // ── Phases 2–4: Play Place staging hub (buildhub.rs) ──

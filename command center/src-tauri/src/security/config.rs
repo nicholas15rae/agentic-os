@@ -13,6 +13,11 @@ use std::time::SystemTime;
 
 pub const FILE: &str = "security.config.json";
 
+/// What Settings → Security may set (Section 24): idle lock 5–120 min, hard re-auth 30–720 min.
+/// The file loader (`clamped`) stays a little wider so a hand edit isn't silently rejected.
+pub const IDLE_LOCK_RANGE: (f64, f64) = (5.0, 120.0);
+pub const REAUTH_RANGE: (f64, f64) = (30.0, 720.0);
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SecurityConfig {
@@ -299,6 +304,7 @@ impl Default for AlertsCfg {
                 "kill_switch",
                 "trading_kill_switch",
                 "pin_changed",
+                "unknown_device",
             ]
             .map(String::from)
             .to_vec(),
@@ -330,7 +336,7 @@ impl SecurityConfig {
     pub fn clamped(mut self) -> Self {
         let d = SecurityConfig::default();
         self.session.idle_lock_minutes = clampf(self.session.idle_lock_minutes, 1.0, 120.0, d.session.idle_lock_minutes);
-        self.session.reauth_minutes = clampf(self.session.reauth_minutes, 5.0, 240.0, d.session.reauth_minutes);
+        self.session.reauth_minutes = clampf(self.session.reauth_minutes, 5.0, REAUTH_RANGE.1, d.session.reauth_minutes);
         self.pin.min_length = self.pin.min_length.clamp(4, 12);
         self.pin.max_attempts = self.pin.max_attempts.clamp(3, 20);
         self.pin.lockout_seconds = clampf(self.pin.lockout_seconds, 30.0, 3600.0, d.pin.lockout_seconds);
@@ -366,6 +372,44 @@ impl SecurityConfig {
             .find(|(_, p)| p.guarded_args.get(cmd).is_some_and(|ptrs| ptrs.iter().any(|ptr| args.pointer(ptr).is_some_and(|v| !v.is_null()))))
             .map(|(m, _)| m.as_str())
     }
+}
+
+/// The Security card's session timers, validated and clamped to the UI ranges (pure). Whole
+/// minutes; a non-number is refused rather than guessed.
+pub fn session_from_ui(idle_lock_minutes: f64, reauth_minutes: f64) -> Result<SessionCfg, String> {
+    if !idle_lock_minutes.is_finite() || !reauth_minutes.is_finite() {
+        return Err("BAD_SESSION_CONFIG: the lock timers must be numbers of minutes".into());
+    }
+    Ok(SessionCfg {
+        idle_lock_minutes: idle_lock_minutes.round().clamp(IDLE_LOCK_RANGE.0, IDLE_LOCK_RANGE.1),
+        reauth_minutes: reauth_minutes.round().clamp(REAUTH_RANGE.0, REAUTH_RANGE.1),
+    })
+}
+
+/// `text` (the current file, or None when it doesn't exist yet) with only `session.idleLockMinutes`
+/// and `session.reauthMinutes` replaced: every other key, known or not, is kept as it is (pure).
+/// An unparsable file is refused, never overwritten with the defaults.
+pub fn with_session(text: Option<&str>, s: &SessionCfg) -> Result<String, String> {
+    let mut v = match text {
+        Some(t) => serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).map_err(|e| format!("BAD_SESSION_CONFIG: {FILE} isn't valid JSON ({e}); fix it by hand first"))?,
+        None => serde_json::to_value(SecurityConfig::default()).map_err(|e| e.to_string())?,
+    };
+    let root = v.as_object_mut().ok_or_else(|| format!("BAD_SESSION_CONFIG: {FILE} isn't a JSON object"))?;
+    let session = root.entry("session").or_insert_with(|| serde_json::json!({}));
+    if !session.is_object() {
+        *session = serde_json::json!({});
+    }
+    session["idleLockMinutes"] = serde_json::json!(s.idle_lock_minutes);
+    session["reauthMinutes"] = serde_json::json!(s.reauth_minutes);
+    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+}
+
+/// Write the session timers into `dir`'s config file (atomic; the mtime check hot-reloads it).
+pub fn set_session_in(dir: &Path, s: &SessionCfg) -> Result<(), String> {
+    let path = dir.join(FILE);
+    let text = std::fs::read_to_string(&path).ok();
+    let next = with_session(text.as_deref(), s)?;
+    super::shared::write_atomic(&path, next.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Read (and clamp) the config at `path`; a missing file is written with the defaults; an
@@ -447,6 +491,40 @@ mod tests {
         assert_eq!(w.module_for_invoke("secret_set", None), Some("settings"));
         assert_eq!(w.module_for_command("finance_ledger_write"), Some("finance"));
         assert_eq!(w.module_for_command("system_stats"), None);
+    }
+
+    #[test]
+    fn security_card_session_timers_are_validated_and_saved_in_place() {
+        assert_eq!(session_from_ui(1.0, 1.0).unwrap(), SessionCfg { idle_lock_minutes: 5.0, reauth_minutes: 30.0 });
+        assert_eq!(session_from_ui(500.0, 5000.0).unwrap(), SessionCfg { idle_lock_minutes: 120.0, reauth_minutes: 720.0 });
+        assert_eq!(session_from_ui(20.4, 90.0).unwrap(), SessionCfg { idle_lock_minutes: 20.0, reauth_minutes: 90.0 });
+        assert!(session_from_ui(f64::NAN, 60.0).is_err());
+        // Defaults are untouched by the new limits.
+        assert_eq!(SessionCfg::default(), SessionCfg { idle_lock_minutes: 15.0, reauth_minutes: 60.0 });
+        // A 12-hour re-auth set from the card survives the loader's clamp.
+        let long: SecurityConfig = serde_json::from_str(r#"{"session":{"idleLockMinutes":30,"reauthMinutes":720}}"#).unwrap();
+        assert_eq!(long.clamped().session.reauth_minutes, 720.0);
+        // Only the two keys change; unknown keys and other sections stay.
+        let s = SessionCfg { idle_lock_minutes: 30.0, reauth_minutes: 240.0 };
+        let out = with_session(Some(r#"{"enabled":true,"custom":{"x":1},"session":{"idleLockMinutes":15,"note":"keep"},"pin":{"minLength":8}}"#), &s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["session"]["idleLockMinutes"], 30.0);
+        assert_eq!(v["session"]["reauthMinutes"], 240.0);
+        assert_eq!(v["session"]["note"], "keep");
+        assert_eq!(v["custom"]["x"], 1);
+        assert_eq!(v["pin"]["minLength"], 8);
+        assert!(with_session(Some("{ broken"), &s).is_err(), "a bad file is never overwritten");
+        let fresh: SecurityConfig = serde_json::from_str(&with_session(None, &s).unwrap()).unwrap();
+        assert_eq!(fresh.session, s);
+        assert_eq!(fresh.modules, SecurityConfig::default().modules);
+        // Through the file + hot reload.
+        let dir = std::env::temp_dir().join(format!("cc-sec-sess-{}", super::super::token::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(get_in(&dir).session, SessionCfg::default());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_session_in(&dir, &s).unwrap();
+        assert_eq!(get_in(&dir).session, s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

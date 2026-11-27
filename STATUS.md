@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 17:07. One page for every Claude Code session and branch.
+Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 17:07
@@ -12,6 +12,8 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 **Switches (engine.json beside providers.json), all false:** `enabled`, `route_agents`, `route_tony`. Turning any on is Nic's call.
 
 **Benchmark (11:13, GPU idle):** engine first token 0.38 s median (p90 1.61), total 1.93 s, 6.2 GB VRAM; LM Studio right after 0.25 s / 1.45 s, 7.3 GB. Engine tail = cache misses across slots (tuning question below).
+
+**Connection check (17:20, `python -m engine.connections`, read-only):** 22 pass, 3 warn, 0 fail. Engine exe + pins, Tony's GGUF, VRAM fit, LM Studio with Tony loaded, CPU nomic embedder round-trip, gateway + baton, all `/api/engine/*` routes (and 403 for the phone), gateway Tony on LM Studio while off, AnythingLLM originals untouched, export verified with 0 secrets, doc store hybrid search, 32 threads, scrolls + knowledge graph, agent policy (director refused outside its folder, no money tools, coder owns fetch). CPU engine smoke run: 3/3 live checks, first token 0.89 s, stopped after. Warnings, expected: no mmproj (vision is plan-only); desktop providers.json has no `llamacpp` until the rebuild; **the desktop chat-chain switch is not built**, so with `route_tony` on only gateway Tony (phone) would move, not desktop Tony.
 
 **Before merging:** main has moved on (kill switch shipped, cf44451); merge main into this branch and re-run the tests first, since `agent_runner` checks the kill switch.
 
@@ -218,13 +220,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 17:07 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 17:12 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 31 | `8589cea` 2026-11-27 docs(status): Section 26 handoff: agents + tools, threads, ingest, ... | clean |
+| `section-26-engine` | 32 | `630ceb8` 2026-11-27 docs(status): refresh branch block; note main moved (kill switch) b... | 2 files |
 | `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |

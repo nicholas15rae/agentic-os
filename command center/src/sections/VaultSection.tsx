@@ -1,10 +1,16 @@
 import { useEffect, useState } from "react";
 import { Archive, Database, HardDriveDownload, Loader2, RefreshCw, Search } from "lucide-react";
 import { Card, Chip, Field, Input, Stat } from "@/components/ui";
-import { backupSummary, cc, type BackupList, type CcConfig, type Collection, type VaultResults } from "@/lib/cc-api";
+import { backupSummary, cc, type BackupList, type CcConfig, type Collection } from "@/lib/cc-api";
 import { useNav } from "@/stores/nav";
 import { isTauri } from "@/lib/platform";
 import { MemoryLifecycleCard } from "@/sections/settings/MemorySettings";
+import { useOs } from "@/features/os/os-store";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { panelShown, revealPanel } from "@/core/widgets/reveal";
+import type { WidgetProps } from "@/core/widgets/types";
+import { useVaultLayout } from "./vault/panels";
+import { useVaultSearch } from "./vault/vault-store";
 
 const FILTERS: { id: Collection; label: string }[] = [
   { id: "notes", label: "Brainstorms" },
@@ -23,93 +29,107 @@ const OPEN: Partial<Record<Collection, Parameters<ReturnType<typeof useNav.getSt
   checks: "finance",
 };
 
-/** Local vector vault (semantic + keyword search) and offline backups. */
+/**
+ * Local vector vault (semantic + keyword search) and offline backups, on the shared layout system:
+ * the search box, its results, backups and (desktop) the memory lifecycle are panels.
+ */
 export function VaultSection() {
-  const [q, setQ] = useState("");
-  const [filters, setFilters] = useState<Set<Collection>>(new Set());
-  const [res, setRes] = useState<VaultResults | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const go = useNav((s) => s.go);
+  // The old page's search lived in local state: it is cleared when the page closes.
+  useEffect(() => () => useVaultSearch.getState().clear(), []);
+  return <LayoutSurface store={useVaultLayout} label="Vault" />;
+}
 
-  const search = async () => {
-    if (!q.trim()) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      // Nic's own search: an unfiltered search still covers receipts, invoices and cheques.
-      setRes(await cc.search(q, [...filters], 20, { includeFinance: true }));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
+/** The search box and collection filters. */
+export function VaultSearchPanel() {
+  const { q, filters, busy, err, setQ, toggle, search } = useVaultSearch();
+  const run = async () => {
+    // A search always lands on visible results.
+    if ((await search()) && !panelShown(useVaultLayout.getState(), "va-results")) revealPanel(useVaultLayout, "va-results", "Vault");
   };
-
   return (
-    <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <Card title="Vault search" hint="Everything you scan, write or say is embedded locally (LM Studio embeddings) — ask in plain language. Falls back to keyword search if no embedding model is loaded.">
-        <form
-          className="flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void search();
-          }}
-        >
-          <div className="relative flex-1">
-            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-3" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="“the Home Depot receipts for the deck job”, “that idea about a car reel”…" className="!pl-10" aria-label="Search the vault" autoFocus />
-          </div>
-          <button className="pill-primary shrink-0" disabled={busy || !q.trim()}>
-            {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search
-          </button>
-        </form>
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {FILTERS.map((f) => (
-            <Chip
-              key={f.id}
-              active={filters.has(f.id)}
-              onClick={() => {
-                const next = new Set(filters);
-                if (next.has(f.id)) next.delete(f.id);
-                else next.add(f.id);
-                setFilters(next);
-              }}
-            >
-              {f.label}
-            </Chip>
-          ))}
+    <Card title="Vault search" hint="Everything you scan, write or say is embedded locally (LM Studio embeddings) — ask in plain language. Falls back to keyword search if no embedding model is loaded.">
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void run();
+        }}
+      >
+        <div className="relative flex-1">
+          <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-3" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="“the Home Depot receipts for the deck job”, “that idea about a car reel”…" className="!pl-10" aria-label="Search the vault" autoFocus />
         </div>
-        {err && <p className="mt-3 text-sm text-alert">{err}</p>}
-        {res && (
-          <div className="mt-4 space-y-2">
-            <p className="label-caps text-ink-3">
-              {res.results.length} results · {res.mode === "hybrid" ? "semantic + keyword" : res.mode}
-            </p>
-            {res.results.map((r) => (
-              <button
-                key={r.id}
-                onClick={() => OPEN[r.collection] && go(OPEN[r.collection]!)}
-                className="block w-full r-14 border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-amber/40"
-              >
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="label-caps text-amber-soft">{FILTERS.find((f) => f.id === r.collection)?.label ?? r.collection}</span>
-                  <span className="ml-auto font-mono fs-11 text-ink-3">{(r.score * 100).toFixed(0)}%</span>
-                </div>
-                <p className="line-clamp-3 whitespace-pre-line text-sm text-ink">{r.snippet}</p>
-              </button>
-            ))}
-            {!res.results.length && <p className="text-sm text-ink-3">Nothing matched.</p>}
-          </div>
-        )}
-      </Card>
-      <BackupCard />
-      {isTauri() && <MemoryLifecycleCard />}
-    </div>
+        <button className="pill-primary shrink-0" disabled={busy || !q.trim()}>
+          {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search
+        </button>
+      </form>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {FILTERS.map((f) => (
+          <Chip key={f.id} active={filters.has(f.id)} onClick={() => toggle(f.id)}>
+            {f.label}
+          </Chip>
+        ))}
+      </div>
+      {err && <p className="mt-3 text-sm text-alert">{err}</p>}
+    </Card>
   );
 }
 
-function BackupCard() {
+/** The last search's results; a tap opens the page the item lives on. */
+export function VaultResultsPanel({ setBadge }: WidgetProps) {
+  const res = useVaultSearch((s) => s.res);
+  const go = useNav((s) => s.go);
+  const count = res ? res.results.length : null;
+  useEffect(() => {
+    setBadge?.(count ? String(count) : null);
+  }, [count, setBadge]);
+  return (
+    <Card title="Results">
+      {!res ? (
+        <p className="text-sm text-ink-3">Search the vault and what it finds shows here.</p>
+      ) : (
+        <div className="space-y-2" data-no-hold>
+          <p className="label-caps text-ink-3">
+            {res.results.length} results · {res.mode === "hybrid" ? "semantic + keyword" : res.mode}
+          </p>
+          {res.results.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => OPEN[r.collection] && go(OPEN[r.collection]!)}
+              className="block w-full r-14 border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-amber/40"
+            >
+              <div className="mb-1 flex items-center gap-2">
+                <span className="label-caps text-amber-soft">{FILTERS.find((f) => f.id === r.collection)?.label ?? r.collection}</span>
+                <span className="ml-auto font-mono fs-11 text-ink-3">{(r.score * 100).toFixed(0)}%</span>
+              </div>
+              <p className="line-clamp-3 whitespace-pre-line text-sm text-ink">{r.snippet}</p>
+            </button>
+          ))}
+          {!res.results.length && <p className="text-sm text-ink-3">Nothing matched.</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** The memory lifecycle card (desktop app); it draws nothing until the OS config loads. */
+export function VaultMemoryPanel() {
+  const ready = useOs((s) => !!s.cfg);
+  const error = useOs((s) => s.error);
+  if (!isTauri()) return null;
+  return (
+    <>
+      <MemoryLifecycleCard />
+      {!ready && (
+        <Card title="Memory lifecycle">
+          <p className="text-sm text-ink-3">{error ? `Couldn't load the OS config: ${error}` : "Loading the OS config…"}</p>
+        </Card>
+      )}
+    </>
+  );
+}
+
+export function BackupCard() {
   const [cfg, setCfg] = useState<CcConfig | null>(null);
   const [list, setList] = useState<BackupList | null>(null);
   const [health, setHealth] = useState<Awaited<ReturnType<typeof cc.health>> | null>(null);

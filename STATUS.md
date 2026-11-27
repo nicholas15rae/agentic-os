@@ -16,6 +16,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
+| Test gate: run_all.py finds every test module itself and runs them in parallel (550 s -> 80-145 s), solo rerun for load flakes | claude/upbeat-wing-e87be0 | b1abe56 | No, PR open |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -42,7 +43,6 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
-| Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 
 ## 3. Waiting on you
 
@@ -52,7 +52,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
 - `hermes-output-cleanup` (15f2ceb, Nov 18): rebase and merge, or drop?
-- Approve the run_all.py commit once the 9-min answer is in.
+- Test gate (`claude/upbeat-wing-e87be0`): review and merge its PR.
 - OK to run the WhatsApp bridge port patch script.
 - Director: Instagram public hosting approach; ElevenLabs voice for the Director (later).
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.

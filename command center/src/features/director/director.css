@@ -1,0 +1,16 @@
+/*
+ * Director Suite readability (Part 6), scoped to the suite's root only: the global tokens in
+ * styles/index.css are untouched. Over a bright wallpaper the default glass (24,28,38 @ 62 %) and
+ * ink-3 (#5a6275) grey subtitles washed out, so inside `.director-suite` the panels are a little
+ * darker and the two secondary inks a little lighter. Unlayered, so it wins over the @utility rules.
+ */
+.director-suite {
+  --color-ink-2: #c0c7d4;
+  --color-ink-3: #8b94a7;
+}
+
+.director-suite .glass {
+  background:
+    linear-gradient(rgba(14, 17, 24, 0.8), rgba(14, 17, 24, 0.8)) padding-box,
+    linear-gradient(to bottom right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03)) border-box;
+}

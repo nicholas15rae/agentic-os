@@ -15,7 +15,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from media_forge import analyze, config, ff, photos, timeline, video
+from media_forge import analyze, bars, config, ff, photos, timeline, video
 from media_forge.config import PolicyError, next_version, project_dir, readable, writable
 from media_forge.jobs import JobManager
 
@@ -120,6 +120,19 @@ async def detect_silence(path: str, threshold_db: float = -35.0, min_duration: f
 
 
 @mcp.tool()
+async def detect_bars(path: str, sample_s: float | None = None, start_s: float = 0.0, samples: int = 8) -> dict:
+    """Find black bars (letterbox / pillarbox, e.g. vertical footage inside a 16:9 file) with ffmpeg
+    cropdetect on `samples` (1-24, default 8) fast-seeked points spread over [start_s, start_s +
+    sample_s] (default: the whole clip; pass a clip's in and out-in to measure just that range).
+    CPU only, a second or two. All-black samples are ignored and the content rect is the union of
+    the rest, so dark scenes never shrink it. Returns {content: {x, y, w, h} (even source pixels,
+    ready for a render_timeline clip "crop"), source: {w, h}, confidence: 0-1, letterboxed,
+    pillarboxed, window: {start_s, end_s}, samples: [...], regions: [{x, y, w, h, count}]}; more
+    than one region means the framing changes inside the window (measure each clip's own range)."""
+    return await _guard(lambda: bars.detect(S, readable(S, path), sample_s, start_s, samples))
+
+
+@mcp.tool()
 async def verify_output(path: str, max_size_mb: float | None = None, width: int | None = None,
                         height: int | None = None, min_duration: float | None = None,
                         require_audio: bool = True) -> dict:
@@ -174,6 +187,19 @@ async def render_timeline(spec_path: str, output: str | None = None, project: st
     (voiceover, music) are delayed to `start` and mixed over it; then 2-pass EBU R128, CPU libx264,
     size cap and an ffprobe verify. Output: `output`, else <project>/renders/<spec name>_vNNN.mp4
     (`project` falls back to the spec's). Never touches raw/ files. Runs as a job like quick_assemble.
+
+    spec v2 = v1 with "version": 2 and these optional keys (unknown keys are refused):
+    clips[]: "transition_in": {"kind": "cut"|"crossfade"|"fade_black", "ms": 0-1500} (crossfade
+    overlaps the previous clip, so the timeline shortens; not on clip 1), "punch_in": 1.0-1.5 (centre
+    zoom), "transcript": abs path of that clip's transcribe_clip .json | null; audio[]: "fade_in_ms",
+    "fade_out_ms": 0-10000, "duck_under_voice": bool (side-chain under the clip audio); "captions":
+    {"enabled", "style": clean|bold_pop|karaoke|minimal, "position": lower|middle,
+    "max_words_per_line": 1-12} (burned from the word timestamps, re-timed to each clip's in/out);
+    "color": {"preset": none|warm|cool|punchy|film|bw, "strength": 0-1}. Still CPU libx264 only.
+    Framing (v2, optional per clip): "crop": {"x", "y", "w", "h"} (even source pixels inside the
+    frame, e.g. detect_bars' content) is cut first; "fit": "pad" (default: scale to fit + black
+    bars, as before) | "fill" (scale to cover W x H and centre-crop; punch_in zooms the output) |
+    "blur" (fit over a blurred, darkened, cover-scaled copy of itself: the Reels look).
     """
     def prep() -> tuple[dict, Path, Path]:
         ff.refuse_gpu_args(S, "x264")
@@ -212,24 +238,67 @@ async def reframe_and_caption(input: str, aspect: str = "9:16", mode: str = "blu
 async def transcribe_clip(path: str, project: str | None = None, model: str | None = None,
                           language: str | None = None, word_timestamps: bool = True, wait_s: float = 480) -> dict:
     """Local faster-whisper (CPU int8 by default; never touches the LLM's GPU) with VAD.
+    `model`: a name (`tiny.en`, looked up under WHISPER_MODEL_DIR) or an absolute model folder;
+    default WHISPER_MODEL. Models are never downloaded: one that isn't on disk is an error.
     Writes .srt / .vtt / .json into <project>/working/captions when `project` is given (required for
-    clips in raw/), else next to the clip.
+    clips in raw/), else next to the clip. The .json has segments with word timestamps
+    ({"w", "s", "e", "p"}), which render_timeline v2 burns as captions.
     Returns timestamped segments, first/last speech times (slate and line detection)."""
+    name = model or S.whisper_model
+
     def prep() -> tuple[Path, Path]:
-        src = readable(S, path)
-        if project:
-            base = project_dir(S, project) / "working" / "captions" / src.stem
-        elif "raw" in (part.lower() for part in src.relative_to(S.media_root).parts[:-1]):
-            raise PolicyError("the clip is in raw/: pass `project` so captions go to working/captions/")
-        else:
-            base = src.with_suffix("")
-        writable(S, str(base.with_suffix(".srt")), overwrite=True)
-        return src, base
+        analyze.resolve_model(S, name)
+        return _caption_base(path, project)
 
     src, base = await _guard(prep)
     job = JOBS.start("transcribe", src.name,
-                     lambda ctx: analyze.transcribe(S, ctx, src, base, model or S.whisper_model, language,
-                                                    word_timestamps))
+                     lambda ctx: analyze.transcribe(S, ctx, src, base, name, language, word_timestamps))
+    return await _await_job(job.id, wait_s)
+
+
+def _caption_base(path: str, project: str | None, stem: str | None = None) -> tuple[Path, Path]:
+    src = readable(S, path)
+    if stem is not None and (not stem or any(c in stem for c in '\\/:*?"<>|') or stem in (".", "..")):
+        raise PolicyError(f"output stem must be a plain file name (got {stem!r})")
+    stem = stem or src.stem
+    if project:
+        base = project_dir(S, project) / "working" / "captions" / stem
+    elif "raw" in (part.lower() for part in src.relative_to(S.media_root).parts[:-1]):
+        raise PolicyError("the clip is in raw/: pass `project` so captions go to working/captions/")
+    else:
+        base = src.with_name(stem)
+    writable(S, str(base.with_suffix(".srt")), overwrite=True)
+    return src, base
+
+
+@mcp.tool()
+async def transcribe_batch(paths: list[str], project: str | None = None, model: str | None = None,
+                           language: str | None = None, word_timestamps: bool = True,
+                           output_stems: list[str] | None = None, wait_s: float = 480) -> dict:
+    """transcribe_clip for up to 50 files, one after another in ONE job (one model load, CPU only).
+    Same outputs per file as transcribe_clip; `output_stems` (same length as `paths`) names each
+    .json/.srt/.vtt (e.g. the asset id) instead of the clip's own name. A file that fails is listed
+    with its error and the batch carries on. Result: {model, count, done, failed, results: [{path,
+    ok, json, srt, vtt, language, segment_count, first_speech_s, last_speech_s, text} | {path, ok:
+    false, error}]}."""
+    name = model or S.whisper_model
+
+    def prep() -> list[tuple[Path, Path]]:
+        if not paths or len(paths) > 50:
+            raise PolicyError("paths must list 1–50 files")
+        if output_stems is not None and len(output_stems) != len(paths):
+            raise PolicyError("output_stems must have one entry per path")
+        analyze.resolve_model(S, name)
+        items = [_caption_base(p, project, output_stems[k] if output_stems else None)
+                 for k, p in enumerate(paths)]
+        bases = [str(b).lower() for _, b in items]
+        if len(set(bases)) != len(bases):
+            raise PolicyError("two files would write the same caption files: pass output_stems")
+        return items
+
+    items = await _guard(prep)
+    job = JOBS.start("transcribe", f"{len(items)} clips",
+                     lambda ctx: analyze.transcribe_batch(S, ctx, items, name, language, word_timestamps))
     return await _await_job(job.id, wait_s)
 
 

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
 import { PHONE_LITE } from "@/lib/phone-lite";
+import { frameLoop } from "@/lib/motion";
 import { micLevel, voiceLevel, type VoiceState } from "./voice-store";
 
 const ANIMATED: VoiceState[] = ["listening", "transcribing", "speaking", "thinking", "holding"];
@@ -36,7 +37,6 @@ export function VoiceOrb({ state, size = 64 }: { state: VoiceState; size?: numbe
     const R = size * 0.36;
     let t = 0;
     let amp = 0;
-    let raf = 0;
 
     const harmonics = [
       { k: 2, w: 0.9, p: 0 },
@@ -45,10 +45,12 @@ export function VoiceOrb({ state, size = 64 }: { state: VoiceState; size?: numbe
       { k: 7, w: -2.1, p: 0.6 },
     ];
 
-    const draw = () => {
+    // `frames` = display frames since the last draw: the per-frame easing and drift below step that
+    // many times, so the orb keeps the speed it had when it redrew on every frame.
+    const draw = (frames = 1) => {
       const level = state === "thinking" ? 0.18 + 0.1 * Math.sin(t * 2) : Math.max(voiceLevel.current, micLevel.current);
       const target = animate ? 0.08 + level * 0.9 : 0;
-      amp += (target - amp) * 0.15;
+      amp += (target - amp) * (1 - Math.pow(1 - 0.15, frames));
       ctx.clearRect(0, 0, full, full);
 
       // Outer glow halo.
@@ -94,19 +96,17 @@ export function VoiceOrb({ state, size = 64 }: { state: VoiceState; size?: numbe
       ctx.arc(cx, cy, R, 0, Math.PI * 2);
       ctx.fill();
 
-      t += 0.016;
-      // Settle, then stop entirely. Phone: ~20 fps while it moves (the mic level keeps it moving).
-      if (animate || amp > 0.002) {
-        if (PHONE_LITE) timer = setTimeout(() => (raf = requestAnimationFrame(draw)), 40);
-        else raf = requestAnimationFrame(draw);
-      }
+      t += 0.016 * frames;
+      // Settle, then stop entirely (the loop parks until the state changes).
+      return animate || amp > 0.002;
     };
-    let timer: ReturnType<typeof setTimeout> | undefined;
     draw();
-    return () => {
-      cancelAnimationFrame(raf);
-      clearTimeout(timer);
-    };
+    if (!animate && amp <= 0.002) return;
+    // Hands-free listening keeps the orb moving all the time, so it gets a frame budget on the
+    // shared grid: 30 fps while in use, 15 while the window is calm, none while hidden. Phone:
+    // 25 fps and one step per draw, as before (it never drew every display frame).
+    const loop = frameLoop((_ts, frames) => draw(PHONE_LITE ? 1 : frames), (l) => (l === "calm" ? 15 : PHONE_LITE ? 25 : 30));
+    return () => loop.stop();
   }, [state, animate, colors, size]);
 
   const full = size * 1.7;

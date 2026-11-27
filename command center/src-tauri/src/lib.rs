@@ -2,6 +2,9 @@ mod audio;
 mod commands;
 mod exe_resolve;
 mod proc;
+/// Hidden / minimised window → WebView2 `IsVisible = false`, so the page stops rendering.
+#[cfg(desktop)]
+mod webview_visibility;
 /// Sovereign security layer (app lock, step-up, audit, alerts, failsafe). `pub` so the
 /// `gabagool-cli` binary (src/bin) shares the exact same code.
 pub mod security;
@@ -38,6 +41,9 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        // Rendering back on now, not at the next poll.
+        #[cfg(desktop)]
+        webview_visibility::apply(&w, true);
     }
 }
 
@@ -322,17 +328,35 @@ pub fn run() {
                     let _ = n8n::n8n_discover(st, Some(true)).await;
                 });
             }
+            // The logon launcher starts this window hidden (SW_HIDE, no window event): the poll
+            // switches WebView2 rendering off within a second, and back on if anything outside
+            // show_main brings the window up.
+            #[cfg(desktop)]
+            webview_visibility::spawn_poll(app.handle().clone());
             #[cfg(desktop)]
             register_voice_hotkey(app)?;
             Ok(())
         })
         // Close → hide to the tray (the engine keeps running); "Quit Engine Completely" exits.
+        // Hide, minimise and restore also switch WebView2 rendering off / on (webview_visibility).
         .on_window_event(|w, ev| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
-                if w.label() == "main" && !QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+            use tauri::Manager;
+            if w.label() != "main" {
+                return;
+            }
+            match ev {
+                tauri::WindowEvent::CloseRequested { api, .. } if !QUITTING.load(std::sync::atomic::Ordering::SeqCst) => {
                     api.prevent_close();
                     let _ = w.hide();
+                    #[cfg(desktop)]
+                    if let Some(wv) = w.app_handle().get_webview_window("main") {
+                        webview_visibility::apply(&wv, false);
+                    }
                 }
+                // Minimise / restore arrive as a resize; focus covers an outside ShowWindow.
+                #[cfg(desktop)]
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(true) => webview_visibility::sync_main(w.app_handle()),
+                _ => {}
             }
         })
         // Keep this list in sync with `NativeCommands` in src/lib/platform.ts.

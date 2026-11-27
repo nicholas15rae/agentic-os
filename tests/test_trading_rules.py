@@ -288,6 +288,54 @@ class EngineScanTests(unittest.TestCase):
         self.assertTrue(all(iid.startswith("re-") for iid, _ in self.e.ex.placed))
         self.assertTrue(all(q <= rl.HardLimits().max_position_shares for _, q in self.e.ex.placed))
 
+    def test_tws_refusal_is_not_reported_as_a_trade(self):
+        """The executor's ack wait turns a TWS rejection (321 Read-Only, seen in the 2026-11-24 paper rehearsal)
+        into ExecutionRefused and the desk records 'failed'. Engine R must not show that row or log that scan as
+        a trade, nor count it against the day's entry cap."""
+        from executor import ExecutionRefused
+
+        first = self.e.eng.store.limits().universe[0]
+        placed = self.e.ex.placed
+
+        async def place(intent, qty):
+            if intent.symbol == first:
+                raise ExecutionRefused("TWS rejected the order: Warning 321: The API interface is currently in Read-Only mode.")
+            placed.append((intent.intent_id, qty))
+            return {"orders": [{"orderId": 1}]}
+        self.e.ex.place = place
+        self.e.desk.set_mode("FULL_AUTO", "t", confirm=True)
+        rows = {r["symbol"]: r for r in self.e.scan()["rows"]}
+        bad = rows[first]
+        self.assertEqual((bad["action"], bad["desk"]["status"]), ("submitted", "failed"))  # handed to the desk; refused
+        self.assertTrue(bad["why"].startswith("desk failed: ") and "Read-Only" in bad["why"], bad["why"])
+        self.assertEqual(self.e.desk._row(bad["intent"]["intent_id"])["status"], "failed")
+        self.assertEqual(len(placed), 3)                                       # the refusal didn't use up an entry
+        self.assertEqual(self.e.eng.entries_today(), 3)
+        taken = self.e.kinds("rule_scan")[0]["payload"]["taken"]
+        self.assertNotIn(first, taken)
+        self.assertEqual(len(taken), 3)
+        signal = next(r for r in self.e.kinds("rule_signal") if r["payload"]["symbol"] == first)
+        self.assertIn("Read-Only", signal["payload"]["why"])
+        accepted = [r for r in rows.values() if r.get("action") == "submitted" and r is not bad]
+        self.assertTrue(accepted and all(r["why"] == "trend breakout" for r in accepted))  # accepted rows unchanged
+
+    def test_desk_rejection_reason_text_and_fallback(self):
+        """A Security Detail rejection carries reasons but no error; a bare rejection carries neither."""
+        u = self.e.eng.store.limits().universe
+        canned = {u[0]: {"ok": False, "status": "rejected", "decision": {"verdict": "REJECTED", "reasons": ["spread too wide", "thin volume"]}},
+                  u[1]: {"ok": False, "status": "rejected"}}
+        real = self.e.desk.submit
+
+        async def submit(raw, actor):
+            return canned.get(raw["symbol"]) or await real(raw, actor)
+        self.e.desk.submit = submit
+        rows = {r["symbol"]: r for r in self.e.scan()["rows"]}
+        self.assertEqual(rows[u[0]]["why"], "desk rejected: spread too wide; thin volume")
+        self.assertEqual(rows[u[1]]["why"], "desk rejected: no reason given")
+        taken = self.e.kinds("rule_scan")[0]["payload"]["taken"]
+        self.assertFalse({u[0], u[1]} & set(taken))
+        self.assertEqual(len(taken), 3)                                        # ADVISORY: 3 hypothetical entries still taken
+
     def test_dry_run_sends_nothing(self):
         rep = self.e.scan(kind="manual", submit=False)
         self.assertEqual(rep["status"], "dry_run")

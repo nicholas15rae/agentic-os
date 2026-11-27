@@ -292,13 +292,7 @@ pub fn route(app: Option<&tauri::AppHandle>, os: &super::os_core::OsState, d: &T
     let e = os.modes.effective();
     use super::modes::DispatchPolicy::*;
     match e.dispatch {
-        SurfaceOnly => Some(DispatchView {
-            id,
-            state: "held".into(),
-            priority: d.priority.clone(),
-            reason: if super::modes::is_learning(&e) { "Learning mode: nothing is dispatched".into() } else { "Solo mode: nothing is dispatched; switch modes to send it".into() },
-            tasks: task_rows(d, &BTreeMap::new()),
-        }),
+        SurfaceOnly => Some(DispatchView { id, state: "held".into(), priority: d.priority.clone(), reason: surface_reason(&e).into(), tasks: task_rows(d, &BTreeMap::new()) }),
         AskBeforeDispatch => {
             pending().lock().unwrap().insert(id.clone(), d.clone());
             // A frozen target shows as held already: a yes won't run it (`execute`).
@@ -308,6 +302,44 @@ pub fn route(app: Option<&tauri::AppHandle>, os: &super::os_core::OsState, d: &T
         }
         AutoDispatch => Some(execute(app, &id, d, true)),
     }
+}
+
+/// Why a SurfaceOnly mode (Solo, Coach, Learning, …) holds a packet (pure).
+fn surface_reason(e: &super::modes::Effective) -> &'static str {
+    if super::modes::is_learning(e) {
+        "Learning mode: nothing is dispatched"
+    } else {
+        "Solo mode: nothing is dispatched; switch modes to send it"
+    }
+}
+
+/// The start of a Tier-2 brainstorm turn's held reason (`brainstorm_reason`).
+pub const BRAINSTORM_HELD: &str = "Brainstorm turn: nothing is dispatched";
+
+/// Why a Tier-2 brainstorm turn's packet is held (pure): `BRAINSTORM_HELD`, then the packet's own
+/// agent to ask by name. A Named route ("ask the Coder to …") always hands the work off, where a
+/// commit cue ("let's do it") on a topic the TS side finds no target for stays Tier 2.
+pub(crate) fn brainstorm_reason(d: &TonyDispatch) -> String {
+    match d.tasks.first() {
+        Some(t) => format!("{BRAINSTORM_HELD}; ask the {} directly to send it", super::agents::role_label(&super::modes::board_agent(&t.target_agent), "")),
+        None => BRAINSTORM_HELD.to_string(),
+    }
+}
+
+/// A Tier-2 brainstorm turn's packet: never run and never parked for a yes, whatever the mode,
+/// decided from ONE read of the mode (a switch mid-turn can't send it down `route`'s Ask arm). A
+/// SurfaceOnly mode keeps its own reason; any other mode shows `brainstorm_reason`.
+pub fn brainstorm(os: &super::os_core::OsState, d: &TonyDispatch) -> Option<DispatchView> {
+    let e = os.modes.effective();
+    let reason = if matches!(e.dispatch, super::modes::DispatchPolicy::SurfaceOnly) { surface_reason(&e).to_string() } else { brainstorm_reason(d) };
+    hold(d, &reason)
+}
+
+/// A packet that must not run this turn, whatever the mode (a Tier-2 brainstorm turn: Nic is
+/// thinking out loud, so nothing is handed off, parked for a yes or queued). Shown as held, like
+/// Solo mode's; `None` when the packet asks for no dispatch (pure).
+pub fn hold(d: &TonyDispatch, reason: &str) -> Option<DispatchView> {
+    d.requires_dispatch.then(|| DispatchView { id: format!("pkt-{}", super::arbiter::now_ms()), state: "held".into(), priority: d.priority.clone(), reason: reason.into(), tasks: task_rows(d, &BTreeMap::new()) })
 }
 
 /// The packet's targets the switchboard froze this turn (target agent → "<Agent> is frozen in
@@ -544,6 +576,28 @@ mod tests {
         let f = frozen_targets(&d, &eff("brainstorm"), &super::super::os_core::SwitchboardConfig::default());
         assert_eq!(f.keys().map(String::as_str).collect::<Vec<_>>(), vec!["librarian"]);
         assert_eq!(f["librarian"], "Librarian is frozen on the master switchboard");
+    }
+
+    #[test]
+    fn a_brainstorm_hold_shows_every_task_held_and_runs_nothing() {
+        let d = TonyDispatch { spoken_reply: "ok".into(), requires_dispatch: true, priority: "urgent".into(), tasks: vec![pkt("build", "coder", &[]), pkt("audit", "security", &["build"])] };
+        let v = hold(&d, BRAINSTORM_HELD).expect("a dispatching packet is shown");
+        assert_eq!((v.state.as_str(), v.priority.as_str(), v.reason.as_str()), ("held", "urgent", BRAINSTORM_HELD));
+        assert!(v.tasks.iter().all(|t| t["status"] == "held"), "{:?}", v.tasks);
+        assert!(!pending().lock().unwrap().values().any(|p| p == &d), "never parked for a yes");
+        // Nothing to dispatch: no card, as `route`.
+        assert!(hold(&TonyDispatch { requires_dispatch: false, tasks: vec![], ..d.clone() }, BRAINSTORM_HELD).is_none());
+        let l = BRAINSTORM_HELD.to_lowercase();
+        assert!(!l.contains("json") && !l.contains("gabagool"));
+        // The reason names the packet's own agent, a Named route that always hands work off, never
+        // "ask Tony to build it" or a commit cue (both stay Tier 2 when the topic has no target).
+        assert_eq!(brainstorm_reason(&d), "Brainstorm turn: nothing is dispatched; ask the Coder directly to send it");
+        let fin = TonyDispatch { tasks: vec![pkt("budget", "financer", &[])], ..d.clone() };
+        assert!(brainstorm_reason(&fin).starts_with(BRAINSTORM_HELD) && !brainstorm_reason(&fin).contains("financer"), "{}", brainstorm_reason(&fin));
+        for r in [brainstorm_reason(&d), brainstorm_reason(&fin)] {
+            let l = r.to_lowercase();
+            assert!(!l.contains("ask tony") && !l.contains("let's do it") && !l.contains("json") && !l.contains("gabagool"), "{r}");
+        }
     }
 
     #[test]

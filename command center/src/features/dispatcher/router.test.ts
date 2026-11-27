@@ -312,6 +312,41 @@ describe("directTool", () => {
   ])("not a live read: %s", (text) => {
     expect(directTool(text)).toBeNull();
   });
+
+  // Section 11.10: money READ questions are Tony's own Finance tool (mirrors routing.rs).
+  it.each([
+    "what do I owe ML Talent?",
+    "how much do I still owe Imperious",
+    "how much did contracting make this month?",
+    "how much have I made this year",
+    "how much did I spend last month",
+    "what's still pending?",
+    "who owes me money",
+    "when is HST due?",
+    "when is my next HST return due",
+    "any unpaid invoices?",
+    "which invoices are still unpaid",
+    "how much commission do I owe",
+    "what are my money reminders",
+  ])("money read: %s → finance", (text) => {
+    expect(directTool(text)).toBe("finance");
+  });
+
+  it.each([
+    "log the hst on the commission cheque",
+    "mark the ML Talent commission as paid",
+    "record a 400 dollar cheque from Lee",
+    "pay ML Talent what I owe them",
+    "send Smith a reminder about the unpaid invoice",
+    "add 42 dollars to the gear budget",
+    "what orders are pending on the online store",
+    "any pending emails?",
+    "fix the overdue invoices widget",
+    "make a new invoice for Smith",
+  ])("not a money read: %s", (text) => {
+    // "any pending emails?" is Tony's Gmail read; none of these is a Finance read.
+    expect(directTool(text)).not.toBe("finance");
+  });
 });
 
 describe("self (Tony) is never a delegation target", () => {

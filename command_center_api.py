@@ -1022,6 +1022,45 @@ def statement_import(body: dict):
     return {"added": added, "skipped": skipped, "importId": imp}
 
 
+# ── finance: Tony's read-only summary (Section 11 item 10) ───────────────────
+
+# What `finance_summary.summarize` reads (statement lines and mileage are never needed).
+FINANCE_SUMMARY_COLLECTIONS = ("income", "receipts", "invoices", "checks", "commissions", "pending")
+
+
+def finance_rows() -> dict[str, list[dict]]:
+    """The live (not deleted) rows of the collections the summary reads. Read-only."""
+    out: dict[str, list[dict]] = {c: [] for c in FINANCE_SUMMARY_COLLECTIONS}
+    marks = ",".join("?" * len(FINANCE_SUMMARY_COLLECTIONS))
+    with db() as c:
+        for r in c.execute(f"SELECT collection, data FROM items WHERE deleted=0 AND collection IN ({marks})", FINANCE_SUMMARY_COLLECTIONS):
+            try:
+                d = json.loads(r["data"])
+            except ValueError:
+                continue
+            if isinstance(d, dict):
+                out[r["collection"]].append(d)
+    return out
+
+
+@router.get("/finance/summary")
+def finance_summary_get(
+    kind: str = Query(..., max_length=32),
+    area: str = Query("", max_length=60),
+    agent: str = Query("", max_length=60),
+    period: str = Query("", max_length=20),
+):
+    """A short plain-words answer to one money question (`finance_summary.QUESTION_KINDS`), for
+    Tony's `finance.ask` tool and the gateway Tony. GET only: totals and a few named lines, never
+    raw rows, at most ~1.5 KB; record text comes back quoted and labelled as data."""
+    import finance_summary as fs
+
+    try:
+        return fs.summarize(kind, finance_rows(), kv_get(BUSINESS_PROFILES_KEY), area=area or None, agent=agent or None, period=period or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # ── key/value (device UI config snapshots, sync cursors) ─────────────────────
 
 _KV_KEY = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
@@ -1600,7 +1639,7 @@ BACKUP_SHRINK_RATIO = 0.25
 # Below this a previous zip says nothing about the store (a brand-new install's first backups).
 BACKUP_BASELINE_MIN = 64 * 1024
 FAILED_BACKUPS_KEEP = 3
-_ROW_TABLES = ("items", "files", "vault", "kv", "os_queue", "comms_messages", "comms_contacts")
+_ROW_TABLES = ("items", "files", "vault", "kv", "os_queue", "comms_messages", "comms_contacts", "comms_phonebook")
 # What a real store holds; kv alone is only bookkeeping (run_backup writes backup.* there itself).
 _CONTENT_TABLES = tuple(t for t in _ROW_TABLES if t != "kv")
 _FAILED_NAME = re.compile(r"failed-cc-[0-9]{8}-[0-9]{6}[a-z]?\.zip")

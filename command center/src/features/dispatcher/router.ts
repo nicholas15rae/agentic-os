@@ -460,7 +460,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   // above ("tell booking to …") hands it over.
   const mentioned = matchNameAnywhere(toks, names);
   const liveRead = directTool(original);
-  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar") || leadsWithName(toks, names)))
+  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar" || liveRead === "finance") || leadsWithName(toks, names)))
     return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
   if (matchNameAnywhere(toks, selfNames)) selfHit = true;
   // A self name in an address position (beats a topic below); any other mention is step (d) only.
@@ -566,8 +566,20 @@ const DIRECT_NOT_LIVE = /\b(?:widget|server|config|api|bug|code|app|script|dashb
  * words may sit between the read word and the noun, so "my agent messages" never matches. */
 const DIRECT_MESSAGES = /\b(?:check|read|any|show|see|new|unread|latest|last|recent|did i get|have i got|got any)\b(?: (?:me|my|the|new|unread|latest|last|recent|\d{1,2}))* (?:messages?|texts?)\b/;
 const DIRECT_SPOTIFY = /\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b/;
+/** Money READ questions Tony answers from Finance himself (`finance.ask`, read-only): what he owes
+ * an agent, what an area made or spent, what's pending, unpaid invoices, HST dates, the money to-do
+ * list. Writes stay on the Finance screens (DIRECT_WRITE / DIRECT_FINANCE_WRITE). */
+const DIRECT_FINANCE =
+  /\b(?:what|how much|who) (?:do |did )?(?:i|we) (?:still )?owe\b|\bcommissions? (?:do |did )?(?:i|we) (?:still )?owe\b|\bhow much commission\b|\bwho (?:still )?owes me\b|\bhow much (?:money )?(?:am i|is) (?:still )?owed\b|\bhow much (?:money )?(?:did|have|has|do|does) (?:i|we|acting|contracting|trades|bf supplements|supplements|the store|my business|personal)(?: \w+)? (?:make|made|earn|earned|bring in|brought in|spend|spent|gross|grossed)\b|\bhow much (?:income|revenue|profit) (?:did|have|has|do)\b|\b(?:whats|what is|anything|any money|any payments?)(?: still)? pending\b|\bpending (?:money|payments?|income)\b|\bwhen (?:is|are) (?:my |the |our |next )*(?:hst|gst)(?: return| payment| filing| remittance)? due\b|\b(?:hst|gst) (?:return |payment |filing |remittance )?(?:is |are )?due\b|\bhow much (?:hst|gst) do i owe\b|\bwhen do i (?:file|pay) (?:my |the )?(?:hst|gst)\b|\b(?:unpaid|outstanding|overdue|open) invoices?\b|\binvoices? (?:are |still )*(?:unpaid|outstanding|overdue|open)\b|\bwho hasnt paid\b|\b(?:money|finance|financial) (?:reminders?|to do|todo)\b/;
+/** "How much did contracting make": "make" as earning, not a write. Dropped before DIRECT_WRITE. */
+const DIRECT_FINANCE_MAKE = /\bhow much (?:money )?(?:did|have|has|do|does) (?:i|we|acting|contracting|trades|bf supplements|supplements|the store|my business|personal)(?: \w+)? make\b/g;
+/** Finance writes DIRECT_WRITE doesn't list ("log the HST on that invoice", "record a cheque"). */
+const DIRECT_FINANCE_WRITE = /\b(?:log|record|enter|track|scan|import|export|categori[sz]e|deposit|charge|bill|split|refund|transfer|send)\b/;
+/** Not a money question: another live tool's or a work item's subject ("any pending emails",
+ * "what orders are pending", "the overdue invoices widget"). */
+const DIRECT_FINANCE_NOT = /\b(?:emails?|inbox|mail|gmail|whatsapp|messages?|texts?|calendar|tasks?|todos?|tickets?|builds?|prs?|pull requests?|reviews?|queue|orders?|deliver(?:y|ies)|packages?|shipments?|updates?|widget|server|config|api|bug|code|app|script|spreadsheet|filter|settings?|button|tests?)\b/;
 
-export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify";
+export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify" | "finance";
 
 /**
  * "Any WhatsApp updates?", "check my inbox", "will it rain tomorrow", "what's playing":
@@ -576,7 +588,7 @@ export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotif
  */
 export function directTool(text: string): DirectTool | null {
   const n = normalize(text);
-  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " "))) return null;
+  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " ").replace(DIRECT_FINANCE_MAKE, " "))) return null;
   if (/\bwhatsapp\b/.test(n)) {
     const lower = text.toLowerCase();
     const saysApp = lower.includes("sapp") || lower.includes("s app");
@@ -588,6 +600,7 @@ export function directTool(text: string): DirectTool | null {
   if (!work && DIRECT_CALENDAR.test(n) && DIRECT_CALENDAR_READ.test(n) && !DIRECT_CALENDAR_WRITE.test(n)) return "calendar";
   if (!work && DIRECT_WEATHER.test(n)) return "weather";
   if (DIRECT_SPOTIFY.test(n)) return "spotify";
+  if (DIRECT_FINANCE.test(n) && !DIRECT_FINANCE_WRITE.test(n) && !DIRECT_FINANCE_NOT.test(n)) return "finance";
   if (!work && DIRECT_MESSAGES.test(n)) return "whatsapp";
   return null;
 }

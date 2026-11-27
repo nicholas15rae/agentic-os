@@ -708,5 +708,66 @@
     "text": "find document about the lease",
     "role": null,
     "kind": "Default"
+  },
+  {
+    "desc": "Section 11.10: what Nic owes an acting agent is Tony's own Finance read",
+    "text": "what do I owe ML Talent?",
+    "role": null,
+    "kind": "Default",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: an area's income this month is a Finance read",
+    "text": "how much did contracting make this month?",
+    "role": "ops",
+    "kind": "Domain",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: what's still pending (money owed to Nic)",
+    "text": "what's still pending?",
+    "role": null,
+    "kind": "Default",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: HST dates are a Finance read, not the Finance agent",
+    "text": "when is HST due?",
+    "role": "finance",
+    "kind": "Domain",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: unpaid invoices are a Finance read",
+    "text": "any unpaid invoices?",
+    "role": "finance",
+    "kind": "Domain",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: a Finance name merely mentioned in a money read is a topic, not an address",
+    "text": "what do I owe my accountant?",
+    "role": null,
+    "kind": "Default",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: opening the line with the Finance agent's name still addresses it",
+    "text": "bookkeeper, what do I owe ML Talent?",
+    "role": "finance",
+    "kind": "Named",
+    "direct": "finance"
+  },
+  {
+    "desc": "Section 11.10: a commission write stays on the Finance screens",
+    "text": "mark the ML Talent commission as paid",
+    "role": "finance",
+    "kind": "Domain"
+  },
+  {
+    "desc": "Section 11.10: pending store orders are Biz Ops', not a money read",
+    "text": "what orders are pending on the online store",
+    "role": "bizops",
+    "kind": "Domain"
   }
 ]

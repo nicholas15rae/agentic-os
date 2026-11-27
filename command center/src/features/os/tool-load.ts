@@ -20,6 +20,10 @@ export const TOOL_WARN = 10;
 const TOOL_OVERHEAD_TOKENS = 8;
 /** Rust `ALWAYS_LIVE_SERVERS`. */
 const ALWAYS_LIVE = ["time", "skills", "tony"];
+/** Rust `mcp::finance_reader_refusal`: the read-only Finance server (`finance.ask`, Section 11.10)
+ * is only ever handed to Tony and the finance role, whatever its grants say. */
+export const FINANCE_SERVER = "finance";
+const FINANCE_READERS = ["general", "finance"];
 
 export type TonyModeTools = Record<string, string[]>;
 
@@ -70,6 +74,7 @@ export function agentServers(cfg: LoadCfg, agent: string, o: { modeId: string; m
   return cfg.mcps
     .filter((s) => {
       if (!s.enabled) return false;
+      if (s.id === FINANCE_SERVER && !FINANCE_READERS.includes(agent)) return false;
       const always = ALWAYS_LIVE.includes(s.id);
       if (!always && o.frozenTools.includes(s.id)) return false;
       if (tony) return ownsServer(s.agents, "general") || extra.includes(s.id);

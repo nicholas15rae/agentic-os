@@ -13,14 +13,14 @@ use super::os_core;
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceHealth {
-    id: String,
-    label: String,
-    kind: String,
-    up: bool,
-    latency_ms: u128,
-    detail: String,
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) kind: String,
+    pub(crate) up: bool,
+    pub(crate) latency_ms: u128,
+    pub(crate) detail: String,
     /// Switched off by the user (droplet master switch / kill switch) — not a fault.
-    manual: bool,
+    pub(crate) manual: bool,
 }
 
 fn origin(base: &str) -> String {
@@ -40,7 +40,8 @@ fn probe_url(p: &Provider) -> String {
     }
 }
 
-async fn probe(state: &DispatchState, osc: &os_core::OsConfig, p: Provider, timeout: Duration) -> ServiceHealth {
+/// One read-only health GET of `p` (also Tony's `system.status`, `infra_status`).
+pub(crate) async fn probe(state: &DispatchState, osc: &os_core::OsConfig, p: Provider, timeout: Duration) -> ServiceHealth {
     let started = Instant::now();
     let kind = serde_json::to_value(p.kind).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
     let off = if os_core::is_droplet(&p, osc) && !osc.droplet.enabled {
@@ -85,7 +86,7 @@ async fn probe(state: &DispatchState, osc: &os_core::OsConfig, p: Provider, time
 }
 
 /// Every configured service (integrations excluded) with the gateway (server.py) first.
-fn targets(cfg: &super::dispatch::Config) -> Vec<Provider> {
+pub(crate) fn targets(cfg: &super::dispatch::Config) -> Vec<Provider> {
     let mut targets: Vec<Provider> = cfg.providers.iter().filter(|p| p.kind != Kind::Integration).cloned().collect();
     // The gateway (server.py) as its own node — it is the sync hub for the phone.
     let mut gw = targets.iter().find(|p| p.kind == Kind::AgenticOs).cloned().unwrap_or_else(|| Provider {

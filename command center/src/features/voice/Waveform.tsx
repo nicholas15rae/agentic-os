@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
 import { PHONE_LITE } from "@/lib/phone-lite";
+import { frameLoop } from "@/lib/motion";
 import { micLevel, voiceLevel, type VoiceState } from "./voice-store";
 
 /**
@@ -23,12 +24,12 @@ export function Waveform({ state, height = 72, className = "", locked = false }:
   const reduced = usePrefersReducedMotion();
   const stateRef = useRef(state);
   stateRef.current = state;
+  const pokeRef = useRef<(() => void) | undefined>(undefined);
 
   useEffect(() => {
     const canvas = ref.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
-    let raf = 0;
     let t = 0;
     let amp = 0.1;
     let w = 0;
@@ -74,13 +75,15 @@ export function Waveform({ state, height = 72, className = "", locked = false }:
       };
     }
 
-    const draw = () => {
+    // `frames` = display frames since the last draw: easing and drift step that many times, so the
+    // wave keeps the speed it had when it redrew on every frame.
+    const draw = (frames: number) => {
       const s = stateRef.current;
       // The mic's level while listening, Tony's TTS envelope while speaking.
       const level = s === "listening" || s === "transcribing" ? micLevel.current : s === "speaking" ? voiceLevel.current : Math.max(voiceLevel.current, micLevel.current);
       const target = s === "listening" || s === "speaking" ? 0.18 + level * 0.82 : s === "thinking" ? 0.35 : s === "error" ? 0.05 : 0.1;
-      amp += (target - amp) * 0.12;
-      t += reduced ? 0 : s === "thinking" ? 0.05 : 0.03;
+      amp += (target - amp) * (1 - Math.pow(1 - 0.12, frames));
+      t += (reduced ? 0 : s === "thinking" ? 0.05 : 0.03) * frames;
 
       ctx.clearRect(0, 0, w, height);
       const mid = height / 2;
@@ -124,25 +127,29 @@ export function Waveform({ state, height = 72, className = "", locked = false }:
       }
       ctx.globalAlpha = 1;
       ctx.shadowBlur = 0;
-      schedule(Math.abs(target - amp) < 0.002 && (s === "idle" || s === "error"));
+      settled = Math.abs(target - amp) < 0.002 && (s === "idle" || s === "error");
     };
-    // Bloat guard: full frame rate only while something moves. A settled idle wave redraws at
-    // ~10 fps, and a hidden window (tray, minimised) checks back twice a second without drawing.
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    const schedule = (settled: boolean) => {
-      if (typeof document !== "undefined" && document.hidden) idleTimer = setTimeout(() => schedule(settled), 500);
-      else if (settled) idleTimer = setTimeout(() => (raf = requestAnimationFrame(draw)), 100);
-      // Phone: ~20 fps while it moves (hands-free listening keeps it moving all the time).
-      else if (PHONE_LITE) idleTimer = setTimeout(() => (raf = requestAnimationFrame(draw)), 40);
-      else raf = requestAnimationFrame(draw);
+    // Frame budget on the shared grid (lib/motion.ts). Moving: 30 fps (phone 25), 15 while the
+    // window is calm. A settled idle wave breathes at 10 fps, one step per draw as before, and
+    // stops while calm. Nothing draws while hidden. A state change wakes a stopped wave.
+    let settled = false;
+    const loop = frameLoop(
+      (_ts, frames) => draw(settled || PHONE_LITE ? 1 : frames),
+      (l) => (settled ? (l === "full" ? 10 : 0) : l === "calm" ? 15 : PHONE_LITE ? 25 : 30),
+    );
+    pokeRef.current = () => {
+      settled = false;
+      loop.kick();
     };
-    raf = requestAnimationFrame(draw);
     return () => {
-      cancelAnimationFrame(raf);
-      clearTimeout(idleTimer);
+      pokeRef.current = undefined;
+      loop.stop();
       ro.disconnect();
     };
   }, [colors, thickness, height, reduced, locked]);
+
+  // A new voice state (listening, speaking…) restarts a wave that settled and stopped while calm.
+  useEffect(() => pokeRef.current?.(), [state]);
 
   return <canvas ref={ref} aria-hidden data-locked={locked || undefined} className={`block w-full ${className}`} style={{ height }} />;
 }

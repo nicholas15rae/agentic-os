@@ -4,6 +4,7 @@ import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { frameLoop, useMotionLevel } from "@/lib/motion";
 import { usePoll } from "@/lib/use-poll";
 import { isTauri } from "@/lib/platform";
 import { useArbiter } from "@/features/arbiter/arbiter-store";
@@ -24,6 +25,8 @@ import { ARC_FRAG, ARC_VERT, ATMO_FRAG, BODY_VERT, NEBULA_FRAG, NEBULA_VERT, PLA
 
 /** Frame cap while visible (the RTX 3060 runs local inference: never more than this). */
 const FPS = 30;
+/** Frame rate while the window is calm (unfocused / idle; lib/motion.ts). */
+const CALM_FPS = 10;
 const ARC_MS = 1600;
 const POLL_MS = 3000;
 const HOME_POS = new THREE.Vector3(0, 30, 46);
@@ -34,17 +37,6 @@ const MOONS = [
   { key: "mem", color: "#38bdf8", label: "MEM" },
   { key: "tool", color: "#fbbf24", label: "MCP" },
 ] as const;
-
-/** Window visible (minimised / tray-hidden → false). */
-function useDocVisible(): boolean {
-  const [v, setV] = useState(() => !document.hidden);
-  useEffect(() => {
-    const on = () => setV(!document.hidden);
-    document.addEventListener("visibilitychange", on);
-    return () => document.removeEventListener("visibilitychange", on);
-  }, []);
-  return v;
-}
 
 /** Shared per-frame world positions (bodies move; arcs, callouts and the camera follow them). */
 type Positions = Map<string, THREE.Vector3>;
@@ -60,21 +52,17 @@ interface Live {
 
 // ── Frame driver ────────────────────────────────────────────────────────────
 
-/** `frameloop="demand"` + a capped rAF that only runs while `running`. Stopped = zero frames. */
+/**
+ * `frameloop="demand"` + a capped rAF that only runs while `running`. Stopped = zero frames. On the
+ * shared frame grid (lib/motion.ts): FPS while in use, CALM_FPS while the window is unfocused or
+ * idle (hand-off pulses still show), none while hidden.
+ */
 function Ticker({ running }: { running: boolean }) {
   const invalidate = useThree((s) => s.invalidate);
   useEffect(() => {
     if (!running) return;
-    let raf = 0;
-    let last = 0;
-    const loop = (t: number) => {
-      raf = requestAnimationFrame(loop);
-      if (t - last < 1000 / FPS - 1) return;
-      last = t;
-      invalidate();
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    const loop = frameLoop(() => invalidate(), (l) => (l === "full" ? FPS : CALM_FPS));
+    return () => loop.stop();
   }, [running, invalidate]);
   return null;
 }
@@ -654,7 +642,8 @@ function Scene({ live, running, reduced, pulses, focus, onPick, homeReq, positio
  */
 export function OrbitalEcosystem() {
   const reduced = usePrefersReducedMotion();
-  const visible = useDocVisible();
+  const motion = useMotionLevel();
+  const visible = motion !== "off";
   const snap = useArbiter((s) => s.snap);
   const pulses = useArbiter((s) => s.pulses);
   const { snap: sys } = useMemmapData();
@@ -713,7 +702,7 @@ export function OrbitalEcosystem() {
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#020308]" role="img" aria-label="Orbital ecosystem: the agent roster as a planetary system. Drag to orbit, scroll to zoom, click a planet to inspect it.">
       <SurfaceBackdropLayer surface="orbital" />
-      {spaceMode !== "minimal" && <DeepSpaceBackdrop mode={spaceMode} active={visible} reduced={reduced} view={view} wallpapers={!customBackdrop} />}
+      {spaceMode !== "minimal" && <DeepSpaceBackdrop mode={spaceMode} active={motion === "full"} reduced={reduced} view={view} wallpapers={!customBackdrop} />}
       <Canvas
         frameloop="demand"
         dpr={[1, 1.5]}

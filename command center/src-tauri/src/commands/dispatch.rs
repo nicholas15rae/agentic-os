@@ -1527,7 +1527,9 @@ pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messa
     let chars: usize = messages.iter().map(|m| m.content.len()).sum();
     let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
     let shaped = first.clone().map(|p| os_core::shape_chain(&osc, vec![p], vram, chars, false).0).unwrap_or_default();
-    let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && p.id != "anythingllm" && !os_core::is_remote(p)) else {
+    // An AnythingLLM shim (any id: `is_allm_shim`) never streams: only `call` folds Tony's turn
+    // context out of the last user message, which the shim embeds as its search query.
+    let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && !is_allm_shim(p) && !os_core::is_remote(p)) else {
         return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
     };
     let started = Instant::now();

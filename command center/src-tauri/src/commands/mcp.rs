@@ -648,17 +648,27 @@ pub(crate) fn sticky_listing_error(transport: &str, err: &str) -> bool {
     transport != "builtin" && !err.contains(NEEDS_TOKEN) && !err.contains(TOKEN_REJECTED) && !err.contains(KILL_SWITCH_MCP)
 }
 
-/// The last good listing of `s` for its current config and token, however old (the managed cache
-/// keeps it per fingerprint), when `err` allows it (`sticky_listing_error`). Disabled, ungranted
-/// and frozen servers never get here (`servers_for`), and a config or token change misses the
-/// fingerprint, so their tools leave the line at once.
+/// How old a last good listing may be and still hold its server's place in Tony's TOOLS line
+/// (`last_good_listing`): past a day's idle (`STALE_MAX`) and a weekend, but a server that has
+/// failed every listing for this long leaves the line instead of being advertised indefinitely.
+const STICKY_MAX: u64 = 3 * 24 * 3600;
+
+/// May a last good listing listed at `at` still stand in for a failed one at `now` (pure)?
+pub(crate) fn sticky_fresh_enough(at: u64, now: u64) -> bool {
+    now.saturating_sub(at) <= STICKY_MAX
+}
+
+/// The last good listing of `s` for its current config and token, up to `STICKY_MAX` old (the
+/// managed cache keeps it per fingerprint), when `err` allows it (`sticky_listing_error`).
+/// Disabled, ungranted and frozen servers never get here (`servers_for`), and a config or token
+/// change misses the fingerprint, so their tools leave the line at once.
 fn last_good_listing(state: &DispatchState, os: &OsState, s: &McpServer, err: &str) -> Option<Vec<ToolInfo>> {
     if !sticky_listing_error(&s.transport, err) || remote_blocked(&os.snapshot(), s) {
         return None;
     }
     let token = remote_token(state, s).ok()?;
     promote_listed(os);
-    cached_listing(os, &s.id, server_fingerprint(s, token.as_deref())).map(|(_, t)| visible_tools(s, t))
+    cached_listing(os, &s.id, server_fingerprint(s, token.as_deref())).filter(|(at, _)| sticky_fresh_enough(*at, os_core::now_secs())).map(|(_, t)| visible_tools(s, t))
 }
 
 /// Pure part of `tool_set`: the enabled, granted servers `agent` may list this turn (a frozen

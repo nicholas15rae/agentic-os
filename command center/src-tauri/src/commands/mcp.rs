@@ -608,7 +608,15 @@ pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolS
     if !is_tony && super::roles::policy_for(agent).is_none() {
         return ToolSet { all: vec![], offered: vec![] };
     }
-    let servers = servers_for(&cfg, &os.modes.effective(), agent);
+    let eff = os.modes.effective();
+    let mut servers = servers_for(&cfg, &eff, agent);
+    if is_tony {
+        // A mode extra that isn't connected yet (Operations' Instagram with no token) is simply
+        // not offered: no failed listing, no error in the queue (Section 18.6). His base still
+        // reports a missing backend as before. Cheap: no network.
+        let extras = os_core::tony_mode_extras(&cfg, &eff.mode_id);
+        servers.retain(|s| !unconnected_extra(s, extras, || unavailable_reason(state, &cfg, &s.id)));
+    }
     // A cold server costs a turn at most `CHAT_LIST_WAIT`: its listing keeps going in the
     // background and lands in the cache for the next turn. The outer timeout is only a
     // backstop and never writes FAILED.
@@ -622,6 +630,12 @@ pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolS
     }))
     .await;
     assemble_tools(&cfg, agent, results.into_iter().flatten().collect())
+}
+
+/// A server Tony gets ONLY from the active mode's extras (not his base grant) whose backend
+/// isn't set up (`reason` = `unavailable_reason`). Pure apart from `reason`.
+pub(crate) fn unconnected_extra(s: &McpServer, extras: &[String], reason: impl FnOnce() -> Option<String>) -> bool {
+    !s.grants("general") && extras.iter().any(|x| x == &s.id) && reason().is_some()
 }
 
 /// Pure part of `tool_set`: the enabled, granted servers `agent` may list this turn (a frozen
@@ -3433,6 +3447,21 @@ mod tony_mode_tool_tests {
         assert_eq!(frozen_refusal_for(&cfg, &mode_eff("learning"), "web.search", CallOrigin::Turn, "general"), None);
         // …but a sub-agent's call still is.
         assert!(frozen_refusal_for(&cfg, &builder, "gmail.recent", CallOrigin::Turn, "coder").is_some());
+    }
+
+    #[test]
+    fn an_unconnected_mode_extra_is_not_offered_but_base_tools_are() {
+        let cfg = OsConfig::default();
+        let ig = cfg.mcps.iter().find(|m| m.id == "instagram").cloned().expect("instagram server");
+        let gmail = cfg.mcps.iter().find(|m| m.id == "gmail").cloned().expect("gmail server");
+        let ops = os_core::tony_mode_extras(&cfg, "operations");
+        assert!(ops.iter().any(|x| x == "instagram"));
+        let no_token = || Some(super::super::instagram::NO_TOKEN.to_string());
+        assert!(!ig.grants("general"), "Instagram is a mode extra for Tony, not his base");
+        assert!(unconnected_extra(&ig, ops, no_token), "no token: Operations doesn't offer it");
+        assert!(!unconnected_extra(&ig, ops, || None), "connected: offered");
+        assert!(!unconnected_extra(&ig, &[], no_token), "not an extra in this mode: not this rule's call");
+        assert!(!unconnected_extra(&gmail, ops, || Some("no backend".into())), "his base still reports a missing backend");
     }
 
     #[test]

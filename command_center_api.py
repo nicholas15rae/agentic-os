@@ -1324,10 +1324,24 @@ def candles(symbol: str, interval: str = "5m", range: str = "5d"):
 
 # ── backups ──────────────────────────────────────────────────────────────────
 
-# A backup this much smaller than the last good one is suspect (a store that went empty, a
-# files folder that vanished) and is kept aside instead of rotating good backups out.
+# A backup this much smaller than the newest good one ON DISK is suspect (a store that went
+# empty, a files folder that vanished) and is kept aside instead of rotating good backups out.
+# The baseline comes from the backup folder, never from the store being checked: a wiped or
+# swapped cc.db can't vouch for itself.
 BACKUP_SHRINK_RATIO = 0.25
+# Below this a previous zip says nothing about the store (a brand-new install's first backups).
+BACKUP_BASELINE_MIN = 64 * 1024
+FAILED_BACKUPS_KEEP = 3
 _ROW_TABLES = ("items", "files", "vault", "kv", "os_queue", "comms_messages", "comms_contacts")
+# What a real store holds; kv alone is only bookkeeping (run_backup writes backup.* there itself).
+_CONTENT_TABLES = tuple(t for t in _ROW_TABLES if t != "kv")
+_FAILED_NAME = re.compile(r"failed-cc-[0-9]{8}-[0-9]{6}[a-z]?\.zip")
+
+
+def _unlink_db(p: Path) -> None:
+    """Remove a SQLite file and the -wal / -shm a read-only open of a WAL snapshot leaves."""
+    for f in (p, p.with_name(p.name + "-wal"), p.with_name(p.name + "-shm")):
+        f.unlink(missing_ok=True)
 
 
 def _backup_db_rows(db_path: Path) -> dict[str, int]:
@@ -1340,10 +1354,27 @@ def _backup_db_rows(db_path: Path) -> dict[str, int]:
         conn.close()
 
 
+def _good_zips(out_dir: Path) -> list[Path]:
+    """Verified backups in the folder, oldest first (failed-cc-*.zip never match)."""
+    return sorted(out_dir.glob("cc-*.zip")) if out_dir.exists() else []
+
+
+def _baseline(out_dir: Path, exclude: Optional[Path] = None) -> dict:
+    """The newest good backup on disk: {file, size} or {} (the shrink / emptied-store baseline)."""
+    for z in reversed(_good_zips(out_dir)):
+        if exclude is not None and z == exclude:
+            continue
+        try:
+            return {"file": str(z), "size": z.stat().st_size}
+        except OSError:
+            continue
+    return {}
+
+
 def verify_backup(zpath: Path, live_rows: dict[str, int], live_files: int, previous_good: Optional[dict] = None) -> dict:
     """Open the zip and check it holds what the live store held: a readable archive, a database
     that passes integrity_check with the same row counts, every stored file, and a size in line
-    with the last good backup. Returns {ok, problems[], ...}; never raises."""
+    with the newest good backup on disk (`previous_good`). Returns {ok, problems[], ...}; never raises."""
     problems: list[str] = []
     out: dict[str, Any] = {"size": zpath.stat().st_size if zpath.exists() else 0}
     tmp = zpath.with_name(f".verify-{zpath.stem}.db")
@@ -1375,33 +1406,60 @@ def verify_backup(zpath: Path, live_rows: dict[str, int], live_files: int, previ
     except (zipfile.BadZipFile, OSError, sqlite3.Error) as e:
         problems.append(f"unreadable: {e}")
     finally:
-        tmp.unlink(missing_ok=True)
+        _unlink_db(tmp)
     if out.get("files", 0) < live_files:
         problems.append(f"{out.get('files', 0)} stored files in the zip, {live_files} on disk")
     prev = (previous_good or {}).get("size") or 0
-    if sum(live_rows.values()) == 0:
-        # A brand-new install is empty and fine; a store that HAD data and is now empty is not.
+    if prev < BACKUP_BASELINE_MIN:
+        prev = 0  # a new install's tiny first backups are no baseline
+    if live_rows and sum(live_rows.get(t, 0) for t in _CONTENT_TABLES) == 0:
+        # A brand-new install is empty and fine; a store whose last good backup held real data is not.
         if prev:
-            problems.append("the live store is empty (is this gateway pointed at the right data folder?)")
+            problems.append("the live store is empty but the last good backup was not (is this gateway pointed at the right data folder?)")
         else:
             out["note"] = "empty store (first backup of a new install)"
     if prev and out["size"] < prev * BACKUP_SHRINK_RATIO:
-        problems.append(f"{out['size']:,} bytes, under {int(BACKUP_SHRINK_RATIO * 100)}% of the last good backup ({prev:,} bytes)")
+        problems.append(f"{out['size']:,} bytes, under {int(BACKUP_SHRINK_RATIO * 100)}% of the last good backup ({prev:,} bytes). If you really removed that much, accept it on the Vault page")
     out["ok"] = not problems
     out["problems"] = problems
     return out
 
 
+def _rotate(out_dir: Path, keep: int) -> None:
+    """Retention: verified backups beyond `keep`, and failed ones beyond FAILED_BACKUPS_KEEP."""
+    zips = _good_zips(out_dir)
+    for old in zips[: max(0, len(zips) - keep)]:
+        old.unlink(missing_ok=True)
+    failed = sorted(out_dir.glob("failed-cc-*.zip"))
+    for old in failed[: max(0, len(failed) - FAILED_BACKUPS_KEEP)]:
+        old.unlink(missing_ok=True)
+
+
+def _mark_good(info: dict, keep: int, out_dir: Path) -> dict:
+    info["ok"] = True
+    _rotate(out_dir, keep)
+    kv_set("backup.last", info)
+    kv_set("backup.lastGood", info)
+    kv_set("backup.lastFailure", None)
+    return info
+
+
+def _free_backup_path(out_dir: Path, stamp: str) -> Path:
+    """cc-<stamp>.zip, or cc-<stamp>b.zip, c, ... for a second backup in the same second (the
+    letter sorts after the bare name, so retention keeps the newest)."""
+    for suffix in [""] + [chr(c) for c in range(ord("b"), ord("z") + 1)]:
+        z = out_dir / f"cc-{stamp}{suffix}.zip"
+        if not z.exists() and not z.with_name(f"failed-{z.name}").exists():
+            return z
+    raise RuntimeError("too many backups in one second")
+
+
 def run_backup(reason: str = "manual") -> dict:
     cfg = load_config()["backup"]
+    keep = int(cfg.get("keep", 14))
     out_dir = Path(cfg["dir"]).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    zpath = out_dir / f"cc-{stamp}.zip"
-    n = 2
-    while zpath.exists() or zpath.with_name(f"failed-{zpath.name}").exists():  # two backups in one second
-        zpath = out_dir / f"cc-{stamp}-{n}.zip"
-        n += 1
+    zpath = _free_backup_path(out_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
     tmp_db = CC_DIR / f".backup-{zpath.stem}.db"
     live_rows: dict[str, int] = {}
     live_files = 0
@@ -1430,12 +1488,12 @@ def run_backup(reason: str = "manual") -> dict:
                         z.write(f, f"files/{f.relative_to(FILES_DIR).as_posix()}")
                         live_files += 1
     finally:
-        tmp_db.unlink(missing_ok=True)
-    check = verify_backup(zpath, live_rows, live_files, kv_get("backup.lastGood"))
+        _unlink_db(tmp_db)
+    check = verify_backup(zpath, live_rows, live_files, _baseline(out_dir, exclude=zpath))
     info = {"file": str(zpath), "size": check["size"], "at": time.time(), "reason": reason, "verified": check}
     if not check["ok"]:
-        # Keep it for inspection under a name retention never counts, leave every good backup
-        # alone, and raise the alarm (Vault page banner via /backups, gateway log).
+        # Keep it for inspection under a name retention never counts as good, leave every good
+        # backup alone, and raise the alarm (Vault page banner via /backups, gateway log).
         failed = zpath.with_name(f"failed-{zpath.name}")
         try:
             zpath.replace(failed)
@@ -1443,19 +1501,32 @@ def run_backup(reason: str = "manual") -> dict:
         except OSError:
             pass
         info["ok"] = False
+        _rotate(out_dir, keep)
         kv_set("backup.last", info)
         kv_set("backup.lastFailure", info)
         print(f"[command-center] BACKUP FAILED verification ({reason}): {'; '.join(check['problems'])}")
         return info
-    info["ok"] = True
-    # Retention: verified backups only, and only after this one verified.
-    zips = sorted(out_dir.glob("cc-*.zip"))
-    for old in zips[: max(0, len(zips) - int(cfg.get("keep", 14)))]:
-        old.unlink(missing_ok=True)
-    kv_set("backup.last", info)
-    kv_set("backup.lastGood", info)
-    kv_set("backup.lastFailure", None)
-    return info
+    return _mark_good(info, keep, out_dir)
+
+
+def accept_failed_backup(name: str) -> dict:
+    """The user confirms a failed backup is right (they really removed that much): it becomes a
+    good backup and the new baseline. Only a failed-cc-*.zip in the backup folder, and only one
+    whose archive itself is sound (readable, cc.db intact)."""
+    cfg = load_config()["backup"]
+    out_dir = Path(cfg["dir"]).expanduser()
+    if not _FAILED_NAME.fullmatch(name or ""):
+        raise ValueError("not a failed backup name")
+    src = out_dir / name
+    if not src.is_file():
+        raise FileNotFoundError(name)
+    sound = verify_backup(src, {}, 0, None)
+    if not sound["ok"]:
+        raise ValueError(f"that archive itself is damaged: {'; '.join(sound['problems'])}")
+    dst = src.with_name(name[len("failed-"):])
+    src.replace(dst)
+    info = {"file": str(dst), "size": dst.stat().st_size, "at": time.time(), "reason": "accepted", "verified": sound}
+    return _mark_good(info, int(cfg.get("keep", 14)), out_dir)
 
 
 def _backup_scheduler() -> None:
@@ -1476,6 +1547,21 @@ def backup_now():
         return run_backup("manual")
     except Exception as e:
         raise HTTPException(500, f"Backup failed: {e}")
+
+
+class BackupAccept(BaseModel):
+    name: str
+
+
+@router.post("/backup/accept")
+def backup_accept(body: BackupAccept):
+    """Accept a failed backup as good (the Vault page's "It's right" on the failure banner)."""
+    try:
+        return accept_failed_backup(body.name)
+    except FileNotFoundError:
+        raise HTTPException(404, "no such failed backup")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.get("/backups")

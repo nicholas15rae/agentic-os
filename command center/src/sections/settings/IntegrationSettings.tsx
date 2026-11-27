@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CalendarDays, Camera, Container, Copy, Download, FileText, FlaskConical, Loader2, Mail, Map as MapIcon, Music2, Plus, Radar, RefreshCw, ShieldCheck, Trash2, Unplug } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
-import { cmd, isTauri, onNativeEvent, type N8nDiscovery, type NativeCommands, type SpotifyReauthEvent, type SpotifyStatus, type WorkflowInfo } from "@/lib/platform";
+import { cmd, isTauri, onNativeEvent, type N8nDiscovery, type NativeCommands, type ProvidersView, type SpotifyReauthEvent, type SpotifyStatus, type WorkflowInfo } from "@/lib/platform";
 import { cc, type CcConfig } from "@/lib/cc-api";
 import { syncCalendar } from "@/features/reminders/scheduler";
 import { setMcpEnabled } from "@/features/integrations/mcp-enable";
@@ -536,11 +536,26 @@ export function SpotifyCard() {
   );
 }
 
+/** Tony's local model id from providers.json (`policy.primaryLocal`'s model), or null. Pure. */
+export function tonyModelOf(view: ProvidersView | null): string | null {
+  const id = view?.policy.primaryLocal;
+  const m = view?.providers.find((p) => p.id === id)?.model?.trim();
+  return m && m !== "local-model" ? m : null;
+}
+
 /** The gateway's local LLM: OCR (vision), organizing, widget generation, vault embeddings. */
 export function LocalLlmCard() {
   const [cfg, setCfg] = useState<CcConfig | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
+  // Tony's brain (providers.json primaryLocal). Section 21.4: the gateway's empty text model means
+  // "the model LM Studio already has loaded" = Tony's, so OCR, brainstorm and widget jobs never
+  // load a second model. An explicit pin would go stale when Tony's model changes, so the default
+  // stays empty and is labelled for what it is.
+  const tonyModel = useProviders((s) => tonyModelOf(s.view));
+  const loadProviders = useProviders((s) => s.load);
+  useEffect(() => void loadProviders(), [loadProviders]);
+  const pinnedElsewhere = !!cfg?.llm.model && !!tonyModel && cfg.llm.model !== tonyModel;
   const load = async () => {
     try {
       setCfg(await cc.config());
@@ -578,10 +593,11 @@ export function LocalLlmCard() {
         <Field label="Endpoint (OpenAI-compatible)">
           <Input defaultValue={cfg.llm.baseUrl} onBlur={(e) => e.target.value !== cfg.llm.baseUrl && void save({ baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
         </Field>
-        {pick("Text model", "model", (m) => !/embed/i.test(m), "First loaded model")}
+        {pick("Text model", "model", (m) => !/embed/i.test(m), tonyModel ? `Tony's loaded model (${tonyModel}) — no second load` : "The loaded model (no second load)")}
         {pick("Vision model (OCR)", "visionModel", (m) => /vl|vision|llava|gemma-3|qwen2\.5-vl|pixtral|minicpm/i.test(m), "Same as text model")}
         {pick("Embedding model (vault)", "embeddingModel", (m) => /embed/i.test(m), "First embedding model")}
       </div>
+      {pinnedElsewhere && <p className="mt-2 text-xs text-amber-soft">The text model is pinned to {cfg.llm.model}, not Tony's {tonyModel}: gateway jobs will load it next to his. Pick "Tony's loaded model" to avoid that.</p>}
       {msg && <p className={`mt-2 text-xs ${/not reach|Gateway|fail/i.test(msg) ? "text-alert" : "text-teal"}`}>{msg}</p>}
       {!isTauri() && <p className="mt-2 text-xs text-ink-3">These settings live on the gateway, so they apply to every device.</p>}
     </Card>

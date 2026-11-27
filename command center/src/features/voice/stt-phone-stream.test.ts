@@ -226,7 +226,7 @@ describe("the phone streams its STT", () => {
     expect(l.hh.onFinal).toHaveBeenLastCalledWith("uploaded text");
   });
 
-  it("starts with captions paused while Tony's reply streams; partialMs 0 = no stream at all", async () => {
+  it("starts with captions paused while Tony's reply streams; partialMs 0 still streams, captions never on", async () => {
     useVoice.setState({ state: "thinking" });
     let l = await listen();
     l.push(LOUD, 30);
@@ -239,10 +239,14 @@ describe("the phone streams its STT", () => {
     useSettings.getState().set({ vad: { ...vad0, activationDb: -44, partialMs: 0 } });
     l = await listen();
     l.push(LOUD, 30);
+    // Captions off (the default since Section 20.5): the phone still streams for the gateway's
+    // final (no WAV upload over NetBird), with partials off from the start and never turned on.
+    expect(fake.sockets).toHaveLength(2);
+    fake.sockets[1].onopen?.({});
+    expect(fake.sockets[1].json()[0].partials).toBe(false);
     l.push(QUIET, 40);
     await flush();
-    expect(fake.sockets).toHaveLength(1);
-    expect(h.langStt).toHaveBeenCalledTimes(1);
+    expect(fake.sockets[1].json().some((m: { type?: string; partials?: boolean }) => m.type === "config" && m.partials === true)).toBe(false);
   });
 
   it("a mute aborts the stream: no final, no upload", async () => {

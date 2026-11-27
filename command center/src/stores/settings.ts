@@ -169,7 +169,7 @@ const defaults: Omit<SettingsState, "set"> = {
   wakeRequire: true,
   glassOpacity: 8,
   gatewayToken: "",
-  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 600 },
+  vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 0 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true, vocalHandoffs: false },
   reminders: { osFallback: true },
@@ -249,6 +249,9 @@ export function migrateSettings(persisted: unknown, from: number): SettingsState
   // v8 (section pass): Agent Chatter is off by default — internal agent back-and-forth is never
   // spoken unless Nic turns it back on (saves ElevenLabs credits). Reset once for existing installs.
   if (from < 8 && isPlainObject(s.routing)) s.routing = { ...s.routing, vocalHandoffs: false };
+  // v9 (section pass, 20.5): live captions off by default — each one is an extra Whisper pass on
+  // the GPU competing with Tony. Only the old 600 ms default is reset; a spacing Nic chose stays.
+  if (from < 9 && isPlainObject(s.vad) && (s.vad as { partialMs?: unknown }).partialMs === 600) s.vad = { ...s.vad, partialMs: 0 };
   // `merge` (below) backfills any still-missing fields right after this runs.
   return s as unknown as SettingsState;
 }
@@ -261,7 +264,7 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: "cc.settings",
-      version: 8,
+      version: 9,
       migrate: migrateSettings,
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults

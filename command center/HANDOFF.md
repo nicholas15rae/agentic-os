@@ -17,7 +17,7 @@ npm run desktop:build  # installer
 ## 1. Topology
 
 ```
- Phone (PWA, NetBird/Wi-Fi) ──┐                         ┌─ LM Studio :1234  (chat, verifier, vision OCR, embeddings)
+ Phone (PWA, NetBird/Wi-Fi) ──┐                         ┌─ LM Studio :1235  (chat, verifier, vision OCR, embeddings)
                               ├─► Gateway :8080 ────────┤
  Desktop (Tauri) ─────────────┘   server.py             ├─ n8n (Docker) :5678 (Gmail/Calendar nodes hold Google OAuth)
         │                         └ /api/cc  → SQLite    └─ Yahoo chart API   (market candles, read-only)
@@ -33,7 +33,7 @@ npm run desktop:build  # installer
 
 | Service | Default | Notes |
 |---|---|---|
-| LM Studio | `http://127.0.0.1:1234/v1` | Chat chain #1. Load a **vision** model (e.g. Qwen2.5-VL) for OCR and an **embedding** model (nomic-embed) for the vault. |
+| LM Studio | `http://127.0.0.1:1235/v1` (Bionic; :1234 is closed) | Chat chain #1. Load a **vision** model (e.g. Qwen2.5-VL) for OCR and an **embedding** model (nomic-embed) for the vault. |
 | **Verifier** | **LM Studio, no key** | Zero-cost local cross-check of mutating plans. Pick a *different* model than the planner (Settings warns if they match). The old OpenRouter entry was backed up to `providers.json.bak-openrouter`. |
 | AnythingLLM | `:3001/api/v1/openai` | Chat chain #2 (needs its API key). |
 | Agentic OS | `:8080` | Chat chain #3 (opencode / agy / claude / gemini / llm; a missing CLI returns 503) and the executor for approved actions (opencode). |

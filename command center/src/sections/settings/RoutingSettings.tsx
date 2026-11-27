@@ -89,7 +89,7 @@ export function NarrationControl({
   modeName?: string;
 }) {
   const level = feedbackLevel(feedback ? { feedback: { sensitivity: feedback.sensitivity, narrationEngine: feedback.narrationEngine } } : null);
-  const engine = feedback?.narrationEngine ?? "roster";
+  const engine = feedback?.narrationEngine ?? "kokoro";
   return (
     <div className="border-b border-white/5 py-2.5">
       <div className="flex flex-wrap items-center gap-3">

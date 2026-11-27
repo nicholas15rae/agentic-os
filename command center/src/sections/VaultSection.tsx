@@ -159,6 +159,26 @@ function BackupCard() {
             Kept aside as {list.failure.file.split(/[\\/]/).pop()}; older good backups were not rotated out.
             {list.lastGood ? ` Last good backup: ${new Date(list.lastGood.at * 1000).toLocaleString()}.` : ""}
           </p>
+          <button
+            className="pill-glass !h-8 mt-2 text-xs"
+            disabled={!!busy}
+            title="Only if you really removed that much (deleted scans, a cleared vault): this backup becomes the good one and the new size baseline."
+            onClick={async () => {
+              const name = list.failure?.file.split(/[\\/]/).pop() ?? "";
+              setBusy("accept");
+              try {
+                await cc.acceptBackup(name);
+                setMsg(`Accepted ${name} as a good backup.`);
+                await load();
+              } catch (e) {
+                setMsg(String(e));
+              } finally {
+                setBusy(null);
+              }
+            }}
+          >
+            It's right, I removed that data
+          </button>
         </div>
       )}
       {health && (

@@ -10,9 +10,9 @@
 
 Run with: python3 tests/run_all.py  (or: python3 tests/test_backup_verify.py)
 """
+import os
 import sys
 import unittest
-import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,14 +62,19 @@ class BackupVerifyTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertTrue(any("stored files" in p for p in out["problems"]), out["problems"])
 
-    def test_a_shrunken_backup_is_kept_aside_and_good_ones_survive_retention(self):
+    def big_scan(self):
+        # Incompressible, so the zip really shrinks when it goes (the baseline must be >= 64 KB).
+        (cc.FILES_DIR / "big-scan.bin").write_bytes(os.urandom(400_000))
+
+    def test_a_shrunken_backup_is_kept_aside_good_ones_survive_and_it_can_be_accepted(self):
         cfg = cc.load_config()
         cfg["backup"]["keep"] = 1
         cc.save_config(cfg)
+        self.big_scan()
         good = cc.run_backup("test")
-        self.assertTrue(good["ok"])
-        # Pretend the last good backup was far bigger: this one now looks like a store gone empty.
-        cc.kv_set("backup.lastGood", {**good, "size": good["size"] * 100})
+        self.assertTrue(good["ok"], good["verified"]["problems"])
+        # The scan goes: the next backup is under 25% of the newest good one ON DISK.
+        (cc.FILES_DIR / "big-scan.bin").unlink()
         bad = cc.run_backup("test")
         self.assertFalse(bad["ok"])
         self.assertTrue(Path(bad["file"]).name.startswith("failed-cc-"), bad["file"])
@@ -78,21 +83,55 @@ class BackupVerifyTests(unittest.TestCase):
         self.assertEqual(lst["failure"]["file"], bad["file"])
         self.assertEqual([b["name"] for b in lst["backups"]], [Path(good["file"]).name])
         self.assertEqual(len(lst["failed"]), 1)
+        # Nic confirms he really removed it: it becomes the good backup (and the baseline).
+        ok = cc.accept_failed_backup(Path(bad["file"]).name)
+        self.assertTrue(ok["ok"])
+        lst = cc.list_backups()
+        self.assertIsNone(lst["failure"])
+        self.assertEqual([b["name"] for b in lst["backups"]], [Path(bad["file"]).name[len("failed-"):]], "keep=1 now keeps the accepted one")
+        nxt = cc.run_backup("test")
+        self.assertTrue(nxt["ok"], nxt["verified"]["problems"])
+        with self.assertRaises(ValueError):
+            cc.accept_failed_backup("../cc.db")
 
-    def test_an_emptied_store_fails_but_a_new_install_does_not(self):
-        cc.kv_set("probe", None)
+    def test_a_wiped_store_fails_against_the_folder_even_with_no_record_of_its_own(self):
+        self.big_scan()
+        self.assertTrue(cc.run_backup("test")["ok"])
+        # cc.db wiped / swapped for an empty one: no rows, no backup.* keys, no files.
+        with cc._db_lock, cc.db() as c:
+            for t in ("kv", "items", "files", "vault", "os_queue"):
+                try:
+                    c.execute(f"DELETE FROM {t}")
+                except Exception:
+                    pass
+        (cc.FILES_DIR / "big-scan.bin").unlink()
+        (cc.FILES_DIR / "scan.txt").unlink()
+        bad = cc.run_backup("test")
+        self.assertFalse(bad["ok"])
+        self.assertTrue(any("live store is empty" in p for p in bad["verified"]["problems"]), bad["verified"]["problems"])
+
+    def test_a_new_install_is_fine_and_failed_zips_are_capped(self):
         with cc._db_lock, cc.db() as c:
             c.execute("DELETE FROM kv")
         (cc.FILES_DIR / "scan.txt").unlink()
         first = cc.run_backup("test")
         self.assertTrue(first["ok"], first["verified"]["problems"])
-        # run_backup wrote backup.* keys; wipe them again so the store is empty, with a good backup on record.
-        last_good = {"size": 5_000_000, "at": 1, "file": "x"}
-        with cc._db_lock, cc.db() as c:
-            c.execute("DELETE FROM kv")
-        out = cc.verify_backup(Path(first["file"]), {t: 0 for t in cc._ROW_TABLES}, 0, last_good)
-        self.assertFalse(out["ok"])
-        self.assertTrue(any("live store is empty" in p for p in out["problems"]), out["problems"])
+        self.assertIn("note", first["verified"])
+        d = self.backups_dir()
+        for i in range(6):
+            (d / f"failed-cc-20200101-00000{i}.zip").write_bytes(b"x")
+        cc._rotate(d, 14)
+        self.assertEqual(len(list(d.glob("failed-cc-*.zip"))), cc.FAILED_BACKUPS_KEEP)
+        # No -wal / -shm litter from the verify / snapshot opens.
+        self.assertEqual([p.name for p in list(d.glob("*.db*")) + list(cc.CC_DIR.glob(".backup-*"))], [])
+
+    def test_same_second_backups_sort_after_the_first(self):
+        d = self.backups_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "cc-20261126-101440.zip").write_bytes(b"x")
+        z = cc._free_backup_path(d, "20261126-101440")
+        self.assertEqual(z.name, "cc-20261126-101440b.zip")
+        self.assertEqual(sorted([z.name, "cc-20261126-101440.zip"])[-1], z.name)
 
 
 if __name__ == "__main__":

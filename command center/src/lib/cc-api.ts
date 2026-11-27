@@ -75,6 +75,8 @@ export const cc = {
   reindex: () => gateway<{ queued: number }>("/api/cc/vault/reindex", { method: "POST" }),
   backupNow: () => gateway<BackupInfo>("/api/cc/backup", { method: "POST", timeoutMs: 120_000 }),
   backups: () => gateway<BackupList>("/api/cc/backups"),
+  /** A failed backup is right after all (you really removed that much): make it good + the new baseline. */
+  acceptBackup: (name: string) => gateway<BackupInfo>("/api/cc/backup/accept", { method: "POST", body: JSON.stringify({ name }) }),
   candles: (symbol: string, interval: string, range: string) =>
     gateway<MarketData>(`/api/cc/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${interval}&range=${range}`, { timeoutMs: 20_000 }),
   fileUrl: (id: string) => `${useSettings.getState().gatewayUrl.replace(/\/+$/, "")}/api/cc/files/${id}`,

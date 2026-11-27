@@ -23,9 +23,12 @@ use super::privacy::Replacement;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ComputeMode {
-    /// 100 % local hardware; every remote/cloud call is blocked.
+    /// 100 % local hardware; every remote/cloud call is blocked, the Claude CLI engines included
+    /// (help desk, verifier, Coder offload).
     Local,
-    /// Local first; offload a turn when VRAM is over the threshold or the prompt is huge.
+    /// Local first; offload BACKGROUND work when VRAM is over the threshold or the prompt is
+    /// huge. Tony's own chat turns never overflow (`shape_tony_turn`), and with cloud routing on
+    /// Ask (the default) an unpinned remote backend is never used at all (Section 20.6).
     #[default]
     Hybrid,
     /// Remote/droplet first to keep the GPU free; local stays as fallback.
@@ -501,7 +504,8 @@ pub struct OsPermissions {
 }
 impl Default for OsPermissions {
     fn default() -> Self {
-        Self { delegation: Tier::Allow, mcp: Tier::Allow, filesystem: Tier::Allow, cloud: Tier::Allow }
+        // Cloud / droplet routing sends data off the machine: Ask (Section 20.7).
+        Self { delegation: Tier::Allow, mcp: Tier::Allow, filesystem: Tier::Allow, cloud: Tier::Ask }
     }
 }
 
@@ -838,7 +842,9 @@ pub struct FeedbackConfig {
 }
 impl Default for FeedbackConfig {
     fn default() -> Self {
-        Self { sensitivity: 1, narration_engine: "roster".into() }
+        // Narration on local Kokoro: spares ElevenLabs credits and its concurrency 429s; Tony's
+        // replies and agent reports keep their ElevenLabs voices (Section 20.4).
+        Self { sensitivity: 1, narration_engine: "kokoro".into() }
     }
 }
 
@@ -1032,6 +1038,8 @@ const MIGRATE_SELF_ROUTING: &str = "self-routing";
 pub(crate) const MIGRATE_VAULT_CADENCE: &str = "vault-cadence";
 /// Migration id: business / finance triggers left `ops` (infra) for `bizops` and `finance`.
 pub(crate) const MIGRATE_BIZOPS_SPLIT: &str = "bizops-split";
+/// Migration id: local-only compute, cloud routing on Ask, no Overseer auto-escalation.
+pub(crate) const MIGRATE_LOCAL_SAFE_DEFAULTS: &str = "local-safe-defaults";
 /// The `ops` triggers that moved to `bizops` / `finance` (removed once from a saved config).
 const MOVED_OFF_OPS: [&str; 8] = ["operations", "business", "finance", "invoice", "receipt", "bf supplements", "contracting", "quote"];
 
@@ -1087,6 +1095,25 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
         strip_booking_tools(cfg);
         cfg.migrations.push(MIGRATE_BOOKING_NO_TOOLS.into());
     }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_LOCAL_SAFE_DEFAULTS) {
+        apply_local_safe_defaults(cfg);
+        cfg.migrations.push(MIGRATE_LOCAL_SAFE_DEFAULTS.into());
+    }
+}
+
+/// Section 20.6/20.7 + 21.5: nothing leaves the machine on its own. Cloud / droplet routing
+/// Allow → Ask (an unpinned remote backend is then never used, so Hybrid can't overflow to the
+/// droplet's Qwen3 0.6B; Tony's turns never overflow anyway, `shape_tony_turn`); the Overseer
+/// never auto-escalates a conversation to Claude. The compute mode is left alone: Local only
+/// would also block the on-demand Claude CLI (help desk, verifier, Coder offload). Deny stays. Once.
+pub(crate) fn apply_local_safe_defaults(cfg: &mut OsConfig) {
+    // Cloud mode is a deliberate remote-first choice: Ask would strip every remote provider from it.
+    if cfg.permissions.cloud == Tier::Allow && cfg.compute.mode != ComputeMode::Cloud {
+        cfg.permissions.cloud = Tier::Ask;
+    }
+    cfg.overseer.auto_escalate = false;
+    // Narration lines on local Kokoro (Section 20.4).
+    cfg.feedback.narration_engine = "kokoro".into();
 }
 
 /// The Booking Desk gets no tools: off every server's grant list and every skill grant, and its
@@ -1588,6 +1615,14 @@ pub fn shape_chain(os: &OsConfig, mut chain: Vec<Provider>, vram_pct: Option<f32
         chain.sort_by_key(|p| !is_remote(p)); // stable: remote providers first
     }
     (chain, notes)
+}
+
+/// `shape_chain` for Tony's own chat turns (interactive / streamed answers): Hybrid never
+/// auto-overflows them. Tony's model sits at ~86% VRAM on its own, so a 90% threshold sent real
+/// turns to the droplet's tiny model (Section 20.6). Cloud mode, the kill switch, Ask/Deny and
+/// the droplet switch still apply exactly as in `shape_chain`.
+pub fn shape_tony_turn(os: &OsConfig, chain: Vec<Provider>) -> (Vec<Provider>, Vec<String>) {
+    shape_chain(os, chain, None, 0, false)
 }
 
 /// Current VRAM %, if an NVIDIA GPU is visible.
@@ -2256,7 +2291,7 @@ mod tests {
         // An existing os.json (no feedback / worker / new memory keys) loads unchanged.
         let old: OsConfig = serde_json::from_value(json!({ "osName": "Tony", "memory": { "storage": "local" } })).unwrap();
         assert_eq!(old.feedback.sensitivity, 1);
-        assert_eq!(old.feedback.narration_engine, "roster");
+        assert_eq!(old.feedback.narration_engine, "kokoro");
         assert!(old.worker.enabled && !old.worker.verify && old.worker.offload_code && old.worker.librarian_audit);
         assert_eq!(old.worker.max_iterations, 3);
         assert_eq!((old.memory.notes_dir.as_str(), old.memory.staging_dir.as_str()), ("", ""));
@@ -2271,7 +2306,7 @@ mod tests {
         assert_eq!(next.feedback.sensitivity, 3);
         assert!(validate(&next).is_ok());
         let v = serde_json::to_value(&next).unwrap();
-        assert_eq!(v["feedback"]["narrationEngine"], "roster");
+        assert_eq!(v["feedback"]["narrationEngine"], "kokoro");
         assert_eq!(v["worker"]["librarianAudit"], true);
         let mut bad = OsConfig::default();
         bad.feedback.narration_engine = "elevenlabs".into();
@@ -2456,7 +2491,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string()]);
     }
 
     #[test]
@@ -2481,6 +2516,49 @@ mod tests {
         assert!(cfg.routing.agents["ops"].domains.contains(&"invoice".to_string()));
         // The finance workspace mapping is exactly finance → finance (not an anomaly).
         assert!(!super::super::finance_vault::finance_mapping_anomaly(&OsConfig::default().anythingllm.workspaces));
+    }
+
+    #[test]
+    fn local_safe_defaults_migrate_once_and_tony_turns_never_overflow() {
+        let fresh = OsConfig::default();
+        assert_eq!(fresh.compute.mode, ComputeMode::Hybrid, "Local only would block the on-demand Claude CLI");
+        assert_eq!(fresh.permissions.cloud, Tier::Ask);
+        assert!(!fresh.overseer.auto_escalate);
+        // A config saved before Section 20: cloud Allow, auto-escalate on, roster narration.
+        let mut cfg = OsConfig::default();
+        cfg.permissions.cloud = Tier::Allow;
+        cfg.overseer.auto_escalate = true;
+        cfg.feedback.narration_engine = "roster".into();
+        apply_migrations(&mut cfg);
+        assert_eq!((cfg.compute.mode, cfg.permissions.cloud, cfg.overseer.auto_escalate), (ComputeMode::Hybrid, Tier::Ask, false));
+        assert_eq!(cfg.feedback.narration_engine, "kokoro");
+        // Once: switching back afterwards is the user's choice.
+        cfg.permissions.cloud = Tier::Allow;
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.permissions.cloud, Tier::Allow);
+        // A deliberate Deny is kept, and so is Allow in deliberate Cloud mode.
+        let mut c2 = OsConfig::default();
+        c2.permissions.cloud = Tier::Deny;
+        apply_local_safe_defaults(&mut c2);
+        assert_eq!(c2.permissions.cloud, Tier::Deny);
+        let mut c3 = OsConfig::default();
+        c3.compute.mode = ComputeMode::Cloud;
+        c3.permissions.cloud = Tier::Allow;
+        apply_local_safe_defaults(&mut c3);
+        assert_eq!(c3.permissions.cloud, Tier::Allow);
+
+        let local = super::super::dispatch::Config::default().providers.into_iter().find(|p| p.kind.is_chat() && !is_remote(p)).expect("a local chat provider");
+        let mut remote = local.clone();
+        remote.id = "remote".into();
+        remote.base_url = "https://api.example.com/v1".into();
+        // On Ask (the default) Hybrid never reaches an unpinned remote backend, even over the threshold.
+        let (asked, _) = shape_chain(&OsConfig::default(), vec![local.clone(), remote.clone()], Some(95.0), 0, false);
+        assert_eq!(asked.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec![local.id.as_str()]);
+        // Allow + VRAM over the threshold: background work offloads, Tony's turn doesn't.
+        let (bg, _) = shape_chain(&cfg, vec![local.clone(), remote.clone()], Some(95.0), 0, false);
+        assert_eq!(bg[0].id, remote.id, "background work may overflow");
+        let (tony, _) = shape_tony_turn(&cfg, vec![local.clone(), remote]);
+        assert_eq!(tony[0].id, local.id, "Tony's chat turn stays local");
     }
 
     #[test]

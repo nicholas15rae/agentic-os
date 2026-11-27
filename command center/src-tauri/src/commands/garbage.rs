@@ -31,6 +31,8 @@ const BOOT_DELAY: Duration = Duration::from_secs(300);
 const DEFER_RETRY: Duration = Duration::from_secs(600);
 /// Quiet window (minutes since the last interactive turn) a scheduled pass waits for.
 const QUIET_MINS: u32 = 5;
+/// A pass put off this long (always busy) runs anyway.
+const MAX_DEFER: Duration = Duration::from_secs(6 * 3600);
 
 /// The effective scheduled cadence for a configured `roster.garbage_minutes`.
 pub fn every(minutes: u32) -> Duration {
@@ -253,6 +255,7 @@ pub async fn daemon(app: tauri::AppHandle) {
     // Next scheduled pass: `every(roster.garbage_minutes)` after a pass (or a market-hours hold),
     // DEFER_RETRY while the user is active or another daemon holds the stagger slot.
     let mut next = tokio::time::Instant::now() + BOOT_DELAY;
+    let mut deferred_since: Option<tokio::time::Instant> = None;
     let defer = |why: String| {
         let mut s = status().lock().unwrap();
         s.heartbeat_at = Some(now_ms());
@@ -289,13 +292,18 @@ pub async fn daemon(app: tauri::AppHandle) {
                     defer(why);
                     continue;
                 }
-                // Idle-only: no voice turn, TTS, generation, open task or Claude fix, and the quiet window over.
-                if let Some(why) = super::compaction::current_idle_reason(&app, QUIET_MINS, false) {
+                // Idle-only: no voice turn or Tony speaking, and the quiet window over. Builds and
+                // queued tasks don't count (one stuck task would starve maintenance forever), and
+                // after MAX_DEFER of continuous deferral the pass runs anyway (it is cheap file work).
+                let starved = deferred_since.is_some_and(|t: tokio::time::Instant| t.elapsed() >= MAX_DEFER);
+                if let Some(why) = super::compaction::user_busy_reason(&app, QUIET_MINS).filter(|_| !starved) {
                     super::stagger::note_deferred("garbage", &why);
                     defer(why);
+                    deferred_since.get_or_insert_with(tokio::time::Instant::now);
                     next = tokio::time::Instant::now() + DEFER_RETRY;
                     continue;
                 }
+                deferred_since = None;
                 if let Err(why) = super::stagger::claim("garbage", super::stagger::gap_seconds()) {
                     defer(why);
                     next = tokio::time::Instant::now() + DEFER_RETRY;
@@ -333,8 +341,16 @@ mod tests {
         // A longer setting is honoured.
         assert_eq!(every(180), Duration::from_secs(3 * 3600));
         assert_eq!(every_minutes(180), 180);
-        // Deferrals retry far slower than the old 60 s loop.
+        // Deferrals retry far slower than the old 60 s loop, and can't starve the pass for good.
         assert!(DEFER_RETRY >= Duration::from_secs(600));
+        assert!(MAX_DEFER <= Duration::from_secs(6 * 3600));
+        // Only the USER defers it: a queued / stuck build never does (user_busy has no task input).
+        use super::super::compaction::{user_busy, IdleWait};
+        let now = 10_000_000;
+        assert!(user_busy(None, 0, now, 300_000).is_none(), "never interacted: idle");
+        assert!(user_busy(None, now - 400_000, now, 300_000).is_none(), "quiet window over");
+        assert!(matches!(user_busy(None, now - 60_000, now, 300_000), Some(IdleWait::Quiet { .. })));
+        assert!(matches!(user_busy(Some((false, true, false)), 0, now, 300_000), Some(IdleWait::Voice)));
     }
 
     fn setup(tag: &str) -> (PathBuf, Allow) {

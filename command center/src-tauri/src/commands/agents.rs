@@ -2573,9 +2573,7 @@ pub(crate) async fn run_chat_streamed_into(state: &DispatchState, os: &OsState, 
     let cfg = state.snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
-    let chars: usize = messages.iter().map(|m| m.content.len()).sum();
-    let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
-    let shaped = first.map(|p| os_core::shape_chain(&osc, vec![p], vram, chars, false).0).unwrap_or_default();
+    let shaped = first.map(|p| os_core::shape_tony_turn(&osc, vec![p]).0).unwrap_or_default();
     let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && p.id != "anythingllm" && !os_core::is_remote(p)) else {
         return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
     };

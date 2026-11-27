@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { isEditingShortcut } from "@/lib/editing-keys";
 import {
   classifyKillKey,
   createKillArm,
@@ -53,6 +54,19 @@ describe("kill-switch hotkey listener (what useKillSwitchHotkey registers)", () 
     const plain = h.ev("x", { ctrl: true });
     h.onKey(plain);
     expect(plain.preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("the kill chord gets past the text-editing guard", () => {
+  it("every chord isKillHotkey accepts is left alone by isEditingShortcut while a text field has focus", () => {
+    const fields = [{ tagName: "TEXTAREA" }, { tagName: "INPUT", type: "text" }, { tagName: "DIV", isContentEditable: true }] as unknown as EventTarget[];
+    for (const target of fields)
+      for (const k of ["X", "x"])
+        for (const mods of [{ ctrlKey: true }, { metaKey: true }]) {
+          const e = { key: k, ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, ...mods, target };
+          expect(isKillHotkey(e)).toBe(true);
+          expect(isEditingShortcut(e)).toBe(false); // else installEditingKeyGuard swallows it before the kill listener
+        }
   });
 });
 

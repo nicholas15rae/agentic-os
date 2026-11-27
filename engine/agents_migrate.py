@@ -47,9 +47,18 @@ REMOVED = {"ops"}  # Ops agent removed 11-26 (its work is Tony's)
 TOOL_POLICY: dict[str, dict] = {
     "filesystem": {"owner": "coder",
                    "readers": {"director": [r"G:\ai-hub\media\projects"],
-                               "designer": []}},  # no Designer project folder exists yet: Nic names it
+                               # Nic 11-27: the repo's widget folders only (resolved from the repo at run
+                               # time). Play Place has no assets folder in the repo (its items live in the
+                               # gateway's shared store, next to the vault), so it isn't granted.
+                               "designer": [str(ROOT / "command center" / "src" / "widgets"), str(ROOT / "recovered-widgets")]}},
     "fetch": {"owner": "coder", "readers": {}},  # Tony uses Brave Search instead
     "knowledge-graph": {"owner": "general", "readers": {"librarian": None, "prompter": None}},  # None = no folder limit
+}
+
+# Nic 11-27: Booking stays frozen. If it is ever unfrozen it gets read-only WhatsApp and draft-only
+# Gmail; Tony keeps ownership of both. Recorded here, applied only when the agent isn't frozen.
+WHEN_UNFROZEN: dict[str, list[dict]] = {
+    "booking": [{"tool": "whatsapp", "access": "read"}, {"tool": "gmail", "access": "draft"}],
 }
 
 
@@ -100,8 +109,11 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
                     access.append({"tool": tid, "access": "read", **({"roots": roots} if roots is not None else {})})
             elif a in (m.get("agents") or []):
                 access.append({"tool": tid, "access": "read" if m.get("readOnly") else "write"})
+        later = WHEN_UNFROZEN.get(a, [])
+        if later and a not in frozen:
+            access += [dict(x) for x in later if x["tool"] not in {y["tool"] for y in access}]
         tools = [x["tool"] for x in access]
-        ro = [x["tool"] for x in access if x["access"] == "read"]
+        ro = [x["tool"] for x in access if x["access"] in ("read", "draft")]
         notes = []
         if a == "bizops":
             src, prompt = f"shared Biz Ops prompt: {BIZOPS_DRAFT}", None
@@ -127,6 +139,7 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
             "names": (agents_cfg.get(a) or {}).get("names", []), "domains": (agents_cfg.get(a) or {}).get("domains", []),
             "promptSource": src, "prompt": prompt, "model": ws.get("model"), "temperature": ws.get("temperature"),
             "history": ws.get("history"), "tools": tools, "readOnlyTools": ro, "toolAccess": access,
+            "whenUnfrozen": later if a in frozen else [],
             "skills": sorted(k for k, v in grants.items() if a in (v or [])),
             "memory": {"workspace": slug, "threads": ws.get("threads", 0), "chats": ws.get("chats", 0), "documents": ws.get("documents", 0)},
             "frozen": a in frozen, "migrate": a not in REMOVED, "notes": notes,

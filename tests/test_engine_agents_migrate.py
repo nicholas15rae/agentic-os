@@ -58,13 +58,16 @@ class ProposeTests(unittest.TestCase):
 
     def test_frozen_removed_and_memory(self):
         self.assertTrue(self.a["booking"]["frozen"])
+        # frozen: no tools now, its future access recorded (Tony keeps ownership of both)
+        self.assertEqual(self.a["booking"]["whenUnfrozen"], [{"tool": "whatsapp", "access": "read"}, {"tool": "gmail", "access": "draft"}])
+        self.assertNotIn("gmail", self.a["booking"]["tools"])
         self.assertFalse(self.a["ops"]["migrate"])
         self.assertEqual(self.a["general"]["memory"], {"workspace": "my-workspace", "threads": 3, "chats": 40, "documents": 0})
 
     def test_questions(self):
         q = " | ".join(self.r["questions"])
         self.assertNotIn("'filesystem' is granted", q)  # decided by TOOL_POLICY
-        self.assertIn("read-only for designer: which project folder", q)
+        self.assertNotIn("which project folder", q)  # Designer's folders are decided
         self.assertNotIn("'ops-only'", q)  # Ops is removed, so general is the only owner
         self.assertIn("agent 'finance' has no prompt", q)
         self.assertIn("director", q)  # a workspace no agent maps to
@@ -93,7 +96,9 @@ class ToolPolicyTests(unittest.TestCase):
         d = self.access("director")
         self.assertEqual(d["filesystem"], {"tool": "filesystem", "access": "read", "roots": [r"G:\ai-hub\media\projects"]})
         self.assertTrue(os.path.isabs(d["filesystem"]["roots"][0]) and all(ord(c) >= 32 for c in d["filesystem"]["roots"][0]))
-        self.assertEqual(self.access("designer")["filesystem"]["roots"], [])  # nothing until Nic names a folder
+        roots = self.access("designer")["filesystem"]["roots"]
+        self.assertEqual([os.path.basename(r) for r in roots], ["widgets", "recovered-widgets"])  # repo widget folders only
+        self.assertTrue(all(os.path.isabs(r) for r in roots))
         self.assertEqual({t: x["access"] for t, x in self.access("general").items()}, {"knowledge-graph": "write", "brave-search": "write"})
         self.assertNotIn("fetch", self.access("general"))  # Tony uses Brave Search
         self.assertEqual({t: x["access"] for t, x in self.access("prompter").items()}, {"knowledge-graph": "read"})
@@ -105,6 +110,15 @@ class ToolPolicyTests(unittest.TestCase):
         for tool in ("filesystem", "fetch", "knowledge-graph", "brave-search"):
             writers = [a for a, ag in agents.items() for x in ag["toolAccess"] if x["tool"] == tool and x["access"] == "write"]
             self.assertEqual(len(writers), 1, (tool, writers))
+
+
+class UnfrozenBookingTests(unittest.TestCase):
+    def test_unfrozen_booking_gets_read_and_draft_only(self):
+        cfg = {**OS, "switchboard": {"frozenAgents": []}, "mcps": OS["mcps"] + [{"id": "gmail", "agents": ["general"]}]}
+        a = propose(cfg, EXPORT)["agents"]
+        acc = {x["tool"]: x["access"] for x in a["booking"]["toolAccess"]}
+        self.assertEqual((acc.get("whatsapp"), acc.get("gmail")), ("read", "draft"))
+        self.assertEqual({x["tool"]: x["access"] for x in a["general"]["toolAccess"]}.get("gmail"), "write")  # Tony owns it
 
 
 if __name__ == "__main__":

@@ -86,7 +86,26 @@ SAMPLE_RATE = 16000
 MAX_AUDIO_BYTES = 20 * 1024 * 1024  # voice.rs caps at ~15 MB, the gateway at 16 MB
 QUEUE_MAX = 16
 PARTIAL_MAX_AGE = 2.0  # s a partial may wait before it is stale
-MIN_FREE_VRAM_MB = 1500  # don't load onto a GPU with less free than this (a model needs ~1.2 GB)
+# The VRAM pre-flight: a GPU load must leave VRAM_FLOOR_MB free even while a beam-5 final decodes.
+# Measured with nvidia-smi (2026-11-26 benchmark, stt/README.md): what each load keeps resident, the
+# CUDA context included (turbo int8_float16: vram_mb 1096-1199), and the decode peak on top (2519 MB
+# free idle against 2367-2391 MB at the lowest while benchmarking: ~130-150 MB).
+VRAM_FLOOR_MB = 500
+DECODE_PEAK_MB = 150
+RESIDENT_VRAM_MB = {
+    ("large-v3-turbo", "int8_float16"): 1200,
+    ("large-v3-turbo", "float16"): 2150,
+    ("distil-large-v3", "int8_float16"): 1030,
+    ("distil-large-v3", "float16"): 2020,
+}
+
+
+def vram_needed_mb(model: str, compute_type: str) -> int:
+    """Free VRAM a GPU load of `model` (alias or folder name) needs: resident + decode peak + floor,
+    1850 MB for the default large-v3-turbo int8_float16. A model / compute type never measured
+    counts as the biggest measured one. Pure."""
+    resident = RESIDENT_VRAM_MB.get((alias_of(model), compute_type), max(RESIDENT_VRAM_MB.values()))
+    return resident + DECODE_PEAK_MB + VRAM_FLOOR_MB
 RETRY_BACKOFF = (30.0, 600.0)  # s: first wait after a failed load, cap (doubles each time)
 FALLBACK_URL = "http://127.0.0.1:8178/v1/audio/transcriptions"  # whisper.cpp base.en on the CPU
 FALLBACK_TIMEOUT = 170.0  # s; voice.rs waits 180 s for a transcription
@@ -173,9 +192,12 @@ def _norm_word(w: str) -> str:
 class LocalAgreement:
     """LocalAgreement-2 over whole-clip partial hypotheses (each partial decodes everything said
     so far). The words two consecutive hypotheses agree on, from the start, are committed: the
-    stable text, never retracted. The rest of the newest hypothesis is tentative. Words compare
-    case- and edge-punctuation-insensitively ("Tony," == "tony"). The same rule as the desktop's
-    `LocalAgreement` (stt-partials.ts). Pure."""
+    stable text. The rest of the newest hypothesis is tentative. Words compare case- and
+    edge-punctuation-insensitively ("Tony," == "tony"). When Whisper revises a committed word (the
+    newest hypothesis no longer starts with the committed words), the newest is shown whole and
+    the committed words shrink to the prefix the two still share: never a splice of old words with
+    the new tail. An empty hypothesis changes nothing. The same rule as the desktop's
+    `LocalAgreement` (stt-partials.ts) and the gateway's (language_hub_api.py). Pure."""
 
     def __init__(self) -> None:
         self.prev: list[str] = []
@@ -184,15 +206,69 @@ class LocalAgreement:
     def push(self, text: str) -> tuple[str, str]:
         """-> (shown text = stable + tentative, stable text)."""
         cur = text.split()
-        c = len(self.committed)
-        # Commit more only while the new hypothesis still starts with what is committed.
-        if len(cur) >= c and all(_norm_word(a) == _norm_word(b) for a, b in zip(self.committed, cur)):
-            n = c
-            while n < min(len(self.prev), len(cur)) and _norm_word(self.prev[n]) == _norm_word(cur[n]):
-                n += 1
-            self.committed += cur[c:n]
-        self.prev = cur
+        if cur:
+            c = len(self.committed)
+            if len(cur) >= c and all(_norm_word(a) == _norm_word(b) for a, b in zip(self.committed, cur)):
+                # Still agrees with what is committed: commit what the last two hypotheses share.
+                n = c
+                while n < min(len(self.prev), len(cur)) and _norm_word(self.prev[n]) == _norm_word(cur[n]):
+                    n += 1
+                self.committed += cur[c:n]
+            else:
+                # A revision: keep only the common prefix, spelled as the newest (which is shown whole).
+                k = 0
+                while k < min(c, len(cur)) and _norm_word(self.committed[k]) == _norm_word(cur[k]):
+                    k += 1
+                self.committed = cur[:k]
+            self.prev = cur
         return " ".join(self.committed + cur[len(self.committed):]), " ".join(self.committed)
+
+
+def _prompt_words(s: str) -> list[str]:
+    words, cur = [], []
+    for c in s + " ":
+        if c.isalnum() or c == "'":
+            cur.append(c)
+        elif cur:
+            w = "".join(cur).replace("'", "").lower()
+            if w:
+                words.append(w)
+            cur = []
+    return words
+
+
+_REFLEX_PHRASES = (("take", "it", "easy"), ("take", "it", "ease"), ("cut", "it", "out"), ("cut", "it"), ("cut", "that"), ("whoa",), ("madone",),
+                   ("aspetta",), ("hey",), ("yo",), ("tony",), ("ok",), ("okay",), ("man",))
+
+
+def _only_reflex_phrases(words: list[str]) -> bool:
+    i = 0
+    while i < len(words):
+        for p in _REFLEX_PHRASES:
+            if tuple(words[i:i + len(p)]) == p:
+                i += len(p)
+                break
+        else:
+            return False
+    return True
+
+
+def echoes_prompt(text: str, prompt: str) -> bool:
+    """voice.rs / language_hub_api.echoes_prompt (a copy: this server runs in its own venv): True
+    when the transcript is MOSTLY the vocabulary prompt read back, i.e. words in runs of 4+
+    consecutive prompt words are >= 70% of it. A line made only of reflex phrases ("Take it easy,
+    cut it") always passes. The callers guard finals themselves; the stream needs it for partials
+    before they reach its LocalAgreement (an echo there would become the stable words). Pure."""
+    run = 4
+    t, p = _prompt_words(text), _prompt_words(prompt)
+    if len(t) < run or len(p) < run or _only_reflex_phrases(t):
+        return False
+    grams = {tuple(p[i:i + run]) for i in range(len(p) - run + 1)}
+    covered = [False] * len(t)
+    for i in range(len(t) - run + 1):
+        if tuple(t[i:i + run]) in grams:
+            covered[i:i + run] = [True] * run
+    return sum(covered) * 10 >= len(t) * 7
 
 
 # ── request -> decode options ────────────────────────────────────────────────
@@ -328,6 +404,21 @@ def resolve_model(name: str, models_dir: Path = MODELS_DIR) -> Path:
     raise ValueError(f"model '{n}' not found in {models_dir}")
 
 
+def startup_model(name: str, models_dir: Path = MODELS_DIR) -> str:
+    """The model the first load uses: `name` when `resolve_model` finds it, else the first of
+    large-v3-turbo / distil-large-v3 that it finds, else `name` (that load fails and retries, as
+    before). A first load has no model to keep: started on a Settings model whose folder is gone
+    (boot, the app's keep-alive and the gateway all pass the saved name), :8177 would stay without
+    one all session, where POST /load refuses the name and keeps the model it has."""
+    for m in (name, "large-v3-turbo", "distil-large-v3"):
+        try:
+            resolve_model(m, models_dir)
+            return m
+        except ValueError:
+            continue
+    return name
+
+
 def alias_of(folder: str) -> str:
     return next((a for a, f in MODEL_ALIASES.items() if f == folder), folder)
 
@@ -456,7 +547,9 @@ class Worker:
     """One thread, one model. submit() never blocks; the future resolves on the worker."""
 
     def __init__(self, loader: Loader = real_loader, models_dir: Path = MODELS_DIR, gpu: Callable[[], Optional[tuple[int, int]]] = gpu_mem,
-                 min_free_mb: int = MIN_FREE_VRAM_MB, warmup: int = 2, retry_backoff: tuple[float, float] = RETRY_BACKOFF):
+                 min_free_mb: Optional[int] = None, warmup: int = 2, retry_backoff: tuple[float, float] = RETRY_BACKOFF):
+        # A GPU load needs vram_needed_mb(model) free (resident + decode peak + floor); min_free_mb
+        # (--min-free-mb) can only raise that, never lower it below the floor's arithmetic.
         self.loader, self.models_dir, self.gpu, self.min_free_mb, self.warmup = loader, models_dir, gpu, min_free_mb, warmup
         # A load that left no model is retried after retry_backoff[0] s, doubling to [1]; 0 = never.
         self.retry_backoff = retry_backoff
@@ -613,11 +706,14 @@ class Worker:
     def _try_load(self, name: str, device: str, compute_type: str) -> None:
         path = resolve_model(name, self.models_dir)
         before = self.gpu() if device == "cuda" else None
-        # The pre-flight: no GPU load below min_free_mb free, nor blind (no nvidia-smi reading).
+        # The pre-flight: no GPU load that would leave less than VRAM_FLOOR_MB free once it is
+        # resident and decoding (the finals then go to whisper.cpp), nor blind (no nvidia-smi reading).
+        need = max(self.min_free_mb or 0, vram_needed_mb(path.name, compute_type))
         if device == "cuda" and before is None:
             raise RuntimeError("no free-VRAM reading from nvidia-smi: not loading on the GPU")
-        if before and before[1] < self.min_free_mb:
-            raise RuntimeError(f"only {before[1]} MB VRAM free (< {self.min_free_mb} MB): not loading on the GPU")
+        if before and before[1] < need:
+            raise RuntimeError(f"only {before[1]} MB VRAM free (< {need} MB: resident + {DECODE_PEAK_MB} MB decode peak + "
+                               f"{VRAM_FLOOR_MB} MB floor): not loading on the GPU")
         t0 = time.perf_counter()
         backend = self.loader(path, device, compute_type)
         load_ms = round((time.perf_counter() - t0) * 1000)
@@ -631,6 +727,12 @@ class Worker:
         if hasattr(backend, "warm_vad"):
             backend.warm_vad()  # load Silero now, not on the first real turn
         after = self.gpu() if device == "cuda" else None
+        if after and after[1] < VRAM_FLOOR_MB:
+            # Bigger than measured (or something else grabbed VRAM meanwhile): the warm-up's beam-5
+            # decode already took the GPU under the floor. Give it back rather than run there.
+            del backend
+            gc.collect()
+            raise RuntimeError(f"only {after[1]} MB VRAM free after the load and warm-up (< the {VRAM_FLOOR_MB} MB floor): released it")
         self.backend = backend
         self._set(ready=True, loading=False, device=device, compute_type=compute_type, model=alias_of(path.name), model_path=str(path),
                   vram_mb=(after[0] - before[0]) if before and after else None, error=None, warmup_ms=warm, load_ms=load_ms,
@@ -840,7 +942,9 @@ def create_app(worker: Worker, *, beam_size: int = 5, prompt_mode: str = "initia
             except Exception:  # noqa: BLE001 — a caption that can't be decoded is simply skipped
                 return
             text = str(out.get("text") or "").strip()
-            if state["done"] or out.get("stale") or not text:
+            # A partial that reads back the vocabulary prompt (likely while it is mostly pre-roll)
+            # never reaches the LocalAgreement: two of them in a row would make the prompt stable.
+            if state["done"] or out.get("stale") or not text or (fields["prompt"] and echoes_prompt(text, fields["prompt"])):
                 return
             shown, stable = la.push(text)
             try:
@@ -974,7 +1078,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Silero VAD before decoding: non-speech clips come back empty without a decode (benchmark: 0
     # false positives on the noise set with it, 4-6 without); partials skip it.
     ap.add_argument("--vad", default=os.environ.get("STT_VAD", "on"), choices=("on", "off"))
-    ap.add_argument("--min-free-mb", type=int, default=MIN_FREE_VRAM_MB)
+    # Default: the model's own resident + decode peak + 500 MB floor (vram_needed_mb; 1850 for turbo
+    # int8_float16). A value here can only raise it.
+    ap.add_argument("--min-free-mb", type=int, default=None)
     ap.add_argument("--models-dir", default=str(MODELS_DIR))
     # Finals this server can't decode on the GPU go here (loopback whisper.cpp); "off" = answer 503.
     ap.add_argument("--fallback-url", default=os.environ.get("STT_FALLBACK_URL", FALLBACK_URL))
@@ -998,9 +1104,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     import uvicorn
 
     worker = Worker(real_loader, Path(a.models_dir), min_free_mb=a.min_free_mb, retry_backoff=(a.retry_first_s, max(a.retry_first_s, a.retry_max_s)))
+    model = startup_model(a.model, Path(a.models_dir))
+    if model != a.model:
+        log.error("--model %s is not in %s: starting on %s instead", a.model, a.models_dir, model)
     log.info("starting on %s:%d model=%s device=%s compute=%s beam=%d prompt_mode=%s vad=%s fallback=%s (pid %d)",
-             a.host, a.port, a.model, a.device, a.compute_type, a.beam_size, a.prompt_mode, a.vad, fallback.url if fallback else "off", os.getpid())
-    worker.load(a.model, a.device, a.compute_type)  # first job on the worker; /health answers meanwhile
+             a.host, a.port, model, a.device, a.compute_type, a.beam_size, a.prompt_mode, a.vad, fallback.url if fallback else "off", os.getpid())
+    worker.load(model, a.device, a.compute_type)  # first job on the worker; /health answers meanwhile
     app = create_app(worker, beam_size=a.beam_size, prompt_mode=a.prompt_mode, vad=a.vad, fallback=fallback)
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False))
     server.run(sockets=[sock])

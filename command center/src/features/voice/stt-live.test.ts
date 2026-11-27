@@ -98,11 +98,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** Start a listen and return the frame pump. */
-async function listen() {
+/** Start a listen that shows captions (they are opt-in) and return the frame pump. */
+async function listen(opts: Parameters<WhisperStt["start"]>[1] = { partials: () => true }) {
   const hh = handlers();
   const stt = new WhisperStt();
-  stt.start(hh);
+  stt.start(hh, opts);
   await flush();
   const push = fake.worklets.at(-1)!.port.onmessage!;
   return { hh, stt, push: (rms: number, n = 1) => Array.from({ length: n }, () => push(frame(rms))) };
@@ -185,6 +185,20 @@ describe("desktop live captions", () => {
     await flush();
     expect(partialCalls()).toHaveLength(0);
     expect(h.nativeRaw).not.toHaveBeenCalled();
+  });
+
+  it("captions are opt-in: a listen started without `partials` (Brainstorm, System Map dictation) sends no stt_partial", async () => {
+    h.partial.mockResolvedValue({ text: "a note" });
+    const { hh, push } = await listen({ maxSilenceStartMs: 8000, endSilenceMs: 1400 }); // dictation.ts's options
+    push(LOUD, 120); // ~2.5 s of speech: four caption slots
+    await flush();
+    expect(partialCalls()).toHaveLength(0);
+    expect(hh.onPartial).not.toHaveBeenCalled();
+    push(QUIET, 80); // the final is still the one full-clip decode
+    await flush();
+    expect(h.nativeRaw).toHaveBeenCalledTimes(1);
+    expect(h.nativeRaw.mock.calls[0][0]).toBe("stt_transcribe");
+    expect(hh.onFinal).toHaveBeenCalledWith("Tony, cut it.");
   });
 
   it("a listen that doesn't want captions (hands-free's passive wake listen) gets no caption pass", async () => {

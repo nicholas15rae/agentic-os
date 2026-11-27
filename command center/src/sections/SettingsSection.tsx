@@ -154,6 +154,7 @@ export function SettingsSection() {
           <Card title="Ultra glass" hint="Opacity of every widget in Ultra-glass mode. 0–5 % is a crystal-clear floating HUD over the wallpaper.">
             <GlassOpacitySlider />
           </Card>
+          <CalmCard />
           <WaveCard />
           <LocationCard />
           <IdentityCard />
@@ -266,6 +267,20 @@ function BusinessCard() {
           </Select>
         </Field>
       </div>
+    </Card>
+  );
+}
+
+/** lib/motion.ts: ambient motion pauses while the window is unfocused or idle for a minute. */
+function CalmCard() {
+  const on = useSettings((s) => s.calmWhenIdle);
+  const set = useSettings((s) => s.set);
+  return (
+    <Card title="Calm when idle" hint="Pause the wallpaper drift, weather, pulses and spinners while this window is unfocused or untouched for a minute. Every frame here is drawn on the same GPU as speech-to-text and the local model. Voice feedback keeps moving at a lower frame rate.">
+      <label className="flex items-center gap-3 text-[13px] text-ink-2">
+        <input type="checkbox" checked={on} onChange={(e) => set({ calmWhenIdle: e.target.checked })} className="accent-teal" />
+        Pause ambient motion when idle
+      </label>
     </Card>
   );
 }

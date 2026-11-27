@@ -133,7 +133,7 @@ fn builtin_listing(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: imp
 
 /// A builtin's tools, or an error when its backend isn't configured, so the
 /// registry never shows a false "ok" for a server that can't answer. `has_calendar`: Google
-/// Calendar's Apps Script pair is set (or was just imported from AnythingLLM on first use).
+/// Calendar's Apps Script pair is set (a listing never imports it; Calendar's first use does).
 fn builtin_listing_with(id: &str, gmail: impl Fn() -> GmailSource, has_brave_key: impl Fn() -> bool, spotify: impl Fn() -> Result<(), String>, has_instagram_token: impl Fn() -> bool, has_calendar: impl Fn() -> bool) -> Result<Vec<ToolInfo>, String> {
     match id {
         "gmail" => match gmail() {
@@ -169,7 +169,8 @@ fn listing(state: &DispatchState, id: &str) -> Result<Vec<ToolInfo>, String> {
         || brave_key(state).is_some(),
         || super::spotify::readiness(state),
         || super::envfile::os_key(state, super::instagram::SECRET).is_some(),
-        || super::calendar::ensure_creds(state).is_some(),
+        // Never the AnythingLLM import: that waits for Calendar's first use (`calendar::ensure_creds`).
+        || super::calendar::has_creds(state),
     )
 }
 
@@ -590,6 +591,11 @@ pub(crate) fn role_filter(all: Vec<ToolInfo>, agent: &str) -> Vec<ToolInfo> {
 pub struct ToolSet {
     pub all: Vec<ToolInfo>,
     pub offered: Vec<ToolInfo>,
+    /// Tony's system TOOLS line: `offered`, except that a server whose listing only failed to
+    /// arrive this turn (cold start, slow, crashed or failing) keeps its last good listing for the
+    /// same config and token (`last_good_listing`), so the line (and the cached prompt prefix it
+    /// sits in) doesn't flicker out and back in. The router and the calls use `offered`.
+    pub line: Vec<ToolInfo>,
 }
 
 /// Tools `agent` is actually allowed to use: every enabled server it is
@@ -601,25 +607,58 @@ pub struct ToolSet {
 /// call time). Servers are queried concurrently with a short per-server timeout so
 /// one dead external server can't stall the whole listing.
 pub async fn tool_set(state: &DispatchState, os: &OsState, agent: &str) -> ToolSet {
+    tool_set_with(state, os, agent, CHAT_LIST_WAIT).await
+}
+
+/// `tool_set`, waiting at most `wait` for a server that isn't listed yet (`Duration::ZERO`: the
+/// caches only; a listing that has to run starts in the background for the next turn).
+pub async fn tool_set_with(state: &DispatchState, os: &OsState, agent: &str, wait: Duration) -> ToolSet {
     let cfg = os.snapshot();
     let is_tony = is_tony(agent);
     if !is_tony && super::roles::policy_for(agent).is_none() {
-        return ToolSet { all: vec![], offered: vec![] };
+        return ToolSet { all: vec![], offered: vec![], line: vec![] };
     }
     let servers = servers_for(&cfg, &os.modes.effective(), agent);
-    // A cold server costs a turn at most `CHAT_LIST_WAIT`: its listing keeps going in the
-    // background and lands in the cache for the next turn. The outer timeout is only a
-    // backstop and never writes FAILED.
+    // A cold server costs a turn at most `wait`: its listing keeps going in the background and
+    // lands in the cache for the next turn. The outer timeout is only a backstop and never
+    // writes FAILED.
     let results = futures_util::future::join_all(servers.iter().map(|s| async move {
-        match tokio::time::timeout(CHAT_LIST_WAIT + Duration::from_secs(2), tools_of(state, os, s, false, CHAT_LIST_WAIT)).await {
-            Ok(Ok(v)) => v,
-            // tools_of / the background listing logged a fresh failure once; cached,
-            // starting and token-less ones stay quiet.
-            Ok(Err(_)) | Err(_) => vec![],
+        let live = match tokio::time::timeout(wait + Duration::from_secs(2), tools_of(state, os, s, false, wait)).await {
+            Ok(r) => r,
+            Err(_) => Err(listing_starting_msg(s)),
+        };
+        // tools_of / the background listing logged a fresh failure once; cached, starting and
+        // token-less ones stay quiet. The TOOLS line keeps the last good listing meanwhile.
+        match live {
+            Ok(v) => (v.clone(), v),
+            Err(e) => (vec![], last_good_listing(state, os, s, &e).unwrap_or_default()),
         }
     }))
     .await;
-    assemble_tools(&cfg, agent, results.into_iter().flatten().collect())
+    let (live, line): (Vec<Vec<ToolInfo>>, Vec<Vec<ToolInfo>>) = results.into_iter().unzip();
+    let line = assemble_tools(&cfg, agent, line.into_iter().flatten().collect()).offered;
+    ToolSet { line, ..assemble_tools(&cfg, agent, live.into_iter().flatten().collect()) }
+}
+
+/// May the TOOLS line keep a server's last good listing after this turn's listing error (pure)?
+/// Only when the listing merely failed to arrive (still starting, slow, crashed, failing): never
+/// for a built-in server (its listing IS its state: off, not connected), a missing or rejected
+/// token, or the kill switch, which are real changes the line must show.
+pub(crate) fn sticky_listing_error(transport: &str, err: &str) -> bool {
+    transport != "builtin" && !err.contains(NEEDS_TOKEN) && !err.contains(TOKEN_REJECTED) && !err.contains(KILL_SWITCH_MCP)
+}
+
+/// The last good listing of `s` for its current config and token, however old (the managed cache
+/// keeps it per fingerprint), when `err` allows it (`sticky_listing_error`). Disabled, ungranted
+/// and frozen servers never get here (`servers_for`), and a config or token change misses the
+/// fingerprint, so their tools leave the line at once.
+fn last_good_listing(state: &DispatchState, os: &OsState, s: &McpServer, err: &str) -> Option<Vec<ToolInfo>> {
+    if !sticky_listing_error(&s.transport, err) || remote_blocked(&os.snapshot(), s) {
+        return None;
+    }
+    let token = remote_token(state, s).ok()?;
+    promote_listed(os);
+    cached_listing(os, &s.id, server_fingerprint(s, token.as_deref())).map(|(_, t)| visible_tools(s, t))
 }
 
 /// Pure part of `tool_set`: the enabled, granted servers `agent` may list this turn (a frozen
@@ -642,7 +681,7 @@ pub(crate) fn assemble_tools(cfg: &OsConfig, agent: &str, listed: Vec<ToolInfo>)
     }
     let all = role_filter(all, agent);
     let offered = router_filter(&all, is_tony);
-    ToolSet { all, offered }
+    ToolSet { all, line: offered.clone(), offered }
 }
 
 /// Tell the webview the set of tools a turn can use changed (Spotify connected /

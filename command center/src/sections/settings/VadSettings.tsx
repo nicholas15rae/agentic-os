@@ -1,13 +1,40 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Square } from "lucide-react";
-import { Card } from "@/components/ui";
+import { Card, Select } from "@/components/ui";
 import { MicCapture, encodeWav16k } from "@/features/voice/engines";
 import { MicLockedError, onMicChange, useMic } from "@/features/voice/mic-gate";
 import { ThresholdMeter } from "@/features/voice/ThresholdMeter";
 import { SPEECH_PROB_OFF, SPEECH_PROB_ON } from "@/features/voice/vad-gate";
+import { DEFAULT_PARTIAL_MS, partialMsChoices, partialMsFrom } from "@/features/voice/stt-partials";
 import { isTauri } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { transcribeWav } from "@/features/voice/engines";
+
+/**
+ * `vad.partialMs`: live captions while you speak, one Whisper pass on the clip so far every this
+ * many ms of speech (GPU STT only); 0 turns them off, and with them the phone's audio stream (it
+ * then uploads the clip when you stop).
+ */
+export function LiveCaptionsField({ value, onChange }: { value: number | undefined; onChange: (ms: number) => void }) {
+  const ms = partialMsFrom(value);
+  return (
+    <div className="text-sm text-ink-2">
+      <label className="flex items-center gap-3">
+        Live captions
+        <Select value={String(ms)} onChange={(e) => onChange(Number(e.target.value))} className="!h-9 !w-60 !py-0 !text-xs" aria-label="Live captions">
+          {partialMsChoices(value).map((v) => (
+            <option key={v} value={v}>
+              {v === 0 ? "Off (and no phone stream)" : `every ${v} ms of speech${v === DEFAULT_PARTIAL_MS ? " (default)" : ""}`}
+            </option>
+          ))}
+        </Select>
+      </label>
+      <p className="mt-1 text-[11px] text-ink-3">
+        What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. Off also stops the phone streaming its audio (it uploads the clip when you stop).
+      </p>
+    </div>
+  );
+}
 
 /**
  * Settings → Voice & Triggers → Activation threshold (Phase 2 Part B). One absolute dBFS gate
@@ -151,6 +178,7 @@ export function VoiceDetectionCard() {
           <input type="range" min={5000} max={30000} step={1000} value={vad.maxUtteranceMs} onChange={(e) => up({ maxUtteranceMs: Number(e.target.value) })} className="flex-1 accent-amber" aria-label="Max utterance" />
           <span className="w-12 text-right font-mono text-ink">{vad.maxUtteranceMs / 1000}s</span>
         </label>
+        <LiveCaptionsField value={vad.partialMs} onChange={(partialMs) => up({ partialMs })} />
 
         {testing && (
           <div>

@@ -8,7 +8,7 @@ gateway's phone path (`language_hub_api.py`) call it without code changes on the
 | Piece | Where |
 |---|---|
 | Server | `G:\agentic os\stt\fw_server.py` (tests: `tests/test_fw_server.py`, a fake model, no GPU) |
-| venv | `C:\ai-stt\.venv` (uv, CPython 3.13): ctranslate2 4.9.1, faster-whisper 1.2.1, fastapi, uvicorn, python-multipart, numpy, huggingface_hub; no torch |
+| venv | `C:\ai-stt\.venv` (uv, CPython 3.13): ctranslate2 4.9.1, faster-whisper 1.2.1, fastapi, uvicorn, python-multipart, numpy, huggingface_hub, websockets 17.4 (for `/v1/stream`); no torch |
 | CUDA DLLs | `C:\ai-stt\cuda`: cuBLAS 12 + cuDNN 9.10.2.21 (+ nvrtc / nvJitLink), copied from `D:\VoiceStudio\project\.venv\Lib\site-packages\torch\lib`; added with `os.add_dll_directory` before ctranslate2 is imported |
 | Models | `C:\models\stt\faster-distil-whisper-large-v3` (Systran, 1.51 GB) and `C:\models\stt\faster-whisper-large-v3-turbo` (mobiuslabsgmbh, 1.62 GB) |
 | Log | `G:\whisper\fw-server.log`: per request audio length, queue and decode ms, never the transcript; 5 MB + one rollover = 10 MB cap |
@@ -29,9 +29,15 @@ gateway's phone path (`language_hub_api.py`) call it without code changes on the
     `device: "cpu-unavailable"`, queue full (16), decode error) is forwarded to whisper.cpp :8178
     (`--fallback-url`, loopback only) with the caller's `model`, `language`, `prompt`,
     `response_format` and `temperature`, and whisper.cpp's answer is returned (headers
-    `X-STT-Backend: whispercpp`, `X-Fallback-Reason`). This is the desktop's only fallback:
-    `voice.rs transcribe_bytes` makes one POST to `policy.stt` and never tries :8178 itself.
+    `X-STT-Backend: whispercpp`, `X-Fallback-Reason`). Besides this, `voice.rs` (`transcribe_with`)
+    retries a clip once on :8178 when :8177 is down or answers 5xx (never on a 4xx).
     It answers `503` only when :8178 is down or fails too, and for partials (never forwarded).
+  * The VRAM pre-flight: a GPU load needs what the model keeps resident (CUDA context included) +
+    150 MB for a beam-5 decode's peak + a 500 MB floor free, by the measured numbers below: 1850 MB
+    for large-v3-turbo int8_float16 (resident 1.2 GB), 2800 for its float16 (2.15 GB), 1680 / 2670
+    for distil-large-v3 int8_float16 / float16; a model never measured counts as the biggest.
+    Below that it loads nothing on the GPU and finals go to whisper.cpp. If the warm-up decode
+    still leaves under 500 MB free, the model is released again.
   * A load that left no model is retried in the background: 30 s, doubling to 10 min
     (`--retry-first-s`, `--retry-max-s`), with the same VRAM pre-flight each time.
   * Headers `X-Queue-Ms` / `X-Decode-Ms` carry the server-side timings; `X-STT-Backend: faster-whisper`.
@@ -53,10 +59,20 @@ gateway's phone path (`language_hub_api.py`) call it without code changes on the
   `partial_ms` (300-3000, default 600) of new audio between 0.5 and 30 s, single-flight, on the GPU
   only; then one `{"type":"final","final","backend"}` decoded with exactly a POST's options (or by
   whisper.cpp when this server can't), and a close. A browser page from a non-loopback origin is
-  refused. **Needs the `websockets` package in the venv** (uvicorn has no WebSocket support without
-  it or `wsproto`; the upgrade then gets a 404). The gateway's phone proxy
-  (`/api/cc/lang/stt/stream`, `language_hub_api.py`) uses this when it answers and otherwise runs
-  the same session over POSTs (`partial=1` + `session`), so phone streaming works either way.
+  refused. A partial that reads the start's `prompt` back (`echoes_prompt`, the same rule as
+  voice.rs and the gateway) is dropped before the LocalAgreement, so it can never become stable.
+  It needs the `websockets` package in the venv (uvicorn has no WebSocket support without it or
+  `wsproto`; the upgrade then gets a 404): websockets 17.4 was installed offline from the uv cache
+  on 2026-11-26, so it is served from the next :8177 restart. The gateway's phone proxy
+  (`/api/cc/lang/stt/stream`, `language_hub_api.py`) uses this when it answers ("relay" mode) and
+  otherwise runs the same session over POSTs (`partial=1` + `session`), so phone streaming works
+  either way.
+* Captions (all three LocalAgreement-2 copies: here, the gateway's, `stt-partials.ts`): the words
+  the last two hypotheses agree on are stable; when Whisper revises a stable word ("I want to" ->
+  "I wanna go home"), the newest hypothesis is shown whole and the stable words shrink to the
+  prefix both still share. Captions are opt-in per listen in the app (Tony's listens ask;
+  Brainstorm and System Map dictation don't, so they cost no GPU pass); `vad.partialMs` (Settings
+  -> Activation threshold -> Live captions, default 600, 0 = off) sets the spacing.
 * Measured (C1, 2026-11-26, Qwen loaded and idle): a final sent after >= 2 s of GPU idle takes
   ~480-510 ms, one within 1 s of other GPU work ~270 ms (clock ramp-up). A partial pass costs about
   what a final does (~265 ms; turbo is encoder-bound, beam 1 saves little), so captions every 600 ms
@@ -90,21 +106,27 @@ Invoke-RestMethod http://127.0.0.1:8177/load -Method Post -ContentType applicati
 
 Flags (env in brackets): `--model` (`STT_MODEL`), `--compute-type` (`STT_COMPUTE`), `--device cuda|cpu`
 (`STT_DEVICE`), `--beam-size` (`STT_BEAM`), `--prompt-mode initial|hotwords|both`
-(`STT_PROMPT_MODE`), `--vad on|off` (`STT_VAD`), `--min-free-mb` (refuse a GPU load below this much
-free VRAM, or with no nvidia-smi reading), `--fallback-url` (`STT_FALLBACK_URL`, default
+(`STT_PROMPT_MODE`), `--vad on|off` (`STT_VAD`), `--min-free-mb` (can only RAISE the VRAM
+pre-flight above the model's resident + decode peak + 500 MB floor; a GPU load with no nvidia-smi
+reading is refused either way), `--fallback-url` (`STT_FALLBACK_URL`, default
 `http://127.0.0.1:8178/v1/audio/transcriptions`, `off` = answer 503 instead), `--retry-first-s` /
 `--retry-max-s` (load retry backoff, 30 / 600), `--port`, `--models-dir`. A second copy exits at
 once: the port is bound exclusively before any model work.
 
 Who starts it:
 * logon: `G:\ai-startup\start-ai-stack.ps1` step 0b, before Tony's Qwen load (settings `$STT_*` in
-  `ai-stack.config.ps1`). It is started even when the 1.5 GB free-VRAM pre-flight fails: the server
+  `ai-stack.config.ps1`). It is started even when the free-VRAM pre-flight fails (the boot script's
+  `$STT_MIN_FREE_MB`; the server itself always needs at least 1850 MB for turbo int8_float16): the server
   then loads nothing on the GPU, forwards finals to :8178 and retries the GPU load after
   `$STT_RETRY_FIRST_SECONDS` (300 s, so after Tony's Qwen load). Step 0b also starts whisper.cpp :8178.
 * the gateway: a phone turn that finds :8177 closed uses :8178 for that turn and re-spawns this
   server detached, at most once per backoff window (30 s, doubling to 10 min).
-* The desktop app does not manage it (its `whisper_ensure` only handles `engine: "whispercpp"`), and
-  once `policy.stt` is faster-whisper it no longer restarts :8178 either.
+* the desktop app: services.rs `stt_ensure` (every 60 s, and right before a transcription whose
+  server is down) starts :8177 with step 0b's command line and keeps :8178 alive as its fallback,
+  under a start limit (30 s backoff doubling to 10 min, at most 3 starts in 10 min). While :8177 is
+  up, ready and idle, the app also switches it to the model saved in Settings if it runs another one
+  (services.rs `fw_model_sync`: `POST /load {model}`, at most once per 30 min per model, never during
+  GPU maintenance; a refusal keeps the running model). So `$STT_MODEL` is only the logon model.
 
 What covers desktop voice when something fails (`policy.stt` = faster-whisper):
 
@@ -112,12 +134,11 @@ What covers desktop voice when something fails (`policy.stt` = faster-whisper):
 |---|---|
 | Model loading, CUDA failed, too little VRAM, queue full, decode error | works: :8177 forwards to :8178 |
 | The above while :8178 is down too | fails (503; the app's probe shows STT red) |
-| The :8177 process is dead (crash, killed) | fails until the gateway's next phone turn re-spawns it, a re-run of `start-ai-stack.ps1`, or a reboot |
-| :8178 dies | nothing restarts it until a re-run of `start-ai-stack.ps1` or a reboot (only matters while :8177 has no GPU model) |
+| The :8177 process is dead (crash, killed) | restarted by the app within 60 s or at the next utterance; that utterance goes to :8178 (one retry, `voice.rs transcribe_with`) |
+| :8178 dies | restarted by the app (same keep-alive) |
 
-Closing the last two rows needs the Rust side: an `stt_ensure` for `engine: "fasterwhisper"` in
-`services.rs` (start :8177 like `whisper_ensure` starts :8178, and keep :8178 alive as its fallback)
-and a retry of the `whisper` provider in `voice.rs transcribe_bytes` when the POST fails to connect.
+The last two rows hold once the desktop app is rebuilt after 2026-11-26; an older running build
+still behaves as before (only the gateway's phone path re-spawns :8177).
 
 ## Config (providers.json)
 
@@ -126,11 +147,18 @@ and a retry of the `whisper` provider in `voice.rs transcribe_bytes` when the PO
  "model": "large-v3-turbo", "needsKey": false, "engine": "fasterwhisper", "language": "en", "custom": true}
 ```
 
+It also has `"sttPrompt"`: the default vocabulary prompt with "Nic" added ("Tony, Nic, Gabagool mode.
+..."; backup `providers.json.20261126-150634-before-stt-prompt-nic`). dispatch.rs `DEFAULT_STT_PROMPT`,
+the gateway's `DEFAULT_STT_PROMPT` and `bench.py` `PROMPT` are the same text (tests/test_language_hub.py
+pins all three).
+
 `policy.stt` points at it (switched 2026-11-26; backup `providers.json.20261126-094917-before-faster-whisper`,
 script `stt\bench\switch_providers.py`). The running desktop app reads providers.json only at start,
 so it uses :8177 from its next launch. With `engine: "fasterwhisper"` the app probes `{baseUrl}/models`,
-lists models from it, and does not try to manage the process; choosing a model in Settings saves it
-but does not hot-swap the server (use `POST /load`). The `whisper` provider (`engine: "whispercpp"`, `modelsDir G:\whisper\models`)
+lists models from it, keeps the process alive (`stt_ensure`), and a model chosen in Settings is
+hot-swapped through `POST /load {model}`. A refused load is read from fw_server's
+`200 {ready: true, model: <previous>, error: "... kept ..."}` answer (or a 503): the old model keeps
+running and nothing is saved. The `whisper` provider (`engine: "whispercpp"`, `modelsDir G:\whisper\models`)
 stays: both Language Hub sidecars find `ggml-small.bin` through it, and it is the fallback (the
 gateway's directly; the desktop's only through :8177, see the table above).
 
@@ -138,11 +166,20 @@ gateway's directly; the desktop's only through :8177, see the table above).
 
 ```powershell
 python -I "G:\agentic os\stt\bench\gen_clips.py"     # Kokoro clips + noise -> data\stt-bench\clips
-python -I "G:\agentic os\stt\bench\bench.py"          # all arms, 3 runs -> data\stt-bench\results-*.json
+python -I "G:\agentic os\stt\bench\bench.py"          # all arms, 3 runs -> data\stt-bench\results-*.json (LIVE :8177, see below)
 python -I "G:\agentic os\stt\bench\probe_noise.py"    # segment stats behind the noise guard
 python -I "G:\agentic os\stt\bench\qwen_tps.py"       # Tony's Qwen tokens/s (read-only; never loads a model)
 python -I "G:\agentic os\stt\bench\phone_path.py" --old <8b1bac6 language_hub_api.py>
 ```
+
+`bench.py` uses the live :8177 server (Tony's STT): its arms hot-swap the model through `POST /load`,
+and live voice turns wait behind the benchmark's decodes while it runs. It reads the model the
+server has at the start (`/health`) and loads it back at the end, also after an error or Ctrl+C
+(a `finally` block; tests: `tests/test_stt_bench.py`). Stopped while an arm's load is still in
+flight, `/health` names the old model with `loading: true`; the restore is posted anyway and the
+worker runs it after that load. The results JSON is written before the restore (`"complete": false`
+after an early stop), so if :8177 is down at the end you get `[restore] failed` and keep the numbers.
+Run it when nobody is talking to Tony.
 
 ### Results (2026-11-26, Qwen 3.5 9B loaded in Bionic at 32k x 2)
 
@@ -169,7 +206,8 @@ over HTTP, 3 runs after a dropped warm-up. Full data: `data\stt-bench\results-20
   "Tory build", "Cicaro"), so it fails the WER gate. It stays on disk.
 * Prompt vs hotwords: identical output on every clip (one 30 s window, same decoder prompt).
   Beam 1 vs 5: same WER on this set; beam 5 is kept (3 ms more at p50 on 2-5 s clips, more robust
-  on real mic audio). Turbo's remaining errors: "Nic" -> "Nick" (Nic is not in the prompt),
+  on real mic audio). Turbo's remaining errors: "Nic" -> "Nick" (Nic was not in the prompt then;
+  it is now: "Tony, Nic, Gabagool mode. ...", not re-benchmarked yet),
   "Tony, ask" -> "Tony asked", "load in" -> "load and", "demos" -> "DeMoss".
 * VRAM (nvidia-smi): 8385 MiB used / 3731 MiB free before; 9586 / 2530 with the server idle
   (turbo int8_float16 = 1.2 GB with the CUDA context).

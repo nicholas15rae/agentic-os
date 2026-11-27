@@ -65,9 +65,9 @@ describe("switchboard presets mirror modes.rs", () => {
 
   it("the exact on-duty agents and tools per preset (the spec's order)", () => {
     expect(row("builder").switchboard).toEqual({ agents: ["prompter", "designer", "coder"], tools: ["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"] });
-    expect(row("operations").switchboard).toEqual({ agents: ["ops", "bizops"], tools: ["gmail", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"] });
+    expect(row("operations").switchboard).toEqual({ agents: ["ops", "bizops"], tools: ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"] });
     // The Librarian runs only as its scheduled script: never on Executive duty.
-    expect(row("executive").switchboard).toEqual({ agents: ["bizops", "finance"], tools: ["knowledge-graph", "gmail", "brave-search", "time", "weather"] });
+    expect(row("executive").switchboard).toEqual({ agents: ["bizops", "finance"], tools: ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"] });
     expect(row("learning").switchboard).toEqual({ agents: [], tools: [] });
     for (const id of ["surface", "brainstorm", "coach", "gabagool"]) {
       expect(row(id).switchboard ?? null, id).toBeNull();

@@ -678,7 +678,12 @@ pub(crate) fn approved_action_lock(hard_locked: bool) -> Result<(), String> {
 /// (hard lock, permission gate, kill switch, switched-on check, no content logged), answered as
 /// `answer`.
 async fn run_approved_action(st: &DispatchState, os: &OsState, bridge: &BridgeState, p: &Value) -> Result<Value, String> {
-    approved_action_lock(crate::security::commands::hard_locked())?;
+    run_approved_action_with(st, os, bridge, p, crate::security::commands::hard_locked()).await
+}
+
+/// `run_approved_action` with the remote failsafe's state passed in (tests).
+async fn run_approved_action_with(st: &DispatchState, os: &OsState, bridge: &BridgeState, p: &Value, hard_locked: bool) -> Result<Value, String> {
+    approved_action_lock(hard_locked)?;
     let (tool, args) = approved_action(p)?;
     let s = |k: &str| args[k].as_str().unwrap_or("").to_string();
     let answer = if tool == super::calendar::CREATE {
@@ -2383,6 +2388,57 @@ mod tests {
         assert!(approved_action_lock(false).is_ok());
         // The live check reads the same runtime flag the background workers honour.
         assert_eq!(approved_action_lock(crate::security::commands::hard_locked()).is_ok(), !crate::security::commands::hard_locked());
+    }
+
+    /// Review notes (A2): the phone's approved card is refused at every gate, for both tools,
+    /// before any Apps Script call: HARD_LOCKED, no approval stamp, MCP Deny, the server switched
+    /// off, a mode / master-switchboard freeze (the Gmail draft used to skip it), the kill switch.
+    #[test]
+    fn the_phones_approved_action_refuses_at_every_gate() {
+        tauri::async_runtime::block_on(async {
+            let (st, bridge) = (DispatchState::default(), BridgeState::default());
+            let env = |f: &dyn Fn(&mut super::super::os_core::OsConfig)| {
+                let os = OsState::default();
+                os.update(|c| {
+                    for m in c.mcps.iter_mut().filter(|m| m.id == "calendar" || m.id == "gmail") {
+                        m.enabled = true;
+                    }
+                    c.privacy.kill_switch = false;
+                    f(c);
+                    Ok(())
+                })
+                .unwrap();
+                os
+            };
+            let cal = json!({ "tool": "calendar.create_event", "args": { "title": "zqx shoot", "startTime": "2030-01-02T09:00" }, "planId": "p1", "approvedAt": "2026-11-26T15:00:00Z" });
+            let draft = json!({ "tool": "gmail.create_draft", "args": { "to": "sam@agency.ca", "subject": "Hi", "body": "zqx" }, "planId": "p2", "approvedAt": "2026-11-26T15:00:00Z" });
+            let run = |os: OsState, p: Value, locked: bool| {
+                let (st, bridge) = (&st, &bridge);
+                async move { run_approved_action_with(st, &os, bridge, &p, locked).await }
+            };
+            for p in [&cal, &draft] {
+                let tool = p["tool"].as_str().unwrap();
+                assert!(run(env(&|_| {}), p.clone(), true).await.unwrap_err().starts_with("HARD_LOCKED"), "{tool}");
+                let mut unstamped = p.clone();
+                unstamped.as_object_mut().unwrap().remove("approvedAt");
+                assert_eq!(run(env(&|_| {}), unstamped, false).await.unwrap_err(), "the action wasn't approved on the card", "{tool}");
+                let e = run(env(&|c| c.permissions.mcp = super::super::bridge::Tier::Deny), p.clone(), false).await.unwrap_err();
+                assert!(e.starts_with("PERMISSION_DENIED:mcp"), "{tool}: {e}");
+                let server = if tool == "gmail.create_draft" { "gmail" } else { "calendar" };
+                let e = run(env(&|c| c.mcps.iter_mut().filter(|m| m.id == server).for_each(|m| m.enabled = false)), p.clone(), false).await.unwrap_err();
+                assert!(e.contains("is switched off"), "{tool}: {e}");
+                let e = run(env(&|c| c.switchboard.frozen_tools = vec![server.into()]), p.clone(), false).await.unwrap_err();
+                assert_eq!(e, format!("MODE_FROZEN: {server} is frozen on the master switchboard"), "{tool}");
+                let builder = env(&|_| {});
+                builder.modes.set_active("builder").unwrap();
+                assert_eq!(run(builder, p.clone(), false).await.unwrap_err(), format!("MODE_FROZEN: {server} is frozen in Builder mode"), "{tool}");
+                let e = run(env(&|c| c.privacy.kill_switch = true), p.clone(), false).await.unwrap_err();
+                assert!(e.starts_with("kill switch is on"), "{tool}: {e}");
+            }
+            // Only the two allowlisted tools ever run.
+            let send = json!({ "tool": "gmail.send", "args": {}, "approvedAt": "x" });
+            assert!(run(env(&|_| {}), send, false).await.unwrap_err().contains("can't be approved"));
+        });
     }
 
     /// The inbox's task path is a synchronous insert: it returns with the task `queued` and

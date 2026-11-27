@@ -15,22 +15,67 @@ describe("sttPartial (desktop IPC)", () => {
   });
 });
 
+/** Hypothesis sequences → [shown, stable] after each push. The SAME table is in
+ * tests/test_fw_server.py (LA_CASES) and checked against both Python copies in
+ * tests/test_language_hub.py: the desktop, fw_server and the gateway caption alike. */
+const LA_CASES: [string[], [string, string][]][] = [
+  [
+    ["Play", "Play Bill", "Play Bilmuri on", "play, Bilmuri on Spotify.", "Pay Bilmuri on Spotify now", ""],
+    [["Play", ""], ["Play Bill", "Play"], ["Play Bilmuri on", "Play"], ["Play Bilmuri on Spotify.", "Play Bilmuri on"], ["Pay Bilmuri on Spotify now", ""], ["", ""]],
+  ],
+  // Whisper revises a committed word AND the word count changes ("want to" -> "wanna").
+  [
+    ["I want to", "I want to go", "I wanna go home", "I wanna go home now"],
+    [["I want to", ""], ["I want to go", "I want to"], ["I wanna go home", "I"], ["I wanna go home now", "I wanna go home"]],
+  ],
+  [
+    ["Play Bill", "Play Bill", "Play Bilmuri on Spotify", "Play Bilmuri on Spotify"],
+    [["Play Bill", ""], ["Play Bill", "Play Bill"], ["Play Bilmuri on Spotify", "Play"], ["Play Bilmuri on Spotify", "Play Bilmuri on Spotify"]],
+  ],
+  [
+    ["Tony cut", "Tony cut", "Tony, can you cut it", "Tony, can you cut it out please"],
+    [["Tony cut", ""], ["Tony cut", "Tony cut"], ["Tony, can you cut it", "Tony,"], ["Tony, can you cut it out please", "Tony, can you cut it"]],
+  ],
+  // A shorter hypothesis shrinks the stable words to it; an empty one changes nothing.
+  [
+    ["Play Bilmuri on", "Play Bilmuri on", "Play Bilmuri", "", "Play Bilmuri now"],
+    [["Play Bilmuri on", ""], ["Play Bilmuri on", "Play Bilmuri on"], ["Play Bilmuri", "Play Bilmuri"], ["Play Bilmuri", "Play Bilmuri"], ["Play Bilmuri now", "Play Bilmuri"]],
+  ],
+];
+
+const words = (s: string) => s.split(/\s+/).filter(Boolean).map((w) => w.toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, ""));
+
 describe("LocalAgreement-2", () => {
-  it("commits what two hypotheses agree on, never retracts, and matches the Python copies", () => {
-    // The same sequence as tests/test_fw_server.py and tests/test_language_hub.py.
-    const la = new LocalAgreement();
-    const seen = ["Play", "Play Bill", "Play Bilmuri on", "play, Bilmuri on Spotify.", "Pay Bilmuri on Spotify now", ""].map((s) => {
-      const v = la.push(s);
-      return [v.text, v.stable];
-    });
-    expect(seen).toEqual([
-      ["Play", ""],
-      ["Play Bill", "Play"],
-      ["Play Bilmuri on", "Play"],
-      ["Play Bilmuri on Spotify.", "Play Bilmuri on"],
-      ["Play Bilmuri on Spotify now", "Play Bilmuri on"],
-      ["Play Bilmuri on", "Play Bilmuri on"],
-    ]);
+  it("commits what two hypotheses agree on; a revision shows the newest whole (parity table with the Python copies)", () => {
+    for (const [seq, want] of LA_CASES) {
+      const la = new LocalAgreement();
+      const seen = seq.map((s) => {
+        const v = la.push(s);
+        return [v.text, v.stable];
+      });
+      expect(seen, seq.join(" | ")).toEqual(want);
+    }
+  });
+
+  it("never shows words the newest hypothesis doesn't have, and stable is always its prefix", () => {
+    const vocab = ["I", "want", "wanna", "to", "go", "home", "Tony,", "tony", "cut", "it", "Play", "Bill", "Bilmuri"];
+    let seed = 11;
+    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
+    for (let run = 0; run < 300; run++) {
+      const la = new LocalAgreement();
+      let cur: string[] = [];
+      for (let step = 0; step < 8; step++) {
+        // Grow, revise one word, or drop the tail, like successive whole-clip partials.
+        const op = rnd(3);
+        if (op === 0 || cur.length === 0) cur = [...cur, vocab[rnd(vocab.length)]];
+        else if (op === 1) cur = cur.map((w, i) => (i === rnd(cur.length) ? vocab[rnd(vocab.length)] : w));
+        else cur = cur.slice(0, Math.max(1, cur.length - 1 - rnd(2)));
+        const v = la.push(cur.join(" "));
+        expect(words(v.text)).toEqual(words(cur.join(" ")));
+        expect(words(v.text).slice(0, words(v.stable).length)).toEqual(words(v.stable));
+        expect([v.stable, v.tentative].filter(Boolean).join(" ")).toBe(v.text);
+      }
+    }
   });
 
   it("splits stable and tentative", () => {

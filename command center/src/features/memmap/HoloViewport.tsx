@@ -5,6 +5,7 @@ import { AdditiveBlending, BoxGeometry, BufferGeometry, CanvasTexture, Color, Do
 import type { Group, Mesh, MeshBasicMaterial, PerspectiveCamera } from "three";
 import type { TraceZone } from "@/lib/platform";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { useMotionLevel } from "@/lib/motion";
 import { useTrace } from "./trace-store";
 import { useZoneUi } from "./zone-store";
 import { e46Wireframe, fitDistance, freshSteps, HOLO_CAMERA, HOLO_FOV, HOLO_TARGET, leaderElbow, pedestal, platePoint, pointAt, PULSE_MS, pulseCurve, pulsesFor, rearPlate, sweepFan, TELEMETRY_NODES, WHEELS_LABEL, ZONE_VOLUMES, zoneAnchor, zoneFlash, type Rect, type V3, type ZoneVolume } from "./holo-geometry";
@@ -77,22 +78,20 @@ function lineGeometry(segments: number[]): BufferGeometry {
   return g;
 }
 
-/** Visible document + canvas on screen (IntersectionObserver). Drives the frame interval. */
+/**
+ * Window in use (lib/motion.ts: not hidden, not calm) + canvas on screen (IntersectionObserver).
+ * Drives the frame interval; a demand frameloop still redraws on interaction while it's off.
+ */
 function useOnScreen(el: RefObject<HTMLElement | null>): boolean {
-  const [visible, setVisible] = useState(() => !document.hidden);
+  const visible = useMotionLevel() === "full";
   const [inView, setInView] = useState(true);
   useEffect(() => {
-    const onVis = () => setVisible(!document.hidden);
-    document.addEventListener("visibilitychange", onVis);
     let io: IntersectionObserver | undefined;
     if (el.current && typeof IntersectionObserver !== "undefined") {
       io = new IntersectionObserver((entries) => setInView(entries.some((e) => e.isIntersecting)));
       io.observe(el.current);
     }
-    return () => {
-      document.removeEventListener("visibilitychange", onVis);
-      io?.disconnect();
-    };
+    return () => io?.disconnect();
   }, [el]);
   return visible && inView;
 }

@@ -43,7 +43,7 @@ class ChatHistoryTests(unittest.TestCase):
                                   "content": "", "timestamp": ""})
         history = server.load_chat_history()
         history["messages"] = []
-        server.CHAT_HISTORY_FILE.write_text(__import__("json").dumps(history))
+        server.CHAT_HISTORY_FILE.write_text(__import__("json").dumps(history), encoding="utf-8")
         status, data = self.h.api("GET", "/api/chat/history")
         self.assertEqual(status, 200)
         self.assertEqual(data["total"], 0)
@@ -241,6 +241,25 @@ class AgentNotInstalledTests(unittest.TestCase):
         status, _ = self.h.api("POST", "/api/chat", {"agent": "hermes", "message": "hi"})
         self.assertEqual(status, 400)
 
+    def test_chat_unsafe_launcher_is_503_with_its_reason(self):
+        """A CLI that exists only as a batch file safe_argv refuses: still a 503, but it says why."""
+        why = "fake.cmd resolves to a batch file (C:/x/fake.cmd) that cannot be run safely"
+        with mock.patch.object(server, "resolve_cli", return_value="C:/x/fake.cmd"),                 mock.patch.object(server, "safe_argv", side_effect=server.UnsafeLauncher(why)):
+            status, data = self.h.api("POST", "/api/chat", {"agent": "opencode", "message": "hi"})
+        self.assertEqual(status, 503)
+        self.assertIn("can't be started safely", data["detail"])
+        self.assertIn("batch file", data["detail"])
+
+    def test_status_shows_an_unsafe_launcher_offline_with_the_reason(self):
+        """/api/status must not say "online" for a CLI that /api/chat would refuse to start."""
+        why = "fake.cmd is an npm launcher but node.exe was not found (beside it or on PATH)"
+        with mock.patch.object(server, "resolve_cli", return_value="C:/x/fake.cmd"),                 mock.patch.object(server, "safe_argv", side_effect=server.UnsafeLauncher(why)):
+            status, data = self.h.api("GET", "/api/status")
+        self.assertEqual(status, 200)
+        agent = next(a for a in data["agents"] if a["name"] == "opencode")
+        self.assertEqual(agent["status"], "offline")
+        self.assertIn("node.exe was not found", agent["reason"])
+
 
 class MemoryGraphTests(unittest.TestCase):
     @classmethod
@@ -262,7 +281,7 @@ class MemoryGraphTests(unittest.TestCase):
 
     def test_memory_graph_has_nodes(self):
         (self.h.tmp / "brain" / "graph-note.md").write_text(
-            "zephyrquadrant graph connectivity notes"
+            "zephyrquadrant graph connectivity notes", encoding="utf-8"
         )
         status, _ = self.h.api("POST", "/api/memory/reindex")
         self.assertEqual(status, 200)

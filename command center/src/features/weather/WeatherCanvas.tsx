@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useAtmosphere, useWeather, type Atmosphere } from "./weather-store";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { frameLoop } from "@/lib/motion";
 
 /**
  * "Living weather" particle layer, ported from the Stitch export and made
@@ -51,7 +52,7 @@ export function WeatherCanvas() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    let w = 0, h = 0, raf = 0;
+    let w = 0, h = 0;
     let parts: P[] = [];
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -68,14 +69,9 @@ export function WeatherCanvas() {
     window.addEventListener("resize", resize);
 
     // 30 fps is plenty for drifting particles and halves the backdrop-blur recompute cost
-    // of every glass panel above it (a big part of the WebView2 flicker).
-    let last = 0;
-    const frame = (ts: number) => {
-      if (ts - last < 33) {
-        raf = requestAnimationFrame(frame);
-        return;
-      }
-      last = ts;
+    // of every glass panel above it (a big part of the WebView2 flicker). Ambient: frozen while
+    // calm (unfocused / idle), stopped while hidden (lib/motion.ts).
+    const frame = () => {
       ctx.clearRect(0, 0, w, h);
       for (const p of parts) {
         ctx.globalAlpha = p.a;
@@ -122,19 +118,12 @@ export function WeatherCanvas() {
         }
       }
       ctx.globalAlpha = 1;
-      raf = requestAnimationFrame(frame);
     };
 
-    const onVis = () => {
-      cancelAnimationFrame(raf);
-      if (!document.hidden) raf = requestAnimationFrame(frame);
-    };
-    document.addEventListener("visibilitychange", onVis);
-    raf = requestAnimationFrame(frame);
+    const loop = frameLoop(frame, (l) => (l === "full" ? 30 : 0));
     return () => {
-      cancelAnimationFrame(raf);
+      loop.stop();
       window.removeEventListener("resize", resize);
-      document.removeEventListener("visibilitychange", onVis);
     };
   }, [mode, reduced]);
 

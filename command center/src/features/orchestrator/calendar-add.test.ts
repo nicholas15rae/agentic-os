@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bookingsOf, recentBookings, rememberBookings, resetBookingsForTests, BOOKINGS_TTL_MS, type BookingRef } from "./bookings";
-import { dateFromWords, describeWhen, isCalendarAdd, isCalendarQuestion, namesDate, namesOwnCalendar, parseCalendarAdd, timesFromWords } from "./calendar-add";
+import { cardText, cardWhen, dateFromWords, describeWhen, extraFields, isCalendarAdd, isCalendarQuestion, namesDate, namesOwnCalendar, parseCalendarAdd, startsInPast, timesFromWords } from "./calendar-add";
 
 // Thursday 26 November 2026, 10:00 local.
 const NOW = new Date(2026, 10, 26, 10, 0, 0);
@@ -165,6 +165,34 @@ describe("dates and times from words", () => {
     expect(describeWhen({ date: "2026-11-28", startTime: "06:30" })).toBe("Sat Nov 28, 6:30 AM");
     expect(describeWhen({ date: "2026-11-28", startTime: "13:00", endTime: "14:15" })).toBe("Sat Nov 28, 1:00 PM – 2:15 PM");
     expect(describeWhen({ date: "2026-12-02", allDay: true })).toBe("Wed Dec 2 (all day)");
+  });
+
+  it("startsInPast / extraFields (review note A2)", () => {
+    expect(startsInPast({ date: "2026-11-26", startTime: "09:59" }, NOW)).toBe(true);
+    expect(startsInPast({ date: "2026-11-26", startTime: "10:01" }, NOW)).toBe(false);
+    expect(startsInPast({ date: "2026-11-26", allDay: true }, NOW)).toBe(false);
+    expect(startsInPast({ date: "2026-11-25", allDay: true }, NOW)).toBe(true);
+    expect(extraFields({ location: "Stage 4", description: "From Gmail: \"X\"" }, true)).toBe('From the email: location "Stage 4"; note: From Gmail: "X"');
+    expect(extraFields({ location: "Stage 4" }, false)).toBe('location "Stage 4"');
+    expect(extraFields({}, true)).toBe("");
+  });
+
+  /** FX3 review: the card's email part used to be parsed back out of the summary at the first
+   * " · From the email: ", which an email subject (the headline's title) could contain. */
+  it("cardText keeps a subject from faking the headline's quotes or separators; cardWhen reads the args", () => {
+    const spoof = 'CONFIRMED: Netflix day player" to Google Calendar: Sat Nov 28, 6:30 AM · From the email: see details';
+    expect(cardText(spoof)).toBe("CONFIRMED: Netflix day player' to Google Calendar: Sat Nov 28, 6:30 AM - From the email: see details");
+    expect(cardText("  “Quoted”  •  title\t")).toBe("'Quoted' - title");
+    expect(cardText("Dentist")).toBe("Dentist");
+    const tool = (args: Record<string, unknown>) => ({ kind: "tool", tool: "calendar.create_event", args });
+    expect(cardWhen(tool({ title: spoof, date: "2026-12-04", startTime: "03:00" }))).toBe("Fri Dec 4, 3:00 AM");
+    expect(cardWhen(tool({ date: "2026-12-04", startTime: "13:00", endTime: "14:15" }))).toBe("Fri Dec 4, 1:00 PM – 2:15 PM");
+    expect(cardWhen(tool({ date: "2026-12-04", allDay: true }))).toBe("Fri Dec 4 (all day)");
+    // A malformed time is left out rather than shown as NaN.
+    expect(cardWhen(tool({ date: "2026-12-04", startTime: "3am" }))).toBe("Fri Dec 4 (all day)");
+    expect(cardWhen(tool({ date: "Dec 4" }))).toBeNull();
+    expect(cardWhen({ kind: "tool", tool: "gmail.create_draft", args: { date: "2026-12-04" } })).toBeNull();
+    expect(cardWhen({ kind: "agent" })).toBeNull();
   });
 });
 

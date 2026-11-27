@@ -5,9 +5,11 @@ import { cmd, isTauri } from "@/lib/platform";
 import { useOs } from "./os-store";
 
 /**
- * Live dashboard state as plain text for the OS system prompt, so Tony answers
- * "what's the weather / is the droplet up / how's the GPU" from what's on
- * screen instead of claiming it has no real-time access.
+ * Live dashboard state as plain text for Tony's turn, so he answers "what's the
+ * weather / is the droplet up / how's the GPU" from what's on screen instead of
+ * claiming it has no real-time access. Rust puts it in the LIVE DASHBOARD section
+ * of the turn-context block after Nic's words in the last user message (never the
+ * system message, which stays byte-identical so the model reuses its cached prefix).
  */
 let statsCache: { at: number; st: Awaited<ReturnType<typeof cmd<"system_stats">>> } | null = null;
 

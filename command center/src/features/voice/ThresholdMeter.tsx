@@ -1,11 +1,14 @@
 import { useEffect, useRef } from "react";
 import { useSettings } from "@/stores/settings";
+import { frameLoop } from "@/lib/motion";
 import { useMic } from "./mic-gate";
 import { DB_MAX, DB_MIN, dbToPct, meterClearsGate } from "./meter-scale";
 import { setActivationDb } from "./threshold";
 import { thresholdFor } from "./vad-gate";
 
-const FILL_BASE = "absolute inset-y-0 left-0 rounded-full transition-[width] duration-75";
+// No width transition: it would re-animate on every update and bring back a frame per display
+// refresh (143 Hz), defeating the meter's 30 fps budget below.
+const FILL_BASE = "absolute inset-y-0 left-0 rounded-full";
 const FILL_CLEAR = `${FILL_BASE} bg-gradient-to-r from-teal to-amber`;
 const FILL_BELOW = `${FILL_BASE} bg-ink-3/40`;
 
@@ -31,7 +34,8 @@ export function ThresholdMeter({ variant = "full" }: { variant?: "full" | "compa
 
   useEffect(() => {
     if (!metering) return;
-    let raf = 0;
+    // A capture stays open all through hands-free listening: 30 updates/s on the shared frame grid,
+    // 15 while calm, none while hidden.
     const draw = () => {
       const m = useMic.getState().activeMeter;
       if (m) {
@@ -44,11 +48,10 @@ export function ThresholdMeter({ variant = "full" }: { variant?: "full" | "compa
         if (floor.current) floor.current.style.left = `${dbToPct(m.floorDb)}%`;
         if (you.current) you.current.textContent = `you ${Math.round(m.levelDb)} dB ${clears ? "✓" : "·"}`;
       }
-      raf = requestAnimationFrame(draw);
     };
-    draw();
+    const loop = frameLoop(draw, (l) => (l === "full" ? 30 : 15));
     return () => {
-      cancelAnimationFrame(raf);
+      loop.stop();
       if (fill.current) fill.current.style.width = "0%";
       if (you.current) you.current.textContent = "";
     };

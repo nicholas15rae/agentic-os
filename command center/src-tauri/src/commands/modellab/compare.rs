@@ -18,7 +18,9 @@
 //!
 //! Cases (cases.rs) are posted straight to Bionic the way Tony sends them, with only the model
 //! name changed. Chat turns: Tony's real system message (`agents::system_prompt_with_core` →
-//! `tony_turn_system` → `tony_system`, with the live MODE block and output contract), stream true,
+//! `tony_turn_system` → `tony_system`, with the live MODE block and output contract) and his real
+//! last user message (the line, then `agents::turn_context_block` with the fixed DASHBOARD and the
+//! case's tool data), stream true,
 //! reasoning_effort none, plus `stream_options.include_usage` for token counts. Router turns:
 //! `agents::router_prompt(agents::router_offer(..))`, stream false, with run_tool_router's one
 //! "JSON only" retry. Variants: `a` adds `chat_template_kwargs.enable_thinking=false`; `b` sends
@@ -834,15 +836,24 @@ impl Ctx<'_> {
         }
     }
 
-    /// Tony's system message for `text` exactly as his turn builds it (agents.rs os_turn), with
-    /// `model` as his model: persona + CORE MEMORIES + LIVE DASHBOARD + TOOLS line, the tool note,
-    /// then the output contract and the MODE block, `/no_think` last for a thinking model.
-    fn tony_system(&self, model: &str, text: &str, tool_note: &str, force_packets: bool) -> String {
+    /// Tony's system message exactly as his turn builds it (agents.rs os_turn), with `model` as his
+    /// model: persona + CORE MEMORIES + TOOLS line, then the output contract and the MODE block,
+    /// `/no_think` last for a thinking model. The same for every case of a suite (byte-stable, as
+    /// on Tony's real turns): the dashboard and tool data ride in the user message (`tony_user`).
+    fn tony_system(&self, model: &str, force_packets: bool) -> String {
         let cfg = &self.cfg;
-        let sys = agents::system_prompt_with_core(cfg, &self.core, DASHBOARD, &self.tools, agents::action_shaped(text, &cfg.os_name));
+        let sys = agents::system_prompt_with_core(cfg, &self.core, &self.tools);
         let contract = agents::tony_live_contract(force_packets || self.packets_live, &self.mode, &cfg.switchboard);
-        let tail = agents::tony_turn_tail("", "", &contract, &modes::mode_block(&self.mode));
-        agents::tony_system(agents::tony_turn_system(&sys, tool_note, "", &tail), Some(model), cfg.compute.deep_thinking)
+        agents::tony_system(agents::tony_turn_system(&sys, "", &contract, &modes::mode_block(&self.mode)), Some(model), cfg.compute.deep_thinking)
+    }
+
+    /// Tony's last user message for `text` as his turn builds it: Nic's words, then the turn-context
+    /// block with the fixed LIVE DASHBOARD, the TOOLS action lines (an action-shaped line only) and
+    /// the tool note.
+    fn tony_user(&self, text: &str, tool_note: &str) -> String {
+        let action = if agents::action_shaped(text, &self.cfg.os_name) { agents::tools_action_note(&self.tools) } else { String::new() };
+        let block = agents::turn_context_block(&agents::TurnContext { dashboard: DASHBOARD, action: &action, tool_note, ..Default::default() });
+        agents::turn_user_message(text, &block)
     }
 
     /// Tony's streamed body (agents.rs `run_chat_streamed_into`) + the variant + usage reporting.
@@ -872,7 +883,7 @@ async fn chat_case(ctx: &Ctx<'_>, block: usize, side: Side, v: Variant, c: &'sta
     let model = ctx.model(side).to_string();
     let note = c.data.map(|(server, data)| agents::tool_note(&ctx.cfg.os_name, &tool_block(server, data), None)).unwrap_or_default();
     let force = c.suite == Suite::Packet;
-    let msgs = vec![ChatMessage::new("system", ctx.tony_system(&model, c.text, &note, force)), ChatMessage::new("user", c.text)];
+    let msgs = vec![ChatMessage::new("system", ctx.tony_system(&model, force)), ChatMessage::new("user", ctx.tony_user(c.text, &note))];
     let out = stream_chat(ctx.state, &ctx.chat_url, &ctx.chat_body(&model, &msgs, v)).await;
     let visible = checks::visible_prose(&out.content);
     let parsed = tony_dispatch::parse(&visible);

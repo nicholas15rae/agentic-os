@@ -86,6 +86,12 @@ export interface SettingsState {
   /** Ultra-glass panel opacity, 0–100 %. 0–5 % = crystal-clear floating HUD. */
   glassOpacity: number;
   /**
+   * Pause ambient motion (wallpaper drift, weather, pulses, spinners, System Map drift) while the
+   * window is unfocused or untouched for a minute, so the WebView2 GPU process stops sharing the
+   * card with STT and the LLM (lib/motion.ts). Off = always animate while visible.
+   */
+  calmWhenIdle: boolean;
+  /**
    * Phone only: bearer token for the gateway when the desktop's network lock is on.
    * Deliberately excluded from persistence (see `partialize` below) — a secret has no
    * business sitting in plaintext `localStorage`. Re-enter it each session.
@@ -181,6 +187,7 @@ const defaults: Omit<SettingsState, "set"> = {
   wakeMode: false,
   wakeRequire: true,
   glassOpacity: 8,
+  calmWhenIdle: true,
   gatewayToken: "",
   vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 600 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },

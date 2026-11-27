@@ -27,7 +27,7 @@ class MemoryTests(unittest.TestCase):
     def test_search_indexes_brain_file(self):
         # Seed a brain file in temp state, reindex, then search
         (self.h.tmp / "brain" / "test-brain-note.md").write_text(
-            "zephyrquadrant cloud infrastructure notes"
+            "zephyrquadrant cloud infrastructure notes", encoding="utf-8"
         )
         status, _ = self.h.api("POST", "/api/memory/reindex")
         self.assertEqual(status, 200)

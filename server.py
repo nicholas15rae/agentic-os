@@ -98,6 +98,12 @@ import net_api  # noqa: E402
 
 app.include_router(net_api.router)
 
+# Maps: the PC's trips snapshot for the phone, refresh requests, "send to phone" hand-offs (own
+# queue and WebSocket, never the comms outbox).
+import maps_api  # noqa: E402
+
+app.include_router(maps_api.router)
+
 # No-cache for dashboard assets — SPA JS is loaded on demand and updated
 # frequently during development (v4.0). Prevents stale-cached pages.
 from starlette.middleware.base import BaseHTTPMiddleware

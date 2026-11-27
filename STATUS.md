@@ -31,6 +31,8 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Merge fixes: Ops' contracting phrases go to Tony (Ops stays frozen); settings migrations v8-v10; TS router starts with Ops frozen | merge/section-pass-into-main | 6d1084b | Yes, pushed to origin |
 | Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | No |
 | Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | No |
+| Director Part 1 quality fixes (auto framing, plan check, one auto-fix, idea verbatim, no-op guard) | director-suite | 45f715c, eeb2509, eff4f43 | No |
+| Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | No |
 
 ## 2. In progress
 
@@ -38,7 +40,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 |---|---|---|
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Next: 11.10 Tony reads Finance, Section 12 | All committed work is in main (conflicts resolved there). Next: merge main into the branch |
-| Director suite build | Part 1 quality fixes (clip length, framing, no-op revisions) | Reviewers running. Next: live E2E rerun, merge main, live SDXL test. Uncommitted |
+| Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes committed, main merged (4e986f1). Next: SDXL test, then Part 3 UI |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
@@ -117,8 +119,8 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Tony recall parrot probe (Bionic, 4 reps) | parroted 21/60 -> **0/60** (six test lines 10/24 -> 0/24); planted facts recalled 24/28 -> 28/28 | 11-26 22:10 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
 | section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
-| director-suite | vitest 2,595, Rust 1,445 + 67 browser, media-forge 116 | 11-26 20:47 |
-| Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
+| director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
+| Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
@@ -134,28 +136,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 22:46 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:08 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/upbeat-wing-e87be0` | 2 | `3fdea38` 2026-11-26 docs(status): test gate 28c60f3 (every module, parallel), its test ... | clean |
-| `merge/section-pass-into-main` | 21 | `37ba367` 2026-11-26 Merge branch 'main' into merge/section-pass-into-main | 1 files |
-| `section-pass` | 10 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | clean |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | clean |
-| `section-pass-batch3` | 15 | `e0419ee` 2026-11-26 Merge main (recall fix fa69ab2) into section-pass-batch3 | 69 files |
+| `director-suite` | 18 | `4e986f1` 2026-11-26 Merge main (a0e730c) into director-suite | 1 files |
+| `claude/upbeat-wing-e87be0` | 3 | `2d60807` 2026-11-26 test(device_registry): put the repo root on sys.path before importi... | clean |
+| `merge/director-suite-into-main` | 18 | `76df04f` 2026-11-26 Merge director-suite (Director Parts 1-2) into main | clean |
+| `section-pass` | 3 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | 25 files |
+| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 206 files |
 | `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 12 files |
-| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 18 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `66df342` 2026-11-26 docs(status): main pushed to origin (3ee3dd6): crash hardening and recall fix
-- `3ee3dd6` 2026-11-26 docs(status): record the recall fix merge into main (8278f76)
-- `8278f76` 2026-11-26 Merge fa69ab2: Tony recall stops parroting old replies
-- `e0f7ee7` 2026-11-26 docs(status): crash hardening 1cd5333, 4073bd9 timing, sessions
-- `4bc4e2d` 2026-11-26 Merge main (STATUS.md + update_status.py) into feat/language-hub
-- `1cd5333` 2026-11-26 fix(command-center): log panics to a file, never start the app over a dying WebView2
+- `eefaf0a` 2026-11-26 Merge main (a0e730c: section-pass + section-pass-batch3 merged) into section-pass-batch3
+- `e0419ee` 2026-11-26 Merge main (recall fix fa69ab2) into section-pass-batch3
+- `889ffb9` 2026-11-26 Merge main into section-pass-batch3
+- `7166d26` 2026-11-26 feat(tony): Tony reads Finance with one read-only tool (section 11.10)
+- `3fe3468` 2026-11-26 feat(comms): phone book grouped by area, linked across Finance, invoices, agencies and auditions (section 12)
+- `cebcdbf` 2026-11-26 fix(business,security): profiles sync safely across devices; PIN step-up for new finance records and profiles
 <!-- /AUTO:BRANCHES -->

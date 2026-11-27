@@ -12,8 +12,7 @@
                   that would not fit is REFUSED, so it can never push Bionic (Tony's live model) or
                   speech-to-text off the card.
 
-The estimate's compute-buffer figure is a starting guess (COMPUTE_MIB); step 5's real load measures
-it and the constant gets calibrated then.
+COMPUTE_MIB is calibrated from step 5's real load (11-27); the estimate stays above the measurement.
 """
 from __future__ import annotations
 
@@ -31,7 +30,10 @@ from engine import gguf_meta  # noqa: E402
 from engine.llama_engine import Engine, EngineRefused, EngineSettings, TONY_ALIAS, TONY_GGUF  # noqa: E402
 
 MIB = 1 << 20
-COMPUTE_MIB = 800       # CUDA compute buffers + context (uncalibrated until step 5)
+# CUDA compute buffers + context. Calibrated 11-27 (step 5): Tony's Qwen3.5 9B Q4_K_M at 32k x 2, f16
+# KV, flash attention measured 6176 MiB on the card (llama.cpp keeps token embeddings in RAM), vs
+# 7295 estimated with 800 here. 500 keeps the estimate on the safe side (~6995).
+COMPUTE_MIB = 500
 MARGIN_MIB = 400        # always left free on the card
 SKIP_DIRS = {".git", "node_modules", "__pycache__", "blobs"}  # HF `blobs` are the same files as `snapshots`
 

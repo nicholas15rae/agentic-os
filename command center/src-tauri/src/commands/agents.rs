@@ -552,8 +552,31 @@ there as LIVE MCP TOOL DATA."
     if spotify_connected(tools) {
         s.push_str("\nSPOTIFY IS CONNECTED. Never say Spotify isn't active or connected unless a TOOL FAILURE in the turn context says so.");
     }
+    if tools.iter().any(|t| t.server == "gmail") {
+        s.push_str(&format!("\n{EMAIL_RULE}"));
+    }
     s
 }
+
+/// Live test 11-27: Tony said he was "scanning your main inbox" with no tool run, and read
+/// Promotions mail as Nic's. Rides in the system TOOLS section whenever Gmail is listed (the same
+/// text every turn, so the cached prefix holds).
+pub(crate) const EMAIL_RULE: &str = "EMAIL: Gmail reads cover the inbox their result names (Primary unless Nic names another tab). For every email you \
+mention, say who sent it, the subject and which inbox it came from (its Inbox: line; with none, don't name one). Never say you opened, read, \
+checked or scanned his email unless a gmail.* LIVE MCP TOOL DATA block in this turn shows it.";
+
+/// Live test 11-27: Tony offered to add "check primary inbox" when Nic meant "Melissa Lee invoice".
+/// The app adds a to-do itself (reminders/todo.ts) after Nic says yes to the exact words. Rides in
+/// the turn-context block only on a line about a to-do (`mentions_todo`): the system message is at
+/// its 3,500-char budget.
+/// A line about Nic's to-do list ("add X to my to-do list", "what's on my todo"). Pure.
+pub(crate) fn mentions_todo(line: &str) -> bool {
+    static TODO: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    TODO.get_or_init(|| regex::Regex::new(r"\b(?:my|the|a|on|your)\s+to do\b|\btodos?\b|\bto-dos?\b|\btask list\b").unwrap()).is_match(&line.to_ascii_lowercase())
+}
+
+pub(crate) const TODO_RULE: &str = "TO-DOS: you can't add one yourself. Say back the exact item in Nic's own words and tell him to say \"add <item> to \
+my to-do list\". Never say you added or saved one, and never put your own words or the current task on his list.";
 
 fn spotify_connected(tools: &[super::mcp::ToolInfo]) -> bool {
     tools.iter().any(|t| t.server == "spotify" && super::mcp::is_spotify_actuator(&t.name))
@@ -1198,6 +1221,28 @@ pub(crate) fn finance_plan_on(original: &str, tools: &[super::mcp::ToolInfo], to
     Some((super::mcp::FINANCE_ASK.to_string(), args))
 }
 
+/// The Gmail tab a line names outright ("my promotions", "the social tab", "updates inbox",
+/// "in forums", "my primary inbox"), or None. Only ever asked of a line that already talks about
+/// email (`mentions_email`). A bare "my social" / "in updates" counts only at the end of the line
+/// (never "from Social Security", "my social worker", "my promotion", "the social event").
+/// Primary is returned too, so it wins over a saved "all" scope. Pure (`norm` is
+/// `routing::normalize`d, punctuation already gone).
+pub(crate) fn named_gmail_tab(norm: &str) -> Option<&'static str> {
+    static TAB: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = TAB.get_or_init(|| {
+        regex::Regex::new(r"\b(?:my|in|under)\s+(?:the\s+)?(primary|promotions|social|updates|forums?)(?:\s+(?:one|please|tony))?\s*$|\b(primary|promotions?|social|updates|forums?)\s+(?:tab|inbox|folder|category|e ?mails?|mail)\b|\b(promotions)\b").unwrap()
+    });
+    let c = re.captures(norm.trim())?;
+    let word = c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3))?.as_str();
+    Some(match word.trim_end_matches('s') {
+        "primary" => "primary",
+        "promotion" => "promotions",
+        "social" => "social",
+        "update" => "updates",
+        _ => "forums",
+    })
+}
+
 /// "read my last email", "latest 3 emails", "check my inbox", "any new
 /// emails", "unread mail" → `gmail.recent`; "emails from Sam" →
 /// `gmail.search {query: "from:Sam"}`. Checked before WhatsApp.
@@ -1217,9 +1262,13 @@ fn gmail_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String,
     if has("gmail.search") {
         if let Some(c) = from.captures(original) {
             let who = c[1].trim_end_matches(['?', '.', ',', '!']);
-            if !who.is_empty() && !["me", "my", "him", "her", "them", "today", "yesterday"].contains(&who.to_ascii_lowercase().as_str()) {
+            if !who.is_empty() && !["me", "my", "him", "her", "them", "today", "yesterday", "the"].contains(&who.to_ascii_lowercase().as_str()) {
                 let query = if who.contains(' ') { format!("from:\"{who}\"") } else { format!("from:{who}") };
-                return Some(("gmail.search".to_string(), json!({ "query": query, "limit": 5 })));
+                let mut args = json!({ "query": query, "limit": 5 });
+                if let Some(tab) = named_gmail_tab(&norm) {
+                    args["inbox"] = json!(tab);
+                }
+                return Some(("gmail.search".to_string(), args));
             }
         }
     }
@@ -1229,7 +1278,7 @@ fn gmail_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String,
     static RECENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RECENT.get_or_init(|| {
         regex::Regex::new(
-            r"\b(?:last|latest|newest|most recent|recent)\s+(\d{1,2})?\s*(?:gmail\s+)?(e ?mails?|gmails?|mails?)\b|\b(?:check|read|open|show|whats in|what is in)\s+(?:me\s+)?(?:my\s+|the\s+)?(?:gmail\s+)?(?:inbox|e ?mails?|gmail|mail)\b|\bany\s+(?:new\s+)?(?:e ?mails?|mail)\b|\bunread\b",
+            r"\b(?:last|latest|newest|most recent|recent)\s+(\d{1,2})?\s*(?:gmail\s+)?(e ?mails?|gmails?|mails?)\b|\b(?:check|read|open|show|whats in|what is in)\s+(?:me\s+)?(?:my\s+|the\s+)?(?:gmail\s+)?(?:(?:primary|promotions?|social|updates|forums?)\s+)?(?:inbox|e ?mails?|gmail|mail)\b|\bany\s+(?:new\s+)?(?:e ?mails?|mail)\b|\bunread\b",
         )
         .unwrap()
     });
@@ -1239,7 +1288,12 @@ fn gmail_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String,
         (None, Some(noun)) if !noun.as_str().ends_with('s') => 1,
         _ => 5,
     };
-    Some(("gmail.recent".to_string(), json!({ "count": count.clamp(1, 20) })))
+    // Primary only (Settings → Comms) unless Nic named another tab.
+    let mut args = json!({ "count": count.clamp(1, 20) });
+    if let Some(tab) = named_gmail_tab(&norm) {
+        args["inbox"] = json!(tab);
+    }
+    Some(("gmail.recent".to_string(), args))
 }
 
 /// "play …" phrases that aren't music ("play a game", "play devil's advocate").
@@ -2612,7 +2666,10 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     }
     let turn_tool_note = if role == "general" { tool_note.clone() } else { String::new() };
     // The TOOLS lines only a send / draft / playback line gets (a question never does).
-    let action_note = if action_shaped(&text, &cfg.os_name) { tools_action_note(&pre.tools) } else { String::new() };
+    let mut action_note = if action_shaped(&text, &cfg.os_name) { tools_action_note(&pre.tools) } else { String::new() };
+    if mentions_todo(&text) {
+        action_note = if action_note.is_empty() { TODO_RULE.to_string() } else { format!("{action_note}\n{TODO_RULE}") };
+    }
 
     // Nic's own words first; a delegated agent's reply (or the comms quotes) right after them.
     let mut user_msg = text.clone();
@@ -3863,6 +3920,30 @@ mod tests {
         assert_eq!(plan("last 99 emails").unwrap().1["count"], 20);
     }
 
+    /// Live test 11-27: Primary is the default; another tab only when Nic names it.
+    #[test]
+    fn gmail_plan_passes_a_tab_only_when_nic_names_one() {
+        let plan = |t: &str| gmail_plan(t, &gmail_tools());
+        assert_eq!(plan("check my inbox"), Some(("gmail.recent".into(), json!({ "count": 5 }))));
+        // Primary named outright rides along (it wins over a saved "all" scope; same query by default).
+        assert_eq!(plan("check my primary inbox").unwrap().1, json!({ "count": 5, "inbox": "primary" }));
+        assert_eq!(plan("check my promotions inbox").unwrap().1, json!({ "count": 5, "inbox": "promotions" }));
+        assert_eq!(plan("any new emails in social?").unwrap().1["inbox"], "social");
+        assert_eq!(plan("read my last email from the updates tab").unwrap().1["inbox"], "updates");
+        assert_eq!(plan("any emails from Sam in promotions").unwrap().1, json!({ "query": "from:Sam", "limit": 5, "inbox": "promotions" }));
+        // Not a tab: an email about a social event, an update in the subject.
+        assert!(plan("any emails about the social event").unwrap().1.get("inbox").is_none());
+        assert!(plan("any new emails with an update on the shoot").unwrap().1.get("inbox").is_none());
+        assert_eq!(named_gmail_tab("whats in my forum inbox"), Some("forums"));
+        // Review 11-27: a word that only looks like a tab picks none.
+        for t in ["any emails from Social Security?", "any emails about my promotion?", "any emails from my social worker", "any emails in social media about the shoot", "emails from updates team"] {
+            let p = plan(t).unwrap();
+            assert!(p.1.get("inbox").is_none(), "{t}: {}", p.1);
+        }
+        assert_eq!(named_gmail_tab("any new emails in my social"), Some("social"));
+        assert_eq!(named_gmail_tab("check the primary tab"), Some("primary"));
+    }
+
     #[test]
     fn gmail_plan_searches_by_sender() {
         assert_eq!(gmail_plan("any emails from Sam?", &gmail_tools()), Some(("gmail.search".into(), json!({ "query": "from:Sam", "limit": 5 }))));
@@ -4134,7 +4215,7 @@ mod tests {
     #[test]
     fn router_lines_carry_args_and_an_example() {
         let line = router_tool_line(&gmail_tools()[1]);
-        assert!(line.starts_with("- gmail.search(query, limit?): "), "{line}");
+        assert!(line.starts_with("- gmail.search(query, limit?, inbox?): "), "{line}");
         assert!(line.ends_with(r#"e.g. {"args":{"query":"<query>"},"tool":"gmail.search"}"#), "{line}");
     }
 
@@ -4177,6 +4258,30 @@ mod tests {
         assert!(!s.contains("don't claim it's done or queued"), "{s}");
         assert!(tools_section(&[]).contains("none switched on"));
         assert!(tools_action_note(&[]).contains("couldn't start it"));
+    }
+
+    /// Live test 11-27: report sender, subject and inbox; never claim a read that didn't run; a
+    /// to-do is the app's, after Nic's yes to his exact words.
+    #[test]
+    fn email_and_todo_rules_ride_in_the_tools_section() {
+        let s = tools_section(&gmail_tools());
+        assert!(s.contains(EMAIL_RULE) && !s.contains(TODO_RULE), "{s}");
+        for cue in ["who sent it", "the subject", "which inbox", "Never say you opened, read, checked or scanned", "Primary unless Nic names another tab"] {
+            assert!(EMAIL_RULE.contains(cue), "{cue}");
+        }
+        assert!(TODO_RULE.contains("exact item in Nic's own words") && TODO_RULE.contains("Never say you added or saved one") && TODO_RULE.contains("you can't add one yourself"));
+        assert!(EMAIL_RULE.contains("the inbox their result names") && EMAIL_RULE.contains("with none, don't name one"));
+        // No Gmail listed: no email rule.
+        assert!(!tools_section(&super::super::mcp::builtin_tools("weather")).contains("EMAIL:"));
+        // The to-do rule rides per turn, only on a line about a to-do.
+        for t in ["add Melissa Lee invoice to my to-do list", "put that on my todo", "Add it to my to do list", "what's on my task list", "any todos left?"] {
+            assert!(mentions_todo(t), "{t}");
+        }
+        for t in ["what do I do today", "check my primary inbox", "today is busy", "I need to do laundry"] {
+            assert!(!mentions_todo(t), "{t}");
+        }
+        // Never the word that flips skip_agentic_os.
+        assert!(!format!("{EMAIL_RULE}{TODO_RULE}").to_ascii_lowercase().contains("json"));
     }
 
     #[test]

@@ -67,8 +67,8 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
         "knowledge-graph" => vec![t(id, "kg.search", "Search the personal knowledge graph (people, projects, facts).", &["query"])],
         "brave-search" => vec![t(id, "web.search", "Search the web (Brave).", &["query"])],
         "gmail" => vec![
-            t(id, "gmail.recent", "Most recent inbox emails (sender, subject, date, preview).", &["count?"]),
-            t(id, "gmail.search", "Search Gmail with Gmail query syntax (from:sam, is:unread, subject:rates, newer_than:7d).", &["query", "limit?"]),
+            t(id, "gmail.recent", "Most recent emails in the Primary inbox (sender, subject, inbox, date, preview). inbox: promotions|social|updates|forums only when Nic names that tab.", &["count?", "inbox?"]),
+            t(id, "gmail.search", "Search the Primary inbox with Gmail query syntax (from:sam, is:unread, subject:rates, newer_than:7d). inbox: promotions|social|updates|forums only when Nic names that tab.", &["query", "limit?", "inbox?"]),
             t(id, "gmail.read_thread", "Read one email thread in full by its thread id (from gmail.recent / gmail.search).", &["threadId"]),
             t(id, super::gmail::BOOKING_SCAN, "Scan Gmail for booking mail (booked, confirmed, call sheet, deal memo, audition, on hold; last 30 days) and read the newest threads.", &["limit?", "read?"]),
             t(id, "gmail.create_draft", "Save a draft email (not sent). Only after the user's confirmation card.", &["to", "subject", "body"]),

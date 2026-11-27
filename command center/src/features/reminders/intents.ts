@@ -3,6 +3,13 @@ import { stripFiller } from "@/features/orchestrator/plan";
 import { formatWhen, parseWhen, stripPhrases } from "./when";
 import { rememberLocalAlarm, scheduleOsAlarm } from "./os-alarm";
 import type { Reminder } from "./types";
+import { createTodoFlow } from "./todo";
+import type { Idea } from "@/lib/platform";
+
+/** To-do adds wait for Nic's yes to the exact words (todo.ts); a parked ledger entry starts nothing. */
+export const todoFlow = createTodoFlow((item) =>
+  collections.create<Idea>("ideas", { title: item, idea: item, tasks: [{ id: crypto.randomUUID(), text: item, done: false }], spec: {}, status: "parked", tags: ["todo"], savedAt: Date.now() }),
+);
 
 /**
  * Voice/typed intents that only touch the local store:
@@ -17,6 +24,9 @@ import type { Reminder } from "./types";
 export async function handleLocalIntent(text: string): Promise<{ reply: string; meta: string } | null> {
   // "aye tony, can you …" / "hey, …": interjection, name and politeness dropped (shared with the planner).
   const t = stripFiller(text);
+  // A to-do add (or the answer to its "Add “…”?" question): Nic's exact words, confirmed first.
+  const todo = await todoFlow.handle(text);
+  if (todo) return todo;
   const s = t.toLowerCase();
 
   const isTimer = /^((set|start) (me )?(a |an )?([\w.]+[- ]?(minutes?|mins?|seconds?|secs?|hours?|hrs?) )?timer\b|timer\b|(a |an )?[\w.]+[- ]?(minutes?|mins?|seconds?|secs?|hours?|hrs?) timer\b)/.test(s);

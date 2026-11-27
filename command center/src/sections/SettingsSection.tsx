@@ -20,16 +20,18 @@ import { RoutingSettings } from "./settings/RoutingSettings";
 import { ModesManagerCard } from "./settings/ModesManager";
 import { SwitchboardCard } from "./settings/SwitchboardSettings";
 import { ClockCard, EffectsCard } from "./settings/ClockEffectsSettings";
+import { GmailInboxCard } from "./settings/CommsSettings";
 import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
 import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
 import { SecurityCard } from "@/features/security/SecurityCard";
 
-type Tab = "services" | "voice" | "modes" | "integrations" | "business" | "appearance" | "security";
+type Tab = "services" | "voice" | "modes" | "comms" | "integrations" | "business" | "appearance" | "security";
 const TABS: { id: Tab; label: string }[] = [
   { id: "services", label: "Services" },
   { id: "voice", label: "Voice & Triggers" },
   { id: "modes", label: "Modes & Switchboard" },
+  { id: "comms", label: "Comms" },
   { id: "integrations", label: "Integrations" },
   { id: "business", label: "Business" },
   { id: "appearance", label: "Appearance" },
@@ -115,6 +117,7 @@ export function SettingsSection() {
           {desktop ? <ModesManagerCard onOpenVoice={() => go("voice")} /> : <DesktopOnly what="Creating and editing Tony's modes and the switchboard" />}
         </>
       )}
+      {tab === "comms" && (desktop ? <GmailInboxCard /> : <DesktopOnly what="Which Gmail inbox Tony reads" />)}
       {tab === "integrations" && (
         <>
           {desktop && (

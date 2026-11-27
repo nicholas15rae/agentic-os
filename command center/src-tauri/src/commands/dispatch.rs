@@ -382,6 +382,9 @@ impl Default for Config {
                 // Bound to the local Docker container on first run (see n8n_discover).
                 p("n8n", "n8n (Docker)", Kind::N8n, "http://127.0.0.1:5678", "-", false),
                 p("google", "Google (Gmail + Calendar)", Kind::Integration, "https://oauth2.googleapis.com", "-", true),
+                // Section 26: the built-in llama.cpp engine (engine/llama_engine.py, off by default).
+                // NOT in policy.chain and never primary: nothing routes to it until Nic switches.
+                p("llamacpp", "Built-in engine (llama.cpp)", Kind::Local, "http://127.0.0.1:1238/v1", "qwen/qwen3.5-9b", false),
             ],
             policy: Policy {
                 gpu_util_max: 85.0,
@@ -1663,6 +1666,22 @@ mod part4_tests {
         assert!(r.contains("cut off"));
         let (c, r) = stream_outcome("Done.", true);
         assert_eq!((c.as_str(), r.as_str()), ("Done.", "chain · streamed"));
+    }
+
+    /// Section 26: the built-in engine is listed but off the request path. Tony stays on
+    /// LM Studio (primary, first in the chain) and no chain or default picks the engine.
+    #[test]
+    fn builtin_engine_is_listed_but_never_routed() {
+        let c = Config::default();
+        let e = c.providers.iter().find(|p| p.id == "llamacpp").expect("llamacpp provider");
+        assert_eq!(e.base_url, "http://127.0.0.1:1238/v1");
+        assert_eq!(c.policy.primary_local, "lmstudio");
+        assert_eq!(c.policy.chain.first().map(String::as_str), Some("lmstudio"));
+        assert!(!c.policy.chain.iter().any(|id| id == "llamacpp"));
+        assert_ne!(c.policy.fallback_cloud, "llamacpp");
+        assert_ne!(c.policy.verifier, "llamacpp");
+        // the first local provider (language_hub fallback) is still LM Studio
+        assert_eq!(c.providers.iter().find(|p| p.kind == Kind::Local).map(|p| p.id.as_str()), Some("lmstudio"));
     }
 
     #[test]

@@ -180,10 +180,10 @@ class Engine:
     process (the gateway, a CLI) can see and stop the same server; it only ever stops a pid that is
     still a llama-server it started (exe path checked)."""
 
-    def __init__(self, settings: Optional[EngineSettings] = None, data_dir: Path = DATA_DIR,
+    def __init__(self, settings: Optional[EngineSettings] = None, data_dir: Optional[Path] = None,
                  http_get: Callable = _get, popen: Callable = subprocess.Popen):
         self.s = settings or load_settings()
-        self.data = data_dir
+        self.data = data_dir or DATA_DIR  # read at call time (tests and the gateway may repoint it)
         self._get = http_get
         self._popen = popen
 

@@ -47,6 +47,13 @@ async def lifespan(app: FastAPI):
             print("Gateway Tony started")
         except Exception as e:
             print(f"Gateway Tony not available: {e}")
+        # Section 26 built-in engine: off by default (engine.json enabled=false), so this starts only
+        # an idle watchdog; with the engine on it starts llama-server with Tony's model at boot.
+        try:
+            import engine.api
+            print(f"Built-in engine: {engine.api.boot()}")
+        except Exception as e:
+            print(f"Built-in engine not available: {e}")
     yield
     if _scheduler_instance:
         try:
@@ -103,6 +110,15 @@ app.include_router(net_api.router)
 import maps_api  # noqa: E402
 
 app.include_router(maps_api.router)
+
+# Section 26 built-in llama.cpp engine: /api/engine/* (desktop / loopback only). Optional: a
+# missing or broken engine package never stops the gateway.
+try:
+    import engine.api  # noqa: E402
+
+    app.include_router(engine.api.router)
+except Exception as _e:  # pragma: no cover
+    print(f"engine routes not mounted: {_e}")
 
 # No-cache for dashboard assets — SPA JS is loaded on demand and updated
 # frequently during development (v4.0). Prevents stale-cached pages.

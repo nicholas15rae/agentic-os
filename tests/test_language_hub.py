@@ -925,9 +925,15 @@ class EchoGuardParity(unittest.TestCase):
         import bench
 
         self.assertIn("nic", lh._prompt_words(self.P))
-        self.assertLessEqual(len(self.P), 220)
+        # Live test 11-27: the Gmail tabs, so "promotions" stops coming out as "permissions".
+        for w in ("inbox", "primary", "promotions", "social", "updates", "forums"):
+            self.assertIn(w, lh._prompt_words(self.P))
+        self.assertLessEqual(len(self.P), 280)
         self.assertEqual(bench.PROMPT, self.P)
-        for ok in ("Tony, it's Nic", "Hey Tony, Nic here", "Tell Nic the booking desk called", "Nic, take it easy", "Tony, gabagool mode on"):
+        for ok in ("check my primary inbox", "anything in promotions?", "don't look in my promotions or social",
+                   "Check promotions, social, updates, forums", "search primary, promotions, social and updates",
+                   "read the Gmail inbox", "Tony, check my Gmail inbox, the primary one",
+                   "Tony, it's Nic", "Hey Tony, Nic here", "Tell Nic the booking desk called", "Nic, take it easy", "Tony, gabagool mode on"):
             self.assertFalse(lh.echoes_prompt(ok, self.P), ok)
         self.assertTrue(lh.echoes_prompt("Tony, Nic, Gabagool mode. Take it easy.", self.P))
 

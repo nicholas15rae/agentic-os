@@ -34,7 +34,7 @@ export const CUT = ["cut it", "cut it out", "cut that", "cutit", "yo tony cut it
  * its own: "Stop.", "Tony, shut it off", "stop, what's next?", "stop the timer". Never a
  * "contains" match, so mid-sentence and negated uses ("don't stop the music", "please don't
  * stop", "I can't stop") stay ordinary lines for the grammars and the LLM. */
-export const CUT_LEADING = ["stop", "stop it", "shut off", "shut it off", "shut it down"];
+export const CUT_LEADING = ["stop", "stop it", "shut off", "shut it off", "shut it down", "hold on", "hold on hold on"];
 /** The "take it easy" family (P5): a hold over a busy/held turn, a stand-down when idle and
  * the whole line, a hold-with-rest when idle with more after it. Whisper writes every one of these. */
 export const EASE_MULTI = ["take it ease", "take it easy", "take it eas", "take it ees", "take it knees", "take at ease", "take it is"];
@@ -59,6 +59,8 @@ const CUT_LEAD = new Set([...LEAD, "please", "no"]);
 const NEGATOR = new Set(["not", "never", "dont", "cant", "wont", "didnt", "doesnt", "shouldnt", "couldnt", "wouldnt", "isnt"]);
 /** `norm` splits "don't" into "don t": the stem before a lone "t". */
 const NEG_STEM = new Set(["don", "can", "won", "didn", "doesn", "shouldn", "couldn", "wouldn", "isn", "ain"]);
+/** "hold on a sec", "stop a minute": the pause words after a hard stop are part of it, never a new turn. */
+const PAUSE_TAIL = new Set(["a", "sec", "second", "minute", "moment", "bit", "one"]);
 /** Trailing politeness after a standalone resume/submit ("keep going please"). */
 const TAIL = new Set(["please", "tony", "now", "then", "yeah", "man"]);
 /** Lead words before the "take it easy" family: the address words plus "please". */
@@ -127,7 +129,7 @@ export function parseReflex(text: string, ctx: ReflexCtx): Reflex {
   // Bare hard stops: the whole line, or its first words. Whatever follows is dropped with the turn.
   const stopLen = prefixLen(w, T_CUT_LEADING, cutLead);
   if (stopLen) {
-    const rest = w.slice(cutLead + stopLen).every((x) => TAIL.has(x)) ? "" : restAfter(text, cutLead + stopLen);
+    const rest = w.slice(cutLead + stopLen).every((x) => TAIL.has(x) || PAUSE_TAIL.has(x)) ? "" : restAfter(text, cutLead + stopLen);
     return { kind: "cut", rest, needsAddress: true };
   }
   const lead = leadCount(w);
@@ -173,7 +175,7 @@ export function parseReflex(text: string, ctx: ReflexCtx): Reflex {
 export function isBareCut(text: string): boolean {
   const w = toks(norm(text));
   if (!w.length) return false;
-  const filler = new Set([...CUT_LEAD, ...TAIL]);
+  const filler = new Set([...CUT_LEAD, ...TAIL, ...PAUSE_TAIL]);
   const core = w.filter((x) => !filler.has(x));
   if (!core.length) return false;
   const s = core.join(" ");

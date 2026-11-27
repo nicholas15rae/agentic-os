@@ -129,6 +129,78 @@ fn arg_str<'a>(args: &'a Value, k: &str) -> &'a str {
     args.get(k).and_then(Value::as_str).map(str::trim).unwrap_or("")
 }
 
+// ── Inbox scope (Settings → Comms) ──────────────────────────────────────────
+//
+// Every Gmail read and search is scoped to the Primary inbox (`category:primary in:inbox`) unless
+// Nic names a tab outright ("check my promotions", a `category:social` query) or switches the saved
+// setting (os.json `gmail.inboxScope`) to "all". Promotions, Social, Updates and Forums stay out.
+
+/// Gmail's inbox tabs, as Gmail's `category:` operator spells them.
+pub(crate) const CATEGORIES: [&str; 5] = ["primary", "promotions", "social", "updates", "forums"];
+/// The saved default: Primary only.
+pub(crate) const SCOPE_PRIMARY: &str = "primary";
+/// The other saved choice: no category filter (every tab; a search also sees archived mail).
+pub(crate) const SCOPE_ALL: &str = "all";
+
+/// The inbox tab a Gmail query names outright (`category:promotions`, `in:social`, `label:updates`),
+/// never a negated one (`-category:promotions` only leaves a tab out). Pure.
+pub(crate) fn named_category(query: &str) -> Option<&'static str> {
+    query.split_whitespace().find_map(|tok| {
+        let tok = tok.trim_matches(|c: char| c == '(' || c == ')').to_ascii_lowercase();
+        let (_, v) = tok.split_once(':').filter(|(k, _)| ["category", "in", "label"].contains(k))?;
+        CATEGORIES.iter().copied().find(|c| *c == v.trim_matches('"'))
+    })
+}
+
+/// The query names a mailbox that isn't an inbox tab (`in:sent`, `in:drafts`, `in:trash`, `in:spam`,
+/// `in:anywhere`, `is:sent`, `is:draft`, a user `label:Clients`): Nic asked for that place, so it
+/// runs as given (Primary-scoping it would find nothing). Negated terms don't count. Pure.
+pub(crate) fn names_mailbox(query: &str) -> bool {
+    query.split_whitespace().any(|tok| {
+        let tok = tok.trim_matches(|c: char| c == '(' || c == ')').to_ascii_lowercase();
+        match tok.split_once(':') {
+            _ if tok.starts_with('-') => false,
+            Some(("in", v)) => !v.is_empty() && v != "inbox",
+            Some(("is", v)) => matches!(v, "sent" | "draft" | "drafts" | "chat" | "chats"),
+            Some(("label", v)) => !v.is_empty(),
+            _ => false,
+        }
+    })
+}
+
+/// A tab's name as Tony reports it ("Primary", "Promotions"…).
+pub(crate) fn inbox_label(category: &str) -> String {
+    let mut c = category.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// The query Gmail actually runs, and the inbox it covers (for Tony's report). `base` is Nic's own
+/// query ("" for recent mail), `scope` the saved setting, `inbox` a tab this request named
+/// (`gmail.recent {inbox: "promotions"}`). A tab named in the query or the request wins; otherwise
+/// the saved scope: "all" leaves the query alone (recent mail = `in:inbox`), anything else
+/// (including an unknown value) is Primary. Pure.
+pub(crate) fn scoped_query(base: &str, scope: &str, inbox: Option<&str>) -> (String, String) {
+    let base = base.trim();
+    if let Some(c) = named_category(base) {
+        return (base.to_string(), inbox_label(c));
+    }
+    if names_mailbox(base) {
+        return (base.to_string(), ALL_MAIL.into());
+    }
+    let pick = inbox.map(|i| i.trim().to_ascii_lowercase()).filter(|i| CATEGORIES.contains(&i.as_str()) || i == SCOPE_ALL);
+    let pick = pick.unwrap_or_else(|| if scope.trim().eq_ignore_ascii_case(SCOPE_ALL) { SCOPE_ALL.into() } else { SCOPE_PRIMARY.into() });
+    if pick == SCOPE_ALL {
+        let q = if base.is_empty() { "in:inbox".to_string() } else { base.to_string() };
+        return (q, ALL_MAIL.into());
+    }
+    let filter = format!("category:{pick} in:inbox");
+    let q = if base.is_empty() { filter } else { format!("{base} {filter}") };
+    (q, inbox_label(&pick))
+}
+
+/// The inbox label of an unscoped read.
+const ALL_MAIL: &str = "all mail";
+
 fn arg_num(args: &Value, k: &str, default: u64, max: u64) -> u64 {
     args.get(k).and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())).unwrap_or(default).clamp(1, max)
 }
@@ -141,11 +213,14 @@ pub(crate) async fn tool(state: &DispatchState, os: &OsState, name: &str, args: 
     match name {
         "gmail.recent" => {
             let n = arg_num(args, "count", 5, 20);
+            let scope = os.snapshot().gmail.inbox_scope;
+            let (query, inbox) = scoped_query("", &scope, args.get("inbox").and_then(Value::as_str));
             match source(state) {
-                Source::Script => recent(state, n).await,
+                Source::Script => recent(state, n, &query, &inbox).await,
                 Source::N8n(wf) => {
-                    let v = super::n8n::fetch_readonly(state, wf, json!({ "count": n })).await.map_err(|e| format!("Gmail (n8n \"{wf}\"): {e}"))?;
-                    Ok(v.to_string().chars().take(6000).collect())
+                    // The read-only workflow gets the scoped query too (an older one may ignore it).
+                    let v = super::n8n::fetch_readonly(state, wf, json!({ "count": n, "query": query })).await.map_err(|e| format!("Gmail (n8n \"{wf}\"): {e}"))?;
+                    Ok(format!("Asked for: {inbox} ({query})\n{}", v.to_string().chars().take(6000).collect::<String>()))
                 }
                 Source::None => Err(NO_BACKEND.into()),
             }
@@ -156,8 +231,10 @@ pub(crate) async fn tool(state: &DispatchState, os: &OsState, name: &str, args: 
                 return Err("gmail.search needs a query (Gmail search syntax, e.g. from:sam is:unread)".into());
             }
             let limit = arg_num(args, "limit", 10, 25);
+            let scope = os.snapshot().gmail.inbox_scope;
+            let (query, inbox) = scoped_query(query, &scope, args.get("inbox").and_then(Value::as_str));
             let data = script(state, "search", json!({ "query": query, "limit": limit, "start": 0 }), 15).await?;
-            Ok(format_threads(&data, &[], 240))
+            Ok(format_threads(&data, &[], 240, &inbox))
         }
         "gmail.read_thread" => {
             let id = arg_str(args, "threadId");
@@ -209,8 +286,8 @@ fn draft_fields(args: &Value) -> Result<(String, String, String), String> {
     Ok((addresses.join(", "), subject.trim().to_string(), body.to_string()))
 }
 
-async fn recent(state: &DispatchState, n: u64) -> Result<String, String> {
-    let data = script(state, "search", json!({ "query": "is:inbox", "limit": n, "start": 0 }), 15).await?;
+async fn recent(state: &DispatchState, n: u64, query: &str, inbox: &str) -> Result<String, String> {
+    let data = script(state, "search", json!({ "query": query, "limit": n, "start": 0 }), 15).await?;
     // Search summaries carry no sender or body, so read the newest few threads too.
     let ids: Vec<String> = data["threads"].as_array().into_iter().flatten().take(n.min(3) as usize).filter_map(|t| t["id"].as_str().map(String::from)).collect();
     let reads = futures_util::future::join_all(ids.iter().map(|id| script(state, "read_thread", json!({ "threadId": id }), 8)));
@@ -218,7 +295,7 @@ async fn recent(state: &DispatchState, n: u64) -> Result<String, String> {
         Ok(v) => v.into_iter().map(|r| r.unwrap_or(Value::Null)).collect(),
         Err(_) => vec![],
     };
-    Ok(format_threads(&data, &details, if n == 1 { 1500 } else { 240 }))
+    Ok(format_threads(&data, &details, if n == 1 { 1500 } else { 240 }, inbox))
 }
 
 fn local_date(s: &str) -> String {
@@ -248,11 +325,14 @@ fn first_str<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
 }
 
 /// `search` data (`{threads, resultCount}`) as numbered lines; `details[i]` is
-/// thread i's `read_thread` data when it was fetched (sender + body preview).
-fn format_threads(data: &Value, details: &[Value], preview: usize) -> String {
+/// thread i's `read_thread` data when it was fetched (sender + body preview). `inbox` is the tab
+/// the query covered ("Primary"; [`ALL_MAIL`] = unscoped): each line says which inbox it came
+/// from, so Tony reports sender, subject and inbox without guessing.
+fn format_threads(data: &Value, details: &[Value], preview: usize, inbox: &str) -> String {
     let threads: Vec<&Value> = data["threads"].as_array().into_iter().flatten().collect();
+    let scoped = inbox != ALL_MAIL;
     if threads.is_empty() {
-        return "No emails found.".into();
+        return if scoped { format!("No emails found in the {inbox} inbox.") } else { "No emails found.".into() };
     }
     let lines: Vec<String> = threads
         .iter()
@@ -264,6 +344,12 @@ fn format_threads(data: &Value, details: &[Value], preview: usize) -> String {
             let date = first_str(t, &["lastMessageDate", "date"]).map(local_date).unwrap_or_default();
             let unread = if t["isUnread"].as_bool() == Some(true) { "[UNREAD] " } else { "" };
             let mut line = format!("{}. {unread}From: {from} · Subject: \"{subject}\"", i + 1);
+            // The bridge's own tab for the thread when it sends one, else the tab the query covered.
+            match first_str(t, &["category"]).and_then(|c| CATEGORIES.iter().find(|k| k.eq_ignore_ascii_case(c))) {
+                Some(c) => line.push_str(&format!(" · Inbox: {}", inbox_label(c))),
+                None if scoped => line.push_str(&format!(" · Inbox: {inbox}")),
+                None => {}
+            }
             if !date.is_empty() {
                 line.push_str(&format!(" · {date}"));
             }
@@ -278,7 +364,8 @@ fn format_threads(data: &Value, details: &[Value], preview: usize) -> String {
         })
         .collect();
     let total = data["resultCount"].as_u64().unwrap_or(threads.len() as u64);
-    format!("{total} email thread(s):\n{}", lines.join("\n"))
+    let scope = if scoped { format!(" in the {inbox} inbox") } else { " (all mail)".into() };
+    format!("{total} email thread(s){scope}:\n{}", lines.join("\n"))
 }
 
 /// `read_thread` data → the latest message in full (truncated) plus who else wrote.
@@ -933,11 +1020,63 @@ mod tests {
             ]
         });
         let details = vec![json!({ "messages": [{ "from": "Old <o@x.com>", "body": "first" }, { "from": "Sam <sam@acme.ca>", "body": "Call time\n\n is 9am." }] })];
-        let s = format_threads(&data, &details, 240);
-        assert!(s.starts_with("2 email thread(s):"));
+        let s = format_threads(&data, &details, 240, ALL_MAIL);
+        assert!(s.starts_with("2 email thread(s) (all mail):"));
         assert!(s.contains("1. [UNREAD] From: Sam <sam@acme.ca> · Subject: \"Shoot Friday\" · not-a-date [thread t1]\n   Call time is 9am."));
         assert!(s.contains("2. From: unknown sender · Subject: \"(no subject)\" [thread t2]\n   see you there"));
-        assert_eq!(format_threads(&json!({ "threads": [] }), &[], 240), "No emails found.");
+        assert_eq!(format_threads(&json!({ "threads": [] }), &[], 240, ALL_MAIL), "No emails found.");
+    }
+
+    /// Live test 11-27: Tony read Promotions as if they were Nic's mail. Every read and search is
+    /// Primary-only unless Nic names a tab or the saved scope is "all".
+    #[test]
+    fn reads_and_searches_default_to_the_primary_inbox() {
+        let q = |base: &str, scope: &str, inbox: Option<&str>| scoped_query(base, scope, inbox);
+        // Recent mail and a plain search: Primary, inbox only.
+        assert_eq!(q("", "primary", None), ("category:primary in:inbox".into(), "Primary".into()));
+        assert_eq!(q("from:Sam", "primary", None), ("from:Sam category:primary in:inbox".into(), "Primary".into()));
+        // A missing / unknown saved value is Primary too (fail toward less mail).
+        assert_eq!(q("from:Sam", "", None).1, "Primary");
+        assert_eq!(q("", "everything", None).0, "category:primary in:inbox");
+        // Nic names a tab: that tab, in the query or as the request's inbox.
+        assert_eq!(q("category:promotions", "primary", None), ("category:promotions".into(), "Promotions".into()));
+        assert_eq!(q("from:shop label:Social", "primary", None).1, "Social");
+        assert_eq!(q("", "primary", Some("promotions")), ("category:promotions in:inbox".into(), "Promotions".into()));
+        assert_eq!(q("from:x", "primary", Some("Updates")).0, "from:x category:updates in:inbox");
+        assert_eq!(q("", "primary", Some("forums")).1, "Forums");
+        // A negated tab only leaves it out: still scoped.
+        assert_eq!(q("-category:promotions invoice", "primary", None).0, "-category:promotions invoice category:primary in:inbox");
+        // A bogus request inbox is ignored.
+        assert_eq!(q("", "primary", Some("permissions")).1, "Primary");
+        // The saved "all" scope: recent mail is the whole inbox, a search runs as given.
+        assert_eq!(q("", "all", None), ("in:inbox".into(), ALL_MAIL.into()));
+        assert_eq!(q("from:Sam", "ALL", None), ("from:Sam".into(), ALL_MAIL.into()));
+        assert_eq!(q("", "all", Some("social")).1, "Social");
+        assert_eq!(named_category("(category:updates OR from:x)"), Some("updates"));
+        assert_eq!(named_category("subject:primary"), None);
+        // Review 11-27: a query that names another mailbox runs as given (never Primary-scoped to nothing).
+        for base in ["in:sent to:sam", "in:drafts", "in:trash invoice", "is:sent to:sam", "label:Clients", "(in:spam OR in:trash) melissa", "in:anywhere invoice"] {
+            assert_eq!(q(base, "primary", None), (base.to_string(), ALL_MAIL.into()), "{base}");
+        }
+        // …but in:inbox and negated places stay scoped.
+        assert_eq!(q("in:inbox from:sam", "primary", None).0, "in:inbox from:sam category:primary in:inbox");
+        assert_eq!(q("-in:sent invoice", "primary", None).1, "Primary");
+        // Nic names Primary outright while the saved scope is "all": Primary wins.
+        assert_eq!(q("", "all", Some("primary")), ("category:primary in:inbox".into(), "Primary".into()));
+    }
+
+    /// Every reported email carries sender, subject and the inbox it came from.
+    #[test]
+    fn each_email_line_names_its_inbox() {
+        let data = json!({ "threads": [{ "id": "a1", "subject": "Invoice 114", "from": "Melissa Lee <ml@x.ca>" }, { "id": "b2", "subject": "Sale", "from": "Shop", "category": "promotions" }] });
+        let s = format_threads(&data, &[], 240, "Primary");
+        assert!(s.starts_with("2 email thread(s) in the Primary inbox:"), "{s}");
+        assert!(s.contains("1. From: Melissa Lee <ml@x.ca> · Subject: \"Invoice 114\" · Inbox: Primary [thread a1]"), "{s}");
+        // The bridge's own category wins over the query's tab.
+        assert!(s.contains("2. From: Shop · Subject: \"Sale\" · Inbox: Promotions [thread b2]"), "{s}");
+        assert_eq!(format_threads(&json!({ "threads": [] }), &[], 240, "Primary"), "No emails found in the Primary inbox.");
+        // Unscoped mail never claims an inbox it doesn't know.
+        assert!(!format_threads(&data, &[], 240, ALL_MAIL).contains("Inbox: Primary"));
     }
 
     #[test]

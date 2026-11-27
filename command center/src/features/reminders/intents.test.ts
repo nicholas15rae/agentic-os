@@ -20,6 +20,28 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+describe("handleLocalIntent — to-do adds wait for a yes to the exact words", () => {
+  it("asks first, then saves Nic's words to the ledger as a parked to-do", async () => {
+    const q = await handleLocalIntent("Hey Tony, add Melissa Lee invoice to my to-do list");
+    expect(q?.reply).toContain("“Melissa Lee invoice”");
+    expect(create).not.toHaveBeenCalled();
+    const r = await handleLocalIntent("yes");
+    expect(r?.reply).toBe("Added “Melissa Lee invoice” to your to-do list.");
+    expect(create).toHaveBeenCalledTimes(1);
+    const [collection, data] = create.mock.calls[0];
+    expect(collection).toBe("ideas");
+    expect(data).toMatchObject({ title: "Melissa Lee invoice", idea: "Melissa Lee invoice", status: "parked", tags: ["todo"], tasks: [{ text: "Melissa Lee invoice", done: false }] });
+  });
+
+  it("a timer line while a to-do waits is still a timer (and the to-do is dropped)", async () => {
+    await handleLocalIntent("add Melissa Lee invoice to my to-do list");
+    const r = await handleLocalIntent("set a timer for 10 minutes");
+    expect(r?.reply).toMatch(/^Timer set/);
+    expect(await handleLocalIntent("yes")).toBeNull();
+    expect(create.mock.calls.every(([c]) => c === "reminders")).toBe(true);
+  });
+});
+
 describe("handleLocalIntent — timers and alarms, no card", () => {
   it("'aye tony set a timer for 10 minutes' → a 10-minute alarm plus the Windows alarm", async () => {
     const r = await handleLocalIntent("aye tony set a timer for 10 minutes");

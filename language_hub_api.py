@@ -497,7 +497,8 @@ async def stt(request: Request, lang: str = Query("auto")):
 # desktop biases Whisper with. A provider's own `sttPrompt` wins ("" = send none). "Nic" is in it so
 # Whisper stops writing "Nick" (4 of turbo's 9 word errors in the benchmark).
 DEFAULT_STT_PROMPT = ("Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk "
-                      "and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.")
+                      "and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint. "
+                      "Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab.")
 WHISPERCPP_FALLBACK = {"id": "whisper", "baseUrl": "http://127.0.0.1:8178/v1", "model": "base.en", "engine": "whispercpp"}
 STT_JUNK = ("[blank_audio]", "(silence)", "[ silence ]", "[silence]")
 FW_PYTHON = Path(os.environ.get("STT_FW_PYTHON", r"C:\ai-stt\.venv\Scripts\python.exe"))

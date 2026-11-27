@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 00:34. One page for every Claude Code session and branch.
+Updated 2026-11-27 01:11. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -36,6 +36,7 @@ Updated 2026-11-27 00:34. One page for every Claude Code session and branch.
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
+| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | **No**, waiting on your OK to merge |
 
 ## 2. In progress
 
@@ -51,6 +52,7 @@ Updated 2026-11-27 00:34. One page for every Claude Code session and branch.
 ## 3. Waiting on you
 
 **Decisions**
+- Merge `system.status` (6eae983, `claude/unruffled-mayer-1247f9`) into main, then rebuild + restart the app? After that, a phone turn "Tony, is the droplet up?" gets the droplet's real state. I'll check it with an inbox turn once it's running.
 - Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
 - The running app (restarted 11-27 00:31) is main at dffdb71: section-pass, batch3, director-suite, PR #8 (Sections 8-10 m2), Ops removal, crash hardening, recall fix.
 - Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
@@ -116,6 +118,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
@@ -147,25 +150,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 00:32 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 01:12 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-pass` | 8 | `675571e` 2026-11-27 feat(section-pass): Play Place on the shared layout (layout step 4,... | 2 files |
-| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | clean |
-| `claude/upbeat-wing-e87be0` | 8 | `1139cc6` 2026-11-26 Merge main (0add160: Sections 8-10 milestone 2) into claude/upbeat-... | clean |
-| `claude/practical-elbakyan-0f96f1` | 8 | `3215d66` 2026-11-26 fix(trading): kill stand-down clears after any unlock; stop retries... | 16 files |
+| `claude/unruffled-mayer-1247f9` | 1 | `6eae983` 2026-11-27 feat(tony): read-only system.status tool for infrastructure questions | 1 files |
+| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
+| `section-pass` | 15 | `d445421` 2026-11-27 feat(section-pass): Settings on the shared layout (layout step 4, p... | 11 files |
+| `claude/practical-elbakyan-0f96f1` | 9 | `6fcd6cd` 2026-11-27 fix(trading): guard waits for the kill's flatten; nets every closin... | 173 files |
+| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | 1 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
 - `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
 - `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
 - `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
 - `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
 - `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
-- `d62333d` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main
 <!-- /AUTO:BRANCHES -->

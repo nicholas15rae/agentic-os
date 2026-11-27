@@ -36,6 +36,7 @@ pub mod gdrive;
 pub mod gmail;
 pub mod handoff_cues;
 pub mod hygiene;
+pub mod infra_status;
 pub mod integrity;
 pub mod language_hub;
 pub mod instagram;

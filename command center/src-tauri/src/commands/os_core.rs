@@ -391,6 +391,8 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         // Vault search (read-only `vault.search`, Section 16.6): Tony's alone;
         // `mcp::vault_reader_refusal` refuses every other agent whatever the grants say.
         "vault" => &["general"],
+        // Infrastructure status (read-only `system.status`): Tony's, since the Ops agent is gone.
+        "system" => &["general"],
         "knowledge-graph" => &["general", "librarian", "prompter"],
         "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
@@ -532,6 +534,7 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("calendar", "Google Calendar", true, "Your upcoming events through the Google Apps Script deployment AnythingLLM's Calendar agent uses (imported on first use). Adding an event only after the confirmation card; never invites."),
         builtin("finance", "Finance (read-only)", true, "Tony answers money questions from the Finance records on the local gateway: what you owe an agent, income and expenses by area, pending money, unpaid invoices, HST dates. Read-only summaries, never raw rows; changes stay on the Finance screens."),
         builtin("vault", "Vault search (read-only)", true, "Tony searches your saved brainstorms, scripts & auditions, jobs, documents and ideas on the local gateway (\"find the note about…\"). A few short quoted matches, never finance records; nothing is changed."),
+        builtin("system", "System status (read-only)", true, "Tony checks whether the droplet (over NetBird), the gateway, Bionic, speech-to-text, Kokoro, Docker and n8n are up, with latency. Short read-only probes; never starts, stops or changes anything."),
         McpServer {
             id: "whatsapp".into(),
             name: "WhatsApp Bridge".into(),
@@ -2828,6 +2831,18 @@ mod tests {
         assert_eq!(grants(&cfg), ["general", "librarian"], "once: a later grant edit stands (the refusal still blocks the Librarian)");
     }
 
+    /// The read-only infrastructure status server (`system.status`): a builtin, on, Tony's alone.
+    #[test]
+    fn system_status_server_is_tonys() {
+        let s = OsConfig::default().mcps.into_iter().find(|m| m.id == "system").expect("system builtin");
+        assert!(s.enabled && s.builtin && s.transport == "builtin" && !s.read_only);
+        assert_eq!(s.agents.as_deref(), Some(&["general".to_string()][..]));
+        assert_eq!(default_mcp_grants("system"), ["general"]);
+        // An older os.json gets the row from `default_mcps` on load, grant included.
+        let d = default_mcps().into_iter().find(|m| m.id == "system").unwrap();
+        assert_eq!(d.agents.as_deref(), Some(&["general".to_string()][..]));
+    }
+
     /// Section 20.8: live delegation never reaches the Librarian / Booking workspaces; the mapping
     /// stays for the scheduled Librarian scripts.
     #[test]
@@ -3212,6 +3227,8 @@ mod tests {
         };
         let mcps: Vec<serde_json::Value> = default_mcps()
             .into_iter()
+            // Added after the switchboard: an os.json this old never had it (load back-fills it).
+            .filter(|m| m.id != "system")
             .map(|m| {
                 let mut v = serde_json::to_value(&m).unwrap();
                 v["agents"] = json!(old_grants(&m.id));

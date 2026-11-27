@@ -831,6 +831,18 @@ fn wants_tools(text: &str) -> bool {
     })
     .is_match(text)
         || super::routing::normalize(text).split(' ').any(|w| w == "whatsapp")
+        || infra_line(&super::routing::normalize(text))
+}
+
+/// The line names a piece of Nic's infrastructure (`norm` is `routing::normalize`d): the
+/// droplet, Docker, n8n, the gateway, Bionic, NetBird, speech-to-text, Kokoro, "my servers"…
+/// Gates `system.status` for the router (`router_line_needs`) and `system_plan`.
+pub(crate) fn infra_line(norm: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"\b(droplets?|docker|n8n|gateway|bionic|lm ?studio|netbird|mesh|stt|speech to text|whisper|kokoro|tts|servers?|services|infra|infrastructure|ai stack|the stack|system status|systems|nodes|backend|model server|llama server)\b").unwrap()
+    })
+    .is_match(norm)
 }
 
 /// The line IS a media command once the address is stripped: it starts with play / put on /
@@ -900,6 +912,8 @@ fn router_line_needs(server: &str, text: &str, norm: &str) -> bool {
         "fetch" => re(&FETCH, r"(?i)(https?://|www\.|\burl\b|\bwebsite\b|\bweb ?page\b|\bfetch\b|\blink\b)").is_match(text),
         "filesystem" => re(&FILES, r"(?i)(\bfiles?\b|\bfolders?\b|\breadme\b|\bdirector(y|ies)\b|\bpath\b|\b[a-z]:[\\/]|\.(md|txt|rs|ts|tsx|py|toml)\b)").is_match(text),
         "git" => re(&GIT, r"\b(git|repo|repository|commits?|branch(es)?|diff)\b").is_match(norm),
+        // Tony's read-only infrastructure status: only on a line about the droplet, Docker, n8n…
+        super::infra_status::SERVER => infra_line(norm),
         "shotcut" | "media-forge" => re(&MEDIA, r"\b(video|videos|edit|editing|render|clips?|reels?|captions?|thumbnails?|photos?|timeline|shotcut|media|footage|transcribe|scenes?|self tape)\b").is_match(norm),
         other => router_keyword_ok(other, norm),
     }
@@ -999,6 +1013,29 @@ fn weather_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(Strin
         None => json!({}),
     };
     Some(("weather.current".to_string(), args))
+}
+
+/// "Tony, is the droplet up?", "is Docker running?", "are my servers down?", "how's n8n doing",
+/// "system status" → `system.status`, without a model round trip: the line names a piece of
+/// infrastructure (`infra_line`) and asks how it is, and asks for no change ("restart n8n",
+/// "bring the droplet back up" are not status questions: the tool never acts).
+fn system_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String, Value)> {
+    static ASKS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static ACTS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if !tools.iter().any(|t| t.name == super::infra_status::TOOL) {
+        return None;
+    }
+    let norm = super::routing::normalize(original);
+    if !infra_line(&norm) {
+        return None;
+    }
+    let asks = ASKS.get_or_init(|| {
+        regex::Regex::new(r"\b(up|down|running|online|offline|alive|dead|working|ok|okay|healthy|health|status|reachable|responding|answering|connected|crashed|broken|fine|doing|hows|how is|how are|check|ping|going on|latency|lagging|slow)\b").unwrap()
+    });
+    let acts = ACTS.get_or_init(|| {
+        regex::Regex::new(r"\b(restart|reboot|start|stop|kill|shut|shutdown|turn on|turn off|deploy|install|uninstall|update|upgrade|fix|rebuild|build|delete|remove|wipe|resize|create|spin|launch|reconnect|restore|switch|change|configure|enable|disable|pull|push|bring|wake|set up|setup|back ?up|login|log in|ssh)\b").unwrap()
+    });
+    (asks.is_match(&norm) && !acts.is_match(&norm)).then(|| (super::infra_status::TOOL.to_string(), json!({})))
 }
 
 /// The request names email at all (`norm` is `routing::normalize`d).
@@ -1306,6 +1343,7 @@ fn deterministic_plan(text: &str, tools: &[super::mcp::ToolInfo], os_name: &str)
         .or_else(|| finance_plan(text, tools))
         .or_else(|| whatsapp_plan(text, tools))
         .or_else(|| spotify_plan(text, tools, os_name))
+        .or_else(|| system_plan(text, tools))
         .or_else(|| time_plan(text, tools))
         .or_else(|| weather_plan(text, tools))
 }
@@ -2395,6 +2433,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         let rules = super::gmail::booking_spec(&cfg.gmail.booking_instructions_path, &cfg.fs_roots).rules;
         tool_note.push_str(&booking_note(&super::devqueue::scrub(&rules, &known)));
     }
+    // An infrastructure status check: answer from it, and never offer a fix it can't make.
+    tool_note.push_str(super::infra_status::answer_note(pre.used.as_deref()));
     let tool_used = pre.used;
 
     // ── Spotify on Tony's tool path ── a write held by the Ask tier (D14) or a reply that is the
@@ -5029,6 +5069,66 @@ mod tests {
         assert!(!names("turn it up").iter().any(|n| super::super::spotify_intent::is_library_write(n)));
     }
 
+    /// Tony's read-only infrastructure tool: a status question about the droplet, Docker, n8n…
+    /// runs `system.status` with no model round trip (phone turns included, whose dashboard is
+    /// empty); a change request never does (the tool never acts).
+    #[test]
+    fn infra_status_questions_run_the_read_only_tool() {
+        let tools = planner_tools("system");
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["system.status"]);
+        for t in [
+            "Tony, is the droplet up?",
+            "is the droplet up",
+            "Is Docker running?",
+            "are my servers down",
+            "how's n8n doing",
+            "system status",
+            "server status",
+            "what's up with the gateway",
+            "is Bionic responding",
+            "check the droplet",
+            "is the speech to text server working?",
+            "Hey Tony, is NetBird connected to the droplet?",
+            "is the droplet healthy",
+        ] {
+            assert_eq!(deterministic_plan(t, &tools, "Tony"), Some(("system.status".to_string(), json!({}))), "{t}");
+        }
+        for t in [
+            "restart the n8n docker container",
+            "bring the droplet back up",
+            "deploy the model to the droplet",
+            "fix docker",
+            "set up a new server",
+            "back up the server",
+            "tell me a joke",
+            "what's up",
+            "is it going to rain",
+            "check my email",
+        ] {
+            assert_eq!(system_plan(t, &tools), None, "{t}");
+        }
+        // Not listed this turn (server off, frozen or not granted): no plan.
+        assert_eq!(system_plan("is the droplet up", &[]), None);
+        // Another planner's own line keeps its tool.
+        let mut both = tools.clone();
+        both.extend(planner_tools("weather"));
+        assert_eq!(deterministic_plan("will it rain tomorrow", &both, "Tony").map(|p| p.0), Some("weather.current".to_string()));
+    }
+
+    /// The router is offered `system.status` only on an infrastructure line (and runs at all on one).
+    #[test]
+    fn router_offers_system_status_only_on_infra_lines() {
+        let mut tools = planner_tools("system");
+        tools.extend(planner_tools("weather"));
+        let names = |line: &str| router_offer(&tools, line, "Tony").into_iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("restart the n8n docker container"), ["system.status"]);
+        assert_eq!(names("why can't my phone reach you, is the mesh flaky"), ["system.status"]);
+        assert_eq!(names("will it rain tomorrow"), ["weather.current"]);
+        assert!(names("tell me a joke").is_empty());
+        assert!(wants_tools("is the droplet healthy") && wants_tools("the gateway feels slow"));
+        assert!(!wants_tools("tell me a joke") && !wants_tools("how was your day"));
+    }
+
     #[test]
     fn ask_cards_return_the_pending_call() {
         let args = json!({ "playlist_name": "Late Night", "track_query": "Tell Me" });
@@ -5209,6 +5309,64 @@ mod measure {
         let whole = tony_system(tony_turn_system(&sys, &scroll, &contract, &super::super::modes::mode_block(&e)), Some("qwen/qwen3.5-9b"), cfg.compute.deep_thinking);
         std::fs::write(&out, &whole).unwrap();
         println!("DUMPED mode={} packets={} chars={} -> {}", modes.active_mode_id, cfg.roster.tony_packets, whole.chars().count(), out.to_string_lossy());
+    }
+
+    /// Opt-in: the messages Tony's phone turn sends his model for an infrastructure question
+    /// (`CC_PROBE_LINE`, default "Tony, is the droplet up?"), with the REAL `system.status` result
+    /// from this PC, as a JSON array at `CC_PROBE_TURN_OUT`. The live os.json gets the new builtin
+    /// back-filled IN MEMORY only; providers.json is loaded from a temp copy (`load_or_init`
+    /// rewrites what it loads); the OsState has no paths, so nothing is persisted. No recall,
+    /// learned or scroll blocks (this probes the tool data, not memory).
+    /// `CC_PROBE_TURN_OUT=<file> cargo test --lib dump_live_infra_turn -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_live_infra_turn() {
+        let (Some(mut cfg), Some(out)) = (live_cfg(), std::env::var_os("CC_PROBE_TURN_OUT")) else {
+            eprintln!("no live os.json or no CC_PROBE_TURN_OUT");
+            return;
+        };
+        let line = std::env::var("CC_PROBE_LINE").unwrap_or_else(|_| "Tony, is the droplet up?".into());
+        for d in super::super::os_core::default_mcps() {
+            if !cfg.mcps.iter().any(|m| m.id == d.id) {
+                let mut d = d;
+                d.agents = Some(super::super::os_core::default_mcp_grants(&d.id));
+                cfg.mcps.push(d);
+            }
+        }
+        let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("os.agentic.commandcenter");
+        let copy = std::env::temp_dir().join(format!("infra-turn-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(dir.join("providers.json"), copy.join("providers.json")).unwrap();
+        tauri::async_runtime::block_on(async {
+            let state = DispatchState::default();
+            state.load_or_init(&copy);
+            let os = OsState::default();
+            os.update(|c| {
+                *c = cfg.clone();
+                Ok(())
+            })
+            .unwrap();
+            let bridge = BridgeState::default();
+            let (modes, _, _) = super::super::modes::load_file(&dir.join("modes.json"));
+            let e = super::super::modes::effective(&modes, &Default::default());
+            let set = super::super::mcp::assemble_tools(&cfg, "general", listed(&cfg, &e, "general", &json!({})));
+            let Some((name, args)) = deterministic_plan(&line, &set.offered, &cfg.os_name) else {
+                println!("NO PLAN for {line:?}");
+                return;
+            };
+            let mut pre = Prefetch::default();
+            let t0 = Instant::now();
+            pre.call(&state, &os, &bridge, &name, &args, true, "general", Duration::from_secs(15)).await;
+            let note = tool_note(&cfg.os_name, &pre.block, pre.failure.as_ref()) + super::super::infra_status::answer_note(pre.used.as_deref());
+            let block = turn_context_block(&TurnContext { tool_note: &note, ..Default::default() });
+            let sys = system_prompt_with_core(&cfg, "", &set.line);
+            let contract = tony_live_contract(cfg.roster.tony_packets, &e, &cfg.switchboard);
+            let whole = tony_system(tony_turn_system(&sys, "", &contract, &super::super::modes::mode_block(&e)), Some("qwen/qwen3.5-9b"), cfg.compute.deep_thinking);
+            let msgs = json!([{ "role": "system", "content": whole }, { "role": "user", "content": turn_user_message(&line, &block) }]);
+            std::fs::write(&out, serde_json::to_string_pretty(&msgs).unwrap()).unwrap();
+            println!("PLAN {name} ({} ms) packets={} mode={}\n{}", t0.elapsed().as_millis(), cfg.roster.tony_packets, modes.active_mode_id, block);
+        });
+        let _ = std::fs::remove_dir_all(&copy);
     }
 }
 

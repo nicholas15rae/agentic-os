@@ -31,6 +31,11 @@ if str(ROOT) not in sys.path:
 OS_JSON = Path(os.environ.get("APPDATA", str(Path.home()))) / "os.agentic.commandcenter" / "os.json"
 OUT = ROOT / "data" / "engine" / "agents.proposed.json"
 BUILTIN_PROMPTS = {"prompter", "designer", "coder", "librarian"}  # agent_prompts.rs role_prompt
+# Nic 11-27: Tony's gateway prompt is the only Tony prompt. The AnythingLLM workspace os.json maps
+# to Tony ("general" -> my-workspace) actually holds the detailed Booking Desk prompt (casting posts,
+# Gmail drafts, templates A/B); the "booking" workspace has only a short generic one. So Booking takes
+# my-workspace's prompt (pending Nic's OK) and nothing from it goes into Tony's.
+PROMPT_FROM = {"booking": "my-workspace"}
 REMOVED = {"ops"}  # Ops agent removed 11-26 (its work is Tony's)
 
 # Nic's tool owners (11-27): one owner gets write access; named readers get read-only, optionally
@@ -76,6 +81,9 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
     for a in names:
         slug = ws_map.get(a)
         ws = export.get(slug or "", {})
+        prompt_ws = PROMPT_FROM.get(a)
+        if prompt_ws and export.get(prompt_ws, {}).get("prompt"):
+            ws = {**ws, "prompt": export[prompt_ws]["prompt"], "promptFrom": prompt_ws}
         access = []
         for m in mcps:
             if not m.get("enabled", True):
@@ -96,10 +104,14 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
             src, prompt = "agent_prompts.rs role_prompt (built in)", None
             if ws.get("prompt"):
                 notes.append("AnythingLLM carries a copy of the built-in prompt; the built-in one wins")
-        elif ws.get("prompt"):
-            src, prompt = f"anythingllm:{slug}", ws["prompt"]
         elif a == "general":
-            src, prompt = "Tony (gateway_tony.system_prompt / agents.rs)", None
+            src, prompt = "Tony's gateway prompt (gateway_tony.system_prompt), the only Tony prompt", None
+            if ws.get("prompt"):
+                notes.append(f"AnythingLLM workspace '{slug}' holds a non-Tony prompt; not merged into Tony's")
+        elif ws.get("prompt"):
+            src, prompt = f"anythingllm:{ws.get('promptFrom') or slug}", ws["prompt"]
+            if ws.get("promptFrom"):
+                notes.append(f"prompt taken from workspace '{ws['promptFrom']}' (the detailed one), not '{slug}': Nic to confirm")
         else:
             src, prompt = "none", None
             questions.append(f"agent '{a}' has no prompt anywhere (no built-in, empty AnythingLLM workspace '{slug}')")

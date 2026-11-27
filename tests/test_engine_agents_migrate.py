@@ -25,7 +25,7 @@ OS = {
     "switchboard": {"frozenAgents": ["booking"]},
 }
 EXPORT = {
-    "my-workspace": {"prompt": "", "model": "qwen/qwen3.5-9b", "threads": 3, "chats": 40, "documents": 0},
+    "my-workspace": {"prompt": "You are Nic's Booking Agent. Never send.", "model": "qwen/qwen3.5-9b", "threads": 3, "chats": 40, "documents": 0},
     "coder": {"prompt": "copy of the coder prompt", "model": "qwen/qwen3.5-9b", "threads": 2, "chats": 9, "documents": 0},
     "booking": {"prompt": "You book gigs for Nic.", "model": "qwen/qwen3.5-9b", "temperature": 0.4, "threads": 1, "chats": 5, "documents": 0},
     "ops": {"prompt": "ops", "model": "m"},
@@ -43,8 +43,11 @@ class ProposeTests(unittest.TestCase):
         self.assertIn("built in", self.a["coder"]["promptSource"])
         self.assertIsNone(self.a["coder"]["prompt"])
         self.assertTrue(self.a["coder"]["notes"])  # the AnythingLLM copy is noted, not used
-        self.assertEqual((self.a["booking"]["promptSource"], self.a["booking"]["prompt"]), ("anythingllm:booking", "You book gigs for Nic."))
-        self.assertIn("Tony", self.a["general"]["promptSource"])
+        self.assertEqual((self.a["booking"]["promptSource"], self.a["booking"]["prompt"]), ("anythingllm:my-workspace", "You are Nic's Booking Agent. Never send."))
+        self.assertTrue(any("Nic to confirm" in n for n in self.a["booking"]["notes"]))
+        self.assertTrue(any("not merged into Tony's" in n for n in self.a["general"]["notes"]))
+        self.assertIn("only Tony prompt", self.a["general"]["promptSource"])
+        self.assertIsNone(self.a["general"]["prompt"])
         self.assertEqual(self.a["finance"]["promptSource"], "none")
 
     def test_tools_only_from_grants_with_read_only(self):

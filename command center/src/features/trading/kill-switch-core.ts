@@ -71,6 +71,73 @@ export function isRepeatActivation(e: Pick<KeyboardEvent, "key" | "repeat">): bo
   return e.repeat && (e.key === "Enter" || e.key === " ");
 }
 
+/** The red button's onKeyDown: a held Enter / Space must not click it again. */
+export function guardKillButtonKeydown(e: Pick<KeyboardEvent, "key" | "repeat" | "preventDefault">): void {
+  if (isRepeatActivation(e)) e.preventDefault();
+}
+
+/** Handlers and labels for TradingDesk's red button, spread onto the <button>: kept here so the key-repeat guard
+ *  is tested, not just the helper it calls. `pressed` = clicks so far in the current sequence (0 = disarmed). */
+export function killButtonProps({ pressed, busy, onPress }: { pressed: number; busy: boolean; onPress: () => void }) {
+  const armed = pressed > 0;
+  const remaining = KILL_PRESSES - pressed;
+  const s = remaining === 1 ? "" : "s";
+  return {
+    onClick: onPress,
+    onKeyDown: guardKillButtonKeydown,
+    disabled: busy,
+    "aria-label": armed
+      ? `Kill switch armed: ${remaining} more click${s} to lock trading, cancel all orders, sell all positions at market`
+      : `Kill switch: click ${KILL_PRESSES} times to lock trading, cancel all orders, flatten all positions`,
+    title: armed
+      ? `${remaining} more click${s}, each within ${KILL_CONFIRM_MS / 1000} s`
+      : `Kill switch (or ${KILL_HOTKEY_LABEL} ×${KILL_PRESSES}): click ${KILL_PRESSES} times. Locks, cancels all orders, flattens all positions`,
+  };
+}
+
+export type KillToast = { title: string; body: string; tone: "info" | "warn" | "error" };
+type KillKeyEvent = Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "key" | "repeat" | "preventDefault" | "stopPropagation">;
+
+/** The keydown listener useKillSwitchHotkey registers on window (capture phase). Pure: trip / notify / clock are
+ *  injected, so the whole behaviour is tested: only deliberate presses count (a held chord's autorepeat is swallowed
+ *  and never counted), Esc disarms, the 3rd press within the window trips. */
+export function createKillKeyListener(deps: {
+  trip: (reason: string) => Promise<KillIncident & { note?: string }>;
+  notify: (t: KillToast) => void;
+  now?: () => number;
+  arm?: ReturnType<typeof createKillArm>;
+}): (e: KillKeyEvent) => void {
+  const arm = deps.arm ?? createKillArm();
+  const now = deps.now ?? Date.now;
+  const { notify } = deps;
+  return (e) => {
+    if (e.key === "Escape" && arm.isArmed(now())) {
+      arm.cancel();
+      notify({ title: "Kill switch disarmed", body: "Nothing was sent.", tone: "info" });
+      return;
+    }
+    const k = classifyKillKey(e);
+    if (k === "none") return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (k === "repeat") return; // a held chord's autorepeat is not a deliberate press
+    const r = arm.press(now());
+    if (r.kind === "arming") {
+      notify({
+        title: `Kill switch ARMED (${KILL_PRESSES - r.remaining}/${KILL_PRESSES})`,
+        body: `Press ${KILL_HOTKEY_LABEL} ${r.remaining} more time${r.remaining === 1 ? "" : "s"} (each within ${KILL_CONFIRM_MS / 1000} s) to lock trading, cancel all orders and sell all positions at market. Esc cancels.`,
+        tone: "warn",
+      });
+      return;
+    }
+    notify({ title: "KILL SWITCH", body: "Locking trading, cancelling orders, flattening positions…", tone: "error" });
+    deps
+      .trip(`keyboard ${KILL_HOTKEY_LABEL} x${KILL_PRESSES} (confirmed)`)
+      .then((res) => notify({ title: res.ok || res.failsafe ? "Trading LOCKED" : "Kill switch: locked with errors", body: summarizeIncident(res), tone: "error" }))
+      .catch((err: Error) => notify({ title: "Kill switch call failed", body: `${err.message}. Use the red button or the bridge CLI.`, tone: "error" }));
+  };
+}
+
 export function summarizeIncident(r: KillIncident & { note?: string }): string {
   if (r.failsafe) return r.note ?? "Lock written by the gateway; cancel/flatten started.";
   const bad = r.steps?.filter((s) => !s.ok).map((s) => `${s.step}: ${s.detail}`) ?? [];

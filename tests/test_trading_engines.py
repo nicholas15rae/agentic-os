@@ -226,21 +226,44 @@ class AckTests(unittest.TestCase):
     RO = NS(status="ValidationError", errorCode=321, message="Warning 321: The API interface is currently in Read-Only mode.")
     W399 = NS(status="ValidationError", errorCode=399, message="Warning 399: Order Message: your order will not be placed at the exchange until 09:30")
 
-    def trade(self, oid, status="PendingSubmit", log=(), parent=0, otype="LMT", filled=0):
-        t = NS(order=NS(orderId=oid, parentId=parent, orderType=otype), orderStatus=NS(status=status, filled=filled), log=list(log))
+    def trade(self, oid, status="PendingSubmit", log=(), parent=0, otype="LMT", filled=0, transmit=True):
+        t = NS(order=NS(orderId=oid, parentId=parent, orderType=otype, transmit=transmit), orderStatus=NS(status=status, filled=filled),
+               log=list(log))
         t.isDone = lambda: t.orderStatus.status in self.DONE
         return t
 
     def bracket(self, parent="PendingSubmit", stop="PendingSubmit", tp="PendingSubmit", **logs):
-        """Parent #4 (LMT entry) with a STP child #5 and a take-profit LMT child #6, as build_bracket makes them."""
-        return [self.trade(4, parent, logs.get("p", ())), self.trade(5, stop, logs.get("s", ()), parent=4, otype="STP"),
+        """Parent #4 (LMT entry) with a STP child #5 and a take-profit LMT child #6, as build_bracket makes them:
+        only the last child transmits."""
+        return [self.trade(4, parent, logs.get("p", ()), transmit=False),
+                self.trade(5, stop, logs.get("s", ()), parent=4, otype="STP", transmit=False),
                 self.trade(6, tp, logs.get("t", ()), parent=4)]
 
-    def run_ack(self, trades, timeout=1.0, evolve=None, fill_on_cancel=False):
-        """Fake TWS: cancelling a parent cancels its attached children, confirmed asynchronously (on the next
-        tick, as TWS does), so a loop that also cancels the children would be seen doing it. fill_on_cancel: the
-        parent fills before the cancel lands (TWS refuses the cancel; the children stay working).
-        self.ib stays readable after a raise."""
+    @staticmethod
+    def ib_async_cancel(t):
+        """What ib_async 2.1.0 IB.cancelOrder does locally, before TWS answers (ib.py cancelOrder): a PendingSubmit,
+        non-transmit order (a bracket parent) or an Inactive one goes straight to Cancelled; others to PendingCancel."""
+        if t.isDone():
+            return
+        st = t.orderStatus.status
+        new = "Cancelled" if (st == "PendingSubmit" and not getattr(t.order, "transmit", True)) or st == "Inactive" else "PendingCancel"
+        t.log.append(NS(status=new, errorCode=0, message=""))
+        t.orderStatus.status = new
+
+    @staticmethod
+    def tws_status(t, status, filled=None):
+        """A TWS orderStatus: ib_async logs it only when the status changes."""
+        if filled is not None:
+            t.orderStatus.filled = filled
+        if t.orderStatus.status != status:
+            t.orderStatus.status = status
+            t.log.append(NS(status=status, errorCode=0, message=""))
+
+    def run_ack(self, trades, timeout=1.0, evolve=None, fill_on_cancel=False, silent_tws=False):
+        """Fake TWS behind ib_async: cancelOrder changes the local status at once (ib_async_cancel); TWS answers on the
+        next tick and cancels the attached children with their parent, so a loop that also cancels the children would
+        be seen doing it. fill_on_cancel: the parent fills before the cancel lands (TWS refuses the cancel; the
+        children stay working). self.ib stays readable after a raise."""
         import executor as ex
 
         self.ib = ib = NS(cancelled=[], warnings=None)
@@ -248,21 +271,26 @@ class AckTests(unittest.TestCase):
 
         def cancel(o):
             ib.cancelled.append(o.orderId)
+            if silent_tws:  # the cancel goes out, but neither ib_async nor TWS ever changes the order's state
+                return
             pending.append(o.orderId)
+            self.ib_async_cancel(next(t for t in trades if t.order.orderId == o.orderId))
 
         def land():
             for oid in pending:
                 for t in trades:
-                    if t.isDone() or (t.order.orderId != oid and t.order.parentId != oid):
+                    if t.order.orderId != oid and t.order.parentId != oid:
                         continue
                     if fill_on_cancel:
                         if t.order.orderId == oid:
-                            t.orderStatus.status, t.orderStatus.filled = "Filled", 1
-                    else:
-                        t.orderStatus.status = "Cancelled"
+                            self.tws_status(t, "Filled", filled=1)  # overrides ib_async's local Cancelled / PendingCancel
+                        elif t.orderStatus.status in ("PendingSubmit", "PendingCancel"):
+                            self.tws_status(t, "PreSubmitted")
+                    elif t.orderStatus.status != "Filled":
+                        self.tws_status(t, "Cancelled")
             pending.clear()
         ib.cancelOrder = cancel
-        ticks = {"n": 0}
+        self.ticks = ticks = {"n": 0}
 
         async def sleep(_s):
             ticks["n"] += 1
@@ -354,11 +382,60 @@ class AckTests(unittest.TestCase):
         self.assertEqual(ib.cancelled, [])
         self.assertIn("Read-Only", ib.warnings[0])
 
+    def test_pending_submit_parent_that_fills_as_it_is_cancelled_is_a_trade(self):
+        """Review of 5751989, reproduced against real ib_async: cancelOrder marks a PendingSubmit, non-transmit
+        parent Cancelled locally before TWS answers. The settle check must wait for TWS, which here says Filled."""
+        for logs, timeout in (({}, 0.05), ({"s": [self.W399]}, 1.0)):          # ack timeout; a 399 warning on the stop
+            with self.subTest(logs=logs):
+                trades = self.bracket(**logs)                                   # all PendingSubmit: no TWS status yet
+                ib = self.run_ack(trades, timeout=timeout, fill_on_cancel=True)
+                self.assertEqual(ib.cancelled, [4])
+                self.assertEqual(self.statuses(trades)[0], "Filled")
+                self.assertNotIn("Cancelled", self.statuses(trades)[1:])        # stop + take-profit still working
+                self.assertIn("filled before the cancel landed", " ".join(ib.warnings))
+
+    def test_settle_wait_is_bounded_when_tws_never_answers_the_cancel(self):
+        import executor as ex
+
+        trades = self.bracket(p=[self.RO])
+        with self.assertRaises(ex.ExecutionRefused) as cm:
+            self.run_ack(trades, silent_tws=True)
+        self.assertIn("Read-Only", str(cm.exception))
+        self.assertEqual(self.ib.cancelled, [4])
+        self.assertGreater(self.ticks["n"], 0)                                  # it did wait, up to settle (0.05 s)
+
+    def test_live_children_of_a_dead_parent_are_cancelled_directly(self):
+        import executor as ex
+
+        e201 = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: margin")
+        trades = self.bracket(parent="Cancelled", stop="PreSubmitted", tp="PreSubmitted", p=[e201])
+        with self.assertRaises(ex.ExecutionRefused):
+            self.run_ack(trades)
+        self.assertEqual(self.ib.cancelled, [5, 6])
+        self.assertEqual(self.statuses(trades), ["Cancelled"] * 3)
+
+    def test_filled_entry_whose_stop_was_rejected_says_no_stop(self):
+        e201 = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: invalid stop price")
+        trades = self.bracket(parent="Submitted", stop="Cancelled", tp="PreSubmitted", s=[e201])
+        trades[0].orderStatus.filled = 1  # partly filled, remainder working
+        ib = self.run_ack(trades)
+        self.assertEqual(ib.cancelled, [])
+        self.assertTrue(ib.warnings[0].startswith("NO STOP: protective STP #5 is Cancelled"), ib.warnings)
+
+    def test_nothing_left_to_cancel_means_no_settle_wait(self):
+        import executor as ex
+
+        e201 = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected")
+        trades = self.bracket(parent="Cancelled", stop="Cancelled", tp="Cancelled", p=[e201])
+        with self.assertRaises(ex.ExecutionRefused):
+            self.run_ack(trades)
+        self.assertEqual((self.ib.cancelled, self.ticks["n"]), ([], 0))
+
     def test_entry_that_fills_before_the_cancel_lands_is_a_trade_not_a_failure(self):
         trades = self.bracket(parent="Submitted", stop="PreSubmitted", tp="PendingSubmit", t=[self.RO])
         ib = self.run_ack(trades, fill_on_cancel=True)
         self.assertEqual(ib.cancelled, [4])                                     # only the parent was sent a cancel
-        self.assertEqual(self.statuses(trades), ["Filled", "PreSubmitted", "PendingSubmit"])
+        self.assertEqual(self.statuses(trades), ["Filled", "PreSubmitted", "PreSubmitted"])  # children never cancelled
         self.assertIn("filled before the cancel landed", " ".join(ib.warnings))
 
     def test_place_reports_ack_warnings_on_the_result(self):
@@ -367,6 +444,7 @@ class AckTests(unittest.TestCase):
 
         w399 = self.W399
         done = self.DONE
+        cancels = []
 
         class IB:
             client = NS(getReqId=lambda: 4)
@@ -388,8 +466,8 @@ class AckTests(unittest.TestCase):
                 t.isDone = lambda: t.orderStatus.status in done
                 return t
 
-            def cancelOrder(self, _o):
-                raise AssertionError("a filled entry's legs must not be cancelled")
+            def cancelOrder(self, o):
+                cancels.append(o.orderId)  # recorded, not raised: _cancel_live swallows exceptions from cancelOrder
 
         f = {"limit": lambda a, q, p: NS(orderType="LMT", action=a, totalQuantity=q, lmtPrice=p),
              "market": lambda a, q: NS(orderType="MKT", action=a, totalQuantity=q),
@@ -401,6 +479,94 @@ class AckTests(unittest.TestCase):
             res = asyncio.run(e.place(parse_intent(raw_intent()), 1, factories=f))
         self.assertEqual([(o["type"], o["status"]) for o in res["orders"]], [("LMT", "Filled"), ("STP", "PreSubmitted"), ("LMT", "PreSubmitted")])
         self.assertIn("Warning 399", res["ackWarnings"][0])
+        self.assertEqual(cancels, [])                                           # a filled entry's legs are never cancelled
+
+
+class CloseOptionAckTests(unittest.TestCase):
+    """The options guard's exit (premium stop / expiry flatten) must be acknowledged by TWS before the desk
+    records it, but a TWS *warning* on a live exit must not cancel it: that would undo the risk reduction."""
+
+    DONE = AckTests.DONE
+
+    def close(self, status="PendingSubmit", log=(), evolve=None, filled=0, ack_timeout=1.0):
+        """Run Executor.close_option against a fake TWS. evolve(tick, trade) moves the order's state; a cancel lands
+        on the next tick. Returns (result or exception, cancelled ids, trade)."""
+        import executor as ex
+
+        box, cancelled, pending = {}, [], []
+
+        class IB:
+            def isConnected(self):
+                return True
+
+            def placeOrder(self, _contract, o):
+                o.orderId = 77
+                t = NS(order=o, orderStatus=NS(status=status, filled=filled), log=list(log))
+                t.isDone = lambda: t.orderStatus.status in CloseOptionAckTests.DONE
+                box["t"] = t
+                return t
+
+            def cancelOrder(self, o):
+                cancelled.append(o.orderId)
+                pending.append(o.orderId)
+                AckTests.ib_async_cancel(box["t"])  # ib_async: PendingCancel locally (an exit transmits)
+
+        ticks = {"n": 0}
+
+        async def sleep(_s):
+            ticks["n"] += 1
+            if pending:
+                AckTests.tws_status(box["t"], "Cancelled")  # TWS confirms on the next tick
+                pending.clear()
+            if evolve:
+                evolve(ticks["n"], box["t"])
+
+        f = {"limit": lambda a, q, p: NS(orderType="LMT", action=a, totalQuantity=q, lmtPrice=p),
+             "market": lambda a, q: NS(orderType="MKT", action=a, totalQuantity=q)}
+        with tempfile.TemporaryDirectory() as td:
+            e = ex.Executor(lock_dir=Path(td))
+            e.ib = IB()
+            try:
+                out = asyncio.run(e.close_option(NS(conId=1, secType="OPT", exchange="SMART"), 1, 1.7, "GUARD-STOP-opt-000001",
+                                                 factories=f, sleep=sleep, ack_timeout=ack_timeout))
+            except ex.ExecutionRefused as err:
+                out = err
+        return out, cancelled, box["t"]
+
+    def test_acknowledged_exit_returns(self):
+        out, cancelled, _ = self.close(evolve=lambda n, t: setattr(t.orderStatus, "status", "Submitted") if n == 1 else None)
+        self.assertEqual((out["status"], cancelled, "ackWarnings" in out), ("Submitted", [], False))
+
+    def test_refused_exit_raises_so_the_guard_retries(self):
+        import executor as ex
+
+        e201 = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: no trading permissions")
+        out, cancelled, _ = self.close(status="Cancelled", log=[e201])
+        self.assertIsInstance(out, ex.ExecutionRefused)
+        self.assertIn("Error 201", str(out))
+        self.assertEqual(cancelled, [])  # nothing was live to cancel
+
+    def test_read_only_exit_never_acknowledged_is_cancelled_and_raises(self):
+        """321 Read-Only: ib_async marks it ValidationError and TWS never gives it a live status."""
+        import executor as ex
+
+        out, cancelled, t = self.close(status="ValidationError", log=[AckTests.RO], ack_timeout=0.05)
+        self.assertIsInstance(out, ex.ExecutionRefused)
+        self.assertIn("didn't acknowledge", str(out))
+        self.assertIn("Read-Only", str(out))
+        self.assertEqual((cancelled, t.orderStatus.status), ([77], "Cancelled"))
+
+    def test_warning_on_a_live_exit_does_not_cancel_it(self):
+        """399 and friends: logged as ValidationError, then TWS gives the order a live status. It must keep working."""
+        out, cancelled, t = self.close(status="ValidationError", log=[AckTests.W399],
+                                       evolve=lambda n, tr: setattr(tr.orderStatus, "status", "PreSubmitted") if n == 1 else None)
+        self.assertEqual((cancelled, t.orderStatus.status), ([], "PreSubmitted"))
+        self.assertTrue(out["ackWarnings"][0].startswith("TWS warning (order not cancelled): Warning 399"), out)
+
+    def test_filled_exit_is_never_cancelled(self):
+        out, cancelled, _ = self.close(status="Filled", filled=1, log=[AckTests.RO])
+        self.assertEqual(cancelled, [])
+        self.assertEqual(out["status"], "Filled")
 
 class EngineATests(unittest.TestCase):
     def test_signal_and_intent(self):
@@ -596,6 +762,68 @@ class DeskEngineTests(unittest.TestCase):
         close = [c for c in self.ex.calls if c[0] == "close"][0]
         self.assertEqual((close[2], close[3], close[4]), (1, 1.7, "SELL"))  # the desk opened 1 (cut by the cap), so it closes 1
         self.assertEqual(dk._row("opt-000001")["status"], "closed_stop")
+
+    def _premium_stop_desk(self):
+        async def fixed(intent):
+            return {"bid": 3.9, "ask": 4.1}, [dict(LIQ_LEG) for _ in intent.legs]
+        dk = self.desk(option_quote=fixed)
+        dk.set_mode("FULL_AUTO", "t", confirm=True)
+        asyncio.run(dk.submit(opt_raw(), "t"))
+        dk.bridge = big_bridge(positions=[{"conId": 1, "symbol": "SPY 730C", "underlying": "SPY", "secType": "OPT", "position": 2,
+                                           "expiry": exp(30), "strike": 730.0, "right": "C", "currency": "USD"}])
+
+        async def crashed(intent):
+            return {"bid": 1.7, "ask": 1.9}, []
+        dk._option_quote = crashed
+        return dk
+
+    def test_guard_premium_stop_refused_by_tws_is_retried_not_recorded(self):
+        """Before close_option waited for TWS, a refused exit was recorded as closed_stop and never looked at again."""
+        from executor import ExecutionRefused
+
+        dk = self._premium_stop_desk()
+        real = self.ex.close_option
+        tries = []
+
+        async def refuse_once(*a, **kw):
+            tries.append(a[3])
+            if len(tries) == 1:
+                raise ExecutionRefused("TWS rejected the order: Warning 321: The API interface is currently in Read-Only mode.")
+            return await real(*a, **kw)
+        self.ex.close_option = refuse_once
+        rep = asyncio.run(dk.options_guard())
+        self.assertEqual(rep["stops"], [])
+        self.assertIn("Read-Only", rep["errors"][0])
+        self.assertEqual(dk._row("opt-000001")["status"], "submitted")           # still watched
+        failed = dk.audit.tail(10, kinds=("options_premium_stop",))[0]
+        self.assertEqual((failed["verdict"], failed["ref"]), ("FAILED", "opt-000001"))
+        self.assertIn("Read-Only", failed["payload"]["error"])
+        rep2 = asyncio.run(dk.options_guard())                                     # next pass: retried
+        self.assertEqual(len(rep2["stops"]), 1, rep2)
+        self.assertEqual(dk._row("opt-000001")["status"], "closed_stop")
+        self.assertEqual(tries, ["GUARD-STOP-opt-000001"] * 2)
+
+    def test_guard_expiry_flatten_refusal_is_audited_and_replanned(self):
+        from executor import ExecutionRefused
+
+        pos = [{"conId": 1, "symbol": "SPY 730C", "underlying": "SPY", "secType": "OPT", "position": 2, "expiry": exp(1), "currency": "USD"}]
+        dk = self.desk(bridge=big_bridge(positions=pos), md=FakeMD())
+        real = self.ex.close_option
+        tries = []
+
+        async def refuse_once(*a, **kw):
+            tries.append(a[3])
+            if len(tries) == 1:
+                raise ExecutionRefused("TWS didn't acknowledge the order within 15s; cancelled to avoid an orphan [#77 MKT PendingSubmit]")
+            return await real(*a, **kw)
+        self.ex.close_option = refuse_once
+        rep = asyncio.run(dk.options_guard(contract_factory=lambda **kw: NS(**kw)))
+        self.assertEqual(rep["flatten"], [])
+        row = dk.audit.tail(10, kinds=("options_expiry_flatten",))[0]
+        self.assertEqual((row["verdict"], row["ref"]), ("FAILED", "1"))
+        rep2 = asyncio.run(dk.options_guard(contract_factory=lambda **kw: NS(**kw)))
+        self.assertEqual(len(rep2["flatten"]), 1)
+        self.assertEqual(tries, ["GUARD-EXP-1"] * 2)
 
     def test_guard_skips_when_locked(self):
         import kill_switch

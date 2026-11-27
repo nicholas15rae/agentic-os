@@ -4,7 +4,7 @@ import { Card, Input } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
-import { isRepeatActivation, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killStageLabel, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
+import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killButtonProps, killStageLabel, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -85,13 +85,7 @@ export function TradingDesk() {
             </button>
           )}
           <button
-            onClick={pressKill}
-            onKeyDown={(e) => {
-              if (isRepeatActivation(e)) e.preventDefault(); // a held Enter must not click it 3 times
-            }}
-            disabled={busy === "kill"}
-            aria-label={armed ? `Kill switch armed: ${remaining} more click${remaining === 1 ? "" : "s"} to lock trading, cancel all orders, sell all positions at market` : `Kill switch: click ${KILL_PRESSES} times to lock trading, cancel all orders, flatten all positions`}
-            title={armed ? `${remaining} more click${remaining === 1 ? "" : "s"}, each within ${KILL_CONFIRM_MS / 1000} s` : `Kill switch (or ${KILL_HOTKEY_LABEL} ×${KILL_PRESSES}): click ${KILL_PRESSES} times. Locks, cancels all orders, flattens all positions`}
+            {...killButtonProps({ pressed, busy: busy === "kill", onPress: pressKill })} // onClick, the held-Enter guard, labels
             className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 text-[13px] font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
           >
             {busy === "kill" ? <Loader2 size={16} className="animate-spin" /> : <OctagonX size={16} />}

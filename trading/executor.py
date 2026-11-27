@@ -36,12 +36,14 @@ ACK_TIMEOUT_S = 15.0  # a TWS order-confirmation dialog on the first API order c
 CANCEL_SETTLE_S = 5.0  # after cancelling an unacknowledged parent: how long to wait to learn whether it filled first
 
 
-def rejection(trade: Any) -> str | None:
-    """Why TWS refused this order, or None. A ValidationError log entry or a dead status counts.
-    Note: ib_async logs TWS *warnings* (399, 404, 2100-2199, ...) as ValidationError while the order stays
-    live, so this is fail-closed. That is only safe while nothing has filled; await_ack checks fills first."""
+def rejection(trade: Any, refuse_warnings: bool = True) -> str | None:
+    """Why TWS refused this order, or None. A dead status counts; so does a ValidationError log entry
+    when `refuse_warnings`. Note: ib_async logs TWS *warnings* (399, 404, 2100-2199, ...) as ValidationError
+    while the order stays live, so that is fail-closed: right for an entry (await_ack checks fills first),
+    wrong for a risk-reducing exit, which must not be cancelled over a warning (refuse_warnings=False)."""
     for e in getattr(trade, "log", []) or []:
-        if getattr(e, "status", "") == "ValidationError" or (getattr(e, "errorCode", 0) and getattr(e, "status", "") in REJECTED):
+        st = getattr(e, "status", "")
+        if (refuse_warnings and st == "ValidationError") or (getattr(e, "errorCode", 0) and st in REJECTED):
             return getattr(e, "message", "") or f"error {e.errorCode}"
     st = trade.orderStatus.status
     if st in REJECTED and not (trade.orderStatus.filled or 0):
@@ -50,8 +52,9 @@ def rejection(trade: Any) -> str | None:
 
 
 def _filled(trades: list[Any]) -> bool:
-    """A leg has (partly) filled: a position exists, so its protective legs must be left alone."""
-    return any((t.orderStatus.filled or 0) > 0 or t.orderStatus.status == "Filled" for t in trades)
+    """A leg has (partly) filled: a position exists, so its protective legs must be left alone. ib_async records an
+    execution in trade.fills (execDetails) separately from orderStatus, so either counts."""
+    return any((t.orderStatus.filled or 0) > 0 or t.orderStatus.status == "Filled" or getattr(t, "fills", None) for t in trades)
 
 
 def _is_child(t: Any) -> bool:
@@ -59,53 +62,69 @@ def _is_child(t: Any) -> bool:
 
 
 async def await_ack(ib: Any, trades: list[Any], timeout: float = ACK_TIMEOUT_S, sleep: Any = None,
-                    settle: float = CANCEL_SETTLE_S) -> list[str]:
-    """Wait until TWS has acknowledged every order of a bracket. Returns warnings (empty when clean).
+                    settle: float = CANCEL_SETTLE_S, refuse_warnings: bool = True, what: str = "entry") -> list[str]:
+    """Wait until TWS has acknowledged every order (a bracket, or one exit). Returns warnings (empty when clean).
 
     A rejection, or no acknowledgement within `timeout`:
     - nothing filled: cancel the parent (TWS cancels its attached children) and raise ExecutionRefused, so
       the desk records "failed", not a phantom "submitted". If the parent fills before the cancel lands,
       its stop / take-profit are still working: return warnings instead of raising.
-    - something filled: a position exists. Never cancel its stop / take-profit; return the problems as
-      warnings so the desk records the real trade (the stop of a filled entry is never stripped)."""
+    - something filled: a position exists (or, for an exit, has shrunk). Never cancel; return the problems as
+      warnings so the desk records what really happened (the stop of a filled entry is never stripped).
+    refuse_warnings=False (exits): a TWS warning alone is not a refusal. The order counts as acknowledged once
+    TWS gives it a live status; still only ValidationError / pending at the deadline = not acknowledged."""
     import asyncio
     import time
 
     sleep = sleep or asyncio.sleep
+    pending = PENDING if refuse_warnings else PENDING | {"ValidationError"}
     deadline = time.monotonic() + timeout
     while True:
-        bad = [r for r in (rejection(t) for t in trades) if r]
-        if not bad and all(t.orderStatus.status not in PENDING for t in trades):
-            return []
+        bad = [r for r in (rejection(t, refuse_warnings) for t in trades) if r]
+        if not bad and all(t.orderStatus.status not in pending for t in trades):
+            return [f"TWS warning (order not cancelled): {m}" for m in _warnings_logged(trades)]
         timed_out = time.monotonic() >= deadline
         if bad or timed_out:
-            problems = list(dict.fromkeys(bad)) if bad else [f"TWS didn't acknowledge the order within {timeout:.0f}s"]
+            problems = list(dict.fromkeys(bad)) if bad else [f"TWS didn't acknowledge the order within {timeout:g}s"]
             if _filled(trades):
-                return _fill_warnings(problems, trades)
+                return _fill_warnings(problems, trades, what)
             seen = "; ".join(_describe(t) for t in trades)
-            _cancel_live(ib, trades)
-            if await _filled_after_cancel(trades, settle, sleep):
-                return _fill_warnings(problems + ["the entry filled before the cancel landed"], trades)
+            sent = _cancel_live(ib, trades)
+            if await _filled_after_cancel(sent, trades, settle, sleep):
+                return _fill_warnings(problems + [f"the {what} filled before the cancel landed"], trades, what)
             if bad:
                 raise ExecutionRefused("TWS rejected the order: " + "; ".join(problems))
             raise ExecutionRefused(f"{problems[0]}; cancelled to avoid an orphan [{seen}]")
         await sleep(0.2)
 
 
-def _fill_warnings(problems: list[str], trades: list[Any]) -> list[str]:
+def _warnings_logged(trades: list[Any]) -> list[str]:
+    return list(dict.fromkeys(getattr(e, "message", "") or f"warning {getattr(e, 'errorCode', '?')}"
+                              for t in trades for e in (getattr(t, "log", []) or []) if getattr(e, "status", "") == "ValidationError"))
+
+
+def _fill_warnings(problems: list[str], trades: list[Any], what: str = "entry") -> list[str]:
     """The legs line shows each leg's real status: a rejected stop shows as Cancelled, and the position is then
     without it (broker-vs-desk reconcile and the overseer's master stop-loss, once armed, are the backstops)."""
     legs = "; ".join(_describe(t) for t in trades)
-    return [f"entry filled, so nothing was cancelled: {p}" for p in problems] + [f"legs: {legs}"]
+    dead_stops = [t for t in trades if _is_child(t) and getattr(t.order, "orderType", "") == "STP" and t.orderStatus.status in REJECTED]
+    alarm = [f"NO STOP: protective STP #{t.order.orderId} is {t.orderStatus.status}; the filled position is unprotected" for t in dead_stops]
+    return alarm + [f"{what} filled, so nothing was cancelled: {p}" for p in problems] + [f"legs: {legs}"]
 
 
-async def _filled_after_cancel(trades: list[Any], settle: float, sleep: Any) -> bool:
-    """After cancelling: wait (bounded) for the parent(s) to finish, then report whether anything filled."""
+async def _filled_after_cancel(sent: list[Any], trades: list[Any], settle: float, sleep: Any) -> bool:
+    """After cancelling: wait (bounded by `settle`) until TWS has answered each cancel, then report whether anything
+    filled. ib_async's cancelOrder sets the status itself before TWS answers (a PendingSubmit, non-transmit bracket
+    parent goes straight to a local "Cancelled"), so done-ness alone proves nothing: wait for a log entry newer than
+    the one cancelOrder wrote (TWS's orderStatus, an execution, or an error). Nothing sent = nothing to wait for."""
     import time
 
+    if not sent:
+        return _filled(trades)
+    marks = {id(t): len(getattr(t, "log", []) or []) for t in sent}
+    answered = lambda t: t.isDone() and len(getattr(t, "log", []) or []) > marks[id(t)]  # noqa: E731
     deadline = time.monotonic() + settle
-    parents = [t for t in trades if not _is_child(t)] or trades
-    while not all(t.isDone() for t in parents) and time.monotonic() < deadline:
+    while not _filled(trades) and not all(answered(t) for t in sent) and time.monotonic() < deadline:
         await sleep(0.2)
     return _filled(trades)
 
@@ -117,19 +136,23 @@ def _describe(t: Any) -> str:
     return f"#{t.order.orderId} {getattr(t.order, 'orderType', '')} {t.orderStatus.status or 'no status'}{msg}"
 
 
-def _cancel_live(ib: Any, trades: list[Any]) -> None:
+def _cancel_live(ib: Any, trades: list[Any]) -> list[Any]:
     """Cancel an unfilled bracket by its parent: TWS cancels the attached children with it. A child whose
     parent is still live is never cancelled directly, so if the parent fills just as the cancel goes out
-    (the cancel then fails), its stop / take-profit stay working. A child with no live parent is cancelled."""
+    (the cancel then fails), its stop / take-profit stay working. A child with no live parent is cancelled.
+    Returns the trades a cancel was sent for."""
     live = lambda t: t.orderStatus.status not in REJECTED and not t.isDone()  # noqa: E731
     live_parents = {t.order.orderId for t in trades if not _is_child(t) and live(t)}
+    sent = []
     for t in trades:
         if not live(t) or (_is_child(t) and t.order.parentId in live_parents):
             continue
         try:
             ib.cancelOrder(t.order)
+            sent.append(t)
         except Exception:  # noqa: BLE001
             pass
+    return sent
 
 
 def opposite(action: str) -> str:
@@ -240,22 +263,35 @@ class Executor:
         bag.comboLegs = [factories["combo_leg"](conId=c.conId, ratio=1, action=l["action"], exchange="SMART") for c, l in zip(q, intent.legs)]
         return bag
 
-    async def close_option(self, contract: Any, qty: float, limit: float | None, ref: str, action: str = "SELL") -> dict[str, Any]:
+    async def close_option(self, contract: Any, qty: float, limit: float | None, ref: str, action: str = "SELL", *,
+                           factories: dict[str, Callable[..., Any]] | None = None, sleep: Any = None,
+                           ack_timeout: float = ACK_TIMEOUT_S) -> dict[str, Any]:
         """Risk-reducing exit for a held long option / spread (premium stop or expiry flatten).
-        Refused while LOCKED (the kill switch already flattened at market)."""
-        ib = await self._ensure()
-        from ib_async import LimitOrder, MarketOrder
+        Refused while LOCKED (the kill switch already flattened at market).
 
+        Waits for TWS to acknowledge the exit, like an entry, but a TWS warning alone doesn't cancel it (it's still
+        working, and cancelling would undo the risk reduction). A refusal, or no acknowledgement, cancels it and raises
+        ExecutionRefused, so the options guard doesn't record a stop that isn't there and retries on its next pass."""
+        ib = await self._ensure()
+        if factories is None:
+            from ib_async import LimitOrder, MarketOrder
+
+            factories = {"limit": LimitOrder, "market": MarketOrder}
         if action not in ("BUY", "SELL"):
             raise ExecutionRefused("close action must be BUY (cover a short leg) or SELL (close a long)")
-        order = LimitOrder(action, qty, limit) if limit else MarketOrder(action, qty)
+        order = factories["limit"](action, qty, limit) if limit else factories["market"](action, qty)
         order.tif = "DAY"
         order.orderRef = ref
         if getattr(contract, "secType", "") != "BAG" and not getattr(contract, "exchange", ""):
             contract.exchange = "SMART"
         self._guard()
         t = ib.placeOrder(contract, order)
-        return {"orderId": t.order.orderId, "type": t.order.orderType, "qty": qty, "limit": limit, "status": t.orderStatus.status}
+        warnings = await await_ack(ib, [t], timeout=ack_timeout, sleep=sleep, refuse_warnings=False, what="exit")
+        res = {"orderId": t.order.orderId, "type": t.order.orderType, "qty": qty, "limit": limit, "status": t.orderStatus.status}
+        if warnings:
+            log.warning("exit %s: %s", ref, "; ".join(warnings))
+            res["ackWarnings"] = warnings
+        return res
 
     async def cancel_working(self, *, ref: str | None = None, con_ids: set[int] | None = None, symbol: str | None = None) -> int:
         """Cancel working orders by orderRef, by contract conId, or (combos) by underlying symbol.

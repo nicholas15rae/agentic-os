@@ -652,8 +652,9 @@ class Desk:
                                                            f"GUARD-EXP-{st['conId']}", action=st["action"])
                     report["flatten"].append({**st, **res})
                     self.audit.append("options_expiry_flatten", {**st, **res}, ref=str(st["conId"]), verdict="SUBMITTED", actor="options_guard")
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001 — e.g. TWS refused / never acknowledged the exit; the next pass re-plans it
                     report["errors"].append(f"flatten {st['symbol']}: {e}")
+                    self.audit.append("options_expiry_flatten", {**st, "error": str(e)}, ref=str(st["conId"]), verdict="FAILED", actor="options_guard")
         # 2. Premium stops for structures the desk opened.
         with self._conn() as c:
             ids = [r[0] for r in c.execute("SELECT intent_id FROM intents WHERE status='submitted'").fetchall()]
@@ -682,12 +683,15 @@ class Desk:
                 ib = await self.executor._ensure()
                 contract = await self.executor._contract(ib, intent, {})
                 limit = opt.tick(max(quote["bid"], 0.01))
+                # close_option waits for TWS to acknowledge the exit and raises if it was refused, so "closed_stop"
+                # (which this pass never looks at again) is only recorded for an exit TWS has really taken.
                 res = await self.executor.close_option(contract, qty, limit, f"GUARD-STOP-{iid}", action="SELL")
                 self._set_status(iid, "closed_stop", {"exit": res, "mid": m})
                 report["stops"].append({"intentId": iid, "mid": m, "stop": intent.stop_loss, **res})
                 self.audit.append("options_premium_stop", {"mid": m, "stop": intent.stop_loss, **res}, ref=iid, verdict="SUBMITTED", actor="options_guard")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 — the intent stays "submitted", so the next pass retries the stop
                 report["errors"].append(f"stop {iid}: {e}")
+                self.audit.append("options_premium_stop", {"mid": m, "stop": intent.stop_loss, "error": str(e)}, ref=iid, verdict="FAILED", actor="options_guard")
         self._save_state(optionsGuard={"at": report["at"], "flattened": len(report["flatten"]), "stopped": len(report["stops"]),
                                        "errors": report["errors"][:5]})
         return report

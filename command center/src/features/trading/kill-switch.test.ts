@@ -1,5 +1,83 @@
-import { describe, expect, it } from "vitest";
-import { classifyKillKey, createKillArm, isKillHotkey, isRepeatActivation, KILL_PRESSES, summarizeIncident } from "./kill-switch-core";
+import { describe, expect, it, vi } from "vitest";
+import {
+  classifyKillKey,
+  createKillArm,
+  createKillKeyListener,
+  isKillHotkey,
+  isRepeatActivation,
+  KILL_PRESSES,
+  killButtonProps,
+  summarizeIncident,
+  type KillToast,
+} from "./kill-switch-core";
+
+/** The exact listener useKillSwitchHotkey registers, with a fake clock, a recorded trip and recorded toasts. */
+function hotkey() {
+  let t = 0;
+  const toasts: KillToast[] = [];
+  const trip = vi.fn(async () => ({ incidentId: "i", ok: true, dryRun: false, cancelled: [], flatten: [], errors: [], steps: [] }));
+  const onKey = createKillKeyListener({ trip, notify: (x) => toasts.push(x), now: () => t });
+  const ev = (k: string, mods: { ctrl?: boolean; shift?: boolean; repeat?: boolean } = {}) => ({
+    key: k, ctrlKey: !!mods.ctrl, metaKey: false, shiftKey: !!mods.shift, altKey: false, repeat: !!mods.repeat,
+    preventDefault: vi.fn(), stopPropagation: vi.fn(),
+  });
+  const chord = (repeat = false) => ev("X", { ctrl: true, shift: true, repeat });
+  return { onKey, trip, toasts, ev, chord, at: (ms: number) => (t = ms) };
+}
+
+describe("kill-switch hotkey listener (what useKillSwitchHotkey registers)", () => {
+  it("a held Ctrl+Shift+X never trips: repeats are swallowed and never counted", () => {
+    const h = hotkey();
+    const first = h.chord();
+    h.onKey(first);
+    const repeats = Array.from({ length: 45 }, () => h.chord(true));
+    repeats.forEach((e, i) => (h.at(500 + i * 33), h.onKey(e)));
+    expect(h.trip).not.toHaveBeenCalled();
+    expect(h.toasts.map((x) => x.title)).toEqual([`Kill switch ARMED (1/${KILL_PRESSES})`]);
+    expect([first, ...repeats].every((e) => e.preventDefault.mock.calls.length === 1)).toBe(true); // swallowed, not passed on
+  });
+  it("three separate presses within the window trip it once", () => {
+    const h = hotkey();
+    [0, 400, 800].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
+    expect(h.trip).toHaveBeenCalledTimes(1);
+    expect(h.trip).toHaveBeenCalledWith("keyboard Ctrl+Shift+X x3 (confirmed)");
+  });
+  it("Esc disarms; other keys pass through untouched", () => {
+    const h = hotkey();
+    h.onKey(h.chord());
+    h.at(100);
+    h.onKey(h.ev("Escape"));
+    expect(h.toasts.at(-1)?.title).toBe("Kill switch disarmed");
+    [200, 300].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
+    expect(h.trip).not.toHaveBeenCalled(); // the count started over after Esc
+    const plain = h.ev("x", { ctrl: true });
+    h.onKey(plain);
+    expect(plain.preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("red kill button props (spread onto TradingDesk's <button>)", () => {
+  const key = (k: string, repeat: boolean) => ({ key: k, repeat, preventDefault: vi.fn() });
+  it("blocks a held Enter / Space from clicking it again, lets a single press through", () => {
+    const onPress = vi.fn();
+    const p = killButtonProps({ pressed: 1, busy: false, onPress });
+    for (const k of ["Enter", " "]) {
+      const held = key(k, true);
+      p.onKeyDown(held);
+      expect(held.preventDefault).toHaveBeenCalledTimes(1);
+      const once = key(k, false);
+      p.onKeyDown(once);
+      expect(once.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(p.onClick).toBe(onPress);
+  });
+  it("labels and busy state", () => {
+    const p0 = killButtonProps({ pressed: 0, busy: true, onPress: () => undefined });
+    expect(p0.disabled).toBe(true);
+    expect(p0["aria-label"]).toContain(`click ${KILL_PRESSES} times`);
+    expect(killButtonProps({ pressed: 2, busy: false, onPress: () => undefined })["aria-label"]).toContain("1 more click to lock");
+  });
+});
 
 const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "repeat", boolean>> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, repeat: false, ...mods });
 

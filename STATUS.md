@@ -123,12 +123,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 21:23 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 21:24 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/status-md-tracking-472ac5` | 1 | `0fcb2cf` 2026-11-26 docs: STATUS.md across all sessions and branches, plus scripts/upda... | clean |
 | `section-pass-batch3` | 11 | `cebcdbf` 2026-11-26 fix(business,security): profiles sync safely across devices; PIN st... | clean |
 | `claude/practical-elbakyan-0f96f1` | 1 | `5751989` 2026-11-26 fix(trading): kill switch ignores held keys; ack wait never strips ... | clean |
 | `section-pass` | 6 | `aa6966a` 2026-11-26 feat(section-pass): logins survive restarts, phone approval login, ... | 7 files |

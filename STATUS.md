@@ -1,21 +1,21 @@
 # STATUS
 
-Updated 2026-11-27 11:45. One page for every Claude Code session and branch.
+Updated 2026-11-27 12:40. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
-## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 ~11:45
+## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 ~12:40
 
-For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, switched on or rebuilt; Tony is on LM Studio. Read `docs/section-26-plan.md` (plan, progress, findings, item 15 + vision designs), `docs/section-26-allm-inventory.md` and `docs/section-26-bizops-prompt.md`.
+For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, switched on or rebuilt; Tony is on LM Studio (restored exactly after the 11:13 benchmark). Read `docs/section-26-plan.md`, `docs/section-26-allm-inventory.md`, `docs/section-26-bizops-prompt.md`.
 
-**Done (committed, tests green):** pinned llama.cpp b12317 CUDA in `D:\llama.cpp\b12317`; runner on :1238 (off: `engine.json` enabled=false; thinking off by default); model manager + GGUF fit check; watchdog; GPU baton yield/reclaim; gateway `/api/engine/*` (loopback only) + boot hook (idle while off); `llamacpp` provider (in no chain); doc store (not the vault), 7 AnythingLLM docs imported; AnythingLLM export `data\engine\allm-export\20261127-101548`, **secrets scrubbed** (keep until Nic confirms; never delete without his OK); inventory; agent-table proposal with **Nic's tool owners** applied; Tony's gateway prompt = the only Tony prompt; **Biz Ops shared prompt draft** + builder; HF download + Recycle-Bin delete; Settings card (needs rebuild); CPU smoke test.
+**Built (all off, all tested):** engine (llama.cpp b12317, :1238, thinking off by default), model manager + calibrated fit check, watchdog, GPU baton yield/reclaim, gateway `/api/engine/*` (loopback only), Settings card (needs rebuild), doc store + ingest (Tony-only notes, memory scrolls; 7 AnythingLLM docs + 5 scrolls in), AnythingLLM export (secrets scrubbed; Drive sync can never take it), agent table with Nic's tool owners + built-in prompts, **gateway agents running their MCP-registry tools under that policy** (`engine/agent_runner.py`, switch `route_agents`), **thread store** (227 AnythingLLM chats archived as 32 threads), **gateway Tony's switch to the engine** (`gateway_tony.engine_route`, switch `route_tony`), Biz Ops prompt draft + builder (unused until Nic approves).
 
-**Nic's 11-27 answers (applied):** benchmark later; Coder owns filesystem + fetch, Director reads `G:\ai-hub\media\projects`, Designer reads its project folder (to be named), Tony owns knowledge-graph writes, others read-only, Tony uses Brave not fetch; one shared Biz Ops prompt by business tag; Tony's gateway prompt only; keep the export, gitignored, no Drive sync, no plaintext secrets.
+**Switches (engine.json beside providers.json), all false:** `enabled`, `route_agents`, `route_tony`. Turning any on is Nic's call.
 
-**Benchmark:** LM Studio first token **0.37 s** median, total **1.71 s**. Engine on GPU: **not run** (Nic will say when). CPU smoke: 3/3 live checks.
+**Benchmark (11:13, GPU idle):** engine first token 0.38 s median (p90 1.61), total 1.93 s, 6.2 GB VRAM; LM Studio right after 0.25 s / 1.45 s, 7.3 GB. Engine tail = cache misses across slots (tuning question below).
 
-**Left:** GPU bench (Nic); rebuild (Nic); Nic's review of the Biz Ops draft + the open questions below; item 15 switch (design in the plan; gateway Tony + model_swap.rs need engine branches); wiring the agent table into the gateway (agents calling the engine, tool access enforced from `toolAccess`); A5 thread store, A7 ingest path; item 14 vault join (Nic); vision via Tony's mmproj.
+**Left:** desktop side of the switch (dispatch.rs chain head + model_swap.rs engine branch, design in the plan); a desktop bridge so gateway agents can run desktop-only tools (gmail, whatsapp, fetch, web.search...: today they answer "needs the desktop app"); engine tuning run (needs Nic's OK); Nic's review of the Biz Ops calls; vault join (Nic); rebuild (Nic); vision via Tony's mmproj (plan only).
 
-**Commands:** `python -m engine.bench_tony --target engine`, `python -m engine.template_check --live engine`, `python -m engine.smoke_cpu`, `python -m engine.models fit|list|vram`, `python -m engine.allm_import report|redact <export>`, `python -m engine.agents_migrate <export>`, `python -m engine.bizops <tag>`.
+**Commands:** `python -m engine.bench_swap` (GPU bench, restores Tony), `python -m engine.bench_tony --target lmstudio|engine`, `python -m engine.template_check --live engine`, `python -m engine.smoke_cpu`, `python -m engine.models fit|list|vram`, `python -m engine.allm_import report|redact <export>`, `python -m engine.agents_migrate <export>`, `python -m engine.ingest scrolls`, `python -m engine.bizops <tag>`.
 
 ## 1. Done
 
@@ -75,6 +75,11 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | S26: **step 5 GPU benchmark** (engine vs LM Studio) with Tony restored exactly (same 6 load settings, answered in 1.7 s); VRAM estimate calibrated | section-26-engine | 7d08994 | No |
 | S26: Designer reads the repo widget folders only; Booking's future access recorded (read-only WhatsApp, draft-only Gmail, Tony owns both; stays frozen) | section-26-engine | f2e8545 | No |
 | S26: Drive sync never uploads the AnythingLLM export, `data/engine` or backup archives (`never_syncs`, tested); OneDrive covers only your user folders, not G: | section-26-engine | acbad0b | No |
+| S26: agent table carries the 4 built-in role prompts verbatim (from agent_prompts.rs) | section-26-engine | 96a13a6 | No |
+| S26: **gateway agents run their MCP-registry tools** under Nic's policy (owner / read / draft, registry read-only, permissions, kill switch, folders, no money tools); live CPU check: Director listed its projects, a read outside was refused; switch `route_agents` OFF | section-26-engine | f63a78b | No |
+| S26: **thread store** for gateway agents; 227 AnythingLLM chats archived as 32 threads (history only, Finance never imported) | section-26-engine | 6d73548 | No |
+| S26: **document ingest**: Tony-only notes + memory-scroll sync into the doc store (5 scrolls in) | section-26-engine | b3d31e5 | No |
+| S26: **gateway Tony's switch to the engine**, built and tested behind `route_tony` (OFF; with it off Tony's path is unchanged) | section-26-engine | 756feda | No |
 
 ## 2. In progress
 
@@ -169,7 +174,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
-| section-26-engine (5a6df42) | full pytest 1,810 pass, 1 skip; engine tests 75/75; vitest 3,027/3,027, tsc clean (at 0162a7d; no TS since); cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in dispatch); CPU smoke 3/3 | 11-27 11:45 |
+| section-26-engine (756feda) | full pytest 1,841 pass, 1 skip; engine tests 101 + switch 5; test_gateway_tony 80/80; vitest engine 6/6, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in code I changed); pipelines 4/4; GPU bench + CPU smoke 3/3 | 11-27 12:40 |
 | claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
@@ -211,13 +216,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 11:20 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 11:39 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 24 | `acbad0b` 2026-11-27 fix(pipelines): Drive sync never uploads the AnythingLLM export, en... | 1 files |
+| `section-26-engine` | 30 | `756feda` 2026-11-27 feat(gateway-tony): switch to the built-in engine, built and tested... | 1 files |
 | `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |

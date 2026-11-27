@@ -5,6 +5,7 @@ import { MIC_LOCKED_MSG, assertMicAllowed, captureClosed, captureOpened, micEnab
 import { api } from "./api";
 import { addAssets, editManifest, useDirector } from "./director-store";
 import { addAudio } from "./manifest";
+import { frameLoop } from "@/lib/motion";
 
 export const VO_MIME = "audio/webm;codecs=opus";
 
@@ -49,23 +50,22 @@ export function VoiceoverRecorder() {
     analyser.fftSize = 512;
     ctx.createMediaStreamSource(stream).connect(analyser);
     const buf = new Float32Array(analyser.fftSize);
-    let raf = 0;
     const t0 = performance.now();
-    const tick = () => {
+    // GPU budget (HANDOFF §8): the level meter runs on the shared frameLoop grid (30 fps, 15 when
+    // calm, parked when hidden), never a raw requestAnimationFrame loop.
+    const loop = frameLoop(() => {
       analyser.getFloatTimeDomainData(buf);
       let peak = 0;
       for (const v of buf) peak = Math.max(peak, Math.abs(v));
       if (meter.current) meter.current.style.width = `${Math.min(100, Math.round(peak * 140))}%`;
       setSecs(Math.floor((performance.now() - t0) / 1000));
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
+    }, (l) => (l === "full" ? 30 : 15));
 
     let save = true;
     let release: () => void = () => undefined;
     let opened = false;
     const cleanup = () => {
-      cancelAnimationFrame(raf);
+      loop.stop();
       stream?.getTracks().forEach((t) => t.stop());
       void ctx.close().catch(() => undefined);
       release();

@@ -29,8 +29,8 @@ describe("vocal handoff pool", () => {
 
   it("a pool whose lines can never fit falls back to the shortest lines (the deadline still caps playback)", () => {
     const wordy = "one two three four five six seven eight nine ten eleven twelve";
-    const b = pickExchange({ ...DEFAULT_POOL, tonyOpen: [wordy, "Go {agent}."], agentReply: { default: [wordy] }, tonyClose: [wordy] }, "ops", seq(0))!;
-    expect(b[0].text).toBe("Go Ops.");
+    const b = pickExchange({ ...DEFAULT_POOL, tonyOpen: [wordy, "Go {agent}."], agentReply: { default: [wordy] }, tonyClose: [wordy] }, "finance", seq(0))!;
+    expect(b[0].text).toBe("Go Finance.");
   });
 
   it("no cue for Tony himself, Claude, or unknown roles; none from an empty pool", () => {
@@ -43,8 +43,8 @@ describe("vocal handoff pool", () => {
     const long = "word ".repeat(16).trim();
     const pool: HandoffPool = { ...DEFAULT_POOL, tonyOpen: ["Okay {agent}.", long], agentReply: { default: ["On it."] }, tonyClose: ["Go."] };
     // rng order per try: nic, tony, open, reply, close — the first try draws the long line.
-    const beats = pickExchange(pool, "ops", seq(0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0))!;
-    expect(beats[0].text).toBe("Okay Ops.");
+    const beats = pickExchange(pool, "finance", seq(0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0))!;
+    expect(beats[0].text).toBe("Okay Finance.");
     expect(estimateSecs(beats)).toBeLessThanOrEqual(5);
   });
 });

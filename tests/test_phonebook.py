@@ -94,7 +94,7 @@ class PhoneBookTests(unittest.TestCase):
         # The trust toggle keeps working and the Dialer / WhatsApp trust check still see the number.
         os_api.comms_contact_put({"address": "4165550100", "name": "SAM", "trusted": False})
         got = os_api.comms_contacts(q="4165550100")["contacts"]
-        self.assertEqual(got, [{"address": "4165550100", "name": "Sam Carter", "trusted": 0, "contactId": e["id"]}])
+        self.assertEqual(got, [{"address": "4165550100", "name": "Sam Carter", "trusted": 0, "channel": "sms", "contactId": e["id"]}])
         self.assertEqual(len(os_api.comms_contacts(q="Northside")["contacts"]), 2, "searchable by company")
 
     def test_edit_drops_a_number_and_delete_unlinks_without_losing_rows(self):
@@ -163,6 +163,34 @@ class PhoneBookTests(unittest.TestCase):
         os_api.pb_save({"name": "Odd", "notes": note, "phones": ["4165550177"]})
         self.assertEqual(os_api.pb_list()["contacts"][0]["notes"], note)
         self.assertEqual(self.iso.sql("SELECT COUNT(*) AS n FROM vault WHERE item_id LIKE 'phonebook%' OR text LIKE ?", (f"%{note}%",))[0]["n"], 0)
+
+
+    def test_a_whatsapp_jid_thread_finds_its_numbers_entry(self):
+        # Filed by number; WhatsApp keys its thread on the JID (Sections 8-10 m2).
+        e = os_api.pb_save({"name": "Sam Carter", "company": "Northside", "phones": ["416-555-0100"]})
+        os_api.comms_sms({"address": "+1 416 555 0100", "channel": "whatsapp", "contact": "Sam WA", "body": "hi", "ts": 1_700_000_000})
+        t = [x for x in os_api.comms_threads(limit=10)["threads"] if x["channel"] == "whatsapp"][0]
+        self.assertEqual(t["thread"], "14165550100@s.whatsapp.net")
+        self.assertEqual((t["contactId"], t["contactName"], t["company"]), (e["id"], "Sam Carter", "Northside"))
+        os_api.comms_sms({"address": "+1 416 555 0100", "channel": "whatsapp", "body": "no name", "ts": 1_700_000_100})
+        self.assertEqual(self.iso.sql("SELECT contact FROM comms_messages ORDER BY ts DESC LIMIT 1")[0]["contact"], "Sam Carter")
+        # The JID row belongs to the filed entry, so it is not listed as unfiled.
+        self.assertNotIn("14165550100@s.whatsapp.net", [u["address"] for u in os_api.pb_list()["unfiled"]])
+        # Trust stays per key: the SMS number's Instant Send never covers the WhatsApp JID.
+        os_api.comms_contact_put({"address": "416-555-0100", "trusted": True, "confirmed": True})
+        self.assertEqual(self.iso.sql("SELECT trusted FROM comms_contacts WHERE address='14165550100@s.whatsapp.net'")[0]["trusted"], 0)
+
+    def test_filing_a_whatsapp_row_stores_the_number_not_the_jid(self):
+        e = os_api.pb_save({"name": "Ana", "phones": [{"label": "whatsapp", "number": "14165550199@s.whatsapp.net"}]})
+        self.assertEqual(e["phones"], [{"label": "whatsapp", "number": "+14165550199"}])
+
+    def test_a_notification_name_never_borrows_an_entry(self):
+        os_api.pb_save({"name": "Mom", "phones": ["4165550100"]})
+        os_api.comms_ingest({"source": "android-notif", "device": "s22", "messages": [
+            {"id": "n1", "channel": "whatsapp", "address": "4165550100", "body": "send money", "ts": 1_700_000_000, "direction": "in"}]})
+        t = [x for x in os_api.comms_threads(limit=10)["threads"] if x["channel"] == "whatsapp"][0]
+        self.assertTrue(t["thread"].startswith("wan:"))
+        self.assertIsNone(t["contactId"])
 
 
 if __name__ == "__main__":

@@ -25,8 +25,8 @@ declare module "@/lib/platform" {
 
 /** What Rust seeds a fresh os.json with (os_core.rs `DEFAULT_FROZEN_AGENTS`): the Booking Desk and
  * the Librarian (it runs only as its scheduled script) frozen everywhere. */
-/** Rust `default_frozen_agents`: Booking, the Librarian (script only) and the Ops placeholder (section pass). */
-export const DEFAULT_OS_SWITCHBOARD: OsSwitchboard = { version: 1, frozenAgents: ["booking", "librarian", "ops"], frozenTools: [] };
+/** Rust `default_frozen_agents`: Booking and the Librarian (script only). */
+export const DEFAULT_OS_SWITCHBOARD: OsSwitchboard = { version: 1, frozenAgents: ["booking", "librarian"], frozenTools: [] };
 
 /** No switchboard in the config (an older desktop): nothing is frozen, which is what it enforces. */
 const NONE: OsSwitchboard = { version: 0, frozenAgents: [], frozenTools: [] };

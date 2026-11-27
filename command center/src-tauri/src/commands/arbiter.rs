@@ -63,7 +63,7 @@ const fn node(id: &'static str, label: &'static str, group: &'static str, comput
 }
 
 /// The roster, in topology order.
-pub const NODES: [NodeDef; 14] = [
+pub const NODES: [NodeDef; 13] = [
     node("tony", "Tony", "foreground", "gpu", Some("tony"), "foreground: preempts background work; yields in Away Mode"),
     node("prompter", "Prompter", "build_circle", "gpu", Some("build_circle"), "build circle: Prompter → Coder → Designer, one token at a time"),
     node("coder", "Coder", "build_circle", "gpu", Some("build_circle"), "build circle"),
@@ -74,7 +74,6 @@ pub const NODES: [NodeDef; 14] = [
     node("garbage", "Garbage", "script", "cpu", None, "idle / Away: purge dumps, graduate stale memory, compact"),
     node("finance", "Finance [Vault]", "vault", "cpu", Some("finance"), "sealed; wakes only when you unlock it or on a validated ledger write"),
     node("observer", "Observer", "auditor", "cpu", Some("observer"), "jittered idle / Away audit of hand-off integrity"),
-    node("ops", "Ops", "mesh", "gpu", None, "on demand (AnythingLLM workspace)"),
     node("director", "Director", "mesh", "gpu", Some("director"), "on demand: edit plans on the GPU slot; renders run on the CPU (libx264)"),
     node("bizops", "Biz Ops", "mesh", "gpu", None, "on demand: one business per turn, in that business's own bizops_<id> workspace"),
     // The IBKR paper-trading agent (trading/ in the repo). Off the shared mesh: its only peer is
@@ -503,7 +502,7 @@ impl Arbiter {
 }
 
 /// Edges the topology draws (valid hand-off paths), `from → to`.
-pub const EDGES: [(&str, &str); 24] = [
+pub const EDGES: [(&str, &str); 23] = [
     ("tony", "prompter"),
     ("prompter", "coder"),
     ("coder", "designer"),
@@ -521,11 +520,10 @@ pub const EDGES: [(&str, &str); 24] = [
     ("observer", "security"),
     ("tony", "finance"),
     ("finance", "librarian"),
-    ("tony", "ops"),
     ("observer", "tony"),
     ("tony", "bizops"),
     ("bizops", "tony"),
-    // The Ops -> Finance hand-off (finance_handoff.rs): a validated ledger write, nothing else.
+    // The Biz Ops -> Finance hand-off (finance_handoff.rs): a validated ledger write, nothing else.
     ("bizops", "finance"),
     // Trading is isolated: Finance is its only peer (capital, budget limits, P&L, risk posture).
     ("trading", "finance"),
@@ -663,7 +661,7 @@ mod tests {
         assert_eq!(node_for_label("lmstudio · background"), None);
         assert_eq!(node_id("general"), Some("tony"));
         assert_eq!(node_id("financer"), Some("finance"));
-        assert_eq!(NODES.len(), 14);
+        assert_eq!(NODES.len(), 13);
         assert_eq!(node_id("bizops"), Some("bizops"));
         assert_eq!(node_for_label("anythingllm · bizops_trades_contracting"), Some("bizops"));
         assert_eq!(node_for_label("anythingllm · finance"), Some("finance"));
@@ -677,7 +675,7 @@ mod tests {
         assert_eq!(node_id("trading_agent"), Some("trading"));
         assert!(mesh_allows("trading", "finance"));
         assert!(mesh_allows("finance", "trading"));
-        for other in ["tony", "librarian", "prompter", "coder", "designer", "director", "booking", "security", "garbage", "observer", "ops", "bizops"] {
+        for other in ["tony", "librarian", "prompter", "coder", "designer", "director", "booking", "security", "garbage", "observer", "bizops"] {
             assert!(!mesh_allows("trading", other), "trading -> {other}");
             assert!(!mesh_allows(other, "trading"), "{other} -> trading");
         }

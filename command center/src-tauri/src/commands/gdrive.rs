@@ -1988,7 +1988,7 @@ mod tests {
             assert_eq!(display, "take1.mp4");
             std::fs::write(root.join(&p.slug).join("raw").join("take1.mp4"), b"existing").unwrap();
             let a = land_pull(&st, &p.slug, &part, &display, "V1", size, |path, name| {
-                Ok(MediaAsset { id: "a-1".into(), project: p.slug.clone(), kind: "video".into(), role: "clip".into(), name: name.into(), path: path.to_string_lossy().to_string(), read_only: true, size_bytes: size, duration_sec: None, width: None, height: None, thumb_path: None, added_at: media::now_iso() })
+                Ok(MediaAsset { id: "a-1".into(), project: p.slug.clone(), kind: "video".into(), role: "clip".into(), name: name.into(), path: path.to_string_lossy().to_string(), read_only: true, size_bytes: size, duration_sec: None, width: None, height: None, thumb_path: None, added_at: media::now_iso(), ..Default::default() })
             })
             .unwrap();
             assert!(a.path.ends_with("take1-2.mp4"), "never overwrites: {}", a.path);
@@ -2257,16 +2257,18 @@ mod tests {
             c.execute("INSERT INTO project (slug, json, updated_at) VALUES ('old', '{}', 'x')", []).unwrap();
         }
         let mut c = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(media::migrate(&mut c).unwrap(), 2);
+        // Director Suite v2 added media.db v3 on top; this checks the v1 → v2 step still holds within it.
+        let latest = media::MIGRATIONS.len() as u32;
+        assert_eq!(media::migrate(&mut c).unwrap(), latest);
         let v: u32 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, latest);
         let n: i64 = c.query_row("SELECT COUNT(*) FROM project WHERE slug = 'old'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
         c.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", []).unwrap();
         c.execute("INSERT INTO drive_sync (id, provider, direction, project, local_path, drive_file_id, name, size_bytes, at) VALUES ('s', 'gdrive', 'push', 'p', 'l', 'f', 'n', 1, 'x')", []).unwrap();
         assert!(c.execute("INSERT INTO drive_sync (id, provider, direction, project, local_path, drive_file_id, name, size_bytes, at) VALUES ('s2', 'gdrive', 'sideways', 'p', 'l', 'f', 'n', 1, 'x')", []).is_err());
         // Idempotent.
-        assert_eq!(media::migrate(&mut c).unwrap(), 2);
+        assert_eq!(media::migrate(&mut c).unwrap(), latest);
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2561,8 +2561,8 @@ mod tests {
     fn a_build_queued_while_the_pipeline_is_frozen_says_when_it_starts() {
         assert_eq!(queued_reply("Tip calculator", None, false), "Queued \"Tip calculator\" for the Prompter. Ask me where the build's at anytime.");
         assert_eq!(queued_reply("Tip calculator", Some("Prompter is frozen in Operations mode"), false), "Queued \"Tip calculator\". Prompter is frozen in Operations mode, so it starts when you switch modes.");
-        let ops = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "operations".into(), ..Default::default() }, &Default::default());
-        assert_eq!(super::super::modes::pipeline_frozen(&ops, &Default::default()).as_deref(), Some("Prompter is frozen in Operations mode"));
+        let operations = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "operations".into(), ..Default::default() }, &Default::default());
+        assert_eq!(super::super::modes::pipeline_frozen(&operations, &Default::default()).as_deref(), Some("Prompter is frozen in Operations mode"));
         assert!(!super::super::modes::pipeline_frozen_on_master(&Default::default()), "the default master switchboard leaves the pipeline live");
     }
 

@@ -75,7 +75,7 @@ fn presets_carry_the_switchboard_spec() {
     let p = presets();
     let row = |id: &str| p.iter().find(|m| m.id == id).unwrap().clone();
     assert_eq!(row("builder").switchboard, board(&["prompter", "designer", "coder"], &["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"]));
-    assert_eq!(row("operations").switchboard, board(&["ops", "bizops"], &["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]));
+    assert_eq!(row("operations").switchboard, board(&["bizops"], &["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]));
     assert_eq!(row("executive").switchboard, board(&["bizops", "finance"], &["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"]));
     assert!(!EXECUTIVE_AGENTS.contains(&"librarian"), "the Librarian runs only as its scheduled script");
     // A2: Google Calendar mirrors Gmail in every preset: live where Gmail is, frozen where it is.
@@ -448,12 +448,12 @@ fn mirror_and_view_carry_the_mode() {
     // The gateway's end-of-prompt text and the switchboard's inputs.
     assert_eq!(m["mode"]["promptTail"], json!(mode_block(&os.modes.effective())));
     assert!(m["mode"]["promptTail"].as_str().unwrap().contains("ON DUTY: Finance, Operations Manager; every other agent is frozen this mode."));
-    assert_eq!(m["mode"]["switchboard"], json!({ "agents": ["bizops", "finance"], "tools": ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"], "frozenAgents": ["booking", "librarian", "ops"], "frozenTools": [] }));
+    assert_eq!(m["mode"]["switchboard"], json!({ "agents": ["bizops", "finance"], "tools": ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"], "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
     assert_eq!(m["mode"]["nightTraining"], false);
     switch_mode(&os, "surface").unwrap();
     let m = os.mirror_value(&os.snapshot());
     assert_eq!(m["mode"]["switchboard"]["agents"], Value::Null, "no overlay");
-    assert_eq!(m["mode"]["switchboard"]["frozenAgents"], json!(["booking", "librarian", "ops"]));
+    assert_eq!(m["mode"]["switchboard"]["frozenAgents"], json!(["booking", "librarian"]));
     switch_mode(&os, "executive").unwrap();
     override_mode(&os, &OverridePatch { curiosity: Some(Curiosity::High), ..Default::default() });
     assert!(m["voice"].is_object(), "Part B's mirror keys are kept");
@@ -553,12 +553,12 @@ fn live_is_not_globally_frozen_and_on_duty_in_the_overlay() {
     let builder = eff("builder");
     let brainstorm = eff("brainstorm");
     // No overlay: everyone but the globally frozen Booking.
-    for a in ["coder", "ops", "bizops", "finance", "librarian", "director", "security-patrol"] {
+    for a in ["coder", "bizops", "finance", "librarian", "director", "security-patrol"] {
         assert!(agent_live(&brainstorm, &g, a), "{a}");
     }
     assert!(!agent_live(&brainstorm, &g, "booking") && !agent_live(&builder, &g, "Booking"));
     // Builder: only its three are on duty.
-    for (a, live) in [("prompter", true), ("designer", true), ("coder", true), ("ops", false), ("bizops", false), ("bizops_corner_bakery", false), ("finance", false), ("financer", false), ("librarian", false), ("director", false)] {
+    for (a, live) in [("prompter", true), ("designer", true), ("coder", true), ("bizops", false), ("bizops_corner_bakery", false), ("finance", false), ("financer", false), ("librarian", false), ("director", false)] {
         assert_eq!(agent_live(&builder, &g, a), live, "{a}");
     }
     // Tony and the system scripts are never frozen, whatever the lists say.
@@ -586,7 +586,6 @@ fn live_is_not_globally_frozen_and_on_duty_in_the_overlay() {
 #[test]
 fn frozen_reasons_name_the_agent_and_the_mode() {
     let g = global(&["booking"], &["instagram"]);
-    assert_eq!(agent_frozen_reason(&eff("builder"), &g, "ops").as_deref(), Some("Ops is frozen in Builder mode"));
     assert_eq!(agent_frozen_reason(&eff("builder"), &g, "bizops").as_deref(), Some("Operations Manager is frozen in Builder mode"));
     assert_eq!(agent_frozen_reason(&eff("brainstorm"), &g, "booking").as_deref(), Some("Booking Desk is frozen on the master switchboard"));
     assert_eq!(agent_frozen_reason(&eff("builder"), &g, "coder"), None);
@@ -596,7 +595,7 @@ fn frozen_reasons_name_the_agent_and_the_mode() {
     assert_eq!(tool_frozen_reason(&eff("executive"), &g, "maps", "Maps / OpenStreetMap").as_deref(), Some("Maps / OpenStreetMap is frozen in Executive mode"));
     // A custom name that already ends in "mode" isn't doubled.
     let e = Effective { name: "Deep Focus Mode".into(), ..eff("builder") };
-    assert_eq!(agent_frozen_reason(&e, &g, "ops").as_deref(), Some("Ops is frozen in Deep Focus mode"));
+    assert_eq!(agent_frozen_reason(&e, &g, "bizops").as_deref(), Some("Operations Manager is frozen in Deep Focus mode"));
     // The build pipeline waits while any of its agents is frozen.
     assert_eq!(pipeline_frozen(&eff("builder"), &g), None);
     assert_eq!(pipeline_frozen(&eff("brainstorm"), &g), None);
@@ -627,7 +626,7 @@ fn the_default_master_switchboard_freezes_the_librarian_in_every_mode() {
 #[test]
 fn on_duty_line_is_deterministic_and_ends_the_block_before_the_notes() {
     assert_eq!(on_duty_line(&eff("builder")).as_deref(), Some("ON DUTY: Coder, Designer, Prompter; every other agent is frozen this mode."));
-    assert_eq!(on_duty_line(&eff("operations")).as_deref(), Some("ON DUTY: Operations Manager, Ops; every other agent is frozen this mode."));
+    assert_eq!(on_duty_line(&eff("operations")).as_deref(), Some("ON DUTY: Operations Manager; every other agent is frozen this mode."));
     assert_eq!(on_duty_line(&eff("executive")).as_deref(), Some("ON DUTY: Finance, Operations Manager; every other agent is frozen this mode."));
     for id in ["surface", "brainstorm", "coach", "gabagool", LEARNING_ID] {
         assert_eq!(on_duty_line(&eff(id)), None, "{id}");
@@ -650,7 +649,7 @@ fn on_duty_line_is_deterministic_and_ends_the_block_before_the_notes() {
 
 #[test]
 fn a_v1_file_is_upgraded_and_a_custom_operations_mode_is_renamed_not_lost() {
-    let d = tmp_dir("ops-collision");
+    let d = tmp_dir("operations-collision");
     let mine = TonyMode { id: "operations".into(), name: "Operations".into(), ..custom("operations") };
     let v1 = json!({ "version": 1, "active_mode_id": "operations", "modes": [presets()[0], mine] });
     std::fs::write(d.join("modes.json"), v1.to_string()).unwrap();
@@ -709,7 +708,7 @@ fn the_worker_holds_queued_builds_while_a_pipeline_agent_is_frozen() {
     // A custom overlay without the Designer holds the queue too; with all three it runs.
     let partial = Effective { switchboard: board(&["prompter", "coder"], &[]), ..eff("brainstorm") };
     assert!(worker_held(&partial, &g));
-    let full = Effective { switchboard: board(&["prompter", "designer", "coder", "ops"], &[]), ..eff("brainstorm") };
+    let full = Effective { switchboard: board(&["prompter", "designer", "coder", "bizops"], &[]), ..eff("brainstorm") };
     assert!(!worker_held(&full, &g));
     // The master switchboard freezing the Coder holds it in every mode.
     assert!(worker_held(&eff("builder"), &global(&["coder"], &[])));

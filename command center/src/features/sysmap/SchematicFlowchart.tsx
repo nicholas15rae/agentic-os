@@ -103,7 +103,7 @@ function AgentCard({
   const x = p.x - CARD_W / 2;
   const y = p.y - CARD_H / 2;
   const hot = s === "ACTIVE";
-  const rag = id === "finance" ? (vaultOpen ? "vault · open" : "vault · sealed") : id === "trading" ? "trading_rag" : mem ? `${mem.active} live` : id === "garbage" || id === "ops" ? "stateless" : "—";
+  const rag = id === "finance" ? (vaultOpen ? "vault · open" : "vault · sealed") : id === "trading" ? "trading_rag" : mem ? `${mem.active} live` : id === "garbage" ? "stateless" : "—";
   const memory = id === "finance" ? "encrypted" : mem ? `${mem.activeKb}KB · ${mem.archived} disk` : "—";
   const sub = (CARD_W - 32) / 3;
   return (

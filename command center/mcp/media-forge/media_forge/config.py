@@ -71,7 +71,7 @@ def load() -> Settings:
         cpu_pct=min(100, max(10, pct)),
         allow_gpu=os.environ.get("MEDIA_ALLOW_GPU", "0") == "1",
         max_jobs=min(4, max(1, int(os.environ.get("MEDIA_MAX_JOBS", "1")))),
-        whisper_model=os.environ.get("WHISPER_MODEL", "small.en"),
+        whisper_model=os.environ.get("WHISPER_MODEL", "tiny.en"),  # the model already on disk; small.en is opt-in
         whisper_device=os.environ.get("WHISPER_DEVICE", "cpu"),
         whisper_compute=os.environ.get("WHISPER_COMPUTE", "int8"),
         whisper_dir=Path(os.environ.get("WHISPER_MODEL_DIR", r"C:\ai-hub\models\faster-whisper")),

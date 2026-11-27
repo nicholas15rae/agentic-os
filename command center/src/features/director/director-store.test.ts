@@ -95,7 +95,7 @@ describe("debounced manifest save", () => {
 
 describe("Director actions never render", () => {
   it("propose_edit_plan saves as the director, then raises the plan card", async () => {
-    const notes = await store.applyDirectorActions([{ type: "propose_edit_plan", clips: [{ assetId: "a-v1", inSec: 1, outSec: 4, fadeMs: 0 }], audio: [], output: { aspect: "9:16" }, note: "" }]);
+    const notes = await store.applyDirectorActions([{ type: "propose_edit_plan", clips: [{ assetId: "a-v1", inSec: 1, outSec: 4, fadeMs: 0, transitionIn: { kind: "cut", ms: 0 }, punchIn: 1 }], audio: [], output: { aspect: "9:16" }, note: "" }]);
     expect(m.manifestSave).toHaveBeenCalledWith(expect.objectContaining({ manifest: expect.objectContaining({ updatedBy: "director", clips: [expect.objectContaining({ assetId: "a-v1", inSec: 1, outSec: 4 })] }) }));
     expect(m.renderPlan).toHaveBeenCalledWith({ slug: "demo", proposedBy: "director" });
     expect(st().plan).toEqual(PLAN);
@@ -110,7 +110,7 @@ describe("Director actions never render", () => {
   });
 
   it("populate_shot_list fills the shot list", async () => {
-    await store.applyDirectorActions([{ type: "populate_shot_list", slots: [{ id: "s1", label: "Hook", instructions: "", kind: "video", targetSec: 5 }] }]);
+    await store.applyDirectorActions([{ type: "populate_shot_list", slots: [{ id: "s1", label: "Hook", instructions: "", kind: "video", targetSec: 5, framing: null, action: "", source: "film", phoneTips: [] }] }]);
     expect(st().manifest?.shotList[0]).toMatchObject({ id: "s1", status: "needed", assetId: null });
   });
 

@@ -162,7 +162,7 @@ A paused build frees its lane. On Resume, the worker picks the build up again fr
 
 ## AD-7: Vocal handoff routing
 
-**When the exchange plays.** When Tony delegates to one of his crew (Coder, Designer, Prompter, Librarian, Booking Desk, Ops), `startHandoffCue(role)` in `voice-controller.ts` plays three short beats over the existing TTS pipeline:
+**When the exchange plays.** When Tony delegates to one of his crew (Coder, Designer, Prompter, Librarian, Booking Desk, Biz Ops, Finance), `startHandoffCue(role)` in `voice-controller.ts` plays three short beats over the existing TTS pipeline:
 - Tony, in the `general` voice;
 - the agent, in its roster voice;
 - Tony again.

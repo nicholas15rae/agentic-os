@@ -81,7 +81,7 @@ impl RolePolicy {
     /// The media Director: may change data only through its local media servers (edit,
     /// render, transcribe inside the media root); every other server stays read-only for it.
     pub const DIRECTOR: RolePolicy = RolePolicy { may_mutate: true, tool_allowlist: None, mutate_servers: Some(&MEDIA_SERVERS), fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
-    /// Prompter, Designer, Booking, Ops and any future agent id.
+    /// Prompter, Designer, Booking, Biz Ops, Finance and any future agent id.
     pub const READ_ONLY: RolePolicy = RolePolicy { may_mutate: false, tool_allowlist: None, mutate_servers: None, fs_write: FsWrite::None, allm: AllmAccess::ReadOnly };
 
     /// May this agent call `tool` (`mutating` = the tool changes data)?
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(policy_for("librarian"), Some(RolePolicy::LIBRARIAN));
         assert_eq!(policy_for(" Librarian "), Some(RolePolicy::LIBRARIAN));
         assert_eq!(policy_for("coder"), Some(RolePolicy::CODER));
-        for r in ["prompter", "designer", "booking", "ops", "bizops", "finance", "finance_librarian", "security-patrol", "finance_2"] {
+        for r in ["prompter", "designer", "booking", "bizops", "finance", "finance_librarian", "security-patrol", "finance_2"] {
             assert_eq!(policy_for(r), Some(RolePolicy::READ_ONLY), "{r}");
         }
         let long = "x".repeat(33);

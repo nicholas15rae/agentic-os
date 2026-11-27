@@ -183,7 +183,7 @@ describe("modes store (phone)", () => {
             overridden: [],
             list: PRESET_MODES.map((m) => ({ id: m.id, name: m.name, icon: m.icon, isNovelty: m.is_novelty })),
             promptTail: "\n\nMODE: Operations. tail",
-            switchboard: { agents: ["ops", "bizops"], tools: ["gmail"], frozenAgents: ["booking"], frozenTools: ["shotcut"] },
+            switchboard: { agents: ["bizops"], tools: ["gmail"], frozenAgents: ["booking"], frozenTools: ["shotcut"] },
           },
         };
       return {};

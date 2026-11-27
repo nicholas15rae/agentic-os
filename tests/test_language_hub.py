@@ -847,7 +847,7 @@ class EchoGuardParity(unittest.TestCase):
 
     def test_prompt_echo_is_dropped(self):
         for echo in ("Tony, Gabagool mode. Take it easy.", "prompter designer coder booking desk", "WhatsApp, Gmail, Spotify, Tauri",
-                     "uh BOOKING-DESK, librarian and ops!", "Tony, Gabagool mode. Take it easy. Cut it. Whoa."):
+                     "uh BOOKING-DESK and librarian!", "Tony, Gabagool mode. Take it easy. Cut it. Whoa."):
             self.assertTrue(lh.echoes_prompt(echo, self.P), echo)
 
     def test_real_lines_pass(self):
@@ -855,7 +855,7 @@ class EchoGuardParity(unittest.TestCase):
                    "play Bilmuri on Spotify", "check my Gmail", "tell the Booking Desk to check WhatsApp", "take it easy on the bass",
                    "Hey, take it easy", "Tony, take it easy", "Hey Tony, take it easy man", "hey take it easy", "Spotify Gmail WhatsApp Tauri",
                    "Take it easy, cut it.", "take it easy cut it", "Hey Tony, take it easy, cut it", "Cut it, take it easy.",
-                   "I want a landing page with a hero, a pricing table and a signup form, and then loop in the booking desk, librarian and ops "
+                   "I want a landing page with a hero, a pricing table and a signup form, and then loop in the booking desk and librarian "
                    "so they know it's coming. Make the colors warm."):
             self.assertFalse(lh.echoes_prompt(ok, self.P), ok)
         self.assertFalse(lh.echoes_prompt("take it ease cut it", "cut it"))
@@ -865,7 +865,7 @@ class EchoGuardParity(unittest.TestCase):
         import fw_server as fws
 
         for line in ("Tony, Gabagool mode. Take it easy.", "prompter designer coder booking desk", "WhatsApp, Gmail, Spotify, Tauri",
-                     "uh BOOKING-DESK, librarian and ops!", "Tony, Gabagool mode. Take it easy. Cut it. Whoa.", "Cut it.", "take it easy",
+                     "uh BOOKING-DESK and librarian!", "Tony, Gabagool mode. Take it easy. Cut it. Whoa.", "Cut it.", "take it easy",
                      "Tony, take it easy", "Hey Tony, take it easy, cut it", "play Bilmuri on Spotify", "tell the Booking Desk to check WhatsApp",
                      "take it ease cut it", "Spotify Gmail WhatsApp Tauri", "Nic, Gabagool mode", "it's Nic"):
             self.assertEqual(fws.echoes_prompt(line, self.P), lh.echoes_prompt(line, self.P), line)

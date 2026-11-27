@@ -33,6 +33,13 @@ $N8N_HEALTH_URL     = 'http://127.0.0.1:5678/healthz'
 $TWS_EXE            = 'C:\Jts\tws.exe'      # IBKR Trader Workstation; you log in to the PAPER account yourself
 $TWS_API_PORT       = 7497                  # paper API port the trading bridge dials (live 7496 is never used)
 $TWS_AUTOSTART      = $true                 # the logon task and the launcher open TWS when it isn't running
+# WhatsApp bridge (lharries whatsapp-mcp, outside the repo). Its REST API has no auth, so it must
+# listen on 127.0.0.1 only, on a port nothing else uses (8080 = gateway, 8091 = trading bridge):
+# scripts\patch-whatsapp-bridge.ps1 sets both. Off at launch until it's proven: set
+# $WA_AUTOSTART = $true in ai-stack.config.ps1, or run start-command-center.ps1 -WithWhatsApp.
+$WA_BRIDGE_PORT     = 8097
+$WA_BRIDGE_DIR      = 'G:\ai-hub\whatsapp-mcp\whatsapp-bridge'
+$WA_AUTOSTART       = $false
 
 $AI_STACK_CONFIG = 'G:\ai-startup\ai-stack.config.ps1'
 if (Test-Path $AI_STACK_CONFIG) { . $AI_STACK_CONFIG }
@@ -46,6 +53,9 @@ $ANYTHINGLLM_EXE   = "$env:LOCALAPPDATA\Programs\AnythingLLM\AnythingLLM.exe"
 $ANYTHINGLLM_PORT  = 3001
 $CC_APP_EXE        = Join-Path $CC_ROOT 'command center\src-tauri\target\release\command-center.exe'
 $CC_PROVIDERS_JSON = "$env:APPDATA\os.agentic.commandcenter\providers.json"
+$WA_BRIDGE_EXE     = Join-Path $WA_BRIDGE_DIR 'whatsapp-bridge.exe'     # go build -o whatsapp-bridge.exe .
+$WA_MESSAGES_DB    = Join-Path $WA_BRIDGE_DIR 'store\messages.db'       # read (read-only) by the ingester
+$WA_INGEST_SCRIPT  = Join-Path $CC_ROOT 'comms_whatsapp_ingest.py'      # messages.db -> /api/comms/ingest
 
 New-Item -ItemType Directory -Force $CC_LOG_DIR | Out-Null
 

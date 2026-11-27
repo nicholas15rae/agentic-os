@@ -13,6 +13,9 @@
 //! can't set a User-Agent, and the limiter must be global). The kill switch blocks them.
 //! Swapping in another provider later means implementing `MapProvider` and returning it
 //! from `provider()`; the tools, commands and UI only see `Place` / `Route`.
+//!
+//! The Maps trips view (`trips.rs`) adds a Canada-biased geocode with a 30-day disk cache under
+//! `<repo>/data/command-center/` and a routing path that never emits `map-route`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -169,6 +172,27 @@ impl Osm<'_> {
         }
         r.json().await.map_err(|e| format!("Nominatim {}", short(e)))
     }
+
+    /// Trips (`trips.rs`): a Canada-biased search near `center` (see `near_url`). The limiter
+    /// applies; no cache here — `cached_geocode` (on disk, 30 days) wraps it. A network call:
+    /// callers pass the kill switch and the MCP permission gate first.
+    pub(crate) async fn geocode_near(&self, query: &str, center: &Place) -> Result<Vec<Place>, String> {
+        let url = near_url(query, center)?;
+        nominatim_slot().await;
+        let r = self
+            .http
+            .get(url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Nominatim {}", short(e)))?;
+        if !r.status().is_success() {
+            return Err(format!("Nominatim HTTP {}", r.status().as_u16()));
+        }
+        let v: Value = r.json().await.map_err(|e| format!("Nominatim {}", short(e)))?;
+        Ok(parse_nominatim(&v))
+    }
 }
 
 impl MapProvider for Osm<'_> {
@@ -232,7 +256,7 @@ impl MapProvider for Osm<'_> {
     }
 }
 
-fn check_coord(lat: f64, lng: f64) -> Result<(), String> {
+pub(crate) fn check_coord(lat: f64, lng: f64) -> Result<(), String> {
     if lat.is_finite() && lng.is_finite() && (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lng) {
         Ok(())
     } else {
@@ -411,6 +435,196 @@ pub async fn plan_route(state: &DispatchState, destination: &str, origin: Option
     }
     points.push(resolve(&p, state, destination).await?);
     p.route(&points).await
+}
+
+// ── Trips support (`trips.rs`): biased geocoding, a disk cache, quiet routing ────
+//
+// Calendar locations are free text ("Stage 4", a studio nickname), so trip geocoding is biased
+// to Canada near the start point, and a match more than `UNRESOLVED_KM` away counts as
+// unresolved rather than drawing a confident wrong pin. Each address is looked up once per
+// `GEO_DISK_TTL_MS` (30 days) through a cache file under `<repo>/data/command-center/`, which git
+// ignores (it holds event addresses). Every function here that reaches the network is called
+// only after `trips.rs` passed the kill switch and the MCP permission gate.
+
+/// A geocode match further than this from the start point is "unresolved".
+pub(crate) const UNRESOLVED_KM: f64 = 150.0;
+/// The bias box around the start point (degrees; about ±110 km north–south, ±120 km east–west
+/// at Toronto's latitude). `bounded=0`: results outside it are still allowed, just ranked lower.
+const BIAS_DLAT: f64 = 1.0;
+const BIAS_DLNG: f64 = 1.5;
+pub(crate) const GEO_DISK_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
+/// A "nothing found" answer is kept for less time than a hit.
+pub(crate) const GEO_DISK_EMPTY_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+pub(crate) const GEO_DISK_MAX: usize = 2000;
+pub(crate) const GEO_DISK_FILE: &str = "maps-geocache.json";
+
+/// The default start point (Toronto city centre), as a `Place`.
+pub(crate) fn default_home() -> Place {
+    Place { lat: DEFAULT_HOME.0, lng: DEFAULT_HOME.1, label: DEFAULT_HOME.2.into() }
+}
+
+/// `<repo>/data/command-center/`: git-ignored, already holds `gateway.token`.
+pub(crate) fn cc_data_dir(state: &DispatchState) -> std::path::PathBuf {
+    std::path::PathBuf::from(state.snapshot().gateway.workdir).join("data").join("command-center")
+}
+
+/// The Nominatim search URL for a trip address: Canada only, a viewbox around `center`
+/// (bounded=0), top 3. Every parameter is percent-encoded by the URL builder. Pure.
+pub(crate) fn near_url(query: &str, center: &Place) -> Result<reqwest::Url, String> {
+    let q = query.trim();
+    if q.is_empty() || q.len() > 300 {
+        return Err("geocode needs an address or place name".into());
+    }
+    check_coord(center.lat, center.lng)?;
+    let viewbox = format!(
+        "{:.4},{:.4},{:.4},{:.4}",
+        center.lng - BIAS_DLNG,
+        (center.lat + BIAS_DLAT).min(90.0),
+        center.lng + BIAS_DLNG,
+        (center.lat - BIAS_DLAT).max(-90.0)
+    );
+    reqwest::Url::parse_with_params(
+        &format!("{NOMINATIM}/search"),
+        &[("q", q), ("format", "jsonv2"), ("limit", "3"), ("countrycodes", "ca"), ("viewbox", viewbox.as_str()), ("bounded", "0")],
+    )
+    .map_err(|e| format!("bad geocode URL: {e}"))
+}
+
+/// The disk-cache key for a biased lookup: the query (case-folded, spaces collapsed) plus the
+/// whole-degree cell of the bias centre, so a different home never reuses another's answer. Pure.
+pub(crate) fn near_key(query: &str, center: &Place) -> String {
+    format!("ca@{:.0},{:.0}:{}", center.lat, center.lng, norm_query(query))
+}
+
+/// Great-circle distance in km. Pure.
+pub(crate) fn haversine_km(a: &Place, b: &Place) -> f64 {
+    let (la1, la2) = (a.lat.to_radians(), b.lat.to_radians());
+    let (dla, dln) = ((b.lat - a.lat).to_radians(), (b.lng - a.lng).to_radians());
+    let h = (dla / 2.0).sin().powi(2) + la1.cos() * la2.cos() * (dln / 2.0).sin().powi(2);
+    6371.0 * 2.0 * h.sqrt().min(1.0).asin()
+}
+
+/// The first candidate within `UNRESOLVED_KM` of `origin`, else why it is unresolved. Pure.
+pub(crate) fn pick_near(cands: &[Place], origin: &Place) -> Result<Place, String> {
+    if cands.is_empty() {
+        return Err("address not found on the map — use a fuller street address".into());
+    }
+    if let Some(p) = cands.iter().find(|p| haversine_km(p, origin) <= UNRESOLVED_KM) {
+        return Ok(p.clone());
+    }
+    let closest = cands.iter().map(|p| haversine_km(p, origin)).fold(f64::INFINITY, f64::min);
+    Err(format!("the closest match is {closest:.0} km away — treated as unresolved"))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct GeoDiskEntry {
+    /// Epoch ms the answer was fetched.
+    at: i64,
+    places: Vec<Place>,
+}
+
+/// The on-disk geocode cache: `{ "v": 1, "entries": { key → { at, places } } }`.
+#[derive(Deserialize, Default, Debug)]
+pub(crate) struct GeoDiskCache {
+    #[serde(default)]
+    entries: HashMap<String, GeoDiskEntry>,
+}
+
+impl GeoDiskCache {
+    fn fresh(e: &GeoDiskEntry, now_ms: i64) -> bool {
+        let ttl = if e.places.is_empty() { GEO_DISK_EMPTY_TTL_MS } else { GEO_DISK_TTL_MS };
+        now_ms >= e.at && now_ms - e.at < ttl
+    }
+
+    pub(crate) fn get(&self, key: &str, now_ms: i64) -> Option<Vec<Place>> {
+        self.entries.get(key).filter(|e| Self::fresh(e, now_ms)).map(|e| e.places.clone())
+    }
+
+    /// Insert, dropping expired entries and then the oldest beyond `GEO_DISK_MAX`.
+    pub(crate) fn put(&mut self, key: String, places: Vec<Place>, now_ms: i64) {
+        self.entries.retain(|_, e| Self::fresh(e, now_ms));
+        while self.entries.len() >= GEO_DISK_MAX {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| k.clone()) else { break };
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(key, GeoDiskEntry { at: now_ms, places });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// A missing or unreadable file is an empty cache (never an error).
+    pub(crate) fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    /// Written atomically (a temp file, then a rename over the old one).
+    pub(crate) fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let body = serde_json::to_string(&GeoDiskCacheOut { v: 1, entries: &self.entries }).map_err(|e| e.to_string())?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Serialize)]
+struct GeoDiskCacheOut<'a> {
+    v: u32,
+    entries: &'a HashMap<String, GeoDiskEntry>,
+}
+
+/// Each cache file, loaded lazily once per process.
+static GEO_DISK: Mutex<Option<HashMap<std::path::PathBuf, GeoDiskCache>>> = Mutex::new(None);
+
+fn with_disk<T>(path: &std::path::Path, f: impl FnOnce(&mut GeoDiskCache) -> T) -> T {
+    let mut g = GEO_DISK.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    let c = m.entry(path.to_path_buf()).or_insert_with(|| GeoDiskCache::load(path));
+    f(c)
+}
+
+/// A cached answer only — never the network.
+pub(crate) fn disk_peek(path: &std::path::Path, key: &str, now_ms: i64) -> Option<Vec<Place>> {
+    with_disk(path, |c| c.get(key, now_ms))
+}
+
+/// Tests: forget the in-memory copy, as a restart would (the file stays).
+#[cfg(test)]
+pub(crate) fn disk_forget(path: &std::path::Path) {
+    if let Some(m) = GEO_DISK.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        m.remove(path);
+    }
+}
+
+/// The disk-cached lookup: a fresh hit never calls `fetch`; a fetched answer (an empty one too)
+/// is saved; a fetch error is never cached.
+pub(crate) async fn cached_geocode<F, Fut>(path: &std::path::Path, key: &str, now_ms: i64, fetch: F) -> Result<Vec<Place>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Place>, String>>,
+{
+    if let Some(hit) = disk_peek(path, key, now_ms) {
+        return Ok(hit);
+    }
+    let places = fetch().await?;
+    with_disk(path, |c| {
+        c.put(key.to_string(), places.clone(), now_ms);
+        if let Err(e) = c.save(path) {
+            eprintln!("[maps] geocode cache not saved: {e}");
+        }
+    });
+    Ok(places)
+}
+
+/// The trips' routing path: the active provider (its 5 min route cache applies), and it NEVER
+/// emits `map-route`, so a trip ETA can't replace the route the Maps widget is showing.
+pub(crate) async fn route_quiet(state: &DispatchState, points: &[Place]) -> Result<Route, String> {
+    provider(state).route(points).await
 }
 
 fn emit_route(r: &Route) {
@@ -643,6 +857,99 @@ mod tests {
         assert!(C.lock().unwrap().as_ref().unwrap().len() <= CACHE_MAX);
         assert_eq!(cache_get(&C, &format!("k{}", CACHE_MAX + 4), ROUTE_TTL), Some(r));
         assert_eq!(cache_get::<Route>(&C, "k0", ROUTE_TTL), None);
+    }
+
+    fn tmp_cache(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("maps-geo-{tag}-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        dir.join(GEO_DISK_FILE)
+    }
+
+    #[test]
+    fn trip_geocode_url_is_encoded_and_biased_to_canada_near_home() {
+        let home = Place { lat: 43.6532, lng: -79.3832, label: "Home".into() };
+        let u = near_url("  Smith & Sons #4, 100 Queen St W, Montréal?x=1  ", &home).unwrap();
+        let s = u.as_str();
+        assert!(s.starts_with("https://nominatim.openstreetmap.org/search?q="), "{s}");
+        // The address is one encoded value: '&', '#', '?', '=' and 'é' never split the query.
+        assert!(s.contains("q=Smith+%26+Sons+%234%2C+100+Queen+St+W%2C+Montr%C3%A9al%3Fx%3D1&"), "{s}");
+        let pairs: HashMap<String, String> = u.query_pairs().into_owned().collect();
+        assert_eq!(pairs["q"], "Smith & Sons #4, 100 Queen St W, Montréal?x=1");
+        assert_eq!(pairs["countrycodes"], "ca");
+        assert_eq!(pairs["bounded"], "0");
+        assert_eq!(pairs["limit"], "3");
+        assert_eq!(pairs["viewbox"], "-80.8832,44.6532,-77.8832,42.6532");
+        assert_eq!(pairs.len(), 6);
+        assert!(near_url("   ", &home).is_err());
+        assert!(near_url(&"x".repeat(301), &home).is_err());
+        assert!(near_url("ok", &Place { lat: 91.0, lng: 0.0, label: String::new() }).is_err());
+        // Keys fold case and spacing and carry the bias cell.
+        assert_eq!(near_key(" 100  Queen St W ", &home), "ca@44,-79:100 queen st w");
+        assert_eq!(near_key("100 queen st w", &home), near_key("100 QUEEN st   W", &home));
+    }
+
+    #[test]
+    fn far_matches_count_as_unresolved() {
+        let home = Place { lat: 43.6532, lng: -79.3832, label: "Home".into() };
+        let hamilton = Place { lat: 43.2557, lng: -79.8711, label: "Hamilton".into() };
+        let vancouver = Place { lat: 49.2827, lng: -123.1207, label: "Vancouver".into() };
+        let km = haversine_km(&home, &hamilton);
+        assert!((55.0..65.0).contains(&km), "{km}");
+        assert!(haversine_km(&home, &vancouver) > 3000.0);
+        assert_eq!(pick_near(&[vancouver.clone(), hamilton.clone()], &home), Ok(hamilton));
+        let far = pick_near(&[vancouver], &home).unwrap_err();
+        assert!(far.contains("km away") && far.contains("unresolved"), "{far}");
+        assert!(pick_near(&[], &home).unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn disk_geocache_honours_ttl_and_cap() {
+        let p = |l: &str| vec![Place { lat: 43.0, lng: -79.0, label: l.into() }];
+        let mut c = GeoDiskCache::default();
+        let t0 = 1_800_000_000_000;
+        c.put("hit".into(), p("A"), t0);
+        c.put("none".into(), vec![], t0);
+        assert_eq!(c.get("hit", t0 + GEO_DISK_TTL_MS - 1), Some(p("A")));
+        assert_eq!(c.get("hit", t0 + GEO_DISK_TTL_MS), None, "30 days, then a fresh lookup");
+        assert_eq!(c.get("none", t0 + GEO_DISK_EMPTY_TTL_MS - 1), Some(vec![]));
+        assert_eq!(c.get("none", t0 + GEO_DISK_EMPTY_TTL_MS), None, "a miss is retried after 7 days");
+        assert_eq!(c.get("hit", t0 - 1), None, "a clock that went backwards never serves the entry");
+        // Expired entries go first, then the oldest; never above the cap.
+        let mut c = GeoDiskCache::default();
+        for i in 0..(GEO_DISK_MAX + 10) {
+            c.put(format!("k{i}"), p("x"), t0 + i as i64);
+        }
+        assert_eq!(c.len(), GEO_DISK_MAX);
+        assert!(c.get("k0", t0 + 20_000).is_none() && c.get(&format!("k{}", GEO_DISK_MAX + 9), t0 + 20_000).is_some());
+    }
+
+    #[test]
+    fn disk_geocache_round_trips_and_survives_a_restart_without_refetching() {
+        tauri::async_runtime::block_on(async {
+            let path = tmp_cache("restart");
+            let now = 1_800_000_000_000;
+            let fetches = std::sync::atomic::AtomicU32::new(0);
+            let fetch = || {
+                fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Ok::<_, String>(vec![Place { lat: 43.65, lng: -79.38, label: "100 Queen St W".into() }]))
+            };
+            let a = cached_geocode(&path, "k", now, fetch).await.unwrap();
+            let b = cached_geocode(&path, "k", now + 1000, fetch).await.unwrap();
+            assert_eq!((a.clone(), fetches.load(std::sync::atomic::Ordering::SeqCst)), (b, 1));
+            // "Restart": the in-memory copy is gone, the file answers.
+            disk_forget(&path);
+            assert_eq!(cached_geocode(&path, "k", now + 2000, fetch).await.unwrap(), a);
+            assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1, "a restart doesn't re-geocode");
+            assert_eq!(GeoDiskCache::load(&path).get("k", now), Some(a));
+            // A fetch error is never cached.
+            let failing = || std::future::ready(Err::<Vec<Place>, String>("Nominatim HTTP 429".into()));
+            assert!(cached_geocode(&path, "bad", now, failing).await.is_err());
+            assert_eq!(disk_peek(&path, "bad", now), None);
+            // A corrupt file is an empty cache.
+            std::fs::write(&path, "{not json").unwrap();
+            assert_eq!(GeoDiskCache::load(&path).len(), 0);
+            disk_forget(&path);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        });
     }
 
     #[test]

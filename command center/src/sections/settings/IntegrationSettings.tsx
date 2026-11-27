@@ -9,6 +9,11 @@ import { useSpotifyAuthRefresh, useSpotifyConnect } from "@/features/integration
 import { cardButton, expiryHint, missingScopesLine, spotifyFix, spotifyFixText } from "@/widgets/spotify/spotify-ui";
 import { notifyIntegrationsChanged, useOnIntegrationsChanged } from "@/features/integrations/changed";
 import { instagramBadge, mapsBadge, tokenExpiryLine, type Tone } from "@/features/integrations/live-status";
+import { useLayout } from "@/core/widgets/layout-store";
+import { MAPS_WIDGET_ID, pageWithWidget } from "@/core/widgets/pages";
+import { useToasts } from "@/features/reminders/notify";
+import { useNav } from "@/stores/nav";
+import { boardNotice, sendToBoard, type BoardShortcutProps } from "./board-shortcut";
 import { useProviders } from "./use-providers";
 import { SecretRow, Toggle, useOsCfg } from "./os-ui";
 
@@ -617,6 +622,28 @@ function useLiveStatus<T>(load: (force: boolean) => Promise<T>) {
   return { status, error, refresh };
 }
 
+/** Puts an integration's widget on the board (or shows it if it's already there) and goes to it. Contract: board-shortcut.ts. */
+function AddToBoardButton({ widgetId, label }: BoardShortcutProps) {
+  const onBoard = useLayout((s) => pageWithWidget(s.pages, widgetId)?.id ?? null);
+  const run = () => {
+    const outcome = sendToBoard(widgetId, {
+      pages: () => useLayout.getState().pages,
+      add: (id) => {
+        const l = useLayout.getState();
+        return l.add(id, undefined, { pageId: l.pages[0]?.id });
+      },
+      setActivePage: (id) => useLayout.getState().setActivePage(id),
+      showBoard: () => useNav.getState().go("command"),
+    });
+    useToasts.getState().push(boardNotice(outcome, label));
+  };
+  return (
+    <button onClick={run} className="pill-glass !h-8 text-xs" title={onBoard ? `Go to the page with the ${label} widget` : `Add the ${label} widget to the first page with room and go there`}>
+      {onBoard ? <MapIcon size={13} /> : <Plus size={13} />} {onBoard ? "Show on board" : "Add to board"}
+    </button>
+  );
+}
+
 const LIVE_TONE: Record<Tone, string> = { ok: "text-teal", warn: "text-amber", down: "text-alert", idle: "text-ink-3" };
 
 /** OpenStreetMap: OpenFreeMap tiles, Nominatim geocoding, OSRM routing. No key. */
@@ -651,14 +678,17 @@ export function MapsCard() {
         <span className={`label-caps ${LIVE_TONE[badge.tone]}`} title={error ?? status?.detail}>
           {badge.label}
         </span>
-        <button onClick={() => void test()} disabled={busy || !server?.enabled} className="pill-glass ml-auto !h-8 text-xs" title="Route from home to the CN Tower (draws on the Route Map widget)">
-          <FlaskConical size={13} /> Test route
-        </button>
+        <span className="ml-auto flex items-center gap-2">
+          <AddToBoardButton widgetId={MAPS_WIDGET_ID} label="Maps" />
+          <button onClick={() => void test()} disabled={busy || !server?.enabled} className="pill-glass !h-8 text-xs" title="Route from home to the CN Tower (draws on the Maps widget)">
+            <FlaskConical size={13} /> Test route
+          </button>
+        </span>
       </div>
       {server && <Toggle on={server.enabled} onChange={(v) => void setMcpEnabled("maps", v).then(() => refresh(true))} label="Maps tools on" hint="Off: Tony can't plan routes or look up addresses." />}
       <p className="mt-1 text-xs text-ink-3">
         {status?.status === "error" ? `${status.detail} · ` : ""}Home for “how long to get to…”:{" "}
-        {status?.homeSet ? "MAP_HOME from .env" : "Toronto city centre — set MAP_HOME (address or “lat,lng”) in the repo-root .env"}. Add the Route Map widget to see routes.
+        {status?.homeSet ? "MAP_HOME from .env" : "Toronto city centre — set MAP_HOME (address or “lat,lng”) in the repo-root .env"}. Routes show on the Maps widget.
       </p>
       {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>

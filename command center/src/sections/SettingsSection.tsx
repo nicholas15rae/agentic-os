@@ -18,6 +18,7 @@ import { VoiceDetectionCard } from "./settings/VadSettings";
 import { RoutingSettings } from "./settings/RoutingSettings";
 import { ModesManagerCard } from "./settings/ModesManager";
 import { SwitchboardCard } from "./settings/SwitchboardSettings";
+import { ClockCard, EffectsCard } from "./settings/ClockEffectsSettings";
 import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
 import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
@@ -155,6 +156,8 @@ export function SettingsSection() {
             <GlassOpacitySlider />
           </Card>
           <WaveCard />
+          <ClockCard />
+          <EffectsCard />
           <LocationCard />
           <IdentityCard />
         </>
@@ -320,7 +323,14 @@ function LocationCard() {
   const [lon, setLon] = useState(weatherLocation?.lon?.toString() ?? "");
   const [label, setLabel] = useState(weatherLocation?.label ?? "");
   return (
-    <Card title="Weather location" hint="Leave empty to use this device's location.">
+    <Card
+      title="Weather location"
+      hint={
+        isAndroidApp()
+          ? "The Android app has no location permission: save a location here for the clock's temperature, the forecast and live weather effects."
+          : "Leave empty to use this device's location. The Android app has no location permission, so set one there too."
+      }
+    >
       <form
         className="grid gap-3 sm:grid-cols-[1fr_1fr_1.4fr_auto]"
         onSubmit={(e) => {

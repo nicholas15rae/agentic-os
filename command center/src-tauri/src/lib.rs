@@ -627,6 +627,8 @@ pub fn run() {
             media::media_ingest_finish,
             media::media_voiceover_save,
             media::media_manifest_save,
+            media::media_render_snapshot,
+            media::media_manifest_restore,
             media::media_chat_log,
             media::media_render_plan,
             media::media_render_execute,

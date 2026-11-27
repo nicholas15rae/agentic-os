@@ -3619,6 +3619,41 @@ pub(crate) fn check_revision_changed(state: &MediaState, slug: &str, note: &Note
     }
 }
 
+// ── Versions (Part 3 C.1) ─────────────────────────────────────────────────────
+
+/// The cut a render was made from (`plan_snapshot` of its plan; notes and shot list are empty in it
+/// by design). `manifest: None` for renders from before snapshots existed.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderSnapshot {
+    pub render_id: String,
+    pub plan_id: String,
+    pub manifest: Option<TimelineManifest>,
+    pub created_at: String,
+}
+
+pub(crate) const NO_SNAPSHOT: &str = "NO_SNAPSHOT: this render was made before versions were kept, so its cut can't be restored.";
+
+/// Reads only. Err when the render isn't in this project.
+pub(crate) fn render_snapshot(state: &MediaState, slug: &str, render_id: &str) -> Result<RenderSnapshot, String> {
+    load_project(state, slug)?;
+    let r = list_renders(state, slug)?.into_iter().find(|r| r.id == render_id).ok_or_else(|| format!("no render {render_id:?} in this project"))?;
+    Ok(RenderSnapshot { manifest: plan_snapshot(state, &r.plan_id), render_id: r.id, plan_id: r.plan_id, created_at: r.created_at })
+}
+
+/// Make a render's cut the working manifest. Clips, audio, the camera-audio level, output, captions,
+/// colour and outputs come from the snapshot; project, notes and the shot list stay the current
+/// ones. Goes through `manifest_save`, so assets that are gone are refused. `expected` is the
+/// revision the caller's timeline is at: when the copy on disk has moved past it (a save from
+/// elsewhere), the restore gets STALE_REVISION instead of overwriting that save. None = the disk's.
+pub(crate) fn manifest_restore(state: &MediaState, slug: &str, render_id: &str, expected: Option<u64>) -> Result<TimelineManifest, String> {
+    let snap = render_snapshot(state, slug, render_id)?.manifest.ok_or_else(|| NO_SNAPSHOT.to_string())?;
+    let current = load_manifest_strict(&project_root(state, slug)?, slug)?;
+    let revision = expected.unwrap_or(current.revision);
+    let m = TimelineManifest { project: current.project, revision, notes: current.notes, shot_list: current.shot_list, updated_by: "nic".into(), updated_at: now_iso(), ..snap };
+    manifest_save(state, slug, m)
+}
+
 // ── Tauri commands ─────────────────────────────────────────────────────────────
 
 pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
@@ -3718,6 +3753,18 @@ pub async fn media_voiceover_save(app: tauri::AppHandle, request: tauri::ipc::Re
 #[tauri::command]
 pub async fn media_manifest_save(app: tauri::AppHandle, slug: String, manifest: TimelineManifest) -> Result<TimelineManifest, String> {
     blocking(move || manifest_save(&app.state::<MediaState>(), &slug, manifest)).await
+}
+
+#[tauri::command]
+pub async fn media_render_snapshot(app: tauri::AppHandle, slug: String, render_id: String) -> Result<RenderSnapshot, String> {
+    blocking(move || render_snapshot(&app.state::<MediaState>(), &slug, &render_id)).await
+}
+
+/// Only from the Versions confirm click. `revision` = the UI's timeline revision (STALE_REVISION when
+/// the disk copy moved on).
+#[tauri::command]
+pub async fn media_manifest_restore(app: tauri::AppHandle, slug: String, render_id: String, revision: Option<u64>) -> Result<TimelineManifest, String> {
+    blocking(move || manifest_restore(&app.state::<MediaState>(), &slug, &render_id, revision)).await
 }
 
 #[derive(Deserialize)]
@@ -4410,6 +4457,112 @@ mod tests {
         let j = serde_json::to_string(&r).unwrap();
         st.with(|c| c.execute("INSERT INTO render (id, project, json, created_at) VALUES (?1, ?2, ?3, ?4)", params![r.id, r.project, j, r.created_at]).map(|_| ()).map_err(sql_err)).unwrap();
         r
+    }
+
+    // ── Part 3 C.1: versions ──
+
+    /// A project with assets v1, v2 and a saved two-clip cut; returns (slug, saved manifest).
+    fn versions_project(st: &MediaState) -> (String, TimelineManifest) {
+        let p = create_project(st, "Versions Test", None).unwrap();
+        put_asset(st, &p.slug, "v1", "video", Some(10.0));
+        put_asset(st, &p.slug, "v2", "video", Some(10.0));
+        let mut m = load_manifest(Path::new(&p.root), &p.slug);
+        m.clips = vec![clip("c1", "v1", 0.0, 3.0), clip("c2", "v2", 1.0, 4.0)];
+        let saved = manifest_save(st, &p.slug, m).unwrap();
+        (p.slug, saved)
+    }
+
+    fn put_snapshot(st: &MediaState, plan_id: &str, m: &TimelineManifest) {
+        let snap = serde_json::to_string(&TimelineManifest { notes: vec![], shot_list: vec![], ..m.clone() }).unwrap();
+        st.with(|c| c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2)", params![plan_manifest_key(plan_id), snap]).map(|_| ()).map_err(sql_err)).unwrap();
+    }
+
+    fn put_render_plan(st: &MediaState, slug: &str, id: &str, plan_id: &str) -> VerifiedRender {
+        let r = VerifiedRender { id: id.into(), project: slug.into(), plan_id: plan_id.into(), path: format!("C:/x/renders/{id}_v001.mp4"), duration_sec: 3.0, width: 1080, height: 1920, size_bytes: 1, loudness_lufs: None, verify: VerifyInfo { ok: true, checks: vec![] }, created_at: now_iso() };
+        let j = serde_json::to_string(&r).unwrap();
+        st.with(|c| c.execute("INSERT INTO render (id, project, json, created_at) VALUES (?1, ?2, ?3, ?4)", params![r.id, r.project, j, r.created_at]).map(|_| ()).map_err(sql_err)).unwrap();
+        r
+    }
+
+    #[test]
+    fn render_snapshot_round_trips_and_is_camel_case() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let (slug, saved) = versions_project(&st);
+        put_snapshot(&st, "p-a", &saved);
+        let r = put_render_plan(&st, &slug, "r-a", "p-a");
+        let s = render_snapshot(&st, &slug, "r-a").unwrap();
+        assert_eq!((s.render_id.as_str(), s.plan_id.as_str(), s.created_at.as_str()), ("r-a", "p-a", r.created_at.as_str()));
+        let m = s.manifest.clone().unwrap();
+        assert_eq!(m.clips, saved.clips);
+        assert!(m.notes.is_empty() && m.shot_list.is_empty());
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("renderId").is_some() && v.get("planId").is_some() && v.get("createdAt").is_some() && v["manifest"].get("clipAudioVolume").is_some());
+        // A render from before snapshots: manifest null, not an error.
+        put_render_plan(&st, &slug, "r-old", "p-old");
+        let old = render_snapshot(&st, &slug, "r-old").unwrap();
+        assert!(old.manifest.is_none());
+        assert!(serde_json::to_value(&old).unwrap()["manifest"].is_null());
+        assert!(render_snapshot(&st, &slug, "r-ghost").unwrap_err().contains("no render"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_brings_back_the_cut_and_keeps_notes_and_shot_list() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let (slug, saved) = versions_project(&st);
+        put_snapshot(&st, "p-a", &saved);
+        put_render_plan(&st, &slug, "r-a", "p-a");
+        // Later edits: one clip, a shot list and a note.
+        let proot = project_root(&st, &slug).unwrap();
+        let mut later = load_manifest_strict(&proot, &slug).unwrap();
+        later.clips = vec![clip("c9", "v2", 2.0, 3.0)];
+        later.shot_list = vec![slot("s1", Some("v2"))];
+        later.clip_audio_volume = 0.4;
+        let later = manifest_save(&st, &slug, later).unwrap();
+        let note = Note { id: "n1".into(), render_id: Some("r-a".into()), at_sec: Some(1.0), text: "tighten the end".into(), by: "nic".into(), via_voice: false, resolved: false, at: now_iso() };
+        let mut on_disk = load_manifest_strict(&proot, &slug).unwrap();
+        on_disk.notes = vec![note.clone()];
+        write_atomic(&manifest_path(&proot), serde_json::to_string_pretty(&on_disk).unwrap().as_bytes()).unwrap();
+
+        // The UI still at the revision before `later` is stale: nothing is restored.
+        assert!(manifest_restore(&st, &slug, "r-a", Some(saved.revision)).unwrap_err().starts_with("STALE_REVISION"));
+        assert_eq!(load_manifest_strict(&proot, &slug).unwrap().clips, later.clips);
+        let restored = manifest_restore(&st, &slug, "r-a", Some(later.revision)).unwrap();
+        assert_eq!(restored.clips, saved.clips);
+        assert_eq!(restored.clip_audio_volume, saved.clip_audio_volume);
+        assert_eq!(restored.shot_list, later.shot_list);
+        assert_eq!(restored.notes, vec![note]);
+        assert_eq!((restored.project.as_str(), restored.updated_by.as_str(), restored.revision), (slug.as_str(), "nic", later.revision + 1));
+        assert_eq!(load_manifest_strict(&proot, &slug).unwrap(), restored);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_refuses_without_a_snapshot() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let (slug, saved) = versions_project(&st);
+        put_render_plan(&st, &slug, "r-old", "p-old");
+        assert_eq!(manifest_restore(&st, &slug, "r-old", None).unwrap_err(), NO_SNAPSHOT);
+        // The working cut is untouched.
+        assert_eq!(load_manifest_strict(&project_root(&st, &slug).unwrap(), &slug).unwrap(), saved);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_refuses_a_render_from_another_project() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let (slug, saved) = versions_project(&st);
+        let other = create_project(&st, "Other Project", None).unwrap();
+        put_snapshot(&st, "p-b", &saved);
+        put_render_plan(&st, &other.slug, "r-b", "p-b");
+        assert!(manifest_restore(&st, &slug, "r-b", None).unwrap_err().contains("no render"));
+        assert!(render_snapshot(&st, &slug, "r-b").is_err());
+        assert_eq!(load_manifest_strict(&project_root(&st, &slug).unwrap(), &slug).unwrap(), saved);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     const V1_MANIFEST: &str = r#"{"version":1,"project":"old","revision":7,

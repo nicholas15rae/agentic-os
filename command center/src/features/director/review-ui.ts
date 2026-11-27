@@ -2,7 +2,7 @@
  * Pure helpers behind the v2 panels (review notes, outputs, transcripts). No store, no IPC, so the
  * components stay thin and these are unit-tested on their own.
  */
-import type { MediaAsset, Note, Platform, ProjectReview, ReviewRound, TimelineManifest } from "./contract";
+import type { MediaAsset, Note, Platform, ProjectReview, ReviewRound, TimelineManifest, VerifiedRender } from "./contract";
 import type { Selection } from "./director-store";
 import { MAX_OUTPUTS, clipLength, clipStarts } from "./manifest";
 import type { PreviewSource } from "./PreviewPlayer";
@@ -96,3 +96,62 @@ export const FLAG_LABEL: Record<MediaAsset["flags"][number]["kind"], string> = {
   silent: "silent",
   wrong_aspect: "wrong aspect",
 };
+
+// ── Part 3 B.1: note markers on the timeline ─────────────────────────────────
+
+export interface NoteMarker {
+  id: string;
+  /** 0–1 along the clip strip. */
+  x: number;
+  resolved: boolean;
+  /** A note on a render: placed by the render's length (its cut may differ from the timeline), drawn hollow. */
+  onRender: boolean;
+  text: string;
+  /** Seconds the note sits at (on the timeline, or into the render). */
+  atSec: number;
+  target: { sel: Selection; sec: number };
+}
+
+const clamp01 = (n: number) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+
+/** Notes with atSec → markers. Timeline notes: x = atSec / total. Render notes: x = atSec / render
+ * duration (`onRender: true`). target = noteTarget(note, manifest). Skips notes without atSec or
+ * target (and render notes whose render isn't listed). Clamps x to [0, 1]. Sorted by x. */
+export function noteMarkers(notes: Note[], manifest: Pick<TimelineManifest, "clips"> | null, totalSec: number, renders: Pick<VerifiedRender, "id" | "durationSec">[]): NoteMarker[] {
+  const out: NoteMarker[] = [];
+  for (const n of notes) {
+    if (n.atSec == null || !Number.isFinite(n.atSec)) continue;
+    const target = noteTarget(n, manifest);
+    if (!target) continue;
+    let x: number;
+    if (n.renderId) {
+      const r = renders.find((v) => v.id === n.renderId);
+      if (!r) continue;
+      x = r.durationSec > 0 ? n.atSec / r.durationSec : 0;
+    } else x = totalSec > 0 ? n.atSec / totalSec : 0;
+    out.push({ id: n.id, x: clamp01(x), resolved: n.resolved, onRender: !!n.renderId, text: n.text, atSec: n.atSec, target });
+  }
+  return out.sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
+}
+
+/** x (0–1 of the timeline's seconds) → px from the strip's left edge, using the widths the strip
+ * actually draws (clip boxes are clamped to 72–220 px, so a straight percentage would drift).
+ * `clips` = each box's drawn width and its length in seconds, in order; `gapPx` = the gap between boxes. */
+export function markerLeftPx(x: number, clips: { widthPx: number; sec: number }[], gapPx = 6): number {
+  if (!clips.length) return 0;
+  const total = clips.reduce((t, c) => t + Math.max(0, c.sec), 0);
+  const t = clamp01(x) * total;
+  let acc = 0;
+  let left = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const c = clips[i];
+    const sec = Math.max(0, c.sec);
+    if (t <= acc + sec || i === clips.length - 1) {
+      const f = sec > 0 ? Math.min(1, Math.max(0, (t - acc) / sec)) : 0;
+      return Math.round((left + f * c.widthPx) * 10) / 10;
+    }
+    acc += sec;
+    left += c.widthPx + gapPx;
+  }
+  return left;
+}

@@ -291,7 +291,23 @@ export interface DirectorCommands {
   media_approve_final: { args: { slug: string; renderIds: string[]; approved: true }; result: Deliverable[] };
   /** The last "Approve final"'s deliverables still on disk (media.db), so they survive a switch or restart. */
   media_deliverables_get: { args: { slug: string }; result: Deliverable[] };
+  // ── Part 3: ComfyUI (comfy.rs) ──
+  comfy_status: { args: undefined; result: ComfyStatus };
+  /** Refused for an unknown / unbuilt template, params that could never render (dry-run fill), or an inputImage outside the project.
+   * A template with a missing model is accepted as status "waiting". */
+  comfy_enqueue: { args: { slug: string; template: string; params?: ComfyParams }; result: ComfyJob };
+  comfy_cancel: { args: { id: string }; result: ComfyJob };
+  /** Skips the policy and lifts the failure backoff, never the mid-conversation / boot-grace checks. `now` = "starting" or why not yet. */
+  comfy_run_now: { args: undefined; result: { accepted: boolean; now: string } };
+  comfy_queue_get: { args: undefined; result: ComfyQueue };
+  comfy_settings_set: { args: { patch: { modelRoots?: string[]; policy?: ComfyPolicy } }; result: ComfySettings };
+  // ── Part 3: Versions (media.rs C.1) ──
+  /** The cut a render was made from (notes and shot list empty). Reads only. `manifest: null` = made before versions were kept. */
+  media_render_snapshot: { args: { slug: string; renderId: string }; result: RenderSnapshot };
+  /** That cut becomes the working manifest (notes and shot list stay). Refuses "NO_SNAPSHOT: …" and STALE_REVISION. */
+  media_manifest_restore: { args: { slug: string; renderId: string; /** the timeline revision the UI holds (STALE_REVISION when the disk moved on) */ revision?: number }; result: TimelineManifest };
 }
+export interface RenderSnapshot { renderId: string; planId: string; manifest: TimelineManifest | null; createdAt: string }
 export interface DirectorTurnRequest { text: string; history: { role: "user" | "assistant"; content: string }[]; context: string; streamId: string | null }
 export interface DirectorTurnResult { answer: string; providerId: string; latencyMs: number; answeredBy: "director" }
 export type McpReady = { enabled: boolean; healthy: boolean; tools: number; error: string | null };
@@ -301,6 +317,117 @@ export type DirectorEvents = {
   "media-render": { slug: string; jobId: string; status: "queued" | "running" | "done" | "failed" | "cancelled"; pct: number; etaSec: number | null; stage: string; render?: VerifiedRender; error?: string };
   "media-ingest": { slug: string; uploadId: string; received: number; total: number };
   "media-intake": { slug: string; assetId: string; stage: "ingested" | "probed" | "transcribed" | "matched" | "failed"; detail: string };
+  // ── Part 3: ComfyUI (comfy.rs) ──
+  "comfy-queue": ComfyJob;                        // every job change (enqueue, waiting↔queued, start, finish, cancel)
+  "comfy-service": ComfyServiceEvent;
+  "comfy-asset": { slug: string; assetId: string }; // a generated output was ingested into the project
+  "director-report": { kind: "comfy-batch"; slug: string; done: number; failed: number }; // one per project a batch touched
+};
+
+// ── ComfyUI (comfy.rs, comfy_templates.rs) ──
+// comfy.rs: rename_all camelCase on Job / JobOutput / ComfySettings / QueueFile / SettingsPatch; lowercase on
+// JobStatus / Policy. comfy_status builds its JSON by hand (json!), key names as below.
+export type ComfyJobStatus = "queued" | "waiting" | "running" | "done" | "failed" | "cancelled"; // waiting = a model file is missing (`error` says which)
+export type ComfyPolicy = "idle" | "overnight" | "manual"; // default "idle"
+/** comfy_templates.rs ASPECTS (the manifest's four + 4:3 / 3:4 for stills). */
+export type ComfyAspect = "16:9" | "9:16" | "4:5" | "1:1" | "4:3" | "3:4";
+export type ComfyTemplateName = "scene-still" | "thumbnail-bg" | "style-transfer" | "upscale" | "broll-motion";
+
+/** What the UI sends as `params` (GenParams, camelCase). `slug` / `jobId` are set by Rust, never sent.
+ * Omit `seed` for a random one (Rust picks it at enqueue and stores it on the job, ≤ 2^53).
+ * Omit `aspect` and `width` / `height` for the project's aspect (thumbnail-bg falls back to 16:9, others to 1:1). */
+export interface ComfyParams {
+  prompt: string; // ≤ COMFY_PROMPT_MAX (2000) chars
+  negative?: string; // inert at cfg 1.0 (SDXL Turbo); kept for provenance
+  seed?: number; // integer 0 … 2^53-1
+  steps?: number; // 1 … COMFY_TURBO_MAX_STEPS (4); default 1
+  width?: number; // 0 or 64 … 1024 (0 = from aspect)
+  height?: number;
+  aspect?: ComfyAspect;
+  inputImage?: string; // style-transfer / upscale: an image asset's absolute `path` inside this project
+  denoise?: number; // style-transfer 0.3 … 0.7 (default 0.5 in the panel); others 1.0
+}
+
+export interface ComfyJobOutput { path: string; filename: string; kind: "image" | "video"; assetId: string | null; gen: GenMeta }
+
+export interface ComfyJob {
+  id: string;
+  slug: string;
+  template: string;
+  /** As stored at enqueue (seed and default aspect filled in). An absolute inputImage stays absolute here (staging only changes the copy sent to ComfyUI). */
+  params: Partial<ComfyParams> & Record<string, unknown>;
+  status: ComfyJobStatus;
+  createdAt: number; // epoch ms
+  startedAt: number | null;
+  finishedAt: number | null;
+  error: string | null;
+  outputs: ComfyJobOutput[];
+  renderMs: number | null;
+  peakVramMb: number | null;
+  promptId: string | null;
+}
+
+export interface ComfySettings { modelRoots: string[]; policy: ComfyPolicy }
+
+/** One row of comfy_status.templates. `label` / `kind` / `implemented` / `unavailableReason` are the
+ * optional A.1 Rust addition (copied from comfy_templates::list()); until then the UI uses COMFY_TEMPLATE_META. */
+export interface ComfyTemplateInfo {
+  name: string;
+  requiredModels: string[];
+  missing: string[];
+  ready: boolean; // every required model is on disk (says nothing about `implemented`)
+  note: string | null; // "needs model checkpoints/…" when missing, else null
+  label?: string;
+  kind?: "image" | "video";
+  implemented?: boolean;
+  unavailableReason?: string | null;
+}
+
+/** comfy_status.lastBatch: a BatchReport, or a crash-recovery result. Loose on purpose; the UI reads only these. */
+export interface ComfyLastBatch {
+  kind?: string; label?: string; finishedAt?: number;
+  done?: string[]; failed?: string[]; requeued?: string[]; cancelled?: string[];
+  preempted?: string | null; deferred?: string | null; error?: string | null;
+  restore?: { ok: boolean } | null;
+}
+
+export interface ComfyStatus {
+  up: boolean;
+  version: string | null;
+  running: boolean; // a batch holds (or is getting) the GPU
+  phase: string; // "" | "waiting for the GPU slot" | "unloading LLMs" | "starting ComfyUI" | "rendering <template> (n/m)" | "putting Tony back"
+  admission: string; // "running" | "not checked yet" | the admit() refusal ("manual policy: press Run now", "mid-conversation (…)", …)
+  runNow: boolean;
+  templates: ComfyTemplateInfo[];
+  counts: Record<ComfyJobStatus, number>;
+  settings: ComfySettings;
+  crashMarker: boolean;
+  lastBatch: ComfyLastBatch | null;
+  backoff: { failures: number; untilMs: number | null };
+  recoveryAttempts: number;
+}
+
+export interface ComfyQueue { version: number; settings: ComfySettings; jobs: ComfyJob[] }
+
+/** comfy-service payloads (comfy.rs run_batch). */
+export type ComfyServiceEvent =
+  | { phase: "waiting for the GPU slot" | "putting Tony back"; label: string }
+  | { phase: "starting ComfyUI" }
+  | { phase: "rendering"; up: true; version: string | null }
+  | { phase: "idle"; deferred?: string | null; batch?: { done: number; failed: number; requeued: number; error: string | null; restoreOk: boolean | null } };
+
+export const COMFY_PROMPT_MAX = 2000;
+export const COMFY_TURBO_MAX_STEPS = 4;
+export const COMFY_STYLE_DENOISE: readonly [number, number] = [0.3, 0.7];
+export const COMFY_UPSCALE_MAX_INPUT_SIDE = 2048;
+export const COMFY_ASPECTS: readonly ComfyAspect[] = ["16:9", "9:16", "4:5", "1:1", "4:3", "3:4"];
+/** Fallback until comfy_status carries label/kind/implemented (keep in step with comfy_templates.rs TEMPLATES). */
+export const COMFY_TEMPLATE_META: Record<ComfyTemplateName, { label: string; kind: "image" | "video"; implemented: boolean; needsInput: boolean; unavailableReason?: string }> = {
+  "scene-still": { label: "Scene still", kind: "image", implemented: true, needsInput: false },
+  "thumbnail-bg": { label: "Thumbnail background", kind: "image", implemented: true, needsInput: false },
+  "style-transfer": { label: "Style transfer", kind: "image", implemented: true, needsInput: true },
+  upscale: { label: "Upscale 4x", kind: "image", implemented: true, needsInput: true },
+  "broll-motion": { label: "B-roll motion", kind: "video", implemented: false, needsInput: false, unavailableReason: "Not built yet: needs a video model." },
 };
 
 /** Cross-page handoff ("Send to Director Suite"): sets the nav + creates or opens a project. */

@@ -5,7 +5,7 @@
  */
 import { create } from "zustand";
 import { useToasts } from "@/features/reminders/notify";
-import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
+import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, ProjectStatus, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
 import { api, onDirectorEvent } from "./api";
 import { revisePlanBody, stripActionBlocks } from "./actions";
 import { briefIdeaFor, checkPlanFor, noopRevisionReason, notesResolved, planChangesNothing, planCheck, revisionSummary, withCheckedClips, type PlanCheckResult } from "./plan-check";
@@ -27,6 +27,7 @@ import {
   withNoteResolved,
   type QuickStart,
 } from "./manifest";
+import { versionLabel } from "./versions";
 
 export type Readiness = DirectorCommands["media_readiness"]["result"];
 export type RenderJob = DirectorEvents["media-render"];
@@ -136,13 +137,18 @@ export interface DirectorState {
   briefIdea: string | null;
   /** Reply ids that already had their one automatic corrective turn (director-chat.ts). */
   autoFixed: string[];
+  // ── Part 3 ──
+  /** Two renders shown A/B in the centre column (render ids); null = the normal preview. */
+  compare: { a: string; b: string } | null;
 }
 
-/** What a Director reply replaced (clips, audio, shot list, looks, outputs), for one-click undo. */
+/** What a Director reply (or a version restore) replaced (clips, audio, shot list, looks, outputs), for one-click undo. */
 export interface DirectorUndo {
   id: string;
   slug: string;
   before: Pick<TimelineManifest, "clips" | "audio" | "shotList" | "captions" | "color" | "outputs" | "output" | "clipAudioVolume">;
+  /** What made the undo point (absent = a Director reply). */
+  what?: "director" | "restore";
 }
 
 const LAST_KEY = "cc.director.lastSlug";
@@ -203,6 +209,7 @@ const initial: DirectorState = {
   undo: null,
   briefIdea: null,
   autoFixed: [],
+  compare: null,
 };
 
 export const useDirector = create<DirectorState>(() => ({ ...initial }));
@@ -216,6 +223,7 @@ export function resetDirectorStore() {
   dirty = false;
   inflight = null;
   resetIntake();
+  snapshotCache.clear();
   useDirector.setState({ ...initial }, true);
 }
 
@@ -267,7 +275,7 @@ export function closeProject() {
 }
 
 /** Per-project v2 state, cleared when another project opens. */
-const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null, briefIdea: null, autoFixed: [] };
+const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null, briefIdea: null, autoFixed: [], compare: null };
 
 /** media_review_get, never throwing (an older backend or a missing project.json review is null). */
 async function loadReview(slug: string): Promise<ProjectReview | null> {
@@ -410,11 +418,69 @@ export async function undoDirectorEdit(): Promise<boolean> {
   dirty = true;
   const ok = await flushSave("nic", true);
   if (ok) {
-    toast("Director's edit undone", "Your timeline and shot list are back as they were.");
+    if (u.what === "restore") toast("Restore undone", "The timeline is back as it was before the restore.");
+    else toast("Director's edit undone", "Your timeline and shot list are back as they were.");
     void refreshAssets(slug);
   }
   return ok;
 }
+
+// ── Part 3 C: versions ───────────────────────────────────────────────────────
+
+/** Snapshots never change: cached per project + render id (null = made before versions were kept). */
+const snapshotCache = new Map<string, TimelineManifest | null>();
+
+/** The cut a render was made from (media_render_snapshot), cached. Throws when it can't be read. */
+export async function loadSnapshot(renderId: string): Promise<TimelineManifest | null> {
+  const slug = get().slug;
+  if (!slug) return null;
+  const key = `${slug}\n${renderId}`;
+  if (snapshotCache.has(key)) return snapshotCache.get(key) ?? null;
+  const s = await api.renderSnapshot({ slug, renderId });
+  const m = s.manifest ? upgradeManifest(s.manifest) : null;
+  snapshotCache.set(key, m);
+  return m;
+}
+
+/** Only from the Versions confirm click. Saves pending edits first, then makes that render's cut the
+ * working manifest (notes and the shot list stay); the edit before is the undo point. */
+export async function restoreVersion(renderId: string): Promise<boolean> {
+  const slug = get().slug;
+  if (!slug || !get().manifest) return false;
+  if (!(await flushSave())) return false;
+  const before = get().manifest;
+  if (get().slug !== slug || !before) return false;
+  const render = get().renders.find((r) => r.id === renderId);
+  const label = render ? versionLabel(render.path) : "";
+  try {
+    const restored = await api.manifestRestore({ slug, renderId, revision: before.revision });
+    if (get().slug !== slug) return false;
+    clearTimeout(saveTimer);
+    saveTimer = undefined;
+    dirty = false;
+    const id = newId("u");
+    set({ manifest: upgradeManifest(restored), undo: { id, slug, before: undoFields(before), what: "restore" }, plan: null, revision: null });
+    useToasts.getState().push({
+      title: label && label !== "—" ? `Version ${label} restored` : "Version restored",
+      body: "Notes and the shot list stayed.",
+      tone: "info",
+      actions: [{ label: "Undo", run: () => void (get().undo?.id === id ? undoDirectorEdit() : undefined) }],
+    });
+    return true;
+  } catch (e) {
+    if (isStaleError(e)) {
+      toast("Timeline changed elsewhere", "Reloaded the latest saved version; nothing was restored.", "warn");
+      await openProject(slug);
+    } else toast("Couldn't restore this version", errText(e).replace(/^[A-Z_]+: /, ""), "error");
+    return false;
+  }
+}
+
+/** Compare replaces the preview, so the preview's selection becomes render A at 0: a note added while
+ * comparing lands on A at A's time (Compare feeds A's time into previewTime). */
+export const openCompare = (a: string, b: string) =>
+  set(a && b && a !== b ? { compare: { a, b }, selection: { kind: "render", id: a }, previewMode: "final", previewTime: 0 } : { compare: null });
+export const closeCompare = () => set({ compare: null });
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : w.endsWith("ch") ? "es" : "s"}`;
 
@@ -639,6 +705,20 @@ export async function updateProject(fields: ProjectFields): Promise<boolean> {
     return true;
   } catch (e) {
     toast("Couldn't update the project", errText(e), "error");
+    return false;
+  }
+}
+
+/** Part 3 B.2: a project's status from the projects board (any project, open or not):
+ * media_project_update({ slug, status }); the result replaces its row in `projects` (and `project`
+ * when it is the open one). Toast on refusal. */
+export async function setProjectStatus(slug: string, status: ProjectStatus): Promise<boolean> {
+  try {
+    const p = upgradeProject(await api.projectUpdate({ slug, status }));
+    set((s) => ({ projects: s.projects.map((x) => (x.slug === slug ? p : x)), ...(s.slug === slug ? { project: p } : {}) }));
+    return true;
+  } catch (e) {
+    toast("Couldn't change the project's status", errText(e), "error");
     return false;
   }
 }
@@ -1025,8 +1105,9 @@ export function setUpload(key: string, u: Upload | null) {
 
 // ── Selection / preview ──────────────────────────────────────────────────────
 
+/** Also closes Compare: a selection is shown in the preview, which Compare replaces. */
 export function select(sel: Selection) {
-  set({ selection: sel, previewMode: sel?.kind === "render" ? "final" : "working" });
+  set({ selection: sel, previewMode: sel?.kind === "render" ? "final" : "working", compare: null });
 }
 export const setPreviewMode = (previewMode: DirectorState["previewMode"]) => set({ previewMode });
 export const setPlayhead = (playhead: number) => set({ playhead: Math.max(0, playhead) });
@@ -1034,7 +1115,7 @@ export const setPreviewTime = (previewTime: number) => set({ previewTime: Number
 /** Show `sel` in the preview and seek it to `sec` (seconds into that source). */
 export function seekTo(sel: Selection, sec: number) {
   if (sel) select(sel);
-  set((s) => ({ seek: { sec: Math.max(0, Number.isFinite(sec) ? sec : 0), n: (s.seek?.n ?? 0) + 1 } }));
+  set((s) => ({ compare: null, seek: { sec: Math.max(0, Number.isFinite(sec) ? sec : 0), n: (s.seek?.n ?? 0) + 1 } }));
 }
 export const setReadiness = (readiness: Readiness | null, readinessError: string | null) => set({ readiness, readinessError });
 

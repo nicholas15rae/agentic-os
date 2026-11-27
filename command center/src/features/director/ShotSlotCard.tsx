@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, Check, PencilLine, Smartphone, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, PencilLine, Smartphone, Sparkles, Trash2, X } from "lucide-react";
 import type { AssetRole, MediaAsset, ShotSlot } from "./contract";
 import { editManifest, editShot, moveShot, removeShot, toggleShotFilmed } from "./director-store";
 import { draggedAsset, hasFiles, hasType, ASSET_MIME, ingestDropped } from "./dnd";
 import { attachSlot } from "./manifest";
 import { ShotSlotEditor } from "./ShotSlotEditor";
+import { generateFromPrompt } from "./comfy-store";
 import { Thumb } from "./StagingBin";
 
 const roleForSlot = (s: ShotSlot): AssetRole => (s.kind === "audio" ? "music" : s.kind === "image" ? (/slate|title|outro|end/i.test(s.label) ? "slate" : "photo") : "clip");
@@ -104,7 +105,22 @@ export function ShotSlotCard({ slot, index, count, slug, asset }: { slot: ShotSl
           </button>
         </div>
       ) : (
-        <p className="mt-2 text-[11px] text-ink-3">{slot.source === "film" ? `Drop a ${slot.kind} from the bin or your files here.` : `Not attached yet (${slot.source}).`}</p>
+        <p className="mt-2 text-[11px] text-ink-3">
+          {slot.source === "film" ? `Drop a ${slot.kind} from the bin or your files here.` : `Not attached yet (${slot.source}).`}
+          {slot.source === "generate" && (
+            <button
+              type="button"
+              onClick={() => {
+                // Suggestion only: prefills the Generate panel; nothing is queued until Enqueue.
+                generateFromPrompt(slot.instructions || slot.label);
+              }}
+              className="ml-1.5 inline-flex items-center gap-0.5 text-teal-soft hover:underline"
+              aria-label={`Generate a still for ${slot.label}`}
+            >
+              <Sparkles size={10} /> Generate…
+            </button>
+          )}
+        </p>
       )}
       {refused && <p className="mt-1 text-[11px] text-alert">{refused}</p>}
       <div className="mt-2 flex items-center gap-1 border-t border-white/[0.06] pt-1.5">

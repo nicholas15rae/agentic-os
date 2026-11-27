@@ -64,6 +64,19 @@ export const api = {
   /** Only ever from Nic's "Approve final" click: copies verified renders to renders/final/<platform>/. */
   approveFinal: (a: Args<"media_approve_final">): Promise<Result<"media_approve_final">> => xcmd("media_approve_final", a),
   deliverablesGet: (a: Args<"media_deliverables_get">): Promise<Result<"media_deliverables_get">> => xcmd("media_deliverables_get", a),
+  // ── Part 3: ComfyUI (comfy.rs) ──
+  comfyStatus: (): Promise<Result<"comfy_status">> => xcmd("comfy_status"),
+  /** Only ever from an Enqueue / Re-roll click. */
+  comfyEnqueue: (a: Args<"comfy_enqueue">): Promise<Result<"comfy_enqueue">> => xcmd("comfy_enqueue", a),
+  comfyCancel: (a: Args<"comfy_cancel">): Promise<Result<"comfy_cancel">> => xcmd("comfy_cancel", a),
+  /** Only ever from the queue's Run now click. */
+  comfyRunNow: (): Promise<Result<"comfy_run_now">> => xcmd("comfy_run_now"),
+  comfyQueue: (): Promise<Result<"comfy_queue_get">> => xcmd("comfy_queue_get"),
+  comfySettingsSet: (a: Args<"comfy_settings_set">): Promise<Result<"comfy_settings_set">> => xcmd("comfy_settings_set", a),
+  // ── Part 3: Versions (media.rs) ──
+  renderSnapshot: (a: Args<"media_render_snapshot">): Promise<Result<"media_render_snapshot">> => xcmd("media_render_snapshot", a),
+  /** Only from the Versions confirm click. */
+  manifestRestore: (a: Args<"media_manifest_restore">): Promise<Result<"media_manifest_restore">> => xcmd("media_manifest_restore", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

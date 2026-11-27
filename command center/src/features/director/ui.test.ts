@@ -8,6 +8,7 @@ vi.mock("@/features/bridge/gate", () => ({ gated: vi.fn() }));
 vi.mock("@/features/reminders/notify", () => ({ useToasts: { getState: () => ({ push: vi.fn() }) } }));
 
 const { EmptyStateView, DesktopOnlyView, GREETING } = await import("./EmptyState");
+const { ProjectsBoardView, NO_PROJECTS_FILTER } = await import("./ProjectsBoard");
 const { RenderPlanView } = await import("./RenderPlanCard");
 const { readinessPill } = await import("./StudioBar");
 const { previewSource } = await import("./PreviewPlayer");
@@ -16,17 +17,19 @@ const { buildDirectorContext } = await import("./context");
 const { addClip } = await import("./manifest");
 
 const noop = () => undefined;
+const board = (projects: ReturnType<typeof project>[]) =>
+  createElement(ProjectsBoardView, { projects, loaded: true, layout: "board", filter: NO_PROJECTS_FILTER, busySlug: null, onLayout: noop, onFilter: noop, onOpen: noop, onStatus: noop });
 
 describe("Director Suite empty state", () => {
   it("greets Nic with the four quick starts and recent projects", () => {
-    const html = renderToStaticMarkup(createElement(EmptyStateView, { projects: [project({ title: "Old teaser" })], loaded: true, onQuickStart: async () => undefined, onOpen: noop }));
+    const html = renderToStaticMarkup(createElement(EmptyStateView, { onQuickStart: async () => undefined, board: board([project({ title: "Old teaser" })]) }));
     expect(html).toContain(GREETING);
     expect(GREETING).toBe("Hey Nic, what do you want to create today?");
     for (const q of ["New Video Edit", "Plan a Video / Channel Series", "Photo &amp; Visual Staging", "Quick Stitch + Slate"]) expect(html).toContain(q);
     expect(html).toContain("Old teaser");
   });
   it("no projects yet", () => {
-    const html = renderToStaticMarkup(createElement(EmptyStateView, { projects: [], loaded: true, onQuickStart: async () => undefined, onOpen: noop }));
+    const html = renderToStaticMarkup(createElement(EmptyStateView, { onQuickStart: async () => undefined, board: board([]) }));
     expect(html).toContain("No projects yet.");
   });
   it("off the desktop: one card", () => {

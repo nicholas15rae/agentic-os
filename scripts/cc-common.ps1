@@ -181,6 +181,61 @@ function Stop-CcTree([int]$procId, [string]$why) {
     return -not (Get-Process -Id $procId -ErrorAction SilentlyContinue)
 }
 
+# ---- desktop app restarts -------------------------------------------------------------
+# The app's WebView2 runs as msedgewebview2.exe processes (browser, gpu, renderer, utility,
+# crashpad) on its own user-data folder. They can outlive command-center.exe by a few seconds.
+# A new instance started meanwhile can fail to create its webview (WebView2 refuses different
+# browser args on a folder that still has live processes), and the release build aborts at
+# start-up (0xc0000409; 2026-11-26 20:42). So never start the app until Wait-CcAppGone is true.
+# Known-folder lookups (the same the app uses), not $env:LOCALAPPDATA / $env:APPDATA, which a
+# stripped environment can lack.
+$CC_WEBVIEW_DIR = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'os.agentic.commandcenter\EBWebView'
+$CC_PANIC_LOG   = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'os.agentic.commandcenter\logs\panic.log'   # written by the app (lib.rs)
+$CC_AUDIT_LOG   = Join-Path $CC_ROOT 'data\security\security_audit.jsonl'          # the app writes app_start here
+
+# PIDs of WebView2 processes on the app's own folder (pure: $procs are Win32_Process-like objects).
+# Other apps' WebView2 (Widgets, Search, Python tools) use other folders and never match. An empty
+# or relative folder matches nothing (fails closed: '' would otherwise match every command line).
+function Select-CcWebViewPids($procs, [string]$dir = $CC_WEBVIEW_DIR) {
+    if (-not $dir -or -not [IO.Path]::IsPathRooted($dir)) { return @() }
+    @($procs | Where-Object { $_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -and
+        $_.CommandLine.IndexOf($dir, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { [int]$_.ProcessId })
+}
+function Get-CcWebViewPids {
+    Select-CcWebViewPids @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue)
+}
+
+# Wait until the desktop app is fully gone: no command-center.exe and none of its WebView2
+# processes. WebView2 processes still there after $capSec (the app itself already gone) are
+# killed, then waited for $killWaitSec more. $true = gone; $false = the app is still running, or
+# its WebView2 would not go. The three scriptblocks are only replaced by tests.
+function Wait-CcAppGone([int]$capSec = 15, [int]$killWaitSec = 5,
+        [scriptblock]$AppPids = { @(Get-Process -Name 'command-center' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }) },
+        [scriptblock]$WebViewPids = { Get-CcWebViewPids },
+        [scriptblock]$Kill = { param($ids) foreach ($i in $ids) { Stop-Process -Id $i -Force -ErrorAction SilentlyContinue } },
+        [int]$pollMs = 250) {
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $limit = $capSec; $killed = $false
+    while ($true) {
+        $app = @(& $AppPids); $wv = @(& $WebViewPids)
+        if ($app.Count -eq 0 -and $wv.Count -eq 0) { return $true }
+        if ($sw.Elapsed.TotalSeconds -ge $limit) {
+            if ($killed -or $app.Count) { return $false }
+            & $Kill $wv
+            $killed = $true; $limit = $sw.Elapsed.TotalSeconds + $killWaitSec
+        }
+        Start-Sleep -Milliseconds $pollMs
+    }
+}
+
+# The last app_start the app wrote to the audit log (its unix time, 0 = none). The app writes it in
+# its own setup, after Tauri created the window, so a new one means this start got past WebView2.
+function Get-CcLastAppStart([string]$auditLog = $CC_AUDIT_LOG) {
+    if (-not (Test-Path $auditLog)) { return 0 }
+    $line = Get-Content $auditLog -Tail 400 -ErrorAction SilentlyContinue | Where-Object { $_ -match '"event":"app_start"' } | Select-Object -Last 1
+    if ($line -and $line -match '"unix":([0-9.]+)') { return [double]$Matches[1] }
+    return 0
+}
+
 function Write-CcLog([string]$file, [string]$msg) {
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
     Add-Content -Path $file -Value $line -Encoding UTF8

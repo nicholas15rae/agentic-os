@@ -38,11 +38,11 @@ export function AgentTopology({ className = "" }: { className?: string }) {
   const away = !!snap?.away;
 
   if (!snap) {
-    return <div className={`rounded-[14px] border border-white/10 p-3 text-[12px] text-ink-3 ${className}`}>Compute arbiter: desktop only (waiting for the engine).</div>;
+    return <div className={`r-14 border border-white/10 p-3 fs-12 text-ink-3 ${className}`}>Compute arbiter: desktop only (waiting for the engine).</div>;
   }
   return (
-    <figure className={`rounded-[14px] border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2 ${className}`} aria-label="Agent topology">
-      <figcaption className="mb-1 flex items-center gap-2 px-1 text-[11px]">
+    <figure className={`r-14 border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2 ${className}`} aria-label="Agent topology">
+      <figcaption className="mb-1 flex items-center gap-2 px-1 fs-11">
         <span className="label-caps text-holo">Agent topology</span>
         <span className="text-ink-3">token: {snap.holder ?? "free"}</span>
         {away && <span className="label-caps rounded-full border border-alert/50 px-2 text-alert">Away Mode</span>}
@@ -91,7 +91,7 @@ export function AgentTopology({ className = "" }: { className?: string }) {
               <circle r={4.6} className={`${look.fill} ${look.ring} ${look.pulse ? "arb-node-pulse" : ""} ${flash ? "arb-flash" : ""}`} strokeWidth={0.6} />
               {n.state === "LOCKED_VAULT" && <path d="M-1.6,-1.2 L0,-2.4 L1.6,-1.2 L1.6,0.6 Q0,2.4 -1.6,0.6 Z" className="fill-violet-300/70" />}
               {n.namespace && n.state !== "LOCKED_VAULT" && <circle cx={3.6} cy={-3.4} r={0.9} className={flash ? "fill-amber" : "fill-white/25"} />}
-              <text y={7.6} textAnchor="middle" className={`${look.text} text-[2.6px] font-mono uppercase`}>
+              <text y={7.6} textAnchor="middle" className={`${look.text} text-[length:calc(2.6px*var(--cc-font-scale))] font-mono uppercase`}>
                 {n.label}
               </text>
             </g>

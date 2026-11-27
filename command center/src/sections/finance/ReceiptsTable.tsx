@@ -107,7 +107,7 @@ export function ReceiptsTable() {
                 setSemantic(null);
               }}
               placeholder="Filter… or ask: “gas for the Whitby job”"
-              className="!h-9 !py-1 !pl-9 text-[13px]"
+              className="!h-9 !py-1 !pl-9 fs-13"
               aria-label="Search receipts"
             />
           </div>
@@ -115,13 +115,13 @@ export function ReceiptsTable() {
             <Sparkles size={13} /> {semantic ? `${semantic.size} found` : "Ask"}
           </button>
         </form>
-        <Select value={quarter} onChange={(e) => setQuarter(e.target.value)} className="!h-9 !w-auto !py-1 text-[13px]" aria-label="Quarter">
+        <Select value={quarter} onChange={(e) => setQuarter(e.target.value)} className="!h-9 !w-auto !py-1 fs-13" aria-label="Quarter">
           <option value="all">All quarters</option>
           {quarters.map((x) => (
             <option key={x}>{x}</option>
           ))}
         </Select>
-        <Select value={cat} onChange={(e) => setCat(e.target.value)} className="!h-9 !w-auto !py-1 text-[13px]" aria-label="Category">
+        <Select value={cat} onChange={(e) => setCat(e.target.value)} className="!h-9 !w-auto !py-1 fs-13" aria-label="Category">
           <option value="all">All categories</option>
           {CATEGORIES.map((c) => (
             <option key={c}>{c}</option>
@@ -130,7 +130,7 @@ export function ReceiptsTable() {
       </div>
       {error && <p className="mb-2 text-xs text-alert">Gateway: {error}</p>}
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-[13px]">
+        <table className="w-full min-w-[720px] text-left fs-13">
           <thead>
             <tr className="label-caps text-ink-3 [&>th]:px-2 [&>th]:pb-2">
               <th>Date</th>
@@ -200,7 +200,7 @@ function Row({ r, currency, onDelete, onPatch, onEdit }: { r: Item<Receipt>; cur
       </td>
       <td className="font-sans">
         <span className="block w-32">
-          <SelectOther label="Category" value={r.category} options={CATEGORIES} onChange={(category) => onPatch({ category })} className="!h-7 !py-0 text-[12px]" />
+          <SelectOther label="Category" value={r.category} options={CATEGORIES} onChange={(category) => onPatch({ category })} className="!h-7 !py-0 fs-12" />
         </span>
       </td>
       <td className="text-right text-ink-2">{money(r.subtotal, currency)}</td>

@@ -722,9 +722,9 @@ export function OrbitalEcosystem() {
       </div>
 
       <div className="pointer-events-none absolute left-4 top-4 z-20 space-y-1 font-mono">
-        <p className="text-[12px] tracking-[0.3em] text-[#fde6d0]">ORBITAL ECOSYSTEM</p>
-        <p className="text-[10px] tracking-[0.12em] text-ink-3">token {snap?.holder ?? "free"} · {snap?.away ? "AWAY MODE" : "foreground"} · vault {snap ? (snap.vaultOpen ? "open" : "sealed") : "—"}</p>
-        <div className="flex gap-3 pt-1 text-[9.5px] text-ink-3">
+        <p className="fs-12 tracking-[0.3em] text-[#fde6d0]">ORBITAL ECOSYSTEM</p>
+        <p className="fs-10 tracking-[0.12em] text-ink-3">token {snap?.holder ?? "free"} · {snap?.away ? "AWAY MODE" : "foreground"} · vault {snap ? (snap.vaultOpen ? "open" : "sealed") : "—"}</p>
+        <div className="flex gap-3 pt-1 fs-9.5 text-ink-3">
           {MOONS.map((m) => (
             <span key={m.key} className="flex items-center gap-1">
               <span className="size-1.5 rounded-full" style={{ background: m.color }} /> {m.label} moon
@@ -732,15 +732,15 @@ export function OrbitalEcosystem() {
           ))}
         </div>
         {following && (
-          <p className="pointer-events-auto flex items-center gap-2 pt-1 text-[10px] tracking-[0.12em] text-sky-200">
+          <p className="pointer-events-auto flex items-center gap-2 pt-1 fs-10 tracking-[0.12em] text-sky-200">
             <span className="size-1.5 animate-pulse rounded-full bg-sky-300" />
             FOLLOWING {following.label.toUpperCase()} · drag to orbit · Esc to release
-            <button type="button" className="sysmap-ctl !px-1.5 !py-0 text-[10px]" onClick={() => setFollow(null)}>
+            <button type="button" className="sysmap-ctl !px-1.5 !py-0 fs-10" onClick={() => setFollow(null)}>
               Release
             </button>
           </p>
         )}
-        {!snap && <p className="text-[10px] text-amber-light">{isTauri() ? "Waiting for the engine…" : "Live states need the desktop engine."}</p>}
+        {!snap && <p className="fs-10 text-amber-light">{isTauri() ? "Waiting for the engine…" : "Live states need the desktop engine."}</p>}
       </div>
       <div className="absolute bottom-3 left-3 z-20 flex gap-1">
         <button

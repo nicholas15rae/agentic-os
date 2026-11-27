@@ -64,7 +64,7 @@ export function FixMenu({ buildId, title }: FixMenuProps) {
     <>
       <button
         onClick={() => setState(open ? { kind: "closed" } : { kind: "editing", text: "" })}
-        className={`absolute left-1.5 top-1.5 z-10 flex h-7 items-center gap-1 rounded-full border border-white/15 bg-[rgba(11,13,17,0.55)] px-2 text-[11px] text-ink-2 backdrop-blur transition-opacity hover:text-ink focus-visible:opacity-100 ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+        className={`absolute left-1.5 top-1.5 z-10 flex h-7 items-center gap-1 rounded-full border border-white/15 bg-[rgba(11,13,17,0.55)] px-2 fs-11 text-ink-2 backdrop-blur transition-opacity hover:text-ink focus-visible:opacity-100 ${open ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         aria-expanded={open}
         aria-label={`Fix or develop ${title}`}
         title="Fix or develop this widget in the Play Place"
@@ -73,7 +73,7 @@ export function FixMenu({ buildId, title }: FixMenuProps) {
       </button>
       {open && (
         <form
-          className="absolute left-1.5 right-1.5 top-10 z-20 space-y-2 rounded-[14px] border border-white/15 bg-[rgba(11,13,17,0.78)] p-2.5 shadow-xl backdrop-blur-md"
+          className="absolute left-1.5 right-1.5 top-10 z-20 space-y-2 r-14 border border-white/15 bg-[rgba(11,13,17,0.78)] p-2.5 shadow-xl backdrop-blur-md"
           onSubmit={(e) => {
             e.preventDefault();
             if (text.trim() && state.kind !== "sending") void send(text.trim());
@@ -90,7 +90,7 @@ export function FixMenu({ buildId, title }: FixMenuProps) {
           </div>
           <textarea
             ref={boxRef}
-            className="field min-h-20 w-full resize-y text-[13px]"
+            className="field min-h-20 w-full resize-y fs-13"
             placeholder="What should change or be added? e.g. “thinner second hand and a date on the E46 face”"
             value={text}
             disabled={state.kind === "sending"}
@@ -98,12 +98,12 @@ export function FixMenu({ buildId, title }: FixMenuProps) {
             aria-label="What should change"
           />
           {state.kind === "error" && (
-            <p role="alert" className="text-[12px] text-alert">
+            <p role="alert" className="fs-12 text-alert">
               {state.message}
             </p>
           )}
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] text-ink-3">The live tile stays as it is until you promote the update.</span>
+            <span className="fs-11 text-ink-3">The live tile stays as it is until you promote the update.</span>
             <button className="pill-primary !h-8 shrink-0 !px-3 text-xs" disabled={state.kind === "sending" || !text.trim()}>
               {state.kind === "sending" ? <Loader2 size={13} className="animate-spin" /> : <Wrench size={13} />} Send to Play Place
             </button>
@@ -130,15 +130,15 @@ export function reworkLabel(view: Exclude<ReworkView, { kind: "live" }>): string
 function ReworkStatus({ view, promoting, onPromote, onOpen }: { view: Exclude<ReworkView, { kind: "live" }>; promoting: boolean; onPromote: () => void; onOpen: () => void }) {
   const tone = view.kind === "repair" ? "border-alert/40 text-alert" : view.kind === "ready" ? "border-teal/40 text-teal-soft" : "border-white/15 text-ink-2";
   return (
-    <div className={`absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.6)] py-0.5 pl-2.5 pr-1 text-[11px] backdrop-blur ${tone}`} role="status">
+    <div className={`absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.6)] py-0.5 pl-2.5 pr-1 fs-11 backdrop-blur ${tone}`} role="status">
       {view.kind === "working" && <Loader2 size={11} className="shrink-0 animate-spin" />}
       <span className="truncate">{reworkLabel(view)}</span>
       {view.kind === "ready" && (
-        <button onClick={onPromote} disabled={promoting} className="pill-primary !h-6 shrink-0 !px-2 text-[11px]">
+        <button onClick={onPromote} disabled={promoting} className="pill-primary !h-6 shrink-0 !px-2 fs-11">
           {promoting ? <Loader2 size={11} className="animate-spin" /> : <Rocket size={11} />} Promote update
         </button>
       )}
-      <button onClick={onOpen} className="pill-glass !h-6 shrink-0 !px-2 text-[11px]" title="Open this build's card in the Play Place">
+      <button onClick={onOpen} className="pill-glass !h-6 shrink-0 !px-2 fs-11" title="Open this build's card in the Play Place">
         Play Place <ArrowUpRight size={11} />
       </button>
     </div>

@@ -62,7 +62,7 @@ export function ListenControls() {
         <button
           onClick={() => set({ wakeRequire: !wakeRequire })}
           aria-pressed={wakeRequire}
-          className={`rounded-full border px-2.5 py-0.5 text-[11px] ${wakeRequire ? "border-amber/50 bg-amber/10 text-amber-light" : "border-white/10 text-ink-3"}`}
+          className={`rounded-full border px-2.5 py-0.5 fs-11 ${wakeRequire ? "border-amber/50 bg-amber/10 text-amber-light" : "border-white/10 text-ink-3"}`}
           title={wakeRequire ? `Only acts on lines that start with “Hey ${name}”` : "Acts on everything it hears"}
         >
           {wakeRequire ? `Needs “Hey ${name}”` : "Any speech"}

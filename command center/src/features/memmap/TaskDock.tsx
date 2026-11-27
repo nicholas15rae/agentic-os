@@ -74,14 +74,14 @@ export function TaskDock({ className = "" }: { className?: string }) {
       title="Future tasks & autonomous queue"
       className={className}
       bodyClassName="flex flex-col gap-2 !pt-2"
-      badge={<span className="font-mono text-[10px] text-ink-3">{counts.all} open</span>}
+      badge={<span className="font-mono fs-10 text-ink-3">{counts.all} open</span>}
       action={
         <button
           type="button"
           onClick={() => void exportBrief()}
           disabled={brief.disabled}
           title={q.lastExport ? `${brief.title}\nLast export: ${q.lastExport.path}` : brief.title}
-          className="flex h-7 items-center gap-1.5 rounded-full border border-holo/40 bg-holo/10 px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-holo transition-[filter] hover:brightness-125 disabled:opacity-40"
+          className="flex h-7 items-center gap-1.5 rounded-full border border-holo/40 bg-holo/10 px-3 font-mono fs-10 font-semibold uppercase tracking-wider text-holo transition-[filter] hover:brightness-125 disabled:opacity-40"
         >
           {q.exporting ? <Loader2 size={11} className="animate-spin" /> : <FileDown size={11} />} {brief.label}
         </button>
@@ -90,7 +90,7 @@ export function TaskDock({ className = "" }: { className?: string }) {
       <div role="tablist" aria-label="Dock view" className="flex items-center gap-1 border-b border-holo/10 pb-1.5">
         <DockTabButton id="queue" tab={tab} setTab={setTab} icon={ListTodo} label="Dev queue" count={counts.all} />
         <DockTabButton id="scheduled" tab={tab} setTab={setTab} icon={CalendarClock} label="Scheduled" count={future.runs.length} />
-        <span className="ml-auto hidden items-center gap-2 font-mono text-[9px] text-ink-3 sm:flex" aria-hidden>
+        <span className="ml-auto hidden items-center gap-2 font-mono fs-9 text-ink-3 sm:flex" aria-hidden>
           {tab === "queue" ? (
             <>
               <Legend c="bg-ember" t="Pending" />
@@ -118,7 +118,7 @@ export function TaskDock({ className = "" }: { className?: string }) {
                 type="button"
                 aria-pressed={q.filter === c}
                 onClick={() => q.setFilter(c)}
-                className={`label-caps h-6 rounded-full border px-2 !text-[9px] transition-colors ${q.filter === c ? "border-holo/50 bg-holo/10 text-holo" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
+                className={`label-caps h-6 rounded-full border px-2 !fs-9 transition-colors ${q.filter === c ? "border-holo/50 bg-holo/10 text-holo" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
               >
                 {c} {counts[c] > 0 && <span className="text-ink-3">{counts[c]}</span>}
               </button>
@@ -127,15 +127,15 @@ export function TaskDock({ className = "" }: { className?: string }) {
               type="button"
               aria-pressed={q.showDone}
               onClick={() => q.setShowDone(!q.showDone)}
-              className={`label-caps ml-auto h-6 rounded-full px-2 !text-[9px] ${q.showDone ? "text-teal-soft" : "text-ink-3 hover:text-ink-2"}`}
+              className={`label-caps ml-auto h-6 rounded-full px-2 !fs-9 ${q.showDone ? "text-teal-soft" : "text-ink-3 hover:text-ink-2"}`}
             >
               {q.showDone ? "Hide" : "Show"} done ({done})
             </button>
           </div>
-          {desktop && q.error && <p className="truncate font-mono text-[10px] text-ember" title={q.error}>{q.error}</p>}
+          {desktop && q.error && <p className="truncate font-mono fs-10 text-ember" title={q.error}>{q.error}</p>}
           <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
             {rows.length === 0 ? (
-              <li className="py-3 text-center font-mono text-[10.5px] text-ink-3">
+              <li className="py-3 text-center font-mono fs-10.5 text-ink-3">
                 {!desktop ? "Desktop app only." : !q.loaded ? "Loading…" : q.tasks.length ? "Nothing open in this filter." : "Queue is empty. Dispatch a note, say \"log a dev note …\", or queue a failed trace step."}
               </li>
             ) : (
@@ -165,7 +165,7 @@ function DockTabButton({ id, tab, setTab, icon: Icon, label, count }: { id: Dock
       role="tab"
       aria-selected={on}
       onClick={() => setTab(id)}
-      className={`label-caps flex h-6 items-center gap-1.5 rounded-full border px-2.5 !text-[9px] transition-colors ${on ? "border-holo/50 bg-holo/10 text-holo" : "border-transparent text-ink-3 hover:text-ink-2"}`}
+      className={`label-caps flex h-6 items-center gap-1.5 rounded-full border px-2.5 !fs-9 transition-colors ${on ? "border-holo/50 bg-holo/10 text-holo" : "border-transparent text-ink-3 hover:text-ink-2"}`}
     >
       <Icon size={11} /> {label} <span className="text-ink-3">{count}</span>
     </button>
@@ -183,27 +183,27 @@ function ScheduledList({ runs, notes, now, why }: { runs: FutureRun[]; notes: st
   return (
     <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
       {notes.map((n) => (
-        <li key={n} className="truncate font-mono text-[10px] text-ember" title={n}>
+        <li key={n} className="truncate font-mono fs-10 text-ember" title={n}>
           {n}
         </li>
       ))}
       {runs.length === 0 ? (
-        <li className="py-3 text-center font-mono text-[10.5px] text-ink-3">{why ?? "Nothing scheduled: no enabled scheduler job, daemon loop, active n8n workflow or queued GPU work."}</li>
+        <li className="py-3 text-center font-mono fs-10.5 text-ink-3">{why ?? "Nothing scheduled: no enabled scheduler job, daemon loop, active n8n workflow or queued GPU work."}</li>
       ) : (
         runs.map((r) => {
           const Icon = RUN_ICON[r.kind];
           const tone = RUN_TONE[r.overdue ? "overdue" : r.due == null ? "open" : r.due - now < 5 * 60_000 ? "soon" : "later"];
           return (
-            <li key={r.key} className={`flex min-w-0 items-center gap-2 rounded-[8px] border border-l-2 border-white/[0.05] bg-white/[0.015] px-2 py-1.5 ${tone.row}`}>
+            <li key={r.key} className={`flex min-w-0 items-center gap-2 r-8 border border-l-2 border-white/[0.05] bg-white/[0.015] px-2 py-1.5 ${tone.row}`}>
               <Icon size={13} className={`shrink-0 ${tone.icon}`} aria-hidden />
               <div className="min-w-0 flex-1" title={`${r.label}\n${r.detail}`}>
-                <p className="truncate text-[12px] text-ink">{r.label}</p>
-                <p className="truncate font-mono text-[9.5px] text-ink-3">
+                <p className="truncate fs-12 text-ink">{r.label}</p>
+                <p className="truncate font-mono fs-9.5 text-ink-3">
                   {RUN_KIND[r.kind]} · {r.detail}
                 </p>
               </div>
               <span
-                className={`label-caps inline-flex h-6 shrink-0 items-center rounded-full border px-2 !text-[9px] ${tone.chip}`}
+                className={`label-caps inline-flex h-6 shrink-0 items-center rounded-full border px-2 !fs-9 ${tone.chip}`}
                 title={r.due != null ? new Date(r.due).toLocaleString() : "No fixed time: runs on its own trigger"}
               >
                 {fmtDue(r.due, now) ?? (r.kind === "n8n" ? "on trigger" : r.kind === "slot" ? "waiting" : "first run")}
@@ -235,8 +235,8 @@ function TaskRow({ t, xray, now, fixRunning }: { t: DevTask; xray: boolean; now:
     .join("\n");
 
   return (
-    <li className={`group flex min-w-0 items-center gap-2 rounded-[8px] border border-l-2 border-white/[0.05] bg-white/[0.015] px-2 py-1.5 ${STATUS_ACCENT[t.status]} ${t.status === "Done" ? "opacity-55" : ""}`}>
-      <button type="button" onClick={() => void cyclePriority(t.id)} title={`${PRIORITY_LABEL[t.priority]} — click to change`} className={`w-6 shrink-0 font-mono text-[10px] font-bold ${PRIORITY_TONE[t.priority]}`}>
+    <li className={`group flex min-w-0 items-center gap-2 r-8 border border-l-2 border-white/[0.05] bg-white/[0.015] px-2 py-1.5 ${STATUS_ACCENT[t.status]} ${t.status === "Done" ? "opacity-55" : ""}`}>
+      <button type="button" onClick={() => void cyclePriority(t.id)} title={`${PRIORITY_LABEL[t.priority]} — click to change`} className={`w-6 shrink-0 font-mono fs-10 font-bold ${PRIORITY_TONE[t.priority]}`}>
         P{t.priority}
       </button>
       {t.status === "Done" ? (
@@ -247,11 +247,11 @@ function TaskRow({ t, xray, now, fixRunning }: { t: DevTask; xray: boolean; now:
         <span className="size-[13px] shrink-0" />
       )}
       <div className="min-w-0 flex-1" title={[t.title, t.body, ctx].filter(Boolean).join("\n\n")}>
-        <p className={`truncate text-[12px] ${t.status === "Done" ? "text-ink-3 line-through" : "text-ink"}`}>
+        <p className={`truncate fs-12 ${t.status === "Done" ? "text-ink-3 line-through" : "text-ink"}`}>
           {KindIcon && <KindIcon size={10} className="mr-1 inline text-ink-3" />}
           {t.title}
         </p>
-        <p className="truncate font-mono text-[9.5px] text-ink-3">
+        <p className="truncate font-mono fs-9.5 text-ink-3">
           {t.category} · {fmtAgo(t.createdAt, now)}
           {t.source !== "typed" && ` · ${t.source}`}
           {xray && ` · ${t.id.slice(0, 8)}${snap.git?.branch ? ` · ${snap.git.branch}` : ""}`}
@@ -262,7 +262,7 @@ function TaskRow({ t, xray, now, fixRunning }: { t: DevTask; xray: boolean; now:
         type="button"
         onClick={() => void cycleStatus(t.id)}
         title={isFixRunning(t) ? "Claude Code is running this fix — cancel it from the Ledger's Dev Fix tab" : `Click: ${t.status} → ${nextStatus(t.status, t)}`}
-        className={`label-caps h-6 shrink-0 rounded-full border px-2 !text-[9px] transition-colors ${STATUS_PILL[t.status]}`}
+        className={`label-caps h-6 shrink-0 rounded-full border px-2 !fs-9 transition-colors ${STATUS_PILL[t.status]}`}
       >
         {t.status}
       </button>
@@ -274,7 +274,7 @@ function TaskRow({ t, xray, now, fixRunning }: { t: DevTask; xray: boolean; now:
         className={`flex h-6 shrink-0 items-center rounded-full px-1.5 transition-colors ${confirmDelete ? "bg-alert/15 text-alert" : "text-ink-3 opacity-60 hover:text-alert group-hover:opacity-100"}`}
       >
         <Trash2 size={11} />
-        {confirmDelete && <span className="ml-1 font-mono text-[9px] uppercase">sure?</span>}
+        {confirmDelete && <span className="ml-1 font-mono fs-9 uppercase">sure?</span>}
       </button>
     </li>
   );
@@ -285,14 +285,14 @@ function ClaudeButton({ t, fixRunning }: { t: DevTask; fixRunning: boolean }) {
   const chip = fixChip(t);
   if (isFixRunning(t)) {
     return (
-      <span className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-teal/50 px-1.5 font-mono text-[9px] text-teal-soft" title={`Claude Code is working on ${t.dispatch?.branch ?? "this fix"}`}>
+      <span className="flex h-6 shrink-0 items-center gap-1 rounded-full border border-teal/50 px-1.5 font-mono fs-9 text-teal-soft" title={`Claude Code is working on ${t.dispatch?.branch ?? "this fix"}`}>
         <Loader2 size={10} className="animate-spin" /> claude
       </span>
     );
   }
   if (!isTauri() || !canDispatchFix(t, fixRunning)) {
     return chip.tone === "failed" || chip.tone === "done" ? (
-      <span className={`shrink-0 font-mono text-[9px] ${chip.tone === "failed" ? "text-alert" : "text-teal-soft"}`} title={t.dispatch?.note ?? chip.label}>
+      <span className={`shrink-0 font-mono fs-9 ${chip.tone === "failed" ? "text-alert" : "text-teal-soft"}`} title={t.dispatch?.note ?? chip.label}>
         {chip.label}
       </span>
     ) : null;

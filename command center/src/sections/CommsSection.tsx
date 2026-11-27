@@ -13,23 +13,13 @@ import { unreadCount, useAgentInbox } from "@/features/comms/agent-inbox";
 import { UNTRUSTABLE_CHANNELS, canSkipCard, isPermissionRequired, whatsappSend, type CommsContactBody, type CommsSendBody, type SendOrigin } from "@/features/comms/send-contract";
 import { PhoneBook } from "@/features/contacts/PhoneBookPanel";
 import { linkOrCreate } from "@/features/contacts/phonebook-store";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { revealPanel } from "@/core/widgets/reveal";
+import { useCommsLayout } from "./comms/panels";
+import { useCommsThreads, type Thread } from "./comms/comms-store";
 
-interface Thread {
-  thread: string;
-  contact: string;
-  address: string;
-  body: string;
-  ts: number;
-  direction: "in" | "out";
-  channel: string;
-  unread: number;
-  trusted: boolean;
-  /** The phone-book entry this number is filed under (os_api comms_threads), if any. */
-  contactId?: string | null;
-  contactName?: string;
-  company?: string;
-  role?: string;
-}
+export type { Thread };
+
 interface Message {
   id: string;
   thread: string;
@@ -85,12 +75,27 @@ function useCommsLive(onEvent: () => void) {
   }, [gatewayUrl, gatewayToken]);
 }
 
+/**
+ * Comms on the shared layout system (AGENTS.md, "Everything Is Customizable"): conversations, the
+ * open conversation, agent reports, dialer, recent calls, phone book, WhatsApp and the phone-bridge
+ * setup are panels (move, resize, hide, add back, per mode, Reset to default). The phone HUD keeps
+ * the tabbed CommsPanel below.
+ */
 export function CommsSection() {
-  return (
-    <div className="mx-auto h-full w-full max-w-6xl overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <CommsPanel />
-    </div>
-  );
+  // The thread list feeds both the Conversations and the Conversation panels.
+  const load = useCommsThreads((s) => s.load);
+  useEffect(load, [load]);
+  useCommsLive(load);
+  // A thread link ("open in Comms" from a transcript) selects it and makes the conversation visible.
+  const focus = useFocus((s) => s.commsThread);
+  useEffect(() => {
+    if (!focus) return;
+    useCommsThreads.getState().setSel(focus);
+    revealPanel(useCommsLayout, "cm-chat", "Comms");
+    // Used once: a later visit keeps the layout and thread you chose.
+    useFocus.getState().set({ commsThread: null });
+  }, [focus]);
+  return <LayoutSurface store={useCommsLayout} label="Comms" />;
 }
 
 type Tab = "agents" | "messages" | "dialer" | "phonebook" | "whatsapp" | "setup";
@@ -135,54 +140,98 @@ function Inbox({ compact }: { compact: boolean }) {
   const load = useCallback(() => void gateway<{ threads: Thread[] }>("/api/comms/threads").then((r) => (setThreads(r.threads), setErr(null))).catch((e) => setErr(String(e))), []);
   useEffect(load, [load]);
   useCommsLive(load);
-  const list = useMemo(() => (threads ?? []).filter((t) => !q || `${t.contactName ?? ""} ${t.company ?? ""} ${t.contact} ${t.address} ${t.body}`.toLowerCase().includes(q.toLowerCase())), [threads, q]);
   const current = threads?.find((t) => t.thread === sel) ?? null;
 
   const showList = !compact || !sel;
   const showChat = !compact || !!sel;
   return (
     <div className={`grid gap-3 ${compact ? "" : "md:grid-cols-[320px_1fr]"}`}>
-      {showList && (
-        <Card title="Conversations" action={<button onClick={load} aria-label="Refresh" className="text-ink-3 hover:text-ink"><RefreshCw size={13} /></button>}>
-          <div className="relative mb-2">
-            <Search size={13} className="absolute left-3 top-3 text-ink-3" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people & texts" className="!pl-8" />
-          </div>
-          {err && <p className="text-xs text-alert">{err}</p>}
-          {threads && !list.length && <Empty>No messages synced yet — set up the phone bridge.</Empty>}
-          <ul className="max-h-[60vh] space-y-1 overflow-y-auto">
-            {list.map((t) => (
-              <li key={t.thread}>
-                <button
-                  onClick={() => {
-                    setSel(t.thread);
-                    if (t.unread) void gateway(`/api/comms/threads/${encodeURIComponent(t.thread)}/read`, { method: "POST" }).then(load);
-                  }}
-                  className={`w-full rounded-[12px] px-3 py-2 text-left transition-colors ${sel === t.thread ? "bg-amber/10" : "hover:bg-white/5"}`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`truncate text-sm ${t.unread ? "font-semibold text-ink" : "text-ink"}`}>{t.contactName || t.contact}</span>
-                    {t.company && <span className="truncate text-[11px] text-ink-3">{t.company}</span>}
-                    {t.channel !== "sms" && <span className="label-caps text-teal">{t.channel}</span>}
-                    {t.trusted && <ShieldCheck size={11} className="text-teal" />}
-                    <span className="ml-auto shrink-0 font-mono text-[10px] text-ink-3">{when(t.ts)}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-xs text-ink-3">{t.direction === "out" ? "You: " : ""}{t.body}</span>
-                    {t.unread > 0 && <span className="ml-auto grid size-4 shrink-0 place-items-center rounded-full bg-amber font-mono text-[9px] text-canvas">{t.unread}</span>}
-                  </div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
+      {showList && <ThreadList threads={threads} err={err} sel={sel} onPick={setSel} load={load} q={q} setQ={setQ} />}
       {showChat && (current ? <Chat thread={current} onBack={compact ? () => setSel(null) : undefined} onChange={load} /> : !compact && <Card><Empty>Pick a conversation.</Empty></Card>)}
     </div>
   );
 }
 
-function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => void; onChange: () => void }) {
+/** The Conversations card: search, the thread list, unread counts. Picking a thread marks it read. */
+function ThreadList({ threads, err, sel, onPick, load, q, setQ }: { threads: Thread[] | null; err: string | null; sel: string | null; onPick: (thread: string) => void; load: () => void; q: string; setQ: (q: string) => void }) {
+  const list = useMemo(() => (threads ?? []).filter((t) => !q || `${t.contactName ?? ""} ${t.company ?? ""} ${t.contact} ${t.address} ${t.body}`.toLowerCase().includes(q.toLowerCase())), [threads, q]);
+  return (
+    <Card title="Conversations" action={<button onClick={load} aria-label="Refresh" className="text-ink-3 hover:text-ink"><RefreshCw size={13} /></button>}>
+      <div className="relative mb-2">
+        <Search size={13} className="absolute left-3 top-3 text-ink-3" />
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search people & texts" className="!pl-8" />
+      </div>
+      {err && <p className="text-xs text-alert">{err}</p>}
+      {threads && !list.length && <Empty>No messages synced yet — set up the phone bridge.</Empty>}
+      <ul className="max-h-[60vh] space-y-1 overflow-y-auto" data-no-hold>
+        {list.map((t) => (
+          <li key={t.thread}>
+            <button
+              onClick={() => {
+                onPick(t.thread);
+                if (t.unread) void gateway(`/api/comms/threads/${encodeURIComponent(t.thread)}/read`, { method: "POST" }).then(load);
+              }}
+              className={`w-full r-12 px-3 py-2 text-left transition-colors ${sel === t.thread ? "bg-amber/10" : "hover:bg-white/5"}`}
+            >
+              <div className="flex items-center gap-2">
+                <span className={`truncate text-sm ${t.unread ? "font-semibold text-ink" : "text-ink"}`}>{t.contactName || t.contact}</span>
+                {t.company && <span className="truncate fs-11 text-ink-3">{t.company}</span>}
+                {t.channel !== "sms" && <span className="label-caps text-teal">{t.channel}</span>}
+                {t.trusted && <ShieldCheck size={11} className="text-teal" />}
+                <span className="ml-auto shrink-0 font-mono fs-10 text-ink-3">{when(t.ts)}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="truncate text-xs text-ink-3">{t.direction === "out" ? "You: " : ""}{t.body}</span>
+                {t.unread > 0 && <span className="ml-auto grid size-4 shrink-0 place-items-center rounded-full bg-amber font-mono fs-9 text-canvas">{t.unread}</span>}
+              </div>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+// ── Panels (the Comms page on the shared layout) ─────────────────────────────
+
+/** Conversations panel: the shared thread list; picking one opens it in the Conversation panel. */
+export function CommsThreads() {
+  const { threads, err, sel, setSel, load } = useCommsThreads();
+  const [q, setQ] = useState("");
+  return <ThreadList threads={threads} err={err} sel={sel} onPick={setSel} load={load} q={q} setQ={setQ} />;
+}
+
+/** Conversation panel: the selected thread, filling its cell (its messages scroll inside). */
+export function CommsChat() {
+  const current = useCommsThreads((s) => s.threads?.find((t) => t.thread === s.sel) ?? null);
+  const load = useCommsThreads((s) => s.load);
+  if (!current)
+    return (
+      <Card className="h-full">
+        <Empty>Pick a conversation.</Empty>
+      </Card>
+    );
+  return <Chat thread={current} onChange={load} fill />;
+}
+
+/** Agent reports panel (the old Agents tab). Reports are made on the desktop: their inbox lives there. */
+export function CommsAgentReports({ compact = false }: { compact?: boolean }) {
+  if (!isDesktopApp())
+    return (
+      <Card title="Agent messages">
+        <Empty>Agent reports live in the desktop app.</Empty>
+      </Card>
+    );
+  return (
+    <div data-no-hold>
+      <AgentInbox compact={compact} />
+    </div>
+  );
+}
+
+export { PhoneBook };
+
+function Chat({ thread, onBack, onChange, fill = false }: { thread: Thread; onBack?: () => void; onChange: () => void; fill?: boolean }) {
   const [msgs, setMsgs] = useState<Message[] | null>(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -274,7 +323,7 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
   };
 
   return (
-    <section className="glass-chat flex min-h-[420px] flex-col rounded-[20px]">
+    <section className={`glass-chat flex ${fill ? "h-full min-h-[320px]" : "min-h-[420px]"} flex-col r-20`}>
       <header className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
         {onBack && (
           <button onClick={onBack} aria-label="Back" className="text-ink-2">
@@ -286,11 +335,11 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
             {name}
             {thread.contactId && <BookUser size={11} className="ml-1 inline text-teal" aria-label="In the phone book" />}
           </p>
-          {(thread.company || thread.role) && <p className="truncate text-[11px] text-ink-2">{[thread.company, thread.role].filter(Boolean).join(" · ")}</p>}
-          <p className="font-mono text-[11px] text-ink-3">{thread.address} · {whatsapp ? "WhatsApp" : "SMS"}</p>
+          {(thread.company || thread.role) && <p className="truncate fs-11 text-ink-2">{[thread.company, thread.role].filter(Boolean).join(" · ")}</p>}
+          <p className="font-mono fs-11 text-ink-3">{thread.address} · {whatsapp ? "WhatsApp" : "SMS"}</p>
         </div>
         {!thread.contactId && !whatsapp && (
-          <button onClick={() => void file()} disabled={filing} className="pill-glass ml-auto !h-8 text-[11px]" title="Add this number to the phone book">
+          <button onClick={() => void file()} disabled={filing} className="pill-glass ml-auto !h-8 fs-11" title="Add this number to the phone book">
             {filing ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />} Phone book
           </button>
         )}
@@ -299,18 +348,18 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
         </a>
         {/* Untrustable channels never offer turning it on, but trust set before this rule can still be switched off. */}
         {(trustable || thread.trusted) && (
-          <button onClick={toggleTrust} className={`pill-glass !h-8 text-[11px] ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies you type to this contact skip the confirmation card (Tony, voice and agents still ask)">
+          <button onClick={toggleTrust} className={`pill-glass !h-8 fs-11 ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies you type to this contact skip the confirmation card (Tony, voice and agents still ask)">
             <Zap size={12} /> {thread.trusted ? "Instant Send on" : "Instant Send"}
           </button>
         )}
       </header>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4" style={{ maxHeight: "60vh" }}>
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4" style={fill ? undefined : { maxHeight: "60vh" }} data-no-hold>
         {!msgs && <Loader2 size={14} className="animate-spin text-ink-3" />}
         {msgs?.map((m) => (
           <div key={m.id} className={`flex ${m.direction === "out" ? "justify-end" : ""}`}>
-            <div className={`max-w-[78%] rounded-[16px] px-3 py-2 text-sm ${m.direction === "out" ? "bg-amber/20 text-ink" : "bg-white/[0.06] text-ink"}`}>
+            <div className={`max-w-[78%] r-16 px-3 py-2 text-sm ${m.direction === "out" ? "bg-amber/20 text-ink" : "bg-white/[0.06] text-ink"}`}>
               <p className="whitespace-pre-wrap break-words">{m.body}</p>
-              <p className="mt-0.5 text-right font-mono text-[10px] text-ink-3">{new Date(m.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
+              <p className="mt-0.5 text-right font-mono fs-10 text-ink-3">{new Date(m.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
             </div>
           </div>
         ))}
@@ -337,12 +386,18 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
 const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
 
 function Dialer() {
+  return (
+    <div className="grid gap-3 md:grid-cols-[300px_1fr]">
+      <DialPad />
+      <RecentCalls />
+    </div>
+  );
+}
+
+/** The dialer card: number or name lookup, keypad, Call / via phone / backspace. */
+export function DialPad() {
   const [num, setNum] = useState("");
-  const [calls, setCalls] = useState<Call[] | null>(null);
   const [contacts, setContacts] = useState<{ address: string; name: string }[]>([]);
-  const load = useCallback(() => void gateway<{ calls: Call[] }>("/api/comms/calls").then((r) => setCalls(r.calls)).catch(() => setCalls([])), []);
-  useEffect(load, [load]);
-  useCommsLive(load);
   useEffect(() => {
     if (!num || /^[\d+*#\s()-]+$/.test(num)) return setContacts([]);
     const t = setTimeout(() => void gateway<{ contacts: { address: string; name: string }[] }>(`/api/comms/contacts?q=${encodeURIComponent(num)}`).then((r) => setContacts(r.contacts)), 250);
@@ -357,74 +412,82 @@ function Dialer() {
       () => "Your phone is dialing.",
     ).catch((e) => useToasts.getState().push({ title: "Call failed", body: String(e), tone: "error" }));
 
-  const icon = (d: Call["direction"]) => (d === "missed" ? <PhoneMissed size={13} className="text-alert" /> : d === "out" ? <PhoneOutgoing size={13} className="text-teal" /> : <PhoneIncoming size={13} className="text-volt" />);
   return (
-    <div className="grid gap-3 md:grid-cols-[300px_1fr]">
-      <Card title="Dialer">
-        <Input value={num} onChange={(e) => setNum(e.target.value)} placeholder="Number or name" className="text-center font-mono !text-lg" aria-label="Number or contact" />
-        {contacts.length > 0 && (
-          <ul className="mt-1 space-y-0.5">
-            {contacts.slice(0, 5).map((c) => (
-              <li key={c.address}>
-                <button onClick={() => setNum(c.address)} className="w-full rounded-[8px] px-2 py-1 text-left text-xs text-ink-2 hover:bg-white/5">
-                  {c.name} · <span className="font-mono">{c.address}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {KEYS.map((k) => (
-            <button key={k} onClick={() => setNum((n) => n + k)} className="well h-12 rounded-[14px] font-mono text-lg text-ink active:scale-95">
-              {k}
-            </button>
-          ))}
-        </div>
-        <div className="mt-3 flex gap-2">
-          <a
-            href={digits ? `tel:${digits}` : undefined}
-            className={`pill-primary !h-11 flex-1 justify-center ${digits ? "" : "pointer-events-none opacity-40"}`}
-            title={isTauri() ? "Opens your system dialer (Windows Phone Link)" : "Opens your phone's dialer"}
-          >
-            <PhoneCall size={16} /> Call
-          </a>
-          {isTauri() && (
-            <button disabled={!digits} onClick={() => callViaBridge(digits, digits)} className="pill-glass !h-11 text-xs" title="Ask the phone bridge to dial">
-              via phone
-            </button>
-          )}
-          <button onClick={() => setNum((n) => n.slice(0, -1))} className="pill-glass !h-11 !w-11 !p-0" aria-label="Backspace">
-            <Delete size={15} />
-          </button>
-        </div>
-      </Card>
-      <Card title="Recent calls" action={<button onClick={load} aria-label="Refresh" className="text-ink-3 hover:text-ink"><RefreshCw size={13} /></button>}>
-        {calls && !calls.length && <Empty>No call log synced yet.</Empty>}
-        <ul className="max-h-[60vh] divide-y divide-white/5 overflow-y-auto">
-          {calls?.map((c) => (
-            <li key={c.id} className="flex items-center gap-3 py-2">
-              {icon(c.direction)}
-              <div className="min-w-0">
-                <p className="truncate text-sm text-ink">{c.contact}</p>
-                <p className="font-mono text-[11px] text-ink-3">
-                  {when(c.ts)} · {c.direction}
-                  {c.duration ? ` · ${Math.round(c.duration / 60)}m` : ""}
-                </p>
-              </div>
-              <a href={`tel:${c.address.replace(/[^\d+]/g, "")}`} className="pill-glass ml-auto !h-8 !w-8 !p-0" aria-label={`Call ${c.contact} back`}>
-                <Phone size={13} />
-              </a>
+    <Card title="Dialer">
+      <Input value={num} onChange={(e) => setNum(e.target.value)} placeholder="Number or name" className="text-center font-mono !text-lg" aria-label="Number or contact" />
+      {contacts.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {contacts.slice(0, 5).map((c) => (
+            <li key={c.address}>
+              <button onClick={() => setNum(c.address)} className="w-full r-8 px-2 py-1 text-left text-xs text-ink-2 hover:bg-white/5">
+                {c.name} · <span className="font-mono">{c.address}</span>
+              </button>
             </li>
           ))}
         </ul>
-      </Card>
-    </div>
+      )}
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        {KEYS.map((k) => (
+          <button key={k} onClick={() => setNum((n) => n + k)} className="well h-12 r-14 font-mono text-lg text-ink active:scale-95">
+            {k}
+          </button>
+        ))}
+      </div>
+      <div className="mt-3 flex gap-2">
+        <a
+          href={digits ? `tel:${digits}` : undefined}
+          className={`pill-primary !h-11 flex-1 justify-center ${digits ? "" : "pointer-events-none opacity-40"}`}
+          title={isTauri() ? "Opens your system dialer (Windows Phone Link)" : "Opens your phone's dialer"}
+        >
+          <PhoneCall size={16} /> Call
+        </a>
+        {isTauri() && (
+          <button disabled={!digits} onClick={() => callViaBridge(digits, digits)} className="pill-glass !h-11 text-xs" title="Ask the phone bridge to dial">
+            via phone
+          </button>
+        )}
+        <button onClick={() => setNum((n) => n.slice(0, -1))} className="pill-glass !h-11 !w-11 !p-0" aria-label="Backspace">
+          <Delete size={15} />
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+/** Recent calls: the synced call log with call-back buttons. */
+export function RecentCalls() {
+  const [calls, setCalls] = useState<Call[] | null>(null);
+  const load = useCallback(() => void gateway<{ calls: Call[] }>("/api/comms/calls").then((r) => setCalls(r.calls)).catch(() => setCalls([])), []);
+  useEffect(load, [load]);
+  useCommsLive(load);
+  const icon = (d: Call["direction"]) => (d === "missed" ? <PhoneMissed size={13} className="text-alert" /> : d === "out" ? <PhoneOutgoing size={13} className="text-teal" /> : <PhoneIncoming size={13} className="text-volt" />);
+  return (
+    <Card title="Recent calls" action={<button onClick={load} aria-label="Refresh" className="text-ink-3 hover:text-ink"><RefreshCw size={13} /></button>}>
+      {calls && !calls.length && <Empty>No call log synced yet.</Empty>}
+      <ul className="max-h-[60vh] divide-y divide-white/5 overflow-y-auto" data-no-hold>
+        {calls?.map((c) => (
+          <li key={c.id} className="flex items-center gap-3 py-2">
+            {icon(c.direction)}
+            <div className="min-w-0">
+              <p className="truncate text-sm text-ink">{c.contact}</p>
+              <p className="font-mono fs-11 text-ink-3">
+                {when(c.ts)} · {c.direction}
+                {c.duration ? ` · ${Math.round(c.duration / 60)}m` : ""}
+              </p>
+            </div>
+            <a href={`tel:${c.address.replace(/[^\d+]/g, "")}`} className="pill-glass ml-auto !h-8 !w-8 !p-0" aria-label={`Call ${c.contact} back`}>
+              <Phone size={13} />
+            </a>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
 // ── WhatsApp (local MCP bridge) ─────────────────────────────────────────────
 
-function WhatsAppPanel() {
+export function WhatsAppPanel() {
   const [out, setOut] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [to, setTo] = useState("");
@@ -450,7 +513,7 @@ function WhatsAppPanel() {
         </button>
         {busy && <Loader2 size={14} className="mt-2 animate-spin text-ink-3" />}
       </div>
-      {out && <pre className="well mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 text-[11px] text-ink-2">{out.slice(0, 12000)}</pre>}
+      {out && <pre className="well mt-2 max-h-80 overflow-auto whitespace-pre-wrap r-10 p-2 fs-11 text-ink-2">{out.slice(0, 12000)}</pre>}
       <form
         className="mt-3 grid gap-2 sm:grid-cols-[1fr_2fr_auto]"
         onSubmit={(e) => {
@@ -463,7 +526,7 @@ function WhatsAppPanel() {
           ).then((r) => r !== null && setMsg(""));
         }}
       >
-        <Input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Phone (with country code) or JID" className="font-mono !text-[12px]" />
+        <Input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Phone (with country code) or JID" className="font-mono !fs-12" />
         <Input value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="Message" />
         <button className="pill-primary !h-10 text-xs">
           <Send size={13} /> Send
@@ -475,7 +538,7 @@ function WhatsAppPanel() {
 
 // ── Phone bridge setup ──────────────────────────────────────────────────────
 
-function BridgeSetup() {
+export function BridgeSetup() {
   const gw = useSettings((s) => s.gatewayUrl);
   const ex = `{"messages":[{"address":"%SMSRF","contact":"%SMSRN","body":"%SMSRB","ts":"%TIMEMS","direction":"in"}]}`;
   return (
@@ -483,7 +546,7 @@ function BridgeSetup() {
       <ol className="list-decimal space-y-2 pl-5 text-sm text-ink-2">
         <li>
           <b className="text-ink">Incoming / sent texts</b> → HTTP POST <code className="font-mono text-amber-light">{gw}/api/comms/sms</code> with JSON body
-          <pre className="well mt-1 overflow-x-auto rounded-[8px] p-2 font-mono text-[11px]">{ex}</pre>
+          <pre className="well mt-1 overflow-x-auto r-8 p-2 font-mono fs-11">{ex}</pre>
           (Tasker variables shown; <code>direction</code> is <code>in</code> or <code>out</code>.)
         </li>
         <li>

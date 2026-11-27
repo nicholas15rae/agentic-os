@@ -55,7 +55,7 @@ const PILL: Record<PillState, string> = {
 
 function Pill({ state, children, title, onClick, disabled, pressed }: { state: PillState; children: ReactNode; title?: string; onClick?: () => void; disabled?: boolean; pressed?: boolean }) {
   const icon = state === "locked" ? <Lock size={10} aria-hidden /> : state === "frozen" ? <Snowflake size={10} aria-hidden /> : null;
-  const cls = `inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] transition-colors ${PILL[state]}`;
+  const cls = `inline-flex h-6 items-center gap-1 rounded-full border px-2 fs-11 transition-colors ${PILL[state]}`;
   // A plain chip shows a fact; a toggle (it has a pressed state) stays a button, disabled when it
   // can't be changed here (the phone, the last owner), so its state still reads as a switch.
   if (pressed === undefined)
@@ -153,12 +153,12 @@ export function SwitchboardView({ cfg, modes, activeId, readOnly, onFreeze, onMo
                 onClick={edit ? () => onFreeze?.({ ...sb, frozenTools: toggleFrozen(sb.frozenTools, s.id) }) : undefined}
               >
                 {s.name}
-                {!s.enabled && <span className="text-[10px] text-ink-3"> · off</span>}
+                {!s.enabled && <span className="fs-10 text-ink-3"> · off</span>}
               </Pill>
             );
           })}
         </Group>
-        <p className="mt-1 text-[11px] text-ink-3">Always live: {ALWAYS_LIVE_TOOLS.join(", ")} (so you can always switch modes by voice).</p>
+        <p className="mt-1 fs-11 text-ink-3">Always live: {ALWAYS_LIVE_TOOLS.join(", ")} (so you can always switch modes by voice).</p>
       </section>
 
       <section aria-label="Mode presets">
@@ -199,7 +199,7 @@ export function SwitchboardView({ cfg, modes, activeId, readOnly, onFreeze, onMo
             const agentIds = overlay && !canEdit ? overlay.agents : agents;
             const toolIds = overlay && !canEdit ? overlay.tools : servers.map((s) => s.id);
             return (
-              <li key={m.id} className={`rounded-[14px] border p-3 ${m.id === activeId ? "border-teal/40 bg-teal/[0.04]" : "border-white/[0.06] bg-white/[0.02]"}`} data-mode={m.id}>
+              <li key={m.id} className={`r-14 border p-3 ${m.id === activeId ? "border-teal/40 bg-teal/[0.04]" : "border-white/[0.06] bg-white/[0.02]"}`} data-mode={m.id}>
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="grid size-7 shrink-0 place-items-center rounded-full border border-white/10 text-ink">
                     <ModeIcon icon={m.icon} size={13} />
@@ -256,10 +256,10 @@ export function SwitchboardView({ cfg, modes, activeId, readOnly, onFreeze, onMo
       <section aria-label="Tool ownership">
         <h3 className="text-sm font-semibold text-ink">Tool ownership</h3>
         <p className="text-xs text-ink-3">Which agents may use each server's tools. {tony}'s pills here are his always-on base (on in every mode, Learning included); each mode adds its own on top (Mode presets above). For everyone else a mode can freeze a server but never grants one. A frozen agent gets no tools at all. Every server keeps at least one owner; switch it off in the MCP registry instead.</p>
-        <p className="mt-1 text-[11px] text-ink-3">{tony}'s base: {tonyBase.map(serverName).join(", ") || "none"}.</p>
+        <p className="mt-1 fs-11 text-ink-3">{tony}'s base: {tonyBase.map(serverName).join(", ") || "none"}.</p>
         <ul className="mt-2 space-y-1.5">
           {servers.map((s) => (
-            <li key={s.id} className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2" data-server={s.id}>
+            <li key={s.id} className="r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2" data-server={s.id}>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm text-ink">{s.name}</span>
                 {!s.enabled && <span className="label-caps text-ink-3">off</span>}
@@ -273,10 +273,10 @@ export function SwitchboardView({ cfg, modes, activeId, readOnly, onFreeze, onMo
                 const sh = shared.find((x) => x.server === s.id);
                 if (!sh || sharedOk.includes(sharedKey(sh))) return null;
                 return (
-                  <p className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-amber-soft" data-shared={s.id}>
+                  <p className="mt-1 flex flex-wrap items-center gap-2 fs-11 text-amber-soft" data-shared={s.id}>
                     <AlertTriangle size={11} aria-hidden /> One owner per tool: {s.name} is on for {sh.owners.map(label).join(" and ")}. Is that intended?
                     {edit && onSharedOk && (
-                      <button type="button" onClick={() => onSharedOk(sharedKey(sh))} className="rounded-full border border-amber/40 px-2 py-0.5 text-[11px] text-amber-soft hover:text-ink">
+                      <button type="button" onClick={() => onSharedOk(sharedKey(sh))} className="rounded-full border border-amber/40 px-2 py-0.5 fs-11 text-amber-soft hover:text-ink">
                         Yes, shared on purpose
                       </button>
                     )}

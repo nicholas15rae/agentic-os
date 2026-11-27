@@ -67,14 +67,14 @@ function ModeSection({ desktop }: { desktop: boolean }) {
   return (
     <section aria-labelledby="orch-mode-h" className="space-y-1">
       <div className="flex items-center gap-2">
-        <h3 id="orch-mode-h" className="flex-1 font-mono text-[10px] tracking-[0.14em] text-ink-3">
+        <h3 id="orch-mode-h" className="flex-1 font-mono fs-10 tracking-[0.14em] text-ink-3">
           ORCHESTRATION MODE
         </h3>
-        <span className="font-mono text-[10px]" style={{ color: SYNC_TONE[status] }} aria-live="polite">
+        <span className="font-mono fs-10" style={{ color: SYNC_TONE[status] }} aria-live="polite">
           ● {statusText}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-white/10 p-0.5" role="radiogroup" aria-labelledby="orch-mode-h">
+      <div className="grid grid-cols-2 gap-1 r-10 border border-white/10 p-0.5" role="radiogroup" aria-labelledby="orch-mode-h">
         {ORCHESTRATION_MODES.map((m, i) => {
           const on = shown === m.id;
           return (
@@ -89,7 +89,7 @@ function ModeSection({ desktop }: { desktop: boolean }) {
               onClick={() => pick(m.id)}
               onKeyDown={(e) => onKey(e, i)}
               title={m.tradeoff}
-              className={`min-h-[30px] rounded-[8px] px-1.5 font-mono text-[11px] leading-tight transition-colors aria-disabled:cursor-not-allowed ${
+              className={`min-h-[30px] r-8 px-1.5 font-mono fs-11 leading-tight transition-colors aria-disabled:cursor-not-allowed ${
                 on ? (m.preempt ? "bg-amber/15 text-ink ring-1 ring-amber/60" : "bg-holo/15 text-ink ring-1 ring-holo/50") : "text-ink-2 hover:text-ink"
               }`}
             >
@@ -98,16 +98,16 @@ function ModeSection({ desktop }: { desktop: boolean }) {
           );
         })}
       </div>
-      {desc && <p className="text-[10.5px] leading-snug text-ink-2">{desc}</p>}
-      <p className="font-mono text-[10px] text-ink-3">
+      {desc && <p className="fs-10.5 leading-snug text-ink-2">{desc}</p>}
+      <p className="font-mono fs-10 text-ink-3">
         {slots === 1 ? "1 GPU slot · locked (single-GPU setup)" : slots == null ? "GPU slots: follow Settings · pick a mode to lock 1" : `${slots} GPU slots (policy) · pick a mode to lock 1`}
       </p>
       {desktop && view && !canSwitch && (
-        <p className="font-mono text-[10px] leading-snug" style={{ color: HEALTH_COLOR.amber }}>
+        <p className="font-mono fs-10 leading-snug" style={{ color: HEALTH_COLOR.amber }}>
           Read from the live policy. Switching needs the pending app rebuild (policy_set_mode).
         </p>
       )}
-      {sync.state === "error" && sync.error && <p className="break-words font-mono text-[10px] leading-snug" style={{ color: RED }}>{sync.error}</p>}
+      {sync.state === "error" && sync.error && <p className="break-words font-mono fs-10 leading-snug" style={{ color: RED }}>{sync.error}</p>}
     </section>
   );
 }
@@ -140,7 +140,7 @@ function LiveSection({ desktop }: { desktop: boolean }) {
         title="Streams a tick per second + every policy / breaker / probe event to disk and a loopback-only read-only HTTP port"
         className={`sysmap-ctl w-full ${on ? "border-holo/60 text-ink" : ""}`}
       >
-        <span className="flex w-full items-center justify-between gap-2 font-mono text-[11px]">
+        <span className="flex w-full items-center justify-between gap-2 font-mono fs-11">
           <span>Live Observer Mode</span>
           <span aria-hidden className={`relative h-3.5 w-6 rounded-full border transition-colors ${on ? "border-holo/70 bg-holo/30" : "border-white/20 bg-white/5"}`}>
             <span className={`absolute top-[1px] h-2.5 w-2.5 rounded-full transition-[left] ${on ? "left-[11px] bg-holo" : "left-[1px] bg-ink-3"}`} />
@@ -148,7 +148,7 @@ function LiveSection({ desktop }: { desktop: boolean }) {
         </span>
       </button>
       {on && live ? (
-        <div className="space-y-0.5 font-mono text-[10px] leading-snug" aria-live="polite">
+        <div className="space-y-0.5 font-mono fs-10 leading-snug" aria-live="polite">
           <p className="break-all text-ink-2">
             <span className="sysmap-blink text-[#f87171]">●</span> LIVE · {live.url ?? (live.port ? `127.0.0.1:${live.port}` : "no port")} · {live.ticks} ticks
           </p>
@@ -159,9 +159,9 @@ function LiveSection({ desktop }: { desktop: boolean }) {
           )}
         </div>
       ) : (
-        <p className="font-mono text-[10px] leading-snug text-ink-3">Off · no background cost. On: ticks + events to disk and 127.0.0.1 (read-only).</p>
+        <p className="font-mono fs-10 leading-snug text-ink-3">Off · no background cost. On: ticks + events to disk and 127.0.0.1 (read-only).</p>
       )}
-      {live?.lastError && <p className="break-words font-mono text-[10px] leading-snug" style={{ color: RED }}>{live.lastError}</p>}
+      {live?.lastError && <p className="break-words font-mono fs-10 leading-snug" style={{ color: RED }}>{live.lastError}</p>}
     </section>
   );
 }
@@ -183,13 +183,13 @@ function PolicySection({ desktop }: { desktop: boolean }) {
   };
   const lastGood = st?.state === "rejected" || st?.state === "missing";
   return (
-    <section aria-label="Orchestrator policy" className="space-y-0.5 font-mono text-[10px] leading-snug">
+    <section aria-label="Orchestrator policy" className="space-y-0.5 font-mono fs-10 leading-snug">
       <div className="flex items-center gap-2">
         <span className="tracking-[0.14em] text-ink-3">POLICY</span>
-        <span className="min-w-0 flex-1 truncate text-[10.5px]" style={{ color: st ? POLICY_TONE[st.state] : undefined }}>
+        <span className="min-w-0 flex-1 truncate fs-10.5" style={{ color: st ? POLICY_TONE[st.state] : undefined }}>
           {st ? (st.state === "missing" ? "file missing" : st.state) : "not loaded"}
         </span>
-        <button type="button" onClick={() => void reload()} disabled={busy} className="sysmap-ctl h-[22px] min-w-0 px-2 text-[10px]" aria-label="Reload policy view">
+        <button type="button" onClick={() => void reload()} disabled={busy} className="sysmap-ctl h-[22px] min-w-0 px-2 fs-10" aria-label="Reload policy view">
           <span className="flex items-center gap-1"><RefreshCw size={10} className={busy ? "animate-spin" : undefined} /> Reload</span>
         </button>
       </div>
@@ -217,7 +217,7 @@ function FootprintBlock({ app, other, system }: { app: Footprint; other: Footpri
   ];
   return (
     <div className="space-y-1">
-      <table className="w-full table-fixed text-[10.5px]" aria-label="App and inference versus total system, peaks during the run">
+      <table className="w-full table-fixed fs-10.5" aria-label="App and inference versus total system, peaks during the run">
         <thead>
           <tr className="text-ink-3">
             <th scope="col" className="w-[3.2rem] text-left font-normal tracking-[0.08em]">PEAK</th>
@@ -253,14 +253,14 @@ function PhaseBreakdown({ probes }: { probes: ProbeEvent[] }) {
   const sh = phaseShares(p);
   const n = (v: number | null) => (v == null ? "—" : String(v));
   return (
-    <div role="group" aria-label="Librarian phase breakdown" className="space-y-1 border-t border-white/10 pt-2 font-mono text-[10.5px]">
-      <h3 className="text-[10px] tracking-[0.14em] text-ink-3">LIBRARIAN PHASES{sh ? ` · ${sh.totalMs}ms` : ""}</h3>
+    <div role="group" aria-label="Librarian phase breakdown" className="space-y-1 border-t border-white/10 pt-2 font-mono fs-10.5">
+      <h3 className="fs-10 tracking-[0.14em] text-ink-3">LIBRARIAN PHASES{sh ? ` · ${sh.totalMs}ms` : ""}</h3>
       {sh && (
         <>
           <div role="img" aria-label={`Librarian phases: ${phaseSummaryText(sh)}`} className="flex h-2.5 w-full overflow-hidden rounded-full border border-white/10 bg-white/5">
             {sh.parts.map((x) => (x.pct > 0 ? <span key={x.key} style={{ width: `${x.pct}%`, background: x.color }} /> : null))}
           </div>
-          <ul aria-hidden className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-ink-3">
+          <ul aria-hidden className="flex flex-wrap gap-x-2 gap-y-0.5 fs-10 text-ink-3">
             {sh.parts.map((x) => (
               <li key={x.key} className="flex items-center gap-1">
                 <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: x.color }} />
@@ -270,7 +270,7 @@ function PhaseBreakdown({ probes }: { probes: ProbeEvent[] }) {
           </ul>
         </>
       )}
-      <p className="text-[10px] text-ink-3">
+      <p className="fs-10 text-ink-3">
         in <span className="text-ink">{n(p.inputTokens)}</span> tok · out <span className="text-ink">{n(p.outputTokens)}</span> tok ·{" "}
         <span className="text-ink">{p.tokensPerSec == null ? "—" : p.tokensPerSec.toFixed(1)}</span> tok/s
       </p>
@@ -291,13 +291,13 @@ function SummaryStrip() {
   const r = useMemo(() => (summary ? classifyRun(summary, list) : null), [summary, list]);
   if (status === "running") {
     const done = list.filter(isTerminal).length;
-    return <p className="font-mono text-[11px] text-ink-2">Running… {done}/{list.length || "?"} nodes back</p>;
+    return <p className="font-mono fs-11 text-ink-2">Running… {done}/{list.length || "?"} nodes back</p>;
   }
-  if (!summary || !r) return <p className="font-mono text-[11px] text-ink-3">No run yet. Results stay in this window only.</p>;
+  if (!summary || !r) return <p className="font-mono fs-11 text-ink-3">No run yet. Results stay in this window only.</p>;
   const tone = r.bottleneck === "clean" ? HEALTH_COLOR.green : r.bottleneck === "cpu_ipc" ? HEALTH_COLOR.amber : HEALTH_COLOR.red;
   return (
-    <div className="space-y-1.5 font-mono text-[11px]" aria-live="polite">
-      <p className="rounded-md border px-2 py-1.5 text-[11.5px] font-semibold" style={{ borderColor: `${tone}88`, color: tone, background: `${tone}14` }}>
+    <div className="space-y-1.5 font-mono fs-11" aria-live="polite">
+      <p className="rounded-md border px-2 py-1.5 fs-11.5 font-semibold" style={{ borderColor: `${tone}88`, color: tone, background: `${tone}14` }}>
         {BOTTLENECK_LABEL[r.bottleneck]}
         {summary.aborted ? " · aborted" : ""}
       </p>
@@ -332,11 +332,11 @@ function ScheduleSection({ disabled }: { disabled: boolean }) {
   if (!view) return null;
   const sc = view.schedule;
   const put = (patch: Partial<DiagSchedule>) => void setSchedule({ ...sc, ...patch });
-  const sel = "h-[26px] rounded-full border border-white/12 bg-[rgba(4,7,12,0.82)] px-2 font-mono text-[10.5px] text-ink-2 disabled:opacity-45";
+  const sel = "h-[26px] rounded-full border border-white/12 bg-[rgba(4,7,12,0.82)] px-2 font-mono fs-10.5 text-ink-2 disabled:opacity-45";
   return (
     <section aria-label="Background schedule" className="space-y-1.5 border-t border-white/10 pt-2.5">
       <label className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] tracking-[0.14em] text-ink-3">AUTO SCHEDULE</span>
+        <span className="font-mono fs-10 tracking-[0.14em] text-ink-3">AUTO SCHEDULE</span>
         <input type="checkbox" checked={sc.enabled} disabled={disabled} onChange={(e) => put({ enabled: e.target.checked })} className="accent-[#22d3ee]" aria-label="Run diagnostics on a schedule" />
       </label>
       <div className="flex flex-wrap gap-1">
@@ -362,16 +362,16 @@ function ScheduleSection({ disabled }: { disabled: boolean }) {
           ))}
         </select>
       </div>
-      <label className="flex items-center gap-1.5 text-[10.5px] text-ink-3">
+      <label className="flex items-center gap-1.5 fs-10.5 text-ink-3">
         <input type="checkbox" checked={sc.onlyWhenGpuIdle} disabled={disabled} onChange={(e) => put({ onlyWhenGpuIdle: e.target.checked })} className="accent-[#22d3ee]" />
         Medium/Heavy only while the GPU is idle
       </label>
-      <p className="font-mono text-[10px] leading-snug text-ink-3">
+      <p className="font-mono fs-10 leading-snug text-ink-3">
         {sc.enabled && view.nextAt ? `Next ≈ ${new Date(view.nextAt).toLocaleTimeString()}` : "Off"}
         {sc.lastRunAt ? ` · last ${new Date(sc.lastRunAt).toLocaleTimeString()}` : ""}
       </p>
       {view.dir && (
-        <p className="break-all font-mono text-[10px] leading-snug text-ink-3" title="Drop request.json here to run on demand">
+        <p className="break-all font-mono fs-10 leading-snug text-ink-3" title="Drop request.json here to run on demand">
           Reports: {view.dir}
         </p>
       )}
@@ -422,12 +422,12 @@ export function DiagnosticPanel() {
     <aside
       id="diag-panel"
       aria-label="Diagnostic and load probe panel"
-      className="sysmap-drawer absolute right-3 top-3 z-20 flex max-h-[calc(100%-24px)] w-[min(300px,calc(100%-24px))] flex-col overflow-hidden rounded-[12px] border border-holo/25 bg-[rgba(4,7,12,0.92)] shadow-[0_12px_40px_rgba(0,0,0,0.5)]"
+      className="sysmap-drawer absolute right-3 top-3 z-20 flex max-h-[calc(100%-24px)] w-[min(300px,calc(100%-24px))] flex-col overflow-hidden r-12 border border-holo/25 bg-[rgba(4,7,12,0.92)] shadow-[0_12px_40px_rgba(0,0,0,0.5)]"
     >
       <header className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
         <Activity size={14} className="text-holo" />
-        <h2 className="flex-1 font-mono text-[11.5px] tracking-[0.14em] text-ink">DIAGNOSTIC & LOAD</h2>
-        <span className="rounded-full border border-white/10 px-1.5 font-mono text-[9.5px] text-ink-3" title="Probes never write RAG, disk artifacts, runs counters or agent memory">
+        <h2 className="flex-1 font-mono fs-11.5 tracking-[0.14em] text-ink">DIAGNOSTIC & LOAD</h2>
+        <span className="rounded-full border border-white/10 px-1.5 font-mono fs-9.5 text-ink-3" title="Probes never write RAG, disk artifacts, runs counters or agent memory">
           EPHEMERAL
         </span>
         <button type="button" onClick={s.togglePanel} className="text-ink-3 hover:text-ink" aria-label="Collapse diagnostic panel" aria-expanded>
@@ -436,7 +436,7 @@ export function DiagnosticPanel() {
       </header>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
-        {!desktop && <p className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1.5 text-[11px] text-ink-2">Probes need the desktop engine.</p>}
+        {!desktop && <p className="rounded-md border border-amber/30 bg-amber/10 px-2 py-1.5 fs-11 text-ink-2">Probes need the desktop engine.</p>}
 
         <ModeSection desktop={desktop} />
         <LiveSection desktop={desktop} />
@@ -452,17 +452,17 @@ export function DiagnosticPanel() {
                 aria-checked={s.intensity === i.id}
                 title={i.hint}
                 onClick={() => s.setIntensity(i.id)}
-                className={`h-7 rounded-full font-mono text-[11px] transition-colors ${s.intensity === i.id ? "bg-holo/15 text-ink ring-1 ring-holo/50" : "text-ink-2 hover:text-ink"}`}
+                className={`h-7 rounded-full font-mono fs-11 transition-colors ${s.intensity === i.id ? "bg-holo/15 text-ink ring-1 ring-holo/50" : "text-ink-2 hover:text-ink"}`}
               >
                 {i.label}
               </button>
             ))}
           </div>
-          <p className="mt-1 text-[10.5px] leading-snug text-ink-3">{INTENSITY.find((i) => i.id === s.intensity)?.hint}</p>
+          <p className="mt-1 fs-10.5 leading-snug text-ink-3">{INTENSITY.find((i) => i.id === s.intensity)?.hint}</p>
         </section>
 
         <section aria-label="Presets" className="space-y-1">
-          <h3 className="font-mono text-[10px] tracking-[0.14em] text-ink-3">PRESETS</h3>
+          <h3 className="font-mono fs-10 tracking-[0.14em] text-ink-3">PRESETS</h3>
           <div className="grid grid-cols-2 gap-1">
             {PRESETS.map((p) => (
               <button key={p.id} type="button" title={p.hint} onClick={() => s.applyPreset(p.id)} disabled={running} className="sysmap-ctl h-auto min-h-[30px] justify-start py-1 text-left leading-tight">
@@ -473,7 +473,7 @@ export function DiagnosticPanel() {
         </section>
 
         <section aria-label="Nodes" className="space-y-1">
-          <h3 className="font-mono text-[10px] tracking-[0.14em] text-ink-3">
+          <h3 className="font-mono fs-10 tracking-[0.14em] text-ink-3">
             NODES · {s.selected.length} selected
           </h3>
           <div className="flex flex-wrap gap-1">
@@ -487,7 +487,7 @@ export function DiagnosticPanel() {
                   aria-pressed={on}
                   disabled={running}
                   onClick={() => s.toggle(n)}
-                  className={`h-6 rounded-full border px-2 font-mono text-[10.5px] transition-colors disabled:cursor-not-allowed ${on ? "border-holo/60 bg-holo/10 text-ink" : "border-white/10 text-ink-3 hover:border-white/25 hover:text-ink-2"}`}
+                  className={`h-6 rounded-full border px-2 font-mono fs-10.5 transition-colors disabled:cursor-not-allowed ${on ? "border-holo/60 bg-holo/10 text-ink" : "border-white/10 text-ink-3 hover:border-white/25 hover:text-ink-2"}`}
                 >
                   {PROBE_LABEL[n]}
                   {p && isTerminal(p) && <span className="ml-1 text-ink-3">{p.totalRttMs}ms</span>}
@@ -514,7 +514,7 @@ export function DiagnosticPanel() {
               aria-label="Loop interval"
               value={s.loop.everyMs}
               onChange={(e) => s.setLoop(s.loop.on, Number(e.target.value) as (typeof EVERY)[number])}
-              className="h-[30px] rounded-full border border-white/12 bg-[rgba(4,7,12,0.82)] px-2 font-mono text-[11px] text-ink-2"
+              className="h-[30px] rounded-full border border-white/12 bg-[rgba(4,7,12,0.82)] px-2 font-mono fs-11 text-ink-2"
             >
               {EVERY.map((ms) => (
                 <option key={ms} value={ms}>
@@ -534,14 +534,14 @@ export function DiagnosticPanel() {
               <Download size={12} />
             </button>
           </div>
-          {s.error && <p className="text-[11px] text-[#f87171]">{s.error}</p>}
+          {s.error && <p className="fs-11 text-[#f87171]">{s.error}</p>}
         </section>
 
         <section aria-label="Bottleneck summary" className="space-y-2 border-t border-white/10 pt-2.5">
           <SummaryStrip />
           <PhaseBreakdown probes={probeList} />
           {s.summary?.reportPath && (
-            <p className="mt-1.5 break-all font-mono text-[10px] leading-snug text-ink-3" title="Every run is written to disk automatically">
+            <p className="mt-1.5 break-all font-mono fs-10 leading-snug text-ink-3" title="Every run is written to disk automatically">
               Saved · {s.summary.trigger !== "ui" ? `${s.summary.trigger} run · ` : ""}
               {s.summary.reportPath}
             </p>

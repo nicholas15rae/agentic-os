@@ -56,7 +56,7 @@ function CueCard({ cue, onChange, onDelete }: { cue: CueWidget & { id: string };
   const [phrases, setPhrases] = useState(cue.phrases.join(", "));
   useEffect(() => setPhrases(cue.phrases.join(", ")), [cue.phrases]);
   return (
-    <section className={`rounded-[16px] border p-4 ${cue.enabled ? "border-white/10 bg-white/[0.02]" : "border-white/5 opacity-60"}`}>
+    <section className={`r-16 border p-4 ${cue.enabled ? "border-white/10 bg-white/[0.02]" : "border-white/5 opacity-60"}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <button role="switch" aria-checked={cue.enabled} aria-label={`Enable ${cue.name}`} onClick={() => onChange({ enabled: !cue.enabled })} className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${cue.enabled ? "bg-teal/80" : "bg-white/15"}`}>
           <span className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition-[left] duration-200 ${cue.enabled ? "left-[18px]" : "left-0.5"}`} />
@@ -84,7 +84,7 @@ function CueCard({ cue, onChange, onDelete }: { cue: CueWidget & { id: string };
               {DAYS.map((d, i) => {
                 const on = cue.days.includes(i);
                 return (
-                  <button key={d} onClick={() => onChange({ days: on ? cue.days.filter((x) => x !== i) : [...cue.days, i].sort() })} className={`h-7 w-7 rounded-full text-[10px] ${on ? "bg-amber/25 text-amber-light" : "text-ink-3 hover:text-ink"}`} title={cue.days.length ? "" : "No days selected = every day"}>
+                  <button key={d} onClick={() => onChange({ days: on ? cue.days.filter((x) => x !== i) : [...cue.days, i].sort() })} className={`h-7 w-7 rounded-full fs-10 ${on ? "bg-amber/25 text-amber-light" : "text-ink-3 hover:text-ink"}`} title={cue.days.length ? "" : "No days selected = every day"}>
                     {d}
                   </button>
                 );
@@ -195,12 +195,12 @@ function ClipRow({ label, icon, clip, theme, cueId, onChange }: { label: string;
   };
 
   return (
-    <div className="rounded-[12px] border border-white/[0.06] p-3">
+    <div className="r-12 border border-white/[0.06] p-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="flex items-center gap-1.5 text-ink">
           {icon} {label}
         </span>
-        {clip && <span className="truncate font-mono text-[11px] text-ink-3">{clip.name} · {fmt(dur)}</span>}
+        {clip && <span className="truncate font-mono fs-11 text-ink-3">{clip.name} · {fmt(dur)}</span>}
         <input ref={file} type="file" accept="audio/*" hidden onChange={(e) => e.target.files?.[0] && void load(e.target.files[0])} />
         <button onClick={() => file.current?.click()} className="pill-glass ml-auto !h-8 text-xs" disabled={busy}>
           {busy ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />} {clip ? "Replace" : "Load audio"}
@@ -214,7 +214,7 @@ function ClipRow({ label, icon, clip, theme, cueId, onChange }: { label: string;
       {err && <p className="mt-1 text-xs text-alert">{err}</p>}
       {clip && (
         <>
-          <div className="relative mt-2 h-14 overflow-hidden rounded-[8px] bg-white/[0.03]">
+          <div className="relative mt-2 h-14 overflow-hidden r-8 bg-white/[0.03]">
             <div className="absolute inset-0 flex items-center gap-px px-px">
               {(wave ?? []).map((v, i) => {
                 const t = (i / (wave?.length ?? 1)) * dur;
@@ -231,11 +231,11 @@ function ClipRow({ label, icon, clip, theme, cueId, onChange }: { label: string;
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-ink-2">
             <label className="flex items-center gap-1">
               Start
-              <input type="number" min={0} max={dur} step={0.1} value={clip.inPoint} onChange={(e) => set({ inPoint: Math.max(0, Math.min(Number(e.target.value), clip.outPoint - 0.1)) })} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" />s
+              <input type="number" min={0} max={dur} step={0.1} value={clip.inPoint} onChange={(e) => set({ inPoint: Math.max(0, Math.min(Number(e.target.value), clip.outPoint - 0.1)) })} className="field !h-7 !w-20 !py-0 font-mono !fs-12" />s
             </label>
             <label className="flex items-center gap-1">
               End
-              <input type="number" min={0} max={dur} step={0.1} value={clip.outPoint} onChange={(e) => set({ outPoint: Math.min(dur, Math.max(Number(e.target.value), clip.inPoint + 0.1)) })} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" />s
+              <input type="number" min={0} max={dur} step={0.1} value={clip.outPoint} onChange={(e) => set({ outPoint: Math.min(dur, Math.max(Number(e.target.value), clip.inPoint + 0.1)) })} className="field !h-7 !w-20 !py-0 font-mono !fs-12" />s
             </label>
             <span className="font-mono text-amber-light">Clip {fmt(clip.outPoint - clip.inPoint)}</span>
             <VolumeSlider
@@ -247,11 +247,11 @@ function ClipRow({ label, icon, clip, theme, cueId, onChange }: { label: string;
             />
             <label className="flex items-center gap-1">
               Fade in
-              <input type="number" min={0} max={5000} step={50} value={clip.fadeInMs} onChange={(e) => set({ fadeInMs: Number(e.target.value) })} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" />ms
+              <input type="number" min={0} max={5000} step={50} value={clip.fadeInMs} onChange={(e) => set({ fadeInMs: Number(e.target.value) })} className="field !h-7 !w-20 !py-0 font-mono !fs-12" />ms
             </label>
             <label className="flex items-center gap-1">
               out
-              <input type="number" min={0} max={5000} step={50} value={clip.fadeOutMs} onChange={(e) => set({ fadeOutMs: Number(e.target.value) })} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" />ms
+              <input type="number" min={0} max={5000} step={50} value={clip.fadeOutMs} onChange={(e) => set({ fadeOutMs: Number(e.target.value) })} className="field !h-7 !w-20 !py-0 font-mono !fs-12" />ms
             </label>
             <label className="flex items-center gap-1">
               <input type="checkbox" checked={clip.loop} onChange={(e) => set({ loop: e.target.checked })} className="accent-teal" /> Loop
@@ -259,10 +259,10 @@ function ClipRow({ label, icon, clip, theme, cueId, onChange }: { label: string;
             {theme && "duck" in clip && (
               <label className="flex items-center gap-1">
                 <input type="checkbox" checked={clip.duck} onChange={(e) => set({ duck: e.target.checked })} className="accent-amber" /> Duck to
-                <input type="number" min={5} max={60} value={clip.duckLevel} onChange={(e) => set({ duckLevel: Number(e.target.value) })} className="field !h-7 !w-14 !py-0 font-mono !text-[12px]" />%
+                <input type="number" min={5} max={60} value={clip.duckLevel} onChange={(e) => set({ duckLevel: Number(e.target.value) })} className="field !h-7 !w-14 !py-0 font-mono !fs-12" />%
               </label>
             )}
-            <button onClick={() => void togglePreview()} className="pill-glass ml-auto !h-7 text-[11px]">
+            <button onClick={() => void togglePreview()} className="pill-glass ml-auto !h-7 fs-11">
               {preview ? <Square size={11} /> : <Zap size={11} />} {preview ? "Stop" : "Preview trimmed selection"}
             </button>
           </div>

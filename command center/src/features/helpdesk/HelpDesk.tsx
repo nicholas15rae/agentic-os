@@ -1,4 +1,5 @@
 import { lazy, Suspense, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, CloudUpload, LifeBuoy, Loader2, X } from "lucide-react";
 import { cmd, isTauri } from "@/lib/platform";
 import { useVoice } from "@/features/voice/voice-store";
@@ -48,15 +49,16 @@ export function HelpDeskButton({ thread }: { thread: string }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[12px] text-ink-2 hover:text-ink"
+        className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 fs-12 text-ink-2 hover:text-ink"
         title="Something's off: have Claude review the last few turns and file a fix ticket"
       >
         <LifeBuoy size={13} /> Something's off
-        <span className="font-mono text-[10px] text-ink-3" title={`Estimate at ${model} API prices (input ~chars/4 + a ~500-token diagnosis)`}>
+        <span className="font-mono fs-10 text-ink-3" title={`Estimate at ${model} API prices (input ~chars/4 + a ~500-token diagnosis)`}>
           {cost}
         </span>
       </button>
-      {open && (
+      {open &&
+        createPortal(
         <div className="fixed inset-0 z-[75] flex justify-end bg-black/40" onClick={() => setOpen(false)}>
           <aside className="glass-chat h-full w-full max-w-xl space-y-4 overflow-y-auto rounded-none p-5" onClick={(e) => e.stopPropagation()} aria-label="Help desk">
             <div className="flex items-center justify-between">
@@ -65,7 +67,7 @@ export function HelpDeskButton({ thread }: { thread: string }) {
                 <X size={16} />
               </button>
             </div>
-            <p className="flex gap-2 rounded-[12px] border border-amber/30 bg-amber/[0.06] p-3 text-sm leading-relaxed text-ink-2">
+            <p className="flex gap-2 r-12 border border-amber/30 bg-amber/[0.06] p-3 text-sm leading-relaxed text-ink-2">
               <CloudUpload size={16} className="mt-0.5 shrink-0 text-amber-soft" aria-hidden />
               <span>
                 Sends the last {HELPDESK_TURNS} turns of this thread to <b>Claude (cloud)</b> through the Claude CLI, after the privacy diffuser. Blocked by the kill switch and LOCAL ONLY mode.
@@ -82,11 +84,11 @@ export function HelpDeskButton({ thread }: { thread: string }) {
             )}
             {phase.k === "done" && (
               <div className="space-y-2">
-                <p className="font-mono text-[11px] text-ink-3">
+                <p className="font-mono fs-11 text-ink-3">
                   {HELPDESK_ENGINE}
                   {phase.redacted ? " · privacy-diffused" : ""} · {phase.ms}ms
                 </p>
-                <pre className="whitespace-pre-wrap rounded-[12px] border border-white/10 bg-black/20 p-3 text-sm leading-relaxed text-ink">{phase.answer}</pre>
+                <pre className="whitespace-pre-wrap r-12 border border-white/10 bg-black/20 p-3 text-sm leading-relaxed text-ink">{phase.answer}</pre>
                 <p className="text-xs text-ink-3">{phase.ticket ? `Saved as a fix ticket: “${phase.ticket}”. Hand it to Claude Code with /fix-queue or the buttons below.` : "No problem found, so no ticket was saved."}</p>
               </div>
             )}
@@ -97,8 +99,9 @@ export function HelpDeskButton({ thread }: { thread: string }) {
               </Suspense>
             </div>
           </aside>
-        </div>
-      )}
+        </div>,
+        document.body,
+        )}
     </>
   );
 }

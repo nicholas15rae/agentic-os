@@ -210,12 +210,12 @@ export function TopBarClockView(p: TopBarClockViewProps) {
         onClick={p.onToggleAlarms}
         className={`flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full transition-colors ${p.density === "compact" ? "px-2" : "px-3"} ${p.open === "alarms" ? "bg-teal/20" : "hover:bg-white/[0.06]"}`}
       >
-        <span className="font-mono text-[13px] font-semibold tracking-wider text-ink tabular" data-clock-part="time">
+        <span className="font-mono fs-13 font-semibold tracking-wider text-ink tabular" data-clock-part="time">
           {time}
         </span>
         {dayPeriod && <span className="label-caps -ml-0.5 text-ink-3">{dayPeriod}</span>}
         {p.tempC !== null && (
-          <span data-clock-part="temp" className="font-mono text-[12px] font-semibold text-teal tabular">
+          <span data-clock-part="temp" className="font-mono fs-12 font-semibold text-teal tabular">
             {p.tempC}°
           </span>
         )}
@@ -265,10 +265,10 @@ export function EffectsPopoverView(p: EffectsPopoverViewProps) {
         >
           <span aria-hidden className={`absolute top-0.5 size-4 rounded-full bg-white transition-[left] ${p.effects.enabled ? "left-[18px]" : "left-0.5"}`} />
         </button>
-        <span className="text-[12px] text-ink-2">{p.effects.enabled ? "On" : "Off"}</span>
+        <span className="fs-12 text-ink-2">{p.effects.enabled ? "On" : "Off"}</span>
         <Segmented size="sm" label="Effects intensity" value={p.effects.intensity} options={INTENSITY} disabled={!p.effects.enabled} onChange={(intensity) => p.onEffects({ intensity })} className="ml-auto" />
       </div>
-      {p.particlesSuppressed && <p className="text-[11px] text-ink-3">Particles are off on this device (performance).</p>}
+      {p.particlesSuppressed && <p className="fs-11 text-ink-3">Particles are off on this device (performance).</p>}
       <button type="button" onClick={p.onOpenForecast} className="pill-glass !h-8 justify-center gap-1.5 text-xs">
         <CloudSun size={13} aria-hidden /> Open weather &amp; forecast
       </button>

@@ -29,20 +29,20 @@ export function IbkrHud() {
       action={
         <div className="flex flex-wrap items-center justify-end gap-1.5">
           {s?.market && (
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] ${MARKET_CHIP[marketTone(s.market)]}`} title={`US market (NYSE calendar) · next open ${s.market.nextOpenNy} ET${s.market.known ? "" : " · holidays unknown for this year"}`}>
+            <span className={`rounded-full border px-2 py-0.5 fs-10 ${MARKET_CHIP[marketTone(s.market)]}`} title={`US market (NYSE calendar) · next open ${s.market.nextOpenNy} ET${s.market.known ? "" : " · holidays unknown for this year"}`}>
               {s.market.label}
             </span>
           )}
-          <span className="rounded-full border border-teal/40 px-2 py-0.5 font-mono text-[10px] tracking-wider text-teal-soft" title="Only the paper socket (7497) can be dialled">
+          <span className="rounded-full border border-teal/40 px-2 py-0.5 font-mono fs-10 tracking-wider text-teal-soft" title="Only the paper socket (7497) can be dialled">
             {s?.mode ?? "PAPER"}
             {s?.port ? ` · ${s.port}` : ""}
           </span>
           {s?.readOnly !== false && (
-            <span className="rounded-full border border-white/20 px-2 py-0.5 font-mono text-[10px] tracking-wider text-ink-2" title="The bridge connects read-only; no orders can be sent">
+            <span className="rounded-full border border-white/20 px-2 py-0.5 font-mono fs-10 tracking-wider text-ink-2" title="The bridge connects read-only; no orders can be sent">
               READ-ONLY
             </span>
           )}
-          <span role="status" aria-label={`IBKR ${label}`} className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${BADGE[level]}`}>
+          <span role="status" aria-label={`IBKR ${label}`} className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 fs-11 font-medium ${BADGE[level]}`}>
             <span className={`h-1.5 w-1.5 rounded-full bg-current ${level === "reconnecting" ? "animate-pulse" : ""}`} />
             {label}
           </span>
@@ -50,13 +50,13 @@ export function IbkrHud() {
       }
     >
       {s?.alert && (
-        <div role="alert" className="mb-3 rounded-[12px] border border-alert/60 bg-alert/15 px-3 py-2 text-[12px] text-alert">
+        <div role="alert" className="mb-3 r-12 border border-alert/60 bg-alert/15 px-3 py-2 fs-12 text-alert">
           <p className="font-semibold">{s.alert.message}</p>
           <p className="mt-0.5 text-ink-2">Down since {s.alert.sinceNy}: {s.alert.reason}</p>
         </div>
       )}
       {(error || (s && level !== "connected")) && !s?.alert && (
-        <p className={`mb-3 text-[12px] ${level === "locked" ? "text-alert" : "text-ink-3"}`}>
+        <p className={`mb-3 fs-12 ${level === "locked" ? "text-alert" : "text-ink-3"}`}>
           {error
             ? `Gateway: ${error}`
             : s?.downReason || [...(s?.reasons ?? []), s?.lastError].filter(Boolean).join(" · ") || "Waiting for TWS on 127.0.0.1:7497…"}
@@ -112,8 +112,8 @@ function Table({ title, head, rows, empty }: { title: string; head: string[]; ro
     <div className="min-w-0">
       <p className="label-caps mb-1.5 text-ink-3">{title}</p>
       {rows.length ? (
-        <div className="overflow-x-auto rounded-[12px] border border-white/[0.06]">
-          <table className="w-full text-[12px]">
+        <div className="overflow-x-auto r-12 border border-white/[0.06]">
+          <table className="w-full fs-12">
             <thead>
               <tr className="text-left text-ink-3">
                 {head.map((h) => (
@@ -133,7 +133,7 @@ function Table({ title, head, rows, empty }: { title: string; head: string[]; ro
           </table>
         </div>
       ) : (
-        <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">{empty}</p>
+        <p className="r-12 border border-dashed border-white/[0.08] px-3 py-4 text-center fs-12 text-ink-3">{empty}</p>
       )}
     </div>
   );

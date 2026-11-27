@@ -16,7 +16,7 @@ const DOT: Record<PillTone, string> = { green: "bg-teal", amber: "bg-amber", red
 /** Who holds the GPU baton: Tony, ComfyUI, another agent, or nobody. Static dot (no animation). Props only. */
 export function BatonPillView({ info }: { info: BatonInfo }) {
   return (
-    <span className={`flex h-8 max-w-[320px] items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 text-[12px] ${TONE[info.tone]}`} title={info.detail ?? info.label} role="status" aria-label={`GPU baton: ${info.label}`}>
+    <span className={`flex h-8 max-w-[320px] items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 fs-12 ${TONE[info.tone]}`} title={info.detail ?? info.label} role="status" aria-label={`GPU baton: ${info.label}`}>
       <Gpu size={12} className="shrink-0" />
       <span className={`size-2 shrink-0 rounded-full ${DOT[info.tone]}`} />
       <span className="truncate">{info.label}</span>

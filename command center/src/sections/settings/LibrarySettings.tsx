@@ -66,11 +66,11 @@ export function SkillsLibraryCard() {
       <div className="flex flex-wrap gap-2">
         <div className="flex min-w-[260px] flex-1 gap-1.5">
           <FolderOpen size={16} className="mt-3 shrink-0 text-ink-3" />
-          <Input key={cfg.skills.dir} defaultValue={cfg.skills.dir} onBlur={(e) => e.target.value.trim() !== cfg.skills.dir && save({ skills: { dir: e.target.value.trim() } })} className="font-mono !text-[12px]" aria-label="Skills folder" spellCheck={false} />
+          <Input key={cfg.skills.dir} defaultValue={cfg.skills.dir} onBlur={(e) => e.target.value.trim() !== cfg.skills.dir && save({ skills: { dir: e.target.value.trim() } })} className="font-mono !fs-12" aria-label="Skills folder" spellCheck={false} />
         </div>
         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter skills…" className="!w-48" aria-label="Filter skills" />
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-3">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 fs-11 text-ink-3">
         {AGENTS.map(([id, label]) => (
           <span key={id} className="rounded-full border border-white/10 px-2 py-0.5">
             {id === "tony" ? cfg.osName : label}: <span className="font-mono text-ink">{count(id)}</span>
@@ -86,9 +86,9 @@ export function SkillsLibraryCard() {
         {list.map((s) => {
           const on = grants[s.name] ?? [];
           return (
-            <li key={s.path} className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+            <li key={s.path} className="r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[13px] text-ink">{s.name}</span>
+                <span className="font-mono fs-13 text-ink">{s.name}</span>
                 <span className="label-caps text-ink-3">{s.kind}</span>
                 <div className="ml-auto flex flex-wrap gap-1">
                   {AGENTS.map(([id, label]) => {
@@ -98,7 +98,7 @@ export function SkillsLibraryCard() {
                         key={id}
                         aria-pressed={active}
                         onClick={() => toggle(s.name, id)}
-                        className={`h-6 rounded-full border px-2 text-[11px] transition-colors ${active ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-3 hover:text-ink"}`}
+                        className={`h-6 rounded-full border px-2 fs-11 transition-colors ${active ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-3 hover:text-ink"}`}
                         title={`${active ? "Detach from" : "Attach to"} ${id === "tony" ? cfg.osName : label}`}
                       >
                         {id === "tony" ? cfg.osName : label}
@@ -274,7 +274,7 @@ export function McpRegistryCard() {
         {cfg.mcps.map((m) => {
           const t = tools?.find((x) => x.id === m.id);
           return (
-            <li key={m.id} className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+            <li key={m.id} className="r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   role="switch"
@@ -289,7 +289,7 @@ export function McpRegistryCard() {
                 <span className="label-caps text-ink-3">{m.transport}</span>
                 {m.enabled && t && <ServerStatus t={t} />}
                 {t?.auth && (
-                  <button onClick={() => setConfiguring(configuring === m.id ? null : m.id)} className="pill-glass !h-6 !px-2 text-[11px]" aria-expanded={configuring === m.id}>
+                  <button onClick={() => setConfiguring(configuring === m.id ? null : m.id)} className="pill-glass !h-6 !px-2 fs-11" aria-expanded={configuring === m.id}>
                     <KeyRound size={11} /> {t.status === "needs_token" ? "Add token" : t.status === "auth_failed" ? "Update token" : "Configure"}
                   </button>
                 )}
@@ -301,11 +301,11 @@ export function McpRegistryCard() {
               </div>
               {m.description && <p className="mt-0.5 text-xs text-ink-3">{m.description}</p>}
               {t?.auth && configuring === m.id && (
-                <div className="well mt-1.5 rounded-[10px] px-2">
+                <div className="well mt-1.5 r-10 px-2">
                   <SecretRow name={t.auth.secret} label={t.auth.label} hint={`Sent only to ${m.url ? new URL(m.url).host : "this server"}. ${t.auth.env} (environment or repo-root .env) takes priority over a key saved here in the keychain.`} onChange={() => load(true)} />
                 </div>
               )}
-              {m.transport !== "builtin" && <p className="mt-0.5 truncate font-mono text-[11px] text-ink-3">{m.transport === "http" ? m.url : `${m.command} ${m.args.join(" ")}`}</p>}
+              {m.transport !== "builtin" && <p className="mt-0.5 truncate font-mono fs-11 text-ink-3">{m.transport === "http" ? m.url : `${m.command} ${m.args.join(" ")}`}</p>}
               {m.transport === "stdio" && <StdioOptions m={m} onSave={(next) => setMcps(cfg.mcps.map((x) => (x.id === m.id ? next : x)))} />}
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {AGENTS.filter(([id]) => id !== "claude").map(([id, label]) => {
@@ -316,7 +316,7 @@ export function McpRegistryCard() {
                       key={id}
                       aria-pressed={active}
                       onClick={() => (isTony ? setTonyGrant(m.id) : setGrants(m.id, id))}
-                      className={`h-6 rounded-full border px-2 text-[11px] transition-colors ${active ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-3 hover:text-ink"}`}
+                      className={`h-6 rounded-full border px-2 fs-11 transition-colors ${active ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-3 hover:text-ink"}`}
                       title={isTony ? `${active ? "Take" : "Give"} this server ${active ? "out of" : "into"} ${cfg.osName}'s always-on base` : `${active ? "Revoke from" : "Grant to"} ${id === "all" ? "every agent" : label}`}
                     >
                       {id === "tony" ? cfg.osName : label}
@@ -336,14 +336,14 @@ export function McpRegistryCard() {
                           .then((o) => setTestOut((s) => ({ ...s, [m.id]: o.slice(0, 600) })))
                           .catch((e) => setTestOut((s) => ({ ...s, [m.id]: `✗ ${describeToolError(e)}` })))
                       }
-                      className="flex items-center gap-1 rounded-full border border-white/10 px-2 py-0.5 font-mono text-[10px] text-ink-2 hover:text-ink"
+                      className="flex items-center gap-1 rounded-full border border-white/10 px-2 py-0.5 font-mono fs-10 text-ink-2 hover:text-ink"
                     >
                       <Wrench size={10} /> {tool.name}
                     </button>
                   ))}
                 </div>
               )}
-              {testOut[m.id] && <pre className="well mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] text-ink-2">{testOut[m.id]}</pre>}
+              {testOut[m.id] && <pre className="well mt-1 max-h-32 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 text-ink-2">{testOut[m.id]}</pre>}
             </li>
           );
         })}
@@ -383,7 +383,7 @@ function AddMcp({ existing, onAdd, onCancel }: { existing: string[]; onAdd: (m: 
   };
   return (
     <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Add MCP server" onClick={onCancel}>
-      <div className="glass w-full max-w-xl rounded-[20px] p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="glass w-full max-w-xl r-20 p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center">
           <h2 className="label-caps text-amber-soft">Add MCP server</h2>
           <button onClick={onCancel} aria-label="Close" className="ml-auto text-ink-2 hover:text-ink">
@@ -421,7 +421,7 @@ function AddMcp({ existing, onAdd, onCancel }: { existing: string[]; onAdd: (m: 
             </Field>
           )}
           <Field label={m.transport === "http" ? "Headers (KEY=value per line)" : "Env vars (KEY=value per line)"} className="sm:col-span-2">
-            <textarea value={env} onChange={(e) => setEnv(e.target.value)} rows={3} className="field font-mono !text-[12px]" placeholder="API_KEY=…" />
+            <textarea value={env} onChange={(e) => setEnv(e.target.value)} rows={3} className="field font-mono !fs-12" placeholder="API_KEY=…" />
           </Field>
           <Field label="Description (optional)" className="sm:col-span-2">
             <Input value={m.description} onChange={(e) => setM({ ...m, description: e.target.value })} />
@@ -448,7 +448,7 @@ function ServerStatus({ t }: { t: ServerTools }) {
   const v = mcpStatusView(t);
   const cls = v.tone === "ok" ? "text-teal" : v.tone === "muted" ? "text-ink-3" : v.tone === "pending" ? "text-amber-light" : "text-alert";
   return (
-    <span className={`flex items-center gap-1 text-[11px] ${cls}`} title={v.title}>
+    <span className={`flex items-center gap-1 fs-11 ${cls}`} title={v.title}>
       {v.tone === "pending" && <Loader2 size={10} className="animate-spin" />}
       {v.text}
     </span>
@@ -474,10 +474,10 @@ function StdioOptions({ m, onSave }: { m: McpServer; onSave: (m: McpServer) => v
   };
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && commit();
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-ink-3">
+    <div className="mt-1 flex flex-wrap items-center gap-2 fs-11 text-ink-3">
       <label className="flex items-center gap-1">
         <span title="How long a cold start may take. A value above 60 s also lets each tool call run that long (it never shortens the 60 s default).">timeout</span>
-        <input value={timeout} onChange={(e) => setTimeoutText(e.target.value)} onBlur={commit} onKeyDown={onKey} placeholder="auto" inputMode="numeric" aria-label={`${m.name} timeout in seconds`} className="field !h-6 !w-14 !px-1.5 font-mono !text-[11px]" />
+        <input value={timeout} onChange={(e) => setTimeoutText(e.target.value)} onBlur={commit} onKeyDown={onKey} placeholder="auto" inputMode="numeric" aria-label={`${m.name} timeout in seconds`} className="field !h-6 !w-14 !px-1.5 font-mono !fs-11" />
         s
       </label>
       <label className="flex items-center gap-1" title="Hide and refuse this server's tools that change data (write, create, delete, edit…), for Tony, sub-agents, pipelines and the tester.">
@@ -486,7 +486,7 @@ function StdioOptions({ m, onSave }: { m: McpServer; onSave: (m: McpServer) => v
       </label>
       <label className="flex min-w-0 flex-1 items-center gap-1">
         folder
-        <input value={cwd} onChange={(e) => setCwd(e.target.value)} onBlur={commit} onKeyDown={onKey} placeholder="the repo" aria-label={`${m.name} working folder`} className="field !h-6 min-w-0 flex-1 !px-1.5 font-mono !text-[11px]" />
+        <input value={cwd} onChange={(e) => setCwd(e.target.value)} onBlur={commit} onKeyDown={onKey} placeholder="the repo" aria-label={`${m.name} working folder`} className="field !h-6 min-w-0 flex-1 !px-1.5 font-mono !fs-11" />
       </label>
       {err && <span className="text-alert">{err}</span>}
     </div>

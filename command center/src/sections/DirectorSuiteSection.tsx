@@ -83,7 +83,7 @@ function DirectorStudio() {
           <Loader2 className="animate-spin" />
         </div>
       ) : !manifest ? (
-        <p className="glass rounded-[20px] p-5 text-sm text-alert">Couldn't open this project{error ? `: ${error}` : "."}</p>
+        <p className="glass r-20 p-5 text-sm text-alert">Couldn't open this project{error ? `: ${error}` : "."}</p>
       ) : (
         <div className="grid gap-4 lg:grid-cols-[minmax(240px,300px)_minmax(0,1fr)_minmax(280px,360px)]">
           <div className="min-w-0 space-y-4">

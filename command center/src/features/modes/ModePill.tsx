@@ -51,7 +51,7 @@ export function ModePillView({
         aria-label="Tony mode"
         title={`Tony mode: ${effective.name}${overridden ? " (overridden)" : ""}`}
         onClick={onOpen}
-        className={`relative flex h-9 items-center gap-1.5 rounded-full px-3 text-[12px] transition-colors ${open ? "bg-teal/20 text-teal" : "text-ink-2 hover:text-ink"}`}
+        className={`relative flex h-9 items-center gap-1.5 rounded-full px-3 fs-12 transition-colors ${open ? "bg-teal/20 text-teal" : "text-ink-2 hover:text-ink"}`}
       >
         <ModeIcon icon={effective.icon} size={14} />
         <span className="hidden max-w-[9rem] truncate xl:inline">{effective.name}</span>
@@ -65,7 +65,7 @@ export function ModePillView({
         aria-label="Gabagool Mode"
         title={gabagoolOn ? "Stop Gabagool Mode" : "Enter Gabagool Mode (novelty: never changes Tony's work mode)"}
         onClick={onToggleNovelty}
-        className={`flex h-9 items-center rounded-full px-2.5 text-[13px] transition-colors ${gabagoolOn ? "bg-amber/90 text-canvas glow-amber" : "text-ink-2 hover:text-ink"}`}
+        className={`flex h-9 items-center rounded-full px-2.5 fs-13 transition-colors ${gabagoolOn ? "bg-amber/90 text-canvas glow-amber" : "text-ink-2 hover:text-ink"}`}
       >
         <span aria-hidden>{"\u{1F35D}"}</span>
       </button>

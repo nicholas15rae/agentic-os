@@ -5,6 +5,7 @@ import { cmd, type InstanceStatus, type PipelinesSettings, type PipelinesView, t
 import { useNow } from "@/lib/cc-api";
 import { gated } from "@/features/bridge/gate";
 import { useToasts } from "@/features/reminders/notify";
+import { useNav } from "@/stores/nav";
 
 /**
  * n8n Pipelines & Drive Sync — a compact live feed (no node graphs).
@@ -105,8 +106,21 @@ export default function Pipelines({ size }: WidgetProps) {
   const online = view?.online ?? false;
   const compact = size.h <= 2;
 
+  // Not connected yet (no instance has an API key): say so and point at the setup, nothing else.
+  if (view && !online && view.instances.every((i) => i.status === "no-key" || !i.hasApiKey)) {
+    return (
+      <div className="flex h-full flex-col items-start justify-center gap-2">
+        <span className="label-caps text-pipe-idle">n8n · not connected</span>
+        <p className="fs-12 leading-relaxed text-ink-2">Add your n8n API key to see and run your workflows here.</p>
+        <button className="pill-glass !h-8 fs-11" onClick={() => useNav.getState().go("settings")}>
+          Set up in Settings → Integrations
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-full min-h-48 flex-col">
+    <div className="flex h-full flex-col">
       {/* Top bar */}
       <header className="mb-2 flex flex-wrap items-center gap-2">
         <span
@@ -116,14 +130,14 @@ export default function Pipelines({ size }: WidgetProps) {
           <span className={`size-1.5 rounded-full ${online ? "bg-pipe-ok shadow-[0_0_8px_#14b8a6]" : "bg-pipe-idle"}`} />
           n8n {view ? (online ? "online" : "offline") : "…"}
         </span>
-        <span className="font-mono text-[11px] text-ink-2 tabular">
+        <span className="font-mono fs-11 text-ink-2 tabular">
           {view?.activeSessions ?? 0} active
           {view?.running ? <span className="text-pipe-live"> · {view.running} running</span> : null}
         </span>
         <button onClick={() => void poll()} aria-label="Refresh pipelines" className="grid size-6 place-items-center rounded-full text-ink-3 hover:text-ink">
           <RefreshCw size={11} />
         </button>
-        <button onClick={() => void sync()} disabled={syncing} className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-full border border-pipe-ok/50 bg-pipe-ok/15 px-3 text-[12px] font-medium text-ink transition-colors hover:bg-pipe-ok/25 disabled:opacity-60">
+        <button onClick={() => void sync()} disabled={syncing} className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-full border border-pipe-ok/50 bg-pipe-ok/15 px-3 fs-12 font-medium text-ink transition-colors hover:bg-pipe-ok/25 disabled:opacity-60">
           {syncing ? <Loader2 size={13} className="animate-spin" /> : <CloudUpload size={13} />} Sync to Google Drive
         </button>
       </header>
@@ -132,7 +146,7 @@ export default function Pipelines({ size }: WidgetProps) {
       {problems.map((p) => (
         <InstanceNotice key={p.id} i={p} />
       ))}
-      {error && <p className="mb-1.5 text-[11px] text-pipe-live">{error.startsWith("PERMISSION_") ? `Permission Bridge: ${error}` : error}</p>}
+      {error && <p className="mb-1.5 fs-11 text-pipe-live">{error.startsWith("PERMISSION_") ? `Permission Bridge: ${error}` : error}</p>}
 
       {/* Pipeline feed */}
       <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto">
@@ -148,7 +162,7 @@ export default function Pipelines({ size }: WidgetProps) {
       </ul>
 
       {/* Drive sync footer */}
-      <footer className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-white/5 pt-2 text-[11px]">
+      <footer className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-white/5 pt-2 fs-11">
         <span className="flex items-center gap-1.5 text-ink-2">
           <FolderSync size={12} className={syncTone(view?.lastSync?.status)} />
           Last Drive backup: <b className="font-medium text-ink">{view?.lastSync ? ago(view.lastSync.at, now) : "never"}</b>
@@ -157,7 +171,7 @@ export default function Pipelines({ size }: WidgetProps) {
         {!compact && view?.lastSync?.detail && <span className="truncate text-ink-3">{view.lastSync.detail}</span>}
         <span className="ml-auto flex flex-wrap gap-1">
           {paths.map((p) => (
-            <span key={p.path} title={p.path + (p.exists ? "" : " (missing)")} className={`rounded-full border px-1.5 py-px font-mono text-[10px] ${p.exists ? "border-white/10 text-ink-2" : "border-white/5 text-ink-3 line-through"}`}>
+            <span key={p.path} title={p.path + (p.exists ? "" : " (missing)")} className={`rounded-full border px-1.5 py-px font-mono fs-10 ${p.exists ? "border-white/10 text-ink-2" : "border-white/5 text-ink-3 line-through"}`}>
               {base(p.path)}
             </span>
           ))}
@@ -179,13 +193,13 @@ function Row({ w, now, busy, onRun, onToggle, multi }: { w: WorkflowStatus; now:
   const ts = w.lastRunTimestamp ? Date.parse(w.lastRunTimestamp) : NaN;
   const when = Number.isFinite(ts) ? `${ago(ts, now)}${w.durationMs != null ? ` • ${fmtMs(w.durationMs)}` : ""}` : "never run";
   return (
-    <li className="group flex items-center gap-2.5 rounded-[10px] border border-white/[0.05] bg-pipe-surface/30 px-2.5 py-1.5">
+    <li className="group flex items-center gap-2.5 r-10 border border-white/[0.05] bg-pipe-surface/30 px-2.5 py-1.5">
       <span className={`size-2 shrink-0 rounded-full ${dot}`} title={w.lastStatus} />
-      <span className="min-w-0 flex-1 truncate text-[13px] text-ink" title={w.name}>
+      <span className="min-w-0 flex-1 truncate fs-13 text-ink" title={w.name}>
         {w.name}
       </span>
-      {(multi || w.instanceLabel) && <span className="hidden shrink-0 rounded-full bg-pipe-raised/70 px-2 py-px font-mono text-[10px] text-ink-2 sm:inline">{w.instanceLabel.replace(/^n8n\s*/i, "") || "local"}</span>}
-      <span className={`w-28 shrink-0 text-right font-mono text-[11px] tabular ${w.lastStatus === "error" ? "text-pipe-live" : "text-ink-3"}`}>{w.lastStatus === "running" ? "running now" : when}</span>
+      {(multi || w.instanceLabel) && <span className="hidden shrink-0 rounded-full bg-pipe-raised/70 px-2 py-px font-mono fs-10 text-ink-2 sm:inline">{w.instanceLabel.replace(/^n8n\s*/i, "") || "local"}</span>}
+      <span className={`w-28 shrink-0 text-right font-mono fs-11 tabular ${w.lastStatus === "error" ? "text-pipe-live" : "text-ink-3"}`}>{w.lastStatus === "running" ? "running now" : when}</span>
       <button
         onClick={onRun}
         disabled={busy || !w.runnable || !w.isActive}
@@ -219,7 +233,7 @@ function InstanceNotice({ i }: { i: InstanceStatus }) {
     error: "error",
   };
   return (
-    <p className="mb-1.5 flex items-center gap-2 rounded-[10px] border border-pipe-idle/30 bg-pipe-surface/40 px-2.5 py-1.5 text-[11px]">
+    <p className="mb-1.5 flex items-center gap-2 r-10 border border-pipe-idle/30 bg-pipe-surface/40 px-2.5 py-1.5 fs-11">
       <span className="size-1.5 shrink-0 rounded-full bg-pipe-idle" />
       <b className="font-medium text-ink">{i.label}</b>
       <span className="label-caps text-pipe-idle">{msg[i.status]}</span>

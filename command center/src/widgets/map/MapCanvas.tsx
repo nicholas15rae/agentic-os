@@ -93,9 +93,9 @@ export default function MapCanvas({ className = "", active = true }: MapCanvasPr
   }, [active, ready]);
 
   return (
-    <div className={`relative min-h-[120px] flex-1 overflow-hidden rounded-[12px] border border-white/[0.07] ${className}`}>
+    <div className={`relative min-h-[120px] flex-1 overflow-hidden r-12 border border-white/[0.07] ${className}`}>
       <div ref={box} className="absolute inset-0" />
-      {mapError && <p className="absolute inset-x-2 bottom-2 rounded-[8px] bg-canvas/80 px-2 py-1 text-[11px] text-alert">{mapError}</p>}
+      {mapError && <p className="absolute inset-x-2 bottom-2 r-8 bg-canvas/80 px-2 py-1 fs-11 text-alert">{mapError}</p>}
     </div>
   );
 }

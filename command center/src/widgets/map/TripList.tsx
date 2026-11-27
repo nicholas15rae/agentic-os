@@ -22,17 +22,17 @@ function TripRow({ t, nowMs, compact, routing, onRoute, onOpen }: { t: Trip; now
   const leave = formatLeaveBy(t.leaveByMs, nowMs);
   const routable = t.placeStatus === "resolved" && !!t.place;
   return (
-    <li className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
+    <li className="r-12 border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
       <div className="flex items-center gap-2">
         <span className="label-caps shrink-0 text-ink-3">{KIND_LABEL[t.event.kind]}</span>
         <span className="min-w-0 flex-1 truncate text-xs text-ink" title={t.event.title}>
           {t.event.title}
         </span>
-        <span className="shrink-0 font-mono text-[11px] tabular text-ink-2">{formatClock(t.event.startMs, nowMs)}</span>
+        <span className="shrink-0 font-mono fs-11 tabular text-ink-2">{formatClock(t.event.startMs, nowMs)}</span>
       </div>
-      {!compact && <p className="mt-0.5 truncate text-[11px] text-ink-3" title={where(t)}>{where(t)}</p>}
+      {!compact && <p className="mt-0.5 truncate fs-11 text-ink-3" title={where(t)}>{where(t)}</p>}
       {routable && (
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 fs-11">
           {leave && <b className={`font-medium ${LEAVE_TONE[leave.tone]}`}>{leave.text}</b>}
           {t.eta && (
             <span className="text-ink-2">
@@ -41,16 +41,16 @@ function TripRow({ t, nowMs, compact, routing, onRoute, onOpen }: { t: Trip; now
             </span>
           )}
           <span className="ml-auto flex gap-1">
-            <button type="button" onClick={onRoute} disabled={routing} className="pill-glass !h-7 !px-2 text-[11px]" title="Draw this trip on the map">
+            <button type="button" onClick={onRoute} disabled={routing} className="pill-glass !h-7 !px-2 fs-11" title="Draw this trip on the map">
               {routing ? <Loader2 size={12} className="animate-spin" /> : <RouteIcon size={12} />} Route
             </button>
-            <button type="button" onClick={onOpen} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Open in Maps" title="Turn-by-turn in Google Maps">
+            <button type="button" onClick={onOpen} className="pill-glass !h-7 !px-2 fs-11" aria-label="Open in Maps" title="Turn-by-turn in Google Maps">
               <ExternalLink size={12} />
             </button>
           </span>
         </div>
       )}
-      {t.error && <p className="mt-0.5 text-[10px] text-ink-3">{t.error}</p>}
+      {t.error && <p className="mt-0.5 fs-10 text-ink-3">{t.error}</p>}
     </li>
   );
 }
@@ -61,21 +61,21 @@ export function TripListView(p: TripListViewProps) {
   const age = p.source === "gateway" ? ageText(p.ageS) : "";
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
+      <div className="flex items-center gap-1.5 fs-11 text-ink-3">
         <span className="min-w-0 flex-1 truncate">{age || etaNote(p.view)}</span>
         {p.refreshPending && <span className="label-caps shrink-0 text-teal-soft">Asked the PC</span>}
         {p.onLocate && p.view && p.view.origin.source !== "home" && (
-          <button type="button" onClick={p.onLocate} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Use my location" title="Start ETAs from this device's location (one fix, under 500 m accuracy)">
+          <button type="button" onClick={p.onLocate} className="pill-glass !h-7 !px-2 fs-11" aria-label="Use my location" title="Start ETAs from this device's location (one fix, under 500 m accuracy)">
             <LocateFixed size={12} />
           </button>
         )}
-        <button type="button" onClick={p.onRefresh} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Refresh trips" title={p.source === "gateway" ? "Ask the PC for fresh trips" : "Refresh trips"}>
+        <button type="button" onClick={p.onRefresh} className="pill-glass !h-7 !px-2 fs-11" aria-label="Refresh trips" title={p.source === "gateway" ? "Ask the PC for fresh trips" : "Refresh trips"}>
           {p.status === "loading" ? <Loader2 size={12} className="animate-spin text-teal" /> : <RefreshCw size={12} className="text-teal" />}
         </button>
       </div>
-      {p.killSwitch && <p className="text-[11px] text-alert">The kill switch is on: trips may be out of date.</p>}
-      {problem && <p className="text-[11px] text-amber-light">{problem}</p>}
-      {p.error && <p className="text-[11px] text-alert">{p.error}</p>}
+      {p.killSwitch && <p className="fs-11 text-alert">The kill switch is on: trips may be out of date.</p>}
+      {problem && <p className="fs-11 text-amber-light">{problem}</p>}
+      {p.error && <p className="fs-11 text-alert">{p.error}</p>}
       {p.status === "loading" && !p.view ? (
         <p className="text-xs text-ink-3">Loading trips…</p>
       ) : p.status === "empty" ? (
@@ -89,7 +89,7 @@ export function TripListView(p: TripListViewProps) {
           ))}
         </ul>
       )}
-      <p className="text-[10px] text-ink-3">ETAs have no live traffic (OpenStreetMap baseline). Google Maps shows traffic once you open a trip.</p>
+      <p className="fs-10 text-ink-3">ETAs have no live traffic (OpenStreetMap baseline). Google Maps shows traffic once you open a trip.</p>
     </div>
   );
 }

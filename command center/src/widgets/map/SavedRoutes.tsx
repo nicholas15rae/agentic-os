@@ -12,38 +12,38 @@ import { SAVED_DELETE_IDLE, savedDeleteHandlers } from "./saved-delete";
 export function SavedRouteRow({ route: r, confirming, busy, onRoute, onOpen, onAskDelete, onConfirmDelete, onCancelDelete, compact }: SavedRouteRowProps) {
   const stops = r.stops?.length ?? 0;
   return (
-    <li className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
+    <li className="r-12 border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate text-xs text-ink" title={r.name}>
           {r.name}
         </span>
         {!confirming && (
           <span className="flex shrink-0 gap-1">
-            <button type="button" onClick={onRoute} disabled={busy} className="pill-glass !h-7 !px-2 text-[11px]" title="Draw this route on the map">
+            <button type="button" onClick={onRoute} disabled={busy} className="pill-glass !h-7 !px-2 fs-11" title="Draw this route on the map">
               <RouteIcon size={12} /> Route
             </button>
-            <button type="button" onClick={onOpen} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Open in Maps" title="Turn-by-turn in Google Maps">
+            <button type="button" onClick={onOpen} className="pill-glass !h-7 !px-2 fs-11" aria-label="Open in Maps" title="Turn-by-turn in Google Maps">
               <ExternalLink size={12} />
             </button>
-            <button type="button" onClick={onAskDelete} disabled={busy} className="pill-glass !h-7 !px-2 text-[11px]" aria-label={`Delete ${r.name}`} title="Delete this saved route">
+            <button type="button" onClick={onAskDelete} disabled={busy} className="pill-glass !h-7 !px-2 fs-11" aria-label={`Delete ${r.name}`} title="Delete this saved route">
               <Trash2 size={12} />
             </button>
           </span>
         )}
         {confirming && (
-          <span className="flex shrink-0 items-center gap-1 text-[11px]" role="group" aria-label="Confirm delete">
+          <span className="flex shrink-0 items-center gap-1 fs-11" role="group" aria-label="Confirm delete">
             <span className="text-alert">Delete?</span>
-            <button type="button" onClick={onConfirmDelete} disabled={busy} className="pill-glass !h-7 !px-2 text-[11px] text-alert">
+            <button type="button" onClick={onConfirmDelete} disabled={busy} className="pill-glass !h-7 !px-2 fs-11 text-alert">
               Yes
             </button>
-            <button type="button" onClick={onCancelDelete} disabled={busy} className="pill-glass !h-7 !px-2 text-[11px]" autoFocus>
+            <button type="button" onClick={onCancelDelete} disabled={busy} className="pill-glass !h-7 !px-2 fs-11" autoFocus>
               No
             </button>
           </span>
         )}
       </div>
       {!compact && (
-        <p className="mt-0.5 truncate text-[11px] text-ink-3">
+        <p className="mt-0.5 truncate fs-11 text-ink-3">
           to {shortLabel(r.destination.label) || "a saved place"} {savedOriginText(r.origin)}
           {stops ? ` · ${stops} stop${stops === 1 ? "" : "s"}` : ""}
         </p>
@@ -59,8 +59,8 @@ export default function SavedRoutes({ onRoute, onOpen, compact }: SavedRoutesPro
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      {error && <p className="text-[11px] text-alert">Saved routes: {error}</p>}
-      {err && <p className="text-[11px] text-alert">{err}</p>}
+      {error && <p className="fs-11 text-alert">Saved routes: {error}</p>}
+      {err && <p className="fs-11 text-alert">{err}</p>}
       {!loaded && !items.length ? (
         <p className="text-xs text-ink-3">Loading saved routes…</p>
       ) : !items.length ? (
@@ -79,7 +79,7 @@ export default function SavedRoutes({ onRoute, onOpen, compact }: SavedRoutesPro
           ))}
         </ul>
       )}
-      <p className="text-[10px] text-ink-3">Synced between your devices. Kept out of search and agents.</p>
+      <p className="fs-10 text-ink-3">Synced between your devices. Kept out of search and agents.</p>
     </div>
   );
 }

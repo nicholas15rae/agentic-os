@@ -57,15 +57,15 @@ export function DesktopMirrorCard() {
             <li key={p.id} className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm text-ink">{p.label}</span>
-                <span className="label-caps text-[10px] text-amber-soft">{KIND[p.kind] ?? p.kind}</span>
-                {chain.includes(p.id) && <span className="text-[10.5px] text-teal">chat chain #{chain.indexOf(p.id) + 1}</span>}
+                <span className="label-caps fs-10 text-amber-soft">{KIND[p.kind] ?? p.kind}</span>
+                {chain.includes(p.id) && <span className="fs-10.5 text-teal">chat chain #{chain.indexOf(p.id) + 1}</span>}
               </div>
-              <div className="break-all font-mono text-[11.5px] text-ink-2">
+              <div className="break-all font-mono fs-11.5 text-ink-2">
                 {p.baseUrl}
                 {p.model ? ` · ${p.model}` : ""}
               </div>
               {p.needsKey && (
-                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-3">
+                <div className="mt-0.5 flex items-center gap-1.5 fs-11 text-ink-3">
                   {p.hasKey ? <ShieldCheck size={12} className="text-teal" /> : <KeyRound size={12} className="text-amber" />}
                   {p.hasKey ? "Key stored on the desktop" : "No key on the desktop yet"}
                 </div>
@@ -75,7 +75,7 @@ export function DesktopMirrorCard() {
         </ul>
       )}
       {os && (
-        <dl className="mt-3 grid gap-x-3 gap-y-1 text-[12px] sm:grid-cols-[auto_1fr]">
+        <dl className="mt-3 grid gap-x-3 gap-y-1 fs-12 sm:grid-cols-[auto_1fr]">
           <dt className="text-ink-3">Compute mode</dt>
           <dd className="font-mono text-ink-2">{os.compute.mode}</dd>
           <dt className="text-ink-3">Cloud droplet</dt>

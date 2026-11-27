@@ -365,3 +365,13 @@ describe("createAnimationSweep", () => {
     expect(sweep.held).toBe(0);
   });
 });
+
+describe("Settings → Appearance → Motion", () => {
+  const on = { visible: true, focused: true, idleMs: 0, calmWhenIdle: true };
+  it("off stops every loop, reduced caps at calm, full changes nothing", () => {
+    expect(resolveMotion({ ...on, pref: "off" })).toBe("off");
+    expect(resolveMotion({ ...on, pref: "reduced" })).toBe("calm");
+    expect(resolveMotion({ ...on, pref: "full" })).toBe("full");
+    expect(resolveMotion({ ...on, visible: false, pref: "reduced" })).toBe("off");
+  });
+});

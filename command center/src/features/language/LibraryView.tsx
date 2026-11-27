@@ -45,7 +45,7 @@ export function LibraryView({ compact = false }: { compact?: boolean }) {
 
   return (
     <div className="space-y-3">
-      <section className="glass space-y-2.5 rounded-[20px] p-3 md:p-4" aria-label="Search and filters">
+      <section className="glass space-y-2.5 r-20 p-3 md:p-4" aria-label="Search and filters">
         <div className="relative">
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-3" />
           <Input value={f.q} onChange={(e) => up({ q: e.target.value })} placeholder="Search original or translation…" aria-label="Search the Library" className="!h-11 !pl-9" type="search" />
@@ -78,7 +78,7 @@ export function LibraryView({ compact = false }: { compact?: boolean }) {
       </section>
 
       <div className="flex flex-wrap items-center gap-2 px-1">
-        <span className="rounded-full bg-[rgba(11,13,17,0.6)] px-2.5 py-1 font-mono text-[11px] text-ink-2 backdrop-blur-md">
+        <span className="rounded-full bg-[rgba(11,13,17,0.6)] px-2.5 py-1 font-mono fs-11 text-ink-2 backdrop-blur-md">
           {rows.length} of {library.length}
         </span>
         {rows.length > 0 && !compact && (
@@ -123,7 +123,7 @@ export function LibraryView({ compact = false }: { compact?: boolean }) {
       </div>
 
       {libraryError && (
-        <p role="alert" className="rounded-[14px] border border-alert/40 bg-alert/10 p-3 text-sm text-alert">
+        <p role="alert" className="r-14 border border-alert/40 bg-alert/10 p-3 text-sm text-alert">
           Library unavailable: {libraryError}{" "}
           <button type="button" className="underline" onClick={() => void loadAll()}>
             Retry
@@ -135,7 +135,7 @@ export function LibraryView({ compact = false }: { compact?: boolean }) {
           <Loader2 className="animate-spin" size={16} />
         </div>
       ) : rows.length === 0 ? (
-        <div className="glass grid min-h-32 place-items-center rounded-[20px] p-6 text-center text-sm text-ink-3">
+        <div className="glass grid min-h-32 place-items-center r-20 p-6 text-center text-sm text-ink-3">
           {library.length ? "Nothing matches these filters." : "Saved translations, captures and lesson phrases land here."}
         </div>
       ) : (
@@ -173,7 +173,7 @@ function EntryRow({ e, selecting, selected, onSelect, onDrill }: { e: LangEntry;
   const patch = (p: Parameters<typeof updateEntry>[1]) => void updateEntry(e.id, p).catch((err) => toastError("Couldn't update", err));
 
   return (
-    <li className={`glass rounded-[18px] p-3.5 ${selected ? "border-amber/60" : ""}`}>
+    <li className={`glass r-18 p-3.5 ${selected ? "border-amber/60" : ""}`}>
       <div className="flex items-start gap-2.5">
         {selecting && (
           <button type="button" onClick={onSelect} aria-label={selected ? "Deselect" : "Select"} aria-pressed={selected} className="mt-0.5 text-amber-light">
@@ -181,16 +181,16 @@ function EntryRow({ e, selecting, selected, onSelect, onDrill }: { e: LangEntry;
           </button>
         )}
         <div className="min-w-0 flex-1">
-          <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10.5px]">
+          <div className="mb-1 flex flex-wrap items-center gap-1.5 fs-10.5">
             <span className="rounded-full bg-white/[0.06] px-2 py-0.5 font-mono uppercase tracking-wider text-ink-2">
               {langName(e.source_lang)} → {langName(e.target_lang)}
             </span>
             <span className="text-ink-3">{cat}</span>
             <span className="text-ink-3">· {new Date(e.timestamp).toLocaleDateString()}</span>
           </div>
-          <p className="text-[13px] text-ink-2">{e.source_text}</p>
-          <p className="text-[16px] font-semibold leading-snug text-ink">{e.translated_text}</p>
-          {e.phonetic_guide && <p className="font-mono text-[12px] text-amber-soft">{e.phonetic_guide}</p>}
+          <p className="fs-13 text-ink-2">{e.source_text}</p>
+          <p className="fs-16 font-semibold leading-snug text-ink">{e.translated_text}</p>
+          {e.phonetic_guide && <p className="font-mono fs-12 text-amber-soft">{e.phonetic_guide}</p>}
           {editing ? (
             <form
               className="mt-1.5 flex gap-1.5"
@@ -200,13 +200,13 @@ function EntryRow({ e, selecting, selected, onSelect, onDrill }: { e: LangEntry;
                 setEditing(false);
               }}
             >
-              <Input value={note} onChange={(ev) => setNote(ev.target.value)} maxLength={500} autoFocus aria-label="Note" placeholder="e.g. Heard at coffee shop" className="!h-9 min-w-0 flex-1 text-[13px]" />
+              <Input value={note} onChange={(ev) => setNote(ev.target.value)} maxLength={500} autoFocus aria-label="Note" placeholder="e.g. Heard at coffee shop" className="!h-9 min-w-0 flex-1 fs-13" />
               <button type="submit" className="pill-primary !h-9 text-xs">
                 Save
               </button>
             </form>
           ) : (
-            e.context_note && <p className="mt-1 text-[12px] italic text-ink-3">“{e.context_note}”</p>
+            e.context_note && <p className="mt-1 fs-12 italic text-ink-3">“{e.context_note}”</p>
           )}
         </div>
         <button type="button" onClick={() => patch({ favorite: !e.favorite })} aria-label={e.favorite ? "Unfavorite" : "Favorite"} aria-pressed={e.favorite} className={e.favorite ? "text-amber-light" : "text-ink-3 hover:text-ink"}>
@@ -222,7 +222,7 @@ function EntryRow({ e, selecting, selected, onSelect, onDrill }: { e: LangEntry;
           <button type="button" onClick={onDrill} className="pill-glass !h-8 text-xs" title="Send to Practice Drill">
             <Layers size={12} /> Drill
           </button>
-          <Select value={e.mastery_status} onChange={(ev) => patch({ mastery_status: ev.target.value as Mastery })} aria-label="Mastery" className="!h-8 !w-auto !py-0 text-[12px]">
+          <Select value={e.mastery_status} onChange={(ev) => patch({ mastery_status: ev.target.value as Mastery })} aria-label="Mastery" className="!h-8 !w-auto !py-0 fs-12">
             {MASTERY.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}

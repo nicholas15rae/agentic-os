@@ -11,7 +11,7 @@ import type { AnchoredPopover } from "./TopBarClock.contract";
 export const POPOVER_W = 320;
 
 /** Opaque card: no backdrop filter, no glass (it paints over the System Map's WebGL canvas). */
-export const POPOVER_CARD = "rounded-[14px] border border-white/10 bg-[rgba(11,13,17,0.94)] p-2 shadow-[0_18px_48px_rgba(0,0,0,0.55)]";
+export const POPOVER_CARD = "r-14 border border-white/10 bg-[rgba(11,13,17,0.94)] p-2 shadow-[0_18px_48px_rgba(0,0,0,0.55)]";
 
 /** Never wider than the screen minus 8 px each side: a 360 px popover on a 360 px screen is 344 px. */
 export function clampPopoverWidth(requested: number, vw: number): number {

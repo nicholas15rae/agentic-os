@@ -35,19 +35,19 @@ function DeliverableRow({ d, render, hashtags }: { d: Deliverable; render: Verif
     }
   };
   return (
-    <li className="rounded-[12px] border border-teal/25 bg-teal/[0.04] p-2">
+    <li className="r-12 border border-teal/25 bg-teal/[0.04] p-2">
       <div className="flex items-center gap-2">
-        <span className="shrink-0 rounded-full border border-teal/40 px-1.5 text-[10px] text-teal-soft">{PLATFORM_LABEL[d.platform]}</span>
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={d.path}>
+        <span className="shrink-0 rounded-full border border-teal/40 px-1.5 fs-10 text-teal-soft">{PLATFORM_LABEL[d.platform]}</span>
+        <span className="min-w-0 flex-1 truncate fs-12 text-ink" title={d.path}>
           {base(d.path)}
         </span>
         <button onClick={() => reveal(d.path)} className="pill-glass !h-7 !w-7 shrink-0 !p-0" title="Open folder" aria-label={`Open folder of ${base(d.path)}`}>
           <FolderOpen size={11} />
         </button>
       </div>
-      {d.captionPath && <p className="mt-0.5 truncate font-mono text-[10px] text-ink-3">captions: {base(d.captionPath)}</p>}
+      {d.captionPath && <p className="mt-0.5 truncate font-mono fs-10 text-ink-3">captions: {base(d.captionPath)}</p>}
       {!open ? (
-        <button onClick={() => setOpen(true)} disabled={!render} className="pill-glass mt-1.5 !h-7 !px-2.5 text-[11px] disabled:opacity-50" title={render ? "Fill in the post, then raise the Instagram card for your approval" : "Its verified render isn't on the shelf"}>
+        <button onClick={() => setOpen(true)} disabled={!render} className="pill-glass mt-1.5 !h-7 !px-2.5 fs-11 disabled:opacity-50" title={render ? "Fill in the post, then raise the Instagram card for your approval" : "Its verified render isn't on the shelf"}>
           <Send size={11} /> Send to Biz Ops
         </button>
       ) : (
@@ -58,18 +58,18 @@ function DeliverableRow({ d, render, hashtags }: { d: Deliverable; render: Verif
             void send();
           }}
         >
-          <textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={2} maxLength={2200} placeholder="Caption" className="field min-h-[44px] resize-y text-[12px]" aria-label="Instagram caption" />
-          <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="hashtags, space separated" className="field !h-8 !py-0 text-[12px]" aria-label="Hashtags" />
-          <p className="text-[10px] text-ink-3">This opens the Instagram card. Nothing is posted until you approve it there.</p>
+          <textarea value={caption} onChange={(e) => setCaption(e.target.value)} rows={2} maxLength={2200} placeholder="Caption" className="field min-h-[44px] resize-y fs-12" aria-label="Instagram caption" />
+          <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="hashtags, space separated" className="field !h-8 !py-0 fs-12" aria-label="Hashtags" />
+          <p className="fs-10 text-ink-3">This opens the Instagram card. Nothing is posted until you approve it there.</p>
           <div className="flex gap-1.5">
-            <button type="submit" disabled={busy} className="pill-primary !h-7 !px-2.5 text-[11px] disabled:opacity-50">
+            <button type="submit" disabled={busy} className="pill-primary !h-7 !px-2.5 fs-11 disabled:opacity-50">
               {busy ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />} Raise the Instagram card
             </button>
-            <button type="button" onClick={() => setOpen(false)} className="pill-glass !h-7 !px-2.5 text-[11px]">
+            <button type="button" onClick={() => setOpen(false)} className="pill-glass !h-7 !px-2.5 fs-11">
               Close
             </button>
           </div>
-          {result && (result.ok ? <p className="text-[11px] text-teal-soft">Card raised: approve or cancel it there.</p> : <p className="text-[11px] text-alert">{result.reason}</p>)}
+          {result && (result.ok ? <p className="fs-11 text-teal-soft">Card raised: approve or cancel it there.</p> : <p className="fs-11 text-alert">{result.reason}</p>)}
         </form>
       )}
     </li>
@@ -78,7 +78,7 @@ function DeliverableRow({ d, render, hashtags }: { d: Deliverable; render: Verif
 
 /** The approved finals (renders/final/<platform>/). */
 export function DeliverablesList({ deliverables, renders, hashtags, done }: { deliverables: Deliverable[]; renders: VerifiedRender[]; hashtags: string; done: boolean }) {
-  if (!deliverables.length) return done ? <p className="mt-3 text-[11px] text-ink-3">This project is done: its finals are in renders/final.</p> : null;
+  if (!deliverables.length) return done ? <p className="mt-3 fs-11 text-ink-3">This project is done: its finals are in renders/final.</p> : null;
   return (
     <div className="mt-3">
       <p className="label-caps flex items-center gap-1 text-teal-soft">

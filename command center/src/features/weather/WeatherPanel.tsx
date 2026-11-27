@@ -98,12 +98,12 @@ export function ForecastStrip({ days, max }: ForecastStripProps) {
         const Icon = wmoIcon(d.code);
         const name = i === 0 ? "Today" : d.weekday;
         return (
-          <li key={d.date} role="listitem" aria-label={forecastAria(d, name)} title={d.label} className="flex min-w-0 flex-col items-center gap-0.5 rounded-[10px] bg-white/[0.03] px-0.5 py-1.5">
+          <li key={d.date} role="listitem" aria-label={forecastAria(d, name)} title={d.label} className="flex min-w-0 flex-col items-center gap-0.5 r-10 bg-white/[0.03] px-0.5 py-1.5">
             <span className="label-caps truncate text-ink-3">{name}</span>
             <Icon size={14} aria-hidden className="text-ink-2" />
-            <span className="font-mono text-[12px] font-semibold text-ink tabular">{deg(d.maxC)}</span>
-            <span className="font-mono text-[10px] text-ink-3 tabular">{deg(d.minC)}</span>
-            {d.precipPct !== null && d.precipPct > 0 && <span className="font-mono text-[9px] text-ink-3 tabular">{Math.round(d.precipPct)}%</span>}
+            <span className="font-mono fs-12 font-semibold text-ink tabular">{deg(d.maxC)}</span>
+            <span className="font-mono fs-10 text-ink-3 tabular">{deg(d.minC)}</span>
+            {d.precipPct !== null && d.precipPct > 0 && <span className="font-mono fs-9 text-ink-3 tabular">{Math.round(d.precipPct)}%</span>}
           </li>
         );
       })}
@@ -134,7 +134,7 @@ function EffectsControls({ effects, particlesSuppressed, onEffects }: Pick<Weath
         <span className="label-caps text-ink-2">Effects</span>
         <Segmented size="sm" label="Effects intensity" value={effects.intensity} options={INTENSITY} disabled={!effects.enabled} onChange={(intensity) => onEffects({ intensity })} className="ml-auto" />
       </div>
-      {particlesSuppressed && <p className="text-[11px] text-ink-3">Particles are off on this device (performance).</p>}
+      {particlesSuppressed && <p className="fs-11 text-ink-3">Particles are off on this device (performance).</p>}
     </div>
   );
 }
@@ -154,7 +154,7 @@ export function WeatherPanelView(p: WeatherPanelViewProps) {
               {statusText(source, atmosphere, now?.label)}
             </span>
             {manual && (
-              <button type="button" onClick={() => p.onMode("auto")} className="pill-glass !h-6 shrink-0 !px-2 text-[10px]">
+              <button type="button" onClick={() => p.onMode("auto")} className="pill-glass !h-6 shrink-0 !px-2 fs-10">
                 Back to Live
               </button>
             )}
@@ -166,7 +166,7 @@ export function WeatherPanelView(p: WeatherPanelViewProps) {
           <span className="font-mono text-4xl font-semibold text-ink tabular">{deg(now.tempC)}</span>
           <div className="pb-1">
             <p className="text-sm text-ink">{now.label}</p>
-            <p className="font-mono text-[11px] text-ink-3 tabular">wind {Math.round(now.windKph)} km/h</p>
+            <p className="font-mono fs-11 text-ink-3 tabular">wind {Math.round(now.windKph)} km/h</p>
           </div>
         </div>
       ) : (

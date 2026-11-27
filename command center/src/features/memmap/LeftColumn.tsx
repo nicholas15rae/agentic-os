@@ -77,7 +77,7 @@ function AgentRoster({ snap, why }: CardProps) {
   return (
     <Panel title={`Agent roster & skills (${snap ? agents.length : "—"} swarm)`} className="shrink-0">
       {!snap ? (
-        <p className="font-mono text-[11px] text-ink-3">
+        <p className="font-mono fs-11 text-ink-3">
           <Dash why={why} /> no roster yet
         </p>
       ) : (
@@ -89,19 +89,19 @@ function AgentRoster({ snap, why }: CardProps) {
               return (
                 <li
                   key={a.role}
-                  className="flex min-w-0 flex-col gap-0.5 rounded-[10px] border border-white/[0.07] bg-white/[0.02] px-2 py-1.5"
+                  className="flex min-w-0 flex-col gap-0.5 r-10 border border-white/[0.07] bg-white/[0.02] px-2 py-1.5"
                   title={[`${a.label} · workspace ${a.slug}`, model ? `chat model: ${model}` : snap.agentsNote, a.agentModel && `agent model: ${a.agentModel}`, a.threads != null && `${a.threads} threads`].filter(Boolean).join("\n")}
                 >
                   <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{a.label}</span>
+                    <span className="min-w-0 flex-1 truncate fs-12 text-ink">{a.label}</span>
                     <Tag tone={tag.tone}>{tag.text}</Tag>
                   </div>
-                  {xray && <span className="truncate font-mono text-[9.5px] text-ink-3">{model ?? "models —"}</span>}
+                  {xray && <span className="truncate font-mono fs-9.5 text-ink-3">{model ?? "models —"}</span>}
                 </li>
               );
             })}
           </ul>
-          <div className="mt-2 flex items-center gap-2 font-mono text-[10.5px] text-ink-2">
+          <div className="mt-2 flex items-center gap-2 font-mono fs-10.5 text-ink-2">
             <span className="label-caps text-ink-3">Skills</span>
             <span className="tabular text-ink">{snap.skills.total}</span>
             <span className="truncate text-ink-3" title={snap.skills.roots.map((r) => `${r.path}: ${r.exists ? r.count : "missing"}${r.sameAs ? ` (same as ${r.sameAs})` : ""}`).join("\n")}>
@@ -113,7 +113,7 @@ function AgentRoster({ snap, why }: CardProps) {
               </Tag>
             )}
           </div>
-          {snap.agentsNote && <p className="mt-1 truncate font-mono text-[10px] text-ember/80" title={snap.agentsNote}>{snap.agentsNote}</p>}
+          {snap.agentsNote && <p className="mt-1 truncate font-mono fs-10 text-ember/80" title={snap.agentsNote}>{snap.agentsNote}</p>}
         </>
       )}
     </Panel>
@@ -136,7 +136,7 @@ function BusCard({ snap, why }: CardProps) {
       title="MCP servers & APIs"
       className="max-h-[300px] shrink-0"
       bodyClassName="overflow-y-auto"
-      badge={snap && <span className="font-mono text-[10px] text-ink-3">{bus.filter((b) => b.status === "ok").length}/{bus.length}</span>}
+      badge={snap && <span className="font-mono fs-10 text-ink-3">{bus.filter((b) => b.status === "ok").length}/{bus.length}</span>}
       action={
         failing + awaiting > 0 && (
           <button
@@ -151,7 +151,7 @@ function BusCard({ snap, why }: CardProps) {
       }
     >
       {!snap ? (
-        <p className="font-mono text-[11px] text-ink-3">
+        <p className="font-mono fs-11 text-ink-3">
           <Dash why={why} /> no bus data yet
         </p>
       ) : (
@@ -170,25 +170,25 @@ function BusRow({ b, xray, now, onFix }: { b: SnapBus; xray: boolean; now: numbe
   const tone = busTone(b.status);
   const err = b.error ?? (b.lastOk === false ? b.lastError : null);
   return (
-    <li className={`rounded-[8px] px-1.5 py-1 ${b.status === "off" ? "opacity-50" : ""}`} title={busWhy(b)}>
+    <li className={`r-8 px-1.5 py-1 ${b.status === "off" ? "opacity-50" : ""}`} title={busWhy(b)}>
       <div className="flex min-w-0 items-center gap-2">
         <Icon size={12} className="shrink-0 text-holo/70" />
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{b.name}</span>
+        <span className="min-w-0 flex-1 truncate fs-12 text-ink">{b.name}</span>
         {busNeedsFix(b.status) ? (
           <button type="button" onClick={onFix} className="flex shrink-0 items-center gap-1" title={`${busWhy(b)}\n\nOpen Settings → Integrations to fix`}>
             <Dot tone={tone} />
-            <span className={`font-mono text-[10.5px] ${tone === "warn" ? "text-ember" : tone === "idle" ? "text-ink-3" : "text-alert"} hover:underline`}>{busText(b.status)}</span>
+            <span className={`font-mono fs-10.5 ${tone === "warn" ? "text-ember" : tone === "idle" ? "text-ink-3" : "text-alert"} hover:underline`}>{busText(b.status)}</span>
           </button>
         ) : (
           <span className="flex shrink-0 items-center gap-1">
             <Dot tone={tone} />
-            {b.status === "unknown" ? <Dash why={busWhy(b)} /> : <span className={`font-mono text-[10.5px] ${tone === "ok" ? "text-teal-soft" : "text-ink-3"}`}>{busText(b.status)}</span>}
+            {b.status === "unknown" ? <Dash why={busWhy(b)} /> : <span className={`font-mono fs-10.5 ${tone === "ok" ? "text-teal-soft" : "text-ink-3"}`}>{busText(b.status)}</span>}
           </span>
         )}
       </div>
-      {err && b.status !== "ok" && <p className="ml-5 truncate font-mono text-[9.5px] text-ink-3">{err}</p>}
+      {err && b.status !== "ok" && <p className="ml-5 truncate font-mono fs-9.5 text-ink-3">{err}</p>}
       {xray && (
-        <p className="ml-5 truncate font-mono text-[9.5px] text-ink-3">
+        <p className="ml-5 truncate font-mono fs-9.5 text-ink-3">
           {b.transport}
           {b.tools != null && ` · ${b.tools} tools`}
           {b.calls != null && ` · ${b.calls} calls${b.failures ? ` (${b.failures} failed)` : ""}`}
@@ -211,10 +211,10 @@ function StoresCard({ snap, why }: CardProps) {
     <Panel
       title="Persistent stores"
       className="shrink-0"
-      badge={snap && <span className="font-mono text-[10px] text-ink-3">{snap.summary.storesOk}/{snap.summary.storesTotal} ok</span>}
+      badge={snap && <span className="font-mono fs-10 text-ink-3">{snap.summary.storesOk}/{snap.summary.storesTotal} ok</span>}
     >
       {!snap ? (
-        <p className="font-mono text-[11px] text-ink-3">
+        <p className="font-mono fs-11 text-ink-3">
           <Dash why={why} /> no store data yet
         </p>
       ) : (
@@ -228,15 +228,15 @@ function StoresCard({ snap, why }: CardProps) {
               <li key={s.id} title={[s.path, s.error, ...s.tables.map((t) => `${t.name}: ${t.rows ?? "?"}`)].filter(Boolean).join("\n")}>
                 <div className="flex min-w-0 items-center gap-2">
                   <Dot tone={tone} />
-                  <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{s.label}</span>
-                  <span className="shrink-0 font-mono text-[10.5px] text-ink-2 tabular">
+                  <span className="min-w-0 flex-1 truncate fs-12 text-ink">{s.label}</span>
+                  <span className="shrink-0 font-mono fs-10.5 text-ink-2 tabular">
                     {s.health === "missing" ? <span className="text-ember">missing</span> : <Val value={fmtBytes(s.bytes)} why={s.error ?? "Size unknown"} />}
                   </span>
                 </div>
                 <div className="ml-3.5 mt-1">
                   <Bar value={share} tone={s.health === "ok" ? "holo" : "ember"} why={s.health === "ok" ? "Size unknown" : (s.error ?? "Store not found")} />
                 </div>
-                <p className="ml-3.5 mt-0.5 truncate font-mono text-[9.5px] text-ink-3">
+                <p className="ml-3.5 mt-0.5 truncate font-mono fs-9.5 text-ink-3">
                   {s.health === "error" && s.error ? (
                     <span className="text-alert">{s.error}</span>
                   ) : (
@@ -253,7 +253,7 @@ function StoresCard({ snap, why }: CardProps) {
           })}
         </ul>
       )}
-      {snap && <p className="mt-2 font-mono text-[9px] text-ink-3">bar = share of total on-disk size</p>}
+      {snap && <p className="mt-2 font-mono fs-9 text-ink-3">bar = share of total on-disk size</p>}
     </Panel>
   );
 }
@@ -285,7 +285,7 @@ function HardwareCard({ snap, why }: CardProps) {
           <>
             <Dot tone={daemon.healthy === daemon.ran ? "ok" : "warn"} />
             <span className={`label-caps ${daemon.healthy === daemon.ran ? "text-teal-soft" : "text-ember"}`}>{daemon.healthy === daemon.ran ? "Daemon active" : "Daemon degraded"}</span>
-            <span className="ml-auto font-mono text-[10px] text-ink-3">
+            <span className="ml-auto font-mono fs-10 text-ink-3">
               {daemon.healthy}/{daemon.total} loops
             </span>
           </>
@@ -300,7 +300,7 @@ function HardwareCard({ snap, why }: CardProps) {
         )}
       </div>
       {xray && h && (
-        <p className="mt-1 truncate font-mono text-[9.5px] text-ink-3" title={h.cpuBrand ?? undefined}>
+        <p className="mt-1 truncate font-mono fs-9.5 text-ink-3" title={h.cpuBrand ?? undefined}>
           {h.hostname ?? "host"} · {h.cpuBrand ?? "cpu —"} · {h.cpuThreads}t
         </p>
       )}
@@ -313,7 +313,7 @@ function Meter({ label, value, text, why }: { label: string; value: number | nul
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span className="label-caps text-ink-3">{label}</span>
-        <span className="ml-auto font-mono text-[10.5px] text-ink-2 tabular">{text ?? <Dash why={why} />}</span>
+        <span className="ml-auto font-mono fs-10.5 text-ink-2 tabular">{text ?? <Dash why={why} />}</span>
       </div>
       <Bar value={value} tone={loadTone(value)} why={why} />
     </div>

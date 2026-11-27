@@ -85,7 +85,7 @@ export function NoteMarkersView({ markers, onSeek, leftPx }: { markers: NoteMark
             {items.length === 1 ? (
               <span className={`size-2 rounded-full ${m.onRender ? "border border-amber bg-transparent" : "bg-amber"}`} />
             ) : (
-              <span className="grid size-3.5 place-items-center rounded-full bg-amber font-mono text-[8px] leading-none text-black">{items.length}</span>
+              <span className="grid size-3.5 place-items-center rounded-full bg-amber font-mono fs-8 leading-none text-black">{items.length}</span>
             )}
           </button>
         );
@@ -134,10 +134,10 @@ export function MiniTimeline() {
   const accepts = (e: React.DragEvent) => hasType(e, CLIP_MIME) || hasType(e, ASSET_MIME);
 
   return (
-    <section ref={box} className={`glass rounded-[20px] p-4 ${focus?.target === "timeline" ? "ring-1 ring-amber/40" : ""}`}>
+    <section ref={box} className={`glass r-20 p-4 ${focus?.target === "timeline" ? "ring-1 ring-amber/40" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <h2 className="label-caps text-amber-soft">Timeline</h2>
-        <span className="font-mono text-[11px] text-ink-3">
+        <span className="font-mono fs-11 text-ink-3">
           {manifest.clips.length} clips · {timecode(total)} · playhead {timecode(playhead)} · rev {manifest.revision}
           {saving ? " · saving…" : ""}
         </span>
@@ -149,14 +149,14 @@ export function MiniTimeline() {
       {/* Clip strip: drag to reorder; drop assets from the bin to insert. The note lane sits above
           it inside the same scroller, so markers stay over their clips. */}
       <div
-        className="well overflow-x-auto rounded-[14px] p-1.5"
+        className="well overflow-x-auto r-14 p-1.5"
         onDragOver={(e) => accepts(e) && e.preventDefault()}
         onDrop={(e) => accepts(e) && dropAt(e, manifest.clips.length)}
       >
         <div className="flex w-max min-w-full flex-col gap-1">
         <NoteMarkersView markers={markers} onSeek={(m) => seekTo(m.target.sel, m.target.sec)} leftPx={(x) => markerLeftPx(x, boxes, STRIP_GAP_PX)} />
         <div className="flex min-h-[64px] gap-1.5">
-        {manifest.clips.length === 0 && <p className="m-auto text-[12px] text-ink-3">Drag clips here from the bin, or Assemble with the Director.</p>}
+        {manifest.clips.length === 0 && <p className="m-auto fs-12 text-ink-3">Drag clips here from the bin, or Assemble with the Director.</p>}
         {manifest.clips.map((c, i) => {
           const a = byId.get(c.assetId);
           const on = selClip?.id === c.id;
@@ -186,15 +186,15 @@ export function MiniTimeline() {
               }}
               onClick={() => select({ kind: "clip", id: c.id })}
               style={{ width: w }}
-              className={`relative flex shrink-0 cursor-grab flex-col gap-1 rounded-[10px] border p-1 active:cursor-grabbing ${on ? "border-amber/60 bg-amber/10" : "border-white/10 bg-white/[0.03]"} ${dragFrom === i ? "opacity-40" : ""} ${overIdx === i && dragFrom !== i ? "ring-1 ring-teal/70" : ""}`}
+              className={`relative flex shrink-0 cursor-grab flex-col gap-1 r-10 border p-1 active:cursor-grabbing ${on ? "border-amber/60 bg-amber/10" : "border-white/10 bg-white/[0.03]"} ${dragFrom === i ? "opacity-40" : ""} ${overIdx === i && dragFrom !== i ? "ring-1 ring-teal/70" : ""}`}
               title={a?.name}
             >
-              {a ? <Thumb asset={a} className="h-9 w-full" /> : <div className="h-9 rounded-[8px] bg-alert/20" />}
-              <span className="truncate text-[10px] text-ink-2">
+              {a ? <Thumb asset={a} className="h-9 w-full" /> : <div className="h-9 r-8 bg-alert/20" />}
+              <span className="truncate fs-10 text-ink-2">
                 {a?.role === "slate" || a?.role === "outro" ? "▣ " : ""}
                 {a?.name ?? "missing asset"}
               </span>
-              <span className="font-mono text-[9px] text-ink-3">{clipLength(c).toFixed(2)}s</span>
+              <span className="font-mono fs-9 text-ink-3">{clipLength(c).toFixed(2)}s</span>
             </div>
           );
         })}
@@ -215,7 +215,7 @@ export function MiniTimeline() {
                 const a = byId.get(e.target.value);
                 if (a) editManifest((m) => addAudio(m, a, playhead));
               }}
-              className="!h-8 !w-auto max-w-[200px] !py-0 text-[12px]"
+              className="!h-8 !w-auto max-w-[200px] !py-0 fs-12"
               aria-label="Add an audio layer at the playhead"
             >
               <option value="">+ Add audio at playhead</option>
@@ -227,7 +227,7 @@ export function MiniTimeline() {
             </Select>
           )}
           <VoiceoverRecorder />
-          <label className="ml-auto flex items-center gap-1.5 text-[11px] text-ink-2" title="Camera audio under the voiceover / music">
+          <label className="ml-auto flex items-center gap-1.5 fs-11 text-ink-2" title="Camera audio under the voiceover / music">
             Clip audio
             <input type="range" min={0} max={2} step={0.05} value={manifest.clipAudioVolume} onChange={(e) => editManifest((m) => setClipAudioVolume(m, Number(e.target.value)))} className="w-20 accent-teal" aria-label="Clip audio volume" />
             <span className="w-8 font-mono">{manifest.clipAudioVolume.toFixed(2)}</span>
@@ -238,14 +238,14 @@ export function MiniTimeline() {
             {manifest.audio.map((l) => {
               const a = byId.get(l.assetId);
               return (
-                <li key={l.id} className="flex flex-wrap items-center gap-2 rounded-[10px] border border-white/[0.08] bg-white/[0.02] px-2 py-1.5 text-[11px]">
+                <li key={l.id} className="flex flex-wrap items-center gap-2 r-10 border border-white/[0.08] bg-white/[0.02] px-2 py-1.5 fs-11">
                   <Music size={12} className="text-teal" />
                   <span className="min-w-0 flex-1 truncate text-ink-2" title={a?.name}>
                     {a?.role ?? "audio"} · {a?.name ?? "missing asset"}
                   </span>
                   <label className="flex items-center gap-1 text-ink-3">
                     at
-                    <input type="number" min={0} step={0.1} value={l.startSec} onChange={(e) => editManifest((m) => updateAudio(m, l.id, { startSec: num(e.target.value) || 0 }, assets))} className="field !h-7 !w-16 !py-0 font-mono !text-[11px]" aria-label="Start offset (s)" />s
+                    <input type="number" min={0} step={0.1} value={l.startSec} onChange={(e) => editManifest((m) => updateAudio(m, l.id, { startSec: num(e.target.value) || 0 }, assets))} className="field !h-7 !w-16 !py-0 font-mono !fs-11" aria-label="Start offset (s)" />s
                   </label>
                   <label className="flex items-center gap-1 text-ink-3">
                     vol
@@ -260,7 +260,7 @@ export function MiniTimeline() {
             })}
           </ul>
         ) : (
-          <p className="text-[11px] text-ink-3">No voiceover or music yet.</p>
+          <p className="fs-11 text-ink-3">No voiceover or music yet.</p>
         )}
       </div>
 
@@ -276,15 +276,15 @@ function ClipEditor({ clip, asset, index, count }: { clip: TimelineClip; asset: 
   const dur = asset?.durationSec ?? Math.max(clip.outSec, 1);
   const pct = (v: number) => (dur ? (v / dur) * 100 : 0);
   return (
-    <div className="mt-3 rounded-[14px] border border-white/[0.08] bg-white/[0.02] p-3">
+    <div className="mt-3 r-14 border border-white/[0.08] bg-white/[0.02] p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+        <span className="min-w-0 flex-1 truncate fs-13 text-ink">
           #{index + 1} · {asset?.name ?? "missing asset"}
         </span>
-        <button onClick={() => editManifest((m) => snapClip(m, clip.id, "start"))} disabled={index === 0} className="pill-glass !h-7 !px-2 text-[11px] disabled:opacity-40" title="Snap to the start (slate)">
+        <button onClick={() => editManifest((m) => snapClip(m, clip.id, "start"))} disabled={index === 0} className="pill-glass !h-7 !px-2 fs-11 disabled:opacity-40" title="Snap to the start (slate)">
           <AlignStartHorizontal size={11} /> Start
         </button>
-        <button onClick={() => editManifest((m) => snapClip(m, clip.id, "end"))} disabled={index === count - 1} className="pill-glass !h-7 !px-2 text-[11px] disabled:opacity-40" title="Snap to the end (outro slate)">
+        <button onClick={() => editManifest((m) => snapClip(m, clip.id, "end"))} disabled={index === count - 1} className="pill-glass !h-7 !px-2 fs-11 disabled:opacity-40" title="Snap to the end (outro slate)">
           <AlignEndHorizontal size={11} /> End
         </button>
         <button
@@ -292,7 +292,7 @@ function ClipEditor({ clip, asset, index, count }: { clip: TimelineClip; asset: 
             editManifest((m) => removeClip(m, clip.id));
             select(null);
           }}
-          className="pill-glass !h-7 !px-2 text-[11px] hover:!border-alert/50"
+          className="pill-glass !h-7 !px-2 fs-11 hover:!border-alert/50"
         >
           <Trash2 size={11} /> Remove
         </button>
@@ -301,11 +301,11 @@ function ClipEditor({ clip, asset, index, count }: { clip: TimelineClip; asset: 
         <label className="flex items-center gap-2 text-xs text-ink-2">
           Hold
           <input type="range" min={STILL_MIN} max={STILL_MAX} step={0.1} value={clip.outSec} onChange={(e) => trim(0, Number(e.target.value))} className="flex-1 accent-amber" aria-label="Hold seconds" />
-          <input type="number" min={STILL_MIN} max={STILL_MAX} step={0.1} value={clip.outSec} onChange={(e) => trim(0, num(e.target.value))} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" aria-label="Hold seconds (number)" />s
+          <input type="number" min={STILL_MIN} max={STILL_MAX} step={0.1} value={clip.outSec} onChange={(e) => trim(0, num(e.target.value))} className="field !h-7 !w-20 !py-0 font-mono !fs-12" aria-label="Hold seconds (number)" />s
         </label>
       ) : (
         <>
-          <div className="relative h-10 overflow-hidden rounded-[8px] bg-white/[0.03]">
+          <div className="relative h-10 overflow-hidden r-8 bg-white/[0.03]">
             <div className="absolute inset-y-0 bg-teal/25" style={{ left: `${pct(clip.inSec)}%`, width: `${pct(clip.outSec - clip.inSec)}%` }} />
             <div className="pointer-events-none absolute inset-y-0 border-l-2 border-amber" style={{ left: `${pct(clip.inSec)}%` }} />
             <div className="pointer-events-none absolute inset-y-0 border-l-2 border-amber" style={{ left: `${pct(clip.outSec)}%` }} />
@@ -316,11 +316,11 @@ function ClipEditor({ clip, asset, index, count }: { clip: TimelineClip; asset: 
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-ink-2">
             <label className="flex items-center gap-1">
               In
-              <input type="number" min={0} max={dur} step={0.01} value={clip.inSec} onChange={(e) => trim(num(e.target.value), clip.outSec)} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" aria-label="In point (s)" />s
+              <input type="number" min={0} max={dur} step={0.01} value={clip.inSec} onChange={(e) => trim(num(e.target.value), clip.outSec)} className="field !h-7 !w-20 !py-0 font-mono !fs-12" aria-label="In point (s)" />s
             </label>
             <label className="flex items-center gap-1">
               Out
-              <input type="number" min={0} max={dur} step={0.01} value={clip.outSec} onChange={(e) => trim(clip.inSec, num(e.target.value))} className="field !h-7 !w-20 !py-0 font-mono !text-[12px]" aria-label="Out point (s)" />s
+              <input type="number" min={0} max={dur} step={0.01} value={clip.outSec} onChange={(e) => trim(clip.inSec, num(e.target.value))} className="field !h-7 !w-20 !py-0 font-mono !fs-12" aria-label="Out point (s)" />s
             </label>
             <span className="font-mono text-ink-3">
               {timecode(clip.inSec)} → {timecode(clip.outSec)} of {timecode(dur)}
@@ -341,7 +341,7 @@ function OutputSettings({ output }: { output: TimelineManifest["output"] }) {
   return (
     <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-3">
       <span className="label-caps text-ink-3">Output</span>
-      <Select value={output.aspect} onChange={(e) => editManifest((m) => setOutput(m, { aspect: e.target.value as TimelineManifest["output"]["aspect"] }))} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Aspect ratio">
+      <Select value={output.aspect} onChange={(e) => editManifest((m) => setOutput(m, { aspect: e.target.value as TimelineManifest["output"]["aspect"] }))} className="!h-8 !w-auto !py-0 fs-12" aria-label="Aspect ratio">
         {ASPECTS.map((a) => (
           <option key={a} value={a}>
             {a}
@@ -353,7 +353,7 @@ function OutputSettings({ output }: { output: TimelineManifest["output"] }) {
           {l} LUFS
         </Chip>
       ))}
-      <label className="flex items-center gap-1 text-[11px] text-ink-2">
+      <label className="flex items-center gap-1 fs-11 text-ink-2">
         ≤
         <input
           type="number"
@@ -362,7 +362,7 @@ function OutputSettings({ output }: { output: TimelineManifest["output"] }) {
           value={output.maxSizeMb ?? ""}
           placeholder="no cap"
           onChange={(e) => editManifest((m) => setOutput(m, { maxSizeMb: e.target.value.trim() === "" ? null : Number(e.target.value) }))}
-          className="field !h-8 !w-20 !py-0 font-mono !text-[12px]"
+          className="field !h-8 !w-20 !py-0 font-mono !fs-12"
           aria-label="Max size (MB)"
         />
         MB
@@ -383,7 +383,7 @@ function NameField({ name }: { name: string }) {
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => e.key === "Enter" && (e.currentTarget as HTMLInputElement).blur()}
-      className="field !h-8 !w-44 !py-0 font-mono !text-[12px]"
+      className="field !h-8 !w-44 !py-0 font-mono !fs-12"
       aria-label="Output name"
     />
   );

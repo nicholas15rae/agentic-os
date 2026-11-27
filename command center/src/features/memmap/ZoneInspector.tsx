@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { ExternalLink, X } from "lucide-react";
 import type { SystemSnapshot, TraceStep, TraceZone } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
@@ -23,6 +25,9 @@ export function ZoneInspector() {
   const zone = useZoneUi((s) => s.selected);
   const select = useZoneUi((s) => s.select);
   const close = useRef<HTMLButtonElement>(null);
+  // lg+: a drawer over its (relative) panel. Narrower: a bottom sheet, portaled to the body so no
+  // panel's scroller or zoom clips or shifts it.
+  const lg = useMediaQuery("(min-width: 1024px)");
 
   useEffect(() => {
     if (!zone) return;
@@ -35,10 +40,10 @@ export function ZoneInspector() {
   }, [zone]);
 
   if (!zone) return null;
-  return (
+  const drawer = (
     <aside
       aria-label={`${ZONE_TITLE[zone]} inspector`}
-      className="fixed inset-x-2 bottom-2 z-40 flex max-h-[78vh] flex-col rounded-[14px] border border-holo/30 bg-[rgba(5,9,14,0.97)] shadow-[0_0_32px_-10px_rgba(0,210,255,0.55)] lg:absolute lg:inset-0 lg:z-20 lg:max-h-none"
+      className={`flex flex-col r-14 border border-holo/30 bg-[rgba(5,9,14,0.97)] shadow-[0_0_32px_-10px_rgba(0,210,255,0.55)] ${lg ? "absolute inset-0 z-20" : "fixed inset-x-2 bottom-2 z-40 max-h-[78vh]"}`}
     >
       <header className="flex min-h-9 items-center gap-2 border-b border-holo/15 px-3 py-2">
         <h2 className="label-caps min-w-0 flex-1 truncate text-holo" title={ZONE_TITLE[zone]}>
@@ -55,18 +60,19 @@ export function ZoneInspector() {
             type="button"
             onClick={() => z !== zone && select(z)}
             aria-current={z === zone ? "true" : undefined}
-            className={`label-caps rounded-full border px-2 py-0.5 !text-[9px] ${z === zone ? "border-ember/50 bg-ember/10 text-ember" : "border-white/10 text-ink-3 hover:text-holo"}`}
+            className={`label-caps rounded-full border px-2 py-0.5 !fs-9 ${z === zone ? "border-ember/50 bg-ember/10 text-ember" : "border-white/10 text-ink-3 hover:text-holo"}`}
           >
             {ZONE_SHORT[z]}
           </button>
         ))}
       </nav>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 font-mono text-[10.5px]">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 font-mono fs-10.5">
         <ZoneBody zone={zone} />
         <RecentSteps zone={zone} />
       </div>
     </aside>
   );
+  return lg || typeof document === "undefined" ? drawer : createPortal(drawer, document.body);
 }
 
 function ZoneBody({ zone }: { zone: TraceZone }) {
@@ -92,7 +98,7 @@ function Sub({ title, children, aside }: { title: string; children: ReactNode; a
   return (
     <section className="space-y-1">
       <div className="flex items-center gap-2">
-        <h3 className="label-caps !text-[9px] text-holo/80">{title}</h3>
+        <h3 className="label-caps !fs-9 text-holo/80">{title}</h3>
         {aside && <div className="ml-auto flex items-center gap-1.5">{aside}</div>}
       </div>
       {children}
@@ -226,7 +232,7 @@ function EcuZone({ snap, why }: { snap: SystemSnapshot | null; why: string }) {
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search skills or agents…"
           aria-label="Search skills"
-          className="h-7 w-full rounded-md border border-holo/20 bg-black/30 px-2 text-[11px] text-ink outline-none placeholder:text-ink-3 focus:border-holo/50"
+          className="h-7 w-full rounded-md border border-holo/20 bg-black/30 px-2 fs-11 text-ink outline-none placeholder:text-ink-3 focus:border-holo/50"
         />
         <ul className="max-h-[220px] space-y-0.5 overflow-y-auto pr-1">
           {skills.slice(0, 80).map((s) => (
@@ -300,7 +306,7 @@ function CargoZone({ snap, why }: { snap: SystemSnapshot | null; why: string }) 
     <>
       <Sub title="Stores">
         <table className="w-full table-fixed text-left">
-          <thead className="label-caps !text-[8.5px] text-ink-3">
+          <thead className="label-caps !fs-8.5 text-ink-3">
             <tr>
               <th className="w-[38%] pb-1 font-normal">Store</th>
               <th className="pb-1 font-normal">Health</th>
@@ -407,7 +413,7 @@ function ExhaustZone({ snap, why }: { snap: SystemSnapshot | null; why: string }
     <Sub
       title={`Bus (${bus.filter((b) => b.status === "ok").length}/${bus.length} connected)`}
       aside={
-        <button type="button" onClick={() => openSettings(go)} className="label-caps flex items-center gap-1 !text-[9px] text-holo hover:text-ink">
+        <button type="button" onClick={() => openSettings(go)} className="label-caps flex items-center gap-1 !fs-9 text-holo hover:text-ink">
           Open in Settings <ExternalLink size={9} />
         </button>
       }
@@ -436,7 +442,7 @@ function ExhaustZone({ snap, why }: { snap: SystemSnapshot | null; why: string }
             </div>
             {(b.error || (b.lastOk === false && b.lastError)) && <p className="mt-0.5 line-clamp-2 text-alert/90">{b.error ?? b.lastError}</p>}
             {busNeedsFix(b.status) && (
-              <button type="button" onClick={() => openSettings(go)} className="label-caps mt-0.5 flex items-center gap-1 !text-[9px] text-ember hover:text-ink">
+              <button type="button" onClick={() => openSettings(go)} className="label-caps mt-0.5 flex items-center gap-1 !fs-9 text-ember hover:text-ink">
                 Fix in Settings <ExternalLink size={9} />
               </button>
             )}

@@ -100,13 +100,13 @@ export function CompareView(p: CompareProps) {
     />
   );
   const tag = (s: Side, which: "a" | "b") => (
-    <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-black/60 px-2 py-0.5 font-mono text-[11px] text-ink">
+    <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-black/60 px-2 py-0.5 font-mono fs-11 text-ink">
       {which.toUpperCase()} · {s.label}
     </span>
   );
 
   return (
-    <section className="@container glass rounded-[20px] p-4" aria-label="Compare versions">
+    <section className="@container glass r-20 p-4" aria-label="Compare versions">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <SubTabs
           tabs={[
@@ -116,7 +116,7 @@ export function CompareView(p: CompareProps) {
           value={p.mode}
           onChange={p.onMode}
         />
-        <span className="font-mono text-[11px] text-ink-3">
+        <span className="font-mono fs-11 text-ink-3">
           {p.a.label} vs {p.b.label}
         </span>
         <button onClick={p.onClose} className="pill-glass ml-auto !h-8 !px-3 text-xs" title="Back to the preview">
@@ -125,23 +125,23 @@ export function CompareView(p: CompareProps) {
       </div>
       {p.mode === "side" ? (
         <div className="grid gap-2 @xl:grid-cols-2">
-          <div className="relative aspect-video overflow-hidden rounded-[14px] bg-black">
+          <div className="relative aspect-video overflow-hidden r-14 bg-black">
             {video(p.a, "a")}
             {tag(p.a, "a")}
           </div>
-          <div className="relative aspect-video overflow-hidden rounded-[14px] bg-black">
+          <div className="relative aspect-video overflow-hidden r-14 bg-black">
             {video(p.b, "b")}
             {tag(p.b, "b")}
           </div>
         </div>
       ) : (
-        <div className="relative aspect-video overflow-hidden rounded-[14px] bg-black" style={wipeStyle}>
+        <div className="relative aspect-video overflow-hidden r-14 bg-black" style={wipeStyle}>
           {video(p.a, "a")}
           <div className="absolute inset-0" style={{ clipPath: "inset(0 0 0 calc(var(--wipe) * 100%))" }}>
             {video(p.b, "b")}
           </div>
           {tag(p.a, "a")}
-          <span className="pointer-events-none absolute right-2 top-2 rounded-full bg-black/60 px-2 py-0.5 font-mono text-[11px] text-ink">B · {p.b.label}</span>
+          <span className="pointer-events-none absolute right-2 top-2 rounded-full bg-black/60 px-2 py-0.5 font-mono fs-11 text-ink">B · {p.b.label}</span>
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -162,7 +162,7 @@ export function CompareView(p: CompareProps) {
           className="min-w-0 flex-1 accent-amber"
           aria-label="Seek both"
         />
-        <span className="shrink-0 font-mono text-[11px] tabular text-ink-2">
+        <span className="shrink-0 font-mono fs-11 tabular text-ink-2">
           {timecode(t)} / {timecode(dur)}
         </span>
         <SubTabs
@@ -175,13 +175,13 @@ export function CompareView(p: CompareProps) {
         />
       </div>
       {p.mode === "wipe" && (
-        <label className="mt-2 flex items-center gap-2 text-[11px] text-ink-2">
+        <label className="mt-2 flex items-center gap-2 fs-11 text-ink-2">
           <span className="label-caps shrink-0">Wipe</span>
           <input type="range" min={0} max={1} step={0.01} value={p.wipe} onChange={(e) => p.onWipe(Number(e.target.value))} className="min-w-0 flex-1 accent-violet" aria-label="Wipe position" />
         </label>
       )}
       {p.diff && (
-        <div className="well mt-3 rounded-[12px] p-2.5 text-[12px]">
+        <div className="well mt-3 r-12 p-2.5 fs-12">
           <p className="label-caps mb-1">
             {p.a.label} → {p.b.label}
           </p>

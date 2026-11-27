@@ -48,7 +48,7 @@ export function IbkrBarsChart({ symbol, interval, range, height = 440 }: { symbo
 
   return (
     <div style={{ height }} className="flex flex-col" data-testid="ibkr-bars-chart">
-      <p className="flex h-[22px] items-center gap-1.5 truncate px-1 text-[11px] text-ink-3" style={{ height: statusH }}>
+      <p className="flex h-[22px] items-center gap-1.5 truncate px-1 fs-11 text-ink-3" style={{ height: statusH }}>
         {loading && <Loader2 size={11} className="animate-spin" />}
         {data?.ok
           ? `${candles.length} bars · ${data.barSize ?? interval} over ${data.duration ?? range}${data.currency && data.currency !== "USD" ? ` · ${data.currency}` : ""} · IBKR paper (TWS) · ${new Date((data.fetchedAt ?? Date.now() / 1000) * 1000).toLocaleTimeString()}`

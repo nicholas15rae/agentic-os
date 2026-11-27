@@ -41,7 +41,7 @@ import {
 } from "./phonebook";
 import { usePhoneBook, usePhoneBookLoaded } from "./phonebook-store";
 
-const small = "!h-9 !py-1 text-[13px]";
+const small = "!h-9 !py-1 fs-13";
 const toastErr = (title: string, e: unknown) => useToasts.getState().push({ title, body: e instanceof Error ? e.message : String(e), tone: "error" });
 
 /** Ask the phone bridge to dial — behind the confirmation card. */
@@ -111,7 +111,7 @@ export function PhoneBook() {
             }}
           />
         </div>
-        <p className="mt-2 text-[11px] text-ink-3">
+        <p className="mt-2 fs-11 text-ink-3">
           Importing straight from the phone isn&apos;t possible yet: the phone bridge only pushes texts and calls. On the phone, open Contacts → Share / Export → .vcf, then import that file here.
         </p>
         {error && <p className="mt-2 text-xs text-alert">{error}</p>}
@@ -160,7 +160,7 @@ export function PhoneBook() {
                 <li key={u.address} className="flex items-center gap-2 py-1.5 text-sm">
                   <span className="min-w-0 flex-1 truncate text-ink">{u.name || u.address}</span>
                   {u.trusted && <ShieldCheck size={11} className="text-teal" aria-label="Instant Send" />}
-                  <span className="font-mono text-[11px] text-ink-3">{u.address}</span>
+                  <span className="font-mono fs-11 text-ink-3">{u.address}</span>
                   <button className="pill-glass !h-8 text-xs" onClick={() => setEditing({ ...emptyDraft(), name: u.name && u.name !== u.address ? u.name : "", phones: [{ label: "mobile", number: u.address }], source: "bridge" })}>
                     <UserPlus size={12} /> File
                   </button>
@@ -194,7 +194,7 @@ function ContactRow({ c, onEdit }: { c: Contact; onEdit: () => void }) {
               {c.name}
               {c.trusted && <ShieldCheck size={11} className="ml-1 inline text-teal" aria-label="Instant Send" />}
             </span>
-            <span className="block truncate text-[11px] text-ink-3">{[c.company, c.role, agency ? `agency: ${agency.name}` : ""].filter(Boolean).join(" · ") || " "}</span>
+            <span className="block truncate fs-11 text-ink-3">{[c.company, c.role, agency ? `agency: ${agency.name}` : ""].filter(Boolean).join(" · ") || " "}</span>
           </span>
         </button>
         {c.phones[0] && (
@@ -211,12 +211,12 @@ function ContactRow({ c, onEdit }: { c: Contact; onEdit: () => void }) {
           <Pencil size={12} />
         </button>
         {confirmDel ? (
-          <span className="flex items-center gap-1 text-[11px]">
+          <span className="flex items-center gap-1 fs-11">
             Delete? Linked records keep their link.
-            <button className="pill-glass !h-7 text-[11px] !text-alert" onClick={() => void usePhoneBook.getState().remove(c.id).catch((e) => toastErr("Not deleted", e))}>
+            <button className="pill-glass !h-7 fs-11 !text-alert" onClick={() => void usePhoneBook.getState().remove(c.id).catch((e) => toastErr("Not deleted", e))}>
               Delete
             </button>
-            <button className="pill-glass !h-7 text-[11px]" onClick={() => setConfirmDel(false)}>
+            <button className="pill-glass !h-7 fs-11" onClick={() => setConfirmDel(false)}>
               Keep
             </button>
           </span>
@@ -227,19 +227,19 @@ function ContactRow({ c, onEdit }: { c: Contact; onEdit: () => void }) {
         )}
       </div>
       {open && (
-        <div className="mt-2 space-y-1.5 pl-6 text-[13px]">
+        <div className="mt-2 space-y-1.5 pl-6 fs-13">
           {c.phones.map((p) => (
             <div key={p.number} className="flex flex-wrap items-center gap-2">
-              <span className="w-16 shrink-0 text-[11px] text-ink-3">{p.label || "phone"}</span>
+              <span className="w-16 shrink-0 fs-11 text-ink-3">{p.label || "phone"}</span>
               <a href={telHref(p.number)} className="font-mono text-ink hover:text-teal">
                 {p.number}
               </a>
               {desktop && (
-                <button className="pill-glass !h-7 text-[11px]" onClick={() => void callViaBridge(p.number, c.name)} title="Ask the phone bridge to dial (confirmation first)">
+                <button className="pill-glass !h-7 fs-11" onClick={() => void callViaBridge(p.number, c.name)} title="Ask the phone bridge to dial (confirmation first)">
                   <PhoneCall size={11} /> via phone
                 </button>
               )}
-              <button className="pill-glass !h-7 text-[11px]" onClick={() => setTexting(texting === p.number ? null : p.number)} title="Text through the phone bridge (confirmation first)">
+              <button className="pill-glass !h-7 fs-11" onClick={() => setTexting(texting === p.number ? null : p.number)} title="Text through the phone bridge (confirmation first)">
                 <MessageSquare size={11} /> Text
               </button>
             </div>
@@ -247,20 +247,20 @@ function ContactRow({ c, onEdit }: { c: Contact; onEdit: () => void }) {
           {texting && <TextComposer to={texting} contact={c} onDone={() => setTexting(null)} />}
           {c.emails.map((e) => (
             <div key={e.address} className="flex flex-wrap items-center gap-2">
-              <span className="w-16 shrink-0 text-[11px] text-ink-3">{e.label || "email"}</span>
+              <span className="w-16 shrink-0 fs-11 text-ink-3">{e.label || "email"}</span>
               <a href={mailtoHref(e.address)} className="break-all text-ink hover:text-teal">
                 {e.address}
               </a>
               {desktop && (
-                <button className="pill-glass !h-7 text-[11px]" onClick={() => setDrafting(drafting === e.address ? null : e.address)} title="Write a Gmail draft (you review it; nothing is sent)">
+                <button className="pill-glass !h-7 fs-11" onClick={() => setDrafting(drafting === e.address ? null : e.address)} title="Write a Gmail draft (you review it; nothing is sent)">
                   <Mail size={11} /> Gmail draft
                 </button>
               )}
             </div>
           ))}
           {drafting && <GmailDraft to={drafting} contact={c} onDone={() => setDrafting(null)} />}
-          {c.notes && <p className="whitespace-pre-wrap break-words text-[12px] text-ink-2">{c.notes}</p>}
-          {!c.phones.length && !c.emails.length && <p className="text-[12px] text-ink-3">No number or email yet.</p>}
+          {c.notes && <p className="whitespace-pre-wrap break-words fs-12 text-ink-2">{c.notes}</p>}
+          {!c.phones.length && !c.emails.length && <p className="fs-12 text-ink-3">No number or email yet.</p>}
         </div>
       )}
     </li>
@@ -307,10 +307,10 @@ function GmailDraft({ to, contact, onDone }: { to: string; contact: Contact; onD
   const [body, setBody] = useState(`Hi ${contact.name.split(" ")[0] || contact.name},\n\n`);
   const [state, setState] = useState<"idle" | "working">("idle");
   return (
-    <div className="well space-y-2 rounded-[12px] p-2">
-      <p className="text-[11px] text-ink-3">Gmail draft to {to}. Nothing is sent: open Gmail and press Send yourself.</p>
+    <div className="well space-y-2 r-12 p-2">
+      <p className="fs-11 text-ink-3">Gmail draft to {to}. Nothing is sent: open Gmail and press Send yourself.</p>
       <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" aria-label="Subject" />
-      <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={5} className="field w-full text-[13px]" aria-label="Message" />
+      <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={5} className="field w-full fs-13" aria-label="Message" />
       <div className="flex gap-2">
         <button
           className="pill-primary !h-9 text-xs"
@@ -415,7 +415,7 @@ function ContactEditor({ initial, contacts, onClose }: { initial: ContactDraft; 
             </div>
           ))}
           {d.phones.length < 10 && (
-            <button type="button" className="pill-glass !h-8 text-[11px]" onClick={() => setD({ ...d, phones: [...d.phones, { label: "mobile", number: "" }] })}>
+            <button type="button" className="pill-glass !h-8 fs-11" onClick={() => setD({ ...d, phones: [...d.phones, { label: "mobile", number: "" }] })}>
               <Plus size={11} /> Phone
             </button>
           )}
@@ -433,14 +433,14 @@ function ContactEditor({ initial, contacts, onClose }: { initial: ContactDraft; 
             </div>
           ))}
           {d.emails.length < 10 && (
-            <button type="button" className="pill-glass !h-8 text-[11px]" onClick={() => setD({ ...d, emails: [...d.emails, { label: "work", address: "" }] })}>
+            <button type="button" className="pill-glass !h-8 fs-11" onClick={() => setD({ ...d, emails: [...d.emails, { label: "work", address: "" }] })}>
               <Plus size={11} /> Email
             </button>
           )}
         </div>
 
         <Field label="Notes">
-          <textarea value={d.notes} onChange={(e) => setD({ ...d, notes: e.target.value })} rows={3} className="field w-full text-[13px]" />
+          <textarea value={d.notes} onChange={(e) => setD({ ...d, notes: e.target.value })} rows={3} className="field w-full fs-13" />
         </Field>
         {problem && <p className="text-xs text-amber-light">{problem}</p>}
         <div className="flex gap-2">
@@ -473,21 +473,21 @@ function ImportPicker({ candidates, onClose }: { candidates: ImportCandidate[]; 
         </button>
       }
     >
-      <div className="mb-2 flex gap-2 text-[11px]">
-        <button className="pill-glass !h-7 text-[11px]" onClick={() => setPicked(candidates.map((c) => !c.duplicate))}>
+      <div className="mb-2 flex gap-2 fs-11">
+        <button className="pill-glass !h-7 fs-11" onClick={() => setPicked(candidates.map((c) => !c.duplicate))}>
           All new
         </button>
-        <button className="pill-glass !h-7 text-[11px]" onClick={() => setPicked(candidates.map(() => false))}>
+        <button className="pill-glass !h-7 fs-11" onClick={() => setPicked(candidates.map(() => false))}>
           None
         </button>
       </div>
       <ul className="max-h-[50vh] divide-y divide-white/5 overflow-y-auto">
         {candidates.map((c, i) => (
-          <li key={i} className="flex items-center gap-2 py-1.5 text-[13px]">
+          <li key={i} className="flex items-center gap-2 py-1.5 fs-13">
             <input type="checkbox" className="accent-teal" checked={picked[i]} disabled={c.duplicate?.kind === "empty"} onChange={(e) => setPicked(picked.map((p, j) => (j === i ? e.target.checked : p)))} aria-label={`Import ${c.draft.name}`} />
             <span className="min-w-0 flex-1 truncate text-ink">{contactLabel(c.draft)}</span>
-            <span className="truncate font-mono text-[11px] text-ink-3">{c.draft.phones[0]?.number ?? c.draft.emails[0]?.address ?? ""}</span>
-            {c.duplicate && <span className="shrink-0 text-[11px] text-amber-light">{why(c)}</span>}
+            <span className="truncate font-mono fs-11 text-ink-3">{c.draft.phones[0]?.number ?? c.draft.emails[0]?.address ?? ""}</span>
+            {c.duplicate && <span className="shrink-0 fs-11 text-amber-light">{why(c)}</span>}
           </li>
         ))}
       </ul>

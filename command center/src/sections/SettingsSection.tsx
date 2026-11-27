@@ -21,14 +21,18 @@ import { RoutingSettings } from "./settings/RoutingSettings";
 import { ModesManagerCard } from "./settings/ModesManager";
 import { SwitchboardCard } from "./settings/SwitchboardSettings";
 import { ClockCard, EffectsCard } from "./settings/ClockEffectsSettings";
+import { useSettingsTab } from "./settings/settings-tab-store";
+import { useSettingsLayout } from "./settings/panels";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { panelShown, revealPanel } from "@/core/widgets/reveal";
 import { GmailInboxCard } from "./settings/CommsSettings";
-import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
+import { AppearanceStudio } from "./settings/AppearanceStudio";
 import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
 import { SecurityCard } from "@/features/security/SecurityCard";
 
-type Tab = "services" | "voice" | "modes" | "comms" | "integrations" | "business" | "appearance" | "security";
-const TABS: { id: Tab; label: string }[] = [
+export type Tab = "services" | "voice" | "modes" | "comms" | "integrations" | "business" | "appearance" | "security";
+export const TABS: { id: Tab; label: string }[] = [
   { id: "services", label: "Services" },
   { id: "voice", label: "Voice & Triggers" },
   { id: "modes", label: "Modes & Switchboard" },
@@ -39,36 +43,42 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "security", label: "Security" },
 ];
 
+/**
+ * Settings on the shared layout system: the tab bar and the open tab's cards are two panels
+ * (move, resize, hide, add back, per mode, Reset). The tab is shared state (settings-tab-store),
+ * so a deep link ("Manage modes…", the shield pill) switches it and shows the content panel.
+ */
 export function SettingsSection() {
-  const [tab, setTab] = useState<Tab>(() => (sessionStorageGet(SETTINGS_TAB_KEY) as Tab) || "services");
-  const go = (t: Tab) => {
-    setTab(t);
-    try {
-      sessionStorage.setItem(SETTINGS_TAB_KEY, t);
-    } catch {
-      /* private mode */
-    }
-  };
-  // A deep link ("Manage modes…", the shield pill) while Settings is already mounted.
+  const tab = useSettingsTab((s) => s.tab);
   useEffect(() => {
-    const on = (e: Event) => {
-      const t = (e as CustomEvent<unknown>).detail;
-      if (TABS.some((x) => x.id === t)) setTab(t as Tab);
-    };
-    window.addEventListener(SETTINGS_TAB_EVENT, on);
-    return () => window.removeEventListener(SETTINGS_TAB_EVENT, on);
-  }, []);
+    if (!panelShown(useSettingsLayout.getState(), "st-content")) revealPanel(useSettingsLayout, "st-content", "Settings");
+  }, [tab]);
+  return <LayoutSurface store={useSettingsLayout} label="Settings" />;
+}
+
+/** The Settings tabs and the read-only banner. */
+export function SettingsTabBar() {
+  const tab = useSettingsTab((s) => s.tab);
+  const go = useSettingsTab((s) => s.set);
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <SubTabs tabs={TABS} value={tab} onChange={go} />
+      <span className="ml-auto">
+        <ReadOnlyBanner module="settings" />
+      </span>
+    </div>
+  );
+}
+
+/** The open tab's cards. */
+export function SettingsContent() {
+  const tab = useSettingsTab((s) => s.tab) as Tab;
+  const go = useSettingsTab((s) => s.set);
   // The desktop app only: the Android app is Tauri too, but its Rust side runs on the phone, so these
   // cards' buttons would probe the phone ("all providers failed", "could not start python").
   const desktop = isDesktopApp();
   return (
-    <div className="mx-auto h-full w-full max-w-4xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <div className="flex flex-wrap items-center gap-3">
-        <SubTabs tabs={TABS} value={tab} onChange={go} />
-        <span className="ml-auto">
-          <ReadOnlyBanner module="settings" />
-        </span>
-      </div>
+    <div className="space-y-4">
       {tab === "security" && <SecurityCard />}
       {tab === "services" && (
         <>
@@ -158,6 +168,7 @@ export function SettingsSection() {
       {tab === "business" && <BusinessProfilesSettings />}
       {tab === "appearance" && (
         <>
+          <AppearanceStudio />
           <Card title="Ultra glass" hint="Opacity of every widget in Ultra-glass mode. 0–5 % is a crystal-clear floating HUD over the wallpaper.">
             <GlassOpacitySlider />
           </Card>
@@ -172,14 +183,6 @@ export function SettingsSection() {
     </div>
   );
 }
-
-const sessionStorageGet = (k: string) => {
-  try {
-    return sessionStorage.getItem(k);
-  } catch {
-    return null;
-  }
-};
 
 function DesktopOnly({ what }: { what: string }) {
   return (
@@ -230,7 +233,7 @@ function CalmCard() {
   const set = useSettings((s) => s.set);
   return (
     <Card title="Calm when idle" hint="Pause the wallpaper drift, weather, pulses and spinners while this window is unfocused or untouched for a minute. Every frame here is drawn on the same GPU as speech-to-text and the local model. Voice feedback keeps moving at a lower frame rate.">
-      <label className="flex items-center gap-3 text-[13px] text-ink-2">
+      <label className="flex items-center gap-3 fs-13 text-ink-2">
         <input type="checkbox" checked={on} onChange={(e) => set({ calmWhenIdle: e.target.checked })} className="accent-teal" />
         Pause ambient motion when idle
       </label>
@@ -243,7 +246,7 @@ function WaveCard() {
   return (
     <Card title="Voice waveform & orb" hint="Colour ramp and stroke weight for the waveform and the floating orb.">
       <div className="mb-3 flex items-center gap-4">
-        <div className="well flex-1 rounded-[14px] px-3">
+        <div className="well flex-1 r-14 px-3">
           <Waveform state="speaking" height={72} />
         </div>
         <div className="grid size-24 shrink-0 place-items-center">

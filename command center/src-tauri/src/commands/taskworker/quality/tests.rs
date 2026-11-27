@@ -1950,3 +1950,113 @@ fn a_dispute_line_always_says_what_is_now_expected() {
     let b = dispute_line(crit, now, &format!("{before} {}", "z".repeat(200)));
     assert!(b.chars().count() <= DISPUTE_LINE && b.ends_with('\u{2026}') && b.contains("≈37"), "{b}");
 }
+
+/// Widget builder, end to end on the checking side: the fortune cookie's five brief points as the
+/// verifier probes them in a real headless Edge. A page that does all five passes all five; a page
+/// that keeps 6 history entries and shows 5 lucky numbers fails exactly those two. The page uses
+/// the style kit (variables + the cc-theme listener) like a generated dashboard widget must.
+#[test]
+fn the_fortune_cookie_brief_is_checked_point_by_point_in_a_real_browser() {
+    let Some(dir) = edge_dir("fortune") else { return };
+    let page = |keep: usize, lucky: usize| {
+        format!(
+            r#"<!doctype html><html><head><meta charset="utf-8"><title>Fortune cookie</title>
+<style>:root{{--cc-accent:#ff7a2f;--cc-accent-2:#00e5c3;--cc-card:rgba(24,28,38,.62);--cc-text:#f8fafc;--cc-text-2:#a1a8b8;--cc-text-3:#5a6275;--cc-radius:20px;--cc-font:ui-sans-serif,system-ui,sans-serif;--cc-font-scale:1;--cc-border:rgba(255,255,255,.16)}}
+body{{background:transparent;color:var(--cc-text);font-family:var(--cc-font)}} .cracked{{transform:rotate(8deg)}} button{{background:var(--cc-accent);border-radius:var(--cc-radius)}}</style>
+<script>addEventListener('message',function(e){{var d=e.data;if(d&&d.type==='cc-theme'&&d.vars)for(var k in d.vars)if(k.indexOf('--cc-')===0)document.documentElement.style.setProperty(k,String(d.vars[k]));}});</script>
+</head><body>
+<button id="cookie" aria-label="Fortune cookie">🥠</button>
+<p id="fortune"></p><div id="lucky"></div>
+<button id="new">New fortune</button>
+<ol id="history"></ol>
+<script>
+var F=["A fresh start will put you on your way.","Your hard work will soon pay off.","Adventure awaits you this week.","A friend asks only for your time.","Good news will come to you by mail."];
+var hist=[];
+function tell(){{
+  var f=F[Math.floor(Math.random()*F.length)];
+  document.getElementById('fortune').textContent=f;
+  var n=[];while(n.length<{lucky}){{var x=1+Math.floor(Math.random()*49);if(n.indexOf(x)<0)n.push(x);}}
+  document.getElementById('lucky').innerHTML=n.map(function(x){{return '<span>'+x+'</span>';}}).join(' ');
+  hist.unshift(f);hist=hist.slice(0,{keep});
+  document.getElementById('history').innerHTML=hist.map(function(h){{var li=document.createElement('li');li.textContent=h;return li.outerHTML;}}).join('');
+}}
+document.getElementById('cookie').addEventListener('click',function(){{this.classList.add('cracked');tell();}});
+document.getElementById('new').addEventListener('click',tell);
+</script></body></html>"#
+        )
+    };
+    let probes = || {
+        vec![
+            probe(0, json!([{ "op": "click", "sel": "#cookie" }, { "op": "expect_class", "sel": "#cookie", "class": "cracked", "present": true }])),
+            probe(1, json!([{ "op": "click", "sel": "#cookie" }, { "op": "expect_count", "sel": "#fortune:not(:empty)", "count": 1 }])),
+            probe(2, json!([{ "op": "click", "sel": "#cookie" }, { "op": "click", "sel": "#new" }, { "op": "expect_count", "sel": "#history li", "count": 2 }])),
+            probe(3, json!([{ "op": "click", "sel": "#cookie" }, { "op": "click", "sel": "#new" }, { "op": "click", "sel": "#new" }, { "op": "click", "sel": "#new" }, { "op": "click", "sel": "#new" }, { "op": "click", "sel": "#new" }, { "op": "click", "sel": "#new" }, { "op": "expect_count", "sel": "#history li", "count": 5 }])),
+            probe(4, json!([{ "op": "click", "sel": "#cookie" }, { "op": "expect_count", "sel": "#lucky span", "count": 6 }])),
+        ]
+    };
+    let good = dir.join("good.html");
+    std::fs::write(&good, page(5, 6)).unwrap();
+    let ProbeRun::Ran(r) = run_probes(&good, &probes(), Duration::from_secs(20), Duration::from_secs(240)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert!(r.iter().all(|x| x.passed), "every point of a correct cookie passes: {d:?}");
+    let bad = dir.join("bad.html");
+    std::fs::write(&bad, page(6, 5)).unwrap();
+    let ProbeRun::Ran(r) = run_probes(&bad, &probes(), Duration::from_secs(20), Duration::from_secs(240)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert!(r[0].passed && r[1].passed && r[2].passed, "{d:?}");
+    assert!(!r[3].passed && !r[3].error, "history kept 6, not the last 5: {d:?}");
+    assert!(!r[4].passed && !r[4].error, "5 lucky numbers, not 6: {d:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Live fortune-cookie run (11-27): the Coder drew the cookie as an SVG `<path>`, and every click
+/// probe on it was reported as "the page hung or navigated away" — SVG elements have no
+/// `.click()`. The harness now dispatches a real click event on them.
+#[test]
+fn a_click_probe_works_on_an_svg_shape() {
+    let Some(dir) = edge_dir("svgclick") else { return };
+    let page = dir.join("page.html");
+    std::fs::write(&page, r##"<!doctype html><html><head><title>t</title></head><body>
+<svg width="200" height="100"><path id="cookie-shape" d="M10,70 Q10,10 100,20 Q190,10 190,70 Z" fill="#c90"/></svg>
+<p id="fortune"></p><ol id="history"></ol>
+<script>
+document.getElementById('cookie-shape').addEventListener('click',function(){document.getElementById('fortune').textContent='Adventure awaits';var li=document.createElement('li');li.textContent='x';document.getElementById('history').appendChild(li)});
+</script></body></html>"##).unwrap();
+    let probes = vec![
+        probe(0, json!([{ "op": "click", "sel": "#cookie-shape" }, { "op": "expect_count", "sel": "#history li", "count": 1 }])),
+        probe(1, json!([{ "op": "click", "sel": "#cookie-shape" }, { "op": "expect_text", "sel": "#fortune", "contains": "Adventure" }])),
+    ];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(120)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert!(r.iter().all(|x| x.passed), "a click on an SVG shape is a real click: {d:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Live fortune-cookie run (11-27), "the animation didn't fully render": the crack set
+/// `clip-path` to raw SVG path syntax, which the browser silently ignores, on a click of an SVG
+/// shape (no button). The smoke now clicks elements that took a click listener and names any
+/// style value the browser rejects; a valid clip-path stays clean.
+#[test]
+fn the_smoke_names_a_style_value_the_browser_ignores() {
+    let Some(dir) = edge_dir("cssignored") else { return };
+    let page = |clip: &str| {
+        format!(
+            r##"<!doctype html><html><head><title>t</title></head><body>
+<svg width="200" height="100"><path id="cookie-shape" d="M10,70 Q10,10 100,20 Q190,10 190,70 Z" fill="#c90"/></svg>
+<script>
+document.getElementById('cookie-shape').addEventListener('click',function(){{var s=this;setTimeout(function(){{s.style.clipPath="{clip}";s.style.opacity=1}},60)}});
+</script></body></html>"##
+        )
+    };
+    let broken = dir.join("broken.html");
+    std::fs::write(&broken, page("M0,70 L42,38 L56,70")).unwrap();
+    let good = dir.join("good.html");
+    std::fs::write(&good, page("polygon(0 0, 100% 0, 50% 100%)")).unwrap();
+    let t = Duration::from_secs(30);
+    match runtime_smoke(&broken, t) {
+        Smoke::Ran { errors, .. } => assert!(errors.iter().any(|e| e.starts_with(CSS_IGNORED) && e.contains("clip-path") && e.contains("M0,70")), "{errors:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(runtime_smoke(&good, t), Smoke::Ran { errors, .. } if errors.is_empty()), "a valid clip-path (and a numeric opacity) is fine");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -116,7 +116,7 @@ function useNetTelemetry(): { net: NetTelemetry | null; error: string | null; do
 }
 
 const Row = ({ k, v, tone }: { k: string; v: React.ReactNode; tone?: string }) => (
-  <div className="flex items-center justify-between gap-3 text-[11.5px]">
+  <div className="flex items-center justify-between gap-3 fs-11.5">
     <span className="text-ink-3">{k}</span>
     <span className={`font-mono ${tone ?? "text-ink-2"}`}>{v}</span>
   </div>
@@ -180,7 +180,7 @@ export function GatewayPopover({ anchor, health, onClose, onReset }: { anchor: R
       ref={panel}
       role="dialog"
       aria-label="Gateway and network"
-      className="fixed z-[9999] w-[300px] rounded-[16px] border border-white/10 bg-[rgba(6,8,12,0.96)] p-3 text-xs shadow-[0_18px_50px_rgba(0,0,0,0.6)]"
+      className="fixed z-[9999] w-[300px] r-16 border border-white/10 bg-[rgba(6,8,12,0.96)] p-3 text-xs shadow-[0_18px_50px_rgba(0,0,0,0.6)]"
       style={{ left: pos.left, bottom: pos.bottom }}
     >
       <div className="mb-2 flex items-center">
@@ -190,25 +190,25 @@ export function GatewayPopover({ anchor, health, onClose, onReset }: { anchor: R
         </button>
       </div>
 
-      <section className="space-y-1 rounded-[12px] border border-white/[0.07] bg-white/[0.02] p-2.5">
+      <section className="space-y-1 r-12 border border-white/[0.07] bg-white/[0.02] p-2.5">
         <p className="label-caps mb-1 flex items-center gap-1.5 text-ink-3">
           <Server size={11} /> Local gateway
         </p>
         <Row k="Status" v={v.label} tone={toneCls} />
         <Row k="Loopback latency" v={health.latencyMs != null ? `${health.latencyMs} ms` : "—"} />
         <Row k="Endpoint" v={endpoint} />
-        {health.detail && health.state !== "online" && <p className="text-[10.5px] text-ink-3">{health.detail}</p>}
-        <button type="button" onClick={onReset} disabled={health.reconnecting} className={`${v.alarm ? "pill-primary" : "pill-glass"} mt-1.5 !h-8 w-full justify-center text-[11px]`}>
+        {health.detail && health.state !== "online" && <p className="fs-10.5 text-ink-3">{health.detail}</p>}
+        <button type="button" onClick={onReset} disabled={health.reconnecting} className={`${v.alarm ? "pill-primary" : "pill-glass"} mt-1.5 !h-8 w-full justify-center fs-11`}>
           {health.reconnecting ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />} Reconnect / Refresh
         </button>
       </section>
 
-      <section className="mt-2 space-y-1 rounded-[12px] border border-white/[0.07] bg-white/[0.02] p-2.5">
+      <section className="mt-2 space-y-1 r-12 border border-white/[0.07] bg-white/[0.02] p-2.5">
         <p className="label-caps mb-1 flex items-center gap-1.5 text-ink-3">
           <Globe size={11} /> Internet
         </p>
         {!isTauri() ? (
-          <p className="text-[11px] text-ink-3">Internet telemetry needs the desktop app.</p>
+          <p className="fs-11 text-ink-3">Internet telemetry needs the desktop app.</p>
         ) : (
           <>
             <Row
@@ -235,18 +235,18 @@ export function GatewayPopover({ anchor, health, onClose, onReset }: { anchor: R
                 <Spark values={up} color="#fbbf24" />
               </div>
             </div>
-            {error && <p className="text-[10.5px] text-alert">{error}</p>}
+            {error && <p className="fs-10.5 text-alert">{error}</p>}
             <div className="mt-1 border-t border-white/[0.06] pt-2">
               {speed.result && !speed.phase && (
                 <div className="mb-1.5 space-y-0.5">
                   <Row k="Download" v={`${speed.result.downloadMbps} Mbps`} tone="text-teal" />
                   <Row k="Upload" v={`${speed.result.uploadMbps} Mbps`} tone="text-amber-soft" />
                   <Row k="Ping unloaded / loaded" v={`${speed.result.pingMs ?? "—"} / ${speed.result.loadedPingMs ?? "—"} ms`} />
-                  <p className="text-right font-mono text-[10px] text-ink-3">Tested {fmtAgo(speed.result.at, now)}</p>
+                  <p className="text-right font-mono fs-10 text-ink-3">Tested {fmtAgo(speed.result.at, now)}</p>
                 </div>
               )}
-              {speed.error && !speed.phase && <p className="mb-1 text-[10.5px] text-alert">{speed.error}</p>}
-              <button type="button" onClick={() => void runSpeedTest()} disabled={!!speed.phase} className="pill-glass !h-8 w-full justify-center text-[11px]" title="Downloads ~10 MB and uploads ~3 MB (Cloudflare) — only when you click">
+              {speed.error && !speed.phase && <p className="mb-1 fs-10.5 text-alert">{speed.error}</p>}
+              <button type="button" onClick={() => void runSpeedTest()} disabled={!!speed.phase} className="pill-glass !h-8 w-full justify-center fs-11" title="Downloads ~10 MB and uploads ~3 MB (Cloudflare) — only when you click">
                 {speed.phase ? <Loader2 size={12} className="animate-spin" /> : <Gauge size={12} />} {speed.phase ? (PHASE_LABEL[speed.phase] ?? "Testing…") : speed.result ? "Test speed again" : "Test speed"}
               </button>
             </div>

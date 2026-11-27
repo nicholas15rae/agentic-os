@@ -23,7 +23,7 @@ export function AuditionCardView(p: AuditionCardProps) {
   const [over, setOver] = useState(false);
   const [f, setF] = useState<SlateFields>({ name: "", role: "", contact: "" });
   const field = (k: keyof SlateFields, label: string, placeholder: string) => (
-    <input value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} placeholder={placeholder} maxLength={80} aria-label={label} className="field !h-9 !py-0 text-[13px]" />
+    <input value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} placeholder={placeholder} maxLength={80} aria-label={label} className="field !h-9 !py-0 fs-13" />
   );
   return (
     <Card title="Audition" hint="Sides and a slate for the self-tape. The import sets the Self-tape output: 16:9, −18 LUFS, up to 100 MB.">
@@ -41,7 +41,7 @@ export function AuditionCardView(p: AuditionCardProps) {
             setOver(false);
             p.onDropFiles(Array.from(e.dataTransfer.files));
           }}
-          className={`rounded-[14px] border border-dashed p-3 text-center text-xs transition-colors ${over ? "border-amber/60 bg-amber/10 text-ink" : "border-white/15 text-ink-3"}`}
+          className={`r-14 border border-dashed p-3 text-center text-xs transition-colors ${over ? "border-amber/60 bg-amber/10 text-ink" : "border-white/15 text-ink-3"}`}
           aria-label="Drop sides here"
         >
           {p.sidesBusy ? <Loader2 size={14} className="mx-auto animate-spin" /> : "Drop sides here (PDF or text)"}
@@ -49,10 +49,10 @@ export function AuditionCardView(p: AuditionCardProps) {
         {p.sides.length > 0 && (
           <ul className="space-y-1" aria-label="Sides">
             {p.sides.map((s) => (
-              <li key={s.path} className="flex items-center gap-2 text-[13px] text-ink-2">
+              <li key={s.path} className="flex items-center gap-2 fs-13 text-ink-2">
                 <FileText size={12} className="shrink-0 text-ink-3" />
                 <span className="min-w-0 flex-1 truncate">{s.name}</span>
-                <span className="text-[11px] text-ink-3">{kb(s.sizeBytes)}</span>
+                <span className="fs-11 text-ink-3">{kb(s.sizeBytes)}</span>
               </li>
             ))}
           </ul>
@@ -64,7 +64,7 @@ export function AuditionCardView(p: AuditionCardProps) {
             if (f.name.trim()) p.onSlate(f);
           }}
         >
-          <p className="text-[12px] text-ink-2">Slate</p>
+          <p className="fs-12 text-ink-2">Slate</p>
           {field("name", "Slate name", "Name")}
           {field("role", "Slate role", "Role")}
           {field("contact", "Slate contact", "Agency or contact")}

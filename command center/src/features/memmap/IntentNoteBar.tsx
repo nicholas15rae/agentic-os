@@ -84,7 +84,7 @@ export function IntentNoteBar({ className = "" }: { className?: string }) {
               aria-checked={kind === k.id}
               title={k.hint}
               onClick={() => setKind(k.id)}
-              className={`label-caps rounded-full px-1.5 py-0.5 !text-[9px] transition-colors ${kind === k.id ? "bg-holo/15 text-holo" : "text-ink-3 hover:text-ink-2"}`}
+              className={`label-caps rounded-full px-1.5 py-0.5 !fs-9 transition-colors ${kind === k.id ? "bg-holo/15 text-holo" : "text-ink-3 hover:text-ink-2"}`}
             >
               {k.label}
             </button>
@@ -106,9 +106,9 @@ export function IntentNoteBar({ className = "" }: { className?: string }) {
         maxLength={8000}
         disabled={!desktop}
         placeholder={desktop ? "What did you notice, or what should change? First line becomes the title." : "The dev queue lives in the desktop app."}
-        className="w-full resize-none rounded-[10px] border border-holo/15 bg-black/30 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed text-ink outline-none placeholder:text-ink-3 focus:border-holo/40"
+        className="w-full resize-none r-10 border border-holo/15 bg-black/30 px-2.5 py-2 font-mono fs-11.5 leading-relaxed text-ink outline-none placeholder:text-ink-3 focus:border-holo/40"
       />
-      {error && phase === "idle" && <p className="mt-1 font-mono text-[10px] text-ember">{error}</p>}
+      {error && phase === "idle" && <p className="mt-1 font-mono fs-10 text-ember">{error}</p>}
       <div className="mt-2 flex items-center gap-2">
         <button
           type="button"
@@ -123,7 +123,7 @@ export function IntentNoteBar({ className = "" }: { className?: string }) {
         >
           {phase === "transcribing" ? <Loader2 size={15} className="animate-spin" /> : listening ? <Square size={13} /> : <Mic size={15} />}
         </button>
-        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-3">
+        <span className="min-w-0 flex-1 truncate font-mono fs-10 text-ink-3">
           {phase === "speech" ? "listening…" : phase === "waiting" ? "say your note" : phase === "transcribing" ? "transcribing…" : dictated ? "dictated · logs as voice" : "logs to the queue only"}
         </span>
         <button
@@ -131,7 +131,7 @@ export function IntentNoteBar({ className = "" }: { className?: string }) {
           onClick={() => void dispatch()}
           disabled={!canSend}
           title={desktop ? "Log to the dev task queue (Ctrl+Enter). Tony isn't messaged." : "Desktop app only"}
-          className="flex h-9 items-center gap-1.5 rounded-full border border-holo/50 bg-holo/15 px-4 font-mono text-[11px] font-semibold uppercase tracking-wider text-holo shadow-[0_0_16px_-4px_rgba(0,210,255,0.6)] transition-[filter,transform] hover:brightness-125 active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
+          className="flex h-9 items-center gap-1.5 rounded-full border border-holo/50 bg-holo/15 px-4 font-mono fs-11 font-semibold uppercase tracking-wider text-holo shadow-[0_0_16px_-4px_rgba(0,210,255,0.6)] transition-[filter,transform] hover:brightness-125 active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
         >
           {busy ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} Dispatch
         </button>

@@ -54,7 +54,7 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
         title="Tony Mode"
         status={
           <>
-            <span className="truncate text-[12px] text-ink">{effective.name}</span>
+            <span className="truncate fs-12 text-ink">{effective.name}</span>
             {overridden && (
               <span className="label-caps rounded-full border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-amber-light" title={`Overridden: ${effective.overridden.join(", ") || "manual change"}`}>
                 Override
@@ -76,7 +76,7 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
               aria-label={m.name}
               title={m.name}
               onClick={() => !on && onSelect(m.id)}
-              className={`flex h-9 min-w-0 shrink-0 items-center gap-1.5 rounded-[10px] border px-2.5 text-[12px] transition-colors ${
+              className={`flex h-9 min-w-0 shrink-0 items-center gap-1.5 r-10 border px-2.5 fs-12 transition-colors ${
                 layout.iconsOnly ? "justify-center" : ""
               } ${on ? "border-teal/60 bg-teal/15 text-ink" : "border-white/10 bg-white/[0.02] text-ink-2 hover:text-ink"}`}
             >
@@ -97,7 +97,7 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
           aria-label={`${m.name} (novelty: plays the sound cue, never changes the work mode)`}
           title={gabagoolOn ? `Stop ${m.name}` : `Start ${m.name}`}
           onClick={() => onToggleNovelty(m.id)}
-          className={`flex h-9 shrink-0 items-center gap-2 rounded-[10px] px-2.5 text-[12px] transition-colors ${
+          className={`flex h-9 shrink-0 items-center gap-2 r-10 px-2.5 fs-12 transition-colors ${
             gabagoolOn ? "bg-amber/90 text-canvas glow-amber" : "border border-white/10 bg-white/[0.02] text-ink-2 hover:text-ink"
           }`}
         >
@@ -118,7 +118,7 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
             <Segmented size="sm" label="Tony mode dispatch" value={isLearningMode(effective) ? "surface_only" : dispatch} options={DISPATCH_OPTS} onChange={(v) => onOverride({ dispatch: v })} disabled={isLearningMode(effective)} />
           </div>
           {overridden && (
-            <button type="button" onClick={onReset} className="flex h-7 items-center gap-1.5 rounded-full border border-amber/40 px-2.5 text-[11px] text-amber-light hover:bg-amber/10">
+            <button type="button" onClick={onReset} className="flex h-7 items-center gap-1.5 rounded-full border border-amber/40 px-2.5 fs-11 text-amber-light hover:bg-amber/10">
               <RotateCcw size={11} aria-hidden /> Reset to mode default
             </button>
           )}
@@ -126,7 +126,7 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
       )}
 
       {layout.footer && (
-        <div className="mt-auto flex items-center gap-2 border-t border-white/5 pt-2 text-[11px] text-ink-3">
+        <div className="mt-auto flex items-center gap-2 border-t border-white/5 pt-2 fs-11 text-ink-3">
           <span title="Background build narration (Settings → Voice & Triggers)">Narration · {NARRATION[effective.feedback_level] ?? "Milestones"}</span>
           {onManage && (
             <button type="button" onClick={onManage} className="ml-auto flex items-center gap-1 text-teal hover:text-ink">
@@ -136,8 +136,8 @@ export function ModePanelView({ modes, activeId, effective, overrides, gabagoolO
         </div>
       )}
 
-      {error && <p className="text-[11px] text-alert">{error}</p>}
-      <p aria-live="polite" className="text-[10px] text-ink-3">
+      {error && <p className="fs-11 text-alert">{error}</p>}
+      <p aria-live="polite" className="fs-10 text-ink-3">
         Applies from Tony's next turn
       </p>
     </div>

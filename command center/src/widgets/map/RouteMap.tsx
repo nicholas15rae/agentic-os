@@ -64,12 +64,12 @@ function SaveRoute({ route, onDone }: { route: MapRoute; onDone: (note: string |
         placeholder="Name this route"
         aria-label="Route name"
         autoFocus
-        className="well h-7 min-w-0 flex-1 rounded-full px-3 text-[11px] text-ink placeholder:text-ink-3 focus:outline-none"
+        className="well h-7 min-w-0 flex-1 rounded-full px-3 fs-11 text-ink placeholder:text-ink-3 focus:outline-none"
       />
-      <button type="submit" disabled={busy || !name.trim()} className="pill-glass !h-7 text-[11px] text-amber">
+      <button type="submit" disabled={busy || !name.trim()} className="pill-glass !h-7 fs-11 text-amber">
         {busy ? <Loader2 size={12} className="animate-spin" /> : "Save"}
       </button>
-      <button type="button" onClick={() => onDone(null)} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Cancel saving">
+      <button type="button" onClick={() => onDone(null)} className="pill-glass !h-7 !px-2 fs-11" aria-label="Cancel saving">
         <X size={12} />
       </button>
     </form>
@@ -175,7 +175,7 @@ export default function RouteMap({ config, setConfig, size }: WidgetProps<RouteM
                 aria-label={fit === "icons" ? label : undefined}
                 title={label}
                 onClick={() => setTab(id)}
-                className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11px] transition-colors ${tab === id ? "border border-white/10 bg-raised text-ink" : "text-ink-2 hover:text-ink"}`}
+                className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 fs-11 transition-colors ${tab === id ? "border border-white/10 bg-raised text-ink" : "text-ink-2 hover:text-ink"}`}
               >
                 <Icon size={12} />
                 {fit === "full" && label}
@@ -199,7 +199,7 @@ export default function RouteMap({ config, setConfig, size }: WidgetProps<RouteM
           )}
           {mapSeen && (
             <div data-map-canvas="" className={tab === "map" ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={tab !== "map" || undefined}>
-              <Suspense fallback={<div className="min-h-[120px] flex-1 rounded-[12px] border border-white/[0.07]" />}>
+              <Suspense fallback={<div className="min-h-[120px] flex-1 r-12 border border-white/[0.07]" />}>
                 <MapCanvas active={tab === "map"} />
               </Suspense>
             </div>
@@ -212,13 +212,13 @@ export default function RouteMap({ config, setConfig, size }: WidgetProps<RouteM
                   <span className="min-w-0 text-ink">
                     <b className="font-mono tabular">{fmtDuration(route.durationS)}</b> · {fmtDistance(route.distanceM)} to {shortLabel(dst.label)}
                   </span>
-                  <button onClick={openInMaps} className="pill-glass ml-auto !h-7 text-[11px]" title="Turn-by-turn in Google Maps (hand off to your phone)">
+                  <button onClick={openInMaps} className="pill-glass ml-auto !h-7 fs-11" title="Turn-by-turn in Google Maps (hand off to your phone)">
                     <ExternalLink size={12} /> {fit === "full" && "Open in Maps"}
                   </button>
-                  <button onClick={() => setSaving((v) => !v)} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Save route" title="Save this route">
+                  <button onClick={() => setSaving((v) => !v)} className="pill-glass !h-7 !px-2 fs-11" aria-label="Save route" title="Save this route">
                     <BookmarkPlus size={12} />
                   </button>
-                  <button onClick={clear} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Clear route" title="Clear route">
+                  <button onClick={clear} className="pill-glass !h-7 !px-2 fs-11" aria-label="Clear route" title="Clear route">
                     <X size={12} />
                   </button>
                 </div>
@@ -232,13 +232,13 @@ export default function RouteMap({ config, setConfig, size }: WidgetProps<RouteM
                   }}
                 />
               )}
-              {route && <p className="mt-1 text-[10px] text-ink-3">{route.note}</p>}
+              {route && <p className="mt-1 fs-10 text-ink-3">{route.note}</p>}
             </>
           )}
           {tab === "upcoming" && <TripList onRoute={routeTrip} onOpen={openTrip} compact={compact} />}
           {tab === "saved" && <SavedRoutes onRoute={routeSaved} onOpen={openSaved} compact={compact} />}
-          {note && <p className="mt-1 text-[11px] text-teal-soft">{note}</p>}
-          {err && <p className="mt-1 text-[11px] text-alert">{err}</p>}
+          {note && <p className="mt-1 fs-11 text-teal-soft">{note}</p>}
+          {err && <p className="mt-1 fs-11 text-alert">{err}</p>}
         </>
       )}
     </div>

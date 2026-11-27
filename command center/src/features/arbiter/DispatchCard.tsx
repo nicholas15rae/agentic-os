@@ -47,7 +47,7 @@ export function DispatchCard({ turnId, view }: { turnId: string; view: DispatchV
     setBusy(false);
   };
   return (
-    <div className="mt-1 w-full rounded-[10px] border border-white/10 bg-white/[0.02] p-2 text-[11px]" aria-label="Dispatch packet">
+    <div className="mt-1 w-full r-10 border border-white/10 bg-white/[0.02] p-2 fs-11" aria-label="Dispatch packet">
       <div className="mb-1 flex items-center gap-2">
         <span className="label-caps text-ink-3">Dispatch</span>
         <span className={view.state === "queued" ? "text-teal" : view.state === "pending" ? "text-amber-light" : "text-ink-3"}>{STATE_TEXT[view.state]}</span>
@@ -67,10 +67,10 @@ export function DispatchCard({ turnId, view }: { turnId: string; view: DispatchV
       )}
       {view.state === "pending" && (
         <div className="mt-1.5 flex gap-2">
-          <button type="button" disabled={busy} onClick={() => void approve()} className="pill-primary !h-7 !px-3 text-[11px]">
+          <button type="button" disabled={busy} onClick={() => void approve()} className="pill-primary !h-7 !px-3 fs-11">
             <Send size={11} aria-hidden /> Dispatch
           </button>
-          <button type="button" disabled={busy} onClick={() => void hold()} className="pill-glass !h-7 !px-3 text-[11px]">
+          <button type="button" disabled={busy} onClick={() => void hold()} className="pill-glass !h-7 !px-3 fs-11">
             <X size={11} aria-hidden /> Hold
           </button>
         </div>
@@ -83,9 +83,9 @@ export function DispatchCard({ turnId, view }: { turnId: string; view: DispatchV
 /** A closed packet: per task its status, attempts and (collapsed) output. */
 export function PacketOutcome({ result }: { result: PacketResult }) {
   return (
-    <div className="mt-1 w-full space-y-1 text-[11px]">
+    <div className="mt-1 w-full space-y-1 fs-11">
       {result.results.map((r) => (
-        <details key={r.taskId} className="rounded-[8px] border border-white/10 px-2 py-1">
+        <details key={r.taskId} className="r-8 border border-white/10 px-2 py-1">
           <summary className="flex cursor-pointer gap-2">
             <span className="w-16 shrink-0 font-mono uppercase text-ink-2">{r.targetAgent}</span>
             <span className="min-w-0 flex-1 truncate text-ink">{r.taskId}</span>

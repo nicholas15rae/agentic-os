@@ -50,18 +50,18 @@ export function PeekView({ b, height = 380 }: { b: BuildView; height?: number })
     void xcmd(name, { buildId: id }).catch((e) => useToasts.getState().push({ title: "Preview", body: errText(e), tone: "error" }));
 
   return (
-    <div className="mt-2 overflow-hidden rounded-[12px] border border-white/10">
+    <div className="mt-2 overflow-hidden r-12 border border-white/10">
       <div className="flex items-center gap-1.5 border-b border-white/10 bg-black/30 px-2 py-1.5">
         <span className={`size-2 shrink-0 rounded-full ${reachable ? "bg-teal" : "bg-amber animate-pulse"}`} title={reachable ? "Preview answering" : "Preview not answering"} />
-        <input readOnly value={url ?? "no preview yet"} onFocus={(e) => e.target.select()} className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-ink-2 outline-none" aria-label="Preview URL" />
+        <input readOnly value={url ?? "no preview yet"} onFocus={(e) => e.target.select()} className="min-w-0 flex-1 bg-transparent font-mono fs-11 text-ink-2 outline-none" aria-label="Preview URL" />
         {compiling && reachable && <span className="label-caps shrink-0 text-amber-soft">building · last output</span>}
         <button onClick={() => setKey((k) => k + 1)} disabled={!url} className="pill-glass !h-7 !w-7 !p-0" title="Refresh the preview (the build keeps running)" aria-label="Refresh preview">
           <RefreshCw size={12} />
         </button>
-        <button onClick={() => act("build_open_browser")} disabled={!url} className="pill-glass !h-7 !px-2 text-[11px]" title="Pop Out in Browser">
+        <button onClick={() => act("build_open_browser")} disabled={!url} className="pill-glass !h-7 !px-2 fs-11" title="Pop Out in Browser">
           <ExternalLink size={12} /> Pop out
         </button>
-        <button onClick={() => act("build_open_window")} disabled={!url} className="pill-glass !h-7 !px-2 text-[11px]" title="Open Dedicated Preview Window">
+        <button onClick={() => act("build_open_window")} disabled={!url} className="pill-glass !h-7 !px-2 fs-11" title="Open Dedicated Preview Window">
           <AppWindow size={12} /> Window
         </button>
       </div>
@@ -79,7 +79,7 @@ export function PeekView({ b, height = 380 }: { b: BuildView; height?: number })
         )}
         {(overlay || (loading && url)) && (
           <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/45 backdrop-blur-[1px]">
-            <span className="flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 font-mono text-[11px] text-amber-soft">
+            <span className="flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 font-mono fs-11 text-amber-soft">
               <Loader2 size={12} className="animate-spin" /> {overlay ?? "Loading preview…"}
             </span>
           </div>

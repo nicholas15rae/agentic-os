@@ -65,7 +65,7 @@ export function ScanPanel({ onSaved }: { onSaved?: (where: SavedTo) => void }) {
           <CameraCapture mode={mode} onCapture={(b) => void process(b)} onQr={(t) => setQr(t || "(no QR code found in that image)")} />
         ) : (
           <div className="space-y-3">
-            {"preview" in stage && <img src={stage.preview} alt="Captured document" className="max-h-[420px] w-full rounded-[14px] border border-white/10 object-contain" />}
+            {"preview" in stage && <img src={stage.preview} alt="Captured document" className="max-h-[420px] w-full r-14 border border-white/10 object-contain" />}
             {stage.s === "working" && (
               <p className="flex items-center gap-2 text-sm text-amber-soft">
                 <Loader2 size={15} className="animate-spin" /> {stage.msg}
@@ -109,10 +109,10 @@ function QrResult({ text, onClear }: { text: string; onClear: () => void }) {
   const [saved, setSaved] = useState(false);
   const isUrl = /^https?:\/\//i.test(text);
   return (
-    <div className="mt-3 rounded-[14px] border border-teal/40 bg-teal/[0.07] p-3">
+    <div className="mt-3 r-14 border border-teal/40 bg-teal/[0.07] p-3">
       <p className="label-caps mb-1 text-teal">QR content</p>
-      <p className="break-all font-mono text-[13px] text-ink">{text}</p>
-      {isUrl && <p className="mt-1 text-[11px] text-ink-3">Link not opened automatically — check it before visiting.</p>}
+      <p className="break-all font-mono fs-13 text-ink">{text}</p>
+      {isUrl && <p className="mt-1 fs-11 text-ink-3">Link not opened automatically — check it before visiting.</p>}
       <div className="mt-2 flex gap-2">
         <button className="pill-glass !h-8 text-xs" onClick={() => void navigator.clipboard?.writeText(text)}>
           <Copy size={12} /> Copy
@@ -252,7 +252,7 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
       hint={ocr ? `Read by ${ocr.engine}${f.confidence != null ? ` · confidence ${Math.round(f.confidence * 100)}%` : ""}. Check every number against the paper.` : undefined}
     >
       {error && (
-        <p className="mb-3 flex gap-2 rounded-[12px] border border-amber/40 bg-amber/10 p-2.5 text-xs text-amber-light">
+        <p className="mb-3 flex gap-2 r-12 border border-amber/40 bg-amber/10 p-2.5 text-xs text-amber-light">
           <AlertTriangle size={14} className="shrink-0" /> {error} The image is saved — fill the fields in by hand.
         </p>
       )}
@@ -271,7 +271,7 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
         </div>
       )}
       {sug.reasons.length > 0 && (
-        <p className="mb-3 rounded-[12px] border border-teal/30 bg-teal/[0.06] p-2.5 text-xs text-ink-2">
+        <p className="mb-3 r-12 border border-teal/30 bg-teal/[0.06] p-2.5 text-xs text-ink-2">
           <span className="text-teal">Suggested</span> from the names on it: {sug.reasons.join(" · ")}. Check the area{moneyIn ? " and agent" : " and category"} below before saving.
         </p>
       )}
@@ -311,12 +311,12 @@ function Review({ kind, fileId, ocr, error, onSaved }: { kind: Kind; fileId: str
               <SelectOther label="How paid" value={method} options={PAY_METHODS} onChange={setMethod} className="" />
             </Field>
             {kind === "check" && (
-              <label className="col-span-2 flex items-center gap-1.5 text-[12px] text-ink-2">
+              <label className="col-span-2 flex items-center gap-1.5 fs-12 text-ink-2">
                 <input type="checkbox" checked={alsoIncome} onChange={(e) => setAlsoIncome(e.target.checked)} className="accent-teal" /> Also log it as income (and any agent commission)
               </label>
             )}
             {area === "acting" && (kind !== "check" || alsoIncome) && <ActingFields gross={inGross} value={acting} onChange={setActing} currency={currency} />}
-            <p className="col-span-2 font-mono text-[11px] text-ink-3">
+            <p className="col-span-2 font-mono fs-11 text-ink-3">
               Books {inGross.toFixed(2)} before tax + {inHst.toFixed(2)} HST{area === "acting" && acting.agentId ? ` · commission on ${inGross.toFixed(2)}: ${commissionCalc(inGross, acting.pct, acting.off).commission.toFixed(2)}` : ""}
             </p>
           </>

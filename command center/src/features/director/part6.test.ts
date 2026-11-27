@@ -118,7 +118,7 @@ describe("phone-friendly shot list", () => {
     expect(h).toContain('data-testid="shot-print"');
     expect(h).toContain("1 of 2 filmed");
     expect(h.match(/role="checkbox"/g)).toHaveLength(2);
-    for (const t of ["Close-up", "Look up", "lock exposure", "chest height", "Full turn", "Copy as text", "Print", "text-[17px]"]) expect(h).toContain(t);
+    for (const t of ["Close-up", "Look up", "lock exposure", "chest height", "Full turn", "Copy as text", "Print", "fs-17"]) expect(h).toContain(t);
     const bare = html(createElement(ShotChecklistView, { slots, onToggle: noop }));
     expect(bare).not.toContain("Copy as text");
   });

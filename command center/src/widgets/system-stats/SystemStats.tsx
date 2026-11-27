@@ -27,7 +27,7 @@ function DesktopStats({ pollMs }: { pollMs: number }) {
           <Row label="VRAM" value={`${(gpu.vramUsedMb / 1024).toFixed(1)} / ${(gpu.vramTotalMb / 1024).toFixed(0)}G`} pct={vramPct} tone="amber" />
         </>
       ) : (
-        <p className="font-mono text-[11px] text-ink-3">No NVIDIA GPU detected (nvidia-smi)</p>
+        <p className="font-mono fs-11 text-ink-3">No NVIDIA GPU detected (nvidia-smi)</p>
       )}
       <NodeStrip />
     </div>
@@ -44,7 +44,7 @@ function NodeStrip() {
       {services.map((s) => (
         <span key={s.id} title={`${s.label}: ${s.up ? "up" : s.detail}`} className={`size-2 rounded-full ${s.up ? "bg-teal shadow-[0_0_6px_#00e5c3]" : "bg-alert/80"}`} />
       ))}
-      <span className="ml-auto font-mono text-[10.5px] text-ink-3">
+      <span className="ml-auto font-mono fs-10.5 text-ink-3">
         {services.filter((s) => s.up).length}/{services.length}
       </span>
     </div>

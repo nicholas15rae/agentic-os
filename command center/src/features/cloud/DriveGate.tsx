@@ -38,7 +38,7 @@ export function DriveGateView({ view, status, error, connecting, compact, onConn
   if (view === "client-missing")
     return (
       <div className="flex flex-1 flex-col items-start gap-2 py-2">
-        <p className="flex items-start gap-1.5 text-[13px] leading-relaxed text-ink-2">
+        <p className="flex items-start gap-1.5 fs-13 leading-relaxed text-ink-2">
           <KeyRound size={14} className="mt-0.5 shrink-0 text-amber-soft" /> {CLIENT_MISSING_TEXT}
         </p>
         <button onClick={onOpenSettings} className="pill-glass !h-8 !px-3 text-xs">
@@ -50,12 +50,12 @@ export function DriveGateView({ view, status, error, connecting, compact, onConn
     return (
       <div className="flex flex-1 flex-col items-start gap-2 py-2">
         {connecting ? (
-          <p className="flex items-center gap-2 text-[13px] text-ink-2" role="status">
+          <p className="flex items-center gap-2 fs-13 text-ink-2" role="status">
             <Loader2 size={14} className="animate-spin text-teal" /> {CONNECTING_TEXT}
           </p>
         ) : (
           <>
-            {!compact && <p className="text-[13px] leading-relaxed text-ink-3">Browse your Drive folders, import footage into a project and upload verified renders.</p>}
+            {!compact && <p className="fs-13 leading-relaxed text-ink-3">Browse your Drive folders, import footage into a project and upload verified renders.</p>}
             <button onClick={onConnect} className="pill-primary !h-9 !px-3.5 text-xs">
               <Cloud size={13} /> Connect Google Drive
             </button>
@@ -67,7 +67,7 @@ export function DriveGateView({ view, status, error, connecting, compact, onConn
     const canConnect = !!status?.clientConfigured && !status.connected && !error;
     return (
       <div className="flex flex-1 flex-col items-start gap-2 py-2">
-        <p className="text-[13px] leading-relaxed text-alert" role="alert">
+        <p className="fs-13 leading-relaxed text-alert" role="alert">
           {error ?? status?.error ?? "Google Drive isn't answering."}
         </p>
         <div className="flex flex-wrap gap-2">
@@ -95,23 +95,23 @@ function AccountChip({ account, onDisconnect }: { account: string | null; onDisc
   const [asking, setAsking] = useState(false);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="flex h-7 min-w-0 max-w-full items-center gap-1.5 rounded-full border border-teal/40 bg-[rgba(11,13,17,0.45)] px-2.5 text-[12px] text-teal-soft" title={account ?? "Connected"}>
+      <span className="flex h-7 min-w-0 max-w-full items-center gap-1.5 rounded-full border border-teal/40 bg-[rgba(11,13,17,0.45)] px-2.5 fs-12 text-teal-soft" title={account ?? "Connected"}>
         <Cloud size={12} className="shrink-0" />
         <span className="truncate">{account ?? "Connected"}</span>
       </span>
       {asking ? (
-        <span className="flex items-center gap-1 text-[12px] text-ink-2">
+        <span className="flex items-center gap-1 fs-12 text-ink-2">
           Disconnect?
           <button
             onClick={() => {
               setAsking(false);
               onDisconnect();
             }}
-            className="pill-glass !h-7 !px-2 text-[11px] text-alert"
+            className="pill-glass !h-7 !px-2 fs-11 text-alert"
           >
             Yes, disconnect
           </button>
-          <button onClick={() => setAsking(false)} className="pill-glass !h-7 !px-2 text-[11px]">
+          <button onClick={() => setAsking(false)} className="pill-glass !h-7 !px-2 fs-11">
             Keep
           </button>
         </span>

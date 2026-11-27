@@ -34,7 +34,7 @@ export function SysMapSwitcher({ className = "" }: { className?: string }) {
             aria-current={active ? "page" : undefined}
             title={`${p.hint} (Ctrl+Alt+${i + 1})`}
             onClick={() => setPage(p.id)}
-            className={`flex h-9 shrink-0 items-center gap-2 rounded-full border px-3.5 font-mono text-[12px] transition-colors ${
+            className={`flex h-9 shrink-0 items-center gap-2 rounded-full border px-3.5 font-mono fs-12 transition-colors ${
               active ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.6)] text-ink-2 hover:border-white/25 hover:text-ink"
             }`}
           >
@@ -55,7 +55,7 @@ class GlBoundary extends Component<{ children: ReactNode }, { failed: string | n
   }
   render() {
     return this.state.failed ? (
-      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-ink-3">
+      <div className="grid h-full place-items-center p-6 text-center fs-12 text-ink-3">
         <p>
           The orbital view needs WebGL and couldn't start ({this.state.failed}).
           <br />
@@ -76,12 +76,12 @@ class GlBoundary extends Component<{ children: ReactNode }, { failed: string | n
 export function SysMapCanvasPage({ page }: { page: 2 | 3 }) {
   useEffect(() => () => useSysMap.getState().close(), []);
   return (
-    <div className="relative h-full min-h-[480px] overflow-hidden rounded-[14px] border border-holo/20 bg-[#03050a]">
+    <div className="relative h-full min-h-[480px] overflow-hidden r-14 border border-holo/20 bg-[#03050a]">
       {page === 2 || PHONE_LITE ? (
         <SchematicFlowchart />
       ) : (
         <GlBoundary>
-          <Suspense fallback={<p className="grid h-full place-items-center text-[12px] text-ink-3">Loading the orbital map…</p>}>
+          <Suspense fallback={<p className="grid h-full place-items-center fs-12 text-ink-3">Loading the orbital map…</p>}>
             <OrbitalEcosystem />
           </Suspense>
         </GlBoundary>

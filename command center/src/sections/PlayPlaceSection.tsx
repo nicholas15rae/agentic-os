@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Archive, BookMarked, Code2, Copy, Eye, Hammer, Lightbulb, Loader2, Maximize2, OctagonX, Play, RotateCcw, Send, Sparkles, Trash2, Wand2, Wrench } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { useCollection } from "@/lib/cc-api";
@@ -16,7 +17,10 @@ import { runTruth } from "@/features/buildhub/build-truth";
 import { useHub } from "@/features/buildhub/hub-store";
 import { devFixMode } from "@/features/memmap/format";
 import { useModes } from "@/features/modes/modes-store";
-import { StagingHub } from "@/features/buildhub/StagingHub";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { usePlayPlaceLayout } from "./playplace/panels";
+import { revealPanel } from "@/core/widgets/reveal";
+import { useMyApps } from "@/features/myapps/store";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
 import { PinButton } from "@/features/myapps/PinButton";
@@ -36,20 +40,28 @@ type LedgerTab = "ideas" | "fixes";
  * a sandboxed iframe (opaque origin — it can't touch the OS or your files),
  * plus the Ideas & Tasks Ledger they came from.
  */
+/** The last card link revealed (module-wide, so a remount doesn't reveal it again). */
+let revealedCard: string | null = null;
+
 export function PlayPlaceSection() {
   const clearUnseen = usePipelines((s) => s.clearUnseen);
   useEffect(() => clearUnseen(), [clearUnseen]);
-  return (
-    <div className="mx-auto h-full w-full max-w-7xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      {/* Thought-to-Product Phase 3: the universal staging hub (desktop; renders nothing on the phone). */}
-      <StagingHub />
-      <PipelineBars />
-      <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
-        <PlayCards />
-        <IdeasLedger />
-      </div>
-    </div>
-  );
+  // "Edit in Play Place" / a card link: the panel that holds it is shown (its page, its window, or
+  // put back when hidden), so the link never lands on nothing.
+  const card = useFocus((s) => s.card);
+  const build = useMyApps((s) => s.focusBuild);
+  useEffect(() => {
+    // Once per link (the card stays highlighted, but a later visit keeps the layout you chose).
+    if (!card || card === revealedCard) return;
+    revealedCard = card;
+    revealPanel(usePlayPlaceLayout, "pp-play-cards", "Play Place");
+  }, [card]);
+  useEffect(() => {
+    if (build) revealPanel(usePlayPlaceLayout, "pp-staging-hub", "Play Place");
+  }, [build]);
+  // Shared layout system: the staging hub, runners, play cards and ledger are panels on the same
+  // grid as the home page (move, resize, hide, add back, per mode, Reset to default).
+  return <LayoutSurface store={usePlayPlaceLayout} label="Play Place" />;
 }
 
 const OWNER_LABEL: Record<string, string> = { tony: "Tony", prompter: "Prompter", librarian: "Librarian", designer: "Designer", coder: "Coder", staging: "Staging", system: "Checks" };
@@ -72,7 +84,7 @@ function StagingLink({ slug }: { slug: string | null }) {
     <button
       type="button"
       onClick={() => void navigator.clipboard?.writeText(path).then(() => useToasts.getState().push({ title: "Copied", body: path, tone: "info" }))}
-      className="flex items-center gap-1 font-mono text-[11px] text-teal hover:underline"
+      className="flex items-center gap-1 font-mono fs-11 text-teal hover:underline"
       title="The build's files (in the repo's staging folder). Click to copy the path."
     >
       <Copy size={10} /> {path}
@@ -81,14 +93,19 @@ function StagingLink({ slug }: { slug: string | null }) {
 }
 
 /** Builds in flight (TaskEnvelopes: status, who has it, iteration n/max), plus the latest finished ones. */
-export function PipelineBars() {
+export function PipelineBars({ showEmpty = false }: { showEmpty?: boolean } = {}) {
   const runs = Object.values(usePipelines((s) => s.runs)).sort((a, b) => a.at - b.at);
   const recent = Object.values(usePipelines((s) => s.recent))
     .sort((a, b) => b.at - a.at)
     .slice(0, 3);
   const builds = useHub((s) => s.view?.builds) ?? [];
   const [clearing, setClearing] = useState(false);
-  if (!runs.length && !recent.length) return null;
+  if (!runs.length && !recent.length)
+    return showEmpty ? (
+      <Card title="Build runners" hint="Nothing running">
+        <Empty>No builds in flight. Stage one from the Ideas ledger, a brainstorm or “Describe a widget”.</Empty>
+      </Card>
+    ) : null;
   // Finished runs whose Staging Hub build has settled: the hub card is their truth now.
   const stale = recent.filter((r) => runTruth(r, builds).stale);
   const clearStale = async () => {
@@ -110,7 +127,7 @@ export function PipelineBars() {
       hint={runs.length ? `${runs.length} running` : "Recent runs"}
       action={
         stale.length > 0 && isTauri() ? (
-          <button className="pill-glass !h-7 !px-2.5 text-[11px]" disabled={clearing} onClick={() => void clearStale()} title="Remove finished runs whose Staging Hub build already decided (kept in the Trash)">
+          <button className="pill-glass !h-7 !px-2.5 fs-11" disabled={clearing} onClick={() => void clearStale()} title="Remove finished runs whose Staging Hub build already decided (kept in the Trash)">
             {clearing ? <Loader2 size={11} className="animate-spin" /> : <Archive size={11} />} Clear settled ({stale.length})
           </button>
         ) : undefined
@@ -152,12 +169,12 @@ function RunRow({ r }: { r: PipelineRun }) {
         )}
         <span className="ml-auto font-mono text-ink-2">{r.pct}%</span>
       </div>
-      <p className="mb-1 truncate text-[11px] text-ink-3" title={truth.note ?? r.label}>
+      <p className="mb-1 truncate fs-11 text-ink-3" title={truth.note ?? r.label}>
         {truth.note ?? (failed && r.error ? r.error : r.label)}
       </p>
       {ready && <StagingLink slug={r.slug} />}
       {truth.canRetry && isTauri() && (
-        <button onClick={() => void retryTask(r.id, r.title)} className="pill-glass !h-7 !px-3 text-[11px]">
+        <button onClick={() => void retryTask(r.id, r.title)} className="pill-glass !h-7 !px-3 fs-11">
           <RotateCcw size={11} /> Retry
         </button>
       )}
@@ -212,7 +229,7 @@ function RunnerControls({ r, live }: { r: PipelineRun; live: boolean }) {
   return (
     <div className="mb-1 flex gap-1.5">
       {live && (
-        <button disabled={!!busy} onClick={() => void cancel()} className="pill-glass !h-7 !px-2.5 text-[11px] !text-alert hover:!border-alert/60" title="Cancel / abort this run now">
+        <button disabled={!!busy} onClick={() => void cancel()} className="pill-glass !h-7 !px-2.5 fs-11 !text-alert hover:!border-alert/60" title="Cancel / abort this run now">
           {busy === "cancel" ? <Loader2 size={11} className="animate-spin" /> : <OctagonX size={11} />} Cancel
         </button>
       )}
@@ -258,10 +275,10 @@ function PlayCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
 function ParkedCardView({ card, compact, focused, onArchive, onDiscard }: { card: PlayCard; compact: boolean; focused: boolean; onArchive: () => void; onDiscard: () => void }) {
   const solo = useSoloMode();
   return (
-    <section className={`glass rounded-[20px] p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
+    <section className={`glass r-20 p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <BookMarked size={15} className="text-amber-soft" />
-        <h2 className="text-[15px] font-semibold text-ink">{card.title}</h2>
+        <h2 className="fs-15 font-semibold text-ink">{card.title}</h2>
         <span className="label-caps text-ink-3">parked</span>
       </div>
       {(card.summary || card.brief) && <p className="text-sm text-ink-2">{card.summary || card.brief}</p>}
@@ -269,7 +286,7 @@ function ParkedCardView({ card, compact, focused, onArchive, onDiscard }: { card
       {card.idea && !compact && (
         <details className="mt-2">
           <summary className="cursor-pointer text-xs text-teal">The conversation</summary>
-          <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 text-[11px] text-ink-2">{card.idea}</pre>
+          <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap r-10 p-2 fs-11 text-ink-2">{card.idea}</pre>
         </details>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
@@ -298,7 +315,7 @@ function Tags({ tags }: { tags?: string[] }) {
   return (
     <div className="mt-1.5 flex flex-wrap gap-1">
       {tags.map((t) => (
-        <span key={t} className="rounded-full border border-white/10 px-2 py-0.5 font-mono text-[10px] text-ink-3">
+        <span key={t} className="rounded-full border border-white/10 px-2 py-0.5 font-mono fs-10 text-ink-3">
           #{t}
         </span>
       ))}
@@ -313,7 +330,8 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
   const boxRef = useRef<HTMLElement>(null);
   // "Edit in Play Place" from a mounted page: bring this card into view with its Tweak box focused.
   useEffect(() => {
-    if (!focused) return;
+    // Not when this copy is hidden (an icon's live badge copy): the visible one takes the focus.
+    if (!focused || !boxRef.current?.offsetParent) return;
     boxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     boxRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
   }, [focused]);
@@ -340,12 +358,12 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
 
   const statusTone = card.status === "approved" ? "text-teal" : card.status === "committed" ? "text-volt" : card.status === "building" ? "text-amber-soft" : "text-ink-2";
   return (
-    <section ref={boxRef} className={`glass rounded-[20px] p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
+    <section ref={boxRef} className={`glass r-20 p-4 ${focused ? "ring-2 ring-amber/60" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <Sparkles size={15} className="text-amber-soft" />
-        <h2 className="text-[15px] font-semibold text-ink">{card.title}</h2>
+        <h2 className="fs-15 font-semibold text-ink">{card.title}</h2>
         <span className={`label-caps ${statusTone}`}>{card.status}</span>
-        {card.versions && <span className="font-mono text-[11px] text-ink-3">v{card.versions.length}</span>}
+        {card.versions && <span className="font-mono fs-11 text-ink-3">v{card.versions.length}</span>}
         <div className="ml-auto flex gap-1">
           {(card.hasHtml || !!card.html) && <PinButton target={{ kind: "card", ref: card.id, title: card.title }} size="md" />}
           <SendToDirectorButton handoff={() => playCardHandoff(card)} className="!h-8 !px-2.5" />
@@ -360,7 +378,7 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
       {card.idea && !compact && <p className="mb-2 line-clamp-2 text-xs text-ink-3">{card.idea}</p>}
 
       {code ? (
-        <pre className="well max-h-[420px] overflow-auto whitespace-pre-wrap rounded-[12px] p-3 font-mono text-[11px] text-ink-2">{card.html || "(no HTML)"}</pre>
+        <pre className="well max-h-[420px] overflow-auto whitespace-pre-wrap r-12 p-3 font-mono fs-11 text-ink-2">{card.html || "(no HTML)"}</pre>
       ) : (
         <iframe
           key={src}
@@ -368,7 +386,7 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
           title={`Prototype: ${card.title}`}
           // No allow-same-origin: the prototype runs in an opaque origin, isolated from the OS.
           sandbox="allow-scripts allow-forms allow-modals allow-popups"
-          className={`w-full rounded-[12px] border border-white/10 bg-white ${compact ? "h-[340px]" : "h-[480px]"}`}
+          className={`w-full r-12 border border-white/10 bg-white ${compact ? "h-[340px]" : "h-[480px]"}`}
           loading="lazy"
         />
       )}
@@ -410,7 +428,7 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
           submitIcon={<Wand2 size={11} />}
           placeholder="Iterate / tweak — e.g. “bigger CTA, add a dark calendar view”. Enter is a new line."
           adornment={
-            <select value={target} onChange={(e) => setTarget(e.target.value as "designer" | "coder")} className="h-6 rounded-full border border-white/10 bg-transparent px-1.5 font-mono text-[10px] text-ink-2 outline-none" aria-label="Send tweak to">
+            <select value={target} onChange={(e) => setTarget(e.target.value as "designer" | "coder")} className="h-6 rounded-full border border-white/10 bg-transparent px-1.5 font-mono fs-10 text-ink-2 outline-none" aria-label="Send tweak to">
               <option value="coder" className="bg-canvas">Coder</option>
               <option value="designer" className="bg-canvas">Designer</option>
             </select>
@@ -425,22 +443,24 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
       {card.buildPlan && !compact && (
         <details className="mt-3">
           <summary className="cursor-pointer text-xs text-teal">Build plan (Prompter → Coder)</summary>
-          <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 text-[11px] text-ink-2">{card.buildPlan}</pre>
+          <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap r-10 p-2 fs-11 text-ink-2">{card.buildPlan}</pre>
         </details>
       )}
-      {card.vaultPath && <p className="mt-2 font-mono text-[11px] text-ink-3">Vault: {card.vaultPath}</p>}
+      {card.vaultPath && <p className="mt-2 font-mono fs-11 text-ink-3">Vault: {card.vaultPath}</p>}
 
-      {full && (
-        <div className="fixed inset-0 z-[85] flex flex-col bg-black/80 p-3" role="dialog" aria-modal="true" aria-label={`${card.title} full screen`}>
+      {full &&
+        createPortal(
+        <div className="fixed inset-0 z-[85] flex flex-col bg-black/80 p-3" role="dialog" aria-modal="true" aria-label={`${card.title} full screen`} onKeyDown={(e) => e.key === "Escape" && setFull(false)}>
           <div className="mb-2 flex items-center">
             <span className="text-sm text-ink">{card.title}</span>
             <button onClick={() => setFull(false)} className="pill-glass ml-auto !h-8 text-xs">
               Close
             </button>
           </div>
-          <iframe src={src} title={`Prototype full screen: ${card.title}`} sandbox="allow-scripts allow-forms allow-modals allow-popups" className="w-full flex-1 rounded-[12px] border-0 bg-white" />
-        </div>
-      )}
+          <iframe src={src} title={`Prototype full screen: ${card.title}`} sandbox="allow-scripts allow-forms allow-modals allow-popups" className="w-full flex-1 r-12 border-0 bg-white" />
+        </div>,
+          document.body,
+        )}
     </section>
   );
 }
@@ -483,7 +503,7 @@ function LedgerTabButton({ id, tab, setTab, icon: Icon, label }: { id: LedgerTab
       role="tab"
       aria-selected={on}
       onClick={() => setTab(id)}
-      className={`label-caps flex h-6 items-center gap-1 rounded-full border px-2 !text-[9px] transition-colors ${on ? "border-amber/50 bg-amber/10 text-amber-soft" : "border-transparent text-ink-3 hover:text-ink-2"}`}
+      className={`label-caps flex h-6 items-center gap-1 rounded-full border px-2 !fs-9 transition-colors ${on ? "border-amber/50 bg-amber/10 text-amber-soft" : "border-transparent text-ink-3 hover:text-ink-2"}`}
     >
       <Icon size={10} /> {label}
     </button>
@@ -506,11 +526,11 @@ function IdeasList({ compact }: { compact: boolean }) {
           const live = !!run && run.status !== "failed" && run.status !== "review_ready";
           const action = ideaAction(i.status, live, !!i.taskId);
           return (
-            <li key={i.id} className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-3">
+            <li key={i.id} className="r-12 border border-white/[0.06] bg-white/[0.02] p-3">
               <div className="flex items-center gap-2">
                 <span className="text-sm text-ink">{i.title}</span>
                 <span className="label-caps text-ink-3">{i.status}</span>
-                <span className="ml-auto font-mono text-[11px] text-ink-3">
+                <span className="ml-auto font-mono fs-11 text-ink-3">
                   {done}/{i.tasks?.length ?? 0}
                 </span>
               </div>
@@ -530,7 +550,7 @@ function IdeasList({ compact }: { compact: boolean }) {
               )}
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {live && run && (
-                  <span className="flex h-7 items-center gap-1 font-mono text-[11px] text-amber-soft">
+                  <span className="flex h-7 items-center gap-1 font-mono fs-11 text-amber-soft">
                     <Loader2 size={11} className="animate-spin" /> {ownerLabel(run.owner)}
                     {run.iteration > 0 ? ` · iter ${run.iteration}/${run.maxIterations}` : ""}
                   </span>
@@ -539,14 +559,14 @@ function IdeasList({ compact }: { compact: boolean }) {
                   <button
                     onClick={() => void requestPipeline(i.id, i.title, "general")}
                     disabled={solo}
-                    className="pill-primary !h-7 !px-3 text-[11px] disabled:opacity-50"
+                    className="pill-primary !h-7 !px-3 fs-11 disabled:opacity-50"
                     title={solo ? SOLO_BUILD_HINT : "Prompter → Designer → Coder, after you approve the card"}
                   >
                     <Play size={11} /> {action === "rebuild" ? "Rebuild prototype" : i.status === "prototyping" || i.status === "failed" ? "Retry build" : "Run pipeline"}
                   </button>
                 )}
                 {action === "retry" && i.taskId && isTauri() && (
-                  <button onClick={() => void retryTask(i.taskId!, i.title)} className="pill-primary !h-7 !px-3 text-[11px]" title="Re-run the failed step (the earlier steps' work is kept)">
+                  <button onClick={() => void retryTask(i.taskId!, i.title)} className="pill-primary !h-7 !px-3 fs-11" title="Re-run the failed step (the earlier steps' work is kept)">
                     <RotateCcw size={11} /> Retry
                   </button>
                 )}
@@ -554,20 +574,20 @@ function IdeasList({ compact }: { compact: boolean }) {
                   <button
                     onClick={() => void requestPipeline(i.id, i.title, "general")}
                     disabled={solo}
-                    className="pill-primary !h-7 !px-3 text-[11px] disabled:opacity-50"
+                    className="pill-primary !h-7 !px-3 fs-11 disabled:opacity-50"
                     title={solo ? SOLO_BUILD_HINT : "Queue it again on the desktop, after you approve the card"}
                   >
                     <RotateCcw size={11} /> Retry build
                   </button>
                 )}
                 {!live && run?.status === "review_ready" && <StagingLink slug={run.slug} />}
-                {i.status === "failed" && i.error && !compact && <p className="w-full text-[11px] text-alert">{i.error}</p>}
+                {i.status === "failed" && i.error && !compact && <p className="w-full fs-11 text-alert">{i.error}</p>}
                 {i.cardId && (
-                  <button onClick={() => useFocus.getState().set({ card: i.cardId! })} className="pill-glass !h-7 !px-3 text-[11px]">
+                  <button onClick={() => useFocus.getState().set({ card: i.cardId! })} className="pill-glass !h-7 !px-3 fs-11">
                     <Send size={11} /> Prototype
                   </button>
                 )}
-                <button onClick={() => void update(i.id, { status: "archived" })} className="pill-glass !h-7 !px-3 text-[11px]">
+                <button onClick={() => void update(i.id, { status: "archived" })} className="pill-glass !h-7 !px-3 fs-11">
                   <Archive size={11} /> Archive
                 </button>
               </div>

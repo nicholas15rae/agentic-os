@@ -128,7 +128,7 @@ export function TranslateView({ compact = false }: { compact?: boolean }) {
   return (
     <div className={compact ? "space-y-3" : "grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]"}>
       <div className="space-y-3">
-        <section className="glass space-y-3 rounded-[20px] p-3 md:p-4" aria-label="Languages">
+        <section className="glass space-y-3 r-20 p-3 md:p-4" aria-label="Languages">
           <div className="flex items-center gap-2">
             <LangSelect value={source} onChange={(v) => setPrefs({ source: v })} auto label="Source language" className="min-w-0 flex-1" />
             <button type="button" onClick={swap} aria-label="Swap languages" title="Swap languages" className="pill-glass !h-10 !w-10 shrink-0 !p-0">
@@ -171,7 +171,7 @@ export function TranslateView({ compact = false }: { compact?: boolean }) {
         </div>
 
         {micLocked && (
-          <p role="alert" className="flex flex-wrap items-center gap-2 rounded-[14px] border border-alert/40 bg-alert/10 p-3 text-sm text-alert">
+          <p role="alert" className="flex flex-wrap items-center gap-2 r-14 border border-alert/40 bg-alert/10 p-3 text-sm text-alert">
             The mic is locked off.
             <button type="button" className="pill-glass !h-8 text-xs" onClick={() => void requestMicEnabled(true).then(() => setMicLocked(false))}>
               Unlock mic
@@ -180,14 +180,14 @@ export function TranslateView({ compact = false }: { compact?: boolean }) {
         )}
 
         {(phase || heard) && (
-          <p role="status" className="flex items-center gap-2 px-1 text-[13px] text-ink-2">
+          <p role="status" className="flex items-center gap-2 px-1 fs-13 text-ink-2">
             {phase && <Loader2 size={13} className="animate-spin" />}
             {phase === "transcribing" ? "Transcribing locally…" : phase === "translating" ? "Translating on the local model…" : null}
             {heard && <span className="truncate italic text-ink-3">“{heard}”</span>}
           </p>
         )}
 
-        <section className="glass space-y-2 rounded-[20px] p-3 md:p-4" aria-label="Type or paste">
+        <section className="glass space-y-2 r-20 p-3 md:p-4" aria-label="Type or paste">
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -201,7 +201,7 @@ export function TranslateView({ compact = false }: { compact?: boolean }) {
             rows={compact ? 2 : 3}
             placeholder="Type English, or paste foreign text (a sign, a menu, a message)…"
             aria-label="Text to translate"
-            className="field min-h-[4.5rem] w-full resize-y text-[15px]"
+            className="field min-h-[4.5rem] w-full resize-y fs-15"
           />
           <div className="flex flex-wrap gap-2">
             <button type="button" disabled={busy || !text.trim()} onClick={() => void submitText("target")} className="pill-primary !h-10 flex-1 text-sm disabled:opacity-40">
@@ -214,17 +214,17 @@ export function TranslateView({ compact = false }: { compact?: boolean }) {
         </section>
 
         {status && !status.multilingualModel && !compact && (
-          <p className="glass rounded-[14px] px-3 py-2 text-[11px] leading-relaxed text-ink-2">
+          <p className="glass r-14 px-3 py-2 fs-11 leading-relaxed text-ink-2">
             <Ear size={11} className="mr-1 inline" />
             Foreign-speech capture needs a multilingual Whisper model (e.g. <span className="font-mono">ggml-small.bin</span>) next to your current one. Until then, “Speak English”, typed and pasted text all work.
           </p>
         )}
       </div>
 
-      <section aria-label="This session" className="glass space-y-2 self-start rounded-[20px] p-3 md:p-4">
+      <section aria-label="This session" className="glass space-y-2 self-start r-20 p-3 md:p-4">
         <div className="flex items-center gap-2 px-1">
           <h2 className="label-caps text-amber-soft">This session</h2>
-          <span className="font-mono text-[11px] text-ink-3">{feed.length}</span>
+          <span className="font-mono fs-11 text-ink-3">{feed.length}</span>
           {unsaved > 0 && (
             <button type="button" onClick={clearUnsaved} className="pill-glass ml-auto !h-8 text-xs" title="Removes unsaved cards from this session; the Library is untouched">
               <Trash2 size={12} /> Clear unsaved ({unsaved})
@@ -250,18 +250,18 @@ function FeedCard({ f }: { f: FeedItem }) {
   // The foreign side is what you want to hear.
   const foreign = f.dir === "out" ? { text: f.translated_text, lang: f.target_lang } : { text: f.source_text, lang: f.source_lang };
   return (
-    <li className="rounded-[16px] border border-white/[0.06] bg-white/[0.03] p-3.5">
+    <li className="r-16 border border-white/[0.06] bg-white/[0.03] p-3.5">
       <div className="mb-1.5 flex items-center gap-2">
-        <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${f.dir === "in" ? "bg-teal/15 text-teal" : "bg-amber/15 text-amber-light"}`}>
+        <span className={`rounded-full px-2 py-0.5 font-mono fs-10 uppercase tracking-wider ${f.dir === "in" ? "bg-teal/15 text-teal" : "bg-amber/15 text-amber-light"}`}>
           {f.dir === "in" ? "Capture" : "You"} · {langName(f.source_lang)} → {langName(f.target_lang)}
         </span>
-        <span className="ml-auto font-mono text-[10px] text-ink-3">{new Date(f.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+        <span className="ml-auto font-mono fs-10 text-ink-3">{new Date(f.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
       </div>
-      <p className="text-[13px] text-ink-2">{f.source_text}</p>
-      <p className="mt-1 text-[17px] font-semibold leading-snug text-ink">{f.translated_text}</p>
-      {f.phonetic && <p className="mt-0.5 font-mono text-[12px] text-amber-soft">{f.phonetic}</p>}
+      <p className="fs-13 text-ink-2">{f.source_text}</p>
+      <p className="mt-1 fs-17 font-semibold leading-snug text-ink">{f.translated_text}</p>
+      {f.phonetic && <p className="mt-0.5 font-mono fs-12 text-amber-soft">{f.phonetic}</p>}
       {(f.literal || f.notes) && (
-        <details className="mt-1.5 text-[12px] text-ink-3">
+        <details className="mt-1.5 fs-12 text-ink-3">
           <summary className="cursor-pointer select-none">Literal &amp; notes</summary>
           {f.literal && <p className="mt-1">Literal: {f.literal}</p>}
           {f.notes && <p className="mt-1">{f.notes}</p>}
@@ -271,7 +271,7 @@ function FeedCard({ f }: { f: FeedItem }) {
         <PlayButton text={foreign.text} lang={foreign.lang} label={`Play ${langName(foreign.lang)}`} />
         <CopyButton text={f.translated_text} />
         <SaveButton saved={!!f.savedId} onSave={() => saveFeed(f.key)} />
-        {f.savedId && <span className="text-[11px] text-teal">Saved</span>}
+        {f.savedId && <span className="fs-11 text-teal">Saved</span>}
       </div>
     </li>
   );

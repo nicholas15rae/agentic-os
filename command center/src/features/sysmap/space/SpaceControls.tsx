@@ -63,9 +63,9 @@ export function SpaceControls() {
         </span>
       </button>
       {open && (
-        <div role="dialog" aria-label="Deep-space backdrop" className="sysmap-drawer absolute bottom-[calc(100%+6px)] left-0 w-[300px] space-y-2.5 rounded-xl border border-white/12 bg-[rgba(4,7,12,0.94)] p-2.5 font-mono text-[11px] text-ink-2 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
+        <div role="dialog" aria-label="Deep-space backdrop" className="sysmap-drawer absolute bottom-[calc(100%+6px)] left-0 w-[300px] space-y-2.5 rounded-xl border border-white/12 bg-[rgba(4,7,12,0.94)] p-2.5 font-mono fs-11 text-ink-2 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
           <div>
-            <p className="mb-1 text-[9.5px] uppercase tracking-[0.16em] text-ink-3">Backdrop mode</p>
+            <p className="mb-1 fs-9.5 uppercase tracking-[0.16em] text-ink-3">Backdrop mode</p>
             <div className="grid grid-cols-3 gap-1" role="radiogroup" aria-label="Backdrop mode">
               {SPACE_MODES.map((m) => (
                 <button
@@ -74,7 +74,7 @@ export function SpaceControls() {
                   role="radio"
                   aria-checked={mode === m.id}
                   onClick={() => useSpace.getState().setMode(m.id)}
-                  className={`h-7 whitespace-nowrap rounded-md border px-1 text-[10.5px] transition-colors ${mode === m.id ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 hover:border-white/25 hover:text-ink"}`}
+                  className={`h-7 whitespace-nowrap rounded-md border px-1 fs-10.5 transition-colors ${mode === m.id ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 hover:border-white/25 hover:text-ink"}`}
                 >
                   {m.label}
                 </button>
@@ -102,12 +102,12 @@ export function SpaceControls() {
             </button>
           </div>
           <div>
-            <p className="mb-1 flex items-center gap-1 text-[9.5px] uppercase tracking-[0.16em] text-ink-3">
+            <p className="mb-1 flex items-center gap-1 fs-9.5 uppercase tracking-[0.16em] text-ink-3">
               <Rocket size={10} aria-hidden /> Trigger flyby
             </p>
             <div className="grid grid-cols-4 gap-1">
               {PREVIEWS.map((p) => (
-                <button key={p.kind} type="button" className="sysmap-ctl !h-7 !px-1 text-[10.5px]" disabled={!engine} onClick={() => useSpace.getState().triggerFlyby(p.kind)} title={engine ? p.hint : "Pick Deep Space or Full Cinema"}>
+                <button key={p.kind} type="button" className="sysmap-ctl !h-7 !px-1 fs-10.5" disabled={!engine} onClick={() => useSpace.getState().triggerFlyby(p.kind)} title={engine ? p.hint : "Pick Deep Space or Full Cinema"}>
                   {p.label}
                 </button>
               ))}

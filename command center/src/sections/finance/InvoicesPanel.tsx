@@ -69,10 +69,10 @@ export function InvoicesPanel() {
         hint={`Outstanding: ${money(outstanding, currency)}. Marking one paid books the income and the HST collected. Each area numbers its own invoices.`}
         action={
           <>
-            <span className="flex items-center gap-1.5 text-[11px] text-ink-3">
+            <span className="flex items-center gap-1.5 fs-11 text-ink-3">
               Paid by
               <span className="w-32">
-                <SelectOther label="Paid by" value={paidBy} options={PAY_METHODS} onChange={setPaidBy} className="!h-8 !py-0 text-[12px]" />
+                <SelectOther label="Paid by" value={paidBy} options={PAY_METHODS} onChange={setPaidBy} className="!h-8 !py-0 fs-12" />
               </span>
             </span>
             <button onClick={() => setEditing("new")} className="pill-primary !h-8 text-xs">
@@ -86,15 +86,15 @@ export function InvoicesPanel() {
           {rows.map((inv) => {
             const t = invoiceTotals(inv);
             return (
-              <li key={inv.id} className="group flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                <span className="font-mono text-[12px] text-ink-2">{inv.number}</span>
+              <li key={inv.id} className="group flex flex-wrap items-center gap-x-3 gap-y-1 r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <span className="font-mono fs-12 text-ink-2">{inv.number}</span>
                 <AreaTag area={inv.area} onAssign={(area) => void update(inv.id, { area })} />
                 <button onClick={() => setEditing(inv)} className="min-w-0 flex-1 truncate text-left text-sm text-ink hover:text-amber-light" title="Edit">
                   {inv.client} <QuestionMark q={inv.question} />
                 </button>
-                <span className="font-mono text-[11px] text-ink-3">due {new Date(inv.dueAt).toLocaleDateString()}</span>
+                <span className="font-mono fs-11 text-ink-3">due {new Date(inv.dueAt).toLocaleDateString()}</span>
                 <span className="w-24 text-right font-mono text-sm text-ink tabular">{money(t.total, currency)}</span>
-                <span className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${STATUS_TONE[inv.status]}`}>{inv.status}</span>
+                <span className={`rounded-full border px-2 py-0.5 font-mono fs-10 uppercase tracking-wider ${STATUS_TONE[inv.status]}`}>{inv.status}</span>
                 <div className="flex">
                   {inv.status === "draft" && (
                     <Btn label="Mark sent" onClick={() => void update(inv.id, { status: "sent", sentAt: Date.now() })}>
@@ -264,9 +264,9 @@ function InvoiceEditor({ initial, defaultArea, onClose }: { initial: Item<Invoic
         <div className="space-y-1.5">
           {inv.items.map((l, i) => (
             <div key={i} className="grid grid-cols-[1fr_70px_100px_32px] gap-1.5">
-              <Input value={l.desc} onChange={(e) => setLine(i, { desc: e.target.value })} placeholder="Description" className="!h-9 !py-1 text-[13px]" aria-label="Line description" />
-              <Input type="number" min={0} step="0.25" value={l.qty} onChange={(e) => setLine(i, { qty: Number(e.target.value) })} className="!h-9 !py-1 font-mono text-[13px]" aria-label="Quantity" />
-              <Input type="number" min={0} step="0.01" value={l.rate} onChange={(e) => setLine(i, { rate: Number(e.target.value) })} className="!h-9 !py-1 font-mono text-[13px]" aria-label="Rate" />
+              <Input value={l.desc} onChange={(e) => setLine(i, { desc: e.target.value })} placeholder="Description" className="!h-9 !py-1 fs-13" aria-label="Line description" />
+              <Input type="number" min={0} step="0.25" value={l.qty} onChange={(e) => setLine(i, { qty: Number(e.target.value) })} className="!h-9 !py-1 font-mono fs-13" aria-label="Quantity" />
+              <Input type="number" min={0} step="0.01" value={l.rate} onChange={(e) => setLine(i, { rate: Number(e.target.value) })} className="!h-9 !py-1 font-mono fs-13" aria-label="Rate" />
               <button type="button" aria-label="Remove line" onClick={() => setInv({ ...inv, items: inv.items.filter((_, j) => j !== i) })} className="grid size-9 place-items-center text-ink-3 hover:text-alert" disabled={inv.items.length === 1}>
                 <X size={13} />
               </button>
@@ -285,7 +285,7 @@ function InvoiceEditor({ initial, defaultArea, onClose }: { initial: Item<Invoic
             Tax {inv.taxRate}% {money(t.tax, currency)}
           </span>
           <span className="text-amber-light">Total {money(t.total, currency)}</span>
-          <Select value={inv.status} onChange={(e) => setInv({ ...inv, status: e.target.value as Invoice["status"] })} className="!h-9 !w-auto !py-1 font-sans text-[13px]" aria-label="Status">
+          <Select value={inv.status} onChange={(e) => setInv({ ...inv, status: e.target.value as Invoice["status"] })} className="!h-9 !w-auto !py-1 font-sans fs-13" aria-label="Status">
             {["draft", "sent", "paid", "void"].map((s) => (
               <option key={s}>{s}</option>
             ))}
@@ -413,7 +413,7 @@ function EmailDraftCard({ inv, onClose, onDrafted }: { inv: Invoice; onClose: ()
           <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
         </Field>
         <Field label="Message">
-          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={10} className="field w-full font-mono text-[12px]" />
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={10} className="field w-full font-mono fs-12" />
         </Field>
         {!desktop && <p className="text-xs text-amber-light">Gmail drafts need the desktop app. Download the PDF and email it yourself.</p>}
         {state.msg && <p className={`text-xs ${state.s === "error" ? "text-alert" : "text-teal"}`}>{state.msg}</p>}

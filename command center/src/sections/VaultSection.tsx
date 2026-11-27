@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
 import { Archive, CheckCircle2, CircleDashed, CloudUpload, Copy, Database, HardDriveDownload, Loader2, RefreshCw, Search, XCircle } from "lucide-react";
 import { Card, Chip, Field, Input, Stat } from "@/components/ui";
-import { backupSummary, cc, type BackupList, type CcConfig, type Collection, type VaultResults } from "@/lib/cc-api";
+import { backupSummary, cc, type BackupList, type CcConfig, type Collection } from "@/lib/cc-api";
 import { gateway } from "@/lib/gateway";
 import { useNav } from "@/stores/nav";
 import { cmd, isTauri, type PipelinesSettings, type SyncResult } from "@/lib/platform";
 import { MemoryLifecycleCard } from "@/sections/settings/MemorySettings";
+import { useOs } from "@/features/os/os-store";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { panelShown, revealPanel } from "@/core/widgets/reveal";
+import type { WidgetProps } from "@/core/widgets/types";
+import { useVaultLayout } from "./vault/panels";
+import { useVaultSearch } from "./vault/vault-store";
 import { focusVaultPasswordRow, VaultPasswordBanner } from "@/sections/settings/VaultPasswordBanner";
 import { useKeySources } from "@/features/integrations/key-sources";
 import { driveSyncState, mirrorAlerts, vaultChecklist, vaultPasswordState, type DriveSyncState } from "@/features/vault/safety";
@@ -29,94 +35,108 @@ const OPEN: Partial<Record<Collection, Parameters<ReturnType<typeof useNav.getSt
   checks: "finance",
 };
 
-/** Local vector vault (semantic + keyword search) and offline backups. */
+/**
+ * Local vector vault (semantic + keyword search) and offline backups, on the shared layout system:
+ * the search box, its results, backups and (desktop) the memory lifecycle are panels.
+ */
 export function VaultSection() {
-  const [q, setQ] = useState("");
-  const [filters, setFilters] = useState<Set<Collection>>(new Set());
-  const [res, setRes] = useState<VaultResults | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const go = useNav((s) => s.go);
+  // The old page's search lived in local state: it is cleared when the page closes.
+  useEffect(() => () => useVaultSearch.getState().clear(), []);
+  return <LayoutSurface store={useVaultLayout} label="Vault" />;
+}
 
-  const search = async () => {
-    if (!q.trim()) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      // Nic's own search: an unfiltered search still covers receipts, invoices and cheques.
-      setRes(await cc.search(q, [...filters], 20, { includeFinance: true }));
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
+/** The search box and collection filters. */
+export function VaultSearchPanel() {
+  const { q, filters, busy, err, setQ, toggle, search } = useVaultSearch();
+  const run = async () => {
+    // A search always lands on visible results.
+    if ((await search()) && !panelShown(useVaultLayout.getState(), "va-results")) revealPanel(useVaultLayout, "va-results", "Vault");
   };
-
   return (
-    <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
+    <Card
+      title="Vault search"
+      hint="Brainstorms (transcripts, summaries, tags), scripts & auditions, jobs, documents, ideas, prototypes, and your receipts, invoices and cheques are embedded locally — ask in plain language. Falls back to keyword search if no embedding model is loaded."
+    >
       {isTauri() && <VaultPasswordBanner />}
-      <Card
-        title="Vault search"
-        hint="Brainstorms (transcripts, summaries, tags), scripts & auditions, jobs, documents, ideas, prototypes, and your receipts, invoices and cheques are embedded locally — ask in plain language. Falls back to keyword search if no embedding model is loaded. Not searched here: reminders, savings goals, chats, Memory Scrolls and the language library. Tony can search this too (never your finance records)."
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void run();
+        }}
       >
-        <form
-          className="flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void search();
-          }}
-        >
-          <div className="relative flex-1">
-            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-3" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="“the Home Depot receipts for the deck job”, “that idea about a car reel”…" className="!pl-10" aria-label="Search the vault" autoFocus />
-          </div>
-          <button className="pill-primary shrink-0" disabled={busy || !q.trim()}>
-            {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search
-          </button>
-        </form>
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {FILTERS.map((f) => (
-            <Chip
-              key={f.id}
-              active={filters.has(f.id)}
-              onClick={() => {
-                const next = new Set(filters);
-                if (next.has(f.id)) next.delete(f.id);
-                else next.add(f.id);
-                setFilters(next);
-              }}
-            >
-              {f.label}
-            </Chip>
-          ))}
+        <div className="relative flex-1">
+          <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-3" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="“the Home Depot receipts for the deck job”, “that idea about a car reel”…" className="!pl-10" aria-label="Search the vault" autoFocus />
         </div>
-        {err && <p className="mt-3 text-sm text-alert">{err}</p>}
-        {res && (
-          <div className="mt-4 space-y-2">
-            <p className="label-caps text-ink-3">
-              {res.results.length} results · {res.mode === "hybrid" ? "semantic + keyword" : res.mode}
-            </p>
-            {res.results.map((r) => (
-              <button
-                key={r.id}
-                onClick={() => OPEN[r.collection] && go(OPEN[r.collection]!)}
-                className="block w-full rounded-[14px] border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-amber/40"
-              >
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="label-caps text-amber-soft">{FILTERS.find((f) => f.id === r.collection)?.label ?? r.collection}</span>
-                  <span className="ml-auto font-mono text-[11px] text-ink-3">{(r.score * 100).toFixed(0)}%</span>
-                </div>
-                <p className="line-clamp-3 whitespace-pre-line text-sm text-ink">{r.snippet}</p>
-              </button>
-            ))}
-            {!res.results.length && <p className="text-sm text-ink-3">Nothing matched.</p>}
-          </div>
-        )}
-      </Card>
-      <BackupCard />
-      {isTauri() && <VaultChecklistCard />}
-      {isTauri() && <MemoryLifecycleCard passwordBanner={false} />}
-    </div>
+        <button className="pill-primary shrink-0" disabled={busy || !q.trim()}>
+          {busy ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search
+        </button>
+      </form>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {FILTERS.map((f) => (
+          <Chip key={f.id} active={filters.has(f.id)} onClick={() => toggle(f.id)}>
+            {f.label}
+          </Chip>
+        ))}
+      </div>
+      {err && <p className="mt-3 text-sm text-alert">{err}</p>}
+    </Card>
+  );
+}
+
+/** The last search's results; a tap opens the page the item lives on. */
+export function VaultResultsPanel({ setBadge }: WidgetProps) {
+  const res = useVaultSearch((s) => s.res);
+  const go = useNav((s) => s.go);
+  const count = res ? res.results.length : null;
+  useEffect(() => {
+    setBadge?.(count ? String(count) : null);
+  }, [count, setBadge]);
+  return (
+    <Card title="Results">
+      {!res ? (
+        <p className="text-sm text-ink-3">Search the vault and what it finds shows here.</p>
+      ) : (
+        <div className="space-y-2" data-no-hold>
+          <p className="label-caps text-ink-3">
+            {res.results.length} results · {res.mode === "hybrid" ? "semantic + keyword" : res.mode}
+          </p>
+          {res.results.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => OPEN[r.collection] && go(OPEN[r.collection]!)}
+              className="block w-full r-14 border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-amber/40"
+            >
+              <div className="mb-1 flex items-center gap-2">
+                <span className="label-caps text-amber-soft">{FILTERS.find((f) => f.id === r.collection)?.label ?? r.collection}</span>
+                <span className="ml-auto font-mono fs-11 text-ink-3">{(r.score * 100).toFixed(0)}%</span>
+              </div>
+              <p className="line-clamp-3 whitespace-pre-line text-sm text-ink">{r.snippet}</p>
+            </button>
+          ))}
+          {!res.results.length && <p className="text-sm text-ink-3">Nothing matched.</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** The memory lifecycle card (desktop app); it draws nothing until the OS config loads. */
+export function VaultMemoryPanel() {
+  const ready = useOs((s) => !!s.cfg);
+  const error = useOs((s) => s.error);
+  if (!isTauri()) return null;
+  return (
+    <>
+      <VaultChecklistCard />
+      <MemoryLifecycleCard passwordBanner={false} />
+      {!ready && (
+        <Card title="Memory lifecycle">
+          <p className="text-sm text-ink-3">{error ? `Couldn't load the OS config: ${error}` : "Loading the OS config…"}</p>
+        </Card>
+      )}
+    </>
   );
 }
 
@@ -127,7 +147,7 @@ export function VaultSection() {
 const BACKUPS_TIMEOUT_MS = 45_000;
 const fetchBackups = () => gateway<BackupList>("/api/cc/backups", { timeoutMs: BACKUPS_TIMEOUT_MS });
 
-function BackupCard() {
+export function BackupCard() {
   const [cfg, setCfg] = useState<CcConfig | null>(null);
   const [list, setList] = useState<BackupList | null>(null);
   const [health, setHealth] = useState<Awaited<ReturnType<typeof cc.health>> | null>(null);
@@ -280,7 +300,7 @@ function BackupCard() {
             <Input type="number" min={1} max={365} defaultValue={cfg.backup.keep} onBlur={(e) => void saveBackup({ keep: Number(e.target.value) })} className="font-mono" />
           </Field>
           <Field label="Backup folder (on the gateway machine)">
-            <Input defaultValue={cfg.backup.dir} onBlur={(e) => e.target.value !== cfg.backup.dir && void saveBackup({ dir: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+            <Input defaultValue={cfg.backup.dir} onBlur={(e) => e.target.value !== cfg.backup.dir && void saveBackup({ dir: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
           </Field>
         </div>
       )}
@@ -288,9 +308,9 @@ function BackupCard() {
       {isTauri() && <OffsitePanel drive={driveState} />}
       {msg && <p className="mt-3 break-all text-xs text-ink-2">{msg}</p>}
       {list && list.backups.length > 0 && (
-        <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto font-mono text-[12px]">
+        <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto font-mono fs-12">
           {list.backups.map((b) => (
-            <li key={b.name} className="flex items-center gap-2 rounded-[10px] border border-white/[0.05] px-3 py-1.5 text-ink-2">
+            <li key={b.name} className="flex items-center gap-2 r-10 border border-white/[0.05] px-3 py-1.5 text-ink-2">
               <Archive size={12} className="text-ink-3" />
               <span className="flex-1 truncate">{b.name}</span>
               <span>{(b.size / 1024).toFixed(0)} KB</span>
@@ -349,7 +369,7 @@ function MirrorsPanel({
             spellCheck={false}
             placeholder="D:\Backups\cc-mirror"
             aria-label="Mirror folders"
-            className="field font-mono !text-[12px]"
+            className="field font-mono !fs-12"
             onBlur={(e) => {
               const next = e.target.value
                 .split(/\r?\n/)
@@ -373,14 +393,14 @@ function MirrorsPanel({
       {rows.length > 0 && (
         <ul className="mt-3 space-y-1.5">
           {rows.map((r) => (
-            <li key={r.dir} className="flex flex-wrap items-center gap-2 rounded-[10px] border border-white/[0.05] px-3 py-1.5 text-[12px]">
+            <li key={r.dir} className="flex flex-wrap items-center gap-2 r-10 border border-white/[0.05] px-3 py-1.5 fs-12">
               {r.alert ? <XCircle size={13} className="text-alert" /> : r.ok ? <CheckCircle2 size={13} className="text-teal" /> : <CircleDashed size={13} className="text-ink-3" />}
               <span className="min-w-0 flex-1 truncate font-mono text-ink-2" title={r.dir}>
                 {r.dir}
               </span>
               <span className={r.alert ? "text-alert" : "text-ink-3"}>{r.alert ? (r.reachable ? "failed" : "unreachable") : r.ok ? "ok" : "not copied yet"}</span>
               <span className="text-ink-3">last good copy: {when(r.lastOkAt)}</span>
-              {r.alert && <p className="w-full break-all text-[11px] text-ink-3">{r.alert}</p>}
+              {r.alert && <p className="w-full break-all fs-11 text-ink-3">{r.alert}</p>}
             </li>
           ))}
         </ul>

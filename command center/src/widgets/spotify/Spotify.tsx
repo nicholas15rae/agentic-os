@@ -87,7 +87,7 @@ function ConnectPanel({ onDone, problem, hint, recheckOnly = false }: { onDone: 
       <WidgetHeader title="Spotify" />
       <p className={`${hint ? "mb-1" : "mb-3"} text-sm ${problem ? "text-alert" : "text-ink-2"}`}>{problem ?? "Connect your Spotify account to see what's playing and control it from here."}</p>
       {hint && <p className="mb-3 text-xs text-ink-2">{hint}</p>}
-      <button onClick={() => void (recheckOnly ? onDone() : connect())} disabled={waiting} className="pill-primary !h-9 w-fit text-[13px]">
+      <button onClick={() => void (recheckOnly ? onDone() : connect())} disabled={waiting} className="pill-primary !h-9 w-fit fs-13">
         {waiting ? <Loader2 size={13} className="animate-spin" /> : <Music2 size={13} />} {recheckOnly ? "Check again" : problem ? "Re-authenticate" : "Connect Spotify"}
       </button>
       {waiting && (
@@ -303,9 +303,9 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
 
       <div className="flex min-w-0 items-center gap-3">
         {d?.artUrl ? (
-          <img src={d.artUrl} alt="" className={`${showList ? "size-14" : "size-11"} shrink-0 rounded-[10px] object-cover`} />
+          <img src={d.artUrl} alt="" className={`${showList ? "size-14" : "size-11"} shrink-0 r-10 object-cover`} />
         ) : (
-          <div className={`${showList ? "size-14" : "size-11"} well grid shrink-0 place-items-center rounded-[10px] text-ink-3`}>
+          <div className={`${showList ? "size-14" : "size-11"} well grid shrink-0 place-items-center r-10 text-ink-3`}>
             <Music2 size={18} />
           </div>
         )}
@@ -317,7 +317,7 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
             {d?.track ? d.artists.join(", ") : np ? "Open Spotify on a device, or pick something below." : ""}
           </p>
           {showList && d?.track && d.album && (
-            <p className="truncate text-[11px] text-ink-3" title={d.album}>
+            <p className="truncate fs-11 text-ink-3" title={d.album}>
               {d.album}
             </p>
           )}
@@ -345,7 +345,7 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
             className="block h-3 w-full cursor-pointer appearance-none bg-transparent bg-[length:100%_4px] bg-center bg-no-repeat disabled:cursor-default [&::-webkit-slider-thumb]:size-2.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-teal-soft [&::-webkit-slider-thumb]:shadow-[0_0_6px_#00e5c3]"
             style={{ backgroundImage: `linear-gradient(to right, var(--color-teal) 0%, var(--color-teal-light) ${fill}%, rgba(255,255,255,0.08) ${fill}%)` }}
           />
-          <div className="mt-0.5 flex justify-between font-mono text-[10px] text-ink-3 tabular">
+          <div className="mt-0.5 flex justify-between font-mono fs-10 text-ink-3 tabular">
             <span>{fmtTime(pos)}</span>
             <span>{fmtTime(d.durationMs)}</span>
           </div>
@@ -412,7 +412,7 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
                 aria-selected={tab === id}
                 onClick={() => (tab === id ? loadList(id) : setConfig({ quick: id }))}
                 title={tab === id ? "Refresh" : label}
-                className={`flex h-6 items-center gap-1 rounded-full px-2.5 text-[11px] ${tab === id ? "bg-white/10 text-ink" : "text-ink-3 hover:text-ink"}`}
+                className={`flex h-6 items-center gap-1 rounded-full px-2.5 fs-11 ${tab === id ? "bg-white/10 text-ink" : "text-ink-3 hover:text-ink"}`}
               >
                 <Icon size={11} /> {label}
               </button>
@@ -426,13 +426,13 @@ function Player({ config, setConfig, size, onDisconnected }: WidgetProps<Config>
               <li key={it.uri}>
                 <button
                   onClick={() => void run(() => cmd("spotify_play_uri", { uri: it.uri, approved: true }))}
-                  className={`flex w-full min-w-0 items-center gap-2 rounded-[10px] px-1.5 py-1 text-left hover:bg-white/[0.06] ${d?.uri === it.uri ? "text-teal" : ""}`}
+                  className={`flex w-full min-w-0 items-center gap-2 r-10 px-1.5 py-1 text-left hover:bg-white/[0.06] ${d?.uri === it.uri ? "text-teal" : ""}`}
                   title={`Play ${it.title}`}
                 >
-                  {it.artUrl ? <img src={it.artUrl} alt="" loading="lazy" className="size-7 shrink-0 rounded-[6px] object-cover" /> : <span className="well size-7 shrink-0 rounded-[6px]" />}
+                  {it.artUrl ? <img src={it.artUrl} alt="" loading="lazy" className="size-7 shrink-0 r-6 object-cover" /> : <span className="well size-7 shrink-0 r-6" />}
                   <span className="min-w-0">
                     <span className="block truncate text-xs text-ink">{it.title}</span>
-                    {it.subtitle && <span className="block truncate text-[11px] text-ink-3">{it.subtitle}</span>}
+                    {it.subtitle && <span className="block truncate fs-11 text-ink-3">{it.subtitle}</span>}
                   </span>
                 </button>
               </li>

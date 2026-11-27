@@ -125,12 +125,12 @@ export function PreviewPlayer() {
   );
 
   return (
-    <section className="glass rounded-[20px] p-4">
+    <section className="glass r-20 p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {tabs}
-        <span className="ml-auto min-w-0 truncate font-mono text-[11px] text-ink-3">{src?.kind === "render" ? src.render.path.split(/[\\/]/).pop() : src?.asset.name}</span>
+        <span className="ml-auto min-w-0 truncate font-mono fs-11 text-ink-3">{src?.kind === "render" ? src.render.path.split(/[\\/]/).pop() : src?.asset.name}</span>
       </div>
-      <div className="grid aspect-video w-full place-items-center overflow-hidden rounded-[14px] bg-black">
+      <div className="grid aspect-video w-full place-items-center overflow-hidden r-14 bg-black">
         {!src ? (
           <p className="px-6 text-center text-sm text-ink-3">{previewMode === "final" ? "No verified render yet." : "Select a staged asset or a timeline clip."}</p>
         ) : kind === "image" ? (
@@ -176,7 +176,7 @@ export function PreviewPlayer() {
             className="min-w-0 flex-1 accent-amber"
             aria-label="Scrub"
           />
-          <span className="shrink-0 font-mono text-[11px] tabular text-ink-2">
+          <span className="shrink-0 font-mono fs-11 tabular text-ink-2">
             {timecode(t - lo)} / {timecode(Math.max(0, hi - lo))}
           </span>
           <button onClick={() => setMuted((m) => !m)} className="pill-glass !h-8 !w-8 shrink-0 !p-0" aria-label={muted ? "Unmute" : "Mute"}>
@@ -185,7 +185,7 @@ export function PreviewPlayer() {
           <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => setVolume(Number(e.target.value))} className="w-20 shrink-0 accent-teal" aria-label="Volume" />
         </div>
       )}
-      {src?.kind === "clip" && kind === "image" && <p className="mt-2 text-center font-mono text-[11px] text-ink-3">Still · held {src.clip.outSec}s</p>}
+      {src?.kind === "clip" && kind === "image" && <p className="mt-2 text-center font-mono fs-11 text-ink-3">Still · held {src.clip.outSec}s</p>}
     </section>
   );
 }

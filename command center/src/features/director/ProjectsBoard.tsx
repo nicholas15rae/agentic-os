@@ -85,13 +85,13 @@ export function StatusChipView({ status, busy, onChange, label }: { status: Proj
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`${label ? `${label} status` : "Status"}: ${STATUS_LABEL[status]}`}
-        className={`flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] disabled:opacity-60 ${STATUS_TONE[status]}`}
+        className={`flex h-6 items-center gap-1 rounded-full border px-2 fs-11 disabled:opacity-60 ${STATUS_TONE[status]}`}
       >
         {busy ? "Saving…" : STATUS_LABEL[status]}
         <ChevronDown size={10} />
       </button>
       {open && (
-        <ul role="menu" aria-label={label ? `Status for ${label}` : "Status"} className="rounded-[10px] border border-white/10 bg-[rgba(11,13,17,0.92)] p-1">
+        <ul role="menu" aria-label={label ? `Status for ${label}` : "Status"} className="r-10 border border-white/10 bg-[rgba(11,13,17,0.92)] p-1">
           {STATUSES.map((s) => (
             <li key={s} role="none">
               <button
@@ -102,7 +102,7 @@ export function StatusChipView({ status, busy, onChange, label }: { status: Proj
                   setOpen(false);
                   if (s !== status) onChange(s);
                 }}
-                className={`block w-full rounded-[8px] px-2 py-1 text-left text-[12px] hover:bg-white/5 ${s === status ? "text-ink" : "text-ink-2"}`}
+                className={`block w-full r-8 px-2 py-1 text-left fs-12 hover:bg-white/5 ${s === status ? "text-ink" : "text-ink-2"}`}
               >
                 {STATUS_LABEL[s]}
               </button>
@@ -138,7 +138,7 @@ export function ProjectsBoardView(p: ProjectsBoardProps) {
   const columns = p.filter.statuses.length ? STATUSES.filter((s) => p.filter.statuses.includes(s)) : STATUSES;
   const chip = (x: MediaProject) => <StatusChipView status={x.status} busy={p.busySlug === x.slug} onChange={(s) => p.onStatus(x.slug, s)} label={x.title} />;
   const title = (x: MediaProject) => (
-    <button type="button" onClick={() => p.onOpen(x.slug)} className="block min-w-0 truncate text-left text-[13px] font-medium text-ink hover:text-amber-soft" title={`Open ${x.title}`}>
+    <button type="button" onClick={() => p.onOpen(x.slug)} className="block min-w-0 truncate text-left fs-13 font-medium text-ink hover:text-amber-soft" title={`Open ${x.title}`}>
       {x.title}
     </button>
   );
@@ -148,7 +148,7 @@ export function ProjectsBoardView(p: ProjectsBoardProps) {
       title="Projects"
       action={
         <>
-          <input value={p.filter.text} onChange={(e) => p.onFilter({ ...p.filter, text: e.target.value })} placeholder="Search" className="field !h-8 !w-40 !py-0 text-[12px]" aria-label="Search projects" />
+          <input value={p.filter.text} onChange={(e) => p.onFilter({ ...p.filter, text: e.target.value })} placeholder="Search" className="field !h-8 !w-40 !py-0 fs-12" aria-label="Search projects" />
           <div className="flex gap-1" role="group" aria-label="Layout">
             <button type="button" onClick={() => p.onLayout("board")} aria-pressed={p.layout === "board"} className={`pill-glass !h-8 !w-8 !p-0 ${p.layout === "board" ? "!border-amber/50 text-ink" : ""}`} aria-label="Board" title="Board">
               <Columns3 size={13} />
@@ -180,25 +180,25 @@ export function ProjectsBoardView(p: ProjectsBoardProps) {
           {columns.map((s) => {
             const col = shown.filter((x) => x.status === s);
             return (
-              <section key={s} aria-label={`${STATUS_LABEL[s]} column`} className="min-w-[200px] rounded-[14px] border border-white/[0.08] bg-white/[0.02] p-2 md:min-w-0">
+              <section key={s} aria-label={`${STATUS_LABEL[s]} column`} className="min-w-[200px] r-14 border border-white/[0.08] bg-white/[0.02] p-2 md:min-w-0">
                 <h3 className="mb-2 flex items-center gap-1.5 px-1">
                   <span className="label-caps text-ink-2">{STATUS_LABEL[s]}</span>
-                  <span className="font-mono text-[11px] text-ink-3">{col.length}</span>
+                  <span className="font-mono fs-11 text-ink-3">{col.length}</span>
                 </h3>
                 {col.length ? (
                   <ul className="space-y-1.5">
                     {col.map((x) => (
-                      <li key={x.slug} aria-label={x.title} className="rounded-[12px] border border-white/10 bg-white/[0.03] p-2">
+                      <li key={x.slug} aria-label={x.title} className="r-12 border border-white/10 bg-white/[0.03] p-2">
                         {title(x)}
                         <div className="mt-1 flex flex-wrap items-start justify-between gap-1">
                           {chip(x)}
-                          <span className="font-mono text-[10px] text-ink-3">{updatedAgo(x.updatedAt, now)}</span>
+                          <span className="font-mono fs-10 text-ink-3">{updatedAgo(x.updatedAt, now)}</span>
                         </div>
                       </li>
                     ))}
                   </ul>
                 ) : (
-                  <p className="px-1 text-[11px] text-ink-3">None</p>
+                  <p className="px-1 fs-11 text-ink-3">None</p>
                 )}
               </section>
             );
@@ -207,9 +207,9 @@ export function ProjectsBoardView(p: ProjectsBoardProps) {
       ) : (
         <ul className="space-y-1">
           {shown.map((x) => (
-            <li key={x.slug} aria-label={x.title} className="flex flex-wrap items-start gap-2 rounded-[12px] px-3 py-2 hover:bg-white/5">
+            <li key={x.slug} aria-label={x.title} className="flex flex-wrap items-start gap-2 r-12 px-3 py-2 hover:bg-white/5">
               <div className="min-w-0 flex-1">{title(x)}</div>
-              <span className="pt-1 font-mono text-[10px] text-ink-3">{updatedAgo(x.updatedAt, now)}</span>
+              <span className="pt-1 font-mono fs-10 text-ink-3">{updatedAgo(x.updatedAt, now)}</span>
               {chip(x)}
             </li>
           ))}

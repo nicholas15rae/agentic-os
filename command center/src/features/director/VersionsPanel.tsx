@@ -42,7 +42,7 @@ export function VersionsView(p: VersionsProps) {
   const aRow = p.rows.find((r) => r.renderId === p.compareA);
   return (
     <div className="space-y-1.5">
-      {aRow && <p className="text-[11px] text-violet">Comparing from {vLabel(aRow.version)}: pick a second version.</p>}
+      {aRow && <p className="fs-11 text-violet">Comparing from {vLabel(aRow.version)}: pick a second version.</p>}
       <ul className="space-y-1.5" aria-label="Versions">
         {p.rows.map((r) => {
           const d = p.diff[r.renderId];
@@ -53,16 +53,16 @@ export function VersionsView(p: VersionsProps) {
           const same = r.current || (typeof d === "object" && d.same);
           const isA = p.compareA === r.renderId;
           return (
-            <li key={r.renderId} className={`rounded-[12px] border p-2 ${isA ? "border-violet/40 bg-violet/[0.06]" : "border-white/[0.08]"}`} data-testid={`version-${r.renderId}`}>
+            <li key={r.renderId} className={`r-12 border p-2 ${isA ? "border-violet/40 bg-violet/[0.06]" : "border-white/[0.08]"}`} data-testid={`version-${r.renderId}`}>
               <div className="flex items-center gap-2">
                 <button onClick={() => p.onExpand(r.renderId)} className="min-w-0 flex-1 text-left" aria-expanded={open} title="Show what changed since this version">
-                  <p className="flex items-center gap-1.5 text-[13px] text-ink">
+                  <p className="flex items-center gap-1.5 fs-13 text-ink">
                     {open ? <ChevronDown size={12} className="shrink-0 text-ink-3" /> : <ChevronRight size={12} className="shrink-0 text-ink-3" />}
                     <span className="font-mono">{label}</span>
-                    {r.current && <span className="rounded-full border border-teal/40 px-1.5 text-[10px] text-teal-soft">Current</span>}
-                    <span className="truncate text-[11px] text-ink-3">{day(r.createdAt)}</span>
+                    {r.current && <span className="rounded-full border border-teal/40 px-1.5 fs-10 text-teal-soft">Current</span>}
+                    <span className="truncate fs-11 text-ink-3">{day(r.createdAt)}</span>
                   </p>
-                  <p className="truncate font-mono text-[10px] text-ink-3">
+                  <p className="truncate font-mono fs-10 text-ink-3">
                     {shortPlan(r.planId)} · {timecode(r.durationSec)} · {r.width}×{r.height}
                     {!r.primary ? " · same cut as above" : ""}
                   </p>
@@ -71,7 +71,7 @@ export function VersionsView(p: VersionsProps) {
                   <button
                     onClick={() => p.onAskRestore(r.renderId)}
                     disabled={none || same || !!p.busy || p.confirming === r.renderId}
-                    className="pill-glass !h-7 !px-2 shrink-0 text-[11px] disabled:opacity-50"
+                    className="pill-glass !h-7 !px-2 shrink-0 fs-11 disabled:opacity-50"
                     title={none ? NO_SNAPSHOT_HINT : same ? "Already the timeline's cut" : `Make ${label}'s cut the timeline (asks first)`}
                   >
                     <RotateCcw size={11} /> Restore…
@@ -81,15 +81,15 @@ export function VersionsView(p: VersionsProps) {
                   onClick={() => p.onCompare(r.renderId)}
                   disabled={!!p.busy}
                   aria-pressed={isA}
-                  className="pill-glass !h-7 !px-2 shrink-0 text-[11px] disabled:opacity-50"
+                  className="pill-glass !h-7 !px-2 shrink-0 fs-11 disabled:opacity-50"
                   title={isA ? "Picked as A (click again to unpick)" : p.compareA ? `Compare with ${vLabel(aRow?.version ?? null)}` : "Pick as A, then pick a second version"}
                 >
                   <Columns2 size={11} /> {isA ? "A" : "Compare"}
                 </button>
               </div>
-              {canRestore && none && <p className="mt-1 text-[11px] text-ink-3">{NO_SNAPSHOT_HINT}.</p>}
+              {canRestore && none && <p className="mt-1 fs-11 text-ink-3">{NO_SNAPSHOT_HINT}.</p>}
               {open && (
-                <div className="well mt-1.5 rounded-[10px] p-2 text-[11px]">
+                <div className="well mt-1.5 r-10 p-2 fs-11">
                   {d === "loading" || d === undefined ? (
                     <p className="flex items-center gap-1 text-ink-3">
                       <Loader2 size={11} className="animate-spin" /> Loading…
@@ -109,8 +109,8 @@ export function VersionsView(p: VersionsProps) {
                 </div>
               )}
               {p.confirming === r.renderId && (
-                <div className="mt-2 rounded-[12px] border border-amber/40 bg-amber/[0.06] p-2.5" role="alertdialog" aria-label="Confirm restore">
-                  <p className="text-[12px] text-ink">{RESTORE_CONFIRM(label)}</p>
+                <div className="mt-2 r-12 border border-amber/40 bg-amber/[0.06] p-2.5" role="alertdialog" aria-label="Confirm restore">
+                  <p className="fs-12 text-ink">{RESTORE_CONFIRM(label)}</p>
                   <div className="mt-2 flex gap-1.5">
                     <button onClick={() => p.onConfirmRestore(r.renderId)} disabled={!!p.busy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
                       {p.busy === r.renderId ? <Loader2 size={12} className="animate-spin" /> : <History size={12} />} Yes, restore

@@ -36,7 +36,7 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | Overnight: Maps widget front end (Map / Upcoming / Saved tabs, trips with leave-by, saved routes with Delete? Yes/No, safe Google Maps links, phone hand-off logic) | claude/sections-8-10-m3 | 6acc15f (PR #10) | Yes (c134f9c); not in the running app until the next rebuild |
 | Overnight: Brainstorm Talk pure helpers (talk intent, digest, wrap-up walk, destinations; no bulk approve, memory by reference only) | claude/sections-8-10-m3 | 0d72190 (PR #10) | Yes (c134f9c) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
-| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | Yes (8647df7), pushed to origin; review round 5 confirmed all round-4 MEDIUMs fixed (1 new MEDIUM left, see Waiting on you). App UI live since the 16:25 restart; **trading bridge not restarted yet** (still runs the old kill-switch Python) |
+| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | Yes (8647df7), pushed to origin; review round 5 confirmed all round-4 MEDIUMs fixed (1 new MEDIUM left, see Waiting on you). App UI live since the 16:25 restart; trading bridge restarted 17:17 on it (main checkout fast-forwarded to cf44451) |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -100,17 +100,32 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | S26: **thread store** for gateway agents; 227 AnythingLLM chats archived as 32 threads (history only, Finance never imported) | section-26-engine | 6d73548 | No |
 | S26: **document ingest**: Tony-only notes + memory-scroll sync into the doc store (5 scrolls in) | section-26-engine | b3d31e5 | No |
 | S26: **gateway Tony's switch to the engine**, built and tested behind `route_tony` (OFF; with it off Tony's path is unchanged) | section-26-engine | 756feda | No |
+| Section 5 cleanup: no Librarian in the build chain, one true build status, archive | section-pass | d94c6cd | Yes (f555484), pushed |
+| Section 6 home grid: push-aside, widget drawer, page presets, widget looks, tap to focus, icons + windows | section-pass | b5b98ee, 604c334 | Yes (f555484), pushed |
+| Everything-is-customizable rule (AGENTS.md) + shared layout plan (docs/shared-layout-plan.md) | section-pass | 76eb094 | Yes (f555484), pushed |
+| Layout step 1: shared layout engine for every page, Reset this page / all pages / Undo, per-mode layouts, safety controls locked (kill switches, Tony's stop, confirmations) | section-pass | b51b7a7 (+ main merged in af74985) | Yes (f555484), pushed |
+| Layout step 2: Settings → Appearance: design tokens, Reset to default first (Undo), page overrides, 4 + saved themes, live preview, export / import of layouts + themes | section-pass | 7f69d01 | Yes (f555484), pushed |
+| Layout step 3: widget builder: brief checklist, interactive widgets built by the Play Place pipeline, every point verified in a real browser, style kit; fortune cookie tested on the checking side | section-pass | 9d02fa4 | Yes (f555484), pushed |
+| Layout step 4, page 1: Play Place on the shared layout (panels, per mode, Reset, deep links reveal their panel) | section-pass | 675571e | Yes (f555484), pushed |
+| Layout step 4, page 2: Agents on the shared layout (threads, conversation, reports, library) | section-pass | 9364ec3 | Yes (f555484), pushed |
+| Layout step 4, pages 3-6: Comms, Operations, Finance, Trading on the shared layout (Trading's execution desk / kill switch locked); icon windows open full size, charts fill their panel | section-pass | 5825204, 8430a52, 68e1c2b, cbc9d7f, e757697 | Yes (f555484), pushed |
+| Layout step 4, page 7: Settings on the shared layout (your pick: tab bar + one content panel) | section-pass | d445421 | Yes (f555484), pushed |
+| Layout step 4, pages 8-11: Language Hub, Vault, Wallpapers, System Map (Blueprint) on the shared layout | section-pass | 5488588, de2a4bd, c0b088f, a597bb0 | Yes (f555484), pushed |
+| Layout step 5: window options: float, pin on top, click-through (safety controls always on top, on the board, never click-through); native pop-out parked | section-pass | 52938a5 | Yes (f555484), pushed |
+| Layout step 6: phone sync of layouts and themes through the gateway (desktop shares on change; phone follows, keeps its page, never mid-edit; 'Follow the desktop' switch) | section-pass | 74f9e0d | Yes (f555484), pushed |
+| Fortune-cookie live build (section-pass app, 11-27 10:06-10:25): every brief point reached the verifier and the widget used the style kit; it went to Repair because click probes on its SVG cookie misfired (checker bug, fixed) and the local verifier quoted code not in the page | section-pass | 96829e3 | Yes (f555484), pushed |
+| Build checks catch an animation that never shows (style values the browser rejects, e.g. the cookie's clip-path; elements with click handlers are clicked in the smoke) | section-pass | febc6e9 | Yes (f555484), pushed |
 
 ## 2. In progress
 
 | Session | Working on | Current step |
 |---|---|---|
 | Tony live-test fixes | All 7 fixes | Merged into main (9d37071). The "Stop Tony parroting" session is rebuilding from main 0418649 and restarting the app; it will check Tony afterwards. Pushed to origin |
-| Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
+| Gabagoul functional pass (section-pass) | Merged into main (f555484) and pushed, 11-27 | Done. Open items are under Waiting on you (fortune-cookie rerun, pop-out windows, hold-to-switch, Play Place redesign, Brainstorm and Director pages). Clean |
 | Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
 | Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
-| Stop the UI burning GPU | Done | Kill switch merged (8647df7), pushed, app restarted 16:25 on 8647df7 (hidden: GPU 0.00%). Nothing in flight |
+| Stop the UI burning GPU | Done | Kill switch merged (8647df7), pushed, app restarted 16:25 on 8647df7 (hidden: GPU 0.00%), bridge restarted 17:17 on the new code. Nothing in flight |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 | Port 46778f9 / kill switch (practical-elbakyan) | Done; session closed | Round 4 fixed in 5a55ebc; merged into main by the GPU session. Round-5 follow-ups listed under Waiting on you |
 | Section 26 engine (section-26-engine, worktree G:\agentic-os-engine) | Built-in llama.cpp engine beside LM Studio / AnythingLLM, off | Stopped at a clean commit with a handoff (top of this page). Waiting on you: GPU bench, rebuild, questions |
@@ -131,6 +146,9 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 
 
 **Decisions**
+- section-pass converted Comms and Operations to the shared layout. The Communications/brainstorming and Remove-Ops sessions also touch those pages: expect merge conflicts in `CommsSection.tsx` / `OperationsSection.tsx`; Brainstorm and Director were left alone for them.
+- section-pass (now in main): fortune-cookie rerun wanted LATER (Nic, 11-27): when you say go, rebuild main, restart the app on it, then you send Fix on the Fortune cookie tile (Tony in Builder).
+- section-pass, parked for you: (1) native pop-out windows for panels (need a section-pass app build to test); (2) Section 7 hold-to-switch on Tony's button (that button is also Tony's stop, a safety control: your call how it should work); (3) Play Place redesign (Section 5: you asked to see the plan first); (4) Brainstorm and Director pages on the shared layout (other sessions own them).
 - Push main (overnight batch merged, not pushed)?
 - Parked overnight (safety or hardware): 14.5 Full auto gate (PIN + phone approval, live-trading control), 14.8 IBKR data everywhere, 14.9; 15.2 camera translate (phone), 15.3 pronunciation (GPU Whisper), 15.4 accents (Scene Reader), 15.7 vocabulary images (ComfyUI); 16.3 recovery key (would change the vault encryption); wiring language curveballs into Tony's turn.
 - Instant cues: "what's pending" deliberately stays Tony's Finance read (live data); only reminders / to-do are instant.
@@ -168,7 +186,7 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 - System Python: `ib_async` 2.1.0 is installed (you asked). pip downgraded `tzdata` from 2026.6 to 2025.3 (ib_async pins <2026). The gateway runs on system Python and uses the 2025.3 time-zone rules after its next restart.
 - Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
 - The running app (restarted 11-27 16:25 by the GPU session) is main 8647df7: everything on main up to 4e69152 (section-pass-batch3 overnight batch included) plus the kill switch + options guard hardening. The earlier checks still apply: Settings has a Comms tab set to "Primary only"; "check my email" reads Primary only; "add Melissa Lee invoice to my to-do list" asks before it saves; saying "hold on" while Tony talks stops him.
-- **Restart the trading bridge** (:8091) to load the new kill-switch / options-guard Python? It needs TWS logged in. Until then the bridge runs the old kill switch; the app's E-stop UI is the new one.
+- Trading bridge restarted 11-27 17:17 (your OK) on the new kill-switch / options-guard code: the main checkout (G:gentic os, feat/language-hub) was fast-forwarded to main cf44451 first; reconnected to TWS paper as client 11 in 3 s and publishes openOrdersAt. The gateway was not restarted: it still runs its older loaded code until its next restart (already pending above for Finance records).
 - Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
@@ -249,7 +267,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Live app after the 23:19 restart | 3 phone turns: fresh greeting and dinner answers (no stored reply copied), Joelle Bandits -> Chris recalled; first words 4.5 s cold, then 1.6 s and 1.0 s | 11-26 23:21 |
 | Live app after the 23:40 restart (main 0c4341f) | Up, no panic.log lines; 2 phone turns answered by the desktop: live weather (not the stored reply), Chris recalled; first words 3.4 s cold, then 0.8 s | 11-26 23:42 |
 | Live app after the 00:31 restart (main dffdb71) | Up, no panic.log lines; Ops migration ran (0 `"ops"` entries left); 2 phone turns answered by the desktop. "Is the droplet up?" now goes to Tony but gets a vague reply, since a phone turn has no live dashboard. First words 3.4 s cold, then 0.6 s | 11-27 00:33 |
-| section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
+| main f555484 (section-pass merged, = section-pass f8ce963 tree) | tsc clean; vitest 3,488/3,488; cargo 1,700 (+1 known CRLF test that fails on main too) | 11-27 UTC |
 | section-pass-batch3 (overnight, before merging main) | tsc clean; vitest 2,831/2,831; Python 870 OK; Rust 1,491 (+2 known CRLF; real-browser tests pass alone) | 11-27 |
 | claude/elated-kare-67e4c4 (Ops removal, on e46d0c7; main since changed STATUS.md only) | tsc clean; vitest 2,887/2,887; cargo 1,596 (+2 known CRLF; browser tests passed); pytest language hub + memory scrolls + gateway + fw_server 253/253 | 11-26 23:45 |
 | main 9c57359 (Ops removal + PR #8 + director-suite) | tsc clean; vitest 2,906/2,906; cargo 1,621 (+2 known CRLF; 3 Edge tests timed out under load, pass alone) | 11-27 00:30 |
@@ -292,26 +310,25 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 17:12 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 17:31 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 32 | `630ceb8` 2026-11-27 docs(status): refresh branch block; note main moved (kill switch) b... | 2 files |
-| `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
+| `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | clean |
+| `section-26-engine` | 34 | `436316e` 2026-11-27 Merge main (cf44451: kill switch) into section-26-engine before the... | 13 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
-| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `3d2e38d` 2026-11-27 Merge claude/gifted-pascal-abdde6 (GPU session) into main, keeping main's STATUS.md
+- `8bb443a` 2026-11-27 docs(status): trading bridge restarted 17:17 on the kill-switch code
 - `cf44451` 2026-11-27 docs(status): kill switch shipped (8647df7), app restarted 16:25; bridge restart waits on Nic
 - `73ed487` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined main tests
 - `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
 - `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
-- `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
-- `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
 <!-- /AUTO:BRANCHES -->

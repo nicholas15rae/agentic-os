@@ -12,7 +12,7 @@ import { useBrainstorm } from "@/features/brainstorm/capture";
 import { cueActive } from "@/features/voice/handoff-cues";
 import { EXIT_TITLE, STANDBY_TITLE, exitConfirmText } from "./power";
 
-const railBtn = "relative grid size-11 place-items-center rounded-[14px] text-ink-2 transition-all duration-200 hover:bg-white/5 hover:text-ink";
+const railBtn = "relative grid size-11 place-items-center r-14 text-ink-2 transition-all duration-200 hover:bg-white/5 hover:text-ink";
 
 /** Bottom of the left rail: gateway heartbeat, Refresh / Hard Reload, Standby, Exit (Phase 1, Section 19). */
 /** Mics under `<main>` (a re-mount would drop them) and audio a hard reload would cut. */

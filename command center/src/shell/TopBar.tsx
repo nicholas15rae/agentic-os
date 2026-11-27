@@ -3,6 +3,7 @@ import { AwayButton } from "@/features/arbiter/AwayButton";
 import { Command, LayoutGrid, Check } from "lucide-react";
 import { useSettings } from "@/stores/settings";
 import { useNav } from "@/stores/nav";
+import { useActiveSurface } from "@/core/widgets/surface-context";
 import { useLayout } from "@/core/widgets/layout-store";
 import { TopBarClock } from "./TopBarClock";
 import { STATE_LABEL, useVoice } from "@/features/voice/voice-store";
@@ -18,8 +19,10 @@ import { BusinessSwitcher } from "@/features/ops/BusinessSwitcher";
 export function TopBar() {
   const identity = useSettings((s) => s.identity);
   const section = useNav((s) => s.section);
-  const editing = useLayout((s) => s.editing);
-  const setEditing = useLayout((s) => s.setEditing);
+  // The page on screen: home, or a page drawn with the shared LayoutSurface.
+  const surface = useActiveSurface((s) => s.store);
+  const editing = surface((s) => s.editing);
+  const setEditing = surface((s) => s.setEditing);
   const wakeMode = useSettings((s) => s.wakeMode);
   const voiceState = useVoice((s) => s.state);
   // Phase 2 Part D: a locked-off mic replaces the state dot with a static red MicOff at every width.
@@ -47,7 +50,7 @@ export function TopBar() {
       {/* Below md the callsign keeps ~3 characters next to the clock and Widgets (it never pushes them off). */}
       <div className="glass-thin flex h-11 min-w-0 items-center gap-3 rounded-full px-4 max-sm:min-w-[5.75rem]">
         {isMicOff(mic) ? <MicLockBadge variant="dot" /> : <span className={`size-2 shrink-0 rounded-full ${STATE_DOT[voiceState]}`} />}
-        <span data-callsign className="truncate font-mono text-[13px] font-semibold tracking-wider text-ink">{identity.callsign}</span>
+        <span data-callsign className="truncate font-mono fs-13 font-semibold tracking-wider text-ink">{identity.callsign}</span>
         <span className="hidden h-4 w-px bg-white/15 sm:block" />
         <span className="label-caps hidden text-teal sm:block">{status.text}</span>
         {status.chip && (
@@ -77,7 +80,7 @@ export function TopBar() {
           <KillSwitch />
         </div>
         <TopBarClock />
-        {section === "command" && <EditToggle editing={editing} setEditing={setEditing} />}
+        {(section === "command" || surface !== useLayout) && <EditToggle editing={editing} setEditing={setEditing} />}
       </div>
     </header>
   );

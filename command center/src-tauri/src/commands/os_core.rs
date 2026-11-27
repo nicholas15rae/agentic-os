@@ -1112,10 +1112,14 @@ pub struct GmailConfig {
     /// The booking-mail check's instruction file (line 1 `query: …`, line 2 `read: N`, then Nic's
     /// rules), re-read on every scan; missing = the built-in default query.
     pub booking_instructions_path: String,
+    /// Settings → Comms: which inbox every Gmail read / search covers. "primary" (the default:
+    /// `category:primary in:inbox`, no Promotions / Social / Updates / Forums unless Nic names one)
+    /// or "all". Any other value reads as "primary" (`gmail::scoped_query`).
+    pub inbox_scope: String,
 }
 impl Default for GmailConfig {
     fn default() -> Self {
-        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into() }
+        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into(), inbox_scope: super::gmail::SCOPE_PRIMARY.into() }
     }
 }
 
@@ -2880,6 +2884,10 @@ mod tests {
         assert_eq!(c.gmail.booking_instructions_path, r"G:\ai-hub\protocols\booking-email-check.md");
         let c: OsConfig = serde_json::from_str(r#"{"gmail":{"bookingInstructionsPath":"D:\\x.md"}}"#).unwrap();
         assert_eq!(c.gmail.booking_instructions_path, r"D:\x.md");
+        // Settings → Comms inbox scope: an os.json saved before it existed gets Primary only.
+        assert_eq!(c.gmail.inbox_scope, "primary");
+        let c: OsConfig = serde_json::from_str(r#"{"gmail":{"inboxScope":"all"}}"#).unwrap();
+        assert_eq!((c.gmail.inbox_scope.as_str(), c.gmail.booking_instructions_path.as_str()), ("all", r"G:\ai-hub\protocols\booking-email-check.md"));
     }
 
     #[test]

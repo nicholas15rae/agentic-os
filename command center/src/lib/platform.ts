@@ -944,6 +944,8 @@ export interface OsConfig {
   fsRoots: string[];
   permissions: { delegation: Tier; mcp: Tier; filesystem: Tier; cloud: Tier };
   privacy: { diffuser: boolean; networkLock: boolean; killSwitch: boolean; destructiveGate: boolean; sensitiveTerms: string[] };
+  /** Gmail settings (Rust `GmailConfig`). `inboxScope`: Settings → Comms, "primary" (default) or "all". */
+  gmail: { bookingInstructionsPath: string; inboxScope: string };
   overseer: { engine: OverseerEngine; claudeModel: string; geminiModel: string; autoEscalate: boolean; manualMode: boolean };
   scheduler: SchedulerConfig;
   /** Part 6 narration / status feedback (Rust always sends it; read it through `feedbackLevel()`). */

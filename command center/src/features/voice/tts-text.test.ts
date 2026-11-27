@@ -1,5 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeList, nextStreamChunk, perSentenceOpts, sentences, stripForSpeech, synthArgs, utteranceIdFor } from "./tts-text";
+import { looksLikeList, nextStreamChunk, perSentenceOpts, sentences, stripForSpeech, stripLabels, synthArgs, utteranceIdFor } from "./tts-text";
+
+/** Live test 11-27: Tony read "Spoken reply" aloud. Internal labels and tags never reach TTS. */
+describe("internal labels are stripped before speech", () => {
+  it("drops a leading label in every shape", () => {
+    for (const t of [
+      "Spoken reply: Hey Nic, two emails in Primary.",
+      "**Spoken reply:** Hey Nic, two emails in Primary.",
+      "Spoken reply - Hey Nic, two emails in Primary.",
+      "[Spoken reply] Hey Nic, two emails in Primary.",
+      "<spoken_reply>Hey Nic, two emails in Primary.</spoken_reply>",
+      "Voice summary: Hey Nic, two emails in Primary.",
+      "Tony: Hey Nic, two emails in Primary.",
+      "spoken_reply: Hey Nic, two emails in Primary.",
+      "(internal) Hey Nic, two emails in Primary.",
+    ]) {
+      expect(stripForSpeech(t), t).toBe("Hey Nic, two emails in Primary.");
+    }
+  });
+
+  it("drops a label after a sentence or on its own line", () => {
+    expect(stripForSpeech("Got it. Spoken reply: it's from Melissa Lee.")).toBe("Got it. it's from Melissa Lee.");
+    expect(stripForSpeech("Internal note: checked Primary\nReply: it's from Melissa Lee.")).toBe("checked Primary\nit's from Melissa Lee.");
+    // (Sentences under 40 chars merge with the next one by design.)
+    expect(sentences("Spoken reply: Melissa Lee sent the invoice. Subject is Invoice 114, Primary inbox.")).toEqual(["Melissa Lee sent the invoice. Subject is Invoice 114, Primary inbox."]);
+  });
+
+  it("leaves ordinary words alone", () => {
+    for (const t of ["Her reply: no thanks.", "Reply-all to Sam later.", "Tony is busy.", "The answer is yes.", "I spoke to the output team.", "Read me the response from Sam."]) {
+      expect(stripLabels(t), t).toBe(t);
+    }
+  });
+
+  it("streamed chunks are stripped too (each chunk goes through stripForSpeech)", () => {
+    const c = nextStreamChunk("Spoken reply: Hey Nic, Melissa Lee wrote about the invoice. ", 0);
+    expect(c).not.toBeNull();
+    expect(stripForSpeech(c!.chunk)).toBe("Hey Nic,");
+  });
+});
 
 describe("stripForSpeech", () => {
   it("strips fenced code blocks and inline code", () => {

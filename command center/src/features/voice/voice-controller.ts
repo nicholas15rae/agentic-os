@@ -877,7 +877,10 @@ async function handleTurn(text: string, opts: { channel: Channel; thread?: Threa
     if (!live()) return;
     if (opts.channel === "voice") {
       v.setState("speaking");
+      startBargeIn();
       await say(local.reply);
+      // The follow-up window, as after any spoken reply: a to-do's "Add “…”?" is answered by a plain "yes".
+      return afterVoiceReply(gen);
     }
     store().setState("idle");
     return;

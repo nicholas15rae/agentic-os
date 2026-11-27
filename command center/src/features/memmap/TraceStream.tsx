@@ -97,7 +97,7 @@ export function TraceStream({ className = "" }: { className?: string }) {
                 role="radio"
                 aria-checked={lane === a}
                 onClick={() => setLane(a)}
-                className={`rounded-full border px-1.5 py-px font-mono text-[9px] uppercase tracking-wider ${lane === a ? "border-holo/50 text-holo" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
+                className={`rounded-full border px-1.5 py-px font-mono fs-9 uppercase tracking-wider ${lane === a ? "border-holo/50 text-holo" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
               >
                 {a ?? "all"}
               </button>
@@ -116,7 +116,7 @@ export function TraceStream({ className = "" }: { className?: string }) {
             if (top > 24 && !frozen) setFrozen(steps);
             else if (top <= 2 && frozen) setFrozen(null);
           }}
-          className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[10.5px] leading-[1.55]"
+          className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono fs-10.5 leading-[1.55]"
           role="log"
           aria-live="off"
         >
@@ -157,13 +157,13 @@ function StepLine({ s, xray, slowest }: { s: TraceStep; xray: boolean; slowest: 
       <div className="flex min-w-0 items-center gap-2">
         <span className={`size-1.5 shrink-0 rounded-full ${s.ok ? "bg-teal/80" : "bg-alert"}`} />
         <span className={`w-[92px] shrink-0 truncate ${s.ok ? "text-ink-2" : "text-alert"}`}>{xray ? s.hop.toUpperCase() : HOP_WORD[s.hop]}</span>
-        {s.severity && <span className={`shrink-0 rounded-full border px-1 text-[8.5px] uppercase ${SEVERITY_TONE[s.severity]}`}>{s.severity}</span>}
+        {s.severity && <span className={`shrink-0 rounded-full border px-1 fs-8.5 uppercase ${SEVERITY_TONE[s.severity]}`}>{s.severity}</span>}
         <span className="min-w-0 flex-1 truncate text-ink" title={s.label}>
           {s.label}
         </span>
         {xray && s.tps != null && <span className="shrink-0 text-ink-3">{s.tps} t/s</span>}
         {xray && <span className={`shrink-0 tabular ${slowest ? "text-ember" : "text-ink-3"}`}>{fmtMs(s.ms) ?? "—"}</span>}
-        {slowest && <span className="shrink-0 text-[9px] uppercase text-ember">slowest</span>}
+        {slowest && <span className="shrink-0 fs-9 uppercase text-ember">slowest</span>}
       </div>
       {!s.ok && (
         <div className="ml-3.5 flex items-start gap-2">
@@ -198,7 +198,7 @@ function QueueFix({ s }: { s: TraceStep }) {
       type="button"
       disabled={state !== "idle"}
       onClick={() => void run()}
-      className={`flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px text-[9px] uppercase tracking-wider transition-colors ${state === "done" ? "border-teal/30 text-teal-soft" : "border-ember/40 text-ember hover:bg-ember/10"} disabled:cursor-default`}
+      className={`flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px fs-9 uppercase tracking-wider transition-colors ${state === "done" ? "border-teal/30 text-teal-soft" : "border-ember/40 text-ember hover:bg-ember/10"} disabled:cursor-default`}
       title="Queue a fix for Claude Code (this step, its error and the other recent failures are attached, secrets scrubbed)"
     >
       <Wrench size={9} /> {state === "done" ? "Queued" : state === "busy" ? "…" : "Queue fix"}
@@ -213,11 +213,11 @@ function IpcPanel() {
   const recent = calls.slice(-1)[0];
   const now = useNow(2000);
   return (
-    <Panel title="IPC ring" className="max-h-[200px] shrink-0" bodyClassName="overflow-y-auto" badge={recent && now - recent.at < ACTIVE_MS ? <Tag tone="ok">Active</Tag> : undefined} action={<span className="font-mono text-[10px] text-ink-3">{calls.length}/200</span>}>
+    <Panel title="IPC ring" className="max-h-[200px] shrink-0" bodyClassName="overflow-y-auto" badge={recent && now - recent.at < ACTIVE_MS ? <Tag tone="ok">Active</Tag> : undefined} action={<span className="font-mono fs-10 text-ink-3">{calls.length}/200</span>}>
       {rows.length === 0 ? (
-        <p className="font-mono text-[10.5px] text-ink-3">{isTauri() ? "No commands invoked yet." : "IPC timings come from the desktop app."}</p>
+        <p className="font-mono fs-10.5 text-ink-3">{isTauri() ? "No commands invoked yet." : "IPC timings come from the desktop app."}</p>
       ) : (
-        <table className="w-full font-mono text-[10px]">
+        <table className="w-full font-mono fs-10">
           <thead className="text-left text-ink-3">
             <tr>
               <th className="font-normal">command</th>

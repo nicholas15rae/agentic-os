@@ -233,13 +233,13 @@ export function RoutingFlowchart({ orient: forced, className = "" }: { orient?: 
     <section
       ref={root}
       aria-label="Architecture routing flowchart"
-      className={`relative shrink-0 overflow-hidden rounded-[14px] border border-holo/20 bg-[rgba(7,11,17,0.78)] shadow-[0_0_24px_-12px_rgba(0,210,255,0.35),inset_0_1px_0_rgba(0,210,255,0.06)] backdrop-blur-md ${className}`}
+      className={`relative shrink-0 overflow-hidden r-14 border border-holo/20 bg-[rgba(7,11,17,0.78)] shadow-[0_0_24px_-12px_rgba(0,210,255,0.35),inset_0_1px_0_rgba(0,210,255,0.06)] backdrop-blur-md ${className}`}
     >
       <header className={`flex min-h-[42px] items-center gap-2 px-3 ${open ? "border-b border-holo/10" : ""}`}>
         <Workflow size={12} className="shrink-0 text-holo" />
         <h2 className="label-caps shrink-0 text-holo">Architecture routing</h2>
         {open ? (
-          <p className="ml-1 hidden min-w-0 truncate font-mono text-[9.5px] text-ink-3 sm:block" title="Cyan wires carry data in to be routed; amber wires are outbound actions. Dashed pulses are inferred from IPC calls or snapshot changes (≥ 10 s stale), not os-trace hops.">
+          <p className="ml-1 hidden min-w-0 truncate font-mono fs-9.5 text-ink-3 sm:block" title="Cyan wires carry data in to be routed; amber wires are outbound actions. Dashed pulses are inferred from IPC calls or snapshot changes (≥ 10 s stale), not os-trace hops.">
             <span className="text-holo">━</span> in · <span className="text-ember">━</span> out · <span className="text-ink-2">┅</span> inferred
           </p>
         ) : (
@@ -282,7 +282,7 @@ function CollapsedStrip({ status, nodeOf, flashOf }: { status: Record<FlowNodeId
               type="button"
               onClick={() => selectZone(n)}
               title={`${n.label}: ${st.text} — ${st.why}${f ? `\nLast: ${f.why}` : ""}`}
-              className={`flex h-6 items-center gap-1 rounded-full border px-2 font-mono text-[9.5px] text-ink-2 transition-colors hover:text-ink ${
+              className={`flex h-6 items-center gap-1 rounded-full border px-2 font-mono fs-9.5 text-ink-2 transition-colors hover:text-ink ${
                 f ? (f.ok ? "border-holo/70 bg-holo/10" : "border-alert/70 bg-alert/10") : "border-white/10 bg-white/[0.03]"
               } ${f?.inferred ? "border-dashed" : ""}`}
             >
@@ -413,7 +413,7 @@ function FlowSvg({
             <rect width={b.w} height={b.h} rx={r} className="fill-[rgba(7,11,17,0.92)] stroke-holo/25 transition-[stroke] group-hover:stroke-holo/60 group-focus-visible:stroke-holo" strokeWidth={1} />
             {st.tone !== "idle" && <circle cx={r + 1} cy={r} r={5} className={LED[st.tone]} opacity={0.22} />}
             <circle cx={r + 1} cy={r} r={2.6} className={LED[st.tone]} />
-            <text x={r + 8} y={r} dominantBaseline="central" className="pointer-events-none fill-ink-2 font-mono text-[9.5px] group-hover:fill-ink">
+            <text x={r + 8} y={r} dominantBaseline="central" className="pointer-events-none fill-ink-2 font-mono fs-9.5 group-hover:fill-ink">
               {pillLabel(n, b.w)}
             </text>
           </g>

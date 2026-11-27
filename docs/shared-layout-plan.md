@@ -91,3 +91,13 @@ One JSON file (`agentic-os-ui.json`): `{ version, themes, activeTheme, surfaces 
 - Per-mode layouts (`variants.ts`): shared until "Customize for <mode>", "Use the shared layout" drops the copy; `page-links.ts` applies the mode to every surface.
 - Reset: Reset this page, Reset all pages, Undo reset (this session).
 - Locks: `locked` widgets (`locks.ts`) can move and resize but are never removed, made an icon, moved to another page, deleted with their page, recoloured or shrunk below 90 %, click-through or off-screen; lost ones are put back on load. The real controls carry `data-safety` (`lib/safety.ts`) and a CSS rule keeps them visible, opaque and clickable whatever a theme sets.
+
+## Step 2 as built
+
+- Tokens (`features/appearance/theme.ts`): accents, background, three text colours, card opacity / blur / style, border width and brightness, corner radius, shadow, font, text size, spacing, icon weight, default widget frame, motion. Defaults are exactly the shipped look.
+- Applied as CSS variables on `<html>` (`install.ts`, from `main.tsx`); Tailwind's `--color-*`, `--font-sans`, `--spacing` are overridden directly. Every `text-[Npx]` / `rounded-[Npx]` became `fs-N` / `r-N` (scaled by the text size / radius tokens).
+- Settings → Appearance (`AppearanceStudio.tsx`): Reset to default first (with Undo), per-page Reset, per-token ↺, themes (4 built in, save / update / rename / delete), app-wide or one page, live preview.
+- Readability guard: text and accent colours are checked against the cards they sit on (and the background) and fall back one by one.
+- Safety controls: `[data-safety]` re-declares every default token, so no theme restyles them.
+- Motion Off / Reduced also drives the canvas loops (`lib/motion.ts`).
+- Export / import `agentic-os-ui.json` (`ui-file.ts`): layouts of every surface and mode + themes; desktop saves through a native Save dialog (`ui_file_save`, Rust writes only where you pick); import is validated, drops unknown widgets, keeps safety controls, backs up first ("Restore what was there before").

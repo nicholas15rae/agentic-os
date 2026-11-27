@@ -55,7 +55,7 @@ export function DevFixQueue({ compact = false }: { compact?: boolean }) {
   return (
     <div className="space-y-2">
       {!compact && <QueueForm />}
-      {error && <p className="truncate font-mono text-[10px] text-ember" title={error}>{error}</p>}
+      {error && <p className="truncate font-mono fs-10 text-ember" title={error}>{error}</p>}
       {!loaded ? (
         <p className="py-3 text-center text-xs text-ink-3">Loading…</p>
       ) : rows.length === 0 ? (
@@ -68,7 +68,7 @@ export function DevFixQueue({ compact = false }: { compact?: boolean }) {
         </ul>
       )}
       {done > 0 && (
-        <button type="button" onClick={() => setShowDone((v) => !v)} className="label-caps text-[9px] text-ink-3 hover:text-ink-2">
+        <button type="button" onClick={() => setShowDone((v) => !v)} className="label-caps fs-9 text-ink-3 hover:text-ink-2">
           {showDone ? "Hide" : "Show"} done ({done})
         </button>
       )}
@@ -104,7 +104,7 @@ function QueueForm() {
     >
       <div className="flex gap-1.5">
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Queue a fix — e.g. “the duck stays on after a barge-in”" className="field !h-8 min-w-0 flex-1 !py-1 text-xs" aria-label="Fix title" />
-        <button className="pill-glass !h-8 text-[11px]" disabled={!title.trim() || busy} title="Queue it for Claude Code (recent errors and the UI route are attached, secrets scrubbed)">
+        <button className="pill-glass !h-8 fs-11" disabled={!title.trim() || busy} title="Queue it for Claude Code (recent errors and the UI route are attached, secrets scrubbed)">
           {busy ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />} Queue
         </button>
       </div>
@@ -149,7 +149,7 @@ function FixRow({ t, anyRunning, compact, canDispatch }: { t: DevTask; anyRunnin
   };
 
   return (
-    <li className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-3">
+    <li className="r-12 border border-white/[0.06] bg-white/[0.02] p-3">
       <div className="flex items-center gap-2">
         <Wrench size={12} className="shrink-0 text-ember" aria-hidden />
         <span className="min-w-0 flex-1 truncate text-sm text-ink" title={t.title}>
@@ -161,22 +161,22 @@ function FixRow({ t, anyRunning, compact, canDispatch }: { t: DevTask; anyRunnin
           type="button"
           disabled={t.priority === 0 || isFixRunning(t) || t.status === "Done"}
           onClick={() => void bump()}
-          className="rounded font-mono text-[10px] text-ink-3 enabled:hover:text-amber-soft disabled:cursor-default"
+          className="rounded font-mono fs-10 text-ink-3 enabled:hover:text-amber-soft disabled:cursor-default"
           title={t.priority === 0 ? PRIORITY_LABEL[t.priority] : `${PRIORITY_LABEL[t.priority]} — click to bump to P${t.priority - 1}`}
         >
           P{t.priority}
           {t.priority > 0 && !isFixRunning(t) && t.status !== "Done" ? "↑" : ""}
         </button>
-        <span className={`label-caps inline-flex h-5 items-center rounded-full border px-2 !text-[9px] ${CHIP_TONE[chip.tone]}`}>{chip.label}</span>
+        <span className={`label-caps inline-flex h-5 items-center rounded-full border px-2 !fs-9 ${CHIP_TONE[chip.tone]}`}>{chip.label}</span>
       </div>
       {!compact && t.body && <p className="mt-1 line-clamp-2 text-xs text-ink-2">{t.body}</p>}
       {!compact && summary && (
-        <p className="mt-1 truncate font-mono text-[10px] text-ink-3" title={summary}>
+        <p className="mt-1 truncate font-mono fs-10 text-ink-3" title={summary}>
           {summary}
         </p>
       )}
       {(d.note || d.branch) && (
-        <p className="mt-1 truncate font-mono text-[10px] text-ink-3" title={[d.branch, d.note].filter(Boolean).join(" · ")}>
+        <p className="mt-1 truncate font-mono fs-10 text-ink-3" title={[d.branch, d.note].filter(Boolean).join(" · ")}>
           {d.branch && <span className="text-holo">{d.branch}</span>}
           {d.branch && d.note ? " · " : ""}
           {d.note}
@@ -185,14 +185,14 @@ function FixRow({ t, anyRunning, compact, canDispatch }: { t: DevTask; anyRunnin
       {!compact && d.verify?.steps?.length ? (
         <div className="mt-1 flex flex-wrap gap-1">
           {d.verify.steps.map((s) => (
-            <span key={s.label} title={s.tail ?? `${s.ms} ms`} className={`rounded-full border px-1.5 font-mono text-[9px] ${s.ok ? "border-teal/40 text-teal-soft" : "border-alert/50 text-alert"}`}>
+            <span key={s.label} title={s.tail ?? `${s.ms} ms`} className={`rounded-full border px-1.5 font-mono fs-9 ${s.ok ? "border-teal/40 text-teal-soft" : "border-alert/50 text-alert"}`}>
               {s.ok ? "✓" : "✗"} {s.label}
             </span>
           ))}
         </div>
       ) : null}
       {lines?.length ? (
-        <ul className="well mt-2 max-h-28 space-y-0.5 overflow-y-auto rounded-[8px] p-1.5 font-mono text-[10px] text-ink-2" aria-label="Claude Code progress">
+        <ul className="well mt-2 max-h-28 space-y-0.5 overflow-y-auto r-8 p-1.5 font-mono fs-10 text-ink-2" aria-label="Claude Code progress">
           {lines.slice(compact ? -3 : -8).map((l, i) => (
             <li key={`${l.at}-${i}`} className="truncate" title={l.text}>
               <span className="text-ink-3">{l.phase}</span> {l.text}
@@ -202,27 +202,27 @@ function FixRow({ t, anyRunning, compact, canDispatch }: { t: DevTask; anyRunnin
       ) : null}
       <div className="mt-2 flex flex-wrap gap-1.5">
         {canDispatch && canDispatchFix(t, anyRunning) && (
-          <button type="button" disabled={busy} onClick={() => void run()} className="pill-primary !h-7 !px-3 text-[11px]" title="Opens a confirmation card. On yes: a fresh git worktree on fix/<id>, Claude Code with a fixed tool allowlist, then the app runs typecheck · vitest · cargo test — only a pass marks it Done. Claude never commits.">
+          <button type="button" disabled={busy} onClick={() => void run()} className="pill-primary !h-7 !px-3 fs-11" title="Opens a confirmation card. On yes: a fresh git worktree on fix/<id>, Claude Code with a fixed tool allowlist, then the app runs typecheck · vitest · cargo test — only a pass marks it Done. Claude never commits.">
             {busy ? <Loader2 size={11} className="animate-spin" /> : <Bot size={11} />} Run with Claude Code
           </button>
         )}
         {live && (
-          <button type="button" onClick={() => void cancelFix(t.id)} className="pill-glass !h-7 !px-3 text-[11px] hover:!border-alert/50" title="Stop Claude Code (and its verify step); the fix goes back to Queued">
+          <button type="button" onClick={() => void cancelFix(t.id)} className="pill-glass !h-7 !px-3 fs-11 hover:!border-alert/50" title="Stop Claude Code (and its verify step); the fix goes back to Queued">
             <Square size={11} /> Cancel
           </button>
         )}
         {t.status === "Pending" && (
-          <button type="button" onClick={() => void queue()} className="pill-glass !h-7 !px-3 text-[11px]" title="Put this draft in the Claude Code queue (.agenticos/claude-fix-queue.json)">
+          <button type="button" onClick={() => void queue()} className="pill-glass !h-7 !px-3 fs-11" title="Put this draft in the Claude Code queue (.agenticos/claude-fix-queue.json)">
             <Plus size={11} /> Queue for Claude
           </button>
         )}
         {d.worktree && (
-          <button type="button" onClick={() => void copy("Worktree path", d.worktree!)} className="pill-glass !h-7 !px-3 text-[11px]" title={d.worktree}>
+          <button type="button" onClick={() => void copy("Worktree path", d.worktree!)} className="pill-glass !h-7 !px-3 fs-11" title={d.worktree}>
             <ClipboardCopy size={11} /> Worktree
           </button>
         )}
         {d.logPath && (
-          <button type="button" onClick={() => void copy("Run log path", d.logPath!)} className="pill-glass !h-7 !px-3 text-[11px]" title={d.logPath}>
+          <button type="button" onClick={() => void copy("Run log path", d.logPath!)} className="pill-glass !h-7 !px-3 fs-11" title={d.logPath}>
             <FileText size={11} /> Log
           </button>
         )}

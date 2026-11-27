@@ -90,11 +90,11 @@ export function VaultSection() {
               <button
                 key={r.id}
                 onClick={() => OPEN[r.collection] && go(OPEN[r.collection]!)}
-                className="block w-full rounded-[14px] border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-amber/40"
+                className="block w-full r-14 border border-white/[0.07] bg-white/[0.02] p-3 text-left hover:border-amber/40"
               >
                 <div className="mb-1 flex items-center gap-2">
                   <span className="label-caps text-amber-soft">{FILTERS.find((f) => f.id === r.collection)?.label ?? r.collection}</span>
-                  <span className="ml-auto font-mono text-[11px] text-ink-3">{(r.score * 100).toFixed(0)}%</span>
+                  <span className="ml-auto font-mono fs-11 text-ink-3">{(r.score * 100).toFixed(0)}%</span>
                 </div>
                 <p className="line-clamp-3 whitespace-pre-line text-sm text-ink">{r.snippet}</p>
               </button>
@@ -236,15 +236,15 @@ function BackupCard() {
             <Input type="number" min={1} max={365} defaultValue={cfg.backup.keep} onBlur={(e) => void saveBackup({ keep: Number(e.target.value) })} className="font-mono" />
           </Field>
           <Field label="Backup folder (on the gateway machine)">
-            <Input defaultValue={cfg.backup.dir} onBlur={(e) => e.target.value !== cfg.backup.dir && void saveBackup({ dir: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+            <Input defaultValue={cfg.backup.dir} onBlur={(e) => e.target.value !== cfg.backup.dir && void saveBackup({ dir: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
           </Field>
         </div>
       )}
       {msg && <p className="mt-3 break-all text-xs text-ink-2">{msg}</p>}
       {list && list.backups.length > 0 && (
-        <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto font-mono text-[12px]">
+        <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto font-mono fs-12">
           {list.backups.map((b) => (
-            <li key={b.name} className="flex items-center gap-2 rounded-[10px] border border-white/[0.05] px-3 py-1.5 text-ink-2">
+            <li key={b.name} className="flex items-center gap-2 r-10 border border-white/[0.05] px-3 py-1.5 text-ink-2">
               <Archive size={12} className="text-ink-3" />
               <span className="flex-1 truncate">{b.name}</span>
               <span>{(b.size / 1024).toFixed(0)} KB</span>

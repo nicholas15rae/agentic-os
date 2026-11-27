@@ -5,6 +5,7 @@ import { getWidget } from "./registry";
 import { GRID_COLS, GRID_ROWS, activeItems, type WidgetWindow } from "./layout-store";
 import { useSurface } from "./surface-context";
 import { LOCKED_MIN_SCALE } from "./locks";
+import { useDefaultFrame } from "@/features/appearance/use-tokens";
 import { isLockedWidget } from "./registry";
 import { placePushing } from "./pages";
 import type { WidgetDefinition, WidgetInstance } from "./types";
@@ -145,7 +146,7 @@ function GridGuides() {
         <div
           key={i}
           aria-hidden
-          className="pointer-events-none rounded-[14px] border border-dashed border-white/[0.07]"
+          className="pointer-events-none r-14 border border-dashed border-white/[0.07]"
           style={{ gridColumn: (i % GRID_COLS) + 1, gridRow: Math.floor(i / GRID_COLS) + 1 }}
         />
       ))}
@@ -156,9 +157,9 @@ function GridGuides() {
 type DragMode = "move" | "resize";
 
 const FRAME_CLASS: Record<Frame, string> = {
-  glass: "glass rounded-[20px]",
-  ultra: "glass-ultra rounded-[20px]",
-  solid: "glass-chat rounded-[20px]",
+  glass: "glass r-20",
+  ultra: "glass-ultra r-20",
+  solid: "glass-chat r-20",
   frameless: "",
 };
 
@@ -182,6 +183,7 @@ function WidgetCell({
   const useLayout = useSurface();
   const def = getWidget(inst.widgetId);
   const locked = isLockedWidget(inst.widgetId);
+  const defaultFrame = useDefaultFrame();
   const { place, remove, setGlass, setFocused, openWindow } = useLayout.getState();
   const focused = useLayout((s) => s.focused === inst.instanceId);
   const windowed = useLayout((s) => s.windows.some((w) => w.instanceId === inst.instanceId));
@@ -240,7 +242,7 @@ function WidgetCell({
 
   if (!def) {
     return (
-      <div className="glass rounded-[14px] p-4 text-sm text-ink-2" style={compact ? undefined : area(inst)}>
+      <div className="glass r-14 p-4 text-sm text-ink-2" style={compact ? undefined : area(inst)}>
         Missing widget “{inst.widgetId}”.{" "}
         <button className="text-amber underline" onClick={() => remove(inst.instanceId)}>
           Remove
@@ -250,7 +252,7 @@ function WidgetCell({
   }
 
   const icon = inst.display === "icon";
-  const frame = frameOf(inst, !!def.chromeless);
+  const frame = frameOf(inst, !!def.chromeless, defaultFrame);
   const alpha = opacityFor(inst.look, wallpaperId);
   const restingFrame = focused ? "solid" : frame;
   const frameless = restingFrame === "frameless";
@@ -281,7 +283,7 @@ function WidgetCell({
               aria-label={`Ultra-glass transparency for ${def.title}`}
               title={frame === "ultra" ? "Ultra glass: on" : "Ultra glass: off"}
               onClick={() => setGlass(inst.instanceId, frame !== "ultra")}
-              className={`well flex h-7 items-center gap-1.5 rounded-full pl-1.5 pr-2.5 text-[10px] font-mono uppercase tracking-wider ${frame === "ultra" ? "text-teal" : "text-ink-2"}`}
+              className={`well flex h-7 items-center gap-1.5 rounded-full pl-1.5 pr-2.5 fs-10 font-mono uppercase tracking-wider ${frame === "ultra" ? "text-teal" : "text-ink-2"}`}
             >
               <span className={`relative h-3.5 w-6 rounded-full transition-colors ${frame === "ultra" ? "bg-teal/80" : "bg-white/15"}`}>
                 <span className={`absolute top-0.5 size-2.5 rounded-full bg-white shadow transition-[left] duration-200 ${frame === "ultra" ? "left-3" : "left-0.5"}`} />
@@ -334,12 +336,12 @@ function WidgetCell({
       {ghost && (
         <div
           aria-hidden
-          className={`pointer-events-none z-10 rounded-[20px] border-2 ${ghostValid ? "border-teal/70 bg-teal/10" : "border-alert/70 bg-alert/10"}`}
+          className={`pointer-events-none z-10 r-20 border-2 ${ghostValid ? "border-teal/70 bg-teal/10" : "border-alert/70 bg-alert/10"}`}
           style={area(ghost)}
         />
       )}
       {icon ? (
-        <section data-widget={inst.instanceId} aria-label={def.title} className={`relative min-h-0 ${editing ? "rounded-[20px] ring-1 ring-amber/40" : ""}`} style={compact ? undefined : area(inst)}>
+        <section data-widget={inst.instanceId} aria-label={def.title} className={`relative min-h-0 ${editing ? "r-20 ring-1 ring-amber/40" : ""}`} style={compact ? undefined : area(inst)}>
           <IconTile inst={inst} def={def} onOpen={() => !editing && openWindow(inst.instanceId)} />
           {!windowed && (
             <div hidden aria-hidden className="pointer-events-none absolute size-0 overflow-hidden">
@@ -358,7 +360,7 @@ function WidgetCell({
           className={[
             // Clipped: a widget's content never spills over its neighbours (it scales to fit instead).
             "group relative min-h-0 overflow-hidden",
-            editing && frameless ? "rounded-[20px] outline-1 outline-dashed outline-white/20" : FRAME_CLASS[restingFrame],
+            editing && frameless ? "r-20 outline-1 outline-dashed outline-white/20" : FRAME_CLASS[restingFrame],
             "transition-[background-color,backdrop-filter,box-shadow] duration-300",
             compact ? (frameless ? "" : "min-h-40") : "",
             editing ? "ring-1 ring-amber/40" : focused ? "ring-1 ring-teal/50" : "",
@@ -452,7 +454,7 @@ function WidgetBody({ inst, def, legible, forceFull }: { inst: WidgetInstance; d
         style={{ zoom: def.locked ? Math.max(LOCKED_MIN_SCALE, scale * fit) : scale * fit, color: (!def.locked && look.color) || undefined }}
       >
         <WidgetBoundary name={def.title}>
-          <Suspense fallback={<div className="h-full animate-pulse rounded-[14px] bg-white/[0.03]" />}>
+          <Suspense fallback={<div className="h-full animate-pulse r-14 bg-white/[0.03]" />}>
             <Widget
               instanceId={inst.instanceId}
               config={{ ...def.defaultConfig, ...inst.config }}
@@ -476,9 +478,9 @@ function IconTile({ inst, def, onOpen }: { inst: WidgetInstance; def: WidgetDefi
     <button onClick={onOpen} className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-center" aria-label={`Open ${def.title}${badge ? ` (${badge})` : ""}`} title={def.title}>
       <span className="glass relative grid aspect-square w-[min(4.5rem,70%)] place-items-center rounded-[22%]">
         <Icon size={26} className="text-teal" aria-hidden />
-        {badge && <span className="absolute -right-1.5 -top-1.5 min-w-5 rounded-full bg-amber px-1.5 font-mono text-[10px] leading-5 text-canvas">{badge}</span>}
+        {badge && <span className="absolute -right-1.5 -top-1.5 min-w-5 rounded-full bg-amber px-1.5 font-mono fs-10 leading-5 text-canvas">{badge}</span>}
       </span>
-      <span className="legible max-w-full truncate px-1 text-[11px] font-medium text-ink">{inst.look?.frame === "frameless" ? "" : def.title}</span>
+      <span className="legible max-w-full truncate px-1 fs-11 font-medium text-ink">{inst.look?.frame === "frameless" ? "" : def.title}</span>
     </button>
   );
 }
@@ -518,14 +520,14 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
   const look = inst.look ?? {};
-  const frame = frameOf(inst, !!def.chromeless);
-  const seg = (on: boolean) => `rounded-full border px-2.5 py-1 text-[11px] ${on ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`;
+  const frame = frameOf(inst, !!def.chromeless, useDefaultFrame());
+  const seg = (on: boolean) => `rounded-full border px-2.5 py-1 fs-11 ${on ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`;
   // Floats above the page (a widget clips its own content), next to the widget, kept on screen.
   const W = 256;
   const left = Math.max(8, Math.min(window.innerWidth - W - 8, anchor.right + 8 + W > window.innerWidth ? anchor.left - W - 8 : anchor.right + 8));
   const top = Math.max(8, Math.min(window.innerHeight - 440, anchor.top));
   return createPortal(
-    <div ref={panel} tabIndex={-1} className="glass-chat fixed z-[85] w-64 space-y-2.5 rounded-[14px] p-3 text-left outline-none" style={{ left, top }} role="dialog" aria-label={`${def.title} look`} onPointerDown={(e) => e.stopPropagation()}>
+    <div ref={panel} tabIndex={-1} className="glass-chat fixed z-[85] w-64 space-y-2.5 r-14 p-3 text-left outline-none" style={{ left, top }} role="dialog" aria-label={`${def.title} look`} onPointerDown={(e) => e.stopPropagation()}>
       <div className="flex items-center">
         <span className="label-caps text-amber-soft">Look</span>
         <button className="ml-auto text-ink-3 hover:text-ink" onClick={onClose} aria-label="Close the look panel">
@@ -588,7 +590,7 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
         )}
       </Row>
       )}
-      {note && <p className="text-[11px] text-alert">{note}</p>}
+      {note && <p className="fs-11 text-alert">{note}</p>}
     </div>,
     document.body,
   );
@@ -597,7 +599,7 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
-      <p className="mb-1 text-[10px] uppercase tracking-wider text-ink-3">{label}</p>
+      <p className="mb-1 fs-10 uppercase tracking-wider text-ink-3">{label}</p>
       <div className="flex flex-wrap items-center gap-1">{children}</div>
     </div>
   );
@@ -663,7 +665,7 @@ function WidgetWindowFrame({ w, inst, def, phone }: { w: WidgetWindow; inst: Wid
       data-widget-window={w.instanceId}
       role="dialog"
       aria-label={def.title}
-      className={`glass-chat fixed flex flex-col overflow-hidden ${phone ? "inset-0 rounded-none pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]" : "rounded-[18px]"}`}
+      className={`glass-chat fixed flex flex-col overflow-hidden ${phone ? "inset-0 rounded-none pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]" : "r-18"}`}
       style={phone ? { zIndex: 80 } : { left: w.x, top: w.y, width: w.w, height: w.h, zIndex: 70 + w.z }}
       onPointerDown={() => openWindow(w.instanceId)}
     >

@@ -29,7 +29,7 @@ export function LiveCaptionsField({ value, onChange }: { value: number | undefin
           ))}
         </Select>
       </label>
-      <p className="mt-1 text-[11px] text-ink-3">
+      <p className="mt-1 fs-11 text-ink-3">
         What Whisper has heard so far, shown while you talk (faster-whisper on the GPU only). Each caption costs the GPU about one final transcription, so a shorter spacing keeps it busier; captions already pause while Tony's reply streams. The final transcript is the same either way.
       </p>
     </div>
@@ -149,10 +149,10 @@ export function VoiceDetectionCard() {
         <div className="text-sm text-ink-2">
           <div className="mb-1 flex items-center justify-between">
             <span>Activation threshold</span>
-            <span className="text-[11px] text-ink-3">{micOn ? (testing ? "live" : "press Test my mic to see your level") : "Mic is locked off: unlock it to test"}</span>
+            <span className="fs-11 text-ink-3">{micOn ? (testing ? "live" : "press Test my mic to see your level") : "Mic is locked off: unlock it to test"}</span>
           </div>
           <ThresholdMeter variant="full" />
-          <div className="mt-1 flex justify-between text-[11px] text-ink-3">
+          <div className="mt-1 flex justify-between fs-11 text-ink-3">
             <span>hears whispers (-70 dB)</span>
             <span>ignores the room (-10 dB)</span>
           </div>
@@ -167,9 +167,9 @@ export function VoiceDetectionCard() {
         <label className="block text-sm text-ink-2">
           End-of-speech pause
           <div className="mt-1 flex items-center gap-3">
-            <span className="w-20 text-[11px] text-ink-3">snappy</span>
+            <span className="w-20 fs-11 text-ink-3">snappy</span>
             <input type="range" min={350} max={1600} step={50} value={vad.endSilenceMs} onChange={(e) => up({ endSilenceMs: Number(e.target.value) })} className="flex-1 accent-amber" aria-label="End-of-speech pause" />
-            <span className="w-24 text-right text-[11px] text-ink-3">lets you think</span>
+            <span className="w-24 text-right fs-11 text-ink-3">lets you think</span>
             <span className="w-16 text-right font-mono text-ink">{vad.endSilenceMs}ms</span>
           </div>
         </label>
@@ -182,13 +182,13 @@ export function VoiceDetectionCard() {
 
         {testing && (
           <div>
-            <div className="label-caps mb-1 text-[10px] text-ink-3">X-Ray</div>
+            <div className="label-caps mb-1 fs-10 text-ink-3">X-Ray</div>
             <div className="relative h-3 overflow-hidden rounded-full bg-white/[0.05]" title="speech probability">
               <div ref={prob} className="h-full rounded-full bg-teal/70 transition-[width] duration-75" style={{ width: "0%" }} />
               <div className="absolute inset-y-0 w-0.5 bg-amber/60" style={{ left: `${SPEECH_PROB_OFF * 100}%` }} title="quiet below this" />
               <div className="absolute inset-y-0 w-0.5 bg-teal" style={{ left: `${SPEECH_PROB_ON * 100}%` }} title="speech at or above this" />
             </div>
-            <div className="mt-1 flex items-center gap-3 text-[11px] text-ink-3">
+            <div className="mt-1 flex items-center gap-3 fs-11 text-ink-3">
               <span className="flex items-center gap-1">
                 <span ref={dot} className="size-2 rounded-full bg-teal" /> speech
               </span>
@@ -196,7 +196,7 @@ export function VoiceDetectionCard() {
                 speech probability · <span ref={engine} className="text-ink-2" />
               </span>
             </div>
-            <ul className="mt-2 space-y-1 font-mono text-[11px] text-ink-2">
+            <ul className="mt-2 space-y-1 font-mono fs-11 text-ink-2">
               {log.length === 0 && <li className="text-ink-3">Say something…</li>}
               {log.map((l, i) => (
                 <li key={i}>{l}</li>

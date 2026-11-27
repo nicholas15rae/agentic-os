@@ -17,6 +17,6 @@ export default function SandboxFrame({ buildId, title, version, bare = false }: 
   }, [buildId]);
   // Surface load failures to the Error Boundary instead of rendering a broken frame.
   if (error) throw error;
-  if (!url) return <div className="grid h-full place-items-center font-mono text-[11px] text-ink-3">starting the sandbox…</div>;
-  return <iframe key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className={bare ? "size-full border-0 bg-transparent" : "size-full rounded-[12px] border border-white/10 bg-white"} />;
+  if (!url) return <div className="grid h-full place-items-center font-mono fs-11 text-ink-3">starting the sandbox…</div>;
+  return <iframe key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className={bare ? "size-full border-0 bg-transparent" : "size-full r-12 border border-white/10 bg-white"} />;
 }

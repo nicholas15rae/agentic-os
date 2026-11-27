@@ -71,7 +71,7 @@ export function PageSwitcher({ mobile = false }: { mobile?: boolean }) {
               onClick={() => (active && editing ? setRenaming(p.id) : setActivePage(p.id))}
               onDoubleClick={() => setRenaming(p.id)}
               onKeyDown={(e) => e.key === "F2" && setRenaming(p.id)}
-              className={`flex items-center rounded-full border font-mono transition-colors ${mobile ? "h-8 px-3 text-[11px]" : "h-9 px-3.5 text-[12px]"} ${
+              className={`flex items-center rounded-full border font-mono transition-colors ${mobile ? "h-8 px-3 fs-11" : "h-9 px-3.5 fs-12"} ${
                 active ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.4)] text-ink-2 backdrop-blur-md hover:border-white/25 hover:text-ink"
               } ${editing && pages.length > 1 ? "pr-7" : ""}`}
             >
@@ -95,7 +95,7 @@ export function PageSwitcher({ mobile = false }: { mobile?: boolean }) {
         aria-label="New page"
         title="New page"
         onClick={() => addPage()}
-        className={`flex shrink-0 items-center gap-1 rounded-full border border-dashed border-white/15 text-ink-2 hover:border-white/30 hover:text-ink ${mobile ? "h-8 px-2.5 text-[11px]" : "h-9 px-3 text-[12px]"}`}
+        className={`flex shrink-0 items-center gap-1 rounded-full border border-dashed border-white/15 text-ink-2 hover:border-white/30 hover:text-ink ${mobile ? "h-8 px-2.5 fs-11" : "h-9 px-3 fs-12"}`}
       >
         <Plus size={13} />
         {!mobile && <span className="font-mono">New</span>}
@@ -124,7 +124,7 @@ function RenameField({ id, name, mobile, onDone }: { id: string; name: string; m
         if (e.key === "Enter") commit();
         if (e.key === "Escape") onDone();
       }}
-      className={`field shrink-0 !rounded-full !py-0 font-mono ${mobile ? "!h-8 w-24 text-[11px]" : "!h-9 w-32 text-[12px]"}`}
+      className={`field shrink-0 !rounded-full !py-0 font-mono ${mobile ? "!h-8 w-24 fs-11" : "!h-9 w-32 fs-12"}`}
     />
   );
 }
@@ -150,14 +150,14 @@ function PageMenu({ id }: { id: string }) {
   }, [open]);
   if (!page) return null;
   const idx = pages.findIndex((p) => p.id === id);
-  const item = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-ink-2 hover:bg-white/5 hover:text-ink disabled:opacity-40";
+  const item = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left fs-12 text-ink-2 hover:bg-white/5 hover:text-ink disabled:opacity-40";
   return (
     <span className="relative ml-1" data-page-menu>
       <button aria-label={`${page.name}: page options`} aria-expanded={open} onClick={() => setOpen((v) => !v)} className="grid size-7 place-items-center rounded-full text-ink-3 hover:text-ink">
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="glass-chat absolute bottom-9 right-0 z-50 w-64 rounded-[14px] p-1.5" role="menu" aria-label={`${page.name} options`}>
+        <div className="glass-chat absolute bottom-9 right-0 z-50 w-64 r-14 p-1.5" role="menu" aria-label={`${page.name} options`}>
           <div className="flex gap-1">
             <button className={item} disabled={idx <= 0} onClick={() => L.movePage(id, -1)}>
               <ChevronLeft size={13} /> Move left
@@ -172,7 +172,7 @@ function PageMenu({ id }: { id: string }) {
           <label className={`${item} cursor-default`}>
             <Link2 size={13} /> Tony's mode
             <select
-              className="ml-auto rounded-md bg-black/30 px-1.5 py-0.5 text-[11px] text-ink outline-none"
+              className="ml-auto rounded-md bg-black/30 px-1.5 py-0.5 fs-11 text-ink outline-none"
               value={page.mode ?? ""}
               onChange={(e) => L.setPageMode(id, e.target.value || null)}
               aria-label="Link this page to one of Tony's modes"

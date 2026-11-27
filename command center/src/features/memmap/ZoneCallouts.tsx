@@ -120,12 +120,12 @@ function Callout({ zone, title, children }: { zone: TraceZone; title: string; ch
       }}
       onPointerEnter={() => ui().hover(zone)}
       onPointerLeave={() => ui().hovered === zone && ui().hover(null)}
-      className={`cursor-pointer rounded-[10px] border bg-[rgba(5,9,14,0.84)] px-2.5 py-2 shadow-[0_0_18px_-8px_rgba(0,210,255,0.5)] outline-none transition-colors focus-visible:border-holo ${open ? "border-ember/55" : hot ? "border-holo/60" : "border-holo/25"}`}
+      className={`cursor-pointer r-10 border bg-[rgba(5,9,14,0.84)] px-2.5 py-2 shadow-[0_0_18px_-8px_rgba(0,210,255,0.5)] outline-none transition-colors focus-visible:border-holo ${open ? "border-ember/55" : hot ? "border-holo/60" : "border-holo/25"}`}
     >
-      <h3 className="label-caps mb-1 truncate !text-[9px] text-holo" title={title}>
+      <h3 className="label-caps mb-1 truncate !fs-9 text-holo" title={title}>
         {title}
       </h3>
-      <div className="space-y-0.5 font-mono text-[10px]">{children}</div>
+      <div className="space-y-0.5 font-mono fs-10">{children}</div>
     </section>
   );
 }
@@ -190,7 +190,7 @@ function Exhaust({ bus, why, compact }: { bus: SnapBus[] | null; why: string; co
           const b = bus.find((x) => x.id === n.id);
           const tone = b ? busTone(b.status) : "idle";
           return (
-            <span key={n.id} title={b ? `${busText(b.status)} — ${busWhy(b)}` : "Not registered in os.json"} className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] px-1.5 py-px text-[9px] text-ink-2">
+            <span key={n.id} title={b ? `${busText(b.status)} — ${busWhy(b)}` : "Not registered in os.json"} className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] px-1.5 py-px fs-9 text-ink-2">
               <Dot tone={tone} /> {n.label}
             </span>
           );

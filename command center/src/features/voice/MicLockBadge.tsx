@@ -71,7 +71,7 @@ export function MicLockBadgeView({ kind, variant = "chip", flash = false, onTogg
       <span>{TEXT[kind]}</span>
     </>
   );
-  const base = `flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 font-mono text-[10px] font-bold tracking-wider ${CHIP_TONE[kind]} ${ring} ${className}`;
+  const base = `flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 font-mono fs-10 font-bold tracking-wider ${CHIP_TONE[kind]} ${ring} ${className}`;
   if (variant === "button") {
     const off = isMicOff(kind);
     return (

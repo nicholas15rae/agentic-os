@@ -11,7 +11,7 @@ import { requestSettingsTab } from "@/sections/settings/settings-tab";
 
 export function Panel({ title, badge, action, children, className = "", bodyClassName = "" }: { title: ReactNode; badge?: ReactNode; action?: ReactNode; children: ReactNode; className?: string; bodyClassName?: string }) {
   return (
-    <section className={`flex min-h-0 flex-col rounded-[14px] border border-holo/20 bg-[rgba(7,11,17,0.82)] shadow-[0_0_24px_-12px_rgba(0,210,255,0.35),inset_0_1px_0_rgba(0,210,255,0.06)] ${className}`}>
+    <section className={`flex min-h-0 flex-col r-14 border border-holo/20 bg-[rgba(7,11,17,0.82)] shadow-[0_0_24px_-12px_rgba(0,210,255,0.35),inset_0_1px_0_rgba(0,210,255,0.06)] ${className}`}>
       <header className="flex min-h-9 items-center gap-2 border-b border-holo/10 px-3 py-2">
         <h2 className="label-caps truncate text-holo">{title}</h2>
         {badge}
@@ -46,7 +46,7 @@ const TAG: Record<Tone, string> = {
 
 export function Tag({ tone, children, title }: { tone: Tone; children: ReactNode; title?: string }) {
   return (
-    <span title={title} className={`label-caps inline-flex h-[18px] shrink-0 items-center rounded-full border px-1.5 !text-[9px] ${TAG[tone]}`}>
+    <span title={title} className={`label-caps inline-flex h-[18px] shrink-0 items-center rounded-full border px-1.5 !fs-9 ${TAG[tone]}`}>
       {children}
     </span>
   );

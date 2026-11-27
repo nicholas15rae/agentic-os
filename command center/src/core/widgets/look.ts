@@ -29,8 +29,9 @@ export const DEFAULT_GLASS_ALPHA = 0.62;
 export const clampScale = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.min(SCALE_MAX, Math.max(SCALE_MIN, v)) : 1);
 
 /** The frame a widget draws: its own choice, else the old ultra toggle, else frameless for a chromeless widget. Pure. */
-export function frameOf(inst: Pick<WidgetInstance, "glass" | "look">, chromeless: boolean): Frame {
-  return inst.look?.frame ?? (inst.glass === "ultra" ? "ultra" : chromeless ? "frameless" : "glass");
+/** `fallback`: Settings → Appearance's default widget frame (a widget's own pick always wins). */
+export function frameOf(inst: Pick<WidgetInstance, "glass" | "look">, chromeless: boolean, fallback: Frame = "glass"): Frame {
+  return inst.look?.frame ?? (inst.glass === "ultra" ? "ultra" : chromeless ? "frameless" : fallback);
 }
 
 /** Glass opacity on `wallpaperId` (falls back to the default). Pure. */

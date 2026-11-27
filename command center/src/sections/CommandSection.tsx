@@ -43,7 +43,7 @@ function GlassAllSwitch() {
       aria-checked={on}
       onClick={() => setGlassAll(!on)}
       title="Make every widget near-transparent so the wallpaper shows through"
-      className={`pill-glass ml-auto !h-9 shrink-0 !px-3 text-[13px] ${on ? "!border-teal/60 text-teal" : ""}`}
+      className={`pill-glass ml-auto !h-9 shrink-0 !px-3 fs-13 ${on ? "!border-teal/60 text-teal" : ""}`}
     >
       <span className={`relative h-4 w-7 rounded-full transition-colors ${on ? "bg-teal/80" : "bg-white/15"}`}>
         <span className={`absolute top-0.5 size-3 rounded-full bg-white shadow transition-[left] duration-200 ${on ? "left-3.5" : "left-0.5"}`} />
@@ -102,8 +102,8 @@ function WidgetTray() {
 
   return (
     <div className="mx-4 mb-3 space-y-2 md:mx-6 xl:mx-8">
-      <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2">
-        <button onClick={() => setDrawer(true)} className="pill-primary !h-9 shrink-0 !px-3 text-[13px]" title="Search every widget, grouped by kind (your Play Place builds first)">
+      <div className="glass flex flex-wrap items-center gap-2 r-18 p-2">
+        <button onClick={() => setDrawer(true)} className="pill-primary !h-9 shrink-0 !px-3 fs-13" title="Search every widget, grouped by kind (your Play Place builds first)">
           <Plus size={13} /> Add widget
         </button>
         <GlassAllSwitch />
@@ -111,7 +111,7 @@ function WidgetTray() {
         <LayoutControls />
       </div>
 
-      <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2">
+      <div className="glass flex flex-wrap items-center gap-2 r-18 p-2">
         <span className="label-caps shrink-0 px-2 text-violet">Generate</span>
         <form
           className="flex min-w-64 flex-1 gap-2"
@@ -121,19 +121,19 @@ function WidgetTray() {
           }}
         >
           <input
-            className="field !h-9 !py-1 text-[13px]"
+            className="field !h-9 !py-1 fs-13"
             placeholder="Describe a widget: “HST paid on fuel receipts”, “countdown to my Dec 12 shoot”…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             aria-label="Describe a widget"
           />
-          <button className="pill-primary !h-9 shrink-0 !px-3 text-[13px]" disabled={busy || !prompt.trim()}>
+          <button className="pill-primary !h-9 shrink-0 !px-3 fs-13" disabled={busy || !prompt.trim()}>
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} Generate
           </button>
         </form>
         <div className="flex gap-1.5 overflow-x-auto">
           {TEMPLATES.map((t) => (
-            <button key={t.label} onClick={() => addCustom(t.spec)} className="pill-glass !h-8 shrink-0 !px-3 text-[12px]">
+            <button key={t.label} onClick={() => addCustom(t.spec)} className="pill-glass !h-8 shrink-0 !px-3 fs-12">
               {t.label}
             </button>
           ))}

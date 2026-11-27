@@ -43,13 +43,13 @@ function ListView({ spec }: { spec: Extract<CustomSpec, { kind: "list" }> }) {
   return (
     <div className="flex h-full flex-col">
       <WidgetHeader title={spec.title} status={<span className="label-caps text-ink-3">{rows.length}</span>} />
-      {error && <p className="text-[11px] text-alert">{error}</p>}
+      {error && <p className="fs-11 text-alert">{error}</p>}
       <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto">
         {rows.slice(0, spec.limit).map((r) => (
-          <li key={r.id} className="flex items-center gap-2 rounded-[10px] border border-white/[0.06] px-2.5 py-1.5 text-[13px]">
+          <li key={r.id} className="flex items-center gap-2 r-10 border border-white/[0.06] px-2.5 py-1.5 fs-13">
             <span className="min-w-0 flex-1 truncate text-ink">{fmt(r[spec.titleField]) || "—"}</span>
-            {spec.subtitleField && <span className="truncate text-[11px] text-ink-3">{fmt(r[spec.subtitleField])}</span>}
-            {spec.dateField && <span className="shrink-0 font-mono text-[11px] text-ink-2">{fmt(r[spec.dateField])}</span>}
+            {spec.subtitleField && <span className="truncate fs-11 text-ink-3">{fmt(r[spec.subtitleField])}</span>}
+            {spec.dateField && <span className="shrink-0 font-mono fs-11 text-ink-2">{fmt(r[spec.dateField])}</span>}
           </li>
         ))}
         {!rows.length && <li className="py-3 text-center text-xs text-ink-3">Nothing matches yet.</li>}
@@ -70,7 +70,7 @@ function StatView({ spec }: { spec: Extract<CustomSpec, { kind: "stat" }> }) {
         {spec.op === "sum" ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : value}
         {spec.suffix && <span className="ml-1 text-base text-ink-3">{spec.suffix}</span>}
       </p>
-      <p className="font-mono text-[11px] text-ink-3">
+      <p className="font-mono fs-11 text-ink-3">
         {spec.op} {spec.field ?? ""} · {spec.collection}
         {spec.filter ? ` where ${spec.filter.field} = ${spec.filter.equals}` : ""}
       </p>
@@ -84,7 +84,7 @@ function CountdownView({ spec }: { spec: Extract<CustomSpec, { kind: "countdown"
     <div className="flex h-full flex-col">
       <WidgetHeader title={spec.title} />
       <p className="my-auto font-mono text-4xl font-semibold text-teal-soft tabular">{countdown(spec.dueAt, now)}</p>
-      <p className="font-mono text-[11px] text-ink-3">{new Date(spec.dueAt).toLocaleString()}</p>
+      <p className="font-mono fs-11 text-ink-3">{new Date(spec.dueAt).toLocaleString()}</p>
     </div>
   );
 }
@@ -110,11 +110,11 @@ function WorkflowView({ spec }: { spec: Extract<CustomSpec, { kind: "workflow" }
     <div className="flex h-full flex-col">
       <WidgetHeader title={spec.title} status={<span className="label-caps text-ink-3">n8n · {spec.workflow}</span>} />
       {error ? (
-        <p className="text-[12px] text-alert">{error}</p>
+        <p className="fs-12 text-alert">{error}</p>
       ) : (
-        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto font-mono text-[11px] text-ink-2">
+        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto font-mono fs-11 text-ink-2">
           {rows.slice(0, 30).map((r, i) => (
-            <li key={i} className="truncate rounded-[8px] border border-white/[0.05] px-2 py-1">
+            <li key={i} className="truncate r-8 border border-white/[0.05] px-2 py-1">
               {Array.isArray(r) ? `${r[0]}: ${fmt(r[1])}` : typeof r === "object" ? Object.values(r as object).slice(0, 3).map(fmt).join(" · ") : fmt(r)}
             </li>
           ))}

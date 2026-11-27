@@ -52,7 +52,7 @@ export function WidgetDrawer({ promoted, onAdd, onClose, surface = "home" }: { p
         </div>
         <label className="relative mb-3 block">
           <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-3" aria-hidden />
-          <input ref={input} className="field !h-10 !pl-9 text-[13px]" placeholder="Search widgets…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search widgets" />
+          <input ref={input} className="field !h-10 !pl-9 fs-13" placeholder="Search widgets…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search widgets" />
         </label>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           {!groups.length && <p className="text-sm text-ink-3">No widget matches “{q}”.</p>}
@@ -64,11 +64,11 @@ export function WidgetDrawer({ promoted, onAdd, onClose, surface = "home" }: { p
                   const Icon = iconOf(it.key);
                   return (
                     <li key={it.key}>
-                      <button onClick={() => pick(it)} className="flex w-full items-start gap-3 rounded-[12px] border border-white/[0.06] px-3 py-2 text-left transition-colors hover:border-teal/40 hover:bg-teal/[0.05]">
+                      <button onClick={() => pick(it)} className="flex w-full items-start gap-3 r-12 border border-white/[0.06] px-3 py-2 text-left transition-colors hover:border-teal/40 hover:bg-teal/[0.05]">
                         <Icon size={16} className={`mt-0.5 shrink-0 ${it.category === "Your builds" ? "text-violet" : "text-teal"}`} aria-hidden />
                         <span className="min-w-0 flex-1">
                           <span className="block text-sm text-ink">{it.title}</span>
-                          <span className="block text-[11px] leading-snug text-ink-3">{it.description}</span>
+                          <span className="block fs-11 leading-snug text-ink-3">{it.description}</span>
                         </span>
                         <Plus size={14} className="mt-0.5 shrink-0 text-ink-3" aria-hidden />
                       </button>

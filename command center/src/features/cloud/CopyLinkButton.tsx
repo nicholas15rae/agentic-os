@@ -15,7 +15,7 @@ export async function copyLink(link: string): Promise<boolean> {
 
 export function CopyLinkButton({ link, compact = false }: { link: string; compact?: boolean }) {
   return (
-    <button onClick={() => void copyLink(link)} className={`pill-glass !h-7 shrink-0 text-[11px] ${compact ? "!w-7 !p-0" : "!px-2"}`} title="Copy the share link" aria-label="Copy link">
+    <button onClick={() => void copyLink(link)} className={`pill-glass !h-7 shrink-0 fs-11 ${compact ? "!w-7 !p-0" : "!px-2"}`} title="Copy the share link" aria-label="Copy link">
       <Copy size={11} />
       {!compact && " Copy link"}
     </button>

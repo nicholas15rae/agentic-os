@@ -67,7 +67,7 @@ export function CentreStage({ narrow, className = "", badgeState }: { narrow: bo
     return (
       <div className={`space-y-2 ${className}`}>
         <RoutingFlowchart orient="v" />
-        <div data-slot="viewport" className="rounded-[14px] border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2">
+        <div data-slot="viewport" className="r-14 border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2">
           <div className="mb-2 flex justify-center">
             <GabagoulBadge state={badgeState} />
           </div>
@@ -83,7 +83,7 @@ export function CentreStage({ narrow, className = "", badgeState }: { narrow: bo
       <RoutingFlowchart />
       <div
         ref={stage}
-        className="@container relative min-h-[340px] flex-1 overflow-hidden rounded-[14px] border border-holo/20 bg-[radial-gradient(ellipse_at_50%_55%,rgba(0,210,255,0.10),rgba(4,8,13,0.55)_65%)]"
+        className="@container relative min-h-[340px] flex-1 overflow-hidden r-14 border border-holo/20 bg-[radial-gradient(ellipse_at_50%_55%,rgba(0,210,255,0.10),rgba(4,8,13,0.55)_65%)]"
       >
         <div data-slot="viewport" className="absolute inset-0">
           <HoloBoundary>

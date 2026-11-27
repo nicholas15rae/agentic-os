@@ -115,7 +115,16 @@ export interface LayoutState extends PagesState, VariantState {
   removeWhere: (pred: (i: WidgetInstance) => boolean) => RemovedTile[];
   /** Put items back where `removeWhere` found them (skips a page that is gone or an id already there). */
   putBack: (tiles: RemovedTile[]) => void;
+  /** Export / import (Settings → Appearance): the saved layout, and a layout from a file (validated, unknown widgets dropped, safety controls kept). */
+  exportLayout: () => SavedLayout;
+  importLayout: (raw: unknown) => void;
 }
+
+/** What a surface saves (and what an `agentic-os-ui.json` file carries per surface). */
+export type SavedLayout = PagesState & VariantState;
+
+/** Drop items whose widget this app doesn't have (an import from another build). Pure. */
+const knownOnly = (p: PagesState): PagesState => ({ ...p, pages: p.pages.map((pg) => ({ ...pg, items: pg.items.filter((i) => !!getWidget(i.widgetId)) })) });
 
 /** An item `removeWhere` took off, and the layout (live or a mode's) and page it was on. */
 export interface RemovedTile {
@@ -331,6 +340,16 @@ export function createLayoutStore(spec: SurfaceSpec) {
               });
               return { pages: into(s, s.variant).pages, variants: Object.fromEntries(Object.entries(s.variants).map(([k, v]) => [k, into(v, k)])) };
             }),
+          exportLayout: () => {
+            const s = get();
+            return { pages: s.pages, activePage: s.activePage, startupPage: s.startupPage ?? null, variant: s.variant, variants: s.variants };
+          },
+          importLayout: (raw) => {
+            const live = ensureLocked(knownOnly(sanitizePages(raw, template)), template, isLockedWidget, shortId);
+            const v = sanitizeVariants(raw, template);
+            const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, ensureLocked(knownOnly(p), template, isLockedWidget, shortId)]));
+            set({ ...live, startupPage: live.startupPage ?? null, ...v, variants, activePage: startupOf(live), lastReset: null, ...fresh });
+          },
           moveToPage: (instanceId, pageId) => {
             const s = get();
             const inst = s.pages.flatMap((p) => p.items).find((i) => i.instanceId === instanceId);

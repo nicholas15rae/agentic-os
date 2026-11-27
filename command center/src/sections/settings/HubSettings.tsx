@@ -32,7 +32,7 @@ export function ComputeRouterCard() {
           <button
             key={p.id}
             onClick={() => set(p.patch)}
-            className={`rounded-[14px] border p-3 text-left text-xs transition-colors ${s.profile === p.id ? "border-amber/60 bg-amber/10 text-ink" : "border-white/10 text-ink-2 hover:text-ink"}`}
+            className={`r-14 border p-3 text-left text-xs transition-colors ${s.profile === p.id ? "border-amber/60 bg-amber/10 text-ink" : "border-white/10 text-ink-2 hover:text-ink"}`}
           >
             <span className="block font-medium">{p.label}</span>
             <span className="mt-1 block text-ink-3">{p.hint}</span>
@@ -43,17 +43,17 @@ export function ComputeRouterCard() {
         <label className="block text-sm text-ink-2">
           Main OS (Tony) vs background agent queue
           <div className="mt-1 flex items-center gap-3">
-            <span className="w-24 font-mono text-[11px] text-ink-3">{s.tonyPriorityPct}% Tony</span>
+            <span className="w-24 font-mono fs-11 text-ink-3">{s.tonyPriorityPct}% Tony</span>
             <input type="range" min={50} max={100} step={5} value={s.tonyPriorityPct} onChange={(e) => set({ tonyPriorityPct: Number(e.target.value) })} className="flex-1 accent-amber" aria-label="Tony priority" />
-            <span className="w-28 text-right font-mono text-[11px] text-ink-3">{100 - s.tonyPriorityPct}% background</span>
+            <span className="w-28 text-right font-mono fs-11 text-ink-3">{100 - s.tonyPriorityPct}% background</span>
           </div>
         </label>
         <label className="block text-sm text-ink-2">
           Local GPU vs cloud / CLI auto-offload
           <div className="mt-1 flex items-center gap-3">
-            <span className="w-24 font-mono text-[11px] text-ink-3">{100 - s.offloadPct}% local</span>
+            <span className="w-24 font-mono fs-11 text-ink-3">{100 - s.offloadPct}% local</span>
             <input type="range" min={0} max={100} step={10} value={s.offloadPct} onChange={(e) => set({ offloadPct: Number(e.target.value) })} className="flex-1 accent-teal" aria-label="Offload share" />
-            <span className="w-28 text-right font-mono text-[11px] text-ink-3">{s.offloadPct}% offload</span>
+            <span className="w-28 text-right font-mono fs-11 text-ink-3">{s.offloadPct}% offload</span>
           </div>
           <span className="mt-1 block text-xs text-ink-3">≥ 50 %: the Coder's build step runs on the offload engine. ≥ 80 %: the Designer's too. Blocked by the kill switch / LOCAL ONLY.</span>
         </label>
@@ -128,17 +128,17 @@ export function CliHubCard() {
           <li key={c.name} className="flex flex-wrap items-center gap-2 py-2">
             {c.installed && !c.error ? <CheckCircle2 size={15} className="text-teal" /> : <XCircle size={15} className={c.installed ? "text-amber-soft" : "text-alert"} />}
             <span className="w-40 text-sm text-ink">{c.label}</span>
-            <span className="font-mono text-[11px] text-ink-2">{c.version ?? (c.installed ? "installed (no version)" : "not installed")}</span>
+            <span className="font-mono fs-11 text-ink-2">{c.version ?? (c.installed ? "installed (no version)" : "not installed")}</span>
             <span className="ml-auto flex items-center gap-2">
               {c.canInstall ? (
                 <button disabled={busy === c.name} onClick={() => void install(c)} className="pill-glass !h-8 text-xs">
                   {busy === c.name ? <Loader2 size={12} className="animate-spin" /> : c.installed ? <Wrench size={12} /> : <Download size={12} />} {c.installed ? "Repair" : "Install"}
                 </button>
               ) : (
-                !c.installed && <span className="text-[11px] text-ink-3">{c.how}</span>
+                !c.installed && <span className="fs-11 text-ink-3">{c.how}</span>
               )}
             </span>
-            {(c.error || out[c.name]) && <pre className="well w-full whitespace-pre-wrap rounded-[8px] p-2 text-[11px] text-ink-2">{(out[c.name] ?? c.error ?? "").slice(0, 600)}</pre>}
+            {(c.error || out[c.name]) && <pre className="well w-full whitespace-pre-wrap r-8 p-2 fs-11 text-ink-2">{(out[c.name] ?? c.error ?? "").slice(0, 600)}</pre>}
           </li>
         ))}
       </ul>
@@ -173,7 +173,7 @@ export function AiProvidersCard() {
       <button onClick={() => test(engine)} className="pill-glass !h-8 text-xs">
         <PlugZap size={12} /> Test connection
       </button>
-      {probe[engine] && <span className={`font-mono text-[11px] ${probe[engine].startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{probe[engine]}</span>}
+      {probe[engine] && <span className={`font-mono fs-11 ${probe[engine].startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{probe[engine]}</span>}
     </div>
   );
   return (
@@ -282,7 +282,7 @@ export function ModelLibraryCard() {
       {scan?.roots && (
         <ul className="mb-2 space-y-0.5" aria-label="Scanned folders">
           {scan.roots.map((r) => (
-            <li key={r.path} className={`font-mono text-[11px] ${r.exists ? "text-ink-2" : "text-ink-3 line-through"}`} title={r.exists ? ROOT_KIND[r.kind] : "not found on this machine"}>
+            <li key={r.path} className={`font-mono fs-11 ${r.exists ? "text-ink-2" : "text-ink-3 line-through"}`} title={r.exists ? ROOT_KIND[r.kind] : "not found on this machine"}>
               {r.path} <span className="text-ink-3">· {ROOT_KIND[r.kind]}</span>
             </li>
           ))}
@@ -293,16 +293,16 @@ export function ModelLibraryCard() {
         [...GROUP_ORDER.filter((g) => scan.groups[g]), ...Object.keys(scan.groups).filter((g) => !GROUP_ORDER.includes(g))].map((g) => (
           <details key={g} open={g === GROUP_ORDER[0]} className="mb-2">
             <summary className="cursor-pointer text-sm text-ink">
-              {g} <span className="font-mono text-[11px] text-ink-3">({scan.groups[g].length})</span>
+              {g} <span className="font-mono fs-11 text-ink-3">({scan.groups[g].length})</span>
             </summary>
             <ul className="mt-1 space-y-1">
               {scan.groups[g].map((m) => (
-                <li key={m.path} className="grid grid-cols-[1fr_auto] gap-x-2 rounded-[10px] px-2 py-1 text-xs hover:bg-white/[0.03]" title={m.path}>
+                <li key={m.path} className="grid grid-cols-[1fr_auto] gap-x-2 r-10 px-2 py-1 text-xs hover:bg-white/[0.03]" title={m.path}>
                   <span className="truncate text-ink">
-                    {m.name} {m.registered && <span className="ml-1 rounded-full bg-teal/15 px-1.5 text-[10px] text-teal">in Bionic</span>}
+                    {m.name} {m.registered && <span className="ml-1 rounded-full bg-teal/15 px-1.5 fs-10 text-teal">in Bionic</span>}
                   </span>
-                  <span className="font-mono text-[11px] text-ink-3">{m.sizeGb} GB</span>
-                  <span className={`col-span-2 text-[11px] ${STATUS_TONE[m.status] ?? "text-ink-3"}`}>
+                  <span className="font-mono fs-11 text-ink-3">{m.sizeGb} GB</span>
+                  <span className={`col-span-2 fs-11 ${STATUS_TONE[m.status] ?? "text-ink-3"}`}>
                     {m.status} — {m.note}
                     {m.ggufs.length > 0 && ` · ${m.ggufs.map((x) => x.file.split(/[\\/]/).pop()).join(", ")}`}
                   </span>
@@ -313,11 +313,11 @@ export function ModelLibraryCard() {
         ))}
       <details className="mb-1">
         <summary className="cursor-pointer text-sm text-ink">
-          CLI agents <span className="font-mono text-[11px] text-ink-3">({clis.filter((c) => c.installed).length} installed)</span>
+          CLI agents <span className="font-mono fs-11 text-ink-3">({clis.filter((c) => c.installed).length} installed)</span>
         </summary>
         <ul className="mt-1 flex flex-wrap gap-1.5">
           {clis.map((c) => (
-            <li key={c.name} className={`rounded-full border px-2 py-0.5 font-mono text-[11px] ${c.installed ? "border-teal/40 text-teal" : "border-white/10 text-ink-3"}`}>
+            <li key={c.name} className={`rounded-full border px-2 py-0.5 font-mono fs-11 ${c.installed ? "border-teal/40 text-teal" : "border-white/10 text-ink-3"}`}>
               {c.name} {c.version ? `· ${c.version.slice(0, 24)}` : ""}
             </li>
           ))}
@@ -412,10 +412,10 @@ export function ModelLabCard() {
                 <tr key={m.key} className="border-t border-white/5 align-top">
                   <td className="py-2">
                     <span className="text-ink">{m.name || m.key}</span>
-                    {m.tony && <span className="ml-1.5 rounded-full bg-amber/20 px-1.5 text-[10px] text-amber-light">TONY</span>}
-                    {m.loaded && <span className="ml-1 rounded-full bg-teal/15 px-1.5 text-[10px] text-teal">loaded</span>}
-                    {m.vision && <span className="ml-1 text-[10px] text-ink-3">vision</span>}
-                    <span className="block font-mono text-[10px] text-ink-3">
+                    {m.tony && <span className="ml-1.5 rounded-full bg-amber/20 px-1.5 fs-10 text-amber-light">TONY</span>}
+                    {m.loaded && <span className="ml-1 rounded-full bg-teal/15 px-1.5 fs-10 text-teal">loaded</span>}
+                    {m.vision && <span className="ml-1 fs-10 text-ink-3">vision</span>}
+                    <span className="block font-mono fs-10 text-ink-3">
                       {m.params} {m.quant}
                     </span>
                   </td>
@@ -425,27 +425,27 @@ export function ModelLabCard() {
                     return (
                       <td className={`py-2 ${b.tone === "ok" ? "text-teal" : b.tone === "warn" ? "font-semibold text-amber-soft" : "font-semibold text-alert"}`} title={b.title}>
                         {b.text}
-                        {b.tone === "bad" && <span className="block text-[10px] font-normal">spills to RAM — slow</span>}
+                        {b.tone === "bad" && <span className="block fs-10 font-normal">spills to RAM — slow</span>}
                       </td>
                     );
                   })()}
                   <td className="py-2 font-mono text-ink-2">
                     {r ? (r.error ? <span className="text-alert">{r.error.slice(0, 80)}</span> : `${(r.loadMs / 1000).toFixed(1)}s load · ${(r.firstTokenMs / 1000).toFixed(2)}s · ${r.tokensPerSec} tok/s · ${r.vramUsedGb}/${Math.round(r.vramTotalGb)} GB`) : "—"}
                     {r?.reply && (
-                      <span className="block max-w-[320px] truncate font-sans text-[11px] text-ink-3" title={r.reply}>
+                      <span className="block max-w-[320px] truncate font-sans fs-11 text-ink-3" title={r.reply}>
                         “{r.reply}”
                       </span>
                     )}
                   </td>
                   <td className="py-2">
                     <div className="flex justify-end gap-1">
-                      <button disabled={!!busy} onClick={() => void bench(m)} className="pill-glass !h-7 !px-2.5 text-[11px]">
+                      <button disabled={!!busy} onClick={() => void bench(m)} className="pill-glass !h-7 !px-2.5 fs-11">
                         {busy === m.key ? <Loader2 size={11} className="animate-spin" /> : <PlugZap size={11} />} Benchmark
                       </button>
                       <button
                         disabled={!!busy || m.tony}
                         onClick={() => void use(m)}
-                        className={`${m.fit === "fits" ? "pill-primary" : "pill-glass"} !h-7 !px-2.5 text-[11px]`}
+                        className={`${m.fit === "fits" ? "pill-primary" : "pill-glass"} !h-7 !px-2.5 fs-11`}
                         title={m.fit === "fits" ? "Make this Tony's brain" : "Doesn't fit the GPU comfortably: asks before switching"}
                       >
                         Use for Tony{m.fit === "fits" ? "" : "…"}

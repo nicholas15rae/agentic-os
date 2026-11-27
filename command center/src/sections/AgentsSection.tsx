@@ -60,15 +60,15 @@ export function AgentsSection() {
         aria-selected={thread === t}
         onClick={() => setThread(t)}
         title={why}
-        className={`flex h-9 items-center gap-2 rounded-full border px-3.5 text-[13px] transition-colors ${
+        className={`flex h-9 items-center gap-2 rounded-full border px-3.5 fs-13 transition-colors ${
           thread === t ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.45)] text-ink-2 backdrop-blur-md hover:text-ink"
         } ${why ? "opacity-50" : ""}`}
       >
         {Icon && <Icon size={14} />}
         {label(t)}
-        {n[t] > 0 && <span className="rounded-full bg-white/10 px-1.5 font-mono text-[10px] text-ink-2">{n[t]}</span>}
+        {n[t] > 0 && <span className="rounded-full bg-white/10 px-1.5 font-mono fs-10 text-ink-2">{n[t]}</span>}
         {unread > 0 && (
-          <span className="rounded-full bg-amber px-1.5 font-mono text-[10px] text-canvas" aria-label={`${unread} unread report${unread === 1 ? "" : "s"}`}>
+          <span className="rounded-full bg-amber px-1.5 font-mono fs-10 text-canvas" aria-label={`${unread} unread report${unread === 1 ? "" : "s"}`}>
             {unread}
           </span>
         )}
@@ -85,7 +85,7 @@ export function AgentsSection() {
             type="button"
             onClick={() => setShowFrozen((v) => !v)}
             aria-expanded={showFrozen}
-            className="flex h-9 items-center gap-1.5 rounded-full border border-dashed border-white/10 px-3 text-[12px] text-ink-3 hover:text-ink-2"
+            className="flex h-9 items-center gap-1.5 rounded-full border border-dashed border-white/10 px-3 fs-12 text-ink-3 hover:text-ink-2"
             title={frozen.map((f) => f.why).join("\n")}
           >
             <Snowflake size={12} /> Frozen ({frozen.length}) {showFrozen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -100,18 +100,18 @@ export function AgentsSection() {
           <HelpDeskButton thread={thread} />
         </div>
         {isTauri() && (
-          <button onClick={() => setDrawer(true)} className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[13px] text-ink-2 hover:text-ink" title="Skills & MCP library">
+          <button onClick={() => setDrawer(true)} className="flex h-9 items-center gap-1.5 rounded-full border border-white/10 px-3 fs-13 text-ink-2 hover:text-ink" title="Skills & MCP library">
             <Library size={13} /> Skills & MCP
           </button>
         )}
         {n[thread] > 0 && (
-          <button onClick={() => clear(thread)} className="flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] text-ink-3 hover:text-ink" aria-label={`Clear the ${label(thread)} thread`}>
+          <button onClick={() => clear(thread)} className="flex h-9 items-center gap-1.5 rounded-full px-3 fs-13 text-ink-3 hover:text-ink" aria-label={`Clear the ${label(thread)} thread`}>
             <Trash2 size={13} /> Clear
           </button>
         )}
       </div>
 
-      <div className="glass-chat flex min-h-0 flex-1 flex-col rounded-[20px]">
+      <div className="glass-chat flex min-h-0 flex-1 flex-col r-20">
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {hasReports && (
             <div className="mb-4">

@@ -33,12 +33,12 @@ export function PushConfirmView({
 }) {
   const choices = uniqueFolders([folder, ...folderChoices]);
   return (
-    <section {...safety("confirm-card")} className="glass mt-2 rounded-[16px] border-amber/50 p-3 ring-1 ring-amber/40" role="alertdialog" aria-label="Confirm upload to Google Drive">
+    <section {...safety("confirm-card")} className="glass mt-2 r-16 border-amber/50 p-3 ring-1 ring-amber/40" role="alertdialog" aria-label="Confirm upload to Google Drive">
       <div className="flex items-center gap-1.5">
         <CloudUpload size={14} className="text-amber-soft" />
         <h3 className="label-caps text-amber-soft">Upload to Drive?</h3>
       </div>
-      <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-[12px]">
+      <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 fs-12">
         <dt className="text-ink-3">File</dt>
         <dd className="truncate text-ink" title={name}>
           {name}
@@ -48,7 +48,7 @@ export function PushConfirmView({
         <dt className="text-ink-3">To</dt>
         <dd className="min-w-0 text-ink-2">
           {choices.length > 1 ? (
-            <Select value={folder?.id ?? ""} onChange={(e) => onFolder(choices.find((c) => (c?.id ?? "") === e.target.value) ?? null)} className="!h-7 !w-auto max-w-full !py-0 text-[12px]" aria-label="Destination folder">
+            <Select value={folder?.id ?? ""} onChange={(e) => onFolder(choices.find((c) => (c?.id ?? "") === e.target.value) ?? null)} className="!h-7 !w-auto max-w-full !py-0 fs-12" aria-label="Destination folder">
               {choices.map((c) => (
                 <option key={c?.id ?? ""} value={c?.id ?? ""}>
                   {c?.name ?? MY_DRIVE}
@@ -60,7 +60,7 @@ export function PushConfirmView({
           )}
         </dd>
       </dl>
-      <p className="mt-2 text-[11px] text-ink-3">Only you can see it until you create a share link.</p>
+      <p className="mt-2 fs-11 text-ink-3">Only you can see it until you create a share link.</p>
       <div className="mt-2 flex flex-wrap gap-1.5">
         <button onClick={onConfirm} disabled={busy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
           {busy ? <Loader2 size={12} className="animate-spin" /> : <CloudUpload size={12} />} Upload to Drive

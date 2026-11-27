@@ -27,7 +27,7 @@ function Section({ id, icon: Icon, title, focus, children }: { id: InspectFocus;
     if (focus === id) ref.current?.scrollIntoView({ block: "start", behavior: "smooth" });
   }, [focus, id]);
   return (
-    <section ref={ref} className={`rounded-[12px] border p-3 ${focus === id ? "border-holo/40 bg-holo/[0.04]" : "border-white/[0.07] bg-white/[0.02]"}`}>
+    <section ref={ref} className={`r-12 border p-3 ${focus === id ? "border-holo/40 bg-holo/[0.04]" : "border-white/[0.07] bg-white/[0.02]"}`}>
       <h3 className="label-caps mb-2 flex items-center gap-1.5 text-holo">
         <Icon size={12} aria-hidden /> {title}
       </h3>
@@ -38,7 +38,7 @@ function Section({ id, icon: Icon, title, focus, children }: { id: InspectFocus;
 
 function Row({ k, v, tone }: { k: string; v: React.ReactNode; tone?: string }) {
   return (
-    <div className="flex justify-between gap-3 text-[11.5px]">
+    <div className="flex justify-between gap-3 fs-11.5">
       <dt className="text-ink-3">{k}</dt>
       <dd className="text-right font-mono text-ink-2" style={tone ? { color: tone } : undefined}>
         {v}
@@ -98,7 +98,7 @@ export function DeepInspector() {
             {bus.label} bus
           </p>
           <h2 className="truncate text-lg font-semibold text-ink">{d?.node.label ?? NODE_LABEL[id]}</h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+          <div className="mt-1 flex flex-wrap items-center gap-2 fs-11">
             <span className="label-caps rounded-full border px-2 py-0.5" style={{ color: SURFACE_TONE[surface], borderColor: `${SURFACE_TONE[surface]}66` }}>
               {surface}
             </span>
@@ -118,13 +118,13 @@ export function DeepInspector() {
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {id === "trading" && <TradingAgentStatusCard />}
-        {!isTauri() && <p className="text-[12px] text-ink-3">Live inspection needs the desktop engine.</p>}
-        {poll.error && <p className="font-mono text-[11px] text-alert">{poll.error}</p>}
-        {d?.node.schedule && <p className="text-[11.5px] leading-relaxed text-ink-3">{d.node.schedule}</p>}
+        {!isTauri() && <p className="fs-12 text-ink-3">Live inspection needs the desktop engine.</p>}
+        {poll.error && <p className="font-mono fs-11 text-alert">{poll.error}</p>}
+        {d?.node.schedule && <p className="fs-11.5 leading-relaxed text-ink-3">{d.node.schedule}</p>}
 
         <Section id="rag" icon={Database} title="1 · RAG memory" focus={focus}>
           {!mem ? (
-            <p className="text-[11.5px] text-ink-3">{d ? "No memory namespace: this node runs stateless." : isTauri() ? "Loading…" : "—"}</p>
+            <p className="fs-11.5 text-ink-3">{d ? "No memory namespace: this node runs stateless." : isTauri() ? "Loading…" : "—"}</p>
           ) : isVault(mem) ? (
             <dl className="space-y-1">
               <Row k="Namespace" v="finance (vault-internal index)" />
@@ -132,7 +132,7 @@ export function DeepInspector() {
               <Row k="Ledger entries" v={mem.sealed ? "sealed — unlock to count" : (mem.entries ?? "—")} />
               <Row k="Ledger on disk" v={mem.hasLedger ? "yes (AES-GCM)" : "none yet"} />
               <Row k="Key in OS keychain" v={mem.hasKey ? "yes" : "no"} />
-              <p className="pt-1 text-[11px] text-ink-3">The vault's index never enters shared memory; its contents are not shown here.</p>
+              <p className="pt-1 fs-11 text-ink-3">The vault's index never enters shared memory; its contents are not shown here.</p>
             </dl>
           ) : (
             <>
@@ -146,14 +146,14 @@ export function DeepInspector() {
               {mem.collections.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1">
                   {mem.collections.map((c) => (
-                    <span key={c.tag} className="rounded-full border border-white/10 px-2 py-0.5 font-mono text-[10.5px] text-ink-2">
+                    <span key={c.tag} className="rounded-full border border-white/10 px-2 py-0.5 font-mono fs-10.5 text-ink-2">
                       {c.tag} · {c.count}
                     </span>
                   ))}
                 </div>
               )}
-              <h4 className="label-caps mt-3 mb-1 text-[10px] text-ink-3">Recent retrievals / writes</h4>
-              <ol className="space-y-0.5 font-mono text-[10.5px]">
+              <h4 className="label-caps mt-3 mb-1 fs-10 text-ink-3">Recent retrievals / writes</h4>
+              <ol className="space-y-0.5 font-mono fs-10.5">
                 {memFeed.slice(0, 6).map((f, i) => (
                   <li key={`${f.at}-${i}`} className="flex gap-2">
                     <span className="shrink-0 text-ink-3">{new Date(f.at).toLocaleTimeString([], { hour12: false })}</span>
@@ -166,12 +166,12 @@ export function DeepInspector() {
               </ol>
               {mem.recent.length > 0 && (
                 <>
-                  <h4 className="label-caps mt-3 mb-1 text-[10px] text-ink-3">Newest documents</h4>
+                  <h4 className="label-caps mt-3 mb-1 fs-10 text-ink-3">Newest documents</h4>
                   <ul className="space-y-1">
                     {mem.recent.map((e) => (
-                      <li key={e.id} className="rounded-[8px] border border-white/[0.06] px-2 py-1 text-[11px]">
+                      <li key={e.id} className="r-8 border border-white/[0.06] px-2 py-1 fs-11">
                         <p className="line-clamp-2 text-ink-2">{e.preview}</p>
-                        <p className="mt-0.5 font-mono text-[10px] text-ink-3">
+                        <p className="mt-0.5 font-mono fs-10 text-ink-3">
                           {ago(e.at, now)} · {e.hits} hit{e.hits === 1 ? "" : "s"}
                           {e.done ? " · done (graduates next pass)" : ""}
                           {e.tags.length ? ` · ${e.tags.slice(0, 3).join(", ")}` : ""}
@@ -206,45 +206,45 @@ export function DeepInspector() {
               <Row k="Runs / last active" v={`${d.live?.runs ?? 0} · ${ago(d.live?.lastActiveAt, now)}`} />
             </dl>
           ) : (
-            <p className="text-[11.5px] text-ink-3">{isTauri() ? "Loading…" : "—"}</p>
+            <p className="fs-11.5 text-ink-3">{isTauri() ? "Loading…" : "—"}</p>
           )}
         </Section>
 
         <Section id="caps" icon={Plug} title="3 · Capabilities & hookups" focus={focus}>
-          <h4 className="label-caps mb-1 flex items-center gap-1 text-[10px] text-ink-3">
+          <h4 className="label-caps mb-1 flex items-center gap-1 fs-10 text-ink-3">
             <Sparkles size={10} aria-hidden /> Skills ({skills.length})
           </h4>
           <div className="flex flex-wrap gap-1">
             {skills.slice(0, 18).map((s) => (
-              <span key={s.path} title={s.description} className="rounded-full border border-white/10 px-2 py-0.5 text-[10.5px] text-ink-2">
+              <span key={s.path} title={s.description} className="rounded-full border border-white/10 px-2 py-0.5 fs-10.5 text-ink-2">
                 {s.name}
               </span>
             ))}
-            {!skills.length && <span className="text-[11px] text-ink-3">{snap ? "No skills granted (os.json skills.grants)." : "—"}</span>}
+            {!skills.length && <span className="fs-11 text-ink-3">{snap ? "No skills granted (os.json skills.grants)." : "—"}</span>}
           </div>
-          <h4 className="label-caps mt-3 mb-1 text-[10px] text-ink-3">MCP servers / APIs</h4>
-          <ul className="space-y-0.5 text-[11px]">
+          <h4 className="label-caps mt-3 mb-1 fs-10 text-ink-3">MCP servers / APIs</h4>
+          <ul className="space-y-0.5 fs-11">
             {hooks.map((b) => (
               <li key={b.id} className="flex items-center gap-2">
                 <span className={`size-1.5 rounded-full ${b.status === "ok" ? "bg-teal" : b.status === "unknown" || b.status === "off" || b.status === "starting" ? "bg-ink-3" : "bg-alert"}`} />
                 <span className="text-ink-2">{b.name}</span>
-                <span className="font-mono text-[10px] text-ink-3">{b.transport}</span>
-                <span className="ml-auto font-mono text-[10px] text-ink-3">{b.tools != null ? `${b.tools} tools` : b.status}</span>
+                <span className="font-mono fs-10 text-ink-3">{b.transport}</span>
+                <span className="ml-auto font-mono fs-10 text-ink-3">{b.tools != null ? `${b.tools} tools` : b.status}</span>
               </li>
             ))}
             {!hooks.length && <li className="text-ink-3">{snap ? "No external servers on this node." : "—"}</li>}
           </ul>
-          <h4 className="label-caps mt-3 mb-1 flex items-center gap-1 text-[10px] text-ink-3">
+          <h4 className="label-caps mt-3 mb-1 flex items-center gap-1 fs-10 text-ink-3">
             {id === "finance" ? <Lock size={10} aria-hidden /> : <ShieldCheck size={10} aria-hidden />} Boundary
           </h4>
-          <p className="text-[11.5px] leading-relaxed text-ink-2">{BOUNDARY[id]}</p>
-          <h4 className="label-caps mt-3 mb-1 text-[10px] text-ink-3">Hand-off contracts</h4>
+          <p className="fs-11.5 leading-relaxed text-ink-2">{BOUNDARY[id]}</p>
+          <h4 className="label-caps mt-3 mb-1 fs-10 text-ink-3">Hand-off contracts</h4>
           <dl className="space-y-1">
             <Row k="Upstream (receives from)" v={d?.upstream.map((u) => (isRoster(u) ? NODE_LABEL[u] : u)).join(", ") || "—"} />
             <Row k="Downstream (hands to)" v={d?.downstream.map((u) => (isRoster(u) ? NODE_LABEL[u] : u)).join(", ") || "—"} />
           </dl>
-          <h4 className="label-caps mt-3 mb-1 text-[10px] text-ink-3">Recent hand-offs</h4>
-          <ol className="space-y-0.5 font-mono text-[10.5px]">
+          <h4 className="label-caps mt-3 mb-1 fs-10 text-ink-3">Recent hand-offs</h4>
+          <ol className="space-y-0.5 font-mono fs-10.5">
             {handoffs.slice(0, 8).map((f, i) => (
               <li key={`${f.at}-${i}`} className="flex gap-2 text-ink-2">
                 <span className="shrink-0 text-ink-3">{new Date(f.at).toLocaleTimeString([], { hour12: false })}</span>

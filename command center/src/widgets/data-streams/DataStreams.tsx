@@ -28,16 +28,16 @@ function ConnectorRow({ c }: { c: Connector }) {
   const Icon = c.icon;
   const status = error ? "offline" : (data?.status ?? "not-configured");
   return (
-    <li className="rounded-[14px] border border-white/[0.06] bg-white/[0.02] p-2.5">
+    <li className="r-14 border border-white/[0.06] bg-white/[0.02] p-2.5">
       <div className="flex items-center gap-2">
         <Icon size={14} className={STATUS_TONE[status]} />
         <span className="text-sm font-medium text-ink">{c.label}</span>
-        <span className="ml-auto truncate font-mono text-[11px] text-ink-3">{error ? "unavailable" : (data?.summary ?? "…")}</span>
+        <span className="ml-auto truncate font-mono fs-11 text-ink-3">{error ? "unavailable" : (data?.summary ?? "…")}</span>
       </div>
       {!!data?.items.length && (
         <ul className="mt-2 space-y-1 border-t border-white/5 pt-2">
           {data.items.slice(0, 5).map((it) => (
-            <li key={it.id} className="flex items-center gap-2 font-mono text-[11px]">
+            <li key={it.id} className="flex items-center gap-2 font-mono fs-11">
               <span className={`size-1 rounded-full ${it.tone === "ok" ? "bg-teal" : it.tone === "warn" ? "bg-amber" : it.tone === "down" ? "bg-alert" : "bg-ink-3"}`} />
               <span className="truncate text-ink-2">{it.title}</span>
               <span className="ml-auto shrink-0 text-ink-3">{it.detail}</span>

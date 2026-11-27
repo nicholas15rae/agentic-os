@@ -27,7 +27,7 @@ export function ReadOnlyBanner({ module }: { module: ProtectedModule }) {
   const label = MODULE_LABEL[module];
   if (!isTauri()) {
     return (
-      <div className="glass-thin flex items-center gap-2 rounded-full px-3 py-1.5 text-[11px] text-ink-3">
+      <div className="glass-thin flex items-center gap-2 rounded-full px-3 py-1.5 fs-11 text-ink-3">
         <Eye size={12} /> {label}: read-only on this device (changes need the desktop app)
       </div>
     );
@@ -35,7 +35,7 @@ export function ReadOnlyBanner({ module }: { module: ProtectedModule }) {
   if (!status || !status.enabled) return null;
   if (left > 0) {
     return (
-      <div className="flex items-center gap-2 rounded-full bg-amber/15 px-3 py-1.5 text-[11px] text-amber-light" role="status">
+      <div className="flex items-center gap-2 rounded-full bg-amber/15 px-3 py-1.5 fs-11 text-amber-light" role="status">
         <LockOpen size={12} />
         <span className="label-caps">{label} unlocked</span>
         <span className="font-mono">
@@ -48,7 +48,7 @@ export function ReadOnlyBanner({ module }: { module: ProtectedModule }) {
     );
   }
   return (
-    <div className="glass-thin flex items-center gap-2 rounded-full px-3 py-1.5 text-[11px] text-ink-3" role="status">
+    <div className="glass-thin flex items-center gap-2 rounded-full px-3 py-1.5 fs-11 text-ink-3" role="status">
       <Eye size={12} />
       <span className="label-caps">Read-only</span>
       <button className="flex items-center gap-1 text-ink-2 underline-offset-2 hover:text-ink hover:underline" onClick={() => void useSecurity.getState().requestStepUp(module).catch(() => undefined)}>

@@ -74,7 +74,7 @@ export function AddBusinessModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-3" role="dialog" aria-modal="true" aria-label="Add business" onClick={() => !busy && onClose()}>
-      <div className="glass max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-[22px] p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="glass max-h-[92vh] w-full max-w-lg overflow-y-auto r-22 p-5" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-semibold text-ink">Add business</h2>
         <p className="mt-1 text-xs leading-relaxed text-ink-3">
           It gets its own workspace, memory folder, librarian scope and ledger. Nothing is shared with your other businesses.
@@ -84,7 +84,7 @@ export function AddBusinessModal({ onClose }: { onClose: () => void }) {
           <div className="mt-4 space-y-3">
             <Field label="Name">
               <Input value={form.displayName} onChange={set("displayName")} placeholder="Corner Bakery" autoFocus maxLength={80} />
-              {nameTaken && <span className="text-[11px] text-alert">A business with this name already exists.</span>}
+              {nameTaken && <span className="fs-11 text-alert">A business with this name already exists.</span>}
             </Field>
             <Field label="Business id (permanent)">
               <Input
@@ -97,7 +97,7 @@ export function AddBusinessModal({ onClose }: { onClose: () => void }) {
                 className="font-mono"
                 maxLength={32}
               />
-              <span className={`text-[11px] ${idErr ? "text-alert" : "text-ink-3"}`}>{idErr ?? (id ? `Workspace bizops_${id} · ledger ${id}` : "Lowercase letters, digits and underscores")}</span>
+              <span className={`fs-11 ${idErr ? "text-alert" : "text-ink-3"}`}>{idErr ?? (id ? `Workspace bizops_${id} · ledger ${id}` : "Lowercase letters, digits and underscores")}</span>
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Category">
@@ -112,7 +112,7 @@ export function AddBusinessModal({ onClose }: { onClose: () => void }) {
             </Field>
             <Field label="Its own clients, vendors, products (one per line)">
               <textarea value={form.blocklist} onChange={set("blocklist")} rows={3} className="field resize-none" placeholder={"Flour Co\nMain St Market"} />
-              <span className="text-[11px] text-ink-3">If one of these shows up in another business's notes, Security holds that write for your review.</span>
+              <span className="fs-11 text-ink-3">If one of these shows up in another business's notes, Security holds that write for your review.</span>
             </Field>
           </div>
         )}
@@ -131,8 +131,8 @@ export function AddBusinessModal({ onClose }: { onClose: () => void }) {
           </ol>
         )}
 
-        {error && <p className="mt-3 rounded-[10px] border border-alert/30 bg-alert/10 px-3 py-2 text-[12px] text-alert">{error}</p>}
-        {result?.status === "active" && <p className="mt-3 text-[12px] text-teal-soft">{result.displayName} is ready. Pick it in the top bar to lock Operations and Finance to it.</p>}
+        {error && <p className="mt-3 r-10 border border-alert/30 bg-alert/10 px-3 py-2 fs-12 text-alert">{error}</p>}
+        {result?.status === "active" && <p className="mt-3 fs-12 text-teal-soft">{result.displayName} is ready. Pick it in the top bar to lock Operations and Finance to it.</p>}
 
         <div className="mt-5 flex justify-end gap-2">
           <button onClick={onClose} disabled={busy} className="h-10 rounded-full px-4 text-sm text-ink-2 hover:text-ink disabled:opacity-40">

@@ -75,13 +75,13 @@ export function TradingDesk() {
           <button
             onClick={() => void kill(true)}
             disabled={!!busy}
-            className="pill-glass !h-8 text-[11px]"
+            className="pill-glass !h-8 fs-11"
             title="Rehearse the E-stop: connects read-only and lists what would be cancelled and flattened. Changes nothing."
           >
             {busy === "dry" ? <Loader2 size={12} className="animate-spin" /> : null} Dry run
           </button>
           {armed && (
-            <button onClick={() => setPressed(0)} className="pill-glass !h-8 text-[11px]" aria-label="Cancel kill switch">
+            <button onClick={() => setPressed(0)} className="pill-glass !h-8 fs-11" aria-label="Cancel kill switch">
               Cancel
             </button>
           )}
@@ -91,7 +91,7 @@ export function TradingDesk() {
             disabled={busy === "kill"}
             aria-label={armed ? `Kill switch armed: ${remaining} more click${remaining === 1 ? "" : "s"} to lock trading, cancel all orders, sell all positions at market` : `Kill switch: click ${KILL_PRESSES} times to lock trading, cancel all orders, flatten all positions`}
             title={armed ? `${remaining} more click${remaining === 1 ? "" : "s"}, each within ${KILL_CONFIRM_MS / 1000} s` : `Kill switch (or ${KILL_HOTKEY_LABEL} ×${KILL_PRESSES}): click ${KILL_PRESSES} times. Locks, cancels all orders, flattens all positions`}
-            className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 text-[13px] font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
+            className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 fs-13 font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
           >
             {busy === "kill" ? <Loader2 size={16} className="animate-spin" /> : <OctagonX size={16} />}
             {killLabel}
@@ -99,12 +99,12 @@ export function TradingDesk() {
         </div>
       }
     >
-      {error && <p className="mb-3 text-[12px] text-alert">Desk unreachable: {error}. The kill switch still works — the gateway locks trading itself if the bridge is down.</p>}
+      {error && <p className="mb-3 fs-12 text-alert">Desk unreachable: {error}. The kill switch still works — the gateway locks trading itself if the bridge is down.</p>}
 
       {locked && data?.lock && (
-        <div role="alert" className="mb-4 rounded-[14px] border border-alert/60 bg-alert/10 p-3">
-          <p className="text-[13px] font-semibold text-alert">TRADING LOCKED — {data.lock.reason}</p>
-          <p className="mt-0.5 text-[11px] text-ink-3">
+        <div role="alert" className="mb-4 r-14 border border-alert/60 bg-alert/10 p-3">
+          <p className="fs-13 font-semibold text-alert">TRADING LOCKED — {data.lock.reason}</p>
+          <p className="mt-0.5 fs-11 text-ink-3">
             {new Date(data.lock.at * 1000).toLocaleString()} · by {data.lock.actor} · incident {data.lock.incidentId}. Stays locked across restarts until you reset it.
           </p>
           <form
@@ -118,8 +118,8 @@ export function TradingDesk() {
               });
             }}
           >
-            <Input value={resetText} onChange={(e) => setResetText(e.target.value)} placeholder='Type RESET to unlock' aria-label="Reset confirmation" className="!h-8 !w-48 !py-1 font-mono text-[12px]" />
-            <button className="pill-glass !h-8 text-[11px]" disabled={resetText !== "RESET" || !!busy}>
+            <Input value={resetText} onChange={(e) => setResetText(e.target.value)} placeholder='Type RESET to unlock' aria-label="Reset confirmation" className="!h-8 !w-48 !py-1 font-mono fs-12" />
+            <button className="pill-glass !h-8 fs-11" disabled={resetText !== "RESET" || !!busy}>
               Unlock
             </button>
           </form>
@@ -136,7 +136,7 @@ export function TradingDesk() {
               title={m.hint}
               disabled={!data || !!busy || (locked && m.id !== "ADVISORY")}
               onClick={() => (m.id === "ADVISORY" ? void run("mode", () => tradingApi.setMode(m.id, false)) : setConfirmMode(m.id))}
-              className={`h-8 rounded-full px-3 text-[12px] transition-colors disabled:opacity-40 ${
+              className={`h-8 rounded-full px-3 fs-12 transition-colors disabled:opacity-40 ${
                 data?.mode === m.id ? (m.id === "FULL_AUTO" ? "bg-alert/25 text-ink" : m.id === "SEMI_AUTO" ? "bg-amber/20 text-ink" : "bg-teal/20 text-ink") : "text-ink-3 hover:text-ink"
               }`}
             >
@@ -144,25 +144,25 @@ export function TradingDesk() {
             </button>
           ))}
         </div>
-        {data?.agentHalted && <span className="rounded-full border border-alert/50 px-2 py-0.5 text-[11px] text-alert">Agent halted</span>}
-        {data && data.posture !== "normal" && <span className="rounded-full border border-amber/50 px-2 py-0.5 text-[11px] text-amber-light">Financer posture: {data.posture}</span>}
-        <span className={`ml-auto flex items-center gap-1 text-[11px] ${data?.audit.ok === false ? "text-alert" : "text-ink-3"}`} title={data?.audit.note}>
+        {data?.agentHalted && <span className="rounded-full border border-alert/50 px-2 py-0.5 fs-11 text-alert">Agent halted</span>}
+        {data && data.posture !== "normal" && <span className="rounded-full border border-amber/50 px-2 py-0.5 fs-11 text-amber-light">Financer posture: {data.posture}</span>}
+        <span className={`ml-auto flex items-center gap-1 fs-11 ${data?.audit.ok === false ? "text-alert" : "text-ink-3"}`} title={data?.audit.note}>
           {data?.audit.ok === false ? <ShieldAlert size={12} /> : <ShieldCheck size={12} />}
           audit chain {data ? (data.audit.ok ? "verified" : "BROKEN") : "…"}
         </span>
       </div>
-      <p className="mt-1.5 text-[11px] text-ink-3">{MODES.find((m) => m.id === data?.mode)?.hint}</p>
+      <p className="mt-1.5 fs-11 text-ink-3">{MODES.find((m) => m.id === data?.mode)?.hint}</p>
 
       {confirmMode && (
-        <div className="mt-3 rounded-[14px] border border-amber/50 bg-amber/10 p-3">
-          <p className="text-[12px] text-ink">
+        <div className="mt-3 r-14 border border-amber/50 bg-amber/10 p-3">
+          <p className="fs-12 text-ink">
             Switch to <b>{MODES.find((m) => m.id === confirmMode)?.label}</b>? {confirmMode === "FULL_AUTO" ? "Intents that pass the Security Detail will be sent to the paper account without asking." : "Approved intents will queue here for your one-click approval."}
           </p>
           <div className="mt-2 flex gap-2">
-            <button className="pill-primary !h-8 text-[11px]" onClick={() => void run("mode", async () => (await tradingApi.setMode(confirmMode, true), setConfirmMode(null)))}>
+            <button className="pill-primary !h-8 fs-11" onClick={() => void run("mode", async () => (await tradingApi.setMode(confirmMode, true), setConfirmMode(null)))}>
               Confirm
             </button>
-            <button className="pill-glass !h-8 text-[11px]" onClick={() => setConfirmMode(null)}>
+            <button className="pill-glass !h-8 fs-11" onClick={() => setConfirmMode(null)}>
               Cancel
             </button>
           </div>
@@ -170,7 +170,7 @@ export function TradingDesk() {
       )}
 
       {data?.limits && <LimitsRow limits={data.limits} financer={data.financer} />}
-      {data?.limitsError && <p className="mt-2 text-[12px] text-alert">risk_limits.json: {data.limitsError} — every intent is refused until it's fixed.</p>}
+      {data?.limitsError && <p className="mt-2 fs-12 text-alert">risk_limits.json: {data.limitsError} — every intent is refused until it's fixed.</p>}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div className="min-w-0">
@@ -185,7 +185,7 @@ export function TradingDesk() {
               ))}
             </div>
           ) : (
-            <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">
+            <p className="r-12 border border-dashed border-white/[0.08] px-3 py-4 text-center fs-12 text-ink-3">
               {data?.mode === "SEMI_AUTO" ? "No cards yet: Engine R's approved intents land here." : "Cards appear in Semi-auto mode."}
             </p>
           )}
@@ -193,25 +193,25 @@ export function TradingDesk() {
         <div className="min-w-0">
           <p className="label-caps mb-1.5 text-ink-3">Recent Security Detail decisions</p>
           {data?.recent.length ? (
-            <ul className="space-y-1 text-[12px]">
+            <ul className="space-y-1 fs-12">
               {data.recent.map((r) => {
                 const why = failureText(r);
                 return (
-                  <li key={r.intentId} className="rounded-[10px] border border-white/[0.05] px-2.5 py-1.5" title={why ?? (r.decision.reasons.join("\n") || "all checks passed")}>
-                    <span className={`font-mono text-[11px] ${VERDICT_TONE[r.decision.verdict] ?? ""}`}>{r.decision.verdict}</span>{" "}
+                  <li key={r.intentId} className="r-10 border border-white/[0.05] px-2.5 py-1.5" title={why ?? (r.decision.reasons.join("\n") || "all checks passed")}>
+                    <span className={`font-mono fs-11 ${VERDICT_TONE[r.decision.verdict] ?? ""}`}>{r.decision.verdict}</span>{" "}
                     <span className="font-mono">{r.intent.action} {r.decision.quantity || r.intent.quantity} {r.intent.symbol}</span>{" "}
                     <span className="text-ink-3">· {r.status.replace("_", " ")} · {new Date(r.updated * 1000).toLocaleTimeString()}</span>
                     {why ? (
-                      <p className="truncate text-[11px] text-alert">{why}</p>
+                      <p className="truncate fs-11 text-alert">{why}</p>
                     ) : (
-                      r.decision.reasons.length > 0 && <p className="truncate text-[11px] text-ink-3">{r.decision.reasons[0]}</p>
+                      r.decision.reasons.length > 0 && <p className="truncate fs-11 text-ink-3">{r.decision.reasons[0]}</p>
                     )}
                   </li>
                 );
               })}
             </ul>
           ) : (
-            <p className="rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3">No intents evaluated yet.</p>
+            <p className="r-12 border border-dashed border-white/[0.08] px-3 py-4 text-center fs-12 text-ink-3">No intents evaluated yet.</p>
           )}
         </div>
       </div>
@@ -219,7 +219,7 @@ export function TradingDesk() {
       {data?.audit.tail.length ? (
         <details className="mt-4">
           <summary className="label-caps cursor-pointer text-ink-3">Audit log (last {data.audit.tail.length})</summary>
-          <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto font-mono text-[11px]">
+          <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto font-mono fs-11">
             {data.audit.tail.map((a) => (
               <li key={a.id} className="flex gap-2 text-ink-2">
                 <span className="text-ink-3">#{a.id} {new Date(a.ts * 1000).toLocaleTimeString()}</span>
@@ -231,7 +231,7 @@ export function TradingDesk() {
           </ul>
         </details>
       ) : null}
-      <p className="mt-3 text-[11px] text-ink-3">E-stop: click the red button {KILL_PRESSES} times, or press {KILL_HOTKEY_LABEL} {KILL_PRESSES} times, each within {KILL_CONFIRM_MS / 1000} s (works from any section; Esc cancels the hotkey). Paper account only — port 7497.</p>
+      <p className="mt-3 fs-11 text-ink-3">E-stop: click the red button {KILL_PRESSES} times, or press {KILL_HOTKEY_LABEL} {KILL_PRESSES} times, each within {KILL_CONFIRM_MS / 1000} s (works from any section; Esc cancels the hotkey). Paper account only — port 7497.</p>
     </Card>
   );
 }
@@ -248,7 +248,7 @@ function LimitsRow({ limits, financer }: { limits: Record<string, number | boole
     ["Orders / day", String(limits.max_orders_per_day)],
   ];
   return (
-    <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
+    <div className="mt-3 flex flex-wrap gap-1.5 fs-11">
       {items.map(([k, v]) => (
         <span key={k} className="rounded-full border border-white/[0.08] px-2 py-0.5 text-ink-3">
           {k} <span className="font-mono text-ink-2">{v}</span>
@@ -267,26 +267,26 @@ function TradeCard({ p, busy, onApprove, onReject }: { p: DeskIntent; busy: bool
   const i = p.intent;
   const d = p.decision;
   return (
-    <div className="rounded-[14px] border border-amber/30 bg-amber/[0.05] p-3">
+    <div className="r-14 border border-amber/30 bg-amber/[0.05] p-3">
       <div className="flex items-center gap-2">
-        <span className={`font-mono text-[13px] font-semibold ${i.action === "BUY" ? "text-teal-soft" : "text-alert"}`}>
+        <span className={`font-mono fs-13 font-semibold ${i.action === "BUY" ? "text-teal-soft" : "text-alert"}`}>
           {i.action} {d.quantity} {i.symbol}
         </span>
-        {d.verdict === "MODIFIED" && <span className="text-[11px] text-amber-light">cut from {d.requestedQuantity}</span>}
-        <span className="ml-auto font-mono text-[11px] text-ink-3">
+        {d.verdict === "MODIFIED" && <span className="fs-11 text-amber-light">cut from {d.requestedQuantity}</span>}
+        <span className="ml-auto font-mono fs-11 text-ink-3">
           {i.order_type}{i.limit_price ? ` ${i.limit_price}` : ""} · stop {i.stop_loss}{i.take_profit ? ` · tp ${i.take_profit}` : ""}
         </span>
       </div>
-      {i.thesis && <p className="mt-1 line-clamp-2 text-[12px] text-ink-2">{i.thesis}</p>}
-      <p className="mt-1 text-[11px] text-ink-3">
+      {i.thesis && <p className="mt-1 line-clamp-2 fs-12 text-ink-2">{i.thesis}</p>}
+      <p className="mt-1 fs-11 text-ink-3">
         risk {d.riskBase?.toFixed(2) ?? "—"} · notional {d.notionalBase?.toFixed(2) ?? "—"} · {i.source}
         {i.citations.length ? ` · ${i.citations.length} citation(s)` : ""}
       </p>
       <div className="mt-2 flex gap-2">
-        <button className="pill-primary !h-8 text-[11px]" disabled={busy} onClick={onApprove} title="Re-runs every Security Detail check with fresh data, then sends to paper">
+        <button className="pill-primary !h-8 fs-11" disabled={busy} onClick={onApprove} title="Re-runs every Security Detail check with fresh data, then sends to paper">
           {busy ? <Loader2 size={12} className="animate-spin" /> : null} Approve
         </button>
-        <button className="pill-glass !h-8 text-[11px]" disabled={busy} onClick={onReject}>
+        <button className="pill-glass !h-8 fs-11" disabled={busy} onClick={onReject}>
           Dismiss
         </button>
       </div>

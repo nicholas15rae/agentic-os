@@ -59,7 +59,7 @@ function HygieneBar() {
         <span className="text-ink-3">
           Next harvest <span className="text-ink-2">{st?.harvesting ? "running now…" : next}</span>
         </span>
-        <button onClick={() => void sweep()} disabled={busy} className="ml-auto flex h-8 items-center gap-1.5 rounded-full border border-white/10 px-3 text-[11px] text-ink-2 hover:text-ink">
+        <button onClick={() => void sweep()} disabled={busy} className="ml-auto flex h-8 items-center gap-1.5 rounded-full border border-white/10 px-3 fs-11 text-ink-2 hover:text-ink">
           {busy ? <Loader2 size={12} className="animate-spin" /> : <Eraser size={12} />} Quick Hygiene Sweep
         </button>
       </div>
@@ -67,18 +67,18 @@ function HygieneBar() {
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10" role="meter" aria-label="Memory buffer pressure" aria-valuemin={0} aria-valuemax={200} aria-valuenow={Math.round((st?.pressureRatio ?? 0) * 100)}>
           <div className={`h-full rounded-full transition-[width] duration-500 ${pressureTone(st?.pressure)}`} style={{ width: `${pressureFill(st?.pressureRatio)}%` }} />
         </div>
-        <span className="shrink-0 text-[11px] text-ink-3">
+        <span className="shrink-0 fs-11 text-ink-3">
           {pressureLabel(st?.pressure)}
           {st?.pendingBytes != null && ` · ${formatBytes(st.pendingBytes)} / ${st.thresholdKb} KB · ${st.pendingTurns ?? 0} / ${st.thresholdTurns} turns`}
         </span>
       </div>
       {st?.lastRun && (
-        <p className={`mt-1.5 text-[11px] ${st.lastRun.ok ? "text-ink-3" : "text-alert"}`}>
+        <p className={`mt-1.5 fs-11 ${st.lastRun.ok ? "text-ink-3" : "text-alert"}`}>
           Last lifecycle run {relTime(st.lastRun.at)} · {st.lastRun.period}
           {st.lastRun.catchUp ? " (catch-up)" : ""} · {st.lastRun.detail}
         </p>
       )}
-      {note && <p className="mt-1.5 text-[11px] text-ink-2">{note}</p>}
+      {note && <p className="mt-1.5 fs-11 text-ink-2">{note}</p>}
     </div>
   );
 }
@@ -181,10 +181,10 @@ export function MemoryLifecycleCard() {
           </Select>
         </Field>
         <Field label="Mount Memory Books into workspace">
-          <Input key={m.mountWorkspace} defaultValue={m.mountWorkspace} onBlur={(e) => e.target.value.trim() !== m.mountWorkspace && save({ memory: { mountWorkspace: e.target.value.trim() } })} className="font-mono !text-[12px]" />
+          <Input key={m.mountWorkspace} defaultValue={m.mountWorkspace} onBlur={(e) => e.target.value.trim() !== m.mountWorkspace && save({ memory: { mountWorkspace: e.target.value.trim() } })} className="font-mono !fs-12" />
         </Field>
         <Field label="Locked vault folder" className="sm:col-span-2">
-          <Input key={m.vaultDir} defaultValue={m.vaultDir} onBlur={(e) => e.target.value.trim() !== m.vaultDir && save({ memory: { vaultDir: e.target.value.trim() } })} className="font-mono !text-[12px]" spellCheck={false} />
+          <Input key={m.vaultDir} defaultValue={m.vaultDir} onBlur={(e) => e.target.value.trim() !== m.vaultDir && save({ memory: { vaultDir: e.target.value.trim() } })} className="font-mono !fs-12" spellCheck={false} />
         </Field>
         <Field label="Droplet cache collections (Qdrant)">
           <Input
@@ -192,7 +192,7 @@ export function MemoryLifecycleCard() {
             defaultValue={m.cacheCollections.join(", ")}
             onBlur={(e) => save({ memory: { cacheCollections: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } })}
             placeholder="tony-cache, chat-logs"
-            className="font-mono !text-[12px]"
+            className="font-mono !fs-12"
           />
         </Field>
       </div>
@@ -233,7 +233,7 @@ export function MemoryLifecycleCard() {
             </Field>
           )}
         </div>
-        <p className="pl-12 text-[11px] text-ink-3">Last verified harvest: {m.lastVerifiedHarvestAt ? new Date(m.lastVerifiedHarvestAt * 1000).toLocaleString() : "never"}</p>
+        <p className="pl-12 fs-11 text-ink-3">Last verified harvest: {m.lastVerifiedHarvestAt ? new Date(m.lastVerifiedHarvestAt * 1000).toLocaleString() : "never"}</p>
         <Toggle on={m.autoFlush} onChange={(v) => save({ memory: { autoFlush: v } })} label="Auto-flush cloud after a verified local backup" hint="Runs only after every vault file passed its SHA-256 re-read; any failed write or checksum aborts it." disabled={!m.autoRunEnabled} />
         <Toggle
           on={m.pruneThreads}
@@ -260,7 +260,7 @@ export function MemoryLifecycleCard() {
           <input type="checkbox" checked={includeLocal} onChange={(e) => setIncludeLocal(e.target.checked)} className="accent-alert" /> flush also clears {cfg.osName}'s local AnythingLLM threads
         </label>
       </div>
-      {progress && <p className="mt-2 font-mono text-[11px] text-amber-soft">{progress}</p>}
+      {progress && <p className="mt-2 font-mono fs-11 text-amber-soft">{progress}</p>}
       {msg && <p className={`mt-2 text-xs ${msg.tone === "ok" ? "text-teal" : "text-alert"}`}>{msg.text}</p>}
 
       <div className="mt-4 overflow-x-auto">
@@ -340,7 +340,7 @@ export function MemoryLifecycleCard() {
 
 function SmallBtn({ children, onClick, title, busy, danger }: { children: React.ReactNode; onClick: () => void; title: string; busy?: boolean; danger?: boolean }) {
   return (
-    <button onClick={onClick} title={title} disabled={busy} className={`flex h-7 items-center gap-1 rounded-full border px-2 text-[11px] text-ink-2 hover:text-ink ${danger ? "border-alert/30 hover:border-alert/60" : "border-white/10"}`}>
+    <button onClick={onClick} title={title} disabled={busy} className={`flex h-7 items-center gap-1 rounded-full border px-2 fs-11 text-ink-2 hover:text-ink ${danger ? "border-alert/30 hover:border-alert/60" : "border-white/10"}`}>
       {busy ? <Loader2 size={11} className="animate-spin" /> : children}
     </button>
   );
@@ -436,7 +436,7 @@ export function MemoryScrollsCard() {
           const v = clampInt(e.target.value, SCROLLS_BOUNDS[k][0], SCROLLS_BOUNDS[k][1], sc[k]);
           if (v !== sc[k]) set({ [k]: v });
         }}
-        className="font-mono !text-[12px]"
+        className="font-mono !fs-12"
         aria-label={`${label} (${unit})`}
       />
     </Field>
@@ -453,7 +453,7 @@ export function MemoryScrollsCard() {
         </button>
         {status && <span className="text-xs text-ink-3">{formatPending(status)}</span>}
       </div>
-      {status?.idleReason && !busy && <p className="mt-1.5 text-[11px] text-amber-soft">Would wait right now: {status.idleReason}</p>}
+      {status?.idleReason && !busy && <p className="mt-1.5 fs-11 text-amber-soft">Would wait right now: {status.idleReason}</p>}
       {shown && <p className={`mt-2 text-xs ${{ error: "text-alert", warn: "text-amber-soft", ok: "text-teal" }[outcomeTone(shown)]}`}>{formatOutcome(shown)}</p>}
 
       <div className="mt-3">
@@ -464,11 +464,11 @@ export function MemoryScrollsCard() {
             <span className="inline-flex flex-wrap items-center gap-2">
               Auto-compact when idle
               {idle && (
-                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${badgeTone(idle)}`} aria-live="polite">
+                <span className={`rounded-full border px-2 py-0.5 fs-10 font-medium ${badgeTone(idle)}`} aria-live="polite">
                   {idle.label}
                 </span>
               )}
-              {status?.highWater && <span className="rounded-full border border-alert/40 px-2 py-0.5 text-[10px] text-alert">High-water: compacting between turns</span>}
+              {status?.highWater && <span className="rounded-full border border-alert/40 px-2 py-0.5 fs-10 text-alert">High-water: compacting between turns</span>}
             </span>
           }
           hint="Only after the pending buffer passes a threshold AND nothing is running: no voice turn or TTS, no LLM generation, no build, no Claude Code fix, and the quiet window over. An armed wake-word mic counts as idle. At 2× the threshold it compacts between turns. Off by default."
@@ -480,10 +480,10 @@ export function MemoryScrollsCard() {
           hint="Stop embedding each task note into the Librarian workspace (notes stay on disk and are distilled into scrolls instead). Turn on after the first RAG offload."
         />
         <div className="mt-1 flex flex-wrap items-center gap-2 pl-12">
-          <button onClick={() => void purge()} disabled={purging} className="flex h-8 items-center gap-1.5 rounded-full border border-alert/30 px-3 text-[11px] text-ink-2 hover:border-alert/60 hover:text-ink">
+          <button onClick={() => void purge()} disabled={purging} className="flex h-8 items-center gap-1.5 rounded-full border border-alert/30 px-3 fs-11 text-ink-2 hover:border-alert/60 hover:text-ink">
             {purging ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Purge Raw Vectors & Re-sync Scrolls
           </button>
-          <span className="text-[11px] text-ink-3">Distills pending notes, removes raw “Idea:” task-note vectors, dedupes scroll embeddings by content hash.</span>
+          <span className="fs-11 text-ink-3">Distills pending notes, removes raw “Idea:” task-note vectors, dedupes scroll embeddings by content hash.</span>
         </div>
         {purgeMsg && <p className={`mt-1 pl-12 text-xs ${purgeMsg.tone === "ok" ? "text-teal" : "text-alert"}`}>{purgeMsg.text}</p>}
       </div>
@@ -494,13 +494,13 @@ export function MemoryScrollsCard() {
             key={p.id}
             onClick={() => set({ thresholdKb: p.kb, thresholdTurns: p.turns })}
             aria-pressed={activePreset === p.id}
-            className={`flex h-7 items-center rounded-full border px-3 text-[11px] ${activePreset === p.id ? "border-teal/50 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`}
+            className={`flex h-7 items-center rounded-full border px-3 fs-11 ${activePreset === p.id ? "border-teal/50 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`}
             title={`${p.kb} KB / ${p.turns} turns`}
           >
             {p.label} · {p.kb} KB / {p.turns}
           </button>
         ))}
-        {!activePreset && <span className="text-[11px] text-ink-3">Custom</span>}
+        {!activePreset && <span className="fs-11 text-ink-3">Custom</span>}
       </div>
       <div className="mt-2 grid gap-3 sm:grid-cols-3">
         {num("thresholdKb", "Threshold (KB)", "kilobytes")}

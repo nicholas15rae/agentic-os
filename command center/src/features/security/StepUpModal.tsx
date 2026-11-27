@@ -83,7 +83,7 @@ export function StepUpModal() {
   return (
     <div className="fixed inset-0 z-[88] grid place-items-center bg-black/60 p-3" role="dialog" aria-modal="true" aria-label={`Unlock ${label} changes`} onClick={() => !busy && close(false)}>
       <form
-        className="glass w-full max-w-xs rounded-[22px] p-5"
+        className="glass w-full max-w-xs r-22 p-5"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();
@@ -111,12 +111,12 @@ export function StepUpModal() {
           className="glass-thin mt-3 h-11 w-full rounded-full px-4 text-center font-mono tracking-[0.4em] text-ink outline-none"
         />
         {error && (
-          <p className="mt-2 text-[11px] text-alert" role="alert">
+          <p className="mt-2 fs-11 text-alert" role="alert">
             {error}
           </p>
         )}
         {phone === "waiting" && (
-          <p className="mt-2 text-[11px] text-ink-2">
+          <p className="mt-2 fs-11 text-ink-2">
             On your phone, type <b className="font-mono text-base text-amber-light">{code}</b> and approve with your fingerprint.
           </p>
         )}

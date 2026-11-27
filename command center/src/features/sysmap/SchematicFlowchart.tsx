@@ -383,7 +383,7 @@ export function SchematicFlowchart() {
       <DiagnosticPanel />
 
       {!snap && (
-        <p className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[11px] text-ink-3">
+        <p className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 fs-11 text-ink-3">
           {isTauri() ? "Waiting for the engine's first arbiter snapshot…" : "Live states need the desktop engine — showing the wiring only."}
         </p>
       )}

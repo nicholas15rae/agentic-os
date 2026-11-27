@@ -60,7 +60,7 @@ export function ConfirmCard() {
         aria-modal="true"
         aria-labelledby="confirm-title"
         aria-describedby="confirm-summary"
-        className="w-[min(560px,100%)] overflow-hidden rounded-[22px] border-2 border-amber/80 bg-[#0d0f14]/95 shadow-[0_0_0_1px_rgba(255,179,107,0.25),0_0_60px_-10px_rgba(255,122,47,0.55),0_30px_60px_-20px_rgba(0,0,0,0.9)] outline-none animate-[card-in_240ms_cubic-bezier(0.23,1,0.32,1)]"
+        className="w-[min(560px,100%)] overflow-hidden r-22 border-2 border-amber/80 bg-[#0d0f14]/95 shadow-[0_0_0_1px_rgba(255,179,107,0.25),0_0_60px_-10px_rgba(255,122,47,0.55),0_30px_60px_-20px_rgba(0,0,0,0.9)] outline-none animate-[card-in_240ms_cubic-bezier(0.23,1,0.32,1)]"
       >
         {/* Countdown: drains to zero, then the action cancels itself. */}
         <div className="h-1 bg-white/5">
@@ -79,7 +79,7 @@ export function ConfirmCard() {
           </div>
 
           <div id="confirm-summary">
-            <p className="mt-3 text-[22px] font-semibold leading-snug text-white sm:text-2xl">{plan.summary}</p>
+            <p className="mt-3 fs-22 font-semibold leading-snug text-white sm:text-2xl">{plan.summary}</p>
             {when && (
               <p className="mt-2 text-sm text-ink">
                 <span className="label-caps mr-1.5 text-teal">When</span>
@@ -87,14 +87,14 @@ export function ConfirmCard() {
               </p>
             )}
             {plan.fromEmail && (
-              <p className="mt-2 rounded-[12px] border border-amber/30 bg-amber/5 px-3 py-2 text-sm leading-relaxed text-ink">
+              <p className="mt-2 r-12 border border-amber/30 bg-amber/5 px-3 py-2 text-sm leading-relaxed text-ink">
                 <span className="label-caps mr-1.5 text-amber-soft">From the email</span>
                 {plan.fromEmail}
               </p>
             )}
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[12px] text-ink-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2 font-mono fs-12 text-ink-2">
             <span className="flex items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1">
               <AgentIcon size={12} className="text-teal" /> {agent.label}
             </span>
@@ -126,12 +126,12 @@ export function ConfirmCard() {
           </div>
 
           {plan.missing.length > 0 && (
-            <p className="mt-3 rounded-[12px] border border-amber/30 bg-amber/10 px-3 py-2 text-sm text-amber-light">
+            <p className="mt-3 r-12 border border-amber/30 bg-amber/10 px-3 py-2 text-sm text-amber-light">
               Not specified: {plan.missing.join(", ")}
             </p>
           )}
           {v.status === "flagged" && (
-            <ul className="mt-3 space-y-1 rounded-[12px] border border-alert/40 bg-alert/10 px-3 py-2 text-sm text-[#ffb4ab]">
+            <ul className="mt-3 space-y-1 r-12 border border-alert/40 bg-alert/10 px-3 py-2 text-sm text-[#ffb4ab]">
               {v.notes.map((n, i) => (
                 <li key={i}>• {n}</li>
               ))}
@@ -144,14 +144,14 @@ export function ConfirmCard() {
                 <ChevronDown size={12} className={`transition-transform ${showPayload ? "rotate-180" : ""}`} /> Payload
               </button>
               {showPayload && (
-                <pre className="well mt-2 max-h-40 overflow-auto rounded-[12px] p-3 font-mono text-[11px] leading-relaxed text-ink-2">
+                <pre className="well mt-2 max-h-40 overflow-auto r-12 p-3 font-mono fs-11 leading-relaxed text-ink-2">
                   {JSON.stringify(plan.payload, null, 2)}
                 </pre>
               )}
             </div>
           )}
 
-          <p className="mt-3 font-mono text-[11px] text-ink-3">
+          <p className="mt-3 font-mono fs-11 text-ink-3">
             “{plan.utterance}” · {plan.planner === "model" ? `planned by ${plan.plannerNote}` : (plan.plannerNote ?? "heuristic plan")}
           </p>
         </div>

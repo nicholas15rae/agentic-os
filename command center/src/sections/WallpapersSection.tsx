@@ -64,7 +64,7 @@ export function WallpapersSection() {
             type="button"
             aria-current={tab === t.id ? "page" : undefined}
             onClick={() => setTab(t.id)}
-            className={`flex h-9 items-center rounded-full border px-3.5 font-mono text-[12px] transition-colors ${
+            className={`flex h-9 items-center rounded-full border px-3.5 font-mono fs-12 transition-colors ${
               tab === t.id ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.4)] text-ink-2 backdrop-blur-md hover:border-white/25 hover:text-ink"
             }`}
           >
@@ -73,7 +73,7 @@ export function WallpapersSection() {
         ))}
       </nav>
 
-      <div className="glass mb-4 space-y-3 rounded-[20px] p-4">
+      <div className="glass mb-4 space-y-3 r-20 p-4">
         {mapSurface && (
           <div role="radiogroup" aria-label={`${SURFACE_LABEL[surface]} backdrop mode`} className="well inline-flex rounded-full p-0.5">
             {[
@@ -149,14 +149,14 @@ export function WallpapersSection() {
           setDragOver(false);
           void handle(e.dataTransfer.files);
         }}
-        className={`grid grid-cols-2 gap-3 rounded-[20px] transition-shadow sm:grid-cols-3 lg:grid-cols-4 ${dragOver ? "ring-2 ring-teal" : ""}`}
+        className={`grid grid-cols-2 gap-3 r-20 transition-shadow sm:grid-cols-3 lg:grid-cols-4 ${dragOver ? "ring-2 ring-teal" : ""}`}
       >
         {items.map((w) => {
           const on = surfacesOf(w);
           const member = tab === "all" || on.includes(surface);
           const pinned = cfg.pinnedWallpaperId === w.id && tab !== "all";
           return (
-            <figure key={w.id} className={`group relative overflow-hidden rounded-[14px] border ${tab !== "all" && isCurrent(w.id) ? "border-amber/70 glow-amber" : "border-white/10"}`}>
+            <figure key={w.id} className={`group relative overflow-hidden r-14 border ${tab !== "all" && isCurrent(w.id) ? "border-amber/70 glow-amber" : "border-white/10"}`}>
               <button onClick={() => pick(w.id, member)} className="block w-full" aria-label={`Show ${w.name}`}>
                 {w.src ? (
                   <img src={w.src} alt="" loading="lazy" className={`aspect-video w-full object-cover transition-opacity ${w.enabled && member ? "" : "opacity-35"}`} />
@@ -176,7 +176,7 @@ export function WallpapersSection() {
                     aria-pressed={on.includes(s)}
                     onClick={() => toggleSurface(w.id, s)}
                     title={on.includes(s) ? `In the ${SURFACE_LABEL[s]} rotation — click to remove` : `Add to the ${SURFACE_LABEL[s]} rotation`}
-                    className={`rounded-full border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider backdrop-blur-sm transition-colors ${
+                    className={`rounded-full border px-1.5 py-0.5 font-mono fs-9.5 uppercase tracking-wider backdrop-blur-sm transition-colors ${
                       on.includes(s) ? "border-amber bg-amber/30 text-ink" : "border-white/20 bg-black/50 text-ink-3 hover:text-ink"
                     }`}
                   >
@@ -186,7 +186,7 @@ export function WallpapersSection() {
               </div>
               {tagging === w.id && <TagEditor id={w.id} tags={w.tags} />}
               <figcaption className="absolute inset-x-0 bottom-0 flex items-center gap-1 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2 pt-6">
-                <span className="truncate text-[13px] text-ink">{w.name}</span>
+                <span className="truncate fs-13 text-ink">{w.name}</span>
                 <button
                   onClick={() => setTagging(tagging === w.id ? null : w.id)}
                   aria-label={`Edit conditions for ${w.name}`}
@@ -247,7 +247,7 @@ function BlendStrip({ surface }: { surface: Exclude<Surface, "home"> }) {
     </label>
   );
   return (
-    <div className="flex flex-wrap items-center gap-4 rounded-[12px] border border-white/[0.07] bg-black/20 px-3 py-2">
+    <div className="flex flex-wrap items-center gap-4 r-12 border border-white/[0.07] bg-black/20 px-3 py-2">
       <span className="label-caps text-ink-3">Blend</span>
       {slider("Opacity", cfg.opacity, 0, 100, "%", "opacity")}
       {slider("Dark scrim", cfg.dimmer, 0, 85, "%", "dimmer")}
@@ -256,7 +256,7 @@ function BlendStrip({ surface }: { surface: Exclude<Surface, "home"> }) {
         <input type="checkbox" checked={cfg.vignette} onChange={(e) => patchSurface(surface, { vignette: e.target.checked })} className="accent-amber" />
         Vignette
       </label>
-      <button className="pill-glass !h-7 ml-auto text-[11px]" onClick={() => reset(surface)}>
+      <button className="pill-glass !h-7 ml-auto fs-11" onClick={() => reset(surface)}>
         <RotateCcw size={11} /> Reset defaults
       </button>
     </div>
@@ -269,7 +269,7 @@ function TagEditor({ id, tags }: { id: string; tags: WallpaperTags }) {
   const setTags = useWallpapers((s) => s.setTags);
   const toggle = <T extends string>(list: T[], v: T) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
   const chip = (on: boolean) =>
-    `rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+    `rounded-full border px-2 py-0.5 font-mono fs-10 uppercase tracking-wider transition-colors ${
       on ? "border-amber bg-amber/25 text-ink" : "border-white/15 bg-black/40 text-ink-2 hover:text-ink"
     }`;
   return (

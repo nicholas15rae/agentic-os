@@ -27,7 +27,7 @@ export function EmptyStateView({ projects, loaded, onQuickStart, onOpen }: { pro
   };
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
-      <section className="glass rounded-[20px] p-6">
+      <section className="glass r-20 p-6">
         <Clapperboard size={22} className="text-amber-soft" />
         <h2 className="mt-3 text-2xl font-semibold text-ink">{GREETING}</h2>
         <p className="mt-1 text-sm text-ink-3">Pick a starting point. The Director plans, you approve, and renders run on the CPU.</p>
@@ -36,11 +36,11 @@ export function EmptyStateView({ projects, loaded, onQuickStart, onOpen }: { pro
             const Icon = ICON[q.id];
             const on = pick === q.id;
             return (
-              <div key={q.id} className={`rounded-[16px] border p-4 transition-colors ${on ? "border-amber/50 bg-amber/10" : "border-white/[0.08] bg-white/[0.02] hover:border-white/20"}`}>
+              <div key={q.id} className={`r-16 border p-4 transition-colors ${on ? "border-amber/50 bg-amber/10" : "border-white/[0.08] bg-white/[0.02] hover:border-white/20"}`}>
                 <button type="button" onClick={() => setPick(on ? null : q.id)} className="flex w-full items-start gap-3 text-left" aria-expanded={on}>
                   <Icon size={18} className="mt-0.5 shrink-0 text-amber-soft" />
                   <span>
-                    <span className="block text-[14px] font-medium text-ink">{q.label}</span>
+                    <span className="block fs-14 font-medium text-ink">{q.label}</span>
                     <span className="mt-0.5 block text-xs text-ink-3">{q.hint}</span>
                   </span>
                 </button>
@@ -52,7 +52,7 @@ export function EmptyStateView({ projects, loaded, onQuickStart, onOpen }: { pro
                       void submit();
                     }}
                   >
-                    <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Give it a title" className="field !h-9 !py-0 text-[13px]" aria-label={`${q.label} title`} />
+                    <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Give it a title" className="field !h-9 !py-0 fs-13" aria-label={`${q.label} title`} />
                     <button type="submit" disabled={!title.trim() || busy} className="pill-primary !h-9 shrink-0 !px-3 text-xs disabled:opacity-50">
                       {busy ? <Loader2 size={12} className="animate-spin" /> : "Start"}
                     </button>
@@ -70,7 +70,7 @@ export function EmptyStateView({ projects, loaded, onQuickStart, onOpen }: { pro
           <ul className="space-y-1">
             {projects.slice(0, 12).map((p) => (
               <li key={p.slug}>
-                <button type="button" onClick={() => onOpen(p.slug)} className="flex w-full items-center gap-2 rounded-[12px] px-3 py-2 text-left hover:bg-white/5">
+                <button type="button" onClick={() => onOpen(p.slug)} className="flex w-full items-center gap-2 r-12 px-3 py-2 text-left hover:bg-white/5">
                   <span className="min-w-0 flex-1 truncate text-sm text-ink">{p.title}</span>
                   <span className="label-caps shrink-0 text-ink-3">{p.status.replace("_", " ")}</span>
                 </button>

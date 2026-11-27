@@ -19,7 +19,7 @@ export function AssetIcon({ kind, size = 16 }: { kind: MediaAsset["kind"]; size?
 export function Thumb({ asset, className = "" }: { asset: MediaAsset; className?: string }) {
   const src = asset.thumbPath ? fileSrc(asset.thumbPath) : asset.kind === "image" ? fileSrc(asset.path) : "";
   return (
-    <div className={`grid shrink-0 place-items-center overflow-hidden rounded-[8px] bg-black/40 ${className}`}>
+    <div className={`grid shrink-0 place-items-center overflow-hidden r-8 bg-black/40 ${className}`}>
       {src ? <img src={src} alt="" className="size-full object-cover" draggable={false} /> : <AssetIcon kind={asset.kind} />}
     </div>
   );
@@ -53,7 +53,7 @@ export function StagingBin() {
       title="Staging Bin"
       action={
         <>
-          <Select value={role} onChange={(e) => setRole(e.target.value as AssetRole)} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Role for new files">
+          <Select value={role} onChange={(e) => setRole(e.target.value as AssetRole)} className="!h-8 !w-auto !py-0 fs-12" aria-label="Role for new files">
             {INGEST_ROLES.map((r) => (
               <option key={r} value={r}>
                 {r}
@@ -83,11 +83,11 @@ export function StagingBin() {
           setOver(false);
           void ingestDropped(slug, Array.from(e.dataTransfer.files), role);
         }}
-        className={`rounded-[14px] border border-dashed p-2 transition-colors ${over ? "border-teal/70 bg-teal/5" : "border-white/10"}`}
+        className={`r-14 border border-dashed p-2 transition-colors ${over ? "border-teal/70 bg-teal/5" : "border-white/10"}`}
       >
         {Object.entries(uploads).map(([k, u]) => (
-          <div key={k} className="mb-2 rounded-[10px] bg-white/[0.03] p-2">
-            <p className="truncate text-[12px] text-ink-2">
+          <div key={k} className="mb-2 r-10 bg-white/[0.03] p-2">
+            <p className="truncate fs-12 text-ink-2">
               <Upload size={11} className="mr-1 inline" />
               {u.name}
             </p>
@@ -109,23 +109,23 @@ export function StagingBin() {
                     e.dataTransfer.effectAllowed = "copy";
                   }}
                   onClick={() => select({ kind: "asset", id: a.id })}
-                  className={`group flex cursor-grab items-center gap-2 rounded-[12px] border p-1.5 active:cursor-grabbing ${on ? "border-amber/40 bg-amber/10" : "border-transparent hover:bg-white/5"}`}
+                  className={`group flex cursor-grab items-center gap-2 r-12 border p-1.5 active:cursor-grabbing ${on ? "border-amber/40 bg-amber/10" : "border-transparent hover:bg-white/5"}`}
                 >
                   <Thumb asset={a} className="h-10 w-16" />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] text-ink" title={a.name}>
+                    <p className="truncate fs-13 text-ink" title={a.name}>
                       {a.name}
                     </p>
                     <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                      <span className="rounded-full border border-white/10 px-1.5 font-mono text-[10px] text-ink-2">
+                      <span className="rounded-full border border-white/10 px-1.5 font-mono fs-10 text-ink-2">
                         {a.kind}/{a.role}
                       </span>
                       {a.readOnly && (
-                        <span className="flex items-center gap-0.5 rounded-full border border-teal/30 px-1.5 text-[10px] text-teal-soft" title="The original copy in raw/ is read-only">
+                        <span className="flex items-center gap-0.5 rounded-full border border-teal/30 px-1.5 fs-10 text-teal-soft" title="The original copy in raw/ is read-only">
                           <Lock size={9} /> Raw · read-only
                         </span>
                       )}
-                      <span className="font-mono text-[10px] text-ink-3">{assetMeta(a)}</span>
+                      <span className="font-mono fs-10 text-ink-3">{assetMeta(a)}</span>
                     </div>
                   </div>
                   <button

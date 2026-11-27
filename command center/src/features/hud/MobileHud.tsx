@@ -171,7 +171,7 @@ export function MobileHud() {
       </main>
       <nav className="grid grid-cols-5 border-t border-white/10 bg-black/80 pb-[env(safe-area-inset-bottom)] backdrop-blur" aria-label="Command center tabs">
         {TABS.map(({ id, label, icon: Icon }) => (
-          <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? "page" : undefined} className={`flex flex-col items-center gap-1 py-2.5 text-[10px] uppercase tracking-wider ${tab === id ? "text-amber-light" : "text-ink-3"}`}>
+          <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? "page" : undefined} className={`flex flex-col items-center gap-1 py-2.5 fs-10 uppercase tracking-wider ${tab === id ? "text-amber-light" : "text-ink-3"}`}>
             <Icon size={20} />
             {id === "tony" ? name : label}
           </button>
@@ -199,24 +199,24 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
     <header className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pt-[calc(env(safe-area-inset-top)+0.5rem)]">
       <ClockChip />
       {lockdown && (
-        <span className="flex items-center gap-1 rounded-full bg-amber/20 px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-amber-light">
+        <span className="flex items-center gap-1 rounded-full bg-amber/20 px-2 py-1 font-mono fs-10 font-bold tracking-wider text-amber-light">
           <Lock size={10} /> LOCKDOWN
         </span>
       )}
       {micChips.map((c) => (
-        <span key={c} role="status" className="flex items-center gap-1 rounded-full bg-alert/20 px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-alert">
+        <span key={c} role="status" className="flex items-center gap-1 rounded-full bg-alert/20 px-2 py-1 font-mono fs-10 font-bold tracking-wider text-alert">
           <MicOff size={10} /> {c}
         </span>
       ))}
       <div className="flex rounded-full border border-white/10 p-0.5" role="radiogroup" aria-label="Compute mode">
         {modes.map(({ id, icon: Icon }) => (
-          <button key={id} role="radio" aria-checked={status?.computeMode === id} onClick={() => void send({ computeMode: id })} className={`flex h-7 items-center gap-1 rounded-full px-2 font-mono text-[10px] ${status?.computeMode === id ? "bg-white/15 text-ink" : "text-ink-3"}`}>
+          <button key={id} role="radio" aria-checked={status?.computeMode === id} onClick={() => void send({ computeMode: id })} className={`flex h-7 items-center gap-1 rounded-full px-2 font-mono fs-10 ${status?.computeMode === id ? "bg-white/15 text-ink" : "text-ink-3"}`}>
             <Icon size={11} />
             {id.toUpperCase()}
           </button>
         ))}
       </div>
-      <span className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${status?.privacy.diffuser ? "text-teal" : "text-ink-3"}`} title="Privacy diffuser">
+      <span className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono fs-10 ${status?.privacy.diffuser ? "text-teal" : "text-ink-3"}`} title="Privacy diffuser">
         <ShieldCheck size={11} /> DIFFUSER {status?.privacy.diffuser ? "ON" : "OFF"}
       </span>
       <button
@@ -224,7 +224,7 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
         disabled={!meshPath}
         aria-expanded={meshPath ? pathInfo : undefined}
         onClick={() => setPathInfo((v) => !v)}
-        className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${mesh && status?.privacy.networkLock ? "text-teal" : "text-amber-soft"}`}
+        className={`flex items-center gap-1 rounded-full border border-white/10 px-2 py-1 font-mono fs-10 ${mesh && status?.privacy.networkLock ? "text-teal" : "text-amber-soft"}`}
         title={meshPath ? meshPath.title : "NetBird mesh"}
       >
         <Network size={11} /> MESH {mesh && status?.privacy.networkLock ? "LOCKED" : "OPEN"}
@@ -239,25 +239,25 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
         role="switch"
         aria-checked={kill}
         onClick={() => void send({ killSwitch: !kill })}
-        className={`ml-auto flex h-8 items-center gap-1 rounded-full px-3 font-mono text-[10px] font-bold ${kill ? "bg-alert text-white" : "border border-alert/40 text-alert"}`}
+        className={`ml-auto flex h-8 items-center gap-1 rounded-full px-3 font-mono fs-10 font-bold ${kill ? "bg-alert text-white" : "border border-alert/40 text-alert"}`}
       >
         <ShieldOff size={12} /> {kill ? "LOCAL ONLY" : "KILL"}
       </button>
-      {pathInfo && meshPath && <span className="w-full font-mono text-[10px] text-ink-3">{meshPath.title}</span>}
+      {pathInfo && meshPath && <span className="w-full font-mono fs-10 text-ink-3">{meshPath.title}</span>}
       <div className="flex w-full flex-wrap items-center gap-1.5">
         {status?.scheduler && (
-          <span className="rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] text-ink-2" title="Compute split">
+          <span className="rounded-full border border-white/10 px-2 py-1 font-mono fs-10 text-ink-2" title="Compute split">
             SPLIT {status.scheduler.profile.toUpperCase()} · {status.scheduler.tonyPriorityPct}/{100 - status.scheduler.tonyPriorityPct}
           </span>
         )}
         {status?.runtime?.droplet && status.runtime.droplet.state !== "disabled" && (
-          <span className={`rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${status.runtime.droplet.state === "connected" ? "text-teal" : "text-alert"}`} title={status.runtime.droplet.detail}>
+          <span className={`rounded-full border border-white/10 px-2 py-1 font-mono fs-10 ${status.runtime.droplet.state === "connected" ? "text-teal" : "text-alert"}`} title={status.runtime.droplet.detail}>
             DROPLET {status.runtime.droplet.state.toUpperCase()}
           </span>
         )}
         <SlotChip />
         {mode && (
-          <span className="rounded-full border border-teal/30 px-2 py-1 font-mono text-[10px] text-teal" title="Tony's mode (switch it on the Tony tab)">
+          <span className="rounded-full border border-teal/30 px-2 py-1 font-mono fs-10 text-teal" title="Tony's mode (switch it on the Tony tab)">
             MODE {mode.name.toUpperCase()}
             {mode.overridden ? " *" : ""}
           </span>
@@ -266,7 +266,7 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
           <GabagoolPill />
         </span>
       </div>
-      {!status && <span className="w-full text-[10px] text-ink-3">Desktop status unavailable — check the gateway token in Settings.</span>}
+      {!status && <span className="w-full fs-10 text-ink-3">Desktop status unavailable — check the gateway token in Settings.</span>}
     </header>
   );
 }
@@ -311,7 +311,7 @@ function ClockChip() {
         aria-expanded={open}
         aria-label={`${a11y}${tempC !== null ? `, ${tempC} degrees` : ""}. Open alarms and key dates`}
         onClick={() => setOpen(true)}
-        className="rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] text-ink tabular"
+        className="rounded-full border border-white/10 px-2 py-1 font-mono fs-10 text-ink tabular"
       >
         {hudClockText(time, dayPeriod, tempC)}
       </button>
@@ -379,7 +379,7 @@ function TonyTab({ hud }: { hud: Hud }) {
         />
       )}
       <PipelineBars />
-      <div className="min-h-[40vh] flex-1 rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3">
+      <div className="min-h-[40vh] flex-1 r-16 border border-white/[0.06] bg-white/[0.02] p-3">
         <Transcript thread={thread} max={60} />
       </div>
       <div className="flex items-center gap-2">
@@ -397,7 +397,7 @@ function TonyTab({ hud }: { hud: Hud }) {
             disabled={deskMicOff}
             onClick={() => void hud.send({ micEnabled: false })}
             title="Lock the desktop's mic off (unlock it on the desktop)"
-            className="flex h-8 items-center gap-1 rounded-full border border-alert/40 px-3 font-mono text-[10px] font-bold tracking-wider text-alert disabled:opacity-50"
+            className="flex h-8 items-center gap-1 rounded-full border border-alert/40 px-3 font-mono fs-10 font-bold tracking-wider text-alert disabled:opacity-50"
           >
             <MicOff size={11} /> {deskMicOff ? "DESK MIC OFF" : "LOCK DESKTOP MIC"}
           </button>
@@ -444,11 +444,11 @@ function MarketsTab() {
         ))}
       </div>
       <TvChart symbol={toTradingView(sym)} interval="5" height={300} />
-      <div className="rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3">
+      <div className="r-16 border border-white/[0.06] bg-white/[0.02] p-3">
         <div className="mb-2 flex items-baseline gap-2">
           <span className="font-mono text-sm text-ink">{sym}</span>
           <span className="font-mono text-lg text-amber-light">{price?.toFixed(2) ?? "—"}</span>
-          <span className="ml-auto text-[10px] text-ink-3">Supply / demand · 5m · research only</span>
+          <span className="ml-auto fs-10 text-ink-3">Supply / demand · 5m · research only</span>
         </div>
         {err && <p className="text-xs text-alert">{err}</p>}
         <ul className="space-y-1">
@@ -478,7 +478,7 @@ function SlotChip() {
   const runs = Object.values(usePipelines((s) => s.runs));
   const r = runs.sort((a, b) => b.at - a.at)[0];
   return (
-    <span className={`rounded-full border border-white/10 px-2 py-1 font-mono text-[10px] ${r ? "text-amber-light" : "text-ink-3"}`}>
+    <span className={`rounded-full border border-white/10 px-2 py-1 font-mono fs-10 ${r ? "text-amber-light" : "text-ink-3"}`}>
       SLOT {r ? `${r.stage.toUpperCase()} ${r.pct}%` : "TONY READY"}
     </span>
   );

@@ -57,7 +57,7 @@ export function TierSelect({ value, onChange, label, hint }: { value: Tier; onCh
             role="radio"
             aria-checked={value === t}
             onClick={() => value !== t && onChange(t)}
-            className={`h-7 rounded-full px-3 font-mono text-[11px] uppercase tracking-wider transition-colors ${
+            className={`h-7 rounded-full px-3 font-mono fs-11 uppercase tracking-wider transition-colors ${
               value === t ? (t === "allow" ? "bg-teal/25 text-teal" : t === "ask" ? "bg-amber/25 text-amber-light" : "bg-alert/25 text-alert") : "text-ink-3 hover:text-ink"
             }`}
           >
@@ -99,7 +99,7 @@ export function SecretRow({ name, label, placeholder, hint, onChange }: { name: 
               .catch((er) => setMsg(String(er)));
           }}
         >
-          <Input type="password" autoComplete="off" value={val} onChange={(e) => (setVal(e.target.value), msg && setMsg(null))} placeholder={b.placeholder} aria-label={label} className="!h-9 !py-1 font-mono !text-[12px]" />
+          <Input type="password" autoComplete="off" value={val} onChange={(e) => (setVal(e.target.value), msg && setMsg(null))} placeholder={b.placeholder} aria-label={label} className="!h-9 !py-1 font-mono !fs-12" />
           <button className="pill-glass !h-9 text-xs" disabled={!val.trim()}>
             Save
           </button>
@@ -114,7 +114,7 @@ export function SecretRow({ name, label, placeholder, hint, onChange }: { name: 
           )}
         </form>
       </div>
-      {b.detail && <p className="mt-1 font-mono text-[11px] text-ink-3">{b.detail}</p>}
+      {b.detail && <p className="mt-1 font-mono fs-11 text-ink-3">{b.detail}</p>}
       {hint && <p className="mt-1 text-xs text-ink-3">{hint}</p>}
       {msg && <p className="mt-1 text-xs text-alert">{msg}</p>}
     </div>
@@ -122,7 +122,7 @@ export function SecretRow({ name, label, placeholder, hint, onChange }: { name: 
 }
 
 export function CfgError({ error }: { error: string | null }) {
-  return error ? <p className="mt-2 rounded-[10px] border border-alert/30 bg-alert/10 px-3 py-2 text-xs text-alert">{error}</p> : null;
+  return error ? <p className="mt-2 r-10 border border-alert/30 bg-alert/10 px-3 py-2 text-xs text-alert">{error}</p> : null;
 }
 
 export type { OsConfig };

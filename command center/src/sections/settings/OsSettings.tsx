@@ -42,14 +42,14 @@ export function OsIdentityCard() {
         </Field>
         <Field label="Identity file" className="sm:col-span-2">
           <div className="flex gap-1.5">
-            <BlurInput value={cfg.identityPath} onSave={(v) => save({ identityPath: v })} className="font-mono !text-[12px]" />
+            <BlurInput value={cfg.identityPath} onSave={(v) => save({ identityPath: v })} className="font-mono !fs-12" />
             <button className="pill-glass !h-10 shrink-0 text-xs" onClick={() => void cmd("os_identity").then(setPreview).catch((e) => setPreview(`⚠ ${e}`))}>
               <Eye size={13} /> Preview
             </button>
           </div>
         </Field>
       </div>
-      {preview && <pre className="well mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-[12px] p-3 text-[11px] text-ink-2">{preview.slice(0, 2000)}</pre>}
+      {preview && <pre className="well mt-2 max-h-48 overflow-auto whitespace-pre-wrap r-12 p-3 fs-11 text-ink-2">{preview.slice(0, 2000)}</pre>}
       <div className="mt-2">
         <Toggle
           on={cfg.rootDirective}
@@ -135,26 +135,26 @@ export function DropletCard() {
       <Toggle on={d.enabled} onChange={(v) => save({ droplet: { enabled: v } })} label={d.enabled ? "Droplet enabled" : "Droplet OFFLINE (manual)"} hint={`Host ${d.host}`} />
       <div className="mt-2 grid gap-3 sm:grid-cols-2">
         <Field label="Model / proxy endpoint (OpenAI-compatible)">
-          <BlurInput value={d.modelUrl} onSave={(v) => save({ droplet: { modelUrl: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={d.modelUrl} onSave={(v) => save({ droplet: { modelUrl: v } })} className="font-mono !fs-12" />
         </Field>
         <Field label="Qdrant vector DB">
-          <BlurInput value={d.qdrantUrl} onSave={(v) => save({ droplet: { qdrantUrl: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={d.qdrantUrl} onSave={(v) => save({ droplet: { qdrantUrl: v } })} className="font-mono !fs-12" />
         </Field>
         <Field label="n8n webhooks">
-          <BlurInput value={d.n8nUrl} onSave={(v) => save({ droplet: { n8nUrl: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={d.n8nUrl} onSave={(v) => save({ droplet: { n8nUrl: v } })} className="font-mono !fs-12" />
         </Field>
         <Field label="Remote AnythingLLM">
-          <BlurInput value={d.anythingllmUrl} onSave={(v) => save({ droplet: { anythingllmUrl: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={d.anythingllmUrl} onSave={(v) => save({ droplet: { anythingllmUrl: v } })} className="font-mono !fs-12" />
         </Field>
         <Field label="NetBird host">
-          <BlurInput value={d.host} onSave={(v) => save({ droplet: { host: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={d.host} onSave={(v) => save({ droplet: { host: v } })} className="font-mono !fs-12" />
         </Field>
       </div>
       <SecretRow name="anythingllm-remote" label="Remote AnythingLLM API key" />
       {probes && (
         <ul className="mt-2 grid gap-1.5 sm:grid-cols-2">
           {probes.map((p) => (
-            <li key={p.id} className="well flex items-center gap-2 rounded-[10px] px-3 py-2 text-xs">
+            <li key={p.id} className="well flex items-center gap-2 r-10 px-3 py-2 text-xs">
               <span className={`size-2 rounded-full ${p.up ? "bg-teal" : "bg-alert"}`} />
               <span className="text-ink">{p.label}</span>
               <span className="ml-auto font-mono text-ink-3">{p.up ? `${p.detail} · ${p.latencyMs}ms` : p.detail}</span>
@@ -199,7 +199,7 @@ export function WorkspacesCard() {
       <div className="grid gap-3 sm:grid-cols-2">
         {ROLES.map(([role, label]) => (
           <Field key={role} label={LIVE_UNMAPPED_ROLES.includes(role) ? `${label} · held from live delegation` : label}>
-            <Select value={map[role] ?? ""} onChange={(e) => save({ anythingllm: { workspaces: { ...map, [role]: e.target.value } } })} className="font-mono !text-[13px]">
+            <Select value={map[role] ?? ""} onChange={(e) => save({ anythingllm: { workspaces: { ...map, [role]: e.target.value } } })} className="font-mono !fs-13">
               <option value="">— not delegated —</option>
               {[...new Set([...(ws?.map((w) => w.slug) ?? []), ...(map[role] ? [map[role]] : [])])].map((s) => (
                 <option key={s} value={s}>
@@ -213,7 +213,7 @@ export function WorkspacesCard() {
       </div>
       <div className="mt-3 grid gap-3 sm:grid-cols-[2fr_1fr]">
         <Field label="AnythingLLM API base">
-          <BlurInput value={cfg.anythingllm.baseUrl} onSave={(v) => save({ anythingllm: { baseUrl: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={cfg.anythingllm.baseUrl} onSave={(v) => save({ anythingllm: { baseUrl: v } })} className="font-mono !fs-12" />
         </Field>
         <Field label="Sub-agent timeout (s)">
           <BlurInput value={String(cfg.anythingllm.timeoutSecs)} onSave={(v) => Number(v) > 0 && save({ anythingllm: { timeoutSecs: Math.round(Number(v)) } })} className="font-mono" inputMode="numeric" />
@@ -242,7 +242,7 @@ export function OsPermissionsCard() {
       <TierSelect label="Local filesystem read" hint={`Only inside: ${cfg.fsRoots.join(", ")} + this project. Secrets (.env, keys) are never read.`} value={p.filesystem} onChange={(t) => save({ permissions: { filesystem: t } })} />
       <TierSelect label="External cloud / droplet routing" hint="Cloud models, droplet, Overseer, remote memory mounts" value={p.cloud} onChange={(t) => save({ permissions: { cloud: t } })} />
       <Field label="Filesystem roots (comma-separated)" className="mt-2">
-        <BlurInput value={cfg.fsRoots.join(", ")} onSave={(v) => save({ fsRoots: v.split(",").map((x) => x.trim()).filter(Boolean) })} className="font-mono !text-[12px]" />
+        <BlurInput value={cfg.fsRoots.join(", ")} onSave={(v) => save({ fsRoots: v.split(",").map((x) => x.trim()).filter(Boolean) })} className="font-mono !fs-12" />
       </Field>
       <CfgError error={error} />
     </Card>
@@ -275,12 +275,12 @@ export function PrivacyShieldCard() {
         <button className="pill-glass !h-8 text-xs" onClick={() => void cmd("privacy_last_payload").then(setLast)}>
           <Eye size={13} /> View last redacted payload
         </button>
-        <input value={test} onChange={(e) => setTest(e.target.value)} className="field !h-8 min-w-0 flex-1 !py-1 !text-[12px]" aria-label="Diffuser test text" />
+        <input value={test} onChange={(e) => setTest(e.target.value)} className="field !h-8 min-w-0 flex-1 !py-1 !fs-12" aria-label="Diffuser test text" />
         <button className="pill-glass !h-8 text-xs" onClick={() => void cmd("privacy_preview", { text: test }).then((r) => setPreview(r.redacted))}>
           Test
         </button>
       </div>
-      {preview && <p className="well mb-2 ml-12 rounded-[10px] px-3 py-2 font-mono text-[11px] text-teal">{preview}</p>}
+      {preview && <p className="well mb-2 ml-12 r-10 px-3 py-2 font-mono fs-11 text-teal">{preview}</p>}
 
       <Toggle
         on={p.networkLock}
@@ -297,7 +297,7 @@ export function PrivacyShieldCard() {
         </button>
       </div>
       {token && (
-        <p className="well mb-2 ml-12 break-all rounded-[10px] px-3 py-2 text-xs text-ink-2">
+        <p className="well mb-2 ml-12 break-all r-10 px-3 py-2 text-xs text-ink-2">
           Type this into the phone's Settings → Gateway token (shown once): <span className="font-mono text-amber-light">{token}</span>
         </p>
       )}
@@ -329,7 +329,7 @@ export function PrivacyShieldCard() {
 function PayloadModal({ record, onClose }: { record: RedactionRecord | null; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Last redacted payload" onClick={onClose}>
-      <div className="glass max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-[20px] p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="glass max-h-[85vh] w-full max-w-3xl overflow-y-auto r-20 p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center gap-2">
           <h2 className="label-caps text-amber-soft">What last left this machine</h2>
           <button onClick={onClose} aria-label="Close" className="ml-auto text-ink-2 hover:text-ink">
@@ -359,7 +359,7 @@ function PayloadModal({ record, onClose }: { record: RedactionRecord | null; onC
             {record.payload.map((m, i) => (
               <div key={i} className="mb-2">
                 <p className="label-caps text-ink-3">{m.role}</p>
-                <pre className="well whitespace-pre-wrap rounded-[10px] p-2 text-[11px] text-ink-2">{m.content.slice(0, 6000)}</pre>
+                <pre className="well whitespace-pre-wrap r-10 p-2 fs-11 text-ink-2">{m.content.slice(0, 6000)}</pre>
               </div>
             ))}
           </>
@@ -414,16 +414,16 @@ export function OverseerCard() {
           </Select>
         </Field>
         <Field label="Claude model">
-          <BlurInput value={o.claudeModel} onSave={(v) => save({ overseer: { claudeModel: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={o.claudeModel} onSave={(v) => save({ overseer: { claudeModel: v } })} className="font-mono !fs-12" />
         </Field>
         <Field label="Gemini model">
-          <BlurInput value={o.geminiModel} onSave={(v) => save({ overseer: { geminiModel: v } })} className="font-mono !text-[12px]" />
+          <BlurInput value={o.geminiModel} onSave={(v) => save({ overseer: { geminiModel: v } })} className="font-mono !fs-12" />
         </Field>
       </div>
       <p className="mt-2 text-xs text-ink-3">
         Cost: <span className="font-mono text-ink-2">{formatReviewCost(reviewCost(typicalReviewChars(), o.claudeModel))}</span> at {o.claudeModel} API prices for a typical “Something's off” review ({HELPDESK_TURNS} turns of ~{TYPICAL_TURN_CHARS} characters; tokens ≈ characters / 4, plus a ~500-token answer). Estimates; through the Claude CLI on a subscription it isn't billed per token.
       </p>
-      {probe && <p className={`mt-2 font-mono text-[11px] ${probe.startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{probe}</p>}
+      {probe && <p className={`mt-2 font-mono fs-11 ${probe.startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{probe}</p>}
       <div className="mt-2">
         <Toggle on={o.autoEscalate} onChange={(v) => save({ overseer: { autoEscalate: v } })} label="Auto-escalate when the local chain fails" />
         <Toggle on={o.manualMode} onChange={(v) => save({ overseer: { manualMode: v } })} label="Manual Overseer Mode" hint="Every confirmation card also gets an Overseer review while you decide." />

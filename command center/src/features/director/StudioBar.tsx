@@ -73,16 +73,16 @@ export function StudioBar() {
   };
 
   return (
-    <header className="glass flex flex-wrap items-center gap-2 rounded-[20px] px-4 py-3">
+    <header className="glass flex flex-wrap items-center gap-2 r-20 px-4 py-3">
       <Clapperboard size={17} className="text-amber-soft" />
-      <h1 className="mr-1 text-[15px] font-semibold text-ink">Director Suite</h1>
+      <h1 className="mr-1 fs-15 font-semibold text-ink">Director Suite</h1>
       {slug && (
         <button onClick={closeProject} className="pill-glass !h-8 !w-8 !p-0" title="All projects" aria-label="All projects">
           <Home size={13} />
         </button>
       )}
       {projects.length > 0 && (
-        <Select value={slug ?? ""} onChange={(e) => e.target.value && void openProject(e.target.value)} className="!h-8 !w-auto max-w-[240px] !py-0 text-[13px]" aria-label="Project">
+        <Select value={slug ?? ""} onChange={(e) => e.target.value && void openProject(e.target.value)} className="!h-8 !w-auto max-w-[240px] !py-0 fs-13" aria-label="Project">
           {!slug && <option value="">Open a project…</option>}
           {projects.map((p) => (
             <option key={p.slug} value={p.slug}>
@@ -100,7 +100,7 @@ export function StudioBar() {
             void create();
           }}
         >
-          <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setNaming(false)} placeholder="Project title" className="field !h-8 !w-48 !py-0 text-[13px]" aria-label="New project title" />
+          <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setNaming(false)} placeholder="Project title" className="field !h-8 !w-48 !py-0 fs-13" aria-label="New project title" />
           <button type="submit" disabled={!title.trim() || busy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
             {busy ? <Loader2 size={12} className="animate-spin" /> : "Create"}
           </button>
@@ -113,7 +113,7 @@ export function StudioBar() {
 
       <div className="ml-auto flex flex-wrap items-center gap-2">
         {job && <RenderBadge job={job} />}
-        <span className={`flex h-8 items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 text-[12px] ${TONE[pill.tone]}`} title={pill.detail ?? pill.label} role="status">
+        <span className={`flex h-8 items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 fs-12 ${TONE[pill.tone]}`} title={pill.detail ?? pill.label} role="status">
           <span className={`size-2 rounded-full ${DOT[pill.tone]}`} />
           {pill.label}
         </span>
@@ -139,7 +139,7 @@ function RenderBadge({ job }: { job: RenderJob }) {
   const live = LIVE.has(job.status);
   const tone = job.status === "failed" ? "border-alert/60 text-alert" : job.status === "done" ? "border-teal/50 text-teal-soft" : "border-amber/50 text-amber-soft";
   return (
-    <span className={`flex h-8 items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 text-[12px] ${tone}`} title={job.stage} role="status">
+    <span className={`flex h-8 items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 fs-12 ${tone}`} title={job.stage} role="status">
       <Cpu size={12} />
       {live ? (
         <>

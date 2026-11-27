@@ -34,17 +34,17 @@ export function RenderCloudActions({ render, origin, compact = false, extraFolde
   else if (driveFileId)
     body = (
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="flex h-7 items-center gap-1 rounded-full border border-teal/40 px-2 text-[11px] text-teal-soft" title="Uploaded to Google Drive">
+        <span className="flex h-7 items-center gap-1 rounded-full border border-teal/40 px-2 fs-11 text-teal-soft" title="Uploaded to Google Drive">
           <Cloud size={11} /> {compact ? "" : "Uploaded"}
         </span>
         {link ? (
           <CopyLinkButton link={link} compact={compact} />
         ) : (
-          <button onClick={() => requestShare(driveFileId, name, origin)} className="pill-glass !h-7 !px-2 text-[11px]" title="Anyone with the link can view">
+          <button onClick={() => requestShare(driveFileId, name, origin)} className="pill-glass !h-7 !px-2 fs-11" title="Anyone with the link can view">
             <Link2 size={11} /> {compact ? "Share" : "Create share link"}
           </button>
         )}
-        <a href={link ?? driveFileUrl(driveFileId)} target="_blank" rel="noreferrer" className="pill-glass !h-7 !px-2 text-[11px]" title="Open in Google Drive">
+        <a href={link ?? driveFileUrl(driveFileId)} target="_blank" rel="noreferrer" className="pill-glass !h-7 !px-2 fs-11" title="Open in Google Drive">
           <ExternalLink size={11} /> {compact ? "" : "Open in Drive"}
         </a>
       </div>
@@ -52,10 +52,10 @@ export function RenderCloudActions({ render, origin, compact = false, extraFolde
   else
     body = (
       <div className="flex flex-wrap items-center gap-1.5">
-        <button onClick={() => requestPush(render, origin)} className="pill-glass !h-7 !px-2 text-[11px]" title="Upload this verified render to Google Drive (asks first)">
+        <button onClick={() => requestPush(render, origin)} className="pill-glass !h-7 !px-2 fs-11" title="Upload this verified render to Google Drive (asks first)">
           <CloudUpload size={11} /> Upload to Drive
         </button>
-        {transfer?.status === "failed" && <span className="truncate text-[10px] text-alert">Last upload failed: {transfer.error ?? "error"}</span>}
+        {transfer?.status === "failed" && <span className="truncate fs-10 text-alert">Last upload failed: {transfer.error ?? "error"}</span>}
       </div>
     );
 

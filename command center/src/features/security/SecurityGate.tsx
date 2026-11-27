@@ -156,7 +156,7 @@ function CompanionApprovals() {
   if (!reqs.length) return null;
   const q = reqs[0];
   return (
-    <div className="glass fixed bottom-24 left-1/2 z-[70] w-[min(92vw,22rem)] -translate-x-1/2 rounded-[20px] p-4" role="alertdialog" aria-label="Approve desktop unlock">
+    <div className="glass fixed bottom-24 left-1/2 z-[70] w-[min(92vw,22rem)] -translate-x-1/2 r-20 p-4" role="alertdialog" aria-label="Approve desktop unlock">
       <div className="flex items-center gap-2 text-amber-soft">
         <Smartphone size={15} />
         <span className="label-caps">{q.purpose.startsWith("step_up:") ? "Step-up request" : "Unlock request"}</span>
@@ -164,7 +164,7 @@ function CompanionApprovals() {
       <p className="mt-2 text-xs leading-relaxed text-ink-2">
         <span className="font-mono">{q.device}</span> wants to {describePurpose(q.purpose)}. Approve only if that's you.
       </p>
-      <label className="mt-2 block text-[11px] text-ink-2">
+      <label className="mt-2 block fs-11 text-ink-2">
         Type the number your desktop shows
         <input
           inputMode="numeric"
@@ -176,7 +176,7 @@ function CompanionApprovals() {
           aria-label="Matching number from the desktop"
         />
       </label>
-      {error && <p className="mt-2 text-[11px] text-alert">{error}</p>}
+      {error && <p className="mt-2 fs-11 text-alert">{error}</p>}
       <div className="mt-3 flex justify-end gap-2">
         <button className="pill-glass" disabled={!!busy} onClick={() => void answer(q, false)}>
           <X size={13} /> Deny

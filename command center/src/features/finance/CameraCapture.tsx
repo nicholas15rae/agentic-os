@@ -100,7 +100,7 @@ export function CameraCapture({ mode, onCapture, onQr }: { mode: "document" | "q
 
   return (
     <div className="space-y-3">
-      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-[16px] border border-white/10 bg-black sm:aspect-video">
+      <div className="relative aspect-[4/3] w-full overflow-hidden r-16 border border-white/10 bg-black sm:aspect-video">
         <video ref={video} playsInline muted className={`size-full object-cover ${live ? "" : "hidden"}`} />
         {!live && (
           <div className="grid size-full place-items-center p-6 text-center text-sm text-ink-3">
@@ -110,9 +110,9 @@ export function CameraCapture({ mode, onCapture, onQr }: { mode: "document" | "q
             </div>
           </div>
         )}
-        {live && mode === "document" && <div aria-hidden className="pointer-events-none absolute inset-[7%] rounded-[12px] border-2 border-dashed border-amber/60" />}
+        {live && mode === "document" && <div aria-hidden className="pointer-events-none absolute inset-[7%] r-12 border-2 border-dashed border-amber/60" />}
         {live && mode === "qr" && (
-          <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 size-[46%] -translate-x-1/2 -translate-y-1/2 rounded-[18px] border-2 border-teal/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]">
+          <div aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 size-[46%] -translate-x-1/2 -translate-y-1/2 r-18 border-2 border-teal/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]">
             <ScanLine className="absolute inset-x-0 top-1/2 mx-auto -translate-y-1/2 animate-pulse text-teal" size={28} />
           </div>
         )}

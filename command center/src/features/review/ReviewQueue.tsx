@@ -68,11 +68,11 @@ export function ReviewQueue() {
   return (
     <div className="space-y-4">
       {review.integrity && (
-        <div role="alert" className="flex items-start gap-3 rounded-[16px] border border-alert/40 bg-alert/10 p-4 text-sm text-alert">
+        <div role="alert" className="flex items-start gap-3 r-16 border border-alert/40 bg-alert/10 p-4 text-sm text-alert">
           <AlertTriangle size={18} className="mt-0.5 shrink-0" />
           <div>
             <p className="font-semibold">Security rules failed their integrity check, so automated actions are halted.</p>
-            <p className="mt-1 text-[12px] opacity-90">{review.integrity}. Purge, restore, Garbage sweeps and Operations writes refuse until the app restarts with intact rules files.</p>
+            <p className="mt-1 fs-12 opacity-90">{review.integrity}. Purge, restore, Garbage sweeps and Operations writes refuse until the app restarts with intact rules files.</p>
           </div>
         </div>
       )}
@@ -80,10 +80,10 @@ export function ReviewQueue() {
         <p className="text-sm text-ink-2">{digestLine(review.groups)}</p>
         {all.length > 1 && (
           <div className="ml-auto flex gap-2">
-            <button onClick={() => void restore(all)} className="h-9 rounded-full border border-white/10 px-3 text-[12px] text-ink-2 hover:text-ink">
+            <button onClick={() => void restore(all)} className="h-9 rounded-full border border-white/10 px-3 fs-12 text-ink-2 hover:text-ink">
               Restore all
             </button>
-            <button onClick={() => void purge(all, "everything pending")} className="h-9 rounded-full border border-alert/40 px-3 text-[12px] text-alert hover:bg-alert/10">
+            <button onClick={() => void purge(all, "everything pending")} className="h-9 rounded-full border border-alert/40 px-3 fs-12 text-alert hover:bg-alert/10">
               Approve purge for all
             </button>
           </div>
@@ -106,10 +106,10 @@ export function ReviewQueue() {
             title={`${g.displayName} · ${g.count}`}
             action={
               <>
-                <button onClick={() => void restore(ids)} className="text-[12px] text-ink-3 hover:text-ink">
+                <button onClick={() => void restore(ids)} className="fs-12 text-ink-3 hover:text-ink">
                   Restore {ids.length > 1 ? "all" : ""}
                 </button>
-                <button onClick={() => void purge(ids, g.displayName)} className="text-[12px] text-alert/80 hover:text-alert">
+                <button onClick={() => void purge(ids, g.displayName)} className="fs-12 text-alert/80 hover:text-alert">
                   Purge {ids.length > 1 ? "all" : ""}
                 </button>
               </>
@@ -121,7 +121,7 @@ export function ReviewQueue() {
                   <p className="label-caps mb-1.5 text-ink-3">
                     {reasonLabel(r.reasonCode)} · {r.items.length}
                   </p>
-                  <ul className="divide-y divide-white/[0.05] rounded-[12px] border border-white/[0.06]">
+                  <ul className="divide-y divide-white/[0.05] r-12 border border-white/[0.06]">
                     {r.items.map((i) => (
                       <ItemRow key={i.itemId} item={i} />
                     ))}
@@ -135,7 +135,7 @@ export function ReviewQueue() {
 
       {review.recentlyResolved.length > 0 && (
         <Card title="Recently resolved">
-          <ul className="space-y-1 text-[12px] text-ink-3">
+          <ul className="space-y-1 fs-12 text-ink-3">
             {review.recentlyResolved.map((i) => (
               <li key={i.itemId} className="flex gap-2">
                 <span className={i.status === "purged" ? "text-alert/80" : "text-teal-soft"}>{i.status}</span>
@@ -170,8 +170,8 @@ function ItemRow({ item }: { item: QItem }) {
         <button onClick={() => void toggle()} aria-expanded={open} aria-label={`Inspect ${item.rel}`} className="flex min-w-0 flex-1 items-center gap-2 text-left">
           {open ? <ChevronDown size={14} className="shrink-0 text-ink-3" /> : <ChevronRight size={14} className="shrink-0 text-ink-3" />}
           <span className="min-w-0">
-            <span className="block truncate font-mono text-[12px] text-ink">{item.rel}</span>
-            <span className="block truncate text-[11px] text-ink-3">
+            <span className="block truncate font-mono fs-12 text-ink">{item.rel}</span>
+            <span className="block truncate fs-11 text-ink-3">
               {item.reason} · {item.sourceAgent} · {ago(item.timestamp)} · {size(item.bytes)}
             </span>
           </span>
@@ -187,8 +187,8 @@ function ItemRow({ item }: { item: QItem }) {
       </div>
       {open && (
         <div className="mt-2 space-y-1.5 pl-6">
-          <pre className="well max-h-48 overflow-auto whitespace-pre-wrap rounded-[10px] p-2.5 text-[11px] leading-relaxed text-ink-2">{preview === undefined ? "Loading…" : (preview ?? "(binary or empty)")}</pre>
-          <p className="break-all font-mono text-[10px] text-ink-3">
+          <pre className="well max-h-48 overflow-auto whitespace-pre-wrap r-10 p-2.5 fs-11 leading-relaxed text-ink-2">{preview === undefined ? "Loading…" : (preview ?? "(binary or empty)")}</pre>
+          <p className="break-all font-mono fs-10 text-ink-3">
             {item.itemId} · sha256 {item.sha256.slice(0, 16)}… · {item.kind === "blocked_write" ? "never written (held by Security)" : "snapshot kept until you decide"}
           </p>
         </div>

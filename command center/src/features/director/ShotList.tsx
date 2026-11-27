@@ -86,22 +86,22 @@ function SlotCard({ slot, slug, asset }: { slot: ShotSlot; slug: string | null; 
         }
         editManifest((m) => attachSlot(m, slot.id, a));
       }}
-      className={`rounded-[14px] border p-2.5 transition-colors ${over ? "border-teal/70 bg-teal/5" : slot.assetId ? "border-white/10 bg-white/[0.02]" : "border-dashed border-white/15"}`}
+      className={`r-14 border p-2.5 transition-colors ${over ? "border-teal/70 bg-teal/5" : slot.assetId ? "border-white/10 bg-white/[0.02]" : "border-dashed border-white/15"}`}
     >
       <div className="flex items-center gap-2">
-        <span className="font-mono text-[10px] text-ink-3">{slot.id}</span>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{slot.label}</span>
-        <span className="font-mono text-[10px] text-ink-3">
+        <span className="font-mono fs-10 text-ink-3">{slot.id}</span>
+        <span className="min-w-0 flex-1 truncate fs-13 font-medium text-ink">{slot.label}</span>
+        <span className="font-mono fs-10 text-ink-3">
           {slot.kind}
           {slot.targetSec != null ? ` · ${slot.targetSec}s` : ""}
         </span>
         <span className={`label-caps ${tone}`}>{slot.status}</span>
       </div>
-      {slot.instructions && <p className="mt-1 text-[12px] leading-snug text-ink-2">{slot.instructions}</p>}
+      {slot.instructions && <p className="mt-1 fs-12 leading-snug text-ink-2">{slot.instructions}</p>}
       {asset ? (
         <div className="mt-2 flex items-center gap-2">
           <Thumb asset={asset} className="h-8 w-12" />
-          <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2">{asset.name}</span>
+          <span className="min-w-0 flex-1 truncate fs-12 text-ink-2">{asset.name}</span>
           {slot.status === "attached" && (
             <button onClick={() => editManifest((m) => ({ ...m, shotList: m.shotList.map((x) => (x.id === slot.id ? { ...x, status: "approved" } : x)) }))} className="pill-glass !h-7 !w-7 !p-0" title="Approve this shot" aria-label={`Approve ${slot.label}`}>
               <Check size={12} />
@@ -112,9 +112,9 @@ function SlotCard({ slot, slug, asset }: { slot: ShotSlot; slug: string | null; 
           </button>
         </div>
       ) : (
-        <p className="mt-2 text-[11px] text-ink-3">Drop a {slot.kind} from the bin or your files here.</p>
+        <p className="mt-2 fs-11 text-ink-3">Drop a {slot.kind} from the bin or your files here.</p>
       )}
-      {refused && <p className="mt-1 text-[11px] text-alert">{refused}</p>}
+      {refused && <p className="mt-1 fs-11 text-alert">{refused}</p>}
     </li>
   );
 }

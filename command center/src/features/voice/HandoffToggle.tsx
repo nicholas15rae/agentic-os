@@ -23,7 +23,7 @@ export function HandoffToggle() {
       role="switch"
       aria-checked={on}
       onClick={() => set({ routing: { ...useSettings.getState().routing, vocalHandoffs: !on } })}
-      className={`flex h-9 items-center gap-2 rounded-full border px-3 text-[12px] transition-colors ${on ? "border-teal/50 bg-teal/10 text-teal-soft" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
+      className={`flex h-9 items-center gap-2 rounded-full border px-3 fs-12 transition-colors ${on ? "border-teal/50 bg-teal/10 text-teal-soft" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
       title={`Vocal Handoffs: when Tony delegates, a ≤5 s spoken exchange in Tony's and the agent's voices. Off: the hand-off happens silently (routing chip only).${path ? `\nEdit the lines in ${path}` : ""}`}
     >
       {on ? <Volume2 size={13} /> : <VolumeX size={13} />}
@@ -48,7 +48,7 @@ export function HandoffChip() {
   }, [chip]);
   if (!chip || Date.now() - chip.at > CHIP_MS) return null;
   return (
-    <span role="status" className="label-caps flex h-9 items-center gap-1.5 rounded-full border border-amber/40 bg-amber/10 px-3 !text-[10px] text-amber-soft">
+    <span role="status" className="label-caps flex h-9 items-center gap-1.5 rounded-full border border-amber/40 bg-amber/10 px-3 !fs-10 text-amber-soft">
       {chip.voiced ? <Volume2 size={11} /> : <VolumeX size={11} className="opacity-60" />}
       {roleLabel("general")} <ArrowRight size={10} /> {roleLabel(chip.to)}
     </span>

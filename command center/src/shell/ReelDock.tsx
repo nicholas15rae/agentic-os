@@ -34,11 +34,11 @@ export function ReelDock() {
               <button
                 onClick={() => select(w.id)}
                 aria-current={live}
-                className={`flex h-11 items-center gap-2.5 rounded-[14px] border pl-1 pr-4 font-mono text-[12px] transition-all duration-200 ${
+                className={`flex h-11 items-center gap-2.5 r-14 border pl-1 pr-4 font-mono fs-12 transition-all duration-200 ${
                   live ? "border-amber/70 bg-amber/10 text-ink glow-amber" : "border-white/10 bg-[rgba(11,13,17,0.4)] text-ink-2 backdrop-blur-md hover:border-white/25 hover:text-ink"
                 }`}
               >
-                <img src={w.src} alt="" className="h-9 w-14 rounded-[10px] object-cover" loading="lazy" />
+                <img src={w.src} alt="" className="h-9 w-14 r-10 object-cover" loading="lazy" />
                 <span className="tabular">{String(i + 1).padStart(2, "0")}</span>
                 <span className="max-w-32 truncate">
                   {w.name}

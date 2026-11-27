@@ -59,7 +59,7 @@ export function N8nCard() {
       hint="Bound to your local n8n container automatically. Read-only workflows (e.g. calendar-upcoming, gmail-recent) feed widgets directly. Mutating ones only run after you approve on the confirmation card — the app can only call workflows listed here."
       action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
     >
-      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+      <div className="mb-3 flex flex-wrap items-center gap-2 r-12 border border-white/[0.07] px-3 py-2 text-sm">
         <Container size={15} className={disc?.healthy ? "text-teal" : "text-ink-3"} />
         {disc?.found ? (
           <span className="text-ink-2">
@@ -73,7 +73,7 @@ export function N8nCard() {
         </button>
       </div>
       <Field label="n8n URL (override)">
-        <Input defaultValue={n8n.baseUrl} key={n8n.baseUrl} onBlur={(e) => e.target.value !== n8n.baseUrl && void patch({ id: "n8n", baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+        <Input defaultValue={n8n.baseUrl} key={n8n.baseUrl} onBlur={(e) => e.target.value !== n8n.baseUrl && void patch({ id: "n8n", baseUrl: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
       </Field>
 
       <div className="mt-3 space-y-1.5">
@@ -86,8 +86,8 @@ export function N8nCard() {
         </div>
         {wfs.map((w, i) => (
           <div key={i} className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1.3fr_90px_32px]">
-            <Input value={w.name} onChange={(e) => setWfs(wfs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} className="!h-9 !py-1 font-mono !text-[12px]" placeholder="calendar-create" aria-label="Workflow name" />
-            <Input value={w.path} onChange={(e) => setWfs(wfs.map((x, j) => (j === i ? { ...x, path: e.target.value } : x)))} className="!h-9 !py-1 font-mono !text-[12px]" placeholder="webhook/calendar-create" aria-label="Webhook path" />
+            <Input value={w.name} onChange={(e) => setWfs(wfs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} className="!h-9 !py-1 font-mono !fs-12" placeholder="calendar-create" aria-label="Workflow name" />
+            <Input value={w.path} onChange={(e) => setWfs(wfs.map((x, j) => (j === i ? { ...x, path: e.target.value } : x)))} className="!h-9 !py-1 font-mono !fs-12" placeholder="webhook/calendar-create" aria-label="Webhook path" />
             <label className="flex items-center gap-2 text-xs text-ink-2">
               <input type="checkbox" checked={w.mutating} onChange={(e) => setWfs(wfs.map((x, j) => (j === i ? { ...x, mutating: e.target.checked } : x)))} className="accent-amber" />
               {w.mutating ? "asks first" : "read-only"}
@@ -143,7 +143,7 @@ export function GoogleCard() {
     <Card title="Google Calendar & n8n Gmail" hint="Route 1 (works today): n8n’s Google Calendar and Gmail nodes hold your Google sign-in; Jarvis calls their webhooks. Reads sync every 10 minutes; creating, cancelling or sending always asks first. For reading mail the Gmail card’s Apps Script backend comes first — gmail-recent is its fallback.">
       <div className="space-y-1.5">
         {GOOGLE_PRESETS.map((p) => (
-          <div key={p.name} className="flex items-center gap-2 text-[13px]">
+          <div key={p.name} className="flex items-center gap-2 fs-13">
             <span className={`size-1.5 rounded-full ${have.has(p.name) ? "bg-teal" : "bg-ink-3"}`} />
             <span className="font-mono text-ink">{p.name}</span>
             <span className="truncate text-ink-3">— {p.description}</span>
@@ -185,8 +185,8 @@ export function GoogleCard() {
             setMsg("Google OAuth client stored in the keychain.");
           }}
         >
-          <Input value={client.id} onChange={(e) => setClient({ ...client, id: e.target.value })} placeholder="Client ID (…apps.googleusercontent.com)" className="font-mono !text-[12px]" autoComplete="off" aria-label="Google OAuth client ID" />
-          <Input type="password" value={client.secret} onChange={(e) => setClient({ ...client, secret: e.target.value })} placeholder="Client secret" className="font-mono !text-[12px]" autoComplete="off" aria-label="Google OAuth client secret" />
+          <Input value={client.id} onChange={(e) => setClient({ ...client, id: e.target.value })} placeholder="Client ID (…apps.googleusercontent.com)" className="font-mono !fs-12" autoComplete="off" aria-label="Google OAuth client ID" />
+          <Input type="password" value={client.secret} onChange={(e) => setClient({ ...client, secret: e.target.value })} placeholder="Client secret" className="font-mono !fs-12" autoComplete="off" aria-label="Google OAuth client secret" />
           <button className="pill-glass !h-10 text-xs" disabled={!client.id || !client.secret}>
             Save
           </button>
@@ -256,7 +256,7 @@ export function GmailCard() {
       hint="Reads your inbox through the Google Apps Script deployment AnythingLLM's Gmail agent uses. Reading runs when you ask; a draft is saved only after you approve the confirmation card, and nothing is ever sent."
       action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
     >
-      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+      <div className="mb-2 flex flex-wrap items-center gap-2 r-12 border border-white/[0.07] px-3 py-2 text-sm">
         <Mail size={15} className={status?.configured ? "text-teal" : "text-ink-3"} />
         <span className="text-ink-2">
           Backend: <b className={status?.configured ? "text-teal" : "text-ink"}>{status ? GMAIL_SOURCE[status.source] : "…"}</b>
@@ -274,7 +274,7 @@ export function GmailCard() {
         <SecretRow name="gmail-script-key" label="Apps Script API key" onChange={refresh} />
         <p className="mt-1 text-xs text-ink-3">Used as a pair: GMAIL_SCRIPT_ID and GMAIL_SCRIPT_KEY (environment or repo-root .env, both set) take priority; otherwise both keychain entries (pasted here, or Import from AnythingLLM). Half of each is never mixed.</p>
       </div>
-      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
       <BookingInstructionsRow />
     </Card>
   );
@@ -307,14 +307,14 @@ function BookingInstructionsRow() {
         “Check my Gmail for what I got booked for” runs this file’s search and reads the newest {info?.spec.read ?? 5} threads (read-only). Line 1 is <span className="font-mono">query:</span>, line 2 <span className="font-mono">read:</span>, then your rules for Tony.
       </p>
       {info && (
-        <p className="mt-1 break-all font-mono text-[11px] text-ink-2">
+        <p className="mt-1 break-all font-mono fs-11 text-ink-2">
           {info.path}
           {info.exists || info.refused ? "" : " (missing: the built-in search is used)"}
         </p>
       )}
       {info?.refused && <p className="mt-1 text-xs text-alert">Not read: {info.refused}. The built-in search is used.</p>}
-      {info && <p className="mt-1 break-all font-mono text-[11px] text-ink-3">query: {info.spec.query}</p>}
-      {info?.exists && <pre className="well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] text-ink-2">{info.preview}</pre>}
+      {info && <p className="mt-1 break-all font-mono fs-11 text-ink-3">query: {info.spec.query}</p>}
+      {info?.exists && <pre className="well mt-2 max-h-40 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 text-ink-2">{info.preview}</pre>}
       <div className="mt-2 flex flex-wrap gap-2">
         <button onClick={() => void open()} disabled={!info?.exists} className="pill-glass !h-8 text-xs" title="Open the instruction file in Notepad">
           <FileText size={13} /> Open in editor
@@ -379,7 +379,7 @@ export function CalendarCard() {
       hint="Tony reads your calendar through the Google Apps Script deployment AnythingLLM's Calendar agent uses. Adding an event only happens after you approve the confirmation card: your primary calendar, no guests, no invites."
       action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
     >
-      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+      <div className="mb-2 flex flex-wrap items-center gap-2 r-12 border border-white/[0.07] px-3 py-2 text-sm">
         <CalendarDays size={15} className={status?.configured ? "text-teal" : "text-ink-3"} />
         <span className="text-ink-2">
           Backend: <b className={status?.configured ? "text-teal" : "text-ink"}>{status ? GCAL_SOURCE[status.source] : "…"}</b>
@@ -397,7 +397,7 @@ export function CalendarCard() {
         <SecretRow name="gcal-script-key" label="Apps Script API key" onChange={refresh} />
         <p className="mt-1 text-xs text-ink-3">Used as a pair, like Gmail's: GCAL_SCRIPT_ID and GCAL_SCRIPT_KEY (environment or repo-root .env) first, else both keychain entries.</p>
       </div>
-      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>
   );
 }
@@ -427,7 +427,7 @@ export function BraveCard() {
       <button onClick={() => void test()} disabled={busy || !server?.enabled} className="pill-glass mt-1 !h-8 text-xs">
         {busy ? <Loader2 size={13} className="animate-spin" /> : <FlaskConical size={13} />} Test search
       </button>
-      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>
   );
 }
@@ -489,7 +489,7 @@ export function SpotifyCard() {
 
   return (
     <Card title="Spotify" hint="Now playing, play / pause / skip / volume and your playlists — by voice, from Tony and from the Spotify widget. Playback control needs Spotify Premium.">
-      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+      <div className="mb-2 flex flex-wrap items-center gap-2 r-12 border border-white/[0.07] px-3 py-2 text-sm">
         <Music2 size={15} className={status?.connected ? "text-teal" : "text-ink-3"} />
         <span className="text-ink-2">
           {!status ? "…" : !status.configured ? "Not configured" : status.connected ? <>Connected{status.account ? <> as <b className="text-ink">{status.account}</b></> : null}</> : "Not connected"}
@@ -596,7 +596,7 @@ export function LocalLlmCard() {
     <Card title="Local AI (gateway)" hint="Used by the phone and desktop alike for receipt OCR, brainstorm organizing, widget generation and the vector vault. Runs on your LM Studio — zero token cost, nothing leaves the machine.">
       <div className="grid gap-2 sm:grid-cols-2">
         <Field label="Endpoint (OpenAI-compatible)">
-          <Input defaultValue={cfg.llm.baseUrl} onBlur={(e) => e.target.value !== cfg.llm.baseUrl && void save({ baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+          <Input defaultValue={cfg.llm.baseUrl} onBlur={(e) => e.target.value !== cfg.llm.baseUrl && void save({ baseUrl: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
         </Field>
         {pick("Text model", "model", (m) => !/embed/i.test(m), tonyModel ? `Tony's loaded model (${tonyModel}) — no second load` : "The loaded model (no second load)")}
         {pick("Vision model (OCR)", "visionModel", (m) => /vl|vision|llava|gemma-3|qwen2\.5-vl|pixtral|minicpm/i.test(m), "Same as text model")}
@@ -689,7 +689,7 @@ export function MapsCard() {
       hint="Free map stack, no key or card: OpenFreeMap tiles, Nominatim geocoding (1 request/second, cached) and OSRM driving routes. ETAs are baseline estimates — public OSRM has no live traffic. Google Maps is on hold behind the same provider interface."
       action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
     >
-      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+      <div className="mb-2 flex flex-wrap items-center gap-2 r-12 border border-white/[0.07] px-3 py-2 text-sm">
         <MapIcon size={15} className={LIVE_TONE[badge.tone]} />
         <span className={`label-caps ${LIVE_TONE[badge.tone]}`} title={error ?? status?.detail}>
           {badge.label}
@@ -706,7 +706,7 @@ export function MapsCard() {
         {status?.status === "error" ? `${status.detail} · ` : ""}Home for “how long to get to…”:{" "}
         {status?.homeSet ? "MAP_HOME from .env" : "Toronto city centre — set MAP_HOME (address or “lat,lng”) in the repo-root .env"}. Routes show on the Maps widget.
       </p>
-      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>
   );
 }
@@ -737,13 +737,13 @@ export function InstagramCard() {
       hint="Your Instagram Professional account via the Instagram API with Instagram Login (Graph API v26.0). Tony reads profile stats, recent posts, insights and comments; replying to a comment or publishing a post always shows a confirmation card first."
       action={busy ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
     >
-      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+      <div className="mb-2 flex flex-wrap items-center gap-2 r-12 border border-white/[0.07] px-3 py-2 text-sm">
         <Camera size={15} className={LIVE_TONE[badge.tone]} />
         <span className={`label-caps ${LIVE_TONE[badge.tone]}`} title={error ?? undefined}>
           {badge.label}
         </span>
         {status?.status === "ok" && (
-          <span className="font-mono text-[11px] text-ink-3 tabular">
+          <span className="font-mono fs-11 text-ink-3 tabular">
             {status.followers ?? "?"} followers · {status.mediaCount ?? "?"} posts
           </span>
         )}
@@ -769,7 +769,7 @@ export function InstagramCard() {
       />
       {status && status.status !== "missing" && <p className="mt-1 text-xs text-ink-3">{tokenExpiryLine(status)}</p>}
       {status && (status.status === "error" || status.status === "missing") && <p className="mt-1 text-xs text-alert">{status.detail}</p>}
-      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[8px] p-2 text-[11px] ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
+      {out && <pre className={`well mt-2 max-h-40 overflow-auto whitespace-pre-wrap r-8 p-2 fs-11 ${out.ok ? "text-ink-2" : "text-alert"}`}>{out.text}</pre>}
     </Card>
   );
 }

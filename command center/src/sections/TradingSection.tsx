@@ -97,7 +97,7 @@ export function TradingSection() {
       <div className="flex justify-end">
         <ReadOnlyBanner module="trading" />
       </div>
-      <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2.5">
+      <div className="glass flex flex-wrap items-center gap-2 r-18 p-2.5">
         <form
           className="flex gap-2"
           onSubmit={(e) => {
@@ -106,7 +106,7 @@ export function TradingSection() {
             if (s) pick(s);
           }}
         >
-          <Input value={symbolInput} onChange={(e) => setSymbolInput(e.target.value)} className="!h-9 !w-36 !py-1 font-mono text-[13px] uppercase" aria-label="Ticker" placeholder="SPY, ES=F, BTC-USD" />
+          <Input value={symbolInput} onChange={(e) => setSymbolInput(e.target.value)} className="!h-9 !w-36 !py-1 font-mono fs-13 uppercase" aria-label="Ticker" placeholder="SPY, ES=F, BTC-USD" />
           <button className="pill-primary !h-9 text-xs">Load</button>
         </form>
         <Input
@@ -114,7 +114,7 @@ export function TradingSection() {
           onChange={(e) => setTvInput(e.target.value.toUpperCase())}
           onBlur={commitTv}
           onKeyDown={(e) => e.key === "Enter" && commitTv()}
-          className="!h-9 !w-40 !py-1 font-mono text-[12px]"
+          className="!h-9 !w-40 !py-1 font-mono fs-12"
           aria-label="TradingView symbol"
           title="TradingView symbol (auto-mapped; override if needed)"
         />
@@ -125,17 +125,17 @@ export function TradingSection() {
             </Chip>
           ))}
         </div>
-        <Select value={t.range} onChange={(e) => up({ range: e.target.value })} className="!h-9 !w-auto !py-1 text-[13px]" aria-label="Range">
+        <Select value={t.range} onChange={(e) => up({ range: e.target.value })} className="!h-9 !w-auto !py-1 fs-13" aria-label="Range">
           {RANGES.map((r) => (
             <option key={r}>{r}</option>
           ))}
         </Select>
-        <span className="ml-auto text-[11px] text-ink-3">IBKR paper only · every order passes the Security Detail.</span>
+        <span className="ml-auto fs-11 text-ink-3">IBKR paper only · every order passes the Security Detail.</span>
       </div>
 
       <HealthCard />
 
-      <div className="glass flex flex-wrap items-center gap-1.5 rounded-[18px] p-2.5" aria-label="Watchlist">
+      <div className="glass flex flex-wrap items-center gap-1.5 r-18 p-2.5" aria-label="Watchlist">
         {watchlist.map((s) => (
           <Chip key={s} active={t.symbol === s} onClick={() => pick(s)}>
             {s}
@@ -165,7 +165,7 @@ export function TradingSection() {
           )}
         </Card>
         <Card title="Market news" className="!p-3">
-          <iframe key={newsSrc} src={newsSrc} title="Market news" className="h-[440px] w-full rounded-[12px] border-0" loading="lazy" />
+          <iframe key={newsSrc} src={newsSrc} title="Market news" className="h-[440px] w-full r-12 border-0" loading="lazy" />
         </Card>
       </div>
 
@@ -195,7 +195,7 @@ export function TradingSection() {
             <Chip active={t.showZones} onClick={() => up({ showZones: !t.showZones })} tone="teal">
               Zones
             </Chip>
-            <Select value={bins} onChange={(e) => setBins(Number(e.target.value))} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Profile resolution">
+            <Select value={bins} onChange={(e) => setBins(Number(e.target.value))} className="!h-8 !w-auto !py-0 fs-12" aria-label="Profile resolution">
               {[24, 48, 72, 96].map((b) => (
                 <option key={b} value={b}>
                   {b} bins
@@ -223,7 +223,7 @@ export function TradingSection() {
             <Stat label="Supply zones" value={zones.filter((z) => z.kind === "supply").length} sub={nearest(zones, "supply", last.c)} tone="alert" />
           </div>
         )}
-        <p className="mt-3 text-[11px] text-ink-3">
+        <p className="mt-3 fs-11 text-ink-3">
           Zones: a tight base followed by a ≥1.5×ATR move; dashed = already tested, removed once price closes through. Volume is spread across each bar's range. Educational tool, not trading advice.
         </p>
       </Card>

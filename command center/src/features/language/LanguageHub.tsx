@@ -46,15 +46,15 @@ export function LanguageHub({ compact = false }: { compact?: boolean }) {
               aria-label={label}
               aria-selected={view === id}
               onClick={() => setPrefs({ view: id })}
-              className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition-colors sm:flex-none sm:px-4 ${
+              className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-full px-3 fs-13 font-medium transition-colors sm:flex-none sm:px-4 ${
                 view === id ? "bg-amber/20 text-amber-light" : "text-ink-2 hover:text-ink"
               }`}
             >
               <Icon size={15} />
               {/* Phones get the one-word label so the three pills stay on one line. */}
-              <span className={compact ? "text-[12px]" : "hidden sm:inline"}>{compact ? short : label}</span>
+              <span className={compact ? "fs-12" : "hidden sm:inline"}>{compact ? short : label}</span>
               {!compact && <span className="sm:hidden">{short}</span>}
-              {id === "library" && loaded && <span className="font-mono text-[10px] text-ink-3">{libCount}</span>}
+              {id === "library" && loaded && <span className="font-mono fs-10 text-ink-3">{libCount}</span>}
             </button>
           ))}
         </div>

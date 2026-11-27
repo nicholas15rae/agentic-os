@@ -56,6 +56,7 @@ export interface ExtCommands extends DirectorJsonCommands, CloudCommands {
   delete_build_job: { args: { jobId: string; purgeFiles?: boolean }; result: DeleteReport };
   /** The Trash, newest first (expired entries swept first). */
   trash_list: { args: undefined; result: TrashEntry[] };
+  ui_file_save: { args: { contents: string }; result: string | null };
   /** Undo a delete: folders back in place, the card back in the hub / the run back on the list. */
   trash_restore: { args: { trashId: string }; result: TrashEntry };
   /** Delete one Trash entry for good. */

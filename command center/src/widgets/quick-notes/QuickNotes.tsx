@@ -28,7 +28,7 @@ export default function QuickNotes({ config, setConfig, instanceId }: WidgetProp
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder="Capture a thought…"
-        className="well min-h-24 w-full flex-1 resize-none rounded-[12px] bg-transparent p-3 font-mono text-[13px] leading-relaxed text-ink outline-none placeholder:text-ink-3 focus:ring-1 focus:ring-teal/60"
+        className="well min-h-24 w-full flex-1 resize-none r-12 bg-transparent p-3 font-mono fs-13 leading-relaxed text-ink outline-none placeholder:text-ink-3 focus:ring-1 focus:ring-teal/60"
       />
     </div>
   );

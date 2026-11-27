@@ -41,7 +41,7 @@ export function DriveBrowser({ startFolderId, compact = false, showOutbox = true
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      <nav aria-label="Drive folders" className="flex min-w-0 flex-wrap items-center gap-0.5 text-[12px]">
+      <nav aria-label="Drive folders" className="flex min-w-0 flex-wrap items-center gap-0.5 fs-12">
         {crumbs(listing).map((c, i, all) => (
           <span key={`${c.id}-${i}`} className="flex min-w-0 items-center gap-0.5">
             {i > 0 && <ChevronRight size={11} className="shrink-0 text-ink-3" />}
@@ -69,7 +69,7 @@ export function DriveBrowser({ startFolderId, compact = false, showOutbox = true
         >
           <div className="relative min-w-0 flex-1">
             <Search size={12} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-3" />
-            <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Search this folder" aria-label="Search Drive" className="field !h-8 !py-0 !pl-7 text-[12px]" />
+            <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Search this folder" aria-label="Search Drive" className="field !h-8 !py-0 !pl-7 fs-12" />
           </div>
           {query && (
             <button
@@ -91,13 +91,13 @@ export function DriveBrowser({ startFolderId, compact = false, showOutbox = true
             <button
               onClick={() => void setFolder("inbox", folder)}
               disabled={isInbox || !listing}
-              className="pill-glass !h-8 !px-2.5 text-[11px] disabled:opacity-50"
+              className="pill-glass !h-8 !px-2.5 fs-11 disabled:opacity-50"
               title="Remember this folder as the Drive inbox (where new footage lands)"
             >
               <Inbox size={12} /> {isInbox ? "Inbox" : "Set as inbox"}
             </button>
             {showOutbox && (
-              <button onClick={() => void setFolder("outbox", folder)} disabled={isOutbox || !listing} className="pill-glass !h-8 !px-2.5 text-[11px] disabled:opacity-50" title="Uploads go to this folder by default">
+              <button onClick={() => void setFolder("outbox", folder)} disabled={isOutbox || !listing} className="pill-glass !h-8 !px-2.5 fs-11 disabled:opacity-50" title="Uploads go to this folder by default">
                 <Send size={12} /> {isOutbox ? "Outbox" : "Set as outbox"}
               </button>
             )}
@@ -105,9 +105,9 @@ export function DriveBrowser({ startFolderId, compact = false, showOutbox = true
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-[12px] border border-white/[0.06]">
+      <div className="min-h-0 flex-1 overflow-y-auto r-12 border border-white/[0.06]">
         {error ? (
-          <p className="p-3 text-[12px] text-alert" role="alert">
+          <p className="p-3 fs-12 text-alert" role="alert">
             {error}
           </p>
         ) : !listing && loading ? (
@@ -115,7 +115,7 @@ export function DriveBrowser({ startFolderId, compact = false, showOutbox = true
             <Loader2 size={15} className="animate-spin" />
           </div>
         ) : listing && listing.items.length === 0 ? (
-          <p className="p-4 text-center text-[12px] text-ink-3">{query ? "Nothing matches." : "This folder is empty."}</p>
+          <p className="p-4 text-center fs-12 text-ink-3">{query ? "Nothing matches." : "This folder is empty."}</p>
         ) : (
           <ul className="divide-y divide-white/[0.04]">
             {listing?.items.map((it) => (
@@ -125,7 +125,7 @@ export function DriveBrowser({ startFolderId, compact = false, showOutbox = true
         )}
         {listing?.nextPageToken && (
           <div className="p-2 text-center">
-            <button onClick={() => void loadMore()} disabled={loading} className="pill-glass !h-7 !px-3 text-[11px] disabled:opacity-50">
+            <button onClick={() => void loadMore()} disabled={loading} className="pill-glass !h-7 !px-3 fs-11 disabled:opacity-50">
               {loading ? <Loader2 size={11} className="animate-spin" /> : null} Load more
             </button>
           </div>
@@ -143,7 +143,7 @@ export function DriveRow({ item, on, compact }: { item: CloudItem; on: boolean; 
       <li>
         <button onClick={() => void browse(item.id)} className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white/5">
           <ItemIcon kind="folder" />
-          <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{item.name}</span>
+          <span className="min-w-0 flex-1 truncate fs-13 text-ink">{item.name}</span>
           <ChevronRight size={12} className="shrink-0 text-ink-3" />
         </button>
       </li>
@@ -157,10 +157,10 @@ export function DriveRow({ item, on, compact }: { item: CloudItem; on: boolean; 
         title={media ? item.name : `${item.name} — only video, image and audio files can be imported`}
         className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left ${on ? "bg-teal/10" : media ? "hover:bg-white/5" : "cursor-not-allowed opacity-45"}`}
       >
-        <span className={`grid size-4 shrink-0 place-items-center rounded-[4px] border ${on ? "border-teal bg-teal text-canvas" : "border-white/20"}`}>{on && <Check size={10} />}</span>
+        <span className={`grid size-4 shrink-0 place-items-center r-4 border ${on ? "border-teal bg-teal text-canvas" : "border-white/20"}`}>{on && <Check size={10} />}</span>
         <ItemIcon kind={item.kind} />
-        <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{item.name}</span>
-        {!compact && meta && <span className="shrink-0 font-mono text-[10px] text-ink-3">{meta}</span>}
+        <span className="min-w-0 flex-1 truncate fs-13 text-ink">{item.name}</span>
+        {!compact && meta && <span className="shrink-0 font-mono fs-10 text-ink-3">{meta}</span>}
       </button>
     </li>
   );

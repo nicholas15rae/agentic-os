@@ -67,12 +67,12 @@ export function SecurityCard() {
       title="Security"
       hint={`App lock after ${status.idleLockMinutes} min without input (talking to Tony counts) and every ${status.reauthMinutes} min regardless; Trading, Finance and Settings are read-only until a PIN step-up, which stays open while you're active (${status.elevationIdleMinutes} min unused, ${status.elevationMaxMinutes} min max). Admin: gabagool-cli.`}
       action={
-        <button className="pill-glass !h-8 text-[11px]" onClick={load} aria-label="Refresh audit">
+        <button className="pill-glass !h-8 fs-11" onClick={load} aria-label="Refresh audit">
           <RefreshCw size={12} />
         </button>
       }
     >
-      <div className="grid grid-cols-2 gap-2 text-[11px] text-ink-2 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 fs-11 text-ink-2 md:grid-cols-4">
         <span>PIN: {status.pinSet ? "set (Argon2id)" : "NOT set"}</span>
         <span>Biometrics: {status.biometricAvailable ? "available" : "unavailable"}</span>
         <span>Companion: {status.companionPaired ? "paired" : status.companionDevice ? "this is the phone" : "not paired"}</span>
@@ -125,12 +125,12 @@ export function SecurityCard() {
           />
         </div>
       )}
-      {msg && <p className="mt-2 text-[11px] text-ink-2">{msg}</p>}
+      {msg && <p className="mt-2 fs-11 text-ink-2">{msg}</p>}
 
       {status.companionDevice && (
         <>
           <h3 className="label-caps mt-4 text-ink-3">Desktop alerts (this phone)</h3>
-          <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto text-[11px]">
+          <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto fs-11">
             {inbox.map((a) => (
               <li key={a.id} className={TONE[a.severity] ?? "text-ink-3"}>
                 {new Date(a.ts * 1000).toLocaleString()} · {a.body}
@@ -150,13 +150,13 @@ export function SecurityCard() {
             type="button"
             aria-pressed={filter === f.id}
             onClick={() => setFilter(f.id)}
-            className={`rounded-full border px-2 py-0.5 text-[10.5px] ${filter === f.id ? "border-amber/50 bg-amber/15 text-amber-light" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
+            className={`rounded-full border px-2 py-0.5 fs-10.5 ${filter === f.id ? "border-amber/50 bg-amber/15 text-amber-light" : "border-white/10 text-ink-3 hover:text-ink-2"}`}
           >
             {f.label}
           </button>
         ))}
       </div>
-      <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto font-mono text-[10.5px]" data-testid="audit-list">
+      <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto font-mono fs-10.5" data-testid="audit-list">
         {shown.map((e) => (
           <li key={`${e.seq}-${e.ts}`} className={TONE[e.severity]}>
             {e.ts.slice(0, 19).replace("T", " ")} · {e.event}
@@ -202,11 +202,11 @@ function TimeoutEditor({ current, onSaved }: { current: SessionTimeouts; onSaved
     }
   };
   return (
-    <div className="mt-3 rounded-[12px] border border-white/[0.06] p-3" aria-label="Session timeouts">
+    <div className="mt-3 r-12 border border-white/[0.06] p-3" aria-label="Session timeouts">
       <p className="label-caps mb-2 text-ink-3">Timeouts (minutes)</p>
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
         {TIMEOUT_FIELDS.map((f) => (
-          <label key={f.key} className="text-[11px] text-ink-2" title={f.hint}>
+          <label key={f.key} className="fs-11 text-ink-2" title={f.hint}>
             {f.label} ({f.min}–{f.max})
             <Input
               type="number"
@@ -220,16 +220,16 @@ function TimeoutEditor({ current, onSaved }: { current: SessionTimeouts; onSaved
           </label>
         ))}
       </div>
-      <label className="mt-2 flex items-center gap-2 text-[11px] text-ink-2" title="An unlocked session comes back after the app restarts, if it is still inside the idle and re-verify windows and nothing locked it in between. Step-ups never carry over.">
+      <label className="mt-2 flex items-center gap-2 fs-11 text-ink-2" title="An unlocked session comes back after the app restarts, if it is still inside the idle and re-verify windows and nothing locked it in between. Step-ups never carry over.">
         <input type="checkbox" checked={!!draft.persistAcrossRestarts} onChange={(e) => setDraft({ ...draft, persistAcrossRestarts: e.target.checked })} />
         Stay unlocked across app restarts
       </label>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <button className="pill-glass !h-8 text-[11px]" disabled={busy || !dirty} onClick={() => void save()} title="Needs your PIN (Settings step-up)">
+        <button className="pill-glass !h-8 fs-11" disabled={busy || !dirty} onClick={() => void save()} title="Needs your PIN (Settings step-up)">
           {busy ? <Loader2 size={12} className="animate-spin" /> : <TimerReset size={12} />} Save timeouts
         </button>
-        {dirty && adjusted && <span className="text-[11px] text-ink-3">Will save as {TIMEOUT_FIELDS.map((f) => next[f.key]).join(" / ")} min.</span>}
-        {note && <span className="text-[11px] text-ink-3">{note}</span>}
+        {dirty && adjusted && <span className="fs-11 text-ink-3">Will save as {TIMEOUT_FIELDS.map((f) => next[f.key]).join(" / ")} min.</span>}
+        {note && <span className="fs-11 text-ink-3">{note}</span>}
       </div>
     </div>
   );
@@ -270,9 +270,9 @@ function PairingQr({ paired }: { paired: boolean }) {
     }
   };
   return (
-    <div className="mt-3 text-[11px] text-ink-2">
+    <div className="mt-3 fs-11 text-ink-2">
       <div className="flex flex-wrap items-center gap-2">
-        <button className="pill-glass !h-8 text-[11px]" disabled={busy} onClick={() => void (qr ? (setQr(null), setNote(null)) : show())}>
+        <button className="pill-glass !h-8 fs-11" disabled={busy} onClick={() => void (qr ? (setQr(null), setNote(null)) : show())}>
           {busy ? <Loader2 size={12} className="animate-spin" /> : <QrCode size={12} />} {qr ? "Hide pairing code" : "Pair phone with QR"}
         </button>
         <span className="text-ink-3">Scan it in the phone app (Settings → Security), then approve one request on the phone within 2 minutes to finish pairing. The code works for one phone only; unused, it expires and nothing changes.</span>

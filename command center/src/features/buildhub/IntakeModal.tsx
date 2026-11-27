@@ -124,10 +124,10 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
 
   return (
     <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-3" role="dialog" aria-modal="true" aria-label="Intake interview">
-      <div className="glass flex max-h-[92dvh] w-full max-w-2xl flex-col rounded-[20px] p-4">
+      <div className="glass flex max-h-[92dvh] w-full max-w-2xl flex-col r-20 p-4">
         <div className="mb-3 flex items-center gap-2">
           <Hammer size={16} className="text-amber-soft" />
-          <h2 className="text-[15px] font-semibold text-ink">Intake interview</h2>
+          <h2 className="fs-15 font-semibold text-ink">Intake interview</h2>
           <span className="label-caps text-ink-3">
             {notes.length} note{notes.length === 1 ? "" : "s"} · {source === "prompter" ? "Prompter's questions" : "standard questions"}
           </span>
@@ -153,8 +153,8 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
             </p>
           )}
           {questions?.map((q, i) => (
-            <fieldset key={q.id} className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-3">
-              <legend className="px-1 text-[13px] text-ink">
+            <fieldset key={q.id} className="r-12 border border-white/[0.06] bg-white/[0.02] p-3">
+              <legend className="px-1 fs-13 text-ink">
                 {i + 1}. {q.question}
               </legend>
               <div className="mt-1 flex flex-wrap gap-1.5">
@@ -166,7 +166,7 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
                       type="button"
                       aria-pressed={on}
                       onClick={() => set(q.id, { choice: on ? undefined : o })}
-                      className={`rounded-full border px-3 py-1 text-[12px] transition-colors ${on ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 text-ink-2 hover:text-ink"}`}
+                      className={`rounded-full border px-3 py-1 fs-12 transition-colors ${on ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 text-ink-2 hover:text-ink"}`}
                     >
                       {o}
                     </button>
@@ -183,11 +183,11 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
               )}
             </fieldset>
           ))}
-          <fieldset className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-3">
-            <label className="flex cursor-pointer items-center gap-2 text-[13px] text-ink">
+          <fieldset className="r-12 border border-white/[0.06] bg-white/[0.02] p-3">
+            <label className="flex cursor-pointer items-center gap-2 fs-13 text-ink">
               <input type="checkbox" checked={mount} onChange={(e) => setMount(e.target.checked)} className="accent-amber" />
               <PanelLeft size={13} className="text-amber-soft" /> Add as Command Center page
-              <span className="text-[11px] text-ink-3">(mount in the left sidebar under My Apps)</span>
+              <span className="fs-11 text-ink-3">(mount in the left sidebar under My Apps)</span>
             </label>
             {mount && (
               <div className="mt-2">
@@ -200,11 +200,11 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
               <summary className="flex cursor-pointer items-center gap-1 text-xs text-teal">
                 <Braces size={12} /> TaskEnvelope (strict JSON)
               </summary>
-              <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 font-mono text-[10.5px] text-ink-2">{JSON.stringify(compiled.envelope, null, 2)}</pre>
+              <pre className="well mt-1 max-h-64 overflow-auto whitespace-pre-wrap r-10 p-2 font-mono fs-10.5 text-ink-2">{JSON.stringify(compiled.envelope, null, 2)}</pre>
             </details>
           )}
           {blocker && (
-            <p role="status" className="flex items-start gap-2 rounded-[12px] border border-amber/30 bg-amber/10 p-2.5 text-xs text-ink">
+            <p role="status" className="flex items-start gap-2 r-12 border border-amber/30 bg-amber/10 p-2.5 text-xs text-ink">
               <Info size={13} className="mt-0.5 shrink-0 text-amber-soft" /> {blocker}
             </p>
           )}
@@ -213,7 +213,7 @@ export function IntakeModal({ notes, onClose }: { notes: IntakeNote[]; onClose: 
         </div>
 
         <div className="mt-3 flex items-center gap-2">
-          <span className="text-[11px] text-ink-3">
+          <span className="fs-11 text-ink-3">
             {answered}/{questions?.length ?? 0} answered{problems.length && compiled ? ` · fix: ${problems.join(", ")}` : ""}
           </span>
           <button onClick={() => void dispatch()} disabled={!compiled || problems.length > 0 || busy || !!blocker} className="pill-primary ml-auto !h-9 text-xs disabled:opacity-50" title={blocker ?? "Raises the confirmation card; nothing is queued before its yes"}>

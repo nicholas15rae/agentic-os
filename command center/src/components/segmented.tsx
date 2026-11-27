@@ -39,7 +39,7 @@ export function Segmented<T extends string | number>({
   disabled?: boolean;
   className?: string;
 }) {
-  const h = size === "sm" ? "h-6 px-2 text-[10px]" : "h-7 px-3 text-[11px]";
+  const h = size === "sm" ? "h-6 px-2 fs-10" : "h-7 px-3 fs-11";
   return (
     <div role="radiogroup" aria-label={label} aria-disabled={disabled || undefined} className={`well flex w-fit rounded-full p-0.5 ${className}`}>
       {options.map((o) => {

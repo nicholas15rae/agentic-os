@@ -111,9 +111,9 @@ export default function RouteMap() {
               {busy ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
             </button>
           </form>
-          <div className="relative min-h-[120px] flex-1 overflow-hidden rounded-[12px] border border-white/[0.07]">
+          <div className="relative min-h-[120px] flex-1 overflow-hidden r-12 border border-white/[0.07]">
             <div ref={box} className="absolute inset-0" />
-            {mapError && <p className="absolute inset-x-2 bottom-2 rounded-[8px] bg-canvas/80 px-2 py-1 text-[11px] text-alert">{mapError}</p>}
+            {mapError && <p className="absolute inset-x-2 bottom-2 r-8 bg-canvas/80 px-2 py-1 fs-11 text-alert">{mapError}</p>}
           </div>
           {route && dst && (
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
@@ -121,16 +121,16 @@ export default function RouteMap() {
               <span className="text-ink">
                 <b className="font-mono tabular">{fmtDuration(route.durationS)}</b> · {fmtDistance(route.distanceM)} to {shortLabel(dst.label)}
               </span>
-              <button onClick={openInMaps} className="pill-glass ml-auto !h-7 text-[11px]" title="Turn-by-turn in Google Maps (hand off to your phone)">
+              <button onClick={openInMaps} className="pill-glass ml-auto !h-7 fs-11" title="Turn-by-turn in Google Maps (hand off to your phone)">
                 <ExternalLink size={12} /> Open in Maps
               </button>
-              <button onClick={clear} className="pill-glass !h-7 !px-2 text-[11px]" aria-label="Clear route" title="Clear route">
+              <button onClick={clear} className="pill-glass !h-7 !px-2 fs-11" aria-label="Clear route" title="Clear route">
                 <X size={12} />
               </button>
             </div>
           )}
-          {route && <p className="mt-1 text-[10px] text-ink-3">{route.note}</p>}
-          {err && <p className="mt-1 text-[11px] text-alert">{err}</p>}
+          {route && <p className="mt-1 fs-10 text-ink-3">{route.note}</p>}
+          {err && <p className="mt-1 fs-11 text-alert">{err}</p>}
         </>
       )}
     </div>

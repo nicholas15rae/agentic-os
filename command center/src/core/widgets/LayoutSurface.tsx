@@ -40,16 +40,16 @@ function SurfaceEditBar() {
   if (!editing) return null;
   return (
     <div className="mx-4 mb-3 md:mx-6 xl:mx-8">
-      <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2">
-        <button onClick={() => setDrawer(true)} className="pill-primary !h-9 shrink-0 !px-3 text-[13px]" title="Add a panel, or bring back one you hid">
+      <div className="glass flex flex-wrap items-center gap-2 r-18 p-2">
+        <button onClick={() => setDrawer(true)} className="pill-primary !h-9 shrink-0 !px-3 fs-13" title="Add a panel, or bring back one you hid">
           <Plus size={13} /> Add panel
         </button>
         <LayoutControls />
-        <button onClick={() => useL.getState().setEditing(false)} className="pill-glass ml-auto !h-9 shrink-0 !px-3 text-[13px]">
+        <button onClick={() => useL.getState().setEditing(false)} className="pill-glass ml-auto !h-9 shrink-0 !px-3 fs-13">
           <Check size={13} /> Done
         </button>
       </div>
-      {msg && <p className="mt-1 px-2 text-[12px] text-ink-2">{msg}</p>}
+      {msg && <p className="mt-1 px-2 fs-12 text-ink-2">{msg}</p>}
       {drawer && (
         <WidgetDrawer
           surface={surface}
@@ -78,7 +78,7 @@ export function LayoutControls() {
   const modeId = useModes((s) => s.activeId);
   const modeName = useModes((s) => s.modes.find((m) => m.id === s.activeId)?.name ?? s.activeId);
   const own = variant !== SHARED && variant === modeId;
-  const btn = "pill-glass !h-9 shrink-0 !px-3 text-[13px]";
+  const btn = "pill-glass !h-9 shrink-0 !px-3 fs-13";
   return (
     <>
       <button onClick={() => useL.getState().reset()} className={btn} title="Restores this page's default layout (any extra page is cleared). Safety controls stay. Other pages are untouched.">

@@ -45,7 +45,7 @@ export function FinanceSection() {
     <div className="mx-auto h-full w-full max-w-6xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
       <div className="flex flex-wrap items-center gap-3">
         <SubTabs tabs={TABS} value={tab} onChange={setTab} />
-        <span className="ml-auto flex items-center gap-1.5 text-[11px] text-ink-3">
+        <span className="ml-auto flex items-center gap-1.5 fs-11 text-ink-3">
           <Lock size={12} /> 100% local · no bank connections
         </span>
         <ReadOnlyBanner module="finance" />
@@ -150,7 +150,7 @@ function Overview({ go }: { go: (t: Tab) => void }) {
               Scan today's receipts
             </Todo>
           </ul>
-          <p className="mt-3 text-[11px] text-ink-3">The HST estimate is a bookkeeping aid, not tax advice — confirm with your accountant before filing.</p>
+          <p className="mt-3 fs-11 text-ink-3">The HST estimate is a bookkeeping aid, not tax advice — confirm with your accountant before filing.</p>
         </Card>
       </div>
     </div>
@@ -160,14 +160,14 @@ function Overview({ go }: { go: (t: Tab) => void }) {
 const dueText = (r: FinanceReminder) => {
   if (r.dueAt == null || r.kind === "hst" || r.kind === "cheque") return null;
   const d = new Date(r.dueAt).toLocaleDateString();
-  return <span className={`ml-1 text-[11px] ${r.overdue ? "text-alert" : "text-ink-3"}`}>{r.overdue ? `· since ${d}` : `· by ${d}`}</span>;
+  return <span className={`ml-1 fs-11 ${r.overdue ? "text-alert" : "text-ink-3"}`}>{r.overdue ? `· since ${d}` : `· by ${d}`}</span>;
 };
 
 function Todo({ show, onClick, children, tone = "amber" }: { show: boolean; onClick: () => void; children: React.ReactNode; tone?: "amber" | "alert" }) {
   if (!show) return null;
   return (
     <li>
-      <button onClick={onClick} className="flex w-full items-center gap-2 rounded-[10px] border border-white/[0.06] px-3 py-2 text-left text-ink hover:border-amber/40">
+      <button onClick={onClick} className="flex w-full items-center gap-2 r-10 border border-white/[0.06] px-3 py-2 text-left text-ink hover:border-amber/40">
         <span className={`size-1.5 shrink-0 rounded-full ${tone === "alert" ? "bg-alert" : "bg-amber"}`} /> <span className="min-w-0">{children}</span>
       </button>
     </li>

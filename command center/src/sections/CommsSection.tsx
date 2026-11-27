@@ -158,18 +158,18 @@ function Inbox({ compact }: { compact: boolean }) {
                     setSel(t.thread);
                     if (t.unread) void gateway(`/api/comms/threads/${encodeURIComponent(t.thread)}/read`, { method: "POST" }).then(load);
                   }}
-                  className={`w-full rounded-[12px] px-3 py-2 text-left transition-colors ${sel === t.thread ? "bg-amber/10" : "hover:bg-white/5"}`}
+                  className={`w-full r-12 px-3 py-2 text-left transition-colors ${sel === t.thread ? "bg-amber/10" : "hover:bg-white/5"}`}
                 >
                   <div className="flex items-center gap-2">
                     <span className={`truncate text-sm ${t.unread ? "font-semibold text-ink" : "text-ink"}`}>{t.contactName || t.contact}</span>
-                    {t.company && <span className="truncate text-[11px] text-ink-3">{t.company}</span>}
+                    {t.company && <span className="truncate fs-11 text-ink-3">{t.company}</span>}
                     {t.channel !== "sms" && <span className="label-caps text-teal">{t.channel}</span>}
                     {t.trusted && <ShieldCheck size={11} className="text-teal" />}
-                    <span className="ml-auto shrink-0 font-mono text-[10px] text-ink-3">{when(t.ts)}</span>
+                    <span className="ml-auto shrink-0 font-mono fs-10 text-ink-3">{when(t.ts)}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="truncate text-xs text-ink-3">{t.direction === "out" ? "You: " : ""}{t.body}</span>
-                    {t.unread > 0 && <span className="ml-auto grid size-4 shrink-0 place-items-center rounded-full bg-amber font-mono text-[9px] text-canvas">{t.unread}</span>}
+                    {t.unread > 0 && <span className="ml-auto grid size-4 shrink-0 place-items-center rounded-full bg-amber font-mono fs-9 text-canvas">{t.unread}</span>}
                   </div>
                 </button>
               </li>
@@ -274,7 +274,7 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
   };
 
   return (
-    <section className="glass-chat flex min-h-[420px] flex-col rounded-[20px]">
+    <section className="glass-chat flex min-h-[420px] flex-col r-20">
       <header className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
         {onBack && (
           <button onClick={onBack} aria-label="Back" className="text-ink-2">
@@ -286,11 +286,11 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
             {name}
             {thread.contactId && <BookUser size={11} className="ml-1 inline text-teal" aria-label="In the phone book" />}
           </p>
-          {(thread.company || thread.role) && <p className="truncate text-[11px] text-ink-2">{[thread.company, thread.role].filter(Boolean).join(" · ")}</p>}
-          <p className="font-mono text-[11px] text-ink-3">{thread.address} · {whatsapp ? "WhatsApp" : "SMS"}</p>
+          {(thread.company || thread.role) && <p className="truncate fs-11 text-ink-2">{[thread.company, thread.role].filter(Boolean).join(" · ")}</p>}
+          <p className="font-mono fs-11 text-ink-3">{thread.address} · {whatsapp ? "WhatsApp" : "SMS"}</p>
         </div>
         {!thread.contactId && !whatsapp && (
-          <button onClick={() => void file()} disabled={filing} className="pill-glass ml-auto !h-8 text-[11px]" title="Add this number to the phone book">
+          <button onClick={() => void file()} disabled={filing} className="pill-glass ml-auto !h-8 fs-11" title="Add this number to the phone book">
             {filing ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />} Phone book
           </button>
         )}
@@ -299,7 +299,7 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
         </a>
         {/* Untrustable channels never offer turning it on, but trust set before this rule can still be switched off. */}
         {(trustable || thread.trusted) && (
-          <button onClick={toggleTrust} className={`pill-glass !h-8 text-[11px] ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies you type to this contact skip the confirmation card (Tony, voice and agents still ask)">
+          <button onClick={toggleTrust} className={`pill-glass !h-8 fs-11 ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies you type to this contact skip the confirmation card (Tony, voice and agents still ask)">
             <Zap size={12} /> {thread.trusted ? "Instant Send on" : "Instant Send"}
           </button>
         )}
@@ -308,9 +308,9 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
         {!msgs && <Loader2 size={14} className="animate-spin text-ink-3" />}
         {msgs?.map((m) => (
           <div key={m.id} className={`flex ${m.direction === "out" ? "justify-end" : ""}`}>
-            <div className={`max-w-[78%] rounded-[16px] px-3 py-2 text-sm ${m.direction === "out" ? "bg-amber/20 text-ink" : "bg-white/[0.06] text-ink"}`}>
+            <div className={`max-w-[78%] r-16 px-3 py-2 text-sm ${m.direction === "out" ? "bg-amber/20 text-ink" : "bg-white/[0.06] text-ink"}`}>
               <p className="whitespace-pre-wrap break-words">{m.body}</p>
-              <p className="mt-0.5 text-right font-mono text-[10px] text-ink-3">{new Date(m.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
+              <p className="mt-0.5 text-right font-mono fs-10 text-ink-3">{new Date(m.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
             </div>
           </div>
         ))}
@@ -366,7 +366,7 @@ function Dialer() {
           <ul className="mt-1 space-y-0.5">
             {contacts.slice(0, 5).map((c) => (
               <li key={c.address}>
-                <button onClick={() => setNum(c.address)} className="w-full rounded-[8px] px-2 py-1 text-left text-xs text-ink-2 hover:bg-white/5">
+                <button onClick={() => setNum(c.address)} className="w-full r-8 px-2 py-1 text-left text-xs text-ink-2 hover:bg-white/5">
                   {c.name} · <span className="font-mono">{c.address}</span>
                 </button>
               </li>
@@ -375,7 +375,7 @@ function Dialer() {
         )}
         <div className="mt-3 grid grid-cols-3 gap-2">
           {KEYS.map((k) => (
-            <button key={k} onClick={() => setNum((n) => n + k)} className="well h-12 rounded-[14px] font-mono text-lg text-ink active:scale-95">
+            <button key={k} onClick={() => setNum((n) => n + k)} className="well h-12 r-14 font-mono text-lg text-ink active:scale-95">
               {k}
             </button>
           ))}
@@ -406,7 +406,7 @@ function Dialer() {
               {icon(c.direction)}
               <div className="min-w-0">
                 <p className="truncate text-sm text-ink">{c.contact}</p>
-                <p className="font-mono text-[11px] text-ink-3">
+                <p className="font-mono fs-11 text-ink-3">
                   {when(c.ts)} · {c.direction}
                   {c.duration ? ` · ${Math.round(c.duration / 60)}m` : ""}
                 </p>
@@ -450,7 +450,7 @@ function WhatsAppPanel() {
         </button>
         {busy && <Loader2 size={14} className="mt-2 animate-spin text-ink-3" />}
       </div>
-      {out && <pre className="well mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 text-[11px] text-ink-2">{out.slice(0, 12000)}</pre>}
+      {out && <pre className="well mt-2 max-h-80 overflow-auto whitespace-pre-wrap r-10 p-2 fs-11 text-ink-2">{out.slice(0, 12000)}</pre>}
       <form
         className="mt-3 grid gap-2 sm:grid-cols-[1fr_2fr_auto]"
         onSubmit={(e) => {
@@ -463,7 +463,7 @@ function WhatsAppPanel() {
           ).then((r) => r !== null && setMsg(""));
         }}
       >
-        <Input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Phone (with country code) or JID" className="font-mono !text-[12px]" />
+        <Input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Phone (with country code) or JID" className="font-mono !fs-12" />
         <Input value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="Message" />
         <button className="pill-primary !h-10 text-xs">
           <Send size={13} /> Send
@@ -483,7 +483,7 @@ function BridgeSetup() {
       <ol className="list-decimal space-y-2 pl-5 text-sm text-ink-2">
         <li>
           <b className="text-ink">Incoming / sent texts</b> → HTTP POST <code className="font-mono text-amber-light">{gw}/api/comms/sms</code> with JSON body
-          <pre className="well mt-1 overflow-x-auto rounded-[8px] p-2 font-mono text-[11px]">{ex}</pre>
+          <pre className="well mt-1 overflow-x-auto r-8 p-2 font-mono fs-11">{ex}</pre>
           (Tasker variables shown; <code>direction</code> is <code>in</code> or <code>out</code>.)
         </li>
         <li>

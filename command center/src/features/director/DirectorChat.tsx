@@ -33,15 +33,15 @@ export function DirectorChat() {
         {chat.length === 0 && <Empty>Tell the Director what you're making.</Empty>}
         {chat.map((m) => (
           <div key={m.id} className={`flex ${m.role === "nic" ? "justify-end" : "justify-start"}`}>
-            <div className={`max-w-[88%] rounded-[14px] px-3 py-2 text-[13px] leading-relaxed ${m.role === "nic" ? "border border-amber/30 bg-amber/12 text-ink" : "border border-white/[0.08] bg-white/[0.03] text-ink-2"}`}>
+            <div className={`max-w-[88%] r-14 px-3 py-2 fs-13 leading-relaxed ${m.role === "nic" ? "border border-amber/30 bg-amber/12 text-ink" : "border border-white/[0.08] bg-white/[0.03] text-ink-2"}`}>
               {m.streaming && !m.text ? <Loader2 size={13} className="animate-spin text-ink-3" /> : <p className="whitespace-pre-wrap">{m.text}</p>}
               {m.applied?.map((a) => (
-                <p key={a} className="mt-1 font-mono text-[10px] text-teal-soft">
+                <p key={a} className="mt-1 font-mono fs-10 text-teal-soft">
                   ✓ {a}
                 </p>
               ))}
               {m.errors?.map((e) => (
-                <p key={e} className="mt-1 flex items-start gap-1 font-mono text-[10px] text-amber-soft">
+                <p key={e} className="mt-1 flex items-start gap-1 font-mono fs-10 text-amber-soft">
                   <TriangleAlert size={10} className="mt-0.5 shrink-0" /> ignored action: {e}
                 </p>
               ))}
@@ -68,7 +68,7 @@ export function DirectorChat() {
           }}
           rows={2}
           placeholder="Ask the Director…"
-          className="field min-h-[44px] resize-none text-[13px]"
+          className="field min-h-[44px] resize-none fs-13"
           aria-label="Message the Director"
         />
         <button type="submit" disabled={!text.trim() || busy} className="pill-primary !h-10 !w-10 shrink-0 !p-0 disabled:opacity-50" aria-label="Send">

@@ -22,11 +22,11 @@ export function DrivePickerModal({ slug, projectTitle, role, onRole, onClose }: 
 
   return createPortal(
     <div className="fixed inset-0 z-[80] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px]" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div role="dialog" aria-modal="true" aria-label="Import from Google Drive" className="glass flex h-[min(640px,90vh)] w-[min(720px,100%)] flex-col gap-3 rounded-[22px] p-4">
+      <div role="dialog" aria-modal="true" aria-label="Import from Google Drive" className="glass flex h-[min(640px,90vh)] w-[min(720px,100%)] flex-col gap-3 r-22 p-4">
         <header className="flex items-center gap-2">
           <Cloud size={15} className="text-amber-soft" />
           <h2 className="label-caps text-amber-soft">From Google Drive</h2>
-          <span className="truncate text-[12px] text-ink-3">→ {projectTitle}</span>
+          <span className="truncate fs-12 text-ink-3">→ {projectTitle}</span>
           <button onClick={onClose} className="pill-glass ml-auto !h-8 !w-8 !p-0" aria-label="Close">
             <X size={13} />
           </button>

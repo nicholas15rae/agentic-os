@@ -47,7 +47,7 @@ function GoogleDriveDesktop({ config, setConfig, size }: WidgetProps<DriveConfig
                 role="tab"
                 aria-selected={tab === t}
                 onClick={() => setConfig({ tab: t })}
-                className={`rounded-full px-2.5 py-0.5 text-[11px] capitalize transition-colors ${tab === t ? "border border-white/10 bg-raised text-ink" : "text-ink-2 hover:text-ink"}`}
+                className={`rounded-full px-2.5 py-0.5 fs-11 capitalize transition-colors ${tab === t ? "border border-white/10 bg-raised text-ink" : "text-ink-2 hover:text-ink"}`}
               >
                 {t}
               </button>
@@ -93,7 +93,7 @@ function OutboxTab({ compact }: { compact: boolean }) {
     };
   }, []);
 
-  if (error) return <p className="text-[12px] text-alert">{error}</p>;
+  if (error) return <p className="fs-12 text-alert">{error}</p>;
   if (!rows)
     return (
       <div className="grid flex-1 place-items-center text-ink-3">
@@ -104,12 +104,12 @@ function OutboxTab({ compact }: { compact: boolean }) {
   return (
     <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto">
       {rows.map(({ render: r, projectTitle }) => (
-        <li key={r.id} className="rounded-[12px] border border-white/[0.08] p-2">
-          <p className="flex items-center gap-1 truncate text-[13px] text-ink" title={r.path}>
+        <li key={r.id} className="r-12 border border-white/[0.08] p-2">
+          <p className="flex items-center gap-1 truncate fs-13 text-ink" title={r.path}>
             <ShieldCheck size={12} className="shrink-0 text-teal" /> {baseName(r.path)}
           </p>
           {!compact && (
-            <p className="truncate font-mono text-[10px] text-ink-3">
+            <p className="truncate font-mono fs-10 text-ink-3">
               {projectTitle} · {formatDuration(r.durationSec)} · {r.width}×{r.height} · {formatBytes(r.sizeBytes)}
             </p>
           )}

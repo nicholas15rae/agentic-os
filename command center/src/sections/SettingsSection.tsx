@@ -22,6 +22,7 @@ import { SwitchboardCard } from "./settings/SwitchboardSettings";
 import { ClockCard, EffectsCard } from "./settings/ClockEffectsSettings";
 import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings/settings-tab";
 import { GlassOpacitySlider } from "@/features/os/OsControls";
+import { AppearanceStudio } from "./settings/AppearanceStudio";
 import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
 import { SecurityCard } from "@/features/security/SecurityCard";
 
@@ -153,6 +154,7 @@ export function SettingsSection() {
       {tab === "business" && <BusinessProfilesSettings />}
       {tab === "appearance" && (
         <>
+          <AppearanceStudio />
           <Card title="Ultra glass" hint="Opacity of every widget in Ultra-glass mode. 0–5 % is a crystal-clear floating HUD over the wallpaper.">
             <GlassOpacitySlider />
           </Card>
@@ -225,7 +227,7 @@ function CalmCard() {
   const set = useSettings((s) => s.set);
   return (
     <Card title="Calm when idle" hint="Pause the wallpaper drift, weather, pulses and spinners while this window is unfocused or untouched for a minute. Every frame here is drawn on the same GPU as speech-to-text and the local model. Voice feedback keeps moving at a lower frame rate.">
-      <label className="flex items-center gap-3 text-[13px] text-ink-2">
+      <label className="flex items-center gap-3 fs-13 text-ink-2">
         <input type="checkbox" checked={on} onChange={(e) => set({ calmWhenIdle: e.target.checked })} className="accent-teal" />
         Pause ambient motion when idle
       </label>
@@ -238,7 +240,7 @@ function WaveCard() {
   return (
     <Card title="Voice waveform & orb" hint="Colour ramp and stroke weight for the waveform and the floating orb.">
       <div className="mb-3 flex items-center gap-4">
-        <div className="well flex-1 rounded-[14px] px-3">
+        <div className="well flex-1 r-14 px-3">
           <Waveform state="speaking" height={72} />
         </div>
         <div className="grid size-24 shrink-0 place-items-center">

@@ -94,7 +94,7 @@ export function CueVoiceLine({ cue, onChange }: { cue: CueWidget; onChange: (p: 
   };
 
   return (
-    <div className="mt-3 rounded-[12px] border border-white/[0.06] p-3">
+    <div className="mt-3 r-12 border border-white/[0.06] p-3">
       <div className="grid gap-3 lg:grid-cols-[180px_1fr]">
         <Field label="Spoken line (text-to-speech)">
           <Select value={cue.intro.mode} onChange={(e) => onChange({ intro: { ...cue.intro, mode: e.target.value as "static" | "llm" } })}>

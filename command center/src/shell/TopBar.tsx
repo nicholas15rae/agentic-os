@@ -50,7 +50,7 @@ export function TopBar() {
       {/* Below md the callsign keeps ~3 characters next to the clock and Widgets (it never pushes them off). */}
       <div className="glass-thin flex h-11 min-w-0 items-center gap-3 rounded-full px-4 max-sm:min-w-[5.75rem]">
         {isMicOff(mic) ? <MicLockBadge variant="dot" /> : <span className={`size-2 shrink-0 rounded-full ${STATE_DOT[voiceState]}`} />}
-        <span data-callsign className="truncate font-mono text-[13px] font-semibold tracking-wider text-ink">{identity.callsign}</span>
+        <span data-callsign className="truncate font-mono fs-13 font-semibold tracking-wider text-ink">{identity.callsign}</span>
         <span className="hidden h-4 w-px bg-white/15 sm:block" />
         <span className="label-caps hidden text-teal sm:block">{status.text}</span>
         {status.chip && (

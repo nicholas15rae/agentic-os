@@ -18,10 +18,10 @@ export function TransferRow({ t, onCancel }: { t: CloudTransfer; onCancel: (id: 
   const Dir = t.direction === "pull" ? CloudDownload : CloudUpload;
   const bar = t.status === "failed" ? "bg-alert" : t.status === "cancelled" ? "bg-ink-3" : t.status === "done" ? "bg-teal" : "bg-amber";
   return (
-    <li className="rounded-[10px] bg-white/[0.03] p-2">
+    <li className="r-10 bg-white/[0.03] p-2">
       <div className="flex items-center gap-1.5">
         <Dir size={12} className="shrink-0 text-ink-3" />
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink-2" title={t.name}>
+        <span className="min-w-0 flex-1 truncate fs-12 text-ink-2" title={t.name}>
           {t.name}
         </span>
         {live ? (
@@ -33,13 +33,13 @@ export function TransferRow({ t, onCancel }: { t: CloudTransfer; onCancel: (id: 
         ) : t.status === "failed" ? (
           <TriangleAlert size={12} className="shrink-0 text-alert" aria-label="Failed" />
         ) : (
-          <span className="shrink-0 text-[10px] text-ink-3">cancelled</span>
+          <span className="shrink-0 fs-10 text-ink-3">cancelled</span>
         )}
       </div>
       <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${t.name} progress`}>
         <div className={`h-full transition-[width] ${bar}`} style={{ width: `${pct}%` }} />
       </div>
-      <p className={`mt-0.5 truncate font-mono text-[10px] ${t.status === "failed" ? "text-alert" : "text-ink-3"}`}>
+      <p className={`mt-0.5 truncate font-mono fs-10 ${t.status === "failed" ? "text-alert" : "text-ink-3"}`}>
         {t.status === "failed" ? (t.error ?? "failed") : t.status === "queued" ? "queued" : t.status === "done" ? `done · ${t.project}` : transferLine(t)}
       </p>
     </li>

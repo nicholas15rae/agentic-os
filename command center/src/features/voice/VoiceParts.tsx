@@ -70,7 +70,7 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
         if (t.convId) return <AgentConversationCard key={t.id} convId={t.convId} fallback={t.text} />;
         if (t.who === "system")
           return (
-            <p key={t.id} className={`font-mono text-[11px] ${t.tone === "error" ? "text-alert" : t.tone === "warn" ? "text-amber-soft" : "text-teal"}`}>
+            <p key={t.id} className={`font-mono fs-11 ${t.tone === "error" ? "text-alert" : t.tone === "warn" ? "text-amber-soft" : "text-teal"}`}>
               — {t.text}
             </p>
           );
@@ -81,16 +81,16 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
         if (selfRow && !t.taskId) return null;
         if (t.who === "relay")
           return (
-            <div key={t.id} className={`rounded-[12px] border px-3 py-2 text-[13px] ${t.tone === "warn" ? "border-amber/30 bg-amber/[0.05]" : "border-volt/20 bg-volt/[0.04]"}`}>
+            <div key={t.id} className={`r-12 border px-3 py-2 fs-13 ${t.tone === "warn" ? "border-amber/30 bg-amber/[0.05]" : "border-volt/20 bg-volt/[0.04]"}`}>
               <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-ink">{agentBadge(t.from ?? "os")}</span>
+                <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono fs-10 font-semibold tracking-wider text-ink">{agentBadge(t.from ?? "os")}</span>
                 {!selfRow && (
                   <>
                     <ArrowRight size={11} className="text-ink-3" />
-                    <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-ink">{agentBadge(t.to ?? "user")}</span>
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono fs-10 font-semibold tracking-wider text-ink">{agentBadge(t.to ?? "user")}</span>
                   </>
                 )}
-                {t.meta && <span className="font-mono text-[10px] text-ink-3">{t.meta}</span>}
+                {t.meta && <span className="font-mono fs-10 text-ink-3">{t.meta}</span>}
               </div>
               <p className="whitespace-pre-wrap break-words text-ink-2">{t.text}</p>
             </div>
@@ -104,16 +104,16 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
             <div className="min-w-0">
               <p className={`whitespace-pre-wrap break-words ${t.who === "user" ? "italic text-ink" : "text-ink"}`}>{t.text}</p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
-                {t.meta && <span className="font-mono text-[11px] text-ink-3">{t.meta}</span>}
+                {t.meta && <span className="font-mono fs-11 text-ink-3">{t.meta}</span>}
                 {t.link && (
-                  <button onClick={() => openThread(t.link!)} className="rounded-full border border-teal/40 bg-teal/10 px-2.5 py-0.5 text-[11px] text-teal hover:bg-teal/20">
+                  <button onClick={() => openThread(t.link!)} className="rounded-full border border-teal/40 bg-teal/10 px-2.5 py-0.5 fs-11 text-teal hover:bg-teal/20">
                     View in {t.link === "general" ? name : SUB_AGENTS[t.link as AgentRole]?.label ?? t.link} →
                   </button>
                 )}
                 {t.commsThread && (
                   <button
                     onClick={() => (useFocus.getState().set({ commsThread: t.commsThread }), useNav.getState().go("comms"))}
-                    className="rounded-full border border-volt/40 bg-volt/10 px-2.5 py-0.5 text-[11px] text-volt hover:bg-volt/20"
+                    className="rounded-full border border-volt/40 bg-volt/10 px-2.5 py-0.5 fs-11 text-volt hover:bg-volt/20"
                   >
                     Jump to Thread in Comms →
                   </button>
@@ -122,20 +122,20 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
                 {t.packet && <PacketOutcome result={t.packet} />}
                 {!!t.pendingMemory?.length && <MemoryProposalCard turnId={t.id} items={t.pendingMemory} end={t.memoryEnd} expiresAt={cardExpiresAt(t)} />}
                 {t.learned?.map((p) => (
-                  <span key={p.id} title={`${p.category} · ${p.confidence}`} className="inline-flex items-center gap-1 rounded-full border border-teal/30 bg-teal/[0.06] px-2 py-0.5 text-[10.5px] text-teal/90">
+                  <span key={p.id} title={`${p.category} · ${p.confidence}`} className="inline-flex items-center gap-1 rounded-full border border-teal/30 bg-teal/[0.06] px-2 py-0.5 fs-10.5 text-teal/90">
                     <BookMarked size={10} aria-hidden /> {learnedPillText(p)}
                   </span>
                 ))}
                 {t.cardId && (
                   <button
                     onClick={() => (useFocus.getState().set({ card: t.cardId }), useNav.getState().go("playplace"))}
-                    className="rounded-full border border-amber/40 bg-amber/10 px-2.5 py-0.5 text-[11px] text-amber-light hover:bg-amber/20"
+                    className="rounded-full border border-amber/40 bg-amber/10 px-2.5 py-0.5 fs-11 text-amber-light hover:bg-amber/20"
                   >
                     Open in Play Place →
                   </button>
                 )}
                 {t.actions?.map((a) => (
-                  <button key={a.run} onClick={() => runTurnAction(a.run, t.thread)} className={a.run.startsWith("pipeline:") ? "pill-primary !h-7 !px-3 text-[11px]" : "pill-glass !h-7 !px-3 text-[11px]"}>
+                  <button key={a.run} onClick={() => runTurnAction(a.run, t.thread)} className={a.run.startsWith("pipeline:") ? "pill-primary !h-7 !px-3 fs-11" : "pill-glass !h-7 !px-3 fs-11"}>
                     {a.label}
                   </button>
                 ))}

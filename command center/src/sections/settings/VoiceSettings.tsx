@@ -108,11 +108,11 @@ export function SttCard() {
                 </option>
               ))}
             </Select>
-            <button type="button" aria-label="Refresh microphones" onClick={() => void loadMics()} className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-white/10 text-ink-2 hover:text-ink">
+            <button type="button" aria-label="Refresh microphones" onClick={() => void loadMics()} className="grid size-10 shrink-0 place-items-center r-12 border border-white/10 text-ink-2 hover:text-ink">
               <RefreshCw size={14} />
             </button>
           </div>
-          {!micOn && mics.some((m) => !m.label) && <p className="mt-1 text-[11px] text-ink-3">Unlock mic to see device names</p>}
+          {!micOn && mics.some((m) => !m.label) && <p className="mt-1 fs-11 text-ink-3">Unlock mic to see device names</p>}
         </Field>
         <Field label="Engine">
           {/* Saved as providers.json `engine` (Rust providers_update stores the id as given). */}
@@ -125,10 +125,10 @@ export function SttCard() {
           </Select>
         </Field>
         <Field label="Endpoint">
-          <Input defaultValue={stt.baseUrl} onBlur={(e) => e.target.value !== stt.baseUrl && void patch({ id: stt.id, baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+          <Input defaultValue={stt.baseUrl} onBlur={(e) => e.target.value !== stt.baseUrl && void patch({ id: stt.id, baseUrl: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
         </Field>
         <Field label="Models folder (ggml-*.bin)">
-          <Input defaultValue={stt.modelsDir ?? ""} placeholder="G:\\whisper\\models" onBlur={(e) => e.target.value !== (stt.modelsDir ?? "") && void patch({ id: stt.id, modelsDir: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+          <Input defaultValue={stt.modelsDir ?? ""} placeholder="G:\\whisper\\models" onBlur={(e) => e.target.value !== (stt.modelsDir ?? "") && void patch({ id: stt.id, modelsDir: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
         </Field>
       </div>
       <Field label="Vocabulary prompt" className="mt-2">
@@ -141,10 +141,10 @@ export function SttCard() {
           spellCheck={false}
           placeholder="Empty = no prompt"
           onBlur={(e) => e.target.value !== (stt.sttPrompt ?? "") && void patch({ id: stt.id, sttPrompt: e.target.value })}
-          className="field resize-y !text-[12px] leading-relaxed"
+          className="field resize-y !fs-12 leading-relaxed"
         />
       </Field>
-      <p className="mt-1 text-[11px] text-ink-3">
+      <p className="mt-1 fs-11 text-ink-3">
         Words Whisper should expect (names, reflex phrases), written as natural speech. A transcript that just repeats 4+ of these words in a row is dropped as a hallucination.
       </p>
       {note && <p className={`mt-2 text-xs ${/not found|fail|error|unreach/i.test(note) ? "text-alert" : "text-teal"}`}>{note}</p>}
@@ -301,10 +301,10 @@ export function TtsCard() {
               </Select>
             </Field>
             <Field label="Endpoint">
-              <Input defaultValue={tts.baseUrl} onBlur={(e) => e.target.value !== tts.baseUrl && void patch({ id: tts.id, baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+              <Input defaultValue={tts.baseUrl} onBlur={(e) => e.target.value !== tts.baseUrl && void patch({ id: tts.id, baseUrl: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
             </Field>
             <Field label="Voices folder" className="sm:col-span-2">
-              <Input defaultValue={tts.voicesDir ?? voices?.voicesDir ?? ""} onBlur={(e) => e.target.value !== (tts.voicesDir ?? "") && void patch({ id: tts.id, voicesDir: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+              <Input defaultValue={tts.voicesDir ?? voices?.voicesDir ?? ""} onBlur={(e) => e.target.value !== (tts.voicesDir ?? "") && void patch({ id: tts.id, voicesDir: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
             </Field>
           </>
         )}
@@ -350,7 +350,7 @@ export function AgentVoiceRoster() {
       <div className="-mx-1 overflow-x-auto">
         <table className="w-full min-w-[780px] text-left text-sm">
           <thead>
-            <tr className="label-caps text-[11px] text-ink-3">
+            <tr className="label-caps fs-11 text-ink-3">
               <th className="px-1 py-1.5">Agent</th>
               <th className="px-1 py-1.5">Engine</th>
               <th className="px-1 py-1.5">Voice</th>
@@ -411,7 +411,7 @@ function RosterRow({ role, entry, defaultEngine, note, allTony, onPatch }: { rol
     <tr className="border-t border-white/[0.06]">
       <td className="px-1 py-1.5 font-medium text-ink">
         {roleLabel(role)}
-        {note && <span className="block text-[10px] font-normal text-ink-3">{note}</span>}
+        {note && <span className="block fs-10 font-normal text-ink-3">{note}</span>}
       </td>
       <td className="px-1 py-1.5">
         <Select value={engine} onChange={(e) => onPatch({ engine: e.target.value as AgentVoice["engine"] })} className="!h-9 !w-36 !py-0 !text-xs !leading-normal">
@@ -450,7 +450,7 @@ function RosterRow({ role, entry, defaultEngine, note, allTony, onPatch }: { rol
         <button type="button" className="pill-glass !h-8 !px-2.5 text-xs" onClick={() => void preview()} disabled={busy === "Previewing…"} title="Preview this agent's voice">
           <Play size={12} />
         </button>
-        {busy && busy !== "Previewing…" && <span className="ml-1.5 text-[10px] text-alert">{busy}</span>}
+        {busy && busy !== "Previewing…" && <span className="ml-1.5 fs-10 text-alert">{busy}</span>}
       </td>
       <td className="px-1 py-1.5">
         <button
@@ -546,7 +546,7 @@ export function ConversationReflexesCard() {
         In effect: <span className="font-semibold text-ink">{effective === "headset" ? "Headset" : "Speakers"}</span>
         {conversation.audioRoute === "auto" && <span className="truncate text-ink-3">· {label ? `“${label}”` : "device name not readable yet (speakers is the safe default)"}</span>}
       </p>
-      <p className="mt-1 text-[11px] text-ink-3">
+      <p className="mt-1 fs-11 text-ink-3">
         Speakers: “oh / eh / whoa” only count while Tony is silent, and talking over him needs a clearer voice. A short pause means quick reflexes; a long command said over Tony may be split, and the follow-up listen catches the rest.
       </p>
       <div className="mt-3 border-t border-white/5 pt-2">
@@ -584,7 +584,7 @@ export function ConversationReflexesCard() {
         <label className="mt-1 block text-sm text-ink-2">
           Lower it by
           <div className="mt-1 flex items-center gap-3">
-            <span className="w-16 text-[11px] text-ink-3">barely</span>
+            <span className="w-16 fs-11 text-ink-3">barely</span>
             <input
               type="range"
               min={0}
@@ -596,7 +596,7 @@ export function ConversationReflexesCard() {
               className="flex-1 accent-teal disabled:opacity-50"
               aria-label="How much to lower Spotify while you talk"
             />
-            <span className="w-16 text-right text-[11px] text-ink-3">half</span>
+            <span className="w-16 text-right fs-11 text-ink-3">half</span>
             <span className="w-36 text-right font-mono text-ink">{duckReadout(duck.reductionPct)}</span>
           </div>
         </label>

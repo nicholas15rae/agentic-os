@@ -762,6 +762,7 @@ pub fn run() {
             buildhub::trash_list,
             buildhub::trash_restore,
             buildhub::trash_purge,
+            commands::ui_file::ui_file_save,
             buildhub::build_widget_url,
             buildhub::build_peek_status,
             buildhub::build_open_window,

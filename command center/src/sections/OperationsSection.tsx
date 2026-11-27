@@ -1,17 +1,30 @@
 import { useEffect, useState } from "react";
-import { Archive, Briefcase, Plus, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
-import { Card, Empty, Field, Input, Stat, SubTabs } from "@/components/ui";
+import { Archive, Briefcase, ChevronDown, ChevronRight, Plus, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Card, Empty, Field, Input, Stat, SubTabs, money } from "@/components/ui";
 import { gated } from "@/features/bridge/gate";
 import { useToasts } from "@/features/reminders/notify";
 import { ocmd } from "@/features/ops/api";
 import { AddBusinessModal } from "@/features/ops/AddBusinessModal";
-import { parseTerms, provisionLabel } from "@/features/ops/logic";
+import { emailsFor, formatEmails, parseEmails, parseTerms, provisionLabel } from "@/features/ops/logic";
+import { businessCardStats, type CardInputs, type CardNumber, type PipelineLike, type ProjectLike } from "@/features/ops/card-stats";
+import type { Check, Income, Invoice } from "@/features/finance/types";
+import type { Reminder } from "@/features/reminders/types";
+import { useCollection, useNow } from "@/lib/cc-api";
+import { useSettings } from "@/stores/settings";
 import { useOps } from "@/features/ops/ops-store";
 import type { AuditView, Business, IntegrityStatus, ReviewSettings } from "@/features/ops/types";
 import { ReviewQueue } from "@/features/review/ReviewQueue";
 import { isTauri } from "@/lib/platform";
 
 type Tab = "businesses" | "review" | "audit" | "settings";
+
+/** One plain line per tab, shown under the tabs. */
+const TAB_HELP: Record<Tab, string> = {
+  businesses: "Each business you run, kept apart: its own notes, workspace and books. Tony routes a request to the one it names.",
+  review: "Things waiting for your yes: notes flagged for mentioning another business, empty or half-written files, and purges. Nothing is deleted until you approve it here.",
+  audit: "A tamper-evident log of every flag, quarantine, purge, restore and hand-off, plus a check that the rules files haven't been changed.",
+  settings: "When you hear about the Review Queue: a daily digest at your hour (or sooner when it piles up), and optionally a counts-only alert to a webhook.",
+};
 
 /** Operations: the business registry, the HITL review queue, the audit trail and digest settings. */
 export function OperationsSection() {
@@ -30,6 +43,7 @@ export function OperationsSection() {
   return (
     <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
       <SubTabs tabs={tabs} value={tab} onChange={setTab} />
+      <p className="-mt-2 text-[12px] text-ink-3">{TAB_HELP[tab]}</p>
       {!isTauri() && <Empty>Operations runs on the desktop app.</Empty>}
       {isTauri() && tab === "businesses" && <Businesses />}
       {isTauri() && tab === "review" && <ReviewQueue />}
@@ -44,6 +58,16 @@ function Businesses() {
   const error = useOps((s) => s.error);
   const [adding, setAdding] = useState(false);
   const active = businesses.filter((b) => b.status === "active").length;
+  // The collections the cards' numbers come from (pure: features/ops/card-stats.ts).
+  const inputs: CardInputs = {
+    income: useCollection<Income>("income").items,
+    invoices: useCollection<Invoice>("invoices").items,
+    checks: useCollection<Check>("checks").items,
+    pipeline: useCollection<PipelineLike>("pipeline").items,
+    projects: useCollection<ProjectLike>("projects").items,
+    reminders: useCollection<Reminder>("reminders").items,
+  };
+  const now = useNow(60_000);
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
@@ -58,20 +82,23 @@ function Businesses() {
       {error && <p className="text-sm text-alert">{error}</p>}
       {!businesses.length && <Empty>No businesses yet.</Empty>}
       {businesses.map((b) => (
-        <BusinessCard key={b.businessId} b={b} />
+        <BusinessCard key={b.businessId} b={b} inputs={inputs} now={now} />
       ))}
       {adding && <AddBusinessModal onClose={() => setAdding(false)} />}
     </div>
   );
 }
 
-function BusinessCard({ b }: { b: Business }) {
+function BusinessCard({ b, inputs, now }: { b: Business; inputs: CardInputs; now: number }) {
   const [editing, setEditing] = useState(false);
-  const [aliases, setAliases] = useState(b.aliases.join(", "));
-  const [blocklist, setBlocklist] = useState(b.crossDomainBlocklist.join("\n"));
+  const [advanced, setAdvanced] = useState(false);
+  const [form, setForm] = useState(() => draftOf(b));
   const [busy, setBusy] = useState(false);
   const refresh = useOps((s) => s.refresh);
   const toast = useToasts((s) => s.push);
+  const currency = useSettings((s) => s.business.currency);
+  const stats = businessCardStats(b.businessId, inputs, now);
+  const mail = emailsFor([b], b.businessId) ?? [];
 
   const run = async (what: string, f: () => Promise<unknown>) => {
     setBusy(true);
@@ -87,7 +114,10 @@ function BusinessCard({ b }: { b: Business }) {
 
   const save = () =>
     run("Couldn't save", async () => {
-      await ocmd("business_update", { businessId: b.businessId, patch: { aliases: parseTerms(aliases), crossDomainBlocklist: parseTerms(blocklist) } });
+      await ocmd("business_update", {
+        businessId: b.businessId,
+        patch: { displayName: form.displayName.trim(), category: form.category.trim(), description: form.description.trim(), aliases: parseTerms(form.aliases), crossDomainBlocklist: parseTerms(form.blocklist), emails: parseEmails(form.emails) },
+      });
       setEditing(false);
     });
 
@@ -109,6 +139,8 @@ function BusinessCard({ b }: { b: Business }) {
   const unarchive = () => run("Couldn't restore", () => ocmd("business_set_archived", { businessId: b.businessId, archived: false }));
 
   const tone = b.status === "active" ? "text-teal-soft" : b.status === "archived" ? "text-ink-3" : b.provision.lastError ? "text-alert" : "text-amber-light";
+  const amount = (n: CardNumber) => (n.value === null ? "—" : money(n.value, currency));
+  const count = (n: CardNumber) => (n.value === null ? "—" : n.value);
 
   return (
     <Card
@@ -133,14 +165,24 @@ function BusinessCard({ b }: { b: Business }) {
         </>
       }
     >
-      {b.description && <p className="mb-3 text-sm text-ink-2">{b.description}</p>}
-      <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 text-[12px] sm:grid-cols-2">
-        <Row k="Business id" v={b.businessId} />
-        <Row k="Workspace / RAG" v={b.workspaceSlug} />
-        <Row k="Ledger tag" v={b.financeLedgerTag} />
-        <Row k="Librarian scope" v={b.librarianScope} />
-        <Row k="Memory" v={b.memoryPath} wide />
-      </dl>
+      {(b.description || b.category) && (
+        <p className="mb-3 text-sm text-ink-2">
+          {b.description}
+          {b.category && <span className="ml-2 rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-3">{b.category}</span>}
+        </p>
+      )}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        <KeyNumber label="Income this month" value={amount(stats.incomeThisMonth)} hint={stats.incomeThisMonth.hint} />
+        <KeyNumber label="Pending payments" value={amount(stats.pendingPayments)} hint={stats.pendingPayments.hint} />
+        <KeyNumber label={b.businessId === "acting" ? "Open bookings" : "Open jobs"} value={count(stats.openJobs)} hint={stats.openJobs.hint} />
+        <KeyNumber label="Unread messages" value={count(stats.unreadMessages)} hint={stats.unreadMessages.hint} />
+        <KeyNumber
+          label="Next deadline"
+          value={stats.nextDeadline.at === null ? "—" : new Date(stats.nextDeadline.at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+          hint={stats.nextDeadline.at === null ? stats.nextDeadline.hint : stats.nextDeadline.what}
+        />
+      </div>
+      <p className="mt-2 text-[11px] text-ink-3">Mail: {mail.map((e) => (e.address ? (e.label ? `${e.label} <${e.address}>` : e.address) : "the main account")).join(", ")}</p>
       {b.provision.lastError && b.status === "provisioning" && <p className="mt-3 rounded-[10px] border border-alert/30 bg-alert/10 px-3 py-2 text-[12px] text-alert">{b.provision.lastError}</p>}
       {!editing ? (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -150,29 +192,73 @@ function BusinessCard({ b }: { b: Business }) {
             </span>
           ))}
           <span className="text-[11px] text-ink-3">· {b.crossDomainBlocklist.length} protected client / vendor names</span>
-          <button onClick={() => setEditing(true)} className="ml-auto text-[12px] text-amber-light hover:underline">
-            Edit names
+          <button
+            onClick={() => {
+              setForm(draftOf(b));
+              setEditing(true);
+            }}
+            className="ml-auto text-[12px] text-amber-light hover:underline"
+          >
+            Edit
           </button>
         </div>
       ) : (
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <Field label="Other names (comma)">
-            <Input value={aliases} onChange={(e) => setAliases(e.target.value)} />
+          <Field label="Name">
+            <Input value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} maxLength={80} />
           </Field>
-          <Field label="Its clients, vendors, products (one per line)">
-            <textarea value={blocklist} onChange={(e) => setBlocklist(e.target.value)} rows={3} className="field resize-none" />
+          <Field label="Category">
+            <Input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} maxLength={60} />
+          </Field>
+          <Field label="Description" className="sm:col-span-2">
+            <Input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} maxLength={400} />
+          </Field>
+          <Field label="Other names (comma)">
+            <Input value={form.aliases} onChange={(e) => setForm({ ...form, aliases: e.target.value })} />
+          </Field>
+          <Field label="Email accounts (one per line; empty = the main account)">
+            <textarea value={form.emails} onChange={(e) => setForm({ ...form, emails: e.target.value })} rows={2} placeholder="Born Fortuna <orders@example.com>" className="field resize-none font-mono text-[12px]" />
+          </Field>
+          <Field label="Its clients, vendors, products (one per line)" className="sm:col-span-2">
+            <textarea value={form.blocklist} onChange={(e) => setForm({ ...form, blocklist: e.target.value })} rows={3} className="field resize-none" />
           </Field>
           <div className="flex justify-end gap-2 sm:col-span-2">
             <button onClick={() => setEditing(false)} className="h-9 rounded-full px-3 text-[12px] text-ink-2">
               Cancel
             </button>
-            <button onClick={save} disabled={busy} className="h-9 rounded-full bg-amber px-4 text-[12px] font-semibold text-canvas disabled:opacity-40">
+            <button onClick={save} disabled={busy || !form.displayName.trim()} className="h-9 rounded-full bg-amber px-4 text-[12px] font-semibold text-canvas disabled:opacity-40">
               Save
             </button>
           </div>
         </div>
       )}
+      <button onClick={() => setAdvanced((a) => !a)} className="mt-3 flex items-center gap-1 text-[11px] text-ink-3 hover:text-ink-2" aria-expanded={advanced}>
+        {advanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Advanced
+      </button>
+      {advanced && (
+        <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1.5 text-[12px] sm:grid-cols-2">
+          <Row k="Business id" v={b.businessId} />
+          <Row k="Workspace / RAG" v={b.workspaceSlug} />
+          <Row k="Ledger tag" v={b.financeLedgerTag} />
+          <Row k="Librarian scope" v={b.librarianScope} />
+          <Row k="Memory" v={b.memoryPath} wide />
+        </dl>
+      )}
     </Card>
+  );
+}
+
+function draftOf(b: Business) {
+  return { displayName: b.displayName, category: b.category, description: b.description, aliases: b.aliases.join(", "), blocklist: b.crossDomainBlocklist.join("\n"), emails: formatEmails(b.emails) };
+}
+
+function KeyNumber({ label, value, hint }: { label: string; value: React.ReactNode; hint: string }) {
+  return (
+    <div className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2" title={hint}>
+      <p className="text-[10px] uppercase tracking-wider text-ink-3">{label}</p>
+      <p className="mt-0.5 truncate font-mono text-sm text-ink tabular">{value}</p>
+      {value === "—" && <p className="truncate text-[10px] text-ink-3">{hint}</p>}
+    </div>
   );
 }
 

@@ -178,7 +178,9 @@ def load_config() -> dict:
     cfg = None
     if CONFIG_PATH.exists():
         try:
-            cfg = _deep_merge(DEFAULT_CONFIG, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            # A deep copy first: _deep_merge shares untouched nested dicts with its base, and the
+            # backup-dir fill-in below must never write into DEFAULT_CONFIG.
+            cfg = _deep_merge(json.loads(json.dumps(DEFAULT_CONFIG)), json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception:
             cfg = None
     if cfg is None:
@@ -963,12 +965,148 @@ def get_kv(key: str):
 
 @router.put("/kv/{key}")
 def put_kv(key: str, body: dict):
-    if not _KV_KEY.match(key) or key.startswith("backup."):
+    # backup.* is the backup job's own bookkeeping; business.* goes through its validated route.
+    if not _KV_KEY.match(key) or key.startswith(("backup.", "business.")):
         raise HTTPException(400, "Bad key")
     if len(json.dumps(body)) > 256 * 1024:
         raise HTTPException(413, "Too large")
     kv_set(key, body.get("value"))
     return {"ok": True}
+
+
+# ── business profiles (Settings → Business; invoices print from these) ───────
+#
+# One profile per business (registry ids: acting, trades_contracting, supplements_ecom) plus the
+# `personal` finance area. Desktop and phone share them through this one kv row. They stay on this
+# machine: nothing here is sent anywhere, and the row is excluded from the vault (kv isn't indexed).
+
+BUSINESS_PROFILES_KEY = "business.profiles"
+_PROFILE_ID = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+_FILE_ID = re.compile(r"^[0-9a-f]{32}$")
+_INVOICE_STYLES = ("classic", "modern", "minimal")
+_PROVINCES = ("ON", "NS", "NB", "NL", "PE", "BC", "AB", "SK", "MB", "QC", "YT", "NT", "NU")
+_PROFILE_TEXT = {"name": 120, "address": 300, "email": 254, "phone": 40, "hstNumber": 40}
+
+
+def _p_text(v: Any, field: str, limit: int) -> str:
+    if v is None:
+        return ""
+    if not isinstance(v, str) or len(v) > limit or any(ord(ch) < 32 and ch not in "\n" for ch in v):
+        raise HTTPException(400, f"{field}: text up to {limit} characters")
+    return v.strip()
+
+
+def _p_num(v: Any, field: str, lo: float, hi: float, allow_none: bool = False) -> Optional[float]:
+    if v is None and allow_none:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
+        raise HTTPException(400, f"{field}: a number {lo:g}–{hi:g}")
+    return float(v)
+
+
+def _p_keys(d: Any, allowed: set, where: str) -> dict:
+    if not isinstance(d, dict):
+        raise HTTPException(400, f"{where}: an object")
+    extra = sorted(set(d) - allowed)
+    if extra:
+        raise HTTPException(400, f"{where}: unknown field(s) {', '.join(extra)}")
+    return d
+
+
+def _clean_agency(a: Any, i: int) -> dict:
+    a = _p_keys(a, {"id", "name", "parentId", "commissionUnion", "commissionNonUnion"}, f"agencies[{i}]")
+    aid = a.get("id")
+    if not isinstance(aid, str) or not _PROFILE_ID.match(aid):
+        raise HTTPException(400, f"agencies[{i}].id: a-z, 0-9, _ (2–32)")
+    parent = a.get("parentId")
+    if parent is not None and (not isinstance(parent, str) or not _PROFILE_ID.match(parent)):
+        raise HTTPException(400, f"agencies[{i}].parentId: an agency id or null")
+    return {
+        "id": aid,
+        "name": _p_text(a.get("name"), f"agencies[{i}].name", 120),
+        "parentId": parent,
+        # null = inherit the principal agency's rate.
+        "commissionUnion": _p_num(a.get("commissionUnion"), f"agencies[{i}].commissionUnion", 0, 100, True),
+        "commissionNonUnion": _p_num(a.get("commissionNonUnion"), f"agencies[{i}].commissionNonUnion", 0, 100, True),
+    }
+
+
+def _clean_profile(pid: str, p: Any) -> dict:
+    p = _p_keys(p, set(_PROFILE_TEXT) | {"hstConfirmed", "province", "taxRate", "currency", "logoFileId", "invoiceStyle", "agencies", "contracting"}, f"profiles.{pid}")
+    out: dict = {k: _p_text(p.get(k), f"profiles.{pid}.{k}", n) for k, n in _PROFILE_TEXT.items()}
+    out["hstConfirmed"] = bool(p.get("hstConfirmed", False)) and bool(out["hstNumber"])
+    prov = p.get("province", "ON")
+    if prov not in _PROVINCES:
+        raise HTTPException(400, f"profiles.{pid}.province: a Canadian province / territory code")
+    out["province"] = prov
+    out["taxRate"] = _p_num(p.get("taxRate", 13), f"profiles.{pid}.taxRate", 0, 30)
+    cur = p.get("currency", "CAD")
+    if cur not in ("CAD", "USD"):
+        raise HTTPException(400, f"profiles.{pid}.currency: CAD or USD")
+    out["currency"] = cur
+    logo = p.get("logoFileId") or ""
+    if logo and (not isinstance(logo, str) or not _FILE_ID.match(logo)):
+        raise HTTPException(400, f"profiles.{pid}.logoFileId: a gateway file id")
+    out["logoFileId"] = logo
+    style = p.get("invoiceStyle", "classic")
+    if style not in _INVOICE_STYLES:
+        raise HTTPException(400, f"profiles.{pid}.invoiceStyle: one of {', '.join(_INVOICE_STYLES)}")
+    out["invoiceStyle"] = style
+    if "agencies" in p and p["agencies"] is not None:
+        if not isinstance(p["agencies"], list) or len(p["agencies"]) > 50:
+            raise HTTPException(400, f"profiles.{pid}.agencies: a list of up to 50")
+        ags = [_clean_agency(a, i) for i, a in enumerate(p["agencies"])]
+        ids = [a["id"] for a in ags]
+        if len(set(ids)) != len(ids):
+            raise HTTPException(400, f"profiles.{pid}.agencies: duplicate id")
+        for a in ags:
+            if a["parentId"] is not None and (a["parentId"] == a["id"] or a["parentId"] not in ids):
+                raise HTTPException(400, f"profiles.{pid}.agencies: {a['id']} names an unknown principal agency")
+            parent = next((x for x in ags if x["id"] == a["parentId"]), None)
+            if parent and parent["parentId"] is not None:
+                raise HTTPException(400, f"profiles.{pid}.agencies: a sub-agent's principal must be a principal itself")
+        out["agencies"] = ags
+    if "contracting" in p and p["contracting"] is not None:
+        c = _p_keys(p["contracting"], {"subRateMode", "subRate", "defaultWork"}, f"profiles.{pid}.contracting")
+        mode = c.get("subRateMode", "percent")
+        if mode not in ("amount", "percent"):
+            raise HTTPException(400, f"profiles.{pid}.contracting.subRateMode: amount or percent")
+        work = c.get("defaultWork", "self")
+        if work not in ("self", "subbed"):
+            raise HTTPException(400, f"profiles.{pid}.contracting.defaultWork: self or subbed")
+        out["contracting"] = {
+            "subRateMode": mode,
+            "subRate": _p_num(c.get("subRate", 0), f"profiles.{pid}.contracting.subRate", 0, 100 if mode == "percent" else 1_000_000),
+            "defaultWork": work,
+        }
+    return out
+
+
+def clean_business_profiles(doc: Any) -> dict:
+    """The stored shape, validated (unknown fields refused, numbers bounded). Pure; raises HTTPException(400)."""
+    doc = _p_keys(doc, {"version", "legacyImported", "profiles"}, "business profiles")
+    profiles = doc.get("profiles") or {}
+    if not isinstance(profiles, dict) or len(profiles) > 40:
+        raise HTTPException(400, "profiles: an object of up to 40 profiles")
+    for pid in profiles:
+        if not isinstance(pid, str) or not _PROFILE_ID.match(pid):
+            raise HTTPException(400, f"profiles: bad id {pid!r}")
+    return {"version": 1, "legacyImported": bool(doc.get("legacyImported", False)), "profiles": {pid: _clean_profile(pid, p) for pid, p in profiles.items()}}
+
+
+@router.get("/business/profiles")
+def get_business_profiles():
+    """`value` is null until the first save (the app then imports its old single profile once)."""
+    return {"value": kv_get(BUSINESS_PROFILES_KEY)}
+
+
+@router.put("/business/profiles")
+def put_business_profiles(body: dict):
+    if len(json.dumps(body)) > 256 * 1024:
+        raise HTTPException(413, "Too large")
+    value = clean_business_profiles(body.get("value"))
+    kv_set(BUSINESS_PROFILES_KEY, value)
+    return {"value": value}
 
 
 # ── n8n status pings (workflows report their own start/finish) ───────────────

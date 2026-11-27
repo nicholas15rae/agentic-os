@@ -4,7 +4,7 @@ import { DesktopMirrorCard } from "./settings/DesktopMirror";
 import { Waveform } from "@/features/voice/Waveform";
 import { VoiceOrb } from "@/features/voice/VoiceOrb";
 import { isTauri } from "@/lib/platform";
-import { Card, Field, Input, Select, SubTabs } from "@/components/ui";
+import { Card, Field, Input, SubTabs } from "@/components/ui";
 import { GatewayStatusCard, OrchestratorCard, VerifierCard } from "./settings/ServicesSettings";
 import { AgentVoiceRoster, ConversationReflexesCard, SttCard, TtsCard } from "./settings/VoiceSettings";
 import { BraveCard, CalendarCard, GmailCard, GoogleCard, InstagramCard, LocalLlmCard, MapsCard, N8nCard, SpotifyCard } from "./settings/IntegrationSettings";
@@ -14,6 +14,7 @@ import { McpRegistryCard, SkillsLibraryCard } from "./settings/LibrarySettings";
 import { MemoryLifecycleCard, MemoryScrollsCard } from "./settings/MemorySettings";
 import { AiProvidersCard, CliHubCard, ComputeRouterCard, ModelLabCard, ModelLibraryCard } from "./settings/HubSettings";
 import { CueStudio } from "./settings/CueStudio";
+import { BusinessProfilesSettings } from "./settings/BusinessProfilesSettings";
 import { VoiceDetectionCard } from "./settings/VadSettings";
 import { RoutingSettings } from "./settings/RoutingSettings";
 import { ModesManagerCard } from "./settings/ModesManager";
@@ -148,7 +149,7 @@ export function SettingsSection() {
           )}
         </>
       )}
-      {tab === "business" && <BusinessCard />}
+      {tab === "business" && <BusinessProfilesSettings />}
       {tab === "appearance" && (
         <>
           <Card title="Ultra glass" hint="Opacity of every widget in Ultra-glass mode. 0–5 % is a crystal-clear floating HUD over the wallpaper.">
@@ -210,62 +211,6 @@ function ConfirmGateCard() {
         <input type="range" min={10} max={120} step={5} value={s.confirmTimeoutSec} onChange={(e) => s.set({ confirmTimeoutSec: Number(e.target.value) })} className="accent-amber" />
         <span className="w-12 font-mono text-ink tabular">{s.confirmTimeoutSec}s</span>
       </label>
-    </Card>
-  );
-}
-
-const PROVINCES: [string, string, number][] = [
-  ["ON", "Ontario — HST", 13], ["NS", "Nova Scotia — HST", 14], ["NB", "New Brunswick — HST", 15], ["NL", "Newfoundland — HST", 15], ["PE", "PEI — HST", 15],
-  ["BC", "British Columbia — GST", 5], ["AB", "Alberta — GST", 5], ["SK", "Saskatchewan — GST", 5], ["MB", "Manitoba — GST", 5], ["QC", "Québec — GST", 5],
-  ["YT", "Yukon — GST", 5], ["NT", "NWT — GST", 5], ["NU", "Nunavut — GST", 5],
-];
-
-function BusinessCard() {
-  const { business, set } = useSettings();
-  const up = (patch: Partial<typeof business>) => set({ business: { ...business, ...patch } });
-  return (
-    <Card title="Business details" hint="Printed on invoices and used for the HST/GST summary. Stored on this device and in your local gateway only.">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Business / your name">
-          <Input value={business.name} onChange={(e) => up({ name: e.target.value })} />
-        </Field>
-        <Field label="HST/GST registration #">
-          <Input value={business.hstNumber} onChange={(e) => up({ hstNumber: e.target.value })} placeholder="123456789 RT0001" className="font-mono" />
-        </Field>
-        <Field label="Address">
-          <Input value={business.address} onChange={(e) => up({ address: e.target.value })} />
-        </Field>
-        <Field label="Email">
-          <Input type="email" value={business.email} onChange={(e) => up({ email: e.target.value })} />
-        </Field>
-        <Field label="Phone">
-          <Input value={business.phone} onChange={(e) => up({ phone: e.target.value })} />
-        </Field>
-        <Field label="Province (sets the default tax rate)">
-          <Select
-            value={business.province}
-            onChange={(e) => {
-              const p = PROVINCES.find((x) => x[0] === e.target.value)!;
-              up({ province: p[0], hstRate: p[2] });
-            }}
-          >
-            {PROVINCES.map(([code, name, rate]) => (
-              <option key={code} value={code}>
-                {name} {rate}%
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Invoice tax rate %">
-          <Input type="number" step="0.5" min={0} max={20} value={business.hstRate} onChange={(e) => up({ hstRate: Number(e.target.value) })} className="font-mono" />
-        </Field>
-        <Field label="Currency">
-          <Select value={business.currency} onChange={(e) => up({ currency: e.target.value })}>
-            <option>CAD</option>
-            <option>USD</option>
-          </Select>
-        </Field>
-      </div>
     </Card>
   );
 }

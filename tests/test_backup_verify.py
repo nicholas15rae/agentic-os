@@ -35,6 +35,10 @@ class BackupVerifyTests(unittest.TestCase):
         return Path(cc.load_config()["backup"]["dir"])
 
     def test_an_isolated_store_backs_up_inside_itself(self):
+        # A saved config without a backup dir must not leak the resolved dir into the defaults.
+        cc.save_config({"llm": {"timeoutSecs": 60}})
+        cc.load_config()
+        self.assertEqual(cc.DEFAULT_CONFIG["backup"]["dir"], "")
         d = self.backups_dir()
         self.assertEqual(d, cc.CC_DIR / "backups")
         self.assertNotEqual(d.resolve(), (cc.BASE_DIR / "backups" / "command-center").resolve())

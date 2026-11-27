@@ -25,6 +25,10 @@ pub const REGISTRY_FILE: &str = "businesses.json";
 pub const WORKSPACE_PREFIX: &str = "bizops_";
 pub const MAX_BUSINESSES: usize = 32;
 const BLOCKLIST_MAX: usize = 200;
+const EMAILS_MAX: usize = 10;
+/// The file's schema version. 2 = the `acting` seed was added to an existing registry once
+/// ([`migrate`]). An older app that rewrites the file writes 1 again; the migration is idempotent.
+pub const REGISTRY_VERSION: u32 = 2;
 /// The Ops prompt template (`{display_name}`, `{business_id}`, `{description}`).
 pub const OPS_PROMPT_TEMPLATE: &str = include_str!("../../rules/bizops.prompt.md");
 
@@ -72,6 +76,21 @@ pub struct Business {
     #[serde(default)]
     pub provision: ProvisionState,
     pub created_at: u64,
+    /// The email accounts this business's mail arrives on (label + address). Empty = the main
+    /// account. Stored and exposed only; Gmail plumbing doesn't read it yet. Omitted from the file
+    /// while empty, so a registry nobody linked mail to stays readable by an older app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emails: Vec<BusinessEmail>,
+}
+
+/// One mailbox linked to a business.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BusinessEmail {
+    /// "Born Fortuna orders", "main".
+    #[serde(default)]
+    pub label: String,
+    pub address: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -106,6 +125,7 @@ pub struct BusinessPatch {
     pub description: Option<String>,
     pub aliases: Option<Vec<String>>,
     pub cross_domain_blocklist: Option<Vec<String>>,
+    pub emails: Option<Vec<BusinessEmail>>,
 }
 
 // ── Validation (pure) ───────────────────────────────────────────────────────
@@ -123,6 +143,10 @@ pub fn validate_business_id(id: &str) -> Result<(), String> {
     const ROLE_IDS: [&str; 14] = ["general", "tony", "librarian", "coder", "booking", "ops", "bizops", "prompter", "designer", "director", "finance", "finance_librarian", "security", "observer"];
     if ROLE_IDS.contains(&id) {
         return Err(format!("businessId {id:?} is an agent id"));
+    }
+    // The finance vault's untagged ledger / the Personal finance area, never a business.
+    if id == super::finance_vault::UNTAGGED {
+        return Err(format!("businessId {id:?} is reserved for personal finances"));
     }
     Ok(())
 }
@@ -156,6 +180,46 @@ fn clean_terms(v: &[String], what: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Trimmed, lower-cased, de-duplicated; each address `local@domain.tld`, one line, no spaces.
+pub fn clean_emails(v: &[BusinessEmail]) -> Result<Vec<BusinessEmail>, String> {
+    if v.len() > EMAILS_MAX {
+        return Err(format!("emails: at most {EMAILS_MAX}"));
+    }
+    let mut out: Vec<BusinessEmail> = vec![];
+    for e in v {
+        let address = clean_line(&e.address, 254, "email address", true)?.to_ascii_lowercase();
+        let ok = match address.split_once('@') {
+            Some((local, domain)) => !local.is_empty() && !domain.contains('@') && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') && !address.contains(char::is_whitespace),
+            None => false,
+        };
+        if !ok {
+            return Err(format!("email address {address:?} doesn't look like an address"));
+        }
+        let label = clean_line(&e.label, 40, "email label", false)?;
+        if !out.iter().any(|o| o.address == address) {
+            out.push(BusinessEmail { label, address });
+        }
+    }
+    Ok(out)
+}
+
+/// The business a mailbox belongs to (case-insensitive). `None` = not linked to one business
+/// (the main account, shared by every business without its own). Pure.
+pub fn business_for_email<'a>(reg: &'a Registry, address: &str) -> Option<&'a Business> {
+    let a = address.trim().to_ascii_lowercase();
+    if a.is_empty() {
+        return None;
+    }
+    reg.businesses.iter().find(|b| b.emails.iter().any(|e| e.address == a))
+}
+
+/// The mailboxes a business reads: its own, or the main account (label "main", empty address)
+/// when it has none. `None` for an unknown business. Pure.
+pub fn emails_for(reg: &Registry, business_id: &str) -> Option<Vec<BusinessEmail>> {
+    let b = reg.businesses.iter().find(|b| b.business_id == business_id)?;
+    Some(if b.emails.is_empty() { vec![BusinessEmail { label: "main".into(), address: String::new() }] } else { b.emails.clone() })
+}
+
 pub fn workspace_slug_for(id: &str) -> String {
     format!("{WORKSPACE_PREFIX}{id}")
 }
@@ -180,6 +244,7 @@ pub fn build(n: &NewBusiness, memory_root: &Path, now: u64) -> Result<Business, 
         status: BusinessStatus::Provisioning,
         provision: ProvisionState::default(),
         created_at: now,
+        emails: vec![],
     })
 }
 
@@ -203,12 +268,51 @@ pub fn validate_registry(r: &Registry, memory_root: &Path) -> Result<(), String>
             if o.display_name.eq_ignore_ascii_case(&b.display_name) {
                 return Err(format!("duplicate displayName {:?}", b.display_name));
             }
+            if let Some(e) = b.emails.iter().find(|e| o.emails.iter().any(|x| x.address == e.address)) {
+                return Err(format!("{} is already linked to {}", e.address, o.display_name));
+            }
         }
     }
     Ok(())
 }
 
-/// The two businesses the registry starts with (both editable / archivable).
+/// The Acting business (auditions, self-tapes, bookings through the agency). Seeded for a new
+/// registry and added once to an existing one ([`migrate`]).
+pub fn acting_seed(memory_root: &Path, now: u64) -> Business {
+    build(
+        &NewBusiness {
+            business_id: "acting".into(),
+            display_name: "Acting".into(),
+            category: "entertainment".into(),
+            description: "Acting work: auditions, self-tapes, callbacks and bookings through the agency, and the agency commission on each job.".into(),
+            // Not a bare "agent" / "booking": those words name agents and the Booking desk, and an
+            // unrouted line naming a business is routed to the Operations Manager (agents.rs).
+            aliases: ["acting", "auditions", "audition", "bookings", "self-tapes", "self tapes", "self-tape", "my agent", "talent agent", "acting agent"].iter().map(|a| a.to_string()).collect(),
+            cross_domain_blocklist: vec![],
+        },
+        memory_root,
+        now,
+    )
+    .expect("the acting seed is valid")
+}
+
+/// One-time upgrades of an existing registry (pure; `true` = it changed and must be saved).
+/// v2: add the `acting` business (status `provisioning`: its memory folder and workspace are made
+/// by the normal "Finish setup" path, never here). An id or display name already taken is left
+/// alone (the user's own record wins).
+pub fn migrate(r: &mut Registry, memory_root: &Path, now: u64) -> bool {
+    if r.version >= REGISTRY_VERSION {
+        return false;
+    }
+    let taken = r.businesses.iter().any(|b| b.business_id == "acting" || b.display_name.eq_ignore_ascii_case("acting"));
+    if !taken && r.businesses.len() < MAX_BUSINESSES {
+        r.businesses.push(acting_seed(memory_root, now));
+    }
+    r.version = REGISTRY_VERSION;
+    true
+}
+
+/// The businesses the registry starts with (all editable / archivable).
 pub fn seeds(memory_root: &Path, now: u64) -> Vec<Business> {
     let s = |id: &str, name: &str, cat: &str, desc: &str, aliases: &[&str]| {
         build(
@@ -240,6 +344,7 @@ pub fn seeds(memory_root: &Path, now: u64) -> Vec<Business> {
             "Online supplement store: website operations, inventory and fulfillment, and compliance.",
             &["supplements and e-commerce", "supplements and ecommerce", "bf supplements", "supplements", "supplement store", "ecom", "e-commerce", "online store"],
         ),
+        acting_seed(memory_root, now),
     ]
 }
 
@@ -327,19 +432,22 @@ impl Store {
         let now = super::arbiter::now_ms();
         let (reg, seed) = match std::fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str::<Registry>(&s).map_err(|e| e.to_string()).and_then(|r| validate_registry(&r, &memory_root).map(|_| r)) {
-                Ok(r) => (r, false),
+                Ok(mut r) => {
+                    let changed = migrate(&mut r, &memory_root, now) && validate_registry(&r, &memory_root).is_ok();
+                    (r, changed)
+                }
                 Err(e) => {
                     eprintln!("[bizops] {REGISTRY_FILE} invalid ({e}); left untouched, no business is routable until it's fixed");
                     (Registry { version: 1, businesses: vec![] }, false)
                 }
             },
-            Err(_) => (Registry { version: 1, businesses: seeds(&memory_root, now) }, true),
+            Err(_) => (Registry { version: REGISTRY_VERSION, businesses: seeds(&memory_root, now) }, true),
         };
         let store = Store { path, memory_root, reg: Mutex::new(reg) };
         if seed {
             let r = store.reg.lock().unwrap().clone();
             if let Err(e) = store.save(&r) {
-                eprintln!("[bizops] seeding {REGISTRY_FILE}: {e}");
+                eprintln!("[bizops] seeding / migrating {REGISTRY_FILE}: {e}");
             }
         }
         store
@@ -362,7 +470,7 @@ impl Store {
         let mut guard = self.reg.lock().unwrap();
         let mut next = guard.clone();
         let out = f(&mut next)?;
-        next.version = 1;
+        next.version = REGISTRY_VERSION;
         validate_registry(&next, &self.memory_root)?;
         self.save(&next)?;
         *guard = next;
@@ -408,6 +516,9 @@ impl Store {
             }
             if let Some(v) = &p.cross_domain_blocklist {
                 b.cross_domain_blocklist = clean_terms(v, "crossDomainBlocklist")?;
+            }
+            if let Some(v) = &p.emails {
+                b.emails = clean_emails(v)?;
             }
             Ok(b.clone())
         })
@@ -702,7 +813,12 @@ pub(crate) mod tests {
         let dir = temp_dir("seed");
         let s = Store::open(&dir);
         let r = s.snapshot();
-        assert_eq!(r.businesses.iter().map(|b| b.business_id.as_str()).collect::<Vec<_>>(), ["trades_contracting", "supplements_ecom"]);
+        assert_eq!(r.businesses.iter().map(|b| b.business_id.as_str()).collect::<Vec<_>>(), ["trades_contracting", "supplements_ecom", "acting"]);
+        assert_eq!(r.version, REGISTRY_VERSION);
+        let a = &r.businesses[2];
+        assert_eq!((a.display_name.as_str(), a.workspace_slug.as_str(), a.finance_ledger_tag.as_str()), ("Acting", "bizops_acting", "acting"));
+        assert_eq!(PathBuf::from(&a.memory_path), dir.join("memory").join("ops").join("acting"));
+        assert!(!a.aliases.iter().any(|x| x == "agent" || x == "booking"), "no alias that names an agent or the Booking desk");
         let t = &r.businesses[0];
         assert_eq!((t.workspace_slug.as_str(), t.rag_namespace.as_str(), t.librarian_scope.as_str(), t.finance_ledger_tag.as_str()), ("bizops_trades_contracting", "bizops_trades_contracting", "bizops_trades_contracting", "trades_contracting"));
         assert_eq!(PathBuf::from(&t.memory_path), dir.join("memory").join("ops").join("trades_contracting"));
@@ -710,6 +826,67 @@ pub(crate) mod tests {
         assert!(dir.join(REGISTRY_FILE).exists());
         // Reopen: same registry, not re-seeded.
         assert_eq!(Store::open(&dir).snapshot(), r);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An existing two-business registry (version 1, as written before Acting) gets `acting`
+    /// added once, unprovisioned (no folder, no workspace made), and keeps everything else.
+    #[test]
+    fn v1_registry_gains_acting_once() {
+        let dir = temp_dir("migrate");
+        let root = dir.join("memory").join("ops");
+        let mut old = Registry { version: 1, businesses: seeds(&root, 1).into_iter().filter(|b| b.business_id != "acting").collect() };
+        old.businesses[0].aliases.push("stonework".into());
+        std::fs::write(dir.join(REGISTRY_FILE), serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        // The old file has no `emails` key and must still parse (serde default).
+        assert!(!std::fs::read_to_string(dir.join(REGISTRY_FILE)).unwrap().contains("emails"));
+        let s = Store::open(&dir);
+        let r = s.snapshot();
+        assert_eq!(r.version, REGISTRY_VERSION);
+        assert_eq!(r.businesses.iter().map(|b| b.business_id.as_str()).collect::<Vec<_>>(), ["trades_contracting", "supplements_ecom", "acting"]);
+        assert!(r.businesses[0].aliases.iter().any(|a| a == "stonework"), "the user's edits survive");
+        let acting = s.get("acting").unwrap();
+        assert_eq!(acting.status, BusinessStatus::Provisioning);
+        assert!(!root.join("acting").exists(), "the migration provisions nothing");
+        // Persisted, and a reopen doesn't add a second one.
+        let reopened = Store::open(&dir).snapshot();
+        assert_eq!(reopened, r);
+        // Pure migrate: idempotent; a user's own "Acting" (other id) is left alone.
+        let mut v = old.clone();
+        assert!(migrate(&mut v, &root, 2) && !migrate(&mut v, &root, 3));
+        assert_eq!(v.businesses.len(), 3);
+        let mut mine = old.clone();
+        mine.businesses.push(build(&NewBusiness { business_id: "acting_work".into(), display_name: "acting".into(), category: "".into(), description: "".into(), aliases: vec![], cross_domain_blocklist: vec![] }, &root, 1).unwrap());
+        migrate(&mut mine, &root, 2);
+        assert_eq!(mine.businesses.iter().filter(|b| b.display_name.eq_ignore_ascii_case("acting")).count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn emails_link_mailboxes_to_one_business() {
+        let dir = temp_dir("emails");
+        let s = Store::open(&dir);
+        let mail = |label: &str, address: &str| BusinessEmail { label: label.into(), address: address.into() };
+        let p = BusinessPatch { emails: Some(vec![mail("Born Fortuna", "  Orders@BornFortuna.ca "), mail("dup", "orders@bornfortuna.ca")]), ..Default::default() };
+        let b = s.patch("supplements_ecom", &p).unwrap();
+        assert_eq!(b.emails, [mail("Born Fortuna", "orders@bornfortuna.ca")], "trimmed, lower-cased, de-duplicated");
+        let r = s.snapshot();
+        assert_eq!(business_for_email(&r, "ORDERS@bornfortuna.ca").map(|b| b.business_id.as_str()), Some("supplements_ecom"));
+        assert!(business_for_email(&r, "someone@gmail.com").is_none());
+        assert!(business_for_email(&r, " ").is_none());
+        assert_eq!(emails_for(&r, "supplements_ecom").unwrap(), [mail("Born Fortuna", "orders@bornfortuna.ca")]);
+        assert_eq!(emails_for(&r, "acting").unwrap(), [mail("main", "")], "no link = the main account");
+        assert!(emails_for(&r, "nope").is_none());
+        // One mailbox, one business; malformed addresses refused.
+        assert!(s.patch("acting", &BusinessPatch { emails: Some(vec![mail("", "orders@bornfortuna.ca")]), ..Default::default() }).unwrap_err().contains("already linked"));
+        for bad in ["nope", "a@b", "@x.ca", "a b@x.ca", "a@x.ca.", "a@@x.ca"] {
+            assert!(s.patch("acting", &BusinessPatch { emails: Some(vec![mail("", bad)]), ..Default::default() }).is_err(), "{bad}");
+        }
+        assert!(serde_json::from_value::<BusinessPatch>(json!({ "emails": [{ "address": "a@x.ca", "secret": 1 }] })).is_err());
+        // Display name / category / description edits (the card's editor).
+        let b = s.patch("acting", &BusinessPatch { display_name: Some("Acting & Voice".into()), category: Some("film".into()), description: Some("Screen and voice work.".into()), ..Default::default() }).unwrap();
+        assert_eq!((b.display_name.as_str(), b.category.as_str(), b.workspace_slug.as_str()), ("Acting & Voice", "film", "bizops_acting"));
+        assert!(validate_business_id("personal").is_err(), "personal is the finance area, never a business");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2, Plus, Printer, Send, Trash2, X } from "lucide-react";
 import { Card, Field, Input, Select, money } from "@/components/ui";
-import { collections, useCollection, type Item } from "@/lib/cc-api";
+import { cc, collections, useCollection, type Item } from "@/lib/cc-api";
 import { invoiceTotals, type Income, type Invoice, type InvoiceLine } from "@/features/finance/types";
 import { useSettings } from "@/stores/settings";
+import { profileFor, useProfiles } from "@/features/business/profiles-store";
+import { printableHst, taxLabel, type BusinessProfile } from "@/features/business/profiles";
 
 const STATUS_TONE: Record<Invoice["status"], string> = {
   draft: "border-white/15 text-ink-2",
@@ -18,6 +20,10 @@ export function InvoicesPanel() {
   const { items, update, remove } = useCollection<Invoice>("invoices");
   const { currency } = useSettings((s) => s.business);
   const [editing, setEditing] = useState<Item<Invoice> | "new" | null>(null);
+  // The per-business profiles printInvoice reads (Settings → Business).
+  useEffect(() => {
+    if (!useProfiles.getState().loaded) void useProfiles.getState().load();
+  }, []);
   const now = Date.now();
   const rows = items.map((i) => (i.status === "sent" && i.dueAt < now ? { ...i, status: "overdue" as const } : i)).sort((a, b) => b.issuedAt - a.issuedAt);
   const outstanding = rows.filter((i) => i.status === "sent" || i.status === "overdue").reduce((s, i) => s + invoiceTotals(i).total, 0);
@@ -99,7 +105,9 @@ function Btn({ label, onClick, danger, children }: { label: string; onClick: () 
 
 function InvoiceEditor({ initial, onClose }: { initial: Item<Invoice> | null; onClose: () => void }) {
   const { create, update, items } = useCollection<Invoice>("invoices");
-  const { hstRate, currency } = useSettings((s) => s.business);
+  const { currency } = useSettings((s) => s.business);
+  // A new invoice starts at its area's tax rate (Contracting until Finance tags invoices by area).
+  const hstRate = useProfiles((s) => (s.loaded ? profileFor().taxRate : null)) ?? useSettings.getState().business.hstRate;
   const [inv, setInv] = useState<Invoice>(
     initial ?? {
       number: `INV-${new Date().getFullYear()}-${String(items.length + 1).padStart(3, "0")}`,
@@ -191,26 +199,43 @@ function InvoiceEditor({ initial, onClose }: { initial: Item<Invoice> | null; on
 
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
-/** A clean, light printable invoice → the browser's Print → Save as PDF. */
+/** The invoice's area: a Finance tag when one exists (a later step adds it), else Contracting. */
+const invoiceArea = (inv: Invoice): string | undefined => (inv as Invoice & { area?: string }).area;
+
+const INVOICE_CSS: Record<BusinessProfile["invoiceStyle"], string> = {
+  classic: `body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#111;margin:48px;max-width:760px}
+h1{font-size:28px;margin:0}table{width:100%;border-collapse:collapse;margin-top:28px}th,td{padding:8px 6px;border-bottom:1px solid #ddd;text-align:left}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#666}`,
+  modern: `body{font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;color:#141414;margin:0 48px 48px;max-width:760px;border-top:10px solid #d97706;padding-top:36px}
+h1{font-size:34px;margin:0;letter-spacing:-.02em}table{width:100%;border-collapse:collapse;margin-top:28px}th,td{padding:9px 6px;text-align:left}
+thead th{background:#f4f4f5}tbody tr:nth-child(even) td{background:#fafafa}th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#555}`,
+  minimal: `body{font:13px/1.5 Georgia,"Times New Roman",serif;color:#222;margin:56px;max-width:720px}
+h1{font-size:20px;font-weight:400;letter-spacing:.2em;margin:0}table{width:100%;border-collapse:collapse;margin-top:28px}th,td{padding:6px 4px;text-align:left}
+th{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#888;font-weight:400}`,
+};
+
+/** A clean, light printable invoice → the browser's Print → Save as PDF. Uses the profile of the invoice's area. */
 function printInvoice(inv: Invoice) {
-  const b = useSettings.getState().business;
+  const b = profileFor(invoiceArea(inv));
   const t = invoiceTotals(inv);
   const m = (n: number) => money(n, b.currency);
-  const taxLabel = ["ON", "NS", "NB", "NL", "PE"].includes(b.province) ? "HST" : "GST";
+  const label = taxLabel(b.province);
+  // Only a well-formed number Nic confirmed is ever printed (Settings → Business).
+  const hst = printableHst(b);
+  const logo = b.logoFileId ? `<img src="${esc(cc.fileUrl(b.logoFileId))}" alt="" style="max-height:64px;max-width:200px;margin-bottom:8px"><br>` : "";
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(inv.number)}</title>
-<style>body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#111;margin:48px;max-width:760px}
-h1{font-size:28px;margin:0}table{width:100%;border-collapse:collapse;margin-top:28px}th,td{padding:8px 6px;border-bottom:1px solid #ddd;text-align:left}
-th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#666}.r{text-align:right}.tot td{border:0;padding:4px 6px}.big{font-size:18px;font-weight:700}
+<style>${INVOICE_CSS[b.invoiceStyle] ?? INVOICE_CSS.classic}
+.r{text-align:right}.tot td{border:0;padding:4px 6px;background:none}.big{font-size:18px;font-weight:700}
 .muted{color:#666}.row{display:flex;justify-content:space-between;gap:24px;margin-top:24px}@media print{body{margin:24px}}</style></head><body>
 <div class="row"><div><h1>INVOICE</h1><div class="muted">${esc(inv.number)}</div></div>
-<div style="text-align:right"><b>${esc(b.name || "Your business")}</b><br>${esc(b.address)}<br>${esc(b.email)} ${esc(b.phone)}<br>${b.hstNumber ? `${taxLabel} # ${esc(b.hstNumber)}` : ""}</div></div>
+<div style="text-align:right">${logo}<b>${esc(b.name || "Your business")}</b><br>${esc(b.address)}<br>${esc(b.email)} ${esc(b.phone)}<br>${hst ? `${label} # ${esc(hst)}` : ""}</div></div>
 <div class="row"><div><div class="muted">Bill to</div><b>${esc(inv.client)}</b><br>${esc(inv.clientAddress ?? "")}<br>${esc(inv.clientEmail ?? "")}</div>
 <div style="text-align:right"><div class="muted">Issued</div>${new Date(inv.issuedAt).toLocaleDateString()}<div class="muted" style="margin-top:6px">Due</div>${new Date(inv.dueAt).toLocaleDateString()}</div></div>
 <table><thead><tr><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead><tbody>
 ${inv.items.map((l) => `<tr><td>${esc(l.desc)}</td><td class="r">${l.qty}</td><td class="r">${m(l.rate)}</td><td class="r">${m(l.qty * l.rate)}</td></tr>`).join("")}
 </tbody></table>
 <table style="width:auto;margin-left:auto"><tbody class="tot"><tr><td>Subtotal</td><td class="r">${m(t.subtotal)}</td></tr>
-<tr><td>${taxLabel} ${inv.taxRate}%</td><td class="r">${m(t.tax)}</td></tr><tr><td class="big">Total</td><td class="r big">${m(t.total)}</td></tr></tbody></table>
+<tr><td>${label} ${inv.taxRate}%</td><td class="r">${m(t.tax)}</td></tr><tr><td class="big">Total</td><td class="r big">${m(t.total)}</td></tr></tbody></table>
 ${inv.notes ? `<p class="muted" style="margin-top:32px">${esc(inv.notes)}</p>` : ""}
 <script>window.onload=()=>{window.print()}</script></body></html>`;
   const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));

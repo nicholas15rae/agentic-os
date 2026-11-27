@@ -42,7 +42,7 @@ describe("disk reports", () => {
 });
 
 describe("probe nodes", () => {
-  it("cover the whole roster (the arbiter's 14 nodes)", () => {
+  it("cover the whole roster (the arbiter's 13 nodes)", () => {
     expect([...PROBE_NODES].sort()).toEqual([...ROSTER].sort());
   });
   it("presets name only known nodes and the stress preset includes Trading", () => {

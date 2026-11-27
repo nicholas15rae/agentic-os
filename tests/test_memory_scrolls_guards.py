@@ -352,7 +352,7 @@ class IdentityTests(unittest.TestCase):
         self.assertIn('"Booking Desk"', roles.read_text(encoding="utf-8"))
         for placeholder in ("Security Patrol", "Finance"):
             self.assertIn(placeholder, agents.read_text(encoding="utf-8"))
-        for n in ("tony", "jarvis", "prompter", "designer", "coder", "librarian", "booking desk", "ops", "security patrol", "dispatcher", "conceptualizer"):
+        for n in ("tony", "jarvis", "prompter", "designer", "coder", "librarian", "booking desk", "biz ops", "security patrol", "dispatcher", "conceptualizer"):
             self.assertIn(n, guards.AGENT_NAMES)
         self.assertNotIn("nic", guards.AGENT_NAMES)
 
@@ -761,7 +761,7 @@ class FalsePositiveTests(unittest.TestCase):
 
     def test_role_words_as_nouns_are_not_user_relabels(self):
         for s in ("- Librarian: user approves every rule change before commit", "- Booking Desk: owner approval required for every send",
-                  "- Ops: operator confirms every service restart", "- User: designer and illustrator", "- The user is a designer and 3D artist",
+                  "- Biz Ops: operator confirms every service restart", "- User: designer and illustrator", "- The user is a designer and 3D artist",
                   "- Librarian is the owner of rule files"):
             self.assertFalse(guards.relabels_user(s), s)
         for s in ("- User: Designer", "- The user is Tony", "- Tony is the user of Agentic OS", "- Jarvis = user"):

@@ -228,7 +228,7 @@ export function enqueueReport(queue: readonly AgentReport[], r: AgentReport, now
 
 // ── Tony's inbox line ────────────────────────────────────────────────────────
 
-const NAMES: Record<string, string> = { prompter: "the Prompter", designer: "the Designer", director: "the Director", coder: "the Coder", librarian: "the Librarian", trading: "the Trading agent", booking: "the Booking Desk", ops: "Ops", bizops: "Biz Ops", finance: "Finance" };
+const NAMES: Record<string, string> = { prompter: "the Prompter", designer: "the Designer", director: "the Director", coder: "the Coder", librarian: "the Librarian", trading: "the Trading agent", booking: "the Booking Desk", bizops: "Biz Ops", finance: "Finance" };
 export const agentName = (a: string) => NAMES[a] ?? a.charAt(0).toUpperCase() + a.slice(1);
 const count = (n: number) => (n === 1 ? "a message" : `${n === 2 ? "2" : n} messages`);
 

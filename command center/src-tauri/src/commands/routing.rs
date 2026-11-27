@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// this only breaks exact score ties). `general`'s own domain triggers are
 /// mostly intercepted earlier by the OS-control intent layer (Part 4), so it
 /// sits last here as a catch-all, never stealing a tie from a sub-agent.
-pub const DOMAIN_TIEBREAK: [&str; 10] = ["booking", "bizops", "finance", "ops", "coder", "designer", "director", "librarian", "prompter", "general"];
+pub const DOMAIN_TIEBREAK: [&str; 9] = ["booking", "bizops", "finance", "coder", "designer", "director", "librarian", "prompter", "general"];
 
 /// "(hey tony,? )?(tell|ask|have|get|let|send|route|hand|pass) (it )?(to )?(my|the|our)? NAME…"
 const VERBS_A: [&str; 9] = ["tell", "ask", "have", "get", "let", "send", "route", "hand", "pass"];
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn tony_is_never_a_delegation_target() {
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         let r = resolve("ask tony to ask the coder to fix it", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
         assert!(r.task.contains("fix"));
@@ -751,7 +751,7 @@ mod tests {
             assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
         }
         // Tony's name beats a topic (it used to be: a sub-agent topic wins over a self address).
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         for text in ["tony check my whatsapp messages", "hey tony, render the reel", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("general"), RouteKind::Own, "high"), "{text}");
@@ -765,8 +765,9 @@ mod tests {
         assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
         let r = resolve("friday, check my reel for the shoot", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
+        // Infrastructure is Tony's own topic: no agent takes it.
         let r = resolve("system status of the droplet", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
+        assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own));
         // A Named agent still wins over Tony's name.
         let r = resolve("hey tony, ask the director to edit video for the shoot", &cfg);
         assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.task.as_str()), (Some("director"), RouteKind::Named, "high", "edit video for the shoot"));
@@ -822,7 +823,7 @@ mod tests {
     /// topic — in `route_for_turn` too. Mirrors router.test.ts.
     #[test]
     fn only_a_real_address_beats_a_topic() {
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         let mut friday = OsConfig::default();
         friday.os_name = "Friday".into();
         // A mention (a noun, an object) leaves the topic's agent in charge.
@@ -833,13 +834,13 @@ mod tests {
             ("fix the layout css before friday", &friday, "designer"),
             ("fix bug in the orchestrator", &cfg, "coder"),
             ("get the orchestrator react code working", &cfg, "coder"),
-            ("the dispatcher keeps timing out, is the droplet healthy", &cfg, "ops"),
+            ("the dispatcher keeps timing out, fix bug in the retry loop", &cfg, "coder"),
         ] {
             let r = resolve(text, c);
             assert_eq!((r.role.as_deref(), r.kind), (Some(role), RouteKind::Domain), "{text}");
         }
         // A mention with no topic is still Tony's (step (d)).
-        for text in ["refactor the dispatcher", "so I'm on my phone now hey tony what's up"] {
+        for text in ["refactor the dispatcher", "so I'm on my phone now hey tony what's up", "the dispatcher keeps timing out, is the droplet healthy"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
         }
@@ -847,15 +848,15 @@ mod tests {
         for (text, c) in [
             ("hey tony, render the reel", &cfg),
             ("ok jarvis, redo the color palette for the landing page", &cfg),
-            ("so tony, is the droplet healthy", &cfg),
-            ("yo tony check my docker containers", &cfg),
+            ("so tony, is the reel rendered", &cfg),
+            ("yo tony check my layout css", &cfg),
             ("friday, check my reel for the shoot", &friday),
             ("ask tony to render the reel", &cfg),
             ("tell the dispatcher about the thumbnail", &cfg),
-            ("have jarvis check the droplet", &cfg),
+            ("have jarvis check the inventory", &cfg),
             ("let tony know the layout changed", &cfg),
             ("render the reel, tony", &cfg),
-            ("is the droplet healthy tony please", &cfg),
+            ("is the thumbnail ready tony please", &cfg),
             ("render the reel, friday", &friday),
         ] {
             let r = resolve(text, c);
@@ -897,14 +898,6 @@ mod tests {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default), "{text}");
         }
-    }
-
-    /// The default config with the Ops placeholder thawed, for priority tests that use Ops' infra
-    /// topics as "another agent's topic".
-    fn ops_thawed() -> OsConfig {
-        let mut c = OsConfig::default();
-        c.switchboard.frozen_agents.retain(|a| a != "ops");
-        c
     }
 
     #[test]
@@ -1031,7 +1024,7 @@ mod tests {
             "what's up, any updates on the build?",
             "hey what's up, any updates?",
             "fix the weather api bug in the code",
-            "Ops, turn off the weather alerts",
+            "Biz Ops, turn off the weather alerts",
             "Booking, order an umbrella for the shoot",
         ] {
             assert_eq!(direct_tool(text), None, "{text}");
@@ -1189,12 +1182,12 @@ mod tests {
 
     #[test]
     fn domain_tie_break_follows_role_order() {
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         // bizops "inventory" (9) vs designer "animation" (9): bizops comes first.
         let r = resolve("inventory animation", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("bizops"), RouteKind::Domain));
-        // A Tony topic ("schedule") never steals a tie: the agent keeps it.
-        let r = resolve("schedule a docker restart", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
+        // A Tony topic ("schedule", 8) never steals a tie: the agent ("captions", 8) keeps it.
+        let r = resolve("schedule the captions", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
     }
 }

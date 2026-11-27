@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 23:44. One page for every Claude Code session and branch.
+Updated 2026-11-26 23:55. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -34,6 +34,7 @@ Updated 2026-11-26 23:44. One page for every Claude Code session and branch.
 | Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
+| Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | see Branches | **No**: one commit on main d69d0df, not pushed |
 
 ## 2. In progress
 
@@ -44,12 +45,13 @@ Updated 2026-11-26 23:44. One page for every Claude Code session and branch.
 | Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
-| Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 
 ## 3. Waiting on you
 
 **Decisions**
+- OK to merge the Ops removal (`claude/elated-kare-67e4c4`, one commit) into main? Then the rebuild + restart below runs its os.json migration.
+- Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
 - The running app (restarted 23:40) is main at 0c4341f: section-pass, batch3, crash hardening, recall fix. Not in it yet: the director-suite merge (Director Parts 1-2, 11.10, about 23:28) and the Ops removal. Rebuild once the Ops removal lands? Its os.json migration runs on that restart.
 - Check in the running app (23:40 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
@@ -61,6 +63,7 @@ Updated 2026-11-26 23:44. One page for every Claude Code session and branch.
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.
 
 **Manual steps**
+- Ops removal, already done live: the Ops lines are out of handoff-cues.json and the STT hint (backups `*.20261126-231018-before-ops-removal`). os.json changes only on the restart after the merge (backup `os.json.bak-<stamp>-ops-removed`).
 - Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
@@ -121,6 +124,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Live app after the 23:40 restart (main 0c4341f) | Up, no panic.log lines; 2 phone turns answered by the desktop: live weather (not the stored reply), Chris recalled; first words 3.4 s cold, then 0.8 s | 11-26 23:42 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
 | section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
+| claude/elated-kare-67e4c4 (Ops removal, on e46d0c7; main since changed STATUS.md only) | tsc clean; vitest 2,887/2,887; cargo 1,596 (+2 known CRLF; browser tests passed); pytest language hub + memory scrolls + gateway + fw_server 253/253 | 11-26 23:45 |
 | main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
 | director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
 | Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
@@ -139,27 +143,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:41 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:48 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/elated-kare-67e4c4` | 1 | `0dcc440` 2026-11-26 refactor(command-center): remove the Ops agent; its work is Tony's | clean |
+| `claude/elated-kare-67e4c4` | 1 | `62f32d0` 2026-11-26 refactor(command-center): remove the Ops agent; its work is Tony's | clean |
+| `claude/sections-8-10-m2` | 6 | `24669ec` 2026-11-26 docs(status): refresh branch table | 89 files |
 | `claude/upbeat-wing-e87be0` | 7 | `aec8c6d` 2026-11-26 Merge main (e46d0c7: director-suite) into claude/upbeat-wing-e87be0 | clean |
 | `director-suite` | 2 | `351dd2c` 2026-11-26 perf(director): keep the Director's system message byte-stable | 2 files |
-| `claude/practical-elbakyan-0f96f1` | 7 | `cdbd99a` 2026-11-26 Merge main (0c4341f, STATUS.md only) into claude/practical-elbakyan... | 9 files |
-| `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | 170 files |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 207 files |
+| `claude/practical-elbakyan-0f96f1` | 7 | `cdbd99a` 2026-11-26 Merge main (0c4341f, STATUS.md only) into claude/practical-elbakyan... | 11 files |
+| `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | 176 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
 - `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
 - `d62333d` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main
 - `7724507` 2026-11-26 docs(status): director-suite merged into main; 11.10 recorded
 - `44bfcc0` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main
 - `76df04f` 2026-11-26 Merge director-suite (Director Parts 1-2) into main
-- `a0e730c` 2026-11-26 docs(status): section-pass and section-pass-batch3 merged into main
 <!-- /AUTO:BRANCHES -->

@@ -524,7 +524,7 @@ mod tests {
         for a in ["designer", "coder", "librarian"] {
             assert!(!role_prompt(a, true).contains(NO_THINK), "{a}");
         }
-        assert!(role_prompt("ops", false).starts_with("You are a helpful specialist"));
+        assert!(role_prompt("security-patrol", false).starts_with("You are a helpful specialist"));
     }
 
     #[test]
@@ -687,7 +687,7 @@ mod tests {
             assert_eq!(srv.count("POST", "/update"), 0);
             assert!(prompts.lock().unwrap()["designer"].as_deref().unwrap().starts_with("Old designer"));
             // Unknown pairing (a slug outside the four) is refused.
-            let r = apply_workspace_prompts(&AllmConn::test(&srv.base), &dir, "T", &[("coder", "ops")]).await;
+            let r = apply_workspace_prompts(&AllmConn::test(&srv.base), &dir, "T", &[("coder", "bizops_bakery")]).await;
             assert_eq!(r[0].outcome, "refused");
             // A server error on update is reported as failed (the backup is kept).
             let srv2 = start(fake_allm(seeded(), true)).await;

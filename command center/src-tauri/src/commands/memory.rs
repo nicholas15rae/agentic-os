@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     fn ws_map() -> BTreeMap<String, String> {
-        [("general", "my-workspace"), ("booking", "booking"), ("librarian", "librarian"), ("coder", "coder"), ("ops", ""), ("dup", "librarian")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        [("general", "my-workspace"), ("booking", "booking"), ("librarian", "librarian"), ("coder", "coder"), ("director", ""), ("dup", "librarian")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
     }
 
     #[test]

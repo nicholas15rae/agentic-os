@@ -32,7 +32,7 @@ not included yet; don't invent it.
   and non-empty, send it as the multipart `prompt` field. Check that whisper.cpp's server reads
   `prompt` on the `--inference-path /v1/audio/transcriptions` route (check `whisper.cpp/examples/server`).
 - Default value (written as natural speech on purpose, not a comma list):
-  `"Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint."`
+  `"Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint."`
 - Add an editable text box for it in Settings → Voice (STT section), saved through the existing provider-update path.
 - **Hallucination guard (required).** `base.en` sometimes repeats its prompt back on near-silent clips. In
   `stt_transcribe`, after the existing `junk` filter, drop the transcript when it contains a run of **4 or more

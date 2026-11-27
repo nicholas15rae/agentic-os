@@ -215,7 +215,6 @@ pub(crate) fn role_label(role: &str, os_name: &str) -> String {
         "librarian" => "Librarian".into(),
         "coder" => "Coder".into(),
         "booking" => "Booking Desk".into(),
-        "ops" => "Ops".into(),
         "prompter" => "Prompter".into(),
         "designer" => "Designer".into(),
         "director" => "Director".into(),
@@ -242,7 +241,7 @@ fn title_case_id(id: &str) -> String {
 /// Tony's own ids): the current roles in their historic order, then any later id A→Z. Data-driven
 /// so a future specialist (Security Patrol, Finance…) joins the sentence with no code change.
 pub(crate) fn sub_agent_roster(cfg: &OsConfig) -> Vec<String> {
-    const ORDER: [&str; 9] = ["librarian", "coder", "booking", "ops", "bizops", "finance", "prompter", "designer", "director"];
+    const ORDER: [&str; 8] = ["librarian", "coder", "booking", "bizops", "finance", "prompter", "designer", "director"];
     let ids: Vec<&String> = cfg.routing.agents.keys().filter(|id| !super::routing::is_self_role(id, &cfg.os_name)).collect();
     let mut out: Vec<String> = ORDER.iter().filter(|o| ids.iter().any(|i| i.as_str() == **o)).map(|o| role_label(o, &cfg.os_name)).collect();
     out.extend(ids.iter().filter(|i| !ORDER.contains(&i.as_str())).map(|i| role_label(i, &cfg.os_name)));
@@ -1740,7 +1739,7 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
 #[serde(rename_all = "camelCase")]
 pub struct OsTurnRequest {
     pub(crate) text: String,
-    /// Sub-agent role: librarian | coder | booking | ops | prompter | designer | general.
+    /// Sub-agent role: librarian | coder | booking | bizops | finance | prompter | designer | director | general.
     pub(crate) role: String,
     /// The user opened that agent's tab (talk to it directly, no synthesis).
     #[serde(default)]
@@ -3230,9 +3229,9 @@ mod answer_sink_tests {
 }
 
 /// Roles whose turns never reach `training_logs/` as text: the folder is read by memory harvest
-/// (fine-tune pairs) and uploaded by Drive sync. Finance phrases route to `ops` until a Finance
-/// agent exists.
-const PRIVATE_LOG_ROLES: [&str; 3] = ["booking", "ops", "finance"];
+/// (fine-tune pairs) and uploaded by Drive sync. Money talk on any other route is caught by the
+/// `private_turn` money pattern.
+const PRIVATE_LOG_ROLES: [&str; 2] = ["booking", "finance"];
 
 /// Why a turn's text stays out of the training log, if it does: a private role, a comms-history
 /// recall (other people's messages), or a request about money / bookkeeping on any route. Pure.
@@ -3246,7 +3245,7 @@ pub(crate) fn private_turn(role: &str, text: &str, delegated_to: Option<&str>) -
     });
     match role {
         "booking" => Some("booking"),
-        "ops" | "finance" => Some("finance"),
+        "finance" => Some("finance"),
         _ if delegated_to == Some("comms-history") => Some("comms"),
         _ if finance.is_match(text) => Some("finance"),
         _ => None,
@@ -3729,10 +3728,9 @@ mod tests {
 
     #[test]
     fn private_turns_never_reach_the_training_log_as_text() {
-        // Booking and finance (ops) routes, a comms recall, and money talk on Tony's own route.
+        // Booking and Finance routes, a comms recall, and money talk on Tony's own route.
         for (role, text, deleg, kind) in [
             ("booking", "book the Thursday callback with Sam", None, "booking"),
-            ("ops", "log the deck job hours", None, "finance"),
             ("finance", "categorise last week", None, "finance"),
             ("general", "what did Maria say about the shoot", Some("comms-history"), "comms"),
             ("general", "how much HST did I pay on the Home Depot receipt", None, "finance"),
@@ -3755,8 +3753,9 @@ mod tests {
         assert_eq!(rec["upstream"], "what's the weather in Toronto");
         let down = rec["downstream"].as_str().unwrap();
         assert!(!down.contains("hunter2-secret-value") && !down.contains("abcdef1234567890") && down.starts_with("Sunny"), "{down}");
-        // Everyday words that are not money talk stay logged.
-        for t in ["check the weather", "play some jazz", "build me a protein calculator"] {
+        // Everyday words that are not money talk stay logged, infrastructure questions (Tony's
+        // own) included.
+        for t in ["check the weather", "play some jazz", "build me a protein calculator", "is the droplet healthy", "restart the n8n docker container"] {
             assert_eq!(private_turn("general", t, None), None, "{t}");
         }
     }
@@ -3945,7 +3944,7 @@ mod tests {
     fn route_for_turn_money_reads_are_tonys_direct_tool() {
         let cfg = OsConfig::default();
         let rt = |role: &str, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit: false, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false, learning: false, stay_with_tony: false }, &cfg);
-        for (role, text, kind) in [("finance", "when is HST due?", Some("Domain")), ("general", "when is HST due?", None), ("general", "any unpaid invoices?", None), ("ops", "how much did contracting make this month?", Some("Domain")), ("general", "what do I owe ML Talent?", None), ("general", "what do I owe my accountant?", None)] {
+        for (role, text, kind) in [("finance", "when is HST due?", Some("Domain")), ("general", "when is HST due?", None), ("general", "any unpaid invoices?", None), ("bizops", "how much did contracting make this month?", Some("Domain")), ("general", "what do I owe ML Talent?", None), ("general", "what do I owe my accountant?", None)] {
             let r = rt(role, text, kind);
             assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Direct"), "{text}");
             assert_eq!(r.reason, "live finance tool");
@@ -4403,12 +4402,12 @@ mod tests {
     fn roster_sentence_is_built_from_the_registry() {
         let cfg = OsConfig { identity_path: "Z:/definitely/missing/MASTER_IDENTITY.md".into(), ..Default::default() };
         // The default registry keeps today's sentence byte for byte.
-        assert!(system_prompt(&cfg, &[]).contains("You can hand work to nine local sub-agents (Librarian, Coder, Booking Desk, Ops, Operations Manager, Finance, Prompter, Designer, Director) and use local MCP tools;"));
+        assert!(system_prompt(&cfg, &[]).contains("You can hand work to eight local sub-agents (Librarian, Coder, Booking Desk, Operations Manager, Finance, Prompter, Designer, Director) and use local MCP tools;"));
         // A future specialist joins it with no code change.
         let mut more = cfg.clone();
         more.routing.agents.insert("security-patrol".into(), Default::default());
         let s = system_prompt(&more, &[]);
-        assert!(s.contains("ten local sub-agents (Librarian, Coder, Booking Desk, Ops, Operations Manager, Finance, Prompter, Designer, Director, Security Patrol)"), "{s}");
+        assert!(s.contains("nine local sub-agents (Librarian, Coder, Booking Desk, Operations Manager, Finance, Prompter, Designer, Director, Security Patrol)"), "{s}");
         assert_eq!(role_label("security-patrol", "Tony"), "Security Patrol");
         assert_eq!(role_label("finance", "Tony"), "Finance");
         assert_eq!(role_label("finance_2", "Tony"), "Finance 2");
@@ -4462,7 +4461,7 @@ mod tests {
         assert_eq!(rt("coder", false, "I think the coder should write a timer script", Some("Named"), false).role, "coder");
         // Direct live-tool reads still win.
         assert_eq!(rt("general", false, "any whatsapp updates", None, true).kind, "Direct");
-        // Booking / Librarian / Ops routing is unchanged.
+        // Booking routing is unchanged.
         let a = rt("booking", false, "check the casting call availability", Some("Domain"), true);
         let b = rt("booking", false, "check the casting call availability", Some("Domain"), false);
         assert_eq!(a, b);
@@ -4524,7 +4523,7 @@ mod tests {
             // Everything before the scroll is byte-identical across modes (cache-stable prefix),
             // and the roster sentence keeps the FULL registry even when the mode froze agents.
             assert!(msg.starts_with(&format!("{sys}{scroll}")), "{}", m.id);
-            assert!(sys.contains("You can hand work to nine local sub-agents (Librarian, Coder, Booking Desk, Ops, Operations Manager, Finance, Prompter, Designer, Director)"));
+            assert!(sys.contains("You can hand work to eight local sub-agents (Librarian, Coder, Booking Desk, Operations Manager, Finance, Prompter, Designer, Director)"));
             seen.push(block);
         }
         assert!(seen.iter().any(|b| b.contains("ON DUTY: Coder, Designer, Prompter;")));
@@ -4609,9 +4608,6 @@ mod tests {
         // On-duty agents and modes with no overlay are untouched; Tony's own turns too.
         assert_eq!(hold(r("coder", "Domain"), false, "write code", "builder"), r("coder", "Domain"));
         assert_eq!(hold(r("bizops", "Domain"), false, "how is Corner Bakery doing", "brainstorm"), r("bizops", "Domain"));
-        // Ops is a frozen placeholder (section pass): a droplet question stays with Tony.
-        let h = hold(r("ops", "Domain"), false, "check the droplet", "brainstorm");
-        assert_eq!((h.role.as_str(), h.reason.as_str()), ("general", "Ops is frozen on the master switchboard"));
         assert_eq!(hold(r("general", "Self"), false, "hi", "operations"), r("general", "Self"));
         // Booking is frozen on the master switchboard: never runs, not even from its tab.
         for (kind, explicit, text) in [("Tab", true, "book a table"), ("Named", false, "hey booking desk, check my availability"), ("Domain", false, "casting call availability")] {

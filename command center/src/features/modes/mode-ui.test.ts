@@ -149,8 +149,8 @@ describe("mode-ui", () => {
 describe("switchboard overlay editing (custom modes)", () => {
   it("withOverlay starts from everything (no Tony, no always-live server, Rust caps), or clears to none", () => {
     const m = custom();
-    const on = withOverlay(m, true, { agents: ["general", "coder", "ops"], tools: ["time", "git"] });
-    expect(on.switchboard).toEqual({ agents: ["coder", "ops"], tools: ["git"] });
+    const on = withOverlay(m, true, { agents: ["general", "coder", "bizops"], tools: ["time", "git"] });
+    expect(on.switchboard).toEqual({ agents: ["coder", "bizops"], tools: ["git"] });
     const many = withOverlay(m, true, { agents: [], tools: Array.from({ length: 20 }, (_, i) => `s${i}`) });
     expect(many.switchboard!.tools).toHaveLength(16);
     expect(validateModeDraft(many)).toBeNull();
@@ -169,7 +169,7 @@ describe("switchboard overlay editing (custom modes)", () => {
   it("duplicating a preset keeps its switchboard; a new mode has none", () => {
     expect(duplicateMode(PRESET_MODES, preset("operations")).switchboard).toEqual(preset("operations").switchboard);
     expect(newModeDraft(PRESET_MODES).switchboard ?? null).toBeNull();
-    expect(switchboardSummary(preset("operations"))).toBe("2 agents · 10 tools on duty; the rest are frozen");
+    expect(switchboardSummary(preset("operations"))).toBe("1 agent · 10 tools on duty; the rest are frozen");
     expect(switchboardSummary(custom({ switchboard: { agents: ["coder"], tools: [] } }))).toBe("1 agent · 0 tools on duty; the rest are frozen");
   });
 });

@@ -12,7 +12,7 @@ describe("toggleGrant", () => {
   it("adds/removes a concrete id from an explicit list", () => {
     expect(toggleGrant([], "coder", ALL)).toEqual(["coder"]);
     expect(toggleGrant(["coder"], "coder", ALL)).toEqual([]);
-    expect(toggleGrant(["coder"], "ops", ALL)).toEqual(["coder", "ops"]);
+    expect(toggleGrant(["coder"], "bizops", ALL)).toEqual(["coder", "bizops"]);
   });
 
   it("narrows 'all' to everyone-but-one when a concrete pill is toggled off", () => {
@@ -33,13 +33,13 @@ describe("toggleGrant", () => {
 });
 
 describe("roles", () => {
-  it("ROLE_IDS covers all 10 roles with general first", () => {
+  it("ROLE_IDS covers all 9 roles with general first", () => {
     expect(ROLE_IDS[0]).toBe("general");
-    expect(ROLE_IDS).toHaveLength(10);
+    expect(ROLE_IDS).toHaveLength(9);
   });
 
   it("SUB_AGENT_IDS excludes general and matches the Part 2 pill order", () => {
-    expect(SUB_AGENT_IDS).toEqual(["booking", "coder", "prompter", "designer", "director", "librarian", "ops", "bizops", "finance"]);
+    expect(SUB_AGENT_IDS).toEqual(["booking", "coder", "prompter", "designer", "director", "librarian", "bizops", "finance"]);
   });
 
   it("toRoleId accepts 'tony' as an alias of 'general'", () => {

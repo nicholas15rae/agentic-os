@@ -172,7 +172,6 @@ const AGENT_NAMES: Record<WorkspaceId, { bare: string[]; suffix: string[] }> = {
   designer: { bare: ["designer", "design agent", "the designer"], suffix: ["design", "ui", "ux"] },
   director: { bare: ["director", "the director", "editor", "the editor", "video editor", "media agent"], suffix: ["edit", "editing", "media", "video"] },
   librarian: { bare: ["librarian", "the librarian"], suffix: ["library", "research"] },
-  ops: { bare: ["ops", "ops agent", "infra"], suffix: ["op"] },
   bizops: { bare: ["biz ops", "bizops", "business ops", "operations manager", "ops manager", "business manager", "operations"], suffix: ["business"] },
   finance: { bare: ["finance", "the bookkeeper", "bookkeeper", "finance agent"], suffix: ["finance", "books"] },
 };

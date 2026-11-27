@@ -997,7 +997,7 @@ name: plain
         osc.skills.dir = root.display().to_string();
         osc.skills.grants.insert("stitch-x".into(), vec!["designer".into()]);
         osc.skills.grants.insert("plain".into(), vec!["coder".into(), "designer".into()]);
-        osc.skills.grants.insert("gone".into(), vec!["ops".into()]);
+        osc.skills.grants.insert("gone".into(), vec!["finance".into()]);
         // A separate workdir without a skills/ folder.
         let work = tmp_dir("skillwork");
         let v = skills_in(&osc, &work, &[]);
@@ -1139,7 +1139,7 @@ name: one
     fn workspace_models_parsed_without_extras() {
         let v = json!({ "workspaces": [
             { "slug": "coder", "name": "Coder", "threads": [{}, {}], "chatProvider": "lmstudio", "chatModel": "qwen/qwen3.5-9b", "agentModel": "qwen2.5-coder-14b-instruct", "openAiPrompt": "secret system prompt" },
-            { "slug": "ops", "name": "Ops", "chatModel": null, "chatProvider": "  " }
+            { "slug": "director", "name": "Director", "chatModel": null, "chatProvider": "  " }
         ]});
         let w = super::super::agents::parse_workspaces(&v);
         assert_eq!(w.len(), 2);

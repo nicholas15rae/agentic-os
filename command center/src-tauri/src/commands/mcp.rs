@@ -56,6 +56,8 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
     match id {
         "weather" => vec![t(id, "weather.current", "Live conditions + 3-day forecast. Omit place for the user's home (Toronto).", &["place?"])],
         "time" => vec![t(id, "time.now", "Current local date, time and weekday.", &[])],
+        // ONE read-only tool: short probes only, never starts / stops / wakes anything.
+        "system" => vec![t(id, super::infra_status::TOOL, "Is the droplet (over NetBird), gateway, Bionic, speech-to-text, Kokoro, Docker or n8n up? Live up/down + latency. Read-only.", &[])],
         "fetch" => vec![t(id, "fetch.url", "Fetch a public web page as plain text.", &["url"])],
         "filesystem" => vec![
             t(id, "fs.list", "List a folder under the allowed roots.", &["path"]),
@@ -1421,6 +1423,8 @@ async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         match name {
             "weather.current" if server_on("weather") => weather(state, &arg("place")).await,
             "time.now" if server_on("time") => Ok(chrono::Local::now().format("%A, %B %-d %Y · %-I:%M %p (%Z local time)").to_string()),
+            // Read-only probes (`infra_status`): never starts, stops or changes a service.
+            super::infra_status::TOOL if server_on(super::infra_status::SERVER) => Ok(super::infra_status::report(state, os).await),
             "fetch.url" if server_on("fetch") => {
                 if cfg.privacy.kill_switch {
                     return Err("kill switch is on — no outbound web requests".into());
@@ -2887,6 +2891,31 @@ mod tests {
 
     /// Section 11.10: ONE read-only Finance tool, offered to Tony's router, refused for every agent
     /// but Tony and the finance role (whatever the grants), with validated compact args.
+    /// Tony's infrastructure status: ONE read-only tool on a builtin server that only he is
+    /// granted; offered to his router, never to a sub-agent with the default grants.
+    #[test]
+    fn system_status_is_one_read_tool_for_tony() {
+        let tools = builtin_tools(super::super::infra_status::SERVER);
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [super::super::infra_status::TOOL]);
+        assert!(tools[0].args.is_empty() && tools[0].description.len() < 200, "compact: it rides on Tony's TOOLS line");
+        assert!(!is_mutating_tool("system.status") && offered_to_router("system.status", true));
+        assert_eq!(server_of_tool("system.status"), "system");
+        let cfg = OsConfig::default();
+        assert!(role_refusal(&cfg, "system.status", "general").is_none());
+        for a in ["coder", "bizops", "librarian", "prompter", "director", "finance"] {
+            assert!(role_refusal(&cfg, "system.status", a).is_some_and(|e| e.starts_with(ROLE_PREFIX)), "{a}");
+        }
+        let e = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "learning".into(), ..Default::default() }, &Default::default());
+        assert!(servers_for(&cfg, &e, "general").iter().any(|s| s.id == "system"), "his base: on in every mode");
+        assert!(!servers_for(&cfg, &e, "coder").iter().any(|s| s.id == "system"));
+        let set = assemble_tools(&cfg, "general", tools.clone());
+        assert!(set.offered.iter().any(|t| t.name == "system.status") && set.line.iter().any(|t| t.name == "system.status"));
+        // The master switchboard can still freeze it.
+        let mut frozen = cfg.clone();
+        frozen.switchboard.frozen_tools = vec!["system".into()];
+        assert!(!servers_for(&frozen, &e, "general").iter().any(|s| s.id == "system"));
+    }
+
     #[test]
     fn finance_ask_is_one_read_tool_for_tony_and_finance_only() {
         let tools = builtin_tools("finance");
@@ -3214,11 +3243,11 @@ mod tests {
         let ids_in = |cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str| servers_for(cfg, e, agent).into_iter().map(|s| s.id).collect::<Vec<_>>();
         let ids = |e: &super::super::modes::Effective, agent: &str| ids_in(&cfg, e, agent);
         // No overlay: Tony gets exactly his own servers (never the Director's media servers).
-        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
+        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "system", "whatsapp"]);
         assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
         assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
         // Builder (section pass): Tony keeps his whole base and gains filesystem + git; the Coder keeps its three.
-        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
+        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "system", "whatsapp"]);
         assert_eq!(ids(&eff("builder"), "coder"), ["fetch", "filesystem", "git"]);
         // The Director is off duty in Builder: a frozen agent gets no tools at all (section pass).
         assert!(ids(&eff("builder"), "director").is_empty(), "off duty in Builder");
@@ -3228,7 +3257,7 @@ mod tests {
         let mut cfg = cfg.clone();
         cfg.switchboard.frozen_tools = vec!["spotify".into()];
         cfg.mcps.iter_mut().find(|m| m.id == "weather").unwrap().enabled = false;
-        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "finance", "whatsapp"]);
+        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "finance", "system", "whatsapp"]);
         // Synthetic tools: the mode switch is always Tony's; skills.read follows skill grants.
         let set = assemble_tools(&cfg, "general", vec![]);
         assert_eq!(set.all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [TONY_SET_MODE]);
@@ -3958,7 +3987,7 @@ mod tony_mode_tool_tests {
         for m in cfg.mcps.iter_mut() {
             m.enabled = true;
         }
-        let base = ["brave-search", "calendar", "finance", "gmail", "knowledge-graph", "maps", "spotify", "time", "weather", "whatsapp"];
+        let base = ["brave-search", "calendar", "finance", "gmail", "knowledge-graph", "maps", "spotify", "system", "time", "weather", "whatsapp"];
         for mode in ["surface", "brainstorm", "coach", "learning", "builder", "operations", "executive"] {
             let ids = tony_ids(&cfg, mode);
             for b in base {

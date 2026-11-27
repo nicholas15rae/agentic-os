@@ -194,7 +194,7 @@ export function McpRegistryCard() {
   const setGrants = (id: string, agent: string) =>
     setMcps(cfg.mcps.map((x) => (x.id === id ? { ...x, agents: toggleGrant(x.agents && x.agents.length > 0 ? x.agents : ["all"], agent, SUB_AGENT_IDS) } : x)));
   const setTonyGrant = (id: string) => setMcps(cfg.mcps.map((x) => (x.id === id ? { ...x, agents: toggleOwner(x.agents, "general", ["general", ...SUB_AGENT_IDS]) } : x)));
-  const quick: Record<string, Record<string, unknown>> = { "weather.current": {}, "time.now": {}, "kg.search": { query: "Nic" }, "git.status": { path: cfg.fsRoots[0] ?? "" } };
+  const quick: Record<string, Record<string, unknown>> = { "weather.current": {}, "time.now": {}, "system.status": {}, "kg.search": { query: "Nic" }, "git.status": { path: cfg.fsRoots[0] ?? "" } };
 
   return (
     <Card

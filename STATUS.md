@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 09:00. One page for every Claude Code session and branch.
+Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -40,6 +40,7 @@ Updated 2026-11-27 09:00. One page for every Claude Code session and branch.
 | Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | **No**, not merged, not pushed, app not rebuilt |
 | Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | **No**, not merged, not pushed, app not rebuilt |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
+| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (merged 11-27 09:50 on top of PR #10), not pushed; app rebuild + live check in progress |
 
 ## 2. In progress
 
@@ -52,6 +53,7 @@ Updated 2026-11-27 09:00. One page for every Claude Code session and branch.
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
+| Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status` merged into main | Testing the combined main, then app rebuild + restart and a live phone inbox check (this session) |
 
 ## 3. Waiting on you
 
@@ -138,6 +140,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 |---|---|---|
 | claude/tony-live-test-fixes-5d85d5 (+ barge-in) | tsc clean; vitest 2,931/2,931; cargo 1,624 (+2 known CRLF: allm, buildhub; 2 Edge browser tests timed out under load, pass alone); pytest not re-run (no Python changed since the 1,733 run below) | 11-27 02:50 |
 | claude/tony-live-test-fixes-5d85d5 (Tony live-test fixes) | tsc clean; vitest 2,925/2,925; cargo 1,625 (+2 known CRLF: allm, buildhub; 1 Edge browser test timed out under load, passes alone); pytest 1,733 (embed flake + 1 socket abort under load, both pass alone; language hub 41/41 after the last prompt change). Not checked in the running app (no rebuild) | 11-27 02:20 |
+| claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
@@ -170,32 +173,30 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 09:47 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 09:48 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/status-m3-merged` | 4 | `c134f9c` 2026-11-27 Merge pull request #10 from nicholas15rae/claude/sections-8-10-m3 | 1 files |
-| `claude/tony-live-test-fixes-5d85d5` | 4 | `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test f... | clean |
+| `claude/tony-live-test-fixes-5d85d5` | 4 | `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test f... | 29 files |
 | `director-suite` | 20 | `1b71fdf` 2026-11-27 docs(status): overnight Director summary, run 15 passed, items waiting | clean |
 | `section-pass-batch3` | 6 | `5c9d089` 2026-11-27 docs(status): overnight batch on section-pass-batch3 (15, 14.6-14.7... | 173 files |
-| `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | no worktree |
 | `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
 | `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
 | `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
-| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
+| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | 29 files |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `196b2f8` 2026-11-27 docs(status): Sections 8-10 PR #10 merged into main (c134f9c)
+- `c134f9c` 2026-11-27 Merge pull request #10 from nicholas15rae/claude/sections-8-10-m3
 - `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
 - `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
 - `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
 - `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
-- `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
-- `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
 <!-- /AUTO:BRANCHES -->

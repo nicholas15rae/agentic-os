@@ -3198,6 +3198,7 @@ function reads(el,op){if(el.tagName==='SELECT'){var o=el.options&&el.options[el.
 if(tick(el))return el.checked?['checked','true','on','yes']:['unchecked','false','off','no'];
 if(/^(INPUT|TEXTAREA|OUTPUT)$/.test(el.tagName))return [nm(el.value)];
 return [nm(op==='expect_value'?el.textContent:(el.innerText||el.textContent))]}
+function hit(el){if(typeof el.click==='function')el.click();else el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}))}
 function ev(el,n,b,key){var e;try{if(key!=null){e=new KeyboardEvent(n,{bubbles:b,cancelable:true,key:key})}else if(/^(focus|blur|focusin|focusout)$/.test(n)){e=new FocusEvent(n,{bubbles:b})}else{e=new Event(n,{bubbles:b})}}catch(x){e=new Event(n,{bubbles:b})}el.dispatchEvent(e)}
 function typeIn(el,v){var key=v?String(v).slice(-1):'Unidentified';ev(el,'focus',false);ev(el,'focusin',true);ev(el,'keydown',true,key);el.value=v;ev(el,'input',true);ev(el,'keyup',true,key);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
 function lead(s){var m=String(s).match(/^\D{0,12}?(-?\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):null}
@@ -3259,7 +3260,7 @@ var l=all(st.sel);var el=l?(l[st.nth||0]||null):null;if(!el){done({ok:false,k:'n
 if(i===fa()&&!S.b&&watch())snap(i);
 if(st.op==='set'){if(tick(el)){var on=/^(true|1|on|yes|checked)$/i.test(st.value);if(el.checked!==on){el.click();S.ac=1}}else{var v0=el.value;typeIn(el,st.value);if(el.value!==v0)S.ac=1}}
 else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}if(el.selectedIndex!==o)S.ac=1;ev(el,'focus',false);el.selectedIndex=o;ev(el,'input',true);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
-else if(st.op==='click'){var c0=tick(el)?el.checked:null;el.click();if(c0===null||el.checked!==c0)S.ac=1}
+else if(st.op==='click'){var c0=tick(el)?el.checked:null;hit(el);if(c0===null||el.checked!==c0)S.ac=1}
 setTimeout(function(){if(E.length>n0){done({ok:false,k:'threw',at:i,got:E[n0]});return}step()},WAIT)}
 addEventListener('load',function(){setTimeout(step,150)});"#;
 

@@ -2008,3 +2008,26 @@ document.getElementById('new').addEventListener('click',tell);
     assert!(!r[4].passed && !r[4].error, "5 lucky numbers, not 6: {d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Live fortune-cookie run (11-27): the Coder drew the cookie as an SVG `<path>`, and every click
+/// probe on it was reported as "the page hung or navigated away" — SVG elements have no
+/// `.click()`. The harness now dispatches a real click event on them.
+#[test]
+fn a_click_probe_works_on_an_svg_shape() {
+    let Some(dir) = edge_dir("svgclick") else { return };
+    let page = dir.join("page.html");
+    std::fs::write(&page, r##"<!doctype html><html><head><title>t</title></head><body>
+<svg width="200" height="100"><path id="cookie-shape" d="M10,70 Q10,10 100,20 Q190,10 190,70 Z" fill="#c90"/></svg>
+<p id="fortune"></p><ol id="history"></ol>
+<script>
+document.getElementById('cookie-shape').addEventListener('click',function(){document.getElementById('fortune').textContent='Adventure awaits';var li=document.createElement('li');li.textContent='x';document.getElementById('history').appendChild(li)});
+</script></body></html>"##).unwrap();
+    let probes = vec![
+        probe(0, json!([{ "op": "click", "sel": "#cookie-shape" }, { "op": "expect_count", "sel": "#history li", "count": 1 }])),
+        probe(1, json!([{ "op": "click", "sel": "#cookie-shape" }, { "op": "expect_text", "sel": "#fortune", "contains": "Adventure" }])),
+    ];
+    let ProbeRun::Ran(r) = run_probes(&page, &probes, Duration::from_secs(20), Duration::from_secs(120)) else { panic!("edge ran") };
+    let d: Vec<&str> = r.iter().map(|x| x.detail.as_str()).collect();
+    assert!(r.iter().all(|x| x.passed), "a click on an SVG shape is a real click: {d:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -87,7 +87,7 @@ async def await_ack(ib: Any, trades: list[Any], timeout: float = ACK_TIMEOUT_S, 
         if bad or timed_out:
             problems = list(dict.fromkeys(bad)) if bad else [f"TWS didn't acknowledge the order within {timeout:g}s"]
             if _filled(trades):
-                return _fill_warnings(problems, trades, what)
+                return _fill_warnings(problems, trades, what, _trim_unprotected(ib, trades))
             seen = "; ".join(_describe(t) for t in trades)
             sent = _cancel_live(ib, trades)
             if await _filled_after_cancel(sent, trades, settle, sleep):
@@ -103,13 +103,34 @@ def _warnings_logged(trades: list[Any]) -> list[str]:
                               for t in trades for e in (getattr(t, "log", []) or []) if getattr(e, "status", "") == "ValidationError"))
 
 
-def _fill_warnings(problems: list[str], trades: list[Any], what: str = "entry") -> list[str]:
+def _dead_stops(trades: list[Any]) -> list[Any]:
+    return [t for t in trades if _is_child(t) and getattr(t.order, "orderType", "") == "STP"
+            and t.orderStatus.status in REJECTED and not (t.orderStatus.filled or 0)]
+
+
+def _trim_unprotected(ib: Any, trades: list[Any]) -> list[str]:
+    """A partly filled entry whose stop is dead: cancel the parent's unfilled remainder, so the position without a
+    stop can't grow. Its filled part is never touched. (Whether TWS then resizes the take-profit to the filled
+    quantity or cancels it isn't clearly documented; either beats more unprotected shares.)"""
+    dead_parents = {t.order.parentId for t in _dead_stops(trades)}
+    notes = []
+    for t in trades:
+        if _is_child(t) or t.order.orderId not in dead_parents or t.orderStatus.status in REJECTED or t.isDone():
+            continue
+        try:
+            ib.cancelOrder(t.order)
+            notes.append(f"cancelled the unfilled remainder of #{t.order.orderId} ({t.orderStatus.filled or 0:g} filled) so the unprotected position can't grow")
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"could NOT cancel the unfilled remainder of #{t.order.orderId}: {e}")
+    return notes
+
+
+def _fill_warnings(problems: list[str], trades: list[Any], what: str = "entry", trimmed: list[str] | None = None) -> list[str]:
     """The legs line shows each leg's real status: a rejected stop shows as Cancelled, and the position is then
     without it (broker-vs-desk reconcile and the overseer's master stop-loss, once armed, are the backstops)."""
     legs = "; ".join(_describe(t) for t in trades)
-    dead_stops = [t for t in trades if _is_child(t) and getattr(t.order, "orderType", "") == "STP" and t.orderStatus.status in REJECTED]
-    alarm = [f"NO STOP: protective STP #{t.order.orderId} is {t.orderStatus.status}; the filled position is unprotected" for t in dead_stops]
-    return alarm + [f"{what} filled, so nothing was cancelled: {p}" for p in problems] + [f"legs: {legs}"]
+    alarm = [f"NO STOP: protective STP #{t.order.orderId} is {t.orderStatus.status}; the filled position is unprotected" for t in _dead_stops(trades)]
+    return alarm + list(trimmed or []) + [f"{what} filled, so nothing else was cancelled: {p}" for p in problems] + [f"legs: {legs}"]
 
 
 async def _filled_after_cancel(sent: list[Any], trades: list[Any], settle: float, sleep: Any) -> bool:

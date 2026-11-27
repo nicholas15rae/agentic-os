@@ -365,7 +365,7 @@ class AckTests(unittest.TestCase):
         ib = self.run_ack(trades)
         self.assertEqual(ib.cancelled, [])
         self.assertEqual(self.statuses(trades), ["Filled", "PreSubmitted", "PreSubmitted"])
-        self.assertTrue(ib.warnings[0].startswith("entry filled, so nothing was cancelled: Warning 399"), ib.warnings)
+        self.assertTrue(ib.warnings[0].startswith("entry filled, so nothing else was cancelled: Warning 399"), ib.warnings)
 
     def test_filled_entry_with_an_unacknowledged_child_is_not_cancelled_on_timeout(self):
         trades = self.bracket(parent="Filled", stop="PreSubmitted", tp="PendingSubmit")
@@ -414,13 +414,32 @@ class AckTests(unittest.TestCase):
         self.assertEqual(self.ib.cancelled, [5, 6])
         self.assertEqual(self.statuses(trades), ["Cancelled"] * 3)
 
-    def test_filled_entry_whose_stop_was_rejected_says_no_stop(self):
-        e201 = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: invalid stop price")
-        trades = self.bracket(parent="Submitted", stop="Cancelled", tp="PreSubmitted", s=[e201])
+    E201_STOP = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: invalid stop price")
+
+    def test_partly_filled_entry_whose_stop_was_rejected_cancels_its_remainder(self):
+        """The filled part has no stop; the remainder must not fill and grow that unprotected position."""
+        trades = self.bracket(parent="Submitted", stop="Cancelled", tp="PreSubmitted", s=[self.E201_STOP])
         trades[0].orderStatus.filled = 1  # partly filled, remainder working
         ib = self.run_ack(trades)
-        self.assertEqual(ib.cancelled, [])
+        self.assertEqual(ib.cancelled, [4])                                     # the parent's remainder, nothing else
         self.assertTrue(ib.warnings[0].startswith("NO STOP: protective STP #5 is Cancelled"), ib.warnings)
+        self.assertEqual(ib.warnings[1], "cancelled the unfilled remainder of #4 (1 filled) so the unprotected position can't grow")
+
+    def test_fully_filled_entry_whose_stop_was_rejected_has_no_remainder_to_cancel(self):
+        trades = self.bracket(parent="Filled", stop="Cancelled", tp="PreSubmitted", s=[self.E201_STOP])
+        trades[0].orderStatus.filled = 10
+        ib = self.run_ack(trades)
+        self.assertEqual(ib.cancelled, [])
+        self.assertTrue(ib.warnings[0].startswith("NO STOP"), ib.warnings)
+        self.assertFalse(any("remainder" in w for w in ib.warnings))
+
+    def test_partly_filled_entry_with_a_working_stop_keeps_its_remainder(self):
+        e201_tp = NS(status="Cancelled", errorCode=201, message="Error 201: Order rejected - reason: take-profit price")
+        trades = self.bracket(parent="Submitted", stop="PreSubmitted", tp="Cancelled", t=[e201_tp])
+        trades[0].orderStatus.filled = 1
+        ib = self.run_ack(trades)
+        self.assertEqual(ib.cancelled, [])                                      # the stop protects the whole bracket
+        self.assertFalse(any(w.startswith("NO STOP") for w in ib.warnings))
 
     def test_nothing_left_to_cancel_means_no_settle_wait(self):
         import executor as ex

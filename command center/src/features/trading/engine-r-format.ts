@@ -4,7 +4,7 @@
  */
 import { GatewayError } from "@/lib/gateway";
 import type { AuditRow } from "@/features/trading/ibkr";
-import { APPROVE_PHRASE, type CompareLabel, type RuleDiff, type RuleParamName, type RuleParams, type SetMetrics } from "@/features/trading/EngineRPanel.contract";
+import { APPROVE_PHRASE, type CompareLabel, type RuleDiff, type RuleParamName, type RuleParams, type RuleScanRow, type SetMetrics } from "@/features/trading/EngineRPanel.contract";
 
 /** rules.PARAM_SCHEMA order (the panel lists parameters and diffs in this order). */
 export const PARAM_ORDER: RuleParamName[] = [
@@ -104,6 +104,27 @@ export function viewErrorText(msg: string): string {
 }
 
 // ── audit log ────────────────────────────────────────────────────────────────
+// ── scan table rows ─────────────────────────────────────────────────────────
+/** Desk outcomes that mean "no trade" for a row Engine R handed to the desk (mirrors trading/rule_engine.py
+ *  ENTRY_STATUSES_EXCLUDED / desk_accepted). The row's action stays "submitted" (locked contract); the panel shows
+ *  the desk's verdict instead, so a refused order never reads as a trade. */
+export const DESK_REFUSED: ReadonlySet<string> = new Set(["rejected", "failed", "expired", "dismissed"]);
+
+const SCAN_TONE: Record<string, string> = { submitted: "text-teal-soft", would_submit: "text-teal-soft", limit_block: "text-alert", no_signal: "text-ink-3", skip: "text-ink-3" };
+
+export interface ScanRowView {
+  label: string;
+  tone: string;
+  /** The desk refused it: the order line is shown struck through, as "not sent". */
+  refused: boolean;
+}
+
+export function scanRowView(r: Pick<RuleScanRow, "action" | "desk">): ScanRowView {
+  const st = r.desk?.status;
+  if (r.action === "submitted" && st && DESK_REFUSED.has(st)) return { label: `desk ${st}`, tone: "text-alert", refused: true };
+  return { label: r.action.replace("_", " "), tone: SCAN_TONE[r.action] ?? "text-ink-3", refused: false };
+}
+
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" ? String(v) : "");
 const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);

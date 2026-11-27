@@ -62,8 +62,10 @@ DEFAULT_RULES: dict[str, list[dict[str, str]]] = {
         {"method": "POST", "path": "/api/trading/agent/enable"},
         {"method": "POST", "path": "/api/trading/kill-switch/reset"},
     ],
-    "finance": [{"method": m, "path": f"/api/cc/c/{c}*"} for c in ("income", "goals", "invoices", "checks", "receipts") for m in ("POST", "PATCH", "DELETE")],
-    "settings": [{"method": "PUT", "path": "/api/cc/config"}],
+    # Keep in step with src-tauri/src/security/config.rs FINANCE_COLLECTIONS (Section 11 added the last four).
+    "finance": [{"method": m, "path": f"/api/cc/c/{c}*"} for c in ("income", "goals", "invoices", "checks", "receipts", "commissions", "mileage", "pending", "statement_lines") for m in ("POST", "PATCH", "DELETE")]
+    + [{"method": "POST", "path": "/api/cc/finance/statement-import"}],
+    "settings": [{"method": "PUT", "path": "/api/cc/config"}, {"method": "PUT", "path": "/api/cc/business/profiles"}],
 }
 
 

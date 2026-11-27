@@ -20,7 +20,7 @@ import {
 
 /** Settings → Business: one profile per business + Personal, on the local gateway. */
 export function BusinessProfilesSettings() {
-  const { doc, loaded, error, saving, importedTo, load } = useProfiles();
+  const { doc, loaded, error, saving, pending, importedTo, load } = useProfiles();
   const [id, setId] = useState<KnownProfileId>("trades_contracting");
   useEffect(() => {
     void load();
@@ -32,8 +32,15 @@ export function BusinessProfilesSettings() {
         <Lock size={13} className="mt-0.5 shrink-0 text-teal" />
         These details stay on this machine: they're kept in your local gateway (shared with your phone over your own network) and printed on your invoices. They're never sent anywhere else.
       </p>
-      {error && <p className="text-sm text-alert">Couldn't reach the gateway: {error}. Changes aren't saved until it's back.</p>}
-      {importedTo && <p className="text-[12px] text-ink-3">Your earlier business details were copied into {PROFILE_LABEL[importedTo as KnownProfileId] ?? importedTo}. Check the HST number below.</p>}
+      {error && (
+        <p className="text-sm text-alert">
+          {pending
+            ? `Couldn't save to the gateway: ${error}. Your changes are kept on this device and saved automatically the next time the gateway answers.`
+            : loaded
+              ? `Couldn't reach the gateway: ${error}.`
+              : `Couldn't load your profiles from the gateway: ${error}. Anything you change here is kept on this device and merged in when it's back.`}
+        </p>
+      )}      {importedTo && <p className="text-[12px] text-ink-3">Your earlier business details were copied into {PROFILE_LABEL[importedTo as KnownProfileId] ?? importedTo}. Check the HST number below.</p>}
       <SubTabs tabs={PROFILE_IDS.map((x) => ({ id: x, label: PROFILE_LABEL[x] }))} value={id} onChange={setId} />
       {!loaded && !error ? <p className="text-sm text-ink-3">Loading…</p> : p && <ProfileEditor key={id} id={id} p={p} saving={saving} />}
     </div>

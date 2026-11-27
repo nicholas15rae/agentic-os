@@ -92,6 +92,8 @@ export interface ProfilesDoc {
   legacyImported: boolean;
   profiles: Record<string, BusinessProfile>;
   finance?: FinanceSettings;
+  /** The gateway's revision of this doc (0 = never saved, or saved before revisions). A save must name it. */
+  rev?: number;
 }
 
 /** The old `useSettings().business` shape. */
@@ -137,7 +139,48 @@ export function withDefaults(doc: ProfilesDoc | null | undefined): ProfilesDoc {
     const got = doc?.profiles?.[id];
     profiles[id] = got ? { ...base, ...got, ...(base.agencies && !got.agencies ? { agencies: base.agencies } : {}), ...(base.contracting && !got.contracting ? { contracting: base.contracting } : {}) } : base;
   }
-  return { version: 1, legacyImported: !!doc?.legacyImported, profiles, finance: { ...DEFAULT_FINANCE, ...(doc?.finance ?? {}) } };
+  const rev = typeof doc?.rev === "number" && Number.isInteger(doc.rev) && doc.rev >= 0 ? doc.rev : 0;
+  return { version: 1, legacyImported: !!doc?.legacyImported, profiles, finance: { ...DEFAULT_FINANCE, ...(doc?.finance ?? {}) }, rev };
+}
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Fields of `mine` that differ from `base` (this device's unsaved edits) laid over `theirs`. */
+function overlay<T extends object>(base: T | undefined, mine: T, theirs: T): T {
+  const out = { ...theirs } as unknown as Record<string, unknown>;
+  const b = (base ?? {}) as Record<string, unknown>;
+  const m = mine as unknown as Record<string, unknown>;
+  for (const k of new Set([...Object.keys(m), ...Object.keys(b)])) {
+    if (same(m[k], b[k])) continue;
+    if (m[k] === undefined) delete out[k];
+    else out[k] = m[k];
+  }
+  return out as unknown as T;
+}
+
+/**
+ * A stale save's three-way merge: this device's edits (`mine` against the `base` it started from)
+ * applied per profile and per field over the newer doc another device saved (`theirs`). Untouched
+ * fields take `theirs`; a field both changed takes this device's (the user's latest intent here).
+ * The result carries `theirs`' rev, so it saves on top of it. Pure.
+ */
+export function mergeEdits(base: ProfilesDoc | null | undefined, mine: ProfilesDoc, theirs: ProfilesDoc | null | undefined): ProfilesDoc {
+  const b = withDefaults(base);
+  const m = withDefaults(mine);
+  const t = withDefaults(theirs);
+  const profiles: Record<string, BusinessProfile> = { ...t.profiles };
+  for (const [id, mp] of Object.entries(m.profiles)) {
+    const tp = t.profiles[id];
+    // A profile new on this device (a custom area) has no base: every field of it is an edit.
+    profiles[id] = tp ? overlay(b.profiles[id], mp, tp) : mp;
+  }
+  return {
+    version: 1,
+    legacyImported: t.legacyImported || m.legacyImported,
+    profiles,
+    finance: overlay(b.finance, m.finance!, t.finance!),
+    rev: t.rev,
+  };
 }
 
 /** Which profile the old single profile belongs to: Contracting unless its name says otherwise. */
@@ -148,30 +191,38 @@ export function legacyTarget(name: string): KnownProfileId {
   return "trades_contracting";
 }
 
-const hasContent = (b: LegacyBusiness | null | undefined): b is LegacyBusiness => !!b && [b.name, b.address, b.email, b.phone, b.hstNumber].some((v) => (v ?? "").trim());
+const textOf = (b: Pick<LegacyBusiness, "name" | "address" | "email" | "phone" | "hstNumber">) => [b.name, b.address, b.email, b.phone, b.hstNumber];
+const hasContent = (b: LegacyBusiness | null | undefined): b is LegacyBusiness => !!b && textOf(b).some((v) => (v ?? "").trim());
+/** A profile someone already filled in (on any device). */
+export const profileHasContent = (p: BusinessProfile | null | undefined): boolean => !!p && textOf(p).some((v) => (v ?? "").trim());
 
 /**
  * The one-time import of the old localStorage profile. `changed` = save the result. A doc already
- * marked `legacyImported` is returned as-is (another device did it, or it ran before). Fields
- * already filled in the target profile win over the old ones. The imported HST number is NOT
- * confirmed: it may well be the placeholder.
+ * marked `legacyImported` is returned as-is (another device did it, or it ran before).
+ *
+ * Only a device that actually HAS old details uses the import up: a device with nothing to import
+ * (the phone: another origin, so an empty localStorage) leaves the doc alone, so the desktop's
+ * real profile still gets copied the next time it loads. A target profile that already has content
+ * (newer, entered in Settings → Business) is never overwritten: the import is just marked done.
+ * The imported HST number is NOT confirmed: it may well be the placeholder.
  */
 export function importLegacy(doc: ProfilesDoc | null | undefined, legacy: LegacyBusiness | null | undefined): { doc: ProfilesDoc; changed: boolean; target: KnownProfileId | null } {
   const full = withDefaults(doc);
   if (doc?.legacyImported) return { doc: full, changed: false, target: null };
-  if (!hasContent(legacy)) return { doc: { ...full, legacyImported: true }, changed: true, target: null };
+  if (!hasContent(legacy)) return { doc: full, changed: false, target: null };
   const target = legacyTarget(legacy.name);
   const cur = full.profiles[target];
-  const pick = (a: string, b: string) => (a.trim() ? a : (b ?? "").trim());
+  if (profileHasContent(cur)) return { doc: { ...full, legacyImported: true }, changed: true, target: null };
+  const t = (v: string) => (v ?? "").trim();
   const province = PROVINCES.some((p) => p[0] === legacy.province) ? legacy.province : cur.province;
   full.profiles[target] = {
     ...cur,
-    name: pick(cur.name, legacy.name),
-    address: pick(cur.address, legacy.address),
-    email: pick(cur.email, legacy.email),
-    phone: pick(cur.phone, legacy.phone),
-    hstNumber: pick(cur.hstNumber, legacy.hstNumber),
-    hstConfirmed: cur.hstNumber.trim() ? cur.hstConfirmed : false,
+    name: t(legacy.name),
+    address: t(legacy.address),
+    email: t(legacy.email),
+    phone: t(legacy.phone),
+    hstNumber: t(legacy.hstNumber),
+    hstConfirmed: false,
     province,
     taxRate: Number.isFinite(legacy.hstRate) && legacy.hstRate >= 0 && legacy.hstRate <= 30 ? legacy.hstRate : cur.taxRate,
     currency: legacy.currency === "USD" ? "USD" : "CAD",

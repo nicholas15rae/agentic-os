@@ -31,7 +31,7 @@ class BusinessProfilesTests(unittest.TestCase):
         self.iso.__exit__(None, None, None)
 
     def test_empty_until_first_save_then_round_trips(self):
-        self.assertEqual(cc.get_business_profiles(), {"value": None})
+        self.assertEqual(cc.get_business_profiles(), {"value": None, "rev": 0})
         acting = {
             "name": "Nic Acting",
             "hstNumber": "123456782 RT0001",
@@ -83,6 +83,49 @@ class BusinessProfilesTests(unittest.TestCase):
                 cc.put_business_profiles({"value": d})
             self.assertEqual(e.exception.status_code, 400)
         self.assertIsNone(cc.get_business_profiles()["value"], "nothing was stored")
+
+    def test_rev_current_saves_and_bumps(self):
+        first = cc.put_business_profiles({"value": doc(acting={"name": "A"}), "rev": 0})
+        self.assertEqual((first["rev"], first["value"]["rev"]), (1, 1))
+        self.assertEqual(cc.get_business_profiles()["rev"], 1)
+        second = cc.put_business_profiles({"value": doc(acting={"name": "B"}), "rev": 1})
+        self.assertEqual(second["rev"], 2)
+        # rev inside the value works too (the doc as the client last read it).
+        third = cc.put_business_profiles({"value": {**doc(acting={"name": "C"}), "rev": 2}})
+        self.assertEqual(third["rev"], 3)
+        self.assertEqual(cc.get_business_profiles()["value"]["profiles"]["acting"]["name"], "C")
+
+    def test_stale_rev_is_409_with_the_current_doc(self):
+        cc.put_business_profiles({"value": doc(acting={"name": "Desktop"}), "rev": 0})
+        cc.put_business_profiles({"value": doc(acting={"name": "Desktop 2"}), "rev": 1})
+        with self.assertRaises(HTTPException) as e:
+            cc.put_business_profiles({"value": doc(acting={"name": "Phone, stale"}), "rev": 1})
+        self.assertEqual(e.exception.status_code, 409)
+        detail = e.exception.detail
+        self.assertEqual((detail["code"], detail["rev"]), ("STALE", 2))
+        self.assertEqual(detail["value"]["profiles"]["acting"]["name"], "Desktop 2")
+        self.assertEqual(cc.get_business_profiles()["value"]["profiles"]["acting"]["name"], "Desktop 2", "nothing overwritten")
+        # A rev from the future is stale too.
+        with self.assertRaises(HTTPException) as e:
+            cc.put_business_profiles({"value": doc(acting={"name": "x"}), "rev": 9})
+        self.assertEqual(e.exception.status_code, 409)
+
+    def test_doc_without_rev_counts_as_rev_0(self):
+        # A row written before revisions existed.
+        cc.kv_set(cc.BUSINESS_PROFILES_KEY, cc.clean_business_profiles(doc(acting={"name": "Old"})))
+        self.assertEqual(cc.get_business_profiles()["rev"], 0)
+        with self.assertRaises(HTTPException) as e:
+            cc.put_business_profiles({"value": doc(acting={"name": "x"}), "rev": 1})
+        self.assertEqual(e.exception.status_code, 409)
+        self.assertEqual(cc.put_business_profiles({"value": doc(acting={"name": "New"}), "rev": 0})["rev"], 1)
+        # An app build from before revisions sends none at all: written as before, rev still bumps.
+        self.assertEqual(cc.put_business_profiles({"value": doc(acting={"name": "Older app"})})["rev"], 2)
+
+    def test_bad_rev_refused(self):
+        for rev in (-1, "1", True, 1.5):
+            with self.subTest(rev=rev), self.assertRaises(HTTPException) as e:
+                cc.put_business_profiles({"value": doc(), "rev": rev})
+            self.assertEqual(e.exception.status_code, 400)
 
     def test_generic_kv_cannot_bypass_validation(self):
         with self.assertRaises(HTTPException) as e:

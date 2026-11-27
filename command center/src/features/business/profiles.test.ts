@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agencyIdFor, checkHstNumber, commissionFrom, DEFAULT_AGENCIES, emptyProfile, importLegacy, legacyTarget, printableHst, profileForArea, withDefaults, type LegacyBusiness, type ProfilesDoc } from "./profiles";
+import { agencyIdFor, checkHstNumber, commissionFrom, DEFAULT_AGENCIES, emptyProfile, importLegacy, legacyTarget, mergeEdits, printableHst, profileForArea, withDefaults, type LegacyBusiness, type ProfilesDoc } from "./profiles";
 
 const legacy = (patch: Partial<LegacyBusiness> = {}): LegacyBusiness => ({ name: "", address: "", email: "", phone: "", hstNumber: "", province: "ON", hstRate: 13, currency: "CAD", ...patch });
 
@@ -33,13 +33,48 @@ describe("business profiles", () => {
     const again = importLegacy(r.doc, legacy({ name: "Something else" }));
     expect(again.changed).toBe(false);
     expect(again.doc.profiles.trades_contracting.name).toBe("Rae Contracting");
-    // Nothing to import: just marked done.
+    // Nothing to import (the phone: another origin, empty localStorage): the import is NOT used up.
     const empty = importLegacy(null, legacy());
-    expect([empty.changed, empty.target, empty.doc.legacyImported]).toEqual([true, null, true]);
-    // A filled target field wins over the old one.
+    expect([empty.changed, empty.target, empty.doc.legacyImported]).toEqual([false, null, false]);
+    expect(importLegacy(null, null).changed).toBe(false);
+    // ...so the desktop, loading later with its real old profile, still copies it in.
+    const desktop = importLegacy(empty.doc, legacy({ name: "Rae Masonry", phone: "555" }));
+    expect([desktop.changed, desktop.target, desktop.doc.legacyImported, desktop.doc.profiles.trades_contracting.name]).toEqual([true, "trades_contracting", true, "Rae Masonry"]);
+    // A target profile that already has (newer) content is never overwritten: just marked done.
     const pre: ProfilesDoc = { ...withDefaults(null), legacyImported: false };
     pre.profiles.trades_contracting.name = "Already set";
-    expect(importLegacy(pre, legacy({ name: "Old", phone: "555" })).doc.profiles.trades_contracting).toMatchObject({ name: "Already set", phone: "555" });
+    pre.profiles.trades_contracting.taxRate = 5;
+    const kept = importLegacy(pre, legacy({ name: "Old", phone: "555", hstRate: 13 }));
+    expect([kept.changed, kept.target, kept.doc.legacyImported]).toEqual([true, null, true]);
+    expect(kept.doc.profiles.trades_contracting).toMatchObject({ name: "Already set", phone: "", taxRate: 5 });
+  });
+
+  it("merges this device's edits per profile and per field over a newer doc", () => {
+    const base = withDefaults({ version: 1, legacyImported: true, profiles: {}, rev: 3 });
+    base.profiles.acting.name = "Acting";
+    base.profiles.trades_contracting.name = "Masonry";
+    // This device: changed Acting's phone and the km rate, added an area.
+    const mine = structuredClone(base);
+    mine.profiles.acting.phone = "555-1234";
+    mine.finance = { kmRate: 0.7 };
+    mine.profiles.rentals = { ...emptyProfile("rentals"), label: "Rentals" };
+    // Another device (saved meanwhile): renamed Acting, filled Contracting's email.
+    const theirs = structuredClone(base);
+    theirs.rev = 5;
+    theirs.profiles.acting.name = "Nic Rae Acting";
+    theirs.profiles.trades_contracting.email = "nic@x.ca";
+    const m = mergeEdits(base, mine, theirs);
+    expect(m.rev).toBe(5);
+    expect(m.profiles.acting).toMatchObject({ name: "Nic Rae Acting", phone: "555-1234" });
+    expect(m.profiles.trades_contracting).toMatchObject({ name: "Masonry", email: "nic@x.ca" });
+    expect(m.profiles.rentals.label).toBe("Rentals");
+    expect(m.finance).toEqual({ kmRate: 0.7 });
+    // Both changed the same field: this device's edit wins.
+    const both = structuredClone(mine);
+    both.profiles.acting.name = "Mine";
+    expect(mergeEdits(base, both, theirs).profiles.acting.name).toBe("Mine");
+    // No edits here: exactly theirs.
+    expect(mergeEdits(base, base, theirs)).toEqual(withDefaults(theirs));
   });
 
   it("flags placeholder and malformed HST numbers, and never prints an unconfirmed one", () => {

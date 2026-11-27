@@ -155,8 +155,9 @@ export function describeSecurityError(e: unknown): string {
 /** Which protected module a gateway path belongs to (a hint; the gateway decides). */
 export function gatewayModule(path: string): ProtectedModule | null {
   if (path.startsWith("/api/trading/")) return "trading";
-  if (/^\/api\/cc\/c\/(income|goals|invoices|checks|receipts)\b/.test(path)) return "finance";
-  if (path.startsWith("/api/cc/config")) return "settings";
+  if (/^\/api\/cc\/c\/(income|goals|invoices|checks|receipts|commissions|mileage|pending|statement_lines)\b/.test(path)) return "finance";
+  if (path.startsWith("/api/cc/finance/statement-import")) return "finance";
+  if (path.startsWith("/api/cc/config") || path.startsWith("/api/cc/business/profiles")) return "settings";
   return null;
 }
 

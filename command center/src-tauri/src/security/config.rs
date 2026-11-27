@@ -17,7 +17,7 @@ pub const FILE: &str = "security.config.json";
 /// list. Mirrored by `security_api.alert_events` (Python reads the same file).
 pub const MIGRATE_UNKNOWN_DEVICE_ALERT: &str = "alerts-unknown-device";
 /// Every migration a freshly written file already reflects.
-pub const MIGRATIONS: [&str; 1] = [MIGRATE_UNKNOWN_DEVICE_ALERT];
+pub const MIGRATIONS: [&str; 2] = [MIGRATE_UNKNOWN_DEVICE_ALERT, MIGRATE_FINANCE_RULES];
 
 /// What Settings → Security may set (Section 24): idle lock 5–120 min, hard re-auth 30–720 min.
 /// The file loader (`clamped`) stays a little wider so a hand edit isn't silently rejected.
@@ -193,10 +193,11 @@ fn default_modules() -> BTreeMap<String, ModulePolicy> {
             ],
         },
     );
-    let fin: Vec<HttpRule> = ["income", "goals", "invoices", "checks", "receipts"]
+    let mut fin: Vec<HttpRule> = FINANCE_COLLECTIONS
         .iter()
         .flat_map(|c| ["POST", "PATCH", "DELETE"].map(|m| rule(m, &format!("/api/cc/c/{c}*"))))
         .collect();
+    fin.push(rule("POST", FINANCE_STATEMENT_IMPORT));
     m.insert(
         "finance".into(),
         ModulePolicy { read_only_by_default: true, commands: vec!["finance_ledger_write".into(), "bizops_finance_handoff".into()], guarded_args: BTreeMap::new(), gateway: fin },
@@ -235,10 +236,38 @@ fn default_modules() -> BTreeMap<String, ModulePolicy> {
                 // `gmail` holds the booking check's instruction-file path (read into Tony's prompt).
                 ["privacy", "mcps", "permissions", "skills", "fsRoots", "routing", "overseer", "identityPath", "rootDirective", "anythingllm", "droplet", "gmail"].map(|k| format!("/patch/{k}")).to_vec(),
             )]),
-            gateway: vec![rule("PUT", "/api/cc/config")],
+            gateway: vec![rule("PUT", "/api/cc/config"), rule("PUT", BUSINESS_PROFILES)],
         },
     );
     m
+}
+
+/// Gateway finance collections whose writes need a Finance step-up (Section 11 added the last
+/// four). Keep in step with `security_api.py` DEFAULT_RULES and `command_center_api.py`.
+pub const FINANCE_COLLECTIONS: [&str; 9] = ["income", "goals", "invoices", "checks", "receipts", "commissions", "mileage", "pending", "statement_lines"];
+pub const FINANCE_STATEMENT_IMPORT: &str = "/api/cc/finance/statement-import";
+/// Business profiles (HST numbers, addresses, agencies, area tax settings): a Settings step-up.
+pub const BUSINESS_PROFILES: &str = "/api/cc/business/profiles";
+pub const MIGRATE_FINANCE_RULES: &str = "rules-finance-v2";
+
+/// `rules-finance-v2`: a saved file that lists module gateway rules explicitly gets the Section 11
+/// finance collections + statement import (finance) and the business profiles PUT (settings)
+/// appended once. A module or list the file doesn't carry already gets them from the defaults.
+fn add_finance_rules(root: &mut serde_json::Map<String, serde_json::Value>) {
+    let mut want: Vec<(&str, String, String)> = FINANCE_COLLECTIONS[5..]
+        .iter()
+        .flat_map(|c| ["POST", "PATCH", "DELETE"].map(|m| ("finance", m.to_string(), format!("/api/cc/c/{c}*"))))
+        .collect();
+    want.push(("finance", "POST".into(), FINANCE_STATEMENT_IMPORT.into()));
+    want.push(("settings", "PUT".into(), BUSINESS_PROFILES.into()));
+    let Some(mods) = root.get_mut("modules").and_then(|m| m.as_object_mut()) else { return };
+    for (module, method, path) in want {
+        let Some(list) = mods.get_mut(module).and_then(|m| m.get_mut("gateway")).and_then(|g| g.as_array_mut()) else { continue };
+        let has = list.iter().any(|r| r["method"].as_str() == Some(method.as_str()) && r["path"].as_str() == Some(path.as_str()));
+        if !has {
+            list.push(serde_json::json!({ "method": method, "path": path }));
+        }
+    }
 }
 
 impl Default for SecurityConfig {
@@ -430,22 +459,31 @@ pub fn set_session_in(dir: &Path, s: &SessionCfg) -> Result<(), String> {
 pub fn migrate_value(v: &mut serde_json::Value) -> bool {
     let Some(root) = v.as_object_mut() else { return false };
     let done = |root: &serde_json::Map<String, serde_json::Value>, id: &str| root.get("migrations").and_then(|m| m.as_array()).is_some_and(|a| a.iter().any(|x| x.as_str() == Some(id)));
-    if done(root, MIGRATE_UNKNOWN_DEVICE_ALERT) {
-        return false;
-    }
-    if let Some(events) = root.get_mut("alerts").and_then(|a| a.get_mut("events")).and_then(|e| e.as_array_mut()) {
-        if !events.iter().any(|e| e.as_str() == Some("unknown_device")) {
-            events.push(serde_json::json!("unknown_device"));
+    let mark = |root: &mut serde_json::Map<String, serde_json::Value>, id: &str| {
+        let m = root.entry("migrations").or_insert_with(|| serde_json::json!([]));
+        if !m.is_array() {
+            *m = serde_json::json!([]);
         }
+        if let Some(a) = m.as_array_mut() {
+            a.push(serde_json::json!(id));
+        }
+    };
+    let mut changed = false;
+    if !done(root, MIGRATE_UNKNOWN_DEVICE_ALERT) {
+        if let Some(events) = root.get_mut("alerts").and_then(|a| a.get_mut("events")).and_then(|e| e.as_array_mut()) {
+            if !events.iter().any(|e| e.as_str() == Some("unknown_device")) {
+                events.push(serde_json::json!("unknown_device"));
+            }
+        }
+        mark(root, MIGRATE_UNKNOWN_DEVICE_ALERT);
+        changed = true;
     }
-    let m = root.entry("migrations").or_insert_with(|| serde_json::json!([]));
-    if !m.is_array() {
-        *m = serde_json::json!([]);
+    if !done(root, MIGRATE_FINANCE_RULES) {
+        add_finance_rules(root);
+        mark(root, MIGRATE_FINANCE_RULES);
+        changed = true;
     }
-    if let Some(a) = m.as_array_mut() {
-        a.push(serde_json::json!(MIGRATE_UNKNOWN_DEVICE_ALERT));
-    }
-    true
+    changed
 }
 
 /// Read (and clamp) the config at `path`; a missing file is written with the defaults; an
@@ -577,6 +615,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Section 11 / 22: a saved file listing module rules explicitly gets the new finance
+    /// collections, the statement import and the business profiles PUT once; defaults carry them.
+    #[test]
+    fn finance_and_profile_rules_reach_saved_files_once() {
+        let d = SecurityConfig::default();
+        let has = |c: &SecurityConfig, m: &str, method: &str, path: &str| c.modules[m].gateway.iter().any(|r| r.method == method && r.path == path);
+        for c in ["commissions", "mileage", "pending", "statement_lines"] {
+            assert!(has(&d, "finance", "PATCH", &format!("/api/cc/c/{c}*")), "{c}");
+        }
+        assert!(has(&d, "finance", "POST", FINANCE_STATEMENT_IMPORT));
+        assert!(has(&d, "settings", "PUT", BUSINESS_PROFILES));
+        // An older saved file: its own explicit rule lists.
+        let mut v = serde_json::to_value(&d).unwrap();
+        v["migrations"] = serde_json::json!(["alerts-unknown-device"]);
+        v["modules"]["finance"]["gateway"] = serde_json::json!([{ "method": "POST", "path": "/api/cc/c/income*" }]);
+        v["modules"]["settings"]["gateway"] = serde_json::json!([{ "method": "PUT", "path": "/api/cc/config" }]);
+        assert!(migrate_value(&mut v));
+        let c: SecurityConfig = serde_json::from_value(v.clone()).unwrap();
+        assert!(has(&c, "finance", "DELETE", "/api/cc/c/statement_lines*"));
+        assert!(has(&c, "finance", "POST", FINANCE_STATEMENT_IMPORT));
+        assert!(has(&c, "settings", "PUT", BUSINESS_PROFILES));
+        assert!(has(&c, "finance", "POST", "/api/cc/c/income*"), "existing rules kept");
+        // Once: a rule removed afterwards stays removed.
+        v["modules"]["settings"]["gateway"] = serde_json::json!([]);
+        assert!(!migrate_value(&mut v));
+        assert_eq!(v["modules"]["settings"]["gateway"], serde_json::json!([]));
+    }
+
     /// Section 24: an existing file with an explicit `alerts.events` list gets "unknown_device"
     /// once (written back, every other key kept); a later removal sticks; fresh files are already
     /// migrated; a file without the list keeps the defaults (which include it).
@@ -591,10 +657,10 @@ mod tests {
         assert_eq!(c.alerts.events, ["hard_lock", "login_failure", "unknown_device"]);
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(saved["alerts"]["events"], serde_json::json!(["hard_lock", "login_failure", "unknown_device"]));
-        assert_eq!(saved["migrations"], serde_json::json!([MIGRATE_UNKNOWN_DEVICE_ALERT]));
+        assert_eq!(saved["migrations"], serde_json::json!([MIGRATE_UNKNOWN_DEVICE_ALERT, MIGRATE_FINANCE_RULES]));
         assert_eq!(saved["custom"]["keep"], true, "unknown keys survive");
         // A deliberate removal afterwards sticks.
-        std::fs::write(&p, r#"{"version":1,"migrations":["alerts-unknown-device"],"alerts":{"events":["hard_lock"]}}"#).unwrap();
+        std::fs::write(&p, r#"{"version":1,"migrations":["alerts-unknown-device","rules-finance-v2"],"alerts":{"events":["hard_lock"]}}"#).unwrap();
         let before = std::fs::read_to_string(&p).unwrap();
         let (c, _) = load(&p);
         assert_eq!(c.alerts.events, ["hard_lock"]);

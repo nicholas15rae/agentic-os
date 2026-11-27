@@ -5,7 +5,7 @@ import { cc, useCollection, type Item } from "@/lib/cc-api";
 import { cmd, isTauri } from "@/lib/platform";
 import { invoiceTotals, PAY_METHODS, type Invoice, type InvoiceLine } from "@/features/finance/types";
 import { useSettings } from "@/stores/settings";
-import { profileFor, useProfiles } from "@/features/business/profiles-store";
+import { ensureProfiles, profileFor, useProfiles } from "@/features/business/profiles-store";
 import { DEFAULT_INVOICE_AREA, printableHst, taxLabel, type BusinessProfile } from "@/features/business/profiles";
 import { applyFilter, localIso } from "@/features/finance/areas";
 import { useFinanceFilter } from "@/features/finance/filter-store";
@@ -30,10 +30,17 @@ export function InvoicesPanel() {
   const [editing, setEditing] = useState<Item<Invoice> | "new" | null>(null);
   const [emailing, setEmailing] = useState<Item<Invoice> | null>(null);
   const [paidBy, setPaidBy] = useState("e-transfer");
+  const [notice, setNotice] = useState<string | null>(null);
   // The per-business profiles printInvoice reads (Settings → Business).
   useEffect(() => {
     if (!useProfiles.getState().loaded) void useProfiles.getState().load();
   }, []);
+  /** Print / PDF only with the real profile: wait for it, or say why not (never "Your business"). */
+  const withProfile = async (run: () => void) => {
+    setNotice(null);
+    if (await ensureProfiles()) return run();
+    setNotice(`Your business details couldn't be loaded from the gateway (${useProfiles.getState().error ?? "not reachable"}), so nothing was printed. Try again when it's back.`);
+  };
   const now = Date.now();
   const rows = applyFilter(items, filter).map((i) => (i.status === "sent" && i.dueAt < now ? { ...i, status: "overdue" as const } : i)).sort((a, b) => b.issuedAt - a.issuedAt);
   const outstanding = rows.filter((i) => i.status === "sent" || i.status === "overdue").reduce((s, i) => s + invoiceTotals(i).total, 0);
@@ -73,6 +80,7 @@ export function InvoicesPanel() {
           </>
         }
       >
+        {notice && <p className="mb-2 text-xs text-alert">{notice}</p>}
         <ul className="space-y-1.5">
           {rows.map((inv) => {
             const t = invoiceTotals(inv);
@@ -97,13 +105,13 @@ export function InvoicesPanel() {
                       <CheckCircle2 size={13} />
                     </Btn>
                   )}
-                  <Btn label="Download PDF" onClick={() => downloadInvoicePdf(inv)}>
+                  <Btn label="Download PDF" onClick={() => void withProfile(() => downloadInvoicePdf(inv))}>
                     <FileDown size={13} />
                   </Btn>
-                  <Btn label="Email (Gmail draft)" onClick={() => setEmailing(inv)}>
+                  <Btn label="Email (Gmail draft)" onClick={() => void withProfile(() => setEmailing(inv))}>
                     <Mail size={13} />
                   </Btn>
-                  <Btn label="Print" onClick={() => printInvoice(inv)}>
+                  <Btn label="Print" onClick={() => void withProfile(() => printInvoice(inv))}>
                     <Printer size={13} />
                   </Btn>
                   <Btn label="Delete" onClick={() => void remove(inv.id)} danger>

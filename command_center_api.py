@@ -1174,8 +1174,10 @@ def _clean_profile(pid: str, p: Any) -> dict:
 
 
 def clean_business_profiles(doc: Any) -> dict:
-    """The stored shape, validated (unknown fields refused, numbers bounded). Pure; raises HTTPException(400)."""
-    doc = _p_keys(doc, {"version", "legacyImported", "profiles", "finance"}, "business profiles")
+    """The stored shape, validated (unknown fields refused, numbers bounded). Pure; raises HTTPException(400).
+
+    `rev` is accepted but dropped: the gateway owns it (put_business_profiles)."""
+    doc = _p_keys(doc, {"version", "legacyImported", "profiles", "finance", "rev"}, "business profiles")
     profiles = doc.get("profiles") or {}
     if not isinstance(profiles, dict) or len(profiles) > 40:
         raise HTTPException(400, "profiles: an object of up to 40 profiles")
@@ -1189,19 +1191,44 @@ def clean_business_profiles(doc: Any) -> dict:
     return out
 
 
+_profiles_lock = threading.Lock()
+
+
+def _profiles_rev(stored: Any) -> int:
+    """The stored doc's revision; a doc saved before revisions existed (or none at all) is 0."""
+    rev = stored.get("rev") if isinstance(stored, dict) else None
+    return rev if isinstance(rev, int) and not isinstance(rev, bool) and rev >= 0 else 0
+
+
 @router.get("/business/profiles")
 def get_business_profiles():
-    """`value` is null until the first save (the app then imports its old single profile once)."""
-    return {"value": kv_get(BUSINESS_PROFILES_KEY)}
+    """`value` is null until the first save (the app then imports its old single profile once).
+    `rev` is what the next PUT must send back (optimistic concurrency between desktop and phone)."""
+    stored = kv_get(BUSINESS_PROFILES_KEY)
+    return {"value": stored, "rev": _profiles_rev(stored)}
 
 
 @router.put("/business/profiles")
 def put_business_profiles(body: dict):
+    """Whole-document save, only on top of the revision it was based on: `{"value": doc, "rev": n}`
+    (`rev` may also sit inside `value`; a stored doc without one is rev 0). A stale rev is refused
+    with 409 and the current doc, so the client can merge its edits and retry. A body with no rev at
+    all is an app build from before revisions: written as before (last write wins), still bumping rev."""
     if len(json.dumps(body)) > 256 * 1024:
         raise HTTPException(413, "Too large")
-    value = clean_business_profiles(body.get("value"))
-    kv_set(BUSINESS_PROFILES_KEY, value)
-    return {"value": value}
+    raw = body.get("value")
+    base = body.get("rev", raw.get("rev") if isinstance(raw, dict) else None)
+    if base is not None and (isinstance(base, bool) or not isinstance(base, int) or base < 0):
+        raise HTTPException(400, "rev: the revision the change is based on (an integer)")
+    value = clean_business_profiles(raw)
+    with _profiles_lock:
+        stored = kv_get(BUSINESS_PROFILES_KEY)
+        current = _profiles_rev(stored)
+        if base is not None and base != current:
+            raise HTTPException(409, {"code": "STALE", "message": "Changed on another device; reload and merge", "value": stored, "rev": current})
+        value["rev"] = current + 1
+        kv_set(BUSINESS_PROFILES_KEY, value)
+    return {"value": value, "rev": value["rev"]}
 
 
 # ── n8n status pings (workflows report their own start/finish) ───────────────

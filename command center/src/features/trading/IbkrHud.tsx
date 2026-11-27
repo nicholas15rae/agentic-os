@@ -1,6 +1,12 @@
 import { Card, Stat } from "@/components/ui";
 import { usePoll } from "@/lib/use-poll";
-import { hudLevel, money, pnlTone, tradingApi, type HudLevel, type IbkrStatus } from "@/features/trading/ibkr";
+import { hudLevel, marketTone, money, pnlTone, tradingApi, type HudLevel, type IbkrStatus } from "@/features/trading/ibkr";
+
+const MARKET_CHIP = {
+  open: "border-teal/40 text-teal-soft",
+  early: "border-amber/50 bg-amber/10 text-amber-light",
+  closed: "border-white/20 text-ink-2",
+} as const;
 
 const BADGE: Record<HudLevel, string> = {
   connected: "border-teal/50 bg-teal/15 text-teal-soft",
@@ -21,7 +27,12 @@ export function IbkrHud() {
     <Card
       title="IBKR · paper account"
       action={
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {s?.market && (
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] ${MARKET_CHIP[marketTone(s.market)]}`} title={`US market (NYSE calendar) · next open ${s.market.nextOpenNy} ET${s.market.known ? "" : " · holidays unknown for this year"}`}>
+              {s.market.label}
+            </span>
+          )}
           <span className="rounded-full border border-teal/40 px-2 py-0.5 font-mono text-[10px] tracking-wider text-teal-soft" title="Only the paper socket (7497) can be dialled">
             {s?.mode ?? "PAPER"}
             {s?.port ? ` · ${s.port}` : ""}
@@ -38,11 +49,17 @@ export function IbkrHud() {
         </div>
       }
     >
-      {(error || (s && level !== "connected")) && (
+      {s?.alert && (
+        <div role="alert" className="mb-3 rounded-[12px] border border-alert/60 bg-alert/15 px-3 py-2 text-[12px] text-alert">
+          <p className="font-semibold">{s.alert.message}</p>
+          <p className="mt-0.5 text-ink-2">Down since {s.alert.sinceNy}: {s.alert.reason}</p>
+        </div>
+      )}
+      {(error || (s && level !== "connected")) && !s?.alert && (
         <p className={`mb-3 text-[12px] ${level === "locked" ? "text-alert" : "text-ink-3"}`}>
           {error
             ? `Gateway: ${error}`
-            : [...(s?.reasons ?? []), s?.lastError].filter(Boolean).join(" · ") || "Waiting for TWS on 127.0.0.1:7497…"}
+            : s?.downReason || [...(s?.reasons ?? []), s?.lastError].filter(Boolean).join(" · ") || "Waiting for TWS on 127.0.0.1:7497…"}
         </p>
       )}
 

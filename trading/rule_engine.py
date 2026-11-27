@@ -31,6 +31,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import kill_switch
+import market_calendar
 import rules as rl
 from engines.common import intent_id, ny_day
 
@@ -118,11 +119,15 @@ def ny_midnight(now: float) -> float:
 
 
 def scan_key(now: float, scan_time_et: str) -> str | None:
-    """'20261124-1545' while today's scan is due (weekday, within the grace window)."""
+    """'20261124-1545' while today's scan is due (a trading day, within the grace window).
+    None on weekends and NYSE holidays, and on half days when the scan time is at/after the 13:00 close."""
     t = datetime.fromtimestamp(now, NY)
-    if t.weekday() >= 5:
+    close = market_calendar.close_time(t.date())
+    if close is None:
         return None
     h, m = (int(x) for x in scan_time_et.split(":"))
+    if (h, m) >= (close.hour, close.minute):
+        return None
     start = t.replace(hour=h, minute=m, second=0, microsecond=0).timestamp()
     if start <= now < start + SCAN_GRACE_S:
         return f"{t.strftime('%Y%m%d')}-{h:02d}{m:02d}"

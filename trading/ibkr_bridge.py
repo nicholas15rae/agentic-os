@@ -14,6 +14,14 @@ What it does:
 
 State machine: DISCONNECTED → CONNECTING → CONNECTED ⇄ RECONNECTING, or LOCKED
 (re-evaluated every few seconds, so fixing .env clears it without a restart).
+
+Down alert: while the bridge isn't CONNECTED it records `downSince`; once it has been down for
+DOWN_ALERT_S inside the US regular session (market_calendar: trading days only, 13:00 close on
+half days), every snapshot carries `alert` {reason, since}, which the Command Center shows in red.
+`market` is today's calendar status ("Market closed: holiday (Thanksgiving)", "Early close ...").
+
+TWS must be logged in with its API on: see TWS_API_HELP. There is no supported way to log in to
+TWS unattended (IBKR offers none), so after a reboot / the weekly re-login someone types the password.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +43,7 @@ try:  # module-level so FastAPI can resolve `req: Request` (annotations are stri
 except ImportError:  # tests / --check without fastapi
     HTTPException = Request = Any  # type: ignore[misc,assignment]
 
+import market_calendar  # noqa: E402
 from config import Endpoint, TradingConfig, is_paper_account, load_config, resolve_endpoint  # noqa: E402
 from telemetry import account_block, fills_block, fx_block, orders_block, pnl_block, positions_block  # noqa: E402
 
@@ -45,6 +55,46 @@ LOCK_RECHECK_S = 5.0
 BACKOFF_MIN_S = 2.0
 BACKOFF_MAX_S = 60.0
 CONNECT_TIMEOUT_S = 10.0
+DOWN_ALERT_S = 120.0  # down this long during the regular session → `alert` on every snapshot
+
+# What TWS needs so the bridge can connect (shown in the down reason and in scripts/start-tws.ps1 -?).
+TWS_API_HELP = ("In TWS (logged in to the PAPER account): Global Configuration > API > Settings: tick 'Enable ActiveX and "
+                "Socket Clients', Socket port 7497, keep 'Allow connections from localhost only' ticked and 127.0.0.1 in "
+                "Trusted IPs. 'Read-Only API' is fine for this read-only bridge, but paper orders need it unticked "
+                "(TWS rejects them with error 321).")
+
+
+def down_reason(state: dict[str, Any]) -> str | None:
+    """One line saying why the bridge isn't CONNECTED (None when it is), with the TWS settings when TWS refused us."""
+    st = state.get("state")
+    if st == "CONNECTED":
+        return None
+    if st == "LOCKED":
+        return "endpoint LOCKED: " + ("; ".join(state.get("reasons") or []) or "see trading/.env")
+    err = str(state.get("lastError") or "")
+    port = state.get("port") or 7497
+    if not err:
+        return f"waiting for TWS on 127.0.0.1:{port}. {TWS_API_HELP}"
+    low = err.lower()
+    if any(k in low for k in ("refused", "1225", "connect call failed", "timeout", "timed out")):
+        return f"TWS API not reachable on 127.0.0.1:{port} ({err[:160]}): is TWS open and logged in? {TWS_API_HELP}"
+    return f"{err[:240]}. {TWS_API_HELP}"
+
+
+def down_alert(state: dict[str, Any], now: float, threshold_s: float = DOWN_ALERT_S) -> dict[str, Any] | None:
+    """The red banner: down/locked for more than `threshold_s` during today's regular session, else None."""
+    since = state.get("downSince")
+    if state.get("state") == "CONNECTED" or since is None or not market_calendar.regular_session_open(now):
+        return None
+    t = market_calendar.ny_now(now)
+    session_start = t.replace(hour=market_calendar.OPEN.hour, minute=market_calendar.OPEN.minute, second=0, microsecond=0).timestamp()
+    down_for = now - max(float(since), session_start)  # down since before the open counts from 09:30
+    if down_for < threshold_s:
+        return None
+    return {"level": "critical", "code": "bridge_down", "since": float(since),
+            "sinceNy": datetime.fromtimestamp(float(since), market_calendar.NY).strftime("%a %H:%M ET"),
+            "minutes": int(down_for // 60), "reason": down_reason(state) or str(state.get("state")),
+            "message": f"IBKR bridge {str(state.get('state')).lower()} for {int(down_for // 60)} min during market hours: no trade can be placed"}
 
 
 class Bridge:
@@ -53,8 +103,10 @@ class Bridge:
         config_loader: Callable[[], TradingConfig] = load_config,
         ib_factory: Callable[[], Any] | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._load = config_loader
+        self._clock = clock
         self._ib_factory = ib_factory
         self._sleep = sleep
         self.ib: Any = None
@@ -74,7 +126,8 @@ class Bridge:
             "reasons": [],
             "lastError": None,
             "connectedSince": None,
-            "updatedAt": time.time(),
+            "downSince": clock(),  # not connected yet: down from the start
+            "updatedAt": clock(),
             "account": None,
             "fx": {},
             "pnl": pnl_block(None),
@@ -85,10 +138,20 @@ class Bridge:
 
     # ── state helpers ────────────────────────────────────────────────
     def _set(self, **kw: Any) -> None:
-        self.state.update(kw, updatedAt=time.time())
+        now = self._clock()
+        self.state.update(kw, updatedAt=now)
+        if self.state["state"] == "CONNECTED":
+            self.state["downSince"] = None
+        elif self.state.get("downSince") is None:
+            self.state["downSince"] = now  # first moment off CONNECTED (a reconnect keeps the original time)
 
     def snapshot(self) -> dict[str, Any]:
-        return json.loads(json.dumps(self.state))  # deep copy, JSON-safe
+        snap = json.loads(json.dumps(self.state))  # deep copy, JSON-safe
+        now = self._clock()
+        snap["downReason"] = down_reason(snap)
+        snap["market"] = market_calendar.market_status(now)
+        snap["alert"] = down_alert(snap, now)
+        return snap
 
     def stop(self) -> None:
         self._stop.set()
@@ -377,7 +440,8 @@ def create_app(bridge: Bridge, desk: Any = None):
     def health_last():
         import healthcheck
 
-        return healthcheck.last_result(desk.d) or {"overall": None, "checks": []}
+        # the connection row is the LIVE bridge state, so this never disagrees with /status
+        return healthcheck.last_result(desk.d, live=bridge.snapshot(), now=time.time()) or {"overall": None, "checks": []}
 
     @app.get("/health")
     def health():

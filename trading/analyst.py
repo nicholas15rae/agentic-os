@@ -33,6 +33,7 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+import market_calendar
 import rules as rl
 
 log = logging.getLogger("trading.analyst")
@@ -79,21 +80,22 @@ Answer with ONE JSON object and nothing else:
 
 
 def outside_trading_hours(now: float) -> bool:
+    """Weekends and NYSE holidays (market_calendar) all day; trading days outside 08:45-16:30 New York."""
     t = datetime.fromtimestamp(now, NY)
-    if t.weekday() >= 5:
+    if not market_calendar.is_trading_day(t.date()):
         return True
     hm = (t.hour, t.minute)
     return hm >= WINDOW_OPEN or hm < WINDOW_CLOSE
 
 
 def review_day(now: float) -> str:
-    """The trading day a run at `now` reviews: today after the close, else the previous weekday."""
+    """The trading day a run at `now` reviews: today after the close, else the previous trading day (holidays skipped)."""
     t = datetime.fromtimestamp(now, NY)
     d = t.date()
-    if t.weekday() < 5 and (t.hour, t.minute) >= WINDOW_OPEN:
+    if market_calendar.is_trading_day(d) and (t.hour, t.minute) >= WINDOW_OPEN:
         return d.strftime("%Y-%m-%d")
     d -= timedelta(days=1)
-    while d.weekday() >= 5:
+    while not market_calendar.is_trading_day(d):
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
@@ -224,7 +226,7 @@ class Analyst:
     # gate
     def blocked(self, kind: str) -> str | None:
         if not outside_trading_hours(self.clock()):
-            return "the analyst only runs outside trading hours (weekdays 16:30-08:45 New York, weekends)"
+            return "the analyst only runs outside trading hours (weekdays 16:30-08:45 New York, weekends, NYSE holidays)"
         if kind != "manual" and not self.settings()["enabled"]:
             return "the analyst is switched off"
         return None
@@ -344,5 +346,5 @@ class Analyst:
         return out
 
     def view(self) -> dict[str, Any]:
-        return {"enabled": self.settings()["enabled"], "blocked": self.blocked("scheduled"), "window": "weekdays 16:30-08:45 New York, weekends",
+        return {"enabled": self.settings()["enabled"], "blocked": self.blocked("scheduled"), "window": "weekdays 16:30-08:45 New York, weekends, NYSE holidays",
                 "runs": self.runs(5)}

@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 21:25. One page for every Claude Code session and branch.
+Updated 2026-11-26 22:35. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -12,6 +12,7 @@ Updated 2026-11-26 21:25. One page for every Claude Code session and branch.
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
+| Sections 8-10 milestone 2: comms ingest core, echo fold, leased outbox, bridge smoke, WhatsApp ingester, wrap-up endpoint, calendar locations, trips/ETAs, maps socket, saved routes | claude/sections-8-10-m2 | c90924b (PR #8) | **No**, PR open |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | No |
@@ -35,13 +36,14 @@ Updated 2026-11-26 21:25. One page for every Claude Code session and branch.
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Step 6 cleanup: Librarian out of build chain, re-running os_core tests. Uncommitted |
 | Gabagoul functional pass (section-pass-batch3) | Next: 11.10 Tony reads Finance, Section 12 | Review fixes committed (cebcdbf). Then merge main (4 conflicts expected) |
 | Director suite build | Part 1 quality fixes (clip length, framing, no-op revisions) | Reviewers running. Next: live E2E rerun, merge main, live SDXL test. Uncommitted |
-| Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
+| Communications page and brainstorming | Sections 8-10 milestone 2 | PR #8 open against main, waiting on your merge. Tony-Rust track still held |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 
 ## 3. Waiting on you
 
 **Decisions**
+- Merge PR #8 (Sections 8-10 milestone 2)?
 - OK to merge `section-pass`, `section-pass-batch3`, `director-suite` into main? Each session asks first.
 - Crash log plus a restart that waits for WebView2 to close: yes/no?
 - Start the waiting "recall parroting" fix session card.
@@ -72,7 +74,7 @@ Updated 2026-11-26 21:25. One page for every Claude Code session and branch.
 - 7 Phone quick access to Tony (needs Android build)
 - 8: native Android bridge, notification capture, tabs UI, official Meta API, taint/injection guards
 - 9: Talk-it-through mode, send-to after wrap-up, one-tap mode switch, E46 clock build
-- 10.4 Maps: saved routes, phone "Open in Maps", widget UI and phone hand-off
+- 10.4 Maps: widget UI for trips/saved routes, phone "Open in Maps" hand-off (backend done in m2)
 - 11.10 Tony reads Finance
 - 12 Phone book
 - 14.5-14.9 Trading (needs IBKR connected)
@@ -109,6 +111,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
 | director-suite | vitest 2,595, Rust 1,445 + 67 browser, media-forge 116 | 11-26 20:47 |
 | Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
+| sections-8-10 m2 (07cc8ef) | pytest 1,649 (+1 lock flake, passes alone), vitest 2,582, tsc clean, cargo 1,434 (+2 known CRLF, +1 flaky browser probe) | 11-26 22:30 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
@@ -124,25 +127,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 21:33 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 22:27 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-pass-batch3` | 11 | `cebcdbf` 2026-11-26 fix(business,security): profiles sync safely across devices; PIN st... | 14 files |
-| `claude/practical-elbakyan-0f96f1` | 1 | `5751989` 2026-11-26 fix(trading): kill switch ignores held keys; ack wait never strips ... | 3 files |
-| `section-pass` | 6 | `aa6966a` 2026-11-26 feat(section-pass): logins survive restarts, phone approval login, ... | 11 files |
-| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 17 files |
+| `section-pass` | 9 | `604c334` 2026-11-26 feat(section-pass): home grid part 2 (section 6): widget looks, foc... | clean |
+| `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 3 files |
+| `section-pass-batch3` | 13 | `7166d26` 2026-11-26 feat(tony): Tony reads Finance with one read-only tool (section 11.10) | 159 files |
+| `claude/sections-8-10-m2` | 2 | `07cc8ef` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 1 files |
+| `merge/section-pass-into-main` | 8 | `76e04da` 2026-11-26 Merge section-pass (sections 1-5) into main | 146 files |
+| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 18 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `691e280` 2026-11-26 docs(status): refresh branch table
-- `0fcb2cf` 2026-11-26 docs: STATUS.md across all sessions and branches, plus scripts/update_status.py
+- `3ee3dd6` 2026-11-26 docs(status): record the recall fix merge into main (8278f76)
+- `8278f76` 2026-11-26 Merge fa69ab2: Tony recall stops parroting old replies
+- `e0f7ee7` 2026-11-26 docs(status): crash hardening 1cd5333, 4073bd9 timing, sessions
+- `4bc4e2d` 2026-11-26 Merge main (STATUS.md + update_status.py) into feat/language-hub
+- `1cd5333` 2026-11-26 fix(command-center): log panics to a file, never start the app over a dying WebView2
 - `4073bd9` 2026-11-26 Merge feat/language-hub (35e30e5: Tony latency fixes) into main
-- `3fe4835` 2026-11-26 Merge 8bd7990: Engine R stops reporting desk-refused orders as trades
-- `ae86c7b` 2026-11-26 fix(gateway): report a launcher safe_argv refuses as unsafe, not "not installed"
-- `bcd8c35` 2026-11-26 Merge pull request #7 from nicholas15rae/claude/sections-8-10-m1
 <!-- /AUTO:BRANCHES -->

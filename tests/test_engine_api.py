@@ -1,6 +1,7 @@
 """engine/api.py: every route is loopback-only, settings PUT validates and rejects unknown keys,
 load is refused while the engine is off, boot() starts nothing but the watchdog while off.
 Uses FastAPI's TestClient with the engine's paths pointed at a temp folder."""
+import json
 import os
 import sys
 import tempfile
@@ -94,3 +95,38 @@ class BootTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = Path(self.tmp.name)
+        self.p = [mock.patch.object(le, "APP_CFG_DIR", self.cfg), mock.patch.object(le, "DATA_DIR", self.cfg / "data")]
+        for p in self.p:
+            p.start()
+        app = FastAPI()
+        app.include_router(api.router)
+        self.local = TestClient(app, client=("127.0.0.1", 5000))
+        self.remote = TestClient(app, client=("100.84.1.20", 5000))
+
+    def tearDown(self):
+        for p in self.p:
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_off_by_default_and_desktop_only(self):
+        self.assertEqual(self.remote.post("/api/engine/agents/coder/run", json={"text": "hi"}).status_code, 403)
+        self.assertEqual(self.remote.get("/api/engine/agents").status_code, 403)
+        r = self.local.post("/api/engine/agents/coder/run", json={"text": "hi"})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("route_agents=false", r.json()["detail"])
+        self.assertFalse(self.local.get("/api/engine/agents").json()["routeAgents"])
+
+    def test_agents_summary_has_no_prompt_text(self):
+        from engine import agent_runner as ar
+        t = self.cfg / "agents.json"
+        t.write_text(json.dumps({"agents": {"coder": {"prompt": "SECRET PROMPT TEXT", "promptSource": "built in", "toolAccess": [{"tool": "fetch", "access": "write"}]}}}))
+        with mock.patch.object(ar, "TABLE", t):
+            r = self.local.get("/api/engine/agents").json()
+        self.assertTrue(r["agents"]["coder"]["hasPrompt"])
+        self.assertNotIn("SECRET PROMPT TEXT", json.dumps(r))

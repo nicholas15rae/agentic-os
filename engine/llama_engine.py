@@ -73,6 +73,9 @@ class EngineSettings:
     # (LM Studio maps `reasoning_effort`, llama-server does not), so without this every client that
     # only sends reasoning_effort (dispatch.rs) or nothing (n8n, Scene Reader) would think first.
     thinking_default: bool = False
+    # Switchboard rows (Section 26), all OFF: nothing uses the engine until Nic turns one on.
+    route_agents: bool = False           # gateway agents (engine/agent_runner.py) answer on the engine
+    route_tony: bool = False             # gateway Tony answers on the engine instead of Bionic
     threads: int = 0                     # 0 = llama-server's default
     extra_args: list[str] = field(default_factory=list)
 

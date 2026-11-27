@@ -25,6 +25,9 @@ export interface EngineSettings {
   keep_warm: boolean;
   jinja: boolean;
   thinking_default: boolean;
+  /** Switchboard rows (off by default; Nic's call): gateway agents / gateway Tony on the engine. */
+  route_agents: boolean;
+  route_tony: boolean;
   threads: number;
   extra_args: string[];
 }

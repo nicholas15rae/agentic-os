@@ -218,6 +218,44 @@ def watchdog_log(request: Request, n: int = 50):
     return out
 
 
+@router.get("/agents")
+def agents(request: Request):
+    """The gateway agent table, without prompt text: source, tools + access, frozen, switch state."""
+    _guard(request)
+    from engine import agent_runner as ar
+    try:
+        table = ar.load_table()
+    except (OSError, ValueError):
+        return {"routeAgents": load_settings().route_agents, "agents": {}, "note": "no agent table yet (python -m engine.agents_migrate <export>)"}
+    rows = {a: {"promptSource": x.get("promptSource"), "hasPrompt": bool(x.get("prompt")), "toolAccess": x.get("toolAccess"),
+                "frozen": x.get("frozen"), "migrate": x.get("migrate"), "whenUnfrozen": x.get("whenUnfrozen")}
+            for a, x in (table.get("agents") or {}).items()}
+    return {"routeAgents": load_settings().route_agents, "agents": rows}
+
+
+@router.post("/agents/{agent}/run")
+def run_agent(request: Request, agent: str, body: dict):
+    """One turn for a gateway agent on the built-in engine. Refused while route_agents is off."""
+    _guard(request)
+    from engine import agent_runner as ar
+    s = load_settings()
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    try:
+        if not s.route_agents:
+            raise ar.AgentRefused("gateway agents are off (engine.json route_agents=false)")
+        if Engine(s).health() != "ok":
+            raise ar.AgentRefused("the built-in engine isn't running")
+        r = ar.run(agent, text[:8000], table=ar.load_table(), os_cfg=ar.load_os(), chat=ar.openai_chat(s.base_url, s.alias),
+                   enabled=s.route_agents)
+    except ar.AgentRefused as e:
+        raise HTTPException(409, str(e))
+    except (OSError, ValueError) as e:
+        raise HTTPException(502, str(e)[:300])
+    return {"agent": r.agent, "answer": r.answer, "calls": r.calls}
+
+
 _booted = False
 
 

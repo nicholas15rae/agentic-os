@@ -47,6 +47,7 @@ Updated 2026-11-27 00:34. One page for every Claude Code session and branch.
 | Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Merged to main (9a46031). Next: Tony-Rust track (Comms 4, Brainstorm 2/4/6), then M3 |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
+| Test gate (PR #9) | Keeping PR #9 mergeable overnight (Auto-fix on) | Idle between Auto-fix events. On a conflict: merge origin/main, keep the discovery run_all.py, full gate, push to the PR branch. No other work started |
 
 ## 3. Waiting on you
 
@@ -112,6 +113,9 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 - Models plan
 - Note: the "+ Beat" control from 11-22 doesn't appear as its own commit. Check that it landed.
 
+**Test gate follow-up** (parked overnight: test_os_inbox is in the gateway/Tony area other sessions work in)
+- Make test_os_inbox's long-poll timing asserts (0.5-0.75 s bounds) wait on events, so PR #9's solo rerun is rarely needed
+
 ## 5. Test results
 
 | Suite | Latest | Where / when |
@@ -148,16 +152,17 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 00:44 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 01:07 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/practical-elbakyan-0f96f1` | 9 | `6fcd6cd` 2026-11-27 fix(trading): guard waits for the kill's flatten; nets every closin... | clean |
-| `section-pass` | 9 | `9364ec3` 2026-11-27 feat(section-pass): Agents on the shared layout (layout step 4, pag... | 14 files |
-| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | clean |
-| `claude/upbeat-wing-e87be0` | 8 | `1139cc6` 2026-11-26 Merge main (0add160: Sections 8-10 milestone 2) into claude/upbeat-... | 73 files |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
+| `section-pass` | 15 | `d445421` 2026-11-27 feat(section-pass): Settings on the shared layout (layout step 4, p... | 6 files |
+| `claude/upbeat-wing-e87be0` | 9 | `49887af` 2026-11-27 Merge main (77993c2: Ops agent removed) into claude/upbeat-wing-e87be0 | 1 files |
+| `claude/practical-elbakyan-0f96f1` | 9 | `6fcd6cd` 2026-11-27 fix(trading): guard waits for the kill's flatten; nets every closin... | 173 files |
+| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | 1 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 

@@ -25,7 +25,9 @@ describe("requestSettingsTab", () => {
 
   it("SettingsSection listens for it, and the deep links use it", () => {
     const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
-    expect(read("../SettingsSection.tsx")).toMatch(/addEventListener\(SETTINGS_TAB_EVENT/);
+    // The shared tab store (tab bar and content panels) listens; Settings reads it.
+    expect(read("./settings-tab-store.ts")).toMatch(/addEventListener\(SETTINGS_TAB_EVENT/);
+    expect(read("../SettingsSection.tsx")).toMatch(/useSettingsTab/);
     expect(read("../../widgets/tony-mode/ModePanel.tsx")).toMatch(/requestSettingsTab\("modes"\)/);
   });
 });

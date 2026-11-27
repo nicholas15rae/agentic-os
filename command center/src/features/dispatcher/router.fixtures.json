@@ -795,7 +795,8 @@
     "desc": "Section 20.1: the frozen Librarian addressed by name is Named (held with Tony + note)",
     "text": "ask the librarian to search vault for my notes",
     "role": "librarian",
-    "kind": "Named"
+    "kind": "Named",
+    "direct": "vault"
   },
   {
     "desc": "Section 20.1: the frozen Librarian addressed by name is Named, before any live topic",
@@ -814,5 +815,66 @@
     "text": "find document about the lease",
     "role": null,
     "kind": "Default"
+  },
+  {
+    "desc": "Section 16.6: searching the vault is Tony's own vault read (the Librarian's 'vault' name is only a topic here) (the director's 'reel' topic; Tony's live vault tool still answers (route_for_turn Direct))",
+    "text": "search my vault for the car reel idea",
+    "role": "director",
+    "kind": "Domain",
+    "direct": "vault"
+  },
+  {
+    "desc": "Section 16.6: searching brainstorm notes is a vault read",
+    "text": "search my notes for the deck job",
+    "role": null,
+    "kind": "Default",
+    "direct": "vault"
+  },
+  {
+    "desc": "Section 16.6: finding a note is a vault read",
+    "text": "find the note about the Imperious callback",
+    "role": "general",
+    "kind": "Self",
+    "direct": "vault"
+  },
+  {
+    "desc": "Section 16.6: 'what did I save about' is a read, not a save",
+    "text": "what did I save about the Netflix audition?",
+    "role": "general",
+    "kind": "Self",
+    "direct": "vault"
+  },
+  {
+    "desc": "Section 16.6: scripts are in the vault (pipeline)",
+    "text": "search my scripts for the lawyer monologue",
+    "role": null,
+    "kind": "Default",
+    "direct": "vault"
+  },
+  {
+    "desc": "Section 16.6: anything in my vault about …",
+    "text": "is there anything in my vault about headshots",
+    "role": null,
+    "kind": "Default",
+    "direct": "vault"
+  },
+  {
+    "desc": "Section 16.6: a vault write is never a vault read",
+    "text": "put the deck job quote in my vault",
+    "role": "librarian",
+    "kind": "Named"
+  },
+  {
+    "desc": "Section 16.6: another live tool's subject is not a vault read",
+    "text": "search my notes for that email from Sam",
+    "role": null,
+    "kind": "Default"
+  },
+  {
+    "desc": "Section 16.6: addressing the (frozen) Librarian by its 'vault' name still names it",
+    "text": "vault, find the note about the deck job",
+    "role": "librarian",
+    "kind": "Named",
+    "direct": "vault"
   }
 ]

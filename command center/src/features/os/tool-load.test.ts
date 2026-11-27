@@ -65,6 +65,18 @@ describe("tool load", () => {
     expect(agentServers({ mcps: open }, "finance", { ...base, modeId: "executive" })).toEqual(["finance"]);
   });
 
+  it("counts Tony's one read-only vault search tool; no other agent is ever handed it (Section 16.6)", () => {
+    const vault = { ...listing("vault", 0), tools: [{ name: "vault.search", description: "Search Nic's saved notes (never finance).", server: "vault", args: ["query", "kind?", "limit?"] }] } as ServerTools;
+    const m = [...mcps, srv("vault", ["general"])];
+    const tony = agentServers({ mcps: m }, "general", { ...base, modeId: "learning", modeTools: [] });
+    expect(tony).toContain("vault");
+    expect(loadOf("general", tony, [vault]).tools).toBe(1);
+    // Granted to "all" by mistake: Rust refuses it for everyone but Tony, so the load never counts it.
+    const open = [srv("vault", null)];
+    for (const a of ["coder", "librarian", "finance", "prompter"]) expect(agentServers({ mcps: open }, a, { ...base, modeId: "builder" })).toEqual([]);
+    expect(agentServers({ mcps: open }, "general", { ...base, modeId: "builder" })).toEqual(["vault"]);
+  });
+
   it("Tony's Spotify load is the core five plus one spotify.more (Section 20.11)", () => {
     const names = ["now_playing", "get_queue", "recently_played", "top_items", "list_playlists", "get_playlist_tracks", "play", "pause", "resume", "next", "previous", "seek", "restart_track", "volume", "shuffle", "repeat", "transfer_device", "queue_add", "create_playlist", "add_to_playlist", "remove_from_playlist", "like_track", "unlike_track"];
     const spotify = { ...listing("spotify", 0), tools: names.map((n) => ({ name: `spotify.${n}`, description: "x".repeat(60), server: "spotify", args: [] })) } as ServerTools;

@@ -520,13 +520,13 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         }
         break;
     }
-    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar / money read ("check
+    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar / money / vault read ("check
     // gmail for booking emails", "any audition emails?", "what do I owe my accountant?") is Tony's
     // own live tool: a name merely mentioned there, even first, is a topic, not an address. Only
     // addressing the desk ("booking desk, any …", "hey booking agent …") or step (a) above
     // ("tell booking to …") hands it over.
     if let Some(role) = match_name_anywhere(&toks, &names) {
-        if !matches!(direct_tool(&original), Some("gmail" | "calendar" | "finance")) || leads_with_name(&original, &toks, &names) {
+        if !matches!(direct_tool(&original), Some("gmail" | "calendar" | "finance" | "vault")) || leads_with_name(&original, &toks, &names) {
             return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
         }
     }
@@ -623,13 +623,28 @@ const DIRECT_FINANCE_WRITE: &str = r"\b(?:log|record|enter|track|scan|import|exp
 /// "what orders are pending", "the overdue invoices widget").
 const DIRECT_FINANCE_NOT: &str = r"\b(?:emails?|inbox|mail|gmail|whatsapp|messages?|texts?|calendar|tasks?|todos?|tickets?|builds?|prs?|pull requests?|reviews?|queue|orders?|deliver(?:y|ies)|packages?|shipments?|updates?|widget|server|config|api|bug|code|app|script|spreadsheet|filter|settings?|button|tests?)\b";
 
+/// Vault READ questions Tony answers with `vault.search` himself (read-only, never finance):
+/// "search my vault / notes for …", "find the note about …", "what did I save about …".
+/// Mirrors router.ts `DIRECT_VAULT`.
+pub(crate) const DIRECT_VAULT: &str = r"\bsearch (?:through |in )?(?:my |the )?(?:vault|notes|brainstorms|documents|docs|scripts|sides|auditions|jobs|ideas)\b|\b(?:look|dig) (?:through|in) (?:my |the )?(?:vault|notes|brainstorms|documents|docs)\b|\blook up (?:the |my |that )?(?:note|notes|brainstorm|document|doc|script|sides|idea) (?:about|on|for|from|with)\b|\bfind (?:the |my |that |a |any )(?:note|notes|brainstorm|brainstorms|document|doc|script|sides|idea|ideas) (?:about|on|for|from|with|where|that i)\b|\bwhat did i (?:save|write down|note down|jot down) (?:about|on|for|regarding)\b|\bwhat have i (?:saved|written down|noted down|jotted down) (?:about|on|for|regarding)\b|\b(?:anything|something) (?:in|from) (?:my |the )?(?:vault|notes|brainstorms|documents)\b|\bdo i have (?:a |any )?(?:notes?|documents?|brainstorms?|ideas?) (?:about|on|for)\b|\b(?:whats|what is) in (?:my |the )?(?:vault|notes)\b";
+/// "What did I save / write down about": a read, not a write. Dropped before DIRECT_WRITE.
+const DIRECT_VAULT_SAVED: &str = r"\bwhat (?:did|have) i (?:save|saved|write down|written down|note down|noted down|jot down|jotted down)\b";
+/// Vault writes DIRECT_WRITE doesn't list ("put this in my vault", "re-index the vault").
+const DIRECT_VAULT_WRITE: &str = r"\b(?:put|stick|store|keep|file|log|record|clear|wipe|reindex|re index|index|export|import|back up|backup|tag)\b";
+/// Another live tool's or the code's subject ("search my notes for that email", "find the doc about the repo").
+const DIRECT_VAULT_NOT: &str = r"\b(?:emails?|inbox|gmail|whatsapp|calendar|repo|repository|codebase|github|web|online|internet|google)\b";
+
 fn direct_re(slot: &'static std::sync::OnceLock<regex::Regex>, pat: &str) -> &'static regex::Regex {
     slot.get_or_init(|| regex::Regex::new(pat).unwrap())
 }
 
 /// The live tool a read question is for: "whatsapp" | "gmail" | "calendar" | "weather" | "spotify"
-/// | "finance". Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
+/// | "finance" | "vault". Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
 pub fn direct_tool(text: &str) -> Option<&'static str> {
+    static VAULT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT_SAVED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT_WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT_NOT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE_WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE_NOT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -651,6 +666,7 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     static MESSAGES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let n = normalize(text);
     let reads = direct_re(&UPDATE_NOUN, DIRECT_UPDATE_NOUN).replace_all(&n, " ");
+    let reads = direct_re(&VAULT_SAVED, DIRECT_VAULT_SAVED).replace_all(&reads, " ");
     if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&direct_re(&FINANCE_MAKE, DIRECT_FINANCE_MAKE).replace_all(&reads, " ")) {
         return None;
     }
@@ -677,6 +693,9 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     }
     if direct_re(&FINANCE, DIRECT_FINANCE).is_match(&n) && !direct_re(&FINANCE_WRITE, DIRECT_FINANCE_WRITE).is_match(&n) && !direct_re(&FINANCE_NOT, DIRECT_FINANCE_NOT).is_match(&n) {
         return Some("finance");
+    }
+    if direct_re(&VAULT, DIRECT_VAULT).is_match(&n) && !direct_re(&VAULT_WRITE, DIRECT_VAULT_WRITE).is_match(&n) && !direct_re(&VAULT_NOT, DIRECT_VAULT_NOT).is_match(&n) {
+        return Some("vault");
     }
     if !work && direct_re(&MESSAGES, DIRECT_MESSAGES).is_match(&n) {
         return Some("whatsapp");

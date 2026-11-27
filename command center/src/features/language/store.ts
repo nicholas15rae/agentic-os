@@ -4,10 +4,13 @@
  * (localStorage, best effort). Nothing here is shared with any other feature's store.
  */
 import { create } from "zustand";
-import type { Category, LangEntry, LangEntryPatch, LangStatus, LangTrack, Level, NewLangEntry, SpokeWith, TutorReply, VoiceEngineInfo, VoicePrefs } from "./contract";
+import type { Category, CurveballLevel, LangEntry, LangEntryPatch, LangStatus, LangTrack, Level, NewLangEntry, SpokeWith, TutorReply, VoiceEngineInfo, VoicePrefs } from "./contract";
 import { defaultVoicePrefs, normalizeVoicePrefs } from "./voice";
 import { langApi } from "./api";
 import type { TutorTurn } from "./prompts";
+import { isCurveballLevel } from "./curveballs";
+import { dayKey, snoozeUntil } from "./daily";
+import { isPracticeReview, reviewPatch, type SrsGrade } from "./srs";
 
 export type HubView = "translate" | "learn" | "library";
 
@@ -54,15 +57,21 @@ interface Prefs {
   trackLang: string;
   /** This device's Web Speech voice per language ("*" = all), by voiceURI. Device-specific, so not synced. */
   browserVoices: Record<string, string>;
+  /** Language curveballs in Tony chats (setting only for now; see curveballs.ts). OFF by default. */
+  curveballs: CurveballLevel;
+  /** Today's lesson: snoozed until (ms; 0 = not) and the local day it was last finished. This device only. */
+  dailySnoozedUntil: number;
+  dailyDoneDay: string | null;
 }
 
 const PREFS_KEY = "language-hub.prefs.v1";
-const DEFAULT_PREFS: Prefs = { view: "translate", source: "auto", target: "it", autoSave: true, autoSpeak: true, trackLang: "it", browserVoices: {} };
+const DEFAULT_PREFS: Prefs = { view: "translate", source: "auto", target: "it", autoSave: true, autoSpeak: true, trackLang: "it", browserVoices: {}, curveballs: "off", dailySnoozedUntil: 0, dailyDoneDay: null };
 
 function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    return raw ? { ...DEFAULT_PREFS, ...(JSON.parse(raw) as Partial<Prefs>) } : DEFAULT_PREFS;
+    const p: Prefs = raw ? { ...DEFAULT_PREFS, ...(JSON.parse(raw) as Partial<Prefs>) } : DEFAULT_PREFS;
+    return isCurveballLevel(p.curveballs) ? p : { ...p, curveballs: "off" };
   } catch {
     return DEFAULT_PREFS;
   }
@@ -88,6 +97,8 @@ interface HubState extends Prefs {
   feed: FeedItem[];
   tutor: Record<string, TutorMsg[]>;
   deck: DrillCard[];
+  /** "daily" while the deck is Today's lesson (finishing it marks the day done). */
+  deckSource: "daily" | null;
   lastEngine: SpokeWith | null;
   /** The shared voice choice (settings "voice") and the TTS providers available. */
   voice: VoicePrefs;
@@ -107,12 +118,28 @@ interface HubState extends Prefs {
   pushTutor: (lang: string, m: Omit<TutorMsg, "key">) => void;
   patchTutor: (lang: string, key: string, reply: TutorReply) => void;
   resetTutor: (lang: string) => void;
-  setDeck: (cards: DrillCard[]) => void;
+  setDeck: (cards: DrillCard[], source?: "daily" | null) => void;
+  /** Grade a Library phrase (flashcard or curveball): new SRS schedule + mastery, saved to disk. Not-due cards are practice (no write unless "again"). */
+  reviewEntry: (id: string, grade: SrsGrade, now?: number) => Promise<void>;
+  setCurveballs: (level: CurveballLevel) => void;
+  snoozeDaily: (kind: "today" | "3days", now?: number) => void;
+  markDailyDone: (now?: number) => void;
   setEngine: (e: SpokeWith) => void;
   setVoice: (v: VoicePrefs) => Promise<void>;
 }
 
-const prefsOf = (s: Prefs): Prefs => ({ view: s.view, source: s.source, target: s.target, autoSave: s.autoSave, autoSpeak: s.autoSpeak, trackLang: s.trackLang, browserVoices: s.browserVoices });
+const prefsOf = (s: Prefs): Prefs => ({
+  view: s.view,
+  source: s.source,
+  target: s.target,
+  autoSave: s.autoSave,
+  autoSpeak: s.autoSpeak,
+  trackLang: s.trackLang,
+  browserVoices: s.browserVoices,
+  curveballs: s.curveballs,
+  dailySnoozedUntil: s.dailySnoozedUntil,
+  dailyDoneDay: s.dailyDoneDay,
+});
 
 export const useHub = create<HubState>((set, get) => ({
   ...loadPrefs(),
@@ -124,6 +151,7 @@ export const useHub = create<HubState>((set, get) => ({
   feed: [],
   tutor: {},
   deck: [],
+  deckSource: null,
   lastEngine: null,
   voice: defaultVoicePrefs(),
   engines: [],
@@ -211,7 +239,21 @@ export const useHub = create<HubState>((set, get) => ({
   pushTutor: (lang, m) => set((s) => ({ tutor: { ...s.tutor, [lang]: [...(s.tutor[lang] ?? []), { ...m, key: newKey("t") }].slice(-60) } })),
   patchTutor: (lang, key, reply) => set((s) => ({ tutor: { ...s.tutor, [lang]: (s.tutor[lang] ?? []).map((m) => (m.key === key ? { ...m, reply } : m)) } })),
   resetTutor: (lang) => set((s) => ({ tutor: { ...s.tutor, [lang]: [] } })),
-  setDeck: (deck) => set({ deck }),
+  setDeck: (deck, source = null) => set({ deck, deckSource: deck.length ? source : null }),
+  reviewEntry: async (id, grade, now = Date.now()) => {
+    const e = get().library.find((x) => x.id === id);
+    if (!e) return;
+    // An early "Got it" / "Hard" is practice: the schedule and mastery stay as they are (srs.ts).
+    if (isPracticeReview(e, grade, now)) return;
+    await get().updateEntry(id, reviewPatch(e, grade, now));
+  },
+  setCurveballs: (curveballs) => {
+    get().setPrefs({ curveballs });
+    // Mirrored to the shared settings table so the Tony side can read it once it's wired (best effort).
+    void langApi.setSetting("curveballs", curveballs).catch(() => undefined);
+  },
+  snoozeDaily: (kind, now = Date.now()) => get().setPrefs({ dailySnoozedUntil: snoozeUntil(kind, now) }),
+  markDailyDone: (now = Date.now()) => get().setPrefs({ dailyDoneDay: dayKey(now), dailySnoozedUntil: 0 }),
   setEngine: (lastEngine) => set({ lastEngine }),
   setVoice: async (voice) => {
     set({ voice });

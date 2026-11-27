@@ -890,7 +890,12 @@ fn router_keyword_ok(server: &str, norm: &str) -> bool {
     static INSTAGRAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static CALENDAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     match server {
+        // Tony's read-only vault search: only on a line about something saved.
+        "vault" => VAULT
+            .get_or_init(|| regex::Regex::new(r"\b(vault|notes?|brainstorms?|documents?|docs?|scripts?|sides|auditions?|jobs?|ideas?|saved|save|wrote|written|jotted|noted)\b").unwrap())
+            .is_match(norm),
         // Tony's read-only Finance tool: only on a line about money.
         "finance" => FINANCE
             .get_or_init(|| regex::Regex::new(r"\b(owe|owes|owed|owing|commissions?|income|earn(ed|ings)?|made|make|revenue|profit|spen[dt]|expenses?|pending|invoices?|hst|gst|tax(es)?|cheques?|money|paid|unpaid)\b").unwrap())
@@ -1221,6 +1226,53 @@ pub(crate) fn finance_plan_on(original: &str, tools: &[super::mcp::ToolInfo], to
     Some((super::mcp::FINANCE_ASK.to_string(), args))
 }
 
+/// "Search my vault for the car reel idea", "find the note about the deck job", "what did I save
+/// about Imperious?" → `vault.search` (read-only, never finance), without a model round trip. Only a
+/// vault READ (`routing::direct_tool` "vault").
+fn vault_plan(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String, Value)> {
+    vault_plan_on(original, tools)
+}
+
+/// `vault_plan` (pure): the search words after the ask ("… for / about / on …"), plus the kind the
+/// line names (brainstorms / notes, scripts / auditions, jobs, documents, ideas).
+pub(crate) fn vault_plan_on(original: &str, tools: &[super::mcp::ToolInfo]) -> Option<(String, Value)> {
+    if !tools.iter().any(|t| t.name == super::mcp::VAULT_SEARCH) || super::routing::direct_tool(original) != Some("vault") {
+        return None;
+    }
+    static ASK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static LEAD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static TAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let n = super::routing::normalize(original);
+    let ask = ASK.get_or_init(|| regex::Regex::new(super::routing::DIRECT_VAULT).unwrap());
+    let m = ask.find(&n)?;
+    let asked = m.as_str();
+    let lead = LEAD.get_or_init(|| regex::Regex::new(r"^(?:(?:for|about|on|regarding|re|mentioning|with|from|where|that i|anything|something|stuff|notes?|the|my|that|a|an|any|i|have|saved|wrote|written)\s+)+").unwrap());
+    let tail = TAIL.get_or_init(|| regex::Regex::new(r"(?:\s+(?:please|tony|for me|again|real quick|thanks))+$").unwrap());
+    let rest = n[m.end()..].trim();
+    let query = tail.replace(lead.replace(rest, "").trim(), "").trim().to_string();
+    if query.is_empty() {
+        return None;
+    }
+    let kind = if regex::Regex::new(r"\b(?:notes?|brainstorms?)\b").unwrap().is_match(asked) {
+        Some("notes")
+    } else if regex::Regex::new(r"\b(?:scripts?|sides|auditions?)\b").unwrap().is_match(asked) {
+        Some("pipeline")
+    } else if regex::Regex::new(r"\bjobs?\b").unwrap().is_match(asked) {
+        Some("projects")
+    } else if regex::Regex::new(r"\b(?:documents?|docs?)\b").unwrap().is_match(asked) {
+        Some("documents")
+    } else if regex::Regex::new(r"\bideas?\b").unwrap().is_match(asked) {
+        Some("ideas")
+    } else {
+        None
+    };
+    let mut args = json!({ "query": query });
+    if let Some(k) = kind {
+        args["kind"] = json!(k);
+    }
+    Some((super::mcp::VAULT_SEARCH.to_string(), args))
+}
+
 /// The Gmail tab a line names outright ("my promotions", "the social tab", "updates inbox",
 /// "in forums", "my primary inbox"), or None. Only ever asked of a line that already talks about
 /// email (`mentions_email`). A bare "my social" / "in updates" counts only at the end of the line
@@ -1395,6 +1447,7 @@ fn deterministic_plan(text: &str, tools: &[super::mcp::ToolInfo], os_name: &str)
         .or_else(|| gmail_plan(text, tools))
         .or_else(|| calendar_plan(text, tools))
         .or_else(|| finance_plan(text, tools))
+        .or_else(|| vault_plan(text, tools))
         .or_else(|| whatsapp_plan(text, tools))
         .or_else(|| spotify_plan(text, tools, os_name))
         .or_else(|| system_plan(text, tools))
@@ -1790,10 +1843,11 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // Asked for email / Spotify / WhatsApp but that server can't serve it (off / no
     // backend / not connected): say why instead of letting the model invent a refusal.
     type Planner = fn(&str, &[super::mcp::ToolInfo], &str) -> Option<(String, Value)>;
-    let planners: [(&str, Planner); 5] = [
+    let planners: [(&str, Planner); 6] = [
         ("gmail", |t, tools, _| booking_mail_plan(t, tools).or_else(|| gmail_plan(t, tools))),
         ("calendar", |t, tools, _| calendar_plan(t, tools)),
         ("finance", |t, tools, _| finance_plan(t, tools)),
+        ("vault", |t, tools, _| vault_plan(t, tools)),
         ("spotify", spotify_plan),
         ("whatsapp", |t, tools, _| whatsapp_plan(t, tools)),
     ];
@@ -3358,26 +3412,35 @@ pub(crate) fn private_tools(tool: Option<&str>, steps: &[OsStep]) -> Option<&'st
         "calendar" => Some("calendar"),
         // Finance summaries never reach training_logs either (Section 11.10).
         "finance" => Some("finance"),
+        // Nor do vault matches (Section 16.6): Nic's own notes, scripts and documents.
+        "vault" => Some("vault"),
         _ => None,
     };
     tool.and_then(kind).or_else(|| steps.iter().filter(|s| s.kind == "tool").find_map(|s| kind(&s.to)))
 }
 
-/// Decision 4 by the request's own words: a Gmail / Google Calendar read (`routing::direct_tool`),
-/// or a line about Nic's own inbox / calendar ("add the shoot to my calendar"), is private
-/// ("email" / "calendar") even when no mail or calendar tool ran: a model test on the GPU
-/// answered first (the maintenance line), or the chain failed before the tool. Pure.
+/// Decision 4 by the request's own words: a Gmail / Google Calendar / vault read
+/// (`routing::direct_tool`), or a line about Nic's own inbox / calendar / vault ("add the shoot to
+/// my calendar", "anything in my vault about the pilot"), is private ("email" / "calendar" /
+/// "vault") even when no mail, calendar or vault tool ran: a model test on the GPU answered first
+/// (the maintenance line), or the chain failed before the tool. Pure.
 pub(crate) fn private_words(text: &str) -> Option<&'static str> {
     static MAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static CALENDAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     match super::routing::direct_tool(text) {
         Some("gmail") => return Some("email"),
         Some("calendar") => return Some("calendar"),
+        // Section 16.6: a vault read (routing::DIRECT_VAULT) whose vault.search step didn't run.
+        Some("vault") => return Some("vault"),
         _ => {}
     }
     let n = super::routing::normalize(text);
     if MAIL.get_or_init(|| regex::Regex::new(r"\b(?:gmail|inbox|my (?:e ?mails?|mail))\b").unwrap()).is_match(&n) {
         return Some("email");
+    }
+    if VAULT.get_or_init(|| regex::Regex::new(r"\b(?:my vault|(?:in|from|through) (?:my |the )?vault)\b").unwrap()).is_match(&n) {
+        return Some("vault");
     }
     CALENDAR.get_or_init(|| regex::Regex::new(r"\b(?:my (?:google )?calendar|google calendar|my agenda)\b").unwrap()).is_match(&n).then_some("calendar")
 }
@@ -4059,6 +4122,46 @@ mod tests {
         assert_eq!(private_tools(Some("finance.ask"), &[]), Some("finance"));
     }
 
+    /// Section 16.6: vault reads become one `vault.search` call with the search words and the kind
+    /// the line names; writes, other tools' subjects and other agents never do.
+    #[test]
+    fn vault_plan_reads_vault_questions() {
+        let tools = super::super::mcp::builtin_tools("vault");
+        let plan = |t: &str| vault_plan_on(t, &tools);
+        let ask = |a: Value| Some((super::super::mcp::VAULT_SEARCH.to_string(), a));
+        assert_eq!(plan("search my vault for the car reel idea"), ask(json!({ "query": "car reel idea" })));
+        assert_eq!(plan("Tony, search my notes for the deck job"), ask(json!({ "query": "deck job", "kind": "notes" })));
+        assert_eq!(plan("find the note about the Imperious callback"), ask(json!({ "query": "imperious callback", "kind": "notes" })));
+        assert_eq!(plan("what did I save about the Netflix audition?"), ask(json!({ "query": "netflix audition" })));
+        assert_eq!(plan("what have I written down about kitchen quotes"), ask(json!({ "query": "kitchen quotes" })));
+        assert_eq!(plan("search my scripts for the lawyer monologue"), ask(json!({ "query": "lawyer monologue", "kind": "pipeline" })));
+        assert_eq!(plan("find the document about the lease please"), ask(json!({ "query": "lease", "kind": "documents" })));
+        assert_eq!(plan("do I have any notes on protein powder"), ask(json!({ "query": "protein powder", "kind": "notes" })));
+        assert_eq!(plan("is there anything in my vault about headshots"), ask(json!({ "query": "headshots" })));
+        for t in ["put this in my vault", "search my vault", "delete the note about the deck job", "search my notes for that email from Sam", "find the doc about the rust repo", "what's the weather", "find document about the lease"] {
+            assert_eq!(plan(t), None, "{t}");
+        }
+        // No vault tool offered (server off / not granted): no plan.
+        assert_eq!(vault_plan_on("search my vault for headshots", &gmail_tools()), None);
+        // A vault turn is private like finance.
+        assert_eq!(private_tools(Some("vault.search"), &[]), Some("vault"));
+    }
+
+    /// Section 16.6: a vault read naming the (frozen) Librarian's "vault" trigger stays Tony's own
+    /// Direct tool path; addressing the Librarian by name still routes to it.
+    #[test]
+    fn route_for_turn_vault_reads_are_tonys_direct_tool() {
+        let cfg = OsConfig::default();
+        let rt = |role: &str, text: &str, kind: Option<&str>| route_for_turn(&TurnRouteInput { role, explicit: false, text, route_kind: kind, route_reason: None, no_delegate: false, solo: false, learning: false, stay_with_tony: false }, &cfg);
+        for text in ["search my vault for the car reel idea", "find the note about the deck job", "what did I save about Imperious?"] {
+            let r = rt("general", text, None);
+            assert_eq!((r.role.as_str(), r.kind.as_str()), ("general", "Direct"), "{text}");
+            assert_eq!(r.reason, "live vault tool");
+        }
+        let r = rt("general", "ask the librarian to search vault for my notes", None);
+        assert_eq!((r.role.as_str(), r.kind.as_str()), ("librarian", "Named"));
+    }
+
     /// Section 11.10: a money read routed to the (frozen / held) Finance agent by topic stays
     /// Tony's own Direct tool path; addressing the agent by name still routes to it.
     #[test]
@@ -4154,6 +4257,36 @@ mod tests {
         log_failed_turn(&bridge, "general", ask, &[], &format!("all providers failed for: {ask}"), &[]);
         let logged: String = std::fs::read_dir(dir.join("logs")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect();
         assert!(logged.contains("\"private\":\"calendar\"") && !logged.contains("Patel"), "{logged}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Section 16.6 review: a vault read whose vault.search step didn't run (the maintenance line,
+    /// a failed chain) is private by its words alone, like mail and calendar.
+    #[test]
+    fn vault_words_alone_make_a_turn_private() {
+        for text in [
+            "search my notes for the pilot audition",
+            "what did I save about the Netflix callback?",
+            "find the note about the zebra mural",
+            "anything in my vault about Sam's contract",
+            "look through the vault for the sides",
+        ] {
+            assert_eq!(private_words(text), Some("vault"), "{text}");
+            let rec = turn_record("general", text, &turn(MAINTENANCE_LINE, None), &[]);
+            assert_eq!(rec["private"], "vault", "{text}");
+            assert!(!rec.to_string().contains(text), "{text}");
+        }
+        for text in ["fix the vault page layout", "tell me a joke", "what's a bank vault"] {
+            assert_eq!(private_words(text), None, "{text}");
+        }
+        // The failed-turn record (no answer) follows the same rule.
+        let dir = std::env::temp_dir().join(format!("vault-failed-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+        let bridge = BridgeState::default();
+        bridge.init(&dir, dir.join("logs"));
+        let ask = "search my vault for the Patel contract";
+        log_failed_turn(&bridge, "general", ask, &[], &format!("all providers failed for: {ask}"), &[]);
+        let logged: String = std::fs::read_dir(dir.join("logs")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect();
+        assert!(logged.contains("\"private\":\"vault\"") && !logged.contains("Patel"), "{logged}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

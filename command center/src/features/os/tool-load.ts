@@ -24,6 +24,10 @@ const ALWAYS_LIVE = ["time", "skills", "tony"];
  * is only ever handed to Tony and the finance role, whatever its grants say. */
 export const FINANCE_SERVER = "finance";
 const FINANCE_READERS = ["general", "finance"];
+/** Rust `mcp::vault_reader_refusal`: the read-only vault search server (`vault.search`, Section 16.6)
+ * is only ever handed to Tony, whatever its grants say. */
+export const VAULT_SERVER = "vault";
+const VAULT_READERS = ["general"];
 
 export type TonyModeTools = Record<string, string[]>;
 
@@ -75,6 +79,7 @@ export function agentServers(cfg: LoadCfg, agent: string, o: { modeId: string; m
     .filter((s) => {
       if (!s.enabled) return false;
       if (s.id === FINANCE_SERVER && !FINANCE_READERS.includes(agent)) return false;
+      if (s.id === VAULT_SERVER && !VAULT_READERS.includes(agent)) return false;
       const always = ALWAYS_LIVE.includes(s.id);
       if (!always && o.frozenTools.includes(s.id)) return false;
       if (tony) return ownsServer(s.agents, "general") || extra.includes(s.id);

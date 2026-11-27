@@ -196,10 +196,17 @@ describe("osRun: a route to a frozen agent stays Tony's in the webview; os_turn 
     expect(gateFor()).toMatchObject({ summary: "Let Tony use Coder", detail: { role: "coder" } });
   });
 
-  it("an agent frozen on the master switchboard, even named: os_turn carries the Booking route; the webview never announces it", async () => {
+  it("the router never picks the frozen Booking Desk (Section 20.1): the old address is Tony's own turn", async () => {
     mode.freeze = { frozenAgents: ["booking"] };
     await handleInput("booking desk, please check my calendar for tomorrow", text);
-    expect(osTurns()[0]).toMatchObject({ role: "booking", routeKind: "Named" });
+    expect(osTurns()[0]).toMatchObject({ role: "general" });
+    expect(routingNotices()).toHaveLength(0);
+  });
+
+  it("an agent frozen on the master switchboard, even named: os_turn carries the route; the webview never announces it", async () => {
+    mode.freeze = { frozenAgents: ["director"] };
+    await handleInput("director, please check the reel", text);
+    expect(osTurns()[0]).toMatchObject({ role: "director", routeKind: "Named" });
     expect(routingNotices()).toHaveLength(0);
     expect(gateFor()).toMatchObject({ summary: "Let Tony use its tools", detail: { role: "general" } });
   });

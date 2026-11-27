@@ -1341,11 +1341,71 @@ _configure_gateway_tony()
 
 models_router = APIRouter(prefix="/api/models", tags=["models"])
 
-MODEL_DIRS = [r"D:\AI Models Productivity", r"D:\AI Models Media and Vision", r"D:\ai model voices"]
+# Section 20.14: every root is configurable (os.pathsep-separated env vars, read at call time);
+# the defaults are the folders that exist on this machine. Nothing here is ever deleted.
+#   CC_MODEL_DIRS     flat roots: each sub-folder is one model
+#   CC_LMSTUDIO_DIRS  LM Studio / Bionic libraries (<publisher>/<model>); the first is the one
+#                     GGUF folders are junctioned into (also CC_LMSTUDIO_DIR)
+#   CC_HF_CACHES      Hugging Face hub caches (models--<org>--<name>); HF_HUB_CACHE / HF_HOME too
+_DEFAULT_MODEL_DIRS = [r"D:\AI Models Productivity", r"D:\AI Models Media and Vision", r"D:\ai model voices", r"D:\Ai Uncensored Models"]
 # Bionic's downloadsFolder (moved to C: 2026-11-25; the D: models are junctioned in under local-d
-# and lmstudio-community).
-LMSTUDIO_DIR = Path(r"C:\Users\nicho\.lmstudio\models")
+# and lmstudio-community), then the old D: library.
+_DEFAULT_LMSTUDIO_DIRS = [str(Path.home() / ".lmstudio" / "models"), r"D:\LM Studio"]
+_DEFAULT_HF_CACHES = [str(Path.home() / ".cache" / "huggingface" / "hub"), r"D:\HuggingFace\hub", r"G:\ai-hub\models\faster-whisper"]
 LINK_PUBLISHER = "local-d"
+
+
+def _env_paths(name: str) -> list[str]:
+    return [p.strip() for p in os.environ.get(name, "").split(os.pathsep) if p.strip()]
+
+
+def _dedupe(paths: list[str]) -> list[str]:
+    seen, out = set(), []
+    for p in paths:
+        k = os.path.normcase(os.path.normpath(p))
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
+
+
+def model_dirs() -> list[str]:
+    return _dedupe(_env_paths("CC_MODEL_DIRS") or _DEFAULT_MODEL_DIRS)
+
+
+def lmstudio_dirs() -> list[str]:
+    first = os.environ.get("CC_LMSTUDIO_DIR", "").strip()
+    return _dedupe(([first] if first else []) + (_env_paths("CC_LMSTUDIO_DIRS") or _DEFAULT_LMSTUDIO_DIRS))
+
+
+def hf_caches() -> list[str]:
+    hub = []
+    if os.environ.get("HF_HUB_CACHE", "").strip():
+        hub.append(os.environ["HF_HUB_CACHE"].strip())
+    if os.environ.get("HF_HOME", "").strip():
+        hub.append(str(Path(os.environ["HF_HOME"].strip()) / "hub"))
+    return _dedupe(hub + (_env_paths("CC_HF_CACHES") or _DEFAULT_HF_CACHES))
+
+
+def lmstudio_dir() -> Path:
+    """Where GGUF folders are junctioned in (the first LM Studio library)."""
+    return Path(lmstudio_dirs()[0])
+
+
+# Back-compat module names (read once at import; the scan itself re-reads the env).
+MODEL_DIRS = model_dirs()
+LMSTUDIO_DIR = lmstudio_dir()
+
+
+def _drive(p: str) -> str:
+    d = os.path.splitdrive(p)[0]
+    return d.upper() if d else ""
+
+
+def model_roots() -> list[dict]:
+    """Every configured root with its kind, drive and whether it exists (C:, D:, G:, F: …)."""
+    rows = [("models", p) for p in model_dirs()] + [("lmstudio", p) for p in lmstudio_dirs()] + [("hf-cache", p) for p in hf_caches()]
+    return [{"path": p, "kind": k, "drive": _drive(p), "exists": Path(p).is_dir()} for k, p in rows]
 _WEIGHT_EXT = {".gguf": "gguf", ".safetensors": "safetensors", ".bin": "pytorch-bin", ".pth": "pytorch", ".pt": "pytorch", ".onnx": "onnx", ".ckpt": "checkpoint", ".msgpack": "flax", ".h5": "tensorflow", ".npz": "numpy", ".tflite": "tflite"}
 
 
@@ -1360,10 +1420,13 @@ def _category(name: str) -> str:
     return "Productivity & Coding LLMs"
 
 
-def _scan_folder(d: Path) -> dict:
-    files, size, formats, ggufs, partial = 0, 0, set(), [], False
-    for root, _dirs, names in os.walk(d):
+def _scan_folder(d: Path, lms: Optional[Path] = None) -> dict:
+    files, size, formats, ggufs, partial, index_only = 0, 0, set(), [], False, False
+    for root, dirs, names in os.walk(d):
+        dirs[:] = [x for x in dirs if x != ".git"]  # a git-lfs checkout's own objects aren't weights
         for n in names:
+            if n.lower().endswith((".safetensors.index.json", ".bin.index.json")):
+                index_only = True
             p = Path(root) / n
             try:
                 sz = p.stat().st_size
@@ -1378,39 +1441,86 @@ def _scan_folder(d: Path) -> dict:
                 formats.add(_WEIGHT_EXT[ext])
                 if ext == ".gguf" and not n.lower().startswith("mmproj"):
                     ggufs.append({"file": str(p.relative_to(d)), "gb": round(sz / 1e9, 2)})
-    linked = (LMSTUDIO_DIR / LINK_PUBLISHER / d.name).exists()
-    in_lms = str(d).lower().startswith(str(LMSTUDIO_DIR).lower())
+    lms = lms or lmstudio_dir()
+    linked = (lms / LINK_PUBLISHER / d.name).exists()
+    in_lms = any(str(d).lower().startswith(x.lower()) for x in lmstudio_dirs())
     status = "gguf" if ggufs else ("partial-download" if partial else ("needs-conversion" if formats else ("unknown-format" if size > 500_000_000 else "incomplete")))
+    # A weights index (model.safetensors.index.json) with no shard next to it: the config and
+    # tokenizer came down, the weights never did (e.g. Hermes-3-Llama-3.1-8B's git-lfs clone).
+    shards_missing = index_only and not formats and not ggufs
     return {
         "name": d.name, "path": str(d), "category": _category(d.name), "sizeGb": round(size / 1e9, 2), "files": files,
         "formats": sorted(formats), "ggufs": ggufs, "status": status,
-        "lmstudioLoadable": bool(ggufs), "registered": linked or in_lms,
-        "note": {"gguf": "Loadable in LM Studio / Bionic", "needs-conversion": "Hugging Face weights — convert to GGUF (or use with a Python runtime) to load in Bionic", "incomplete": "No weight files — download looks unfinished", "unknown-format": "Large files in a format the scanner doesn't recognize", "partial-download": "Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`"}[status],
+        "lmstudioLoadable": bool(ggufs), "registered": linked or in_lms, "drive": _drive(str(d)),
+        "note": "No weight files: only the config, tokenizer and the weights index came down (the shards are missing)" if shards_missing and status == "incomplete" else {"gguf": "Loadable in LM Studio / Bionic", "needs-conversion": "Hugging Face weights — convert to GGUF (or use with a Python runtime) to load in Bionic", "incomplete": "No weight files — download looks unfinished", "unknown-format": "Large files in a format the scanner doesn't recognize", "partial-download": "Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`"}[status],
     }
 
 
 @models_router.get("/local-scan")
 def local_scan():
     import os as _os  # noqa: F401  (os.walk via module-level import below)
-    out = []
-    for base in MODEL_DIRS:
+    return scan_models()
+
+
+def _real(p: Path) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(p))
+    except OSError:
+        return os.path.normcase(str(p))
+
+
+def scan_models() -> dict:
+    """The whole library: flat model roots, every LM Studio library (C: and D:), the Hugging Face
+    caches. A folder reached twice (a junction into another root) is listed once."""
+    out, seen = [], set()
+    lms = lmstudio_dir()
+
+    def add(d: Path, root: str, **extra):
+        k = _real(d)
+        if k in seen:
+            return
+        seen.add(k)
+        out.append({**_scan_folder(d, lms), "root": root, **extra})
+
+    for base in model_dirs():
         b = Path(base)
-        if not b.is_dir():
-            continue
-        for d in sorted(b.iterdir()):
-            if d.is_dir():
-                out.append({**_scan_folder(d), "root": base})
-    # Bionic's own library too (already loadable).
-    if LMSTUDIO_DIR.is_dir():
-        for pub in LMSTUDIO_DIR.iterdir():
-            if pub.is_dir() and pub.name != LINK_PUBLISHER:
-                for d in pub.iterdir():
-                    if d.is_dir():
-                        out.append({**_scan_folder(d), "root": str(LMSTUDIO_DIR), "registered": True})
+        if b.is_dir():
+            for d in sorted(b.iterdir()):
+                if d.is_dir():
+                    add(d, base)
+    # The LM Studio / Bionic libraries (already loadable); local-d only holds junctions to the above.
+    for base in lmstudio_dirs():
+        b = Path(base)
+        if b.is_dir():
+            for pub in sorted(b.iterdir()):
+                if pub.is_dir() and pub.name != LINK_PUBLISHER:
+                    for d in sorted(pub.iterdir()):
+                        if d.is_dir():
+                            add(d, base, registered=True)
+    # Hugging Face caches: models--<org>--<name>, scanned through their snapshots (the blobs are
+    # hash-named and would read as a partial download).
+    for base in hf_caches():
+        b = Path(base)
+        if b.is_dir():
+            for d in sorted(b.glob("models--*")):
+                snaps = d / "snapshots"
+                if not snaps.is_dir():
+                    continue
+                k = _real(d)
+                if k in seen:
+                    continue
+                seen.add(k)
+                row = _scan_folder(snaps, lms)
+                if any(p.suffix in (".incomplete", ".part") for p in (d / "blobs").glob("*")) and row["status"] != "gguf":
+                    row.update(status="partial-download", note="Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`")
+                name = d.name[len("models--"):].replace("--", "/")
+                out.append({**row, "name": name, "path": str(d), "category": _category(name), "drive": _drive(str(d)), "root": base})
     groups: dict[str, list] = {}
     for m in out:
         groups.setdefault(m["category"], []).append(m)
-    return {"dirs": MODEL_DIRS, "lmstudioDir": str(LMSTUDIO_DIR), "count": len(out), "groups": groups, "scannedAt": time.time()}
+    roots = model_roots()
+    return {"dirs": model_dirs(), "lmstudioDir": str(lms), "lmstudioDirs": lmstudio_dirs(), "hfCaches": hf_caches(), "roots": roots,
+            "drives": sorted({r["drive"] for r in roots if r["exists"] and r["drive"]}), "count": len(out), "groups": groups, "scannedAt": time.time()}
 
 
 @models_router.post("/sync-lmstudio")
@@ -1419,9 +1529,9 @@ def sync_lmstudio():
     (LMSTUDIO_DIR\local-d\<folder>) with a directory junction — no copying."""
     import subprocess
     linked, skipped, errors = [], [], []
-    target_root = LMSTUDIO_DIR / LINK_PUBLISHER
+    target_root = lmstudio_dir() / LINK_PUBLISHER
     target_root.mkdir(parents=True, exist_ok=True)
-    for base in MODEL_DIRS:
+    for base in model_dirs():
         b = Path(base)
         if not b.is_dir():
             continue

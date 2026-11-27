@@ -248,6 +248,11 @@ fn name_pairs(cfg: &OsConfig) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (key, t) in &cfg.routing.agents {
         let role = if is_self_role(key, &cfg.os_name) { "general".to_string() } else { key.clone() };
+        // A frozen agent's names never fire (Section 20.1): the line falls through to the next
+        // live match, or Tony.
+        if frozen_role(cfg, &role) {
+            continue;
+        }
         for n in &t.names {
             let norm = normalize(n);
             if !norm.is_empty() {
@@ -262,6 +267,12 @@ fn name_pairs(cfg: &OsConfig) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// `role` is frozen on the master switchboard (`switchboard.frozenAgents`): the router never
+/// picks it. Tony (`general`) is never frozen. Mirrors `isFrozenRole` in router.ts.
+pub fn frozen_role(cfg: &OsConfig, role: &str) -> bool {
+    role != "general" && cfg.switchboard.frozen_agents.iter().any(|f| f.trim().eq_ignore_ascii_case(role))
 }
 
 /// Does one of `names` match starting exactly at `toks[pos..]`? The longest
@@ -485,6 +496,9 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
     let mut best: Option<(&str, usize)> = None;
     let mut self_topic = false;
     for role in DOMAIN_TIEBREAK.iter().copied() {
+        if frozen_role(cfg, role) {
+            continue;
+        }
         let Some(t) = cfg.routing.agents.get(role) else { continue };
         let score = domain_score(&toks, t);
         if score == 0 {
@@ -673,26 +687,58 @@ mod tests {
         }
         // Tony's name beats a topic (it used to be: a sub-agent topic wins over a self address).
         let cfg = OsConfig::default();
-        for text in ["tony check my whatsapp messages", "hey tony, check my self-tape availability", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"] {
+        for text in ["tony check my whatsapp messages", "hey tony, render the reel", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("general"), RouteKind::Own, "high"), "{text}");
         }
         let mut friday = OsConfig::default();
         friday.os_name = "Friday".into();
-        let r = resolve("friday, check my wardrobe for the shoot", &friday);
+        let r = resolve("friday, check my reel for the shoot", &friday);
         assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own));
         // Without his name the same topic still delegates; his own topic alone doesn't beat it.
-        let r = resolve("check my self-tape availability", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Domain));
-        let r = resolve("friday, check my wardrobe for the shoot", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Domain));
+        let r = resolve("render the reel", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
+        let r = resolve("friday, check my reel for the shoot", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
         let r = resolve("system status of the droplet", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
         // A Named agent still wins over Tony's name.
-        let r = resolve("hey tony, ask the booking desk to check my availability", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.task.as_str()), (Some("booking"), RouteKind::Named, "high", "check my availability"));
-        let r = resolve("tony, my booking agent hasn't replied about the wardrobe", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named));
+        let r = resolve("hey tony, ask the director to edit video for the shoot", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.task.as_str()), (Some("director"), RouteKind::Named, "high", "edit video for the shoot"));
+        let r = resolve("tony, my coder hasn't replied about the layout", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
+    }
+
+    /// Section 20.1: a frozen agent's triggers never fire; the line falls through to the next
+    /// live match, or Tony. The Booking Desk has no triggers left at all.
+    #[test]
+    fn a_frozen_agent_is_never_picked() {
+        let cfg = OsConfig::default();
+        assert!(frozen_role(&cfg, "librarian") && frozen_role(&cfg, "booking") && !frozen_role(&cfg, "general") && !frozen_role(&cfg, "coder"));
+        // The Librarian's name and topics (frozen by default) don't route.
+        for text in ["ask the librarian to search vault for the contract", "librarian, find document about the lease", "search vault for my notes"] {
+            assert_ne!(resolve(text, &cfg).role.as_deref(), Some("librarian"), "{text}");
+        }
+        // …a live agent's topic in the same line still wins.
+        let r = resolve("librarian, find document about the rust repo", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Domain));
+        // Booking: no names, no topics; the old phrases are Tony's or the Director's.
+        for text in ["ask the booking desk to check my availability", "booking desk, any casting calls", "draft email to agent about the audition"] {
+            let r = resolve(text, &cfg);
+            assert_ne!(r.role.as_deref(), Some("booking"), "{text}");
+        }
+        // Thawed, the Librarian routes again (and a thawed Booking still has nothing to match).
+        let mut thawed = OsConfig::default();
+        thawed.switchboard.frozen_agents.clear();
+        assert_eq!(resolve("ask the librarian to search vault for the contract", &thawed).role.as_deref(), Some("librarian"));
+        assert_ne!(resolve("ask the booking desk to check my availability", &thawed).role.as_deref(), Some("booking"));
+        // Freezing a live agent: its address falls back to Tony, its topic to the next agent.
+        let mut cold = OsConfig::default();
+        cold.switchboard.frozen_agents.push("Coder".into());
+        let r = resolve("ask the coder to fix bug in the layout", &cold);
+        assert_eq!(r.role.as_deref(), Some("designer"), "{r:?}");
+        let r = resolve("coder, write code", &cold);
+        assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default));
     }
 
     /// Regression: the override fired for a self name ANYWHERE in the line, so the common nouns in
@@ -707,8 +753,8 @@ mod tests {
         for (text, c, role) in [
             ("fix bug in the orchestrator react code", &cfg, "coder"),
             ("refactor the dispatcher rust code", &cfg, "coder"),
-            ("check my self-tape availability for friday", &friday, "booking"),
-            ("book the wardrobe fitting before friday", &friday, "booking"),
+            ("render the reel for friday", &friday, "director"),
+            ("fix the layout css before friday", &friday, "designer"),
             ("fix bug in the orchestrator", &cfg, "coder"),
             ("get the orchestrator react code working", &cfg, "coder"),
             ("the dispatcher keeps timing out, is the droplet healthy", &cfg, "ops"),
@@ -723,18 +769,18 @@ mod tests {
         }
         // An address — leading (after an interjection), "ask/tell <self> to/about …", trailing vocative.
         for (text, c) in [
-            ("hey tony, check my self-tape availability", &cfg),
+            ("hey tony, render the reel", &cfg),
             ("ok jarvis, redo the color palette for the landing page", &cfg),
             ("so tony, is the droplet healthy", &cfg),
-            ("yo tony check my calendar", &cfg),
-            ("friday, check my wardrobe for the shoot", &friday),
-            ("ask tony to check my self-tape availability", &cfg),
-            ("tell the dispatcher about the wardrobe fitting", &cfg),
+            ("yo tony check my docker containers", &cfg),
+            ("friday, check my reel for the shoot", &friday),
+            ("ask tony to render the reel", &cfg),
+            ("tell the dispatcher about the thumbnail", &cfg),
             ("have jarvis check the droplet", &cfg),
-            ("let tony know my availability changed", &cfg),
-            ("check my self-tape availability, tony", &cfg),
+            ("let tony know the layout changed", &cfg),
+            ("render the reel, tony", &cfg),
             ("is the droplet healthy tony please", &cfg),
-            ("check my self-tape availability, friday", &friday),
+            ("render the reel, friday", &friday),
         ] {
             let r = resolve(text, c);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.reason.as_str()), (Some("general"), RouteKind::Own, "high", "you addressed the OS by name"), "{text}");
@@ -960,21 +1006,26 @@ mod tests {
             assert_ne!(r.kind, RouteKind::Named, "{text}: {r:?}");
             assert!(matches!(direct_tool(text), Some("gmail" | "calendar")), "{text}");
         }
-        for (text, conf) in [("booking desk, any new emails about the shoot?", "medium"), ("tell booking to check my email for the callback", "high"), ("booking desk check my inbox", "high"), ("hey booking agent, any emails?", "medium")] {
+        // Addressing a live desk still hands a mail read over (the frozen Booking Desk has no names left).
+        for (text, conf) in [("director, any new emails about the shoot?", "medium"), ("tell the director to check my email for the callback", "high"), ("director check my inbox", "high"), ("hey director, any emails?", "medium")] {
             let r = resolve(text, &cfg);
-            assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("booking"), RouteKind::Named, conf), "{text}");
+            assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("director"), RouteKind::Named, conf), "{text}");
         }
-        // Not a mail read: a mention still names the desk, as before.
-        let r = resolve("what did the booking desk say", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named));
+        // Not a mail read: a mention still names the agent, as before.
+        let r = resolve("what did the director say", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Named));
+        // The Booking Desk is never named any more.
+        assert_ne!(resolve("what did the booking desk say", &cfg).role.as_deref(), Some("booking"));
     }
 
     #[test]
-    fn domain_tie_break_prefers_booking_over_ops() {
+    fn domain_tie_break_follows_role_order() {
         let cfg = OsConfig::default();
-        // booking "wardrobe" (8) vs ops "schedule" (8).
-        let r = resolve("schedule a wardrobe fitting", &cfg);
-        assert_eq!(r.role, Some("booking".to_string()));
-        assert_eq!(r.kind, RouteKind::Domain);
+        // bizops "inventory" (9) vs designer "animation" (9): bizops comes first.
+        let r = resolve("inventory animation", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("bizops"), RouteKind::Domain));
+        // A Tony topic ("schedule") never steals a tie: the agent keeps it.
+        let r = resolve("schedule a docker restart", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
     }
 }

@@ -1205,10 +1205,14 @@ async fn run_tool_router(
     deadline: Instant,
     out: &mut Prefetch,
 ) {
-    let offered = router_offer(tools, text, os_name);
-    if offered.is_empty() {
+    let available = router_offer(tools, text, os_name);
+    if available.is_empty() {
         return;
     }
+    // Tony's router sees ~5 Spotify tools plus one `spotify.more` (Section 20.11); the other
+    // agents only ever get Spotify's reads, listed by name.
+    let more = super::mcp::spotify_more_info(&super::mcp::spotify_hidden(&available));
+    let offered = if super::mcp::is_tony(agent) { super::mcp::tony_spotify_view(available.clone(), &more) } else { available.clone() };
     let mut extra = String::new();
     for _ in 0..2 {
         let router = router_prompt(&offered, context, &extra);
@@ -1247,6 +1251,19 @@ async fn run_tool_router(
             break;
         };
         let args = if j["args"].is_object() { j["args"].clone() } else { json!({}) };
+        // `spotify.more` dispatches to the real tool (one of this turn's offered ones), which then
+        // runs through the same gates as if the router had named it.
+        let (name, args) = if name == super::mcp::SPOTIFY_MORE {
+            match super::mcp::expand_spotify_more(&args, &available) {
+                Ok(x) => x,
+                Err(e) => {
+                    out.steps.push(step("tool", "os", "router", format!("no tool ({e})"), true, 0));
+                    break;
+                }
+            }
+        } else {
+            (name, args)
+        };
         let call_secs = deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(15));
         if call_secs.is_zero() {
             out.steps.push(step("tool", "os", &name, format!("{name} skipped — out of time"), false, 0));
@@ -1329,7 +1346,11 @@ pub struct TonyToolsPreview {
 }
 
 fn tools_preview(set: &super::mcp::ToolSet, spotify_ready: bool) -> TonyToolsPreview {
-    TonyToolsPreview { all: set.all.iter().map(|t| t.name.clone()).collect(), router_offered: set.offered.iter().map(|t| t.name.clone()).collect(), spotify_ready }
+    // What Tony's router is shown: his Spotify core by name plus `spotify.more` (Section 20.11).
+    let offered: Vec<&super::mcp::ToolInfo> = set.offered.iter().collect();
+    let more = super::mcp::spotify_more_info(&super::mcp::spotify_hidden(&offered));
+    let router_offered = super::mcp::tony_spotify_view(offered, &more).iter().map(|t| t.name.clone()).collect();
+    TonyToolsPreview { all: set.all.iter().map(|t| t.name.clone()).collect(), router_offered, spotify_ready }
 }
 
 /// Diagnostics: the tool names Tony's next turn would see. Names only — no
@@ -1919,7 +1940,8 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             }
             (slug, b.block)
         }
-        None => (cfg.anythingllm.workspaces.get(&role).filter(|s| !s.is_empty()).cloned(), String::new()),
+        // Booking / Librarian are unmapped from live delegation (Section 20.8): Tony answers.
+        None => (os_core::live_workspace(&cfg, &role), String::new()),
     };
     let (delegation_ok, tools_ok) = turn_approvals(req.approved, req.delegation_approved);
     if role != "general" && comms_thread.is_none() {

@@ -223,11 +223,19 @@ interface ScanModel {
   registered: boolean;
   note: string;
 }
+/** A scanned root (os_api `model_roots`): configurable with CC_MODEL_DIRS / CC_LMSTUDIO_DIRS / CC_HF_CACHES. */
+interface ScanRoot {
+  path: string;
+  kind: "models" | "lmstudio" | "hf-cache";
+  drive: string;
+  exists: boolean;
+}
+const ROOT_KIND: Record<ScanRoot["kind"], string> = { models: "models", lmstudio: "LM Studio library", "hf-cache": "Hugging Face cache" };
 const GROUP_ORDER = ["Productivity & Coding LLMs", "Vision & Media Models", "Embedding Models", "Voice STT / TTS Models"];
 const STATUS_TONE: Record<string, string> = { gguf: "text-teal", "needs-conversion": "text-amber-soft", "partial-download": "text-alert", incomplete: "text-ink-3", "unknown-format": "text-ink-3" };
 
 export function ModelLibraryCard() {
-  const [scan, setScan] = useState<{ groups: Record<string, ScanModel[]>; count: number; scannedAt: number } | null>(null);
+  const [scan, setScan] = useState<{ groups: Record<string, ScanModel[]>; count: number; scannedAt: number; roots?: ScanRoot[]; drives?: string[] } | null>(null);
   const [busy, setBusy] = useState<"scan" | "sync" | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [clis, setClis] = useState<CliStatus[]>([]);
@@ -257,8 +265,8 @@ export function ModelLibraryCard() {
   };
   return (
     <Card
-      title="Local model library (D:\ drive)"
-      hint="Scans D:\AI Models Productivity, D:\AI Models Media and Vision and D:\ai model voices. GGUF folders can be linked into Bionic's models folder, C:\Users\nicho\.lmstudio\models (the D:\ models are junctioned in — nothing is copied), and then show up in every model dropdown."
+      title={`Local model library${scan?.drives?.length ? ` (${scan.drives.join(" ")})` : ""}`}
+      hint="Scans the model folders on C:, D: and G: (set CC_MODEL_DIRS, CC_LMSTUDIO_DIRS and CC_HF_CACHES for the gateway to change them): the D:\ model folders, both LM Studio libraries and the Hugging Face caches. GGUF folders can be linked into Bionic's models folder, C:\Users\nicho\.lmstudio\models by default (the first LM Studio library; the D:\ models are junctioned in, nothing is copied or deleted), and then show up in every model dropdown."
       action={
         <>
           <button onClick={() => void rescan()} disabled={!!busy} className="pill-glass !h-8 text-xs">
@@ -271,6 +279,15 @@ export function ModelLibraryCard() {
       }
     >
       {msg && <p className="mb-2 text-xs text-teal">{msg}</p>}
+      {scan?.roots && (
+        <ul className="mb-2 space-y-0.5" aria-label="Scanned folders">
+          {scan.roots.map((r) => (
+            <li key={r.path} className={`font-mono text-[11px] ${r.exists ? "text-ink-2" : "text-ink-3 line-through"}`} title={r.exists ? ROOT_KIND[r.kind] : "not found on this machine"}>
+              {r.path} <span className="text-ink-3">· {ROOT_KIND[r.kind]}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {!scan && <Loader2 size={14} className="animate-spin text-ink-3" />}
       {scan &&
         [...GROUP_ORDER.filter((g) => scan.groups[g]), ...Object.keys(scan.groups).filter((g) => !GROUP_ORDER.includes(g))].map((g) => (

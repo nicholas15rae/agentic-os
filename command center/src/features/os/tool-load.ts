@@ -78,6 +78,18 @@ export function agentServers(cfg: LoadCfg, agent: string, o: { modeId: string; m
     .map((s) => s.id);
 }
 
+/** Rust `mcp::TONY_SPOTIFY_CORE` (Section 20.11): the Spotify tools Tony's router sees by name. */
+export const TONY_SPOTIFY_CORE: readonly string[] = ["spotify.now_playing", "spotify.play", "spotify.resume", "spotify.pause", "spotify.next"];
+/** Rust `mcp::spotify_more_info`: the one entry standing for every other Spotify tool. */
+const SPOTIFY_MORE = { name: "spotify.more", description: "Any other Spotify action: action is one of get_queue, recently_played, top_items, list_playlists, get_playlist_tracks, previous, seek, restart_track, volume, shuffle, repeat, transfer_device, queue_add, create_playlist, add_to_playlist, remove_from_playlist, like_track, unlike_track; args are that action's own arguments. Spotify only.", args: ["action", "args?"] };
+
+/** What one agent is handed of a listing: Tony gets Spotify's core plus `spotify.more`. */
+function handed(agent: string, l: ServerTools): readonly { name: string; description: string; args: readonly string[] }[] {
+  if (agent !== "general" || l.id !== "spotify") return l.tools;
+  const core = l.tools.filter((t) => TONY_SPOTIFY_CORE.includes(t.name));
+  return core.length < l.tools.length ? [...core, SPOTIFY_MORE] : core;
+}
+
 /** Count and token cost of `servers`, from the cached listings. */
 export function loadOf(agent: string, servers: readonly string[], listed: readonly ServerTools[]): AgentLoad {
   let tools = 0;
@@ -89,18 +101,30 @@ export function loadOf(agent: string, servers: readonly string[], listed: readon
       unlisted.push(id);
       continue;
     }
-    tools += l.tools.length;
-    tokens += l.tools.reduce((n, t) => n + toolTokens(t), 0);
+    const ts = handed(agent, l);
+    tools += ts.length;
+    tokens += ts.reduce((n, t) => n + toolTokens(t), 0);
   }
   return { agent, servers: [...servers], tools, tokens, unlisted, warn: tools > TOOL_WARN };
 }
 
-/** Servers more than one ACTIVE agent owns (`active`: Tony + the agents not frozen everywhere). */
+/** Section 21.1: servers shared on purpose, by exactly these owners: Maps (Tony + the Ops /
+ * Job Desk agent) and Instagram (Biz Ops, Tony read-only). Never flagged as shared. */
+export const INTENDED_SHARED: Readonly<Record<string, readonly string[]>> = {
+  maps: ["general", "ops"],
+  instagram: ["general", "bizops"],
+};
+
+/** The owners are (a subset of) the server's intended pair. */
+const intended = (server: string, owners: readonly string[]) => !!INTENDED_SHARED[server] && owners.every((o) => INTENDED_SHARED[server].includes(o));
+
+/** Servers more than one ACTIVE agent owns (`active`: Tony + the agents not frozen everywhere),
+ * except the intended pairs (`INTENDED_SHARED`). */
 export function sharedServers(mcps: readonly McpServer[], active: readonly string[]): { server: string; owners: string[] }[] {
   return mcps
     .filter((s) => s.enabled && !ALWAYS_LIVE.includes(s.id))
     .map((s) => ({ server: s.id, owners: active.filter((a) => ownsServer(s.agents, a)) }))
-    .filter((x) => x.owners.length > 1);
+    .filter((x) => x.owners.length > 1 && !intended(x.server, x.owners));
 }
 
 /** The key a "yes, shared on purpose" answer is stored under: a new owner asks again. */

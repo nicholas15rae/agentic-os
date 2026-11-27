@@ -111,15 +111,10 @@ fn trig(names: &[&str], domains: &[&str]) -> AgentTriggers {
 /// The user's exact default trigger matrix (Part 1 spec). Keyed by role id.
 pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
     let mut m = BTreeMap::new();
-    // No bare "whatsapp" / "messages": a WhatsApp read is Tony's own live tool (`routing::direct_tool`),
-    // and "messages" alone pulled every chat-ish line (and Whisper's "what's up" greeting) to Booking.
-    m.insert(
-        "booking".to_string(),
-        trig(
-            &["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-            &["casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
-        ),
-    );
+    // Section 20.1: the frozen Booking Desk has NO triggers at all. Acting logistics (auditions,
+    // casting calls, bookings, the agency) are Tony's; recording / editing a self-tape is the
+    // Director's. The empty row stays so the role keeps its place in Settings.
+    m.insert("booking".to_string(), trig(&[], &[]));
     m.insert(
         "prompter".to_string(),
         trig(
@@ -138,27 +133,86 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "designer".to_string(),
         trig(&["designer", "ui agent", "ux agent"], &["ui", "ux", "layout", "css", "color palette", "prototype", "play place", "mockup", "animation"]),
     );
-    // Plain "self-tape" stays with Booking (casting logistics); editing one is the Director's.
-    m.insert(
-        "director".to_string(),
-        trig(
-            &["director", "editor", "media agent", "video editor"],
-            &["edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll"],
-        ),
-    );
+    // Plain "self-tape" is Tony's (scheduling one, the audition it is for); recording or editing
+    // one is the Director's (the longer phrase out-scores Tony's topic).
+    m.insert("director".to_string(), trig(&["director", "editor", "media agent", "video editor"], DIRECTOR_DOMAINS));
     m.insert(
         "librarian".to_string(),
         trig(&["librarian", "memory", "vault", "researcher"], &["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"]),
     );
-    // Ops is infrastructure only; business work is the Operations Manager's (`bizops`, one
-    // isolated workspace per registry business) and money is Finance's.
-    m.insert("ops".to_string(), trig(&["ops", "infra", "infrastructure"], &["droplet", "docker", "n8n", "server status", "schedule", "calendar"]));
-    m.insert("bizops".to_string(), trig(&["bizops", "operations manager", "ops manager", "business manager", "operations", "business"], &["invoice", "quote", "job site", "subcontractor", "inventory", "fulfillment", "open orders", "bf supplements", "supplements", "contracting", "masonry", "ecommerce"]));
-    m.insert("finance".to_string(), trig(&["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"], &["ledger", "expenses", "receipt", "receipts", "cash flow", "profit", "p&l", "my books"]));
+    // Section 20.2, one owner per topic. Ops = infrastructure plus the contracting work (masonry,
+    // job sites, subcontractors, job quotes / estimates: the future Job Desk); Biz Ops = BF
+    // Supplements / the Born Fortuna store / Instagram / e-commerce; money is Finance's; the
+    // calendar, schedule and reminders are Tony's.
+    m.insert("ops".to_string(), trig(&["ops", "infra", "infrastructure", "job desk"], OPS_DOMAINS));
+    m.insert("bizops".to_string(), trig(&["bizops", "operations manager", "ops manager", "business manager", "operations", "business"], BIZOPS_DOMAINS));
+    m.insert("finance".to_string(), trig(&["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"], FINANCE_DOMAINS));
     // Tony has no name triggers: addressing him ("thanks tony", "ask the dispatcher…") is
-    // `routing::SELF_NAMES` → kind Self, never a delegation to himself.
-    m.insert("general".to_string(), trig(&[], &["system status", "switch model"]));
+    // `routing::SELF_NAMES` → kind Self, never a delegation to himself. His topics only mark a
+    // line as his own when no agent's topic matched.
+    m.insert("general".to_string(), trig(&[], GENERAL_DOMAINS));
     m
+}
+
+/// Director topics (media); the self-tape recording / editing phrases came from Booking.
+const DIRECTOR_DOMAINS: &[&str] = &[
+    "edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll",
+    "record a self-tape", "record my self-tape", "film a self-tape", "film my self-tape", "self-tape recording", "edit my self-tape", "edit the self-tape",
+];
+/// Ops: infra + contracting (Section 20.2).
+const OPS_DOMAINS: &[&str] = &["droplet", "docker", "n8n", "server status", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates"];
+/// Biz Ops: the store and the brand (Section 20.2).
+const BIZOPS_DOMAINS: &[&str] = &["inventory", "fulfillment", "open orders", "bf supplements", "supplements", "born fortuna", "instagram", "ecommerce", "online store"];
+/// Finance: money (Section 20.2; commissions are acting money).
+const FINANCE_DOMAINS: &[&str] = &["ledger", "expenses", "receipt", "receipts", "invoice", "invoices", "cheque", "cheques", "money", "hst", "commission", "commissions", "cash flow", "profit", "p&l", "my books"];
+/// Tony: his calendar / schedule / reminders and, for now, acting (auditions, bookings, the agency).
+const GENERAL_DOMAINS: &[&str] = &[
+    "system status", "switch model", "calendar", "schedule", "reminder", "reminders", "remind me",
+    "audition", "auditions", "casting", "casting call", "casting email", "casting emails", "self-tape", "self tape", "callback", "wardrobe", "availability",
+    "bookings", "talent agent", "my agent", "agency", "imperious", "draft email to agent",
+];
+
+/// Section 20.1 / 20.2 one-time re-split: (old owner, phrase) pairs removed from a saved config,
+/// exactly these (anything else the user added stays). Booking's whole row is cleared separately.
+const ROUTING_MOVED_OFF: &[(&str, &str)] = &[
+    ("bizops", "invoice"), ("bizops", "quote"), ("bizops", "job site"), ("bizops", "subcontractor"), ("bizops", "contracting"), ("bizops", "masonry"),
+    ("ops", "schedule"), ("ops", "calendar"),
+];
+/// …and the (new owner, phrase) pairs added once, names marked `n:`.
+const ROUTING_ADDED: &[(&str, &str)] = &[
+    ("ops", "n:job desk"), ("ops", "contracting"), ("ops", "masonry"), ("ops", "job site"), ("ops", "job sites"), ("ops", "subcontractor"), ("ops", "subcontractors"), ("ops", "quote"), ("ops", "quotes"), ("ops", "estimate"), ("ops", "estimates"),
+    ("bizops", "born fortuna"), ("bizops", "instagram"), ("bizops", "online store"),
+    ("finance", "invoice"), ("finance", "invoices"), ("finance", "cheque"), ("finance", "cheques"), ("finance", "money"), ("finance", "hst"), ("finance", "commission"), ("finance", "commissions"),
+    ("director", "record a self-tape"), ("director", "record my self-tape"), ("director", "film a self-tape"), ("director", "film my self-tape"), ("director", "self-tape recording"), ("director", "edit my self-tape"), ("director", "edit the self-tape"),
+    ("general", "calendar"), ("general", "schedule"), ("general", "reminder"), ("general", "reminders"), ("general", "remind me"),
+    ("general", "audition"), ("general", "auditions"), ("general", "casting"), ("general", "casting call"), ("general", "casting email"), ("general", "casting emails"), ("general", "self-tape"), ("general", "self tape"), ("general", "callback"), ("general", "wardrobe"), ("general", "availability"),
+    ("general", "bookings"), ("general", "talent agent"), ("general", "my agent"), ("general", "agency"), ("general", "imperious"), ("general", "draft email to agent"),
+];
+
+/// The routing re-split (Sections 20.1 / 20.2), once: Booking's row emptied, the moved phrases
+/// off their old owners, the new phrases on their new owners (deduped, case-insensitive).
+pub(crate) fn resplit_routing(cfg: &mut OsConfig) {
+    if let Some(b) = cfg.routing.agents.get_mut("booking") {
+        b.names.clear();
+        b.domains.clear();
+    }
+    for (role, phrase) in ROUTING_MOVED_OFF {
+        if let Some(t) = cfg.routing.agents.get_mut(*role) {
+            let same = |p: &String| super::routing::normalize(p) == super::routing::normalize(phrase);
+            t.names.retain(|n| !same(n));
+            t.domains.retain(|d| !same(d));
+        }
+    }
+    for (role, entry) in ROUTING_ADDED {
+        let t = cfg.routing.agents.entry(role.to_string()).or_default();
+        let (list, phrase) = match entry.strip_prefix("n:") {
+            Some(n) => (&mut t.names, n),
+            None => (&mut t.domains, *entry),
+        };
+        if !list.iter().any(|x| super::routing::normalize(x) == super::routing::normalize(phrase)) {
+            list.push(phrase.to_string());
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -329,13 +383,57 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
         "fetch" => &["coder", "prompter"],
-        "maps" => &["ops"],
+        // One owner per integration (Section 21.1): Maps is Tony's and the Ops (Job Desk)
+        // agent's; Instagram is Biz Ops' (Tony only reads it, as a mode extra: `TONY_READ_ONLY_SERVERS`).
+        "maps" => &["general", "ops"],
         "instagram" => &["bizops"],
         // Local media servers: only the Director edits and renders through them.
         "shotcut" | "media-forge" => &["director"],
         _ => &["all"],
     };
     list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Servers Tony may only READ, whoever owns them (Section 21.1): Instagram's replies and
+/// publishing are Biz Ops'. Enforced in `mcp` (listing and call gate) and in the TS planner.
+pub const TONY_READ_ONLY_SERVERS: [&str; 1] = ["instagram"];
+/// Servers only the Director runs: never Tony, by grant or by a mode extra (Section 21.1).
+pub const DIRECTOR_ONLY_SERVERS: [&str; 2] = ["shotcut", "media-forge"];
+/// Roles whose AnythingLLM workspace is never used for a LIVE delegation (chat / voice turns,
+/// Section 20.8): the turn stays with Tony. The mapping itself stays in os.json, because the
+/// scheduled Librarian scripts (documenter, Memory Scrolls sync, the preflight) still read it.
+pub const LIVE_UNMAPPED_ROLES: [&str; 2] = ["booking", "librarian"];
+
+/// The workspace a live turn may delegate `role` to: its mapping, unless the role is one of
+/// `LIVE_UNMAPPED_ROLES` (then `None`: Tony answers himself). Pure.
+pub fn live_workspace(cfg: &OsConfig, role: &str) -> Option<String> {
+    if LIVE_UNMAPPED_ROLES.contains(&role) {
+        return None;
+    }
+    cfg.anythingllm.workspaces.get(role).filter(|s| !s.is_empty()).cloned()
+}
+
+/// Section 21.1, once: one owner per integration. WhatsApp → Tony only; Shotcut / Media Forge →
+/// the Director only (and out of every Tony mode extra); Instagram → Biz Ops (Tony keeps his
+/// read-only Operations extra); Maps → Tony + Ops. Every other server only loses the Booking Desk
+/// (frozen), as `strip_booking_tools` already does. `enabled` / `read_only` are never touched.
+pub(crate) fn apply_integration_owners(cfg: &mut OsConfig) {
+    for m in cfg.mcps.iter_mut() {
+        let owners: Option<&[&str]> = match m.id.as_str() {
+            "whatsapp" => Some(&["general"]),
+            "shotcut" | "media-forge" => Some(&["director"]),
+            "instagram" => Some(&["bizops"]),
+            "maps" => Some(&["general", "ops"]),
+            _ => None,
+        };
+        if let Some(o) = owners {
+            m.agents = Some(o.iter().map(|s| s.to_string()).collect());
+        }
+    }
+    for extras in cfg.tony_mode_tools.values_mut() {
+        extras.retain(|s| !DIRECTOR_ONLY_SERVERS.contains(&s.as_str()));
+    }
+    strip_booking_tools(cfg);
 }
 
 /// Server ids whose grants the one-time tool-owner migration rewrites (`default_mcp_grants`).
@@ -1040,6 +1138,11 @@ pub(crate) const MIGRATE_VAULT_CADENCE: &str = "vault-cadence";
 pub(crate) const MIGRATE_BIZOPS_SPLIT: &str = "bizops-split";
 /// Migration id: local-only compute, cloud routing on Ask, no Overseer auto-escalation.
 pub(crate) const MIGRATE_LOCAL_SAFE_DEFAULTS: &str = "local-safe-defaults";
+/// Migration id: Booking lost every trigger; contracting → ops, money → finance, the store →
+/// bizops, calendar / acting → Tony (Sections 20.1 / 20.2, `resplit_routing`).
+pub(crate) const MIGRATE_ROUTING_RESPLIT: &str = "routing-resplit";
+/// Migration id: one owner per integration (Section 21.1, `apply_integration_owners`).
+pub(crate) const MIGRATE_INTEGRATION_OWNERS: &str = "integration-owners";
 /// The `ops` triggers that moved to `bizops` / `finance` (removed once from a saved config).
 const MOVED_OFF_OPS: [&str; 8] = ["operations", "business", "finance", "invoice", "receipt", "bf supplements", "contracting", "quote"];
 
@@ -1098,6 +1201,14 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_LOCAL_SAFE_DEFAULTS) {
         apply_local_safe_defaults(cfg);
         cfg.migrations.push(MIGRATE_LOCAL_SAFE_DEFAULTS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_ROUTING_RESPLIT) {
+        resplit_routing(cfg);
+        cfg.migrations.push(MIGRATE_ROUTING_RESPLIT.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_INTEGRATION_OWNERS) {
+        apply_integration_owners(cfg);
+        cfg.migrations.push(MIGRATE_INTEGRATION_OWNERS.into());
     }
 }
 
@@ -2350,18 +2461,110 @@ mod tests {
         let agents = default_routing_agents();
         for role in ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "general"] {
             let t = agents.get(role).unwrap_or_else(|| panic!("missing default routing role {role}"));
-            // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self).
-            assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
+            // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self);
+            // the frozen Booking Desk has none at all (Section 20.1).
+            assert_eq!(t.names.is_empty(), role == "general" || role == "booking", "{role} name triggers");
         }
+        assert_eq!(agents["booking"], AgentTriggers::default(), "Booking has no triggers at all");
         // A WhatsApp read is Tony's live tool, and Whisper's "what's up" greeting used to land on
         // Booking through these two: neither is a Booking topic any more.
         assert!(!agents["booking"].domains.contains(&"whatsapp".to_string()));
         assert!(!agents["booking"].domains.contains(&"messages".to_string()));
         // Nor is any messages / texts read: Tony reads Gmail and WhatsApp himself (section pass).
         assert!(!agents["booking"].domains.iter().any(|d| d.contains("message") || d.contains("text")));
-        // Casting logistics stay with Booking; editing a tape is the Director's.
-        assert!(agents["booking"].domains.contains(&"self-tape".to_string()));
+        // Casting logistics are Tony's now; recording / editing a tape is the Director's.
+        assert!(agents["general"].domains.contains(&"self-tape".to_string()));
         assert!(!agents["director"].domains.contains(&"self-tape".to_string()));
+        assert!(agents["director"].domains.contains(&"record my self-tape".to_string()));
+    }
+
+    /// Sections 20.1 / 20.2: the one-time re-split removes exactly the moved phrases from their old
+    /// owners (a phrase of the user's own stays), empties Booking, adds the new owners' phrases,
+    /// runs once, and leaves a fresh config equal to the defaults.
+    #[test]
+    fn routing_resplit_moves_exactly_the_moved_phrases_once() {
+        use super::super::routing::resolve;
+        let mut cfg = OsConfig::default();
+        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into()];
+        // The pre-Section-20 rows, plus one phrase of the user's own on each.
+        cfg.routing.agents.insert("booking".into(), trig(&["booking", "booking desk", "casting", "audition"], &["casting call", "self-tape", "wardrobe", "availability", "draft email to agent"]));
+        cfg.routing.agents.insert("ops".into(), trig(&["ops", "infra", "infrastructure"], &["droplet", "docker", "n8n", "server status", "schedule", "calendar", "grafana"]));
+        cfg.routing.agents.insert("bizops".into(), trig(&["bizops", "business"], &["invoice", "quote", "job site", "subcontractor", "inventory", "bf supplements", "contracting", "masonry", "ecommerce", "shopify"]));
+        apply_migrations(&mut cfg);
+        let a = &cfg.routing.agents;
+        assert_eq!(a["booking"], AgentTriggers::default());
+        assert!(a["ops"].domains.contains(&"grafana".to_string()) && !a["ops"].domains.iter().any(|d| d == "schedule" || d == "calendar"));
+        assert!(a["ops"].domains.contains(&"masonry".to_string()) && a["ops"].names.contains(&"job desk".to_string()));
+        assert!(a["bizops"].domains.contains(&"shopify".to_string()) && a["bizops"].domains.contains(&"instagram".to_string()));
+        for gone in ["invoice", "quote", "job site", "subcontractor", "contracting", "masonry"] {
+            assert!(!a["bizops"].domains.iter().any(|d| d == gone), "{gone} left bizops");
+        }
+        assert!(a["finance"].domains.contains(&"invoice".to_string()) && a["finance"].domains.contains(&"commissions".to_string()));
+        assert!(a["general"].domains.contains(&"calendar".to_string()) && a["general"].domains.contains(&"audition".to_string()));
+        for (text, role) in [("send the masonry quote to the subcontractor", "ops"), ("how many bf supplements orders on instagram", "bizops"), ("log the hst on that invoice", "finance"), ("edit my self-tape for the audition", "director")] {
+            assert_eq!(resolve(text, &cfg).role.as_deref(), Some(role), "{text}");
+        }
+        for text in ["check the casting call availability", "schedule the audition", "did imperious send the bookings"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (Some("general"), super::super::routing::RouteKind::Own), "{text}");
+        }
+        // Once: a phrase the user puts back afterwards stays.
+        cfg.routing.agents.get_mut("bizops").unwrap().domains.push("invoice".into());
+        apply_migrations(&mut cfg);
+        assert!(cfg.routing.agents["bizops"].domains.contains(&"invoice".to_string()));
+        // A fresh config already is the outcome.
+        let mut fresh = OsConfig::default();
+        let before = fresh.routing.agents.clone();
+        resplit_routing(&mut fresh);
+        assert_eq!(fresh.routing.agents, before);
+    }
+
+    /// Section 21.1: one owner per integration, by default and by the one-time migration.
+    #[test]
+    fn integration_owners_one_owner_each_once() {
+        let grants = |c: &OsConfig, id: &str| c.mcps.iter().find(|m| m.id == id).and_then(|m| m.agents.clone()).unwrap_or_default();
+        let fresh = OsConfig::default();
+        assert_eq!(grants(&fresh, "whatsapp"), ["general"]);
+        assert_eq!(grants(&fresh, "maps"), ["general", "ops"]);
+        assert_eq!(grants(&fresh, "instagram"), ["bizops"]);
+        assert_eq!(grants(&fresh, "shotcut"), ["director"]);
+        assert_eq!(grants(&fresh, "media-forge"), ["director"]);
+        assert!(grants(&fresh, "gmail") == ["general"], "every gmail tool is Tony's");
+        // A saved config from before: Booking on WhatsApp / Gmail, Tony on Shotcut, maps Ops only.
+        let mut cfg = OsConfig::default();
+        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into()];
+        let set = |c: &mut OsConfig, id: &str, a: &[&str]| c.mcps.iter_mut().find(|m| m.id == id).unwrap().agents = Some(a.iter().map(|s| s.to_string()).collect());
+        set(&mut cfg, "whatsapp", &["general", "booking"]);
+        set(&mut cfg, "gmail", &["general", "booking"]);
+        set(&mut cfg, "shotcut", &["director", "general"]);
+        set(&mut cfg, "instagram", &["bizops", "general"]);
+        set(&mut cfg, "maps", &["ops"]);
+        set(&mut cfg, "filesystem", &["coder", "booking", "librarian"]);
+        cfg.tony_mode_tools.insert("builder".into(), vec!["git".into(), "media-forge".into()]);
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg, "whatsapp"), ["general"]);
+        assert_eq!(grants(&cfg, "gmail"), ["general"]);
+        assert_eq!(grants(&cfg, "shotcut"), ["director"]);
+        assert_eq!(grants(&cfg, "instagram"), ["bizops"]);
+        assert_eq!(grants(&cfg, "maps"), ["general", "ops"]);
+        assert_eq!(grants(&cfg, "filesystem"), ["coder", "librarian"], "other servers only lose the frozen Booking Desk");
+        assert_eq!(cfg.tony_mode_tools["builder"], ["git"]);
+        // Once.
+        set(&mut cfg, "maps", &["ops"]);
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg, "maps"), ["ops"]);
+    }
+
+    /// Section 20.8: live delegation never reaches the Librarian / Booking workspaces; the mapping
+    /// stays for the scheduled Librarian scripts.
+    #[test]
+    fn live_delegation_skips_the_unmapped_roles() {
+        let cfg = OsConfig::default();
+        assert_eq!(live_workspace(&cfg, "librarian"), None);
+        assert_eq!(live_workspace(&cfg, "booking"), None);
+        assert_eq!(cfg.anythingllm.workspaces.get("librarian").map(String::as_str), Some("librarian"), "kept for the scheduled scripts");
+        assert_eq!(live_workspace(&cfg, "coder").as_deref(), Some("coder"));
+        assert_eq!(cfg.anythingllm.timeout_secs, 90);
     }
 
     #[test]
@@ -2385,7 +2588,7 @@ mod tests {
             ("filesystem", &["coder", "designer", "director", "librarian", "prompter"]),
             ("git", &["coder"]),
             ("fetch", &["coder", "prompter"]),
-            ("maps", &["ops"]),
+            ("maps", &["general", "ops"]),
             ("instagram", &["bizops"]),
             ("shotcut", &["director"]),
             ("media-forge", &["director"]),
@@ -2400,7 +2603,7 @@ mod tests {
             assert!(TOOL_OWNER_SERVERS.contains(&id), "{id}");
         }
         let tony: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), "tony")).map(|(id, _)| *id).collect();
-        assert_eq!(tony, ["weather", "calendar", "spotify", "brave-search", "gmail", "whatsapp", "time", "knowledge-graph"]);
+        assert_eq!(tony, ["weather", "calendar", "spotify", "brave-search", "gmail", "whatsapp", "time", "knowledge-graph", "maps"]);
         for (agent, want) in [("coder", &["filesystem", "git", "fetch"][..]), ("designer", &["filesystem"]), ("director", &["filesystem", "shotcut", "media-forge"]), ("bizops", &["instagram"]), ("ops", &["maps"]), ("librarian", &["knowledge-graph", "filesystem"]), ("prompter", &["knowledge-graph", "filesystem", "fetch"]), ("finance", &[]), ("trader", &[])] {
             let mut got: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), agent)).map(|(id, _)| *id).collect();
             let mut want = want.to_vec();
@@ -2491,7 +2694,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string()]);
     }
 
     #[test]
@@ -2501,6 +2704,8 @@ mod tests {
         cfg.routing.agents.remove("bizops");
         cfg.routing.agents.remove("finance");
         cfg.routing.agents.insert("ops".into(), trig(&["ops", "operations", "business", "finance"], &["invoice", "receipt", "BF Supplements", "contracting", "quote", "schedule", "calendar", "droplet", "grafana"]));
+        // Only the bizops split here (the later re-split has its own test).
+        cfg.migrations = vec![MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into()];
         apply_migrations(&mut cfg);
         let ops = &cfg.routing.agents["ops"];
         assert_eq!(ops.names, ["ops"]);
@@ -2508,7 +2713,7 @@ mod tests {
         assert_eq!(cfg.routing.agents["bizops"], default_routing_agents()["bizops"]);
         assert!(cfg.routing.agents["finance"].names.contains(&"finance".to_string()));
         // Routing now sends business paperwork to bizops and money questions to Finance.
-        assert_eq!(super::super::routing::resolve("pull up the invoice and the quote", &cfg).role.as_deref(), Some("bizops"));
+        assert_eq!(super::super::routing::resolve("check the bf supplements inventory", &cfg).role.as_deref(), Some("bizops"));
         assert_eq!(super::super::routing::resolve("ask the bookkeeper about expenses", &cfg).role.as_deref(), Some("finance"));
         // Once: a phrase the user puts back on ops afterwards is left alone.
         cfg.routing.agents.get_mut("ops").unwrap().domains.push("invoice".into());

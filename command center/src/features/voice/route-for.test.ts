@@ -72,8 +72,11 @@ describe("greetings stay with Tony (regression)", () => {
   it("Tony's name beats a topic on the desktop too; a Named agent still delegates", () => {
     expect(rf("hey tony, check my self-tape availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
     expect(rf("hey tony, check my self-tape availability", "auto", "text")).toMatchObject({ role: "general", kind: "Self" });
-    expect(rf("check my self-tape availability", "auto", "voice")).toMatchObject({ role: "booking", kind: "Domain" });
-    expect(rf("hey tony, ask the booking desk to check my availability", "auto", "voice")).toMatchObject({ role: "booking", kind: "Named" });
+    expect(rf("render the reel", "auto", "voice")).toMatchObject({ role: "director", kind: "Domain" });
+    expect(rf("hey tony, ask the director to edit video", "auto", "voice")).toMatchObject({ role: "director", kind: "Named" });
+    // Section 20.1: plain self-tape scheduling is Tony's own topic; the frozen Booking Desk is never Named.
+    expect(rf("check my self-tape availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
+    expect(rf("hey tony, ask the booking desk to check my availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
   });
 });
 
@@ -84,16 +87,16 @@ describe("addressed: the wake phrase was stripped before routing", () => {
   const rfA = (utterance: string, thread: ThreadId, channel: Channel, addressed: boolean, phone = false) => routeFor({ utterance, thread, channel, cfg, osName: "Tony", phone, addressed });
   it("a Domain hit stays with Tony on the desktop, voice and typed", () => {
     for (const ch of ["voice", "text"] as Channel[]) {
-      expect(rfA("check my self-tape availability", "auto", ch, true), ch).toMatchObject({ role: "general", kind: "Self", confidence: "high", reason: "you addressed Tony" });
+      expect(rfA("render the reel", "auto", ch, true), ch).toMatchObject({ role: "general", kind: "Self", confidence: "high", reason: "you addressed Tony" });
       expect(rfA(TOPIC, "auto", ch, true), ch).toMatchObject({ role: "general", kind: "Self" });
       // Not addressed: the same stripped text still delegates from Auto (desktop unchanged).
-      expect(rfA("check my self-tape availability", "auto", ch, false), ch).toMatchObject({ role: "booking", kind: "Domain" });
+      expect(rfA("render the reel", "auto", ch, false), ch).toMatchObject({ role: "director", kind: "Domain" });
     }
     // The renamed OS name goes in the reason.
     expect(routeFor({ utterance: TOPIC, thread: "auto", channel: "voice", cfg, osName: "Friday", phone: false, addressed: true })).toMatchObject({ role: "general", kind: "Self", reason: "you addressed Friday" });
   });
   it("a Named agent still delegates; a live read is still Direct; nothing else changes", () => {
-    expect(rfA("ask the booking desk to check my availability", "auto", "voice", true)).toMatchObject({ role: "booking", kind: "Named" });
+    expect(rfA("ask the director to edit video", "auto", "voice", true)).toMatchObject({ role: "director", kind: "Named" });
     expect(rfA("coder, fix the broken build", "general", "text", true)).toMatchObject({ role: "coder", kind: "Named" });
     expect(rfA("any whatsapp updates", "auto", "voice", true)).toMatchObject({ role: "general", kind: "Direct" });
     expect(rfA("good morning", "auto", "voice", true)).toMatchObject({ role: "general", kind: "Default" });
@@ -102,7 +105,7 @@ describe("addressed: the wake phrase was stripped before routing", () => {
     expect(rfA("how's it going", "prompter", "text", true)).toMatchObject({ role: "prompter", kind: "Tab" });
   });
   it("defaults to not addressed", () => {
-    expect(routeFor({ utterance: "check my self-tape availability", thread: "auto", channel: "voice", cfg, osName: "Tony", phone: false })).toMatchObject({ role: "booking", kind: "Domain" });
+    expect(routeFor({ utterance: "render the reel", thread: "auto", channel: "voice", cfg, osName: "Tony", phone: false })).toMatchObject({ role: "director", kind: "Domain" });
   });
   it("the phone keeps an addressed topic with Tony too", () => {
     expect(rfA("check my self-tape availability", "auto", "voice", true, true)).toMatchObject({ role: "general", kind: "Self" });
@@ -128,8 +131,8 @@ describe("phone (Android app): a topic stays with Tony", () => {
   it("only a Named agent or an explicit pick delegates", () => {
     for (const ch of ["voice", "text"] as Channel[]) {
       expect(rfPhone("tell the coder to fix the build", "auto", ch), ch).toMatchObject({ role: "coder", kind: "Named" });
-      expect(rfPhone("booking desk, please check my calendar for tomorrow", "auto", ch), ch).toMatchObject({ role: "booking", kind: "Named" });
-      expect(rfPhone("my booking agent hasn't replied yet", "auto", ch), ch).toMatchObject({ role: "booking", kind: "Named" });
+      expect(rfPhone("director, please check the reel", "auto", ch), ch).toMatchObject({ role: "director", kind: "Named" });
+      expect(rfPhone("my director hasn't replied yet", "auto", ch), ch).toMatchObject({ role: "director", kind: "Named" });
     }
     // A typed line on a sub-agent's own tab is an explicit pick of that agent.
     expect(rfPhone(TOPIC, "prompter", "text")).toMatchObject({ role: "prompter", kind: "Tab" });
@@ -248,7 +251,8 @@ describe("Solo hold mirrored from Rust (regression)", () => {
     expect(soloHold(rf("fix bug in the repo script", "auto", "text"), solo)).toMatchObject({ role: "general", kind: "Self" });
     expect(soloHold(rf("tell the coder to fix the build", "auto", "text"), solo)).toMatchObject({ role: "coder", kind: "Named" });
     expect(soloHold(rf("fix bug in the repo script", "auto", "text"), { explicit: false, dispatch: "ask_before_dispatch" }).role).toBe("coder");
-    expect(soloHold(rf("check my last five whatsapp messages from the casting call", "auto", "text"), solo).role).not.toBe("general");
+    // Casting calls are Tony's own topic now (Section 20.1): nothing to hold.
+    expect(soloHold(rf("check my last five whatsapp messages from the casting call", "auto", "text"), solo).role).toBe("general");
   });
 });
 
@@ -274,14 +278,19 @@ describe("switchboard hold mirrored from Rust (frozenHold)", () => {
     expect(hold(rf("tell the coder to fix the build", "auto", "voice"), "learning")).toMatchObject({ role: "coder", kind: "Named" });
   });
 
-  it("a globally frozen agent (the Booking Desk) never runs, even asked directly", () => {
-    const named = rf("hey tony, ask the booking desk to check my availability", "auto", "voice");
-    expect(named).toMatchObject({ role: "booking", kind: "Named" });
-    expect(hold(named, "brainstorm")).toMatchObject({ role: "general", kind: "Self", reason: "Booking Desk is frozen on the master switchboard" });
+  it("a globally frozen agent never runs, even asked directly", () => {
+    // The router never picks the frozen Booking Desk at all (Section 20.1).
+    expect(rf("hey tony, ask the booking desk to check my availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
     expect(hold(rf("check my availability", "booking", "text"), "brainstorm", true)).toMatchObject({ role: "general", kind: "Self" });
-    expect(hold(rf("check my self-tape availability", "auto", "voice"), "surface")).toMatchObject({ role: "general", kind: "Self" });
+    // A route that does reach a master-frozen agent (the webview's config lagging) is held.
+    const dirFrozen = { frozenAgents: ["director"], frozenTools: [] };
+    const named = rf("hey tony, ask the director to edit video", "auto", "voice");
+    expect(named).toMatchObject({ role: "director", kind: "Named" });
+    const held = hold(named, "brainstorm", false, dirFrozen);
+    expect(held).toMatchObject({ role: "general", kind: "Self" });
+    expect(held.reason).toMatch(/frozen on the master switchboard/);
     // Thawed on the master switchboard: back to the old routing.
-    expect(hold(named, "brainstorm", false, null)).toMatchObject({ role: "booking", kind: "Named" });
+    expect(hold(named, "brainstorm", false, null)).toMatchObject({ role: "director", kind: "Named" });
   });
 
   it("Tony himself is never held", () => {

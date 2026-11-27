@@ -209,7 +209,8 @@ function LockTimers({ status, onSaved }: { status: SecurityStatus; onSaved: (s: 
   );
 }
 
-/** Desktop: show a one-time pairing QR for the phone (a NEW pairing key; 2-minute lifetime). */
+/** Desktop: show a one-time pairing QR for the phone (a NEW pairing key, pending on the desktop
+ * until the phone's first approval within 2 minutes; companion.rs `pair_begin_qr`). */
 function PairingQr({ paired }: { paired: boolean }) {
   const [qr, setQr] = useState<{ payload: string; expiresAt: number } | null>(null);
   const [left, setLeft] = useState(0);
@@ -231,7 +232,7 @@ function PairingQr({ paired }: { paired: boolean }) {
   }, [qr]);
   const svg = useMemo(() => (qr ? qrSvgPath(encodeQr(qr.payload)) : null), [qr]);
   const show = async () => {
-    if (paired && !confirm("Pair a phone with a QR code?\n\nThis makes a NEW pairing key: the phone paired now stops approving until it scans the new code.")) return;
+    if (paired && !confirm("Pair a phone with a QR code?\n\nThis makes a NEW pairing key. It replaces the current pairing once the new phone approves its first request within 2 minutes; if no phone uses it in time, the current pairing stays.")) return;
     setBusy(true);
     setNote(null);
     try {
@@ -248,7 +249,7 @@ function PairingQr({ paired }: { paired: boolean }) {
         <button className="pill-glass !h-8 text-[11px]" disabled={busy} onClick={() => void (qr ? (setQr(null), setNote(null)) : show())}>
           {busy ? <Loader2 size={12} className="animate-spin" /> : <QrCode size={12} />} {qr ? "Hide pairing code" : "Pair phone with QR"}
         </button>
-        <span className="text-ink-3">Scan it in the phone app (Settings → Security). The code works once and expires after 2 minutes.</span>
+        <span className="text-ink-3">Scan it in the phone app (Settings → Security), then approve one request on the phone within 2 minutes to finish pairing. The code works for one phone only; unused, it expires and nothing changes.</span>
       </div>
       {qr && svg && (
         <div className="mt-2 flex items-center gap-3">

@@ -312,11 +312,33 @@ _TITLES = {
 }
 
 
+_DEFAULT_ALERT_EVENTS = ["remote_kill", "remote_kill_rejected", "hard_lock", "trading_kill_switch", "kill_switch", "unknown_device"]
+# Mirrors config.rs `MIGRATE_UNKNOWN_DEVICE_ALERT`: until the desktop app has migrated the file
+# (it writes the id into `migrations`), an explicit `alerts.events` list counts as also listing
+# "unknown_device"; after it, the list is taken as saved (a deliberate removal sticks).
+MIGRATE_UNKNOWN_DEVICE_ALERT = "alerts-unknown-device"
+
+
+def alert_events(cfg: dict) -> list[str]:
+    """The audit events that raise an alert for the whole parsed security.config.json `cfg` (pure).
+    Same rule as Rust's loader (`config::migrate_value`), without writing the file (Rust owns it)."""
+    alerts = cfg.get("alerts") if isinstance(cfg.get("alerts"), dict) else {}
+    events = alerts.get("events")
+    if not isinstance(events, list) or not events:
+        return list(_DEFAULT_ALERT_EVENTS)
+    events = [e for e in events if isinstance(e, str)]
+    migrations = cfg.get("migrations") if isinstance(cfg.get("migrations"), list) else []
+    if MIGRATE_UNKNOWN_DEVICE_ALERT not in migrations and "unknown_device" not in events:
+        events.append("unknown_device")
+    return events
+
+
 def maybe_alert(entry: dict, d: Path | None = None) -> threading.Thread | None:
-    cfg = load_config(d).get("alerts") or {}
+    whole = load_config(d)
+    cfg = whole.get("alerts") or {}
     if cfg.get("enabled") is False:
         return None
-    events = cfg.get("events") or ["remote_kill", "remote_kill_rejected", "hard_lock", "trading_kill_switch", "kill_switch", "unknown_device"]
+    events = alert_events(whole)
     if entry["event"] not in events:
         return None
     critical = entry["severity"] == "critical"

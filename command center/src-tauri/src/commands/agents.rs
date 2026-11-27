@@ -1311,16 +1311,31 @@ pub(crate) fn router_second_pass(name: &str, res: &str) -> String {
     )
 }
 
-/// The router's system prompt: one line per offered tool (args + example call).
+/// The router's system prompt: one line per offered tool (args + example call). The Spotify rule
+/// names only the Spotify tools actually offered this turn (Tony's reduced view: the core plus
+/// `spotify.more`), and is left out when none is.
 pub(crate) fn router_prompt(offered: &[&super::mcp::ToolInfo], context: &str, extra: &str) -> String {
     let list = offered.iter().map(|t| router_tool_line(t)).collect::<Vec<_>>().join("\n");
     format!(
         "You route a request to at most ONE tool. Tools:\n{list}\n\nLIVE DASHBOARD:\n{}{extra}\n\nReply ONLY with JSON: {{\"tool\": \"<tool name>\" or null, \"args\": {{…}}}}. \
-Use null if the dashboard/previous tool result already answers it or no tool helps. Spotify controls (spotify.play, spotify.pause, \
-spotify.next, spotify.volume, …) only when the user plainly asks to play, pause, skip or change the music. \
+Use null if the dashboard/previous tool result already answers it or no tool helps.{}",
+        context.chars().take(1500).collect::<String>(),
+        router_spotify_rule(offered)
+    )
+}
+
+/// The router prompt's Spotify sentence for exactly the offered Spotify tools ("" when none).
+fn router_spotify_rule(offered: &[&super::mcp::ToolInfo]) -> String {
+    let names: Vec<&str> = offered.iter().filter(|t| t.server == "spotify").map(|t| t.name.as_str()).collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    let shown = names.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+    let more = if names.len() > 8 { ", …" } else { "" };
+    format!(
+        " Spotify tools ({shown}{more}) only when the user plainly asks to play, pause, skip or change the music. \
 Spotify tools control Spotify only — never use them for YouTube, videos or local sounds. Use library tools only when the user \
-explicitly asks to change a playlist or Liked Songs.",
-        context.chars().take(1500).collect::<String>()
+explicitly asks to change a playlist or Liked Songs."
     )
 }
 
@@ -3997,6 +4012,43 @@ mod tests {
         assert_eq!(note("coder", true, "fix the build", "operations"), "");
     }
 
+    /// End to end (resolve → route_for_turn → switchboard_hold → switchboard_note): addressing a
+    /// master-frozen agent BY NAME is Named to that agent, held with Tony, and gets the "switched off
+    /// on the master switchboard" note; a frozen agent's TOPIC never reaches it (no note).
+    #[test]
+    fn a_named_frozen_agent_is_held_with_the_master_note_and_its_topic_falls_through() {
+        let cfg = OsConfig::default();
+        let eff = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "brainstorm".into(), ..Default::default() }, &Default::default());
+        let turn = |text: &str, cfg: &OsConfig| {
+            let input = TurnRouteInput { role: "general", explicit: false, text, route_kind: None, route_reason: None, no_delegate: false, solo: false, learning: false, stay_with_tony: false };
+            let routed = route_for_turn(&input, cfg);
+            let routed_role = routed.role.clone();
+            let routed_kind = routed.kind.clone();
+            let held = switchboard_hold(routed, false, text, cfg, &eff);
+            let note = switchboard_note(&routed_role, &held, &cfg.switchboard);
+            (routed_role, routed_kind, held, note)
+        };
+        let mut coder_frozen = cfg.clone();
+        coder_frozen.switchboard.frozen_agents.push("coder".into());
+        for (text, c, role) in [
+            ("ask the librarian to find the lease", &cfg, "librarian"),
+            ("hey tony, ask the booking desk to check my availability", &cfg, "booking"),
+            ("booking desk, any casting calls this week", &cfg, "booking"),
+            ("ask the coder to fix bug in the layout", &coder_frozen, "coder"),
+        ] {
+            let (routed_role, routed_kind, held, note) = turn(text, c);
+            assert_eq!((routed_role.as_str(), routed_kind.as_str()), (role, "Named"), "{text}");
+            assert_eq!((held.role.as_str(), held.kind.as_str()), ("general", "Self"), "{text}");
+            assert!(note.contains("FROZEN THIS TURN") && note.contains("switched off on the master switchboard"), "{text}: {note}");
+        }
+        // A frozen agent's topic falls through (never routed to it, so no note).
+        let (routed_role, _, held, note) = turn("find document about the lease", &cfg);
+        assert_ne!(routed_role, "librarian");
+        assert_eq!((held.role.as_str(), note.as_str()), ("general", ""));
+        let (routed_role, _, _, note) = turn("fix bug in the layout", &coder_frozen);
+        assert_eq!((routed_role.as_str(), note.as_str()), ("designer", ""));
+    }
+
     #[test]
     fn the_router_is_offered_only_the_servers_a_line_needs() {
         let mut tools = vec![];
@@ -4040,6 +4092,18 @@ mod tests {
         // Sub-agents' routers never see playback.
         let sub = super::super::mcp::router_filter(&ready, false);
         assert!(!router_prompt(&router_offer(&sub, "play some jazz", "Tony"), "", "").contains("spotify.play("));
+        // Tony's reduced view (the core + spotify.more): the rule names only what is offered.
+        let available = router_offer(&offered_all, "turn it up", "Tony");
+        let more = super::super::mcp::spotify_more_info(&super::super::mcp::spotify_hidden(&available));
+        let view = super::super::mcp::tony_spotify_view(available.clone(), &more);
+        let prompt = router_prompt(&view, "", "");
+        let rule = prompt.split("Spotify tools (").nth(1).unwrap_or_default().split(')').next().unwrap_or_default().to_string();
+        assert!(!rule.contains("spotify.volume") && rule.contains("spotify.more") && rule.contains("spotify.play"), "{rule}");
+        for name in rule.split(", ") {
+            assert!(view.iter().any(|t| t.name == name), "{name} named but not offered");
+        }
+        // No Spotify offered: no Spotify sentence at all.
+        assert!(!router_prompt(&router_offer(&offered_all, "what's the weather", "Tony"), "", "").contains("Spotify"));
     }
 
     #[test]

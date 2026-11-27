@@ -13,6 +13,12 @@ use std::time::SystemTime;
 
 pub const FILE: &str = "security.config.json";
 
+/// Migration id: `unknown_device` (Section 24) appended once to an explicit `alerts.events`
+/// list. Mirrored by `security_api.alert_events` (Python reads the same file).
+pub const MIGRATE_UNKNOWN_DEVICE_ALERT: &str = "alerts-unknown-device";
+/// Every migration a freshly written file already reflects.
+pub const MIGRATIONS: [&str; 1] = [MIGRATE_UNKNOWN_DEVICE_ALERT];
+
 /// What Settings → Security may set (Section 24): idle lock 5–120 min, hard re-auth 30–720 min.
 /// The file loader (`clamped`) stays a little wider so a hand edit isn't silently rejected.
 pub const IDLE_LOCK_RANGE: (f64, f64) = (5.0, 120.0);
@@ -22,6 +28,9 @@ pub const REAUTH_RANGE: (f64, f64) = (30.0, 720.0);
 #[serde(rename_all = "camelCase", default)]
 pub struct SecurityConfig {
     pub version: u32,
+    /// One-time file migrations already applied (`migrate_value`), so a later deliberate edit
+    /// (e.g. removing "unknown_device" from `alerts.events`) sticks. Fresh files carry them all.
+    pub migrations: Vec<String>,
     /// Master switch. Off = the IPC gate and gateway checks allow everything (audited on start).
     pub enabled: bool,
     pub session: SessionCfg,
@@ -236,6 +245,7 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             version: 1,
+            migrations: MIGRATIONS.map(String::from).to_vec(),
             enabled: true,
             session: SessionCfg::default(),
             pin: PinCfg::default(),
@@ -412,14 +422,54 @@ pub fn set_session_in(dir: &Path, s: &SessionCfg) -> Result<(), String> {
     super::shared::write_atomic(&path, next.as_bytes()).map_err(|e| e.to_string())
 }
 
+/// One-time, versioned upgrades of a saved file, on the raw JSON so every other key (known or
+/// not) is kept as it is (pure). Returns true when `v` changed (the caller writes it back).
+/// `alerts-unknown-device`: an explicit `alerts.events` list gets "unknown_device" appended once
+/// (a file without the list already gets it from the defaults); the id is recorded in
+/// `migrations`, so removing the event afterwards sticks.
+pub fn migrate_value(v: &mut serde_json::Value) -> bool {
+    let Some(root) = v.as_object_mut() else { return false };
+    let done = |root: &serde_json::Map<String, serde_json::Value>, id: &str| root.get("migrations").and_then(|m| m.as_array()).is_some_and(|a| a.iter().any(|x| x.as_str() == Some(id)));
+    if done(root, MIGRATE_UNKNOWN_DEVICE_ALERT) {
+        return false;
+    }
+    if let Some(events) = root.get_mut("alerts").and_then(|a| a.get_mut("events")).and_then(|e| e.as_array_mut()) {
+        if !events.iter().any(|e| e.as_str() == Some("unknown_device")) {
+            events.push(serde_json::json!("unknown_device"));
+        }
+    }
+    let m = root.entry("migrations").or_insert_with(|| serde_json::json!([]));
+    if !m.is_array() {
+        *m = serde_json::json!([]);
+    }
+    if let Some(a) = m.as_array_mut() {
+        a.push(serde_json::json!(MIGRATE_UNKNOWN_DEVICE_ALERT));
+    }
+    true
+}
+
 /// Read (and clamp) the config at `path`; a missing file is written with the defaults; an
-/// unparsable one falls back to the defaults (the strict posture) and says so.
+/// unparsable one falls back to the defaults (the strict posture) and says so. A pending
+/// one-time migration (`migrate_value`) is applied and written back atomically first.
 pub fn load(path: &Path) -> (SecurityConfig, Option<String>) {
     match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<SecurityConfig>(text.trim_start_matches('\u{feff}')) {
-            Ok(c) => (c.clamped(), None),
-            Err(e) => (SecurityConfig::default(), Some(format!("{}: {e}; using the defaults", path.display()))),
-        },
+        Ok(text) => {
+            let mut v = match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) {
+                Ok(v) => v,
+                Err(e) => return (SecurityConfig::default(), Some(format!("{}: {e}; using the defaults", path.display()))),
+            };
+            let mut warn = None;
+            if migrate_value(&mut v) {
+                let written = serde_json::to_string_pretty(&v).map_err(|e| e.to_string()).and_then(|s| super::shared::write_atomic(path, s.as_bytes()).map_err(|e| e.to_string()));
+                if let Err(e) = written {
+                    warn = Some(format!("{}: couldn't save the one-time migration ({e}); applied in memory", path.display()));
+                }
+            }
+            match serde_json::from_value::<SecurityConfig>(v) {
+                Ok(c) => (c.clamped(), warn),
+                Err(e) => (SecurityConfig::default(), Some(format!("{}: {e}; using the defaults", path.display()))),
+            }
+        }
         Err(_) => {
             let c = SecurityConfig::default();
             if let Some(p) = path.parent() {
@@ -524,6 +574,43 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         set_session_in(&dir, &s).unwrap();
         assert_eq!(get_in(&dir).session, s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Section 24: an existing file with an explicit `alerts.events` list gets "unknown_device"
+    /// once (written back, every other key kept); a later removal sticks; fresh files are already
+    /// migrated; a file without the list keeps the defaults (which include it).
+    #[test]
+    fn unknown_device_alert_is_migrated_into_saved_event_lists_once() {
+        let dir = std::env::temp_dir().join(format!("cc-sec-mig-{}", super::super::token::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(FILE);
+        std::fs::write(&p, r#"{"version":1,"custom":{"keep":true},"alerts":{"enabled":true,"events":["hard_lock","login_failure"]}}"#).unwrap();
+        let (c, w) = load(&p);
+        assert!(w.is_none(), "{w:?}");
+        assert_eq!(c.alerts.events, ["hard_lock", "login_failure", "unknown_device"]);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(saved["alerts"]["events"], serde_json::json!(["hard_lock", "login_failure", "unknown_device"]));
+        assert_eq!(saved["migrations"], serde_json::json!([MIGRATE_UNKNOWN_DEVICE_ALERT]));
+        assert_eq!(saved["custom"]["keep"], true, "unknown keys survive");
+        // A deliberate removal afterwards sticks.
+        std::fs::write(&p, r#"{"version":1,"migrations":["alerts-unknown-device"],"alerts":{"events":["hard_lock"]}}"#).unwrap();
+        let before = std::fs::read_to_string(&p).unwrap();
+        let (c, _) = load(&p);
+        assert_eq!(c.alerts.events, ["hard_lock"]);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before, "nothing rewritten");
+        // Pure: already listed → only the marker; no list → only the marker (defaults have it).
+        let mut v = serde_json::json!({"alerts": {"events": ["unknown_device"]}});
+        assert!(migrate_value(&mut v));
+        assert_eq!(v["alerts"]["events"], serde_json::json!(["unknown_device"]));
+        assert!(!migrate_value(&mut v), "once");
+        let mut v = serde_json::json!({"alerts": {"enabled": false}});
+        assert!(migrate_value(&mut v));
+        let c: SecurityConfig = serde_json::from_value(v).unwrap();
+        assert!(c.alerts.events.iter().any(|e| e == "unknown_device"));
+        // A fresh default file is already migrated.
+        let mut fresh = serde_json::to_value(SecurityConfig::default()).unwrap();
+        assert!(!migrate_value(&mut fresh));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

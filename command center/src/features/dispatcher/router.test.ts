@@ -104,23 +104,33 @@ describe("domain tie-break", () => {
 });
 
 // Section 20.1: the router never picks an agent frozen on the master switchboard.
-describe("frozen agents never route", () => {
-  it("the Booking Desk has no triggers; the frozen Librarian's never fire", () => {
-    expect(DEFAULT_ROUTING_CONFIG.agents.booking).toEqual({ names: [], domains: [] });
+describe("frozen agents: named, never by topic", () => {
+  it("the Booking Desk keeps only its names; a frozen agent addressed by name is Named, its topics never fire", () => {
+    expect(DEFAULT_ROUTING_CONFIG.agents.booking).toEqual({ names: ["booking desk", "booking agent", "B&Co"], domains: [] });
     expect(isFrozenRole("librarian") && isFrozenRole("booking") && !isFrozenRole("general") && !isFrozenRole("coder")).toBe(true);
-    for (const text of ["ask the librarian to search vault for the contract", "librarian, find document about the lease", "search vault for my notes"]) {
-      expect(resolve(text, DEFAULT_ROUTING_CONFIG).role, text).not.toBe("librarian");
+    for (const [text, role] of [
+      ["ask the librarian to search vault for the contract", "librarian"],
+      ["librarian, find document about the lease", "librarian"],
+      ["ask the booking desk to check my availability", "booking"],
+      ["booking desk, any casting calls", "booking"],
+      ["tony, my booking agent hasn't replied about the wardrobe", "booking"],
+    ]) {
+      expect(resolve(text, DEFAULT_ROUTING_CONFIG), text).toMatchObject({ role, kind: "Named" });
     }
-    expect(resolve("librarian, find document about the rust repo", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "coder", kind: "Domain" });
+    // Topics of a frozen agent fall through: to the next live topic, Tony's own, or nothing.
+    expect(resolve("find document about the rust repo", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "coder", kind: "Domain" });
+    expect(resolve("find document about the lease", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: null, kind: "Default" });
+    expect(resolve("draft email to agent about the audition", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "general", kind: "Self" });
   });
   it("follows the master switchboard (setRouterFrozenAgents) and a per-call override", () => {
     try {
       setRouterFrozenAgents([]);
-      expect(resolve("ask the librarian to search vault for the contract", DEFAULT_ROUTING_CONFIG).role).toBe("librarian");
+      expect(resolve("find document about the lease", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "librarian", kind: "Domain" });
       setRouterFrozenAgents(["booking", "Coder"]);
-      expect(resolve("ask the coder to fix bug in the layout", DEFAULT_ROUTING_CONFIG).role).toBe("designer");
-      expect(resolve("coder, write code", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: null, kind: "Default" });
-      expect(resolve("coder, write code", DEFAULT_ROUTING_CONFIG, "", { frozen: [] })).toMatchObject({ role: "coder", kind: "Named" });
+      expect(resolve("ask the coder to fix bug in the layout", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "coder", kind: "Named", confidence: "high" });
+      expect(resolve("fix bug in the layout", DEFAULT_ROUTING_CONFIG).role).toBe("designer");
+      expect(resolve("write code", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: null, kind: "Default" });
+      expect(resolve("write code", DEFAULT_ROUTING_CONFIG, "", { frozen: [] })).toMatchObject({ role: "coder", kind: "Domain" });
     } finally {
       resetRouterFrozenAgents();
     }
@@ -191,7 +201,7 @@ describe("Tony's name beats a topic", () => {
     expect(resolve("tony, coder, fix the build", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "coder", kind: "Named" });
     expect(resolve("tony, my coder hasn't replied about the layout", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "coder", kind: "Named" });
     // The frozen Booking Desk is never Named.
-    expect(resolve("hey tony, ask the booking desk to check my availability", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "general", kind: "Self" });
+    expect(resolve("hey tony, ask the booking desk to check my availability", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "booking", kind: "Named", confidence: "high" });
   });
 });
 

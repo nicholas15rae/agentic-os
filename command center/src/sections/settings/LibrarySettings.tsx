@@ -246,6 +246,11 @@ export function McpRegistryCard() {
                   ; read-only in Tony (not auto-started): <span className="font-mono text-ink">{sync.report!.readOnly!.join(", ")}</span>
                 </>
               )}
+              {(sync.report!.unparked?.length ?? 0) > 0 && (
+                <>
+                  ; needed again (auto-start back on): <span className="font-mono text-ink">{sync.report!.unparked!.join(", ")}</span>
+                </>
+              )}
             </>
           )}
         </p>

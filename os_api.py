@@ -1405,7 +1405,14 @@ def _drive(p: str) -> str:
 def model_roots() -> list[dict]:
     """Every configured root with its kind, drive and whether it exists (C:, D:, G:, F: …)."""
     rows = [("models", p) for p in model_dirs()] + [("lmstudio", p) for p in lmstudio_dirs()] + [("hf-cache", p) for p in hf_caches()]
-    return [{"path": p, "kind": k, "drive": _drive(p), "exists": Path(p).is_dir()} for k, p in rows]
+
+    def exists(p: str) -> bool:
+        try:
+            return Path(p).is_dir()
+        except OSError:  # an unreadable root reads as missing, never fails the listing
+            return False
+
+    return [{"path": p, "kind": k, "drive": _drive(p), "exists": exists(p)} for k, p in rows]
 _WEIGHT_EXT = {".gguf": "gguf", ".safetensors": "safetensors", ".bin": "pytorch-bin", ".pth": "pytorch", ".pt": "pytorch", ".onnx": "onnx", ".ckpt": "checkpoint", ".msgpack": "flax", ".h5": "tensorflow", ".npz": "numpy", ".tflite": "tflite"}
 
 
@@ -1471,8 +1478,11 @@ def _real(p: Path) -> str:
 
 def scan_models() -> dict:
     """The whole library: flat model roots, every LM Studio library (C: and D:), the Hugging Face
-    caches. A folder reached twice (a junction into another root) is listed once."""
+    caches. A folder reached twice (a junction into another root) is listed once. One unreadable
+    root (permissions, a dead junction, a drive that went away mid-scan) never fails the scan:
+    it is skipped with a note in `errors` (and on its `roots` row)."""
     out, seen = [], set()
+    errors: list[dict] = []
     lms = lmstudio_dir()
 
     def add(d: Path, root: str, **extra):
@@ -1482,45 +1492,64 @@ def scan_models() -> dict:
         seen.add(k)
         out.append({**_scan_folder(d, lms), "root": root, **extra})
 
-    for base in model_dirs():
-        b = Path(base)
-        if b.is_dir():
-            for d in sorted(b.iterdir()):
-                if d.is_dir():
-                    add(d, base)
+    def each_root(kind: str, bases: list[str], scan) -> None:
+        for base in bases:
+            mark = len(out)
+            try:
+                b = Path(base)
+                if b.is_dir():
+                    scan(b, base)
+            except OSError as e:
+                for row in out[mark:]:  # a half-scanned root is dropped whole
+                    seen.discard(_real(Path(row["path"])))
+                del out[mark:]
+                errors.append({"root": base, "kind": kind, "error": f"{type(e).__name__}: {e}"[:300]})
+
+    def flat(b: Path, base: str) -> None:
+        for d in sorted(b.iterdir()):
+            if d.is_dir():
+                add(d, base)
+
+    each_root("models", model_dirs(), flat)
+
     # The LM Studio / Bionic libraries (already loadable); local-d only holds junctions to the above.
-    for base in lmstudio_dirs():
-        b = Path(base)
-        if b.is_dir():
-            for pub in sorted(b.iterdir()):
-                if pub.is_dir() and pub.name != LINK_PUBLISHER:
-                    for d in sorted(pub.iterdir()):
-                        if d.is_dir():
-                            add(d, base, registered=True)
+    def lmstudio(b: Path, base: str) -> None:
+        for pub in sorted(b.iterdir()):
+            if pub.is_dir() and pub.name != LINK_PUBLISHER:
+                for d in sorted(pub.iterdir()):
+                    if d.is_dir():
+                        add(d, base, registered=True)
+
+    each_root("lmstudio", lmstudio_dirs(), lmstudio)
+
     # Hugging Face caches: models--<org>--<name>, scanned through their snapshots (the blobs are
     # hash-named and would read as a partial download).
-    for base in hf_caches():
-        b = Path(base)
-        if b.is_dir():
-            for d in sorted(b.glob("models--*")):
-                snaps = d / "snapshots"
-                if not snaps.is_dir():
-                    continue
-                k = _real(d)
-                if k in seen:
-                    continue
-                seen.add(k)
-                row = _scan_folder(snaps, lms)
-                if any(p.suffix in (".incomplete", ".part") for p in (d / "blobs").glob("*")) and row["status"] != "gguf":
-                    row.update(status="partial-download", note="Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`")
-                name = d.name[len("models--"):].replace("--", "/")
-                out.append({**row, "name": name, "path": str(d), "category": _category(name), "drive": _drive(str(d)), "root": base})
+    def hf(b: Path, base: str) -> None:
+        for d in sorted(b.glob("models--*")):
+            snaps = d / "snapshots"
+            if not snaps.is_dir():
+                continue
+            k = _real(d)
+            if k in seen:
+                continue
+            seen.add(k)
+            row = _scan_folder(snaps, lms)
+            if any(p.suffix in (".incomplete", ".part") for p in (d / "blobs").glob("*")) and row["status"] != "gguf":
+                row.update(status="partial-download", note="Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`")
+            name = d.name[len("models--"):].replace("--", "/")
+            out.append({**row, "name": name, "path": str(d), "category": _category(name), "drive": _drive(str(d)), "root": base})
+
+    each_root("hf-cache", hf_caches(), hf)
     groups: dict[str, list] = {}
     for m in out:
         groups.setdefault(m["category"], []).append(m)
     roots = model_roots()
+    for r in roots:
+        err = next((e["error"] for e in errors if e["root"] == r["path"] and e["kind"] == r["kind"]), None)
+        if err:
+            r["error"] = err
     return {"dirs": model_dirs(), "lmstudioDir": str(lms), "lmstudioDirs": lmstudio_dirs(), "hfCaches": hf_caches(), "roots": roots,
-            "drives": sorted({r["drive"] for r in roots if r["exists"] and r["drive"]}), "count": len(out), "groups": groups, "scannedAt": time.time()}
+            "drives": sorted({r["drive"] for r in roots if r["exists"] and r["drive"]}), "count": len(out), "groups": groups, "errors": errors, "scannedAt": time.time()}
 
 
 @models_router.post("/sync-lmstudio")

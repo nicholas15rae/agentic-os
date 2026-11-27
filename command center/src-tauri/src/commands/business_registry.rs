@@ -27,8 +27,10 @@ pub const MAX_BUSINESSES: usize = 32;
 const BLOCKLIST_MAX: usize = 200;
 const EMAILS_MAX: usize = 10;
 /// The file's schema version. 2 = the `acting` seed was added to an existing registry once
-/// ([`migrate`]). An older app that rewrites the file writes 1 again; the migration is idempotent.
-pub const REGISTRY_VERSION: u32 = 2;
+/// ([`migrate`]); 3 = the Acting business lost its bare "acting" alias (everyday lines like "my
+/// laptop is acting up" named it) for specific phrases. An older app that rewrites the file
+/// writes 1 again; the migration is idempotent.
+pub const REGISTRY_VERSION: u32 = 3;
 /// The Ops prompt template (`{display_name}`, `{business_id}`, `{description}`).
 pub const OPS_PROMPT_TEMPLATE: &str = include_str!("../../rules/bizops.prompt.md");
 
@@ -286,8 +288,9 @@ pub fn acting_seed(memory_root: &Path, now: u64) -> Business {
             category: "entertainment".into(),
             description: "Acting work: auditions, self-tapes, callbacks and bookings through the agency, and the agency commission on each job.".into(),
             // Not a bare "agent" / "booking": those words name agents and the Booking desk, and an
-            // unrouted line naming a business is routed to the Operations Manager (agents.rs).
-            aliases: ["acting", "auditions", "audition", "bookings", "self-tapes", "self tapes", "self-tape", "my agent", "talent agent", "acting agent"].iter().map(|a| a.to_string()).collect(),
+            // unrouted line naming a business is routed to the Operations Manager (agents.rs). Not
+            // a bare "acting" either ("my laptop is acting up"): only these specific phrases.
+            aliases: ACTING_ALIASES.iter().map(|a| a.to_string()).collect(),
             cross_domain_blocklist: vec![],
         },
         memory_root,
@@ -296,17 +299,37 @@ pub fn acting_seed(memory_root: &Path, now: u64) -> Business {
     .expect("the acting seed is valid")
 }
 
+/// The Acting business's aliases: specific phrases only (no bare "acting").
+pub const ACTING_ALIASES: &[&str] = &[
+    "acting business", "acting work", "acting income", "acting gig", "acting gigs", "acting job", "acting jobs", "my acting",
+    "auditions", "audition", "bookings", "self-tapes", "self tapes", "self-tape", "my agent", "talent agent", "acting agent",
+];
+
 /// One-time upgrades of an existing registry (pure; `true` = it changed and must be saved).
 /// v2: add the `acting` business (status `provisioning`: its memory folder and workspace are made
 /// by the normal "Finish setup" path, never here). An id or display name already taken is left
 /// alone (the user's own record wins).
+/// v3: the `acting` business loses exactly its bare "acting" alias (any alias the user added
+/// stays) and gains the specific `ACTING_ALIASES` phrases it doesn't have.
 pub fn migrate(r: &mut Registry, memory_root: &Path, now: u64) -> bool {
     if r.version >= REGISTRY_VERSION {
         return false;
     }
-    let taken = r.businesses.iter().any(|b| b.business_id == "acting" || b.display_name.eq_ignore_ascii_case("acting"));
-    if !taken && r.businesses.len() < MAX_BUSINESSES {
-        r.businesses.push(acting_seed(memory_root, now));
+    if r.version < 2 {
+        let taken = r.businesses.iter().any(|b| b.business_id == "acting" || b.display_name.eq_ignore_ascii_case("acting"));
+        if !taken && r.businesses.len() < MAX_BUSINESSES {
+            r.businesses.push(acting_seed(memory_root, now));
+        }
+    }
+    if r.version < 3 {
+        if let Some(b) = r.businesses.iter_mut().find(|b| b.business_id == "acting") {
+            b.aliases.retain(|a| !a.trim().eq_ignore_ascii_case("acting"));
+            for p in ACTING_ALIASES {
+                if !b.aliases.iter().any(|a| a.trim().eq_ignore_ascii_case(p)) {
+                    b.aliases.push(p.to_string());
+                }
+            }
+        }
     }
     r.version = REGISTRY_VERSION;
     true
@@ -361,9 +384,26 @@ pub enum Resolution {
     Unknown(String),
 }
 
-/// Phrases that name `b` (normalised): its display name, its id as words, its aliases.
+/// Single everyday words (verbs, generic nouns) a business's display name or id may be, but which
+/// never name it ON THEIR OWN in a line ("my laptop is acting up", "back to work"): such a
+/// business is named by its aliases (or a longer display name) instead. Aliases are never
+/// filtered: an alias is a deliberate trigger.
+const COMMON_NAME_WORDS: &[&str] = &[
+    "acting", "action", "art", "building", "business", "cleaning", "coaching", "consulting", "design", "film", "general", "home", "job", "jobs", "main", "marketing",
+    "media", "money", "music", "office", "operations", "personal", "play", "projects", "running", "sales", "service", "services", "shop", "store", "studio", "team", "trading",
+    "work", "working", "writing",
+];
+
+/// A display name / id phrase that is one common word (`COMMON_NAME_WORDS`) never names a
+/// business by itself.
+fn generic_name(phrase: &str) -> bool {
+    !phrase.contains(' ') && COMMON_NAME_WORDS.contains(&phrase)
+}
+
+/// Phrases that name `b` (normalised): its display name, its id as words (unless that is a single
+/// common word, `generic_name`), and its aliases.
 fn names_of(b: &Business) -> Vec<String> {
-    let mut v = vec![super::routing::normalize(&b.display_name), super::routing::normalize(&b.business_id.replace('_', " "))];
+    let mut v: Vec<String> = [super::routing::normalize(&b.display_name), super::routing::normalize(&b.business_id.replace('_', " "))].into_iter().filter(|p| !generic_name(p)).collect();
     v.extend(b.aliases.iter().map(|a| super::routing::normalize(a)));
     v.retain(|s| !s.is_empty());
     v
@@ -947,6 +987,61 @@ pub(crate) mod tests {
             return Err("PERMISSION_REQUIRED:business-archive".into());
         }
         s.set_status(id, BusinessStatus::Archived)
+    }
+
+    /// "acting" as an everyday verb never names the Acting business; its specific phrases do.
+    #[test]
+    fn acting_is_named_only_by_its_specific_phrases() {
+        let (s, dir) = active_store("acting-words");
+        s.provision_memory("acting").unwrap();
+        s.record_step("acting", |p| p.workspace = true).unwrap();
+        s.set_status("acting", BusinessStatus::Active).unwrap();
+        let r = s.snapshot();
+        assert!(!r.businesses.iter().find(|b| b.business_id == "acting").unwrap().aliases.iter().any(|a| a == "acting"));
+        for text in ["my laptop is acting up", "the gateway is acting weird", "Spotify keeps acting strange", "why is docker acting like this", "Acting up again, the build"] {
+            assert_eq!(resolve_business(&r, None, text), Resolution::None, "{text}");
+        }
+        for text in [
+            "how much acting income did I make this month",
+            "any acting gigs this week",
+            "log the acting job from tuesday",
+            "how's my acting business doing",
+            "how is my acting going",
+            "did I get any auditions",
+            "send the self-tape to my agent",
+            "what did my talent agent say",
+            "check the bookings",
+        ] {
+            assert!(matches!(resolve_business(&r, None, text), Resolution::One(ref b) if b.business_id == "acting"), "{text}");
+        }
+        // A multi-word display name still names its business by itself.
+        assert!(matches!(resolve_business(&r, None, "check trades & contracting"), Resolution::One(ref b) if b.business_id == "trades_contracting"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v3: a v2 registry's Acting business loses exactly the bare "acting" alias (the user's own
+    /// aliases stay) and gains the specific phrases; once.
+    #[test]
+    fn v2_registry_drops_the_bare_acting_alias_once() {
+        let dir = temp_dir("migrate-v3");
+        let root = dir.join("memory").join("ops");
+        let mut v2 = Registry { version: 2, businesses: seeds(&root, 1) };
+        let a = v2.businesses.iter_mut().find(|b| b.business_id == "acting").unwrap();
+        a.aliases = vec!["acting".into(), "auditions".into(), "voice work".into(), "Acting".into()];
+        let mut v = v2.clone();
+        assert!(migrate(&mut v, &root, 2));
+        assert_eq!(v.version, REGISTRY_VERSION);
+        let al = &v.businesses.iter().find(|b| b.business_id == "acting").unwrap().aliases;
+        assert!(!al.iter().any(|x| x.eq_ignore_ascii_case("acting")), "{al:?}");
+        assert!(al.iter().any(|x| x == "voice work") && al.iter().any(|x| x == "auditions") && al.iter().any(|x| x == "acting income"), "{al:?}");
+        assert_eq!(al.iter().filter(|x| *x == "auditions").count(), 1);
+        // Once: a bare alias the user puts back afterwards stays.
+        v.businesses.iter_mut().find(|b| b.business_id == "acting").unwrap().aliases.push("acting".into());
+        assert!(!migrate(&mut v, &root, 3));
+        assert!(v.businesses.iter().find(|b| b.business_id == "acting").unwrap().aliases.iter().any(|x| x == "acting"));
+        // The other businesses are untouched.
+        assert_eq!(v.businesses[0], v2.businesses[0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

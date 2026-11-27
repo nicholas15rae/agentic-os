@@ -2131,6 +2131,10 @@ pub struct AllmSyncReport {
     /// Entries a backed agent needs but Tony marks read-only: AnythingLLM can't enforce
     /// read-only, so they carry `anythingllm.readOnly: true` and never auto-start.
     pub read_only: Vec<String>,
+    /// Entries this sync parked / made read-only earlier (marked `parkedBy` / `readOnlyBy`) that
+    /// a backed agent needs again (writable): `autoStart` back to true, the markers dropped. An
+    /// `autoStart: false` the user set themselves (no marker) is never touched.
+    pub unparked: Vec<String>,
 }
 
 /// The agents that run on AnythingLLM (Section 20.12): every role with a workspace mapping plus
@@ -2186,6 +2190,72 @@ fn allm_needs_token(url: &str, headers: Option<&serde_json::Map<String, Value>>)
     remote_auth(&probe).is_some() && !headers.is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
 }
 
+/// The marker value this sync writes into `anythingllm.parkedBy` / `anythingllm.readOnlyBy`
+/// when IT switched an entry's `autoStart` off / set `readOnly`, so only those are ever undone.
+pub(crate) const ALLM_MARK: &str = "agentic-os";
+const ALLM_PARKED_BY: &str = "parkedBy";
+const ALLM_READ_ONLY_BY: &str = "readOnlyBy";
+
+/// Does `entry.anythingllm.<key>` carry this sync's marker?
+fn allm_marked(entry: &Value, key: &str) -> bool {
+    entry.get("anythingllm").and_then(|a| a.get(key)).and_then(|v| v.as_str()) == Some(ALLM_MARK)
+}
+
+/// Set `entry.anythingllm.<key>` to this sync's marker.
+fn allm_mark(entry: &mut Value, key: &str) {
+    if let Some(a) = entry.as_object_mut().map(|o| o.entry("anythingllm").or_insert_with(|| json!({}))).and_then(|a| a.as_object_mut()) {
+        a.insert(key.into(), json!(ALLM_MARK));
+    }
+}
+
+/// Remove `entry.anythingllm.<keys>`.
+fn allm_unset(entry: &mut Value, keys: &[&str]) {
+    if let Some(a) = entry.get_mut("anythingllm").and_then(|a| a.as_object_mut()) {
+        for k in keys {
+            a.remove(*k);
+        }
+    }
+}
+
+/// Park an entry: `autoStart: false`, marked `parkedBy` only when THIS call switched it off (an
+/// `autoStart: false` already there, the user's own or a token gate, stays unmarked). True when
+/// the entry changed.
+fn allm_park(entry: &mut Value) -> bool {
+    if allm_flag(entry, "autoStart", false) {
+        allm_mark(entry, ALLM_PARKED_BY);
+        return true;
+    }
+    false
+}
+
+/// Undo what this sync did to a needed, writable entry: a `readOnlyBy` marker drops the
+/// `readOnly` flag it set, a `parkedBy` marker turns `autoStart` back on. Unmarked flags (the
+/// user's) are left alone. True when the entry changed.
+fn allm_unpark(entry: &mut Value) -> bool {
+    let mut changed = false;
+    if allm_marked(entry, ALLM_READ_ONLY_BY) {
+        allm_unset(entry, &["readOnly", ALLM_READ_ONLY_BY]);
+        changed = true;
+    }
+    if allm_marked(entry, ALLM_PARKED_BY) {
+        allm_flag(entry, "autoStart", true);
+        allm_unset(entry, &[ALLM_PARKED_BY]);
+        changed = true;
+    }
+    changed
+}
+
+/// Mark a needed server read-only (Tony limits it): `readOnly: true` and `autoStart: false`, each
+/// marked when this call set it. True when the entry changed.
+fn allm_make_read_only(entry: &mut Value) -> bool {
+    let a = allm_flag(entry, "readOnly", true);
+    if a {
+        allm_mark(entry, ALLM_READ_ONLY_BY);
+    }
+    let b = allm_park(entry);
+    a || b
+}
+
 fn allm_no_autostart(entry: &mut Value) {
     if let Some(o) = entry.as_object_mut() {
         let a = o.entry("anythingllm").or_insert_with(|| json!({}));
@@ -2205,9 +2275,11 @@ fn allm_no_autostart(entry: &mut Value) {
 /// Scoped to `agents` (the AnythingLLM-backed agents, `allm_agents`; Section 20.12). AnythingLLM
 /// keeps ONE MCP file for every workspace, so the only lever here is which servers it may run:
 /// a server none of `agents` is granted is never added, and an existing entry for one (a Tony id
-/// or an AnythingLLM-only entry) is parked (`autoStart: false`; nothing is deleted). A needed
-/// server Tony marks read-only is written / kept with `readOnly: true` and never auto-starts
-/// (AnythingLLM has no read-only mode). Per workspace, only the chat mode limits it: a Query-mode
+/// or an AnythingLLM-only entry) is parked (`autoStart: false`, marked `parkedBy: "agentic-os"`;
+/// nothing is deleted). A needed server Tony marks read-only is written / kept with
+/// `readOnly: true` (marked `readOnlyBy`) and never auto-starts (AnythingLLM has no read-only
+/// mode). Parking is reversible: a marked entry that is needed (and writable) again gets
+/// `autoStart: true` back and loses its markers; an unmarked `autoStart: false` is the user's. Per workspace, only the chat mode limits it: a Query-mode
 /// workspace (the Librarian's) runs no agent tools at all.
 fn merge_allm_servers(existing: &Value, mcps: &[McpServer], agents: &[String]) -> (Value, AllmSyncReport) {
     let needed = allm_needed(mcps, agents);
@@ -2232,18 +2304,20 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer], agents: &[String]) -
         let Some(entry) = servers.get_mut(&id) else { continue };
         let tony_ro = mcps.iter().any(|m| m.id == id && m.read_only);
         if !needed.contains(&id) {
-            if allm_flag(entry, "autoStart", false) {
+            if allm_park(entry) {
                 report.parked.push(id.clone());
             }
             continue;
         }
         if tony_ro {
-            let a = allm_flag(entry, "readOnly", true);
-            let b = allm_flag(entry, "autoStart", false);
-            if a || b {
+            if allm_make_read_only(entry) {
                 report.read_only.push(id.clone());
             }
             continue;
+        }
+        // Needed and writable again: undo only what this sync parked / made read-only.
+        if allm_unpark(entry) {
+            report.unparked.push(id.clone());
         }
         // Still runnable by AnythingLLM's agents: flag it when Tony limits it (or doesn't manage it).
         let managed = mcps.iter().find(|m| m.id == id && m.transport != "builtin");
@@ -2285,8 +2359,7 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer], agents: &[String]) -
         };
         let mut entry = entry;
         if m.read_only {
-            allm_flag(&mut entry, "readOnly", true);
-            allm_flag(&mut entry, "autoStart", false);
+            allm_make_read_only(&mut entry);
             report.read_only.push(m.id.clone());
         }
         servers.insert(m.id.clone(), entry);
@@ -2295,6 +2368,12 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer], agents: &[String]) -
     let mut out = if existing.is_object() { existing.clone() } else { json!({}) };
     out["mcpServers"] = Value::Object(servers);
     (out, report)
+}
+
+/// Did the merge change the file (an add, a repair, a park, a read-only mark or an un-park)?
+/// Otherwise the file is left exactly as it is (no `.bak` churn).
+fn allm_file_changed(r: &AllmSyncReport) -> bool {
+    !(r.added.is_empty() && r.fixed.is_empty() && r.parked.is_empty() && r.read_only.is_empty() && r.unparked.is_empty())
 }
 
 /// Parse AnythingLLM's MCP file. Only a missing file counts as empty: an unreadable one,
@@ -2326,7 +2405,7 @@ pub fn mcp_sync_anythingllm(os: State<'_, OsState>) -> Result<AllmSyncReport, St
     let path = anythingllm_mcp_path().ok_or("%APPDATA% is not set")?;
     let existing = parse_allm_file(std::fs::read_to_string(&path))?;
     let (next, report) = merge_allm_servers(&existing, &cfg.mcps, &allm_agents(&cfg));
-    if report.added.is_empty() && report.fixed.is_empty() && report.parked.is_empty() && report.read_only.is_empty() {
+    if !allm_file_changed(&report) {
         // Nothing to add or repair — leave the file exactly as it is (no `.bak` churn).
         return Ok(report);
     }
@@ -3334,7 +3413,7 @@ mod tests {
         assert!(next["mcpServers"].get("shotcut").is_none());
         assert!(report.skipped.contains(&"shotcut (no AnythingLLM agent is granted it: not synced)".to_string()), "{:?}", report.skipped);
         // Read-only in Tony: marked, never auto-started.
-        assert_eq!(next["mcpServers"]["sqlite"]["anythingllm"], json!({ "readOnly": true, "autoStart": false }));
+        assert_eq!(next["mcpServers"]["sqlite"]["anythingllm"], json!({ "readOnly": true, "autoStart": false, "readOnlyBy": ALLM_MARK, "parkedBy": ALLM_MARK }));
         assert_eq!(report.read_only, ["sqlite"]);
         // Tony's own WhatsApp and AnythingLLM's unknown ai-hub: parked, settings and keys kept.
         let mut parked = report.parked.clone();
@@ -3350,6 +3429,57 @@ mod tests {
         let (again_v, again) = merge_allm_servers(&next, &[], &coder());
         assert!(again.added.is_empty() && again.read_only.is_empty());
         assert_eq!(again_v["mcpServers"]["ai-hub"], next["mcpServers"]["ai-hub"]);
+    }
+
+    /// Parking is reversible: park → re-grant → unpark (autoStart back on, marker gone, the file
+    /// counts as changed); a read-only mark is undone when Tony lifts read-only; an
+    /// `autoStart: false` the user set (no marker) is never touched.
+    #[test]
+    fn allm_sync_unparks_only_what_it_parked() {
+        let existing = json!({ "mcpServers": {
+            "serena": { "command": "uvx", "args": [] },
+            "mine": { "command": "npx", "args": [], "anythingllm": { "autoStart": false } }
+        } });
+        let mut serena = mcp_stdio("serena", true);
+        serena.agents = Some(vec!["director".into()]);
+        let mut mine = mcp_stdio("mine", true);
+        mine.agents = Some(vec!["director".into()]);
+        // Not granted to the Coder: serena is parked and marked; the user's own false is left as is.
+        let (parked_v, r) = merge_allm_servers(&existing, &[serena.clone(), mine.clone()], &coder());
+        assert_eq!(r.parked, ["serena"]);
+        assert_eq!(parked_v["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": false, "parkedBy": ALLM_MARK }));
+        assert_eq!(parked_v["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false }));
+        assert!(allm_file_changed(&r));
+        // Re-granted to the Coder: serena comes back; "mine" (user-set false, no marker) stays off.
+        serena.agents = Some(vec!["coder".into()]);
+        mine.agents = Some(vec!["coder".into()]);
+        let (back, r) = merge_allm_servers(&parked_v, &[serena.clone(), mine.clone()], &coder());
+        assert_eq!(r.unparked, ["serena"]);
+        assert!(r.added.is_empty() && r.parked.is_empty() && r.read_only.is_empty(), "{r:?}");
+        assert!(allm_file_changed(&r), "an un-park alone must still write the file");
+        assert_eq!(back["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": true }));
+        assert_eq!(back["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false }));
+        // Steady state: nothing changes, nothing written.
+        let (_, r) = merge_allm_servers(&back, &[serena.clone(), mine.clone()], &coder());
+        assert!(!allm_file_changed(&r) && r.unparked.is_empty(), "{r:?}");
+        // Read-only in Tony → marked read-only and parked; lifted → both undone.
+        serena.read_only = true;
+        let (ro, r) = merge_allm_servers(&back, &[serena.clone()], &coder());
+        assert_eq!(r.read_only, ["serena"]);
+        assert_eq!(ro["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": false, "readOnly": true, "readOnlyBy": ALLM_MARK, "parkedBy": ALLM_MARK }));
+        serena.read_only = false;
+        let (rw, r) = merge_allm_servers(&ro, &[serena.clone()], &coder());
+        assert_eq!(r.unparked, ["serena"]);
+        assert_eq!(rw["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": true }));
+        // A user-set false on a read-only entry: readOnly is marked, autoStart stays the user's.
+        let user_off = json!({ "mcpServers": { "mine": { "command": "npx", "args": [], "anythingllm": { "autoStart": false } } } });
+        let mut mine_ro = mine.clone();
+        mine_ro.read_only = true;
+        let (v, _) = merge_allm_servers(&user_off, &[mine_ro], &coder());
+        assert_eq!(v["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false, "readOnly": true, "readOnlyBy": ALLM_MARK }));
+        let (v, r) = merge_allm_servers(&v, &[mine.clone()], &coder());
+        assert_eq!(r.unparked, ["mine"]);
+        assert_eq!(v["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false }), "the user's autoStart false survives");
     }
 
     /// Which agents count as AnythingLLM-backed: mapped roles + Biz Ops, never Tony, a frozen

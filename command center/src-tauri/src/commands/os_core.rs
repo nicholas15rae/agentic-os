@@ -111,10 +111,11 @@ fn trig(names: &[&str], domains: &[&str]) -> AgentTriggers {
 /// The user's exact default trigger matrix (Part 1 spec). Keyed by role id.
 pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
     let mut m = BTreeMap::new();
-    // Section 20.1: the frozen Booking Desk has NO triggers at all. Acting logistics (auditions,
-    // casting calls, bookings, the agency) are Tony's; recording / editing a self-tape is the
-    // Director's. The empty row stays so the role keeps its place in Settings.
-    m.insert("booking".to_string(), trig(&[], &[]));
+    // Section 20.1: the frozen Booking Desk has NO topics. Acting logistics (auditions, casting
+    // calls, bookings, the agency) are Tony's; recording / editing a self-tape is the Director's.
+    // It keeps its NAMES only, so addressing it ("ask the booking desk…") still resolves to it
+    // (kind Named) and the switchboard keeps the turn with Tony with the FROZEN note.
+    m.insert("booking".to_string(), trig(BOOKING_NAMES, &[]));
     m.insert(
         "prompter".to_string(),
         trig(
@@ -154,6 +155,8 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
     m
 }
 
+/// The Booking Desk's own names (no topic words: "casting", "audition", "talent agent" are Tony's).
+pub(crate) const BOOKING_NAMES: &[&str] = &["booking desk", "booking agent", "B&Co"];
 /// Director topics (media); the self-tape recording / editing phrases came from Booking.
 const DIRECTOR_DOMAINS: &[&str] = &[
     "edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll",
@@ -189,11 +192,12 @@ const ROUTING_ADDED: &[(&str, &str)] = &[
     ("general", "bookings"), ("general", "talent agent"), ("general", "my agent"), ("general", "agency"), ("general", "imperious"), ("general", "draft email to agent"),
 ];
 
-/// The routing re-split (Sections 20.1 / 20.2), once: Booking's row emptied, the moved phrases
-/// off their old owners, the new phrases on their new owners (deduped, case-insensitive).
+/// The routing re-split (Sections 20.1 / 20.2), once: Booking's topics emptied (only its own
+/// `BOOKING_NAMES` stay), the moved phrases off their old owners, the new phrases on their new
+/// owners (deduped, case-insensitive).
 pub(crate) fn resplit_routing(cfg: &mut OsConfig) {
     if let Some(b) = cfg.routing.agents.get_mut("booking") {
-        b.names.clear();
+        b.names.retain(|n| BOOKING_NAMES.iter().any(|k| super::routing::normalize(k) == super::routing::normalize(n)));
         b.domains.clear();
     }
     for (role, phrase) in ROUTING_MOVED_OFF {
@@ -1143,6 +1147,9 @@ pub(crate) const MIGRATE_LOCAL_SAFE_DEFAULTS: &str = "local-safe-defaults";
 pub(crate) const MIGRATE_ROUTING_RESPLIT: &str = "routing-resplit";
 /// Migration id: one owner per integration (Section 21.1, `apply_integration_owners`).
 pub(crate) const MIGRATE_INTEGRATION_OWNERS: &str = "integration-owners";
+/// Migration id: the Booking Desk's own names came back (`BOOKING_NAMES`, none of its topics), so
+/// addressing the frozen desk is Named and held with Tony's FROZEN note (`restore_booking_names`).
+pub(crate) const MIGRATE_BOOKING_NAMES: &str = "booking-names";
 /// The `ops` triggers that moved to `bizops` / `finance` (removed once from a saved config).
 const MOVED_OFF_OPS: [&str; 8] = ["operations", "business", "finance", "invoice", "receipt", "bf supplements", "contracting", "quote"];
 
@@ -1209,6 +1216,21 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_INTEGRATION_OWNERS) {
         apply_integration_owners(cfg);
         cfg.migrations.push(MIGRATE_INTEGRATION_OWNERS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BOOKING_NAMES) {
+        restore_booking_names(cfg);
+        cfg.migrations.push(MIGRATE_BOOKING_NAMES.into());
+    }
+}
+
+/// Once: put the Booking Desk's own names (`BOOKING_NAMES`) back on its row (deduped,
+/// case-insensitive). Its topics are never restored.
+pub(crate) fn restore_booking_names(cfg: &mut OsConfig) {
+    let t = cfg.routing.agents.entry("booking".to_string()).or_default();
+    for n in BOOKING_NAMES {
+        if !t.names.iter().any(|x| super::routing::normalize(x) == super::routing::normalize(n)) {
+            t.names.push(n.to_string());
+        }
     }
 }
 
@@ -2462,10 +2484,13 @@ mod tests {
         for role in ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "general"] {
             let t = agents.get(role).unwrap_or_else(|| panic!("missing default routing role {role}"));
             // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self);
-            // the frozen Booking Desk has none at all (Section 20.1).
-            assert_eq!(t.names.is_empty(), role == "general" || role == "booking", "{role} name triggers");
+            // the frozen Booking Desk keeps only its own names (Section 20.1).
+            assert_eq!(t.names.is_empty(), role == "general", "{role} name triggers");
         }
-        assert_eq!(agents["booking"], AgentTriggers::default(), "Booking has no triggers at all");
+        assert_eq!(agents["booking"], trig(BOOKING_NAMES, &[]), "Booking has its names and no topics");
+        for topic in ["booking", "casting", "audition", "talent agent"] {
+            assert!(!agents["booking"].names.iter().any(|n| n == topic), "{topic} is not a Booking name");
+        }
         // A WhatsApp read is Tony's live tool, and Whisper's "what's up" greeting used to land on
         // Booking through these two: neither is a Booking topic any more.
         assert!(!agents["booking"].domains.contains(&"whatsapp".to_string()));
@@ -2492,7 +2517,8 @@ mod tests {
         cfg.routing.agents.insert("bizops".into(), trig(&["bizops", "business"], &["invoice", "quote", "job site", "subcontractor", "inventory", "bf supplements", "contracting", "masonry", "ecommerce", "shopify"]));
         apply_migrations(&mut cfg);
         let a = &cfg.routing.agents;
-        assert_eq!(a["booking"], AgentTriggers::default());
+        // Booking keeps only its own names (the topic-ish "booking" / "casting" / "audition" go).
+        assert_eq!(a["booking"], trig(BOOKING_NAMES, &[]));
         assert!(a["ops"].domains.contains(&"grafana".to_string()) && !a["ops"].domains.iter().any(|d| d == "schedule" || d == "calendar"));
         assert!(a["ops"].domains.contains(&"masonry".to_string()) && a["ops"].names.contains(&"job desk".to_string()));
         assert!(a["bizops"].domains.contains(&"shopify".to_string()) && a["bizops"].domains.contains(&"instagram".to_string()));
@@ -2517,6 +2543,23 @@ mod tests {
         let before = fresh.routing.agents.clone();
         resplit_routing(&mut fresh);
         assert_eq!(fresh.routing.agents, before);
+    }
+
+    /// A config that already ran the re-split (Booking emptied) gets the desk's NAMES back once,
+    /// never its topics; a name the user later removes stays removed.
+    #[test]
+    fn booking_names_come_back_once_without_topics() {
+        let mut cfg = OsConfig::default();
+        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into()];
+        cfg.routing.agents.insert("booking".into(), AgentTriggers::default());
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.routing.agents["booking"], trig(BOOKING_NAMES, &[]));
+        let r = super::super::routing::resolve("ask the booking desk to check my availability", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), super::super::routing::RouteKind::Named));
+        // Once: the user drops "B&Co"; it stays dropped.
+        cfg.routing.agents.get_mut("booking").unwrap().names.retain(|n| n != "B&Co");
+        apply_migrations(&mut cfg);
+        assert!(!cfg.routing.agents["booking"].names.iter().any(|n| n == "B&Co"));
     }
 
     /// Section 21.1: one owner per integration, by default and by the one-time migration.
@@ -2694,7 +2737,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string()]);
     }
 
     #[test]

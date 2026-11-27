@@ -19,6 +19,7 @@ rows without one (derived from their decision checks / error text), so history s
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 LABELS = {
@@ -67,6 +68,11 @@ def from_checks(checks: list[dict[str, Any]]) -> dict[str, Any] | None:
     return failure("risk_limit", detail)
 
 
+# An IBKR / TWS error code on an order ("Error 201", "error code 321", "errorCode=110"): the
+# order-level range 100-499. Not "WinError 1225" (no word boundary, four digits: bridge_down).
+_IBKR_ERROR_CODE = re.compile(r"\berror\s*(?:code)?\s*[:#=]?\s*[1-4]\d\d\b")
+
+
 def from_error(error: str) -> dict[str, Any]:
     e = str(error or "")
     low = e.lower()
@@ -74,10 +80,12 @@ def from_error(error: str) -> dict[str, Any]:
         return failure("schema", e)
     if "llm-sourced" in low:
         return failure("policy", e)
+    # IBKR's own rejection first: its text can mention a halt ("Error 201 ... trading halted")
+    # without the kill switch having anything to do with it.
+    if "tws rejected" in low or "didn't acknowledge" in low or "read-only mode" in low or _IBKR_ERROR_CODE.search(low):
+        return failure("rejected_by_ibkr", e)
     if "kill switch" in low or "halted" in low:
         return failure("kill_switch", e)
-    if "tws rejected" in low or "didn't acknowledge" in low or "error 321" in low or "read-only mode" in low:
-        return failure("rejected_by_ibkr", e)
     if ("endpoint locked" in low or "not connected" in low or "connectionrefused" in low or "connectionerror" in low
             or "timeouterror" in low or "winerror 1225" in low or "connect call failed" in low):
         return failure("bridge_down", e)

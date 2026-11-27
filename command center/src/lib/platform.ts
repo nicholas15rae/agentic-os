@@ -908,6 +908,8 @@ export interface AllmSyncReport {
   parked?: string[];
   /** Needed entries Tony marks read-only: readOnly true and never auto-started (AnythingLLM can't enforce it). */
   readOnly?: string[];
+  /** Entries this sync had parked / made read-only (marked) that are needed again: auto-start back on. */
+  unparked?: string[];
 }
 
 /** `librarian_preflight` (mcp.rs `LibrarianGuard`). */

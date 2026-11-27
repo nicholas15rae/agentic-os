@@ -1,9 +1,9 @@
 [
   {
-    "desc": "frozen Booking Desk (Section 20.1): no names left, so 'tell my booking agent…' is Tony's own WhatsApp read",
+    "desc": "frozen Booking Desk (Section 20.1): addressed by name it is Named (the switchboard holds it with Tony's FROZEN note)",
     "text": "hey tony, tell my booking agent to check my last five whatsapp messages",
-    "role": "general",
-    "kind": "Self",
+    "role": "booking",
+    "kind": "Named",
     "taskContains": "check",
     "direct": "whatsapp"
   },
@@ -21,10 +21,10 @@
     "kind": "Named"
   },
   {
-    "desc": "frozen Booking Desk: no names; the calendar is Tony's topic (and his live calendar read)",
+    "desc": "frozen Booking Desk: the vocative address is Named; the switchboard keeps it with Tony",
     "text": "booking desk, please check my calendar for tomorrow",
-    "role": "general",
-    "kind": "Self",
+    "role": "booking",
+    "kind": "Named",
     "taskContains": "check",
     "direct": "calendar"
   },
@@ -35,10 +35,10 @@
     "kind": "Named"
   },
   {
-    "desc": "frozen Booking Desk: a bare 'booking agent' mention routes nowhere",
+    "desc": "frozen Booking Desk: a bare name mention is still Named (held with Tony + note)",
     "text": "my booking agent hasn't replied yet",
-    "role": null,
-    "kind": "Default"
+    "role": "booking",
+    "kind": "Named"
   },
   {
     "desc": "a bare name mention beats a domain trigger (finance name; the invoice is Finance's anyway)",
@@ -291,10 +291,10 @@
     "direct": "spotify"
   },
   {
-    "desc": "frozen Booking Desk: no name to delegate to; Tony's live WhatsApp read",
+    "desc": "frozen Booking Desk: an explicit delegation still names it (the caller keeps Named; the switchboard holds it)",
     "text": "ask the booking desk for any whatsapp updates",
-    "role": null,
-    "kind": "Default",
+    "role": "booking",
+    "kind": "Named",
     "direct": "whatsapp"
   },
   {
@@ -420,17 +420,17 @@
     "kind": "Domain"
   },
   {
-    "desc": "frozen Booking Desk: the old delegation stays with Tony (availability is his topic)",
+    "desc": "frozen Booking Desk: named through Tony is Named; the switchboard keeps it with Tony",
     "text": "hey tony, ask the booking desk to check my availability",
-    "role": "general",
-    "kind": "Self",
+    "role": "booking",
+    "kind": "Named",
     "taskContains": "check my availability"
   },
   {
-    "desc": "frozen Booking Desk: a mention next to Tony's name is Tony's",
+    "desc": "frozen Booking Desk: a name mention next to Tony's name is Named, not his topic",
     "text": "tony, my booking agent hasn't replied about the wardrobe",
-    "role": "general",
-    "kind": "Self"
+    "role": "booking",
+    "kind": "Named"
   },
   {
     "desc": "regression: a self name used as a noun ('the orchestrator react code') is a mention, not an address — the coder topic wins",
@@ -609,10 +609,10 @@
     "direct": "gmail"
   },
   {
-    "desc": "A2: the frozen Booking Desk has no name; the mail read is Tony's live tool",
+    "desc": "A2: the frozen desk addressed at the start of a mail read is Named (held with Tony)",
     "text": "booking desk, any new emails about the shoot?",
-    "role": null,
-    "kind": "Default",
+    "role": "booking",
+    "kind": "Named",
     "direct": "gmail"
   },
   {
@@ -624,10 +624,10 @@
     "direct": "gmail"
   },
   {
-    "desc": "frozen Booking Desk: a mention routes nowhere",
+    "desc": "frozen Booking Desk: a mention outside a mail read names the desk",
     "text": "what did the booking desk say about the shoot",
-    "role": null,
-    "kind": "Default"
+    "role": "booking",
+    "kind": "Named"
   },
   {
     "desc": "A2: a calendar read is Tony's own topic and live tool",
@@ -686,15 +686,27 @@
     "kind": "Self"
   },
   {
-    "desc": "Section 20.1: the frozen Librarian's name never fires (falls through: nothing else matched)",
+    "desc": "Section 20.1: the frozen Librarian addressed by name is Named (held with Tony + note)",
     "text": "ask the librarian to search vault for my notes",
-    "role": null,
-    "kind": "Default"
+    "role": "librarian",
+    "kind": "Named"
   },
   {
-    "desc": "Section 20.1: the frozen Librarian's name never fires; the live coder topic wins",
+    "desc": "Section 20.1: the frozen Librarian addressed by name is Named, before any live topic",
     "text": "librarian, find document about the rust repo",
+    "role": "librarian",
+    "kind": "Named"
+  },
+  {
+    "desc": "Section 20.1: a frozen Librarian TOPIC never fires; the live coder topic wins",
+    "text": "find document about the rust repo",
     "role": "coder",
     "kind": "Domain"
+  },
+  {
+    "desc": "Section 20.1: a frozen Librarian topic alone falls through to nothing",
+    "text": "find document about the lease",
+    "role": null,
+    "kind": "Default"
   }
 ]

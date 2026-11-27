@@ -248,11 +248,9 @@ fn name_pairs(cfg: &OsConfig) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (key, t) in &cfg.routing.agents {
         let role = if is_self_role(key, &cfg.os_name) { "general".to_string() } else { key.clone() };
-        // A frozen agent's names never fire (Section 20.1): the line falls through to the next
-        // live match, or Tony.
-        if frozen_role(cfg, &role) {
-            continue;
-        }
+        // A frozen agent's NAMES still fire (kind Named): addressing it resolves to it, and the
+        // switchboard (`agents::switchboard_hold` / `switchboard_note`) keeps the turn with Tony
+        // and adds the FROZEN note. Only its TOPICS are skipped (step (c) in `resolve`).
         for n in &t.names {
             let norm = normalize(n);
             if !norm.is_empty() {
@@ -269,8 +267,9 @@ fn name_pairs(cfg: &OsConfig) -> Vec<(String, String)> {
     out
 }
 
-/// `role` is frozen on the master switchboard (`switchboard.frozenAgents`): the router never
-/// picks it. Tony (`general`) is never frozen. Mirrors `isFrozenRole` in router.ts.
+/// `role` is frozen on the master switchboard (`switchboard.frozenAgents`): its topics never
+/// route (a NAME still does, so the switchboard can hold it with a note). Tony (`general`) is
+/// never frozen. Mirrors `isFrozenRole` in router.ts.
 pub fn frozen_role(cfg: &OsConfig, role: &str) -> bool {
     role != "general" && cfg.switchboard.frozen_agents.iter().any(|f| f.trim().eq_ignore_ascii_case(role))
 }
@@ -709,36 +708,47 @@ mod tests {
         assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
     }
 
-    /// Section 20.1: a frozen agent's triggers never fire; the line falls through to the next
-    /// live match, or Tony. The Booking Desk has no triggers left at all.
+    /// Section 20.1: a frozen agent's TOPICS never fire (the line falls through to the next live
+    /// match, or Tony), but addressing it BY NAME still resolves to it (kind Named), so the
+    /// switchboard holds the turn with Tony and adds the FROZEN note (agents.rs).
     #[test]
-    fn a_frozen_agent_is_never_picked() {
+    fn a_frozen_agent_is_named_but_its_topics_never_fire() {
         let cfg = OsConfig::default();
         assert!(frozen_role(&cfg, "librarian") && frozen_role(&cfg, "booking") && !frozen_role(&cfg, "general") && !frozen_role(&cfg, "coder"));
-        // The Librarian's name and topics (frozen by default) don't route.
-        for text in ["ask the librarian to search vault for the contract", "librarian, find document about the lease", "search vault for my notes"] {
-            assert_ne!(resolve(text, &cfg).role.as_deref(), Some("librarian"), "{text}");
-        }
-        // …a live agent's topic in the same line still wins.
-        let r = resolve("librarian, find document about the rust repo", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Domain));
-        // Booking: no names, no topics; the old phrases are Tony's or the Director's.
-        for text in ["ask the booking desk to check my availability", "booking desk, any casting calls", "draft email to agent about the audition"] {
+        // Addressed by name: Named, the frozen role itself.
+        for (text, role) in [
+            ("ask the librarian to search vault for the contract", "librarian"),
+            ("librarian, find document about the lease", "librarian"),
+            ("ask the booking desk to check my availability", "booking"),
+            ("booking desk, any casting calls", "booking"),
+            ("tony, my booking agent hasn't replied about the wardrobe", "booking"),
+            ("send it to b&co", "booking"),
+        ] {
             let r = resolve(text, &cfg);
-            assert_ne!(r.role.as_deref(), Some("booking"), "{text}");
+            assert_eq!((r.role.as_deref(), r.kind), (Some(role), RouteKind::Named), "{text}");
         }
-        // Thawed, the Librarian routes again (and a thawed Booking still has nothing to match).
+        // A frozen agent's topic falls through: Librarian topics alone route nowhere, Booking's
+        // old topics are Tony's own now.
+        let r = resolve("find document about the lease", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default), "{r:?}");
+        for text in ["draft email to agent about the audition", "check my casting call availability"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
+        }
+        // …and a live agent's topic in the same line still wins over a frozen agent's topic.
+        let r = resolve("find document about the rust repo", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Domain));
+        // Thawed, the Librarian's topics route again.
         let mut thawed = OsConfig::default();
         thawed.switchboard.frozen_agents.clear();
-        assert_eq!(resolve("ask the librarian to search vault for the contract", &thawed).role.as_deref(), Some("librarian"));
-        assert_ne!(resolve("ask the booking desk to check my availability", &thawed).role.as_deref(), Some("booking"));
-        // Freezing a live agent: its address falls back to Tony, its topic to the next agent.
+        assert_eq!(resolve("find document about the lease", &thawed).role.as_deref(), Some("librarian"));
+        // Freezing a live agent: its address still names it; its topic goes to the next agent.
         let mut cold = OsConfig::default();
         cold.switchboard.frozen_agents.push("Coder".into());
         let r = resolve("ask the coder to fix bug in the layout", &cold);
-        assert_eq!(r.role.as_deref(), Some("designer"), "{r:?}");
-        let r = resolve("coder, write code", &cold);
-        assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default));
+        assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("coder"), RouteKind::Named, "high"), "{r:?}");
+        let r = resolve("fix bug in the layout", &cold);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("designer"), RouteKind::Domain), "{r:?}");
     }
 
     /// Regression: the override fired for a self name ANYWHERE in the line, so the common nouns in
@@ -1006,7 +1016,7 @@ mod tests {
             assert_ne!(r.kind, RouteKind::Named, "{text}: {r:?}");
             assert!(matches!(direct_tool(text), Some("gmail" | "calendar")), "{text}");
         }
-        // Addressing a live desk still hands a mail read over (the frozen Booking Desk has no names left).
+        // Addressing a desk still hands a mail read over (a frozen one is then held with Tony).
         for (text, conf) in [("director, any new emails about the shoot?", "medium"), ("tell the director to check my email for the callback", "high"), ("director check my inbox", "high"), ("hey director, any emails?", "medium")] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("director"), RouteKind::Named, conf), "{text}");
@@ -1014,8 +1024,11 @@ mod tests {
         // Not a mail read: a mention still names the agent, as before.
         let r = resolve("what did the director say", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Named));
-        // The Booking Desk is never named any more.
-        assert_ne!(resolve("what did the booking desk say", &cfg).role.as_deref(), Some("booking"));
+        // The frozen Booking Desk is still named (Named; the switchboard holds it with a note),
+        // also when it opens a mail read.
+        assert_eq!(resolve("what did the booking desk say", &cfg).kind, RouteKind::Named);
+        let r = resolve("booking desk, any new emails about the shoot?", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named));
     }
 
     #[test]

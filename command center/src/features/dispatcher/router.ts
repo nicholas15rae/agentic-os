@@ -61,9 +61,10 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   // `general` (Tony) has no name triggers: addressing him is `SELF_NAMES` → kind "Self".
   autoSwitch: true,
   agents: {
-    // Section 20.1: the frozen Booking Desk has no triggers at all; acting logistics are Tony's,
-    // recording / editing a self-tape the Director's.
-    booking: { names: [], domains: [] },
+    // Section 20.1: the frozen Booking Desk has no topics; acting logistics are Tony's, recording /
+    // editing a self-tape the Director's. Its own names stay, so addressing it is Named and the
+    // switchboard holds the turn with Tony's FROZEN note (mirrors os_core.rs `BOOKING_NAMES`).
+    booking: { names: ["booking desk", "booking agent", "B&Co"], domains: [] },
     prompter: {
       names: ["prompter", "prompt builder", "spec writer", "architect prompt"],
       domains: ["write a prompt", "build a prompt", "break it into phases", "master prompt", "prompt for claude"],
@@ -128,8 +129,8 @@ export function resetRouterFrozenAgents(): void {
   routerFrozen = DEFAULT_ROUTER_FROZEN;
 }
 
-/** `role` is frozen on the master switchboard: the router never picks it. Tony never is.
- * Mirrors `frozen_role` in routing.rs. */
+/** `role` is frozen on the master switchboard: its topics never route (a name still does, so the
+ * switchboard can hold it with a note). Tony never is. Mirrors `frozen_role` in routing.rs. */
 export function isFrozenRole(role: string, frozen: readonly string[] = routerFrozen): boolean {
   return role !== "general" && frozen.some((f) => f.trim().toLowerCase() === role.toLowerCase());
 }
@@ -236,12 +237,12 @@ const roleRank = (role: string): number => {
 
 /** Every (role, normalized name) pair; a self-alias role key counts as `general`, and the
  * built-in self names (+ the OS name) are added as `general`'s. */
-function namePairs(cfg: RoutingConfig, osName: string, frozen: readonly string[] = routerFrozen): [string, string][] {
+function namePairs(cfg: RoutingConfig, osName: string): [string, string][] {
   const out: [string, string][] = [];
   for (const [key, t] of Object.entries(cfg.agents)) {
     const role = isSelfRoleId(key, osName) ? "general" : key;
-    // A frozen agent's names never fire: the line falls through to the next live match, or Tony.
-    if (isFrozenRole(role, frozen)) continue;
+    // A frozen agent's NAMES still fire (kind Named): the switchboard holds the turn with Tony and
+    // adds the FROZEN note. Only its topics are skipped (step (c)).
     for (const n of t.names) {
       const norm = normalize(n);
       if (norm) out.push([role, norm]);
@@ -363,7 +364,7 @@ export interface ResolveOpts {
   /** Read the topic only: a self address no longer beats a Domain match (the agent a
    * brainstorm was about: tier.ts `offerTarget`, the voice controller's Tier-2 `agentKept`). */
   ignoreSelfAddress?: boolean;
-  /** The frozen agents to skip; default: the master switchboard's (`setRouterFrozenAgents`). */
+  /** The frozen agents whose TOPICS are skipped (names still resolve); default: the master switchboard's (`setRouterFrozenAgents`). */
   frozen?: readonly string[];
 }
 
@@ -409,7 +410,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   const norm = normalize(original);
   const toks = tokenize(norm);
   const frozen = opts.frozen ?? routerFrozen;
-  const all = namePairs(cfg, osName, frozen);
+  const all = namePairs(cfg, osName);
   const names = all.filter(([r]) => r !== "general");
   const selfNames = all.filter(([r]) => r === "general");
   let selfHit = false;

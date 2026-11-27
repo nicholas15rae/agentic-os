@@ -87,6 +87,40 @@ class ModelLibraryTests(unittest.TestCase):
         self.assertEqual(r["count"], 4)
         self.assertTrue(all(x["exists"] for x in r["roots"] if x["path"] in (str(models), str(lms), str(hf))))
 
+    def test_one_unreadable_root_is_skipped_with_a_note(self):
+        from unittest import mock
+        good, bad, lms, hf = self.root / "good", self.root / "bad", self.root / "lms", self.root / "hf"
+        write(good / "Qwen-GGUF" / "qwen.Q4_K_M.gguf", 6_000_000)
+        write(bad / "Other" / "other.gguf", 6_000_000)
+        lms.mkdir()
+        hf.mkdir()
+        os.environ["CC_MODEL_DIRS"] = os.pathsep.join([str(bad), str(good)])
+        os.environ["CC_LMSTUDIO_DIRS"] = str(lms)
+        os.environ["CC_HF_CACHES"] = str(hf)
+        for k in ("CC_LMSTUDIO_DIR", "HF_HUB_CACHE", "HF_HOME"):
+            os.environ.pop(k, None)
+        real_iterdir = Path.iterdir
+
+        def iterdir(p):
+            if p == bad:
+                raise PermissionError(13, "Access is denied", str(p))
+            return real_iterdir(p)
+
+        with mock.patch.object(Path, "iterdir", iterdir):
+            r = os_api.scan_models()
+        rows = {m["name"]: m for g in r["groups"].values() for m in g}
+        self.assertIn("Qwen-GGUF", rows, "the readable root is still scanned")
+        self.assertNotIn("Other", rows)
+        self.assertEqual(r["count"], 1)
+        self.assertEqual([(e["root"], e["kind"]) for e in r["errors"]], [(str(bad), "models")])
+        self.assertIn("PermissionError", r["errors"][0]["error"])
+        bad_row = next(x for x in r["roots"] if x["path"] == str(bad))
+        self.assertIn("Access is denied", bad_row["error"])
+        self.assertNotIn("error", next(x for x in r["roots"] if x["path"] == str(good)))
+        # Through the endpoint function too.
+        with mock.patch.object(Path, "iterdir", iterdir):
+            self.assertEqual(os_api.local_scan()["count"], 1)
+
     def test_real_hermes_folder_is_incomplete_if_present(self):
         d = Path(r"D:\AI Models Productivity\Hermes-3-Llama-3.1-8B")
         if not d.is_dir():

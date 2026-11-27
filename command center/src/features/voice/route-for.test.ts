@@ -74,9 +74,10 @@ describe("greetings stay with Tony (regression)", () => {
     expect(rf("hey tony, check my self-tape availability", "auto", "text")).toMatchObject({ role: "general", kind: "Self" });
     expect(rf("render the reel", "auto", "voice")).toMatchObject({ role: "director", kind: "Domain" });
     expect(rf("hey tony, ask the director to edit video", "auto", "voice")).toMatchObject({ role: "director", kind: "Named" });
-    // Section 20.1: plain self-tape scheduling is Tony's own topic; the frozen Booking Desk is never Named.
+    // Section 20.1: plain self-tape scheduling is Tony's own topic; the frozen Booking Desk addressed
+    // by name is still Named (the switchboard holds it with Tony's FROZEN note).
     expect(rf("check my self-tape availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
-    expect(rf("hey tony, ask the booking desk to check my availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
+    expect(rf("hey tony, ask the booking desk to check my availability", "auto", "voice")).toMatchObject({ role: "booking", kind: "Named" });
   });
 });
 
@@ -279,8 +280,10 @@ describe("switchboard hold mirrored from Rust (frozenHold)", () => {
   });
 
   it("a globally frozen agent never runs, even asked directly", () => {
-    // The router never picks the frozen Booking Desk at all (Section 20.1).
-    expect(rf("hey tony, ask the booking desk to check my availability", "auto", "voice")).toMatchObject({ role: "general", kind: "Self" });
+    // Named, the frozen Booking Desk is routed to and then held (Section 20.1).
+    const booking = rf("hey tony, ask the booking desk to check my availability", "auto", "voice");
+    expect(booking).toMatchObject({ role: "booking", kind: "Named" });
+    expect(hold(booking, "brainstorm")).toMatchObject({ role: "general", kind: "Self", reason: "Booking Desk is frozen on the master switchboard" });
     expect(hold(rf("check my availability", "booking", "text"), "brainstorm", true)).toMatchObject({ role: "general", kind: "Self" });
     // A route that does reach a master-frozen agent (the webview's config lagging) is held.
     const dirFrozen = { frozenAgents: ["director"], frozenTools: [] };

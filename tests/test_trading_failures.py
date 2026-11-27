@@ -49,6 +49,12 @@ class ClassifyTests(unittest.TestCase):
             "schema: quantity must be > 0": "schema",
             "pretrade: max_shares": "risk_limit",
             "something odd": "other",
+            # IBKR's own rejection wins over its mention of a halt (not the kill switch).
+            "ExecutionRefused: TWS rejected the order: trading halted for this contract": "rejected_by_ibkr",
+            "Error 201, reqId 12: Order rejected - reason: the contract is halted": "rejected_by_ibkr",
+            "ibkr errorCode=110: price does not conform; symbol halted": "rejected_by_ibkr",
+            "error code 321: Error validating request": "rejected_by_ibkr",
+            "WinError 1225: connect call failed": "bridge_down",
         }
         for err, code in cases.items():
             self.assertEqual(failures.from_error(err)["code"], code, err)

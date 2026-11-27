@@ -262,6 +262,28 @@ class SecurityLayerTests(unittest.TestCase):
         self.assertTrue(sa.verify_chain()[0])
         self.assertIn("unknown_device", sa._TITLES)
 
+    def test_unknown_device_alert_follows_the_one_time_migration(self):
+        # Same rule as config.rs `migrate_value`: an explicit, unmigrated list also alerts on
+        # unknown_device; once Rust recorded the migration, the saved list is final.
+        self.assertIn("unknown_device", sa.alert_events({}))
+        self.assertIn("unknown_device", sa.alert_events({"alerts": {"events": ["hard_lock"]}}))
+        self.assertEqual(sa.alert_events({"alerts": {"events": ["hard_lock"]}, "migrations": [sa.MIGRATE_UNKNOWN_DEVICE_ALERT]}), ["hard_lock"])
+        self.assertEqual(sa.alert_events({"alerts": {"events": ["hard_lock", "unknown_device"]}}), ["hard_lock", "unknown_device"])
+        # Through maybe_alert and the real file: an old explicit list still raises the alert.
+        d = Path(tempfile.mkdtemp(prefix="cc-sec-alert-"))
+        try:
+            (d / "security.config.json").write_text(json.dumps({"alerts": {"enabled": True, "channels": [], "events": ["hard_lock"]}}), encoding="utf-8")
+            sa._LAST_ALERT.pop("unknown_device", None)
+            entry = {"event": "unknown_device", "severity": "warn", "deviceId": "gateway", "source": "gateway:1.2.3.4", "detail": {}}
+            t = sa.maybe_alert(entry, d)
+            self.assertIsNotNone(t)
+            t.join(5)
+            (d / "security.config.json").write_text(json.dumps({"migrations": [sa.MIGRATE_UNKNOWN_DEVICE_ALERT], "alerts": {"enabled": True, "channels": [], "events": ["hard_lock"]}}), encoding="utf-8")
+            sa._LAST_ALERT.pop("unknown_device", None)
+            self.assertIsNone(sa.maybe_alert(entry, d), "a deliberate removal after the migration sticks")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

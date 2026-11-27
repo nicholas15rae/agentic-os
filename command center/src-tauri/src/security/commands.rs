@@ -662,9 +662,11 @@ pub struct PairingQr {
     pub expires_at: f64,
 }
 
-/// Desktop: pair a phone with a QR code. Generates a NEW pairing key (exactly like
-/// `gabagool-cli pair-companion`, so a previously paired phone must pair again) and returns it as a
-/// one-time payload that expires after `PAIR_QR_TTL_S`. Needs a settings step-up.
+/// Desktop: pair a phone with a QR code. Generates a NEW pairing key, held as PENDING
+/// (`companion::pair_begin_qr`): it replaces the current pairing only when the phone first uses it
+/// (its first signed approval) within `PAIR_QR_TTL_S`, and is then bound to that phone; unused, it
+/// expires and the current pairing stays. `gabagool-cli pair-companion` still pairs directly.
+/// Needs a settings step-up.
 #[tauri::command]
 pub fn security_companion_pair_qr(app: AppHandle) -> Result<PairingQr, String> {
     if cfg!(any(target_os = "android", target_os = "ios")) {
@@ -673,8 +675,7 @@ pub fn security_companion_pair_qr(app: AppHandle) -> Result<PairingQr, String> {
     require_settings_step_up("pair a phone")?;
     let dir = super::dir();
     let was_paired = companion::pair_key(&dir).is_some();
-    let key = companion::pair_generate(&dir)?;
-    let expires_at = super::now() + companion::PAIR_QR_TTL_S;
+    let (key, expires_at) = companion::pair_begin_qr(super::now());
     let payload = companion::pair_payload(&key, expires_at, &super::device_id(&dir));
     audit::log("companion_pair_qr", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", json!({ "replaced": was_paired, "expiresAt": expires_at }));
     emit(&app);

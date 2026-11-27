@@ -1,0 +1,270 @@
+import { useEffect, useState } from "react";
+import { Copy, Dices, FileText, Loader2, Plus, SlidersHorizontal, Sparkles, Tag, TriangleAlert, X } from "lucide-react";
+import { useToasts } from "@/features/reminders/notify";
+import { fileSrc } from "./api";
+import type { GenMeta, MediaAsset } from "./contract";
+import { MAX_TAGS, TAG_MAX_CHARS, cleanTags, seekTo, setAssetTags } from "./director-store";
+import { genSettingsJson, timecode } from "./manifest";
+import { FLAG_LABEL, shotCount, transcriptFile, transcriptLines, type TranscriptLine } from "./review-ui";
+import { reroll, tweak, useComfy } from "./comfy-store";
+import { rerollBlocker } from "./comfy-ui";
+
+/** The one-line badges under an asset's name: flags as warnings, the shot count, the transcript size. Props only. */
+export function AssetBadges({ asset }: { asset: MediaAsset }) {
+  const shots = asset.kind === "video" ? shotCount(asset.scenes) : null;
+  return (
+    <>
+      {asset.flags.map((f) => (
+        <span key={f.kind} className="flex items-center gap-0.5 rounded-full border border-amber/40 px-1.5 fs-10 text-amber-soft" title={f.detail}>
+          <TriangleAlert size={9} /> {FLAG_LABEL[f.kind] ?? f.kind}
+        </span>
+      ))}
+      {shots && <span className="rounded-full border border-white/10 px-1.5 font-mono fs-10 text-ink-2">{shots}</span>}
+      {asset.transcript && (
+        <span className="flex items-center gap-0.5 rounded-full border border-white/10 px-1.5 font-mono fs-10 text-ink-2" title="Transcribed">
+          <FileText size={9} /> {asset.transcript.words}w
+        </span>
+      )}
+    </>
+  );
+}
+
+/** The bin chip for a generated asset (template + seed in the tooltip). Props only; nothing for filmed media. */
+export function GeneratedChip({ asset }: { asset: MediaAsset }) {
+  const g = asset.generation;
+  if (!g) return null;
+  return (
+    <span className="flex items-center gap-0.5 rounded-full border border-violet/40 px-1.5 fs-10 text-violet" title={`Generated · ${g.template || "template"} · seed ${g.seed}`}>
+      <Sparkles size={9} /> Generated
+    </span>
+  );
+}
+
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`);
+
+/** Provenance of a generated asset: template, seed, steps, prompt, render time, peak VRAM, a
+ * "Copy settings" button (clipboard JSON), and Re-roll / Tweak when their handlers are given. Props only. */
+export function GenerationBlock({
+  gen,
+  onCopy,
+  onReroll,
+  onTweak,
+  rerollBlocked,
+  rerollBusy = false,
+}: {
+  gen: GenMeta;
+  onCopy: (json: string) => void;
+  onReroll?: () => void; // same params, new seed -> enqueue (explicit click; toast "Queued: re-roll of <name>")
+  onTweak?: () => void; // prefill + open the Generate panel, scroll it into view
+  rerollBlocked?: string | null; // e.g. "The source still for this one isn't known any more"
+  rerollBusy?: boolean; // a comfy_enqueue is in flight: one click, one job
+}) {
+  const rows: [string, string][] = [
+    ["Template", gen.template || "—"],
+    ["Seed", String(gen.seed)],
+    ["Steps", `${gen.steps}${gen.cfg ? ` · cfg ${gen.cfg}` : ""}${gen.sampler ? ` · ${gen.sampler}` : ""}`],
+    ["Render", gen.renderMs ? fmtMs(gen.renderMs) : "—"],
+    ["Peak VRAM", gen.peakVramMb != null ? `${(gen.peakVramMb / 1024).toFixed(1)} GB` : "—"],
+  ];
+  return (
+    <div aria-label="Generation provenance">
+      <div className="flex items-center justify-between gap-2">
+        <p className="label-caps flex items-center gap-1 text-ink-3">
+          <Sparkles size={10} /> Generated
+        </p>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {onReroll && (
+            <button onClick={onReroll} disabled={!!rerollBlocked || rerollBusy} aria-busy={rerollBusy || undefined} className="flex items-center gap-1 fs-11 text-violet hover:underline disabled:opacity-40 disabled:hover:no-underline" title={rerollBlocked ?? "Same settings, new seed (queues a ComfyUI job)"}>
+              {rerollBusy ? <Loader2 size={10} className="animate-spin" /> : <Dices size={10} />} Re-roll
+            </button>
+          )}
+          {onTweak && (
+            <button onClick={onTweak} className="flex items-center gap-1 fs-11 text-teal-soft hover:underline" title="Open these settings in the Generate panel">
+              <SlidersHorizontal size={10} /> Tweak
+            </button>
+          )}
+          <button onClick={() => onCopy(genSettingsJson(gen))} className="flex items-center gap-1 fs-11 text-teal-soft hover:underline" title="Copy the generation settings as JSON">
+            <Copy size={10} /> Copy settings
+          </button>
+        </div>
+      </div>
+      {onReroll && rerollBlocked && <p className="mt-0.5 fs-10 text-ink-3">Re-roll: {rerollBlocked}</p>}
+      <dl className="mt-0.5 grid grid-cols-[auto_1fr] gap-x-2 fs-11">
+        {rows.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-ink-3">{k}</dt>
+            <dd className="min-w-0 truncate font-mono fs-10 leading-[16px] text-ink-2">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {gen.prompt && <p className="mt-0.5 line-clamp-3 fs-11 text-ink-2" title={gen.prompt}>“{gen.prompt}”</p>}
+    </div>
+  );
+}
+
+async function copySettings(json: string) {
+  try {
+    await navigator.clipboard.writeText(json);
+    useToasts.getState().push({ title: "Settings copied", body: "Generation settings are on the clipboard as JSON.", tone: "info" });
+  } catch (e) {
+    useToasts.getState().push({ title: "Couldn't copy the settings", body: e instanceof Error ? e.message : String(e), tone: "error" });
+  }
+}
+
+/** Tags as removable chips plus an add field (media_asset_update). Props only. */
+export function TagEditor({ tags, onChange }: { tags: string[]; onChange: (tags: string[]) => void }) {
+  const [text, setText] = useState("");
+  const add = () => {
+    const next = cleanTags([...tags, ...text.split(",")]);
+    setText("");
+    if (next.join() !== tags.join()) onChange(next);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1" aria-label="Tags">
+      <Tag size={11} className="text-ink-3" />
+      {tags.map((t) => (
+        <span key={t} className="flex h-6 items-center gap-0.5 rounded-full border border-teal/30 pl-2 pr-0.5 fs-11 text-teal-soft">
+          {t}
+          <button onClick={() => onChange(tags.filter((x) => x !== t))} className="grid size-5 place-items-center rounded-full hover:bg-white/10" aria-label={`Remove tag ${t}`}>
+            <X size={9} />
+          </button>
+        </span>
+      ))}
+      {tags.length < MAX_TAGS && (
+        <form
+          className="flex items-center"
+          onSubmit={(e) => {
+            e.preventDefault();
+            add();
+          }}
+        >
+          <input value={text} onChange={(e) => setText(e.target.value)} maxLength={TAG_MAX_CHARS * 3} placeholder="add tag" className="h-6 w-20 rounded-full border border-white/10 bg-transparent px-2 fs-11 text-ink outline-none placeholder:text-ink-3 focus:border-teal/50" aria-label="New tag" />
+          <button type="submit" disabled={!text.trim()} className="ml-0.5 grid size-6 place-items-center rounded-full border border-white/10 text-ink-2 disabled:opacity-40" aria-label="Add tag">
+            <Plus size={10} />
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/** Reads the transcript JSON through the asset protocol; shows the summary only when it can't. */
+function TranscriptLines({ path, assetId }: { path: string; assetId: string }) {
+  const [lines, setLines] = useState<TranscriptLine[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const url = fileSrc(path);
+    if (!url) {
+      setError("Transcripts open in the desktop app only.");
+      return;
+    }
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: unknown) => alive && setLines(transcriptLines(j)))
+      .catch((e: unknown) => alive && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      alive = false;
+    };
+  }, [path]);
+  if (error) return <p className="fs-11 text-ink-3">Couldn't read the transcript file ({error}).</p>;
+  if (!lines) return <Loader2 size={12} className="animate-spin text-ink-3" />;
+  if (!lines.length) return <p className="fs-11 text-ink-3">No speech in the transcript.</p>;
+  return (
+    <ol className="max-h-48 space-y-0.5 overflow-y-auto pr-1">
+      {lines.map((l, i) => (
+        <li key={i} className="flex gap-1.5 fs-11">
+          <button onClick={() => seekTo({ kind: "asset", id: assetId }, l.start)} className="shrink-0 font-mono fs-10 text-teal-soft hover:underline" title="Play from here">
+            {timecode(l.start)}
+          </button>
+          <span className="min-w-0 flex-1 text-ink-2">{l.text}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** The expanded asset: tags, transcript, moments and scene cuts. */
+export function AssetDetails({ asset, projectRoot }: { asset: MediaAsset; projectRoot: string | null }) {
+  const [showText, setShowText] = useState(false);
+  const t = asset.transcript;
+  const file = transcriptFile(asset, projectRoot);
+  const cuts = asset.scenes ?? [];
+  const genJobId = asset.generation?.comfyJobId;
+  const genJob = useComfy((s) => (genJobId ? s.jobs.find((j) => j.id === genJobId) : undefined));
+  const enqueueBusy = useComfy((s) => s.busy.enqueue);
+  return (
+    <div className="mt-1.5 space-y-2 r-10 bg-white/[0.02] p-2">
+      <TagEditor tags={asset.tags} onChange={(tags) => void setAssetTags(asset.id, tags)} />
+      {asset.generation && (
+        <GenerationBlock gen={asset.generation} onCopy={(json) => void copySettings(json)} onReroll={() => void reroll(asset)} onTweak={() => tweak(asset)} rerollBlocked={rerollBlocker(asset.generation, genJob)} rerollBusy={enqueueBusy} />
+      )}
+      {t ? (
+        <div>
+          <p className="fs-11 text-ink-2">
+            Transcript · {t.lang} · {t.words} words
+            {t.firstSpeechSec != null && t.lastSpeechSec != null ? ` · speech ${timecode(t.firstSpeechSec)}–${timecode(t.lastSpeechSec)}` : ""}
+          </p>
+          {file && (
+            <button onClick={() => setShowText((v) => !v)} className="mt-0.5 fs-11 text-teal-soft hover:underline" aria-expanded={showText}>
+              {showText ? "Hide transcript" : "View transcript"}
+            </button>
+          )}
+          {showText && file && (
+            <div className="mt-1">
+              <TranscriptLines path={file} assetId={asset.id} />
+            </div>
+          )}
+        </div>
+      ) : (
+        asset.kind !== "image" && <p className="fs-11 text-ink-3">Not transcribed yet.</p>
+      )}
+      {asset.moments.length > 0 && (
+        <div>
+          <p className="label-caps text-ink-3">Moments</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {asset.moments.map((m) => (
+              <li key={m.id}>
+                <button onClick={() => seekTo({ kind: "asset", id: asset.id }, m.inSec)} className="flex w-full items-center gap-1.5 text-left fs-11 hover:text-ink" title="Play this moment">
+                  <span className="shrink-0 font-mono fs-10 text-teal-soft">
+                    {timecode(m.inSec)}–{timecode(m.outSec)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-ink-2">{m.label}</span>
+                  <span className="shrink-0 font-mono fs-10 text-ink-3">
+                    {Math.round(m.score * 100)}% · {m.by === "nic" ? "you" : "Director"}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {asset.kind === "video" && asset.scenes != null && (
+        <p className="fs-11 text-ink-2">
+          {shotCount(asset.scenes)}
+          {cuts.length > 0 && (
+            <>
+              {" · cuts at "}
+              {cuts.slice(0, 8).map((c, i) => (
+                <button key={c} onClick={() => seekTo({ kind: "asset", id: asset.id }, c)} className="font-mono fs-10 text-teal-soft hover:underline">
+                  {i ? ", " : ""}
+                  {timecode(c)}
+                </button>
+              ))}
+              {cuts.length > 8 ? ` +${cuts.length - 8}` : ""}
+            </>
+          )}
+        </p>
+      )}
+      {asset.flags.length > 0 && (
+        <ul className="space-y-0.5">
+          {asset.flags.map((f) => (
+            <li key={f.kind} className="flex items-start gap-1 fs-11 text-amber-soft">
+              <TriangleAlert size={10} className="mt-0.5 shrink-0" /> {FLAG_LABEL[f.kind] ?? f.kind}: {f.detail}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}

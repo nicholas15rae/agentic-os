@@ -86,7 +86,7 @@ pub struct AnythingLlmConfig {
 }
 impl Default for AnythingLlmConfig {
     fn default() -> Self {
-        let ws = [("librarian", "librarian"), ("coder", "coder"), ("booking", "booking"), ("ops", "ops"), ("general", "my-workspace"), ("prompter", "prompter-dispatcher"), ("designer", "designer"), ("director", "director"), ("finance", "finance")];
+        let ws = [("librarian", "librarian"), ("coder", "coder"), ("booking", "booking"), ("general", "my-workspace"), ("prompter", "prompter-dispatcher"), ("designer", "designer"), ("director", "director"), ("finance", "finance")];
         Self {
             base_url: "http://127.0.0.1:3001".into(),
             workspaces: ws.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
@@ -141,12 +141,11 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "librarian".to_string(),
         trig(&["librarian", "memory", "vault", "researcher"], &["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"]),
     );
-    // Section 20.2, one owner per topic. Ops = infrastructure (Ops is a frozen placeholder, so
-    // contracting work — masonry, job sites, subcontractors, job quotes / estimates, the future
-    // Job Desk — is Tony's until a Job Desk exists; `OPS_PHRASES_TO_TONY`); Biz Ops = BF
-    // Supplements / the Born Fortuna store / Instagram / e-commerce; money is Finance's; the
-    // calendar, schedule and reminders are Tony's.
-    m.insert("ops".to_string(), trig(&["ops", "infra", "infrastructure"], OPS_DOMAINS));
+    // Section 20.2, one owner per topic. Contracting work (masonry, job sites, subcontractors, job
+    // quotes / estimates, the future Job Desk) is Tony's until a Job Desk exists
+    // (`CONTRACTING_TO_TONY`), and so is infrastructure (droplet, Docker, n8n: his LIVE
+    // DASHBOARD); Biz Ops = BF Supplements / the Born Fortuna store / Instagram / e-commerce; money
+    // is Finance's; the calendar, schedule and reminders are Tony's.
     m.insert("bizops".to_string(), trig(&["bizops", "operations manager", "ops manager", "business manager", "operations", "business"], BIZOPS_DOMAINS));
     m.insert("finance".to_string(), trig(&["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"], FINANCE_DOMAINS));
     // Tony has no name triggers: addressing him ("thanks tony", "ask the dispatcher…") is
@@ -163,19 +162,16 @@ const DIRECTOR_DOMAINS: &[&str] = &[
     "edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll",
     "record a self-tape", "record my self-tape", "film a self-tape", "film my self-tape", "self-tape recording", "edit my self-tape", "edit the self-tape",
 ];
-/// Ops: infra only (Section 20.2). Contracting is Tony's while Ops is frozen (`OPS_PHRASES_TO_TONY`).
-const OPS_DOMAINS: &[&str] = &["droplet", "docker", "n8n", "server status"];
-/// Contracting phrases (the future Job Desk). Section 20.2 gave them to Ops, but Ops is a frozen
-/// placeholder (Section 3), so they are Tony's topics until a Job Desk agent exists.
-const OPS_PHRASES_TO_TONY: &[&str] = &["job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates"];
+/// Contracting phrases (the future Job Desk): Tony's topics until a Job Desk agent exists.
+const CONTRACTING_TO_TONY: &[&str] = &["job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates"];
 /// Biz Ops: the store and the brand (Section 20.2).
 const BIZOPS_DOMAINS: &[&str] = &["inventory", "fulfillment", "open orders", "bf supplements", "supplements", "born fortuna", "instagram", "ecommerce", "online store"];
 /// Finance: money (Section 20.2; commissions are acting money).
 const FINANCE_DOMAINS: &[&str] = &["ledger", "expenses", "receipt", "receipts", "invoice", "invoices", "cheque", "cheques", "money", "hst", "commission", "commissions", "cash flow", "profit", "p&l", "my books"];
-/// Tony: his calendar / schedule / reminders and, for now, acting (auditions, bookings, the agency)
-/// and contracting (while Ops is frozen).
+/// Tony: his calendar / schedule / reminders, infrastructure (he reads it on the LIVE DASHBOARD)
+/// and, for now, acting (auditions, bookings, the agency) and contracting (no Job Desk yet).
 const GENERAL_DOMAINS: &[&str] = &[
-    "system status", "switch model", "calendar", "schedule", "reminder", "reminders", "remind me",
+    "system status", "switch model", "droplet", "docker", "n8n", "server status", "calendar", "schedule", "reminder", "reminders", "remind me",
     "audition", "auditions", "casting", "casting call", "casting email", "casting emails", "self-tape", "self tape", "callback", "wardrobe", "availability",
     "bookings", "talent agent", "my agent", "agency", "imperious", "draft email to agent",
     "job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates",
@@ -185,11 +181,10 @@ const GENERAL_DOMAINS: &[&str] = &[
 /// exactly these (anything else the user added stays). Booking's whole row is cleared separately.
 const ROUTING_MOVED_OFF: &[(&str, &str)] = &[
     ("bizops", "invoice"), ("bizops", "quote"), ("bizops", "job site"), ("bizops", "subcontractor"), ("bizops", "contracting"), ("bizops", "masonry"),
-    ("ops", "schedule"), ("ops", "calendar"),
 ];
 /// …and the (new owner, phrase) pairs added once, names marked `n:`.
 const ROUTING_ADDED: &[(&str, &str)] = &[
-    // Contracting goes to Tony, not the frozen Ops (`OPS_PHRASES_TO_TONY`).
+    // Contracting goes to Tony (`CONTRACTING_TO_TONY`).
     ("general", "job desk"), ("general", "contracting"), ("general", "masonry"), ("general", "job site"), ("general", "job sites"), ("general", "subcontractor"), ("general", "subcontractors"), ("general", "quote"), ("general", "quotes"), ("general", "estimate"), ("general", "estimates"),
     ("bizops", "born fortuna"), ("bizops", "instagram"), ("bizops", "online store"),
     ("finance", "invoice"), ("finance", "invoices"), ("finance", "cheque"), ("finance", "cheques"), ("finance", "money"), ("finance", "hst"), ("finance", "commission"), ("finance", "commissions"),
@@ -244,7 +239,7 @@ impl Default for RoutingConfig {
 #[serde(rename_all = "camelCase", default)]
 pub struct SkillsConfig {
     pub dir: String,
-    /// Skill name → agents it is attached to ("tony", "booking", "coder", "librarian", "ops", "claude").
+    /// Skill name → agents it is attached to ("tony", "booking", "coder", "librarian", "bizops", "claude").
     pub grants: BTreeMap<String, Vec<String>>,
 }
 impl Default for SkillsConfig {
@@ -376,9 +371,9 @@ pub fn agent_matches(list: &[String], agent: &str) -> bool {
 
 /// The default per-agent MCP grants, by server id: the user's tool-ownership split (switchboard
 /// spec). Tony (`general`) respects these like every other agent: gmail (reads + the draft card),
-/// WhatsApp (read-only server), Brave, weather, time, Spotify and the knowledge graph are his.
+/// WhatsApp (read-only server), Brave, weather, time, Spotify, maps and the knowledge graph are his.
 /// Coder: filesystem, git, fetch. Designer: filesystem. Director: Shotcut, Media Forge,
-/// filesystem (never Tony). Biz Ops: Instagram. Ops: maps. Librarian: knowledge graph,
+/// filesystem (never Tony). Biz Ops: Instagram. Librarian: knowledge graph,
 /// filesystem. Prompter: fetch, filesystem, knowledge graph (reads; it is a read-only role).
 /// Finance / a trader: none yet. Booking is frozen on the master switchboard but keeps the
 /// servers it had, so it comes back exactly as it was if Nic ever thaws it. Any id not named
@@ -393,13 +388,18 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         // Finance (read-only `finance.ask`, Section 11.10): Tony's alone. The finance role may
         // also read it if Nic grants it; `mcp::finance_reader_refusal` refuses everyone else.
         "finance" => &["general"],
+        // Vault search (read-only `vault.search`, Section 16.6): Tony's alone;
+        // `mcp::vault_reader_refusal` refuses every other agent whatever the grants say.
+        "vault" => &["general"],
+        // Infrastructure status (read-only `system.status`): Tony's, since the Ops agent is gone.
+        "system" => &["general"],
         "knowledge-graph" => &["general", "librarian", "prompter"],
         "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
         "fetch" => &["coder", "prompter"],
-        // One owner per integration (Section 21.1): Maps is Tony's and the Ops (Job Desk)
-        // agent's; Instagram is Biz Ops' (Tony only reads it, as a mode extra: `TONY_READ_ONLY_SERVERS`).
-        "maps" => &["general", "ops"],
+        // One owner per integration (Section 21.1): Maps is Tony's; Instagram is Biz Ops' (Tony
+        // only reads it, as a mode extra: `TONY_READ_ONLY_SERVERS`).
+        "maps" => &["general"],
         "instagram" => &["bizops"],
         // Local media servers: only the Director edits and renders through them.
         "shotcut" | "media-forge" => &["director"],
@@ -429,7 +429,7 @@ pub fn live_workspace(cfg: &OsConfig, role: &str) -> Option<String> {
 
 /// Section 21.1, once: one owner per integration. WhatsApp → Tony only; Shotcut / Media Forge →
 /// the Director only (and out of every Tony mode extra); Instagram → Biz Ops (Tony keeps his
-/// read-only Operations extra); Maps → Tony + Ops. Every other server only loses the Booking Desk
+/// read-only Operations extra); Maps → Tony. Every other server only loses the Booking Desk
 /// (frozen), as `strip_booking_tools` already does. `enabled` / `read_only` are never touched.
 pub(crate) fn apply_integration_owners(cfg: &mut OsConfig) {
     for m in cfg.mcps.iter_mut() {
@@ -437,7 +437,7 @@ pub(crate) fn apply_integration_owners(cfg: &mut OsConfig) {
             "whatsapp" => Some(&["general"]),
             "shotcut" | "media-forge" => Some(&["director"]),
             "instagram" => Some(&["bizops"]),
-            "maps" => Some(&["general", "ops"]),
+            "maps" => Some(&["general"]),
             _ => None,
         };
         if let Some(o) = owners {
@@ -483,12 +483,9 @@ pub struct SwitchboardConfig {
 /// Librarian, which runs only as its scheduled script (internal / scheduled Librarian calls are
 /// not switchboard turns and stay ungated).
 pub const DEFAULT_FROZEN_AGENTS: [&str; 2] = ["booking", "librarian"];
-/// Section pass: Ops is an unused placeholder (no schedule, never dispatched, only a Maps tool),
-/// so it starts frozen too until Nic gives it a job. Thaw it on the master switchboard.
-pub const FROZEN_PLACEHOLDER_AGENTS: [&str; 1] = ["ops"];
 
 fn default_frozen_agents() -> Vec<String> {
-    DEFAULT_FROZEN_AGENTS.iter().chain(FROZEN_PLACEHOLDER_AGENTS.iter()).map(|s| s.to_string()).collect()
+    DEFAULT_FROZEN_AGENTS.iter().map(|s| s.to_string()).collect()
 }
 
 impl Default for SwitchboardConfig {
@@ -536,6 +533,8 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("instagram", "Instagram", true, "Your Instagram Professional account: profile stats, recent posts and insights, comments. Replies and publishing only after the confirmation card (needs INSTAGRAM_ACCESS_TOKEN)."),
         builtin("calendar", "Google Calendar", true, "Your upcoming events through the Google Apps Script deployment AnythingLLM's Calendar agent uses (imported on first use). Adding an event only after the confirmation card; never invites."),
         builtin("finance", "Finance (read-only)", true, "Tony answers money questions from the Finance records on the local gateway: what you owe an agent, income and expenses by area, pending money, unpaid invoices, HST dates. Read-only summaries, never raw rows; changes stay on the Finance screens."),
+        builtin("vault", "Vault search (read-only)", true, "Tony searches your saved brainstorms, scripts & auditions, jobs, documents and ideas on the local gateway (\"find the note about…\"). A few short quoted matches, never finance records; nothing is changed."),
+        builtin("system", "System status (read-only)", true, "Tony checks whether the droplet (over NetBird), the gateway, Bionic, speech-to-text, Kokoro, Docker and n8n are up, with latency. Short read-only probes; never starts, stops or changes anything."),
         McpServer {
             id: "whatsapp".into(),
             name: "WhatsApp Bridge".into(),
@@ -1120,10 +1119,14 @@ pub struct GmailConfig {
     /// The booking-mail check's instruction file (line 1 `query: …`, line 2 `read: N`, then Nic's
     /// rules), re-read on every scan; missing = the built-in default query.
     pub booking_instructions_path: String,
+    /// Settings → Comms: which inbox every Gmail read / search covers. "primary" (the default:
+    /// `category:primary in:inbox`, no Promotions / Social / Updates / Forums unless Nic names one)
+    /// or "all". Any other value reads as "primary" (`gmail::scoped_query`).
+    pub inbox_scope: String,
 }
 impl Default for GmailConfig {
     fn default() -> Self {
-        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into() }
+        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into(), inbox_scope: super::gmail::SCOPE_PRIMARY.into() }
     }
 }
 
@@ -1149,8 +1152,6 @@ const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
 /// Section pass: the frozen Booking Desk loses every tool pill and skill, and its "messages" /
 /// "texts" routing phrases (Tony reads Gmail and WhatsApp himself).
 const MIGRATE_BOOKING_NO_TOOLS: &str = "booking-no-tools";
-/// Section pass: freeze the Ops placeholder once on an existing install (a later thaw sticks).
-const MIGRATE_FREEZE_OPS: &str = "freeze-ops";
 /// Section pass: the build chain drops the Librarian (no audit stage) and gets two revision
 /// rounds; a saved 3 (the old default) becomes 2, any other choice is kept.
 const MIGRATE_BUILD_CHAIN: &str = "build-chain-no-librarian";
@@ -1158,11 +1159,11 @@ const MIGRATE_BUILD_CHAIN: &str = "build-chain-no-librarian";
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
 pub(crate) const MIGRATE_VAULT_CADENCE: &str = "vault-cadence";
-/// Migration id: business / finance triggers left `ops` (infra) for `bizops` and `finance`.
+/// Migration id: business / finance triggers got their own `bizops` and `finance` rows.
 pub(crate) const MIGRATE_BIZOPS_SPLIT: &str = "bizops-split";
 /// Migration id: local-only compute, cloud routing on Ask, no Overseer auto-escalation.
 pub(crate) const MIGRATE_LOCAL_SAFE_DEFAULTS: &str = "local-safe-defaults";
-/// Migration id: Booking lost every trigger; contracting → ops, money → finance, the store →
+/// Migration id: Booking lost every trigger; contracting → Tony, money → finance, the store →
 /// bizops, calendar / acting → Tony (Sections 20.1 / 20.2, `resplit_routing`).
 pub(crate) const MIGRATE_ROUTING_RESPLIT: &str = "routing-resplit";
 /// Migration id: one owner per integration (Section 21.1, `apply_integration_owners`).
@@ -1173,11 +1174,20 @@ pub(crate) const MIGRATE_BOOKING_NAMES: &str = "booking-names";
 /// Migration id: Tony's read-only Finance tool (Section 11.10): the `finance` server is granted to
 /// Tony only, once (`grant_finance_read`).
 pub(crate) const MIGRATE_FINANCE_READ: &str = "finance-read";
-/// Migration id: contracting phrases left the frozen Ops for Tony (`ops_phrases_to_tony`), for a
-/// config that already ran an earlier `routing-resplit` which put them on Ops.
-pub(crate) const MIGRATE_OPS_PHRASES_TO_TONY: &str = "ops-phrases-to-tony";
-/// The `ops` triggers that moved to `bizops` / `finance` (removed once from a saved config).
-const MOVED_OFF_OPS: [&str; 8] = ["operations", "business", "finance", "invoice", "receipt", "bf supplements", "contracting", "quote"];
+/// Migration id: the contracting phrases became Tony's topics (`contracting_to_tony`), for a config
+/// that already ran an earlier `routing-resplit` which put them on another row. (The id is the one
+/// saved configs already record.)
+pub(crate) const MIGRATE_CONTRACTING_TO_TONY: &str = "ops-phrases-to-tony";
+/// Migration id: the infrastructure agent (role id `REMOVED_OPS_ROLE`) was removed (2026-11); its
+/// topics and tools are Tony's (`remove_ops_agent`).
+pub(crate) const MIGRATE_OPS_REMOVED: &str = "ops-removed";
+/// The removed infrastructure agent's role id. Only its removal names it.
+pub(crate) const REMOVED_OPS_ROLE: &str = "ops";
+/// Backup suffix of the removal: `os.json.bak-<YYYYMMDD-HHMMSS>-ops-removed`.
+pub(crate) const OPS_REMOVED_TAG: &str = "ops-removed";
+/// Migration id: Tony's read-only vault search (Section 16.6): the `vault` server is granted to
+/// Tony only, once (`grant_vault_search`).
+pub(crate) const MIGRATE_VAULT_SEARCH: &str = "vault-search";
 
 /// One-time upgrades of a saved config. `read_only: false` is never written to disk, so an
 /// older os.json can't say whether WhatsApp was left writable on purpose: mark it read-only
@@ -1210,18 +1220,10 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
         cfg.memory.auto_monthly = false;
         cfg.migrations.push(MIGRATE_VAULT_CADENCE.into());
     }
-    // `ops` became infra-only: the business / finance phrases the user's saved `ops` row still
-    // carries would out-score `bizops` / `finance`, so drop exactly those, once. Anything else
-    // the user added to `ops` stays.
+    // Business paperwork and money got their own rows: back-fill them once. (The removed
+    // infrastructure agent's row, which used to carry those phrases, goes whole in
+    // `remove_ops_agent`.)
     if !cfg.migrations.iter().any(|m| m == MIGRATE_BIZOPS_SPLIT) {
-        if let Some(o) = cfg.routing.agents.get_mut("ops") {
-            let moved = |p: &String| MOVED_OFF_OPS.iter().any(|m| super::routing::normalize(p) == *m);
-            o.names.retain(|n| !moved(n));
-            o.domains.retain(|d| !moved(d));
-            if o.names.is_empty() {
-                o.names = vec!["ops".into(), "infra".into()];
-            }
-        }
         for (role, t) in default_routing_agents().into_iter().filter(|(r, _)| r == "bizops" || r == "finance") {
             cfg.routing.agents.entry(role).or_insert(t);
         }
@@ -1230,14 +1232,6 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_BOOKING_NO_TOOLS) {
         strip_booking_tools(cfg);
         cfg.migrations.push(MIGRATE_BOOKING_NO_TOOLS.into());
-    }
-    if !cfg.migrations.iter().any(|m| m == MIGRATE_FREEZE_OPS) {
-        for a in FROZEN_PLACEHOLDER_AGENTS {
-            if !cfg.switchboard.frozen_agents.iter().any(|f| f == a) {
-                cfg.switchboard.frozen_agents.push(a.into());
-            }
-        }
-        cfg.migrations.push(MIGRATE_FREEZE_OPS.into());
     }
     if !cfg.migrations.iter().any(|m| m == MIGRATE_BUILD_CHAIN) {
         cfg.worker.librarian_audit = false;
@@ -1262,13 +1256,23 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
         restore_booking_names(cfg);
         cfg.migrations.push(MIGRATE_BOOKING_NAMES.into());
     }
-    if !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_PHRASES_TO_TONY) {
-        ops_phrases_to_tony(cfg);
-        cfg.migrations.push(MIGRATE_OPS_PHRASES_TO_TONY.into());
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_CONTRACTING_TO_TONY) {
+        contracting_to_tony(cfg);
+        cfg.migrations.push(MIGRATE_CONTRACTING_TO_TONY.into());
     }
     if !cfg.migrations.iter().any(|m| m == MIGRATE_FINANCE_READ) {
         grant_finance_read(cfg);
         cfg.migrations.push(MIGRATE_FINANCE_READ.into());
+    }
+    // A config that never had the removed infrastructure agent has nothing to undo: record it, so
+    // a role Nic adds under that id later is left alone. One that has it is migrated with a backup
+    // first (`migrate_saved_ops_removal`, from `load_or_init`).
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED) && !carries_removed_ops(cfg) {
+        cfg.migrations.push(MIGRATE_OPS_REMOVED.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_SEARCH) {
+        grant_vault_search(cfg);
+        cfg.migrations.push(MIGRATE_VAULT_SEARCH.into());
     }
 }
 
@@ -1281,19 +1285,94 @@ pub(crate) fn grant_finance_read(cfg: &mut OsConfig) {
     }
 }
 
-/// Once: the contracting phrases (`OPS_PHRASES_TO_TONY`) leave Ops' names and topics and become
-/// Tony's topics (deduped, case-insensitive). Ops' infra triggers and anything else stay.
-pub(crate) fn ops_phrases_to_tony(cfg: &mut OsConfig) {
-    let norm = super::routing::normalize;
-    let moved = |p: &String| OPS_PHRASES_TO_TONY.iter().any(|k| norm(k) == norm(p));
-    if let Some(o) = cfg.routing.agents.get_mut("ops") {
-        o.names.retain(|n| !moved(n));
-        o.domains.retain(|d| !moved(d));
+/// Once (Section 16.6): the `vault` server (back-filled from `default_mcps` on load) is granted to
+/// Tony only, so a row saved under that id earlier (or with "all") never hands the vault to another
+/// agent. `enabled` is left as saved. Afterwards Nic's own grant edits stand (and
+/// `mcp::vault_reader_refusal` still refuses everyone but Tony).
+pub(crate) fn grant_vault_search(cfg: &mut OsConfig) {
+    for m in cfg.mcps.iter_mut().filter(|m| m.id == "vault") {
+        m.agents = Some(vec!["general".into()]);
     }
+}
+
+/// Once: the contracting phrases (`CONTRACTING_TO_TONY`) become Tony's topics (deduped,
+/// case-insensitive). The row that held them before (the removed infrastructure agent's) goes in
+/// `remove_ops_agent`.
+pub(crate) fn contracting_to_tony(cfg: &mut OsConfig) {
+    let norm = super::routing::normalize;
     let g = cfg.routing.agents.entry("general".to_string()).or_default();
-    for p in OPS_PHRASES_TO_TONY {
+    for p in CONTRACTING_TO_TONY {
         if !g.domains.iter().any(|x| norm(x) == norm(p)) {
             g.domains.push(p.to_string());
+        }
+    }
+}
+
+fn is_removed_ops(id: &str) -> bool {
+    id.trim().eq_ignore_ascii_case(REMOVED_OPS_ROLE)
+}
+
+/// Does `cfg` still carry the removed infrastructure agent: its route, its AnythingLLM link, an
+/// MCP or skill grant, or a master-switchboard freeze? Pure.
+pub(crate) fn carries_removed_ops(cfg: &OsConfig) -> bool {
+    cfg.routing.agents.keys().any(|k| is_removed_ops(k))
+        || cfg.anythingllm.workspaces.keys().any(|k| is_removed_ops(k))
+        || cfg.mcps.iter().any(|m| m.agents.iter().flatten().any(|a| is_removed_ops(a)))
+        || cfg.skills.grants.values().flatten().any(|a| is_removed_ops(a))
+        || cfg.switchboard.frozen_agents.iter().any(|a| is_removed_ops(a))
+}
+
+/// One-time: the removed infrastructure agent leaves a saved config. Its topics (droplet, Docker,
+/// n8n, any of Nic's own) become Tony's (deduped, case-insensitive) and its row and AnythingLLM
+/// link go (the workspace itself stays in AnythingLLM, untouched); every MCP grant it held passes
+/// to Tony (Maps; never an empty list, which means everyone); its skill grants and its
+/// master-switchboard freeze go. Nothing else changes. Pure.
+pub(crate) fn remove_ops_agent(cfg: &mut OsConfig) {
+    let norm = super::routing::normalize;
+    let topics: Vec<String> = cfg.routing.agents.iter().filter(|(k, _)| is_removed_ops(k)).flat_map(|(_, t)| t.domains.clone()).collect();
+    cfg.routing.agents.retain(|k, _| !is_removed_ops(k));
+    if !topics.is_empty() {
+        let g = cfg.routing.agents.entry("general".to_string()).or_default();
+        for p in topics {
+            if !norm(&p).is_empty() && !g.domains.iter().any(|x| norm(x) == norm(&p)) {
+                g.domains.push(p);
+            }
+        }
+    }
+    cfg.anythingllm.workspaces.retain(|k, _| !is_removed_ops(k));
+    for agents in cfg.mcps.iter_mut().filter_map(|m| m.agents.as_mut()) {
+        if agents.iter().any(|a| is_removed_ops(a)) {
+            agents.retain(|a| !is_removed_ops(a));
+            if !agent_matches(agents, "general") {
+                agents.push("general".into());
+            }
+        }
+    }
+    for agents in cfg.skills.grants.values_mut() {
+        agents.retain(|a| !is_removed_ops(a));
+    }
+    cfg.skills.grants.retain(|_, a| !a.is_empty());
+    cfg.switchboard.frozen_agents.retain(|a| !is_removed_ops(a));
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED) {
+        cfg.migrations.push(MIGRATE_OPS_REMOVED.into());
+    }
+}
+
+/// The removal for a config read from `path` (`text` = the file as saved): backup first; no
+/// backup, no migration (it isn't recorded, so the next launch tries again).
+pub(crate) fn migrate_saved_ops_removal(cfg: &mut OsConfig, path: &Path, text: &str) -> Option<PathBuf> {
+    if cfg.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED) || !carries_removed_ops(cfg) {
+        return None;
+    }
+    match backup_os_json(path, text, OPS_REMOVED_TAG) {
+        Ok(b) => {
+            remove_ops_agent(cfg);
+            eprintln!("[os] removed the infrastructure agent (its topics and Maps are Tony's); previous os.json saved as {}", b.display());
+            Some(b)
+        }
+        Err(e) => {
+            eprintln!("[os] infrastructure-agent removal skipped, backup failed ({e}); it runs on the next launch");
+            None
         }
     }
 }
@@ -1555,6 +1634,8 @@ impl OsState {
         // Switchboard v1, once: the tool-owner split (a timestamped backup of os.json first).
         if let Some(text) = saved.as_deref() {
             migrate_saved_tool_owners(&mut cfg, &path, text);
+            // The removed infrastructure agent leaves the saved config, once (a backup first).
+            migrate_saved_ops_removal(&mut cfg, &path, text);
         }
         // Designer / Director start with their skills attached (impeccable + design-taste-frontend;
         // animation-vocabulary).
@@ -2560,7 +2641,7 @@ mod tests {
     #[test]
     fn routing_defaults_cover_every_role() {
         let agents = default_routing_agents();
-        for role in ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "general"] {
+        for role in ["booking", "prompter", "coder", "designer", "director", "librarian", "bizops", "finance", "general"] {
             let t = agents.get(role).unwrap_or_else(|| panic!("missing default routing role {role}"));
             // Tony (general) has none on purpose: addressing him is routing::SELF_NAMES (kind Self);
             // the frozen Booking Desk keeps only its own names (Section 20.1).
@@ -2580,31 +2661,36 @@ mod tests {
         assert!(agents["general"].domains.contains(&"self-tape".to_string()));
         assert!(!agents["director"].domains.contains(&"self-tape".to_string()));
         assert!(agents["director"].domains.contains(&"record my self-tape".to_string()));
+        // The removed infrastructure agent has no row: infrastructure and job quotes / estimates
+        // are Tony's own topics.
+        assert!(!agents.keys().any(|k| is_removed_ops(k)));
+        for t in ["droplet", "docker", "n8n", "server status", "quote", "estimate", "estimates"] {
+            assert!(agents["general"].domains.contains(&t.to_string()), "{t}");
+            assert!(!agents.iter().any(|(r, a)| r != "general" && a.domains.contains(&t.to_string())), "{t} has one owner");
+        }
     }
 
     /// Sections 20.1 / 20.2: the one-time re-split removes exactly the moved phrases from their old
     /// owners (a phrase of the user's own stays), empties Booking, adds the new owners' phrases,
     /// runs once, and leaves a fresh config equal to the defaults.
     #[test]
-    fn contracting_moves_off_a_frozen_ops_to_tony_once() {
+    fn contracting_becomes_tonys_once() {
         use super::super::routing::{resolve, RouteKind};
         let mut cfg = OsConfig::default();
-        // A config that already ran the older resplit, which put contracting on Ops.
-        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_FREEZE_OPS.into(), MIGRATE_BUILD_CHAIN.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into(), MIGRATE_BOOKING_NAMES.into()];
-        cfg.routing.agents.insert("ops".into(), trig(&["ops", "infra", "job desk"], &["droplet", "grafana", "masonry", "Quote", "estimates", "subcontractor"]));
-        cfg.routing.agents.get_mut("general").unwrap().domains.retain(|d| d != "masonry" && d != "quote");
+        // A config that already ran the older resplit, which put contracting on another row.
+        cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_BUILD_CHAIN.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into(), MIGRATE_BOOKING_NAMES.into()];
+        cfg.routing.agents.get_mut("general").unwrap().domains.retain(|d| !CONTRACTING_TO_TONY.contains(&d.as_str()));
+        cfg.routing.agents.get_mut("general").unwrap().domains.push("Quote".into());
         apply_migrations(&mut cfg);
-        let a = &cfg.routing.agents;
-        assert_eq!(a["ops"], trig(&["ops", "infra"], &["droplet", "grafana"]), "infra and the user's own phrase stay on Ops");
-        for p in OPS_PHRASES_TO_TONY {
-            assert_eq!(a["general"].domains.iter().filter(|d| d.eq_ignore_ascii_case(p)).count(), 1, "{p} is Tony's once");
+        for p in CONTRACTING_TO_TONY {
+            assert_eq!(cfg.routing.agents["general"].domains.iter().filter(|d| d.eq_ignore_ascii_case(p)).count(), 1, "{p} is Tony's once");
         }
         let r = resolve("send the masonry quote to the subcontractor", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own));
-        // Once: putting a phrase back on Ops by hand sticks.
-        cfg.routing.agents.get_mut("ops").unwrap().domains.push("masonry".into());
+        // Once: a phrase Nic takes off Tony by hand stays off.
+        cfg.routing.agents.get_mut("general").unwrap().domains.retain(|d| d != "masonry");
         apply_migrations(&mut cfg);
-        assert!(cfg.routing.agents["ops"].domains.contains(&"masonry".to_string()));
+        assert!(!cfg.routing.agents["general"].domains.contains(&"masonry".to_string()));
     }
 
     #[test]
@@ -2614,15 +2700,12 @@ mod tests {
         cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into()];
         // The pre-Section-20 rows, plus one phrase of the user's own on each.
         cfg.routing.agents.insert("booking".into(), trig(&["booking", "booking desk", "casting", "audition"], &["casting call", "self-tape", "wardrobe", "availability", "draft email to agent"]));
-        cfg.routing.agents.insert("ops".into(), trig(&["ops", "infra", "infrastructure"], &["droplet", "docker", "n8n", "server status", "schedule", "calendar", "grafana"]));
         cfg.routing.agents.insert("bizops".into(), trig(&["bizops", "business"], &["invoice", "quote", "job site", "subcontractor", "inventory", "bf supplements", "contracting", "masonry", "ecommerce", "shopify"]));
         apply_migrations(&mut cfg);
         let a = &cfg.routing.agents;
         // Booking keeps only its own names (the topic-ish "booking" / "casting" / "audition" go).
         assert_eq!(a["booking"], trig(BOOKING_NAMES, &[]));
-        assert!(a["ops"].domains.contains(&"grafana".to_string()) && !a["ops"].domains.iter().any(|d| d == "schedule" || d == "calendar"));
-        // Contracting is Tony's while Ops is frozen, not Ops'.
-        assert!(!a["ops"].domains.iter().any(|d| d == "masonry") && !a["ops"].names.iter().any(|n| n == "job desk"));
+        // Contracting is Tony's (no Job Desk yet).
         assert!(a["general"].domains.contains(&"masonry".to_string()) && a["general"].domains.contains(&"job desk".to_string()));
         assert!(a["bizops"].domains.contains(&"shopify".to_string()) && a["bizops"].domains.contains(&"instagram".to_string()));
         for gone in ["invoice", "quote", "job site", "subcontractor", "contracting", "masonry"] {
@@ -2671,12 +2754,12 @@ mod tests {
         let grants = |c: &OsConfig, id: &str| c.mcps.iter().find(|m| m.id == id).and_then(|m| m.agents.clone()).unwrap_or_default();
         let fresh = OsConfig::default();
         assert_eq!(grants(&fresh, "whatsapp"), ["general"]);
-        assert_eq!(grants(&fresh, "maps"), ["general", "ops"]);
+        assert_eq!(grants(&fresh, "maps"), ["general"]);
         assert_eq!(grants(&fresh, "instagram"), ["bizops"]);
         assert_eq!(grants(&fresh, "shotcut"), ["director"]);
         assert_eq!(grants(&fresh, "media-forge"), ["director"]);
         assert!(grants(&fresh, "gmail") == ["general"], "every gmail tool is Tony's");
-        // A saved config from before: Booking on WhatsApp / Gmail, Tony on Shotcut, maps Ops only.
+        // A saved config from before: Booking on WhatsApp / Gmail, Tony on Shotcut, maps the Coder's.
         let mut cfg = OsConfig::default();
         cfg.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into(), MIGRATE_BOOKING_NO_TOOLS.into(), MIGRATE_LOCAL_SAFE_DEFAULTS.into(), MIGRATE_ROUTING_RESPLIT.into()];
         let set = |c: &mut OsConfig, id: &str, a: &[&str]| c.mcps.iter_mut().find(|m| m.id == id).unwrap().agents = Some(a.iter().map(|s| s.to_string()).collect());
@@ -2684,7 +2767,7 @@ mod tests {
         set(&mut cfg, "gmail", &["general", "booking"]);
         set(&mut cfg, "shotcut", &["director", "general"]);
         set(&mut cfg, "instagram", &["bizops", "general"]);
-        set(&mut cfg, "maps", &["ops"]);
+        set(&mut cfg, "maps", &["coder"]);
         set(&mut cfg, "filesystem", &["coder", "booking", "librarian"]);
         cfg.tony_mode_tools.insert("builder".into(), vec!["git".into(), "media-forge".into()]);
         apply_migrations(&mut cfg);
@@ -2692,13 +2775,13 @@ mod tests {
         assert_eq!(grants(&cfg, "gmail"), ["general"]);
         assert_eq!(grants(&cfg, "shotcut"), ["director"]);
         assert_eq!(grants(&cfg, "instagram"), ["bizops"]);
-        assert_eq!(grants(&cfg, "maps"), ["general", "ops"]);
+        assert_eq!(grants(&cfg, "maps"), ["general"]);
         assert_eq!(grants(&cfg, "filesystem"), ["coder", "librarian"], "other servers only lose the frozen Booking Desk");
         assert_eq!(cfg.tony_mode_tools["builder"], ["git"]);
         // Once.
-        set(&mut cfg, "maps", &["ops"]);
+        set(&mut cfg, "maps", &["coder"]);
         apply_migrations(&mut cfg);
-        assert_eq!(grants(&cfg, "maps"), ["ops"]);
+        assert_eq!(grants(&cfg, "maps"), ["coder"]);
     }
 
     /// Section 11.10: the read-only Finance server is a builtin, on, Tony's alone, by default and
@@ -2718,11 +2801,50 @@ mod tests {
         apply_migrations(&mut cfg);
         assert_eq!(grants(&cfg), ["general"]);
         assert!(!cfg.mcps.iter().find(|m| m.id == "finance").unwrap().enabled, "a server Nic switched off stays off");
-        assert_eq!(cfg.migrations.last().map(String::as_str), Some(MIGRATE_FINANCE_READ));
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_FINANCE_READ));
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_SEARCH), "vault-search runs after it (Section 16.6)");
         // Once: Nic grants the finance role too; the migration never takes it back.
         cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["general".into(), "finance".into()]);
         apply_migrations(&mut cfg);
         assert_eq!(grants(&cfg), ["general", "finance"]);
+    }
+
+    /// Section 16.6: the read-only vault search server is a builtin, on, Tony's alone, by default
+    /// and by the one-time migration (appended after ops-removed; a later edit stands).
+    #[test]
+    fn vault_search_server_is_tonys_once() {
+        let grants = |c: &OsConfig| c.mcps.iter().find(|m| m.id == "vault").and_then(|m| m.agents.clone()).unwrap_or_default();
+        let fresh = OsConfig::default();
+        let v = fresh.mcps.iter().find(|m| m.id == "vault").expect("vault builtin");
+        assert!(v.enabled && v.builtin && v.transport == "builtin");
+        assert_eq!(grants(&fresh), ["general"]);
+        assert_eq!(default_mcp_grants("vault"), ["general"]);
+        let mut cfg = OsConfig::default();
+        apply_migrations(&mut cfg);
+        let i = cfg.migrations.iter().position(|m| m == MIGRATE_VAULT_SEARCH).expect("recorded");
+        assert_eq!(cfg.migrations.get(i.wrapping_sub(1)).map(String::as_str), Some(MIGRATE_OPS_REMOVED), "right after main's ops-removed (which follows finance-read)");
+        cfg.migrations.retain(|m| m != MIGRATE_VAULT_SEARCH);
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().agents = Some(vec!["all".into()]);
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().enabled = false;
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general"]);
+        assert!(!cfg.mcps.iter().find(|m| m.id == "vault").unwrap().enabled, "a server Nic switched off stays off");
+        assert_eq!(cfg.migrations.last().map(String::as_str), Some(MIGRATE_VAULT_SEARCH));
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().agents = Some(vec!["general".into(), "librarian".into()]);
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general", "librarian"], "once: a later grant edit stands (the refusal still blocks the Librarian)");
+    }
+
+    /// The read-only infrastructure status server (`system.status`): a builtin, on, Tony's alone.
+    #[test]
+    fn system_status_server_is_tonys() {
+        let s = OsConfig::default().mcps.into_iter().find(|m| m.id == "system").expect("system builtin");
+        assert!(s.enabled && s.builtin && s.transport == "builtin" && !s.read_only);
+        assert_eq!(s.agents.as_deref(), Some(&["general".to_string()][..]));
+        assert_eq!(default_mcp_grants("system"), ["general"]);
+        // An older os.json gets the row from `default_mcps` on load, grant included.
+        let d = default_mcps().into_iter().find(|m| m.id == "system").unwrap();
+        assert_eq!(d.agents.as_deref(), Some(&["general".to_string()][..]));
     }
 
     /// Section 20.8: live delegation never reaches the Librarian / Booking workspaces; the mapping
@@ -2758,7 +2880,7 @@ mod tests {
             ("filesystem", &["coder", "designer", "director", "librarian", "prompter"]),
             ("git", &["coder"]),
             ("fetch", &["coder", "prompter"]),
-            ("maps", &["general", "ops"]),
+            ("maps", &["general"]),
             ("instagram", &["bizops"]),
             ("shotcut", &["director"]),
             ("media-forge", &["director"]),
@@ -2774,7 +2896,7 @@ mod tests {
         }
         let tony: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), "tony")).map(|(id, _)| *id).collect();
         assert_eq!(tony, ["weather", "calendar", "spotify", "brave-search", "gmail", "whatsapp", "time", "knowledge-graph", "maps"]);
-        for (agent, want) in [("coder", &["filesystem", "git", "fetch"][..]), ("designer", &["filesystem"]), ("director", &["filesystem", "shotcut", "media-forge"]), ("bizops", &["instagram"]), ("ops", &["maps"]), ("librarian", &["knowledge-graph", "filesystem"]), ("prompter", &["knowledge-graph", "filesystem", "fetch"]), ("finance", &[]), ("trader", &[])] {
+        for (agent, want) in [("coder", &["filesystem", "git", "fetch"][..]), ("designer", &["filesystem"]), ("director", &["filesystem", "shotcut", "media-forge"]), ("bizops", &["instagram"]), ("librarian", &["knowledge-graph", "filesystem"]), ("prompter", &["knowledge-graph", "filesystem", "fetch"]), ("finance", &[]), ("trader", &[])] {
             let mut got: Vec<&str> = cases.iter().filter(|(id, _)| agent_matches(&default_mcp_grants(id), agent)).map(|(id, _)| *id).collect();
             let mut want = want.to_vec();
             got.sort();
@@ -2792,9 +2914,9 @@ mod tests {
         let all = McpServer { agents: Some(vec!["all".into()]), ..blank_mcp() };
         assert!(all.grants("coder"));
 
-        let scoped = McpServer { agents: Some(vec!["coder".into(), "ops".into()]), ..blank_mcp() };
+        let scoped = McpServer { agents: Some(vec!["coder".into(), "bizops".into()]), ..blank_mcp() };
         assert!(scoped.grants("coder"));
-        assert!(scoped.grants("ops"));
+        assert!(scoped.grants("bizops"));
         assert!(!scoped.grants("booking"));
         // Tony is NOT special-cased: he respects grants like every other agent.
         assert!(!scoped.grants("general") && !scoped.grants("tony"));
@@ -2825,6 +2947,10 @@ mod tests {
         assert_eq!(c.gmail.booking_instructions_path, r"G:\ai-hub\protocols\booking-email-check.md");
         let c: OsConfig = serde_json::from_str(r#"{"gmail":{"bookingInstructionsPath":"D:\\x.md"}}"#).unwrap();
         assert_eq!(c.gmail.booking_instructions_path, r"D:\x.md");
+        // Settings → Comms inbox scope: an os.json saved before it existed gets Primary only.
+        assert_eq!(c.gmail.inbox_scope, "primary");
+        let c: OsConfig = serde_json::from_str(r#"{"gmail":{"inboxScope":"all"}}"#).unwrap();
+        assert_eq!((c.gmail.inbox_scope.as_str(), c.gmail.booking_instructions_path.as_str()), ("all", r"G:\ai-hub\protocols\booking-email-check.md"));
     }
 
     #[test]
@@ -2864,31 +2990,27 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_OPS_PHRASES_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_CONTRACTING_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string(), MIGRATE_OPS_REMOVED.to_string(), MIGRATE_VAULT_SEARCH.to_string()]);
     }
 
     #[test]
-    fn bizops_split_moves_business_triggers_off_ops_once() {
-        // A saved pre-split config: ops still carries business / finance phrases plus one of the user's own.
+    fn bizops_split_backfills_the_business_and_finance_rows_once() {
+        // A saved pre-split config: no bizops / finance rows.
         let mut cfg = OsConfig::default();
         cfg.routing.agents.remove("bizops");
         cfg.routing.agents.remove("finance");
-        cfg.routing.agents.insert("ops".into(), trig(&["ops", "operations", "business", "finance"], &["invoice", "receipt", "BF Supplements", "contracting", "quote", "schedule", "calendar", "droplet", "grafana"]));
         // Only the bizops split here (the later re-split has its own test).
         cfg.migrations = vec![MIGRATE_ROUTING_RESPLIT.into(), MIGRATE_INTEGRATION_OWNERS.into()];
         apply_migrations(&mut cfg);
-        let ops = &cfg.routing.agents["ops"];
-        assert_eq!(ops.names, ["ops"]);
-        assert_eq!(ops.domains, ["schedule", "calendar", "droplet", "grafana"], "the user's own trigger stays");
         assert_eq!(cfg.routing.agents["bizops"], default_routing_agents()["bizops"]);
         assert!(cfg.routing.agents["finance"].names.contains(&"finance".to_string()));
         // Routing now sends business paperwork to bizops and money questions to Finance.
         assert_eq!(super::super::routing::resolve("check the bf supplements inventory", &cfg).role.as_deref(), Some("bizops"));
         assert_eq!(super::super::routing::resolve("ask the bookkeeper about expenses", &cfg).role.as_deref(), Some("finance"));
-        // Once: a phrase the user puts back on ops afterwards is left alone.
-        cfg.routing.agents.get_mut("ops").unwrap().domains.push("invoice".into());
+        // Once: a row Nic deletes afterwards stays deleted.
+        cfg.routing.agents.remove("bizops");
         apply_migrations(&mut cfg);
-        assert!(cfg.routing.agents["ops"].domains.contains(&"invoice".to_string()));
+        assert!(!cfg.routing.agents.contains_key("bizops"));
         // The finance workspace mapping is exactly finance → finance (not an anomaly).
         assert!(!super::super::finance_vault::finance_mapping_anomaly(&OsConfig::default().anythingllm.workspaces));
     }
@@ -3061,13 +3183,13 @@ mod tests {
     #[test]
     fn switchboard_defaults_legacy_and_camel_case() {
         let d = OsConfig::default();
-        // Booking, the Librarian (scheduled script only) and the Ops placeholder are frozen on a fresh install.
-        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
+        // Booking and the Librarian (scheduled script only) are frozen on a fresh install.
+        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
         let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian", "ops"], "frozenTools": [] }));
-        // An os.json saved before the switchboard: all three frozen, migration still to run.
+        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
+        // An os.json saved before the switchboard: both frozen, migration still to run.
         let old: OsConfig = serde_json::from_str(r#"{"osName":"Tony"}"#).unwrap();
-        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
+        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
         // A saved choice is kept as is (Nic thawed Booking).
         let thawed: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":[],"frozenTools":["instagram"]}}"#).unwrap();
         assert_eq!((thawed.switchboard.frozen_agents.len(), thawed.switchboard.frozen_tools.clone()), (0, vec!["instagram".to_string()]));
@@ -3100,10 +3222,10 @@ mod tests {
     fn pre_switchboard_os_json(skills_dir: &Path) -> String {
         let old_grants = |id: &str| -> Vec<&str> {
             match id {
-                "whatsapp" | "gmail" => vec!["booking", "ops"],
-                "time" => vec!["booking", "coder", "ops"],
-                "filesystem" => vec!["booking", "coder", "librarian", "prompter", "designer", "director", "ops"],
-                "knowledge-graph" => vec!["booking", "librarian", "prompter", "ops"],
+                "whatsapp" | "gmail" => vec!["booking"],
+                "time" => vec!["booking", "coder"],
+                "filesystem" => vec!["booking", "coder", "librarian", "prompter", "designer", "director"],
+                "knowledge-graph" => vec!["booking", "librarian", "prompter"],
                 "git" => vec!["coder"],
                 "fetch" => vec!["coder", "librarian", "prompter", "designer"],
                 "brave-search" => vec!["coder", "librarian"],
@@ -3113,6 +3235,8 @@ mod tests {
         };
         let mcps: Vec<serde_json::Value> = default_mcps()
             .into_iter()
+            // Added after the switchboard: an os.json this old never had it (load back-fills it).
+            .filter(|m| m.id != "system")
             .map(|m| {
                 let mut v = serde_json::to_value(&m).unwrap();
                 v["agents"] = json!(old_grants(&m.id));
@@ -3124,7 +3248,7 @@ mod tests {
         for n in ["animate", "design-taste-frontend", "emil-design-eng", "frontend-design", "impeccable", "stitch-generate-design", "stitch-manage-design-system", "taste-design"] {
             grants.insert(n.into(), json!(["designer"]));
         }
-        grants.insert("daily-standup".into(), json!(["tony", "ops"]));
+        grants.insert("daily-standup".into(), json!(["tony", "coder"]));
         json!({ "osName": "Tony", "mcps": mcps, "skills": { "dir": skills_dir.display().to_string(), "grants": grants }, "migrations": ["whatsapp-read-only", "self-routing", "vault-cadence", "bizops-split"] }).to_string()
     }
 
@@ -3172,12 +3296,12 @@ mod tests {
         for n in ["taste-design", "animate", "emil-design-eng", "frontend-design", "stitch-generate-design"] {
             assert!(!cfg.skills.grants.contains_key(n), "{n}");
         }
-        assert_eq!(who("daily-standup"), vec!["ops"], "Tony's grant is dropped, Ops keeps its own");
-        // 4. Booking, the Librarian and the Ops placeholder frozen, version set, saved.
-        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
+        assert_eq!(who("daily-standup"), vec!["coder"], "Tony's grant is dropped, the Coder keeps its own");
+        // 4. Booking and the Librarian frozen, version set, saved.
+        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
         let on_disk: OsConfig = serde_json::from_str(&std::fs::read_to_string(dir.join("os.json")).unwrap()).unwrap();
         assert_eq!(on_disk.switchboard.version, 1);
-        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string(), "ops".to_string()]);
+        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string()]);
         // 5. Never twice: Nic re-grants git to Tony and re-enables maps; a restart keeps both, no new backup.
         os.update(|c| {
             c.mcps.iter_mut().find(|m| m.id == "git").unwrap().agents = Some(vec!["coder".into(), "general".into()]);
@@ -3210,15 +3334,95 @@ mod tests {
         assert!(again.worker.librarian_audit);
     }
 
+    /// The live os.json shape before the removal: the infrastructure agent's route (its infra
+    /// topics plus one of Nic's own), its AnythingLLM link, its Maps grant, a skill grant and a
+    /// master-switchboard freeze (the old section-pass placeholder).
+    fn with_removed_ops(mut cfg: OsConfig) -> OsConfig {
+        let id = REMOVED_OPS_ROLE.to_string();
+        cfg.routing.agents.insert(id.clone(), trig(&[REMOVED_OPS_ROLE, "infra", "infrastructure"], &["droplet", "docker", "n8n", "server status", "grafana"]));
+        cfg.anythingllm.workspaces.insert(id.clone(), id.clone());
+        for m in cfg.mcps.iter_mut() {
+            match m.id.as_str() {
+                "maps" => m.agents = Some(vec![id.clone()]),
+                "time" => m.agents = Some(vec!["general".into(), id.clone()]),
+                _ => {}
+            }
+        }
+        cfg.skills.grants.insert("daily-standup".into(), vec![id.clone()]);
+        cfg.skills.grants.insert("impeccable".into(), vec!["designer".into(), id.clone()]);
+        cfg.switchboard.frozen_agents.push(id);
+        cfg
+    }
+
     #[test]
-    fn ops_is_frozen_once_and_a_later_thaw_sticks() {
-        let mut cfg: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":["booking"],"frozenTools":[]}}"#).unwrap();
+    fn the_removed_infrastructure_agent_leaves_the_config_and_tony_takes_its_work() {
+        use super::super::routing::{resolve, RouteKind};
+        let mut cfg = with_removed_ops(OsConfig::default());
+        assert!(carries_removed_ops(&cfg));
+        // apply_migrations leaves a config that still carries it to the backed-up path.
         apply_migrations(&mut cfg);
-        assert_eq!(cfg.switchboard.frozen_agents, vec!["booking".to_string(), "ops".to_string()]);
-        cfg.switchboard.frozen_agents.retain(|a| a != "ops"); // Nic gives Ops a job and thaws it
-        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
-        apply_migrations(&mut again);
-        assert_eq!(again.switchboard.frozen_agents, vec!["booking".to_string()]);
+        assert!(carries_removed_ops(&cfg) && !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED));
+        remove_ops_agent(&mut cfg);
+        assert!(!carries_removed_ops(&cfg));
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED));
+        // Its topics are Tony's (once each), Nic's own one too; the other rows are untouched.
+        let d = OsConfig::default();
+        for t in ["droplet", "docker", "n8n", "server status", "grafana"] {
+            assert_eq!(cfg.routing.agents["general"].domains.iter().filter(|x| *x == t).count(), 1, "{t}");
+        }
+        assert!(cfg.routing.agents.iter().all(|(r, t)| r == "general" || d.routing.agents.get(r) == Some(t)));
+        for line in ["is the droplet healthy", "restart the n8n docker container", "check grafana"] {
+            let r = resolve(line, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{line}");
+        }
+        // Maps passes to Tony (never an empty list, which means everyone); a shared grant drops it.
+        let grants = |id: &str| cfg.mcps.iter().find(|m| m.id == id).unwrap().agents.clone().unwrap();
+        assert_eq!(grants("maps"), ["general"]);
+        assert_eq!(grants("time"), ["general"]);
+        // Its own skill goes, a shared one keeps its other agent, its freeze goes; Booking's stays.
+        assert!(!cfg.skills.grants.contains_key("daily-standup"));
+        assert_eq!(cfg.skills.grants["impeccable"], ["designer"]);
+        assert_eq!(cfg.switchboard.frozen_agents, ["booking", "librarian"]);
+        assert_eq!(cfg.anythingllm.workspaces, d.anythingllm.workspaces);
+        // Tony's roster sentence no longer counts it.
+        assert!(!super::super::agents::sub_agent_roster(&cfg).iter().any(|r| is_removed_ops(r)));
+        // Once: a role Nic adds under that id later is left alone.
+        cfg.routing.agents.insert(REMOVED_OPS_ROLE.into(), trig(&["infra"], &[]));
+        apply_migrations(&mut cfg);
+        assert!(cfg.routing.agents.contains_key(REMOVED_OPS_ROLE));
+        // A config that never had it just records the migration.
+        let mut fresh = OsConfig::default();
+        apply_migrations(&mut fresh);
+        assert!(fresh.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED) && !carries_removed_ops(&fresh));
+    }
+
+    #[test]
+    fn the_removal_backs_up_os_json_first_and_runs_once() {
+        // `load_or_init` seeds the global mic flag: share the mic tests' lock.
+        let _mic = super::super::voice::mic_gate_tests::lock();
+        let root = tmp("ops-removed");
+        let (dir, repo) = (root.join("cfg"), root.join("repo"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut before = with_removed_ops(OsConfig::default());
+        before.migrations = vec![MIGRATE_WHATSAPP_READ_ONLY.into(), MIGRATE_SELF_ROUTING.into(), MIGRATE_VAULT_CADENCE.into(), MIGRATE_BIZOPS_SPLIT.into()];
+        let saved = serde_json::to_string_pretty(&before).unwrap();
+        std::fs::write(dir.join("os.json"), &saved).unwrap();
+        let os = OsState::default();
+        os.load_or_init(&dir, &repo);
+        let backups = || -> Vec<PathBuf> { std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().unwrap().to_string_lossy().ends_with(&format!("-{OPS_REMOVED_TAG}"))).collect() };
+        let b = backups();
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(std::fs::read_to_string(&b[0]).unwrap(), saved, "the backup is the file exactly as it was");
+        assert!(!carries_removed_ops(&os.snapshot()));
+        let on_disk: OsConfig = serde_json::from_str(&std::fs::read_to_string(dir.join("os.json")).unwrap()).unwrap();
+        assert!(!carries_removed_ops(&on_disk) && on_disk.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED));
+        assert_eq!(on_disk.mcps.iter().find(|m| m.id == "maps").unwrap().agents, Some(vec!["general".to_string()]));
+        assert!(on_disk.routing.agents["general"].domains.contains(&"droplet".to_string()));
+        // A restart: no second backup, nothing re-removed.
+        let again = OsState::default();
+        again.load_or_init(&dir, &repo);
+        assert_eq!(backups().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

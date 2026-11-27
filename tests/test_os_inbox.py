@@ -16,6 +16,7 @@ import math
 import re
 import shutil
 import socket
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -71,6 +72,13 @@ class IsolatedCC:
 
     def __enter__(self):
         self._saved = {n: getattr(cc, n) for n in self._NAMES}
+        # Importing server.py starts the real vault indexer (cc.start()), which keeps retrying a
+        # previous test's rows on whatever cc.DB_PATH is now. Two first connections switching a
+        # brand-new file to WAL at once fail at once ("database is locked", no busy wait), so the
+        # file is already WAL before any of them can see it.
+        with sqlite3.connect(self.tmp / "cc.db") as pre:
+            pre.execute("PRAGMA journal_mode=WAL")
+        pre.close()
         cc.CC_DIR = self.tmp
         cc.FILES_DIR = self.tmp / "files"
         cc.DB_PATH = self.tmp / "cc.db"

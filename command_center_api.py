@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import array
 import base64
+import bisect
 import hashlib
 import json
 import math
@@ -45,7 +46,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -100,6 +101,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep": 14,
         # "" = `_default_backup_dir()`, resolved per call against the store in use (see there).
         "dir": "",
+        # Second copies (Section 16.2): after a backup verifies, the zip is copied to each of these
+        # folders (another drive, e.g. D:\Backups\cc-mirror) and the copy is verified.
+        "mirrorDirs": [],
+        # Mirror retention. 0 = keep every copy (the default: a mirror never loses anything). A
+        # positive number only ever removes cc-*.zip copies this gateway wrote and verified there.
+        "mirrorKeep": 0,
     },
     # Gateway Tony (gateway_tony.py): while no desktop app works the inbox, the gateway answers a
     # phone turn as Tony on his own local model. false is the rollback switch: phone turns then wait
@@ -124,6 +131,7 @@ COLLECTIONS = {
     "ideas",  # Ideas & Tasks ledger (Tony → Prompter → Librarian)
     "playplace",  # staged prototypes from the Designer / Coder pipeline
     "cues",  # Voice & Triggers widgets (Gabagool Mode, startup welcome, timed cues)
+    "routes",  # Maps saved routes (resolved coordinates). Deliberately NOT in VAULT_FIELDS: see PRIVATE_COLLECTIONS
     # Finance (section 11): every record carries an `area` (acting, trades_contracting, ...).
     "commissions",  # amounts owed to an acting agent per paid booking
     "mileage",  # mileage log (from, to, km, purpose, area)
@@ -134,9 +142,13 @@ COLLECTIONS = {
 # Finance records: never part of an unscoped vault search (agent context reads those).
 FINANCE_COLLECTIONS = frozenset({"receipts", "invoices", "checks", "income", "commissions", "mileage", "pending", "statement_lines"})
 
+# Never embedded, never in any vault search (scoped or not), so home / job-site addresses stay out
+# of the AI search index and agent context. They sync like any other collection.
+PRIVATE_COLLECTIONS = frozenset({"routes"})
+
 # Which fields get embedded into the vault, per collection.
 VAULT_FIELDS: dict[str, list[str]] = {
-    "notes": ["title", "rawText", "organized"],
+    "notes": ["title", "rawText", "organized", "summary", "tags"],
     "receipts": ["vendor", "date", "category", "total", "hst", "gst", "notes", "ocrText"],
     "invoices": ["number", "client", "items", "notes", "total"],
     "checks": ["payer", "amount", "memo", "notes"],
@@ -146,6 +158,8 @@ VAULT_FIELDS: dict[str, list[str]] = {
     "ideas": ["title", "idea", "summary", "tasks", "spec", "status"],
     "playplace": ["title", "idea", "brief", "blueprint", "buildPlan", "notes", "status"],
 }
+if PRIVATE_COLLECTIONS & VAULT_FIELDS.keys():
+    raise RuntimeError("a private collection must never be embedded")
 
 MAX_UPLOAD = 15 * 1024 * 1024
 ALLOWED_UPLOAD = ("image/", "application/pdf", "audio/", "text/plain")
@@ -259,6 +273,84 @@ def _coll(name: str) -> str:
 
 def _clean(data: dict) -> dict:
     return {k: v for k, v in data.items() if not k.startswith("_") and k != "id"}
+
+
+# ── saved routes (Maps): the stored shape is checked, so a bad pin never reaches a nav intent ──
+# SavedRoute { name, origin: MapPlace | "here" | "home", destination: MapPlace, stops: MapPlace[],
+# pinned? }. MapPlace { lat, lng, label }. Mirrors SavedRoute in command center/src/lib/cc-api.ts.
+ROUTE_NAME_MAX = 80
+ROUTE_LABEL_MAX = 200
+ROUTE_STOPS_MAX = 9  # Google Maps directions URLs take at most 9 waypoints
+ROUTE_ORIGINS = ("here", "home")  # resolved at use time: "here" to the device fix, "home" to MAP_HOME
+_ROUTE_FIELDS = frozenset({"name", "origin", "destination", "stops", "pinned"})
+_UNSAFE_TEXT = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]")
+
+
+def _route_text(v: Any, what: str, cap: int, required: bool) -> str:
+    if v is None and not required:
+        return ""
+    if not isinstance(v, str):
+        raise HTTPException(400, f"{what} must be text")
+    s = " ".join(_UNSAFE_TEXT.sub(" ", v).split())
+    if required and not s:
+        raise HTTPException(400, f"{what} is required")
+    if len(s) > cap:
+        raise HTTPException(400, f"{what} is longer than {cap} characters")
+    return s
+
+
+def _route_place(v: Any, what: str) -> dict:
+    if not isinstance(v, dict):
+        raise HTTPException(400, f"{what} must be a place {{lat, lng, label}}")
+    extra = set(v) - {"lat", "lng", "label"}
+    if extra:
+        raise HTTPException(400, f"{what} has unknown fields: {', '.join(sorted(extra))}")
+    out: dict = {}
+    for k, lim in (("lat", 90.0), ("lng", 180.0)):
+        n = v.get(k)
+        if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) or abs(n) > lim:
+            raise HTTPException(400, f"{what}.{k} must be a number from -{lim:g} to {lim:g}")
+        out[k] = float(n)
+    out["label"] = _route_text(v.get("label"), f"{what}.label", ROUTE_LABEL_MAX, required=False)
+    return out
+
+
+def _check_route(body: dict) -> dict:
+    """A whole SavedRoute (create, or the merged row on a PATCH), normalised; 400 when it isn't one."""
+    extra = set(body) - _ROUTE_FIELDS
+    if extra:
+        raise HTTPException(400, f"Unknown saved-route fields: {', '.join(sorted(extra))}")
+    origin = body.get("origin")
+    if isinstance(origin, str):
+        if origin not in ROUTE_ORIGINS:
+            raise HTTPException(400, "origin must be a place, 'here' or 'home'")
+    else:
+        origin = _route_place(origin, "origin")
+    stops = body.get("stops", [])
+    if not isinstance(stops, list):
+        raise HTTPException(400, "stops must be a list of places")
+    if len(stops) > ROUTE_STOPS_MAX:
+        raise HTTPException(400, f"At most {ROUTE_STOPS_MAX} stops")
+    out = {
+        "name": _route_text(body.get("name"), "name", ROUTE_NAME_MAX, required=True),
+        "origin": origin,
+        "destination": _route_place(body.get("destination"), "destination"),
+        "stops": [_route_place(s, f"stops[{i}]") for i, s in enumerate(stops)],
+    }
+    if "pinned" in body:
+        if not isinstance(body["pinned"], bool):
+            raise HTTPException(400, "pinned must be true or false")
+        out["pinned"] = body["pinned"]
+    return out
+
+
+# Per-collection shape checks, applied to the created body and to the merged row on a PATCH.
+_VALIDATORS = {"routes": _check_route}
+
+
+def _validated(collection: str, body: dict) -> dict:
+    check = _VALIDATORS.get(collection)
+    return check(body) if check else body
 
 
 def kv_get(key: str, default: Any = None) -> Any:
@@ -1127,6 +1219,7 @@ def vault_search(q: str, collections: Optional[list[str]] = None, k: int = 8, in
     (the Librarian's vault matches) never gets receipts, invoices, cheques or income."""
     with db() as c:
         rows = c.execute("SELECT item_id, collection, text, vector FROM vault").fetchall()
+    rows = [r for r in rows if r["collection"] not in PRIVATE_COLLECTIONS]  # even when asked for by name
     if collections:
         rows = [r for r in rows if r["collection"] in collections]
     elif not include_finance:
@@ -1230,7 +1323,7 @@ def list_items(collection: str, since: float = 0, include_deleted: bool = False)
 @router.post("/c/{collection}")
 def create_item(collection: str, data: dict):
     _coll(collection)
-    body = _clean(data)
+    body = _validated(collection, _clean(data))
     if len(json.dumps(body)) > 512 * 1024:
         raise HTTPException(413, "Item too large")
     item_id = str(data.get("id") or uuid.uuid4())
@@ -1254,7 +1347,7 @@ def update_item(collection: str, item_id: str, patch: dict):
         r = c.execute("SELECT * FROM items WHERE id=? AND collection=?", (item_id, collection)).fetchone()
         if not r:
             raise HTTPException(404, "Not found")
-        merged = {**json.loads(r["data"]), **_clean(patch)}
+        merged = _validated(collection, {**json.loads(r["data"]), **_clean(patch)})
         now = time.time()
         c.execute("UPDATE items SET data=?, updated=?, deleted=0 WHERE id=?", (json.dumps(merged), now, item_id))
     _upsert_vault_text(item_id, collection, merged, False)
@@ -1648,6 +1741,14 @@ def put_config(patch: dict):
     b = cfg["backup"]
     b["intervalHours"] = max(1, min(24 * 30, float(b.get("intervalHours", 24))))
     b["keep"] = max(1, min(365, int(b.get("keep", 14))))
+    try:
+        b["mirrorDirs"] = _clean_mirror_dirs(b.get("mirrorDirs"), b.get("dir") or "")
+    except ValueError as e:
+        raise HTTPException(400, f"backup.mirrorDirs: {e}")
+    try:
+        b["mirrorKeep"] = max(0, min(365, int(b.get("mirrorKeep") or 0)))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "backup.mirrorKeep must be a whole number (0 = keep every copy)")
     save_config(cfg)
     _models_cache.clear()
     _loaded_cache.clear()
@@ -1873,6 +1974,464 @@ def llm_json(req: JsonGenRequest):
     return j
 
 
+# ── brainstorm wrap-up (Section 9: "Talk it through" → items to approve one by one) ──
+#
+# POST /brainstorm/wrapup {id} reads a note's transcript (segments with Nic / Tony speakers; a
+# legacy note's rawText) and asks the local model for a title, a summary and items. The model's
+# answer is validated strictly and nothing it invents survives:
+#   * every item must carry a `quote` that is found, word for word (case, punctuation and spacing
+#     aside), in the transcript; an item whose quote isn't there is dropped and counted in `dropped`.
+#   * an item text that drifts from the transcript's words is replaced by its quote.
+#   * a quote must sit in one speaker's words (one line, or adjacent lines of the same speaker);
+#     "..." may skip at most WRAPUP_ELLIPSIS_GAP words. Stitching Nic and Tony together is dropped.
+#   * a memory suggestion must trace to Nic's own words, never Tony's; a decision or next step
+#     that traces only to Tony is kept as an idea (speaker "tony"), never offered as Nic's decision.
+# Item ids are assigned here (a hash of kind + quote), not by the model, so a re-run gives the same
+# item the same id. Statuses live on the note (`wrapup.items[].status`): a re-run never resets an
+# item that is sending, sent, skipped or failed, and keeps those even when the new run drops them.
+# Model busy (the desktop holds the GPU past a short wait, or a maintenance window), unreachable,
+# or no valid JSON after one retry: 503 {detail, reason, retryAfter, note} plus a Retry-After header.
+# The note then carries a no-model fallback (Nic's own lines as candidate items) unless it
+# already has a model wrap-up, which is kept. Mirrored by src/features/brainstorm/session-types.ts.
+
+WRAPUP_KINDS = ("idea", "decision", "next_step")
+WRAPUP_DESTINATIONS = ("play_place", "director", "ledger", "memory")
+WRAPUP_STATUSES = ("pending", "sending", "sent", "skipped", "failed")
+WRAPUP_MEMORY_CATEGORIES = ("preference", "workflow", "rule", "persona", "domain_knowledge", "correction")
+WRAPUP_MAX_CHARS = 24000      # transcript window sent to the model (the end of the session)
+WRAPUP_MAX_ITEMS = 20
+WRAPUP_FALLBACK_MAX = 30
+WRAPUP_TEXT_MAX = 300         # also the memory-commit cap per item
+WRAPUP_ELLIPSIS_GAP = 12      # most words one "..." in a quote may skip
+WRAPUP_TITLE_MAX = 80
+WRAPUP_SUMMARY_MAX = 800
+WRAPUP_GPU_WAIT_SECS = 4.0    # Tony finishing his last sentence; longer than this is "busy"
+WRAPUP_RETRY_SECS = 15
+
+WRAPUP_PROMPT = """You wrap up a brainstorming session between Nic and Tony (his assistant). Each transcript line starts with "Nic:" or "Tony:".
+List only what was actually said. Never invent ideas, decisions, steps, names, dates or facts. When unsure, leave it out.
+Return ONLY JSON, nothing else:
+{"title": str (<= 8 words), "summary": str (2-3 sentences, only what was said),
+ "items": [{"kind": "idea" | "decision" | "next_step",
+   "text": str (one short sentence),
+   "quote": str (the exact words from ONE transcript line that this item comes from, copied verbatim, without the "Nic:" / "Tony:" label),
+   "suggested_destination": "play_place" | "director" | "ledger" | "memory" | null,
+   "memory_category": "preference" | "workflow" | "rule" | "persona" | "domain_knowledge" | "correction" | null}]}
+Destinations: play_place = an app, widget or prototype to build; director = a film, video, music or other creative media project; ledger = a task or idea to track; memory = a lasting fact or preference Nic said about himself or how he works; null = none fits.
+At most 20 items. An empty items list is fine."""
+
+_WRAP_NONWORD = re.compile(r"[\W_]+", re.UNICODE)
+_WRAP_SPEAKER = re.compile(r"^\s*(nic|tony)\s*[:\-–—]\s*", re.I)
+_WRAP_ELLIPSIS = re.compile(r"\.{3,}|…")
+_WRAP_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+_WRAP_STOP = frozenset(
+    "about after again also because been being could does doing done from have here into just like make more most much need "
+    "only other over really should some such than that their them then there these they thing things this those through "
+    "very want what when where which while will with would your yeah okay maybe gonna wanna".split()
+)
+_wrapup_running: set[str] = set()
+_wrapup_running_lock = threading.Lock()
+
+
+def _wrap_norm(s: Any) -> str:
+    """Case, punctuation and spacing folded away: what a verbatim quote must still match."""
+    s = unicodedata.normalize("NFKC", str(s or "")).casefold()
+    return " ".join(_WRAP_NONWORD.sub(" ", s).split())
+
+
+def _wrap_clean(s: Any, cap: int) -> str:
+    """One line of display text: control / bidi / zero-width characters out, spaces collapsed,
+    cut at a word boundary to `cap`."""
+    s = "".join(ch for ch in str(s or "") if unicodedata.category(ch)[0] != "C" or ch in "\t\n")
+    s = " ".join(s.split())
+    if len(s) > cap:
+        cut = s[:cap]
+        sp = cut.rfind(" ")
+        s = (cut[:sp] if sp > cap // 2 else cut).rstrip()
+    return s
+
+
+def _wrap_segments(note: dict) -> list[dict]:
+    """The note's transcript as [{t, text, speaker}]: segments (no speaker = Nic, Listen Mode),
+    or a legacy note's rawText split into lines ("Tony:" / "Nic:" labels honoured)."""
+    out: list[dict] = []
+    segs = note.get("segments")
+    if isinstance(segs, list) and any(isinstance(s, dict) and str(s.get("text") or "").strip() for s in segs):
+        for s in segs:
+            if not isinstance(s, dict):
+                continue
+            text = str(s.get("text") or "").strip()
+            if not text:
+                continue
+            t = s.get("t")
+            t = float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t) else None
+            out.append({"t": t, "text": text, "speaker": "tony" if s.get("speaker") == "tony" else "nic"})
+        return out
+    for line in str(note.get("rawText") or "").splitlines():
+        m = _WRAP_SPEAKER.match(line)
+        speaker = m.group(1).lower() if m else "nic"
+        text = (line[m.end():] if m else line).strip()
+        if text:
+            out.append({"t": None, "text": text, "speaker": speaker})
+    return out
+
+
+def _wrap_window(segs: list[dict], max_chars: int = WRAPUP_MAX_CHARS) -> list[dict]:
+    """The last segments that fit in `max_chars` of labelled transcript (a huge last one is cut to its end)."""
+    window: list[dict] = []
+    used = 0
+    for s in reversed(segs):
+        cost = len(s["text"]) + 6
+        if used + cost > max_chars:
+            if not window:
+                window.append({**s, "text": s["text"][-(max_chars - 6):]})
+            break
+        window.append(s)
+        used += cost
+    window.reverse()
+    return window
+
+
+def _wrap_transcript(window: list[dict]) -> str:
+    return "\n".join(f"{'Tony' if s['speaker'] == 'tony' else 'Nic'}: {s['text']}" for s in window)
+
+
+def _wrap_item_id(kind: str, quote: str) -> str:
+    return "w" + hashlib.sha1(f"{kind}|{_wrap_norm(quote)}".encode("utf-8")).hexdigest()[:12]
+
+
+class _WrapTrace:
+    """Finds a quote in the transcript window; says which segments it spans."""
+
+    def __init__(self, window: list[dict]):
+        self.window = window
+        norms = [_wrap_norm(s["text"]) for s in window]
+        self.starts: list[int] = []
+        pos = 0
+        for n in norms:
+            self.starts.append(pos)
+            pos += len(n) + 1
+        self.joined = " ".join(norms)
+        self._padded = f" {self.joined} "
+        self.prefixes = {w[:5] for w in self.joined.split() if len(w) >= 4}
+
+    def _seg_at(self, pos: int) -> int:
+        return max(0, bisect.bisect_right(self.starts, pos) - 1)
+
+    def find(self, quote: str) -> Optional[list[int]]:
+        """Indices of the segments a quote spans (Nic-only spans preferred), or None when it isn't
+        in the transcript. "..." in a quote may skip at most WRAPUP_ELLIPSIS_GAP words; the parts
+        must appear in order. The whole quote must sit in one speaker's words: one segment, or
+        adjacent segments of the same speaker. A quote stitched across Nic and Tony (or across a
+        long gap) is not a quote of anything either of them said."""
+        parts = [p for p in (_wrap_norm(x) for x in _WRAP_ELLIPSIS.split(_WRAP_SPEAKER.sub("", quote or ""))) if p]
+        if not parts:
+            return None
+        if sum(len(p.split()) for p in parts) < 2 or sum(len(p) for p in parts) < 6:
+            return None  # too short to trace anything ("yes", "ok")
+        # P is the joined text padded with one space each side, so an index i of " part " in P is
+        # the index of the part itself in self.joined (what self.starts counts in).
+        P = self._padded
+        first = f" {parts[0]} "
+        tony_span: Optional[list[int]] = None
+        i = P.find(first)
+        tries = 0
+        while i >= 0 and tries < 200:
+            tries += 1
+            end = i + len(parts[0])  # exclusive end in self.joined
+            ok = True
+            for p in parts[1:]:
+                j = P.find(f" {p} ", end)  # the nearest next part is the smallest gap
+                if j < 0 or len(P[end + 1:j + 1].split()) > WRAPUP_ELLIPSIS_GAP:
+                    ok = False
+                    break
+                end = j + len(p)
+            if ok:
+                segs = list(range(self._seg_at(i), self._seg_at(max(i, end - 1)) + 1))
+                speakers = {self.window[k]["speaker"] for k in segs}
+                if speakers == {"nic"}:
+                    return segs
+                if speakers == {"tony"} and tony_span is None:
+                    tony_span = segs
+            i = P.find(first, i + 1)
+        return tony_span
+
+    def grounded(self, text: str) -> bool:
+        """Most of an item text's content words (stems) were said in the session."""
+        words = [w for w in _wrap_norm(text).split() if len(w) >= 4 and w not in _WRAP_STOP]
+        if not words:
+            return True
+        hits = sum(1 for w in words if w[:5] in self.prefixes)
+        return hits / len(words) >= 0.6
+
+
+def _wrap_dest(v: Any) -> Optional[str]:
+    if not isinstance(v, str):
+        return None
+    d = v.strip().lower().replace("-", "_").replace(" ", "_")
+    d = {"playplace": "play_place", "play": "play_place"}.get(d, d)
+    return d if d in WRAPUP_DESTINATIONS else None
+
+
+def _wrap_kind(v: Any) -> Optional[str]:
+    if not isinstance(v, str):
+        return None
+    k = v.strip().lower().replace("-", "_").replace(" ", "_")
+    k = {"nextstep": "next_step", "next": "next_step", "step": "next_step", "action": "next_step", "task": "next_step"}.get(k, k)
+    return k if k in WRAPUP_KINDS else None
+
+
+def _wrap_validate(raw: Any, trace: _WrapTrace) -> Optional[dict]:
+    """The model's answer as {title, summary, items, dropped}, or None when its shape is wrong
+    (that earns the one retry). Items that fail are dropped one by one, never repaired by guessing."""
+    if not isinstance(raw, dict):
+        return None
+    title, summary, items = raw.get("title"), raw.get("summary"), raw.get("items")
+    if not isinstance(title, str) or not isinstance(summary, str) or not isinstance(items, list):
+        return None
+    out: list[dict] = []
+    seen: set[str] = set()
+    dropped = 0
+    for it in items:
+        if len(out) >= WRAPUP_MAX_ITEMS:
+            dropped += 1
+            continue
+        if not isinstance(it, dict):
+            dropped += 1
+            continue
+        kind = _wrap_kind(it.get("kind"))
+        text = _wrap_clean(it.get("text"), WRAPUP_TEXT_MAX) if isinstance(it.get("text"), str) else ""
+        quote = _wrap_clean(_WRAP_SPEAKER.sub("", it.get("quote") or "") if isinstance(it.get("quote"), str) else "", WRAPUP_TEXT_MAX)
+        segs = trace.find(quote) if kind and text and quote else None
+        if segs is None:
+            dropped += 1
+            continue
+        if not trace.grounded(text):
+            text = quote  # the model's wording drifted from what was said: show the words themselves
+        speaker = "nic" if all(trace.window[k]["speaker"] == "nic" for k in segs) else "tony"
+        if speaker == "tony" and kind in ("decision", "next_step"):
+            kind = "idea"  # Tony proposing it is not Nic deciding it: offered as Tony's idea
+        suggested = _wrap_dest(it.get("suggested_destination"))
+        if suggested == "memory" and speaker != "nic":
+            suggested = None  # core memory only from Nic's own words
+        item_id = _wrap_item_id(kind, quote)
+        if item_id in seen:
+            continue  # the same item twice
+        seen.add(item_id)
+        item: dict[str, Any] = {
+            "id": item_id, "kind": kind, "text": text, "quote": quote, "speaker": speaker,
+            "t": trace.window[segs[0]]["t"], "suggested": suggested, "dest": suggested, "status": "pending",
+        }
+        if suggested == "memory":
+            cat = it.get("memory_category")
+            item["memoryCategory"] = cat if cat in WRAPUP_MEMORY_CATEGORIES else "rule"
+        out.append(item)
+    return {"title": _wrap_clean(title, WRAPUP_TITLE_MAX), "summary": _wrap_clean(summary, WRAPUP_SUMMARY_MAX), "items": out, "dropped": dropped}
+
+
+def _wrap_fallback(note: dict, window: list[dict], reason: str) -> dict:
+    """No model: Nic's own lines (sentences of 3+ words) become candidate items, unsorted and
+    undirected. Nothing is summarised beyond his first words."""
+    items: list[dict] = []
+    seen: set[str] = set()
+    firsts: list[str] = []
+    for s in window:
+        if s["speaker"] != "nic":
+            continue
+        for sentence in _WRAP_SENTENCE.split(s["text"]):
+            line = _wrap_clean(sentence, WRAPUP_TEXT_MAX)
+            if len(_wrap_norm(line).split()) < 3:
+                continue
+            if len(firsts) < 2:
+                firsts.append(line)
+            item_id = _wrap_item_id("idea", line)
+            if item_id in seen or len(items) >= WRAPUP_FALLBACK_MAX:
+                continue
+            seen.add(item_id)
+            items.append({
+                "id": item_id, "kind": "idea", "text": line, "quote": line, "speaker": "nic", "t": s["t"],
+                "suggested": None, "dest": None, "status": "pending",
+            })
+    return {
+        "at": time.time(),
+        "title": _wrap_clean(note.get("title") or "Brainstorm", WRAPUP_TITLE_MAX) or "Brainstorm",
+        "summary": _wrap_clean(" ".join(firsts), WRAPUP_SUMMARY_MAX),
+        "items": items,
+        "engine": "fallback",
+        "fallbackReason": reason,
+        "coveredSegments": len(window),
+        "dropped": 0,
+    }
+
+
+def _wrap_merge(old: Any, new: dict) -> dict:
+    """`new` with the old run's decisions kept: an item already sending / sent / skipped / failed is
+    never reset (and is carried over when the new run lost it); a pending item keeps its old id
+    and the destination Nic picked by hand."""
+    old_items = [i for i in ((old or {}).get("items") if isinstance(old, dict) else None) or [] if isinstance(i, dict) and isinstance(i.get("id"), str)]
+    by_id = {i["id"]: i for i in old_items}
+    by_quote: dict[str, dict] = {}
+    by_text: dict[str, dict] = {}
+    for i in old_items:
+        by_quote.setdefault(_wrap_norm(i.get("quote")), i)
+        by_text.setdefault(_wrap_norm(i.get("text")), i)
+    by_quote.pop("", None)
+    by_text.pop("", None)
+    def overlapping(q: str) -> Optional[dict]:
+        """An old item whose quote and this one are the same words give or take a few at the ends
+        ("I want a clock widget…" vs "a clock widget…"): the shorter is inside the longer, is
+        3+ words and at least 60% of it."""
+        qw = q.split()
+        hits = []
+        for o in old_items:
+            ow = _wrap_norm(o.get("quote")).split()
+            short, long_ = (qw, ow) if len(qw) <= len(ow) else (ow, qw)
+            if len(short) >= 3 and len(short) >= 0.6 * len(long_) and f" {' '.join(short)} " in f" {' '.join(long_)} ":
+                hits.append(o)
+        return next((o for o in hits if o["id"] not in used), hits[0] if hits else None)
+
+    used: set[str] = set()
+    items: list[dict] = []
+    for n in new["items"]:
+        nq = _wrap_norm(n.get("quote"))
+        o = by_id.get(n["id"]) or by_quote.get(nq) or by_text.get(_wrap_norm(n.get("text")))
+        if o is None or o["id"] in used:
+            o = overlapping(nq) or o
+        if o is not None and o["id"] not in used:
+            used.add(o["id"])
+            if o.get("status") != "pending":
+                items.append(o)  # decided (or in flight): exactly as it was
+                continue
+            m = {**n, "id": o["id"]}
+            if _wrap_dest(o.get("dest")) and o.get("dest") != o.get("suggested"):
+                m["dest"] = o["dest"]
+            items.append(m)
+            continue
+        if o is not None and o.get("status") != "pending":
+            continue  # a second new item for an already decided one: never a second send
+        items.append(n)
+    for o in old_items:
+        if o["id"] not in used and o.get("status") != "pending":
+            items.append(o)
+    unique: list[dict] = []
+    ids: set[str] = set()
+    for i in items:
+        if i["id"] not in ids:
+            ids.add(i["id"])
+            unique.append(i)
+    return {**new, "items": unique}
+
+
+def _wrap_organized(note: dict, wrap: dict) -> dict:
+    live = [i for i in wrap["items"] if i.get("status") != "skipped"]
+    cats = [
+        {"name": name, "bullets": [i["text"] for i in live if i.get("kind") == kind]}
+        for name, kind in (("Ideas", "idea"), ("Decisions", "decision"))
+    ]
+    prev = note.get("organized") if isinstance(note.get("organized"), dict) else {}
+    return {
+        "title": wrap["title"],
+        "summary": wrap["summary"],
+        "categories": [c for c in cats if c["bullets"]],
+        "actions": [{"text": i["text"], "due": None} for i in live if i.get("kind") == "next_step"],
+        "tags": prev.get("tags") if isinstance(prev.get("tags"), list) else [],
+    }
+
+
+def _wrap_store(note_id: str, wrap: dict, keep_model_run: bool) -> dict:
+    """Merge `wrap` into the note's current wrap-up and save it, read and written under one lock
+    (a status a device wrote while the model ran is the one merged). `keep_model_run`: a fallback
+    never replaces an existing model wrap-up."""
+    with _db_lock, db() as c:
+        r = c.execute("SELECT * FROM items WHERE id=? AND collection='notes' AND deleted=0", (note_id,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Note not found")
+        note = json.loads(r["data"])
+        cur = note.get("wrapup") if isinstance(note.get("wrapup"), dict) else None
+        if keep_model_run and cur and cur.get("engine") == "llm":
+            merged = note
+        else:
+            w = _wrap_merge(cur, wrap)
+            patch: dict[str, Any] = {"wrapup": w}
+            if w["engine"] == "llm":
+                patch.update(organized=_wrap_organized(note, w), organizedAt=w["at"])
+                if not note.get("titleLocked") and w["title"]:
+                    patch["title"] = w["title"]
+            merged = {**note, **patch}
+            c.execute("UPDATE items SET data=?, updated=? WHERE id=?", (json.dumps(merged), time.time(), note_id))
+        r = c.execute("SELECT * FROM items WHERE id=?", (note_id,)).fetchone()
+    _upsert_vault_text(note_id, "notes", merged, False)
+    return _row(r)
+
+
+def _wrap_ask_model(transcript: str, trace: _WrapTrace) -> tuple[Optional[dict], str, str]:
+    """(validated answer or None, failure reason, detail). One retry when the JSON is bad,
+    unless the desktop took the GPU meanwhile."""
+    msgs = [{"role": "system", "content": WRAPUP_PROMPT}, {"role": "user", "content": f"TRANSCRIPT:\n{transcript}"}]
+    for attempt in range(2):
+        if attempt and gpu_busy():
+            return None, "busy", "the desktop took the GPU before the retry"
+        try:
+            out = llm_chat(msgs if not attempt else msgs + [{"role": "user", "content": "Return ONLY the JSON object described, nothing else."}], max_tokens=1600, temperature=0.1, gpu_wait=0)
+        except GpuMaintenance as e:
+            return None, "busy", str(e)
+        except Exception as e:
+            return None, "unavailable", _why(e)
+        v = _wrap_validate(extract_json(out), trace)
+        if v is not None:
+            return v, "", ""
+    return None, "invalid", "the local model returned no valid wrap-up JSON (twice)"
+
+
+class WrapUpRequest(BaseModel):
+    id: str
+
+
+@router.post("/brainstorm/wrapup")
+def brainstorm_wrapup(req: WrapUpRequest):
+    with db() as c:
+        r = c.execute("SELECT * FROM items WHERE id=? AND collection='notes' AND deleted=0", (req.id,)).fetchone()
+    if not r:
+        raise HTTPException(404, "Note not found")
+    note = json.loads(r["data"])
+    window = _wrap_window(_wrap_segments(note))
+    if not window:
+        raise HTTPException(400, "Nothing to wrap up yet")
+    with _wrapup_running_lock:
+        if req.id in _wrapup_running:
+            raise HTTPException(409, "A wrap-up for this note is already running")
+        _wrapup_running.add(req.id)
+    try:
+        trace = _WrapTrace(window)
+        reason, detail, answer = "", "", None
+        if not wait_gpu(WRAPUP_GPU_WAIT_SECS, poll=0.1) or gpu_maintenance():
+            reason, detail = "busy", "the desktop holds the GPU"
+        else:
+            answer, reason, detail = _wrap_ask_model(_wrap_transcript(window), trace)
+        if answer is not None:
+            wrap = {
+                "at": time.time(), "title": answer["title"] or _wrap_clean(note.get("title") or "Brainstorm", WRAPUP_TITLE_MAX),
+                "summary": answer["summary"], "items": answer["items"], "engine": "llm",
+                "coveredSegments": len(window), "dropped": answer["dropped"],
+            }
+            return _wrap_store(req.id, wrap, keep_model_run=False)
+        stored = _wrap_store(req.id, _wrap_fallback(note, window, reason), keep_model_run=True)
+        retry = WRAPUP_RETRY_SECS
+        if reason == "busy":
+            st = gpu_state()
+            if st.get("expiresAt"):
+                retry = int(min(120, max(5, math.ceil(st["expiresAt"] - time.time()))))
+        msg = {"busy": "Local model busy", "unavailable": "Local model unavailable", "invalid": "Local model gave no usable wrap-up"}[reason]
+        return JSONResponse(
+            status_code=503,
+            content={"detail": f"{msg}: {detail}"[:300], "reason": reason, "retryAfter": retry, "note": stored},
+            headers={"Retry-After": str(retry)},
+        )
+    finally:
+        with _wrapup_running_lock:
+            _wrapup_running.discard(req.id)
+
+
 # ── vault endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/vault/search")
@@ -2064,14 +2623,465 @@ def _mark_good(info: dict, keep: int, out_dir: Path) -> dict:
     return info
 
 
-def _free_backup_path(out_dir: Path, stamp: str) -> Path:
+def _free_backup_path(out_dir: Path, stamp: str, mirror_dirs: Optional[list] = None) -> Path:
     """cc-<stamp>.zip, or cc-<stamp>b.zip, c, ... for a second backup in the same second (the
-    letter sorts after the bare name, so retention keeps the newest)."""
+    letter sorts after the bare name, so retention keeps the newest). A name a mirror folder
+    already holds is skipped too: retention may have removed it here, but its mirror copy stays.
+    Mirrors are never probed synchronously here: their names come from the manifest plus a
+    bounded listing (`_mirror_held_names`), so an offline share can't hold up the backup."""
+    held = _mirror_held_names(mirror_dirs)
+
+    def taken(name: str) -> bool:
+        if name in held or f"failed-{name}" in held:
+            return True
+        try:
+            return (out_dir / name).exists() or (out_dir / f"failed-{name}").exists()
+        except OSError:
+            return False
+
     for suffix in [""] + [chr(c) for c in range(ord("b"), ord("z") + 1)]:
         z = out_dir / f"cc-{stamp}{suffix}.zip"
-        if not z.exists() and not z.with_name(f"failed-{z.name}").exists():
+        if not taken(z.name):
             return z
     raise RuntimeError("too many backups in one second")
+
+
+# ── backup mirrors (Section 16.2: a second copy on another drive) ────────────
+#
+# After a backup verifies, its zip is copied into each `backup.mirrorDirs` folder and the copy is
+# checked (same size, a readable zip, the same sha256). Per-mirror status lives in kv
+# `backup.mirrors` (gateway-owned: clients can't write backup.* keys) and the Vault page alerts
+# when a mirror failed or can't be reached. Nothing here deletes a file unless `mirrorKeep` > 0,
+# and then only cc-*.zip copies this gateway wrote and verified in that folder (kv
+# `backup.mirrorManifest`, matched by name, size and sha256). A copy that fails its check is
+# kept as failed-cc-*.zip for inspection, never removed.
+
+MIRROR_MAX_DIRS = 5
+_MIRROR_NAME = re.compile(r"cc-[0-9]{8}-[0-9]{6}[a-z]?\.zip")
+
+
+def _norm_dir(p: Any) -> str:
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def _clean_mirror_dirs(dirs: Any, primary: str) -> list[str]:
+    """`backup.mirrorDirs` from a PUT: absolute folders, deduplicated, never the backup folder
+    itself (or a folder inside it / around it), at most MIRROR_MAX_DIRS. Raises ValueError."""
+    if dirs in (None, ""):
+        return []
+    if isinstance(dirs, str):
+        dirs = re.split(r"[\r\n;]+", dirs)
+    if not isinstance(dirs, list):
+        raise ValueError("a list of folders")
+    out: list[str] = []
+    prim = _norm_dir(Path(primary).expanduser()) if primary else None
+    for d in dirs:
+        if not isinstance(d, str):
+            raise ValueError("each mirror is a folder path")
+        d = d.strip().strip('"')
+        if not d:
+            continue
+        if len(d) > 260:
+            raise ValueError("a folder path is too long")
+        pd = Path(d).expanduser()
+        if not pd.is_absolute():
+            raise ValueError(f"{d} is not an absolute path (e.g. D:\\Backups\\cc-mirror)")
+        a = _norm_dir(pd)
+        if prim is not None and (a == prim or a.startswith(prim.rstrip(os.sep) + os.sep) or prim.startswith(a.rstrip(os.sep) + os.sep)):
+            raise ValueError(f"{d} is the backup folder itself (or inside / around it); a mirror must be a different folder, ideally on another drive")
+        if any(_norm_dir(x) == a for x in out):
+            continue
+        out.append(str(pd))
+    if len(out) > MIRROR_MAX_DIRS:
+        raise ValueError(f"at most {MIRROR_MAX_DIRS} mirror folders")
+    return out
+
+
+def _sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _zip_problem(p: Path) -> Optional[str]:
+    """None when the zip opens and every entry's CRC checks out, else the reason."""
+    try:
+        with zipfile.ZipFile(p) as z:
+            bad = z.testzip()
+        return f"corrupt entry {bad}" if bad else None
+    except (zipfile.BadZipFile, OSError) as e:
+        return f"unreadable zip: {e}"
+
+
+# Reachability: `Path(anchor).exists()` on an offline SMB share / mapped drive can block for tens
+# of seconds, so every probe runs in its own daemon thread, all mirrors in parallel, and the caller
+# waits at most MIRROR_PROBE_TIMEOUT in total. One probe per drive / share root is in flight at a
+# time (a hung share never piles up threads) and the last answer is cached for MIRROR_PROBE_TTL.
+MIRROR_PROBE_TIMEOUT = 2.0
+MIRROR_PROBE_TTL = 60.0
+_mirror_probe_lock = threading.Lock()
+_mirror_probe_cache: dict[str, dict] = {}
+_mirror_probe_inflight: dict[str, threading.Event] = {}
+# One mirror run at a time (status / manifest are read-modify-write kv records).
+_mirror_lock = threading.Lock()
+
+
+def _mirror_exists(p: Path) -> bool:
+    """The blocking call a probe makes (tests swap in a slow fake)."""
+    return p.exists()
+
+
+def _probe_key(d: Path) -> str:
+    return _norm_dir(d.anchor) if d.anchor else _norm_dir(d)
+
+
+def _mirror_probe_start(d: Path) -> threading.Event:
+    key = _probe_key(d)
+    with _mirror_probe_lock:
+        ev = _mirror_probe_inflight.get(key)
+        if ev is not None:
+            return ev
+        ev = threading.Event()
+        _mirror_probe_inflight[key] = ev
+
+    def run() -> None:
+        try:
+            ok = bool(d.anchor) and _mirror_exists(Path(d.anchor))
+            reason = None if ok else f"{d.anchor or d} is not reachable (drive unplugged or share offline)"
+        except Exception as e:  # OSError and anything odd from a network redirector
+            ok, reason = False, f"{d.anchor or d} is not reachable ({_why(e)})"
+        with _mirror_probe_lock:
+            _mirror_probe_cache[key] = {"at": time.time(), "reachable": ok, "reason": reason}
+            _mirror_probe_inflight.pop(key, None)
+        ev.set()
+
+    threading.Thread(target=run, name="cc-mirror-probe", daemon=True).start()
+    return ev
+
+
+def _mirror_reach(dirs: list, timeout: float = MIRROR_PROBE_TIMEOUT, max_age: float = MIRROR_PROBE_TTL) -> dict[str, dict]:
+    """{str(dir): {reachable, reason, timeout?}} for each mirror folder, probing in parallel and
+    waiting at most `timeout` seconds in total. A cached answer younger than `max_age` is reused
+    (max_age 0 = probe again, still sharing a probe that is already running). A probe that hasn't
+    answered in time reports "unreachable (not answering)"; when it answers later, its result
+    replaces that in the cache."""
+    now = time.time()
+    out: dict[str, dict] = {}
+    waiting: list[tuple[str, Path, str, threading.Event]] = []
+    for x in dirs:
+        d = Path(x)
+        key = _probe_key(d)
+        with _mirror_probe_lock:
+            hit = _mirror_probe_cache.get(key)
+        if hit is not None and max_age > 0 and now - hit["at"] < max_age:
+            out[str(d)] = hit
+            continue
+        waiting.append((str(d), d, key, _mirror_probe_start(d)))
+    deadline = time.monotonic() + max(0.0, timeout)
+    for name, d, key, ev in waiting:
+        ev.wait(max(0.0, deadline - time.monotonic()))
+        with _mirror_probe_lock:
+            if ev.is_set() or key not in _mirror_probe_inflight:
+                out[name] = _mirror_probe_cache.get(key) or {"at": time.time(), "reachable": False, "reason": f"{d.anchor or d} is not reachable"}
+                continue
+            res = {
+                "at": time.time(),
+                "reachable": False,
+                "timeout": True,
+                "reason": f"{d.anchor or d} is unreachable (not answering after {timeout:g} s: share offline or drive asleep)",
+            }
+            _mirror_probe_cache[key] = res
+        out[name] = res
+    return out
+
+
+def _mirror_reachable(d: Path) -> bool:
+    """The drive / share root exists (an unplugged USB drive or an offline share does not).
+    Bounded: an unanswering share counts as unreachable after MIRROR_PROBE_TIMEOUT."""
+    return bool(_mirror_reach([d])[str(Path(d))]["reachable"])
+
+
+def _mirror_held_names(mirror_dirs: Optional[list], timeout: float = MIRROR_PROBE_TIMEOUT) -> set[str]:
+    """Backup names the mirror folders hold: every name in the recorded manifest, plus a listing of
+    each folder that answers in time (cached / bounded reachability, then the listings in parallel
+    threads, at most 2 x `timeout` in all). Never blocks for long on an offline share."""
+    ds = [Path(m) for m in (mirror_dirs or []) if isinstance(m, str) and m.strip()]
+    if not ds:
+        return set()
+    names: set[str] = set()
+    manifests: dict = kv_get("backup.mirrorManifest") or {}
+    for d in ds:
+        names.update(str(m.get("name") or "") for m in manifests.get(str(d)) or [])
+    start = time.monotonic()
+    reach = _mirror_reach(ds, timeout)
+    found: list[str] = []
+    found_lock = threading.Lock()
+
+    def listing(d: Path) -> None:
+        try:
+            got = [p.name for p in d.iterdir() if p.name.startswith(("cc-", "failed-cc-"))]
+        except OSError:
+            return
+        with found_lock:
+            found.extend(got)
+
+    threads = [threading.Thread(target=listing, args=(d,), name="cc-mirror-list", daemon=True) for d in ds if reach[str(d)].get("reachable")]
+    for t in threads:
+        t.start()
+    deadline = start + 2 * max(0.0, timeout)
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    with found_lock:
+        names.update(found)
+    names.discard("")
+    return names
+
+
+# Leftover partial copies: recorded in kv `backup.mirrorPartials` ({dir: {name: started_at}}) when a
+# copy starts and forgotten when it finishes, so a retry only ever removes a partial THIS code wrote.
+_PARTIAL_NAME = re.compile(r"\.partial-cc-[0-9]{8}-[0-9]{6}[a-z]?\.zip")
+# Filesystem timestamps can be coarse (FAT: 2 s).
+_PARTIAL_MTIME_SLACK = 2.0
+
+
+def _partials() -> dict:
+    v = kv_get("backup.mirrorPartials")
+    return v if isinstance(v, dict) else {}
+
+
+def _note_partial(d: Path, name: str, started: float) -> None:
+    rec = _partials()
+    rec.setdefault(str(d), {})[name] = started
+    kv_set("backup.mirrorPartials", rec)
+
+
+def _forget_partial(d: Path, name: str) -> None:
+    rec = _partials()
+    if name in (rec.get(str(d)) or {}):
+        del rec[str(d)][name]
+        if not rec[str(d)]:
+            del rec[str(d)]
+        kv_set("backup.mirrorPartials", rec)
+
+
+def _remove_stale_partial(d: Path, part: Path, src_size: int, attempt: float) -> bool:
+    """Remove `part` only when it is a partial copy this gateway started (recorded in kv under this
+    folder and name, the exact .partial-cc-*.zip pattern), a plain file, older than this attempt,
+    written after its recorded start, and no bigger than the backup. True when it is gone."""
+    started = (_partials().get(str(d)) or {}).get(part.name)
+    if not _PARTIAL_NAME.fullmatch(part.name) or not isinstance(started, (int, float)):
+        return False
+    try:
+        if part.is_symlink() or not part.is_file():
+            return False
+        st = part.stat()
+        if not (started - _PARTIAL_MTIME_SLACK <= st.st_mtime < attempt) or st.st_size > src_size:
+            return False
+        part.unlink()
+    except OSError:
+        return False
+    _forget_partial(d, part.name)
+    return True
+
+
+def _mirror_one(src: Path, src_size: int, src_sha: str, d: Path, reachable: Optional[bool] = None) -> dict:
+    """Copy `src` into mirror folder `d` and verify the copy: {ok, reason?, file?, size?, sha256?}.
+    Never overwrites or removes anything already in the folder, except a stale partial copy of
+    this same backup that this code itself started earlier (`_remove_stale_partial`).
+    `reachable` = the caller already probed the folder (bounded); None = probe it here (bounded)."""
+    why = None
+    if reachable is None:
+        r = _mirror_reach([d])[str(d)]
+        reachable, why = bool(r.get("reachable")), r.get("reason")
+    if not reachable:
+        return {"ok": False, "unreachable": True, "reason": why or f"{d.anchor or d} is not reachable (drive unplugged or share offline)"}
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "reason": f"can't create the folder: {_why(e)}"}
+    dst = d / src.name
+    if dst.exists():
+        try:
+            if dst.stat().st_size == src_size and _sha256(dst) == src_sha:
+                return {"ok": True, "file": str(dst), "size": src_size, "sha256": src_sha, "already": True}
+        except OSError as e:
+            return {"ok": False, "reason": f"can't read the copy already there: {_why(e)}"}
+        return {"ok": False, "reason": f"a different file named {src.name} is already in the mirror (left as it is)"}
+    part = d / f".partial-{src.name}"
+    attempt = time.time()
+    if part.exists() and not _remove_stale_partial(d, part, src_size, attempt):
+        return {"ok": False, "reason": f"{part.name} is left from an earlier copy; check it, then remove it by hand"}
+    _note_partial(d, part.name, attempt)
+    try:
+        shutil.copyfile(src, part)
+    except OSError as e:
+        # Our own half-written copy from this attempt: remove it now if the folder lets us (else
+        # the kv record lets the next attempt clear it).
+        try:
+            if part.is_file() and not part.is_symlink():
+                part.unlink()
+                _forget_partial(d, part.name)
+        except OSError:
+            pass
+        return {"ok": False, "reason": f"copy failed: {_why(e)}"}
+    problems: list[str] = []
+    try:
+        size = part.stat().st_size
+        if size != src_size:
+            problems.append(f"the copy is {size:,} bytes, the backup {src_size:,}")
+        bad = _zip_problem(part)
+        if bad:
+            problems.append(bad)
+        if not problems and _sha256(part) != src_sha:
+            problems.append("sha256 differs from the backup")
+    except OSError as e:
+        problems.append(f"can't re-read the copy: {_why(e)}")
+    if problems:
+        # Kept for inspection under a name retention never counts (and never removes).
+        try:
+            kept = d / f"failed-{src.name}"
+            if not kept.exists():
+                part.replace(kept)
+                _forget_partial(d, part.name)
+        except OSError:
+            pass
+        return {"ok": False, "reason": "the copy failed its check: " + "; ".join(problems)}
+    try:
+        part.replace(dst)
+    except OSError as e:
+        return {"ok": False, "reason": f"can't finish the copy: {_why(e)}"}
+    _forget_partial(d, part.name)
+    return {"ok": True, "file": str(dst), "size": src_size, "sha256": src_sha}
+
+
+def _rotate_mirror(d: Path, keep: int, manifest: list[dict], current: Optional[str] = None) -> list[dict]:
+    """mirrorKeep > 0 only: remove the oldest copies beyond `keep`, and only ones this gateway
+    wrote and verified there (in the manifest, a cc-*.zip name, the same size and sha256 as
+    recorded). Any other file in the folder is never touched. The newest `keep` by name stay, and
+    so does `current` (the copy just written in this run, even when it has an older name, e.g. an
+    accepted old failed backup). Returns the manifest left."""
+    if keep <= 0:
+        return manifest
+    ours = sorted((m for m in manifest if _MIRROR_NAME.fullmatch(str(m.get("name") or ""))), key=lambda m: m["name"])
+    kept = {m["name"] for m in ours[max(0, len(ours) - keep):]}
+    if current:
+        kept.add(current)
+    gone: set[str] = set()
+    for m in [m for m in ours if m["name"] not in kept]:
+        f = d / m["name"]
+        try:
+            if not f.is_file():
+                gone.add(m["name"])  # removed by hand already: forget it
+                continue
+            if f.stat().st_size != m.get("size") or _sha256(f) != m.get("sha256"):
+                continue  # not the copy we wrote any more: leave it alone
+            f.unlink()
+            gone.add(m["name"])
+        except OSError:
+            continue
+    return [m for m in manifest if m.get("name") not in gone]
+
+
+def mirror_backup(zpath: Path, cfg: Optional[dict] = None) -> dict:
+    """Copy a verified backup into every mirror folder; records and returns per-mirror status
+    {dir: {ok, reason?, at, backup, lastOkAt, lastOkFile, unreachable?}}. Never raises for a
+    mirror's own trouble and never fails the backup itself."""
+    cfg = cfg or load_config()["backup"]
+    dirs = [Path(x) for x in (cfg.get("mirrorDirs") or []) if isinstance(x, str) and x.strip()]
+    if not dirs:
+        return {}
+    keep = int(cfg.get("mirrorKeep") or 0)
+    err = None
+    try:
+        src_size, src_sha = zpath.stat().st_size, _sha256(zpath)
+    except OSError as e:
+        src_size, src_sha, err = 0, "", f"can't read the backup to copy: {_why(e)}"
+    with _mirror_lock:
+        return _mirror_backup_locked(zpath, dirs, keep, src_size, src_sha, err)
+
+
+def _mirror_backup_locked(zpath: Path, dirs: list[Path], keep: int, src_size: int, src_sha: str, err: Optional[str]) -> dict:
+    status: dict = kv_get("backup.mirrors") or {}
+    manifests: dict = kv_get("backup.mirrorManifest") or {}
+    # Every mirror probed in parallel, at most MIRROR_PROBE_TIMEOUT in total; one that doesn't
+    # answer is skipped with its status recorded.
+    reach = _mirror_reach(dirs, max_age=0) if not err else {}
+    now = time.time()
+    for d in dirs:
+        key = str(d)
+        prev = status.get(key) or {}
+        if err:
+            res = {"ok": False, "reason": err}
+        elif not reach[key].get("reachable"):
+            res = {"ok": False, "unreachable": True, "reason": reach[key].get("reason") or f"{d.anchor or d} is not reachable"}
+        else:
+            res = _mirror_one(zpath, src_size, src_sha, d, reachable=True)
+        rec = {"ok": bool(res.get("ok")), "at": now, "backup": zpath.name, "lastOkAt": prev.get("lastOkAt"), "lastOkFile": prev.get("lastOkFile")}
+        if res.get("ok"):
+            rec.update(lastOkAt=now, lastOkFile=res.get("file"))
+            man = list(manifests.get(key) or [])
+            if not any(m.get("name") == zpath.name for m in man) and not res.get("already"):
+                man.append({"name": zpath.name, "size": res["size"], "sha256": res["sha256"], "at": now})
+            try:
+                man = _rotate_mirror(d, keep, man, current=zpath.name)
+            except Exception as e:  # retention trouble never marks the copy failed
+                rec["note"] = f"retention skipped: {_why(e)}"
+            manifests[key] = man
+        else:
+            rec["reason"] = res.get("reason") or "unknown problem"
+            if res.get("unreachable"):
+                rec["unreachable"] = True
+            print(f"[command-center] BACKUP MIRROR FAILED ({key}): {rec['reason']}")
+        status[key] = rec
+    kv_set("backup.mirrors", status)
+    kv_set("backup.mirrorManifest", manifests)
+    return {str(d): status[str(d)] for d in dirs}
+
+
+def mirror_view(cfg: Optional[dict] = None) -> list[dict]:
+    """The Vault page's rows for the configured mirror folders: the last result, the last good
+    copy, whether the drive is reachable right now, and `alert` when something needs a look."""
+    cfg = cfg or load_config()["backup"]
+    status: dict = kv_get("backup.mirrors") or {}
+    last_good = (kv_get("backup.lastGood") or {}).get("at") or 0
+    rows = []
+    dirs = [Path(x) for x in cfg.get("mirrorDirs") or [] if isinstance(x, str) and x.strip()]
+    # Bounded and cached: an offline share costs this page at most MIRROR_PROBE_TIMEOUT, once a minute.
+    reach = _mirror_reach(dirs) if dirs else {}
+    for d in dirs:
+        rec = status.get(str(d)) or {}
+        r = reach.get(str(d)) or {}
+        reachable = bool(r.get("reachable"))
+        row = {"dir": str(d), "reachable": reachable, "ok": rec.get("ok"), "reason": rec.get("reason"), "at": rec.get("at"), "lastOkAt": rec.get("lastOkAt"), "lastOkFile": rec.get("lastOkFile")}
+        if r.get("timeout"):
+            row["notAnswering"] = True
+        if rec.get("ok") is False:
+            row["alert"] = rec.get("reason") or "the last copy failed"
+        elif not reachable and r.get("timeout"):
+            row["alert"] = f"{d.anchor or d} is not reachable right now: unreachable (not answering; share offline or drive asleep)"
+        elif not reachable:
+            row["alert"] = f"{d.anchor or d} is not reachable right now (drive unplugged or share offline)"
+        elif not rec and last_good:
+            row["alert"] = "no backup has been copied here yet (Mirror latest now copies one)"
+        rows.append(row)
+    return rows
+
+
+def mirror_latest() -> dict:
+    """Copy the newest good backup on disk into the mirrors now (the Vault page's button)."""
+    cfg = load_config()["backup"]
+    if not cfg.get("mirrorDirs"):
+        raise ValueError("no mirror folders set")
+    newest = _baseline(Path(cfg["dir"]).expanduser())
+    if not newest:
+        raise FileNotFoundError("no good backup to copy yet")
+    z = Path(newest["file"])
+    bad = _zip_problem(z)
+    if bad:
+        raise ValueError(f"the newest backup is damaged ({bad}); not copied")
+    return mirror_backup(z, cfg)
 
 
 def run_backup(reason: str = "manual") -> dict:
@@ -2079,7 +3089,7 @@ def run_backup(reason: str = "manual") -> dict:
     keep = int(cfg.get("keep", 14))
     out_dir = Path(cfg["dir"]).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    zpath = _free_backup_path(out_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    zpath = _free_backup_path(out_dir, datetime.now().strftime("%Y%m%d-%H%M%S"), cfg.get("mirrorDirs"))
     tmp_db = CC_DIR / f".backup-{zpath.stem}.db"
     live_rows: dict[str, int] = {}
     live_files = 0
@@ -2126,7 +3136,18 @@ def run_backup(reason: str = "manual") -> dict:
         kv_set("backup.lastFailure", info)
         print(f"[command-center] BACKUP FAILED verification ({reason}): {'; '.join(check['problems'])}")
         return info
-    return _mark_good(info, keep, out_dir)
+    return _with_mirrors(_mark_good(info, keep, out_dir), zpath, cfg)
+
+
+def _with_mirrors(info: dict, zpath: Path, cfg: dict) -> dict:
+    """A verified backup goes to the mirror folders too; their trouble never fails the backup."""
+    if cfg.get("mirrorDirs"):
+        try:
+            info["mirrors"] = mirror_backup(zpath, cfg)
+        except Exception as e:
+            print(f"[command-center] backup mirror error: {_why(e)}")
+            info["mirrors"] = {"error": _why(e)}
+    return info
 
 
 def accept_failed_backup(name: str) -> dict:
@@ -2146,7 +3167,32 @@ def accept_failed_backup(name: str) -> dict:
     dst = src.with_name(name[len("failed-"):])
     src.replace(dst)
     info = {"file": str(dst), "size": dst.stat().st_size, "at": time.time(), "reason": "accepted", "verified": sound}
-    return _mark_good(info, int(cfg.get("keep", 14)), out_dir)
+    info = _mark_good(info, int(cfg.get("keep", 14)), out_dir)
+    # The POST doesn't wait on the mirror drives: the copy runs in the background and its status
+    # lands in kv backup.mirrors (the Vault page's mirror rows) as usual.
+    if cfg.get("mirrorDirs"):
+        _mirror_in_background(dst, cfg)
+        info = {**info, "mirrorsPending": True}
+    return info
+
+
+_mirror_bg_thread: Optional[threading.Thread] = None
+
+
+def _mirror_in_background(zpath: Path, cfg: dict) -> threading.Thread:
+    """Mirror an already-good backup from a daemon thread (tests join `_mirror_bg_thread`)."""
+    global _mirror_bg_thread
+
+    def run() -> None:
+        try:
+            _with_mirrors({}, zpath, cfg)
+        except Exception as e:  # never escapes a background thread
+            print(f"[command-center] background backup mirror error: {_why(e)}")
+
+    t = threading.Thread(target=run, name="cc-backup-mirror", daemon=True)
+    _mirror_bg_thread = t
+    t.start()
+    return t
 
 
 def _backup_scheduler() -> None:
@@ -2184,6 +3230,17 @@ def backup_accept(body: BackupAccept):
         raise HTTPException(400, str(e))
 
 
+@router.post("/backup/mirror")
+def backup_mirror_now():
+    """Copy the newest good backup into the mirror folders now (a retry after plugging a drive in)."""
+    try:
+        return {"mirrors": mirror_latest()}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/backups")
 def list_backups():
     cfg = load_config()["backup"]
@@ -2198,6 +3255,9 @@ def list_backups():
         "failure": kv_get("backup.lastFailure"),
         "backups": [{"name": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime} for f in files[:100]],
         "failed": [{"name": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime} for f in failed[:20]],
+        # Section 16.2: second copies, one row per configured mirror folder (`alert` = needs a look).
+        "mirrors": mirror_view(cfg),
+        "mirrorKeep": int(cfg.get("mirrorKeep") or 0),
     }
 
 

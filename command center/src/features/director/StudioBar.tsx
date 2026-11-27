@@ -7,10 +7,14 @@ import { requestSettingsTab } from "@/sections/settings/settings-tab";
 import { api } from "./api";
 import type { McpReady } from "./contract";
 import { closeProject, createProject, openProject, setReadiness, useDirector, type Readiness, type RenderJob } from "./director-store";
+import { BatonPill } from "./BatonPill";
+import { COMFY_STATUS_POLL_MS, refreshComfy } from "./comfy-store";
 
 export const READINESS_POLL_MS = 10_000;
+/** The project Select's "All projects…" entry (closes the project: the board shows). */
+const ALL_PROJECTS = "__all_projects__";
 
-export type PillTone = "green" | "amber" | "red" | "unknown";
+export type PillTone = "green" | "amber" | "red" | "violet" | "unknown";
 
 /** MCP readiness → pill tone + label (pure). */
 export function readinessPill(r: Readiness | null, err: string | null): { tone: PillTone; label: string; detail: string | null } {
@@ -25,16 +29,22 @@ export function readinessPill(r: Readiness | null, err: string | null): { tone: 
   const off = servers.filter(([, s]) => !s.enabled || s.tools === 0).map(([n]) => n);
   if (off.length) return { tone: "amber", label: `${off.join(" + ")} off`, detail: "Enable it in Settings → Integrations" };
   if (!r.ffmpegFound) return { tone: "amber", label: "ffmpeg not found", detail: "Install ffmpeg (on PATH) to render" };
-  return { tone: "green", label: `MCP ready · ${r.shotcut.tools + r.mediaForge.tools} tools`, detail: null };
+  // The count is the two media servers' listings, not the Director's tool set: it lives in the tooltip.
+  return {
+    tone: "green",
+    label: "MCP ready · Shotcut + MediaForge",
+    detail: `${r.shotcut.tools + r.mediaForge.tools} tools listed (Shotcut ${r.shotcut.tools}, MediaForge ${r.mediaForge.tools}). These are the media servers' tools, not the Director's full tool set.`,
+  };
 }
 
 const TONE: Record<PillTone, string> = {
   green: "border-teal/50 text-teal-soft",
   amber: "border-amber/50 text-amber-soft",
   red: "border-alert/60 text-alert",
+  violet: "border-violet/50 text-violet",
   unknown: "border-white/10 text-ink-3",
 };
-const DOT: Record<PillTone, string> = { green: "bg-teal", amber: "bg-amber", red: "bg-alert", unknown: "bg-ink-3" };
+const DOT: Record<PillTone, string> = { green: "bg-teal", amber: "bg-amber", red: "bg-alert", violet: "bg-violet", unknown: "bg-ink-3" };
 
 export function StudioBar() {
   const { projects, slug, project, job } = useDirector();
@@ -59,6 +69,16 @@ export function StudioBar() {
     READINESS_POLL_MS,
   );
   const pill = readinessPill(readiness, readinessError);
+  // ComfyUI status + queue for the baton pill and the Queue card, only while a project is open.
+  // refreshComfy never throws (an unavailable bridge lands in statusError).
+  usePoll(
+    async () => {
+      if (slug) await refreshComfy();
+      return null;
+    },
+    COMFY_STATUS_POLL_MS,
+    [slug],
+  );
 
   const create = async () => {
     if (!title.trim()) return;
@@ -82,7 +102,16 @@ export function StudioBar() {
         </button>
       )}
       {projects.length > 0 && (
-        <Select value={slug ?? ""} onChange={(e) => e.target.value && void openProject(e.target.value)} className="!h-8 !w-auto max-w-[240px] !py-0 fs-13" aria-label="Project">
+        <Select
+          value={slug ?? ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === ALL_PROJECTS) closeProject();
+            else if (v) void openProject(v);
+          }}
+          className="!h-8 !w-auto max-w-[240px] !py-0 fs-13"
+          aria-label="Project"
+        >
           {!slug && <option value="">Open a project…</option>}
           {projects.map((p) => (
             <option key={p.slug} value={p.slug}>
@@ -90,6 +119,7 @@ export function StudioBar() {
             </option>
           ))}
           {slug && project && !projects.some((p) => p.slug === slug) && <option value={slug}>{project.title}</option>}
+          {slug && <option value={ALL_PROJECTS}>All projects…</option>}
         </Select>
       )}
       {naming ? (
@@ -112,6 +142,7 @@ export function StudioBar() {
       )}
 
       <div className="ml-auto flex flex-wrap items-center gap-2">
+        {slug && <BatonPill />}
         {job && <RenderBadge job={job} />}
         <span className={`flex h-8 items-center gap-1.5 rounded-full border bg-[rgba(11,13,17,0.45)] px-3 fs-12 ${TONE[pill.tone]}`} title={pill.detail ?? pill.label} role="status">
           <span className={`size-2 rounded-full ${DOT[pill.tone]}`} />

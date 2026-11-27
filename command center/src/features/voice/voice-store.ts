@@ -12,7 +12,7 @@ import type { Section } from "@/stores/nav";
  * confirmation card and the Agents section are all views of this.
  *
  * Conversations are split into isolated threads, one per Dispatcher tab:
- * "auto" (Auto-route), each sub-agent (librarian, coder, booking, ops) and
+ * "auto" (Auto-route), each sub-agent (librarian, coder, booking, bizops…) and
  * "general" (the OS itself, "Tony"). Inter-agent traffic (TONY → BOOKING
  * AGENT and back) is logged as `relay` turns in that agent's thread.
  */
@@ -28,7 +28,7 @@ export type VoiceState =
 
 export type Channel = "voice" | "text";
 export type ThreadId = "auto" | AgentRole;
-export const THREADS: ThreadId[] = ["auto", "general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops", "bizops", "finance"];
+export const THREADS: ThreadId[] = ["auto", "general", "prompter", "designer", "director", "coder", "booking", "librarian", "bizops", "finance"];
 
 /** The phone HUD (`/cc/?view=hud`, MobileHud): Tony's thread there is always "general". */
 const HUD_VIEW = typeof location !== "undefined" && new URLSearchParams(location.search).get("view") === "hud";

@@ -5,11 +5,11 @@ import { THREADS } from "@/features/voice/voice-store";
 
 /**
  * Regression: the phone HUD listed six threads, without Tony's desktop conversation ("auto": the
- * Command view / VoiceHUD) or Ops, so most mirrored Nic↔Tony traffic was unreachable on the phone.
+ * Command view / VoiceHUD), so most mirrored Nic↔Tony traffic was unreachable on the phone.
  * (Read from source: MobileHud.tsx is a browser-only component.)
  */
 describe("the phone HUD shows every mirrored thread", () => {
-  it("auto and ops are tabs, and every thread the desktop mirrors is listed", () => {
+  it("auto is a tab, and every thread the desktop mirrors is listed", () => {
     const src = readFileSync(fileURLToPath(new URL("./MobileHud.tsx", import.meta.url)), "utf-8");
     const m = /export const HUD_THREADS: ThreadId\[\] = \[([^\]]*)\]/.exec(src);
     expect(m).not.toBeNull();

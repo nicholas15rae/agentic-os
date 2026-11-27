@@ -106,7 +106,10 @@ def test_render_timeline(s, jobs, media):
     (lambda sp, m: sp["clips"][1].update(out=99.0), "past the end"),
     (lambda sp, m: sp["clips"][0].update(path=r"C:\Windows\win.ini"), "outside the media root"),
     (lambda sp, m: sp.update(width=1921), "even integer"),
-    (lambda sp, m: sp.update(version=2), "version"),
+    (lambda sp, m: sp.update(version=3), "version"),
+    (lambda sp, m: sp.update(version=True), "version"),
+    (lambda sp, m: sp["clips"][0].update(punch_in=1.2), "unknown key"),  # v2 keys need version 2
+    (lambda sp, m: sp.update(captions={"enabled": False}), "unknown key"),
     (lambda sp, m: sp["clips"][2].update(out=90), "held 0.2"),
     (lambda sp, m: sp.update(loudness_lufs=-20), "loudness_lufs"),
     (lambda sp, m: sp["audio"][0].update(volume=3), "volume"),

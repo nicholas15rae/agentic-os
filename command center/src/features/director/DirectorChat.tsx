@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Send, TriangleAlert } from "lucide-react";
+import { Loader2, Send, TriangleAlert, Undo2 } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { sendDirectorTurn } from "./director-chat";
-import { useDirector } from "./director-store";
+import { undoDirectorEdit, useDirector } from "./director-store";
+import { useChatDraft } from "./gaps";
 
 /** Zone 4: typed chat with the `director` workspace (no voice, no TTS). */
 export function DirectorChat() {
   const chat = useDirector((s) => s.chat);
   const busy = useDirector((s) => s.chatBusy);
   const focus = useDirector((s) => s.focus);
+  const undoId = useDirector((s) => s.undo?.id ?? null);
+  const draft = useChatDraft((s) => s.draft);
   const [text, setText] = useState("");
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -19,6 +22,15 @@ export function DirectorChat() {
   useEffect(() => {
     if (focus?.target === "chat") input.current?.focus();
   }, [focus]);
+  // A suggested line (fill the gaps): it lands in the box; Nic sends it.
+  useEffect(() => {
+    if (!draft) return;
+    setText(draft.text);
+    // Used once: a remount (or another project) must not bring the line back.
+    useChatDraft.setState({ draft: null });
+    input.current?.focus();
+    input.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [draft]);
 
   const send = () => {
     const t = text.trim();
@@ -33,11 +45,30 @@ export function DirectorChat() {
         {chat.length === 0 && <Empty>Tell the Director what you're making.</Empty>}
         {chat.map((m) => (
           <div key={m.id} className={`flex ${m.role === "nic" ? "justify-end" : "justify-start"}`}>
-            <div className={`max-w-[88%] r-14 px-3 py-2 fs-13 leading-relaxed ${m.role === "nic" ? "border border-amber/30 bg-amber/12 text-ink" : "border border-white/[0.08] bg-white/[0.03] text-ink-2"}`}>
+            <div
+              className={`max-w-[88%] r-14 px-3 py-2 fs-13 leading-relaxed ${m.autoFix ? "border border-dashed border-white/[0.14] bg-transparent font-mono fs-11 text-ink-3" : m.role === "nic" ? "border border-amber/30 bg-amber/12 text-ink" : "border border-white/[0.08] bg-white/[0.03] text-ink-2"}`}
+              title={m.autoFix ? "Sent by the page, not by you: one automatic request for corrected action blocks" : undefined}
+            >
               {m.streaming && !m.text ? <Loader2 size={13} className="animate-spin text-ink-3" /> : <p className="whitespace-pre-wrap">{m.text}</p>}
-              {m.applied?.map((a) => (
-                <p key={a} className="mt-1 font-mono fs-10 text-teal-soft">
-                  ✓ {a}
+              {m.applied?.map((a) =>
+                /\bnot applied\b/.test(a) ? (
+                  <p key={a} className="mt-1 flex items-start gap-1 font-mono fs-10 text-amber-soft">
+                    <TriangleAlert size={10} className="mt-0.5 shrink-0" /> {a}
+                  </p>
+                ) : (
+                  <p key={a} className="mt-1 font-mono fs-10 text-teal-soft">
+                    ✓ {a}
+                  </p>
+                ),
+              )}
+              {m.undoId && m.undoId === undoId && (
+                <button type="button" onClick={() => void undoDirectorEdit()} className="mt-1.5 inline-flex items-center gap-1 rounded-full border border-white/[0.12] px-2 py-0.5 font-mono fs-10 text-ink-2 hover:bg-white/[0.06]">
+                  <Undo2 size={10} /> Undo these edits
+                </button>
+              )}
+              {m.warnings?.map((w) => (
+                <p key={w} className="mt-1 flex items-start gap-1 font-mono fs-10 text-amber-soft">
+                  <TriangleAlert size={10} className="mt-0.5 shrink-0" /> plan check: {w}
                 </p>
               ))}
               {m.errors?.map((e) => (

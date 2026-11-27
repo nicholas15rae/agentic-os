@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Eye, GraduationCap, Layers, Loader2, RotateCcw, Send, Sparkles, ThumbsUp } from "lucide-react";
+import { AlarmClock, CalendarCheck, ChevronDown, Eye, GraduationCap, Layers, Loader2, RotateCcw, Send, Sparkles, ThumbsUp, Turtle } from "lucide-react";
 import { Chip, Input } from "@/components/ui";
 import { Segmented } from "@/components/segmented";
-import type { LangEntry, Lesson, Level, TutorReply } from "./contract";
+import type { CurveballLevel, LangEntry, Lesson, Level, TutorReply } from "./contract";
 import { LEVELS } from "./contract";
 import { langApi } from "./api";
 import { speak, useRecorder } from "./audio";
 import { langName } from "./languages";
 import { foreignSide } from "./library";
-import { lessonPrompt, LESSON_KINDS, nextMastery, normalizeLesson, normalizeTutor, tutorPrompt, type LessonKind } from "./prompts";
+import { CURVEBALL_LEVELS } from "./curveballs";
+import { buildDailyLesson, dailyLessonDue } from "./daily";
+import { dueCount, flashcardOrder, isDue, type SrsGrade } from "./srs";
+import { lessonPrompt, LESSON_KINDS, normalizeLesson, normalizeTutor, tutorPrompt, type LessonKind } from "./prompts";
 import { LangSelect, PlayButton, RecordButton, SaveButton, toastError } from "./parts";
 import { newKey, useHub, type DrillCard, type TutorMsg } from "./store";
 
@@ -48,7 +51,10 @@ export function LearnView({ compact = false }: { compact?: boolean }) {
             {track.got} got it · {track.again} review · {track.lessons} lessons
           </span>
         </div>
+        <CurveballSlider />
       </section>
+
+      <TodayLesson lang={lang} />
 
       <Segmented<Tool>
         label="Practice tool"
@@ -260,7 +266,8 @@ function TutorLine({ m, lang }: { m: TutorMsg; lang: string }) {
 function Drills({ lang, level }: { lang: string; level: Level }) {
   const library = useHub((s) => s.library);
   const deck = useHub((s) => s.deck);
-  const { setDeck, saveEntry, bumpTrack } = useHub();
+  const deckSource = useHub((s) => s.deckSource);
+  const { setDeck, saveEntry, bumpTrack, markDailyDone } = useHub();
   const [kind, setKind] = useState<LessonKind>("phrases");
   const [topic, setTopic] = useState("");
   const [lesson, setLesson] = useState<Lesson | null>(null);
@@ -283,13 +290,14 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
     }
   };
 
+  const due = dueCount(saved, Date.now());
   const libraryDeck = (entries: LangEntry[]): DrillCard[] =>
     entries.map((e) => {
       const f = foreignSide(e);
       return { key: newKey("d"), english: f.english, target: f.text, phonetic: e.phonetic_guide ?? "", lang: f.lang, entryId: e.id };
     });
 
-  if (deck.length) return <Flashcards cards={deck} onDone={() => setDeck([])} />;
+  if (deck.length) return <Flashcards cards={deck} onDone={() => setDeck([])} onComplete={deckSource === "daily" ? () => markDailyDone() : undefined} />;
 
   return (
     <section className="glass space-y-3 r-20 p-3 md:p-4" aria-label="Drills">
@@ -310,8 +318,9 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
           {busy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />} Generate lesson
         </button>
         {saved.length > 0 && (
-          <button type="button" onClick={() => setDeck(libraryDeck(saved.filter((e) => e.mastery_status !== "mastered").slice(0, 20)))} className="pill-glass !h-10 text-sm">
+          <button type="button" onClick={() => setDeck(libraryDeck(flashcardOrder(saved, Date.now(), 20)))} className="pill-glass !h-10 text-sm" title="Due cards first (spaced repetition)">
             <Layers size={14} /> Flashcards from Library
+            {due > 0 && <span className="font-mono fs-11 text-teal-light">{due} due</span>}
           </button>
         )}
       </div>
@@ -354,8 +363,9 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
   );
 }
 
-function Flashcards({ cards, onDone }: { cards: DrillCard[]; onDone: () => void }) {
-  const { updateEntry, bumpTrack, library } = useHub();
+function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone: () => void; onComplete?: () => void }) {
+  const { reviewEntry, bumpTrack } = useHub();
+  const library = useHub((s) => s.library);
   const [i, setI] = useState(0);
   const [shown, setShown] = useState(false);
   const [queue, setQueue] = useState(cards);
@@ -366,6 +376,21 @@ function Flashcards({ cards, onDone }: { cards: DrillCard[]; onDone: () => void 
     setShown(false);
   }, [cards]);
   const card = queue[i];
+  const finished = !card && queue.length > 0;
+  const completeRef = useRef(onComplete);
+  completeRef.current = onComplete;
+  useEffect(() => {
+    if (finished) completeRef.current?.();
+  }, [finished]);
+  // Library cards left in this deck that are due (counts down as you answer).
+  const dueLeft = useMemo(() => {
+    const ids = new Set(queue.slice(i).map((c) => c.entryId).filter(Boolean));
+    return dueCount(library.filter((e) => ids.has(e.id)), Date.now());
+  }, [queue, i, library]);
+
+  // A Library card that isn't due yet is practice: "Got it" doesn't move its schedule (srs.ts).
+  const cardEntry = card?.entryId ? library.find((e) => e.id === card.entryId) : undefined;
+  const practice = !!cardEntry && !isDue(cardEntry, Date.now());
 
   if (!card) {
     return (
@@ -381,13 +406,12 @@ function Flashcards({ cards, onDone }: { cards: DrillCard[]; onDone: () => void 
     );
   }
 
-  const answer = async (got: boolean) => {
+  const answer = async (grade: SrsGrade) => {
+    const got = grade !== "again";
     setStats((s) => (got ? { ...s, got: s.got + 1 } : { ...s, again: s.again + 1 }));
     bumpTrack(card.lang, got ? { got: 1 } : { again: 1 });
-    if (card.entryId) {
-      const e = library.find((x) => x.id === card.entryId);
-      if (e) void updateEntry(e.id, { mastery_status: nextMastery(e.mastery_status, got) }).catch((err) => toastError("Couldn't update mastery", err));
-    }
+    // Library cards: SM-2 schedule + mastery (srs.ts). Lesson-only cards just count.
+    if (card.entryId) void reviewEntry(card.entryId, grade).catch((err) => toastError("Couldn't update the review schedule", err));
     // "Review again" puts the card back at the end of this session's deck.
     if (!got) setQueue((q) => [...q, { ...card, key: newKey("d") }]);
     setShown(false);
@@ -401,6 +425,12 @@ function Flashcards({ cards, onDone }: { cards: DrillCard[]; onDone: () => void 
           {i + 1} / {queue.length}
         </span>
         <span>{langName(card.lang)}</span>
+        {dueLeft > 0 && <span className="font-mono text-teal-light">{dueLeft} due</span>}
+        {practice && (
+          <span className="text-ink-3" title="Not due yet: answering doesn't change when it comes back (Review again still does)">
+            practice
+          </span>
+        )}
         <button type="button" onClick={onDone} className="pill-glass ml-auto !h-8 text-xs">
           End
         </button>
@@ -429,16 +459,94 @@ function Flashcards({ cards, onDone }: { cards: DrillCard[]; onDone: () => void 
           <Eye size={16} /> Reveal &amp; play
         </button>
       ) : (
-        <div className="grid grid-cols-[auto_1fr_1fr] gap-2">
+        <div className={`grid gap-2 ${card.entryId ? "grid-cols-[auto_1fr_1fr_1fr]" : "grid-cols-[auto_1fr_1fr]"}`}>
           <PlayButton text={card.target} lang={card.lang} />
-          <button type="button" onClick={() => void answer(false)} className="pill-glass !h-12 fs-14">
+          <button type="button" onClick={() => void answer("again")} className="pill-glass !h-12 fs-14">
             <RotateCcw size={15} /> Review again
           </button>
-          <button type="button" onClick={() => void answer(true)} className="pill-primary !h-12 fs-14">
+          {card.entryId && (
+            <button type="button" onClick={() => void answer("hard")} className="pill-glass !h-12 fs-14" title="Got it, but it was hard (shorter interval)">
+              <Turtle size={15} /> Hard
+            </button>
+          )}
+          <button type="button" onClick={() => void answer("good")} className="pill-primary !h-12 fs-14">
             <ThumbsUp size={15} /> Got it
           </button>
         </div>
       )}
     </section>
+  );
+}
+
+// ── Today's lesson ──────────────────────────────────────────────────────────
+
+/** ~5 minutes from due + recently saved phrases (daily.ts). Snooze/done live on this device only. */
+function TodayLesson({ lang }: { lang: string }) {
+  const library = useHub((s) => s.library);
+  const snoozedUntil = useHub((s) => s.dailySnoozedUntil);
+  const doneDay = useHub((s) => s.dailyDoneDay);
+  const { setDeck, snoozeDaily } = useHub();
+  const now = Date.now();
+  if (!dailyLessonDue({ entries: library, lang, snoozedUntil, doneDay }, now)) return null;
+  const lesson = buildDailyLesson(library, lang, now);
+  const start = () =>
+    setDeck(
+      lesson.items.map((e) => {
+        const f = foreignSide(e);
+        return { key: newKey("d"), english: f.english, target: f.text, phonetic: e.phonetic_guide ?? "", lang: f.lang, entryId: e.id };
+      }),
+      "daily",
+    );
+  return (
+    <section className="glass flex flex-wrap items-center gap-2 r-20 p-3 md:p-4" aria-label="Today's lesson">
+      <CalendarCheck size={16} className="text-teal-light" />
+      <div className="min-w-0 flex-1">
+        <h2 className="fs-14 font-semibold text-ink">Today&apos;s lesson · {langName(lang)}</h2>
+        <p className="fs-12 text-ink-3">
+          {lesson.items.length} card{lesson.items.length === 1 ? "" : "s"} · ~{lesson.minutes} min{lesson.due ? ` · ${lesson.due} due` : ""}
+        </p>
+      </div>
+      <button type="button" onClick={start} className="pill-primary !h-9 text-sm">
+        Start
+      </button>
+      <button type="button" onClick={() => snoozeDaily("today")} className="pill-glass !h-9 text-xs" title="Hide until tomorrow">
+        <AlarmClock size={12} /> Tomorrow
+      </button>
+      <button type="button" onClick={() => snoozeDaily("3days")} className="pill-glass !h-9 text-xs" title="Hide for 3 days">
+        3 days
+      </button>
+    </section>
+  );
+}
+
+// ── Curveballs (setting only) ───────────────────────────────────────────────
+
+/** OFF by default. Saved now; Tony doesn't use it yet (see the TODO in curveballs.ts). */
+function CurveballSlider() {
+  const level = useHub((s) => s.curveballs);
+  const setCurveballs = useHub((s) => s.setCurveballs);
+  const idx = Math.max(0, CURVEBALL_LEVELS.findIndex((l) => l.id === level));
+  const cur = CURVEBALL_LEVELS[idx];
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <label htmlFor="lang-curveballs" className="fs-12 font-medium text-ink-2">
+        Curveballs in Tony chats
+      </label>
+      <input
+        id="lang-curveballs"
+        type="range"
+        min={0}
+        max={CURVEBALL_LEVELS.length - 1}
+        step={1}
+        value={idx}
+        onChange={(e) => setCurveballs(CURVEBALL_LEVELS[Number(e.target.value)]?.id ?? ("off" as CurveballLevel))}
+        aria-valuetext={cur.label}
+        className="w-36 accent-amber"
+      />
+      <span className="font-mono fs-11 text-ink-3">
+        {cur.label} · {cur.hint}
+        {level !== "off" ? " · saved; Tony hookup pending" : ""}
+      </span>
+    </div>
   );
 }

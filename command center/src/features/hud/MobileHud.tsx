@@ -343,9 +343,9 @@ function ClockChip() {
   );
 }
 
-/** Every mirrored thread: Tony's desktop conversation ("auto": the Command view / VoiceHUD) and
- * Ops included, so nothing Nic said to Tony or an agent said back is unreachable on the phone. */
-export const HUD_THREADS: ThreadId[] = ["general", "auto", "prompter", "designer", "director", "coder", "librarian", "booking", "ops", "bizops", "finance"];
+/** Every mirrored thread, Tony's desktop conversation ("auto": the Command view / VoiceHUD)
+ * included, so nothing Nic said to Tony or an agent said back is unreachable on the phone. */
+export const HUD_THREADS: ThreadId[] = ["general", "auto", "prompter", "designer", "director", "coder", "librarian", "booking", "bizops", "finance"];
 
 function TonyTab({ hud }: { hud: Hud }) {
   const mode = useHudModes(hud);

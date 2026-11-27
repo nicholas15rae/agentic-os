@@ -657,7 +657,7 @@ class Stream(Base):
         # Relay mode: the gateway proxies the phone onto this WebSocket with the vocabulary prompt.
         # Early partials (mostly pre-roll) can come back as the prompt read back; two in a row used
         # to commit it, so every later caption started with it.
-        prompt = "Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops."
+        prompt = "Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian."
         echo = "Tony, Gabagool mode. Take it easy. Cut it. Whoa."
         self.start()
         self.script(lambda secs, o: "Play Bilmuri on Spotify." if not o.partial else echo if secs < 1.5 else "Play Bilmuri" if secs < 2.1 else "Play Bilmuri on Spotify")

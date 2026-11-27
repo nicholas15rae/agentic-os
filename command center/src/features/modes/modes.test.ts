@@ -65,7 +65,7 @@ describe("switchboard presets mirror modes.rs", () => {
 
   it("the exact on-duty agents and tools per preset (the spec's order)", () => {
     expect(row("builder").switchboard).toEqual({ agents: ["prompter", "designer", "coder"], tools: ["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"] });
-    expect(row("operations").switchboard).toEqual({ agents: ["ops", "bizops"], tools: ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"] });
+    expect(row("operations").switchboard).toEqual({ agents: ["bizops"], tools: ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"] });
     // The Librarian runs only as its scheduled script: never on Executive duty.
     expect(row("executive").switchboard).toEqual({ agents: ["bizops", "finance"], tools: ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"] });
     expect(row("learning").switchboard).toEqual({ agents: [], tools: [] });
@@ -92,7 +92,7 @@ describe("switchboard presets mirror modes.rs", () => {
   it("rustRoleLabel matches every arm of agents.rs role_label", () => {
     const body = agentsRs.slice(agentsRs.indexOf("fn role_label("), agentsRs.indexOf("fn title_case_id("));
     const arms = [...body.matchAll(/"([a-z_-]+)" => "([^"]+)"\.into\(\)/g)].map((x) => [x[1], x[2]]);
-    expect(arms.length).toBeGreaterThanOrEqual(9);
+    expect(arms.length).toBeGreaterThanOrEqual(8);
     for (const [id, label] of arms) expect(M.rustRoleLabel(id), id).toBe(label);
     // Any other registry id: title case per word (Rust `title_case_id`).
     expect(M.rustRoleLabel("security-patrol")).toBe("Security Patrol");
@@ -131,7 +131,7 @@ describe("modeBlock (the curiosity dial)", () => {
     const block = M.modeBlock(e);
     expect(Array.from(block).length).toBeLessThanOrEqual(M.MODE_BLOCK_MAX);
     expect(block).toContain("MODE NOTES: xxx");
-    const full = M.modeBlock({ ...e, switchboard: { agents: ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "bizops", "finance"], tools: [] } });
+    const full = M.modeBlock({ ...e, switchboard: { agents: ["booking", "prompter", "coder", "designer", "director", "librarian", "bizops", "finance"], tools: [] } });
     expect(Array.from(full).length).toBeLessThanOrEqual(M.MODE_BLOCK_MAX);
     expect(full).toContain(M.ON_DUTY_TAIL);
     expect(M.MODE_BLOCK_MAX).toBe(800);
@@ -144,7 +144,7 @@ describe("modeBlock (the switchboard line)", () => {
 
   it("an overlay adds one deterministic ON DUTY line (Rust labels, sorted) after the dial lines", () => {
     expect(M.modeBlock(eff("builder"))).toBe(`${head("Builder")}\n${M.CURIOSITY_MEDIUM}\n${M.DISPATCH_AUTO}\nON DUTY: Coder, Designer, Prompter; every other agent is frozen this mode.`);
-    expect(M.modeBlock(eff("operations"))).toBe(`${head("Operations")}\n${M.CURIOSITY_MEDIUM}\nON DUTY: Operations Manager, Ops; every other agent is frozen this mode.`);
+    expect(M.modeBlock(eff("operations"))).toBe(`${head("Operations")}\n${M.CURIOSITY_MEDIUM}\nON DUTY: Operations Manager; every other agent is frozen this mode.`);
     expect(M.modeBlock(eff("executive"))).toBe(`${head("Executive")}\n${M.CURIOSITY_LOW}\n${M.VERBOSITY_TERSE}\nON DUTY: Finance, Operations Manager; every other agent is frozen this mode.`);
     // The list order in the mode never changes the text.
     const shuffled = { ...eff("builder"), switchboard: { agents: ["coder", "prompter", "designer", "coder"], tools: [] } };

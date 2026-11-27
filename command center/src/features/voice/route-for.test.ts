@@ -263,7 +263,7 @@ describe("switchboard hold mirrored from Rust (frozenHold)", () => {
   const hold = (r: RoutedTurn, id: string, explicit = false, freeze: typeof master | null = master) => frozenHold(r, { explicit, effective: eff(id), freeze, osName: "Tony" });
 
   it("Tony's own routing never goes to an agent frozen in the mode", () => {
-    // A Domain hit (the Designer's topic) in Operations: Ops + Biz Ops only.
+    // A Domain hit (the Designer's topic) in Operations: Biz Ops only.
     expect(rf(TOPIC, "auto", "text")).toMatchObject({ role: "designer", kind: "Domain" });
     expect(hold(rf(TOPIC, "auto", "text"), "operations")).toMatchObject({ role: "general", kind: "Self", reason: "Designer is frozen in Operations mode" });
     // A low-confidence mention is not a direct ask.

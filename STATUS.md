@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
+Updated 2026-11-27 10:46. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -10,10 +10,13 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Tony latency: byte-stable system msg, TURN CONTEXT block | feat/language-hub | 35e30e5 | Yes (4073bd9) |
 | App crash hardening: panic.log, restarts wait for WebView2 to exit, scripts\restart-desktop-app.ps1 | feat/language-hub | 1cd5333 | Yes (4bc4e2d), pushed to origin; live since the 22:26 restart |
 | Engine R stops reporting refused orders as trades | claude/practical-elbakyan | 8bd7990 | Yes (3fe4835) |
-| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), pushed to origin; live after the next app rebuild + restart |
+| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), pushed to origin; live since the 23:19 restart; the 23:40 rebuild is main at 0c4341f |
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
+| Sections 8-10 milestone 2: comms ingest core, echo fold, leased outbox, bridge smoke, WhatsApp ingester, wrap-up endpoint, calendar locations, trips/ETAs, maps socket, saved routes | claude/sections-8-10-m2 | c90924b (PR #8) | Yes (9a46031) |
+| Overnight: Maps widget front end (Map / Upcoming / Saved tabs, trips with leave-by, saved routes with Delete? Yes/No, safe Google Maps links, phone hand-off logic) | claude/sections-8-10-m3 | 6acc15f (PR #10) | Yes (c134f9c); not in the running app until the next rebuild |
+| Overnight: Brainstorm Talk pure helpers (talk intent, digest, wrap-up walk, destinations; no bulk approve, memory by reference only) | claude/sections-8-10-m3 | 0d72190 (PR #10) | Yes (c134f9c) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
@@ -29,26 +32,73 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Sections 20-21 safe defaults, routing ownership | section-pass-batch3 | af2d427, 7f151c2 | Yes (6d1084b) |
 | Review fixes: profiles sync safely, PIN step-up for business + finance | section-pass-batch3 | cebcdbf | Yes (6d1084b) |
 | Merge fixes: Ops' contracting phrases go to Tony (Ops stays frozen); settings migrations v8-v10; TS router starts with Ops frozen | merge/section-pass-into-main | 6d1084b | Yes, pushed to origin |
-| Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | No |
-| Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | No |
+| Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | Yes (76df04f) |
+| Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | Yes (76df04f) |
+| Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
+| Director chat system message kept byte-stable for prefix caching (STUDIO STATE moved to the last user message) | director-suite | this commit | Yes (5098ca3) |
+| SDXL Turbo live test passed; harness runs with Command Center open (own crash marker) | director-suite | e0f4410, 6d3f9f5 | Yes (5098ca3) |
+| Director sees timed transcript lines; clips open on the sentence; a fit-only revision no longer resolves a timing note | director-suite | 116fbb2 | Yes (5098ca3) |
+| Part 3 UI: ComfyUI Generate panel, render queue, GPU pill, Re-roll/Tweak; note markers on the timeline; projects board; bin filters; Versions tab with restore and A/B Compare (contract in docs/proposals/director-suite-part3-contract.md). Phone review not built | director-suite | 202ae7c, 386203d | Yes (5098ca3) |
+| A revision may move the cut only ±30% off the brief's length (run 10 halved a Reel); its summary now starts with the real length change | director-suite | see log | Yes (5098ca3) |
+| Part 4: Scene Reader audition import (read-only, from a temp copy of its db; takes copied, never moved), sides drop, slate card, self-tape output. Part 5: Director reports to the inbox (brief ready, footage gaps, ComfyUI batch, review rounds) via publish_note, no voice/comms edits | director-suite | bd403c8 | Yes (5098ca3) |
+| Director's LENGTH line states the plan band and, with a note open, the revision band | director-suite | 6575cc7 | Yes (5098ca3) |
+| Part 6 small items: launcher presets, more versions from one cut, phone shot list, style memory (STYLE line), fill the gaps | director-suite | see log | Yes (5098ca3) |
+| Length refusals name a concrete whole-line fix; live E2E retries a busy LM Studio turn once | director-suite | 74655ad, f900096 | Yes (5098ca3) |
+| 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
+| Section 12 Phone book (grouped by area, linked across Finance, invoices, agencies, auditions, messages; .vcf import) | section-pass-batch3 | 3fe3468 | Yes (6d1084b) |
+| Section 15 part: spaced-repetition flashcards, Today's lesson, curveball setting (off, not wired to Tony) | section-pass-batch3 | 763dab0, 4520f35 | Yes (with this merge), not pushed |
+| Section 14.6 + 14.7: Discord rankings need 30 calls (Wilson bands); paper track record beside the backtest + SPY (display only) | section-pass-batch3 | 55030dd | Yes (with this merge), not pushed |
+| Section 16.2 + 16.3 + 16.6: backup mirrors to a second drive (verified, keep-all), vault password banner + checklist, Tony's read-only `vault.search` | section-pass-batch3 | f138a9b, 4520f35 | Yes (with this merge), not pushed |
+| S20.10 instant cues: time / date / weather / reminders with no model call; your own fast cues in Voice & Triggers | section-pass-batch3 | 5c80888 | Yes (with this merge), not pushed |
+| Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
+| Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
+| Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
+| Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
+| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (87b6527), on origin; live since the 10:41 restart (main 0418649): "is the droplet up?" on the phone path answered "up, 62 ms" |
 
 ## 2. In progress
 
 | Session | Working on | Current step |
 |---|---|---|
+| Tony live-test fixes | All 7 fixes | Merged into main (9d37071). The "Stop Tony parroting" session is rebuilding from main 0418649 and restarting the app; it will check Tony afterwards. Pushed to origin |
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
-| Gabagoul functional pass (section-pass-batch3) | Next: 11.10 Tony reads Finance, Section 12 | All committed work is in main (conflicts resolved there). Next: merge main into the branch |
-| Director suite build | Part 1 quality fixes (clip length, framing, no-op revisions) | Reviewers running. Next: live E2E rerun, merge main, live SDXL test. Uncommitted |
-| Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
+| Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
+| Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
+| Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
-| Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 
 ## 3. Waiting on you
+- Director length hint may suggest moving a clip's START earlier (run 14 had no out point free, so it suggested opening clip 1 on the line before). Keep, or out points only?
+- Director picks moments from the transcript alone, so a cut can miss Nic's face (run 15 was one acted scene under narration). Want a face/person check in media-forge (local, CPU) feeding the context?
+- Director Part 6 larger items need your call before building: talk-to-edit (new incremental actions), three speeds incl. Full AI, storyboard first, performance-aware comping (needs Scene Reader data), NetBird private link (gateway), Instagram posting (hosting), tool pill (agents.rs). Part 7 boosters not started.
+- Director voice (Part 5): pick an ElevenLabs voice for the Director (agentVoices.director); voice settings are shared core, so not set.
+- Scene Reader link (Part 4): its app has no HTTP endpoint; the card shows when Studio TTS (:5123) answers. Import reads %APPDATA%\com.scenereader.dev (copy only). OK, or want a real export endpoint in Scene Reader (its repo)?
+- Director Part 3 contract questions (defaults picked, change any): (1) ComfyUI policy select sits on the Queue card and applies to every project; (2) Re-roll of a style-transfer whose job was pruned from the queue is disabled; (3) Restore is offered only from the Versions tab.
+- Director Part 3 phone review needs a gateway (server.py) /api/media proxy behind the security gate: shared core, so not built. OK to build it?
 
 **Decisions**
-- OK to merge `director-suite` into main? (section-pass and batch3 are merged.)
-- Check after the next app rebuild: pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
+- Push main (overnight batch merged, not pushed)?
+- Parked overnight (safety or hardware): 14.5 Full auto gate (PIN + phone approval, live-trading control), 14.8 IBKR data everywhere, 14.9; 15.2 camera translate (phone), 15.3 pronunciation (GPU Whisper), 15.4 accents (Scene Reader), 15.7 vocabulary images (ComfyUI); 16.3 recovery key (would change the vault encryption); wiring language curveballs into Tony's turn.
+- Instant cues: "what's pending" deliberately stays Tony's Finance read (live data); only reminders / to-do are instant.
+- Tony live-test fixes (all 7, merged into main 11-27 on your go). Choices I made overnight (safest option each time):
+  - Barge-in (fix 6) is built (your go, 11-27). Trade-off to watch on speakers: a cough, or Tony's own voice leaking into the mic, now cuts him off too. The barge-in listen's stricter trigger is unchanged. A hold ("whoa") over his voice now holds your thought, but there's no paused reply left to resume.
+  - The booking-mail scan keeps its own query from your instruction file (it already excludes Promotions and Social); only reads and searches got the Primary scope.
+  - To-dos had no store, so a confirmed to-do goes to the Ideas & Tasks ledger (Play Place) as a parked item tagged `todo`. Parked items start nothing. In Learning mode a to-do line still goes to Tony's model (Learning skips local intents).
+  - The to-do prompt rule rides only on a turn that mentions a to-do, because Tony's system prompt is at its 3,500-char budget. I didn't raise the budget.
+  - "Promotions" in the Whisper hints: added as "Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab." The paired "X tab" wording keeps a spoken list of tab names from being dropped as a prompt echo. The hint cap went from 220 to 280 chars. The live faster-whisper entry still holds the old default, so a one-time migration swaps it on the next app start. An edited prompt is kept.
+  - A Gmail query that names another mailbox (`in:sent`, `in:drafts`, `label:Clients`…) runs as given, not Primary-scoped. "My primary inbox" wins over a saved "All inboxes".
+  - After a spoken local reply (to-do question, timer, reminder), the normal follow-up listen now opens, so a plain "yes" answers the to-do without the wake word. It's the same as every other spoken reply.
+  - A 4-agent review plus a skeptic pass found 9 real issues in my first cut. All are fixed and tested.
+- Sections 8-10: after the next app rebuild, look at the Maps widget Upcoming and Saved tabs (not yet checked in a running app).
+- Sections 8-10 contract `features/maps/contract.ts` is a DRAFT: approve to lock it.
+- Sections 8-10 parked because they touch safety controls (your call): confirmation-card options (Brainstorm 9, `gate.ts` / ConfirmCard) and the auto-dispatch taint rule (Comms 4, `tony_dispatch.rs`).
+- Sections 8-10 parked because another session owns the code: Comms screens (Comms 9; the phone-book session is in CommsSection) and the Director Ideas board (Brainstorm 14, Director page).
+- Sections 8-10 parked for the app or the phone: wire the Maps hand-off listener into `App.tsx`; add `maps_trips` + trip-words to `platform.ts` NativeCommands; Android work (Comms 6-8, Maps 4 + 12, Brainstorm 12, one APK); voice Talk (Brainstorm 2, 3, 7, 10, 11, 13).
+- Sections 8-10 overnight defaults I picked (safest each time): phone and narrow widgets open on Upcoming, the PC on Map; location only on a tap of "Use my location" (desktop); hand-offs refused unless every link is an https Google Maps link, and the opened link is rebuilt from coordinates; hand-off TTL 30 min (2 min clock skew); trips and seen hand-offs kept in memory only (addresses); refresh 5 min desktop / 2 min gateway / 10 min after an error; wrap phrases count only as a whole line; in Talk only cut / hold / "Tony, end talk" act; memory items only from Nic's lines and only by reference; "later" in the walk leaves an item pending; talk digest never labels Tony's words as Nic's.
+- Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
+- The running app (restarted 11-27 10:41 by the recall session) is main 0418649: Tony live-test fixes, Director Parts 1-5, system.status, PR #10. Not in it yet: main's 14 newer commits (the section-pass-batch3 overnight batch). Checks for you in the running app (from the Tony live-test session): Settings has a Comms tab set to "Primary only"; "check my email" reads Primary only; "add Melissa Lee invoice to my to-do list" asks before it saves; saying "hold on" while Tony talks stops him.
+- Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
 - `hermes-output-cleanup` (15f2ceb, Nov 18): rebase and merge, or drop?
@@ -58,10 +108,12 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.
 
 **Manual steps**
+- After the next rebuild + restart: set a mirror folder on another drive (Vault, Second copies), press Re-index vault, re-run the Engine R evaluation (fills the track record's spread).
+- Ops removal: done live. The Ops lines are out of handoff-cues.json and the STT hint (backups `*.20261126-231018-before-ops-removal`), and os.json was migrated at the 00:31 restart (backup `os.json.bak-20261127-003126-ops-removed`).
 - Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
-- Keep Tony quiet for ~3 min when the Director runs the live SDXL test (it will message first).
+- Director/ComfyUI: copy the SDXL Turbo checkpoint (6.5 GB) from D: (HDD) to an SSD folder? Its read from D: is most of the 80 s render; on SSD a still should take seconds. Parked: moving model files is your call.
 - Restart the gateway (new Finance records won't save until then). Bionic runs elevated, so only you can quit it.
 - Queue the E46 rebuild in Play Place (steps in `docs/e46-clock-spec-note.md`).
 - Before the next "Sync to AnythingLLM": grant the MCP servers you use directly, or it turns their auto-start off.
@@ -78,20 +130,17 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 - 7 Phone quick access to Tony (needs Android build)
 - 8: native Android bridge, notification capture, tabs UI, official Meta API, taint/injection guards
 - 9: Talk-it-through mode, send-to after wrap-up, one-tap mode switch, E46 clock build
-- 10.4 Maps: saved routes, phone "Open in Maps", widget UI and phone hand-off
-- 11.10 Tony reads Finance
-- 12 Phone book
-- 14.5-14.9 Trading (needs IBKR connected)
-- 15 Language
-- 16.2, 16.3, 16.6: off-machine copy, vault password, vault search
+- 10.4 Maps: phone "Open in Maps" (Android NavPlugin), hand-off listener wiring, location permission (widget UI done overnight, local branch)
+- 14.5, 14.8, 14.9 Trading (parked: safety / needs IBKR)
+- 15.2, 15.3, 15.4, 15.7 Language (parked: phone, GPU, Scene Reader)
 - 17 Wallpapers, 18 Flowchart/Blueprint/Orbital, 23 Appearance (held until Section 6)
-- S20.10 instant-cue fast path
+- 21 setup walkthroughs: Instagram reconnect + expiry, n8n key and webhooks, Maps home in settings, Calendar route pick
 
 Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S20.10, and the Tony-Rust parts of 8 and 9.
 
 **Director Suite**
 - 1.6 public hosting for Instagram
-- Part 2 live SDXL Turbo test; B-roll template (no video model yet)
+- B-roll template (no video model yet)
 - Part 3: Projects board, Generate panel and render queue, Versions with A/B compare, phone review
 - Part 4 Scene Reader link
 - Part 5 Voice/comms
@@ -110,15 +159,39 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| claude/tony-live-test-fixes-5d85d5 (+ barge-in) | tsc clean; vitest 2,931/2,931; cargo 1,624 (+2 known CRLF: allm, buildhub; 2 Edge browser tests timed out under load, pass alone); pytest not re-run (no Python changed since the 1,733 run below) | 11-27 02:50 |
+| claude/tony-live-test-fixes-5d85d5 (Tony live-test fixes) | tsc clean; vitest 2,925/2,925; cargo 1,625 (+2 known CRLF: allm, buildhub; 1 Edge browser test timed out under load, passes alone); pytest 1,733 (embed flake + 1 socket abort under load, both pass alone; language hub 41/41 after the last prompt change). Not checked in the running app (no rebuild) | 11-27 02:20 |
+| claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
+| main 87b6527 (PR #10 + system.status) | tsc clean; vitest 3,021/3,021; cargo 1,628 (+2 known CRLF; 6 Edge tests timed out under load, all 67 quality tests pass alone) | 11-27 10:05 |
+| Live app after the 10:41 restart (main 0418649) | Up, no panic.log lines; providers.json STT-hint migration ran (backup `providers.json.20261127-100740-before-stt-gmail-tabs`); 3 phone turns answered by the desktop: droplet "up, 62 ms" (system.status), fresh greeting, Chris recalled; first words 3.6 s cold, then 0.7-0.8 s | 11-27 10:43 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
 | claude/vibrant-davinci-742cf7 (recall fix) | cargo 1,419 (+2 known CRLF; 1 Edge timeout under load passes alone) on the 4073bd9 base; memtier + turn_context 24/24 after the rebase onto e0f7ee7 | 11-26 22:20 |
 | Tony recall parrot probe (Bionic, 4 reps) | parroted 21/60 -> **0/60** (six test lines 10/24 -> 0/24); planted facts recalled 24/28 -> 28/28 | 11-26 22:10 |
+| Live app after the 23:19 restart | 3 phone turns: fresh greeting and dinner answers (no stored reply copied), Joelle Bandits -> Chris recalled; first words 4.5 s cold, then 1.6 s and 1.0 s | 11-26 23:21 |
+| Live app after the 23:40 restart (main 0c4341f) | Up, no panic.log lines; 2 phone turns answered by the desktop: live weather (not the stored reply), Chris recalled; first words 3.4 s cold, then 0.8 s | 11-26 23:42 |
+| Live app after the 00:31 restart (main dffdb71) | Up, no panic.log lines; Ops migration ran (0 `"ops"` entries left); 2 phone turns answered by the desktop. "Is the droplet up?" now goes to Tony but gets a vague reply, since a phone turn has no live dashboard. First words 3.4 s cold, then 0.6 s | 11-27 00:33 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
-| section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
-| director-suite | vitest 2,595, Rust 1,445 + 67 browser, media-forge 116 | 11-26 20:47 |
-| Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
+| section-pass-batch3 (overnight, before merging main) | tsc clean; vitest 2,831/2,831; Python 870 OK; Rust 1,491 (+2 known CRLF; real-browser tests pass alone) | 11-27 |
+| claude/elated-kare-67e4c4 (Ops removal, on e46d0c7; main since changed STATUS.md only) | tsc clean; vitest 2,887/2,887; cargo 1,596 (+2 known CRLF; browser tests passed); pytest language hub + memory scrolls + gateway + fw_server 253/253 | 11-26 23:45 |
+| main 9c57359 (Ops removal + PR #8 + director-suite) | tsc clean; vitest 2,906/2,906; cargo 1,621 (+2 known CRLF; 3 Edge tests timed out under load, pass alone) | 11-27 00:30 |
+| main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
+| director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
+| director-suite (116fbb2) | tsc clean; vitest 2,904/2,904; cargo 1,611 (+2 known CRLF); taskworker::quality 67/67 | 11-27 02:30 |
+| director-suite merged into main (5098ca3; gate on e2411fe) | tsc clean; vitest 3,211; cargo 1,617 (+2 known CRLF; taskworker::quality 67/67 alone); Python 863 OK; media-forge 116; Playwright director 9/9. Latency probe (stress MEDIUM, running app): per-probe exec in line with earlier runs (Tony 1.39 s), wall 48 s from a queued Librarian probe | 11-27 10:30 |
+| director-suite (Part 6) | tsc clean; vitest 3,052/3,052; cargo 1,637 (+2 known CRLF); Playwright director 9/9 | 11-27 04:45 |
+| director-suite (6575cc7, Parts 4-5 + bands) | tsc clean; vitest 3,022/3,022; cargo 1,628 (+2 known CRLF; taskworker::quality 67/67 alone); Playwright director 7/7 | 11-27 04:10 |
+| director-suite (Part 3 + revision fix) | tsc clean; vitest 3,005/3,005; cargo 1,613 (+2 known CRLF; taskworker::quality 67/67 alone); media 68; Playwright director specs 5/5 desktop | 11-27 03:30 |
+| ComfyUI SDXL Turbo live test (comfy_live.rs) | PASS: 1 image, ingested with provenance; boot 77 s, render 80 s (checkpoint read from HDD), peak VRAM 10,193 MiB, Qwen reload 212 s (builds running alongside), only Tony loaded after at 32768 ctx x 2; total 6.3 min | 11-27 01:23 |
+| Director live E2E run 15 | PASS 15/15 in 196 s, no auto-fixes or re-asks; idea verbatim; round 1 15.8 s, round 2 11.8 s (inside the revision band, summary states the real length change); captions whole sentences; -14.2 LUFS. Weak spot: the cut is ONE 15.8 s clip (an acted period scene under narration), the Director picks by transcript only and can't see faces | 11-27 05:55 |
+| Director live E2E runs 13-14 | 13: LM Studio turn timeout (replayed fine in 15 s, busy server). 14: six revisions at 9 / 8.4 s vs 10.5-19.5 s, led to the length hint | 11-27 05:00 |
+| Director live E2E run 12 | INCONCLUSIVE: stopped at step 3c when an LM Studio turn hit the 120 s cap (builds were loading the CPU; LM Studio stayed up, Tony at production settings). Length bands not yet tested live; re-run when the machine is quiet | 11-27 04:10 |
+| Director live E2E run 11 | FAIL at step 5b (12/13 steps): the new ±30% revision guard refused 6 revisions (22.7, 19.6, 28.1, 3.9, 25.7, 3.9 s vs 10.5–19.5 s); Qwen never landed in the band. Next: show the band in the Director's LENGTH line before it revises | 11-27 03:45 |
+| Director live E2E run 10 | 15/15 steps. Captions now whole sentences; idea verbatim; round 1 14.0 s. FAIL: the round-2 revision cut it to 7.4 s (revisions only warn on length) and its summary claimed it was extended. 4 auto-fixes + 3 re-asks to hit length (Qwen arithmetic) | 11-27 02:15 |
+| Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
+| sections-8-10 m3 overnight (0d72190) | pytest 1,735; vitest 3,021 (211 files; 132 new maps + brainstorm tests); tsc clean; cargo 1,612 (+2 known CRLF in allm/buildhub, not mine, left alone). Not checked by eye: no dev server allowed overnight, MapLibre needs WebGL | 11-27 02:00 |
+| sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
@@ -134,28 +207,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 22:46 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:43 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/upbeat-wing-e87be0` | 2 | `3fdea38` 2026-11-26 docs(status): test gate 28c60f3 (every module, parallel), its test ... | clean |
-| `merge/section-pass-into-main` | 21 | `37ba367` 2026-11-26 Merge branch 'main' into merge/section-pass-into-main | 1 files |
-| `section-pass` | 10 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | clean |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | clean |
-| `section-pass-batch3` | 15 | `e0419ee` 2026-11-26 Merge main (recall fix fa69ab2) into section-pass-batch3 | 69 files |
-| `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 12 files |
-| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 18 files |
+| `section-26-engine` | 14 | `1569272` 2026-11-27 docs(engine): Section 26 handoff, CPU smoke test, item 15 + vision ... | 2 files |
+| `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | no worktree |
+| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | 2 files |
+| `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
+| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `66df342` 2026-11-26 docs(status): main pushed to origin (3ee3dd6): crash hardening and recall fix
-- `3ee3dd6` 2026-11-26 docs(status): record the recall fix merge into main (8278f76)
-- `8278f76` 2026-11-26 Merge fa69ab2: Tony recall stops parroting old replies
-- `e0f7ee7` 2026-11-26 docs(status): crash hardening 1cd5333, 4073bd9 timing, sessions
-- `4bc4e2d` 2026-11-26 Merge main (STATUS.md + update_status.py) into feat/language-hub
-- `1cd5333` 2026-11-26 fix(command-center): log panics to a file, never start the app over a dying WebView2
+- `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
+- `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
+- `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
+- `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
+- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
+- `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
 <!-- /AUTO:BRANCHES -->

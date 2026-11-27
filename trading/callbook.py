@@ -81,8 +81,20 @@ class CallBook:
         return [{"horizon": h, "ret": r, "hit": hit, "authorId": s, "author": SOURCES.get(s, s), "channelId": "desk", "channel": "desk"}
                 for h, r, hit, s in rows]
 
+    # Only three desk sources exist, so every one is LISTED from its first scored call (the agent's own
+    # "record" line and its SPY-baseline comparison need that, internally). That listing is not a ranking:
+    # a source is RANKED only at outcomes.MIN_SCORED scored calls; below it the row is ranked=False and
+    # sorts after the ranked rows, and the UI shows it under "not enough calls yet".
+    LIST_FROM_CALLS = 1
+
     def leaderboard(self, horizon: int = 5) -> list[dict[str, Any]]:
-        return outcomes.leaderboard(self.outcome_rows(), horizon=horizon, by="author", min_calls=1)
+        return outcomes.leaderboard(self.outcome_rows(), horizon=horizon, by="author", min_calls=self.LIST_FROM_CALLS,
+                                    min_scored=outcomes.MIN_SCORED)
+
+    def rankings(self, horizon: int = 5) -> dict[str, Any]:
+        """Display split: {'ranked': sources with >= MIN_SCORED scored calls, 'notEnough': the rest, 'minScored'}."""
+        return outcomes.rankings(self.outcome_rows(), horizon=horizon, by="author", min_calls=self.LIST_FROM_CALLS,
+                                 min_scored=outcomes.MIN_SCORED)
 
     def counts(self) -> dict[str, int]:
         with self._conn() as c:

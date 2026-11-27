@@ -128,6 +128,12 @@ export interface SettingsState {
    * of the spoken Agent Chatter (`routing.vocalHandoffs`) and the narrator.
    */
   chat: { showAgentConversation: boolean };
+  /**
+   * Section 20.10 instant cues: whole-line built-ins (time, date, weather now, what's pending)
+   * and Nic's own fast cues (Settings → Voice & Triggers) answer without a model call. Off = the
+   * normal turn. Backfilled by `merge` for older installs (both on).
+   */
+  fastPath: { builtins: boolean; userCues: boolean };
   /** System Map: Streamlined OS (default) or Dev X-Ray. */
   systemMapMode: SystemMapMode;
   /** System Map routing flowchart strip: expanded / collapsed; null = expand only on tall screens (≥ 900 px). */
@@ -194,6 +200,7 @@ const defaults: Omit<SettingsState, "set"> = {
   routing: { announcerHandoff: true, vocalHandoffs: false },
   reminders: { osFallback: true },
   chat: { showAgentConversation: true },
+  fastPath: { builtins: true, userCues: true },
   systemMapMode: "streamlined",
   systemMapFlowOpen: null,
   waveColors: ["#00F0FF", "#A855F7", "#FF6B4A"],

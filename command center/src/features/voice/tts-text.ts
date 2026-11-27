@@ -6,10 +6,25 @@
 
 import type { SpeakOpts } from "./tts-types";
 
-/** Strip markdown, code fences and emoji before anything is spoken — none of it should
- * ever be read aloud ("asterisk asterisk bold asterisk asterisk"). */
+/** Internal label words a model sometimes prints in front of what it means to say ("Spoken
+ * reply:", "Voice summary -", "Tony:"). Never part of the reply: live test 11-27 read "Spoken reply"
+ * aloud. */
+const LABEL_WORDS = String.raw`spoken[ _-]?(?:reply|response|text|line)?|voice[ _-]?(?:reply|summary|response|line)|tts(?:[ _-]?text)?|reply|response|answer|output|assistant|tony|internal(?:[ _-]?note)?|note to self|final answer`;
+/** A label at the start of the text, a line or a sentence, with its colon / dash (and any bold or
+ * brackets around it): "**Spoken reply:** Hey Nic" → "Hey Nic". Mid-sentence words stay ("my reply: no"). */
+const LEADING_LABEL = new RegExp(String.raw`(^|[\n.!?]["')\]]*[ \t]*)(?:\*\*|__)?[\[(<]?[ \t]*(?:${LABEL_WORDS})[ \t]*[\])>]?(?:\*\*|__)?(?:[ \t]*[:：]|[ \t]+[—–-])[ \t]*(?:\*\*|__)?[ \t]*`, "gi");
+/** A bracketed or tag-shaped label anywhere: "[Spoken reply]", "(internal)", "<spoken_reply>", "</tts>". */
+const TAG_LABEL = new RegExp(String.raw`[\[(<][ \t]*\/?[ \t]*(?:${LABEL_WORDS})[ \t]*[\])>]`, "gi");
+
+/** Drop internal labels and tags before speech. Exported for tests. */
+export function stripLabels(text: string): string {
+  return text.replace(TAG_LABEL, " ").replace(LEADING_LABEL, "$1");
+}
+
+/** Strip internal labels, markdown, code fences and emoji before anything is spoken — none of it
+ * should ever be read aloud ("asterisk asterisk bold asterisk asterisk", "Spoken reply"). */
 export function stripForSpeech(text: string): string {
-  return text
+  return stripLabels(text)
     .replace(/```[\s\S]*?```/g, " ") // fenced code blocks
     .replace(/`([^`]+)`/g, "$1") // inline code
     .replace(/!\[[^\]]*]\([^)]*\)/g, " ") // images

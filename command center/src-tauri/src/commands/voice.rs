@@ -436,7 +436,7 @@ fn only_reflex_phrases(words: &[String]) -> bool {
 /// Hallucination guard: true when the transcript is MOSTLY the prompt read back — the words
 /// covered by runs of 4+ consecutive prompt words (in prompt order, case- and
 /// punctuation-insensitive) make up at least 70% of it. A long real dictation that merely
-/// contains a 4-word run ("…loop in the booking desk, librarian and ops…") is never thrown
+/// contains a 4-word run ("…loop in the booking desk and librarian…") is never thrown
 /// away whole, and a line made only of reflex phrases ("Take it easy, cut it") always passes.
 pub(crate) fn echoes_prompt(text: &str, prompt: &str) -> bool {
     const RUN: usize = 4;
@@ -716,7 +716,7 @@ pub async fn tts_voice_upload(state: State<'_, DispatchState>, request: Request<
 }
 
 /// Built-in Kokoro voice a sub-agent (or a worker narrator: verifier, staging, system) speaks
-/// with when the roster has no row for it, so a handoff ("Here's Ops.") or a narration line
+/// with when the roster has no row for it, so a handoff ("Here's the Coder.") or a narration line
 /// never answers in Tony's own voice. Runtime only: providers.json is never rewritten. Tony
 /// ("general") has no default: he keeps the local provider's own voice.
 pub(crate) fn default_agent_voice(role: &str) -> Option<&'static str> {
@@ -727,7 +727,6 @@ pub(crate) fn default_agent_voice(role: &str) -> Option<&'static str> {
         "designer" => Some("af_nicole"),
         "director" => Some("bm_daniel"),
         "librarian" => Some("bf_emma"),
-        "ops" => Some("am_eric"),
         "verifier" => Some("bm_lewis"),
         "staging" => Some("af_sarah"),
         "system" => Some("am_liam"),
@@ -1253,7 +1252,7 @@ mod stt_prompt_tests {
         assert!(echoes_prompt("prompter designer coder booking desk", p));
         assert!(echoes_prompt("WhatsApp, Gmail, Spotify, Tauri", p));
         // Case/punctuation-insensitive and found mid-transcript.
-        assert!(echoes_prompt("uh BOOKING-DESK, librarian and ops!", p));
+        assert!(echoes_prompt("uh BOOKING-DESK and librarian!", p));
     }
 
     #[test]
@@ -1274,12 +1273,12 @@ mod stt_prompt_tests {
     }
 
     /// Regression: ANY 4-word prompt run threw the whole transcript away — a long dictated idea
-    /// that mentions "the booking desk, librarian and ops", or the reflex combo "Take it easy,
+    /// that mentions "the booking desk and librarian", or the reflex combo "Take it easy,
     /// cut it" (so the cut never fired).
     #[test]
     fn a_real_line_that_contains_a_prompt_run_is_kept() {
         let p = DEFAULT_STT_PROMPT;
-        let idea = "I want a landing page with a hero, a pricing table and a signup form, and then loop in the booking desk, librarian and ops so they know it's coming. Make the colors warm.";
+        let idea = "I want a landing page with a hero, a pricing table and a signup form, and then loop in the booking desk and librarian so they know it's coming. Make the colors warm.";
         assert!(!echoes_prompt(idea, p), "a long dictation is never dropped whole");
         for ok in ["Take it easy, cut it.", "take it easy cut it", "Hey Tony, take it easy, cut it", "Cut it, take it easy."] {
             assert!(!echoes_prompt(ok, p), "{ok} must pass");
@@ -1333,13 +1332,63 @@ mod part3_tests {
         assert!(apply_provider_migrations(&mut cfg));
         let speaking: Vec<_> = cfg.agent_voices.iter().filter(|(_, v)| v.auto_speak).map(|(k, _)| k.as_str()).collect();
         assert_eq!(speaking, vec!["general"]);
-        assert_eq!(cfg.migrations, vec![MIGRATE_AUTOSPEAK_TONY_ONLY.to_string()]);
+        assert_eq!(cfg.migrations[0], MIGRATE_AUTOSPEAK_TONY_ONLY);
         // Once: turning a specialist back on afterwards sticks.
         cfg.agent_voices.get_mut("designer").unwrap().auto_speak = true;
         assert!(!apply_provider_migrations(&mut cfg));
         assert!(cfg.agent_voices["designer"].auto_speak);
         // A fresh install has nothing to migrate.
         assert!(!apply_provider_migrations(&mut Config::default()));
+    }
+
+    /// Live test 11-27: Whisper heard "promotions" as "permissions". The Gmail tab names are in the
+    /// hint list, and a provider holding the old default word for word gets the new one, once;
+    /// an edited or cleared prompt is never touched.
+    #[test]
+    fn the_stt_hint_list_has_the_gmail_tabs_and_an_unedited_old_default_moves_to_it() {
+        use super::super::dispatch::{apply_provider_migrations, Config, Kind, DEFAULT_STT_PROMPT, MIGRATE_STT_PROMPT_GMAIL_TABS, PREVIOUS_STT_PROMPT};
+        let words = prompt_words(DEFAULT_STT_PROMPT);
+        for w in ["inbox", "primary", "promotions", "social", "updates", "forums", "gmail", "tab"] {
+            assert!(words.iter().any(|x| x == w), "{w}");
+        }
+        assert!(DEFAULT_STT_PROMPT.starts_with(PREVIOUS_STT_PROMPT));
+        // Nic's real lines about his inbox are never dropped as a prompt echo; the tab list read back is.
+        for ok in ["check my primary inbox", "anything in promotions?", "don't look in my promotions or social", "Tony, check my Gmail inbox, the primary one"] {
+            assert!(!echoes_prompt(ok, DEFAULT_STT_PROMPT), "{ok}");
+        }
+        assert!(echoes_prompt("Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab.", DEFAULT_STT_PROMPT));
+        // Review 11-27: a spoken list of tab names is Nic, not an echo (no 4 tab names in a row in the prompt).
+        for ok in ["Check promotions, social, updates, forums", "search primary, promotions, social and updates", "check the promotions tab and the social tab"] {
+            assert!(!echoes_prompt(ok, DEFAULT_STT_PROMPT), "{ok}");
+        }
+
+        let mut cfg = Config::default();
+        cfg.migrations.retain(|m| m != MIGRATE_STT_PROMPT_GMAIL_TABS);
+        let stt: Vec<usize> = cfg.providers.iter().enumerate().filter(|(_, p)| p.kind == Kind::Stt).map(|(i, _)| i).collect();
+        assert!(!stt.is_empty());
+        let mut fw = cfg.providers[stt[0]].clone();
+        fw.id = "faster-whisper".into();
+        fw.stt_prompt = Some(PREVIOUS_STT_PROMPT.into());
+        let mut edited = fw.clone();
+        edited.id = "edited".into();
+        edited.stt_prompt = Some("Tony, Nic, Gabagool.".into());
+        let mut cleared = fw.clone();
+        cleared.id = "cleared".into();
+        cleared.stt_prompt = Some(String::new());
+        cfg.providers.extend([fw, edited, cleared]);
+        assert!(apply_provider_migrations(&mut cfg));
+        fn prompt_of(cfg: &Config, id: &str) -> Option<String> {
+            cfg.providers.iter().find(|p| p.id == id).unwrap().stt_prompt.clone()
+        }
+        let prompt = |id: &str| prompt_of(&cfg, id);
+        assert_eq!(prompt("faster-whisper").as_deref(), Some(DEFAULT_STT_PROMPT));
+        assert_eq!(prompt("edited").as_deref(), Some("Tony, Nic, Gabagool."));
+        assert_eq!(prompt("cleared").as_deref(), Some(""));
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_STT_PROMPT_GMAIL_TABS));
+        // Once: putting the old text back afterwards sticks.
+        cfg.providers.iter_mut().find(|p| p.id == "faster-whisper").unwrap().stt_prompt = Some(PREVIOUS_STT_PROMPT.into());
+        assert!(!apply_provider_migrations(&mut cfg));
+        assert_eq!(prompt_of(&cfg, "faster-whisper").as_deref(), Some(PREVIOUS_STT_PROMPT));
     }
 
     fn av(engine: &str, voice: &str) -> AgentVoice {
@@ -1371,22 +1420,22 @@ mod part3_tests {
         let mut m = BTreeMap::new();
         m.insert("general".into(), av("elevenlabs", "tony-voice"));
         m.insert("booking".into(), av("elevenlabs", "booking-voice"));
-        let ops = roster_entry_for(&m, Some("ops"), true).unwrap();
+        let dir = roster_entry_for(&m, Some("director"), true).unwrap();
         let lib = roster_entry_for(&m, Some("librarian"), true).unwrap();
-        assert_eq!((ops.engine.as_str(), ops.auto_speak), ("kokoro", false));
+        assert_eq!((dir.engine.as_str(), dir.auto_speak), ("kokoro", false));
         assert_eq!(lib.engine, "kokoro");
-        assert_ne!(ops.voice, lib.voice);
+        assert_ne!(dir.voice, lib.voice);
         // The user's own choices win, and Tony never gets a default.
         assert_eq!(roster_entry_for(&m, Some("booking"), true).unwrap().voice.as_deref(), Some("booking-voice"));
         assert_eq!(roster_entry_for(&m, Some("general"), true).unwrap().voice.as_deref(), Some("tony-voice"));
         // Every sub-agent default is distinct.
-        let ids: std::collections::BTreeSet<_> = ["booking", "prompter", "coder", "designer", "director", "librarian", "ops", "verifier", "staging", "system"].iter().filter_map(|r| default_agent_voice(r)).collect();
-        assert_eq!(ids.len(), 10);
+        let ids: std::collections::BTreeSet<_> = ["booking", "prompter", "coder", "designer", "director", "librarian", "verifier", "staging", "system"].iter().filter_map(|r| default_agent_voice(r)).collect();
+        assert_eq!(ids.len(), 9);
         // An empty roster (per-agent voices never set up) still gives each agent its own
         // Kokoro default when Kokoro is configured (Part 6: the old `!is_empty()` guard is gone)…
-        assert_eq!(roster_entry_for(&BTreeMap::new(), Some("ops"), true).unwrap().voice.as_deref(), Some("am_eric"));
+        assert_eq!(roster_entry_for(&BTreeMap::new(), Some("director"), true).unwrap().voice.as_deref(), Some("bm_daniel"));
         // …and the single policy voice without Kokoro.
-        assert!(roster_entry_for(&BTreeMap::new(), Some("ops"), false).is_none());
+        assert!(roster_entry_for(&BTreeMap::new(), Some("director"), false).is_none());
     }
 
     #[test]

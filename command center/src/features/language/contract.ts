@@ -10,7 +10,7 @@
  *   lang_status                        GET    /api/cc/lang/status
  *   lang_library_list                  GET    /api/cc/lang/entries
  *   lang_library_save {entry}          POST   /api/cc/lang/entries
- *   lang_library_update {id, patch}    PATCH  /api/cc/lang/entries/{id}
+ *   lang_library_update {id, patch}    PATCH  /api/cc/lang/entries/{id}   (patch.srs = a review, srs.ts)
  *   lang_library_delete {ids}          POST   /api/cc/lang/entries/delete
  *   lang_tracks_list                   GET    /api/cc/lang/tracks
  *   lang_track_save {track}            PUT    /api/cc/lang/tracks/{lang}
@@ -35,6 +35,8 @@
 export type Category = "public_capture" | "my_translation" | "lesson_vocab";
 export type Mastery = "new" | "learning" | "mastered";
 export type Level = "beginner" | "intermediate" | "conversational";
+/** How often Tony slips a known phrase into chat (OFF by default; see curveballs.ts). */
+export type CurveballLevel = "off" | "light" | "medium" | "heavy";
 
 export const CATEGORIES: { id: Category; label: string }[] = [
   { id: "public_capture", label: "Public capture" },
@@ -66,13 +68,28 @@ export interface LangEntry {
   category: Category;
   favorite: boolean;
   mastery_status: Mastery;
+  /** Spaced-repetition schedule (table `srs`); null/absent until the first review = due since saved. */
+  srs?: SrsState | null;
+}
+
+/**
+ * SM-2 style schedule of one phrase (srs.ts computes it; Rust and the gateway validate + store it in
+ * the `srs` table keyed by phrase id). Times are ms since epoch.
+ */
+export interface SrsState {
+  ease: number;
+  interval_days: number;
+  due_at: number;
+  reps: number;
+  lapses: number;
+  last_review: number | null;
 }
 
 export type NewLangEntry = Omit<LangEntry, "id" | "timestamp" | "favorite" | "mastery_status" | "phonetic_guide" | "context_note"> &
   Partial<Pick<LangEntry, "favorite" | "mastery_status" | "phonetic_guide" | "context_note">>;
 
-/** Editable fields. `context_note: ""` clears the note. */
-export type LangEntryPatch = Partial<Pick<LangEntry, "context_note" | "favorite" | "mastery_status" | "translated_text" | "phonetic_guide">>;
+/** Editable fields. `context_note: ""` clears the note. `srs` upserts the phrase's schedule. */
+export type LangEntryPatch = Partial<Pick<LangEntry, "context_note" | "favorite" | "mastery_status" | "translated_text" | "phonetic_guide">> & { srs?: SrsState };
 
 /** Per-language tutor progress. */
 export interface LangTrack {

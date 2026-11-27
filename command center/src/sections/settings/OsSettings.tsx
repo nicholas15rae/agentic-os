@@ -171,7 +171,7 @@ export function DropletCard() {
 
 // Curated display order for this card; derived from the shared ROLE_IDS so a role added or
 // removed there can't silently drift out of sync — any id not listed here is appended.
-const ROLE_ORDER: RoleId[] = ["librarian", "coder", "booking", "ops", "bizops", "finance", "general", "prompter", "designer", "director"];
+const ROLE_ORDER: RoleId[] = ["librarian", "coder", "booking", "bizops", "finance", "general", "prompter", "designer", "director"];
 const ROLE_LABEL_OVERRIDES: Partial<Record<RoleId, string>> = { general: "Tony (own RAG)", prompter: "Prompter / dispatcher" };
 const ROLES: [RoleId, string][] = [...ROLE_ORDER, ...ROLE_IDS.filter((id) => !ROLE_ORDER.includes(id))].map((id) => [id, ROLE_LABEL_OVERRIDES[id] ?? roleLabel(id)]);
 
@@ -237,7 +237,7 @@ export function OsPermissionsCard() {
   const p = cfg.permissions;
   return (
     <Card title={`${cfg.osName} master permissions`} hint="Root permissions for the OS itself. Allow = runs; Ask = a confirmation card first; Deny = refused (enforced in Rust). Mutating actions always confirm regardless.">
-      <TierSelect label="AnythingLLM inter-agent delegation" hint="Tony → Booking / Coder / Librarian / Ops" value={p.delegation} onChange={(t) => save({ permissions: { delegation: t } })} />
+      <TierSelect label="AnythingLLM inter-agent delegation" hint="Tony → Booking / Coder / Librarian / Biz Ops" value={p.delegation} onChange={(t) => save({ permissions: { delegation: t } })} />
       <TierSelect label="Direct OS tool & MCP execution" hint="Weather, time, fetch, git, knowledge graph, your added MCP servers" value={p.mcp} onChange={(t) => save({ permissions: { mcp: t } })} />
       <TierSelect label="Local filesystem read" hint={`Only inside: ${cfg.fsRoots.join(", ")} + this project. Secrets (.env, keys) are never read.`} value={p.filesystem} onChange={(t) => save({ permissions: { filesystem: t } })} />
       <TierSelect label="External cloud / droplet routing" hint="Cloud models, droplet, Overseer, remote memory mounts" value={p.cloud} onChange={(t) => save({ permissions: { cloud: t } })} />

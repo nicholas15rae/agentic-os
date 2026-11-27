@@ -29,8 +29,8 @@ export const MIN_QUEUE_MS: Readonly<Record<Intensity, number>> = { LIGHT: 5, MED
 
 export const HEALTH_COLOR: Readonly<Record<Health, string>> = { green: "#34d399", amber: "#fbbf24", red: "#f87171" };
 
-/** Every probe target in panel order (the arbiter's 14 nodes). */
-export const PROBE_NODES: readonly ProbeNode[] = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "ops", "bizops", "trading", "observer", "security", "garbage"];
+/** Every probe target in panel order (the arbiter's 13 nodes). */
+export const PROBE_NODES: readonly ProbeNode[] = ["tony", "prompter", "coder", "designer", "director", "librarian", "finance", "booking", "bizops", "trading", "observer", "security", "garbage"];
 
 export const PROBE_LABEL: Readonly<Record<ProbeNode, string>> = {
   tony: "Tony",
@@ -41,7 +41,6 @@ export const PROBE_LABEL: Readonly<Record<ProbeNode, string>> = {
   librarian: "Librarian",
   finance: "Financer",
   booking: "BookingAgent",
-  ops: "Ops",
   bizops: "BizOps",
   trading: "Trading Agent",
   observer: "Observer",

@@ -307,6 +307,12 @@ export interface LeaderRow {
   avgRet: number;
   medianRet: number;
   horizon: number;
+  /** 95% Wilson interval for hitRate (outcomes.wilson). Optional: older bridges don't send it. */
+  wilsonLow?: number;
+  wilsonHigh?: number;
+  /** calls >= minScored (outcomes.MIN_SCORED = 30); below it the row is "not enough calls yet", never ranked. */
+  ranked?: boolean;
+  minScored?: number;
 }
 
 export interface JournalRecord {

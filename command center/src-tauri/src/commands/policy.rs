@@ -113,7 +113,7 @@ impl Default for Policy {
 
 impl Default for GpuPolicy {
     fn default() -> Self {
-        let tiers = [("trading", 1), ("tony", 1), ("security", 2), ("observer", 2), ("librarian", 3), ("coder", 3), ("prompter", 3), ("designer", 3), ("director", 3), ("ops", 3), ("bizops", 3)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let tiers = [("trading", 1), ("tony", 1), ("security", 2), ("observer", 2), ("librarian", 3), ("coder", 3), ("prompter", 3), ("designer", 3), ("director", 3), ("bizops", 3)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         let queue_timeout_ms = [("1", 0), ("2", 120_000), ("3", 600_000)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         // Single-GPU setup: pinned to 1 by default (an explicit null hands capacity to the Settings slider).
         Self { max_concurrent_slots: Some(1), tiers, default_tier: 3, queue_timeout_ms, preempt_tier3_for_tier1: false }

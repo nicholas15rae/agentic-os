@@ -321,7 +321,7 @@ export function TtsCard() {
 }
 
 /** Row order the spec gives: Tony first, then the sub-agents. */
-const ROSTER_ORDER = ["general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops", "bizops", "finance", "trading"] as const;
+const ROSTER_ORDER = ["general", "prompter", "designer", "director", "coder", "booking", "librarian", "bizops", "finance", "trading"] as const;
 
 /** Per-agent voice roster (Part 3): engine, voice, model and auto-speak, one row
  * per agent. Tony's own row ("general") doubles as the fallback for any agent

@@ -1,26 +1,48 @@
 import { useState } from "react";
-import { Check, Loader2, Sparkles, Wand2, X } from "lucide-react";
+import { List, Loader2, Plus, Smartphone, Sparkles, Wand2 } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
-import type { AssetRole, ShotSlot } from "./contract";
-import { editManifest, flushSave, useDirector } from "./director-store";
+import { addShot, editManifest, flushSave, toggleShotFilmed, useDirector } from "./director-store";
 import { sendDirectorTurn } from "./director-chat";
-import { draggedAsset, hasFiles, hasType, ASSET_MIME, ingestDropped } from "./dnd";
-import { allSlotsAttached, attachSlot, clipsFromShotList } from "./manifest";
-import { Thumb } from "./StagingBin";
+import { SHOT_SLOTS_MAX, allSlotsAttached, clipsFromShotList } from "./manifest";
+import { ShotChecklistView } from "./ShotChecklist";
+import { copyText, shotListText } from "./shot-print";
+import { ShotSlotCard } from "./ShotSlotCard";
+import { ShotSlotEditor } from "./ShotSlotEditor";
 
 export const ASSEMBLE_PROMPT = "All shot-list slots are attached and I've laid them on the timeline in slot order. Propose an edit plan (trims, order, audio, output) as a propose_edit_plan action.";
 export const SHOT_LIST_PROMPT = "Draft a shot list for this project as a populate_shot_list action.";
 
-const roleForSlot = (s: ShotSlot): AssetRole => (s.kind === "audio" ? "music" : s.kind === "image" ? (/slate|title|outro|end/i.test(s.label) ? "slate" : "photo") : "clip");
+const PHONE_KEY = "cc.director.phoneView";
+const readPhone = () => {
+  try {
+    return localStorage.getItem(PHONE_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
 
 export function ShotList() {
   const slug = useDirector((s) => s.slug);
   const manifest = useDirector((s) => s.manifest);
   const assets = useDirector((s) => s.assets);
   const chatBusy = useDirector((s) => s.chatBusy);
+  const title = useDirector((s) => s.project?.title ?? "");
   const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [phone, setPhoneState] = useState(readPhone);
   if (!manifest) return null;
   const ready = allSlotsAttached(manifest);
+  const slots = manifest.shotList;
+  const full = slots.length >= SHOT_SLOTS_MAX;
+
+  const setPhone = (on: boolean) => {
+    setPhoneState(on);
+    try {
+      localStorage.setItem(PHONE_KEY, on ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+  };
 
   const assemble = async () => {
     setBusy(true);
@@ -36,85 +58,63 @@ export function ShotList() {
     <Card
       title="Shot List"
       action={
-        manifest.shotList.length > 0 && (
-          <button onClick={() => void assemble()} disabled={!ready || busy || chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50" title={ready ? "Lay the slots on the timeline and ask the Director for an edit plan" : "Attach media to every slot first"}>
-            {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />} Assemble with Director
-          </button>
-        )
-      }
-    >
-      {manifest.shotList.length ? (
-        <ul className="space-y-2">
-          {manifest.shotList.map((s) => (
-            <SlotCard key={s.id} slot={s} slug={slug} asset={assets.find((a) => a.id === s.assetId) ?? null} />
-          ))}
-        </ul>
-      ) : (
-        <div className="text-center">
-          <Empty>No shot list yet.</Empty>
-          <button onClick={() => void sendDirectorTurn(SHOT_LIST_PROMPT)} disabled={chatBusy} className="pill-glass !h-8 !px-3 text-xs disabled:opacity-50">
-            <Sparkles size={12} /> Ask the Director for one
-          </button>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function SlotCard({ slot, slug, asset }: { slot: ShotSlot; slug: string | null; asset: ReturnType<typeof useDirector.getState>["assets"][number] | null }) {
-  const [over, setOver] = useState(false);
-  const [refused, setRefused] = useState<string | null>(null);
-  const tone = slot.status === "approved" ? "text-teal" : slot.status === "attached" ? "text-amber-soft" : "text-ink-3";
-  return (
-    <li
-      onDragOver={(e) => {
-        if (!hasType(e, ASSET_MIME) && !hasFiles(e)) return;
-        e.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={async (e) => {
-        e.preventDefault();
-        setOver(false);
-        setRefused(null);
-        let a = draggedAsset(e);
-        if (!a && hasFiles(e) && slug) a = (await ingestDropped(slug, Array.from(e.dataTransfer.files).slice(0, 1), roleForSlot(slot)))[0] ?? null;
-        if (!a) return;
-        if (a.kind !== slot.kind) {
-          setRefused(`Needs ${slot.kind}, got ${a.kind}`);
-          return;
-        }
-        editManifest((m) => attachSlot(m, slot.id, a));
-      }}
-      className={`r-14 border p-2.5 transition-colors ${over ? "border-teal/70 bg-teal/5" : slot.assetId ? "border-white/10 bg-white/[0.02]" : "border-dashed border-white/15"}`}
-    >
-      <div className="flex items-center gap-2">
-        <span className="font-mono fs-10 text-ink-3">{slot.id}</span>
-        <span className="min-w-0 flex-1 truncate fs-13 font-medium text-ink">{slot.label}</span>
-        <span className="font-mono fs-10 text-ink-3">
-          {slot.kind}
-          {slot.targetSec != null ? ` · ${slot.targetSec}s` : ""}
-        </span>
-        <span className={`label-caps ${tone}`}>{slot.status}</span>
-      </div>
-      {slot.instructions && <p className="mt-1 fs-12 leading-snug text-ink-2">{slot.instructions}</p>}
-      {asset ? (
-        <div className="mt-2 flex items-center gap-2">
-          <Thumb asset={asset} className="h-8 w-12" />
-          <span className="min-w-0 flex-1 truncate fs-12 text-ink-2">{asset.name}</span>
-          {slot.status === "attached" && (
-            <button onClick={() => editManifest((m) => ({ ...m, shotList: m.shotList.map((x) => (x.id === slot.id ? { ...x, status: "approved" } : x)) }))} className="pill-glass !h-7 !w-7 !p-0" title="Approve this shot" aria-label={`Approve ${slot.label}`}>
-              <Check size={12} />
+        <>
+          {slots.length > 0 && (
+            <button onClick={() => setPhone(!phone)} aria-pressed={phone} className="pill-glass !h-8 !w-8 !p-0" title={phone ? "Full shot list" : "Phone view: the filming checklist, big type, copy or print"} aria-label={phone ? "Full shot list" : "Phone view"}>
+              {phone ? <List size={13} /> : <Smartphone size={13} />}
             </button>
           )}
-          <button onClick={() => editManifest((m) => attachSlot(m, slot.id, null))} className="pill-glass !h-7 !w-7 !p-0" title="Detach" aria-label={`Detach from ${slot.label}`}>
-            <X size={12} />
-          </button>
-        </div>
+          {!phone && (
+            <button onClick={() => setAdding(true)} disabled={adding || full} className="pill-glass !h-8 !w-8 !p-0 disabled:opacity-50" title={full ? `Up to ${SHOT_SLOTS_MAX} shots` : "Add a shot"} aria-label="Add a shot">
+              <Plus size={13} />
+            </button>
+          )}
+          {slots.length > 0 && !phone && (
+            <button onClick={() => void assemble()} disabled={!ready || busy || chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50" title={ready ? "Lay the slots on the timeline and ask the Director for an edit plan" : "Attach media to every slot first"}>
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />} Assemble with Director
+            </button>
+          )}
+        </>
+      }
+    >
+      {phone && slots.length ? (
+        <ShotChecklistView slots={slots} onToggle={toggleShotFilmed} onCopy={() => copyText(shotListText(title, slots))} onPrint={() => window.print()} />
       ) : (
-        <p className="mt-2 fs-11 text-ink-3">Drop a {slot.kind} from the bin or your files here.</p>
+        <>
+          {slots.length > 0 && (
+            <ul className="space-y-2">
+              {slots.map((s, i) => (
+                <ShotSlotCard key={s.id} slot={s} index={i} count={slots.length} slug={slug} asset={assets.find((a) => a.id === s.assetId) ?? null} />
+              ))}
+            </ul>
+          )}
+          {adding && (
+            <div className={slots.length ? "mt-2" : ""}>
+              <ShotSlotEditor
+                slot={null}
+                onCancel={() => setAdding(false)}
+                onSave={(p) => {
+                  addShot(p);
+                  setAdding(false);
+                }}
+              />
+            </div>
+          )}
+          {!slots.length && !adding && (
+            <div className="text-center">
+              <Empty>No shot list yet.</Empty>
+              <div className="flex flex-wrap justify-center gap-1.5">
+                <button onClick={() => void sendDirectorTurn(SHOT_LIST_PROMPT)} disabled={chatBusy} className="pill-glass !h-8 !px-3 text-xs disabled:opacity-50">
+                  <Sparkles size={12} /> Ask the Director for one
+                </button>
+                <button onClick={() => setAdding(true)} className="pill-glass !h-8 !px-3 text-xs">
+                  <Plus size={12} /> Add a shot
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       )}
-      {refused && <p className="mt-1 fs-11 text-alert">{refused}</p>}
-    </li>
+    </Card>
   );
 }

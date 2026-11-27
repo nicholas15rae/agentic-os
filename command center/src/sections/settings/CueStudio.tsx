@@ -9,6 +9,7 @@ import { fireCue } from "@/features/cues/cue-runtime";
 import { newClip, type AudioClip, type CueWidget, type ThemeClip } from "@/features/cues/types";
 import { MAX_CUE_VOLUME } from "@/features/cues/volume";
 import { CueVoiceLine } from "./CueVoiceLine";
+import { FastCues } from "./FastCues";
 
 const DAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 const fmt = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}` : `${s.toFixed(1)}s`);
@@ -18,7 +19,8 @@ export function CueStudio() {
   const { items, loaded, create, update, remove } = useCollection<CueWidget>("cues");
   const running = useCueRun((s) => s.running);
   const stop = useCueRun((s) => s.stopAll);
-  const cues = [...items].sort((a, b) => (a.builtin ? 0 : 1) - (b.builtin ? 0 : 1) || a._created - b._created);
+  // Fast cues (Section 20.10) live in the same collection; they get their own list below.
+  const cues = items.filter((c) => !c.fast).sort((a, b) => (a.builtin ? 0 : 1) - (b.builtin ? 0 : 1) || a._created - b._created);
   return (
     <Card
       title="Voice & triggers — cue widgets"
@@ -45,6 +47,7 @@ export function CueStudio() {
           <CueCard key={c.id} cue={c} onChange={(p) => void update(c.id, p)} onDelete={() => void remove(c.id)} />
         ))}
       </div>
+      <FastCues cues={items} create={create} update={update} remove={remove} />
     </Card>
   );
 }

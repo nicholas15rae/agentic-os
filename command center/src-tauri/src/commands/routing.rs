@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// this only breaks exact score ties). `general`'s own domain triggers are
 /// mostly intercepted earlier by the OS-control intent layer (Part 4), so it
 /// sits last here as a catch-all, never stealing a tie from a sub-agent.
-pub const DOMAIN_TIEBREAK: [&str; 10] = ["booking", "bizops", "finance", "ops", "coder", "designer", "director", "librarian", "prompter", "general"];
+pub const DOMAIN_TIEBREAK: [&str; 9] = ["booking", "bizops", "finance", "coder", "designer", "director", "librarian", "prompter", "general"];
 
 /// "(hey tony,? )?(tell|ask|have|get|let|send|route|hand|pass) (it )?(to )?(my|the|our)? NAME…"
 const VERBS_A: [&str; 9] = ["tell", "ask", "have", "get", "let", "send", "route", "hand", "pass"];
@@ -520,13 +520,13 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         }
         break;
     }
-    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar / money read ("check
+    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar / money / vault read ("check
     // gmail for booking emails", "any audition emails?", "what do I owe my accountant?") is Tony's
     // own live tool: a name merely mentioned there, even first, is a topic, not an address. Only
     // addressing the desk ("booking desk, any …", "hey booking agent …") or step (a) above
     // ("tell booking to …") hands it over.
     if let Some(role) = match_name_anywhere(&toks, &names) {
-        if !matches!(direct_tool(&original), Some("gmail" | "calendar" | "finance")) || leads_with_name(&original, &toks, &names) {
+        if !matches!(direct_tool(&original), Some("gmail" | "calendar" | "finance" | "vault")) || leads_with_name(&original, &toks, &names) {
             return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
         }
     }
@@ -623,13 +623,28 @@ const DIRECT_FINANCE_WRITE: &str = r"\b(?:log|record|enter|track|scan|import|exp
 /// "what orders are pending", "the overdue invoices widget").
 const DIRECT_FINANCE_NOT: &str = r"\b(?:emails?|inbox|mail|gmail|whatsapp|messages?|texts?|calendar|tasks?|todos?|tickets?|builds?|prs?|pull requests?|reviews?|queue|orders?|deliver(?:y|ies)|packages?|shipments?|updates?|widget|server|config|api|bug|code|app|script|spreadsheet|filter|settings?|button|tests?)\b";
 
+/// Vault READ questions Tony answers with `vault.search` himself (read-only, never finance):
+/// "search my vault / notes for …", "find the note about …", "what did I save about …".
+/// Mirrors router.ts `DIRECT_VAULT`.
+pub(crate) const DIRECT_VAULT: &str = r"\bsearch (?:through |in )?(?:my |the )?(?:vault|notes|brainstorms|documents|docs|scripts|sides|auditions|jobs|ideas)\b|\b(?:look|dig) (?:through|in) (?:my |the )?(?:vault|notes|brainstorms|documents|docs)\b|\blook up (?:the |my |that )?(?:note|notes|brainstorm|document|doc|script|sides|idea) (?:about|on|for|from|with)\b|\bfind (?:the |my |that |a |any )(?:note|notes|brainstorm|brainstorms|document|doc|script|sides|idea|ideas) (?:about|on|for|from|with|where|that i)\b|\bwhat did i (?:save|write down|note down|jot down) (?:about|on|for|regarding)\b|\bwhat have i (?:saved|written down|noted down|jotted down) (?:about|on|for|regarding)\b|\b(?:anything|something) (?:in|from) (?:my |the )?(?:vault|notes|brainstorms|documents)\b|\bdo i have (?:a |any )?(?:notes?|documents?|brainstorms?|ideas?) (?:about|on|for)\b|\b(?:whats|what is) in (?:my |the )?(?:vault|notes)\b";
+/// "What did I save / write down about": a read, not a write. Dropped before DIRECT_WRITE.
+const DIRECT_VAULT_SAVED: &str = r"\bwhat (?:did|have) i (?:save|saved|write down|written down|note down|noted down|jot down|jotted down)\b";
+/// Vault writes DIRECT_WRITE doesn't list ("put this in my vault", "re-index the vault").
+const DIRECT_VAULT_WRITE: &str = r"\b(?:put|stick|store|keep|file|log|record|clear|wipe|reindex|re index|index|export|import|back up|backup|tag)\b";
+/// Another live tool's or the code's subject ("search my notes for that email", "find the doc about the repo").
+const DIRECT_VAULT_NOT: &str = r"\b(?:emails?|inbox|gmail|whatsapp|calendar|repo|repository|codebase|github|web|online|internet|google)\b";
+
 fn direct_re(slot: &'static std::sync::OnceLock<regex::Regex>, pat: &str) -> &'static regex::Regex {
     slot.get_or_init(|| regex::Regex::new(pat).unwrap())
 }
 
 /// The live tool a read question is for: "whatsapp" | "gmail" | "calendar" | "weather" | "spotify"
-/// | "finance". Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
+/// | "finance" | "vault". Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
 pub fn direct_tool(text: &str) -> Option<&'static str> {
+    static VAULT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT_SAVED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT_WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT_NOT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE_WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static FINANCE_NOT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -651,6 +666,7 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     static MESSAGES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let n = normalize(text);
     let reads = direct_re(&UPDATE_NOUN, DIRECT_UPDATE_NOUN).replace_all(&n, " ");
+    let reads = direct_re(&VAULT_SAVED, DIRECT_VAULT_SAVED).replace_all(&reads, " ");
     if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&direct_re(&FINANCE_MAKE, DIRECT_FINANCE_MAKE).replace_all(&reads, " ")) {
         return None;
     }
@@ -677,6 +693,9 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     }
     if direct_re(&FINANCE, DIRECT_FINANCE).is_match(&n) && !direct_re(&FINANCE_WRITE, DIRECT_FINANCE_WRITE).is_match(&n) && !direct_re(&FINANCE_NOT, DIRECT_FINANCE_NOT).is_match(&n) {
         return Some("finance");
+    }
+    if direct_re(&VAULT, DIRECT_VAULT).is_match(&n) && !direct_re(&VAULT_WRITE, DIRECT_VAULT_WRITE).is_match(&n) && !direct_re(&VAULT_NOT, DIRECT_VAULT_NOT).is_match(&n) {
+        return Some("vault");
     }
     if !work && direct_re(&MESSAGES, DIRECT_MESSAGES).is_match(&n) {
         return Some("whatsapp");
@@ -733,7 +752,7 @@ mod tests {
 
     #[test]
     fn tony_is_never_a_delegation_target() {
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         let r = resolve("ask tony to ask the coder to fix it", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("coder"), RouteKind::Named));
         assert!(r.task.contains("fix"));
@@ -751,7 +770,7 @@ mod tests {
             assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
         }
         // Tony's name beats a topic (it used to be: a sub-agent topic wins over a self address).
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         for text in ["tony check my whatsapp messages", "hey tony, render the reel", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("general"), RouteKind::Own, "high"), "{text}");
@@ -765,8 +784,9 @@ mod tests {
         assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
         let r = resolve("friday, check my reel for the shoot", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
+        // Infrastructure is Tony's own topic: no agent takes it.
         let r = resolve("system status of the droplet", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
+        assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own));
         // A Named agent still wins over Tony's name.
         let r = resolve("hey tony, ask the director to edit video for the shoot", &cfg);
         assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str(), r.task.as_str()), (Some("director"), RouteKind::Named, "high", "edit video for the shoot"));
@@ -822,7 +842,7 @@ mod tests {
     /// topic — in `route_for_turn` too. Mirrors router.test.ts.
     #[test]
     fn only_a_real_address_beats_a_topic() {
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         let mut friday = OsConfig::default();
         friday.os_name = "Friday".into();
         // A mention (a noun, an object) leaves the topic's agent in charge.
@@ -833,13 +853,13 @@ mod tests {
             ("fix the layout css before friday", &friday, "designer"),
             ("fix bug in the orchestrator", &cfg, "coder"),
             ("get the orchestrator react code working", &cfg, "coder"),
-            ("the dispatcher keeps timing out, is the droplet healthy", &cfg, "ops"),
+            ("the dispatcher keeps timing out, fix bug in the retry loop", &cfg, "coder"),
         ] {
             let r = resolve(text, c);
             assert_eq!((r.role.as_deref(), r.kind), (Some(role), RouteKind::Domain), "{text}");
         }
         // A mention with no topic is still Tony's (step (d)).
-        for text in ["refactor the dispatcher", "so I'm on my phone now hey tony what's up"] {
+        for text in ["refactor the dispatcher", "so I'm on my phone now hey tony what's up", "the dispatcher keeps timing out, is the droplet healthy"] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (Some("general"), RouteKind::Own), "{text}");
         }
@@ -847,15 +867,15 @@ mod tests {
         for (text, c) in [
             ("hey tony, render the reel", &cfg),
             ("ok jarvis, redo the color palette for the landing page", &cfg),
-            ("so tony, is the droplet healthy", &cfg),
-            ("yo tony check my docker containers", &cfg),
+            ("so tony, is the reel rendered", &cfg),
+            ("yo tony check my layout css", &cfg),
             ("friday, check my reel for the shoot", &friday),
             ("ask tony to render the reel", &cfg),
             ("tell the dispatcher about the thumbnail", &cfg),
-            ("have jarvis check the droplet", &cfg),
+            ("have jarvis check the inventory", &cfg),
             ("let tony know the layout changed", &cfg),
             ("render the reel, tony", &cfg),
-            ("is the droplet healthy tony please", &cfg),
+            ("is the thumbnail ready tony please", &cfg),
             ("render the reel, friday", &friday),
         ] {
             let r = resolve(text, c);
@@ -897,14 +917,6 @@ mod tests {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default), "{text}");
         }
-    }
-
-    /// The default config with the Ops placeholder thawed, for priority tests that use Ops' infra
-    /// topics as "another agent's topic".
-    fn ops_thawed() -> OsConfig {
-        let mut c = OsConfig::default();
-        c.switchboard.frozen_agents.retain(|a| a != "ops");
-        c
     }
 
     #[test]
@@ -1031,7 +1043,7 @@ mod tests {
             "what's up, any updates on the build?",
             "hey what's up, any updates?",
             "fix the weather api bug in the code",
-            "Ops, turn off the weather alerts",
+            "Biz Ops, turn off the weather alerts",
             "Booking, order an umbrella for the shoot",
         ] {
             assert_eq!(direct_tool(text), None, "{text}");
@@ -1189,12 +1201,12 @@ mod tests {
 
     #[test]
     fn domain_tie_break_follows_role_order() {
-        let cfg = ops_thawed(); // Ops (a frozen placeholder) stands in for another agent's topic
+        let cfg = OsConfig::default();
         // bizops "inventory" (9) vs designer "animation" (9): bizops comes first.
         let r = resolve("inventory animation", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("bizops"), RouteKind::Domain));
-        // A Tony topic ("schedule") never steals a tie: the agent keeps it.
-        let r = resolve("schedule a docker restart", &cfg);
-        assert_eq!((r.role.as_deref(), r.kind), (Some("ops"), RouteKind::Domain));
+        // A Tony topic ("schedule", 8) never steals a tie: the agent ("captions", 8) keeps it.
+        let r = resolve("schedule the captions", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("director"), RouteKind::Domain));
     }
 }

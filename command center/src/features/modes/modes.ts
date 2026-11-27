@@ -119,7 +119,7 @@ export const DEFAULT_MODE_ID = "brainstorm";
 export const NOVELTY_MODE_ID = "gabagool";
 /** One-on-one training: Tony only, dispatch hard-locked to Solo, lessons saved as pathways. */
 export const LEARNING_MODE_ID = "learning";
-/** Business operations: Ops and the Operations Manager on duty, Tony asks before any hand-off. */
+/** Business operations: the Operations Manager on duty, Tony asks before any hand-off. */
 export const OPERATIONS_MODE_ID = "operations";
 export const isLearningMode = (e: Pick<EffectiveMode, "mode_id"> | null | undefined): boolean => e?.mode_id === LEARNING_MODE_ID;
 export const MODIFIER_MAX = 280;
@@ -157,7 +157,7 @@ export const SWITCHBOARD_LIST_MAX = 16;
 const board = (agents: string[], tools: string[]): ModeSwitchboard => ({ agents, tools });
 export const BUILDER_SWITCHBOARD = board(["prompter", "designer", "coder"], ["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"]);
 /** Google Calendar mirrors Gmail (Rust `OPERATIONS_TOOLS` / `EXECUTIVE_TOOLS`): live wherever Gmail is, frozen where it is. */
-export const OPERATIONS_SWITCHBOARD = board(["ops", "bizops"], ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]);
+export const OPERATIONS_SWITCHBOARD = board(["bizops"], ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]);
 /** The Librarian is not on Executive duty: it runs only as its scheduled script (Rust `EXECUTIVE_AGENTS`). */
 export const EXECUTIVE_SWITCHBOARD = board(["bizops", "finance"], ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"]);
 /** Learning: Tony only (the always-live tools stay on). */

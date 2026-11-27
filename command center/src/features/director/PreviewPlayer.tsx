@@ -3,7 +3,7 @@ import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import { SubTabs } from "@/components/ui";
 import { fileSrc } from "./api";
 import type { MediaAsset, TimelineClip, VerifiedRender } from "./contract";
-import { setPlayhead, setPreviewMode, useDirector, type DirectorState } from "./director-store";
+import { setPlayhead, setPreviewMode, setPreviewTime, useDirector, type DirectorState } from "./director-store";
 import { clipStarts, timecode } from "./manifest";
 
 export type PreviewSource =
@@ -65,6 +65,26 @@ export function PreviewPlayer() {
     setT(lo);
   }, [url, lo, hi]);
 
+  // A review note (or a moment) asked to seek: now if loaded, else once the new source's metadata lands.
+  const seek = useDirector((s) => s.seek);
+  const pendingSeek = useRef<number | null>(null);
+  useEffect(() => {
+    if (!seek) return;
+    const el = media.current;
+    if (el && el.readyState >= 1) {
+      el.currentTime = seek.sec;
+      setT(seek.sec);
+      setPreviewTime(seek.sec);
+    } else pendingSeek.current = seek.sec;
+  }, [seek]);
+  const startAt = (el: HTMLMediaElement) => {
+    const s = pendingSeek.current;
+    pendingSeek.current = null;
+    el.currentTime = s ?? lo;
+    setT(s ?? lo);
+    setPreviewTime(s ?? lo);
+  };
+
   useEffect(() => {
     if (media.current) {
       media.current.muted = muted;
@@ -80,6 +100,7 @@ export function PreviewPlayer() {
       el.currentTime = range.outSec;
     }
     setT(el.currentTime);
+    setPreviewTime(el.currentTime);
     if (src?.kind === "clip") setPlayhead(src.clipStart + Math.max(0, el.currentTime - src.clip.inSec));
   };
 
@@ -115,7 +136,7 @@ export function PreviewPlayer() {
         ) : kind === "image" ? (
           <img src={url} alt={src.kind !== "render" ? src.asset.name : ""} className="max-h-full max-w-full object-contain" />
         ) : kind === "audio" ? (
-          <audio ref={media} src={url} preload="metadata" onLoadedMetadata={(e) => { setDur(e.currentTarget.duration || 0); e.currentTarget.currentTime = lo; }} onTimeUpdate={onTime} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
+          <audio ref={media} src={url} preload="metadata" onLoadedMetadata={(e) => { setDur(e.currentTarget.duration || 0); startAt(e.currentTarget); }} onTimeUpdate={onTime} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
         ) : (
           <video
             ref={media}
@@ -126,7 +147,7 @@ export function PreviewPlayer() {
             className="max-h-full max-w-full"
             onLoadedMetadata={(e) => {
               setDur(e.currentTarget.duration || 0);
-              e.currentTarget.currentTime = lo;
+              startAt(e.currentTarget);
             }}
             onTimeUpdate={onTime}
             onPlay={() => setPlaying(true)}
@@ -150,6 +171,7 @@ export function PreviewPlayer() {
               const v = Number(e.target.value);
               if (media.current) media.current.currentTime = v;
               setT(v);
+              setPreviewTime(v);
             }}
             className="min-w-0 flex-1 accent-amber"
             aria-label="Scrub"

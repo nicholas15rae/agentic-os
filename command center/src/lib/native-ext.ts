@@ -12,7 +12,7 @@ import type { CloudCommands } from "@/features/cloud/contract";
 
 /** Director Suite (media.rs): every JSON-args command. The two raw-body ones (`media_ingest_chunk`,
  * `media_voiceover_save`) go through `features/director/api.ts`, never `xcmd`. */
-export type DirectorJsonCommands = Omit<DirectorCommands, "media_ingest_chunk" | "media_voiceover_save">;
+export type DirectorJsonCommands = Omit<DirectorCommands, "media_ingest_chunk" | "media_voiceover_save" | "media_sides_save">;
 
 /** Cloud storage (gdrive.rs): every `cloud_*` command is plain JSON, so the locked contract is used as is. */
 export interface ExtCommands extends DirectorJsonCommands, CloudCommands {
@@ -84,7 +84,20 @@ export function xcmd<K extends keyof ExtCommands>(name: K, ...args: ExtCommands[
   return native<ExtCommands[K]["result"]>(name, args[0] as Record<string, unknown> | undefined);
 }
 
-export type ExtEventName = "gateway-health" | "build-hub" | "agent-transcript" | "media-render" | "media-ingest" | "cloud-transfer" | "cloud-status";
+export type ExtEventName =
+  | "gateway-health"
+  | "build-hub"
+  | "agent-transcript"
+  | "media-render"
+  | "media-ingest"
+  | "media-intake"
+  | "cloud-transfer"
+  | "cloud-status"
+  // Director Suite Part 3: ComfyUI (comfy.rs)
+  | "comfy-queue"
+  | "comfy-service"
+  | "comfy-asset"
+  | "director-report";
 
 /** Subscribe to one of this feature's Rust → webview events. No-op on the PWA. */
 export async function onExtEvent<P>(event: ExtEventName, handler: (payload: P) => void): Promise<() => void> {

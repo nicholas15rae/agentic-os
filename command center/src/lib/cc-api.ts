@@ -5,8 +5,9 @@
  * NetBird shows up on the desktop within one sync tick (and vice versa).
  * Writes are optimistic; reads poll with `?since=` so only changed rows move.
  */
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { gateway, GatewayError, authHeader } from "@/lib/gateway";
+import type { MapPlace } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 
 export type Collection =
@@ -27,11 +28,19 @@ export type Collection =
   | "commissions"
   | "mileage"
   | "pending"
-  | "statement_lines";
+  | "statement_lines"
+  | "routes";
 
 /** Finance records: Nic's screens only, never an agent's context. Mirrors FINANCE_COLLECTIONS in command_center_api.py. */
 export const FINANCE_COLLECTIONS: readonly Collection[] = ["receipts", "invoices", "checks", "income", "commissions", "mileage", "pending", "statement_lines"];
 export const isFinanceCollection = (c: string): boolean => (FINANCE_COLLECTIONS as readonly string[]).includes(c);
+
+/**
+ * Never embedded and never in any vault search (addresses stay out of the AI index and agent
+ * context). They still sync phone <-> desktop. Mirrors PRIVATE_COLLECTIONS in command_center_api.py.
+ */
+export const PRIVATE_COLLECTIONS: readonly Collection[] = ["routes"];
+export const isPrivateCollection = (c: string): boolean => (PRIVATE_COLLECTIONS as readonly string[]).includes(c);
 
 export interface Meta {
   id: string;
@@ -76,14 +85,17 @@ export const cc = {
   /** Vault matches for an agent's context: never finance records (receipts, invoices, cheques, income). */
   agentSearch: async (q: string, k = 5) => {
     const res = await cc.search(q, [], k);
-    // The gateway already leaves finance out of an unscoped search; filter again so an older gateway can't leak it.
-    return { ...res, results: res.results.filter((r) => !isFinanceCollection(r.collection)) };
+    // The gateway already leaves finance and private collections out of an unscoped search; filter
+    // again so an older gateway can't leak them.
+    return { ...res, results: res.results.filter((r) => !isFinanceCollection(r.collection) && !isPrivateCollection(r.collection)) };
   },
   reindex: () => gateway<{ queued: number }>("/api/cc/vault/reindex", { method: "POST" }),
   backupNow: () => gateway<BackupInfo>("/api/cc/backup", { method: "POST", timeoutMs: 120_000 }),
   backups: () => gateway<BackupList>("/api/cc/backups"),
   /** A failed backup is right after all (you really removed that much): make it good + the new baseline. */
   acceptBackup: (name: string) => gateway<BackupInfo>("/api/cc/backup/accept", { method: "POST", body: JSON.stringify({ name }) }),
+  /** Copy the newest good backup into the mirror folders now (Section 16.2; a retry after plugging a drive in). */
+  mirrorNow: () => gateway<{ mirrors: Record<string, MirrorResult> }>("/api/cc/backup/mirror", { method: "POST", timeoutMs: 180_000 }),
   candles: (symbol: string, interval: string, range: string) =>
     gateway<MarketData>(`/api/cc/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${interval}&range=${range}`, { timeoutMs: 20_000 }),
   fileUrl: (id: string) => `${useSettings.getState().gatewayUrl.replace(/\/+$/, "")}/api/cc/files/${id}`,
@@ -102,7 +114,42 @@ type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]>
 
 export interface CcConfig {
   llm: { baseUrl: string; model: string; visionModel: string; embeddingModel: string; timeoutSecs: number };
-  backup: { enabled: boolean; intervalHours: number; keep: number; dir: string };
+  backup: {
+    enabled: boolean;
+    intervalHours: number;
+    keep: number;
+    dir: string;
+    /** Second-copy folders (another drive); absent on older gateways. */
+    mirrorDirs?: string[];
+    /** Mirror retention: 0 = keep every copy (the default). */
+    mirrorKeep?: number;
+  };
+}
+
+/** One mirror folder's last copy (gateway `mirror_backup`). */
+export interface MirrorResult {
+  ok: boolean;
+  at: number;
+  backup?: string;
+  reason?: string;
+  unreachable?: boolean;
+  lastOkAt?: number | null;
+  lastOkFile?: string | null;
+}
+
+/** A configured mirror folder on the Vault page (gateway `mirror_view`). */
+export interface MirrorRow {
+  dir: string;
+  /** The drive / share is there right now. */
+  reachable: boolean;
+  /** Last copy: true / false, null = nothing copied yet. */
+  ok: boolean | null;
+  reason?: string | null;
+  at?: number | null;
+  lastOkAt?: number | null;
+  lastOkFile?: string | null;
+  /** Set when the mirror needs a look (failed, unreachable, never copied). */
+  alert?: string;
 }
 
 export interface BackupInfo {
@@ -113,6 +160,8 @@ export interface BackupInfo {
   /** false = it failed its self-check (kept aside as failed-cc-*.zip). Absent on older gateways. */
   ok?: boolean;
   verified?: { ok: boolean; problems: string[]; entries?: number; files?: number; note?: string };
+  /** Per-mirror copy results (only when mirror folders are set). */
+  mirrors?: Record<string, MirrorResult> | { error: string };
 }
 
 export interface BackupList {
@@ -123,13 +172,19 @@ export interface BackupList {
   failure?: BackupInfo | null;
   backups: { name: string; size: number; at: number }[];
   failed?: { name: string; size: number; at: number }[];
+  /** Section 16.2 mirror folders (absent on older gateways). */
+  mirrors?: MirrorRow[];
+  mirrorKeep?: number;
 }
 
 /** One line for a backup result: where it went and whether it checked out. */
 export function backupSummary(b: BackupInfo): string {
   if (b.ok === false) return `Backup FAILED its check (kept aside as ${b.file}): ${b.verified?.problems.join("; ") ?? "unknown problem"}`;
   const v = b.verified;
-  return `Backed up to ${b.file}${v?.ok ? ` · verified (${v.entries ?? 0} entries, ${v.files ?? 0} files)` : ""}`;
+  const m = b.mirrors && !("error" in b.mirrors) ? Object.values(b.mirrors as Record<string, MirrorResult>) : [];
+  const failed = m.filter((x) => !x.ok).length;
+  const mirrors = m.length ? ` · mirrored to ${m.length - failed}/${m.length}${failed ? ` (${failed} FAILED)` : ""}` : "";
+  return `Backed up to ${b.file}${v?.ok ? ` · verified (${v.entries ?? 0} entries, ${v.files ?? 0} files)` : ""}${mirrors}`;
 }
 
 export interface OcrFields {
@@ -357,9 +412,140 @@ export const collections = {
     emit(s);
     return saved;
   },
+  remove: async (c: Collection, id: string) => {
+    await cc.remove(c, id);
+    const s = storeFor(c);
+    const prev = s.items.get(id);
+    if (prev) s.items.set(id, { ...prev, _deleted: true });
+    emit(s);
+  },
   snapshot: <T>(c: Collection) => storeFor(c).snapshot as Item<T>[],
+  /** Read-only: the collection has synced at least once without an error (Tony's instant cues only answer from loaded data). */
+  loaded: (c: Collection) => storeFor(c).loaded && !storeFor(c).error,
   sync: (c: Collection) => sync(c),
 };
+
+// ── saved routes (Maps): collection "routes", synced, never in the vault ─────
+
+/** Where a saved route starts: a stored place, or resolved when it is used ("here" = the device fix, "home" = MAP_HOME). */
+export type RouteOrigin = MapPlace | "here" | "home";
+/** One saved route. Coordinates are stored, so opening it never geocodes again. Mirrors _check_route in command_center_api.py. */
+export interface SavedRoute {
+  name: string;
+  origin: RouteOrigin;
+  destination: MapPlace;
+  stops: MapPlace[];
+  pinned?: boolean;
+}
+
+export const ROUTE_NAME_MAX = 80;
+export const ROUTE_LABEL_MAX = 200;
+/** Google Maps directions URLs take at most 9 waypoints. */
+export const ROUTE_STOPS_MAX = 9;
+
+/** A saved route the gateway would refuse (400), caught before the request. */
+export class SavedRouteError extends Error {}
+
+// Control, bidi and zero-width characters: the same set the gateway strips.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g;
+
+function routeText(v: unknown, what: string, cap: number, required: boolean): string {
+  if (v == null && !required) return "";
+  if (typeof v !== "string") throw new SavedRouteError(`${what} must be text`);
+  const s = v.replace(UNSAFE_TEXT, " ").split(/\s+/).filter(Boolean).join(" ");
+  if (required && !s) throw new SavedRouteError(`${what} is required`);
+  if (s.length > cap) throw new SavedRouteError(`${what} is longer than ${cap} characters`);
+  return s;
+}
+
+function routePlace(v: unknown, what: string): MapPlace {
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new SavedRouteError(`${what} must be a place {lat, lng, label}`);
+  const p = v as Record<string, unknown>;
+  const extra = Object.keys(p).filter((k) => k !== "lat" && k !== "lng" && k !== "label");
+  if (extra.length) throw new SavedRouteError(`${what} has unknown fields: ${extra.sort().join(", ")}`);
+  const coord = (k: "lat" | "lng", lim: number) => {
+    const n = p[k];
+    if (typeof n !== "number" || !Number.isFinite(n) || Math.abs(n) > lim) throw new SavedRouteError(`${what}.${k} must be a number from -${lim} to ${lim}`);
+    return n;
+  };
+  return { lat: coord("lat", 90), lng: coord("lng", 180), label: routeText(p.label, `${what}.label`, ROUTE_LABEL_MAX, false) };
+}
+
+function routeOrigin(v: unknown): RouteOrigin {
+  if (typeof v === "string") {
+    if (v === "here" || v === "home") return v;
+    throw new SavedRouteError("origin must be a place, 'here' or 'home'");
+  }
+  return routePlace(v, "origin");
+}
+
+function routeStops(v: unknown): MapPlace[] {
+  if (v == null) return [];
+  if (!Array.isArray(v)) throw new SavedRouteError("stops must be a list of places");
+  if (v.length > ROUTE_STOPS_MAX) throw new SavedRouteError(`At most ${ROUTE_STOPS_MAX} stops`);
+  return v.map((s, i) => routePlace(s, `stops[${i}]`));
+}
+
+const ROUTE_FIELDS = new Set(["name", "origin", "destination", "stops", "pinned"]);
+
+function noExtraRouteFields(r: object) {
+  const extra = Object.keys(r).filter((k) => !ROUTE_FIELDS.has(k));
+  if (extra.length) throw new SavedRouteError(`Unknown saved-route fields: ${extra.sort().join(", ")}`);
+}
+
+function routePinned(v: unknown): boolean {
+  if (typeof v !== "boolean") throw new SavedRouteError("pinned must be true or false");
+  return v;
+}
+
+/** A whole route, normalised the way the gateway stores it. Throws SavedRouteError. */
+export function toSavedRoute(r: SavedRoute): SavedRoute {
+  noExtraRouteFields(r);
+  const out: SavedRoute = {
+    name: routeText(r.name, "name", ROUTE_NAME_MAX, true),
+    origin: routeOrigin(r.origin),
+    destination: routePlace(r.destination, "destination"),
+    stops: routeStops(r.stops),
+  };
+  if (r.pinned !== undefined) out.pinned = routePinned(r.pinned);
+  return out;
+}
+
+/** Only the fields a patch carries, each checked (the gateway re-checks the merged row). Throws SavedRouteError. */
+export function toSavedRoutePatch(p: Partial<SavedRoute>): Partial<SavedRoute> {
+  noExtraRouteFields(p);
+  const out: Partial<SavedRoute> = {};
+  if ("name" in p) out.name = routeText(p.name, "name", ROUTE_NAME_MAX, true);
+  if ("origin" in p) out.origin = routeOrigin(p.origin);
+  if ("destination" in p) out.destination = routePlace(p.destination, "destination");
+  if ("stops" in p) out.stops = routeStops(p.stops);
+  if ("pinned" in p) out.pinned = routePinned(p.pinned);
+  return out;
+}
+
+/** Pinned first, then newest. */
+export const sortSavedRoutes = <T extends SavedRoute & Meta>(rs: readonly T[]): T[] =>
+  [...rs].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b._created - a._created);
+
+/** Non-hook access to saved routes (the trip list's "Save as route", tests). */
+export const savedRoutes = {
+  list: async () => sortSavedRoutes((await cc.list<SavedRoute>("routes")).items.filter((i) => !i._deleted)),
+  save: async (r: SavedRoute) => collections.create<SavedRoute>("routes", toSavedRoute(r)),
+  update: async (id: string, patch: Partial<SavedRoute>) => collections.update<SavedRoute>("routes", id, toSavedRoutePatch(patch)),
+  remove: (id: string) => collections.remove("routes", id),
+  snapshot: () => sortSavedRoutes(collections.snapshot<SavedRoute>("routes")),
+};
+
+/** Live, synced saved routes (pinned first) with checked mutators. */
+export function useSavedRoutes() {
+  const c = useCollection<SavedRoute>("routes");
+  const { create: rawCreate, update: rawUpdate } = c;
+  const create = useCallback(async (r: SavedRoute) => rawCreate(toSavedRoute(r)), [rawCreate]);
+  const update = useCallback(async (id: string, patch: Partial<SavedRoute>) => rawUpdate(id, toSavedRoutePatch(patch)), [rawUpdate]);
+  const items = useMemo(() => sortSavedRoutes(c.items), [c.items]);
+  return { ...c, items, create, update };
+}
 
 /** Re-render on an interval (countdowns). */
 export function useNow(ms = 1000) {

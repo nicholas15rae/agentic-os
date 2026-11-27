@@ -8,6 +8,7 @@ vi.mock("@/features/bridge/gate", () => ({ gated: vi.fn() }));
 vi.mock("@/features/reminders/notify", () => ({ useToasts: { getState: () => ({ push: vi.fn() }) } }));
 
 const { EmptyStateView, DesktopOnlyView, GREETING } = await import("./EmptyState");
+const { ProjectsBoardView, NO_PROJECTS_FILTER } = await import("./ProjectsBoard");
 const { RenderPlanView } = await import("./RenderPlanCard");
 const { readinessPill } = await import("./StudioBar");
 const { previewSource } = await import("./PreviewPlayer");
@@ -16,17 +17,19 @@ const { buildDirectorContext } = await import("./context");
 const { addClip } = await import("./manifest");
 
 const noop = () => undefined;
+const board = (projects: ReturnType<typeof project>[]) =>
+  createElement(ProjectsBoardView, { projects, loaded: true, layout: "board", filter: NO_PROJECTS_FILTER, busySlug: null, onLayout: noop, onFilter: noop, onOpen: noop, onStatus: noop });
 
 describe("Director Suite empty state", () => {
   it("greets Nic with the four quick starts and recent projects", () => {
-    const html = renderToStaticMarkup(createElement(EmptyStateView, { projects: [project({ title: "Old teaser" })], loaded: true, onQuickStart: async () => undefined, onOpen: noop }));
+    const html = renderToStaticMarkup(createElement(EmptyStateView, { onQuickStart: async () => undefined, board: board([project({ title: "Old teaser" })]) }));
     expect(html).toContain(GREETING);
     expect(GREETING).toBe("Hey Nic, what do you want to create today?");
     for (const q of ["New Video Edit", "Plan a Video / Channel Series", "Photo &amp; Visual Staging", "Quick Stitch + Slate"]) expect(html).toContain(q);
     expect(html).toContain("Old teaser");
   });
   it("no projects yet", () => {
-    const html = renderToStaticMarkup(createElement(EmptyStateView, { projects: [], loaded: true, onQuickStart: async () => undefined, onOpen: noop }));
+    const html = renderToStaticMarkup(createElement(EmptyStateView, { onQuickStart: async () => undefined, board: board([]) }));
     expect(html).toContain("No projects yet.");
   });
   it("off the desktop: one card", () => {
@@ -56,7 +59,8 @@ describe("Render Plan card", () => {
 describe("readiness pill", () => {
   const ok = { enabled: true, healthy: true, tools: 4, error: null };
   it("green / amber names the off server / red shows the error", () => {
-    expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: true }, null)).toMatchObject({ tone: "green", label: "MCP ready · 8 tools" });
+    expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: true }, null)).toMatchObject({ tone: "green", label: "MCP ready · Shotcut + MediaForge" });
+    expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: true }, null).detail).toMatch(/^8 tools listed \(Shotcut 4, MediaForge 4\)/);
     expect(readinessPill({ shotcut: { ...ok, enabled: false, tools: 0 }, mediaForge: ok, ffmpegFound: true }, null)).toMatchObject({ tone: "amber", label: "shotcut off" });
     expect(readinessPill({ shotcut: ok, mediaForge: { ...ok, healthy: false, error: "spawn failed" }, ffmpegFound: true }, null)).toMatchObject({ tone: "red", detail: "spawn failed" });
     expect(readinessPill({ shotcut: ok, mediaForge: ok, ffmpegFound: false }, null)).toMatchObject({ tone: "amber" });
@@ -91,9 +95,10 @@ describe("director chat request", () => {
     expect(h[0]).toEqual({ role: "user", content: "m4" });
     expect(h[9]).toEqual({ role: "assistant", content: "m13" });
   });
-  it("the os_turn request targets the director tab with no delegation or cards", () => {
-    expect(directorRequest("hi", [], "ctx", "sid")).toEqual({ text: "hi", role: "director", explicit: true, routeKind: "Tab", history: [], context: "ctx", streamId: "sid", noDelegate: true, askCards: false, answering: [] });
-    expect(directorRequest("yes", [], "ctx", "sid", ["mem-1-1"]).answering).toEqual(["mem-1-1"]);
+  it("the director_turn request carries the line, history, context and stream id only (no Tony routing)", () => {
+    expect(directorRequest("hi", [{ role: "user", content: "a" }, { role: "assistant", content: "b" }], "ctx", "sid")).toEqual({ text: "hi", history: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }], context: "ctx", streamId: "sid" });
+    const r = directorRequest("hi", [], "ctx", "sid") as unknown as Record<string, unknown>;
+    for (const k of ["role", "explicit", "routeKind", "noDelegate", "askCards"]) expect(r[k]).toBeUndefined();
   });
   it("context carries the project, assets, the manifest and the action contract", () => {
     const c = buildDirectorContext(project({ source: { from: "brainstorm", refId: "n1", brief: "30s teaser" } }), ASSETS, manifest());

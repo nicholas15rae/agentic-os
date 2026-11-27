@@ -21,6 +21,7 @@ import {
   type RulesView,
   type SetMetrics,
 } from "@/features/trading/EngineRPanel.contract";
+import { DRIFT_TONE, TRACK_ROWS, isTrackRecord, rText, spyText, trackCell, trackRecordApi, type SpyBaseline, type TrackRecord, type TrackSet } from "@/features/trading/track-record";
 import { METRIC_ROWS, PARAM_ORDER, VERDICT, compareTone, diffLines, diffText, errorText, logLine, metricText, paramValue, viewErrorText, type Tone } from "@/features/trading/engine-r-format";
 
 const TONE_TEXT: Record<"teal" | "alert" | "amber", string> = { teal: "text-teal-soft", alert: "text-alert", amber: "text-amber-light" };
@@ -208,6 +209,8 @@ export function EngineRPanel(_props: EngineRPanelProps) {
             </section>
           </div>
 
+          <TrackRecordSection />
+
           <EvaluationSection ev={ev} activeVersion={data.active.version} error={evalPoll.error} />
 
           <ScanSection scan={data.lastScan} />
@@ -386,6 +389,60 @@ function SplitTable({ title, build, test }: { title: string; build: SetMetrics; 
       </table>
       {(build.note || test.note) && <p className="mt-1 fs-10.5 text-ink-3">{[build.note && `build: ${build.note}`, test.note && `test: ${test.note}`].filter(Boolean).join(" · ")}</p>}
     </div>
+  );
+}
+
+/** 14.6 headline: the paper record next to the backtest splits and SPY buy-and-hold. Display only. */
+function TrackRecordSection() {
+  const { data, error } = usePoll<TrackRecord>(trackRecordApi.get, 60_000);
+  if (!isTrackRecord(data)) {
+    return error ? <p className="mt-4 fs-11 text-ink-3">Track record unavailable ({error}).</p> : null;
+  }
+  const t = data;
+  const cols: { label: string; set: TrackSet | null; spy: SpyBaseline | null }[] = [
+    { label: "Paper", set: t.paper, spy: t.spy.paper },
+    { label: "Build 70%", set: t.build, spy: t.spy.build },
+    { label: "Test 30%", set: t.test, spy: t.spy.test },
+  ];
+  const spyWhy = [t.spy.paper, t.spy.build, t.spy.test].find((s) => s && s.retPct == null)?.why;
+  const partial = [t.spy.paper, t.spy.build, t.spy.test].some((s) => s?.partial);
+  return (
+    <section className="mt-4" aria-label="Track record over backtest">
+      <p className="label-caps mb-1.5 text-ink-3">Track record over backtest{t.version != null ? ` · v${t.version}` : ""}</p>
+      <p className={`fs-12 ${DRIFT_TONE[t.drift.status]}`} role="status">{t.drift.message}</p>
+      <div className="mt-1.5 overflow-x-auto r-10 border border-white/[0.06] p-2">
+        <table className="w-full fs-11.5" aria-label="Paper vs backtest vs SPY">
+          <thead>
+            <tr className="text-left text-ink-3">
+              <th className="py-0.5 pr-1 font-medium" scope="col">Metric</th>
+              {cols.map((c) => <th key={c.label} className="py-0.5 pr-1 text-right font-medium" scope="col">{c.label}</th>)}
+            </tr>
+          </thead>
+          <tbody className="font-mono tabular">
+            {TRACK_ROWS.map((r) => (
+              <tr key={r.key} className="border-t border-white/[0.04]">
+                <th scope="row" className="py-0.5 pr-1 text-left font-sans font-normal text-ink-2">{r.label}</th>
+                {cols.map((c) => <td key={c.label} className="py-0.5 pr-1 text-right text-ink-2">{trackCell(r.key, c.set)}</td>)}
+              </tr>
+            ))}
+            <tr className="border-t border-white/[0.04]">
+              <th scope="row" className="py-0.5 pr-1 text-left font-sans font-normal text-ink-2">SPY buy &amp; hold</th>
+              {cols.map((c) => <td key={c.label} className="py-0.5 pr-1 text-right text-ink-2" title={c.spy ? `${c.spy.from} to ${c.spy.to}${c.spy.why ? ` · ${c.spy.why}` : ""}` : undefined}>{spyText(c.spy)}</td>)}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-1 break-words fs-10.5 text-ink-3">
+        {[
+          t.goal.text,
+          t.drift.interval ? `test 95% interval ${rText(t.drift.interval.low)} to ${rText(t.drift.interval.high)} (n ${t.drift.interval.n})` : "",
+          t.paper.from ? `paper ${t.paper.from} to ${t.paper.to ?? "—"}` : "no closed Engine R paper trades yet",
+          spyWhy ? `SPY: ${spyWhy}` : "",
+          partial ? "* SPY bars end before the period does" : "",
+          ...t.notes,
+        ].filter(Boolean).join(" · ")}
+      </p>
+    </section>
   );
 }
 

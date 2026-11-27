@@ -34,6 +34,7 @@ import hmac
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -96,7 +97,26 @@ CREATE TABLE IF NOT EXISTS settings(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS srs(
+  phrase_id TEXT PRIMARY KEY,
+  ease REAL NOT NULL DEFAULT 2.5,
+  interval_days REAL NOT NULL DEFAULT 0,
+  due_at REAL NOT NULL,
+  reps INTEGER NOT NULL DEFAULT 0,
+  lapses INTEGER NOT NULL DEFAULT 0,
+  last_review REAL
+);
+CREATE INDEX IF NOT EXISTS srs_due ON srs(due_at);
 """
+
+# Phrases joined with their spaced-repetition row (absent until the first review). The webview's
+# srs.ts computes schedules; this side (like Rust) only validates and stores them.
+ENTRY_SELECT = (
+    "SELECT p.*, s.ease AS srs_ease, s.interval_days AS srs_interval_days, s.due_at AS srs_due_at, s.reps AS srs_reps, "
+    "s.lapses AS srs_lapses, s.last_review AS srs_last_review FROM phrases p LEFT JOIN srs s ON s.phrase_id = p.id"
+)
+SRS_MIN_EASE, SRS_MAX_EASE, SRS_MAX_INTERVAL_DAYS = 1.3, 3.0, 3650.0
+_SRS_COLS = ("ease", "interval_days", "due_at", "reps", "lapses", "last_review")
 
 router = APIRouter(prefix="/api/cc/lang", tags=["language-hub"])
 _lock = threading.Lock()
@@ -125,7 +145,32 @@ def db() -> Iterator[sqlite3.Connection]:
 def _entry(r: sqlite3.Row) -> dict:
     d = dict(r)
     d["favorite"] = bool(d["favorite"])
+    srs = {k: d.pop(f"srs_{k}", None) for k in _SRS_COLS}
+    d["srs"] = srs if srs["due_at"] is not None else None
     return d
+
+
+def validate_srs(v: Any) -> dict:
+    """Clamp a schedule from the webview (same bounds as Rust `validate_srs` and srs.ts)."""
+    if not isinstance(v, dict):
+        raise HTTPException(400, "bad srs")
+    try:
+        ease, days, due = float(v.get("ease", 2.5)), float(v.get("interval_days", 0)), float(v["due_at"])
+        reps, lapses = int(v.get("reps", 0)), int(v.get("lapses", 0))
+        last = v.get("last_review")
+        last = None if last is None else float(last)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise HTTPException(400, "bad srs")
+    if not all(math.isfinite(x) for x in (ease, days, due) + ((last,) if last is not None else ())) or not 0 <= due <= 7.3e12:
+        raise HTTPException(400, "bad srs")
+    return {
+        "ease": round(min(SRS_MAX_EASE, max(SRS_MIN_EASE, ease)) * 100) / 100,
+        "interval_days": min(SRS_MAX_INTERVAL_DAYS, max(0.0, days)),
+        "due_at": due,
+        "reps": max(0, min(1_000_000, reps)),
+        "lapses": max(0, min(1_000_000, lapses)),
+        "last_review": last if last is not None and last >= 0 else None,
+    }
 
 
 def _clip(v: Any, n: int) -> Optional[str]:
@@ -140,7 +185,7 @@ def _clip(v: Any, n: int) -> Optional[str]:
 @router.get("/entries")
 def list_entries():
     with db() as c:
-        return {"entries": [_entry(r) for r in c.execute("SELECT * FROM phrases ORDER BY timestamp DESC LIMIT 10000")]}
+        return {"entries": [_entry(r) for r in c.execute(f"{ENTRY_SELECT} ORDER BY p.timestamp DESC LIMIT 10000")]}
 
 
 @router.post("/entries")
@@ -172,13 +217,13 @@ def save_entry(e: dict = Body(...)):
     }
     with _lock, db() as c:
         c.execute(f"INSERT INTO phrases({','.join(row)}) VALUES({','.join('?' * len(row))})", list(row.values()))
-    return {**row, "favorite": bool(row["favorite"])}
+    return {**row, "favorite": bool(row["favorite"]), "srs": None}
 
 
 @router.patch("/entries/{eid}")
 def update_entry(eid: str, patch: dict = Body(...)):
     with _lock, db() as c:
-        r = c.execute("SELECT * FROM phrases WHERE id=?", (eid,)).fetchone()
+        r = c.execute(f"{ENTRY_SELECT} WHERE p.id=?", (eid,)).fetchone()
         if not r:
             raise HTTPException(404, "Not found")
         e = _entry(r)
@@ -197,10 +242,18 @@ def update_entry(eid: str, patch: dict = Body(...)):
             e["translated_text"] = t
         if "phonetic_guide" in patch:
             e["phonetic_guide"] = _clip(patch["phonetic_guide"], MAX_TEXT)
+        if patch.get("srs") is not None:
+            e["srs"] = validate_srs(patch["srs"])
         c.execute(
             "UPDATE phrases SET context_note=?, favorite=?, mastery_status=?, translated_text=?, phonetic_guide=? WHERE id=?",
             (e["context_note"], int(e["favorite"]), e["mastery_status"], e["translated_text"], e["phonetic_guide"], eid),
         )
+        if patch.get("srs") is not None:
+            c.execute(
+                "INSERT INTO srs(phrase_id,ease,interval_days,due_at,reps,lapses,last_review) VALUES(:id,:ease,:interval_days,:due_at,:reps,:lapses,:last_review) "
+                "ON CONFLICT(phrase_id) DO UPDATE SET ease=:ease,interval_days=:interval_days,due_at=:due_at,reps=:reps,lapses=:lapses,last_review=:last_review",
+                {"id": eid, **e["srs"]},
+            )
     return e
 
 
@@ -211,6 +264,7 @@ def delete_entries(body: dict = Body(...)):
         raise HTTPException(400, "bad ids")
     with _lock, db() as c:
         n = sum(c.execute("DELETE FROM phrases WHERE id=?", (str(i),)).rowcount for i in ids)
+        c.executemany("DELETE FROM srs WHERE phrase_id=?", [(str(i),) for i in ids])
     return {"deleted": n}
 
 
@@ -442,8 +496,9 @@ async def stt(request: Request, lang: str = Query("auto")):
 # voice.rs DEFAULT_STT_PROMPT (command center/src-tauri/src/commands/dispatch.rs): the vocabulary the
 # desktop biases Whisper with. A provider's own `sttPrompt` wins ("" = send none). "Nic" is in it so
 # Whisper stops writing "Nick" (4 of turbo's 9 word errors in the benchmark).
-DEFAULT_STT_PROMPT = ("Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, "
-                      "Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.")
+DEFAULT_STT_PROMPT = ("Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk "
+                      "and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint. "
+                      "Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab.")
 WHISPERCPP_FALLBACK = {"id": "whisper", "baseUrl": "http://127.0.0.1:8178/v1", "model": "base.en", "engine": "whispercpp"}
 STT_JUNK = ("[blank_audio]", "(silence)", "[ silence ]", "[silence]")
 FW_PYTHON = Path(os.environ.get("STT_FW_PYTHON", r"C:\ai-stt\.venv\Scripts\python.exe"))

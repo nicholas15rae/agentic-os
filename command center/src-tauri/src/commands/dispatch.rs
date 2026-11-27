@@ -263,6 +263,10 @@ pub struct Config {
 /// queued per-agent report voices (Comms inbox), never their live chatter.
 pub(crate) const MIGRATE_AUTOSPEAK_TONY_ONLY: &str = "autospeak-tony-only";
 
+/// Live test 11-27: the Gmail tab names joined the Whisper hint list. A provider whose prompt is
+/// the old default word for word gets the new one; an edited or cleared ("" = none) prompt is kept.
+pub(crate) const MIGRATE_STT_PROMPT_GMAIL_TABS: &str = "stt-prompt-gmail-tabs";
+
 /// Apply the one-time providers.json migrations. Returns true when anything changed.
 pub(crate) fn apply_provider_migrations(cfg: &mut Config) -> bool {
     let mut changed = false;
@@ -275,6 +279,15 @@ pub(crate) fn apply_provider_migrations(cfg: &mut Config) -> bool {
         cfg.migrations.push(MIGRATE_AUTOSPEAK_TONY_ONLY.into());
         changed = true;
     }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_STT_PROMPT_GMAIL_TABS) {
+        for p in cfg.providers.iter_mut().filter(|p| p.kind == Kind::Stt) {
+            if p.stt_prompt.as_deref().map(str::trim) == Some(PREVIOUS_STT_PROMPT) {
+                p.stt_prompt = Some(DEFAULT_STT_PROMPT.to_string());
+            }
+        }
+        cfg.migrations.push(MIGRATE_STT_PROMPT_GMAIL_TABS.into());
+        changed = true;
+    }
     changed
 }
 
@@ -282,7 +295,7 @@ pub(crate) fn apply_provider_migrations(cfg: &mut Config) -> bool {
 /// file) can key on. Kept local here rather than importing `roles.ts`'s
 /// list from the TS side: the roster lives in providers.json, not OsConfig,
 /// so it has no Rust-side shared list of its own yet.
-pub(crate) const ROLE_IDS: [&str; 8] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops"];
+pub(crate) const ROLE_IDS: [&str; 7] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian"];
 
 /// `"tony"` is accepted as an alias of `"general"` (ground rule) wherever a
 /// role id arrives from the outside (Settings UI, `tts_synthesize`'s `agent`).
@@ -303,7 +316,7 @@ pub(crate) fn valid_role(r: &str) -> bool {
 /// task worker's non-routing speakers. `ROLE_IDS` stays the routing list.
 /// `trading` speaks only its own reports (Comms inbox / urgent alerts): it has a roster voice
 /// but is never a routing role (arbiter.rs keeps it boxed to the Financer).
-pub(crate) const NARRATOR_IDS: [&str; 12] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "verifier", "staging", "system", "trading"];
+pub(crate) const NARRATOR_IDS: [&str; 11] = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "verifier", "staging", "system", "trading"];
 
 /// A voice-roster key (`agentVoices`, `agent_voice_update`): any `NARRATOR_IDS` entry.
 pub(crate) fn valid_narrator(r: &str) -> bool {
@@ -401,7 +414,7 @@ impl Default for Config {
             agent_voices: BTreeMap::new(),
             agent_voices_all_tony: false,
             // A fresh install starts with every migration's outcome already in place.
-            migrations: vec![MIGRATE_AUTOSPEAK_TONY_ONLY.into()],
+            migrations: vec![MIGRATE_AUTOSPEAK_TONY_ONLY.into(), MIGRATE_STT_PROMPT_GMAIL_TABS.into()],
         }
     }
 }
@@ -773,9 +786,14 @@ pub struct ProviderPatch {
 /// Whisper treats the prompt as preceding transcript, so it biases spelling best this way.
 /// "Take it easy." (P5: the hold / stand-down family) stays its own sentence, never right after
 /// "Tony"/"Hey", so a real 4-word "Tony, take it easy" can't match a prompt run in `echoes_prompt`.
-/// "Nic" is in it so Whisper stops writing "Nick"; it must equal language_hub_api.DEFAULT_STT_PROMPT
+/// "Nic" is in it so Whisper stops writing "Nick", and the Gmail tab names so it stops hearing
+/// "promotions" as "permissions" (live test 11-27); it must equal language_hub_api.DEFAULT_STT_PROMPT
 /// and stt/bench/bench.py PROMPT (tests/test_language_hub.py pins all three).
-pub const DEFAULT_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
+pub const DEFAULT_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint. Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab.";
+
+/// The default before the Gmail tab names (11-26). An STT provider still holding exactly this text
+/// (Settings saved the default verbatim, never edited) is moved to [`DEFAULT_STT_PROMPT`] once.
+pub(crate) const PREVIOUS_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
 
 /// Switch model / voice / URL etc. for one provider (Settings dropdowns).
 #[tauri::command]

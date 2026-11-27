@@ -80,8 +80,8 @@ class ApproverTests(unittest.TestCase):
         self.assertEqual(new, "- NEVER install new skills/MCPs/packages without Nic's approval (proposed through the Librarian).")
         new, act = guards.approver_fix("- Never add an MCP server without the Librarian's sign-off")
         self.assertEqual(new, "- Never add an MCP server without Nic's sign-off (proposed through the Librarian)")
-        new, act = guards.approver_fix("- Config changes are approved by the Ops agent")
-        self.assertIn("approved by Nic (proposed through the Ops)", new)
+        new, act = guards.approver_fix("- Config changes are approved by the Coder agent")
+        self.assertIn("approved by Nic (proposed through the Coder)", new)
         # A bare "without approval" on an install rule names Nic.
         new, act = guards.approver_fix("Never install a new skill, MCP or package without approval. Propose it through the Librarian.")
         self.assertEqual(new, "Never install a new skill, MCP or package without Nic's approval. Propose it through the Librarian.")

@@ -3270,6 +3270,193 @@ fn secs(x: f64) -> String {
     s.strip_suffix(".0").map(String::from).unwrap_or(s)
 }
 
+/// A length hint never runs a clip across a pause longer than this to reach the next line: the
+/// dead air would play in the cut (run 14: 54.31 → 62.83 s is 8.5 s of nothing). A pause up to
+/// this long is a breath between lines and is fine.
+const HINT_MAX_PAUSE_SEC: f64 = 1.5;
+/// At most this many clip edges are changed (and listed) by one hint.
+const HINT_MAX_CHANGES: usize = 3;
+
+/// One edge a length hint moves: (clip index, in point?, the plan's value, the new value).
+type HintChange = (usize, bool, f64, f64);
+
+/// The next whole line a clip edge can take in (`grow`) or give back (`!grow`), or None.
+/// Grow: the out point runs on to the end of the next line, or (`in_edge`) the in point back to the
+/// start of the line before. Never past the asset's bounds, across a pause > HINT_MAX_PAUSE_SEC,
+/// or into audio another clip of the same asset plays (a clip of that take starting at or before
+/// the new out point, or ending at or after the new in point, on that side, blocks it). Shrink
+/// (out points only): back to the end of an earlier line, keeping the clip ≥ MIN_CLIP_SEC.
+fn hint_step(clips: &[TimelineClip], k: usize, in_edge: bool, grow: bool, sp: &Speech, dur: f64) -> Option<f64> {
+    const EPS: f64 = 0.0005;
+    let c = &clips[k];
+    let same = |f: &dyn Fn(&TimelineClip) -> bool| clips.iter().enumerate().any(|(j, o)| j != k && o.asset_id == c.asset_id && f(o));
+    match (grow, in_edge) {
+        (true, false) => {
+            let &(s, e) = sp.segments.iter().filter(|(_, e)| *e > c.out_sec + EPS).min_by(|a, b| a.1.total_cmp(&b.1))?;
+            let ok = s - c.out_sec <= HINT_MAX_PAUSE_SEC + 1e-9 && e <= dur + 0.05 && !same(&|o| o.in_sec <= e + EPS && o.out_sec > c.out_sec + EPS);
+            // The plan check clamps an out point to the asset's end (`snap_out(..).min(dur)`), so
+            // the hint does too: its total is then the one the re-check measures.
+            ok.then_some(e.min(dur))
+        }
+        (true, true) => {
+            let &(s, e) = sp.segments.iter().filter(|(s, _)| *s < c.in_sec - EPS).max_by(|a, b| a.0.total_cmp(&b.0))?;
+            let ok = c.in_sec - e <= HINT_MAX_PAUSE_SEC + 1e-9 && s >= 0.0 && !same(&|o| o.out_sec >= s - EPS && o.in_sec < c.in_sec - EPS);
+            ok.then_some(s)
+        }
+        (false, _) => sp.segments.iter().map(|(_, e)| *e).filter(|e| *e < c.out_sec - EPS && *e - c.in_sec >= MIN_CLIP_SEC - EPS).max_by(f64::total_cmp),
+    }
+}
+
+/// A concrete fix for a plan the length rules refuse, as text to append to the refusal (" — e.g.
+/// clip 3 out 54.31 → 57.20 s (end of the line): that makes 14.6 s"). Pure; the plan is not
+/// changed (the Director's actions stay suggestions and Nic approves renders).
+/// Too short: video clips with a transcript take in whole lines, out points first (last clip
+/// first, then earlier ones), then in points (same order), each one line at a time while the
+/// total (`expected_duration`, so crossfades count) gets closer to `target`. Too long: out points
+/// go back to earlier line ends, longest clip first; if that can't reach `lo`–`hi`, dropping the
+/// shortest clip is suggested (or another clip whose drop lands in the band). If the lines can't
+/// reach the band, it says another moment is needed, and why. `cap` = the smallest output
+/// max_sec: the band's top never passes it (a fix over the platform cap is refused next).
+/// None when no clip of the plan has a transcript (the refusal stays as it was), or when the cap
+/// sits below the band (the cap's own refusal says what to remove).
+pub(crate) fn length_hint(m: &TimelineManifest, assets: &[MediaAsset], speech: &dyn Fn(&MediaAsset) -> Option<Speech>, target: f64, lo: f64, hi: f64, cap: Option<f64>) -> Option<String> {
+    let hi = cap.map_or(hi, |c| hi.min(c));
+    if hi < lo {
+        return None;
+    }
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let total_of = |cs: &[TimelineClip]| r3(expected_duration(&TimelineManifest { clips: cs.to_vec(), ..m.clone() }));
+    let in_band = |x: f64| x >= lo - 0.0005 && x <= hi + 0.0005;
+    // Each video clip with a valid range and a transcript: (index, speech, asset duration).
+    let mut usable: Vec<(usize, Speech, f64)> = vec![];
+    for (k, c) in m.clips.iter().enumerate() {
+        let Some(a) = assets.iter().find(|a| a.id == c.asset_id && a.kind == "video") else { continue };
+        let dur = a.duration_sec.unwrap_or(0.0);
+        if !(c.in_sec.is_finite() && c.out_sec.is_finite() && c.in_sec >= 0.0 && c.in_sec < c.out_sec && c.out_sec <= dur + 0.05) {
+            continue;
+        }
+        if let Some(sp) = speech(a).filter(|sp| !sp.segments.is_empty()) {
+            usable.push((k, sp, dur));
+        }
+    }
+    if usable.is_empty() {
+        return None;
+    }
+    let start = total_of(&m.clips);
+    let grow = start < target;
+    let mut clips = m.clips.clone();
+    let mut cur = start;
+    let mut changes: Vec<HintChange> = vec![];
+    let order: Vec<(usize, bool)> = if grow {
+        let mut o: Vec<(usize, bool)> = usable.iter().rev().map(|(k, ..)| (*k, false)).collect();
+        o.extend(usable.iter().rev().map(|(k, ..)| (*k, true)));
+        o
+    } else {
+        let mut o: Vec<(usize, bool)> = usable.iter().map(|(k, ..)| (*k, false)).collect();
+        o.sort_by(|a, b| (clips[b.0].out_sec - clips[b.0].in_sec).total_cmp(&(clips[a.0].out_sec - clips[a.0].in_sec)));
+        o
+    };
+    // Why the grow loop stopped short, for the fallback's wording: the change cap with an edge
+    // left that could still take in a line, or a next line that would jump past the band
+    // (the smallest such total).
+    let mut capped = false;
+    let mut overshoot: Option<f64> = None;
+    for (i, &(k, in_edge)) in order.iter().enumerate() {
+        let known = changes.iter().any(|(j, e, ..)| *j == k && *e == in_edge);
+        if !known && changes.len() >= HINT_MAX_CHANGES {
+            capped = order[i..].iter().any(|&(j, e)| {
+                let (_, sp, dur) = usable.iter().find(|(u, ..)| *u == j).unwrap();
+                hint_step(&clips, j, e, grow, sp, *dur).is_some()
+            });
+            break;
+        }
+        let (_, sp, dur) = usable.iter().find(|(j, ..)| *j == k).unwrap();
+        while let Some(v) = hint_step(&clips, k, in_edge, grow, sp, *dur) {
+            let mut next = clips.clone();
+            let old = if in_edge { std::mem::replace(&mut next[k].in_sec, v) } else { std::mem::replace(&mut next[k].out_sec, v) };
+            let nt = total_of(&next);
+            // Closer to the target, and never jumping past the band to its far side.
+            let short_side = if grow { nt < lo } else { nt > hi };
+            if (nt - target).abs() >= (cur - target).abs() - 1e-9 || !(in_band(nt) || short_side) {
+                if grow && nt > hi {
+                    overshoot = Some(overshoot.map_or(nt, |x: f64| x.min(nt)));
+                }
+                break;
+            }
+            match changes.iter_mut().find(|(j, e, ..)| *j == k && *e == in_edge) {
+                Some(ch) => ch.3 = v,
+                None => changes.push((k, in_edge, old, v)),
+            }
+            (clips, cur) = (next, nt);
+        }
+    }
+    let list = |chs: &[HintChange]| {
+        chs.iter()
+            .map(|(k, in_edge, old, new)| {
+                let why = match (in_edge, grow) {
+                    (true, _) => "start of the line",
+                    (false, true) => "end of the line",
+                    (false, false) => "end of an earlier line",
+                };
+                format!("clip {} {} {old:.2} → {new:.2} s ({why})", k + 1, if *in_edge { "in" } else { "out" })
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if in_band(cur) && !changes.is_empty() {
+        return Some(format!(" — e.g. {}: that makes {} s", list(&changes), secs(cur)));
+    }
+    if grow {
+        let more = secs((lo - cur).max(0.1));
+        return Some(if capped {
+            // More edges could still take in lines: never claim the lines run out.
+            format!(" — {} changes get it to {} s ({}): add another moment of at least {more} s, or run more clip edges on to whole lines", changes.len(), secs(cur), list(&changes))
+        } else if let Some(x) = overshoot {
+            let reached = if changes.is_empty() { String::new() } else { format!("the clips' own lines reach {} s ({}); ", secs(cur), list(&changes)) };
+            format!(" — {reached}the next whole line would make it {} s, past {} s: add another moment of at least {more} s", secs(x), secs(hi))
+        } else if changes.is_empty() {
+            format!(" — no clip can run on into a next line (each is taken by another clip, past a pause over {} s, or past the take's end): add another moment of at least {more} s", secs(HINT_MAX_PAUSE_SEC))
+        } else {
+            format!(" — the clips' own lines only reach {} s ({}): add another moment of at least {more} s", secs(cur), list(&changes))
+        });
+    }
+    // Too long and the trims can't reach the band: the trims, then drop a clip.
+    if clips.len() < 2 {
+        return (!changes.is_empty()).then(|| format!(" — trimming to whole lines only gets it to {} s ({}): cut a different, shorter moment", secs(cur), list(&changes)));
+    }
+    let len = |c: &TimelineClip| c.out_sec - c.in_sec;
+    // The shortest as the plan sent it (the length Nic and the Director know it by).
+    let shortest = (0..m.clips.len()).min_by(|a, b| len(&m.clips[*a]).total_cmp(&len(&m.clips[*b]))).unwrap();
+    let drop_total = |k: usize| {
+        let mut rest = clips.clone();
+        rest.remove(k);
+        total_of(&rest)
+    };
+    // The shortest if its drop lands in the band; else the clip whose drop lands closest to
+    // the target inside the band.
+    let pick = if in_band(drop_total(shortest)) {
+        Some(shortest)
+    } else {
+        (0..clips.len()).filter(|k| in_band(drop_total(*k))).min_by(|a, b| (drop_total(*a) - target).abs().total_cmp(&(drop_total(*b) - target).abs()))
+    };
+    let named = |k: usize| format!("clip {} ({} s{})", k + 1, secs(len(&m.clips[k])), if k == shortest { ", the shortest" } else { "" });
+    if let Some(k) = pick {
+        changes.retain(|(j, ..)| *j != k);
+        let trims = if changes.is_empty() { String::new() } else { format!("{} and ", list(&changes)) };
+        return Some(format!(" — e.g. {trims}drop {}: that makes {} s", named(k), secs(drop_total(k))));
+    }
+    let nt = drop_total(shortest);
+    if nt > hi {
+        // Even the smallest drop leaves it too long.
+        changes.retain(|(j, ..)| *j != shortest);
+        let trims = if changes.is_empty() { String::new() } else { format!("{} and ", list(&changes)) };
+        return Some(format!(" — e.g. {trims}drop {}: that makes {} s; still more than the brief, so a shorter moment is needed", named(shortest), secs(nt)));
+    }
+    // Dropping a clip jumps under the band: say so, and don't suggest it.
+    let trims = if changes.is_empty() { format!("no out point can move back to an earlier line's end and land in {}–{} s", secs(lo), secs(hi)) } else { format!("trimming to whole lines only gets it to {} s ({})", secs(cur), list(&changes)) };
+    Some(format!(" — {trims}, and dropping {} would make it {} s, under {} s: cut a different, shorter moment instead", named(shortest), secs(nt), secs(lo)))
+}
+
 /// The plan check (pure): snap every video clip to speech, then the length rules. `speech` gives
 /// an asset's transcript spans (None = no transcript: the clip is left as it is). `base` gives the
 /// outputs (their maxSec); `target` is the brief's lengthSec.
@@ -3342,12 +3529,21 @@ pub(crate) fn plan_check_core_with(clips: Vec<TimelineClip>, assets: &[MediaAsse
             // not without limit: live E2E run 10 had a "tighten" revision halve a 15 s Reel to
             // 7.4 s. Within ±30% (at least 3 s) it is a warning; beyond, a refusal.
             let rev_tol = (t * REVISION_LENGTH_TOLERANCE).max(3.0).max(tol);
+            // Live E2E runs 11 and 14: the Director model can't do the arithmetic ("add about
+            // 1.5 s" → six 8–9 s revisions in a row), so a refusal also names a concrete fix.
+            let sp_of = |a: &MediaAsset| match cache.get(&a.id) {
+                Some(s) => s.clone(),
+                None => speech(a),
+            };
+            let cap = m.outputs.iter().filter_map(|o| o.max_sec).min_by(f64::total_cmp);
+            let hint = |lo: f64, hi: f64| length_hint(&m, assets, &sp_of, t, lo, hi, cap).unwrap_or_default();
             if revision && (total - t).abs() <= rev_tol {
                 warnings.push(format!("the revised cut is {} s but the brief asks for {} s: kept, since it answers Nic's notes; if the notes ask for a new length, suggest that Nic change the brief's length to match", secs(total), secs(t)));
             } else if revision {
-                refusals.push(format!("the revised cut is {} s but the brief asks for {} s: a revision may move the length to anything from {} to {} s; {verb} about {} s, or suggest that Nic change the brief's length first", secs(total), secs(t), secs((t - rev_tol).max(0.0)), secs(t + rev_tol), secs(if total < t { t - rev_tol - total } else { total - t - rev_tol })));
+                let (lo, hi) = ((t - rev_tol).max(0.0), t + rev_tol);
+                refusals.push(format!("the revised cut is {} s but the brief asks for {} s: a revision may move the length to anything from {} to {} s; {verb} about {} s, or suggest that Nic change the brief's length first{}", secs(total), secs(t), secs(lo), secs(hi), secs(if total < t { t - rev_tol - total } else { total - t - rev_tol }), hint(lo, hi)));
             } else {
-                refusals.push(format!("the cut is {} s but the brief asks for {} s: {verb} about {} s (anything from {} to {} s is fine)", secs(total), secs(t), secs(by), secs(t - tol), secs(t + tol)));
+                refusals.push(format!("the cut is {} s but the brief asks for {} s: {verb} about {} s (anything from {} to {} s is fine){}", secs(total), secs(t), secs(by), secs(t - tol), secs(t + tol), hint(t - tol, t + tol)));
             }
         }
     }
@@ -5888,7 +6084,8 @@ mod framing_tests {
         assert_eq!(r.clips.iter().map(|c| (c.id.as_str(), c.in_sec, c.out_sec)).collect::<Vec<_>>(), [("", 6.0, 8.0), ("c2", 10.0, 13.0), ("c3", 0.0, 2.0)]);
         assert_eq!(r.warnings, ["clip 1: in 6.3 → 6 s (start of the word)", "clip 1: out 7.5 → 8 s (end of the word or sentence)"]);
         assert_eq!((r.total_sec, r.target_sec), (7.0, Some(15.0)));
-        assert_eq!(r.refusals, ["the cut is 7 s but the brief asks for 15 s: add about 8 s (anything from 13.5 to 16.5 s is fine)"]);
+        // v's in point can take in both lines (a 1.5 s pause is a breath), still short of 13.5 s.
+        assert_eq!(r.refusals, ["the cut is 7 s but the brief asks for 15 s: add about 8 s (anything from 13.5 to 16.5 s is fine) — the clips' own lines only reach 11 s (clip 1 in 6.00 → 2.00 s (start of the line)): add another moment of at least 2.5 s"]);
         // An in point just after a sentence's start goes back to it (and the warning says so).
         let r = plan_check_core(vec![clip("c1", "v", 2.5, 7.5)], &assets, &speech, &base, None);
         assert_eq!((r.clips[0].in_sec, r.clips[0].out_sec), (2.0, 8.0));
@@ -5989,6 +6186,125 @@ mod framing_tests {
         assert_eq!(r.refusals, ["the cut is 65 s, over the tiktok limit of 60 s: remove at least 5 s"]);
         let r = plan_check_core(vec![clip("c1", "w", 0.0, 60.0)], &assets, &speech, &base, Some(30.0));
         assert!(r.refusals[0].starts_with("the cut is 60 s but the brief asks for 30 s"), "{:?}", r.refusals);
+    }
+
+    /// The demo reel's transcript lines (run 14, working/captions/a-mwyslmhg1.json, 0–124 s).
+    fn reel_speech() -> Speech {
+        let segments = vec![
+            (6.03, 8.35), (8.65, 10.07), (11.03, 12.85), (18.08, 19.26), (23.61, 24.51), (25.11, 26.27), (27.15, 28.31), (29.09, 31.79), (32.17, 33.91), (34.23, 36.27), (36.37, 36.95),
+            (37.37, 38.97), (39.47, 40.57), (40.57, 45.07), (45.07, 50.21), (51.55, 54.31), (62.83, 67.67), (67.67, 70.21), (70.93, 73.53), (73.53, 79.97), (80.67, 85.33),
+        ];
+        Speech { words: vec![], segments }
+    }
+
+    #[test]
+    fn length_refusals_name_a_concrete_fix_in_whole_lines() {
+        let a = "a-mwyslmhg1";
+        let assets = vec![asset(a, "video", Some(123.737), 1920, 1080), asset("w", "video", Some(120.0), 1920, 1080)];
+        let speech = |x: &MediaAsset| (x.id == "a-mwyslmhg1").then(reel_speech);
+        let base = default_manifest("p");
+        // Run 14's revision: 1.1 + 5.14 + 2.76 = 9 s at a 15 s brief. Every out point is blocked
+        // (clip 3 → 62.83 s is an 8.5 s pause; clips 1 and 2 run into the next clip of the take),
+        // so clip 1's in point takes in the lines before it.
+        let rev = vec![clip("c1", a, 39.47, 40.57), clip("c2", a, 45.07, 50.21), clip("c3", a, 51.55, 54.31)];
+        let r = plan_check_core_with(rev.clone(), &assets, &speech, &base, Some(15.0), true);
+        assert_eq!(r.total_sec, 9.0);
+        assert_eq!(r.refusals, ["the revised cut is 9 s but the brief asks for 15 s: a revision may move the length to anything from 10.5 to 19.5 s; add about 1.5 s, or suggest that Nic change the brief's length first — e.g. clip 1 in 39.47 → 34.23 s (start of the line): that makes 14.2 s"]);
+        let fixed = vec![clip("c1", a, 34.23, 40.57), rev[1].clone(), rev[2].clone()];
+        let t = plan_check_core_with(fixed.clone(), &assets, &speech, &base, Some(15.0), true).total_sec;
+        assert!((10.5..=19.5).contains(&t), "{t}");
+        // The same clips as a plan: the hint lands in 13.5–16.5 s.
+        let r = plan_check_core(rev.clone(), &assets, &speech, &base, Some(15.0));
+        assert_eq!(r.refusals, ["the cut is 9 s but the brief asks for 15 s: add about 6 s (anything from 13.5 to 16.5 s is fine) — e.g. clip 1 in 39.47 → 34.23 s (start of the line): that makes 14.2 s"]);
+        let t = plan_check_core(fixed, &assets, &speech, &base, Some(15.0)).total_sec;
+        assert!((13.5..=16.5).contains(&t), "{t}");
+        // Crossfades count: a 0.5 s crossfade into clip 2 takes 0.5 s off, so one more line fits.
+        let xf = vec![rev[0].clone(), TimelineClip { transition_in: Transition { kind: "crossfade".into(), ms: 500 }, ..rev[1].clone() }, rev[2].clone()];
+        let r = plan_check_core_with(xf.clone(), &assets, &speech, &base, Some(15.0), true);
+        assert_eq!(r.total_sec, 8.505); // capped at 45% of clip 1's 1.1 s
+
+        assert!(r.refusals[0].ends_with(" — e.g. clip 1 in 39.47 → 32.17 s (start of the line): that makes 15.8 s"), "{:?}", r.refusals);
+        let mut xf_fixed = xf.clone();
+        xf_fixed[0].in_sec = 32.17;
+        assert!((expected_duration(&TimelineManifest { clips: xf_fixed, ..base.clone() }) - 15.8).abs() < 1e-6);
+        // Same take: clip 1's out point can't run into clip 2's lines, nor clip 2's in point back
+        // into clip 1's; clip 1 takes in earlier lines instead.
+        let r = plan_check_core(vec![clip("c1", a, 45.07, 50.21), clip("c2", a, 51.55, 54.31)], &assets, &speech, &base, Some(15.0));
+        assert!(r.refusals[0].ends_with(" — e.g. clip 1 in 45.07 → 37.37 s (start of the line): that makes 15.6 s"), "{:?}", r.refusals);
+        // The asset's end: 50.21 s is past a 50 s take, so the out point stays and the in point moves.
+        let short_take = vec![asset(a, "video", Some(50.0), 1920, 1080)];
+        let r = plan_check_core(vec![clip("c1", a, 40.57, 45.07)], &short_take, &speech, &base, Some(9.0));
+        assert!(r.refusals[0].ends_with(" — e.g. clip 1 in 40.57 → 36.37 s (start of the line): that makes 8.7 s"), "{:?}", r.refusals);
+        let r = plan_check_core(vec![clip("c1", a, 40.57, 45.07)], &assets, &speech, &base, Some(9.0));
+        assert!(r.refusals[0].ends_with(" — e.g. clip 1 out 45.07 → 50.21 s (end of the line): that makes 9.6 s"), "{:?}", r.refusals);
+        // Too long: out points back to earlier line ends, longest clip first.
+        let r = plan_check_core(vec![clip("c1", a, 29.09, 36.95), clip("c2", a, 45.07, 54.31)], &assets, &speech, &base, Some(10.0));
+        assert_eq!(r.refusals, ["the cut is 17.1 s but the brief asks for 10 s: remove about 7.1 s (anything from 8.5 to 11.5 s is fine) — e.g. clip 2 out 54.31 → 50.21 s (end of an earlier line), clip 1 out 36.95 → 33.91 s (end of an earlier line): that makes 10 s"]);
+        // …and when trims to whole lines (each clip ≥ 1 s) can't get there, drop the shortest clip.
+        let r = plan_check_core(vec![clip("c1", a, 51.55, 54.31), clip("c2", a, 6.03, 12.85)], &assets, &speech, &base, Some(3.0));
+        assert!(r.refusals[0].ends_with(" — e.g. clip 2 out 12.85 → 8.35 s (end of an earlier line) and drop clip 1 (2.8 s, the shortest): that makes 2.3 s"), "{:?}", r.refusals);
+        // No transcript: the refusal stays as it was.
+        let r = plan_check_core_with(vec![clip("c1", "w", 39.47, 40.57), clip("c2", "w", 45.07, 50.21), clip("c3", "w", 51.55, 54.31)], &assets, &speech, &base, Some(15.0), true);
+        assert_eq!(r.refusals, ["the revised cut is 9 s but the brief asks for 15 s: a revision may move the length to anything from 10.5 to 19.5 s; add about 1.5 s, or suggest that Nic change the brief's length first"]);
+        // Nothing can grow: say another moment is needed (no clip change listed).
+        let one_line = vec![asset("s", "video", Some(3.0), 1920, 1080)];
+        let only = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(0.0, 3.0)] });
+        let r = plan_check_core(vec![clip("c1", "s", 0.0, 3.0)], &one_line, &only, &base, Some(15.0));
+        assert_eq!(r.refusals, ["the cut is 3 s but the brief asks for 15 s: add about 12 s (anything from 13.5 to 16.5 s is fine) — no clip can run on into a next line (each is taken by another clip, past a pause over 1.5 s, or past the take's end): add another moment of at least 10.5 s"]);
+        // The plan itself is untouched: the hint is text only.
+        assert_eq!(plan_check_core(rev.clone(), &assets, &speech, &base, Some(15.0)).clips, rev);
+    }
+
+    #[test]
+    fn length_hints_never_suggest_a_fix_the_next_check_refuses() {
+        let a = "a-mwyslmhg1";
+        let assets = vec![asset(a, "video", Some(123.737), 1920, 1080)];
+        let speech = |x: &MediaAsset| (x.id == a).then(reel_speech);
+        let base = default_manifest("p");
+        // LH-1: one line per clip, nothing can trim, and dropping the shortest (11.6 s) lands
+        // under 12.5–15.5 s: not "still more than the brief", and no drop is suggested.
+        let r = plan_check_core(vec![clip("c1", a, 45.07, 50.21), clip("c2", a, 73.53, 79.97), clip("c3", a, 80.67, 85.33)], &assets, &speech, &base, Some(14.0));
+        assert_eq!(r.total_sec, 16.24);
+        assert!(r.refusals[0].ends_with(" — no out point can move back to an earlier line's end and land in 12.5–15.5 s, and dropping clip 3 (4.7 s, the shortest) would make it 11.6 s, under 12.5 s: cut a different, shorter moment instead"), "{:?}", r.refusals);
+        // F1: two equal one-line clips from two takes; dropping either leaves 6 s, under 8.5 s.
+        let two = vec![asset("s1", "video", Some(30.0), 1920, 1080), asset("s2", "video", Some(30.0), 1920, 1080)];
+        let one = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(0.0, 6.0)] });
+        let r = plan_check_core(vec![clip("c1", "s1", 0.0, 6.0), clip("c2", "s2", 0.0, 6.0)], &two, &one, &base, Some(10.0));
+        assert!(r.refusals[0].ends_with(", and dropping clip 1 (6 s, the shortest) would make it 6 s, under 8.5 s: cut a different, shorter moment instead"), "{:?}", r.refusals);
+        assert!(!r.refusals[0].contains("still more than the brief"));
+        // Dropping the shortest leaves it too long, but dropping another lands in the band.
+        let take = vec![asset("t", "video", Some(30.0), 1920, 1080)];
+        let lines = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(0.0, 2.0), (10.0, 15.0), (20.0, 26.0)] });
+        let r = plan_check_core(vec![clip("c1", "t", 0.0, 2.0), clip("c2", "t", 10.0, 15.0), clip("c3", "t", 20.0, 26.0)], &take, &lines, &base, Some(7.0));
+        assert!(r.refusals[0].ends_with(" — e.g. drop clip 3 (6 s): that makes 7 s"), "{:?}", r.refusals);
+        // LH-2: a 60 s TikTok cap clamps the band's top (54–66 s): the next line's 64.5 s is over it.
+        let long = vec![asset("l", "video", Some(100.0), 1920, 1080)];
+        let ll = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(0.0, 52.0), (52.5, 64.5)] });
+        let mut tiktok = base.clone();
+        tiktok.outputs = vec![preset("tiktok", "9:16", Some(60.0))];
+        let r = plan_check_core(vec![clip("c1", "l", 0.0, 52.0)], &long, &ll, &tiktok, Some(60.0));
+        assert_eq!(r.refusals, ["the cut is 52 s but the brief asks for 60 s: add about 8 s (anything from 54 to 66 s is fine) — the next whole line would make it 64.5 s, past 60 s: add another moment of at least 2 s"]);
+        // Without the cap the same step is the fix.
+        let r = plan_check_core(vec![clip("c1", "l", 0.0, 52.0)], &long, &ll, &base, Some(60.0));
+        assert!(r.refusals[0].ends_with(" — e.g. clip 1 out 52.00 → 64.50 s (end of the line): that makes 64.5 s"), "{:?}", r.refusals);
+        // F2: the next line exists and is free, but it jumps past the band: say that.
+        let s = vec![asset("s", "video", Some(30.0), 1920, 1080)];
+        let sl = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(0.0, 3.0), (3.2, 20.0)] });
+        let r = plan_check_core(vec![clip("c1", "s", 0.0, 3.0)], &s, &sl, &base, Some(12.0));
+        assert!(r.refusals[0].ends_with(" — the next whole line would make it 20 s, past 13.5 s: add another moment of at least 7.5 s"), "{:?}", r.refusals);
+        // LH-3: three changes hit the cap with a fourth edge still able to grow: no "lines only reach".
+        let four: Vec<MediaAsset> = (1..=4).map(|k| asset(&format!("v{k}"), "video", Some(20.0), 1920, 1080)).collect();
+        let fl = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(0.0, 1.0), (1.2, 2.2), (10.0, 11.0)] });
+        let r = plan_check_core((1..=4).map(|k| clip(&format!("c{k}"), &format!("v{k}"), 1.2, 2.2)).collect(), &four, &fl, &base, Some(9.5));
+        assert!(r.refusals[0].ends_with(" — 3 changes get it to 7.6 s (clip 4 in 1.20 → 0.00 s (start of the line), clip 3 in 1.20 → 0.00 s (start of the line), clip 2 in 1.20 → 0.00 s (start of the line)): add another moment of at least 0.4 s, or run more clip edges on to whole lines"), "{:?}", r.refusals);
+        // LH-4: the line ends at 50.21 s but the take at 50.18 s: the hint clamps as the re-check
+        // does (13.49 s, under 13.5 s), so it never claims a fix the re-check refuses.
+        let clampt = vec![asset("e", "video", Some(50.18), 1920, 1080)];
+        let el = |_: &MediaAsset| Some(Speech { words: vec![], segments: vec![(36.69, 45.07), (45.07, 50.21)] });
+        let r = plan_check_core(vec![clip("c1", "e", 36.69, 45.07)], &clampt, &el, &base, Some(15.0));
+        assert!(r.refusals[0].ends_with(" — the clips' own lines only reach 13.5 s (clip 1 out 45.07 → 50.18 s (end of the line)): add another moment of at least 0.1 s"), "{:?}", r.refusals);
+        let again = plan_check_core(vec![clip("c1", "e", 36.69, 50.18)], &clampt, &el, &base, Some(15.0));
+        assert_eq!(again.total_sec, 13.49);
     }
 
     #[test]

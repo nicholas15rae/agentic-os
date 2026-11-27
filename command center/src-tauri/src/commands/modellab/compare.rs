@@ -874,9 +874,10 @@ impl Ctx<'_> {
     }
 }
 
-/// The `[LIVE MCP TOOL DATA - server]` block agents.rs `Prefetch::call` appends for a tool result.
+/// The `[LIVE MCP TOOL DATA - server]` block agents.rs `Prefetch::call` appends for a tool result,
+/// fenced the same way (`agents::fence_untrusted`), so a case is measured on the text a live turn sends.
 pub(crate) fn tool_block(server: &str, data: &str) -> String {
-    format!("\n\n[LIVE MCP TOOL DATA - {server} ({})]:\n{data}", agents::TOOL_DATA_LABEL)
+    format!("\n\n[LIVE MCP TOOL DATA - {server} ({})]:\n{}", agents::TOOL_DATA_LABEL, agents::fence_untrusted(data))
 }
 
 async fn chat_case(ctx: &Ctx<'_>, block: usize, side: Side, v: Variant, c: &'static ChatCase, rep: u32) -> ChatRun {

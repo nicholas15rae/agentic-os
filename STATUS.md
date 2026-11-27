@@ -10,7 +10,7 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 | Tony latency: byte-stable system msg, TURN CONTEXT block | feat/language-hub | 35e30e5 | Yes (4073bd9) |
 | App crash hardening: panic.log, restarts wait for WebView2 to exit, scripts\restart-desktop-app.ps1 | feat/language-hub | 1cd5333 | Yes (4bc4e2d), pushed to origin; live since the 22:26 restart |
 | Engine R stops reporting refused orders as trades | claude/practical-elbakyan | 8bd7990 | Yes (3fe4835) |
-| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), pushed to origin; live after the next app rebuild + restart |
+| Tony stops parroting old replies from recall (skips the re-asked turn, stopwords, no mid-list replies) | claude/vibrant-davinci-742cf7 | fa69ab2 | Yes (8278f76), pushed to origin; live since the 23:19 rebuild + restart (built from 66df342, so without the section-pass merges) |
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
@@ -49,6 +49,7 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 ## 3. Waiting on you
 
 **Decisions**
+- The running app (23:19) is built from 66df342: recall fix and crash hardening, but not main's 26 newer commits (section-pass, batch3). Rebuild from main? `feat/language-hub` in the base checkout would need main merged in first.
 - Check after the next app rebuild: pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
@@ -115,6 +116,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
 | claude/vibrant-davinci-742cf7 (recall fix) | cargo 1,419 (+2 known CRLF; 1 Edge timeout under load passes alone) on the 4073bd9 base; memtier + turn_context 24/24 after the rebase onto e0f7ee7 | 11-26 22:20 |
 | Tony recall parrot probe (Bionic, 4 reps) | parroted 21/60 -> **0/60** (six test lines 10/24 -> 0/24); planted facts recalled 24/28 -> 28/28 | 11-26 22:10 |
+| Live app after the 23:19 restart | 3 phone turns: fresh greeting and dinner answers (no stored reply copied), Joelle Bandits -> Chris recalled; first words 4.5 s cold, then 1.6 s and 1.0 s | 11-26 23:21 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
 | section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
 | main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
@@ -135,15 +137,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:26 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:27 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `merge/director-suite-into-main` | 21 | `0a2072f` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main | 1 files |
 | `claude/practical-elbakyan-0f96f1` | 7 | `cdbd99a` 2026-11-26 Merge main (0c4341f, STATUS.md only) into claude/practical-elbakyan... | clean |
 | `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | clean |
-| `merge/director-suite-into-main` | 19 | `44bfcc0` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main | 1 files |
 | `claude/elated-kare-67e4c4` | 1 | `88ae91d` 2026-11-26 WIP: remove the Ops agent (to be squashed) | no worktree |
 | `claude/upbeat-wing-e87be0` | 6 | `11f777c` 2026-11-26 docs(status): test gate PR #9 results after merging main eefaf0a | clean |
 | `director-suite` | 19 | `8532c7b` 2026-11-26 docs(status): Director Part 1 fixes, run 9 E2E, main merged (4e986f1) | clean |

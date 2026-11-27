@@ -12,7 +12,8 @@ The export (kept until Nic confirms nothing is missing):
   workspaces/<slug>.json   settings + system prompt + prompt history + threads + chats, per workspace
   manifest.json            source path, counts per table, sha256 of every copied file, what was skipped
 
-Not exported: `comkey` (AnythingLLM's encryption key), `models/` and `engines/` (its bundled
+Secrets: API keys, tokens and passwords are redacted from the export (redact_export: secret columns,
+secret-named JSON fields, token-shaped strings, then VACUUM). Not exported: `comkey` (AnythingLLM's encryption key), `models/` and `engines/` (its bundled
 runtimes, ~5 GB, no user data), `logs/`, `tmp/`, `hotdir/`, the *.bak MCP lists.
 
 The import puts only DOCUMENTS (documents/**.json pageContent) into the doc store. Chats stay in the
@@ -23,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -114,6 +116,7 @@ def export(storage: Path = STORAGE, out_root: Path = EXPORT_ROOT, stamp: Optiona
                 "documents": len(list((out / "documents").rglob("*.json"))) if (out / "documents").is_dir() else 0,
                 "systemSettingLabels": settings_labels, "skipped": list(SKIPPED), "sha256": files}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    redact_export(out)  # no API key or token stays in plain text in an export
     return out
 
 
@@ -186,11 +189,129 @@ def report(export_dir: Path, storage: Path = STORAGE, store=None) -> dict:
             "integrity": verify(export_dir) or "ok"}
 
 
+# ── secrets: the export never keeps an API key or token in plain text (Nic, 11-27) ──
+
+# A field NAME that holds a secret: the name ends in one of these words (BRAVE_API_KEY, apiKey,
+# access_token, clientSecret), so counts like token_count_estimate or tokenLimit are left alone.
+SECRET_KEY = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|bearer|authorization|cookie|credentials?)$")
+SECRET_VALUE = re.compile(r"(?<![A-Za-z0-9])(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{30,}"
+                          r"|xox[abp]-[A-Za-z0-9-]{10,}|ya29\.[0-9A-Za-z_-]{20,}|1//[0-9A-Za-z_-]{30,})|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{16,}")
+REDACTED = "[REDACTED]"
+# (table, column) pairs that only ever hold secrets
+SECRET_COLUMNS = (("api_keys", "secret"), ("desktop_mobile_devices", "token"), ("users", "password"),
+                  ("temporary_auth_tokens", "token"), ("browser_extension_api_keys", "key"), ("recovery_codes", "code_hash"),
+                  ("password_reset_tokens", "token"))
+
+
+def _scrub(v, counter: list[int]):
+    """Redact secret-named fields and token-shaped strings anywhere in a JSON value."""
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if SECRET_KEY.search(str(k)) and isinstance(x, (str, int)) and str(x) not in ("", REDACTED):
+                out[k] = REDACTED
+                counter[0] += 1
+            else:
+                out[k] = _scrub(x, counter)
+        return out
+    if isinstance(v, list):
+        return [_scrub(x, counter) for x in v]
+    if isinstance(v, str):
+        new, n = SECRET_VALUE.subn(REDACTED, v)
+        counter[0] += n
+        return new
+    return v
+
+
+def _scrub_text(t: str, counter: list[int]) -> str:
+    t2 = t
+    if t.lstrip().startswith(("{", "[")):
+        try:
+            return json.dumps(_scrub(json.loads(t), counter), indent=2, ensure_ascii=False)
+        except ValueError:
+            pass
+    t2, n = SECRET_VALUE.subn(REDACTED, t2)
+    counter[0] += n
+    return t2
+
+
+def redact_export(export_dir: Path) -> dict:
+    """Scrub secrets out of an export IN PLACE (the export only, never AnythingLLM), VACUUM the
+    database so no old page keeps them, and rewrite the manifest's checksums."""
+    export_dir = Path(export_dir)
+    db = export_dir / "anythingllm.db"
+    counts: dict[str, int] = {}
+    c = sqlite3.connect(db)
+    try:
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for t, col in SECRET_COLUMNS:
+            if t in tables and col in [r[1] for r in c.execute(f'PRAGMA table_info("{t}")')]:
+                # per-row marker: some of these columns are UNIQUE (api_keys.secret)
+                n = c.execute(f'UPDATE "{t}" SET "{col}" = ? || rowid WHERE "{col}" IS NOT NULL '
+                              f'AND "{col}" NOT LIKE ? AND "{col}" != ""', (REDACTED + "-", REDACTED + "%")).rowcount
+                if n:
+                    counts[f"{t}.{col}"] = n
+        if "system_settings" in tables:
+            for sid, val in c.execute("SELECT id, value FROM system_settings").fetchall():
+                k = [0]
+                new = _scrub_text(val or "", k)
+                if k[0]:
+                    c.execute("UPDATE system_settings SET value=? WHERE id=?", (new, sid))
+                    counts["system_settings"] = counts.get("system_settings", 0) + k[0]
+        for t in ("workspace_chats", "event_logs", "prompt_history"):
+            if t not in tables:
+                continue
+            cols = [r[1] for r in c.execute(f'PRAGMA table_info("{t}")') if r[2].upper() in ("TEXT", "")]
+            for row in c.execute(f'SELECT rowid, {", ".join(chr(34) + x + chr(34) for x in cols)} FROM "{t}"').fetchall():
+                for col, val in zip(cols, row[1:]):
+                    if isinstance(val, str) and SECRET_VALUE.search(val):
+                        k = [0]
+                        new = SECRET_VALUE.sub(REDACTED, val)
+                        c.execute(f'UPDATE "{t}" SET "{col}"=? WHERE rowid=?', (new, row[0]))
+                        counts[t] = counts.get(t, 0) + 1
+        c.commit()
+        c.execute("VACUUM")  # rewrite the file: no free page keeps an old value
+    finally:
+        c.close()
+    for p in sorted(export_dir.rglob("*")):
+        if not p.is_file() or p.name in ("anythingllm.db", "manifest.json") or p.suffix.lower() not in (".json", ".txt", ".md", ".log", ".yml", ".yaml", ".env"):
+            continue
+        k = [0]
+        t = p.read_text(encoding="utf-8", errors="replace")
+        new = _scrub_text(t, k)
+        if k[0]:
+            p.write_text(new, encoding="utf-8")
+            counts[p.relative_to(export_dir).as_posix()] = k[0]
+    m = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
+    m["sha256"] = {p.relative_to(export_dir).as_posix(): _sha(p) for p in sorted(export_dir.rglob("*"))
+                   if p.is_file() and p.name != "manifest.json"}
+    m["redacted"] = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "counts": counts}
+    (export_dir / "manifest.json").write_text(json.dumps(m, indent=2), encoding="utf-8")
+    return counts
+
+
+def leftover_secrets(export_dir: Path) -> list[str]:
+    """Anything token-shaped still in the export (text files, and the database's raw bytes)."""
+    found = []
+    for p in sorted(Path(export_dir).rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            t = p.read_bytes().decode("utf-8", errors="ignore")
+        except OSError:
+            continue
+        if SECRET_VALUE.search(t):
+            found.append(p.relative_to(export_dir).as_posix())
+    return found
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="AnythingLLM export / import (read-only on AnythingLLM)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("export")
+    rd = sub.add_parser("redact")
+    rd.add_argument("export_dir")
     for name in ("import", "report"):
         sp = sub.add_parser(name)
         sp.add_argument("export_dir")
@@ -199,6 +320,9 @@ def main(argv=None) -> int:
         out = export()
         print(f"exported to {out}")
         print(json.dumps(json.loads((out / "manifest.json").read_text())["counts"], indent=2))
+    elif a.cmd == "redact":
+        print(json.dumps(redact_export(Path(a.export_dir)), indent=2))
+        print("leftover token-shaped strings:", leftover_secrets(Path(a.export_dir)) or "none")
     elif a.cmd == "import":
         print(json.dumps(import_documents(Path(a.export_dir)), indent=2))
     else:

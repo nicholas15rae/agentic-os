@@ -119,3 +119,61 @@ class ExportImportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactTests(unittest.TestCase):
+    """Nic 11-27: no API key or token in plain text anywhere in the export."""
+    KEY = "sk-live-" + "A1b2C3d4E5f6G7h8J9k0"
+    BRAVE = "BSA" + "q9W8e7R6t5Y4u3I2o1P0aSdFgHj"
+
+    def test_export_holds_no_plaintext_secret(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            s = make_storage(d)
+            c = sqlite3.connect(s / "anythingllm.db")
+            c.executescript(f"""
+                CREATE TABLE api_keys(id INTEGER PRIMARY KEY, secret TEXT UNIQUE, name TEXT);
+                INSERT INTO api_keys VALUES(1, 'ALLM-SECRET-KEY-0123456789', 'desktop');
+                INSERT INTO api_keys VALUES(2, 'ALLM-SECRET-KEY-9876543210', 'phone');
+                CREATE TABLE desktop_mobile_devices(id INTEGER PRIMARY KEY, deviceName TEXT, token TEXT);
+                INSERT INTO desktop_mobile_devices VALUES(1, 'S22', 'device-token-abcdefghij');
+                UPDATE system_settings SET value='{{"deploymentId":"AKfycbx","apiKey":"apps-script-key-123456"}}' WHERE label='gmail_agent_config';
+                INSERT INTO workspace_chats VALUES(9, 1, 'use key {self.KEY} please', 'ok', NULL);
+            """)
+            c.commit()
+            c.close()
+            (s / "plugins" / "anythingllm_mcp_servers.json").write_text(json.dumps(
+                {"mcpServers": {"brave-search": {"command": "npx", "env": {"BRAVE_API_KEY": self.BRAVE, "MEMORY_FILE_PATH": "C:/kg.json"}}}}))
+            before = tree_hash(s)
+            out = ai.export(s, d / "exp", stamp="r1")
+            self.assertEqual(tree_hash(s), before)  # AnythingLLM itself untouched
+            raw = b"".join(p.read_bytes() for p in out.rglob("*") if p.is_file())
+            for secret in ("ALLM-SECRET-KEY-0123456789", "ALLM-SECRET-KEY-9876543210", "device-token-abcdefghij", "apps-script-key-123456", self.KEY, self.BRAVE):
+                self.assertNotIn(secret.encode(), raw, secret)
+            self.assertEqual(ai.leftover_secrets(out), [])
+            mcp = json.loads((out / "plugins" / "anythingllm_mcp_servers.json").read_text())
+            env = mcp["mcpServers"]["brave-search"]["env"]
+            self.assertEqual(env, {"BRAVE_API_KEY": "[REDACTED]", "MEMORY_FILE_PATH": "C:/kg.json"})
+            c = sqlite3.connect(out / "anythingllm.db")
+            gmail = json.loads(c.execute("SELECT value FROM system_settings WHERE label='gmail_agent_config'").fetchone()[0])
+            self.assertEqual(gmail, {"deploymentId": "AKfycbx", "apiKey": "[REDACTED]"})
+            self.assertEqual(c.execute("SELECT prompt FROM workspace_chats WHERE id=9").fetchone()[0], "use key [REDACTED] please")
+            self.assertEqual(c.execute("SELECT response FROM workspace_chats WHERE id=1").fetchone()[0], "$40 at the store")
+            c.close()
+            m = json.loads((out / "manifest.json").read_text())
+            self.assertIn("api_keys.secret", m["redacted"]["counts"])
+            self.assertEqual(ai.verify(out), [])  # checksums rewritten after the scrub
+
+    def test_session_ids_are_not_mistaken_for_keys(self):
+        self.assertIsNone(ai.SECRET_VALUE.search('"api_session_id": "task-1795791234567-abcdefgh"'))
+
+
+class RedactKeepsDataTests(unittest.TestCase):
+    def test_counts_and_ids_are_not_secrets(self):
+        n = [0]
+        out = ai._scrub({"token_count_estimate": 614, "tokenLimit": 32768, "apiKey": "abc123456", "meta": {"access_token": "x" * 20},
+                         "api_session_id": "task-1795791234567"}, n)
+        self.assertEqual(out["token_count_estimate"], 614)
+        self.assertEqual(out["tokenLimit"], 32768)
+        self.assertEqual(out["api_session_id"], "task-1795791234567")
+        self.assertEqual((out["apiKey"], out["meta"]["access_token"], n[0]), ("[REDACTED]", "[REDACTED]", 2))

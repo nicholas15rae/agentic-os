@@ -174,10 +174,11 @@
     "kind": "Default"
   },
   {
-    "desc": "number-word normalization feeding a multi-word domain phrase",
+    "desc": "'last five messages' is Tony's own WhatsApp read, never the Booking Desk",
     "text": "give me the last five messages",
-    "role": "booking",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default",
+    "direct": "whatsapp"
   },
   {
     "desc": "domain score tie broken by role order (booking 'wardrobe' 8 = ops 'schedule' 8 → booking)",

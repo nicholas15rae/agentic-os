@@ -367,7 +367,7 @@ pub(crate) async fn create_event_approved(state: &DispatchState, os: &OsState, b
     if !cfg.mcps.iter().any(|m| m.id == "calendar" && m.enabled) {
         return Err("Google Calendar is switched off — enable it in Settings → Skills & MCP Library".into());
     }
-    if let Some(e) = super::modes::tool_frozen_error(&os.modes.effective(), &cfg.switchboard, "calendar") {
+    if let Some(e) = super::mcp::tony_frozen_reason(&cfg, &os.modes.effective(), "calendar", "calendar").map(|r| format!("{}: {r}", super::modes::MODE_FROZEN)) {
         return Err(e);
     }
     let out = tool(state, os, CREATE, args, true).await;

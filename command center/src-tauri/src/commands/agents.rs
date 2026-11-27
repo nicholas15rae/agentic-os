@@ -1398,7 +1398,7 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             // Frozen by the switchboard first ("Gmail is frozen in Builder mode"), then switched
             // off / no backend; an enabled stdio WhatsApp server that listed nothing is a bridge
             // that isn't running.
-            let frozen = super::modes::tool_frozen_reason(&mode, &cfg.switchboard, id, &server.name);
+            let frozen = if super::mcp::is_tony(agent) { super::mcp::tony_frozen_reason(cfg, &mode, id, &server.name) } else { super::modes::tool_frozen_reason(&mode, &cfg.switchboard, id, &server.name) };
             if let Some(reason) = frozen.or_else(|| super::mcp::unavailable_reason(state, cfg, id)).or_else(|| (id == "whatsapp").then(|| WHATSAPP_DOWN.to_string())) {
                 out.steps.push(step("tool", "os", id, format!("failed: {reason}"), false, 0));
                 out.failure = Some((id.into(), reason));

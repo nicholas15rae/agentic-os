@@ -79,6 +79,18 @@
   box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.6), inset 0 1px 1px 0 rgba(255, 255, 255, 0.08);
 }
 
+/* Chat panels (Agents / Comms threads): the same glass, darker, so text stays readable over a
+   busy wallpaper (section pass: 0.62 -> 0.84). Used instead of `glass`, not on top of it. */
+@utility glass-chat {
+  background:
+    linear-gradient(rgba(16, 19, 26, 0.84), rgba(16, 19, 26, 0.84)) padding-box,
+    linear-gradient(to bottom right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03)) border-box;
+  border: 1px solid transparent;
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.6), inset 0 1px 1px 0 rgba(255, 255, 255, 0.08);
+}
+
 /*
  * Ultra glass: near-clear panel so the wallpaper reads through almost
  * untouched. Legibility comes from a soft text shadow instead of a backdrop.
@@ -173,11 +185,14 @@
 .glass .glass-ultra,
 .glass-ultra .glass,
 .glass-ultra .glass-ultra,
-.glass .glass-thin {
+.glass .glass-thin,
+.glass-chat .glass,
+.glass-chat .glass-thin {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 .glass,
+.glass-chat,
 .glass-ultra,
 .glass-thin {
   backface-visibility: hidden;

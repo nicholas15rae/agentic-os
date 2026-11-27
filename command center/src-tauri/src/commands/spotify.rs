@@ -3031,7 +3031,7 @@ fn tool_precheck(cfg: &OsConfig, e: &super::modes::Effective, name: &str) -> Res
     if !server.is_some_and(|m| m.enabled) {
         return Err(SERVER_OFF.into());
     }
-    if let Some(frozen) = super::modes::tool_frozen_error(e, &cfg.switchboard, "spotify") {
+    if let Some(frozen) = super::mcp::tony_frozen_reason(cfg, e, "spotify", "spotify").map(|r| format!("{}: {r}", super::modes::MODE_FROZEN)) {
         return Err(frozen);
     }
     if intent::is_write_tool(name) && server.is_some_and(|m| m.read_only) {
@@ -4336,10 +4336,10 @@ mod suite_tests {
         use super::super::os_core::McpServer;
         let mut cfg = OsConfig::default();
         cfg.mcps = vec![McpServer { id: "spotify".into(), name: "Spotify".into(), transport: "builtin".into(), enabled: true, ..Default::default() }];
-        // Builder lists Spotify; Operations doesn't, so every tool (reads too) is refused there.
-        assert_eq!(tool_precheck(&cfg, &mode("builder"), "spotify.pause"), Ok(()));
-        for name in ["spotify.pause", "spotify.now_playing", "spotify.play"] {
-            assert_eq!(tool_precheck(&cfg, &mode("operations"), name), Err("MODE_FROZEN: spotify is frozen in Operations mode".into()), "{name}");
+        // Spotify is in Tony's always-on base (section pass): live in every mode, even one whose
+        // overlay doesn't list it (Operations) and Learning.
+        for m in ["builder", "operations", "learning"] {
+            assert_eq!(tool_precheck(&cfg, &mode(m), "spotify.pause"), Ok(()), "{m}");
         }
         // Frozen on the master switchboard: refused in every mode, even one with no overlay.
         cfg.switchboard.frozen_tools = vec!["spotify".into()];

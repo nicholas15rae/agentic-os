@@ -387,6 +387,17 @@ pub fn tool_live(e: &Effective, g: &SwitchboardConfig, server: &str) -> bool {
     !g.frozen_tools.iter().any(|f| f == s) && e.switchboard.as_ref().map_or(true, |b| b.tools.iter().any(|t| t == s))
 }
 
+/// Is `server` live for TONY this turn (section pass)? His base (`base`: he is granted it) is
+/// always on, in every mode including Learning; a mode's extras (`extra`) are on in that mode.
+/// Only the master switchboard (or the server not being his) takes one away. Pure.
+pub fn tony_server_live(g: &SwitchboardConfig, server: &str, base: bool, extra: &[String]) -> bool {
+    let s = server.trim();
+    if ALWAYS_LIVE_SERVERS.contains(&s) {
+        return true;
+    }
+    !g.frozen_tools.iter().any(|f| f == s) && (base || extra.iter().any(|t| t == s))
+}
+
 /// "Builder" → "in Builder mode"; the master switchboard → "on the master switchboard".
 fn frozen_where(e: &Effective, master: bool) -> String {
     if master {

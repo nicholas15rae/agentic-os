@@ -243,13 +243,15 @@ export function inboxLine(unread: readonly Pick<InboxMessage, "agent" | "read">[
   return `You've got ${list}.`;
 }
 
-/** Nic asking about his agent messages: "any messages?", "what are my messages", "play my
- * messages", "read me the messages". `play` = play the unread ones too. Pure. */
+/** Nic asking about his AGENT reports: "any agent reports?", "what are my agent messages", "play
+ * my reports", "read me the agent messages". `play` = play the unread ones too. A plain "check my
+ * messages" is NOT this — it is a WhatsApp / Gmail read Tony does with his own tools. Pure. */
 export function parseInboxAsk(line: string): { play: boolean } | null {
   const t = line.toLowerCase().replace(/[^a-z' ]+/g, " ").replace(/\s+/g, " ").trim().replace(/^(hey |yo |ok |okay )?(tony |jarvis )?/, "");
-  if (!/\bmessages?\b/.test(t) || /\b(text|texts|sms|whatsapp|email|emails|gmail|send|reply|write)\b/.test(t)) return null;
-  if (/^(play|read|hear)( me)?( my| the| those| them| all)*( new| unread)? messages?( please)?$/.test(t)) return { play: true };
-  if (/^((do i have|have i got|got|any|i got)( any)?( new| unread)? messages?|(check|what are|what s|whats)( my| the)?( new| unread)? messages?|messages)( please)?$/.test(t)) return { play: false };
+  const noun = "(agent (messages?|reports?|updates?)|reports?)";
+  if (!new RegExp(`\\b${noun}\\b`).test(t) || /\b(text|texts|sms|whatsapp|email|emails|gmail|send|reply|write)\b/.test(t)) return null;
+  if (new RegExp(`^(play|read|hear)( me)?( my| the| those| them| all)*( new| unread)? ${noun}( please)?$`).test(t)) return { play: true };
+  if (new RegExp(`^((do i have|have i got|got|any|i got)( any)?( new| unread)? ${noun}|(check|what are|what s|whats)( my| the)?( new| unread)? ${noun}|${noun})( please)?$`).test(t)) return { play: false };
   return null;
 }
 

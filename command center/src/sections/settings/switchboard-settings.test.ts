@@ -70,7 +70,10 @@ describe("Switchboard → mode presets", () => {
     const builder = block(h, "data-mode", "builder");
     for (const l of ["Prompter", "Designer", "Coder"]) expect(builder).toContain(`>${l}</span>`);
     expect(builder).not.toContain(">Biz Ops<");
-    expect(builder).not.toContain("<button");
+    // The preset's own overlay is read-only; only Tony's per-mode extras (os.json) are toggles.
+    const [overlay, tonyExtras] = builder.split("adds in this mode");
+    expect(overlay).not.toContain("<button");
+    expect(tonyExtras).toContain('title="Take Git from Tony in Builder"');
     expect(builder).toContain("3 agents · 8 tools on duty");
     expect(builder).toContain(">Active<");
     const ops = block(h, "data-mode", "operations");

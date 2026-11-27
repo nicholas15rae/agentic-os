@@ -105,11 +105,18 @@ describe("domain tie-break", () => {
 });
 
 describe("default matrix: WhatsApp is not a Booking topic", () => {
-  it("booking's domains drop bare 'whatsapp' / 'messages' but keep 'last 5 messages'", () => {
+  it("booking's domains hold no messages / texts phrase at all (Tony reads them himself)", () => {
     const d = DEFAULT_ROUTING_CONFIG.agents.booking.domains;
-    expect(d).not.toContain("whatsapp");
-    expect(d).not.toContain("messages");
-    expect(d).toContain("last 5 messages");
+    for (const p of d) expect(p, p).not.toMatch(/whatsapp|messages?|texts?/);
+  });
+  it("a plain messages read is Tony's WhatsApp tool, never the agent inbox or the Booking Desk", () => {
+    for (const text of ["check my messages", "any new messages", "read my last five messages", "give me the last 5 messages", "check my texts"]) {
+      expect(directTool(text), text).toBe("whatsapp");
+      expect(resolve(text, DEFAULT_ROUTING_CONFIG).role, text).not.toBe("booking");
+    }
+    for (const text of ["check my agent messages", "the messages in this design feel off", "send a message to Sam"]) expect(directTool(text), text).toBeNull();
+    // An email word still wins: Gmail, not WhatsApp.
+    expect(directTool("check my last five gmail messages")).toBe("gmail");
   });
   it("WhatsApp lines are Tony's (Default + his live tool), never a Booking Domain", () => {
     for (const text of ["check my whatsapp", "any whatsapp updates", "what's up", "check my what's up messages"]) {

@@ -35,6 +35,8 @@ vi.mock("@/features/modes/modes-store", async () => {
     useModes: { getState: () => ({ effective: mode.effective, load: async () => undefined }) },
     currentFreeze: () => mode.freeze,
     isToolLiveNow: (s: string) => m.toolLive(mode.effective as import("@/features/modes/modes").EffectiveMode, s, mode.freeze),
+    // Tony's base (Spotify is in it): only the master switchboard freezes it (section pass).
+    isTonyToolLiveNow: (s: string) => !(mode.freeze.frozenTools ?? []).includes(s),
   };
 });
 
@@ -216,7 +218,7 @@ describe("osRun: a route to a frozen agent stays Tony's in the webview; os_turn 
   });
 });
 
-describe("the Spotify fast path runs only while the spotify server is live", () => {
+describe("the Spotify fast path runs while Spotify is live for Tony (his always-on base)", () => {
   it("live (Builder lists it): the Spotify control runs in-process, no os_turn", async () => {
     useMode("builder");
     await handleInput("pause the music", text);
@@ -224,12 +226,11 @@ describe("the Spotify fast path runs only while the spotify server is live", () 
     expect(osTurns()).toHaveLength(0);
   });
 
-  it("frozen by the mode (Operations doesn't list it): the line falls through to Tony's turn", async () => {
+  it("a mode whose overlay doesn't list it (Operations) still runs it: it's in Tony's base", async () => {
     useMode("operations");
     await handleInput("pause the music", text);
-    expect(h.runSpotify).not.toHaveBeenCalled();
-    expect(osTurns()).toHaveLength(1);
-    expect(osTurns()[0].text).toBe("pause the music");
+    expect(h.runSpotify).toHaveBeenCalledTimes(1);
+    expect(osTurns()).toHaveLength(0);
   });
 
   it("frozen on the master switchboard (no mode overlay): the same", async () => {
@@ -239,9 +240,9 @@ describe("the Spotify fast path runs only while the spotify server is live", () 
     expect(osTurns()).toHaveLength(1);
   });
 
-  it("Learning keeps every external tool off, as before", async () => {
+  it("Learning keeps Tony's base on too", async () => {
     useMode("learning");
     await handleInput("pause the music", text);
-    expect(h.runSpotify).not.toHaveBeenCalled();
+    expect(h.runSpotify).toHaveBeenCalledTimes(1);
   });
 });

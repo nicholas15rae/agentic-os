@@ -313,7 +313,40 @@ pub async fn add_voice(state: &DispatchState, p: &Provider, name: &str, file_nam
 /// before returning (the webview needs a complete file for `decodeAudioData`).
 /// `optimize_streaming_latency=3` and `previous_text` are only sent to models
 /// that accept them (`supports_stitching`); see `tts_request`.
+/// The voice queue's single lane: at most ONE ElevenLabs synthesis in flight at a time, across
+/// every caller (live replies, prefetched sentences, agent reports, Language Hub). ElevenLabs
+/// answers concurrent requests over the plan's limit with HTTP 429 even when credits are fine,
+/// so the requests line up here instead (FIFO: tokio's semaphore is fair).
+static LANE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// ElevenLabs 429s seen this run (shown in the log line; the file keeps the history).
+static RATE_LIMITED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One `elevenlabs-429.jsonl` line: when, which voice / model, the Retry-After, how long the
+/// request queued for the lane, the running count and ElevenLabs' own message. Pure.
+pub fn rate_limit_line(at: &str, voice_id: &str, model: &str, retry_after: Option<u64>, queued_ms: u128, count: u64, message: &str) -> String {
+    serde_json::json!({ "at": at, "voice": voice_id, "model": model, "retryAfter": retry_after, "queuedMs": queued_ms as u64, "count": count, "message": message }).to_string()
+}
+
+/// Log a 429: stderr always, plus a line in `<config>/telemetry/elevenlabs-429.jsonl` once
+/// telemetry is initialised.
+fn log_rate_limit(voice_id: &str, model: &str, retry_after: Option<u64>, queued_ms: u128, message: &str) {
+    let count = RATE_LIMITED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let line = rate_limit_line(&chrono::Local::now().to_rfc3339(), voice_id, model, retry_after, queued_ms, count, message);
+    eprintln!("[tts] ElevenLabs 429 #{count} (queued {queued_ms} ms, retry-after {retry_after:?}): {message}");
+    if let Some(dir) = super::diagnostics::telemetry_dir().and_then(Path::parent) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("elevenlabs-429.jsonl")) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 pub async fn synthesize(state: &DispatchState, p: &Provider, text: &str, voice_id: &str, model_override: Option<&str>, previous_text: Option<&str>) -> Result<Vec<u8>, ElevenError> {
+    let queued = std::time::Instant::now();
+    // Held until the whole body is read: the stream is the request ElevenLabs counts.
+    let _lane = LANE.acquire().await.map_err(|_| ElevenError::local("ElevenLabs voice queue closed"))?;
+    let queued_ms = queued.elapsed().as_millis();
     if !valid_voice_id(voice_id) {
         return Err(ElevenError::local(format!("'{voice_id}' isn't an ElevenLabs voice ID — pick one in Settings → Voice")));
     }
@@ -338,6 +371,9 @@ pub async fn synthesize(state: &DispatchState, p: &Provider, text: &str, voice_i
         let status = res.status().as_u16();
         let retry_after = retry_after_secs(&res);
         let (message, detail) = explain_detail(res).await;
+        if status == 429 {
+            log_rate_limit(voice_id, model, retry_after, queued_ms, &message);
+        }
         return Err(ElevenError { status: Some(status), message, detail, retry_after, timeout: false });
     }
     let mut stream = res.bytes_stream();
@@ -349,6 +385,26 @@ pub async fn synthesize(state: &DispatchState, p: &Provider, text: &str, voice_i
         })?);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+
+    #[test]
+    fn one_synthesis_at_a_time() {
+        assert_eq!(LANE.available_permits(), 1);
+    }
+
+    #[test]
+    fn rate_limit_line_is_one_json_object() {
+        let l = rate_limit_line("2026-11-26T10:00:00-05:00", "abc", "eleven_turbo_v2_5", Some(30), 1200, 3, "too many concurrent requests");
+        let v: serde_json::Value = serde_json::from_str(&l).unwrap();
+        assert_eq!(v["retryAfter"], 30);
+        assert_eq!(v["queuedMs"], 1200);
+        assert_eq!(v["count"], 3);
+        assert!(!l.contains('\n'));
+    }
 }
 
 #[cfg(test)]

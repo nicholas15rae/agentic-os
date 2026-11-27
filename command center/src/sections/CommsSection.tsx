@@ -218,7 +218,7 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
   const toggleTrust = () => void gateway("/api/comms/contacts", { method: "POST", body: JSON.stringify({ address: thread.address, name: thread.contact, trusted: !thread.trusted }) }).then(onChange);
 
   return (
-    <section className="glass flex min-h-[420px] flex-col rounded-[20px]">
+    <section className="glass-chat flex min-h-[420px] flex-col rounded-[20px]">
       <header className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
         {onBack && (
           <button onClick={onBack} aria-label="Back" className="text-ink-2">

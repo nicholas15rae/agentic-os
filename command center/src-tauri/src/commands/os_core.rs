@@ -114,7 +114,7 @@ pub fn default_routing_agents() -> BTreeMap<String, AgentTriggers> {
         "booking".to_string(),
         trig(
             &["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-            &["last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
+            &["casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
         ),
     );
     m.insert(
@@ -319,11 +319,11 @@ pub fn agent_matches(list: &[String], agent: &str) -> bool {
 pub fn default_mcp_grants(id: &str) -> Vec<String> {
     let list: &[&str] = match id {
         "weather" | "spotify" | "brave-search" => &["general"],
-        "gmail" | "whatsapp" | "time" => &["general", "booking"],
+        "gmail" | "whatsapp" | "time" => &["general"],
         // Google Calendar: Tony's own (reads, and the calendar-add card).
         "calendar" => &["general"],
-        "knowledge-graph" => &["general", "librarian", "prompter", "booking"],
-        "filesystem" => &["coder", "designer", "director", "librarian", "prompter", "booking"],
+        "knowledge-graph" => &["general", "librarian", "prompter"],
+        "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
         "fetch" => &["coder", "prompter"],
         "maps" => &["ops"],
@@ -938,6 +938,24 @@ pub struct OsConfig {
     /// on disk = a config saved before it (version 0: the tool-owner migration runs once).
     #[serde(default = "SwitchboardConfig::legacy")]
     pub switchboard: SwitchboardConfig,
+    /// Tony's tools by mode (section pass): the servers each mode ADDS to his always-on base
+    /// (his own grants in `mcps[].agents`, live in every mode unless frozen on the master
+    /// switchboard). Keyed by mode id; a mode not listed adds nothing. Edited as pills in
+    /// Settings → Master switchboard, like every other agent's.
+    #[serde(default = "default_tony_mode_tools")]
+    pub tony_mode_tools: BTreeMap<String, Vec<String>>,
+}
+
+/// Tony's per-mode extras: Builder adds Git and the filesystem, Operations the business tools,
+/// Executive web page reads. Learning and the conversational modes add nothing (his base stays on).
+pub fn default_tony_mode_tools() -> BTreeMap<String, Vec<String>> {
+    let m: [(&str, &[&str]); 3] = [("builder", &["git", "filesystem"]), ("operations", &["maps", "instagram", "fetch"]), ("executive", &["fetch"])];
+    m.into_iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect()
+}
+
+/// The servers mode `mode_id` adds to Tony's base. Pure.
+pub fn tony_mode_extras<'a>(cfg: &'a OsConfig, mode_id: &str) -> &'a [String] {
+    cfg.tony_mode_tools.get(mode_id).map(Vec::as_slice).unwrap_or(&[])
 }
 
 impl Default for OsConfig {
@@ -967,6 +985,7 @@ impl Default for OsConfig {
             gmail: GmailConfig::default(),
             migrations: vec![],
             switchboard: SwitchboardConfig::default(),
+            tony_mode_tools: default_tony_mode_tools(),
         }
     }
 }
@@ -1004,6 +1023,9 @@ impl Default for ReviewConfig {
 
 /// Migration id: WhatsApp became read-only by default.
 const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
+/// Section pass: the frozen Booking Desk loses every tool pill and skill, and its "messages" /
+/// "texts" routing phrases (Tony reads Gmail and WhatsApp himself).
+const MIGRATE_BOOKING_NO_TOOLS: &str = "booking-no-tools";
 /// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
@@ -1060,6 +1082,38 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
             cfg.routing.agents.entry(role).or_insert(t);
         }
         cfg.migrations.push(MIGRATE_BIZOPS_SPLIT.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_BOOKING_NO_TOOLS) {
+        strip_booking_tools(cfg);
+        cfg.migrations.push(MIGRATE_BOOKING_NO_TOOLS.into());
+    }
+}
+
+/// The Booking Desk gets no tools: off every server's grant list and every skill grant, and its
+/// messages / texts phrases leave its routing row. A list naming ONLY Booking becomes `["none"]`
+/// (an empty list would mean everyone); `"all"` stays `"all"`, and `servers_for` gives a frozen
+/// agent nothing anyway.
+pub(crate) fn strip_booking_tools(cfg: &mut OsConfig) {
+    let booking = |a: &String| a.trim().eq_ignore_ascii_case("booking");
+    for m in cfg.mcps.iter_mut() {
+        if let Some(v) = m.agents.as_mut() {
+            if v.iter().any(booking) {
+                v.retain(|a| !booking(a));
+                if v.is_empty() {
+                    v.push("none".into());
+                }
+            }
+        }
+    }
+    for agents in cfg.skills.grants.values_mut() {
+        agents.retain(|a| !booking(a));
+    }
+    cfg.skills.grants.retain(|_, a| !a.is_empty());
+    if let Some(b) = cfg.routing.agents.get_mut("booking") {
+        b.domains.retain(|d| {
+            let n = super::routing::normalize(d);
+            !(n.contains("message") || n.contains("text"))
+        });
     }
 }
 
@@ -2268,7 +2322,8 @@ mod tests {
         // Booking through these two: neither is a Booking topic any more.
         assert!(!agents["booking"].domains.contains(&"whatsapp".to_string()));
         assert!(!agents["booking"].domains.contains(&"messages".to_string()));
-        assert!(agents["booking"].domains.contains(&"last 5 messages".to_string()));
+        // Nor is any messages / texts read: Tony reads Gmail and WhatsApp himself (section pass).
+        assert!(!agents["booking"].domains.iter().any(|d| d.contains("message") || d.contains("text")));
         // Casting logistics stay with Booking; editing a tape is the Director's.
         assert!(agents["booking"].domains.contains(&"self-tape".to_string()));
         assert!(!agents["director"].domains.contains(&"self-tape".to_string()));
@@ -2288,11 +2343,11 @@ mod tests {
             ("calendar", &["general"]),
             ("spotify", &["general"]),
             ("brave-search", &["general"]),
-            ("gmail", &["general", "booking"]),
-            ("whatsapp", &["general", "booking"]),
-            ("time", &["general", "booking"]),
-            ("knowledge-graph", &["general", "librarian", "prompter", "booking"]),
-            ("filesystem", &["coder", "designer", "director", "librarian", "prompter", "booking"]),
+            ("gmail", &["general"]),
+            ("whatsapp", &["general"]),
+            ("time", &["general"]),
+            ("knowledge-graph", &["general", "librarian", "prompter"]),
+            ("filesystem", &["coder", "designer", "director", "librarian", "prompter"]),
             ("git", &["coder"]),
             ("fetch", &["coder", "prompter"]),
             ("maps", &["ops"]),
@@ -2347,7 +2402,7 @@ mod tests {
     fn default_mcps_carry_exact_grants() {
         let mcps = default_mcps();
         let whatsapp = mcps.iter().find(|m| m.id == "whatsapp").unwrap();
-        assert_eq!(whatsapp.agents, Some(vec!["general".to_string(), "booking".to_string()]));
+        assert_eq!(whatsapp.agents, Some(vec!["general".to_string()]));
         let weather = mcps.iter().find(|m| m.id == "weather").unwrap();
         assert_eq!(weather.agents, Some(vec!["general".to_string()]));
         let spotify = mcps.iter().find(|m| m.id == "spotify").unwrap();
@@ -2381,7 +2436,7 @@ mod tests {
                 m.agents = Some(default_mcp_grants(&m.id));
             }
         }
-        assert_eq!(cfg.mcps[0].agents, Some(vec!["general".to_string(), "booking".to_string()]));
+        assert_eq!(cfg.mcps[0].agents, Some(vec!["general".to_string()]));
         assert_eq!(cfg.mcps[1].agents, Some(vec!["booking".to_string()])); // untouched: user-edited value kept
     }
 
@@ -2401,7 +2456,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string()]);
     }
 
     #[test]

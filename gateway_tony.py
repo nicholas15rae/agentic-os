@@ -122,7 +122,7 @@ _NEUTRAL = re.compile(r"json|/no_think|gabagool", re.I)
 
 WAKING_LINE = "One sec, Nic — waking up."
 # A2: a Gmail / calendar ask with the desktop app closed. Fixed, in persona, no model call.
-DESKTOP_TOOLS_LINE = "Nic, I can only get into your Gmail and your calendar through the desktop app, so I can't check that from here. Open the app on the PC and ask me again."
+DESKTOP_TOOLS_LINE = "Nic, I can only get into your Gmail, WhatsApp and calendar through the desktop app, so I can't check that from here. Open the app on the PC and ask me again."
 # A2: what makes a line a Gmail / calendar job only the desktop can do (`needs_desktop_tools`).
 # Mirrors routing.rs `direct_tool` "gmail" / "calendar" (its DIRECT_* patterns, on the same
 # normalized text) plus agents.rs's "emails from Sam" search; "my inbox" / "my calendar" (also a
@@ -142,6 +142,9 @@ _DT_MAIL_FROM = re.compile(r"\b(?:e ?mails?|g?mails?) from [a-z0-9]")
 _DT_CAL = re.compile(r"\b(?:calendar|agenda)\b")
 _DT_CAL_READ = re.compile(r"\b(?:check|read|any|anything|whats|what is|what do i have|do i have|am i free|am i busy|show|look|today|tonight|tomorrow|this week|next week|upcoming|next|free|busy|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b")
 _DT_CAL_WRITE = re.compile(r"\b(?:put|pop|stick|throw|pencil|block (?:off|out))\b")
+# A messages read ("check my messages", "last 5 texts", "any WhatsApp messages"): WhatsApp, a desktop
+# tool. Mirrors routing.rs DIRECT_MESSAGES; filler words only, so "my agent messages" never matches.
+_DT_MESSAGES = re.compile(r"\b(?:check|read|any|show|see|new|unread|latest|last|recent|did i get|have i got|got any)\b(?: (?:me|my|the|new|unread|latest|last|recent|whatsapp|\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|twenty))* (?:messages?|texts?)\b|\b(?:check|on|from|in|my) whatsapp\b")
 _DT_OWN = re.compile(r"\bmy (?:gmail|inbox|calendar|agenda|schedule)\b")
 # A question about Nic's day with no calendar noun ("what's on today"): the desktop's tool router
 # reads it as a calendar ask (agents.rs router_keyword_ok "calendar": "whats on", "am i free").
@@ -1201,7 +1204,7 @@ def needs_desktop_tools(text: Any) -> bool:
         return False
     if _DT_MAIL.search(n) and (_DT_MAIL_READ.search(n) or _DT_BOOKING.search(n) or _DT_MAIL_FROM.search(n)):
         return True
-    if _DT_SCHEDULE.search(n):
+    if _DT_SCHEDULE.search(n) or _DT_MESSAGES.search(n):
         return True
     return bool(_DT_CAL.search(n) and _DT_CAL_READ.search(n) and not _DT_CAL_WRITE.search(n))
 

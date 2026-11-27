@@ -1,6 +1,7 @@
 import { cmd, isTauri, nativeRaw, onNativeEvent, type TtsUnpinEvent } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { micLevel, useVoice, voiceLevel } from "./voice-store";
+import { speechStarted } from "./speech-start";
 import { SileroStream, preloadSilero } from "./silero";
 import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, isQuietFrame, thresholdFor } from "./vad-gate";
 import { PARTIAL_QUIET_MS, PartialLoop, newCaptureId, partialMsFrom, replyStreaming, sttPartial, type SpeechTick } from "./stt-partials";
@@ -854,6 +855,7 @@ export class KokoroTts implements TtsEngine {
           src.onended = () => resolve(this.pausedSrc !== src);
           this.current = src;
           src.start();
+          if (i === 0) speechStarted();
         });
         if (gen !== this.generation) return;
         if (finished) i++;
@@ -953,6 +955,7 @@ export class WebSpeechTts implements TtsEngine {
         voiceLevel.current = 0;
         resolve();
       };
+      u.onstart = () => speechStarted();
       u.onend = done;
       u.onerror = done;
       speechSynthesis.speak(u);

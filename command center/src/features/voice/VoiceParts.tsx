@@ -3,14 +3,13 @@ import { ArrowRight, BookMarked } from "lucide-react";
 import { PromptBox } from "@/components/PromptBox";
 import { useDraft } from "@/lib/prompt-drafts";
 import { tonyThreadForView, useThreadTurns, useVoice, type ThreadId, type VoiceState } from "./voice-store";
-import { askOverseer, handleInput, runTurnAction, setMicEnabled, toggleListening } from "./voice-controller";
+import { handleInput, runTurnAction, setMicEnabled, toggleListening } from "./voice-controller";
 import { useMic } from "./mic-gate";
 import { MicButtonView } from "./MicLockBadge";
 import { isSelfRelay } from "./route-for";
 import { useFocus } from "@/features/os/focus-store";
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { agentBadge, useOsName } from "@/features/os/os-store";
-import { isTauri } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
 import { AgentConversationCard } from "@/features/transcript/AgentConversationCard";
 import { learnedPillText } from "@/features/modes/learning";
@@ -54,7 +53,6 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
   const turns = useThreadTurns(thread).slice(-max);
   const name = useOsName();
   const end = useRef<HTMLDivElement>(null);
-  const desktop = isTauri();
   // Braces matter: newer Chromium returns a Promise from scrollIntoView, and an
   // effect must not return anything but a cleanup function.
   useEffect(() => {
@@ -141,15 +139,6 @@ export function Transcript({ max = 50, className = "", thread }: { max?: number;
                     {a.label}
                   </button>
                 ))}
-                {desktop && t.who === "agent" && t.from !== "overseer" && (
-                  <button
-                    onClick={() => void askOverseer(t)}
-                    className="rounded-full border border-white/10 px-2.5 py-0.5 text-[11px] text-ink-3 opacity-70 transition-opacity hover:text-ink group-hover:opacity-100"
-                    title="Escalate this answer to the Overseer (Claude / Gemini / droplet — Settings → Integrations)"
-                  >
-                    Ask Overseer
-                  </button>
-                )}
               </div>
             </div>
           </div>

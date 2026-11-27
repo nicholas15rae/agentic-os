@@ -263,6 +263,8 @@ pub fn run() {
                 // MCP: start listing enabled stdio servers ~5 s after launch (into the cache, in
                 // the background). No HTTP / token-gated server is contacted.
                 tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
+                // Section pass: the Librarian workspace is kept on Query mode (checked once at start).
+                tauri::async_runtime::spawn(mcp::librarian_lock_at_start(app.handle().clone()));
                 tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
                 tauri::async_runtime::spawn(commands::hygiene::lifecycle_loop(app.handle().clone()));
                 // Phase 3: idle auto-compaction of Tier-1 memory into Memory Scrolls (off by default).

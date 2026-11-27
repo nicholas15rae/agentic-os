@@ -90,3 +90,13 @@ describe("settings v6 migration (P4: spotifyDuck → mediaDuck)", () => {
     expect(useSettings.getState().conversation).not.toHaveProperty("spotifyDuck");
   });
 });
+
+describe("v8: Agent Chatter off by default", () => {
+  it("is off for a fresh install and reset once for an existing one", () => {
+    expect(useSettings.getInitialState?.().routing.vocalHandoffs ?? false).toBe(false);
+    const s = migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 7);
+    expect(s.routing).toEqual({ announcerHandoff: true, vocalHandoffs: false });
+    // Turned back on after v8: kept.
+    expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 8).routing.vocalHandoffs).toBe(true);
+  });
+});

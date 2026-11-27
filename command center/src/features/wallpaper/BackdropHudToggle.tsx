@@ -3,6 +3,7 @@ import { useNav } from "@/stores/nav";
 import { useBackdrops, patchSurface, useSurfaceConfig } from "./backdrop-store";
 import { useBackdropActive } from "./SurfaceBackdropLayer";
 import type { Surface } from "./backdrop-model";
+import { useWallpaperReveal } from "./reveal-request";
 
 /**
  * In-page HUD pill: `Backdrop: Clean / Custom` (one click, no page change) plus a gear that opens
@@ -14,6 +15,8 @@ export function BackdropHudToggle({ surface }: { surface: Exclude<Surface, "home
   const empty = cfg.enabled && !active;
   const openManager = () => {
     useBackdrops.getState().setTab(surface);
+    // The manager opens with this surface's rotation and upload controls on screen.
+    useWallpaperReveal.getState().request();
     useNav.getState().go("wallpapers");
   };
   return (

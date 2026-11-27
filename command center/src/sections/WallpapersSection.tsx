@@ -1,9 +1,15 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, Pin, PinOff, RotateCcw, Tags, Trash2, Upload } from "lucide-react";
 import { useWallpapers, type WallpaperTags } from "@/features/wallpaper/wallpaper-store";
 import { PHASES, useAtmosphere, useTimePhase, type Atmosphere } from "@/features/weather/weather-store";
 import { SURFACE_LABEL, SURFACE_SHORT, SURFACES, surfacePool, surfacesOf, type Surface } from "@/features/wallpaper/backdrop-model";
 import { patchSurface, useBackdrops, useSurfaceConfig, type ManagerTab } from "@/features/wallpaper/backdrop-store";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { revealPanel } from "@/core/widgets/reveal";
+import type { WidgetProps } from "@/core/widgets/types";
+import { useWallpapersLayout } from "./wallpapers/panels";
+import { useWallpaperUploadMsg } from "./wallpapers/upload-store";
+import { useWallpaperReveal } from "@/features/wallpaper/reveal-request";
 
 const TABS: readonly { id: ManagerTab; label: string }[] = [
   { id: "home", label: "Home" },
@@ -12,30 +18,45 @@ const TABS: readonly { id: ManagerTab; label: string }[] = [
   { id: "all", label: "All Library" },
 ];
 
+/** The surface the open tab edits ("All Library" uploads go to Home). */
+const useTabSurface = (): Surface => {
+  const tab = useBackdrops((s) => s.tab);
+  return tab === "all" ? "home" : tab;
+};
+
 /**
- * Wallpaper manager → Multi-Surface Backdrop Engine. One library (built-ins + IndexedDB uploads),
- * three surfaces (Home, Schematic Flowchart, Orbital Ecosystem) with their own pool, rotation,
- * weather / time sync and — for the System Map pages — a Clean Minimal / Custom switch and a
- * readability blend strip. Each card's Home / Flowchart / Orbital badges add or remove it from
- * that surface's pool in one click.
+ * Wallpaper manager → Multi-Surface Backdrop Engine, on the shared layout system (AGENTS.md,
+ * "Everything Is Customizable"). One library (built-ins + IndexedDB uploads), three surfaces
+ * (Home, Schematic Flowchart, Orbital Ecosystem) with their own pool, rotation, weather / time
+ * sync and — for the System Map pages — a Clean Minimal / Custom switch and a readability blend
+ * strip. Each card's Home / Flowchart / Orbital badges add or remove it from that surface's pool in
+ * one click. The tabs, rotation controls, uploads and gallery are panels.
  */
 export function WallpapersSection() {
-  const { items, currentId, select, toggleEnabled, toggleSurface, upload, remove } = useWallpapers();
+  // The System Map gear ("open the manager on this surface") shows the rotation and upload
+  // controls even if they were hidden or are icons; upload first, so the phone column lands on
+  // the rotation controls the gear was opened for.
+  useEffect(() => {
+    const reveal = () => {
+      if (!useWallpaperReveal.getState().consume()) return;
+      revealPanel(useWallpapersLayout, "wp-upload", "Wallpapers");
+      revealPanel(useWallpapersLayout, "wp-rotation", "Wallpapers");
+    };
+    reveal();
+    return useWallpaperReveal.subscribe((s) => s.pending && reveal());
+  }, []);
+  return <LayoutSurface store={useWallpapersLayout} label="Wallpapers" />;
+}
+
+/** Upload `files` to the open tab's surface; the first images for a System Map page switch its backdrop on. */
+function useUploadHandler() {
+  const items = useWallpapers((s) => s.items);
+  const upload = useWallpapers((s) => s.upload);
   const tab = useBackdrops((s) => s.tab);
-  const setTab = useBackdrops((s) => s.setTab);
-  const surfaceCurrent = useBackdrops((s) => s.current);
-  const surface: Surface = tab === "all" ? "home" : tab;
-  const cfg = useSurfaceConfig(surface);
   const atmosphere = useAtmosphere();
   const phase = useTimePhase();
-  const fitsNow = new Set(surfacePool(items, surface, { syncWeatherTime: true, pinnedWallpaperId: null }, atmosphere, phase).map((w) => w.id));
-  const [tagging, setTagging] = useState<string | null>(null);
-  const input = useRef<HTMLInputElement>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
-  const mapSurface = surface !== "home";
-
-  const handle = async (files: FileList | null) => {
+  const setMsg = useWallpaperUploadMsg((s) => s.set);
+  return async (files: FileList | null) => {
     if (!files?.length) return;
     const target: Surface = tab === "all" ? "home" : tab;
     const poolBefore = surfacePool(items, target, { syncWeatherTime: false, pinnedWallpaperId: null }, atmosphere, phase).length;
@@ -48,6 +69,150 @@ export function WallpapersSection() {
     }
     setMsg([r.added ? `Added ${r.added} wallpaper${r.added > 1 ? "s" : ""} to ${SURFACE_LABEL[target]}.${note}` : "", ...r.rejected].filter(Boolean).join(" "));
   };
+}
+
+/** Home / Schematic Flowchart / Orbital Ecosystem / All Library. */
+export function WallpaperTabs() {
+  const tab = useBackdrops((s) => s.tab);
+  const setTab = useBackdrops((s) => s.setTab);
+  return (
+    <nav aria-label="Backdrop surface" className="flex flex-wrap gap-1.5">
+      {TABS.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          aria-current={tab === t.id ? "page" : undefined}
+          onClick={() => setTab(t.id)}
+          className={`flex h-9 items-center rounded-full border px-3.5 font-mono fs-12 transition-colors ${
+            tab === t.id ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.4)] text-ink-2 backdrop-blur-md hover:border-white/25 hover:text-ink"
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+/** The open surface's backdrop mode, rotation, shuffle, weather & time sync, pin and blend strip. */
+export function WallpaperRotation({ setBadge }: WidgetProps) {
+  const items = useWallpapers((s) => s.items);
+  const tab = useBackdrops((s) => s.tab);
+  const surface = useTabSurface();
+  const cfg = useSurfaceConfig(surface);
+  const atmosphere = useAtmosphere();
+  const phase = useTimePhase();
+  const mapSurface = surface !== "home";
+  // The icon's badge: the rotate interval while rotation is on.
+  const badge = tab !== "all" && cfg.rotateEnabled ? `${cfg.rotateIntervalSec}s` : null;
+  useEffect(() => setBadge?.(badge), [badge, setBadge]);
+  return (
+    <div className="glass space-y-3 r-20 p-4">
+      {mapSurface && (
+        <div role="radiogroup" aria-label={`${SURFACE_LABEL[surface]} backdrop mode`} className="well inline-flex rounded-full p-0.5">
+          {[
+            { on: false, label: "Clean Minimal (Off)" },
+            { on: true, label: "Custom Rolling Backdrop (On)" },
+          ].map((o) => (
+            <button
+              key={String(o.on)}
+              role="radio"
+              aria-checked={cfg.enabled === o.on}
+              onClick={() => patchSurface(surface, { enabled: o.on })}
+              className={`h-8 rounded-full px-3 text-xs transition-colors ${cfg.enabled === o.on ? "bg-amber/25 text-amber-light" : "text-ink-2 hover:text-ink"}`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-4">
+        {tab !== "all" && (
+          <>
+            <label className="flex items-center gap-2 text-sm text-ink-2">
+              <input type="checkbox" checked={cfg.rotateEnabled} onChange={(e) => patchSurface(surface, { rotateEnabled: e.target.checked })} className="accent-amber" />
+              Rotate every
+              <input
+                type="range"
+                min={10}
+                max={300}
+                step={5}
+                value={cfg.rotateIntervalSec}
+                disabled={!cfg.rotateEnabled}
+                onChange={(e) => patchSurface(surface, { rotateIntervalSec: Number(e.target.value) })}
+                className="accent-amber"
+              />
+              <span className="w-12 font-mono text-ink tabular">{cfg.rotateIntervalSec}s</span>
+            </label>
+            <label className="flex items-center gap-2 text-sm text-ink-2">
+              <input type="checkbox" checked={cfg.shuffle} onChange={(e) => patchSurface(surface, { shuffle: e.target.checked })} className="accent-amber" />
+              Shuffle
+            </label>
+            <label className="flex items-center gap-2 text-sm text-ink-2">
+              <input type="checkbox" checked={cfg.syncWeatherTime} onChange={(e) => patchSurface(surface, { syncWeatherTime: e.target.checked })} className="accent-amber" />
+              Sync to weather &amp; time
+            </label>
+            {cfg.pinnedWallpaperId && (
+              <button className="pill-glass !h-8 text-xs" onClick={() => patchSurface(surface, { pinnedWallpaperId: null })}>
+                <PinOff size={12} /> Unpin “{items.find((i) => i.id === cfg.pinnedWallpaperId)?.name ?? "?"}”
+              </button>
+            )}
+          </>
+        )}
+        <span className="label-caps ml-auto text-ink-3">
+          Now: <span className="text-teal">{atmosphere}</span> · <span className="text-amber-soft">{phase}</span>
+        </span>
+      </div>
+      {mapSurface && cfg.enabled && <BlendStrip surface={surface} />}
+      {tab === "all" && <p className="text-xs text-ink-3">The whole library. Rotation is set per surface: pick Home, Schematic Flowchart or Orbital Ecosystem.</p>}
+    </div>
+  );
+}
+
+/** The upload button (to the open surface), the last upload result and how uploads work. */
+export function WallpaperUpload() {
+  const tab = useBackdrops((s) => s.tab);
+  const surface = useTabSurface();
+  const msg = useWallpaperUploadMsg((s) => s.msg);
+  const handle = useUploadHandler();
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <div className="glass space-y-3 r-20 p-4">
+      <button className="pill-primary" onClick={() => input.current?.click()}>
+        <Upload size={15} /> Upload wallpapers{tab !== "all" && tab !== "home" ? ` to ${SURFACE_SHORT[surface]}` : ""}
+      </button>
+      <input ref={input} type="file" accept="image/*" multiple hidden onChange={(e) => void handle(e.target.files)} />
+      {tab === "all" && <p className="text-xs text-ink-3">The whole library. Uploads here go to Home; use the badges on each card to share a wallpaper with the System Map pages.</p>}
+      {msg && (
+        <p className="w-full text-xs text-ink-2" data-no-hold>
+          {msg}
+        </p>
+      )}
+      <p className="text-xs text-ink-3">
+        Drop images anywhere on the gallery. Uploads stay on this device (IndexedDB) and work offline. Tag each scene with the weather and time it
+        suits — with sync on, a snowy December evening rotates through your snow + night scenes.
+      </p>
+    </div>
+  );
+}
+
+/** Every wallpaper as a card; drop images anywhere on it to upload them to the open surface. */
+export function WallpaperGallery({ setBadge }: WidgetProps) {
+  const { items, currentId, select, toggleEnabled, toggleSurface, remove } = useWallpapers();
+  const tab = useBackdrops((s) => s.tab);
+  const surfaceCurrent = useBackdrops((s) => s.current);
+  const surface = useTabSurface();
+  const cfg = useSurfaceConfig(surface);
+  const atmosphere = useAtmosphere();
+  const phase = useTimePhase();
+  const fitsNow = new Set(surfacePool(items, surface, { syncWeatherTime: true, pinnedWallpaperId: null }, atmosphere, phase).map((w) => w.id));
+  const [tagging, setTagging] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const handle = useUploadHandler();
+
+  // The icon's badge: how many wallpapers are in the open surface's pool (the whole library on All).
+  const count = tab === "all" ? items.length : items.filter((w) => surfacesOf(w).includes(surface)).length;
+  useEffect(() => setBadge?.(String(count)), [count, setBadge]);
 
   const isCurrent = (id: string) => (surface === "home" ? id === currentId : surfaceCurrent[surface] === id);
   const pick = (id: string, member: boolean) => {
@@ -56,101 +221,22 @@ export function WallpapersSection() {
   };
 
   return (
-    <div className="mx-auto h-full w-full max-w-6xl overflow-y-auto px-4 pb-28 md:px-6 md:pb-8">
-      <nav aria-label="Backdrop surface" className="mb-3 flex flex-wrap gap-1.5">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            aria-current={tab === t.id ? "page" : undefined}
-            onClick={() => setTab(t.id)}
-            className={`flex h-9 items-center rounded-full border px-3.5 font-mono fs-12 transition-colors ${
-              tab === t.id ? "border-amber/70 bg-amber/10 text-ink" : "border-white/10 bg-[rgba(11,13,17,0.4)] text-ink-2 backdrop-blur-md hover:border-white/25 hover:text-ink"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      <div className="glass mb-4 space-y-3 r-20 p-4">
-        {mapSurface && (
-          <div role="radiogroup" aria-label={`${SURFACE_LABEL[surface]} backdrop mode`} className="well inline-flex rounded-full p-0.5">
-            {[
-              { on: false, label: "Clean Minimal (Off)" },
-              { on: true, label: "Custom Rolling Backdrop (On)" },
-            ].map((o) => (
-              <button
-                key={String(o.on)}
-                role="radio"
-                aria-checked={cfg.enabled === o.on}
-                onClick={() => patchSurface(surface, { enabled: o.on })}
-                className={`h-8 rounded-full px-3 text-xs transition-colors ${cfg.enabled === o.on ? "bg-amber/25 text-amber-light" : "text-ink-2 hover:text-ink"}`}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="flex flex-wrap items-center gap-4">
-          <button className="pill-primary" onClick={() => input.current?.click()}>
-            <Upload size={15} /> Upload wallpapers{tab !== "all" && tab !== "home" ? ` to ${SURFACE_SHORT[surface]}` : ""}
-          </button>
-          <input ref={input} type="file" accept="image/*" multiple hidden onChange={(e) => void handle(e.target.files)} />
-          {tab !== "all" && (
-            <>
-              <label className="flex items-center gap-2 text-sm text-ink-2">
-                <input type="checkbox" checked={cfg.rotateEnabled} onChange={(e) => patchSurface(surface, { rotateEnabled: e.target.checked })} className="accent-amber" />
-                Rotate every
-                <input
-                  type="range"
-                  min={10}
-                  max={300}
-                  step={5}
-                  value={cfg.rotateIntervalSec}
-                  disabled={!cfg.rotateEnabled}
-                  onChange={(e) => patchSurface(surface, { rotateIntervalSec: Number(e.target.value) })}
-                  className="accent-amber"
-                />
-                <span className="w-12 font-mono text-ink tabular">{cfg.rotateIntervalSec}s</span>
-              </label>
-              <label className="flex items-center gap-2 text-sm text-ink-2">
-                <input type="checkbox" checked={cfg.shuffle} onChange={(e) => patchSurface(surface, { shuffle: e.target.checked })} className="accent-amber" />
-                Shuffle
-              </label>
-              <label className="flex items-center gap-2 text-sm text-ink-2">
-                <input type="checkbox" checked={cfg.syncWeatherTime} onChange={(e) => patchSurface(surface, { syncWeatherTime: e.target.checked })} className="accent-amber" />
-                Sync to weather &amp; time
-              </label>
-              {cfg.pinnedWallpaperId && (
-                <button className="pill-glass !h-8 text-xs" onClick={() => patchSurface(surface, { pinnedWallpaperId: null })}>
-                  <PinOff size={12} /> Unpin “{items.find((i) => i.id === cfg.pinnedWallpaperId)?.name ?? "?"}”
-                </button>
-              )}
-            </>
-          )}
-          <span className="label-caps ml-auto text-ink-3">
-            Now: <span className="text-teal">{atmosphere}</span> · <span className="text-amber-soft">{phase}</span>
-          </span>
-        </div>
-        {mapSurface && cfg.enabled && <BlendStrip surface={surface} />}
-        {tab === "all" && <p className="text-xs text-ink-3">The whole library. Uploads here go to Home; use the badges on each card to share a wallpaper with the System Map pages.</p>}
-        {msg && <p className="w-full text-xs text-ink-2">{msg}</p>}
-      </div>
-
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragOver(false);
-          void handle(e.dataTransfer.files);
-        }}
-        className={`grid grid-cols-2 gap-3 r-20 transition-shadow sm:grid-cols-3 lg:grid-cols-4 ${dragOver ? "ring-2 ring-teal" : ""}`}
-      >
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        void handle(e.dataTransfer.files);
+      }}
+      className={`@container h-full min-h-0 overflow-y-auto r-20 transition-shadow ${dragOver ? "ring-2 ring-teal" : ""}`}
+      data-no-hold
+    >
+      {items.length === 0 && <p className="glass r-20 p-4 text-sm text-ink-3">No wallpapers yet. Upload some, or drop images here.</p>}
+      <div className="grid grid-cols-2 gap-3 @xl:grid-cols-3 @4xl:grid-cols-4">
         {items.map((w) => {
           const on = surfacesOf(w);
           const member = tab === "all" || on.includes(surface);
@@ -224,10 +310,6 @@ export function WallpapersSection() {
           );
         })}
       </div>
-      <p className="mt-3 text-xs text-ink-3">
-        Drop images anywhere on the grid. Uploads stay on this device (IndexedDB) and work offline. Tag each scene with the weather and time it
-        suits — with sync on, a snowy December evening rotates through your snow + night scenes.
-      </p>
     </div>
   );
 }

@@ -17,6 +17,8 @@ import shutil
 import string
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +41,9 @@ def _missing_drive() -> str:
 class BackupMirrorTests(unittest.TestCase):
     def setUp(self):
         self.iso = IsolatedCC().__enter__()
+        with cc._mirror_probe_lock:
+            cc._mirror_probe_cache.clear()
+            cc._mirror_probe_inflight.clear()
         cc.kv_set("probe", {"x": 1})
         cc.FILES_DIR.mkdir(parents=True, exist_ok=True)
         (cc.FILES_DIR / "scan.txt").write_text("receipt " * 50, encoding="utf-8")
@@ -47,6 +52,9 @@ class BackupMirrorTests(unittest.TestCase):
         self.m2 = self.mirror_root / "usb" / "copies"
 
     def tearDown(self):
+        t = cc._mirror_bg_thread
+        if t is not None:
+            t.join(10)
         self.iso.__exit__(None, None, None)
         shutil.rmtree(self.mirror_root, ignore_errors=True)
 
@@ -181,10 +189,102 @@ class BackupMirrorTests(unittest.TestCase):
         self.assertFalse(bad["ok"])
         self.assertNotIn("mirrors", bad)
         self.assertEqual(len(list(self.m1.glob("*.zip"))), 1)
-        # Accepting it makes it good, and then it is mirrored.
+        # Accepting it makes it good, and then it is mirrored, in the background (the POST
+        # doesn't wait on the mirror drives).
         ok = cc.accept_failed_backup(Path(bad["file"]).name)
-        self.assertTrue(ok["mirrors"][str(self.m1)]["ok"])
+        self.assertTrue(ok["ok"])
+        self.assertTrue(ok.get("mirrorsPending"))
+        self.assertNotIn("mirrors", ok)
+        cc._mirror_bg_thread.join(10)
+        self.assertFalse(cc._mirror_bg_thread.is_alive())
         self.assertEqual(len(list(self.m1.glob("cc-*.zip"))), 2)
+        row = cc.list_backups()["mirrors"][0]
+        self.assertTrue(row["ok"], row)
+        self.assertEqual(Path(row["lastOkFile"]).name, Path(ok["file"]).name)
+
+    def test_retention_never_deletes_the_copy_it_just_wrote(self):
+        # mirrorKeep 1, then an OLDER-named good backup is mirrored (e.g. an accepted old failed
+        # one): the newest by name stays AND the copy just written stays.
+        self.set_backup(mirrorDirs=[str(self.m1)], mirrorKeep=1)
+        newest = Path(cc.run_backup("test")["file"])
+        old = newest.with_name("cc-20200101-000000.zip")
+        shutil.copyfile(newest, old)
+        res = cc.mirror_backup(old)[str(self.m1)]
+        self.assertTrue(res["ok"], res)
+        self.assertTrue((self.m1 / old.name).is_file(), "the copy written in this run is never removed")
+        self.assertTrue((self.m1 / newest.name).is_file(), "the newest by name is kept")
+        # The next newer backup rotates the old one out as usual (both are ours).
+        nxt = Path(cc.run_backup("test")["file"])
+        self.assertEqual(sorted(p.name for p in self.m1.glob("cc-*.zip")), [nxt.name])
+
+    def test_rotate_mirror_keeps_current_and_newest(self):
+        man = [{"name": f"cc-2026010{i}-000000.zip", "size": 1, "sha256": "x"} for i in range(1, 5)]
+        self.m1.mkdir(parents=True)
+        # None of the files exist: every name is just forgotten, except the kept ones.
+        left = cc._rotate_mirror(self.m1, 1, man, current="cc-20260101-000000.zip")
+        self.assertEqual(sorted(m["name"] for m in left), ["cc-20260101-000000.zip", "cc-20260104-000000.zip"])
+
+    def test_a_stale_partial_this_code_started_is_cleared_and_the_copy_retried(self):
+        self.set_backup(mirrorDirs=[str(self.m1)])
+        info = cc.run_backup("test")
+        name = Path(info["file"]).name
+        (self.m1 / name).unlink()  # pretend the earlier copy died partway
+        part = self.m1 / f".partial-{name}"
+        part.write_bytes(b"half a zip")
+        past = time.time() - 120
+        os.utime(part, (past, past))
+        cc._note_partial(self.m1, part.name, past - 1)
+        out = cc.mirror_latest()[str(self.m1)]
+        self.assertTrue(out["ok"], out)
+        self.assertFalse(part.exists())
+        self.assertTrue((self.m1 / name).is_file())
+        self.assertEqual(cc._partials(), {}, "the record is forgotten once the copy finished")
+
+    def test_a_partial_this_code_did_not_record_is_left_alone(self):
+        self.set_backup(mirrorDirs=[str(self.m1)])
+        name = Path(cc.run_backup("test")["file"]).name
+        (self.m1 / name).unlink()
+        part = self.m1 / f".partial-{name}"
+        part.write_bytes(b"someone's file")
+        past = time.time() - 120
+        os.utime(part, (past, past))
+        out = cc.mirror_latest()[str(self.m1)]
+        self.assertFalse(out["ok"])
+        self.assertIn("remove it by hand", out["reason"])
+        self.assertEqual(part.read_bytes(), b"someone's file")
+        # Recorded, but modified after this attempt started (not older than the attempt): kept.
+        cc._note_partial(self.m1, part.name, past - 1)
+        future = time.time() + 3600
+        os.utime(part, (future, future))
+        self.assertFalse(cc.mirror_latest()[str(self.m1)]["ok"])
+        self.assertEqual(part.read_bytes(), b"someone's file")
+        # Recorded, but bigger than the backup: not our partial copy of it.
+        os.utime(part, (past, past))
+        part.write_bytes(b"x" * (Path(cc.load_config()["backup"]["dir"], name).stat().st_size + 10))
+        os.utime(part, (past, past))
+        self.assertFalse(cc.mirror_latest()[str(self.m1)]["ok"])
+        self.assertTrue(part.exists())
+
+    def test_a_copy_that_fails_partway_cleans_up_its_own_partial(self):
+        self.set_backup(mirrorDirs=[str(self.m1)])
+        real_copy = cc.shutil.copyfile
+
+        def dying_copy(src, dst):
+            with open(dst, "wb") as f:
+                f.write(b"half")
+            raise OSError("the network name is no longer available")
+
+        cc.shutil.copyfile = dying_copy
+        try:
+            info = cc.run_backup("test")
+        finally:
+            cc.shutil.copyfile = real_copy
+        st = info["mirrors"][str(self.m1)]
+        self.assertFalse(st["ok"])
+        self.assertIn("copy failed", st["reason"])
+        self.assertEqual([p.name for p in self.m1.iterdir()], [], "no partial left behind")
+        self.assertTrue(cc.mirror_latest()[str(self.m1)]["ok"])
+
 
     def test_mirror_settings_are_validated(self):
         primary = cc.load_config()["backup"]["dir"]
@@ -204,6 +304,99 @@ class BackupMirrorTests(unittest.TestCase):
     def test_clients_cannot_write_mirror_status(self):
         with self.assertRaises(cc.HTTPException):
             cc.put_kv("backup.mirrors", {"value": {}})
+
+
+class SlowMirrorTests(unittest.TestCase):
+    """An offline SMB share / mapped drive: Path(anchor).exists() hangs (fake: until released)."""
+
+    SLOW = r"\\offline-nas\share\cc-mirror"
+
+    def setUp(self):
+        if os.name != "nt":
+            self.skipTest("UNC paths (Windows)")
+        self.iso = IsolatedCC().__enter__()
+        with cc._mirror_probe_lock:
+            cc._mirror_probe_cache.clear()
+            cc._mirror_probe_inflight.clear()
+        cc.kv_set("probe", {"x": 1})
+        self.mirror_root = Path(tempfile.mkdtemp(prefix="agentic-os-mirror-"))
+        self.m1 = self.mirror_root / "drive-d" / "cc-mirror"
+        self.release = threading.Event()
+        self.calls: list[str] = []
+        self._exists = cc._mirror_exists
+        slow_anchor = Path(self.SLOW).anchor
+
+        def fake_exists(p):
+            self.calls.append(str(p))
+            if str(p) == slow_anchor:
+                self.release.wait(30)  # an SMB redirector that doesn't answer
+                return False
+            return self._exists(p)
+
+        cc._mirror_exists = fake_exists
+        cc.put_config({"backup": {"mirrorDirs": [self.SLOW, str(self.m1)]}})
+
+    def tearDown(self):
+        self.release.set()
+        cc._mirror_exists = self._exists
+        self.iso.__exit__(None, None, None)
+        shutil.rmtree(self.mirror_root, ignore_errors=True)
+
+    def test_backups_list_answers_within_the_probe_timeout_and_caches(self):
+        t0 = time.monotonic()
+        rows = {r["dir"]: r for r in cc.list_backups()["mirrors"]}
+        took = time.monotonic() - t0
+        self.assertLess(took, cc.MIRROR_PROBE_TIMEOUT + 1.5, "bounded, not the 15 s client timeout")
+        slow = rows[self.SLOW]
+        self.assertFalse(slow["reachable"])
+        self.assertTrue(slow["notAnswering"])
+        self.assertIn("not answering", slow["alert"])
+        self.assertTrue(rows[str(self.m1)]["reachable"])
+        # Cached for ~60 s: the next load doesn't wait again, and no second probe is started.
+        n = len([c for c in self.calls if c == Path(self.SLOW).anchor])
+        t0 = time.monotonic()
+        cc.list_backups()
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(len([c for c in self.calls if c == Path(self.SLOW).anchor]), n)
+
+    def test_a_backup_waits_only_seconds_on_mirrors_and_skips_the_dead_one(self):
+        t0 = time.monotonic()
+        info = cc.run_backup("test")
+        took = time.monotonic() - t0
+        self.assertTrue(info["ok"], info.get("verified"))
+        # Name choice (bounded) + the mirror probe (bounded), not the share's own timeout.
+        self.assertLess(took, 3 * cc.MIRROR_PROBE_TIMEOUT + 3)
+        self.assertTrue(Path(info["file"]).is_file(), "the primary zip is written")
+        dead = info["mirrors"][self.SLOW]
+        self.assertFalse(dead["ok"])
+        self.assertTrue(dead["unreachable"])
+        self.assertIn("not answering", dead["reason"])
+        self.assertTrue(info["mirrors"][str(self.m1)]["ok"])
+        self.assertFalse(cc.kv_get("backup.mirrors")[self.SLOW]["ok"], "the skip is recorded")
+        # Only one probe of the hung share is ever in flight.
+        self.assertEqual(len([c for c in self.calls if c == Path(self.SLOW).anchor]), 1)
+
+    def test_free_backup_path_never_probes_mirrors_synchronously(self):
+        d = Path(cc.load_config()["backup"]["dir"])
+        d.mkdir(parents=True, exist_ok=True)
+        cc.kv_set("backup.mirrorManifest", {self.SLOW: [{"name": "cc-20261126-101440.zip", "size": 1, "sha256": "x"}]})
+        t0 = time.monotonic()
+        z = cc._free_backup_path(d, "20261126-101440", [self.SLOW, str(self.m1)])
+        self.assertLess(time.monotonic() - t0, 2 * cc.MIRROR_PROBE_TIMEOUT + 1.5)
+        self.assertEqual(z.name, "cc-20261126-101440b.zip", "a name the manifest says the dead mirror holds is skipped")
+
+    def test_a_late_answer_replaces_the_timeout_in_the_cache(self):
+        r = cc._mirror_reach([self.SLOW], timeout=0.2)[self.SLOW]
+        self.assertTrue(r["timeout"])
+        self.release.set()
+        for _ in range(50):
+            with cc._mirror_probe_lock:
+                if not cc._mirror_probe_inflight:
+                    break
+            time.sleep(0.05)
+        r = cc._mirror_reach([self.SLOW], timeout=0.2)[self.SLOW]
+        self.assertNotIn("timeout", r)
+        self.assertFalse(r["reachable"])
 
 
 class VaultCoverageTests(unittest.TestCase):

@@ -3323,21 +3323,28 @@ pub(crate) fn private_tools(tool: Option<&str>, steps: &[OsStep]) -> Option<&'st
     tool.and_then(kind).or_else(|| steps.iter().filter(|s| s.kind == "tool").find_map(|s| kind(&s.to)))
 }
 
-/// Decision 4 by the request's own words: a Gmail / Google Calendar read (`routing::direct_tool`),
-/// or a line about Nic's own inbox / calendar ("add the shoot to my calendar"), is private
-/// ("email" / "calendar") even when no mail or calendar tool ran: a model test on the GPU
-/// answered first (the maintenance line), or the chain failed before the tool. Pure.
+/// Decision 4 by the request's own words: a Gmail / Google Calendar / vault read
+/// (`routing::direct_tool`), or a line about Nic's own inbox / calendar / vault ("add the shoot to
+/// my calendar", "anything in my vault about the pilot"), is private ("email" / "calendar" /
+/// "vault") even when no mail, calendar or vault tool ran: a model test on the GPU answered first
+/// (the maintenance line), or the chain failed before the tool. Pure.
 pub(crate) fn private_words(text: &str) -> Option<&'static str> {
     static MAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static CALENDAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static VAULT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     match super::routing::direct_tool(text) {
         Some("gmail") => return Some("email"),
         Some("calendar") => return Some("calendar"),
+        // Section 16.6: a vault read (routing::DIRECT_VAULT) whose vault.search step didn't run.
+        Some("vault") => return Some("vault"),
         _ => {}
     }
     let n = super::routing::normalize(text);
     if MAIL.get_or_init(|| regex::Regex::new(r"\b(?:gmail|inbox|my (?:e ?mails?|mail))\b").unwrap()).is_match(&n) {
         return Some("email");
+    }
+    if VAULT.get_or_init(|| regex::Regex::new(r"\b(?:my vault|(?:in|from|through) (?:my |the )?vault)\b").unwrap()).is_match(&n) {
+        return Some("vault");
     }
     CALENDAR.get_or_init(|| regex::Regex::new(r"\b(?:my (?:google )?calendar|google calendar|my agenda)\b").unwrap()).is_match(&n).then_some("calendar")
 }
@@ -4130,6 +4137,36 @@ mod tests {
         log_failed_turn(&bridge, "general", ask, &[], &format!("all providers failed for: {ask}"), &[]);
         let logged: String = std::fs::read_dir(dir.join("logs")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect();
         assert!(logged.contains("\"private\":\"calendar\"") && !logged.contains("Patel"), "{logged}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Section 16.6 review: a vault read whose vault.search step didn't run (the maintenance line,
+    /// a failed chain) is private by its words alone, like mail and calendar.
+    #[test]
+    fn vault_words_alone_make_a_turn_private() {
+        for text in [
+            "search my notes for the pilot audition",
+            "what did I save about the Netflix callback?",
+            "find the note about the zebra mural",
+            "anything in my vault about Sam's contract",
+            "look through the vault for the sides",
+        ] {
+            assert_eq!(private_words(text), Some("vault"), "{text}");
+            let rec = turn_record("general", text, &turn(MAINTENANCE_LINE, None), &[]);
+            assert_eq!(rec["private"], "vault", "{text}");
+            assert!(!rec.to_string().contains(text), "{text}");
+        }
+        for text in ["fix the vault page layout", "tell me a joke", "what's a bank vault"] {
+            assert_eq!(private_words(text), None, "{text}");
+        }
+        // The failed-turn record (no answer) follows the same rule.
+        let dir = std::env::temp_dir().join(format!("vault-failed-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+        let bridge = BridgeState::default();
+        bridge.init(&dir, dir.join("logs"));
+        let ask = "search my vault for the Patel contract";
+        log_failed_turn(&bridge, "general", ask, &[], &format!("all providers failed for: {ask}"), &[]);
+        let logged: String = std::fs::read_dir(dir.join("logs")).unwrap().flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect();
+        assert!(logged.contains("\"private\":\"vault\"") && !logged.contains("Patel"), "{logged}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -5,7 +5,13 @@
  * Storage: the `srs` table next to `phrases` in library.db (one row per phrase, created on the
  * first review). Rust (`language_hub.rs`) and the gateway (`language_hub_api.py`) only validate and
  * persist what this module computes, so there is ONE scheduler. A phrase with no row yet is a new
- * card, due at the moment it was saved — i.e. due now.
+ * card, due at the moment it was saved — i.e. due now. (Phrases marked learning / mastered before the
+ * `srs` table existed have no row either: see `legacySrs`.)
+ *
+ * Early reviews: a card answered before it is due (the deck and today's lesson fill up with
+ * not-yet-due cards) is PRACTICE. "Got it" / "Hard" on it changes nothing — no reps, no interval, no
+ * mastery — so two taps a minute apart can't make a phrase "mastered". "Again" still counts: missing
+ * a card is information whenever it happens.
  */
 import type { LangEntry, Mastery, SrsState } from "./contract";
 
@@ -24,9 +30,35 @@ export function initialSrs(savedAt: number): SrsState {
   return { ease: START_EASE, interval_days: 0, due_at: savedAt, reps: 0, lapses: 0, last_review: null };
 }
 
-export function srsOf(e: Pick<LangEntry, "timestamp"> & { srs?: SrsState | null }): SrsState {
-  return e.srs ?? initialSrs(e.timestamp);
+/** Default interval for a phrase marked mastered before spaced repetition existed. */
+export const LEGACY_MASTERED_DAYS = 14;
+
+/**
+ * The schedule of a phrase with no `srs` row. A "new" (or "learning") phrase is due since it was
+ * saved. A phrase already "mastered" before 763dab0 is treated as a learned card last seen when it
+ * was saved (the phrases table has no updated-at column, so the save time is the only anchor) with a
+ * 14-day interval — it comes back 14 days after saving instead of counting as overdue from day one.
+ */
+export function legacySrs(e: Pick<LangEntry, "timestamp"> & { mastery_status?: Mastery }): SrsState {
+  if (e.mastery_status === "mastered") {
+    return {
+      ease: START_EASE,
+      interval_days: LEGACY_MASTERED_DAYS,
+      due_at: e.timestamp + LEGACY_MASTERED_DAYS * DAY_MS,
+      reps: 2,
+      lapses: 0,
+      last_review: e.timestamp,
+    };
+  }
+  return initialSrs(e.timestamp);
 }
+
+export function srsOf(e: Pick<LangEntry, "timestamp"> & { srs?: SrsState | null; mastery_status?: Mastery }): SrsState {
+  return normalizeSrs(e.srs) ?? legacySrs(e);
+}
+
+/** True when grading `prev` at `now` is early: the card isn't due yet. */
+export const isEarly = (prev: SrsState, now: number) => prev.due_at > now;
 
 const clampEase = (x: number) => Math.min(MAX_EASE, Math.max(MIN_EASE, Math.round(x * 100) / 100));
 const clampDays = (x: number) => Math.min(MAX_INTERVAL_DAYS, Math.max(1, Math.round(x)));
@@ -37,6 +69,8 @@ const clampDays = (x: number) => Math.min(MAX_INTERVAL_DAYS, Math.max(1, Math.ro
  * reps back to 0, ease −0.2, due again in 10 minutes. Ease never drops below 1.3.
  */
 export function review(prev: SrsState, grade: SrsGrade, now: number): SrsState {
+  // Practice on a card that isn't due: "Got it" / "Hard" don't move the schedule (see top of file).
+  if (grade !== "again" && isEarly(prev, now)) return prev;
   if (grade === "again") {
     return {
       ease: clampEase(prev.ease - 0.2),
@@ -69,9 +103,19 @@ export function masteryAfter(current: Mastery, grade: SrsGrade, next?: SrsState)
   return current === "mastered" || !next || next.reps >= 2 ? "mastered" : "learning";
 }
 
-/** The patch a review writes back: the new schedule plus the mastery chip. */
+/** True when this answer is practice only (an early "Got it" / "Hard"): nothing needs saving. */
+export function isPracticeReview(e: LangEntry, grade: SrsGrade, now: number): boolean {
+  return grade !== "again" && isEarly(srsOf(e), now);
+}
+
+/**
+ * The patch a review writes back: the new schedule plus the mastery chip. An early "Got it" /
+ * "Hard" returns the current schedule and mastery unchanged (never promotes).
+ */
 export function reviewPatch(e: LangEntry, grade: SrsGrade, now: number): { srs: SrsState; mastery_status: Mastery } {
-  const srs = review(srsOf(e), grade, now);
+  const prev = srsOf(e);
+  if (isPracticeReview(e, grade, now)) return { srs: prev, mastery_status: e.mastery_status };
+  const srs = review(prev, grade, now);
   return { srs, mastery_status: masteryAfter(e.mastery_status, grade, srs) };
 }
 
@@ -90,7 +134,8 @@ export const dueCount = (entries: LangEntry[], now: number) => entries.reduce((n
 
 /**
  * A flashcard deck: every due card first (most overdue first), then — to fill up to `max` — the
- * not-yet-due cards that aren't mastered, soonest first.
+ * not-yet-due cards that aren't mastered, soonest first. The filler is practice: grading it doesn't
+ * advance its schedule (`review`).
  */
 export function flashcardOrder(entries: LangEntry[], now: number, max = 20): LangEntry[] {
   const due = dueEntries(entries, now);
@@ -102,6 +147,7 @@ export function flashcardOrder(entries: LangEntry[], now: number, max = 20): Lan
 /** Validate a schedule coming off the wire (mirrors the Rust/Python clamps). */
 export function normalizeSrs(raw: unknown): SrsState | null {
   if (!raw || typeof raw !== "object") return null;
+  // A stored row must have a schedule time; anything else is "no row" (srsOf falls back to legacySrs).
   const o = raw as Record<string, unknown>;
   const n = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) ? v : d);
   if (typeof o.due_at !== "number" || !Number.isFinite(o.due_at)) return null;

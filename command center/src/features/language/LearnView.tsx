@@ -10,7 +10,7 @@ import { langName } from "./languages";
 import { foreignSide } from "./library";
 import { CURVEBALL_LEVELS } from "./curveballs";
 import { buildDailyLesson, dailyLessonDue } from "./daily";
-import { dueCount, flashcardOrder, type SrsGrade } from "./srs";
+import { dueCount, flashcardOrder, isDue, type SrsGrade } from "./srs";
 import { lessonPrompt, LESSON_KINDS, normalizeLesson, normalizeTutor, tutorPrompt, type LessonKind } from "./prompts";
 import { LangSelect, PlayButton, RecordButton, SaveButton, toastError } from "./parts";
 import { newKey, useHub, type DrillCard, type TutorMsg } from "./store";
@@ -388,6 +388,10 @@ function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone:
     return dueCount(library.filter((e) => ids.has(e.id)), Date.now());
   }, [queue, i, library]);
 
+  // A Library card that isn't due yet is practice: "Got it" doesn't move its schedule (srs.ts).
+  const cardEntry = card?.entryId ? library.find((e) => e.id === card.entryId) : undefined;
+  const practice = !!cardEntry && !isDue(cardEntry, Date.now());
+
   if (!card) {
     return (
       <section className="glass space-y-3 rounded-[20px] p-5 text-center" aria-label="Flashcards done">
@@ -422,6 +426,11 @@ function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone:
         </span>
         <span>{langName(card.lang)}</span>
         {dueLeft > 0 && <span className="font-mono text-teal-light">{dueLeft} due</span>}
+        {practice && (
+          <span className="text-ink-3" title="Not due yet: answering doesn't change when it comes back (Review again still does)">
+            practice
+          </span>
+        )}
         <button type="button" onClick={onDone} className="pill-glass ml-auto !h-8 text-xs">
           End
         </button>

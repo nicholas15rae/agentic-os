@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Archive, CheckCircle2, CircleDashed, CloudUpload, Copy, Database, HardDriveDownload, Loader2, RefreshCw, Search, XCircle } from "lucide-react";
 import { Card, Chip, Field, Input, Stat } from "@/components/ui";
 import { backupSummary, cc, type BackupList, type CcConfig, type Collection, type VaultResults } from "@/lib/cc-api";
+import { gateway } from "@/lib/gateway";
 import { useNav } from "@/stores/nav";
 import { cmd, isTauri, type PipelinesSettings, type SyncResult } from "@/lib/platform";
 import { MemoryLifecycleCard } from "@/sections/settings/MemorySettings";
@@ -119,6 +120,13 @@ export function VaultSection() {
   );
 }
 
+/**
+ * GET /api/cc/backups with a longer timeout than the default: it probes the mirror folders
+ * (bounded on the gateway, ~2 s, cached a minute), and a slow answer must not blank the card.
+ */
+const BACKUPS_TIMEOUT_MS = 45_000;
+const fetchBackups = () => gateway<BackupList>("/api/cc/backups", { timeoutMs: BACKUPS_TIMEOUT_MS });
+
 function BackupCard() {
   const [cfg, setCfg] = useState<CcConfig | null>(null);
   const [list, setList] = useState<BackupList | null>(null);
@@ -134,14 +142,18 @@ function BackupCard() {
         .then(([settings, last]) => setDrive({ settings, last }))
         .catch(() => setDrive(null));
     }
+    // Loaded separately: a slow backups list (mirror drives) can't blank the schedule / health.
+    const backups = fetchBackups()
+      .then(setList)
+      .catch((e) => setMsg(`Backups list: ${String(e)}`));
     try {
-      const [c, l, h] = await Promise.all([cc.config(), cc.backups(), cc.health()]);
+      const [c, h] = await Promise.all([cc.config(), cc.health()]);
       setCfg(c);
-      setList(l);
       setHealth(h);
     } catch (e) {
       setMsg(`Gateway: ${String(e)}`);
     }
+    await backups;
   };
   const driveState = drive ? driveSyncState(drive.settings, drive.last, cfg?.backup.dir) : null;
   const alerts = mirrorAlerts(list);
@@ -186,8 +198,8 @@ function BackupCard() {
               const name = list.failure?.file.split(/[\\/]/).pop() ?? "";
               setBusy("accept");
               try {
-                await cc.acceptBackup(name);
-                setMsg(`Accepted ${name} as a good backup.`);
+                const r = (await cc.acceptBackup(name)) as { mirrorsPending?: boolean };
+                setMsg(`Accepted ${name} as a good backup.${r?.mirrorsPending ? " Copying it to the mirror folders in the background (Refresh to see)." : ""}`);
                 await load();
               } catch (e) {
                 setMsg(String(e));
@@ -455,7 +467,7 @@ function VaultChecklistCard() {
   const [drive, setDrive] = useState<DriveSyncState | null>(null);
   const [writtenDown, setWrittenDown] = useState(readWrittenDown);
   useEffect(() => {
-    void cc.backups().then(setList).catch(() => setList(null));
+    void fetchBackups().then(setList).catch(() => setList(null));
     void Promise.all([cmd("pipelines_settings"), cmd("pipelines_last_sync").catch(() => null), cc.config().catch(() => null)])
       .then(([s, last, c]) => setDrive(driveSyncState(s, last, c?.backup.dir)))
       .catch(() => setDrive(null));

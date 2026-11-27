@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LangEntry, SrsState } from "./contract";
 import { CURVEBALL_RATE, curveballFor, curveballGrade, isCurveballLevel, recordCurveballReview } from "./curveballs";
 import { buildDailyLesson, DAILY_MAX_ITEMS, dailyLessonDue, dayKey, snoozeUntil } from "./daily";
-import { byDue, DAY_MS, dueCount, flashcardOrder, initialSrs, isDue, masteryAfter, MIN_EASE, normalizeSrs, RELEARN_MS, review, reviewPatch, START_EASE } from "./srs";
+import { byDue, DAY_MS, dueCount, flashcardOrder, initialSrs, isDue, isPracticeReview, LEGACY_MASTERED_DAYS, masteryAfter, MIN_EASE, normalizeSrs, RELEARN_MS, review, reviewPatch, srsOf, START_EASE } from "./srs";
 
 const T0 = new Date(2026, 10, 27, 12, 0, 0).getTime(); // local noon, so day math is timezone-safe
 
@@ -122,6 +122,82 @@ describe("SM-2 scheduler", () => {
     expect(normalizeSrs(null)).toBeNull();
     expect(normalizeSrs({ ease: 2 })).toBeNull();
     expect(normalizeSrs({ due_at: 5, ease: 0.2, reps: -3, lapses: 2.7, interval_days: 99999 })).toEqual({ ease: MIN_EASE, interval_days: 3650, due_at: 5, reps: 0, lapses: 2, last_review: null });
+  });
+});
+
+describe("early reviews are practice", () => {
+  /** Apply a patch the way the store + server do. */
+  const apply = (e: LangEntry, p: { srs: SrsState; mastery_status: LangEntry["mastery_status"] }): LangEntry => ({ ...e, ...p });
+
+  it("save -> Got it -> Got it a minute later stays learning, interval <= 1 day", () => {
+    let e = entry({ timestamp: T0 });
+    e = apply(e, reviewPatch(e, "good", T0));
+    expect(e.mastery_status).toBe("learning");
+    expect(isPracticeReview(e, "good", T0 + 60_000)).toBe(true);
+    e = apply(e, reviewPatch(e, "good", T0 + 60_000));
+    expect(e.mastery_status).toBe("learning");
+    expect(e.srs!.interval_days).toBeLessThanOrEqual(1);
+    expect(e.srs).toMatchObject({ reps: 1, due_at: T0 + DAY_MS, last_review: T0 });
+    // A third tap, and "hard", change nothing either.
+    expect(reviewPatch(e, "good", T0 + 120_000)).toEqual({ srs: e.srs, mastery_status: "learning" });
+    expect(reviewPatch(e, "hard", T0 + 120_000)).toEqual({ srs: e.srs, mastery_status: "learning" });
+  });
+
+  it("never promotes mastery early, even from reps 1 -> 2", () => {
+    const e = entry({ mastery_status: "learning", srs: sched({ reps: 1, interval_days: 1, due_at: T0 + DAY_MS, last_review: T0 }) });
+    expect(reviewPatch(e, "good", T0 + DAY_MS - 1).mastery_status).toBe("learning");
+    // Once due, the same answer is a real step: 6 days and mastered.
+    const due = reviewPatch(e, "good", T0 + DAY_MS);
+    expect(due).toMatchObject({ mastery_status: "mastered", srs: { reps: 2, interval_days: 6 } });
+  });
+
+  it("'again' on an early card still shortens it", () => {
+    const e = entry({ mastery_status: "mastered", srs: sched({ reps: 3, interval_days: 15, due_at: T0 + 10 * DAY_MS }) });
+    expect(isPracticeReview(e, "again", T0)).toBe(false);
+    const p = reviewPatch(e, "again", T0);
+    expect(p).toMatchObject({ mastery_status: "learning", srs: { reps: 0, interval_days: 0, due_at: T0 + RELEARN_MS, lapses: 1 } });
+  });
+
+  it("due-card behaviour is unchanged", () => {
+    const s = sched({ reps: 2, interval_days: 6, due_at: T0 });
+    expect(review(s, "good", T0)).toMatchObject({ reps: 3, interval_days: 15, due_at: T0 + 15 * DAY_MS });
+    expect(review(s, "good", T0 + DAY_MS).due_at).toBe(T0 + DAY_MS + 15 * DAY_MS); // overdue too
+    expect(review(s, "hard", T0)).toMatchObject({ reps: 3, interval_days: 7 });
+  });
+
+  it("today's lesson filler (recent, not due) is practice too", () => {
+    const recent = entry({ timestamp: T0 - 3_600_000, mastery_status: "learning", srs: sched({ reps: 1, interval_days: 1, due_at: T0 + DAY_MS }) });
+    const l = buildDailyLesson([recent], "it", T0);
+    expect(l.items.map((e) => e.id)).toEqual([recent.id]);
+    expect(l.due).toBe(0);
+    expect(reviewPatch(recent, "good", T0)).toEqual({ srs: recent.srs, mastery_status: "learning" });
+  });
+});
+
+describe("phrases without an srs row (before spaced repetition)", () => {
+  it("mastered: a 14-day card from its save time, not overdue", () => {
+    const e = entry({ timestamp: T0 - 3 * DAY_MS, mastery_status: "mastered", srs: null });
+    expect(srsOf(e)).toEqual({ ease: START_EASE, interval_days: LEGACY_MASTERED_DAYS, due_at: T0 + 11 * DAY_MS, reps: 2, lapses: 0, last_review: T0 - 3 * DAY_MS });
+    expect(isDue(e, T0)).toBe(false);
+    expect(isDue(e, T0 + 11 * DAY_MS)).toBe(true);
+    expect(dueCount([e], T0)).toBe(0);
+    expect(flashcardOrder([e], T0)).toEqual([]);
+    expect(buildDailyLesson([e], "it", T0).due).toBe(0);
+    // Reviewing it once due continues from the 14-day interval.
+    expect(reviewPatch(e, "good", T0 + 11 * DAY_MS)).toMatchObject({ mastery_status: "mastered", srs: { reps: 3, interval_days: 35 } });
+  });
+
+  it("learning and new: due now (since saved)", () => {
+    const learning = entry({ timestamp: T0 - DAY_MS, mastery_status: "learning", srs: null });
+    const fresh = entry({ timestamp: T0 - DAY_MS, mastery_status: "new" });
+    expect(srsOf(learning)).toEqual(initialSrs(T0 - DAY_MS));
+    expect(srsOf(fresh)).toEqual(initialSrs(T0 - DAY_MS));
+    expect(dueCount([learning, fresh], T0)).toBe(2);
+  });
+
+  it("a stored row always wins over the legacy default", () => {
+    const e = entry({ mastery_status: "mastered", srs: sched({ due_at: T0 - 1 }) });
+    expect(isDue(e, T0)).toBe(true);
   });
 });
 

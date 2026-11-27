@@ -10,7 +10,7 @@ import { langApi } from "./api";
 import type { TutorTurn } from "./prompts";
 import { isCurveballLevel } from "./curveballs";
 import { dayKey, snoozeUntil } from "./daily";
-import { reviewPatch, type SrsGrade } from "./srs";
+import { isPracticeReview, reviewPatch, type SrsGrade } from "./srs";
 
 export type HubView = "translate" | "learn" | "library";
 
@@ -119,7 +119,7 @@ interface HubState extends Prefs {
   patchTutor: (lang: string, key: string, reply: TutorReply) => void;
   resetTutor: (lang: string) => void;
   setDeck: (cards: DrillCard[], source?: "daily" | null) => void;
-  /** Grade a Library phrase (flashcard or curveball): new SRS schedule + mastery, saved to disk. */
+  /** Grade a Library phrase (flashcard or curveball): new SRS schedule + mastery, saved to disk. Not-due cards are practice (no write unless "again"). */
   reviewEntry: (id: string, grade: SrsGrade, now?: number) => Promise<void>;
   setCurveballs: (level: CurveballLevel) => void;
   snoozeDaily: (kind: "today" | "3days", now?: number) => void;
@@ -243,6 +243,8 @@ export const useHub = create<HubState>((set, get) => ({
   reviewEntry: async (id, grade, now = Date.now()) => {
     const e = get().library.find((x) => x.id === id);
     if (!e) return;
+    // An early "Got it" / "Hard" is practice: the schedule and mastery stay as they are (srs.ts).
+    if (isPracticeReview(e, grade, now)) return;
     await get().updateEntry(id, reviewPatch(e, grade, now));
   },
   setCurveballs: (curveballs) => {

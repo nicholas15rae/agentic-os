@@ -393,6 +393,9 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         // Finance (read-only `finance.ask`, Section 11.10): Tony's alone. The finance role may
         // also read it if Nic grants it; `mcp::finance_reader_refusal` refuses everyone else.
         "finance" => &["general"],
+        // Vault search (read-only `vault.search`, Section 16.6): Tony's alone;
+        // `mcp::vault_reader_refusal` refuses every other agent whatever the grants say.
+        "vault" => &["general"],
         "knowledge-graph" => &["general", "librarian", "prompter"],
         "filesystem" => &["coder", "designer", "director", "librarian", "prompter"],
         "git" => &["coder"],
@@ -536,6 +539,7 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("instagram", "Instagram", true, "Your Instagram Professional account: profile stats, recent posts and insights, comments. Replies and publishing only after the confirmation card (needs INSTAGRAM_ACCESS_TOKEN)."),
         builtin("calendar", "Google Calendar", true, "Your upcoming events through the Google Apps Script deployment AnythingLLM's Calendar agent uses (imported on first use). Adding an event only after the confirmation card; never invites."),
         builtin("finance", "Finance (read-only)", true, "Tony answers money questions from the Finance records on the local gateway: what you owe an agent, income and expenses by area, pending money, unpaid invoices, HST dates. Read-only summaries, never raw rows; changes stay on the Finance screens."),
+        builtin("vault", "Vault search (read-only)", true, "Tony searches your saved brainstorms, scripts & auditions, jobs, documents and ideas on the local gateway (\"find the note about…\"). A few short quoted matches, never finance records; nothing is changed."),
         McpServer {
             id: "whatsapp".into(),
             name: "WhatsApp Bridge".into(),
@@ -1173,6 +1177,9 @@ pub(crate) const MIGRATE_BOOKING_NAMES: &str = "booking-names";
 /// Migration id: Tony's read-only Finance tool (Section 11.10): the `finance` server is granted to
 /// Tony only, once (`grant_finance_read`).
 pub(crate) const MIGRATE_FINANCE_READ: &str = "finance-read";
+/// Migration id: Tony's read-only vault search (Section 16.6): the `vault` server is granted to
+/// Tony only, once (`grant_vault_search`).
+pub(crate) const MIGRATE_VAULT_SEARCH: &str = "vault-search";
 /// Migration id: contracting phrases left the frozen Ops for Tony (`ops_phrases_to_tony`), for a
 /// config that already ran an earlier `routing-resplit` which put them on Ops.
 pub(crate) const MIGRATE_OPS_PHRASES_TO_TONY: &str = "ops-phrases-to-tony";
@@ -1269,6 +1276,20 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_FINANCE_READ) {
         grant_finance_read(cfg);
         cfg.migrations.push(MIGRATE_FINANCE_READ.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_SEARCH) {
+        grant_vault_search(cfg);
+        cfg.migrations.push(MIGRATE_VAULT_SEARCH.into());
+    }
+}
+
+/// Once (Section 16.6): the `vault` server (back-filled from `default_mcps` on load) is granted to
+/// Tony only, so a row saved under that id earlier (or with "all") never hands the vault to another
+/// agent. `enabled` is left as saved. Afterwards Nic's own grant edits stand (and
+/// `mcp::vault_reader_refusal` still refuses everyone but Tony).
+pub(crate) fn grant_vault_search(cfg: &mut OsConfig) {
+    for m in cfg.mcps.iter_mut().filter(|m| m.id == "vault") {
+        m.agents = Some(vec!["general".into()]);
     }
 }
 
@@ -2718,11 +2739,38 @@ mod tests {
         apply_migrations(&mut cfg);
         assert_eq!(grants(&cfg), ["general"]);
         assert!(!cfg.mcps.iter().find(|m| m.id == "finance").unwrap().enabled, "a server Nic switched off stays off");
-        assert_eq!(cfg.migrations.last().map(String::as_str), Some(MIGRATE_FINANCE_READ));
+        // finance-read, then the vault-search grant appended after it (Section 16.6).
+        assert_eq!(cfg.migrations.iter().rev().take(2).map(String::as_str).collect::<Vec<_>>(), [MIGRATE_VAULT_SEARCH, MIGRATE_FINANCE_READ]);
         // Once: Nic grants the finance role too; the migration never takes it back.
         cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["general".into(), "finance".into()]);
         apply_migrations(&mut cfg);
         assert_eq!(grants(&cfg), ["general", "finance"]);
+    }
+
+    /// Section 16.6: the read-only vault search server is a builtin, on, Tony's alone, by default
+    /// and by the one-time migration (appended after finance-read; a later edit stands).
+    #[test]
+    fn vault_search_server_is_tonys_once() {
+        let grants = |c: &OsConfig| c.mcps.iter().find(|m| m.id == "vault").and_then(|m| m.agents.clone()).unwrap_or_default();
+        let fresh = OsConfig::default();
+        let v = fresh.mcps.iter().find(|m| m.id == "vault").expect("vault builtin");
+        assert!(v.enabled && v.builtin && v.transport == "builtin");
+        assert_eq!(grants(&fresh), ["general"]);
+        assert_eq!(default_mcp_grants("vault"), ["general"]);
+        let mut cfg = OsConfig::default();
+        apply_migrations(&mut cfg);
+        let i = cfg.migrations.iter().position(|m| m == MIGRATE_VAULT_SEARCH).expect("recorded");
+        assert_eq!(cfg.migrations.get(i.wrapping_sub(1)).map(String::as_str), Some(MIGRATE_FINANCE_READ), "right after finance-read");
+        cfg.migrations.retain(|m| m != MIGRATE_VAULT_SEARCH);
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().agents = Some(vec!["all".into()]);
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().enabled = false;
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general"]);
+        assert!(!cfg.mcps.iter().find(|m| m.id == "vault").unwrap().enabled, "a server Nic switched off stays off");
+        assert_eq!(cfg.migrations.last().map(String::as_str), Some(MIGRATE_VAULT_SEARCH));
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().agents = Some(vec!["general".into(), "librarian".into()]);
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general", "librarian"], "once: a later grant edit stands (the refusal still blocks the Librarian)");
     }
 
     /// Section 20.8: live delegation never reaches the Librarian / Booking workspaces; the mapping
@@ -2864,7 +2912,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_OPS_PHRASES_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_OPS_PHRASES_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string(), MIGRATE_VAULT_SEARCH.to_string()]);
     }
 
     #[test]

@@ -581,6 +581,7 @@ pub fn run() {
             pipelines::pipeline_run,
             pipelines::pipeline_set_active,
             pipelines::pipelines_settings,
+            pipelines::pipelines_last_sync,
             pipelines::pipelines_settings_update,
             pipelines::n8n_instance_add,
             pipelines::trigger_gdrive_sync,

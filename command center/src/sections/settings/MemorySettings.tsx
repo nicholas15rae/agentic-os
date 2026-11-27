@@ -5,6 +5,7 @@ import { cmd, onNativeEvent, type CompactOutcome, type CompactionStatus, type Ha
 import { gated } from "@/features/bridge/gate";
 import { CfgError, SecretRow, Toggle, useOsCfg } from "./os-ui";
 import { archiveSourceLabel, canCompact, clampInt, effectiveScrollsDir, formatBytes, formatOutcome, formatPending, outcomeTone, SCROLLS_BOUNDS } from "./memory-scrolls-format";
+import { VAULT_PASSWORD_ROW_ID, VaultPasswordBanner } from "./VaultPasswordBanner";
 import { badgeTone, cadenceLabel, cadencePeriod, presetOf, pressureFill, pressureLabel, pressureTone, relTime, SCROLLS_PRESETS, WEEKDAYS } from "./hygiene-format";
 
 /**
@@ -98,7 +99,7 @@ const month = () => new Date().toISOString().slice(0, 7);
  * cloud cache flush, and a ledger of Memory Books you can mount into RAG and
  * unmount again.
  */
-export function MemoryLifecycleCard() {
+export function MemoryLifecycleCard({ passwordBanner = true }: { passwordBanner?: boolean } = {}) {
   const { cfg, error, save } = useOsCfg();
   const [ledger, setLedger] = useState<LedgerEntry[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -164,6 +165,7 @@ export function MemoryLifecycleCard() {
       title="RAG memory & vault lifecycle"
       hint="Harvest pulls every agent's conversations + training logs (and droplet cache), checksums them, condenses a Memory Book, builds a de-duplicated fine-tuning dataset, and locks it all in your local vault. Then the cloud copy can be wiped and selected books re-mounted whenever you need them."
     >
+      {passwordBanner && <VaultPasswordBanner />}
       <HygieneBar />
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="RAG storage">
@@ -196,7 +198,14 @@ export function MemoryLifecycleCard() {
           />
         </Field>
       </div>
-      <SecretRow name="vault" label="Vault password (AES-256-GCM)" placeholder="10+ characters" hint="Stored in the Windows Credential Manager. Without it archives are written unencrypted. Lose it and locked archives can't be opened." />
+      <div id={VAULT_PASSWORD_ROW_ID} className="scroll-mt-24">
+        <SecretRow
+          name="vault"
+          label="Vault password (AES-256-GCM)"
+          placeholder="10+ characters"
+          hint="Stored in the Windows Credential Manager. Without it archives are written unencrypted. Lose it and locked archives can't be opened (there is no recovery key): write it down or keep it in your password manager."
+        />
+      </div>
       <div className="mt-1">
         <Toggle
           on={m.autoRunEnabled}

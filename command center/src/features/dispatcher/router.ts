@@ -512,7 +512,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   // ("booking desk, any …", "hey booking agent …") or step (a) above ("tell booking to …") hands it over.
   const mentioned = matchNameAnywhere(toks, names);
   const liveRead = directTool(original);
-  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar" || liveRead === "finance") || leadsWithName(original, toks, names)))
+  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar" || liveRead === "finance" || liveRead === "vault") || leadsWithName(original, toks, names)))
     return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
   if (matchNameAnywhere(toks, selfNames)) selfHit = true;
   // A self name in an address position (beats a topic below); any other mention is step (d) only.
@@ -631,7 +631,18 @@ const DIRECT_FINANCE_WRITE = /\b(?:log|record|enter|track|scan|import|export|cat
  * "what orders are pending", "the overdue invoices widget"). */
 const DIRECT_FINANCE_NOT = /\b(?:emails?|inbox|mail|gmail|whatsapp|messages?|texts?|calendar|tasks?|todos?|tickets?|builds?|prs?|pull requests?|reviews?|queue|orders?|deliver(?:y|ies)|packages?|shipments?|updates?|widget|server|config|api|bug|code|app|script|spreadsheet|filter|settings?|button|tests?)\b/;
 
-export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify" | "finance";
+/** Vault READ questions Tony answers with `vault.search` himself (read-only, never finance):
+ * "search my vault / notes for …", "find the note about …", "what did I save about …". Mirrors routing.rs. */
+const DIRECT_VAULT =
+  /\bsearch (?:through |in )?(?:my |the )?(?:vault|notes|brainstorms|documents|docs|scripts|sides|auditions|jobs|ideas)\b|\b(?:look|dig) (?:through|in) (?:my |the )?(?:vault|notes|brainstorms|documents|docs)\b|\blook up (?:the |my |that )?(?:note|notes|brainstorm|document|doc|script|sides|idea) (?:about|on|for|from|with)\b|\bfind (?:the |my |that |a |any )(?:note|notes|brainstorm|brainstorms|document|doc|script|sides|idea|ideas) (?:about|on|for|from|with|where|that i)\b|\bwhat did i (?:save|write down|note down|jot down) (?:about|on|for|regarding)\b|\bwhat have i (?:saved|written down|noted down|jotted down) (?:about|on|for|regarding)\b|\b(?:anything|something) (?:in|from) (?:my |the )?(?:vault|notes|brainstorms|documents)\b|\bdo i have (?:a |any )?(?:notes?|documents?|brainstorms?|ideas?) (?:about|on|for)\b|\b(?:whats|what is) in (?:my |the )?(?:vault|notes)\b/;
+/** "What did I save / write down about": a read, not a write. Dropped before DIRECT_WRITE. */
+const DIRECT_VAULT_SAVED = /\bwhat (?:did|have) i (?:save|saved|write down|written down|note down|noted down|jot down|jotted down)\b/g;
+/** Vault writes DIRECT_WRITE doesn't list ("put this in my vault", "re-index the vault"). */
+const DIRECT_VAULT_WRITE = /\b(?:put|stick|store|keep|file|log|record|clear|wipe|reindex|re index|index|export|import|back up|backup|tag)\b/;
+/** Another live tool's or the code's subject ("search my notes for that email", "find the doc about the repo"). */
+const DIRECT_VAULT_NOT = /\b(?:emails?|inbox|gmail|whatsapp|calendar|repo|repository|codebase|github|web|online|internet|google)\b/;
+
+export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify" | "finance" | "vault";
 
 /**
  * "Any WhatsApp updates?", "check my inbox", "will it rain tomorrow", "what's playing":
@@ -640,7 +651,7 @@ export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotif
  */
 export function directTool(text: string): DirectTool | null {
   const n = normalize(text);
-  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " ").replace(DIRECT_FINANCE_MAKE, " "))) return null;
+  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " ").replace(DIRECT_VAULT_SAVED, " ").replace(DIRECT_FINANCE_MAKE, " "))) return null;
   if (/\bwhatsapp\b/.test(n)) {
     const lower = text.toLowerCase();
     const saysApp = lower.includes("sapp") || lower.includes("s app");
@@ -653,6 +664,7 @@ export function directTool(text: string): DirectTool | null {
   if (!work && DIRECT_WEATHER.test(n)) return "weather";
   if (DIRECT_SPOTIFY.test(n)) return "spotify";
   if (DIRECT_FINANCE.test(n) && !DIRECT_FINANCE_WRITE.test(n) && !DIRECT_FINANCE_NOT.test(n)) return "finance";
+  if (DIRECT_VAULT.test(n) && !DIRECT_VAULT_WRITE.test(n) && !DIRECT_VAULT_NOT.test(n)) return "vault";
   if (!work && DIRECT_MESSAGES.test(n)) return "whatsapp";
   return null;
 }

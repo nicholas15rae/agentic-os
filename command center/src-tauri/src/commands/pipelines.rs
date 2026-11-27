@@ -431,6 +431,13 @@ pub fn pipelines_settings(state: State<'_, DispatchState>) -> PipelinesSettings 
     settings_view(&state)
 }
 
+/// The last recorded Google Drive sync (memory, loaded from gdrive-last-sync.json at startup): no
+/// n8n poll and no network, unlike `pipelines_status`. The Vault page's off-site row (Section 16.2).
+#[tauri::command]
+pub fn pipelines_last_sync(pipes: State<'_, PipelineState>) -> Option<SyncResult> {
+    pipes.last_sync.read().unwrap().clone()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelinesPatch {

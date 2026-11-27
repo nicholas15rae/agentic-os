@@ -84,6 +84,8 @@ export const cc = {
   backups: () => gateway<BackupList>("/api/cc/backups"),
   /** A failed backup is right after all (you really removed that much): make it good + the new baseline. */
   acceptBackup: (name: string) => gateway<BackupInfo>("/api/cc/backup/accept", { method: "POST", body: JSON.stringify({ name }) }),
+  /** Copy the newest good backup into the mirror folders now (Section 16.2; a retry after plugging a drive in). */
+  mirrorNow: () => gateway<{ mirrors: Record<string, MirrorResult> }>("/api/cc/backup/mirror", { method: "POST", timeoutMs: 180_000 }),
   candles: (symbol: string, interval: string, range: string) =>
     gateway<MarketData>(`/api/cc/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${interval}&range=${range}`, { timeoutMs: 20_000 }),
   fileUrl: (id: string) => `${useSettings.getState().gatewayUrl.replace(/\/+$/, "")}/api/cc/files/${id}`,
@@ -102,7 +104,42 @@ type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]>
 
 export interface CcConfig {
   llm: { baseUrl: string; model: string; visionModel: string; embeddingModel: string; timeoutSecs: number };
-  backup: { enabled: boolean; intervalHours: number; keep: number; dir: string };
+  backup: {
+    enabled: boolean;
+    intervalHours: number;
+    keep: number;
+    dir: string;
+    /** Second-copy folders (another drive); absent on older gateways. */
+    mirrorDirs?: string[];
+    /** Mirror retention: 0 = keep every copy (the default). */
+    mirrorKeep?: number;
+  };
+}
+
+/** One mirror folder's last copy (gateway `mirror_backup`). */
+export interface MirrorResult {
+  ok: boolean;
+  at: number;
+  backup?: string;
+  reason?: string;
+  unreachable?: boolean;
+  lastOkAt?: number | null;
+  lastOkFile?: string | null;
+}
+
+/** A configured mirror folder on the Vault page (gateway `mirror_view`). */
+export interface MirrorRow {
+  dir: string;
+  /** The drive / share is there right now. */
+  reachable: boolean;
+  /** Last copy: true / false, null = nothing copied yet. */
+  ok: boolean | null;
+  reason?: string | null;
+  at?: number | null;
+  lastOkAt?: number | null;
+  lastOkFile?: string | null;
+  /** Set when the mirror needs a look (failed, unreachable, never copied). */
+  alert?: string;
 }
 
 export interface BackupInfo {
@@ -113,6 +150,8 @@ export interface BackupInfo {
   /** false = it failed its self-check (kept aside as failed-cc-*.zip). Absent on older gateways. */
   ok?: boolean;
   verified?: { ok: boolean; problems: string[]; entries?: number; files?: number; note?: string };
+  /** Per-mirror copy results (only when mirror folders are set). */
+  mirrors?: Record<string, MirrorResult> | { error: string };
 }
 
 export interface BackupList {
@@ -123,13 +162,19 @@ export interface BackupList {
   failure?: BackupInfo | null;
   backups: { name: string; size: number; at: number }[];
   failed?: { name: string; size: number; at: number }[];
+  /** Section 16.2 mirror folders (absent on older gateways). */
+  mirrors?: MirrorRow[];
+  mirrorKeep?: number;
 }
 
 /** One line for a backup result: where it went and whether it checked out. */
 export function backupSummary(b: BackupInfo): string {
   if (b.ok === false) return `Backup FAILED its check (kept aside as ${b.file}): ${b.verified?.problems.join("; ") ?? "unknown problem"}`;
   const v = b.verified;
-  return `Backed up to ${b.file}${v?.ok ? ` · verified (${v.entries ?? 0} entries, ${v.files ?? 0} files)` : ""}`;
+  const m = b.mirrors && !("error" in b.mirrors) ? Object.values(b.mirrors as Record<string, MirrorResult>) : [];
+  const failed = m.filter((x) => !x.ok).length;
+  const mirrors = m.length ? ` · mirrored to ${m.length - failed}/${m.length}${failed ? ` (${failed} FAILED)` : ""}` : "";
+  return `Backed up to ${b.file}${v?.ok ? ` · verified (${v.entries ?? 0} entries, ${v.files ?? 0} files)` : ""}${mirrors}`;
 }
 
 export interface OcrFields {

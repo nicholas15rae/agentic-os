@@ -5,11 +5,13 @@ import { useSurfaceConfig } from "./backdrop-store";
 import { useAtmosphere, useTimePhase } from "@/features/weather/weather-store";
 import { useSettings } from "@/stores/settings";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { motionLevel } from "@/lib/motion";
 
 /**
  * Full-bleed background. Two stacked layers: when the current wallpaper
  * changes, the new one fades in over the old (decoded first so there is never
- * a flash of black). A slow "living drift" pan keeps stills feeling alive.
+ * a flash of black). A slow "living drift" pan keeps stills feeling alive (stepped 4×/s and
+ * paused while calm: styles/index.css).
  * The vignette keeps foreground text legible on any user upload.
  */
 export function WallpaperSlideshow() {
@@ -40,11 +42,12 @@ export function WallpaperSlideshow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, allowedKey]);
 
-  // Auto-advance (paused when hidden or when the user pauses the reel).
+  // Auto-advance (paused when the user pauses the reel, and while the window is hidden or calm:
+  // each 1.6 s crossfade redraws every glass panel at the full display rate).
   useEffect(() => {
     if (!playing || !hydrated || home.pinnedWallpaperId) return;
     const t = setInterval(() => {
-      if (!document.hidden) next(1, wallpaperShuffle, allowed);
+      if (motionLevel() === "full") next(1, wallpaperShuffle, allowed);
     }, Math.max(5, wallpaperIntervalSec) * 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps

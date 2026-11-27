@@ -368,6 +368,8 @@ export interface TtsUnpinEvent {
 export type NativeEventName =
   /** Lock state / elevation / hard lock changed (security/commands.rs `Status`). */
   | "security-state"
+  /** Main window shown (`true`) or hidden / minimised (`false`): webview_visibility.rs; lib/motion.ts listens. */
+  | "window-visibility"
   | "voice-toggle"
   | "memory-progress"
   | "pipeline-step"

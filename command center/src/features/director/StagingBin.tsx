@@ -8,7 +8,7 @@ import type { AssetRole, MediaAsset } from "./contract";
 import { addAssets, editManifest, select, useDirector } from "./director-store";
 import { ASSET_MIME, DIALOG_FILTERS, hasFiles, ingestDropped } from "./dnd";
 import { INGEST_ROLES, addClip, timecode } from "./manifest";
-import { AssetBadges, AssetDetails } from "./AssetDetails";
+import { AssetBadges, AssetDetails, GeneratedChip } from "./AssetDetails";
 import { BinSuggestions } from "./BinSuggestions";
 import { IntakeStatusLine } from "./IntakeStatus";
 
@@ -133,6 +133,7 @@ export function StagingBin() {
                           <Lock size={9} /> Raw · read-only
                         </span>
                       )}
+                      <GeneratedChip asset={a} />
                       <span className="font-mono text-[10px] text-ink-3">{assetMeta(a)}</span>
                       <AssetBadges asset={a} />
                       {a.tags.slice(0, 3).map((t) => (

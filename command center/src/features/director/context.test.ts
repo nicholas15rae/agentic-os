@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { MediaAsset, Note, ShotSlot, TimelineClip } from "./contract";
-import { asset, manifest, project } from "./fixtures.test-util";
+import { asset, gen, manifest, project } from "./fixtures.test-util";
 import { ACTION_CONTRACT, CONTEXT_BUDGET, buildDirectorContext } from "./context";
+import { BRIEF_FIELDS, parseDirectorActions, validateAction } from "./actions";
 
 const FRAMINGS = ["wide", "medium", "mcu", "closeup", "insert"] as const;
 
@@ -25,6 +26,8 @@ function typical() {
       slotId: i < 5 ? `s${i + 1}` : null,
       // Busy clips: 7 cuts each (only 4 are shown).
       scenes: kind === "video" ? (i === 10 ? [] : [1.234, 2.5, 4.75, 6.1, 8.333, 9.9, 11.05]) : null,
+      // The stills were generated (Part 2 provenance: one compact "generated <template> seed N").
+      generation: kind === "image" ? gen({ template: "sdxl-turbo-still-wide", seed: 1_000_000_000 + i }) : null,
     });
   });
   const shotList: ShotSlot[] = Array.from({ length: 8 }, (_, i) => ({
@@ -89,6 +92,16 @@ describe("buildDirectorContext v2", () => {
     expect(c.length).toBeLessThan(CONTEXT_BUDGET);
   });
 
+  it("names each generated asset's template and seed on its own line, and nothing for filmed media", () => {
+    const { p, assets, m, review } = typical();
+    const c = buildDirectorContext(p, assets, m, review);
+    const lines = c.split("\n").filter((l) => l.includes("generated "));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(`${assets[11].id} ·`);
+    expect(lines[0]).toContain("generated sdxl-turbo-still-wide seed 1000000011");
+    expect(c).not.toContain("neon dance studio"); // the prompt stays out of the context
+  });
+
   it("carries the brief, shot list v2, asset flags / tags / transcripts / moments, the review round and open notes", () => {
     const { p, assets, m, review } = typical();
     const c = buildDirectorContext(p, assets, m, review);
@@ -136,5 +149,38 @@ describe("buildDirectorContext v2", () => {
     expect(ACTION_CONTRACT).toMatch(/CPU-only/);
     expect(ACTION_CONTRACT).toMatch(/Never claim a render ran/);
     expect(ACTION_CONTRACT).not.toMatch(/\b(he|she|his|her|him)\b/i);
+  });
+});
+
+// Live E2E 2026-11-26: Qwen 3.5-9B copied the old example literally ("idea":"Nic's words verbatim",
+// "guessed":["9:16 aspect ratio", …]) and every draft_brief was refused. The example must use real
+// field names, and a brief built that way must validate.
+describe("ACTION_CONTRACT draft_brief example", () => {
+  const line = ACTION_CONTRACT.split("\n").find((l) => l.startsWith("1. ")) ?? "";
+  it("lists 'guessed' as field names the parser accepts, and no placeholder idea to copy", () => {
+    expect(line).not.toMatch(/Nic's words verbatim/);
+    const guessed = JSON.parse(`[${/"guessed":\[([^\]]*)\]/.exec(line)?.[1] ?? ""}]`) as string[];
+    expect(guessed.length).toBeGreaterThan(0);
+    for (const g of guessed) expect(BRIEF_FIELDS as readonly string[]).toContain(g);
+    for (const f of BRIEF_FIELDS) expect(line).toContain(f);
+    const brief = { idea: "Cut my reel", goal: "", platform: "reels", lengthSec: 15, aspect: "9:16", tone: "", references: [], guessed };
+    expect(validateAction({ type: "draft_brief", brief }, { assets: [] }).ok).toBe(true);
+  });
+});
+
+describe("ACTION_CONTRACT fence", () => {
+  // Live E2E: a prose-only description of the fence made Qwen fall back to ```json fences (never
+  // parsed), so the visual layout stays; a copied "{json}" line is dropped by the parser.
+  it("shows the fence layout, whose placeholder line the parser tolerates", () => {
+    expect(ACTION_CONTRACT).toContain("```director-action\n{json}\n```");
+    const b = '{"type":"report_open_decisions","items":["x"]}';
+    expect(parseDirectorActions("```director-action\n{json}\n" + b + "\n```", { assets: [] }).actions).toHaveLength(1);
+  });
+});
+
+describe("ACTION_CONTRACT audio rule", () => {
+  it("says a video clip carries its own sound and audio can be empty", () => {
+    expect(ACTION_CONTRACT).toContain('"audio":[] or [');
+    expect(ACTION_CONTRACT).toMatch(/a video clip already plays its own sound/);
   });
 });

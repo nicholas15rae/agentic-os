@@ -13,6 +13,7 @@ import type {
   CreativeBrief,
   EditPlanBody,
   Framing,
+  GenMeta,
   LegacyProjectStatus,
   MediaAsset,
   MediaProject,
@@ -526,7 +527,49 @@ export function upgradeAsset(raw: unknown): MediaAsset {
     moments: list(a.moments) as MediaAsset["moments"],
     slotId: typeof a.slotId === "string" ? a.slotId : null,
     scenes: Array.isArray(a.scenes) ? (a.scenes as unknown[]).filter((t): t is number => typeof t === "number" && Number.isFinite(t)).slice(0, 200) : null,
+    generation: upgradeGenMeta(a.generation),
   };
+}
+
+/** A generation record as GenMeta (missing fields get defaults); anything that isn't an object → null. */
+export function upgradeGenMeta(raw: unknown): GenMeta | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const g = raw as Loose;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const strOrNull = (v: unknown) => (typeof v === "string" ? v : null);
+  const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    template: str(g.template),
+    prompt: str(g.prompt),
+    negative: str(g.negative),
+    seed: numOr(g.seed, 0),
+    steps: numOr(g.steps, 0),
+    cfg: numOr(g.cfg, 0),
+    sampler: str(g.sampler),
+    scheduler: str(g.scheduler),
+    width: numOr(g.width, 0),
+    height: numOr(g.height, 0),
+    denoise: numOr(g.denoise, 0),
+    checkpoint: str(g.checkpoint),
+    checkpointPath: strOrNull(g.checkpointPath),
+    checkpointSha256: strOrNull(g.checkpointSha256),
+    comfyuiVersion: str(g.comfyuiVersion),
+    ...(g.workflow !== undefined && g.workflow !== null ? { workflow: g.workflow } : {}),
+    comfyJobId: str(g.comfyJobId),
+    promptId: str(g.promptId),
+    renderMs: numOr(g.renderMs, 0),
+    peakVramMb: numOrNull(g.peakVramMb),
+    whisperResident: typeof g.whisperResident === "boolean" ? g.whisperResident : null,
+    createdAt: str(g.createdAt),
+    durationSec: numOrNull(g.durationSec),
+    sidecarPath: strOrNull(g.sidecarPath),
+  };
+}
+
+/** "Copy settings": the re-usable generation settings as pretty JSON (no ids, timings or workflow). */
+export function genSettingsJson(g: GenMeta): string {
+  const { template, prompt, negative, seed, steps, cfg, sampler, scheduler, width, height, denoise, checkpoint, checkpointSha256, comfyuiVersion } = g;
+  return JSON.stringify({ template, prompt, negative, seed, steps, cfg, sampler, scheduler, width, height, denoise, checkpoint, checkpointSha256, comfyuiVersion }, null, 2);
 }
 
 /** A v1 (or partial) manifest as v2: every new field gets its default; v2 values are kept. */

@@ -1,0 +1,67 @@
+{
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "sd_xl_turbo_1.0_fp16.safetensors" },
+    "_meta": { "title": "Load Checkpoint" }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "example.png" },
+    "_meta": { "title": "Load Image (ComfyUI input dir, or 'name [output]')" }
+  },
+  "11": {
+    "class_type": "ImageScale",
+    "inputs": { "image": ["10", 0], "upscale_method": "lanczos", "width": 512, "height": 512, "crop": "center" },
+    "_meta": { "title": "Fit to target size" }
+  },
+  "12": {
+    "class_type": "VAEEncode",
+    "inputs": { "pixels": ["11", 0], "vae": ["4", 2] },
+    "_meta": { "title": "VAE Encode" }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "in the style of a watercolor painting", "clip": ["4", 1] },
+    "_meta": { "title": "Style prompt" }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "", "clip": ["4", 1] },
+    "_meta": { "title": "Negative prompt" }
+  },
+  "20": {
+    "class_type": "SDTurboScheduler",
+    "inputs": { "model": ["4", 0], "steps": 2, "denoise": 0.5 },
+    "_meta": { "title": "SDTurboScheduler (img2img strength)" }
+  },
+  "14": {
+    "class_type": "KSamplerSelect",
+    "inputs": { "sampler_name": "euler_ancestral" },
+    "_meta": { "title": "KSamplerSelect" }
+  },
+  "13": {
+    "class_type": "SamplerCustom",
+    "inputs": {
+      "model": ["4", 0],
+      "add_noise": true,
+      "noise_seed": 0,
+      "cfg": 1.0,
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "sampler": ["14", 0],
+      "sigmas": ["20", 0],
+      "latent_image": ["12", 0]
+    },
+    "_meta": { "title": "SamplerCustom" }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["13", 0], "vae": ["4", 2] },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["8", 0], "filename_prefix": "director/template/style-transfer" },
+    "_meta": { "title": "Save Image" }
+  }
+}

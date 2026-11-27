@@ -192,6 +192,49 @@ pub struct MediaAsset {
     /// `None` = not detected (yet); `Some([])` = one continuous shot. Kept in the json column.
     #[serde(default)]
     pub scenes: Option<Vec<f64>>,
+    /// Part 2: how a generated still/clip was made (ComfyUI). `None` for filmed/imported media and
+    /// every v1/v2 row. Kept in the json column (no migration); the full record, with the exact
+    /// API workflow, is the `working/gen/<id>.gen.json` sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenMeta>,
+}
+
+/// Provenance of one generated asset (ComfyUI). Every field defaults so a partial or older
+/// record still loads. `workflow` (the API prompt graph sent to ComfyUI) lives only in the
+/// sidecar: the copy on the asset row drops it to keep asset lists small.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GenMeta {
+    pub template: String,
+    pub prompt: String,
+    pub negative: String,
+    pub seed: u64,
+    pub steps: u32,
+    pub cfg: f64,
+    pub sampler: String,
+    pub scheduler: String,
+    pub width: u32,
+    pub height: u32,
+    pub denoise: f64,
+    /// Checkpoint file name (filled from `checkpoint_path` when empty).
+    pub checkpoint: String,
+    /// Where the checkpoint is on disk (hashed once per path+size+mtime, cached in media.db kv).
+    pub checkpoint_path: Option<String>,
+    pub checkpoint_sha256: Option<String>,
+    pub comfyui_version: String,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub workflow: Value,
+    pub comfy_job_id: String,
+    pub prompt_id: String,
+    pub render_ms: u64,
+    pub peak_vram_mb: Option<u64>,
+    /// Whether faster-whisper STT stayed resident on the GPU during the render (`None` = unknown).
+    pub whisper_resident: Option<bool>,
+    pub created_at: String,
+    /// Generated video only (the caller knows frames / fps; there is no probe here).
+    pub duration_sec: Option<f64>,
+    /// `working/gen/<asset-id>.gen.json` (set by `ingest_generated`).
+    pub sidecar_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1192,6 +1235,153 @@ pub(crate) fn remove_staged(p: &Path) {
         let _ = std::fs::set_permissions(p, perm);
     }
     let _ = std::fs::remove_file(p);
+}
+
+// ── Part 2: generated media provenance ─────────────────────────────────────────
+
+/// Copy `src` to a new file `dst` and compare the two byte for byte (as the intake does); the
+/// partial copy is removed on any failure.
+fn copy_byte_checked(src: &Path, dst: &Path) -> Result<(), String> {
+    let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let res = (|| -> std::io::Result<bool> {
+        let mut a = std::fs::File::open(src)?;
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(dst)?;
+        std::io::copy(&mut a, &mut out)?;
+        out.sync_all()?;
+        drop(out);
+        same_content(&mut a, dst)
+    })();
+    match res {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            remove_staged(dst);
+            Err(format!("{name}: the raw/ copy doesn't match the generated file"))
+        }
+        Err(e) => {
+            remove_staged(dst);
+            Err(format!("copy {name}: {e}"))
+        }
+    }
+}
+
+fn ckpt_hash_key(path: &Path) -> String {
+    format!("ckpt-sha256:{}", path.to_string_lossy())
+}
+
+/// SHA-256 of a checkpoint (hex), computed once per file: cached in media.db kv by path, size and
+/// mtime, so a 7 GB file is only read again when it changes.
+#[cfg_attr(not(test), allow(dead_code))] // called by the ComfyUI bridge (Part 2)
+pub(crate) fn checkpoint_sha256(state: &MediaState, path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let p = dunce_canon(path).unwrap_or_else(|| path.to_path_buf());
+    let meta = std::fs::metadata(&p).map_err(|e| format!("checkpoint {}: {e}", p.display()))?;
+    let (size, mt) = (meta.len(), mtime_ms(meta.modified().ok()));
+    let key = ckpt_hash_key(&p);
+    let cached: Option<Value> = state.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get::<_, String>(0)).optional().map_err(sql_err)).ok().flatten().and_then(|s| serde_json::from_str(&s).ok());
+    if let Some(v) = cached {
+        if v["size"].as_u64() == Some(size) && v["mtimeMs"].as_u64() == Some(mt) {
+            if let Some(h) = v["sha256"].as_str() {
+                return Ok(h.to_string());
+            }
+        }
+    }
+    let mut f = std::fs::File::open(&p).map_err(|e| format!("checkpoint {}: {e}", p.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("checkpoint {}: {e}", p.display()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    let hex = format!("{:x}", h.finalize());
+    let v = json!({ "size": size, "mtimeMs": mt, "sha256": hex }).to_string();
+    let _ = state.with(|c| c.execute("INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2", params![key, v]).map(|_| ()).map_err(sql_err));
+    Ok(hex)
+}
+
+/// Ingest a generated still (PNG, …) or clip (mp4) into `raw/`: a byte-checked, read-only copy like
+/// any intake, role `photo` / `clip`, with `generation` on the asset and the full provenance
+/// (including the exact API workflow) written to `working/gen/<asset-id>.gen.json`. No probe or
+/// thumbnail: the generator already knows the size (a still is its own thumbnail in the bin).
+/// Nothing is recorded if any step fails.
+#[cfg_attr(not(test), allow(dead_code))] // called by the ComfyUI bridge (Part 2)
+pub(crate) fn ingest_generated(state: &MediaState, slug: &str, file: &Path, meta: &GenMeta) -> Result<MediaAsset, String> {
+    load_project(state, slug)?;
+    let name = safe_file_name(&file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+    let (kind, role) = match kind_for_ext(&ext_of(&name)) {
+        Some("image") => ("image", "photo"),
+        Some("video") => ("video", "clip"),
+        _ => return Err(format!("{name}: a generated asset must be an image or a video")),
+    };
+    let size = std::fs::metadata(file).map_err(|e| format!("{name}: {e}"))?.len();
+    if !file.is_file() || size == 0 {
+        return Err(format!("{name}: the generated file is missing or empty"));
+    }
+    let root = project_root(state, slug)?;
+    let raw = root.join("raw");
+    let gen_dir = root.join("working").join("gen");
+    std::fs::create_dir_all(&raw).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&gen_dir).map_err(|e| e.to_string())?;
+    let dst = unique_path(&raw, &name);
+    copy_byte_checked(file, &dst)?;
+    set_read_only(&dst);
+    let id = short_id("a");
+    let mut g = meta.clone();
+    if g.checkpoint.is_empty() {
+        if let Some(n) = g.checkpoint_path.as_deref().and_then(|p| Path::new(p).file_name()) {
+            g.checkpoint = n.to_string_lossy().to_string();
+        }
+    }
+    if g.checkpoint_sha256.as_deref().is_none_or(str::is_empty) {
+        // Best effort: an unreadable checkpoint leaves the hash unknown, it never blocks the ingest.
+        g.checkpoint_sha256 = g.checkpoint_path.as_deref().and_then(|p| checkpoint_sha256(state, Path::new(p)).ok());
+    }
+    if g.created_at.is_empty() {
+        g.created_at = now_iso();
+    }
+    let sidecar = gen_dir.join(format!("{id}.gen.json"));
+    g.sidecar_path = Some(sidecar.to_string_lossy().to_string());
+    let mut doc = serde_json::to_value(&g).map_err(|e| e.to_string())?;
+    doc["assetId"] = json!(id);
+    doc["file"] = json!(dst.file_name().map(|n| n.to_string_lossy().to_string()));
+    doc["workflow"] = g.workflow.clone(); // the exact graph sent, `null` when none was given
+    let pretty = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    if let Err(e) = write_atomic(&sidecar, pretty.as_bytes()) {
+        remove_staged(&dst);
+        return Err(e);
+    }
+    g.workflow = Value::Null;
+    let a = MediaAsset {
+        id,
+        project: slug.into(),
+        kind: kind.into(),
+        role: role.into(),
+        name: name.clone(),
+        path: dunce_canon(&dst).unwrap_or_else(|| dst.clone()).to_string_lossy().to_string(),
+        read_only: true,
+        size_bytes: size,
+        duration_sec: if kind == "video" { g.duration_sec.filter(|d| d.is_finite() && *d > 0.0) } else { None },
+        width: (g.width > 0).then_some(g.width),
+        height: (g.height > 0).then_some(g.height),
+        thumb_path: None,
+        added_at: now_iso(),
+        generation: Some(g),
+        ..Default::default()
+    };
+    if let Err(e) = save_asset(state, &a) {
+        remove_staged(&dst);
+        let _ = std::fs::remove_file(&sidecar);
+        return Err(e);
+    }
+    let _g = state.project_lock.lock().unwrap();
+    if let Ok(mut p) = load_project(state, slug) {
+        p.updated_at = now_iso();
+        let _ = save_project(state, &p);
+    }
+    Ok(a)
 }
 
 pub(crate) fn ingest_begin(state: &MediaState, slug: &str, name: &str, size: u64, role: &str) -> Result<String, String> {
@@ -2990,33 +3180,7 @@ async fn watch_one(app: &tauri::AppHandle, slug: &str, batch: &str, job_id: &str
                 let (slug2, plan_id, o2) = (slug.to_string(), plan.plan_id.clone(), o.clone());
                 let verdict = blocking(move || {
                     let cfg = app2.state::<OsState>().snapshot();
-                    let ffprobe = media_bin(&cfg, "ffprobe").ok_or("ffprobe not found")?;
-                    if !o2.out.is_file() {
-                        return Err(format!("the render reported done but {} is not on disk", o2.out.display()));
-                    }
-                    let size = std::fs::metadata(&o2.out).map(|m| m.len()).unwrap_or(0);
-                    let pr = probe(&ffprobe, &o2.out)?;
-                    let verify = verify_render(&pr, size, expect, o2.w, o2.h, o2.cap);
-                    if !verify.ok {
-                        return Err(format!("render failed verification: {}", verify.checks.join("; ")));
-                    }
-                    let r = VerifiedRender {
-                        id: short_id("r"),
-                        project: slug2.clone(),
-                        plan_id,
-                        path: dunce_canon(&o2.out).unwrap_or(o2.out.clone()).to_string_lossy().to_string(),
-                        duration_sec: pr.duration.unwrap_or(0.0),
-                        width: pr.width.unwrap_or(0),
-                        height: pr.height.unwrap_or(0),
-                        size_bytes: size,
-                        loudness_lufs: lufs,
-                        verify,
-                        created_at: now_iso(),
-                    };
-                    let st = app2.state::<MediaState>();
-                    record_render(&st, &r, Some(&o2.platform))?;
-                    on_verified_render(&st, &slug2, &r.id);
-                    Ok(r)
+                    verify_and_record(&app2.state::<MediaState>(), &cfg, &slug2, &plan_id, &o2, expect, lufs)
                 })
                 .await;
                 return match verdict {
@@ -3028,6 +3192,38 @@ async fn watch_one(app: &tauri::AppHandle, slug: &str, batch: &str, job_id: &str
             _ => return Outcome::Failed(v["error"].as_str().unwrap_or("the render failed").to_string()),
         }
     }
+}
+
+/// A finished output, checked by Rust (never the tool's word): on disk, probed, `verify_render`
+/// passed. Then it's listed (`record_render`) and opens / joins its review round. Sync (the
+/// batch runs it on a blocking thread).
+pub(crate) fn verify_and_record(state: &MediaState, cfg: &os_core::OsConfig, slug: &str, plan_id: &str, o: &RenderOut, expect: f64, lufs: Option<f64>) -> Result<VerifiedRender, String> {
+    let ffprobe = media_bin(cfg, "ffprobe").ok_or("ffprobe not found")?;
+    if !o.out.is_file() {
+        return Err(format!("the render reported done but {} is not on disk", o.out.display()));
+    }
+    let size = std::fs::metadata(&o.out).map(|m| m.len()).unwrap_or(0);
+    let pr = probe(&ffprobe, &o.out)?;
+    let verify = verify_render(&pr, size, expect, o.w, o.h, o.cap);
+    if !verify.ok {
+        return Err(format!("render failed verification: {}", verify.checks.join("; ")));
+    }
+    let r = VerifiedRender {
+        id: short_id("r"),
+        project: slug.to_string(),
+        plan_id: plan_id.to_string(),
+        path: dunce_canon(&o.out).unwrap_or(o.out.clone()).to_string_lossy().to_string(),
+        duration_sec: pr.duration.unwrap_or(0.0),
+        width: pr.width.unwrap_or(0),
+        height: pr.height.unwrap_or(0),
+        size_bytes: size,
+        loudness_lufs: lufs,
+        verify,
+        created_at: now_iso(),
+    };
+    record_render(state, &r, Some(&o.platform))?;
+    on_verified_render(state, slug, &r.id);
+    Ok(r)
 }
 
 /// List a verified render, remembering which output (platform) it was made for (media.db kv
@@ -4457,3 +4653,165 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// Part 2 provenance: `ingest_generated`, the sidecar, the checkpoint hash cache (temp dirs only).
+#[cfg(test)]
+mod gen_tests {
+    use super::*;
+
+    fn tmp_root() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("media-gen-test-{}", short_id("t")));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn meta(ckpt: Option<&Path>) -> GenMeta {
+        GenMeta {
+            template: "sdxl-turbo-still".into(),
+            prompt: "a neon dance studio at night".into(),
+            negative: "blurry".into(),
+            seed: 424242,
+            steps: 4,
+            cfg: 1.0,
+            sampler: "euler_ancestral".into(),
+            scheduler: "normal".into(),
+            width: 1024,
+            height: 576,
+            denoise: 1.0,
+            checkpoint_path: ckpt.map(|p| p.to_string_lossy().to_string()),
+            comfyui_version: "0.46.0".into(),
+            workflow: json!({ "3": { "class_type": "KSampler", "inputs": { "seed": 424242, "steps": 4 } } }),
+            comfy_job_id: "g-1".into(),
+            prompt_id: "6f1c-prompt".into(),
+            render_ms: 2150,
+            peak_vram_mb: Some(7300),
+            whisper_resident: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn sha_hex(b: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(b))
+    }
+
+    #[test]
+    fn ingest_generated_copies_read_only_and_writes_the_sidecar() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let p = create_project(&st, "Gen Test", None).unwrap();
+        let out = root.join("comfy-out");
+        std::fs::create_dir_all(&out).unwrap();
+        let png = out.join("ComfyUI_00001_.png");
+        let bytes: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&png, &bytes).unwrap();
+        let ckpt = out.join("sd_xl_turbo_1.0_fp16.safetensors");
+        std::fs::write(&ckpt, b"fake checkpoint bytes").unwrap();
+
+        let a = ingest_generated(&st, &p.slug, &png, &meta(Some(&ckpt))).unwrap();
+        assert_eq!((a.kind.as_str(), a.role.as_str(), a.read_only), ("image", "photo", true));
+        assert_eq!((a.width, a.height, a.duration_sec, a.size_bytes), (Some(1024), Some(576), None, 5000));
+        let raw = Path::new(&a.path);
+        assert!(raw.starts_with(dunce_canon(&Path::new(&p.root).join("raw")).unwrap()));
+        assert_eq!(std::fs::read(raw).unwrap(), bytes, "byte-identical copy");
+        assert!(std::fs::metadata(raw).unwrap().permissions().readonly());
+        assert!(png.is_file(), "the ComfyUI output is copied, never moved");
+
+        let g = a.generation.as_ref().unwrap();
+        assert_eq!(g.checkpoint, "sd_xl_turbo_1.0_fp16.safetensors");
+        assert_eq!(g.checkpoint_sha256.as_deref(), Some(sha_hex(b"fake checkpoint bytes").as_str()));
+        assert!(g.workflow.is_null(), "the asset row doesn't carry the workflow graph");
+        assert!(!g.created_at.is_empty());
+
+        // The sidecar: every field, plus the exact workflow.
+        let side = Path::new(&p.root).join("working").join("gen").join(format!("{}.gen.json", a.id));
+        assert_eq!(g.sidecar_path.as_deref(), Some(side.to_string_lossy().as_ref()));
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(&side).unwrap()).unwrap();
+        for k in ["template", "prompt", "negative", "seed", "steps", "cfg", "sampler", "scheduler", "width", "height", "denoise", "checkpoint", "checkpointSha256", "comfyuiVersion", "workflow", "comfyJobId", "promptId", "renderMs", "peakVramMb", "whisperResident", "createdAt"] {
+            assert!(s.get(k).is_some(), "sidecar misses {k}");
+        }
+        assert_eq!(s["workflow"], meta(None).workflow);
+        assert_eq!((s["seed"].as_u64(), s["assetId"].as_str(), s["comfyuiVersion"].as_str()), (Some(424242), Some(a.id.as_str()), Some("0.46.0")));
+        assert_eq!(s["whisperResident"], json!(true));
+
+        // Stored and listed with its provenance; a second render of the same name doesn't clobber.
+        assert_eq!(load_asset(&st, &p.slug, &a.id).unwrap(), a);
+        let b = ingest_generated(&st, &p.slug, &png, &GenMeta { whisper_resident: None, peak_vram_mb: None, ..meta(None) }).unwrap();
+        assert_ne!(a.path, b.path);
+        assert_eq!(b.generation.as_ref().unwrap().checkpoint_sha256, None, "no checkpoint path = unknown hash");
+        assert_eq!(list_assets(&st, &p.slug).unwrap().len(), 2);
+        let s2: Value = serde_json::from_str(&std::fs::read_to_string(b.generation.unwrap().sidecar_path.unwrap()).unwrap()).unwrap();
+        assert!(s2["whisperResident"].is_null() && s2["peakVramMb"].is_null());
+
+        // A generated clip: role clip, the caller's duration; audio / unknown files are refused.
+        let mp4 = out.join("gen.mp4");
+        std::fs::write(&mp4, b"not really an mp4").unwrap();
+        let v = ingest_generated(&st, &p.slug, &mp4, &GenMeta { duration_sec: Some(2.5), ..meta(None) }).unwrap();
+        assert_eq!((v.kind.as_str(), v.role.as_str(), v.duration_sec), ("video", "clip", Some(2.5)));
+        let wav = out.join("x.wav");
+        std::fs::write(&wav, b"x").unwrap();
+        assert!(ingest_generated(&st, &p.slug, &wav, &meta(None)).is_err());
+        assert!(ingest_generated(&st, &p.slug, &out.join("missing.png"), &meta(None)).is_err());
+        let empty = out.join("empty.png");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(ingest_generated(&st, &p.slug, &empty, &meta(None)).is_err());
+        assert!(ingest_generated(&st, "no-such-project", &png, &meta(None)).is_err());
+        assert_eq!(list_assets(&st, &p.slug).unwrap().len(), 3, "failed ingests record nothing");
+
+        for e in std::fs::read_dir(Path::new(&p.root).join("raw")).unwrap() {
+            remove_staged(&e.unwrap().path());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn checkpoint_hash_is_cached_by_path_size_and_mtime() {
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        let ckpt = root.join("model.safetensors");
+        std::fs::write(&ckpt, b"weights v1").unwrap();
+        let h1 = checkpoint_sha256(&st, &ckpt).unwrap();
+        assert_eq!(h1, sha_hex(b"weights v1"));
+        // Prove the second call reads the cache, not the file: plant a marker under the same size+mtime.
+        let key = ckpt_hash_key(&dunce_canon(&ckpt).unwrap());
+        let mut v: Value = serde_json::from_str(&st.with(|c| c.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get::<_, String>(0)).map_err(sql_err)).unwrap()).unwrap();
+        v["sha256"] = json!("cached-marker");
+        st.with(|c| c.execute("UPDATE kv SET value = ?2 WHERE key = ?1", params![key, v.to_string()]).map(|_| ()).map_err(sql_err)).unwrap();
+        assert_eq!(checkpoint_sha256(&st, &ckpt).unwrap(), "cached-marker");
+        // A changed file (size differs) is hashed again and the cache refreshed.
+        std::fs::write(&ckpt, b"weights v2, longer").unwrap();
+        assert_eq!(checkpoint_sha256(&st, &ckpt).unwrap(), sha_hex(b"weights v2, longer"));
+        assert_eq!(checkpoint_sha256(&st, &ckpt).unwrap(), sha_hex(b"weights v2, longer"));
+        assert!(checkpoint_sha256(&st, &root.join("absent.safetensors")).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn old_asset_rows_load_without_generation() {
+        // A v1 row (no v2 fields) and a v2 row (no generation) both load with `generation: None`,
+        // and an asset without provenance serialises without the key.
+        let v1 = r#"{"id":"a-1","project":"p","kind":"video","role":"clip","name":"a.mp4","path":"C:/x/a.mp4","readOnly":true,"sizeBytes":1,"durationSec":2.0,"width":null,"height":null,"thumbPath":null,"addedAt":"t"}"#;
+        let a: MediaAsset = serde_json::from_str(v1).unwrap();
+        assert!(a.generation.is_none() && a.scenes.is_none());
+        let v2 = serde_json::to_string(&MediaAsset { tags: vec!["x".into()], scenes: Some(vec![]), ..a.clone() }).unwrap();
+        assert!(!v2.contains("generation"));
+        assert!(serde_json::from_str::<MediaAsset>(&v2).unwrap().generation.is_none());
+        // A partial generation record (older bridge) fills the rest with defaults.
+        let g: MediaAsset = serde_json::from_str(&v1.replace(r#""addedAt":"t""#, r#""addedAt":"t","generation":{"template":"t1","seed":7}"#)).unwrap();
+        let gm = g.generation.unwrap();
+        assert_eq!((gm.template.as_str(), gm.seed, gm.steps, gm.workflow.is_null()), ("t1", 7, 0, true));
+        // Through the db: a row written before Part 2 still lists.
+        let root = tmp_root();
+        let st = MediaState::in_memory(&root);
+        st.with(|c| c.execute("INSERT INTO asset (id, project, json, added_at, tags, flags, moments) VALUES ('a-1', 'p', ?1, 't', '[]', '[]', '[]')", [v1]).map(|_| ()).map_err(sql_err)).unwrap();
+        let rows = list_assets(&st, "p").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].generation.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The live Director Suite E2E run (#[ignore]d, E2E_LIVE=1): media_e2e.rs.
+#[cfg(test)]
+#[path = "media_e2e.rs"]
+mod e2e_live;

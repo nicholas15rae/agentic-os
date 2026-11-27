@@ -24,15 +24,15 @@ You are the Director inside Nic's Director Suite. You may end a reply with fence
 {json}
 \`\`\`
 each holding EXACTLY ONE of these JSON shapes (no other fields, no comments):
-1. {"type":"draft_brief","brief":{"idea":"Nic's words verbatim","goal":"…","platform":"reels"|"tiktok"|"ig_feed"|"youtube"|"shorts"|"self_tape"|"custom","lengthSec":5-600,"aspect":"16:9"|"9:16"|"4:5"|"1:1","tone":"…","references":["…"],"guessed":["fields you filled with a default"]}}
+1. {"type":"draft_brief","brief":{"idea":"<Nic's idea, word for word>","goal":"…","platform":"reels"|"tiktok"|"ig_feed"|"youtube"|"shorts"|"self_tape"|"custom","lengthSec":5-600,"aspect":"16:9"|"9:16"|"4:5"|"1:1","tone":"…","references":["…"],"guessed":["platform","lengthSec"]}} ("guessed": NAMES of fields you filled with a default; explain guesses in prose)
 2. {"type":"populate_shot_list","slots":[{"id":"s1","label":"Hook","instructions":"…","kind":"video"|"image"|"audio","targetSec":3|null,"framing":"wide"|"medium"|"mcu"|"closeup"|"insert"|"overhead"|"pov"|null,"action":"what happens","source":"film"|"generate"|"stock","phoneTips":["≤4 short tips"]}]}
 3. {"type":"match_footage","matches":[{"assetId":"a-…","slotId":"s1","reason":"…"}],"moments":[{"assetId":"a-…","inSec":0,"outSec":2.5,"label":"…","score":0-1}]}
-4. {"type":"propose_edit_plan","clips":[{"assetId":"a-…","inSec":0,"outSec":5.5,"fadeMs":0,"transitionIn":{"kind":"cut"|"crossfade"|"fade_black","ms":0-1500},"punchIn":1-1.5}],"audio":[{"assetId":"a-…","startSec":0,"inSec":0,"outSec":30,"volume":1,"fadeInMs":0,"fadeOutMs":0,"duckUnderVoice":false}],"output":{"aspect":…,"loudnessLufs":-14|-16|-18,"maxSizeMb":100|null,"name":"…"},"captions":{"enabled":true,"style":"clean"|"bold_pop"|"karaoke"|"minimal","position":"lower"|"middle","maxWordsPerLine":1-12},"color":{"preset":"none"|"warm"|"cool"|"punchy"|"film"|"bw","strength":0-1},"outputs":["reels",…≤4],"note":"why this cut"}
+4. {"type":"propose_edit_plan","clips":[{"assetId":"a-…","inSec":0,"outSec":5.5,"fadeMs":0,"transitionIn":{"kind":"cut"|"crossfade"|"fade_black","ms":0-1500},"punchIn":1-1.5}],"audio":[] or [{"assetId":"<an audio asset>","startSec":0,"inSec":0,"outSec":30,"volume":1,"fadeInMs":0,"fadeOutMs":0,"duckUnderVoice":false}],"output":{"aspect":…,"loudnessLufs":-14|-16|-18,"maxSizeMb":100|null,"name":"…"},"captions":{"enabled":true,"style":"clean"|"bold_pop"|"karaoke"|"minimal","position":"lower"|"middle","maxWordsPerLine":1-12},"color":{"preset":"none"|"warm"|"cool"|"punchy"|"film"|"bw","strength":0-1},"outputs":["reels",…≤4],"note":"why this cut"}
 5. {"type":"revise_edit","round":1,"resolves":["n-…"],"plan":{same body as propose_edit_plan, no "type"},"summary":"what changed"}
 6. {"type":"report_open_decisions","items":["…"]}
 7. {"type":"execute_verified_render"}
 Rules:
-- Use only the asset, slot and note ids listed below. Clips are video or image assets; audio layers are audio assets. A match pairs an asset with a slot of the same kind.
+- Use only the asset, slot and note ids listed below. Clips are video or image assets; audio layers are audio assets only: a video clip already plays its own sound, so "audio" is [] without music or voiceover. A match pairs an asset with a slot of the same kind.
 - Video clips: 0 ≤ inSec < outSec ≤ duration. Stills: outSec = hold seconds 0.2–60. fadeMs 0–2000, volume 0–2. Clip order = playback order.
 - captions, color and outputs are optional; leave them out to keep the current ones. self_tape never gets captions.
 - Draft a brief only when there is none or Nic asks; mark every field you guessed. Only Nic approves a brief.
@@ -70,6 +70,7 @@ function shotLines(m: TimelineManifest): string {
 function assetLine(a: MediaAsset): string {
   const bits = [a.id, cut(a.name, 40), a.kind, `role ${a.role}`, fmtDur(a.durationSec), fmtSize(a)];
   if (a.slotId) bits.push(`slot ${a.slotId}`);
+  if (a.generation) bits.push(`generated ${cut(a.generation.template || "?", 32)} seed ${a.generation.seed}`);
   if (a.tags.length) bits.push(`tags ${a.tags.slice(0, 6).join(",")}`);
   if (a.flags.length) bits.push(`flags ${a.flags.map((f) => f.kind).join(",")}`);
   if (a.kind === "video" && Array.isArray(a.scenes)) {

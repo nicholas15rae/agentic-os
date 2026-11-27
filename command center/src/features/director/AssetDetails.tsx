@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { FileText, Loader2, Plus, Tag, TriangleAlert, X } from "lucide-react";
+import { Copy, FileText, Loader2, Plus, Sparkles, Tag, TriangleAlert, X } from "lucide-react";
+import { useToasts } from "@/features/reminders/notify";
 import { fileSrc } from "./api";
-import type { MediaAsset } from "./contract";
+import type { GenMeta, MediaAsset } from "./contract";
 import { MAX_TAGS, TAG_MAX_CHARS, cleanTags, seekTo, setAssetTags } from "./director-store";
-import { timecode } from "./manifest";
+import { genSettingsJson, timecode } from "./manifest";
 import { FLAG_LABEL, shotCount, transcriptFile, transcriptLines, type TranscriptLine } from "./review-ui";
 
 /** The one-line badges under an asset's name: flags as warnings, the shot count, the transcript size. Props only. */
@@ -24,6 +25,61 @@ export function AssetBadges({ asset }: { asset: MediaAsset }) {
       )}
     </>
   );
+}
+
+/** The bin chip for a generated asset (template + seed in the tooltip). Props only; nothing for filmed media. */
+export function GeneratedChip({ asset }: { asset: MediaAsset }) {
+  const g = asset.generation;
+  if (!g) return null;
+  return (
+    <span className="flex items-center gap-0.5 rounded-full border border-violet/40 px-1.5 text-[10px] text-violet" title={`Generated · ${g.template || "template"} · seed ${g.seed}`}>
+      <Sparkles size={9} /> Generated
+    </span>
+  );
+}
+
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`);
+
+/** Provenance of a generated asset: template, seed, steps, prompt, render time, peak VRAM, and a
+ * "Copy settings" button (clipboard JSON). Props only. Re-roll / tweak come with the Generate panel. */
+export function GenerationBlock({ gen, onCopy }: { gen: GenMeta; onCopy: (json: string) => void }) {
+  const rows: [string, string][] = [
+    ["Template", gen.template || "—"],
+    ["Seed", String(gen.seed)],
+    ["Steps", `${gen.steps}${gen.cfg ? ` · cfg ${gen.cfg}` : ""}${gen.sampler ? ` · ${gen.sampler}` : ""}`],
+    ["Render", gen.renderMs ? fmtMs(gen.renderMs) : "—"],
+    ["Peak VRAM", gen.peakVramMb != null ? `${(gen.peakVramMb / 1024).toFixed(1)} GB` : "—"],
+  ];
+  return (
+    <div aria-label="Generation provenance">
+      <div className="flex items-center justify-between gap-2">
+        <p className="label-caps flex items-center gap-1 text-ink-3">
+          <Sparkles size={10} /> Generated
+        </p>
+        <button onClick={() => onCopy(genSettingsJson(gen))} className="flex items-center gap-1 text-[11px] text-teal-soft hover:underline" title="Copy the generation settings as JSON">
+          <Copy size={10} /> Copy settings
+        </button>
+      </div>
+      <dl className="mt-0.5 grid grid-cols-[auto_1fr] gap-x-2 text-[11px]">
+        {rows.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-ink-3">{k}</dt>
+            <dd className="min-w-0 truncate font-mono text-[10px] leading-[16px] text-ink-2">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {gen.prompt && <p className="mt-0.5 line-clamp-3 text-[11px] text-ink-2" title={gen.prompt}>“{gen.prompt}”</p>}
+    </div>
+  );
+}
+
+async function copySettings(json: string) {
+  try {
+    await navigator.clipboard.writeText(json);
+    useToasts.getState().push({ title: "Settings copied", body: "Generation settings are on the clipboard as JSON.", tone: "info" });
+  } catch (e) {
+    useToasts.getState().push({ title: "Couldn't copy the settings", body: e instanceof Error ? e.message : String(e), tone: "error" });
+  }
 }
 
 /** Tags as removable chips plus an add field (media_asset_update). Props only. */
@@ -108,6 +164,7 @@ export function AssetDetails({ asset, projectRoot }: { asset: MediaAsset; projec
   return (
     <div className="mt-1.5 space-y-2 rounded-[10px] bg-white/[0.02] p-2">
       <TagEditor tags={asset.tags} onChange={(tags) => void setAssetTags(asset.id, tags)} />
+      {asset.generation && <GenerationBlock gen={asset.generation} onCopy={(json) => void copySettings(json)} />}
       {t ? (
         <div>
           <p className="text-[11px] text-ink-2">

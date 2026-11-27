@@ -190,6 +190,9 @@ pub fn run() {
                 // Model Lab A/B compare reports (<config dir>/telemetry/modellab) + its request.json loop.
                 #[cfg(desktop)]
                 modellab::compare::init(app.handle(), &dir);
+                // Director Part 2: the ComfyUI batch queue (<config dir>/comfy-queue.json) + its runner.
+                #[cfg(desktop)]
+                commands::comfy::init(app.handle(), &dir);
                 finance_vault::init(&dir);
                 // Operations Manager: the business registry (<config dir>/businesses.json, memory/ops/<id>).
                 business_registry::init(&dir);
@@ -489,6 +492,12 @@ pub fn run() {
             agents::overseer_ask,
             mcp::mcp_list_tools,
             director::director_turn,
+            commands::comfy::comfy_status,
+            commands::comfy::comfy_enqueue,
+            commands::comfy::comfy_cancel,
+            commands::comfy::comfy_run_now,
+            commands::comfy::comfy_queue_get,
+            commands::comfy::comfy_settings_set,
             media::media_projects,
             media::media_project_create,
             media::media_project_get,

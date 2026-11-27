@@ -55,6 +55,37 @@ export interface MediaAsset {
   /** Shot-cut times in seconds (media-forge detect_scenes after the probe; video only, ≤ 200).
    * Absent / null = not detected (yet); [] = one continuous shot. */
   scenes?: number[] | null;
+  /** Part 2: how a generated still/clip was made (ComfyUI). Absent / null = filmed or imported.
+   * The full record, with the exact API workflow, is `generation.sidecarPath` (working/gen/<id>.gen.json). */
+  generation?: GenMeta | null;
+}
+
+/** Provenance of one generated asset (media.rs GenMeta). `workflow` is only in the sidecar file. */
+export interface GenMeta {
+  template: string;
+  prompt: string;
+  negative: string;
+  seed: number;
+  steps: number;
+  cfg: number;
+  sampler: string;
+  scheduler: string;
+  width: number;
+  height: number;
+  denoise: number;
+  checkpoint: string;              // file name
+  checkpointPath: string | null;
+  checkpointSha256: string | null;
+  comfyuiVersion: string;
+  workflow?: unknown;              // sidecar only (the asset row drops it)
+  comfyJobId: string;
+  promptId: string;
+  renderMs: number;
+  peakVramMb: number | null;
+  whisperResident: boolean | null; // faster-whisper stayed on the GPU during the render; null = unknown
+  createdAt: string;
+  durationSec: number | null;      // generated video only
+  sidecarPath: string | null;
 }
 
 export interface ShotSlot {

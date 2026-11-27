@@ -87,6 +87,10 @@ export const api = {
   /** Raw body: the sides file; `x-slug` / `x-name` headers (the name percent-encoded: headers are ASCII). */
   sidesSave: (a: Args<"media_sides_save">): Promise<Result<"media_sides_save">> => rawInvoke("media_sides_save", a.bytes, { "x-slug": a.slug, "x-name": encodeURIComponent(a.name) }),
   slateCard: (a: Args<"media_slate_card">): Promise<Result<"media_slate_card">> => xcmd("media_slate_card", a),
+  // ── Part 6: style memory (director_style.rs) ──
+  styleGet: (): Promise<Result<"media_style_get">> => xcmd("media_style_get"),
+  /** Only after Nic's Approve final or a note resolve. */
+  styleRecord: (a: Args<"media_style_record">): Promise<Result<"media_style_record">> => xcmd("media_style_record", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

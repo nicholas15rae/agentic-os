@@ -28,6 +28,8 @@ import {
   type QuickStart,
 } from "./manifest";
 import { versionLabel } from "./versions";
+import { recordStyle } from "./style";
+import { useChatDraft } from "./gaps";
 
 export type Readiness = DirectorCommands["media_readiness"]["result"];
 export type RenderJob = DirectorEvents["media-render"];
@@ -241,7 +243,10 @@ export async function loadProjects(): Promise<void> {
 export async function openProject(slug: string): Promise<void> {
   if (get().slug && get().slug !== slug) await flushSave();
   const same = get().slug === slug;
-  if (!same) resetIntake();
+  if (!same) {
+    resetIntake();
+    useChatDraft.setState({ draft: null });
+  }
   set({ slug, loading: true, error: null, plan: null, selection: null, previewMode: "working", playhead: 0, previewTime: 0, seek: null, chat: same ? get().chat : [], ...(same ? {} : PROJECT_V2_BLANK) });
   rememberSlug(slug);
   try {
@@ -271,6 +276,7 @@ export function closeProject() {
   void flushSave();
   rememberSlug(null);
   resetIntake();
+  useChatDraft.setState({ draft: null });
   set({ slug: null, project: null, assets: [], manifest: null, renders: [], chat: [], plan: null, selection: null, error: null, ...PROJECT_V2_BLANK });
 }
 
@@ -889,6 +895,8 @@ export async function resolveNote(noteId: string, opts: { manual?: boolean } = {
   try {
     await api.noteResolve(opts.manual ? { slug, noteId, manual: true } : { slug, noteId });
     if (get().slug === slug) set((s) => ({ manifest: s.manifest ? withNoteResolved(s.manifest, noteId) : s.manifest }));
+    // Part 6 style memory: a resolve is a sign-off on this cut (Rust keeps one entry per cut revision).
+    void recordStyle(slug, "notes");
     return true;
   } catch (e) {
     const why = errText(e);
@@ -905,6 +913,7 @@ export async function approveFinal(renderIds: string[]): Promise<Deliverable[] |
   if (!slug || !renderIds.length) return null;
   try {
     const deliverables = await api.approveFinal({ slug, renderIds, approved: true });
+    void recordStyle(slug, "final");
     if (get().slug !== slug) return deliverables;
     set({ deliverables });
     const [data, review] = await Promise.all([api.projectGet({ slug }).catch(() => null), loadReview(slug)]);

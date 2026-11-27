@@ -241,11 +241,17 @@ export function transcriptSection(
   return short.length <= budget ? short : "";
 }
 
-export function buildDirectorContext(project: MediaProject, assets: MediaAsset[], manifest: TimelineManifest, review?: ProjectReview | null, transcripts?: AssetTranscriptLines[] | null): string {
+/** The Part 6 STYLE line's cap (mirrors style.ts STYLE_LINE_MAX). Its room comes out of the
+ * TRANSCRIPT section's share, so CONTEXT_BUDGET and TRANSCRIPT_BUDGET together are unchanged. */
+export const STYLE_BUDGET = 200;
+
+export function buildDirectorContext(project: MediaProject, assets: MediaAsset[], manifest: TimelineManifest, review?: ProjectReview | null, transcripts?: AssetTranscriptLines[] | null, style?: string | null): string {
   const assetLines = assets.length ? assets.map(assetLine).join("\n") : "- (none staged yet)";
+  const styleText = style?.trim() ? cut(style.trim().replace(/\s+/g, " "), STYLE_BUDGET) : "";
   const before = [
     `PROJECT: ${project.title} (slug ${project.slug}) · status ${project.status} · speed ${project.speed}`,
     briefLines(project),
+    ...(styleText ? [styleText] : []),
     shotLines(manifest),
     `ASSETS (${assets.length}):\n${assetLines}`,
   ];
@@ -257,7 +263,8 @@ export function buildDirectorContext(project: MediaProject, assets: MediaAsset[]
   ];
   const rest = [...before, ...after].join("\n\n").length;
   // The transcript gets the room left under CONTEXT_BUDGET (less its "\n\n"), up to its own cap.
-  const room = Math.min(TRANSCRIPT_BUDGET, CONTEXT_BUDGET - 1 - rest - 2);
+  // A STYLE line's chars come out of the transcript's cap (its share of the budget).
+  const room = Math.min(TRANSCRIPT_BUDGET - (styleText ? styleText.length + 2 : 0), CONTEXT_BUDGET - 1 - rest - 2);
   const transcript = room > 0 ? transcriptSection(assets, manifest, transcripts, room) : "";
   return [...before, ...(transcript ? [transcript] : []), ...after].join("\n\n");
 }

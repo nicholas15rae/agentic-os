@@ -647,6 +647,8 @@ pub fn run() {
             media::media_review_write,
             media::media_approve_final,
             media::media_deliverables_get,
+            commands::director_style::media_style_get,
+            commands::director_style::media_style_record,
             commands::scene_reader::scene_reader_status,
             commands::scene_reader::scene_reader_list,
             commands::scene_reader::scene_reader_import,

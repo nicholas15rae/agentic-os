@@ -49,6 +49,7 @@ pub mod market;
 pub mod mcp;
 pub mod director;
 pub mod director_reports;
+pub mod director_style;
 pub mod scene_reader;
 pub mod media;
 pub mod net_telemetry;

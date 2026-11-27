@@ -5,6 +5,7 @@ import { createProject, lastSlug, loadProjects, openProject, refreshAssets, star
 import { onPullDone, startCloud } from "@/features/cloud/cloud-store";
 import { DesktopOnlyView, EmptyStateView } from "@/features/director/EmptyState";
 import { ProjectsBoard } from "@/features/director/ProjectsBoard";
+import { startFromPreset } from "@/features/director/launcher";
 import { StudioBar } from "@/features/director/StudioBar";
 import { StagingBin } from "@/features/director/StagingBin";
 import { ShotList } from "@/features/director/ShotList";
@@ -69,6 +70,7 @@ function DirectorStudio() {
       {!slug ? (
         <EmptyStateView
           onQuickStart={(q, title) => createProject(title, q)}
+          onPreset={(id, title) => startFromPreset(id, title)}
           board={
             <>
               <SceneReaderCard />

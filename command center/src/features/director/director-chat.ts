@@ -16,6 +16,7 @@ import { api } from "./api";
 import type { AssetTranscriptLines, DirectorAction, DirectorTurnRequest } from "./contract";
 import { extractActionBlocks, parseDirectorActions } from "./actions";
 import { buildDirectorContext } from "./context";
+import { styleLineFor } from "./style";
 import { applyDirectorActionsReport, AUTO_FIX_SHOWN, AUTO_FIX_TAG, isAutoFixLine, setBriefIdea, useDirector, type ChatMsg } from "./director-store";
 
 export const HISTORY_TURNS = 10;
@@ -160,7 +161,7 @@ export async function transcriptLinesFor(slug: string): Promise<AssetTranscriptL
 
 /** One model call + apply, with chatBusy already held by the caller. Null = no reply to judge. */
 async function runTurn(slug: string, body: string, opts: RunOpts): Promise<(TurnProblems & { replyId: string }) | null> {
-  const transcripts = await transcriptLinesFor(slug);
+  const [transcripts, style] = await Promise.all([transcriptLinesFor(slug), styleLineFor()]);
   const { project, assets, manifest, chat, review } = st();
   if (st().slug !== slug || !project || !manifest) return null;
   const history = chatHistory(chat);
@@ -181,7 +182,7 @@ async function runTurn(slug: string, body: string, opts: RunOpts): Promise<(Turn
     patchMsg(replyId, { text: cut >= 0 ? buffered.slice(0, cut).trimEnd() : buffered });
   });
 
-  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest, review, transcripts), streamId);
+  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest, review, transcripts, style), streamId);
   try {
     const r = await api.turn({ req });
     const answer = (r.answer || buffered).trim();

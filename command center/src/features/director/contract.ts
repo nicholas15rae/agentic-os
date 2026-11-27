@@ -318,7 +318,23 @@ export interface DirectorCommands {
   media_sides_save: { args: { slug: string; name: string; bytes: Uint8Array }; result: SidesFile };
   /** A 16:9 slate still (name, role, contact) as a `slate` asset. Never placed on the timeline by itself. */
   media_slate_card: { args: { slug: string; name: string; role?: string; contact?: string }; result: MediaAsset };
+  // ── Part 6: style memory (director_style.rs) ──
+  /** <projects root>/style-profile.json (the last 20 sign-offs). Reads only. */
+  media_style_get: { args: undefined; result: StyleProfile };
+  /** Nic's Approve final ("final") or note resolve ("notes") on `slug` adds one entry (Rust derives every fact). */
+  media_style_record: { args: { slug: string; kind: StyleKind }; result: StyleProfile };
 }
+export type StyleKind = "final" | "notes";
+/** One sign-off's style facts (director_style.rs StyleEntry). Themes come from a fixed word list, never note text. */
+export interface StyleEntry {
+  at: string; slug: string; kind: StyleKind; revision: number;
+  platform: string; aspect: string; lengthSec: number; clips: number; avgClipSec: number;
+  captions: string; // "off" or the caption style
+  color: string;    // colour preset ("none" = no look)
+  fits: string[];   // non-auto fits used
+  themes: string[]; // note themes, most frequent first
+}
+export interface StyleProfile { version: number; entries: StyleEntry[] }
 export interface SceneReaderStatus { up: boolean; url: string; projectsRoot: string | null }
 export interface SrTake { id: string; name: string; file: string; durSec: number; best: boolean; createdAt: number; available: boolean }
 export interface SrProject { id: string; title: string; updatedAt: number; takes: SrTake[]; copyChars: number }

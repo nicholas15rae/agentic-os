@@ -68,7 +68,7 @@ const render = (id: string, createdAt: string, path = `C:\\ai-hub\\media\\projec
   verify: { ok: true, checks: [] },
   createdAt,
 });
-const proj = (slug: string, title: string): MediaProject => ({ slug, title, status: "editing", root: "", createdAt: "", updatedAt: "", source: { from: "suite", refId: null, brief: null } });
+const proj = (slug: string, title: string): MediaProject => ({ slug, title, status: "editing", root: "", createdAt: "", updatedAt: "", source: { from: "suite", refId: null, brief: null }, brief: null, speed: "rough" });
 const xfer = (p: Partial<CloudTransfer>): CloudTransfer => ({ id: "x-1", provider: "gdrive", direction: "push", name: "r1.mp4", project: "demo", status: "running", bytesDone: 0, bytesTotal: 10, error: null, result: null, startedAt: "2026-11-22T10:00:00Z", ...p });
 const rec = (p: Partial<CloudSyncRecord>): CloudSyncRecord => ({ id: "d1", provider: "gdrive", direction: "push", project: "demo", localPath: "", driveFileId: "f1", name: "r1.mp4", sizeBytes: 1, webViewLink: null, at: "2026-11-22T10:00:00Z", ...p });
 

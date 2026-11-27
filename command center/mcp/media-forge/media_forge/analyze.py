@@ -14,6 +14,61 @@ _model_lock = threading.Lock()
 _model_cache: dict[tuple, object] = {}
 
 
+def _is_model_dir(p: Path) -> bool:
+    return p.is_dir() and (p / "model.bin").is_file() and (p / "config.json").is_file()
+
+
+def _hf_snapshot(root: Path, name: str) -> Path | None:
+    """`<root>/models--Systran--faster-whisper-<name>/snapshots/<rev>/` (the HF cache layout that
+    faster-whisper's own downloads leave behind), preferring the revision refs/main names."""
+    repo = root / f"models--Systran--faster-whisper-{name}"
+    snaps = repo / "snapshots"
+    if not snaps.is_dir():
+        return None
+    try:
+        main = (repo / "refs" / "main").read_text("utf-8").strip()
+    except OSError:
+        main = ""
+    if main and _is_model_dir(snaps / main):
+        return snaps / main
+    found = sorted((d for d in snaps.iterdir() if _is_model_dir(d)), key=lambda d: d.stat().st_mtime)
+    return found[-1] if found else None
+
+
+def resolve_model(s: Settings, model: str) -> Path:
+    """A local CTranslate2 Whisper model folder for a name (`tiny.en`) or an absolute folder path.
+
+    Never downloads: a model that isn't on disk is an error that says where it was looked for.
+    Names are looked up under WHISPER_MODEL_DIR as `<name>/`, `faster-whisper-<name>/` and the HF
+    cache layout. A path that doesn't exist but is named `faster-whisper-<name>` falls back to the
+    HF cache in its parent folder (that's where faster-whisper itself stores `tiny.en`)."""
+    model = (model or "").strip()
+    if not model:
+        raise PolicyError("a whisper model name or folder is required")
+    p = Path(model)
+    if p.is_absolute():
+        if _is_model_dir(p):
+            return p
+        if p.name.startswith("faster-whisper-"):
+            snap = _hf_snapshot(p.parent, p.name[len("faster-whisper-"):])
+            if snap:
+                return snap
+        raise PolicyError(f"no whisper model at {p} (needs model.bin + config.json); models are never "
+                          "downloaded automatically")
+    if any(c in model for c in "\\/:") or model in (".", ".."):
+        raise PolicyError(f"whisper model must be a name like tiny.en or an absolute folder (got {model!r})")
+    root = s.whisper_dir
+    for cand in (root / model, root / f"faster-whisper-{model}"):
+        if _is_model_dir(cand):
+            return cand
+    snap = _hf_snapshot(root, model)
+    if snap:
+        return snap
+    raise PolicyError(f"whisper model {model!r} is not on disk under {root}; it is never downloaded "
+                      "automatically. Use model='tiny.en' (already local) or fetch the model first "
+                      "(small.en is a ~480 MB download: ask Nic)")
+
+
 def _model(s: Settings, name: str):
     try:
         from faster_whisper import WhisperModel
@@ -23,13 +78,27 @@ def _model(s: Settings, name: str):
     if device != "cpu" and not s.allow_gpu:
         # The 12 GB GPU belongs to the local LLM unless the gateway says otherwise.
         raise PolicyError("GPU_BUSY: Whisper on CUDA is not allowed right now; it runs on CPU int8")
-    key = (name, device, s.whisper_compute)
+    folder = resolve_model(s, name)
+    key = (str(folder), device, s.whisper_compute)
     with _model_lock:
         if key not in _model_cache:
-            s.whisper_dir.mkdir(parents=True, exist_ok=True)
-            _model_cache[key] = WhisperModel(name, device=device, compute_type=s.whisper_compute,
-                                             download_root=str(s.whisper_dir), cpu_threads=s.threads)
+            # A folder path + local_files_only: faster-whisper never reaches the network.
+            _model_cache[key] = WhisperModel(str(folder), device=device, compute_type=s.whisper_compute,
+                                             cpu_threads=s.threads, local_files_only=True)
         return _model_cache[key]
+
+
+def model_label(name: str) -> str:
+    """`tiny.en` for a name or a local snapshot/folder path (picks the `.en` language default)."""
+    p = Path(name)
+    if not p.is_absolute():
+        return name
+    for part in reversed(p.parts):
+        if part.startswith("models--Systran--faster-whisper-"):
+            return part[len("models--Systran--faster-whisper-"):]
+        if part.startswith("faster-whisper-"):
+            return part[len("faster-whisper-"):]
+    return p.name
 
 
 def _ts(t: float, sep: str) -> str:
@@ -59,7 +128,7 @@ def transcribe(s: Settings, ctx: Ctx, src: Path, out_base: Path, model: str, lan
     duration = ff.probe(s, src)["duration_sec"] or 1.0
     ctx.stage(f"loading whisper {model} ({s.whisper_device}/{s.whisper_compute})", 0.01)
     m = _model(s, model)
-    lang = language or ("en" if model.endswith(".en") else None)
+    lang = language or ("en" if model_label(model).endswith(".en") else None)
     ctx.stage("decoding audio", 0.03)
     audio = _pcm16k(s, src)
     ctx.stage("transcribing", 0.05)
@@ -88,6 +157,51 @@ def transcribe(s: Settings, ctx: Ctx, src: Path, out_base: Path, model: str, lan
             "segment_count": len(segs), "first_speech_s": first_speech, "last_speech_s": last_speech,
             "text": " ".join(x["text"] for x in segs)[:4000],
             "segments": [{k: v for k, v in x.items() if k != "words"} for x in segs[:200]]}
+
+
+class _SliceCtx:
+    """A job Ctx view that maps 0..1 progress into [lo, hi) of the parent job (batch items)."""
+
+    def __init__(self, ctx: Ctx, lo: float, hi: float, prefix: str) -> None:
+        self._ctx, self._lo, self._hi, self._prefix = ctx, lo, hi, prefix
+        self.cancel = ctx.cancel
+
+    def _map(self, frac: float) -> float:
+        return self._lo + (self._hi - self._lo) * max(0.0, min(1.0, frac))
+
+    def progress(self, frac: float, stage: str | None = None) -> None:
+        self._ctx.progress(self._map(frac), f"{self._prefix}: {stage}" if stage else None)
+
+    def stage(self, name: str, frac: float | None = None) -> None:
+        self._ctx.stage(f"{self._prefix}: {name}", self._map(frac) if frac is not None else None)
+
+    def attach(self, proc) -> None:
+        self._ctx.attach(proc)
+
+    def check(self) -> None:
+        self._ctx.check()
+
+
+def transcribe_batch(s: Settings, ctx: Ctx, items: list[tuple[Path, Path]], model: str, language: str | None,
+                     words: bool) -> dict:
+    """Transcribe (src, out_base) pairs one after another in a single job, sharing one loaded model.
+    A file that fails is reported and the batch moves on; cancelling stops the whole batch."""
+    ctx.stage(f"checking whisper model {model_label(model)}", 0.0)
+    resolve_model(s, model)  # fail the whole job up front if the model isn't on disk
+    results = []
+    n = len(items)
+    for k, (src, base) in enumerate(items):
+        ctx.check()
+        sub = _SliceCtx(ctx, k / n, (k + 1) / n, f"{k + 1}/{n} {src.name}")
+        try:
+            res = transcribe(s, sub, src, base, model, language, words)
+            results.append({"path": str(src), "ok": True, **{key: res[key] for key in (
+                "srt", "vtt", "json", "language", "segment_count", "first_speech_s", "last_speech_s")},
+                "text": res["text"][:400]})
+        except PolicyError as e:
+            results.append({"path": str(src), "ok": False, "error": str(e)})
+    done = sum(r["ok"] for r in results)
+    return {"model": model_label(model), "count": n, "done": done, "failed": n - done, "results": results}
 
 
 def _sec(tc) -> float:

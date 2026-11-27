@@ -48,6 +48,8 @@ pub mod maps;
 pub mod market;
 pub mod mcp;
 pub mod director;
+pub mod director_reports;
+pub mod scene_reader;
 pub mod media;
 pub mod net_telemetry;
 pub mod memory;

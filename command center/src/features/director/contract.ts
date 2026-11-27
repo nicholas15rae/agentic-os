@@ -197,7 +197,7 @@ export interface MediaProject {
   slug: string; title: string; status: ProjectStatus;
   root: string;               // C:\ai-hub\media\projects\<slug>
   createdAt: string; updatedAt: string;
-  source: { from: "suite" | "brainstorm" | "playplace"; refId: string | null; brief: string | null }; // source.brief = the original handoff text
+  source: { from: "suite" | "brainstorm" | "playplace" | "scene_reader"; refId: string | null; brief: string | null }; // source.brief = the original handoff text
   brief: CreativeBrief | null;            // v2
   speed: "rough" | "polish" | "full_ai";  // v2: Part 6 later; stored now, default "rough"
   /** v2 §5: stored in project.json (media_review_get reads it). Absent on rows Rust hasn't re-saved. */
@@ -306,7 +306,24 @@ export interface DirectorCommands {
   media_render_snapshot: { args: { slug: string; renderId: string }; result: RenderSnapshot };
   /** That cut becomes the working manifest (notes and shot list stay). Refuses "NO_SNAPSHOT: …" and STALE_REVISION. */
   media_manifest_restore: { args: { slug: string; renderId: string; /** the timeline revision the UI holds (STALE_REVISION when the disk moved on) */ revision?: number }; result: TimelineManifest };
+  // ── Part 4: auditions (scene_reader.rs) ──
+  /** Probes Scene Reader's Studio /health (≤ 1.5 s). `up: false` = hide the Scene Reader entry. */
+  scene_reader_status: { args: undefined; result: SceneReaderStatus };
+  /** Its voiceover projects and takes, read from a temp copy of its library (Nic's click only). */
+  scene_reader_list: { args: undefined; result: SrProject[] };
+  /** Nic's Import click: a new audition project (source scene_reader) with copies of the takes (default: the best one). */
+  scene_reader_import: { args: { project: string; takeIds?: string[] }; result: SceneReaderImport };
+  media_sides_list: { args: { slug: string }; result: SidesFile[] };
+  /** Raw body = the dropped file; headers x-slug / x-name. PDF or text, ≤ 20 MB, kept read-only in raw/sides/. */
+  media_sides_save: { args: { slug: string; name: string; bytes: Uint8Array }; result: SidesFile };
+  /** A 16:9 slate still (name, role, contact) as a `slate` asset. Never placed on the timeline by itself. */
+  media_slate_card: { args: { slug: string; name: string; role?: string; contact?: string }; result: MediaAsset };
 }
+export interface SceneReaderStatus { up: boolean; url: string; projectsRoot: string | null }
+export interface SrTake { id: string; name: string; file: string; durSec: number; best: boolean; createdAt: number; available: boolean }
+export interface SrProject { id: string; title: string; updatedAt: number; takes: SrTake[]; copyChars: number }
+export interface SceneReaderImport { project: MediaProject; assets: MediaAsset[]; skipped: string[] }
+export interface SidesFile { name: string; path: string; sizeBytes: number }
 export interface RenderSnapshot { renderId: string; planId: string; manifest: TimelineManifest | null; createdAt: string }
 export interface DirectorTurnRequest { text: string; history: { role: "user" | "assistant"; content: string }[]; context: string; streamId: string | null }
 export interface DirectorTurnResult { answer: string; providerId: string; latencyMs: number; answeredBy: "director" }

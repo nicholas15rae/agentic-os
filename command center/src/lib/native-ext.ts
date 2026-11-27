@@ -12,7 +12,7 @@ import type { CloudCommands } from "@/features/cloud/contract";
 
 /** Director Suite (media.rs): every JSON-args command. The two raw-body ones (`media_ingest_chunk`,
  * `media_voiceover_save`) go through `features/director/api.ts`, never `xcmd`. */
-export type DirectorJsonCommands = Omit<DirectorCommands, "media_ingest_chunk" | "media_voiceover_save">;
+export type DirectorJsonCommands = Omit<DirectorCommands, "media_ingest_chunk" | "media_voiceover_save" | "media_sides_save">;
 
 /** Cloud storage (gdrive.rs): every `cloud_*` command is plain JSON, so the locked contract is used as is. */
 export interface ExtCommands extends DirectorJsonCommands, CloudCommands {

@@ -759,11 +759,12 @@ export async function approveBrief(): Promise<boolean> {
   return updateProject({ brief: { ...b, approved: true, updatedBy: "nic", updatedAt: new Date().toISOString() } });
 }
 
-/** Replace the approved brief with the held Director draft (unapproved until Nic approves it). */
+/** Replace the approved brief with the held Director draft (unapproved until Nic approves it). The
+ * accept is Nic's save, so it never comes back as a Director report (director_reports.rs). */
 export async function acceptBriefDraft(): Promise<boolean> {
   const d = get().briefDraft;
   if (!d) return false;
-  const ok = await updateProject({ brief: d });
+  const ok = await updateProject({ brief: { ...d, updatedBy: "nic", updatedAt: new Date().toISOString() } });
   if (ok) set({ briefDraft: null });
   return ok;
 }

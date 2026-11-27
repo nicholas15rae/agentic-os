@@ -824,7 +824,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Err(format!("save {}: {}", path.display(), last.map(|e| e.to_string()).unwrap_or_default()))
 }
 
-fn set_read_only(path: &Path) {
+pub(crate) fn set_read_only(path: &Path) {
     if let Ok(meta) = std::fs::metadata(path) {
         let mut perm = meta.permissions();
         perm.set_readonly(true);
@@ -850,7 +850,7 @@ pub(crate) fn dunce_canon(p: &Path) -> Option<PathBuf> {
 
 /// ffprobe / ffmpeg: media-forge's own MEDIA_FF* override in os.json, then PATH (winget's
 /// links), then Shotcut's bundled copy.
-fn media_bin(cfg: &os_core::OsConfig, name: &str) -> Option<String> {
+pub(crate) fn media_bin(cfg: &os_core::OsConfig, name: &str) -> Option<String> {
     let key = if name == "ffprobe" { "MEDIA_FFPROBE" } else { "MEDIA_FFMPEG" };
     if let Some(v) = cfg.mcps.iter().find(|m| m.id == "media-forge").and_then(|m| m.env.get(key)).filter(|v| Path::new(v.as_str()).is_file()) {
         return Some(v.clone());
@@ -871,7 +871,7 @@ pub(crate) struct Probe {
     pub has_audio: bool,
 }
 
-fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
+pub(crate) fn run_hidden(program: &str, args: &[&str], timeout: Duration) -> Result<std::process::Output, String> {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     #[cfg(windows)]
@@ -992,7 +992,7 @@ pub(crate) fn ensure_project_dirs(root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&cap).map_err(|e| format!("create {}: {e}", cap.display()))
 }
 
-fn save_project(state: &MediaState, p: &MediaProject) -> Result<(), String> {
+pub(crate) fn save_project(state: &MediaState, p: &MediaProject) -> Result<(), String> {
     let j = serde_json::to_string(p).map_err(|e| e.to_string())?;
     state.with(|c| c.execute("INSERT INTO project (slug, json, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(slug) DO UPDATE SET json = ?2, updated_at = ?3", params![p.slug, j, p.updated_at]).map(|_| ()).map_err(sql_err))?;
     let root = PathBuf::from(&p.root);
@@ -1028,7 +1028,7 @@ fn asset_from_row(r: &rusqlite::Row) -> rusqlite::Result<Option<MediaAsset>> {
     Ok(Some(a))
 }
 
-fn list_assets(state: &MediaState, slug: &str) -> Result<Vec<MediaAsset>, String> {
+pub(crate) fn list_assets(state: &MediaState, slug: &str) -> Result<Vec<MediaAsset>, String> {
     state.with(|c| {
         let mut st = c.prepare(&format!("SELECT {ASSET_COLS} FROM asset WHERE project = ?1 ORDER BY added_at, id")).map_err(sql_err)?;
         let rows = st.query_map([slug], asset_from_row).map_err(sql_err)?;
@@ -1125,7 +1125,7 @@ pub(crate) fn create_project(state: &MediaState, title: &str, source: Option<Sou
         return Err("give the project a title (up to 120 characters)".into());
     }
     let source = source.unwrap_or(Source { from: "suite".into(), ref_id: None, brief: None });
-    if !["suite", "brainstorm", "playplace"].contains(&source.from.as_str()) {
+    if !["suite", "brainstorm", "playplace", "scene_reader"].contains(&source.from.as_str()) {
         return Err(format!("unknown project source {:?}", source.from));
     }
     let base = slugify(title);
@@ -1262,7 +1262,7 @@ pub(crate) fn remove_staged(p: &Path) {
 
 /// Copy `src` to a new file `dst` and compare the two byte for byte (as the intake does); the
 /// partial copy is removed on any failure.
-fn copy_byte_checked(src: &Path, dst: &Path) -> Result<(), String> {
+pub(crate) fn copy_byte_checked(src: &Path, dst: &Path) -> Result<(), String> {
     let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let res = (|| -> std::io::Result<bool> {
         let mut a = std::fs::File::open(src)?;
@@ -1718,6 +1718,7 @@ pub(crate) fn project_update(state: &MediaState, slug: &str, title: Option<Strin
         }
         p.speed = s.clone();
     }
+    let brief_saved = brief.is_some();
     if let Some(mut b) = brief {
         validate_brief(&b)?;
         b.updated_at = now_iso();
@@ -1735,6 +1736,11 @@ pub(crate) fn project_update(state: &MediaState, slug: &str, title: Option<Strin
     }
     p.updated_at = now_iso();
     save_project(state, &p)?;
+    // Part 5: a Director draft leaves the Director's report, only when this call saved the brief
+    // (a rename, a speed or a status change never reports the stored one).
+    if brief_saved {
+        super::director_reports::brief_saved(state, &p);
+    }
     Ok(p)
 }
 
@@ -2422,6 +2428,7 @@ pub(crate) fn intake_tick_once(state: &MediaState, cfg: &os_core::OsConfig, forg
             set_intake(state, slug, |i| i.processing = None);
         }
     }
+    let mut settled: Vec<String> = vec![];
     loop {
         let Some(job) = state.transcribe_queue.lock().unwrap().pop_front() else { break };
         match run_intake_job(state, cfg, forge, &job, emit) {
@@ -2429,6 +2436,13 @@ pub(crate) fn intake_tick_once(state: &MediaState, cfg: &os_core::OsConfig, forg
             Err(e) => intake_failed(state, &job.slug, Some(&job.asset_id), &e, emit),
         }
         set_intake(state, &job.slug, |i| i.processing = None);
+        if !settled.contains(&job.slug) {
+            settled.push(job.slug.clone());
+        }
+    }
+    // Part 5: the queue is empty, so these projects' intake has settled: report unfilled film slots.
+    for slug in &settled {
+        super::director_reports::footage_gaps(state, slug);
     }
     Ok(())
 }
@@ -4122,14 +4136,21 @@ pub(crate) fn on_verified_render(state: &MediaState, slug: &str, render_id: &str
     let _g = state.project_lock.lock().unwrap();
     if let Ok(mut p) = load_project(state, slug) {
         let renders = list_renders(state, slug).unwrap_or_default();
+        let mut opened = None;
         if round_index(&p.review, render_id, &renders).is_none() {
             record_review_round(&mut p.review, render_id);
+            opened = p.review.rounds.iter().find(|r| r.render_id == render_id).map(|r| r.round);
         }
         if status_rank("review") > status_rank(&p.status) {
             p.status = "review".into();
         }
         p.updated_at = now_iso();
-        let _ = save_project(state, &p);
+        // Part 5: the round this render opened, as a Director report, once it is saved.
+        if save_project(state, &p).is_ok() {
+            if let Some(round) = opened {
+                super::director_reports::review_round(state, slug, round, render_id);
+            }
+        }
     }
 }
 

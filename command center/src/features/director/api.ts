@@ -77,6 +77,16 @@ export const api = {
   renderSnapshot: (a: Args<"media_render_snapshot">): Promise<Result<"media_render_snapshot">> => xcmd("media_render_snapshot", a),
   /** Only from the Versions confirm click. */
   manifestRestore: (a: Args<"media_manifest_restore">): Promise<Result<"media_manifest_restore">> => xcmd("media_manifest_restore", a),
+  // ── Part 4: auditions (scene_reader.rs) ──
+  sceneReaderStatus: (): Promise<Result<"scene_reader_status">> => xcmd("scene_reader_status"),
+  /** Only from a click (reads a copy of Scene Reader's library). */
+  sceneReaderList: (): Promise<Result<"scene_reader_list">> => xcmd("scene_reader_list"),
+  /** Only from the Import click. */
+  sceneReaderImport: (a: Args<"scene_reader_import">): Promise<Result<"scene_reader_import">> => xcmd("scene_reader_import", a),
+  sidesList: (a: Args<"media_sides_list">): Promise<Result<"media_sides_list">> => xcmd("media_sides_list", a),
+  /** Raw body: the sides file; `x-slug` / `x-name` headers (the name percent-encoded: headers are ASCII). */
+  sidesSave: (a: Args<"media_sides_save">): Promise<Result<"media_sides_save">> => rawInvoke("media_sides_save", a.bytes, { "x-slug": a.slug, "x-name": encodeURIComponent(a.name) }),
+  slateCard: (a: Args<"media_slate_card">): Promise<Result<"media_slate_card">> => xcmd("media_slate_card", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

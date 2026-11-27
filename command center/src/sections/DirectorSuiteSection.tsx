@@ -20,6 +20,8 @@ import { OutputsCard } from "@/features/director/OutputsCard";
 import { GeneratePanel } from "@/features/director/GeneratePanel";
 import { RenderQueue } from "@/features/director/RenderQueue";
 import { startComfyEvents } from "@/features/director/comfy-store";
+import { SceneReaderCard } from "@/features/director/SceneReaderCard";
+import { AuditionCard } from "@/features/director/AuditionCard";
 import "@/features/director/director.css";
 
 /**
@@ -65,7 +67,15 @@ function DirectorStudio() {
     <div className="director-suite mx-auto h-full w-full max-w-[1600px] space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
       <StudioBar />
       {!slug ? (
-        <EmptyStateView onQuickStart={(q, title) => createProject(title, q)} board={<ProjectsBoard />} />
+        <EmptyStateView
+          onQuickStart={(q, title) => createProject(title, q)}
+          board={
+            <>
+              <SceneReaderCard />
+              <ProjectsBoard />
+            </>
+          }
+        />
       ) : loading && !manifest ? (
         <div className="grid h-64 place-items-center text-ink-3">
           <Loader2 className="animate-spin" />
@@ -76,6 +86,7 @@ function DirectorStudio() {
         <div className="grid gap-4 lg:grid-cols-[minmax(240px,300px)_minmax(0,1fr)_minmax(280px,360px)]">
           <div className="min-w-0 space-y-4">
             <BriefCard />
+            <AuditionCard />
             <StagingBin />
             <ShotList />
           </div>

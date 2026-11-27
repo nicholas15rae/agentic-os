@@ -1818,7 +1818,11 @@ fn report_hook(app: &tauri::AppHandle, store: &Store, rep: &BatchReport) {
     slugs.dedup();
     for slug in slugs {
         let of = |ids: &[String]| ids.iter().filter(|id| store.job(id).is_some_and(|j| j.slug == slug)).count();
-        let _ = app.emit("director-report", json!({ "kind": "comfy-batch", "done": of(&rep.done), "failed": of(&rep.failed), "slug": slug }));
+        let (done, failed) = (of(&rep.done), of(&rep.failed));
+        let _ = app.emit("director-report", json!({ "kind": "comfy-batch", "done": done, "failed": failed, "slug": slug }));
+        // Part 5: the same batch as a Director report for the inbox (once per batch and project).
+        use tauri::Manager;
+        super::director_reports::comfy_batch(&app.state::<super::media::MediaState>(), &slug, done, failed, rep.started_at);
     }
 }
 

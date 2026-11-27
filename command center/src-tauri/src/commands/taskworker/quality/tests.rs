@@ -2031,3 +2031,32 @@ document.getElementById('cookie-shape').addEventListener('click',function(){docu
     assert!(r.iter().all(|x| x.passed), "a click on an SVG shape is a real click: {d:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Live fortune-cookie run (11-27), "the animation didn't fully render": the crack set
+/// `clip-path` to raw SVG path syntax, which the browser silently ignores, on a click of an SVG
+/// shape (no button). The smoke now clicks elements that took a click listener and names any
+/// style value the browser rejects; a valid clip-path stays clean.
+#[test]
+fn the_smoke_names_a_style_value_the_browser_ignores() {
+    let Some(dir) = edge_dir("cssignored") else { return };
+    let page = |clip: &str| {
+        format!(
+            r##"<!doctype html><html><head><title>t</title></head><body>
+<svg width="200" height="100"><path id="cookie-shape" d="M10,70 Q10,10 100,20 Q190,10 190,70 Z" fill="#c90"/></svg>
+<script>
+document.getElementById('cookie-shape').addEventListener('click',function(){{var s=this;setTimeout(function(){{s.style.clipPath="{clip}";s.style.opacity=1}},60)}});
+</script></body></html>"##
+        )
+    };
+    let broken = dir.join("broken.html");
+    std::fs::write(&broken, page("M0,70 L42,38 L56,70")).unwrap();
+    let good = dir.join("good.html");
+    std::fs::write(&good, page("polygon(0 0, 100% 0, 50% 100%)")).unwrap();
+    let t = Duration::from_secs(30);
+    match runtime_smoke(&broken, t) {
+        Smoke::Ran { errors, .. } => assert!(errors.iter().any(|e| e.starts_with(CSS_IGNORED) && e.contains("clip-path") && e.contains("M0,70")), "{errors:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(runtime_smoke(&good, t), Smoke::Ran { errors, .. } if errors.is_empty()), "a valid clip-path (and a numeric opacity) is fine");
+    let _ = std::fs::remove_dir_all(&dir);
+}

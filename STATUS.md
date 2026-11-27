@@ -136,18 +136,18 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:42 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:43 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/sections-8-10-m2` | 5 | `b38b87c` 2026-11-26 Merge origin/main (section-pass, section-pass-batch3) into Sections... | clean |
 | `claude/elated-kare-67e4c4` | 1 | `0dcc440` 2026-11-26 refactor(command-center): remove the Ops agent; its work is Tony's | clean |
 | `claude/upbeat-wing-e87be0` | 7 | `aec8c6d` 2026-11-26 Merge main (e46d0c7: director-suite) into claude/upbeat-wing-e87be0 | clean |
 | `director-suite` | 2 | `351dd2c` 2026-11-26 perf(director): keep the Director's system message byte-stable | 2 files |
 | `claude/practical-elbakyan-0f96f1` | 7 | `cdbd99a` 2026-11-26 Merge main (0c4341f, STATUS.md only) into claude/practical-elbakyan... | 11 files |
 | `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | 170 files |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 207 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 

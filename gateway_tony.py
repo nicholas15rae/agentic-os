@@ -217,7 +217,7 @@ GATEWAY_ROW_SQL = "(COALESCE(claimed_by,'')='gateway' AND COALESCE(claim_token,'
 
 SELF_ROLE_IDS = ("general", "tony", "os", "dispatcher", "orchestrator", "jarvis")  # routing.rs SELF_ROLE_IDS
 _ROLE_LABELS = {  # agents.rs role_label
-    "librarian": "Librarian", "coder": "Coder", "booking": "Booking Desk", "ops": "Ops", "prompter": "Prompter",
+    "librarian": "Librarian", "coder": "Coder", "booking": "Booking Desk", "prompter": "Prompter",
     "designer": "Designer", "director": "Director", "bizops": "Operations Manager", "finance": "Finance",
 }
 

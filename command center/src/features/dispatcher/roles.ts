@@ -5,7 +5,7 @@ import { SELF_ROLE_IDS, isSelfRoleId } from "./router";
  * The ONE shared list of agent role ids (Tony first, then the sub-agents in routing
  * tie-break order). `general` is Tony; "tony" is accepted as an alias in config/UI input.
  */
-export const ROLE_IDS = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "bizops", "finance"] as const;
+export const ROLE_IDS = ["general", "booking", "prompter", "coder", "designer", "director", "librarian", "bizops", "finance"] as const;
 export type RoleId = (typeof ROLE_IDS)[number];
 
 export const isRoleId = (s: string): s is RoleId => (ROLE_IDS as readonly string[]).includes(s);
@@ -36,8 +36,8 @@ export function roleLabel(id: string): string {
 }
 
 /** Every sub-agent (not Tony), in the order Part 2's drawer pills use: Booking
- * Desk · Coder · Prompter · Designer · Director · Librarian · Ops · Biz Ops · Finance. */
-export const SUB_AGENT_IDS = ["booking", "coder", "prompter", "designer", "director", "librarian", "ops", "bizops", "finance"] as const;
+ * Desk · Coder · Prompter · Designer · Director · Librarian · Biz Ops · Finance. */
+export const SUB_AGENT_IDS = ["booking", "coder", "prompter", "designer", "director", "librarian", "bizops", "finance"] as const;
 
 const REGISTRY_ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 

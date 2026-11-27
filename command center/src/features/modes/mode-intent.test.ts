@@ -47,7 +47,7 @@ describe("parseModeSwitch", () => {
     expect(parseModeSwitch("go into ops mode and check the Invoices")).toEqual({ mode: "operations", rest: "check the Invoices" });
   });
 
-  it("'ops' / 'operations' without 'mode' never switch (they are Ops / Biz Ops routing names)", () => {
+  it("'ops' / 'operations' without 'mode' never switch (they are Biz Ops routing words)", () => {
     for (const line of ["ops, check the invoices", "ops", "operations", "tell ops to call the supplier", "check operations for the contracting business", "go into operations", "switch to ops", "ops mode is weird today"]) {
       expect(parseModeSwitch(line), line).toBeNull();
     }

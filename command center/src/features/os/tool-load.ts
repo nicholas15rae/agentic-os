@@ -113,10 +113,9 @@ export function loadOf(agent: string, servers: readonly string[], listed: readon
   return { agent, servers: [...servers], tools, tokens, unlisted, warn: tools > TOOL_WARN };
 }
 
-/** Section 21.1: servers shared on purpose, by exactly these owners: Maps (Tony + the Ops /
- * Job Desk agent) and Instagram (Biz Ops, Tony read-only). Never flagged as shared. */
+/** Section 21.1: servers shared on purpose, by exactly these owners: Instagram (Biz Ops, Tony
+ * read-only). Never flagged as shared. (Maps is Tony's alone.) */
 export const INTENDED_SHARED: Readonly<Record<string, readonly string[]>> = {
-  maps: ["general", "ops"],
   instagram: ["general", "bizops"],
 };
 

@@ -75,11 +75,11 @@ GUARDS_VERSION = 8
 # ── roster (mirror of the Command Center; tests/test_memory_scrolls_guards.py checks it) ─────────
 
 # roles.ts ROLE_IDS
-ROLE_IDS = ("general", "booking", "prompter", "coder", "designer", "director", "librarian", "ops", "bizops", "finance")
+ROLE_IDS = ("general", "booking", "prompter", "coder", "designer", "director", "librarian", "bizops", "finance")
 # router.ts SELF_ROLE_IDS: every id that means Tony himself
 SELF_ROLE_IDS = ("general", "tony", "os", "dispatcher", "orchestrator", "jarvis")
 # agents.ts labels (+ Tony, the default OS name roles.ts shows for `general`)
-ROLE_LABELS = ("Tony", "Prompter", "Designer", "Director", "Librarian", "Coder", "Booking Desk", "Ops", "Biz Ops", "Finance")
+ROLE_LABELS = ("Tony", "Prompter", "Designer", "Director", "Librarian", "Coder", "Booking Desk", "Biz Ops", "Finance")
 # agents.ts: prep-only registry ids that already resolve (Phase 2 section 4)
 PLACEHOLDER_AGENTS = ("Security Patrol", "Finance")
 # ai-hub roster names that alias Command Center agents (AI_HUB_BASELINE_REPORT conflict 1)
@@ -99,7 +99,7 @@ def agent_names() -> frozenset:
 AGENT_NAMES = agent_names()
 # Agent names that are also ordinary nouns (a job, a desk, a department): "the user is a designer",
 # "User: designer and illustrator" describe the user, not a relabel.
-GENERIC_AGENT_WORDS = frozenset({"designer", "coder", "ops", "booking", "librarian", "prompter", "dispatcher", "orchestrator", "reviewer", "finance"})
+GENERIC_AGENT_WORDS = frozenset({"designer", "coder", "booking", "librarian", "prompter", "dispatcher", "orchestrator", "reviewer", "finance"})
 
 
 def _alt(names) -> str:

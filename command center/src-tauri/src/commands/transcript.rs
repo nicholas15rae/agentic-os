@@ -52,7 +52,7 @@ pub const KINDS: [&str; 12] = ["prompt", "reply", "handoff", "status", "question
 pub const CONV_KINDS: [&str; 4] = ["task", "hub", "turn", "dev"];
 pub const KEEP_PAST_CAP: [&str; 5] = ["handoff", "error", "smoke", "repair", "override"];
 /// Mirrors TS `THREADS` (voice-store.ts).
-pub const THREADS: [&str; 9] = ["auto", "general", "prompter", "designer", "director", "coder", "booking", "librarian", "ops"];
+pub const THREADS: [&str; 8] = ["auto", "general", "prompter", "designer", "director", "coder", "booking", "librarian"];
 /// Conversation statuses that make a conversation prunable once over the cap.
 pub const TERMINAL_STATUSES: [&str; 7] = ["review_ready", "failed", "done", "deployed", "ready_for_merge", "cancelled", "removed"];
 const DB_FILE: &str = "transcripts.db";

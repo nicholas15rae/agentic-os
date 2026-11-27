@@ -12,7 +12,6 @@
     "prompter": "the Prompter",
     "librarian": "the Librarian",
     "booking": "Booking Desk",
-    "ops": "Ops",
     "bizops": "Biz Ops",
     "finance": "Finance"
   },
@@ -37,7 +36,6 @@
     "prompter": ["I'll write it up tight.", "Spec's coming, {tony}."],
     "librarian": ["I'll dig it up, {tony}.", "It's in the files. On it."],
     "booking": ["I'll book it, {tony}.", "Booking's on it."],
-    "ops": ["Ops has got it, {tony}.", "I'll handle it, {tony}."],
     "bizops": ["Biz Ops has it, {tony}.", "I'll run the numbers on the job."],
     "finance": ["I'll check the books, {tony}.", "Finance is on it."]
   },

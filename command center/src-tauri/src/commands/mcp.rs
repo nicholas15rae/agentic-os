@@ -56,6 +56,8 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
     match id {
         "weather" => vec![t(id, "weather.current", "Live conditions + 3-day forecast. Omit place for the user's home (Toronto).", &["place?"])],
         "time" => vec![t(id, "time.now", "Current local date, time and weekday.", &[])],
+        // ONE read-only tool: short probes only, never starts / stops / wakes anything.
+        "system" => vec![t(id, super::infra_status::TOOL, "Is the droplet (over NetBird), gateway, Bionic, speech-to-text, Kokoro, Docker or n8n up? Live up/down + latency. Read-only.", &[])],
         "fetch" => vec![t(id, "fetch.url", "Fetch a public web page as plain text.", &["url"])],
         "filesystem" => vec![
             t(id, "fs.list", "List a folder under the allowed roots.", &["path"]),
@@ -1421,6 +1423,8 @@ async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeStat
         match name {
             "weather.current" if server_on("weather") => weather(state, &arg("place")).await,
             "time.now" if server_on("time") => Ok(chrono::Local::now().format("%A, %B %-d %Y · %-I:%M %p (%Z local time)").to_string()),
+            // Read-only probes (`infra_status`): never starts, stops or changes a service.
+            super::infra_status::TOOL if server_on(super::infra_status::SERVER) => Ok(super::infra_status::report(state, os).await),
             "fetch.url" if server_on("fetch") => {
                 if cfg.privacy.kill_switch {
                     return Err("kill switch is on — no outbound web requests".into());
@@ -2887,6 +2891,31 @@ mod tests {
 
     /// Section 11.10: ONE read-only Finance tool, offered to Tony's router, refused for every agent
     /// but Tony and the finance role (whatever the grants), with validated compact args.
+    /// Tony's infrastructure status: ONE read-only tool on a builtin server that only he is
+    /// granted; offered to his router, never to a sub-agent with the default grants.
+    #[test]
+    fn system_status_is_one_read_tool_for_tony() {
+        let tools = builtin_tools(super::super::infra_status::SERVER);
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [super::super::infra_status::TOOL]);
+        assert!(tools[0].args.is_empty() && tools[0].description.len() < 200, "compact: it rides on Tony's TOOLS line");
+        assert!(!is_mutating_tool("system.status") && offered_to_router("system.status", true));
+        assert_eq!(server_of_tool("system.status"), "system");
+        let cfg = OsConfig::default();
+        assert!(role_refusal(&cfg, "system.status", "general").is_none());
+        for a in ["coder", "bizops", "librarian", "prompter", "director", "finance"] {
+            assert!(role_refusal(&cfg, "system.status", a).is_some_and(|e| e.starts_with(ROLE_PREFIX)), "{a}");
+        }
+        let e = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "learning".into(), ..Default::default() }, &Default::default());
+        assert!(servers_for(&cfg, &e, "general").iter().any(|s| s.id == "system"), "his base: on in every mode");
+        assert!(!servers_for(&cfg, &e, "coder").iter().any(|s| s.id == "system"));
+        let set = assemble_tools(&cfg, "general", tools.clone());
+        assert!(set.offered.iter().any(|t| t.name == "system.status") && set.line.iter().any(|t| t.name == "system.status"));
+        // The master switchboard can still freeze it.
+        let mut frozen = cfg.clone();
+        frozen.switchboard.frozen_tools = vec!["system".into()];
+        assert!(!servers_for(&frozen, &e, "general").iter().any(|s| s.id == "system"));
+    }
+
     #[test]
     fn finance_ask_is_one_read_tool_for_tony_and_finance_only() {
         let tools = builtin_tools("finance");
@@ -2903,7 +2932,7 @@ mod tests {
         assert!(role_refusal(&cfg, FINANCE_ASK, "finance").unwrap().starts_with(ROLE_PREFIX), "not granted by default");
         cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["all".into()]);
         assert!(role_refusal(&cfg, FINANCE_ASK, "finance").is_none(), "granted: the finance role may read");
-        for a in ["coder", "ops", "bizops", "librarian", "prompter", "director", "booking", "trader"] {
+        for a in ["coder", "bizops", "librarian", "prompter", "director", "booking", "trader"] {
             let e = role_refusal(&cfg, FINANCE_ASK, a).unwrap_or_default();
             assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony and the Finance agent only"), "{a}: {e}");
             // Even the worker's scripted path (grants skipped) is refused.
@@ -3214,11 +3243,11 @@ mod tests {
         let ids_in = |cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str| servers_for(cfg, e, agent).into_iter().map(|s| s.id).collect::<Vec<_>>();
         let ids = |e: &super::super::modes::Effective, agent: &str| ids_in(&cfg, e, agent);
         // No overlay: Tony gets exactly his own servers (never the Director's media servers).
-        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
+        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "system", "whatsapp"]);
         assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
         assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
         // Builder (section pass): Tony keeps his whole base and gains filesystem + git; the Coder keeps its three.
-        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
+        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "system", "whatsapp"]);
         assert_eq!(ids(&eff("builder"), "coder"), ["fetch", "filesystem", "git"]);
         // The Director is off duty in Builder: a frozen agent gets no tools at all (section pass).
         assert!(ids(&eff("builder"), "director").is_empty(), "off duty in Builder");
@@ -3228,7 +3257,7 @@ mod tests {
         let mut cfg = cfg.clone();
         cfg.switchboard.frozen_tools = vec!["spotify".into()];
         cfg.mcps.iter_mut().find(|m| m.id == "weather").unwrap().enabled = false;
-        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "finance", "whatsapp"]);
+        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "finance", "system", "whatsapp"]);
         // Synthetic tools: the mode switch is always Tony's; skills.read follows skill grants.
         let set = assemble_tools(&cfg, "general", vec![]);
         assert_eq!(set.all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [TONY_SET_MODE]);
@@ -3472,11 +3501,13 @@ mod tests {
                 assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony is not granted"), "{e}");
             }
             assert_eq!(role_refusal(&cfg, TONY_SET_MODE, agent), None);
+            // Maps is his own (routes, ETAs, the Route Map).
+            assert_eq!(role_refusal(&cfg, "maps.route", agent), None, "{agent:?}");
         }
         // Nic's own UI (Settings testers) acting as Tony isn't held to Tony's grants.
         assert!(!origin_checks_grants(CallOrigin::Ui, "tony") && origin_checks_grants(CallOrigin::Ui, "coder"));
         assert!(origin_checks_grants(CallOrigin::Turn, "tony") && origin_checks_grants(CallOrigin::Direct, "tony"));
-        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false, &[]), None);
+        assert_eq!(role_refusal_with(&cfg, "git.status", "tony", false, &[]), None);
         assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder"), &[]).is_some());
         for m in cfg.mcps.iter_mut().filter(|m| m.id == "spotify") {
             m.agents = Some(vec!["all".into()]);
@@ -3506,7 +3537,7 @@ mod tests {
     #[test]
     fn whatsapp_writes_stay_refused_for_everyone() {
         let cfg = role_cfg();
-        for agent in ["tony", "general", "booking", "ops", "librarian"] {
+        for agent in ["tony", "general", "booking", "bizops", "librarian"] {
             let refused = role_refusal(&cfg, "whatsapp.send_message", agent).or_else(|| read_only_refusal(&cfg, "whatsapp.send_message"));
             assert!(refused.is_some_and(|e| e.starts_with("PERMISSION_")), "{agent}");
         }
@@ -3655,22 +3686,20 @@ mod tests {
     #[test]
     fn allm_agents_are_the_live_mapped_roles() {
         let cfg = OsConfig::default();
-        // Ops starts frozen (a placeholder), so it is not AnythingLLM-backed until thawed.
         assert_eq!(allm_agents(&cfg), ["bizops", "coder", "designer", "director", "finance", "prompter"]);
         let mut c = OsConfig::default();
         c.switchboard.frozen_agents.push("designer".into());
         assert!(!allm_agents(&c).contains(&"designer".to_string()));
         // Default grants: what those agents need (Tony-only servers never ride along).
         let mut d = OsConfig::default();
-        d.switchboard.frozen_agents.retain(|a| a != "ops"); // Ops holds the Maps grant once thawed
         for m in d.mcps.iter_mut() {
             m.enabled = true;
         }
         let needed = allm_needed(&d.mcps, &allm_agents(&d));
-        for id in ["filesystem", "git", "fetch", "knowledge-graph", "maps", "instagram", "shotcut", "media-forge"] {
+        for id in ["filesystem", "git", "fetch", "knowledge-graph", "instagram", "shotcut", "media-forge"] {
             assert!(needed.contains(id), "{id}");
         }
-        for id in ["whatsapp", "gmail", "spotify", "weather", "time", "calendar", "brave-search"] {
+        for id in ["whatsapp", "gmail", "spotify", "weather", "time", "calendar", "brave-search", "maps"] {
             assert!(!needed.contains(id), "{id} is Tony's alone");
         }
     }
@@ -3958,7 +3987,7 @@ mod tony_mode_tool_tests {
         for m in cfg.mcps.iter_mut() {
             m.enabled = true;
         }
-        let base = ["brave-search", "calendar", "finance", "gmail", "knowledge-graph", "maps", "spotify", "time", "weather", "whatsapp"];
+        let base = ["brave-search", "calendar", "finance", "gmail", "knowledge-graph", "maps", "spotify", "system", "time", "weather", "whatsapp"];
         for mode in ["surface", "brainstorm", "coach", "learning", "builder", "operations", "executive"] {
             let ids = tony_ids(&cfg, mode);
             for b in base {
@@ -3999,14 +4028,14 @@ mod tony_mode_tool_tests {
         let cfg = OsConfig::default();
         let ig = cfg.mcps.iter().find(|m| m.id == "instagram").cloned().expect("instagram server");
         let gmail = cfg.mcps.iter().find(|m| m.id == "gmail").cloned().expect("gmail server");
-        let ops = os_core::tony_mode_extras(&cfg, "operations");
-        assert!(ops.iter().any(|x| x == "instagram"));
+        let operations = os_core::tony_mode_extras(&cfg, "operations");
+        assert!(operations.iter().any(|x| x == "instagram"));
         let no_token = || Some(super::super::instagram::NO_TOKEN.to_string());
         assert!(!ig.grants("general"), "Instagram is a mode extra for Tony, not his base");
-        assert!(unconnected_extra(&ig, ops, no_token), "no token: Operations doesn't offer it");
-        assert!(!unconnected_extra(&ig, ops, || None), "connected: offered");
+        assert!(unconnected_extra(&ig, operations, no_token), "no token: Operations doesn't offer it");
+        assert!(!unconnected_extra(&ig, operations, || None), "connected: offered");
         assert!(!unconnected_extra(&ig, &[], no_token), "not an extra in this mode: not this rule's call");
-        assert!(!unconnected_extra(&gmail, ops, || Some("no backend".into())), "his base still reports a missing backend");
+        assert!(!unconnected_extra(&gmail, operations, || Some("no backend".into())), "his base still reports a missing backend");
     }
 
     #[test]
@@ -4018,8 +4047,8 @@ mod tony_mode_tool_tests {
         }
         // Booking is frozen on the master switchboard by default: nothing, even with "all".
         assert!(servers_for(&cfg, &mode_eff("brainstorm"), "booking").is_empty());
-        // Ops is off duty in Builder mode: nothing either.
-        assert!(servers_for(&cfg, &mode_eff("builder"), "ops").is_empty());
+        // Biz Ops is off duty in Builder mode: nothing either.
+        assert!(servers_for(&cfg, &mode_eff("builder"), "bizops").is_empty());
         assert!(!servers_for(&cfg, &mode_eff("builder"), "coder").is_empty());
     }
 

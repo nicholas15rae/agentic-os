@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { addressesSelf, DEFAULT_ROUTING_CONFIG, directTool, isFrozenRole, isSelfRoleId, matchingAgents, normalize, originalTail, overlappingPhrases, resetRouterFrozenAgents, resolve, setRouterFrozenAgents } from "./router";
 import fixtures from "./router.fixtures.json";
 
@@ -98,14 +98,11 @@ describe("whole-word boundaries", () => {
 });
 
 describe("domain tie-break", () => {
-  // These check routing priority with Ops as "another agent's topic", so Ops is thawed here
-  // (it starts frozen as a placeholder; the shared fixtures cover the frozen default).
-  beforeEach(() => setRouterFrozenAgents(["booking", "librarian"]));
-  afterEach(() => resetRouterFrozenAgents());
   it("follows the role order on an equal score; Tony's topic never steals one", () => {
     // bizops "inventory" (9) vs designer "animation" (9).
     expect(resolve("inventory animation", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "bizops", kind: "Domain" });
-    expect(resolve("schedule a docker restart", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "ops", kind: "Domain" });
+    // Tony's "schedule" (8) vs the Director's "captions" (8): the agent keeps it.
+    expect(resolve("schedule the captions", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "director", kind: "Domain" });
   });
 });
 
@@ -186,10 +183,6 @@ describe("default matrix: WhatsApp is not a Booking topic", () => {
 });
 
 describe("Tony's name beats a topic", () => {
-  // These check routing priority with Ops as "another agent's topic", so Ops is thawed here
-  // (it starts frozen as a placeholder; the shared fixtures cover the frozen default).
-  beforeEach(() => setRouterFrozenAgents(["booking", "librarian"]));
-  afterEach(() => resetRouterFrozenAgents());
   it("a self address + a Domain-only hit is Self", () => {
     for (const text of ["hey tony, check my self-tape availability", "tony, how's the droplet doing", "jarvis redo the color palette", "ask the dispatcher to check my calendar"]) {
       expect(resolve(text, DEFAULT_ROUTING_CONFIG), text).toMatchObject({ role: "general", kind: "Self", confidence: "high" });
@@ -203,8 +196,10 @@ describe("Tony's name beats a topic", () => {
     // Plain self-tape / availability are Tony's own topics now (Section 20.1).
     expect(resolve("check my self-tape availability", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "general", kind: "Self" });
   });
-  it("only his name, not his own topic, beats another agent's topic", () => {
-    expect(resolve("system status of the droplet", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "ops", kind: "Domain" });
+  it("infrastructure, job quotes and estimates are his own topics: no agent takes them", () => {
+    for (const t of ["system status of the droplet", "is the droplet healthy and is docker up", "how many estimates are still out", "send the quote for the deck job"]) {
+      expect(resolve(t, DEFAULT_ROUTING_CONFIG), t).toMatchObject({ role: "general", kind: "Self" });
+    }
   });
   it("a Named agent still wins over Tony's name", () => {
     expect(resolve("hey tony, ask the director to edit video for the shoot", DEFAULT_ROUTING_CONFIG)).toMatchObject({ role: "director", kind: "Named", confidence: "high", task: "edit video for the shoot" });
@@ -218,10 +213,6 @@ describe("Tony's name beats a topic", () => {
 // Regression: the override fired for a self name ANYWHERE in the line, so the common nouns in
 // SELF_NAMES ("dispatcher", "orchestrator") and a renamed OS name ("Friday") beat every topic.
 describe("only a real address beats a topic (not a mention)", () => {
-  // These check routing priority with Ops as "another agent's topic", so Ops is thawed here
-  // (it starts frozen as a placeholder; the shared fixtures cover the frozen default).
-  beforeEach(() => setRouterFrozenAgents(["booking", "librarian"]));
-  afterEach(() => resetRouterFrozenAgents());
   const cfg = DEFAULT_ROUTING_CONFIG;
   it("a self name used as a noun or an object leaves the topic's agent in charge", () => {
     expect(resolve("fix bug in the orchestrator react code", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
@@ -230,24 +221,25 @@ describe("only a real address beats a topic (not a mention)", () => {
     expect(resolve("fix the layout css before friday", cfg, "Friday")).toMatchObject({ role: "designer", kind: "Domain" });
     expect(resolve("fix bug in the orchestrator", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
     expect(resolve("get the orchestrator react code working", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
-    expect(resolve("the dispatcher keeps timing out, is the droplet healthy", cfg)).toMatchObject({ role: "ops", kind: "Domain" });
+    expect(resolve("the dispatcher keeps timing out, fix bug in the retry loop", cfg)).toMatchObject({ role: "coder", kind: "Domain" });
   });
   it("a mention with no topic is still Tony's (the step-(d) fallback)", () => {
     expect(resolve("refactor the dispatcher", cfg)).toMatchObject({ role: "general", kind: "Self" });
     expect(resolve("so I'm on my phone now hey tony what's up", cfg)).toMatchObject({ role: "general", kind: "Self" });
+    expect(resolve("the dispatcher keeps timing out, is the droplet healthy", cfg)).toMatchObject({ role: "general", kind: "Self" });
   });
   it.each([
     ["hey tony, render the reel", ""],
     ["ok jarvis, redo the color palette for the landing page", ""],
-    ["so tony, is the droplet healthy", ""],
-    ["yo tony check my docker containers", ""],
+    ["so tony, is the reel rendered", ""],
+    ["yo tony check my layout css", ""],
     ["friday, check my reel for the shoot", "Friday"],
     ["ask tony to render the reel", ""],
     ["tell the dispatcher about the thumbnail", ""],
-    ["have jarvis check the droplet", ""],
+    ["have jarvis check the inventory", ""],
     ["let tony know the layout changed", ""],
     ["render the reel, tony", ""],
-    ["is the droplet healthy tony please", ""],
+    ["is the thumbnail ready tony please", ""],
     ["render the reel, friday", "Friday"],
   ])("an address beats the topic: %s", (text, osName) => {
     expect(resolve(text, cfg, osName)).toMatchObject({ role: "general", kind: "Self", confidence: "high", reason: "you addressed the OS by name" });
@@ -321,7 +313,7 @@ describe("directTool", () => {
     "what's up, any updates on the build?",
     "hey what's up, any updates?",
     "fix the weather api bug in the code",
-    "Ops, turn off the weather alerts",
+    "Biz Ops, turn off the weather alerts",
     "Booking, order an umbrella for the shoot",
   ])("not a live read: %s", (text) => {
     expect(directTool(text)).toBeNull();

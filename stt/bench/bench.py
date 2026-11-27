@@ -42,8 +42,8 @@ CLIPS = ROOT / "data" / "stt-bench" / "clips"
 WCPP = "http://127.0.0.1:8178/v1"
 FW = "http://127.0.0.1:8177"
 # voice.rs DEFAULT_STT_PROMPT (command center/src-tauri/src/commands/dispatch.rs), "Nic" included
-PROMPT = ("Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, "
-          "Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.")
+PROMPT = ("Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk "
+          "and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.")
 VOCAB = ["tony", "gabagool", "madone", "aspetta", "bilmuri", "erra", "booking desk", "librarian", "kokoro", "tauri", "nic",
          "serena", "call sheet", "deal memo", "whatsapp", "spotify", "checkpoint"]
 BUCKETS = ((0, 2, "<=2s"), (2, 5, "2-5s"), (5, 10, "5-10s"), (10, 31, "10-30s"))

@@ -31,6 +31,7 @@ EXPORT = {
     "ops": {"prompt": "ops", "model": "m"},
     "finance": {"prompt": "", "model": "m"},
     "director": {"prompt": "x", "model": "m"},
+    "bizops_trades_contracting": {"prompt": "ops for contracting", "model": "m"},
 }
 
 
@@ -67,6 +68,7 @@ class ProposeTests(unittest.TestCase):
         self.assertNotIn("'ops-only'", q)  # Ops is removed, so general is the only owner
         self.assertIn("agent 'finance' has no prompt", q)
         self.assertIn("director", q)  # a workspace no agent maps to
+        self.assertNotIn("bizops_", q)  # business workspaces map to the shared Biz Ops prompt
 
 
 

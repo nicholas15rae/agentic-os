@@ -65,6 +65,10 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | S26: gateway `/api/engine/*` (loopback only), boot hook, GPU baton yield/reclaim | section-26-engine | 24dbfe8 | No |
 | S26: agent-table proposal from os.json + the export (read-only, not wired) | section-26-engine | 840aadc | No |
 | S26: CPU-only smoke test of the real llama-server (no GPU): 3/3 live checks, first token 1.0 s on CPU | section-26-engine | (this commit) | No |
+| S26: AnythingLLM export holds no API key or token in plain text (6/6 live secrets scrubbed, VACUUMed; new exports scrub automatically); gitignored; no Drive sync on this PC | section-26-engine | 47ae063 | No |
+| S26: your tool owners in the agent proposal (Coder owns filesystem + fetch, Tony owns knowledge-graph writes, readers read-only; one writer per tool, tested) | section-26-engine | 145949e | No |
+| S26: Tony's gateway prompt is the only Tony prompt; Booking takes the detailed Booking Desk prompt (to confirm) | section-26-engine | 95e021a | No |
+| S26: Biz Ops shared prompt DRAFT (Acting, Contracting, BF Supplements sections by business tag); both business workspaces map to it | section-26-engine | (this commit) | No |
 
 ## 2. In progress
 
@@ -81,10 +85,13 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 
 ## 3. Waiting on you
 
-**Questions for Nic (Section 26, section-26-engine)**
-- Step 5 benchmark (new engine) not run: Bionic holds Tony's model (~10.5 of 12 GB), so the engine can only load after Bionic unloads it, which takes Tony offline and changes LM Studio state (yours). When you're ready: unload in Bionic, then `python -m engine.models load "D:\LM Studio\lmstudio-community\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf" --force`, `python -m engine.bench_tony --target engine`, `python -m engine.models unload`, reload in Bionic.
-- Agent migration (item 10), from `python -m engine.agents_migrate <export>` (proposal in data/engine/agents.proposed.json, not wired): (a) one owner per tool: `filesystem` is granted to coder, designer, director, librarian, prompter; `fetch` to coder + prompter; `knowledge-graph` to general, librarian, prompter. Who owns each? (b) `bizops` has no prompt anywhere; the two business workspaces (bizops_trades_contracting, bizops_supplements_ecom) map to no agent. Per-business prompts from business_registry, or one bizops prompt? (c) Tony's 'general' workspace is `my-workspace` (named "Booking" in AnythingLLM) and carries a prompt there: keep Tony's gateway prompt as the only one?
-- The AnythingLLM export holds everything incl. the Finance workspace's chats and the Gmail/Calendar agent configs (local, gitignored, same machine). Chats are NOT made searchable. OK to keep it there until you confirm nothing is missing?
+**Questions for Nic (Section 26, section-26-engine)** (your 11-27 answers are applied; these are what's left)
+- GPU benchmark of the engine: waiting for you to say the GPU is free (you unload Tony's model in Bionic).
+- **Biz Ops shared prompt: DRAFT for your review** in `docs/section-26-bizops-prompt.md` (shared rules + one section each for Acting, Trades & Contracting, BF Supplements; only the tagged business's section is sent). 4 small questions at its end.
+- **Tony's prompt vs his AnythingLLM prompt (your answer 4):** nothing merged. The AnythingLLM workspace mapped to Tony (`my-workspace`) does not hold a Tony prompt: it holds the detailed **Booking Desk** prompt (casting posts, Gmail drafts, templates A/B). Diff, gateway prompt vs that workspace: 0 lines in common (similarity 1.6% with the `booking` workspace's short prompt; nothing Tony-related). Tony's gateway prompt stays as it is. OK?
+- Booking (frozen): the proposal gives it the detailed `my-workspace` prompt instead of the short `booking` one. Its prompt reads WhatsApp and saves Gmail drafts, but the registry grants `whatsapp` and `gmail` only to Tony. When Booking is unfrozen: Booking read-only on whatsapp + draft-only gmail, with Tony keeping ownership?
+- Designer's filesystem read access: which project folder? None exists, so it has no access until you name one (Director reads `G:\ai-hub\media\projects`).
+- `backup.sh` (manual) tars all of `data/`, so local backups also hold the AnythingLLM export (no secrets in it now). Exclude `data/engine/allm-export` there? I didn't edit the backup script.
 
 
 **Decisions**
@@ -198,16 +205,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 10:37 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:49 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 13 | `840aadc` 2026-11-27 feat(engine): propose the gateway agent table from os.json + the An... | 3 files |
-| `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | clean |
-| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | clean |
-| `section-pass-batch3` | 9 | `4ca35ee` 2026-11-27 Merge main (9d37071: Tony live-test fixes, barge-in) into section-p... | 71 files |
+| `section-26-engine` | 17 | `95e021a` 2026-11-27 feat(engine): Tony's gateway prompt is the only Tony prompt; Bookin... | 4 files |
+| `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | no worktree |
+| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | 2 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
@@ -216,10 +222,10 @@ _Refreshed 2026-11-27 10:37 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
+- `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
+- `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
 - `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
 - `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
 - `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
-- `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
-- `5098ca3` 2026-11-27 Merge director-suite into main: Director Suite Parts 1-5 and Part 6 small items
-- `9d37071` 2026-11-27 Merge main (87b6527: Tony's read-only system.status tool) into claude/tony-live-test-fixes-5d85d5
 <!-- /AUTO:BRANCHES -->

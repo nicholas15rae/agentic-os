@@ -36,6 +36,9 @@ BUILTIN_PROMPTS = {"prompter", "designer", "coder", "librarian"}  # agent_prompt
 # Gmail drafts, templates A/B); the "booking" workspace has only a short generic one. So Booking takes
 # my-workspace's prompt (pending Nic's OK) and nothing from it goes into Tony's.
 PROMPT_FROM = {"booking": "my-workspace"}
+# Nic 11-27: one shared Biz Ops prompt with a section per business, picked by the business tag.
+BIZOPS_DRAFT = "docs/section-26-bizops-prompt.md (DRAFT, Nic reviews)"
+BIZOPS_WORKSPACES = ("bizops_trades_contracting", "bizops_supplements_ecom", "bizops_acting")
 REMOVED = {"ops"}  # Ops agent removed 11-26 (its work is Tony's)
 
 # Nic's tool owners (11-27): one owner gets write access; named readers get read-only, optionally
@@ -100,7 +103,10 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
         tools = [x["tool"] for x in access]
         ro = [x["tool"] for x in access if x["access"] == "read"]
         notes = []
-        if a in BUILTIN_PROMPTS:
+        if a == "bizops":
+            src, prompt = f"shared Biz Ops prompt: {BIZOPS_DRAFT}", None
+            notes.append("maps the business workspaces: " + ", ".join(w for w in BIZOPS_WORKSPACES if w in export or w == "bizops_acting"))
+        elif a in BUILTIN_PROMPTS:
             src, prompt = "agent_prompts.rs role_prompt (built in)", None
             if ws.get("prompt"):
                 notes.append("AnythingLLM carries a copy of the built-in prompt; the built-in one wins")
@@ -133,7 +139,7 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
         for reader, roots in pol["readers"].items():
             if roots == []:
                 questions.append(f"'{tid}' read-only for {reader}: which project folder? (no access until named)")
-    unmapped = sorted(set(export) - set(ws_map.values()))
+    unmapped = sorted(set(export) - set(ws_map.values()) - set(BIZOPS_WORKSPACES) - set(PROMPT_FROM.values()))
     if unmapped:
         questions.append(f"AnythingLLM workspaces no agent maps to (kept in the export, not migrated): {', '.join(unmapped)}")
     return {"agents": agents, "questions": questions, "tools": {m["id"]: m.get("agents", []) for m in mcps}}

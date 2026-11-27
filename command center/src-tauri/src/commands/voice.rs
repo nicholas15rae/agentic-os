@@ -1332,13 +1332,63 @@ mod part3_tests {
         assert!(apply_provider_migrations(&mut cfg));
         let speaking: Vec<_> = cfg.agent_voices.iter().filter(|(_, v)| v.auto_speak).map(|(k, _)| k.as_str()).collect();
         assert_eq!(speaking, vec!["general"]);
-        assert_eq!(cfg.migrations, vec![MIGRATE_AUTOSPEAK_TONY_ONLY.to_string()]);
+        assert_eq!(cfg.migrations[0], MIGRATE_AUTOSPEAK_TONY_ONLY);
         // Once: turning a specialist back on afterwards sticks.
         cfg.agent_voices.get_mut("designer").unwrap().auto_speak = true;
         assert!(!apply_provider_migrations(&mut cfg));
         assert!(cfg.agent_voices["designer"].auto_speak);
         // A fresh install has nothing to migrate.
         assert!(!apply_provider_migrations(&mut Config::default()));
+    }
+
+    /// Live test 11-27: Whisper heard "promotions" as "permissions". The Gmail tab names are in the
+    /// hint list, and a provider holding the old default word for word gets the new one, once;
+    /// an edited or cleared prompt is never touched.
+    #[test]
+    fn the_stt_hint_list_has_the_gmail_tabs_and_an_unedited_old_default_moves_to_it() {
+        use super::super::dispatch::{apply_provider_migrations, Config, Kind, DEFAULT_STT_PROMPT, MIGRATE_STT_PROMPT_GMAIL_TABS, PREVIOUS_STT_PROMPT};
+        let words = prompt_words(DEFAULT_STT_PROMPT);
+        for w in ["inbox", "primary", "promotions", "social", "updates", "forums", "gmail", "tab"] {
+            assert!(words.iter().any(|x| x == w), "{w}");
+        }
+        assert!(DEFAULT_STT_PROMPT.starts_with(PREVIOUS_STT_PROMPT));
+        // Nic's real lines about his inbox are never dropped as a prompt echo; the tab list read back is.
+        for ok in ["check my primary inbox", "anything in promotions?", "don't look in my promotions or social", "Tony, check my Gmail inbox, the primary one"] {
+            assert!(!echoes_prompt(ok, DEFAULT_STT_PROMPT), "{ok}");
+        }
+        assert!(echoes_prompt("Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab.", DEFAULT_STT_PROMPT));
+        // Review 11-27: a spoken list of tab names is Nic, not an echo (no 4 tab names in a row in the prompt).
+        for ok in ["Check promotions, social, updates, forums", "search primary, promotions, social and updates", "check the promotions tab and the social tab"] {
+            assert!(!echoes_prompt(ok, DEFAULT_STT_PROMPT), "{ok}");
+        }
+
+        let mut cfg = Config::default();
+        cfg.migrations.retain(|m| m != MIGRATE_STT_PROMPT_GMAIL_TABS);
+        let stt: Vec<usize> = cfg.providers.iter().enumerate().filter(|(_, p)| p.kind == Kind::Stt).map(|(i, _)| i).collect();
+        assert!(!stt.is_empty());
+        let mut fw = cfg.providers[stt[0]].clone();
+        fw.id = "faster-whisper".into();
+        fw.stt_prompt = Some(PREVIOUS_STT_PROMPT.into());
+        let mut edited = fw.clone();
+        edited.id = "edited".into();
+        edited.stt_prompt = Some("Tony, Nic, Gabagool.".into());
+        let mut cleared = fw.clone();
+        cleared.id = "cleared".into();
+        cleared.stt_prompt = Some(String::new());
+        cfg.providers.extend([fw, edited, cleared]);
+        assert!(apply_provider_migrations(&mut cfg));
+        fn prompt_of(cfg: &Config, id: &str) -> Option<String> {
+            cfg.providers.iter().find(|p| p.id == id).unwrap().stt_prompt.clone()
+        }
+        let prompt = |id: &str| prompt_of(&cfg, id);
+        assert_eq!(prompt("faster-whisper").as_deref(), Some(DEFAULT_STT_PROMPT));
+        assert_eq!(prompt("edited").as_deref(), Some("Tony, Nic, Gabagool."));
+        assert_eq!(prompt("cleared").as_deref(), Some(""));
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_STT_PROMPT_GMAIL_TABS));
+        // Once: putting the old text back afterwards sticks.
+        cfg.providers.iter_mut().find(|p| p.id == "faster-whisper").unwrap().stt_prompt = Some(PREVIOUS_STT_PROMPT.into());
+        assert!(!apply_provider_migrations(&mut cfg));
+        assert_eq!(prompt_of(&cfg, "faster-whisper").as_deref(), Some(PREVIOUS_STT_PROMPT));
     }
 
     fn av(engine: &str, voice: &str) -> AgentVoice {

@@ -132,6 +132,20 @@ def orders_block(trades: Iterable[Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def open_qty(o: dict[str, Any]) -> float:
+    """Still-working size of an openOrders row. Before TWS sends an orderStatus, `remaining` reads 0 on a live
+    order, so a not-done row without a positive remaining counts as quantity - filled (as reconcile._open_qty)."""
+    rem = float(o.get("remaining") or 0)
+    return rem if rem > 0 else max(float(o.get("quantity") or 0) - float(o.get("filled") or 0), 0.0)
+
+
+def exec_key(exec_id: Any) -> str:
+    """An IB execId without its last ".NN" segment, the correction counter: a corrected execution
+    ("....01.02") replaces the one it corrects ("....01.01") instead of counting twice."""
+    s = str(exec_id or "")
+    return s.rsplit(".", 1)[0] if s.count(".") >= 2 else s
+
+
 def fills_block(fills: Iterable[Any]) -> list[dict[str, Any]]:
     """IBKR executions (+ commission reports) for the trade journal. orderRef ties a fill to its intent."""
     rows = []

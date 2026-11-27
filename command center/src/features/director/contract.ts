@@ -128,8 +128,8 @@ export interface ClipFraming { crop: CropRect | null; contentW: number | null; c
  * may be left out. A `crop` is accepted and ignored (framing is measured by media_render_plan). */
 export type PlanCheckClip = Pick<TimelineClip, "assetId" | "inSec" | "outSec"> & Partial<Omit<TimelineClip, "assetId" | "inSec" | "outSec">> & { crop?: unknown };
 /** media_plan_check's answer. `clips`: the same clips in order, video in/out snapped to the transcript
- * (in → start of the word it falls in; out → end of its word, or its sentence's end when that is
- * within 0.6 s; never past the asset); a clip sent without an id comes back without one.
+ * (in → start of the word it falls in, or its sentence's start when that is within 1.2 s before;
+ * out → end of its word, or its sentence's end when that is within 0.6 s; never past the asset); a clip sent without an id comes back without one.
  * `refusals` (a Director plan must not apply): clip < 1 s, total outside the brief's lengthSec ±10%
  * (at least ±1.5 s), total over an output's maxSec, a clip outside its asset or not in the project.
  * The 1 s minimum is for video clips only (a still holds 0.2–60 s). A revision (`plan.resolves`)
@@ -138,6 +138,11 @@ export type PlanCheckClip = Pick<TimelineClip, "assetId" | "inSec" | "outSec"> &
  * `unchangedSinceRender` (revisions only): true = the same cut as the render its notes are on;
  * absent = no snapshot to compare with. */
 export interface PlanCheck { clips: (Omit<TimelineClip, "id"> & { id?: string })[]; totalSec: number; targetSec: number | null; warnings: string[]; refusals: string[]; unchangedSinceRender?: boolean }
+/** media_transcript_lines: one transcript segment (whole, asset time, 2 decimals). */
+export interface TranscriptLine { start: number; end: number; text: string }
+/** One video asset's timed lines, in time order; `more` = lines Rust's per-asset cap left out
+ * (it keeps the lines near the asset's moments and saved timeline clips first, then the rest in time order). */
+export interface AssetTranscriptLines { assetId: string; lines: TranscriptLine[]; more: number }
 /** media_plan_check's optional `plan`: the rest of the plan as it would apply (the manifest with
  * the plan merged in), so the checks use the plan's own outputs (maxSec), captions, color and
  * audio rather than the saved ones. `resolves`: a revise_edit's note ids. */
@@ -192,7 +197,7 @@ export interface MediaProject {
   slug: string; title: string; status: ProjectStatus;
   root: string;               // C:\ai-hub\media\projects\<slug>
   createdAt: string; updatedAt: string;
-  source: { from: "suite" | "brainstorm" | "playplace"; refId: string | null; brief: string | null }; // source.brief = the original handoff text
+  source: { from: "suite" | "brainstorm" | "playplace" | "scene_reader"; refId: string | null; brief: string | null }; // source.brief = the original handoff text
   brief: CreativeBrief | null;            // v2
   speed: "rough" | "polish" | "full_ai";  // v2: Part 6 later; stored now, default "rough"
   /** v2 §5: stored in project.json (media_review_get reads it). Absent on rows Rust hasn't re-saved. */
@@ -277,6 +282,8 @@ export interface DirectorCommands {
   media_note_resolve: { args: { slug: string; noteId: string; manual?: boolean }; result: void };
   /** Snap a plan's clips to speech and check clip / total length against the brief and the outputs. Reads only. */
   media_plan_check: { args: { slug: string; clips: PlanCheckClip[]; plan?: PlanCheckPlan }; result: PlanCheck };
+  /** Every video asset's transcript as timed lines (reads only; `maxChars` per asset, default 6000). */
+  media_transcript_lines: { args: { slug: string; maxChars?: number }; result: AssetTranscriptLines[] };
   media_review_get: { args: { slug: string }; result: ProjectReview };
   /** The Director's words on the review, stored in project.json: a round's summary (≤ 2000 chars;
    * the round must exist) and/or the open decisions (≤ 12, each ≤ 300 chars; replaced whole). Text only. */
@@ -284,7 +291,56 @@ export interface DirectorCommands {
   media_approve_final: { args: { slug: string; renderIds: string[]; approved: true }; result: Deliverable[] };
   /** The last "Approve final"'s deliverables still on disk (media.db), so they survive a switch or restart. */
   media_deliverables_get: { args: { slug: string }; result: Deliverable[] };
+  // ── Part 3: ComfyUI (comfy.rs) ──
+  comfy_status: { args: undefined; result: ComfyStatus };
+  /** Refused for an unknown / unbuilt template, params that could never render (dry-run fill), or an inputImage outside the project.
+   * A template with a missing model is accepted as status "waiting". */
+  comfy_enqueue: { args: { slug: string; template: string; params?: ComfyParams }; result: ComfyJob };
+  comfy_cancel: { args: { id: string }; result: ComfyJob };
+  /** Skips the policy and lifts the failure backoff, never the mid-conversation / boot-grace checks. `now` = "starting" or why not yet. */
+  comfy_run_now: { args: undefined; result: { accepted: boolean; now: string } };
+  comfy_queue_get: { args: undefined; result: ComfyQueue };
+  comfy_settings_set: { args: { patch: { modelRoots?: string[]; policy?: ComfyPolicy } }; result: ComfySettings };
+  // ── Part 3: Versions (media.rs C.1) ──
+  /** The cut a render was made from (notes and shot list empty). Reads only. `manifest: null` = made before versions were kept. */
+  media_render_snapshot: { args: { slug: string; renderId: string }; result: RenderSnapshot };
+  /** That cut becomes the working manifest (notes and shot list stay). Refuses "NO_SNAPSHOT: …" and STALE_REVISION. */
+  media_manifest_restore: { args: { slug: string; renderId: string; /** the timeline revision the UI holds (STALE_REVISION when the disk moved on) */ revision?: number }; result: TimelineManifest };
+  // ── Part 4: auditions (scene_reader.rs) ──
+  /** Probes Scene Reader's Studio /health (≤ 1.5 s). `up: false` = hide the Scene Reader entry. */
+  scene_reader_status: { args: undefined; result: SceneReaderStatus };
+  /** Its voiceover projects and takes, read from a temp copy of its library (Nic's click only). */
+  scene_reader_list: { args: undefined; result: SrProject[] };
+  /** Nic's Import click: a new audition project (source scene_reader) with copies of the takes (default: the best one). */
+  scene_reader_import: { args: { project: string; takeIds?: string[] }; result: SceneReaderImport };
+  media_sides_list: { args: { slug: string }; result: SidesFile[] };
+  /** Raw body = the dropped file; headers x-slug / x-name. PDF or text, ≤ 20 MB, kept read-only in raw/sides/. */
+  media_sides_save: { args: { slug: string; name: string; bytes: Uint8Array }; result: SidesFile };
+  /** A 16:9 slate still (name, role, contact) as a `slate` asset. Never placed on the timeline by itself. */
+  media_slate_card: { args: { slug: string; name: string; role?: string; contact?: string }; result: MediaAsset };
+  // ── Part 6: style memory (director_style.rs) ──
+  /** <projects root>/style-profile.json (the last 20 sign-offs). Reads only. */
+  media_style_get: { args: undefined; result: StyleProfile };
+  /** Nic's Approve final ("final") or note resolve ("notes") on `slug` adds one entry (Rust derives every fact). */
+  media_style_record: { args: { slug: string; kind: StyleKind }; result: StyleProfile };
 }
+export type StyleKind = "final" | "notes";
+/** One sign-off's style facts (director_style.rs StyleEntry). Themes come from a fixed word list, never note text. */
+export interface StyleEntry {
+  at: string; slug: string; kind: StyleKind; revision: number;
+  platform: string; aspect: string; lengthSec: number; clips: number; avgClipSec: number;
+  captions: string; // "off" or the caption style
+  color: string;    // colour preset ("none" = no look)
+  fits: string[];   // non-auto fits used
+  themes: string[]; // note themes, most frequent first
+}
+export interface StyleProfile { version: number; entries: StyleEntry[] }
+export interface SceneReaderStatus { up: boolean; url: string; projectsRoot: string | null }
+export interface SrTake { id: string; name: string; file: string; durSec: number; best: boolean; createdAt: number; available: boolean }
+export interface SrProject { id: string; title: string; updatedAt: number; takes: SrTake[]; copyChars: number }
+export interface SceneReaderImport { project: MediaProject; assets: MediaAsset[]; skipped: string[] }
+export interface SidesFile { name: string; path: string; sizeBytes: number }
+export interface RenderSnapshot { renderId: string; planId: string; manifest: TimelineManifest | null; createdAt: string }
 export interface DirectorTurnRequest { text: string; history: { role: "user" | "assistant"; content: string }[]; context: string; streamId: string | null }
 export interface DirectorTurnResult { answer: string; providerId: string; latencyMs: number; answeredBy: "director" }
 export type McpReady = { enabled: boolean; healthy: boolean; tools: number; error: string | null };
@@ -294,6 +350,117 @@ export type DirectorEvents = {
   "media-render": { slug: string; jobId: string; status: "queued" | "running" | "done" | "failed" | "cancelled"; pct: number; etaSec: number | null; stage: string; render?: VerifiedRender; error?: string };
   "media-ingest": { slug: string; uploadId: string; received: number; total: number };
   "media-intake": { slug: string; assetId: string; stage: "ingested" | "probed" | "transcribed" | "matched" | "failed"; detail: string };
+  // ── Part 3: ComfyUI (comfy.rs) ──
+  "comfy-queue": ComfyJob;                        // every job change (enqueue, waiting↔queued, start, finish, cancel)
+  "comfy-service": ComfyServiceEvent;
+  "comfy-asset": { slug: string; assetId: string }; // a generated output was ingested into the project
+  "director-report": { kind: "comfy-batch"; slug: string; done: number; failed: number }; // one per project a batch touched
+};
+
+// ── ComfyUI (comfy.rs, comfy_templates.rs) ──
+// comfy.rs: rename_all camelCase on Job / JobOutput / ComfySettings / QueueFile / SettingsPatch; lowercase on
+// JobStatus / Policy. comfy_status builds its JSON by hand (json!), key names as below.
+export type ComfyJobStatus = "queued" | "waiting" | "running" | "done" | "failed" | "cancelled"; // waiting = a model file is missing (`error` says which)
+export type ComfyPolicy = "idle" | "overnight" | "manual"; // default "idle"
+/** comfy_templates.rs ASPECTS (the manifest's four + 4:3 / 3:4 for stills). */
+export type ComfyAspect = "16:9" | "9:16" | "4:5" | "1:1" | "4:3" | "3:4";
+export type ComfyTemplateName = "scene-still" | "thumbnail-bg" | "style-transfer" | "upscale" | "broll-motion";
+
+/** What the UI sends as `params` (GenParams, camelCase). `slug` / `jobId` are set by Rust, never sent.
+ * Omit `seed` for a random one (Rust picks it at enqueue and stores it on the job, ≤ 2^53).
+ * Omit `aspect` and `width` / `height` for the project's aspect (thumbnail-bg falls back to 16:9, others to 1:1). */
+export interface ComfyParams {
+  prompt: string; // ≤ COMFY_PROMPT_MAX (2000) chars
+  negative?: string; // inert at cfg 1.0 (SDXL Turbo); kept for provenance
+  seed?: number; // integer 0 … 2^53-1
+  steps?: number; // 1 … COMFY_TURBO_MAX_STEPS (4); default 1
+  width?: number; // 0 or 64 … 1024 (0 = from aspect)
+  height?: number;
+  aspect?: ComfyAspect;
+  inputImage?: string; // style-transfer / upscale: an image asset's absolute `path` inside this project
+  denoise?: number; // style-transfer 0.3 … 0.7 (default 0.5 in the panel); others 1.0
+}
+
+export interface ComfyJobOutput { path: string; filename: string; kind: "image" | "video"; assetId: string | null; gen: GenMeta }
+
+export interface ComfyJob {
+  id: string;
+  slug: string;
+  template: string;
+  /** As stored at enqueue (seed and default aspect filled in). An absolute inputImage stays absolute here (staging only changes the copy sent to ComfyUI). */
+  params: Partial<ComfyParams> & Record<string, unknown>;
+  status: ComfyJobStatus;
+  createdAt: number; // epoch ms
+  startedAt: number | null;
+  finishedAt: number | null;
+  error: string | null;
+  outputs: ComfyJobOutput[];
+  renderMs: number | null;
+  peakVramMb: number | null;
+  promptId: string | null;
+}
+
+export interface ComfySettings { modelRoots: string[]; policy: ComfyPolicy }
+
+/** One row of comfy_status.templates. `label` / `kind` / `implemented` / `unavailableReason` are the
+ * optional A.1 Rust addition (copied from comfy_templates::list()); until then the UI uses COMFY_TEMPLATE_META. */
+export interface ComfyTemplateInfo {
+  name: string;
+  requiredModels: string[];
+  missing: string[];
+  ready: boolean; // every required model is on disk (says nothing about `implemented`)
+  note: string | null; // "needs model checkpoints/…" when missing, else null
+  label?: string;
+  kind?: "image" | "video";
+  implemented?: boolean;
+  unavailableReason?: string | null;
+}
+
+/** comfy_status.lastBatch: a BatchReport, or a crash-recovery result. Loose on purpose; the UI reads only these. */
+export interface ComfyLastBatch {
+  kind?: string; label?: string; finishedAt?: number;
+  done?: string[]; failed?: string[]; requeued?: string[]; cancelled?: string[];
+  preempted?: string | null; deferred?: string | null; error?: string | null;
+  restore?: { ok: boolean } | null;
+}
+
+export interface ComfyStatus {
+  up: boolean;
+  version: string | null;
+  running: boolean; // a batch holds (or is getting) the GPU
+  phase: string; // "" | "waiting for the GPU slot" | "unloading LLMs" | "starting ComfyUI" | "rendering <template> (n/m)" | "putting Tony back"
+  admission: string; // "running" | "not checked yet" | the admit() refusal ("manual policy: press Run now", "mid-conversation (…)", …)
+  runNow: boolean;
+  templates: ComfyTemplateInfo[];
+  counts: Record<ComfyJobStatus, number>;
+  settings: ComfySettings;
+  crashMarker: boolean;
+  lastBatch: ComfyLastBatch | null;
+  backoff: { failures: number; untilMs: number | null };
+  recoveryAttempts: number;
+}
+
+export interface ComfyQueue { version: number; settings: ComfySettings; jobs: ComfyJob[] }
+
+/** comfy-service payloads (comfy.rs run_batch). */
+export type ComfyServiceEvent =
+  | { phase: "waiting for the GPU slot" | "putting Tony back"; label: string }
+  | { phase: "starting ComfyUI" }
+  | { phase: "rendering"; up: true; version: string | null }
+  | { phase: "idle"; deferred?: string | null; batch?: { done: number; failed: number; requeued: number; error: string | null; restoreOk: boolean | null } };
+
+export const COMFY_PROMPT_MAX = 2000;
+export const COMFY_TURBO_MAX_STEPS = 4;
+export const COMFY_STYLE_DENOISE: readonly [number, number] = [0.3, 0.7];
+export const COMFY_UPSCALE_MAX_INPUT_SIDE = 2048;
+export const COMFY_ASPECTS: readonly ComfyAspect[] = ["16:9", "9:16", "4:5", "1:1", "4:3", "3:4"];
+/** Fallback until comfy_status carries label/kind/implemented (keep in step with comfy_templates.rs TEMPLATES). */
+export const COMFY_TEMPLATE_META: Record<ComfyTemplateName, { label: string; kind: "image" | "video"; implemented: boolean; needsInput: boolean; unavailableReason?: string }> = {
+  "scene-still": { label: "Scene still", kind: "image", implemented: true, needsInput: false },
+  "thumbnail-bg": { label: "Thumbnail background", kind: "image", implemented: true, needsInput: false },
+  "style-transfer": { label: "Style transfer", kind: "image", implemented: true, needsInput: true },
+  upscale: { label: "Upscale 4x", kind: "image", implemented: true, needsInput: true },
+  "broll-motion": { label: "B-roll motion", kind: "video", implemented: false, needsInput: false, unavailableReason: "Not built yet: needs a video model." },
 };
 
 /** Cross-page handoff ("Send to Director Suite"): sets the nav + creates or opens a project. */

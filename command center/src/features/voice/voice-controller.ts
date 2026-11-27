@@ -54,6 +54,8 @@ import { answeringIds, pillPathways, stripLearnTags } from "@/features/modes/lea
 import { spokenSoFar } from "@/features/dispatcher/tony-dispatch";
 import { onArbiterEvent, type PacketResult } from "@/features/arbiter/api";
 import { activeBusinessForTurn } from "@/features/ops/ops-store";
+import { isReadOnlyHandler, modeOfHandler, MUSIC_LINES, type FastHandlerId, type FastMatch } from "./fast-path";
+import { answerReadOnly, matchFastLine } from "./fast-path-live";
 import { duckOnSpeech, duckOnTrigger, musicPlayingHere, restoreAfterPause, restoreDuck, scheduleRestore, settleCommand, settleNoise } from "./spotify-duck";
 
 /**
@@ -209,8 +211,11 @@ function agentAutoSpeak(role: string): boolean {
 // If you start talking, he stops mid-sentence and your words are transcribed.
 // When he finishes, the mic stays open for a few seconds for your follow-up —
 // no wake word, no button.
-// Phase 2: a barge-in no longer stops him on the spot. Speech onset DUCKS him (one audio
-// frame); once Whisper returns, `parseReflex` decides: cut / hold / stand-down / a new command.
+// Live test 11-27 (Nic's call): talking over Tony while he is AUDIBLE stops him on the spot —
+// speech onset cancels his audio and drops the rest of the reply (`bargeStop`: its stream is
+// cancelled, the bubble keeps what was written, nothing is resumed or repeated). Over a turn
+// that is still thinking (nothing audible yet) onset only DUCKS, as in Phase 2. Either way,
+// once Whisper returns, `parseReflex` decides: cut / hold / stand-down / a new command.
 // `ducked` = you started talking over this listen and the decision is still pending.
 const convo = { barged: false, active: false, ducked: false };
 /** say() calls in flight (incl. one paused by a hold) — Tony or an agent has audio queued. */
@@ -286,7 +291,8 @@ function speechHandlers() {
         convo.barged = true;
         convo.active = false;
         convo.ducked = true;
-        tts.duck?.(true);
+        if (sayDepth > 0 && !hold.active) bargeStop();
+        else tts.duck?.(true);
       }
       if (p === "transcribing") {
         setCueDuck("user", false);
@@ -681,6 +687,36 @@ async function switchModeTurn(line: string, mode: string, rest: string, opts: { 
   store().setState("idle");
 }
 
+// ── Instant cues (Section 20.10) ───────────────────────────────────────────────
+
+/**
+ * Answer a fast-path match without a model: push the reply with an "instant cue · N ms" meta tag
+ * (time since the line came in), speak it on voice with the normal barge-in / follow-up handling.
+ * False = the handler had no answer (or threw): the caller runs the normal turn.
+ */
+async function instantCueTurn(m: FastMatch, thread: ThreadId, channel: Channel, gen: number): Promise<boolean> {
+  let reply: string | null = null;
+  try {
+    reply = m.handler === "reply" ? (m.reply ?? null) : answerReadOnly(m.handler as FastHandlerId);
+  } catch {
+    reply = null;
+  }
+  if (!reply) return false;
+  if (gen !== micGen) return true; // hard-stopped meanwhile: stay silent
+  const start = ttfw.gen === gen && ttfw.start ? ttfw.start : performance.now();
+  const ms = Math.max(0, Math.round(performance.now() - start));
+  store().pushTurn({ who: "agent", from: "os", role: "general", text: reply, thread, meta: `instant cue · ${ms} ms` });
+  if (channel === "voice") {
+    store().setState("speaking");
+    startBargeIn();
+    await say(reply);
+    afterVoiceReply(gen);
+    return true;
+  }
+  store().setState("idle");
+  return true;
+}
+
 // ── Routing (Part 1 / P2) ────────────────────────────────────────────────────
 //
 // One resolver for the planner (mutating plans → a gateway agent) and the OS turn (read-only →
@@ -769,6 +805,14 @@ async function handleTurn(text: string, opts: { channel: Channel; thread?: Threa
   const live = () => gen === micGen;
   if (opts.channel === "text") turnOrigin = "text";
   else if (opts.origin) turnOrigin = opts.origin;
+  // Section 20.10 instant cues: a whole-line match against the built-ins (time, date, weather,
+  // what's pending) and Nic's fast cues. Pure lookup; a throw just means "no fast path".
+  let fast: FastMatch | null = null;
+  try {
+    fast = matchFastLine(t);
+  } catch {
+    fast = null;
+  }
   // Tony's work mode by voice or text ("go into builder mode", "coaching mode", "exec mode and …"):
   // the same setter as the top-bar MODE menu, before any card, cue, grammar or model call.
   if (!opts.shown) {
@@ -776,9 +820,12 @@ async function handleTurn(text: string, opts: { channel: Channel; thread?: Threa
     if (ms) return switchModeTurn(t, ms.mode, ms.rest, opts, gen);
   }
   // One parse decides stops, cue volume and whether a cue may fire; a line it leaves alone asks
-  // Rust's Spotify grammar (`spotify_parse`, the only Spotify grammar).
+  // Rust's Spotify grammar (`spotify_parse`, the only Spotify grammar). An OS intent (kill switch,
+  // stops, status…) always beats a fast cue. A fast cue mapped to music hands Rust's grammar the
+  // canonical line instead, so every Spotify gate below (live tool, card, confirm) still applies.
   const intent = parseOsLine(t);
-  let sp: SpotifyIntent | null = intent ? null : await parseSpotifyLine(t);
+  const musicLine = fast && !intent && fast.handler in MUSIC_LINES ? MUSIC_LINES[fast.handler as keyof typeof MUSIC_LINES] : null;
+  let sp: SpotifyIntent | null = intent ? null : await parseSpotifyLine(musicLine ?? t);
   if (sp && cueOwnsVolume(sp, cuePlayingNow(), t)) sp = null; // "volume 30" during Gabagool ⇒ Tony, as before
   // The Spotify fast path only runs while Spotify is live for Tony this turn (his base: every mode,
   // Learning included; frozen only on the master switchboard or when he doesn't own it). Otherwise
@@ -789,6 +836,13 @@ async function handleTurn(text: string, opts: { channel: Channel; thread?: Threa
     if (intent && worksWhileConfirming(intent)) return controlWhileConfirming(t, intent, opts.channel);
     if (sp?.tool === "spotify.pause") return controlWhileConfirming(t, sp, opts.channel);
     return answerConfirmation(t, opts.channel);
+  }
+  // A fast cue mapped to a mode switch (Nic's own cue): only AFTER the OS-intent parse (stops, cue
+  // stops, kill switch, status) and the open-card answer above, so a user phrase can never shadow
+  // a stop or swallow a card's yes / no (review: "turn it off" during a cue, "scratch that" on a card).
+  if (!opts.shown && !intent && !sp) {
+    const fastMode = fast ? modeOfHandler(fast.handler) : null;
+    if (fastMode) return switchModeTurn(t, fastMode, "", opts, gen);
   }
 
   convo.barged = false;
@@ -822,6 +876,14 @@ async function handleTurn(text: string, opts: { channel: Channel; thread?: Threa
     store().setState("idle");
     fireCue(cue);
     return;
+  }
+
+  // Section 20.10 instant cue: a read-only answer (or Nic's fixed reply) straight from the client
+  // stores, no model call. Only when nothing deterministic owns the line (no OS intent, no Spotify
+  // command), never on a typed sub-agent tab, and after any open card was answered above. A
+  // handler that can't answer (stale weather, data not loaded) or throws falls through unchanged.
+  if (fast && !intent && !sp && !isSubAgentThread(thread) && (fast.handler === "reply" || isReadOnlyHandler(fast.handler))) {
+    if (await instantCueTurn(fast, thread, opts.channel, gen)) return;
   }
 
   // "Any messages?" / "play my messages": the Comms inbox of agent reports, answered in-process.
@@ -877,7 +939,10 @@ async function handleTurn(text: string, opts: { channel: Channel; thread?: Threa
     if (!live()) return;
     if (opts.channel === "voice") {
       v.setState("speaking");
+      startBargeIn();
       await say(local.reply);
+      // The follow-up window, as after any spoken reply: a to-do's "Add “…”?" is answered by a plain "yes".
+      return afterVoiceReply(gen);
     }
     store().setState("idle");
     return;
@@ -2359,6 +2424,18 @@ function supersedeTurn() {
   micGen++;
   cancelTts();
   releaseTtsDuck();
+}
+
+/**
+ * Nic talked over Tony while he was audible: stop now and drop the rest of the reply. His audio is
+ * cancelled, the turn's server stream is stopped and its generation is superseded, so no later
+ * sentence is spoken and nothing resumes or repeats (the bubble keeps what was written). The
+ * barge-in listen stays open: Whisper's words decide what happens next (a cut, a hold, a new
+ * command; noise just leaves him stopped).
+ */
+function bargeStop() {
+  cancelStreams();
+  supersedeTurn();
 }
 
 /** Stop every os_turn still generating (its LLM / sub-agent streams) server-side. */

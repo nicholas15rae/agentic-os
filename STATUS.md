@@ -36,7 +36,7 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | Overnight: Maps widget front end (Map / Upcoming / Saved tabs, trips with leave-by, saved routes with Delete? Yes/No, safe Google Maps links, phone hand-off logic) | claude/sections-8-10-m3 | 6acc15f (PR #10) | Yes (c134f9c); not in the running app until the next rebuild |
 | Overnight: Brainstorm Talk pure helpers (talk intent, digest, wrap-up walk, destinations; no bulk approve, memory by reference only) | claude/sections-8-10-m3 | 0d72190 (PR #10) | Yes (c134f9c) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
-| Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
+| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | Yes (8647df7), pushed to origin; review round 5 confirmed all round-4 MEDIUMs fixed (1 new MEDIUM left, see Waiting on you). App UI live since the 16:25 restart; **trading bridge not restarted yet** (still runs the old kill-switch Python) |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -53,8 +53,24 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | Yes (76df04f) |
 | Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | Yes (76df04f) |
 | Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
+| Director chat system message kept byte-stable for prefix caching (STUDIO STATE moved to the last user message) | director-suite | this commit | Yes (5098ca3) |
+| SDXL Turbo live test passed; harness runs with Command Center open (own crash marker) | director-suite | e0f4410, 6d3f9f5 | Yes (5098ca3) |
+| Director sees timed transcript lines; clips open on the sentence; a fit-only revision no longer resolves a timing note | director-suite | 116fbb2 | Yes (5098ca3) |
+| Part 3 UI: ComfyUI Generate panel, render queue, GPU pill, Re-roll/Tweak; note markers on the timeline; projects board; bin filters; Versions tab with restore and A/B Compare (contract in docs/proposals/director-suite-part3-contract.md). Phone review not built | director-suite | 202ae7c, 386203d | Yes (5098ca3) |
+| A revision may move the cut only ±30% off the brief's length (run 10 halved a Reel); its summary now starts with the real length change | director-suite | see log | Yes (5098ca3) |
+| Part 4: Scene Reader audition import (read-only, from a temp copy of its db; takes copied, never moved), sides drop, slate card, self-tape output. Part 5: Director reports to the inbox (brief ready, footage gaps, ComfyUI batch, review rounds) via publish_note, no voice/comms edits | director-suite | bd403c8 | Yes (5098ca3) |
+| Director's LENGTH line states the plan band and, with a note open, the revision band | director-suite | 6575cc7 | Yes (5098ca3) |
+| Part 6 small items: launcher presets, more versions from one cut, phone shot list, style memory (STYLE line), fill the gaps | director-suite | see log | Yes (5098ca3) |
+| Length refusals name a concrete whole-line fix; live E2E retries a busy LM Studio turn once | director-suite | 74655ad, f900096 | Yes (5098ca3) |
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
+| Section 12 Phone book (grouped by area, linked across Finance, invoices, agencies, auditions, messages; .vcf import) | section-pass-batch3 | 3fe3468 | Yes (6d1084b) |
+| Section 15 part: spaced-repetition flashcards, Today's lesson, curveball setting (off, not wired to Tony) | section-pass-batch3 | 763dab0, 4520f35 | Yes (with this merge), not pushed |
+| Section 14.6 + 14.7: Discord rankings need 30 calls (Wilson bands); paper track record beside the backtest + SPY (display only) | section-pass-batch3 | 55030dd | Yes (with this merge), not pushed |
+| Section 16.2 + 16.3 + 16.6: backup mirrors to a second drive (verified, keep-all), vault password banner + checklist, Tony's read-only `vault.search` | section-pass-batch3 | f138a9b, 4520f35 | Yes (with this merge), not pushed |
+| S20.10 instant cues: time / date / weather / reminders with no model call; your own fast cues in Voice & Triggers | section-pass-batch3 | 5c80888 | Yes (with this merge), not pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
+| Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
+| Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
 | Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (merged 11-27 09:50 on top of PR #10), not pushed; app rebuild + live check in progress |
 | S26: plan + Tony latency bench (`engine/bench_tony.py`; refuses unless Tony's model is loaded and the baton is free) | section-26-engine | 686860b | No |
@@ -89,16 +105,24 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 
 | Session | Working on | Current step |
 |---|---|---|
+| Tony live-test fixes | All 7 fixes | Merged into main (9d37071). The "Stop Tony parroting" session is rebuilding from main 0418649 and restarting the app; it will check Tony afterwards. Pushed to origin |
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
-| Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
-| Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
+| Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
+| Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
-| Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
+| Stop the UI burning GPU | Done | Kill switch merged (8647df7), pushed, app restarted 16:25 on 8647df7 (hidden: GPU 0.00%). Nothing in flight |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
-| Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status` merged into main | Testing the combined main, then app rebuild + restart and a live phone inbox check (this session) |
+| Port 46778f9 / kill switch (practical-elbakyan) | Done; session closed | Round 4 fixed in 5a55ebc; merged into main by the GPU session. Round-5 follow-ups listed under Waiting on you |
 | Section 26 engine (section-26-engine, worktree G:\agentic-os-engine) | Built-in llama.cpp engine beside LM Studio / AnythingLLM, off | Stopped at a clean commit with a handoff (top of this page). Waiting on you: GPU bench, rebuild, questions |
 
 ## 3. Waiting on you
+- Director length hint may suggest moving a clip's START earlier (run 14 had no out point free, so it suggested opening clip 1 on the line before). Keep, or out points only?
+- Director picks moments from the transcript alone, so a cut can miss Nic's face (run 15 was one acted scene under narration). Want a face/person check in media-forge (local, CPU) feeding the context?
+- Director Part 6 larger items need your call before building: talk-to-edit (new incremental actions), three speeds incl. Full AI, storyboard first, performance-aware comping (needs Scene Reader data), NetBird private link (gateway), Instagram posting (hosting), tool pill (agents.rs). Part 7 boosters not started.
+- Director voice (Part 5): pick an ElevenLabs voice for the Director (agentVoices.director); voice settings are shared core, so not set.
+- Scene Reader link (Part 4): its app has no HTTP endpoint; the card shows when Studio TTS (:5123) answers. Import reads %APPDATA%\com.scenereader.dev (copy only). OK, or want a real export endpoint in Scene Reader (its repo)?
+- Director Part 3 contract questions (defaults picked, change any): (1) ComfyUI policy select sits on the Queue card and applies to every project; (2) Re-roll of a style-transfer whose job was pruned from the queue is disabled; (3) Restore is offered only from the Versions tab.
+- Director Part 3 phone review needs a gateway (server.py) /api/media proxy behind the security gate: shared core, so not built. OK to build it?
 
 **Questions for Nic (Section 26, section-26-engine)** (answers through your 2nd 11-27 message are applied; these are my calls for you to review)
 - **Biz Ops draft, my calls on its 4 questions (kept UNUSED until you approve):** (1) Name "Biz Ops" and the old workspaces' tone: kept, because the scope rules are already proven in the two live workspaces and one name across businesses keeps routing simple. (2) Acting: casting posts and Gmail drafts stay with the **Booking Desk**, so Biz Ops points there. Booking already owns that flow and its templates, and two agents drafting the same emails would double up. (3) Section title **"BF Supplements"**, since that's what you call it; the registry name stays "Supplements & E-Commerce" for matching. (4) `instagram`: Biz Ops keeps it **read-only / draft posts only**, never posts; same pattern as Booking's draft-only Gmail.
@@ -107,14 +131,44 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 
 
 **Decisions**
+- Push main (overnight batch merged, not pushed)?
+- Parked overnight (safety or hardware): 14.5 Full auto gate (PIN + phone approval, live-trading control), 14.8 IBKR data everywhere, 14.9; 15.2 camera translate (phone), 15.3 pronunciation (GPU Whisper), 15.4 accents (Scene Reader), 15.7 vocabulary images (ComfyUI); 16.3 recovery key (would change the vault encryption); wiring language curveballs into Tony's turn.
+- Instant cues: "what's pending" deliberately stays Tony's Finance read (live data); only reminders / to-do are instant.
+- Tony live-test fixes (all 7, merged into main 11-27 on your go). Choices I made overnight (safest option each time):
+  - Barge-in (fix 6) is built (your go, 11-27). Trade-off to watch on speakers: a cough, or Tony's own voice leaking into the mic, now cuts him off too. The barge-in listen's stricter trigger is unchanged. A hold ("whoa") over his voice now holds your thought, but there's no paused reply left to resume.
+  - The booking-mail scan keeps its own query from your instruction file (it already excludes Promotions and Social); only reads and searches got the Primary scope.
+  - To-dos had no store, so a confirmed to-do goes to the Ideas & Tasks ledger (Play Place) as a parked item tagged `todo`. Parked items start nothing. In Learning mode a to-do line still goes to Tony's model (Learning skips local intents).
+  - The to-do prompt rule rides only on a turn that mentions a to-do, because Tony's system prompt is at its 3,500-char budget. I didn't raise the budget.
+  - "Promotions" in the Whisper hints: added as "Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab." The paired "X tab" wording keeps a spoken list of tab names from being dropped as a prompt echo. The hint cap went from 220 to 280 chars. The live faster-whisper entry still holds the old default, so a one-time migration swaps it on the next app start. An edited prompt is kept.
+  - A Gmail query that names another mailbox (`in:sent`, `in:drafts`, `label:Clients`…) runs as given, not Primary-scoped. "My primary inbox" wins over a saved "All inboxes".
+  - After a spoken local reply (to-do question, timer, reminder), the normal follow-up listen now opens, so a plain "yes" answers the to-do without the wake word. It's the same as every other spoken reply.
+  - A 4-agent review plus a skeptic pass found 9 real issues in my first cut. All are fixed and tested.
 - Sections 8-10: after the next app rebuild, look at the Maps widget Upcoming and Saved tabs (not yet checked in a running app).
 - Sections 8-10 contract `features/maps/contract.ts` is a DRAFT: approve to lock it.
 - Sections 8-10 parked because they touch safety controls (your call): confirmation-card options (Brainstorm 9, `gate.ts` / ConfirmCard) and the auto-dispatch taint rule (Comms 4, `tony_dispatch.rs`).
 - Sections 8-10 parked because another session owns the code: Comms screens (Comms 9; the phone-book session is in CommsSection) and the Director Ideas board (Brainstorm 14, Director page).
 - Sections 8-10 parked for the app or the phone: wire the Maps hand-off listener into `App.tsx`; add `maps_trips` + trip-words to `platform.ts` NativeCommands; Android work (Comms 6-8, Maps 4 + 12, Brainstorm 12, one APK); voice Talk (Brainstorm 2, 3, 7, 10, 11, 13).
 - Sections 8-10 overnight defaults I picked (safest each time): phone and narrow widgets open on Upcoming, the PC on Map; location only on a tap of "Use my location" (desktop); hand-offs refused unless every link is an https Google Maps link, and the opened link is rebuilt from coordinates; hand-off TTL 30 min (2 min clock skew); trips and seen hand-offs kept in memory only (addresses); refresh 5 min desktop / 2 min gateway / 10 min after an error; wrap phrases count only as a whole line; in Talk only cut / hold / "Tony, end talk" act; memory items only from Nic's lines and only by reference; "later" in the walk leaves an item pending; talk digest never labels Tony's words as Nic's.
+- **Kill switch / options guard** (`claude/practical-elbakyan-0f96f1`): round 4 is fixed in 5a55ebc (you said "fix them now"). Review round 5 (GPU session) confirmed all 3 round-4 MEDIUMs fixed and merged it into main. **The trading bridge needs a restart to load it** (not done: your call). Things to know:
+  - A manual order in TWS on an expiring option leg is now named in the guard's report (and audited). If it sits on a short leg, the guard keeps the long legs until you cancel or replace it.
+  - Dry runs (09:00 health check, the UI button) now connect as client id 26. Set `IBKR_CLIENT_ID_KILL_DRY` if 26 is taken on your TWS.
+  - A second E-stop press during a kill waits for it. It runs again only if the first never connected. If the first connected but failed, the press reports that and sends nothing; then run `python trading/kill_switch.py`.
+  Not fixed:
+  - Normal guard passes still net against an open-order list the bridge hasn't confirmed (openOrdersAt missing).
+  - Unlock-disabled-mid-kill has no render test; the server's refusal is tested.
+  - The hotkey doesn't read the in-flight count; the desk serializes kills, and the toast says "already running".
+  - An unfilled closed_stop LMT exit is never re-armed (predates this work).
+  - TWS's take-profit handling when a partly filled entry is cancelled is unconfirmed.
+  - Real Windows key-repeat inside WebView2 is untested (only CDP key events).
+  Round-5 follow-ups (port session closed; full findings `kill-switch-review-round5-5a55ebc.json` in the GPU session's notes folder):
+  - MEDIUM: a premium stop partly held back by a manual resting SELL (e.g. GTC SELL 1 of 2 at 9.50) sells only the rest, is marked closed_stop and reports nothing; the held-back contract is never re-checked. Still safer than before (no over-sell).
+  - Low: a kill that raises after its network steps (audit or incident write) counts as "never connected", so a waiting second press re-runs it; the rerun rule should be "placed no KILL- order".
+  - Low: the stand-down doesn't stop Engine A's auto scan; reset() unlinks the lock before its ADVISORY write lands.
+  - Low: untested: closes_now side-only / size-only checks, Unlock-disabled-mid-kill, red-button toast titles.
+- System Python: `ib_async` 2.1.0 is installed (you asked). pip downgraded `tzdata` from 2026.6 to 2025.3 (ib_async pins <2026). The gateway runs on system Python and uses the 2025.3 time-zone rules after its next restart.
 - Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
-- The running app (restarted 11-27 00:31) is main at dffdb71: section-pass, batch3, director-suite, PR #8 (Sections 8-10 m2), Ops removal, crash hardening, recall fix.
+- The running app (restarted 11-27 16:25 by the GPU session) is main 8647df7: everything on main up to 4e69152 (section-pass-batch3 overnight batch included) plus the kill switch + options guard hardening. The earlier checks still apply: Settings has a Comms tab set to "Primary only"; "check my email" reads Primary only; "add Melissa Lee invoice to my to-do list" asks before it saves; saying "hold on" while Tony talks stops him.
+- **Restart the trading bridge** (:8091) to load the new kill-switch / options-guard Python? It needs TWS logged in. Until then the bridge runs the old kill switch; the app's E-stop UI is the new one.
 - Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
@@ -125,11 +179,12 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.
 
 **Manual steps**
+- After the next rebuild + restart: set a mirror folder on another drive (Vault, Second copies), press Re-index vault, re-run the Engine R evaluation (fills the track record's spread).
 - Ops removal: done live. The Ops lines are out of handoff-cues.json and the STT hint (backups `*.20261126-231018-before-ops-removal`), and os.json was migrated at the 00:31 restart (backup `os.json.bak-20261127-003126-ops-removed`).
 - Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
-- Keep Tony quiet for ~3 min when the Director runs the live SDXL test (it will message first).
+- Director/ComfyUI: copy the SDXL Turbo checkpoint (6.5 GB) from D: (HDD) to an SSD folder? Its read from D: is most of the 80 s render; on SSD a still should take seconds. Parked: moving model files is your call.
 - Restart the gateway (new Finance records won't save until then). Bionic runs elevated, so only you can quit it.
 - Queue the E46 rebuild in Play Place (steps in `docs/e46-clock-spec-note.md`).
 - Before the next "Sync to AnythingLLM": grant the MCP servers you use directly, or it turns their auto-start off.
@@ -147,19 +202,16 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 - 8: native Android bridge, notification capture, tabs UI, official Meta API, taint/injection guards
 - 9: Talk-it-through mode, send-to after wrap-up, one-tap mode switch, E46 clock build
 - 10.4 Maps: phone "Open in Maps" (Android NavPlugin), hand-off listener wiring, location permission (widget UI done overnight, local branch)
-- 11.10 Tony reads Finance
-- 12 Phone book
-- 14.5-14.9 Trading (needs IBKR connected)
-- 15 Language
-- 16.2, 16.3, 16.6: off-machine copy, vault password, vault search
+- 14.5, 14.8, 14.9 Trading (parked: safety / needs IBKR)
+- 15.2, 15.3, 15.4, 15.7 Language (parked: phone, GPU, Scene Reader)
 - 17 Wallpapers, 18 Flowchart/Blueprint/Orbital, 23 Appearance (held until Section 6)
-- S20.10 instant-cue fast path
+- 21 setup walkthroughs: Instagram reconnect + expiry, n8n key and webhooks, Maps home in settings, Calendar route pick
 
 Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S20.10, and the Tony-Rust parts of 8 and 9.
 
 **Director Suite**
 - 1.6 public hosting for Instagram
-- Part 2 live SDXL Turbo test; B-roll template (no video model yet)
+- B-roll template (no video model yet)
 - Part 3: Projects board, Generate panel and render queue, Versions with A/B compare, phone review
 - Part 4 Scene Reader link
 - Part 5 Voice/comms
@@ -179,7 +231,16 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Suite | Latest | Where / when |
 |---|---|---|
 | section-26-engine (756feda) | full pytest 1,841 pass, 1 skip; engine tests 101 + switch 5; test_gateway_tony 80/80; vitest engine 6/6, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in code I changed); pipelines 4/4; GPU bench + CPU smoke 3/3 | 11-27 12:40 |
+| main 8647df7 (kill switch merge) | tsc clean; vitest 3,352/3,352; pytest run_all 988 OK; all test_trading_* 748 OK; cargo 1,693 (+2 known CRLF; 1 real-browser test failed under load, passes alone) | 11-27 11:05 |
+| Live app (10:41 build, main 0418649), the system.status session's own check | 2 phone-style inbox turns, both answered by the desktop: "Tony, is the droplet up?" -> "Yeah, the Droplet is up and running, Nic..." (system.status 382 ms; droplet 61 ms, from the app's own 15-second check 2 s earlier); "is Docker running?" -> "Yeah, Docker is running good." First words 1.8 s and 1.2 s | 11-27 11:01 |
+| main 8647df7 (+ kill switch / options guard hardening) | tsc clean; vitest 3,352/3,352; cargo 1,694 (+2 known CRLF; Edge tests passed) | 11-27 11:30 |
+| main 4e69152 (+ section-pass-batch3 overnight batch) | tsc clean; vitest 3,321/3,321; cargo 1,693 (+2 known CRLF; 1 Edge test timed out under load, passes alone) | 11-27 11:20 |
+| main e547863 (Director Parts 1-5 + Tony live-test fixes + system.status) | tsc clean; vitest 3,211/3,211; cargo 1,682 (+2 known CRLF; 2 Edge tests timed out under load, pass alone) | 11-27 10:50 |
+| claude/tony-live-test-fixes-5d85d5 (+ barge-in) | tsc clean; vitest 2,931/2,931; cargo 1,624 (+2 known CRLF: allm, buildhub; 2 Edge browser tests timed out under load, pass alone); pytest not re-run (no Python changed since the 1,733 run below) | 11-27 02:50 |
+| claude/tony-live-test-fixes-5d85d5 (Tony live-test fixes) | tsc clean; vitest 2,925/2,925; cargo 1,625 (+2 known CRLF: allm, buildhub; 1 Edge browser test timed out under load, passes alone); pytest 1,733 (embed flake + 1 socket abort under load, both pass alone; language hub 41/41 after the last prompt change). Not checked in the running app (no rebuild) | 11-27 02:20 |
 | claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
+| main 87b6527 (PR #10 + system.status) | tsc clean; vitest 3,021/3,021; cargo 1,628 (+2 known CRLF; 6 Edge tests timed out under load, all 67 quality tests pass alone) | 11-27 10:05 |
+| Live app after the 10:41 restart (main 0418649) | Up, no panic.log lines; providers.json STT-hint migration ran (backup `providers.json.20261127-100740-before-stt-gmail-tabs`); 3 phone turns answered by the desktop: droplet "up, 62 ms" (system.status), fresh greeting, Chris recalled; first words 3.6 s cold, then 0.7-0.8 s | 11-27 10:43 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
@@ -189,16 +250,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Live app after the 23:40 restart (main 0c4341f) | Up, no panic.log lines; 2 phone turns answered by the desktop: live weather (not the stored reply), Chris recalled; first words 3.4 s cold, then 0.8 s | 11-26 23:42 |
 | Live app after the 00:31 restart (main dffdb71) | Up, no panic.log lines; Ops migration ran (0 `"ops"` entries left); 2 phone turns answered by the desktop. "Is the droplet up?" now goes to Tony but gets a vague reply, since a phone turn has no live dashboard. First words 3.4 s cold, then 0.6 s | 11-27 00:33 |
 | section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
-| section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
+| section-pass-batch3 (overnight, before merging main) | tsc clean; vitest 2,831/2,831; Python 870 OK; Rust 1,491 (+2 known CRLF; real-browser tests pass alone) | 11-27 |
 | claude/elated-kare-67e4c4 (Ops removal, on e46d0c7; main since changed STATUS.md only) | tsc clean; vitest 2,887/2,887; cargo 1,596 (+2 known CRLF; browser tests passed); pytest language hub + memory scrolls + gateway + fw_server 253/253 | 11-26 23:45 |
 | main 9c57359 (Ops removal + PR #8 + director-suite) | tsc clean; vitest 2,906/2,906; cargo 1,621 (+2 known CRLF; 3 Edge tests timed out under load, pass alone) | 11-27 00:30 |
 | main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
 | director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
+| director-suite (116fbb2) | tsc clean; vitest 2,904/2,904; cargo 1,611 (+2 known CRLF); taskworker::quality 67/67 | 11-27 02:30 |
+| director-suite merged into main (5098ca3; gate on e2411fe) | tsc clean; vitest 3,211; cargo 1,617 (+2 known CRLF; taskworker::quality 67/67 alone); Python 863 OK; media-forge 116; Playwright director 9/9. Latency probe (stress MEDIUM, running app): per-probe exec in line with earlier runs (Tony 1.39 s), wall 48 s from a queued Librarian probe | 11-27 10:30 |
+| director-suite (Part 6) | tsc clean; vitest 3,052/3,052; cargo 1,637 (+2 known CRLF); Playwright director 9/9 | 11-27 04:45 |
+| director-suite (6575cc7, Parts 4-5 + bands) | tsc clean; vitest 3,022/3,022; cargo 1,628 (+2 known CRLF; taskworker::quality 67/67 alone); Playwright director 7/7 | 11-27 04:10 |
+| director-suite (Part 3 + revision fix) | tsc clean; vitest 3,005/3,005; cargo 1,613 (+2 known CRLF; taskworker::quality 67/67 alone); media 68; Playwright director specs 5/5 desktop | 11-27 03:30 |
+| ComfyUI SDXL Turbo live test (comfy_live.rs) | PASS: 1 image, ingested with provenance; boot 77 s, render 80 s (checkpoint read from HDD), peak VRAM 10,193 MiB, Qwen reload 212 s (builds running alongside), only Tony loaded after at 32768 ctx x 2; total 6.3 min | 11-27 01:23 |
+| Director live E2E run 15 | PASS 15/15 in 196 s, no auto-fixes or re-asks; idea verbatim; round 1 15.8 s, round 2 11.8 s (inside the revision band, summary states the real length change); captions whole sentences; -14.2 LUFS. Weak spot: the cut is ONE 15.8 s clip (an acted period scene under narration), the Director picks by transcript only and can't see faces | 11-27 05:55 |
+| Director live E2E runs 13-14 | 13: LM Studio turn timeout (replayed fine in 15 s, busy server). 14: six revisions at 9 / 8.4 s vs 10.5-19.5 s, led to the length hint | 11-27 05:00 |
+| Director live E2E run 12 | INCONCLUSIVE: stopped at step 3c when an LM Studio turn hit the 120 s cap (builds were loading the CPU; LM Studio stayed up, Tony at production settings). Length bands not yet tested live; re-run when the machine is quiet | 11-27 04:10 |
+| Director live E2E run 11 | FAIL at step 5b (12/13 steps): the new ±30% revision guard refused 6 revisions (22.7, 19.6, 28.1, 3.9, 25.7, 3.9 s vs 10.5–19.5 s); Qwen never landed in the band. Next: show the band in the Director's LENGTH line before it revises | 11-27 03:45 |
+| Director live E2E run 10 | 15/15 steps. Captions now whole sentences; idea verbatim; round 1 14.0 s. FAIL: the round-2 revision cut it to 7.4 s (revisions only warn on length) and its summary claimed it was extended. 4 auto-fixes + 3 re-asks to hit length (Qwen arithmetic) | 11-27 02:15 |
 | Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
 | sections-8-10 m3 overnight (0d72190) | pytest 1,735; vitest 3,021 (211 files; 132 new maps + brainstorm tests); tsc clean; cargo 1,612 (+2 known CRLF in allm/buildhub, not mine, left alone). Not checked by eye: no dev server allowed overnight, MapLibre needs WebGL | 11-27 02:00 |
 | sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
-| Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
+| claude/practical-elbakyan-0f96f1 (5a55ebc, round 4) | tsc clean; vitest 2,937/2,937; test:scripts 12/12; test_trading_* 731/731 (system Python), venv 727/731 (3 known python-multipart, 1 temp-dir cleanup race, now tolerated and 5/5 alone); run_all 950 OK; cargo --lib 1,614 (+2 known CRLF; 7 real-browser tests failed under parallel load, all pass alone); 27 Python + 1 UI mutations all caught | 11-27 10:30 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 

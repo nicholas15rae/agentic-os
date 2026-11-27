@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
-import { Archive, Database, HardDriveDownload, Loader2, RefreshCw, Search } from "lucide-react";
+import { Archive, CheckCircle2, CircleDashed, CloudUpload, Copy, Database, HardDriveDownload, Loader2, RefreshCw, Search, XCircle } from "lucide-react";
 import { Card, Chip, Field, Input, Stat } from "@/components/ui";
 import { backupSummary, cc, type BackupList, type CcConfig, type Collection, type VaultResults } from "@/lib/cc-api";
+import { gateway } from "@/lib/gateway";
 import { useNav } from "@/stores/nav";
-import { isTauri } from "@/lib/platform";
+import { cmd, isTauri, type PipelinesSettings, type SyncResult } from "@/lib/platform";
 import { MemoryLifecycleCard } from "@/sections/settings/MemorySettings";
+import { focusVaultPasswordRow, VaultPasswordBanner } from "@/sections/settings/VaultPasswordBanner";
+import { useKeySources } from "@/features/integrations/key-sources";
+import { driveSyncState, mirrorAlerts, vaultChecklist, vaultPasswordState, type DriveSyncState } from "@/features/vault/safety";
 
 const FILTERS: { id: Collection; label: string }[] = [
   { id: "notes", label: "Brainstorms" },
@@ -14,6 +18,8 @@ const FILTERS: { id: Collection; label: string }[] = [
   { id: "pipeline", label: "Scripts & auditions" },
   { id: "projects", label: "Jobs" },
   { id: "documents", label: "Documents" },
+  { id: "ideas", label: "Ideas" },
+  { id: "playplace", label: "Prototypes" },
 ];
 
 const OPEN: Partial<Record<Collection, Parameters<ReturnType<typeof useNav.getState>["go"]>[0]>> = {
@@ -48,7 +54,11 @@ export function VaultSection() {
 
   return (
     <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <Card title="Vault search" hint="Everything you scan, write or say is embedded locally (LM Studio embeddings) — ask in plain language. Falls back to keyword search if no embedding model is loaded.">
+      {isTauri() && <VaultPasswordBanner />}
+      <Card
+        title="Vault search"
+        hint="Brainstorms (transcripts, summaries, tags), scripts & auditions, jobs, documents, ideas, prototypes, and your receipts, invoices and cheques are embedded locally — ask in plain language. Falls back to keyword search if no embedding model is loaded. Not searched here: reminders, savings goals, chats, Memory Scrolls and the language library. Tony can search this too (never your finance records)."
+      >
         <form
           className="flex gap-2"
           onSubmit={(e) => {
@@ -104,10 +114,18 @@ export function VaultSection() {
         )}
       </Card>
       <BackupCard />
-      {isTauri() && <MemoryLifecycleCard />}
+      {isTauri() && <VaultChecklistCard />}
+      {isTauri() && <MemoryLifecycleCard passwordBanner={false} />}
     </div>
   );
 }
+
+/**
+ * GET /api/cc/backups with a longer timeout than the default: it probes the mirror folders
+ * (bounded on the gateway, ~2 s, cached a minute), and a slow answer must not blank the card.
+ */
+const BACKUPS_TIMEOUT_MS = 45_000;
+const fetchBackups = () => gateway<BackupList>("/api/cc/backups", { timeoutMs: BACKUPS_TIMEOUT_MS });
 
 function BackupCard() {
   const [cfg, setCfg] = useState<CcConfig | null>(null);
@@ -115,17 +133,30 @@ function BackupCard() {
   const [health, setHealth] = useState<Awaited<ReturnType<typeof cc.health>> | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [drive, setDrive] = useState<{ settings: PipelinesSettings; last: SyncResult | null } | null>(null);
 
   const load = async () => {
+    if (isTauri()) {
+      // Saved settings + the last recorded sync only: no n8n poll, no network.
+      void Promise.all([cmd("pipelines_settings"), cmd("pipelines_last_sync").catch(() => null)])
+        .then(([settings, last]) => setDrive({ settings, last }))
+        .catch(() => setDrive(null));
+    }
+    // Loaded separately: a slow backups list (mirror drives) can't blank the schedule / health.
+    const backups = fetchBackups()
+      .then(setList)
+      .catch((e) => setMsg(`Backups list: ${String(e)}`));
     try {
-      const [c, l, h] = await Promise.all([cc.config(), cc.backups(), cc.health()]);
+      const [c, h] = await Promise.all([cc.config(), cc.health()]);
       setCfg(c);
-      setList(l);
       setHealth(h);
     } catch (e) {
       setMsg(`Gateway: ${String(e)}`);
     }
+    await backups;
   };
+  const driveState = drive ? driveSyncState(drive.settings, drive.last, cfg?.backup.dir) : null;
+  const alerts = mirrorAlerts(list);
   useEffect(() => void load(), []);
 
   const saveBackup = async (patch: Partial<CcConfig["backup"]>) => {
@@ -167,8 +198,8 @@ function BackupCard() {
               const name = list.failure?.file.split(/[\\/]/).pop() ?? "";
               setBusy("accept");
               try {
-                await cc.acceptBackup(name);
-                setMsg(`Accepted ${name} as a good backup.`);
+                const r = (await cc.acceptBackup(name)) as { mirrorsPending?: boolean };
+                setMsg(`Accepted ${name} as a good backup.${r?.mirrorsPending ? " Copying it to the mirror folders in the background (Refresh to see)." : ""}`);
                 await load();
               } catch (e) {
                 setMsg(String(e));
@@ -179,6 +210,19 @@ function BackupCard() {
           >
             It's right, I removed that data
           </button>
+        </div>
+      )}
+      {alerts.length > 0 && (
+        <div role="alert" className="mb-4 rounded-xl border border-alert/40 bg-alert/10 px-3 py-2 text-xs text-ink">
+          <p className="font-semibold text-alert">{alerts.length === 1 ? "A backup mirror needs a look" : `${alerts.length} backup mirrors need a look`}</p>
+          <ul className="mt-1 list-disc pl-4 text-ink-2">
+            {alerts.map((a) => (
+              <li key={a} className="break-all">
+                {a}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-ink-3">The backups in the main folder are not affected; only the second copy is missing. Plug the drive in, then use Mirror latest now.</p>
         </div>
       )}
       {health && (
@@ -240,6 +284,8 @@ function BackupCard() {
           </Field>
         </div>
       )}
+      {cfg && <MirrorsPanel cfg={cfg} list={list} busy={busy} setBusy={setBusy} setMsg={setMsg} onSaved={setCfg} reload={load} />}
+      {isTauri() && <OffsitePanel drive={driveState} />}
       {msg && <p className="mt-3 break-all text-xs text-ink-2">{msg}</p>}
       {list && list.backups.length > 0 && (
         <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto font-mono text-[12px]">
@@ -253,6 +299,223 @@ function BackupCard() {
           ))}
         </ul>
       )}
+    </Card>
+  );
+}
+
+const when = (secs?: number | null) => (secs ? new Date(secs * 1000).toLocaleString() : "never");
+
+/** Section 16.2: second copies of each verified backup on another drive. */
+function MirrorsPanel({
+  cfg,
+  list,
+  busy,
+  setBusy,
+  setMsg,
+  onSaved,
+  reload,
+}: {
+  cfg: CcConfig;
+  list: BackupList | null;
+  busy: string | null;
+  setBusy: (b: string | null) => void;
+  setMsg: (m: string | null) => void;
+  onSaved: (c: CcConfig) => void;
+  reload: () => Promise<void>;
+}) {
+  const dirs = cfg.backup.mirrorDirs ?? [];
+  const rows = list?.mirrors ?? [];
+  const save = async (patch: { mirrorDirs?: string[]; mirrorKeep?: number }) => {
+    try {
+      onSaved(await cc.setConfig({ backup: patch }));
+      setMsg("Mirror settings saved.");
+      await reload();
+    } catch (e) {
+      setMsg(String(e));
+    }
+  };
+  return (
+    <div className="mt-5 border-t border-white/[0.06] pt-4">
+      <p className="label-caps text-amber-soft">Second copies</p>
+      <p className="mt-1 text-xs leading-relaxed text-ink-3">
+        After each backup passes its self-check, the zip is copied to these folders (another drive, e.g. D:\Backups\cc-mirror) and the copy is checked: same size, a readable zip, the same SHA-256. A mirror never removes anything unless you set Keep below; then only copies the gateway wrote there are removed.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-[3fr_1fr]">
+        <Field label="Mirror folders (one per line, on the gateway machine)">
+          <textarea
+            key={dirs.join("|")}
+            defaultValue={dirs.join("\n")}
+            rows={Math.max(2, dirs.length + 1)}
+            spellCheck={false}
+            placeholder="D:\Backups\cc-mirror"
+            aria-label="Mirror folders"
+            className="field font-mono !text-[12px]"
+            onBlur={(e) => {
+              const next = e.target.value
+                .split(/\r?\n/)
+                .map((x) => x.trim())
+                .filter(Boolean);
+              if (next.join("|") !== dirs.join("|")) void save({ mirrorDirs: next });
+            }}
+          />
+        </Field>
+        <Field label="Keep in each mirror (0 = all)">
+          <Input
+            type="number"
+            min={0}
+            max={365}
+            defaultValue={cfg.backup.mirrorKeep ?? 0}
+            onBlur={(e) => Number(e.target.value) !== (cfg.backup.mirrorKeep ?? 0) && void save({ mirrorKeep: Number(e.target.value) })}
+            className="font-mono"
+          />
+        </Field>
+      </div>
+      {rows.length > 0 && (
+        <ul className="mt-3 space-y-1.5">
+          {rows.map((r) => (
+            <li key={r.dir} className="flex flex-wrap items-center gap-2 rounded-[10px] border border-white/[0.05] px-3 py-1.5 text-[12px]">
+              {r.alert ? <XCircle size={13} className="text-alert" /> : r.ok ? <CheckCircle2 size={13} className="text-teal" /> : <CircleDashed size={13} className="text-ink-3" />}
+              <span className="min-w-0 flex-1 truncate font-mono text-ink-2" title={r.dir}>
+                {r.dir}
+              </span>
+              <span className={r.alert ? "text-alert" : "text-ink-3"}>{r.alert ? (r.reachable ? "failed" : "unreachable") : r.ok ? "ok" : "not copied yet"}</span>
+              <span className="text-ink-3">last good copy: {when(r.lastOkAt)}</span>
+              {r.alert && <p className="w-full break-all text-[11px] text-ink-3">{r.alert}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {dirs.length > 0 && (
+        <button
+          className="pill-glass mt-3 !h-8 text-xs"
+          disabled={!!busy}
+          onClick={async () => {
+            setBusy("mirror");
+            try {
+              const r = await cc.mirrorNow();
+              const all = Object.values(r.mirrors);
+              const bad = all.filter((m) => !m.ok).length;
+              setMsg(bad ? `Copied to ${all.length - bad}/${all.length} mirrors; ${bad} failed (see above).` : `Copied the newest backup to ${all.length} mirror${all.length === 1 ? "" : "s"} and verified it.`);
+              await reload();
+            } catch (e) {
+              setMsg(String(e));
+            } finally {
+              setBusy(null);
+            }
+          }}
+        >
+          {busy === "mirror" ? <Loader2 size={13} className="animate-spin" /> : <Copy size={13} />} Mirror latest now
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The off-site copy is the Google Drive sync (n8n gdrive-sync): status only, from saved settings. */
+function OffsitePanel({ drive }: { drive: DriveSyncState | null }) {
+  const go = useNav((s) => s.go);
+  return (
+    <div className="mt-5 border-t border-white/[0.06] pt-4">
+      <p className="label-caps flex items-center gap-1.5 text-amber-soft">
+        <CloudUpload size={13} /> Off-site copy
+      </p>
+      <p className="mt-1 text-xs leading-relaxed text-ink-3">
+        There is no separate cloud uploader: the off-site copy is the Google Drive sync in Settings → Integrations → n8n &amp; Cloud Backup (the gdrive-sync workflow). It uploads the tracked folders as they are (not encrypted) and sends files over 1 MB as metadata only, so full backup zips stay on your own drives: keep a mirror on a second drive for those.
+      </p>
+      {!drive ? (
+        <p className="mt-2 text-xs text-ink-3">Drive sync status unavailable.</p>
+      ) : (
+        <ul className="mt-2 space-y-0.5 text-xs text-ink-2">
+          <li>
+            Configured: <span className={drive.configured ? "text-teal" : "text-alert"}>{drive.configured ? "yes (webhook set)" : "no"}</span>
+            {drive.configured && ` · automatic: ${drive.auto ? `every ${drive.autoHours} h` : "off (manual only)"}`}
+          </li>
+          <li>
+            Last sync:{" "}
+            {drive.last ? (
+              <span className={drive.lastOk ? "text-teal" : "text-alert"}>
+                {drive.last.status} · {new Date(drive.last.at).toLocaleString()}
+                {drive.last.detail ? ` · ${drive.last.detail}` : ""}
+              </span>
+            ) : (
+              "never"
+            )}
+          </li>
+          <li>Gateway backup folder tracked: {drive.tracksBackups ? "yes" : "no"}</li>
+        </ul>
+      )}
+      <button className="pill-glass mt-2 !h-8 text-xs" onClick={() => go("settings")}>
+        Open Settings
+      </button>
+    </div>
+  );
+}
+
+const WRITTEN_DOWN_KEY = "cc.vault.passwordWrittenDown";
+function readWrittenDown(): boolean {
+  try {
+    return localStorage.getItem(WRITTEN_DOWN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Section 16.3: the Vault safety checklist (desktop: the keychain and Drive settings live there). */
+function VaultChecklistCard() {
+  const { data } = useKeySources();
+  const [list, setList] = useState<BackupList | null>(null);
+  const [drive, setDrive] = useState<DriveSyncState | null>(null);
+  const [writtenDown, setWrittenDown] = useState(readWrittenDown);
+  useEffect(() => {
+    void fetchBackups().then(setList).catch(() => setList(null));
+    void Promise.all([cmd("pipelines_settings"), cmd("pipelines_last_sync").catch(() => null), cc.config().catch(() => null)])
+      .then(([s, last, c]) => setDrive(driveSyncState(s, last, c?.backup.dir)))
+      .catch(() => setDrive(null));
+  }, []);
+  const password = vaultPasswordState(data);
+  const items = vaultChecklist({ password, writtenDown, list, drive });
+  return (
+    <Card title="Vault safety checklist" hint="What keeps your vault and backups recoverable. Read-only: nothing here changes a setting.">
+      <ul className="space-y-1.5">
+        {items.map((it) => (
+          <li key={it.id} className="flex items-start gap-2 text-sm">
+            {it.done === true ? (
+              <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-teal" />
+            ) : it.done === false ? (
+              <XCircle size={15} className="mt-0.5 shrink-0 text-alert" />
+            ) : (
+              <CircleDashed size={15} className="mt-0.5 shrink-0 text-ink-3" />
+            )}
+            <span className="min-w-0 flex-1">
+              <span className="text-ink">{it.label}</span>
+              <span className="block text-xs text-ink-3">{it.hint}</span>
+              {it.id === "password" && it.done === false && (
+                <button type="button" className="pill-glass !h-7 mt-1 text-xs" onClick={() => focusVaultPasswordRow()}>
+                  Set it
+                </button>
+              )}
+              {it.id === "written-down" && password === "set" && (
+                <label className="mt-1 flex items-center gap-2 text-xs text-ink-2">
+                  <input
+                    type="checkbox"
+                    className="accent-amber"
+                    checked={writtenDown}
+                    onChange={(e) => {
+                      setWrittenDown(e.target.checked);
+                      try {
+                        localStorage.setItem(WRITTEN_DOWN_KEY, e.target.checked ? "1" : "0");
+                      } catch {
+                        /* this device only; nothing else depends on it */
+                      }
+                    }}
+                  />
+                  I wrote it down / saved it in my password manager
+                </label>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }

@@ -3,6 +3,7 @@ import { Loader2, Send, TriangleAlert, Undo2 } from "lucide-react";
 import { Card, Empty } from "@/components/ui";
 import { sendDirectorTurn } from "./director-chat";
 import { undoDirectorEdit, useDirector } from "./director-store";
+import { useChatDraft } from "./gaps";
 
 /** Zone 4: typed chat with the `director` workspace (no voice, no TTS). */
 export function DirectorChat() {
@@ -10,6 +11,7 @@ export function DirectorChat() {
   const busy = useDirector((s) => s.chatBusy);
   const focus = useDirector((s) => s.focus);
   const undoId = useDirector((s) => s.undo?.id ?? null);
+  const draft = useChatDraft((s) => s.draft);
   const [text, setText] = useState("");
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -20,6 +22,15 @@ export function DirectorChat() {
   useEffect(() => {
     if (focus?.target === "chat") input.current?.focus();
   }, [focus]);
+  // A suggested line (fill the gaps): it lands in the box; Nic sends it.
+  useEffect(() => {
+    if (!draft) return;
+    setText(draft.text);
+    // Used once: a remount (or another project) must not bring the line back.
+    useChatDraft.setState({ draft: null });
+    input.current?.focus();
+    input.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [draft]);
 
   const send = () => {
     const t = text.trim();

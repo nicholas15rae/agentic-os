@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, Check, PencilLine, Smartphone, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Clapperboard, PencilLine, Smartphone, Sparkles, Trash2, X } from "lucide-react";
 import type { AssetRole, MediaAsset, ShotSlot } from "./contract";
 import { editManifest, editShot, moveShot, removeShot, toggleShotFilmed } from "./director-store";
 import { draggedAsset, hasFiles, hasType, ASSET_MIME, ingestDropped } from "./dnd";
 import { attachSlot } from "./manifest";
 import { ShotSlotEditor } from "./ShotSlotEditor";
+import { generateFromPrompt } from "./comfy-store";
+import { brollLine, slotStillPrompt, suggestChatLine } from "./gaps";
 import { Thumb } from "./StagingBin";
 
 const roleForSlot = (s: ShotSlot): AssetRole => (s.kind === "audio" ? "music" : s.kind === "image" ? (/slate|title|outro|end/i.test(s.label) ? "slate" : "photo") : "clip");
@@ -65,7 +67,7 @@ export function ShotSlotCard({ slot, index, count, slug, asset }: { slot: ShotSl
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{slot.label}</span>
         <span className="font-mono text-[10px] text-ink-3">
           {slot.kind}
-          {slot.targetSec != null ? ` Â· ${slot.targetSec}s` : ""}
+          {slot.targetSec != null ? ` · ${slot.targetSec}s` : ""}
         </span>
         <span className={`label-caps ${tone}`}>{slot.status}</span>
       </div>
@@ -104,7 +106,34 @@ export function ShotSlotCard({ slot, index, count, slug, asset }: { slot: ShotSl
           </button>
         </div>
       ) : (
-        <p className="mt-2 text-[11px] text-ink-3">{slot.source === "film" ? `Drop a ${slot.kind} from the bin or your files here.` : `Not attached yet (${slot.source}).`}</p>
+        <p className="mt-2 text-[11px] text-ink-3">
+          {slot.source === "film" ? `Drop a ${slot.kind} from the bin or your files here.` : `Not attached yet (${slot.source}).`}
+          {slot.source === "generate" && (
+            <button
+              type="button"
+              onClick={() => {
+                // Suggestion only: prefills the Generate panel; nothing is queued until Enqueue.
+                generateFromPrompt(slotStillPrompt(slot));
+              }}
+              className="ml-1.5 inline-flex items-center gap-0.5 text-teal-soft hover:underline"
+              aria-label={`Generate a still for ${slot.label}`}
+            >
+              <Sparkles size={10} /> Generate…
+            </button>
+          )}
+        </p>
+      )}
+      {!asset && slot.source === "film" && (
+        // Part 6 fill the gaps: suggestions only. The still waits in the Generate panel for Enqueue;
+        // the B-roll line waits in the chat box for Send.
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          <button type="button" onClick={() => generateFromPrompt(slotStillPrompt(slot))} className="inline-flex h-6 items-center gap-1 rounded-full border border-white/10 px-2 text-[10px] text-teal-soft hover:bg-white/5" aria-label={`Generate a still for ${slot.label}`} title="Fill the Generate panel from this shot (nothing runs until Enqueue)">
+            <Sparkles size={10} /> Generate a still
+          </button>
+          <button type="button" onClick={() => suggestChatLine(brollLine(slot))} className="inline-flex h-6 items-center gap-1 rounded-full border border-white/10 px-2 text-[10px] text-ink-2 hover:bg-white/5" aria-label={`Ask for B-roll for ${slot.label}`} title="Put a B-roll request in the Director chat box (nothing is sent until Send)">
+            <Clapperboard size={10} /> Ask for B-roll
+          </button>
+        </div>
       )}
       {refused && <p className="mt-1 text-[11px] text-alert">{refused}</p>}
       <div className="mt-2 flex items-center gap-1 border-t border-white/[0.06] pt-1.5">

@@ -263,6 +263,10 @@ pub struct Config {
 /// queued per-agent report voices (Comms inbox), never their live chatter.
 pub(crate) const MIGRATE_AUTOSPEAK_TONY_ONLY: &str = "autospeak-tony-only";
 
+/// Live test 11-27: the Gmail tab names joined the Whisper hint list. A provider whose prompt is
+/// the old default word for word gets the new one; an edited or cleared ("" = none) prompt is kept.
+pub(crate) const MIGRATE_STT_PROMPT_GMAIL_TABS: &str = "stt-prompt-gmail-tabs";
+
 /// Apply the one-time providers.json migrations. Returns true when anything changed.
 pub(crate) fn apply_provider_migrations(cfg: &mut Config) -> bool {
     let mut changed = false;
@@ -273,6 +277,15 @@ pub(crate) fn apply_provider_migrations(cfg: &mut Config) -> bool {
             }
         }
         cfg.migrations.push(MIGRATE_AUTOSPEAK_TONY_ONLY.into());
+        changed = true;
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_STT_PROMPT_GMAIL_TABS) {
+        for p in cfg.providers.iter_mut().filter(|p| p.kind == Kind::Stt) {
+            if p.stt_prompt.as_deref().map(str::trim) == Some(PREVIOUS_STT_PROMPT) {
+                p.stt_prompt = Some(DEFAULT_STT_PROMPT.to_string());
+            }
+        }
+        cfg.migrations.push(MIGRATE_STT_PROMPT_GMAIL_TABS.into());
         changed = true;
     }
     changed
@@ -404,7 +417,7 @@ impl Default for Config {
             agent_voices: BTreeMap::new(),
             agent_voices_all_tony: false,
             // A fresh install starts with every migration's outcome already in place.
-            migrations: vec![MIGRATE_AUTOSPEAK_TONY_ONLY.into()],
+            migrations: vec![MIGRATE_AUTOSPEAK_TONY_ONLY.into(), MIGRATE_STT_PROMPT_GMAIL_TABS.into()],
         }
     }
 }
@@ -776,9 +789,14 @@ pub struct ProviderPatch {
 /// Whisper treats the prompt as preceding transcript, so it biases spelling best this way.
 /// "Take it easy." (P5: the hold / stand-down family) stays its own sentence, never right after
 /// "Tony"/"Hey", so a real 4-word "Tony, take it easy" can't match a prompt run in `echoes_prompt`.
-/// "Nic" is in it so Whisper stops writing "Nick"; it must equal language_hub_api.DEFAULT_STT_PROMPT
+/// "Nic" is in it so Whisper stops writing "Nick", and the Gmail tab names so it stops hearing
+/// "promotions" as "permissions" (live test 11-27); it must equal language_hub_api.DEFAULT_STT_PROMPT
 /// and stt/bench/bench.py PROMPT (tests/test_language_hub.py pins all three).
-pub const DEFAULT_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
+pub const DEFAULT_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint. Inbox: Primary tab, Promotions tab, Social tab, Updates tab, Forums tab.";
+
+/// The default before the Gmail tab names (11-26). An STT provider still holding exactly this text
+/// (Settings saved the default verbatim, never edited) is moved to [`DEFAULT_STT_PROMPT`] once.
+pub(crate) const PREVIOUS_STT_PROMPT: &str = "Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk and Librarian. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.";
 
 /// Switch model / voice / URL etc. for one provider (Settings dropdowns).
 #[tauri::command]

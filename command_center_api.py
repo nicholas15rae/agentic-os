@@ -101,6 +101,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep": 14,
         # "" = `_default_backup_dir()`, resolved per call against the store in use (see there).
         "dir": "",
+        # Second copies (Section 16.2): after a backup verifies, the zip is copied to each of these
+        # folders (another drive, e.g. D:\Backups\cc-mirror) and the copy is verified.
+        "mirrorDirs": [],
+        # Mirror retention. 0 = keep every copy (the default: a mirror never loses anything). A
+        # positive number only ever removes cc-*.zip copies this gateway wrote and verified there.
+        "mirrorKeep": 0,
     },
     # Gateway Tony (gateway_tony.py): while no desktop app works the inbox, the gateway answers a
     # phone turn as Tony on his own local model. false is the rollback switch: phone turns then wait
@@ -142,7 +148,7 @@ PRIVATE_COLLECTIONS = frozenset({"routes"})
 
 # Which fields get embedded into the vault, per collection.
 VAULT_FIELDS: dict[str, list[str]] = {
-    "notes": ["title", "rawText", "organized"],
+    "notes": ["title", "rawText", "organized", "summary", "tags"],
     "receipts": ["vendor", "date", "category", "total", "hst", "gst", "notes", "ocrText"],
     "invoices": ["number", "client", "items", "notes", "total"],
     "checks": ["payer", "amount", "memo", "notes"],
@@ -1735,6 +1741,14 @@ def put_config(patch: dict):
     b = cfg["backup"]
     b["intervalHours"] = max(1, min(24 * 30, float(b.get("intervalHours", 24))))
     b["keep"] = max(1, min(365, int(b.get("keep", 14))))
+    try:
+        b["mirrorDirs"] = _clean_mirror_dirs(b.get("mirrorDirs"), b.get("dir") or "")
+    except ValueError as e:
+        raise HTTPException(400, f"backup.mirrorDirs: {e}")
+    try:
+        b["mirrorKeep"] = max(0, min(365, int(b.get("mirrorKeep") or 0)))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "backup.mirrorKeep must be a whole number (0 = keep every copy)")
     save_config(cfg)
     _models_cache.clear()
     _loaded_cache.clear()
@@ -2609,14 +2623,465 @@ def _mark_good(info: dict, keep: int, out_dir: Path) -> dict:
     return info
 
 
-def _free_backup_path(out_dir: Path, stamp: str) -> Path:
+def _free_backup_path(out_dir: Path, stamp: str, mirror_dirs: Optional[list] = None) -> Path:
     """cc-<stamp>.zip, or cc-<stamp>b.zip, c, ... for a second backup in the same second (the
-    letter sorts after the bare name, so retention keeps the newest)."""
+    letter sorts after the bare name, so retention keeps the newest). A name a mirror folder
+    already holds is skipped too: retention may have removed it here, but its mirror copy stays.
+    Mirrors are never probed synchronously here: their names come from the manifest plus a
+    bounded listing (`_mirror_held_names`), so an offline share can't hold up the backup."""
+    held = _mirror_held_names(mirror_dirs)
+
+    def taken(name: str) -> bool:
+        if name in held or f"failed-{name}" in held:
+            return True
+        try:
+            return (out_dir / name).exists() or (out_dir / f"failed-{name}").exists()
+        except OSError:
+            return False
+
     for suffix in [""] + [chr(c) for c in range(ord("b"), ord("z") + 1)]:
         z = out_dir / f"cc-{stamp}{suffix}.zip"
-        if not z.exists() and not z.with_name(f"failed-{z.name}").exists():
+        if not taken(z.name):
             return z
     raise RuntimeError("too many backups in one second")
+
+
+# ── backup mirrors (Section 16.2: a second copy on another drive) ────────────
+#
+# After a backup verifies, its zip is copied into each `backup.mirrorDirs` folder and the copy is
+# checked (same size, a readable zip, the same sha256). Per-mirror status lives in kv
+# `backup.mirrors` (gateway-owned: clients can't write backup.* keys) and the Vault page alerts
+# when a mirror failed or can't be reached. Nothing here deletes a file unless `mirrorKeep` > 0,
+# and then only cc-*.zip copies this gateway wrote and verified in that folder (kv
+# `backup.mirrorManifest`, matched by name, size and sha256). A copy that fails its check is
+# kept as failed-cc-*.zip for inspection, never removed.
+
+MIRROR_MAX_DIRS = 5
+_MIRROR_NAME = re.compile(r"cc-[0-9]{8}-[0-9]{6}[a-z]?\.zip")
+
+
+def _norm_dir(p: Any) -> str:
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def _clean_mirror_dirs(dirs: Any, primary: str) -> list[str]:
+    """`backup.mirrorDirs` from a PUT: absolute folders, deduplicated, never the backup folder
+    itself (or a folder inside it / around it), at most MIRROR_MAX_DIRS. Raises ValueError."""
+    if dirs in (None, ""):
+        return []
+    if isinstance(dirs, str):
+        dirs = re.split(r"[\r\n;]+", dirs)
+    if not isinstance(dirs, list):
+        raise ValueError("a list of folders")
+    out: list[str] = []
+    prim = _norm_dir(Path(primary).expanduser()) if primary else None
+    for d in dirs:
+        if not isinstance(d, str):
+            raise ValueError("each mirror is a folder path")
+        d = d.strip().strip('"')
+        if not d:
+            continue
+        if len(d) > 260:
+            raise ValueError("a folder path is too long")
+        pd = Path(d).expanduser()
+        if not pd.is_absolute():
+            raise ValueError(f"{d} is not an absolute path (e.g. D:\\Backups\\cc-mirror)")
+        a = _norm_dir(pd)
+        if prim is not None and (a == prim or a.startswith(prim.rstrip(os.sep) + os.sep) or prim.startswith(a.rstrip(os.sep) + os.sep)):
+            raise ValueError(f"{d} is the backup folder itself (or inside / around it); a mirror must be a different folder, ideally on another drive")
+        if any(_norm_dir(x) == a for x in out):
+            continue
+        out.append(str(pd))
+    if len(out) > MIRROR_MAX_DIRS:
+        raise ValueError(f"at most {MIRROR_MAX_DIRS} mirror folders")
+    return out
+
+
+def _sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _zip_problem(p: Path) -> Optional[str]:
+    """None when the zip opens and every entry's CRC checks out, else the reason."""
+    try:
+        with zipfile.ZipFile(p) as z:
+            bad = z.testzip()
+        return f"corrupt entry {bad}" if bad else None
+    except (zipfile.BadZipFile, OSError) as e:
+        return f"unreadable zip: {e}"
+
+
+# Reachability: `Path(anchor).exists()` on an offline SMB share / mapped drive can block for tens
+# of seconds, so every probe runs in its own daemon thread, all mirrors in parallel, and the caller
+# waits at most MIRROR_PROBE_TIMEOUT in total. One probe per drive / share root is in flight at a
+# time (a hung share never piles up threads) and the last answer is cached for MIRROR_PROBE_TTL.
+MIRROR_PROBE_TIMEOUT = 2.0
+MIRROR_PROBE_TTL = 60.0
+_mirror_probe_lock = threading.Lock()
+_mirror_probe_cache: dict[str, dict] = {}
+_mirror_probe_inflight: dict[str, threading.Event] = {}
+# One mirror run at a time (status / manifest are read-modify-write kv records).
+_mirror_lock = threading.Lock()
+
+
+def _mirror_exists(p: Path) -> bool:
+    """The blocking call a probe makes (tests swap in a slow fake)."""
+    return p.exists()
+
+
+def _probe_key(d: Path) -> str:
+    return _norm_dir(d.anchor) if d.anchor else _norm_dir(d)
+
+
+def _mirror_probe_start(d: Path) -> threading.Event:
+    key = _probe_key(d)
+    with _mirror_probe_lock:
+        ev = _mirror_probe_inflight.get(key)
+        if ev is not None:
+            return ev
+        ev = threading.Event()
+        _mirror_probe_inflight[key] = ev
+
+    def run() -> None:
+        try:
+            ok = bool(d.anchor) and _mirror_exists(Path(d.anchor))
+            reason = None if ok else f"{d.anchor or d} is not reachable (drive unplugged or share offline)"
+        except Exception as e:  # OSError and anything odd from a network redirector
+            ok, reason = False, f"{d.anchor or d} is not reachable ({_why(e)})"
+        with _mirror_probe_lock:
+            _mirror_probe_cache[key] = {"at": time.time(), "reachable": ok, "reason": reason}
+            _mirror_probe_inflight.pop(key, None)
+        ev.set()
+
+    threading.Thread(target=run, name="cc-mirror-probe", daemon=True).start()
+    return ev
+
+
+def _mirror_reach(dirs: list, timeout: float = MIRROR_PROBE_TIMEOUT, max_age: float = MIRROR_PROBE_TTL) -> dict[str, dict]:
+    """{str(dir): {reachable, reason, timeout?}} for each mirror folder, probing in parallel and
+    waiting at most `timeout` seconds in total. A cached answer younger than `max_age` is reused
+    (max_age 0 = probe again, still sharing a probe that is already running). A probe that hasn't
+    answered in time reports "unreachable (not answering)"; when it answers later, its result
+    replaces that in the cache."""
+    now = time.time()
+    out: dict[str, dict] = {}
+    waiting: list[tuple[str, Path, str, threading.Event]] = []
+    for x in dirs:
+        d = Path(x)
+        key = _probe_key(d)
+        with _mirror_probe_lock:
+            hit = _mirror_probe_cache.get(key)
+        if hit is not None and max_age > 0 and now - hit["at"] < max_age:
+            out[str(d)] = hit
+            continue
+        waiting.append((str(d), d, key, _mirror_probe_start(d)))
+    deadline = time.monotonic() + max(0.0, timeout)
+    for name, d, key, ev in waiting:
+        ev.wait(max(0.0, deadline - time.monotonic()))
+        with _mirror_probe_lock:
+            if ev.is_set() or key not in _mirror_probe_inflight:
+                out[name] = _mirror_probe_cache.get(key) or {"at": time.time(), "reachable": False, "reason": f"{d.anchor or d} is not reachable"}
+                continue
+            res = {
+                "at": time.time(),
+                "reachable": False,
+                "timeout": True,
+                "reason": f"{d.anchor or d} is unreachable (not answering after {timeout:g} s: share offline or drive asleep)",
+            }
+            _mirror_probe_cache[key] = res
+        out[name] = res
+    return out
+
+
+def _mirror_reachable(d: Path) -> bool:
+    """The drive / share root exists (an unplugged USB drive or an offline share does not).
+    Bounded: an unanswering share counts as unreachable after MIRROR_PROBE_TIMEOUT."""
+    return bool(_mirror_reach([d])[str(Path(d))]["reachable"])
+
+
+def _mirror_held_names(mirror_dirs: Optional[list], timeout: float = MIRROR_PROBE_TIMEOUT) -> set[str]:
+    """Backup names the mirror folders hold: every name in the recorded manifest, plus a listing of
+    each folder that answers in time (cached / bounded reachability, then the listings in parallel
+    threads, at most 2 x `timeout` in all). Never blocks for long on an offline share."""
+    ds = [Path(m) for m in (mirror_dirs or []) if isinstance(m, str) and m.strip()]
+    if not ds:
+        return set()
+    names: set[str] = set()
+    manifests: dict = kv_get("backup.mirrorManifest") or {}
+    for d in ds:
+        names.update(str(m.get("name") or "") for m in manifests.get(str(d)) or [])
+    start = time.monotonic()
+    reach = _mirror_reach(ds, timeout)
+    found: list[str] = []
+    found_lock = threading.Lock()
+
+    def listing(d: Path) -> None:
+        try:
+            got = [p.name for p in d.iterdir() if p.name.startswith(("cc-", "failed-cc-"))]
+        except OSError:
+            return
+        with found_lock:
+            found.extend(got)
+
+    threads = [threading.Thread(target=listing, args=(d,), name="cc-mirror-list", daemon=True) for d in ds if reach[str(d)].get("reachable")]
+    for t in threads:
+        t.start()
+    deadline = start + 2 * max(0.0, timeout)
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    with found_lock:
+        names.update(found)
+    names.discard("")
+    return names
+
+
+# Leftover partial copies: recorded in kv `backup.mirrorPartials` ({dir: {name: started_at}}) when a
+# copy starts and forgotten when it finishes, so a retry only ever removes a partial THIS code wrote.
+_PARTIAL_NAME = re.compile(r"\.partial-cc-[0-9]{8}-[0-9]{6}[a-z]?\.zip")
+# Filesystem timestamps can be coarse (FAT: 2 s).
+_PARTIAL_MTIME_SLACK = 2.0
+
+
+def _partials() -> dict:
+    v = kv_get("backup.mirrorPartials")
+    return v if isinstance(v, dict) else {}
+
+
+def _note_partial(d: Path, name: str, started: float) -> None:
+    rec = _partials()
+    rec.setdefault(str(d), {})[name] = started
+    kv_set("backup.mirrorPartials", rec)
+
+
+def _forget_partial(d: Path, name: str) -> None:
+    rec = _partials()
+    if name in (rec.get(str(d)) or {}):
+        del rec[str(d)][name]
+        if not rec[str(d)]:
+            del rec[str(d)]
+        kv_set("backup.mirrorPartials", rec)
+
+
+def _remove_stale_partial(d: Path, part: Path, src_size: int, attempt: float) -> bool:
+    """Remove `part` only when it is a partial copy this gateway started (recorded in kv under this
+    folder and name, the exact .partial-cc-*.zip pattern), a plain file, older than this attempt,
+    written after its recorded start, and no bigger than the backup. True when it is gone."""
+    started = (_partials().get(str(d)) or {}).get(part.name)
+    if not _PARTIAL_NAME.fullmatch(part.name) or not isinstance(started, (int, float)):
+        return False
+    try:
+        if part.is_symlink() or not part.is_file():
+            return False
+        st = part.stat()
+        if not (started - _PARTIAL_MTIME_SLACK <= st.st_mtime < attempt) or st.st_size > src_size:
+            return False
+        part.unlink()
+    except OSError:
+        return False
+    _forget_partial(d, part.name)
+    return True
+
+
+def _mirror_one(src: Path, src_size: int, src_sha: str, d: Path, reachable: Optional[bool] = None) -> dict:
+    """Copy `src` into mirror folder `d` and verify the copy: {ok, reason?, file?, size?, sha256?}.
+    Never overwrites or removes anything already in the folder, except a stale partial copy of
+    this same backup that this code itself started earlier (`_remove_stale_partial`).
+    `reachable` = the caller already probed the folder (bounded); None = probe it here (bounded)."""
+    why = None
+    if reachable is None:
+        r = _mirror_reach([d])[str(d)]
+        reachable, why = bool(r.get("reachable")), r.get("reason")
+    if not reachable:
+        return {"ok": False, "unreachable": True, "reason": why or f"{d.anchor or d} is not reachable (drive unplugged or share offline)"}
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "reason": f"can't create the folder: {_why(e)}"}
+    dst = d / src.name
+    if dst.exists():
+        try:
+            if dst.stat().st_size == src_size and _sha256(dst) == src_sha:
+                return {"ok": True, "file": str(dst), "size": src_size, "sha256": src_sha, "already": True}
+        except OSError as e:
+            return {"ok": False, "reason": f"can't read the copy already there: {_why(e)}"}
+        return {"ok": False, "reason": f"a different file named {src.name} is already in the mirror (left as it is)"}
+    part = d / f".partial-{src.name}"
+    attempt = time.time()
+    if part.exists() and not _remove_stale_partial(d, part, src_size, attempt):
+        return {"ok": False, "reason": f"{part.name} is left from an earlier copy; check it, then remove it by hand"}
+    _note_partial(d, part.name, attempt)
+    try:
+        shutil.copyfile(src, part)
+    except OSError as e:
+        # Our own half-written copy from this attempt: remove it now if the folder lets us (else
+        # the kv record lets the next attempt clear it).
+        try:
+            if part.is_file() and not part.is_symlink():
+                part.unlink()
+                _forget_partial(d, part.name)
+        except OSError:
+            pass
+        return {"ok": False, "reason": f"copy failed: {_why(e)}"}
+    problems: list[str] = []
+    try:
+        size = part.stat().st_size
+        if size != src_size:
+            problems.append(f"the copy is {size:,} bytes, the backup {src_size:,}")
+        bad = _zip_problem(part)
+        if bad:
+            problems.append(bad)
+        if not problems and _sha256(part) != src_sha:
+            problems.append("sha256 differs from the backup")
+    except OSError as e:
+        problems.append(f"can't re-read the copy: {_why(e)}")
+    if problems:
+        # Kept for inspection under a name retention never counts (and never removes).
+        try:
+            kept = d / f"failed-{src.name}"
+            if not kept.exists():
+                part.replace(kept)
+                _forget_partial(d, part.name)
+        except OSError:
+            pass
+        return {"ok": False, "reason": "the copy failed its check: " + "; ".join(problems)}
+    try:
+        part.replace(dst)
+    except OSError as e:
+        return {"ok": False, "reason": f"can't finish the copy: {_why(e)}"}
+    _forget_partial(d, part.name)
+    return {"ok": True, "file": str(dst), "size": src_size, "sha256": src_sha}
+
+
+def _rotate_mirror(d: Path, keep: int, manifest: list[dict], current: Optional[str] = None) -> list[dict]:
+    """mirrorKeep > 0 only: remove the oldest copies beyond `keep`, and only ones this gateway
+    wrote and verified there (in the manifest, a cc-*.zip name, the same size and sha256 as
+    recorded). Any other file in the folder is never touched. The newest `keep` by name stay, and
+    so does `current` (the copy just written in this run, even when it has an older name, e.g. an
+    accepted old failed backup). Returns the manifest left."""
+    if keep <= 0:
+        return manifest
+    ours = sorted((m for m in manifest if _MIRROR_NAME.fullmatch(str(m.get("name") or ""))), key=lambda m: m["name"])
+    kept = {m["name"] for m in ours[max(0, len(ours) - keep):]}
+    if current:
+        kept.add(current)
+    gone: set[str] = set()
+    for m in [m for m in ours if m["name"] not in kept]:
+        f = d / m["name"]
+        try:
+            if not f.is_file():
+                gone.add(m["name"])  # removed by hand already: forget it
+                continue
+            if f.stat().st_size != m.get("size") or _sha256(f) != m.get("sha256"):
+                continue  # not the copy we wrote any more: leave it alone
+            f.unlink()
+            gone.add(m["name"])
+        except OSError:
+            continue
+    return [m for m in manifest if m.get("name") not in gone]
+
+
+def mirror_backup(zpath: Path, cfg: Optional[dict] = None) -> dict:
+    """Copy a verified backup into every mirror folder; records and returns per-mirror status
+    {dir: {ok, reason?, at, backup, lastOkAt, lastOkFile, unreachable?}}. Never raises for a
+    mirror's own trouble and never fails the backup itself."""
+    cfg = cfg or load_config()["backup"]
+    dirs = [Path(x) for x in (cfg.get("mirrorDirs") or []) if isinstance(x, str) and x.strip()]
+    if not dirs:
+        return {}
+    keep = int(cfg.get("mirrorKeep") or 0)
+    err = None
+    try:
+        src_size, src_sha = zpath.stat().st_size, _sha256(zpath)
+    except OSError as e:
+        src_size, src_sha, err = 0, "", f"can't read the backup to copy: {_why(e)}"
+    with _mirror_lock:
+        return _mirror_backup_locked(zpath, dirs, keep, src_size, src_sha, err)
+
+
+def _mirror_backup_locked(zpath: Path, dirs: list[Path], keep: int, src_size: int, src_sha: str, err: Optional[str]) -> dict:
+    status: dict = kv_get("backup.mirrors") or {}
+    manifests: dict = kv_get("backup.mirrorManifest") or {}
+    # Every mirror probed in parallel, at most MIRROR_PROBE_TIMEOUT in total; one that doesn't
+    # answer is skipped with its status recorded.
+    reach = _mirror_reach(dirs, max_age=0) if not err else {}
+    now = time.time()
+    for d in dirs:
+        key = str(d)
+        prev = status.get(key) or {}
+        if err:
+            res = {"ok": False, "reason": err}
+        elif not reach[key].get("reachable"):
+            res = {"ok": False, "unreachable": True, "reason": reach[key].get("reason") or f"{d.anchor or d} is not reachable"}
+        else:
+            res = _mirror_one(zpath, src_size, src_sha, d, reachable=True)
+        rec = {"ok": bool(res.get("ok")), "at": now, "backup": zpath.name, "lastOkAt": prev.get("lastOkAt"), "lastOkFile": prev.get("lastOkFile")}
+        if res.get("ok"):
+            rec.update(lastOkAt=now, lastOkFile=res.get("file"))
+            man = list(manifests.get(key) or [])
+            if not any(m.get("name") == zpath.name for m in man) and not res.get("already"):
+                man.append({"name": zpath.name, "size": res["size"], "sha256": res["sha256"], "at": now})
+            try:
+                man = _rotate_mirror(d, keep, man, current=zpath.name)
+            except Exception as e:  # retention trouble never marks the copy failed
+                rec["note"] = f"retention skipped: {_why(e)}"
+            manifests[key] = man
+        else:
+            rec["reason"] = res.get("reason") or "unknown problem"
+            if res.get("unreachable"):
+                rec["unreachable"] = True
+            print(f"[command-center] BACKUP MIRROR FAILED ({key}): {rec['reason']}")
+        status[key] = rec
+    kv_set("backup.mirrors", status)
+    kv_set("backup.mirrorManifest", manifests)
+    return {str(d): status[str(d)] for d in dirs}
+
+
+def mirror_view(cfg: Optional[dict] = None) -> list[dict]:
+    """The Vault page's rows for the configured mirror folders: the last result, the last good
+    copy, whether the drive is reachable right now, and `alert` when something needs a look."""
+    cfg = cfg or load_config()["backup"]
+    status: dict = kv_get("backup.mirrors") or {}
+    last_good = (kv_get("backup.lastGood") or {}).get("at") or 0
+    rows = []
+    dirs = [Path(x) for x in cfg.get("mirrorDirs") or [] if isinstance(x, str) and x.strip()]
+    # Bounded and cached: an offline share costs this page at most MIRROR_PROBE_TIMEOUT, once a minute.
+    reach = _mirror_reach(dirs) if dirs else {}
+    for d in dirs:
+        rec = status.get(str(d)) or {}
+        r = reach.get(str(d)) or {}
+        reachable = bool(r.get("reachable"))
+        row = {"dir": str(d), "reachable": reachable, "ok": rec.get("ok"), "reason": rec.get("reason"), "at": rec.get("at"), "lastOkAt": rec.get("lastOkAt"), "lastOkFile": rec.get("lastOkFile")}
+        if r.get("timeout"):
+            row["notAnswering"] = True
+        if rec.get("ok") is False:
+            row["alert"] = rec.get("reason") or "the last copy failed"
+        elif not reachable and r.get("timeout"):
+            row["alert"] = f"{d.anchor or d} is not reachable right now: unreachable (not answering; share offline or drive asleep)"
+        elif not reachable:
+            row["alert"] = f"{d.anchor or d} is not reachable right now (drive unplugged or share offline)"
+        elif not rec and last_good:
+            row["alert"] = "no backup has been copied here yet (Mirror latest now copies one)"
+        rows.append(row)
+    return rows
+
+
+def mirror_latest() -> dict:
+    """Copy the newest good backup on disk into the mirrors now (the Vault page's button)."""
+    cfg = load_config()["backup"]
+    if not cfg.get("mirrorDirs"):
+        raise ValueError("no mirror folders set")
+    newest = _baseline(Path(cfg["dir"]).expanduser())
+    if not newest:
+        raise FileNotFoundError("no good backup to copy yet")
+    z = Path(newest["file"])
+    bad = _zip_problem(z)
+    if bad:
+        raise ValueError(f"the newest backup is damaged ({bad}); not copied")
+    return mirror_backup(z, cfg)
 
 
 def run_backup(reason: str = "manual") -> dict:
@@ -2624,7 +3089,7 @@ def run_backup(reason: str = "manual") -> dict:
     keep = int(cfg.get("keep", 14))
     out_dir = Path(cfg["dir"]).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    zpath = _free_backup_path(out_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    zpath = _free_backup_path(out_dir, datetime.now().strftime("%Y%m%d-%H%M%S"), cfg.get("mirrorDirs"))
     tmp_db = CC_DIR / f".backup-{zpath.stem}.db"
     live_rows: dict[str, int] = {}
     live_files = 0
@@ -2671,7 +3136,18 @@ def run_backup(reason: str = "manual") -> dict:
         kv_set("backup.lastFailure", info)
         print(f"[command-center] BACKUP FAILED verification ({reason}): {'; '.join(check['problems'])}")
         return info
-    return _mark_good(info, keep, out_dir)
+    return _with_mirrors(_mark_good(info, keep, out_dir), zpath, cfg)
+
+
+def _with_mirrors(info: dict, zpath: Path, cfg: dict) -> dict:
+    """A verified backup goes to the mirror folders too; their trouble never fails the backup."""
+    if cfg.get("mirrorDirs"):
+        try:
+            info["mirrors"] = mirror_backup(zpath, cfg)
+        except Exception as e:
+            print(f"[command-center] backup mirror error: {_why(e)}")
+            info["mirrors"] = {"error": _why(e)}
+    return info
 
 
 def accept_failed_backup(name: str) -> dict:
@@ -2691,7 +3167,32 @@ def accept_failed_backup(name: str) -> dict:
     dst = src.with_name(name[len("failed-"):])
     src.replace(dst)
     info = {"file": str(dst), "size": dst.stat().st_size, "at": time.time(), "reason": "accepted", "verified": sound}
-    return _mark_good(info, int(cfg.get("keep", 14)), out_dir)
+    info = _mark_good(info, int(cfg.get("keep", 14)), out_dir)
+    # The POST doesn't wait on the mirror drives: the copy runs in the background and its status
+    # lands in kv backup.mirrors (the Vault page's mirror rows) as usual.
+    if cfg.get("mirrorDirs"):
+        _mirror_in_background(dst, cfg)
+        info = {**info, "mirrorsPending": True}
+    return info
+
+
+_mirror_bg_thread: Optional[threading.Thread] = None
+
+
+def _mirror_in_background(zpath: Path, cfg: dict) -> threading.Thread:
+    """Mirror an already-good backup from a daemon thread (tests join `_mirror_bg_thread`)."""
+    global _mirror_bg_thread
+
+    def run() -> None:
+        try:
+            _with_mirrors({}, zpath, cfg)
+        except Exception as e:  # never escapes a background thread
+            print(f"[command-center] background backup mirror error: {_why(e)}")
+
+    t = threading.Thread(target=run, name="cc-backup-mirror", daemon=True)
+    _mirror_bg_thread = t
+    t.start()
+    return t
 
 
 def _backup_scheduler() -> None:
@@ -2729,6 +3230,17 @@ def backup_accept(body: BackupAccept):
         raise HTTPException(400, str(e))
 
 
+@router.post("/backup/mirror")
+def backup_mirror_now():
+    """Copy the newest good backup into the mirror folders now (a retry after plugging a drive in)."""
+    try:
+        return {"mirrors": mirror_latest()}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/backups")
 def list_backups():
     cfg = load_config()["backup"]
@@ -2743,6 +3255,9 @@ def list_backups():
         "failure": kv_get("backup.lastFailure"),
         "backups": [{"name": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime} for f in files[:100]],
         "failed": [{"name": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime} for f in failed[:20]],
+        # Section 16.2: second copies, one row per configured mirror folder (`alert` = needs a look).
+        "mirrors": mirror_view(cfg),
+        "mirrorKeep": int(cfg.get("mirrorKeep") or 0),
     }
 
 

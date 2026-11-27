@@ -11,6 +11,11 @@ The leaderboard ranks authors and channels by a SHRUNK hit rate:
 (hits + PRIOR_WEIGHT * 0.5) / (calls + PRIOR_WEIGHT) — a coin-flip prior, so
 three lucky calls don't turn someone into a guru. The Trading Agent sees these
 numbers next to every Discord hypothesis it is given.
+
+Displayed rankings need a real sample: a source is RANKED only once it has
+MIN_SCORED (30) scored calls, by the lower bound of its 95% Wilson interval;
+smaller samples are listed after the ranking as "not enough calls yet".
+Scores are context only: nothing here turns a call into a trade.
 """
 
 from __future__ import annotations
@@ -29,6 +34,8 @@ log = logging.getLogger("trading.outcomes")
 HORIZONS = (1, 5, 20)
 HIT_THRESHOLD_PCT = 0.25
 PRIOR_WEIGHT = 10
+MIN_SCORED = 30     # scored calls before an author / channel / desk source is RANKED (fewer: "not enough calls yet")
+WILSON_Z = 1.96     # 95% Wilson score interval
 NY = ZoneInfo("America/New_York")
 SESSION_CLOSE = (16, 0)
 
@@ -67,8 +74,26 @@ def score_call(bars: list[dict[str, Any]], ts_ms: int, direction: str, horizons:
     return out
 
 
-def leaderboard(rows: list[dict[str, Any]], *, horizon: int = 5, by: str = "author", min_calls: int = 3) -> list[dict[str, Any]]:
-    """rows from DiscordStore.outcome_rows(). by = 'author' | 'channel'."""
+def wilson(hits: int, n: int, z: float = WILSON_Z) -> tuple[float, float]:
+    """95% Wilson score interval for a hit rate (hits / n). (0, 1) when n == 0."""
+    if n <= 0:
+        return 0.0, 1.0
+    p = hits / n
+    den = 1 + z * z / n
+    mid = (p + z * z / (2 * n)) / den
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return max(0.0, mid - half), min(1.0, mid + half)
+
+
+def leaderboard(rows: list[dict[str, Any]], *, horizon: int = 5, by: str = "author", min_calls: int = 3,
+                min_scored: int = MIN_SCORED) -> list[dict[str, Any]]:
+    """rows from DiscordStore.outcome_rows(). by = 'author' | 'channel'.
+
+    min_calls is only the floor for being LISTED; min_scored (MIN_SCORED = 30) is the floor for being
+    RANKED. Every row carries its sample size, a 95% Wilson band (wilsonLow / wilsonHigh) and
+    `ranked`. Ranked rows come first, ordered by the Wilson lower bound (then the shrunk hit rate,
+    then average return); rows with too few scored calls follow, by sample size, flagged
+    ranked=False ("not enough calls yet") so a display never presents them as a ranking."""
     key_id, key_name = ("authorId", "author") if by == "author" else ("channelId", "channel")
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     names: dict[str, str] = {}
@@ -84,11 +109,21 @@ def leaderboard(rows: list[dict[str, Any]], *, horizon: int = 5, by: str = "auth
             continue
         hits = sum(r["hit"] for r in rs)
         rets = [r["ret"] for r in rs]
+        lo, hi = wilson(hits, n)
         out.append({"id": gid, "name": names[gid], "calls": n, "hits": hits, "hitRate": hits / n,
                     "shrunkHitRate": (hits + PRIOR_WEIGHT * 0.5) / (n + PRIOR_WEIGHT),
+                    "wilsonLow": round(lo, 4), "wilsonHigh": round(hi, 4), "ranked": n >= min_scored, "minScored": min_scored,
                     "avgRet": statistics.fmean(rets), "medianRet": statistics.median(rets), "horizon": horizon})
-    out.sort(key=lambda x: (x["shrunkHitRate"], x["avgRet"]), reverse=True)
-    return out
+    ranked = sorted((x for x in out if x["ranked"]), key=lambda x: (x["wilsonLow"], x["shrunkHitRate"], x["avgRet"]), reverse=True)
+    rest = sorted((x for x in out if not x["ranked"]), key=lambda x: (x["calls"], x["shrunkHitRate"]), reverse=True)
+    return ranked + rest
+
+
+def rankings(rows: list[dict[str, Any]], *, horizon: int = 5, by: str = "author", min_calls: int = 3,
+             min_scored: int = MIN_SCORED) -> dict[str, Any]:
+    """The same board split for display: {'ranked': [...], 'notEnough': [...], 'minScored': n}."""
+    lb = leaderboard(rows, horizon=horizon, by=by, min_calls=min_calls, min_scored=min_scored)
+    return {"ranked": [r for r in lb if r["ranked"]], "notEnough": [r for r in lb if not r["ranked"]], "minScored": min_scored}
 
 
 async def score_pending(store: Any, md: Any, *, now_ms: int | None = None, limit: int = 500) -> dict[str, Any]:

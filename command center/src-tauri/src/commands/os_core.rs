@@ -388,6 +388,9 @@ pub fn default_mcp_grants(id: &str) -> Vec<String> {
         // Finance (read-only `finance.ask`, Section 11.10): Tony's alone. The finance role may
         // also read it if Nic grants it; `mcp::finance_reader_refusal` refuses everyone else.
         "finance" => &["general"],
+        // Vault search (read-only `vault.search`, Section 16.6): Tony's alone;
+        // `mcp::vault_reader_refusal` refuses every other agent whatever the grants say.
+        "vault" => &["general"],
         // Infrastructure status (read-only `system.status`): Tony's, since the Ops agent is gone.
         "system" => &["general"],
         "knowledge-graph" => &["general", "librarian", "prompter"],
@@ -530,6 +533,7 @@ pub fn default_mcps() -> Vec<McpServer> {
         builtin("instagram", "Instagram", true, "Your Instagram Professional account: profile stats, recent posts and insights, comments. Replies and publishing only after the confirmation card (needs INSTAGRAM_ACCESS_TOKEN)."),
         builtin("calendar", "Google Calendar", true, "Your upcoming events through the Google Apps Script deployment AnythingLLM's Calendar agent uses (imported on first use). Adding an event only after the confirmation card; never invites."),
         builtin("finance", "Finance (read-only)", true, "Tony answers money questions from the Finance records on the local gateway: what you owe an agent, income and expenses by area, pending money, unpaid invoices, HST dates. Read-only summaries, never raw rows; changes stay on the Finance screens."),
+        builtin("vault", "Vault search (read-only)", true, "Tony searches your saved brainstorms, scripts & auditions, jobs, documents and ideas on the local gateway (\"find the note about…\"). A few short quoted matches, never finance records; nothing is changed."),
         builtin("system", "System status (read-only)", true, "Tony checks whether the droplet (over NetBird), the gateway, Bionic, speech-to-text, Kokoro, Docker and n8n are up, with latency. Short read-only probes; never starts, stops or changes anything."),
         McpServer {
             id: "whatsapp".into(),
@@ -1115,10 +1119,14 @@ pub struct GmailConfig {
     /// The booking-mail check's instruction file (line 1 `query: …`, line 2 `read: N`, then Nic's
     /// rules), re-read on every scan; missing = the built-in default query.
     pub booking_instructions_path: String,
+    /// Settings → Comms: which inbox every Gmail read / search covers. "primary" (the default:
+    /// `category:primary in:inbox`, no Promotions / Social / Updates / Forums unless Nic names one)
+    /// or "all". Any other value reads as "primary" (`gmail::scoped_query`).
+    pub inbox_scope: String,
 }
 impl Default for GmailConfig {
     fn default() -> Self {
-        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into() }
+        Self { booking_instructions_path: super::gmail::BOOKING_INSTRUCTIONS_DEFAULT_PATH.into(), inbox_scope: super::gmail::SCOPE_PRIMARY.into() }
     }
 }
 
@@ -1177,6 +1185,9 @@ pub(crate) const MIGRATE_OPS_REMOVED: &str = "ops-removed";
 pub(crate) const REMOVED_OPS_ROLE: &str = "ops";
 /// Backup suffix of the removal: `os.json.bak-<YYYYMMDD-HHMMSS>-ops-removed`.
 pub(crate) const OPS_REMOVED_TAG: &str = "ops-removed";
+/// Migration id: Tony's read-only vault search (Section 16.6): the `vault` server is granted to
+/// Tony only, once (`grant_vault_search`).
+pub(crate) const MIGRATE_VAULT_SEARCH: &str = "vault-search";
 
 /// One-time upgrades of a saved config. `read_only: false` is never written to disk, so an
 /// older os.json can't say whether WhatsApp was left writable on purpose: mark it read-only
@@ -1259,6 +1270,10 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_OPS_REMOVED) && !carries_removed_ops(cfg) {
         cfg.migrations.push(MIGRATE_OPS_REMOVED.into());
     }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_SEARCH) {
+        grant_vault_search(cfg);
+        cfg.migrations.push(MIGRATE_VAULT_SEARCH.into());
+    }
 }
 
 /// Once (Section 11.10): the `finance` server (back-filled from `default_mcps` on load) is granted
@@ -1266,6 +1281,16 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
 /// another agent. `enabled` is left as saved. Afterwards Nic's own grant edits stand.
 pub(crate) fn grant_finance_read(cfg: &mut OsConfig) {
     for m in cfg.mcps.iter_mut().filter(|m| m.id == "finance") {
+        m.agents = Some(vec!["general".into()]);
+    }
+}
+
+/// Once (Section 16.6): the `vault` server (back-filled from `default_mcps` on load) is granted to
+/// Tony only, so a row saved under that id earlier (or with "all") never hands the vault to another
+/// agent. `enabled` is left as saved. Afterwards Nic's own grant edits stand (and
+/// `mcp::vault_reader_refusal` still refuses everyone but Tony).
+pub(crate) fn grant_vault_search(cfg: &mut OsConfig) {
+    for m in cfg.mcps.iter_mut().filter(|m| m.id == "vault") {
         m.agents = Some(vec!["general".into()]);
     }
 }
@@ -2777,10 +2802,37 @@ mod tests {
         assert_eq!(grants(&cfg), ["general"]);
         assert!(!cfg.mcps.iter().find(|m| m.id == "finance").unwrap().enabled, "a server Nic switched off stays off");
         assert!(cfg.migrations.iter().any(|m| m == MIGRATE_FINANCE_READ));
+        assert!(cfg.migrations.iter().any(|m| m == MIGRATE_VAULT_SEARCH), "vault-search runs after it (Section 16.6)");
         // Once: Nic grants the finance role too; the migration never takes it back.
         cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["general".into(), "finance".into()]);
         apply_migrations(&mut cfg);
         assert_eq!(grants(&cfg), ["general", "finance"]);
+    }
+
+    /// Section 16.6: the read-only vault search server is a builtin, on, Tony's alone, by default
+    /// and by the one-time migration (appended after ops-removed; a later edit stands).
+    #[test]
+    fn vault_search_server_is_tonys_once() {
+        let grants = |c: &OsConfig| c.mcps.iter().find(|m| m.id == "vault").and_then(|m| m.agents.clone()).unwrap_or_default();
+        let fresh = OsConfig::default();
+        let v = fresh.mcps.iter().find(|m| m.id == "vault").expect("vault builtin");
+        assert!(v.enabled && v.builtin && v.transport == "builtin");
+        assert_eq!(grants(&fresh), ["general"]);
+        assert_eq!(default_mcp_grants("vault"), ["general"]);
+        let mut cfg = OsConfig::default();
+        apply_migrations(&mut cfg);
+        let i = cfg.migrations.iter().position(|m| m == MIGRATE_VAULT_SEARCH).expect("recorded");
+        assert_eq!(cfg.migrations.get(i.wrapping_sub(1)).map(String::as_str), Some(MIGRATE_OPS_REMOVED), "right after main's ops-removed (which follows finance-read)");
+        cfg.migrations.retain(|m| m != MIGRATE_VAULT_SEARCH);
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().agents = Some(vec!["all".into()]);
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().enabled = false;
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general"]);
+        assert!(!cfg.mcps.iter().find(|m| m.id == "vault").unwrap().enabled, "a server Nic switched off stays off");
+        assert_eq!(cfg.migrations.last().map(String::as_str), Some(MIGRATE_VAULT_SEARCH));
+        cfg.mcps.iter_mut().find(|m| m.id == "vault").unwrap().agents = Some(vec!["general".into(), "librarian".into()]);
+        apply_migrations(&mut cfg);
+        assert_eq!(grants(&cfg), ["general", "librarian"], "once: a later grant edit stands (the refusal still blocks the Librarian)");
     }
 
     /// The read-only infrastructure status server (`system.status`): a builtin, on, Tony's alone.
@@ -2895,6 +2947,10 @@ mod tests {
         assert_eq!(c.gmail.booking_instructions_path, r"G:\ai-hub\protocols\booking-email-check.md");
         let c: OsConfig = serde_json::from_str(r#"{"gmail":{"bookingInstructionsPath":"D:\\x.md"}}"#).unwrap();
         assert_eq!(c.gmail.booking_instructions_path, r"D:\x.md");
+        // Settings → Comms inbox scope: an os.json saved before it existed gets Primary only.
+        assert_eq!(c.gmail.inbox_scope, "primary");
+        let c: OsConfig = serde_json::from_str(r#"{"gmail":{"inboxScope":"all"}}"#).unwrap();
+        assert_eq!((c.gmail.inbox_scope.as_str(), c.gmail.booking_instructions_path.as_str()), ("all", r"G:\ai-hub\protocols\booking-email-check.md"));
     }
 
     #[test]
@@ -2934,7 +2990,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_CONTRACTING_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string(), MIGRATE_OPS_REMOVED.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_BUILD_CHAIN.to_string(), MIGRATE_LOCAL_SAFE_DEFAULTS.to_string(), MIGRATE_ROUTING_RESPLIT.to_string(), MIGRATE_INTEGRATION_OWNERS.to_string(), MIGRATE_BOOKING_NAMES.to_string(), MIGRATE_CONTRACTING_TO_TONY.to_string(), MIGRATE_FINANCE_READ.to_string(), MIGRATE_OPS_REMOVED.to_string(), MIGRATE_VAULT_SEARCH.to_string()]);
     }
 
     #[test]

@@ -130,7 +130,7 @@ describe("context: length, ≥ 1 s, sentences, fit", () => {
   it("lengthLine shows the target and the current cut", () => {
     const b: CreativeBrief = { idea: "x", goal: "", platform: "reels", lengthSec: 15, aspect: "9:16", tone: "", references: [], guessed: ["lengthSec"], approved: false, updatedBy: "director", updatedAt: "t" };
     const mf = manifest({ clips: [clip({ inSec: 0, outSec: 9.3 }), clip({ inSec: 2, outSec: 2.3 })] });
-    expect(lengthLine(project({ brief: b }), mf)).toBe("LENGTH: target 15s (guessed) · cut 9.6s · 1 clip under 1s");
+    expect(lengthLine(project({ brief: b }), mf)).toBe("LENGTH: target 15s (guessed) · cut 9.6s · 1 clip under 1s · a plan must total 13.5–16.5s");
     expect(lengthLine(project(), manifest())).toBe("LENGTH: target none (no brief) · cut 0s");
     expect(buildDirectorContext(project({ brief: b }), ASSETS, mf)).toContain("LENGTH: target 15s");
   });
@@ -512,7 +512,7 @@ describe("review fixes: LENGTH is the render's length", () => {
     const xf = (ms: number) => ({ kind: "crossfade" as const, ms });
     // Five 3 s clips, four 600 ms crossfades: 15 − 2.4 = 12.6 s (the plan check's total).
     const five = manifest({ clips: [clip({ outSec: 3 }), ...Array.from({ length: 4 }, () => clip({ outSec: 3, transitionIn: xf(600) }))] });
-    expect(lengthLine(project({ brief: b }), five)).toBe("LENGTH: target 15s · cut 12.6s");
+    expect(lengthLine(project({ brief: b }), five)).toBe("LENGTH: target 15s · cut 12.6s · a plan must total 13.5–16.5s");
     expect(crossfadeOverlap(five.clips)).toBeCloseTo(2.4, 6);
     // The cap: a 1500 ms crossfade into a 2 s clip overlaps 0.9 s; a crossfade on clip 1 is a cut.
     expect(crossfadeOverlap([clip({ outSec: 2, transitionIn: xf(1000) }), clip({ outSec: 5, transitionIn: xf(1500) })])).toBeCloseTo(0.9, 6);
@@ -553,7 +553,7 @@ describe("review fixes: plan check gets the plan's own outputs, and revisions co
     m.planCheck.mockImplementationOnce(async (a: { clips: PlanCheckResult["clips"] }) => ({ ...(await passCheck(a)), unchangedSinceRender: true }));
     const r = await store.applyDirectorActionsReport([revise(5)]);
     expect(r.refusedTypes).toEqual(["revise_edit"]);
-    expect(r.refusals[0]).toMatch(/as the cut Nic's notes are on/);
+    expect(r.refusals[0]).toMatch(/compared with the render the notes are on/);
     expect(st().revision).toBeNull();
   });
   it("planCheck keeps unchangedSinceRender only when Rust sent a boolean", async () => {

@@ -1,7 +1,149 @@
-import { describe, expect, it } from "vitest";
-import { createKillArm, isKillHotkey, KILL_PRESSES, summarizeIncident } from "./kill-switch-core";
+import { describe, expect, it, vi } from "vitest";
+import { isEditingShortcut } from "@/lib/editing-keys";
+import {
+  classifyKillKey,
+  createKillArm,
+  createKillKeyListener,
+  installKillHotkey,
+  isKillHotkey,
+  isRepeatActivation,
+  KILL_PRESSES,
+  killButtonProps,
+  killToastTitle,
+  summarizeIncident,
+  type KillToast,
+} from "./kill-switch-core";
 
-const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey", boolean>> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...mods });
+/** The exact listener useKillSwitchHotkey registers, with a fake clock, a recorded trip and recorded toasts. */
+function hotkey() {
+  let t = 0;
+  const toasts: KillToast[] = [];
+  const trip = vi.fn(async () => ({ incidentId: "i", ok: true, dryRun: false, cancelled: [], flatten: [], errors: [], steps: [] }));
+  const onKey = createKillKeyListener({ trip, notify: (x) => toasts.push(x), now: () => t });
+  const ev = (k: string, mods: { ctrl?: boolean; shift?: boolean; repeat?: boolean } = {}) => ({
+    key: k, ctrlKey: !!mods.ctrl, metaKey: false, shiftKey: !!mods.shift, altKey: false, repeat: !!mods.repeat,
+    preventDefault: vi.fn(), stopPropagation: vi.fn(),
+  });
+  const chord = (repeat = false) => ev("X", { ctrl: true, shift: true, repeat });
+  return { onKey, trip, toasts, ev, chord, at: (ms: number) => (t = ms) };
+}
+
+describe("kill-switch hotkey listener (what useKillSwitchHotkey registers)", () => {
+  it("a held Ctrl+Shift+X never trips: repeats are swallowed and never counted", () => {
+    const h = hotkey();
+    const first = h.chord();
+    h.onKey(first);
+    const repeats = Array.from({ length: 45 }, () => h.chord(true));
+    repeats.forEach((e, i) => (h.at(500 + i * 33), h.onKey(e)));
+    expect(h.trip).not.toHaveBeenCalled();
+    expect(h.toasts.map((x) => x.title)).toEqual([`Kill switch ARMED (1/${KILL_PRESSES})`]);
+    expect([first, ...repeats].every((e) => e.preventDefault.mock.calls.length === 1)).toBe(true); // swallowed, not passed on
+  });
+  it("three separate presses within the window trip it once", () => {
+    const h = hotkey();
+    [0, 400, 800].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
+    expect(h.trip).toHaveBeenCalledTimes(1);
+    expect(h.trip).toHaveBeenCalledWith("keyboard Ctrl+Shift+X x3 (confirmed)");
+  });
+  it("a press while a kill runs is toasted as that kill, not as a new lock", async () => {
+    const h = hotkey();
+    h.trip.mockResolvedValueOnce({ incidentId: "i", ok: false, dryRun: false, cancelled: [], flatten: [], errors: ["flatten: x"], steps: [], alreadyRunning: true } as never);
+    [0, 400, 800].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.toasts.at(-1)?.title).toBe("Kill switch already ran, with errors");
+  });
+  it("Esc disarms; other keys pass through untouched", () => {
+    const h = hotkey();
+    h.onKey(h.chord());
+    h.at(100);
+    h.onKey(h.ev("Escape"));
+    expect(h.toasts.at(-1)?.title).toBe("Kill switch disarmed");
+    [200, 300].forEach((ms) => (h.at(ms), h.onKey(h.chord())));
+    expect(h.trip).not.toHaveBeenCalled(); // the count started over after Esc
+    const plain = h.ev("x", { ctrl: true });
+    h.onKey(plain);
+    expect(plain.preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("installKillHotkey (what the hook's effect does)", () => {
+  it("adds the listener in the capture phase and removes the same one", () => {
+    const calls: [string, string, unknown, unknown][] = [];
+    const target = {
+      addEventListener: (t: string, fn: unknown, o: unknown) => calls.push(["add", t, fn, o]),
+      removeEventListener: (t: string, fn: unknown, o: unknown) => calls.push(["remove", t, fn, o]),
+    };
+    const trip = vi.fn(async () => ({ incidentId: "i", ok: true, dryRun: false, cancelled: [], flatten: [], errors: [], steps: [] }));
+    const off = installKillHotkey(target, { trip, notify: () => undefined });
+    off();
+    expect(calls.map(([k, t, , o]) => [k, t, o])).toEqual([["add", "keydown", { capture: true }], ["remove", "keydown", { capture: true }]]);
+    expect(calls[0][2]).toBe(calls[1][2]);
+  });
+});
+
+describe("the kill chord gets past the text-editing guard", () => {
+  it("every chord isKillHotkey accepts is left alone by isEditingShortcut while a text field has focus", () => {
+    const fields = [{ tagName: "TEXTAREA" }, { tagName: "INPUT", type: "text" }, { tagName: "DIV", isContentEditable: true }] as unknown as EventTarget[];
+    for (const target of fields)
+      for (const k of ["X", "x"])
+        for (const mods of [{ ctrlKey: true }, { metaKey: true }]) {
+          const e = { key: k, ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, ...mods, target };
+          expect(isKillHotkey(e)).toBe(true);
+          expect(isEditingShortcut(e)).toBe(false); // else installEditingKeyGuard swallows it before the kill listener
+        }
+  });
+});
+
+describe("red kill button props (spread onto TradingDesk's <button>)", () => {
+  const key = (k: string, repeat: boolean) => ({ key: k, repeat, preventDefault: vi.fn() });
+  it("blocks a held Enter / Space from clicking it again, lets a single press through", () => {
+    const onPress = vi.fn();
+    const p = killButtonProps({ pressed: 1, busy: false, onPress });
+    for (const k of ["Enter", " "]) {
+      const held = key(k, true);
+      p.onKeyDown(held);
+      expect(held.preventDefault).toHaveBeenCalledTimes(1);
+      const once = key(k, false);
+      p.onKeyDown(once);
+      expect(once.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(p.onClick).toBe(onPress);
+  });
+  it("labels and busy state", () => {
+    const p0 = killButtonProps({ pressed: 0, busy: true, onPress: () => undefined });
+    expect(p0.disabled).toBe(true);
+    expect(p0["aria-label"]).toContain(`click ${KILL_PRESSES} times`);
+    expect(killButtonProps({ pressed: 2, busy: false, onPress: () => undefined })["aria-label"]).toContain("1 more click to lock");
+  });
+});
+
+const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "repeat", boolean>> = {}) => ({ key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, repeat: false, ...mods });
+
+describe("kill-switch key repeat", () => {
+  const chord = (repeat = false) => key("X", { ctrlKey: true, shiftKey: true, repeat });
+  it("classifies a held chord's autorepeat apart from a deliberate press", () => {
+    expect(classifyKillKey(chord())).toBe("press");
+    expect(classifyKillKey(chord(true))).toBe("repeat");
+    expect(classifyKillKey(key("x", { ctrlKey: true, repeat: true }))).toBe("none");
+  });
+  it("holding Ctrl+Shift+X never trips it; three separate presses still do", () => {
+    // What useKillSwitchHotkey does with each keydown: count only "press".
+    const feed = (events: { e: ReturnType<typeof chord>; at: number }[]) => {
+      const arm = createKillArm();
+      return events.map(({ e, at }) => (classifyKillKey(e) === "press" ? arm.press(at).kind : "ignored"));
+    };
+    // OS autorepeat: ~500 ms delay, then ~30 Hz, for 2 s
+    const held = [{ e: chord(), at: 0 }, ...Array.from({ length: 45 }, (_, i) => ({ e: chord(true), at: 500 + i * 33 }))];
+    expect(feed(held)).not.toContain("fire");
+    expect(feed([{ e: chord(), at: 0 }, { e: chord(), at: 400 }, { e: chord(), at: 800 }]).at(-1)).toBe("fire");
+  });
+  it("a held Enter or Space on the red button is a repeat activation; a single press is not", () => {
+    expect(isRepeatActivation(key("Enter", { repeat: true }))).toBe(true);
+    expect(isRepeatActivation(key(" ", { repeat: true }))).toBe(true);
+    expect(isRepeatActivation(key("Enter"))).toBe(false);
+    expect(isRepeatActivation(key("Tab", { repeat: true }))).toBe(false);
+  });
+});
 
 describe("kill-switch hotkey", () => {
   it("fires on Ctrl/Cmd+Shift+X only", () => {
@@ -59,5 +201,68 @@ describe("summarizeIncident", () => {
     const s = summarizeIncident({ ...base, dryRun: false, ok: false, steps: [{ step: "connect", ok: false, detail: "refused" }] });
     expect(s).toContain("connect: refused");
     expect(summarizeIncident({ ...base, dryRun: false, steps: [], failsafe: true, note: "lock written by the gateway" })).toBe("lock written by the gateway");
+  });
+  it("titles a live kill's toast by what happened", () => {
+    const inc = { ...base, dryRun: false, steps: [] };
+    expect(killToastTitle(inc)).toBe("Trading LOCKED");
+    expect(killToastTitle({ ...inc, ok: false })).toBe("Kill switch: locked with errors");
+    expect(killToastTitle({ ...inc, ok: false, failsafe: true })).toBe("Trading LOCKED");
+    expect(killToastTitle({ ...inc, alreadyRunning: true })).toBe("Kill switch already running");
+    expect(killToastTitle({ ...inc, ok: false, alreadyRunning: true })).toBe("Kill switch already ran, with errors");
+  });
+  it("a second press during a kill reports the running one, not a new one", () => {
+    const r = { ...base, dryRun: false, steps: [], alreadyRunning: true };
+    expect(summarizeIncident({ ...r, note: "A kill was already running and has cancelled and flattened: nothing more was sent." })).toBe(
+      "A kill was already running and has cancelled and flattened: nothing more was sent.",
+    );
+    expect(summarizeIncident(r)).toBe("A kill is already running: nothing more was sent.");
+  });
+});
+
+describe("tripKillSwitch sets the live-kill in-flight flag", () => {
+  it("on for a live kill until it settles; a dry run leaves it alone", async () => {
+    vi.resetModules();
+    let release!: () => void;
+    vi.doMock("@/features/trading/ibkr", () => ({ tradingApi: { kill: vi.fn(() => new Promise((r) => (release = () => r({ ok: true })))) } }));
+    vi.doMock("@/features/reminders/notify", () => ({ useToasts: () => () => undefined }));
+    const ks = await import("./kill-switch");
+    const live = ks.tripKillSwitch("t", false);
+    expect(ks.useKillInFlight.getState().on).toBe(true);
+    release();
+    await live;
+    expect(ks.useKillInFlight.getState().on).toBe(false);
+    const dry = ks.tripKillSwitch("t", true);
+    expect(ks.useKillInFlight.getState().on).toBe(false);
+    release();
+    await dry;
+    vi.doUnmock("@/features/trading/ibkr");
+    vi.doUnmock("@/features/reminders/notify");
+  });
+  it("clears when a live kill call fails (timeout, gateway down)", async () => {
+    vi.resetModules();
+    vi.doMock("@/features/trading/ibkr", () => ({ tradingApi: { kill: vi.fn(async () => Promise.reject(new Error("timed out"))) } }));
+    vi.doMock("@/features/reminders/notify", () => ({ useToasts: () => () => undefined }));
+    const ks = await import("./kill-switch");
+    await expect(ks.tripKillSwitch("t", false)).rejects.toThrow("timed out");
+    expect(ks.useKillInFlight.getState()).toEqual({ n: 0, on: false });
+    vi.doUnmock("@/features/trading/ibkr");
+    vi.doUnmock("@/features/reminders/notify");
+  });
+  it("stays on until the last of two overlapping live kills settles (button + hotkey)", async () => {
+    vi.resetModules();
+    const releases: (() => void)[] = [];
+    vi.doMock("@/features/trading/ibkr", () => ({ tradingApi: { kill: vi.fn(() => new Promise((r) => releases.push(() => r({ ok: true })))) } }));
+    vi.doMock("@/features/reminders/notify", () => ({ useToasts: () => () => undefined }));
+    const ks = await import("./kill-switch");
+    const a = ks.tripKillSwitch("button", false);
+    const b = ks.tripKillSwitch("hotkey", false);
+    releases[0]();
+    await a;
+    expect(ks.useKillInFlight.getState().on).toBe(true); // the hotkey's kill is still in flight
+    releases[1]();
+    await b;
+    expect(ks.useKillInFlight.getState()).toEqual({ n: 0, on: false });
+    vi.doUnmock("@/features/trading/ibkr");
+    vi.doUnmock("@/features/reminders/notify");
   });
 });

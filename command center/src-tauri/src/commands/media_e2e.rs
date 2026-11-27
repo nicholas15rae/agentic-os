@@ -183,6 +183,11 @@ struct TurnInfo {
     fix_shown: Option<String>,
 }
 
+/// A failed or timed-out request (not an HTTP error status or a bad body).
+fn is_transport_error(e: &str) -> bool {
+    e.starts_with("LM Studio: error sending request") || e.contains("timed out") || e.contains("operation timed out")
+}
+
 struct Run {
     t0: Instant,
     st: MediaState,
@@ -227,6 +232,8 @@ impl Run {
             "manifest": load_manifest_strict(&self.root, &self.slug)?,
             "review": p.review,
             "renders": list_renders(&self.st, &self.slug)?,
+            // What the page's media_transcript_lines gives its TRANSCRIPT section.
+            "transcripts": transcript_lines(&self.st, &self.slug, None).unwrap_or_default(),
         }))
     }
 
@@ -365,7 +372,15 @@ impl Run {
         }
         std::fs::write(dir.join("prompt.json"), serde_json::to_string_pretty(&msgs.iter().map(|m| json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>()).unwrap()).map_err(|e| e.to_string())?;
         let _ = chat_log(&self.st, &self.slug, Some(("nic".into(), shown.clone())));
-        let call = self.chat_call(&msgs);
+        let mut call = self.chat_call(&msgs);
+        // A transport error (LM Studio busy with another client until the turn cap; runs 12-13) is
+        // the environment, not the Director: retry the same turn once and say so in the report.
+        if let Err(e) = &call {
+            if is_transport_error(e) {
+                self.errors.push(format!("turn {label}: {e}; retried once (LM Studio busy, not a Director defect)"));
+                call = self.chat_call(&msgs);
+            }
+        }
         let (answer, latency, usage) = match call {
             Ok(x) => x,
             Err(e) => {
@@ -801,4 +816,12 @@ fn write_report(run: &Run) {
         md.push_str(&format!("- {s}\n"));
     }
     let _ = std::fs::write(run.e2e.join("report.md"), md);
+}
+
+#[test]
+fn only_transport_errors_are_retried() {
+    assert!(is_transport_error("LM Studio: error sending request for url (http://127.0.0.1:1235/v1/chat/completions)"));
+    assert!(is_transport_error("LM Studio: operation timed out"));
+    assert!(!is_transport_error("LM Studio: HTTP status client error (400 Bad Request)"));
+    assert!(!is_transport_error("LM Studio body: expected value at line 1 column 1"));
 }

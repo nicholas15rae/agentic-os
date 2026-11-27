@@ -1,3 +1,5 @@
+import type { FastCueSpec } from "@/features/voice/fast-path";
+
 /** Cue widgets: a trigger (phrase / time / startup) → Tony line + soundbite + theme music + OS action. */
 
 export interface AudioClip {
@@ -46,6 +48,12 @@ export interface CueWidget {
   lastFired?: string;
   /** Built-in widgets can't be deleted (only disabled). */
   builtin?: "gabagool" | "startup";
+  /**
+   * Section 20.10 "Make this a fast cue": an instant answer for one phrase (a fast-path handler
+   * or a fixed reply), no model call. A fast cue keeps `phrases` empty, `time` "" and `startup`
+   * false, so the widget runtime (phrase match, schedule, startup) never fires it.
+   */
+  fast?: FastCueSpec;
 }
 
 export const newClip = (fileId: string, name: string, duration: number): AudioClip => ({

@@ -21,11 +21,11 @@ import {
   type RulesView,
   type SetMetrics,
 } from "@/features/trading/EngineRPanel.contract";
-import { METRIC_ROWS, PARAM_ORDER, VERDICT, compareTone, diffLines, diffText, errorText, logLine, metricText, paramValue, viewErrorText, type Tone } from "@/features/trading/engine-r-format";
+import { DRIFT_TONE, TRACK_ROWS, isTrackRecord, rText, spyText, trackCell, trackRecordApi, type SpyBaseline, type TrackRecord, type TrackSet } from "@/features/trading/track-record";
+import { METRIC_ROWS, PARAM_ORDER, VERDICT, compareTone, diffLines, diffText, errorText, logLine, metricText, paramValue, scanRowView, viewErrorText, type Tone } from "@/features/trading/engine-r-format";
 
 const TONE_TEXT: Record<"teal" | "alert" | "amber", string> = { teal: "text-teal-soft", alert: "text-alert", amber: "text-amber-light" };
 const CELL_TONE: Record<Exclude<Tone, null>, string> = { better: "text-teal-soft", worse: "text-alert", same: "text-ink-2" };
-const SCAN_TONE: Record<string, string> = { submitted: "text-teal-soft", would_submit: "text-teal-soft", limit_block: "text-alert", no_signal: "text-ink-3", skip: "text-ink-3" };
 const when = (s: number) => new Date(s * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const empty = "rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3";
 
@@ -208,6 +208,8 @@ export function EngineRPanel(_props: EngineRPanelProps) {
             </section>
           </div>
 
+          <TrackRecordSection />
+
           <EvaluationSection ev={ev} activeVersion={data.active.version} error={evalPoll.error} />
 
           <ScanSection scan={data.lastScan} />
@@ -389,6 +391,60 @@ function SplitTable({ title, build, test }: { title: string; build: SetMetrics; 
   );
 }
 
+/** 14.6 headline: the paper record next to the backtest splits and SPY buy-and-hold. Display only. */
+function TrackRecordSection() {
+  const { data, error } = usePoll<TrackRecord>(trackRecordApi.get, 60_000);
+  if (!isTrackRecord(data)) {
+    return error ? <p className="mt-4 text-[11px] text-ink-3">Track record unavailable ({error}).</p> : null;
+  }
+  const t = data;
+  const cols: { label: string; set: TrackSet | null; spy: SpyBaseline | null }[] = [
+    { label: "Paper", set: t.paper, spy: t.spy.paper },
+    { label: "Build 70%", set: t.build, spy: t.spy.build },
+    { label: "Test 30%", set: t.test, spy: t.spy.test },
+  ];
+  const spyWhy = [t.spy.paper, t.spy.build, t.spy.test].find((s) => s && s.retPct == null)?.why;
+  const partial = [t.spy.paper, t.spy.build, t.spy.test].some((s) => s?.partial);
+  return (
+    <section className="mt-4" aria-label="Track record over backtest">
+      <p className="label-caps mb-1.5 text-ink-3">Track record over backtest{t.version != null ? ` · v${t.version}` : ""}</p>
+      <p className={`text-[12px] ${DRIFT_TONE[t.drift.status]}`} role="status">{t.drift.message}</p>
+      <div className="mt-1.5 overflow-x-auto rounded-[10px] border border-white/[0.06] p-2">
+        <table className="w-full text-[11.5px]" aria-label="Paper vs backtest vs SPY">
+          <thead>
+            <tr className="text-left text-ink-3">
+              <th className="py-0.5 pr-1 font-medium" scope="col">Metric</th>
+              {cols.map((c) => <th key={c.label} className="py-0.5 pr-1 text-right font-medium" scope="col">{c.label}</th>)}
+            </tr>
+          </thead>
+          <tbody className="font-mono tabular">
+            {TRACK_ROWS.map((r) => (
+              <tr key={r.key} className="border-t border-white/[0.04]">
+                <th scope="row" className="py-0.5 pr-1 text-left font-sans font-normal text-ink-2">{r.label}</th>
+                {cols.map((c) => <td key={c.label} className="py-0.5 pr-1 text-right text-ink-2">{trackCell(r.key, c.set)}</td>)}
+              </tr>
+            ))}
+            <tr className="border-t border-white/[0.04]">
+              <th scope="row" className="py-0.5 pr-1 text-left font-sans font-normal text-ink-2">SPY buy &amp; hold</th>
+              {cols.map((c) => <td key={c.label} className="py-0.5 pr-1 text-right text-ink-2" title={c.spy ? `${c.spy.from} to ${c.spy.to}${c.spy.why ? ` · ${c.spy.why}` : ""}` : undefined}>{spyText(c.spy)}</td>)}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-1 break-words text-[10.5px] text-ink-3">
+        {[
+          t.goal.text,
+          t.drift.interval ? `test 95% interval ${rText(t.drift.interval.low)} to ${rText(t.drift.interval.high)} (n ${t.drift.interval.n})` : "",
+          t.paper.from ? `paper ${t.paper.from} to ${t.paper.to ?? "—"}` : "no closed Engine R paper trades yet",
+          spyWhy ? `SPY: ${spyWhy}` : "",
+          partial ? "* SPY bars end before the period does" : "",
+          ...t.notes,
+        ].filter(Boolean).join(" · ")}
+      </p>
+    </section>
+  );
+}
+
 function EvaluationSection({ ev, activeVersion, error }: { ev: EvaluationReport | NoEvaluation | null; activeVersion: number; error: string | null }) {
   return (
     <section className="mt-4" aria-label="70/30 report">
@@ -418,7 +474,8 @@ function EvaluationSection({ ev, activeVersion, error }: { ev: EvaluationReport 
   );
 }
 
-function ScanSection({ scan }: { scan: RuleScan | null }) {
+/** Exported for its render test (engine-r-scan.test.ts). */
+export function ScanSection({ scan }: { scan: RuleScan | null }) {
   return (
     <section className="mt-4" aria-label="Last scan">
       <p className="label-caps mb-1.5 text-ink-3">Last scan{scan ? ` · ${scan.kind}${scan.submit ? "" : " dry run"} · ${when(scan.at)}` : ""}</p>
@@ -429,14 +486,24 @@ function ScanSection({ scan }: { scan: RuleScan | null }) {
           </p>
           {scan.rows.length > 0 && (
             <ul className="mt-1 space-y-0.5 text-[11.5px]">
-              {scan.rows.map((r) => (
-                <li key={r.symbol} className="flex min-w-0 flex-wrap gap-x-2">
-                  <span className="w-12 font-mono text-ink">{r.symbol}</span>
-                  <span className={SCAN_TONE[r.action] ?? "text-ink-3"}>{r.action.replace("_", " ")}</span>
-                  {r.intent && <span className="font-mono text-ink-2">BUY {r.intent.quantity} @ {r.intent.limit_price} · stop {r.intent.stop_loss} · tp {r.intent.take_profit}</span>}
-                  {r.why && <span className="min-w-0 break-words text-ink-3">{r.why}</span>}
-                </li>
-              ))}
+              {scan.rows.map((r) => {
+                const v = scanRowView(r); // a desk-refused row says so, in the alert tone, and its order line reads "not sent"
+                return (
+                  <li key={r.symbol} className="flex min-w-0 flex-wrap gap-x-2">
+                    <span className="w-12 font-mono text-ink">{r.symbol}</span>
+                    <span className={v.tone}>{v.label}</span>
+                    {r.intent && (
+                      <span
+                        className={`font-mono ${v.refused ? "text-ink-3 line-through" : "text-ink-2"}`}
+                        title={v.refused ? "Not sent: the desk refused it" : v.unsure ? "The cancel couldn't be sent: this order may still be working at TWS" : undefined}
+                      >
+                        BUY {r.intent.quantity} @ {r.intent.limit_price} · stop {r.intent.stop_loss} · tp {r.intent.take_profit}
+                      </span>
+                    )}
+                    {r.why && <span className="min-w-0 break-words text-ink-3">{r.why}</span>}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </>

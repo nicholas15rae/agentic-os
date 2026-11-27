@@ -22,9 +22,13 @@ use super::os_core::{self, OsState};
 pub(crate) const DIRECTOR_CRAFT: &str = include_str!("director_craft.md");
 
 /// Budgets. Hybrid mode moves a prompt of `compute.heavyContextChars` (24 000 by default) to
-/// the droplet, so a Director turn stays well under that and keeps running locally.
+/// the droplet, so a Director turn stays under that and keeps running locally
+/// (`whole_prompt_stays_under_the_hybrid_heavy_context_threshold` holds the worst case to it).
 pub(crate) const MAX_TEXT_CHARS: usize = 2_000;
-pub(crate) const MAX_CONTEXT_CHARS: usize = 9_000;
+/// The page's STUDIO STATE, TRANSCRIPT section included. MIRRORS context.ts CONTEXT_BUDGET (the page
+/// keeps its context under it, so this clip, which cuts from the end where the ACTION CONTRACT is,
+/// never bites). Raised from 9 000 for the TRANSCRIPT section (run 9 issue 1).
+pub(crate) const MAX_CONTEXT_CHARS: usize = 11_500;
 pub(crate) const MAX_IDENTITY_CHARS: usize = 1_200;
 pub(crate) const MAX_HISTORY_TURNS: usize = 10;
 pub(crate) const MAX_HISTORY_MSG_CHARS: usize = 600;
@@ -69,35 +73,43 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
     out
 }
 
-/// The system message: persona + craft, then the identity file, then the page's project context. Pure.
-pub(crate) fn director_system(identity: Option<&str>, context: &str) -> String {
+/// The system message: persona + craft, then the identity file. It holds nothing that changes
+/// turn to turn, so it stays byte-stable and LM Studio can reuse its prefix cache (the same rule
+/// as Tony's system message; the project state rides on the last user message instead). Pure.
+pub(crate) fn director_system(identity: Option<&str>) -> String {
     let mut sys = DIRECTOR_CRAFT.trim().to_string();
     if let Some(id) = identity.map(str::trim).filter(|s| !s.is_empty()) {
         sys.push_str("\n\nABOUT NIC (MASTER_IDENTITY.md, for taste and voice):\n");
         sys.push_str(&clip(id, MAX_IDENTITY_CHARS));
     }
-    let ctx = context.trim();
-    if !ctx.is_empty() {
-        sys.push_str("\n\nSTUDIO STATE (the open project; trust this over memory):\n");
-        sys.push_str(&clip(ctx, MAX_CONTEXT_CHARS));
-    }
     sys
 }
 
-/// The message list for one Director turn (pure): system, the last turns of this project's
-/// chat (user/assistant only, each clipped), then Nic's line. `Err` for an empty line.
+/// The last user message: this turn's STUDIO STATE (when the page sent one), then Nic's line. Pure.
+pub(crate) fn director_user_turn(context: &str, text: &str) -> String {
+    let line = clip(text, MAX_TEXT_CHARS);
+    let ctx = context.trim();
+    if ctx.is_empty() {
+        return line;
+    }
+    format!("STUDIO STATE (the open project right now; trust this over memory):\n{}\n\nNIC:\n{}", clip(ctx, MAX_CONTEXT_CHARS), line)
+}
+
+/// The message list for one Director turn (pure): the stable system message, the last turns of
+/// this project's chat (user/assistant only, each clipped), then STUDIO STATE + Nic's line.
+/// `Err` for an empty line.
 pub(crate) fn director_messages(req: &DirectorTurnRequest, identity: Option<&str>) -> Result<Vec<ChatMessage>, String> {
     let text = req.text.trim();
     if text.is_empty() {
         return Err("nothing to send to the Director".into());
     }
-    let mut msgs = vec![ChatMessage::new("system", director_system(identity, &req.context))];
+    let mut msgs = vec![ChatMessage::new("system", director_system(identity))];
     let hist: Vec<&HistoryMsg> = req.history.iter().filter(|m| matches!(m.role.as_str(), "user" | "assistant") && !m.content.trim().is_empty()).collect();
     let start = hist.len().saturating_sub(MAX_HISTORY_TURNS);
     for m in &hist[start..] {
         msgs.push(ChatMessage::new(&m.role, clip(&m.content, MAX_HISTORY_MSG_CHARS)));
     }
-    msgs.push(ChatMessage::new("user", clip(text, MAX_TEXT_CHARS)));
+    msgs.push(ChatMessage::new("user", director_user_turn(&req.context, text)));
     Ok(msgs)
 }
 
@@ -136,7 +148,7 @@ mod tests {
 
     #[test]
     fn system_is_the_director_not_tony() {
-        let s = director_system(None, "");
+        let s = director_system(None);
         assert!(s.starts_with("You are the Director"));
         assert!(s.contains("never as Tony"));
         assert!(!s.contains("STUDIO STATE"));
@@ -144,14 +156,28 @@ mod tests {
     }
 
     #[test]
-    fn system_carries_identity_and_context_clipped() {
+    fn system_carries_identity_and_the_last_user_message_carries_the_clipped_context() {
         let id = "x".repeat(MAX_IDENTITY_CHARS + 50);
-        let ctx = format!("PROJECT: reel\n{}", "y".repeat(MAX_CONTEXT_CHARS + 50));
-        let s = director_system(Some(&id), &ctx);
+        let s = director_system(Some(&id));
         assert!(s.contains("ABOUT NIC"));
-        assert!(s.contains("STUDIO STATE"));
-        assert!(s.contains("PROJECT: reel"));
-        assert!(s.chars().count() < DIRECTOR_CRAFT.chars().count() + MAX_IDENTITY_CHARS + MAX_CONTEXT_CHARS + 200);
+        assert!(!s.contains("STUDIO STATE"));
+        assert!(s.chars().count() < DIRECTOR_CRAFT.chars().count() + MAX_IDENTITY_CHARS + 100);
+        let ctx = format!("PROJECT: reel\n{}", "y".repeat(MAX_CONTEXT_CHARS + 50));
+        let u = director_user_turn(&ctx, "cut it");
+        assert!(u.starts_with("STUDIO STATE"));
+        assert!(u.contains("PROJECT: reel"));
+        assert!(u.ends_with("NIC:\ncut it"));
+        assert!(u.chars().count() < MAX_CONTEXT_CHARS + 120);
+        assert_eq!(director_user_turn("  ", "cut it"), "cut it");
+    }
+
+    #[test]
+    fn the_system_message_is_byte_stable_across_turns_and_projects() {
+        let a = director_messages(&req("first", vec![], "PROJECT: a\nclips 3"), Some("Nic")).unwrap();
+        let b = director_messages(&req("second", vec![("user", "first"), ("assistant", "ok")], "PROJECT: b\nclips 9"), Some("Nic")).unwrap();
+        assert_eq!(a[0].content, b[0].content);
+        assert!(b.last().unwrap().content.contains("PROJECT: b"));
+        assert_eq!(b[1].content, "first", "history keeps Nic's plain line, not an old STUDIO STATE");
     }
 
     #[test]
@@ -163,7 +189,7 @@ mod tests {
         assert_eq!(m.len(), 1 + MAX_HISTORY_TURNS + 1);
         assert_eq!(m[1].content, "m4");
         assert_eq!(m.last().unwrap().role, "user");
-        assert_eq!(m.last().unwrap().content, "cut it tighter");
+        assert!(m.last().unwrap().content.ends_with("NIC:\ncut it tighter"));
     }
 
     #[test]
@@ -189,9 +215,20 @@ mod tests {
             context: "c".repeat(50_000),
             stream_id: None,
         };
-        let m = director_messages(&r, Some(&"i".repeat(10_000))).unwrap();
+        let mut m = director_messages(&r, Some(&"i".repeat(10_000))).unwrap();
+        // director_turn appends /no_think to the system message on a thinking model.
+        m[0].content = super::super::agent_prompts::with_no_think(&m[0].content);
         let chars: usize = m.iter().map(|x| x.content.chars().count()).sum();
         assert!(chars < 24_000, "{chars} chars would overflow to the droplet in hybrid mode");
+        // The context really is MAX_CONTEXT_CHARS of it (the TRANSCRIPT section's room is used).
+        assert!(m.last().unwrap().content.chars().count() > MAX_CONTEXT_CHARS);
+        eprintln!("worst-case Director prompt: {chars} chars (headroom {})", 24_000 - chars);
+    }
+
+    #[test]
+    fn the_context_cap_mirrors_the_page_budget() {
+        let ts = include_str!("../../../src/features/director/context.ts");
+        assert!(ts.contains(&format!("export const CONTEXT_BUDGET = {}_{:03};", MAX_CONTEXT_CHARS / 1000, MAX_CONTEXT_CHARS % 1000)), "context.ts CONTEXT_BUDGET must equal MAX_CONTEXT_CHARS ({MAX_CONTEXT_CHARS})");
     }
 
     #[test]

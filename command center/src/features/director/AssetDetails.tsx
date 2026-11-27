@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { Copy, FileText, Loader2, Plus, Sparkles, Tag, TriangleAlert, X } from "lucide-react";
+import { Copy, Dices, FileText, Loader2, Plus, SlidersHorizontal, Sparkles, Tag, TriangleAlert, X } from "lucide-react";
 import { useToasts } from "@/features/reminders/notify";
 import { fileSrc } from "./api";
 import type { GenMeta, MediaAsset } from "./contract";
 import { MAX_TAGS, TAG_MAX_CHARS, cleanTags, seekTo, setAssetTags } from "./director-store";
 import { genSettingsJson, timecode } from "./manifest";
 import { FLAG_LABEL, shotCount, transcriptFile, transcriptLines, type TranscriptLine } from "./review-ui";
+import { reroll, tweak, useComfy } from "./comfy-store";
+import { rerollBlocker } from "./comfy-ui";
 
 /** The one-line badges under an asset's name: flags as warnings, the shot count, the transcript size. Props only. */
 export function AssetBadges({ asset }: { asset: MediaAsset }) {
@@ -40,9 +42,23 @@ export function GeneratedChip({ asset }: { asset: MediaAsset }) {
 
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`);
 
-/** Provenance of a generated asset: template, seed, steps, prompt, render time, peak VRAM, and a
- * "Copy settings" button (clipboard JSON). Props only. Re-roll / tweak come with the Generate panel. */
-export function GenerationBlock({ gen, onCopy }: { gen: GenMeta; onCopy: (json: string) => void }) {
+/** Provenance of a generated asset: template, seed, steps, prompt, render time, peak VRAM, a
+ * "Copy settings" button (clipboard JSON), and Re-roll / Tweak when their handlers are given. Props only. */
+export function GenerationBlock({
+  gen,
+  onCopy,
+  onReroll,
+  onTweak,
+  rerollBlocked,
+  rerollBusy = false,
+}: {
+  gen: GenMeta;
+  onCopy: (json: string) => void;
+  onReroll?: () => void; // same params, new seed -> enqueue (explicit click; toast "Queued: re-roll of <name>")
+  onTweak?: () => void; // prefill + open the Generate panel, scroll it into view
+  rerollBlocked?: string | null; // e.g. "The source still for this one isn't known any more"
+  rerollBusy?: boolean; // a comfy_enqueue is in flight: one click, one job
+}) {
   const rows: [string, string][] = [
     ["Template", gen.template || "—"],
     ["Seed", String(gen.seed)],
@@ -56,10 +72,23 @@ export function GenerationBlock({ gen, onCopy }: { gen: GenMeta; onCopy: (json: 
         <p className="label-caps flex items-center gap-1 text-ink-3">
           <Sparkles size={10} /> Generated
         </p>
-        <button onClick={() => onCopy(genSettingsJson(gen))} className="flex items-center gap-1 text-[11px] text-teal-soft hover:underline" title="Copy the generation settings as JSON">
-          <Copy size={10} /> Copy settings
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {onReroll && (
+            <button onClick={onReroll} disabled={!!rerollBlocked || rerollBusy} aria-busy={rerollBusy || undefined} className="flex items-center gap-1 text-[11px] text-violet hover:underline disabled:opacity-40 disabled:hover:no-underline" title={rerollBlocked ?? "Same settings, new seed (queues a ComfyUI job)"}>
+              {rerollBusy ? <Loader2 size={10} className="animate-spin" /> : <Dices size={10} />} Re-roll
+            </button>
+          )}
+          {onTweak && (
+            <button onClick={onTweak} className="flex items-center gap-1 text-[11px] text-teal-soft hover:underline" title="Open these settings in the Generate panel">
+              <SlidersHorizontal size={10} /> Tweak
+            </button>
+          )}
+          <button onClick={() => onCopy(genSettingsJson(gen))} className="flex items-center gap-1 text-[11px] text-teal-soft hover:underline" title="Copy the generation settings as JSON">
+            <Copy size={10} /> Copy settings
+          </button>
+        </div>
       </div>
+      {onReroll && rerollBlocked && <p className="mt-0.5 text-[10px] text-ink-3">Re-roll: {rerollBlocked}</p>}
       <dl className="mt-0.5 grid grid-cols-[auto_1fr] gap-x-2 text-[11px]">
         {rows.map(([k, v]) => (
           <div key={k} className="contents">
@@ -161,10 +190,15 @@ export function AssetDetails({ asset, projectRoot }: { asset: MediaAsset; projec
   const t = asset.transcript;
   const file = transcriptFile(asset, projectRoot);
   const cuts = asset.scenes ?? [];
+  const genJobId = asset.generation?.comfyJobId;
+  const genJob = useComfy((s) => (genJobId ? s.jobs.find((j) => j.id === genJobId) : undefined));
+  const enqueueBusy = useComfy((s) => s.busy.enqueue);
   return (
     <div className="mt-1.5 space-y-2 rounded-[10px] bg-white/[0.02] p-2">
       <TagEditor tags={asset.tags} onChange={(tags) => void setAssetTags(asset.id, tags)} />
-      {asset.generation && <GenerationBlock gen={asset.generation} onCopy={(json) => void copySettings(json)} />}
+      {asset.generation && (
+        <GenerationBlock gen={asset.generation} onCopy={(json) => void copySettings(json)} onReroll={() => void reroll(asset)} onTweak={() => tweak(asset)} rerollBlocked={rerollBlocker(asset.generation, genJob)} rerollBusy={enqueueBusy} />
+      )}
       {t ? (
         <div>
           <p className="text-[11px] text-ink-2">

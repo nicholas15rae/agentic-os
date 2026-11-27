@@ -16,9 +16,12 @@ export function isTextField(target: EventTarget | null): boolean {
   return el.tagName === "INPUT" && TEXT_INPUTS.test(el.type || "text");
 }
 
-/** True when `e` is a text-editing shortcut aimed at a focused text field (pure). */
-export function isEditingShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "target">): boolean {
+/** True when `e` is a text-editing shortcut aimed at a focused text field (pure).
+ *  One exception: Ctrl/Cmd+Shift+X is the trading E-stop (features/trading/kill-switch-core.ts isKillHotkey), not an
+ *  edit, so it must reach the kill-switch listener while you type. Ctrl+X (cut) and Ctrl+Shift+Z (redo) stay the field's. */
+export function isEditingShortcut(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "target"> & { shiftKey?: boolean }): boolean {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return false;
+  if (e.shiftKey && e.key.toLowerCase() === "x") return false; // the kill-switch chord
   return EDIT_KEYS.has(e.key.toLowerCase()) && isTextField(e.target);
 }
 

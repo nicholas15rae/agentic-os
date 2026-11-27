@@ -116,6 +116,28 @@ describe("decision 5: a typed phone turn in Learning mode", () => {
     expect(turn.pendingMemory).toBeUndefined();
   });
 
+  it("FX2: the typed yes Rust answered ends the card above it (Saved), so it never shows live buttons again", async () => {
+    h.dispatch.mockResolvedValueOnce(outcome(ASKED, { pendingMemory: pending }));
+    await handleInput(LESSON, { channel: "text", thread: "auto" });
+    const [card] = agentTurns();
+    expect(card.memoryExpiresAt).toBeGreaterThan(Date.now()); // created + 10 min
+    expect(card.memoryEnd).toBeUndefined();
+    // Rust's no-model answer comes back as provider "learning" (the phone shows desktop:learning).
+    h.dispatch.mockResolvedValueOnce({ ...outcome("Saved to my core memories.", { learned: [saved] }), result: { providerId: "desktop:learning", content: "Saved to my core memories.", fellBack: false, reason: "phone → desktop Tony", latencyMs: 5 } });
+    await handleInput("yes", { channel: "text", thread: "auto" });
+    const [ended, answer] = agentTurns();
+    expect(answer.meta).toContain("desktop:learning");
+    expect(ended).toMatchObject({ id: card.id, memoryEnd: "saved", pendingMemory: pending });
+  });
+
+  it("FX2: the model's own reply (not Rust's answer) leaves the card live", async () => {
+    h.dispatch.mockResolvedValueOnce(outcome(ASKED, { pendingMemory: pending }));
+    await handleInput(LESSON, { channel: "text", thread: "auto" });
+    h.dispatch.mockResolvedValueOnce(outcome("Saved to my core memories."));
+    await handleInput("great, and remember it", { channel: "text", thread: "auto" });
+    expect(agentTurns()[0].memoryEnd).toBeUndefined();
+  });
+
   it("an ordinary typed phone turn has neither", async () => {
     h.dispatch.mockResolvedValueOnce(outcome("It's sunny."));
     await handleInput("what's the weather like today", { channel: "text", thread: "auto" });

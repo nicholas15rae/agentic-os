@@ -331,10 +331,53 @@ fn leads_with_self(toks: &[&str], self_names: &[(String, String)]) -> bool {
     match_name_at(toks, p, self_names).is_some()
 }
 
-/// The line opens with one of `names` (an agent's), optionally after "hey / hi / ok / yo / so".
-fn leads_with_name(toks: &[&str], names: &[(String, String)]) -> bool {
+/// Words after "email" that make it the mail noun of a read ("audition email check", "booking
+/// email updates"), not a command to send one ("booking email Sam about the shoot").
+const MAIL_NOUN_NEXT: [&str; 11] = ["check", "checks", "read", "update", "updates", "today", "tonight", "yesterday", "from", "inbox", "summary"];
+
+/// In a mail read, the word at `k` right after an opening desk name is "email" used as the mail
+/// noun, so "NAME email …" is a topic ("audition email check"), not "NAME, email …". Mirrors router.ts.
+fn mail_noun_at(toks: &[&str], k: usize, original: &str) -> bool {
+    tok_at(toks, k) == Some("email") && tok_at(toks, k + 1).map_or(true, |w| MAIL_NOUN_NEXT.contains(&w)) && direct_tool(original) == Some("gmail")
+}
+
+/// Marks that end a spoken address ("booking desk, …", "booking: …", "booking - …").
+const ADDRESS_PAUSES: [&str; 9] = [",", ":", ";", "!", "?", ".", "\u{2014}", "\u{2013}", " - "];
+/// The `ADDRESS_LEADS` that call out to someone ("hey booking agent …"). "ok" / "okay" / "so" are
+/// fillers ("Okay, booking emails from today?"): they never make the next word an address.
+const ADDRESS_VOCATIVES: [&str; 3] = ["hey", "hi", "yo"];
+/// After "hey / hi / yo NAME", the words that keep NAME an address ("hey booking any new emails",
+/// "hey booking agent did Sam reply?"), besides `ADDRESS_NEXT` and `VERBS_B`. Any other word
+/// ("hey booking emails from today?") makes NAME a topic word. Mirrors router.ts.
+const VOCATIVE_NEXT: [&str; 15] = ["any", "anything", "did", "do", "does", "have", "has", "is", "are", "was", "were", "can", "could", "would", "will"];
+
+/// The line opens by ADDRESSING one of `names` (an agent's), after any "hey / hi / ok / yo / so"
+/// leads: the name, then a pause mark or the line's end ("booking desk, any new emails?",
+/// "Okay, booking: any emails today?"); or, after a vocative lead only, the name followed by
+/// an address word ("hey booking agent any emails?", "hey booking check my inbox"). A name that
+/// opens the line as a topic word ("booking emails from today?", "Okay, booking emails from
+/// today?", "so audition email check") is no address. `original`: the raw line (its
+/// punctuation). Mirrors `leadsWithName` in router.ts.
+fn leads_with_name(original: &str, toks: &[&str], names: &[(String, String)]) -> bool {
     let p = toks.iter().take_while(|w| ADDRESS_LEADS.contains(*w)).count();
-    match_name_at(toks, p, names).is_some()
+    let Some((_, nlen)) = match_name_at(toks, p, names) else { return false };
+    if toks[..p].iter().any(|w| ADDRESS_VOCATIVES.contains(w)) {
+        let k = p + nlen + usize::from(tok_at(toks, p + nlen) == Some("please"));
+        let follows = match tok_at(toks, k) {
+            None => true,
+            Some(w) => (ADDRESS_NEXT.contains(&w) || VOCATIVE_NEXT.contains(&w) || VERBS_B.contains(&w)) && !mail_noun_at(toks, k, original),
+        };
+        if follows {
+            return true;
+        }
+    }
+    // The text after the leads, up to the next pause mark, is exactly the name. A pause inside
+    // the leads ("Okay, …") doesn't count: the first one with more than the leads before it.
+    let mut pauses: Vec<usize> = ADDRESS_PAUSES.iter().flat_map(|m| original.match_indices(m).map(|(i, _)| i)).collect();
+    pauses.sort_unstable();
+    let before = |i: usize| tokenize(&normalize(&original[..i])).len();
+    let cut = pauses.into_iter().find(|&i| before(i) > p).unwrap_or(original.len());
+    before(cut) == p + nlen
 }
 
 /// The line ends with a self name ("…, tony", "… tony please") that isn't an object (`NOT_VOCATIVE_BEFORE`).
@@ -455,7 +498,7 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
             pos = k;
             continue;
         }
-        if matches!(tok_at(&toks, k), Some(v) if VERBS_B.contains(&v)) {
+        if matches!(tok_at(&toks, k), Some(v) if VERBS_B.contains(&v)) && !mail_noun_at(&toks, k, &original) {
             let task = toks[k..].join(" ");
             return Route {
                 role: Some(role),
@@ -468,11 +511,12 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         break;
     }
     // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar read ("check gmail
-    // for booking emails", "any audition emails?") is Tony's own live tool: a name merely
-    // mentioned there is a topic, not an address. Only opening the line with it ("booking desk,
-    // any …") or step (a) above ("tell booking to …") hands it over.
+    // for booking emails", "any audition emails?", "booking emails from today?") is Tony's own
+    // live tool: a name merely mentioned there, even first, is a topic, not an address. Only
+    // addressing the desk ("booking desk, any …", "hey booking agent …") or step (a) above
+    // ("tell booking to …") hands it over.
     if let Some(role) = match_name_anywhere(&toks, &names) {
-        if !matches!(direct_tool(&original), Some("gmail" | "calendar")) || leads_with_name(&toks, &names) {
+        if !matches!(direct_tool(&original), Some("gmail" | "calendar")) || leads_with_name(&original, &toks, &names) {
             return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
         }
     }
@@ -954,19 +998,45 @@ mod tests {
     #[test]
     fn a_mail_read_naming_a_booking_word_stays_with_tony() {
         let cfg = OsConfig::default();
-        for text in ["check gmail for booking emails", "any audition emails?", "check my inbox for the casting call", "check my calendar for the audition"] {
+        // Review note (A2): a mail read that merely OPENS with a booking word is a topic too.
+        for text in ["check gmail for booking emails", "any audition emails?", "check my inbox for the casting call", "check my calendar for the audition", "booking emails from today?", "audition email check", "Booking confirmations in my gmail?", "audition emails this week?", "casting calendar check for tomorrow"] {
             let r = resolve(text, &cfg);
             // At most a topic (Domain), which the live-tool backstop keeps with Tony (`direct_tool`).
             assert_ne!(r.kind, RouteKind::Named, "{text}: {r:?}");
             assert!(matches!(direct_tool(text), Some("gmail" | "calendar")), "{text}");
         }
-        for (text, conf) in [("booking desk, any new emails about the shoot?", "medium"), ("tell booking to check my email for the callback", "high"), ("booking desk check my inbox", "high"), ("hey booking agent, any emails?", "medium")] {
+        for (text, conf) in [
+            ("booking desk, any new emails about the shoot?", "medium"),
+            ("tell booking to check my email for the callback", "high"),
+            ("booking desk check my inbox", "high"),
+            ("hey booking agent, any emails?", "medium"),
+            ("hey booking any new emails", "medium"),
+            ("Booking: any emails today?", "medium"),
+        ] {
             let r = resolve(text, &cfg);
             assert_eq!((r.role.as_deref(), r.kind, r.confidence.as_str()), (Some("booking"), RouteKind::Named, conf), "{text}");
         }
         // Not a mail read: a mention still names the desk, as before.
         let r = resolve("what did the booking desk say", &cfg);
         assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named));
+    }
+
+    /// FX3 review: a filler lead ("Okay,", "so", "ok") skipped the pause / line-end rule, so a
+    /// Whisper transcript like "Okay, booking emails from today?" still went to the (frozen)
+    /// Booking Desk instead of Tony's own Gmail read. Fillers never address; "hey / hi / yo" do
+    /// only before an address word. Mirrors router.ts (and the shared fixtures).
+    #[test]
+    fn a_filler_lead_never_hands_a_mail_read_to_the_desk() {
+        let cfg = OsConfig::default();
+        for text in ["Okay, booking emails from today?", "okay booking emails from today?", "so booking emails from today?", "ok audition emails this week?", "So, audition email check", "hey booking emails from today?", "Hey, audition email check"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (None, RouteKind::Default), "{text}: {r:?}");
+            assert_eq!(direct_tool(text), Some("gmail"), "{text}");
+        }
+        for text in ["Okay, booking: any emails today?", "so, booking desk, any new emails?", "hey booking agent any emails?", "hey booking any new emails", "hi booking agent did I get any emails?", "hey booking email Sam about the shoot", "yo casting check my inbox"] {
+            let r = resolve(text, &cfg);
+            assert_eq!((r.role.as_deref(), r.kind), (Some("booking"), RouteKind::Named), "{text}: {r:?}");
+        }
     }
 
     #[test]

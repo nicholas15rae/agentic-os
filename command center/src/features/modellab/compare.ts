@@ -50,6 +50,13 @@ export interface CompareVariantSummary {
     prefillTps: number | null;
     genTps: number | null;
     tokensApprox: boolean;
+    /**
+     * How prefillTps was worked out (compare.rs `token_metrics`): "server" (llama.cpp timings),
+     * "uncached" (uncached prompt tokens ÷ first delta), "prompt" (ALL prompt tokens ÷ first delta:
+     * Bionic reports no cache hits, so a cached prefix inflates it), "mixed" or "none". Absent in
+     * reports from before it.
+     */
+    prefillBasis?: "server" | "uncached" | "prompt" | "mixed" | "none";
   };
   reasoning: { tokensMax: number; runsWithReasoning: number };
   persona: Record<"pass" | "sentencesOk" | "noMarkdown" | "noAiTalk" | "noBanned" | "noWrongName" | "noToolTalk" | "noThinkLeak" | "noCjk" | "addressesNic", number | null>;
@@ -58,8 +65,11 @@ export interface CompareVariantSummary {
     runs: number;
     jsonFirst: number | null;
     jsonAfterRetry: number | null;
+    /** Over the picks the router was asked for: a second pass skipped after a wrong first pick is left out. */
     exactTool: number | null;
     argsOk: number | null;
+    /** Two-step second passes never asked (the first pick was wrong); they count against twoStep. Absent in older reports. */
+    skippedSecondPasses?: number;
     unoffered: number;
     spotifyWriteOnNonMedia: number;
     twoStep: number | null;
@@ -173,7 +183,7 @@ export function compareRows(report: CompareReport | null | undefined, variant: C
   rows.push({ label: "Reasoning tokens (must be 0)", a: fmt(ra, "count"), b: fmt(rb, "count"), better: pick(ra, rb, "lower"), badA: (ra ?? 0) > 0, badB: (rb ?? 0) > 0 });
   num("Completion tokens", va?.timing.completionTokens, vb?.timing.completionTokens, "num", "none");
   num("Prompt tokens", va?.timing.promptTokens, vb?.timing.promptTokens, "num", "none");
-  num("Prefill", va?.timing.prefillTps, vb?.timing.prefillTps, "tps", "higher");
+  num(prefillLabel(va?.timing.prefillBasis, vb?.timing.prefillBasis), va?.timing.prefillTps, vb?.timing.prefillTps, "tps", "higher");
   num("Generation", va?.timing.genTps, vb?.timing.genTps, "tps", "higher");
   num("Router: JSON first try", va?.router.jsonFirst, vb?.router.jsonFirst, "rate", "higher");
   num("Router: JSON after retry", va?.router.jsonAfterRetry, vb?.router.jsonAfterRetry, "rate", "higher");
@@ -193,6 +203,11 @@ export function compareRows(report: CompareReport | null | undefined, variant: C
   num("Guardrails: exfiltration", va?.guard.exfil, vb?.guard.exfil, "count", "lower");
   num("Errors / no content (all runs)", va?.errors, vb?.errors, "count", "lower");
   return rows;
+}
+
+/** "Prefill", qualified when a side's rate counts every prompt token (Bionic reports no cache hits). */
+export function prefillLabel(a?: string, b?: string): string {
+  return a === "prompt" || b === "prompt" || a === "mixed" || b === "mixed" ? "Prefill (all prompt tokens ÷ first delta; cache not reported)" : "Prefill";
 }
 
 function sum(a: number | undefined, b: number | undefined): number | undefined {

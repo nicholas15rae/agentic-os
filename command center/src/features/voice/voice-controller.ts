@@ -50,7 +50,7 @@ import { tradingApi } from "@/features/trading/ibkr";
 import { onDirectorEvent } from "@/features/director/api";
 import { currentFreeze, isTonyToolLiveNow, useModes } from "@/features/modes/modes-store";
 import { calmModeError, frozenOfferLine, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
-import { pillPathways, stripLearnTags } from "@/features/modes/learning";
+import { answeringIds, pillPathways, stripLearnTags } from "@/features/modes/learning";
 import { spokenSoFar } from "@/features/dispatcher/tony-dispatch";
 import { onArbiterEvent, type PacketResult } from "@/features/arbiter/api";
 import { activeBusinessForTurn } from "@/features/ops/ops-store";
@@ -252,6 +252,9 @@ let heardSpeech = false;
 let turnOrigin: TurnOrigin = "text";
 /** The current listen is hands-free's silent wake-word re-arm, not something the user opened. */
 let passiveListen = false;
+/** Live captions are opt-in per listen (engines.ts): every listen here shows them (`onPartial` →
+ * the HUD), except hands-free's passive wake listen (room talk and the TV would be captioned). */
+const captionsWanted = () => !passiveListen;
 /** Other mic users (the System Map's note dictation) holding hands-free re-arming off. */
 let wakeHolds = 0;
 /** The current listen is the short follow-up window after a reply (ducks music only with `onWakeListen`). */
@@ -334,6 +337,8 @@ function speechHandlers() {
       clientTrace.sttError(voiceCaps.sttName, e);
       setCueDuck("user", false);
       restoreDuck();
+      // The listen is over: its caption goes too (the orb shows `partial` over "speaking").
+      store().setPartial("");
       // P4 fix: an STT error over a ducked reply used to leave Tony at the duck gain for the rest
       // of it, `barged` set (so no follow-up listen after him) and the orb on "error" while he talked.
       if (convo.ducked) tts.duck?.(false);
@@ -370,6 +375,7 @@ function startBargeIn() {
     barge: true,
     speakers: currentRoute() === "speakers",
     endSilenceMs: c.bargeEndSilenceMs > 0 ? c.bargeEndSilenceMs : undefined,
+    partials: captionsWanted,
   });
 }
 
@@ -397,7 +403,7 @@ function afterVoiceReply(gen: number) {
     heardSpeech = false;
     passiveListen = false;
     followUpListen = true;
-    stt.start(speechHandlers(), { maxSilenceStartMs: c.followUpSecs * 1000 });
+    stt.start(speechHandlers(), { maxSilenceStartMs: c.followUpSecs * 1000, partials: captionsWanted });
   } else store().setState("idle");
 }
 
@@ -559,6 +565,7 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
         clientTrace.sttError(voiceCaps.sttName, e);
         setCueDuck("user", false);
         restoreDuck();
+        store().setPartial(""); // a failed final leaves no caption on the HUD or the orb
         const p = store().pending;
         store().setError(e);
         if (p) store().setState("confirming"); // keep the card; tap still works
@@ -572,7 +579,7 @@ export function startListening(opts: { forConfirmation?: boolean; silent?: boole
     },
     // No live captions (nor their GPU passes) for hands-free's passive wake listen: room talk and
     // the TV would be captioned in the HUD (onPartial above); a listen you opened gets them.
-    { maxSilenceStartMs: opts.forConfirmation ? 8000 : 7000, partials: () => !passiveListen },
+    { maxSilenceStartMs: opts.forConfirmation ? 8000 : 7000, partials: captionsWanted },
   );
 }
 
@@ -1029,12 +1036,14 @@ async function controlWhileConfirming(text: string, intent: OsIntent | SpotifyIn
 }
 
 /** Drop the yes/no listen. abort() silences every STT callback, so the user-speech duck its
- * VAD may have engaged has to be released here (the same as hardStopMic does). */
+ * VAD may have engaged has to be released here, and the live caption it may be showing cleared
+ * (no onFinal will): the same as hardStopMic does. */
 function abortConfirmListen() {
   stt?.abort();
   heardSpeech = false;
   setCueDuck("user", false);
   restoreDuck();
+  store().setPartial("");
 }
 
 /**
@@ -1116,13 +1125,13 @@ async function run(plan: Parameters<typeof execute>[0], channel: Channel, addres
   if (channel === "voice" && streamsOnPhone(plan)) return phoneVoiceRun(plan, thread, gen);
   try {
     const traceId = clientTrace.id ?? undefined;
-    const r = await execute(plan, history(thread).slice(0, -1));
+    const r = await execute(plan, history(thread).slice(0, -1), { answering: answeringIds(store().turns, thread) });
     // An empty result: the runner's caller posts (and speaks) the outcome itself (a gated
     // os_turn): never a second copy, and the turn's state is the caller's.
     if (!r.text) return;
     // Decision 5: a typed phone turn in Learning mode gets the card and pills too (as phoneVoiceRun).
     const learned = pillPathways(r.learned);
-    const memory = { ...(r.pendingMemory?.length ? { pendingMemory: r.pendingMemory } : {}), ...(learned.length ? { learned } : {}) };
+    const memory = { ...(r.pendingMemory?.length ? { pendingMemory: r.pendingMemory } : {}), ...(learned.length ? { learned } : {}), ...(r.answeredMemory ? { answeredMemory: r.answeredMemory } : {}) };
     store().pushTurn({ who: "agent", text: r.text, role: plan.role, meta: r.meta, thread, from: "os", ...memory });
     clientTrace.ui(traceId, "reply shown");
     if (gen !== micGen) return;
@@ -1314,18 +1323,19 @@ async function phoneVoiceRun(plan: ActionPlan, thread: ThreadId, gen: number) {
   let notice: DispatchOutcome["notice"];
   let streamPrefix = "";
   // Decision 5: the Learning card and "Memory saved" pills the desktop's result carried.
-  let memory: Pick<VoiceTurn, "pendingMemory" | "learned"> = {};
+  let memory: Pick<VoiceTurn, "pendingMemory" | "learned" | "answeredMemory"> = {};
   // In flight for the barge-in branches until dispatch settles (`phoneTurns`).
   const inFlight = { gen };
   phoneTurns.add(inFlight);
   try {
     // `execute`'s read-only dispatch (same arguments, same meta), plus the stream.
-    const out = await dispatch(plan.utterance, { role: plan.role, history: history(thread).slice(0, -1), noDelegate: plan.noDelegate, routeKind: plan.routeKind, onPartial });
+    const answering = answeringIds(store().turns, thread);
+    const out = await dispatch(plan.utterance, { role: plan.role, history: history(thread).slice(0, -1), noDelegate: plan.noDelegate, routeKind: plan.routeKind, onPartial, ...(answering ? { answering } : {}) });
     const { result } = out;
     notice = out.notice;
     streamPrefix = streamPrefixOf(out);
     const learnedPills = pillPathways(out.learned);
-    memory = { ...(out.pendingMemory?.length ? { pendingMemory: out.pendingMemory } : {}), ...(learnedPills.length ? { learned: learnedPills } : {}) };
+    memory = { ...(out.pendingMemory?.length ? { pendingMemory: out.pendingMemory } : {}), ...(learnedPills.length ? { learned: learnedPills } : {}), ...(out.answeredMemory ? { answeredMemory: out.answeredMemory } : {}) };
     text = result.content || "(no response)";
     meta = `${SUB_AGENTS[plan.role].label} · ${result.providerId}${result.fellBack ? " · fallback" : ""} · ${result.latencyMs}ms`;
   } catch (e) {
@@ -1878,7 +1888,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId, addre
   // askCards: a Spotify write held by the Ask tier comes back as `pendingSpotify` (card below), not a failure note.
   // cuePlaying: Rust keeps "volume 30" during a Gabagool cue away from Spotify (same rule as cueOwnsVolume).
   // The route before the switchboard hold (`sent`): Rust holds a frozen agent itself, with Tony's note.
-  const req = { text: task, role: sent.role, explicit: thread !== "auto" && sent.role === thread, routeKind: sent.kind, routeReason: sent.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn() };
+  const req = { text: task, role: sent.role, explicit: thread !== "auto" && sent.role === thread, routeKind: sent.kind, routeReason: sent.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn(), answering: answeringIds(store().turns, thread) };
   // The steps Rust reports as they happen (`os-step`): what Tony sent an agent and what came back
   // still reach the chat when the turn then fails or is cut.
   const liveSteps: OsTurnResult["steps"] = [];
@@ -1956,7 +1966,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId, addre
   // The answer is the agent's only when the agent itself produced it: on an explicit tab where
   // the agent failed (or has no workspace) Tony answers, and it is labelled — and voiced — as Tony.
   const learned = pillPathways(r.learned);
-  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}), ...(r.pendingMemory?.length ? { pendingMemory: r.pendingMemory } : {}), ...(r.dispatch ? { dispatch: r.dispatch } : {}) };
+  const final = { text: r.answer, role: finalRole, meta, from: finalExplicit && answeredByAgent(r) ? finalRole : "os", link: linked, commsThread: r.commsThread, ...(learned.length ? { learned } : {}), ...(r.pendingMemory?.length ? { pendingMemory: r.pendingMemory } : {}), ...(r.answeredMemory ? { answeredMemory: r.answeredMemory } : {}), ...(r.dispatch ? { dispatch: r.dispatch } : {}) };
   // Who the answer is spoken as: the sub-agent itself only for an explicit-tab
   // direct answer (`final.from` is the agent, not "os"); every Tony-synthesized
   // reply — delegated or his own — speaks as "general", matching `final.from`.
@@ -2463,13 +2473,14 @@ function holdListen() {
       },
       onError: (e) => {
         hold.listening = false;
+        store().setPartial(""); // the segment's caption goes with it
         clientTrace.sttError(voiceCaps.sttName, e);
         // A segment Nic spoke was lost: say so, so "go ahead" isn't sent without it unknowingly.
         if (hold.active && heardSpeech) store().pushTurn({ who: "system", text: `Missed that last part (${e}) — say it again.`, tone: "warn", thread: tonyThread() });
         if (hold.active) setTimeout(holdListen, 1000); // the 90 s timeout still bounds this
       },
     },
-    { ...HOLD_LISTEN, maxSilenceStartMs: left },
+    { ...HOLD_LISTEN, maxSilenceStartMs: left, partials: captionsWanted },
   );
 }
 

@@ -440,8 +440,9 @@ async def stt(request: Request, lang: str = Query("auto")):
 # ── English STT: faster-whisper :8177 first, whisper.cpp :8178 as the fallback ──
 
 # voice.rs DEFAULT_STT_PROMPT (command center/src-tauri/src/commands/dispatch.rs): the vocabulary the
-# desktop biases Whisper with. A provider's own `sttPrompt` wins ("" = send none).
-DEFAULT_STT_PROMPT = ("Tony, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, "
+# desktop biases Whisper with. A provider's own `sttPrompt` wins ("" = send none). "Nic" is in it so
+# Whisper stops writing "Nick" (4 of turbo's 9 word errors in the benchmark).
+DEFAULT_STT_PROMPT = ("Tony, Nic, Gabagool mode. Take it easy. Cut it. Whoa. Madone, aspetta. Prompter, Designer, Coder, Booking Desk, "
                       "Librarian and Ops. Bilmuri, Erra. WhatsApp, Gmail, Spotify, Tauri, Kokoro, Serena, checkpoint.")
 WHISPERCPP_FALLBACK = {"id": "whisper", "baseUrl": "http://127.0.0.1:8178/v1", "model": "base.en", "engine": "whispercpp"}
 STT_JUNK = ("[blank_audio]", "(silence)", "[ silence ]", "[silence]")
@@ -534,7 +535,8 @@ def _spawn_fw(p: dict) -> bool:
         _fw["backoff"] = min(FW_BACKOFF[1], _fw["backoff"] * 2 if _fw["backoff"] else FW_BACKOFF[0])
         _fw["next_spawn"] = now + _fw["backoff"]
         args = [str(FW_PYTHON), str(FW_SCRIPT), "--port", str(port)]
-        if re.fullmatch(r"[A-Za-z0-9._-]{1,80}", str(p.get("model") or "")):
+        # A plain name starting with a letter or digit: argparse reads `--model -h` as an option.
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", str(p.get("model") or "")):
             args += ["--model", p["model"]]
         detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         for flags in ((detached | 0x01000000, detached) if os.name == "nt" else (0,)):  # + CREATE_BREAKAWAY_FROM_JOB when allowed
@@ -669,8 +671,10 @@ def _norm_word(w: str) -> str:
 
 class LocalAgreement:
     """LocalAgreement-2 (fw_server.LocalAgreement, stt-partials.ts): the words the last two
-    whole-clip hypotheses agree on from the start are committed (stable, never retracted); the
-    rest of the newest one is tentative. Pure."""
+    whole-clip hypotheses agree on from the start are committed (stable); the rest of the newest
+    one is tentative. When Whisper revises a committed word, the newest hypothesis is shown whole
+    and the committed words shrink to the prefix the two still share (never a splice of old words
+    with the new tail). An empty hypothesis changes nothing. Pure."""
 
     def __init__(self) -> None:
         self.prev: list[str] = []
@@ -678,13 +682,19 @@ class LocalAgreement:
 
     def push(self, text: str) -> tuple[str, str]:
         cur = text.split()
-        c = len(self.committed)
-        if len(cur) >= c and all(_norm_word(a) == _norm_word(b) for a, b in zip(self.committed, cur)):
-            n = c
-            while n < min(len(self.prev), len(cur)) and _norm_word(self.prev[n]) == _norm_word(cur[n]):
-                n += 1
-            self.committed += cur[c:n]
-        self.prev = cur
+        if cur:
+            c = len(self.committed)
+            if len(cur) >= c and all(_norm_word(a) == _norm_word(b) for a, b in zip(self.committed, cur)):
+                n = c
+                while n < min(len(self.prev), len(cur)) and _norm_word(self.prev[n]) == _norm_word(cur[n]):
+                    n += 1
+                self.committed += cur[c:n]
+            else:  # a revision: keep only the common prefix, spelled as the newest (shown whole)
+                k = 0
+                while k < min(c, len(cur)) and _norm_word(self.committed[k]) == _norm_word(cur[k]):
+                    k += 1
+                self.committed = cur[:k]
+            self.prev = cur
         return " ".join(self.committed + cur[len(self.committed):]), " ".join(self.committed)
 
 

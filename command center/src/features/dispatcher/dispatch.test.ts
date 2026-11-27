@@ -58,6 +58,9 @@ import {
   postMayHaveQueued,
   postRefused,
   MEMORY_DECISION_CAP_MS,
+  MEMORY_DECISION_RETRY_MS,
+  memoryStillPendingMessage,
+  memoryUnconfirmedMessage,
   queueDesktopTurn,
   sendDesktopTurn,
   sendMemoryDecision,
@@ -1199,6 +1202,20 @@ describe("decision 5: the Learning card reaches the phone", () => {
     const out = await p;
     expect(out).not.toHaveProperty("pendingMemory");
     expect(out).not.toHaveProperty("learned");
+    expect(out).not.toHaveProperty("answeredMemory");
+    const post = h.gateway.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(post[1].body).payload).not.toHaveProperty("answering");
+  });
+
+  it("a yes sends the card's ids (answering) and keeps the desktop's answeredMemory (well-formed only)", async () => {
+    stubQueue(() => ({ status: "done", result: { ok: true, result: { answer: "Saved to my core memories.", providerId: "learning", answeredMemory: { ids: ["mem-1-2", "../x"], approved: true } } } }));
+    const p = dispatch("yes", { answering: ["mem-1-2"] });
+    await vi.advanceTimersByTimeAsync(2_000);
+    const out = await p;
+    expect(out.answeredMemory).toEqual({ ids: ["mem-1-2"], approved: true });
+    expect(out.result.providerId).toBe("desktop:learning");
+    const post = h.gateway.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(post[1].body).payload.answering).toEqual(["mem-1-2"]);
   });
 
   it("sendMemoryDecision queues a command and returns the desktop's memory answer", async () => {
@@ -1211,11 +1228,102 @@ describe("decision 5: the Learning card reaches the phone", () => {
     expect(JSON.parse(post[1].body)).toEqual({ kind: "command", payload: { memoryApprove: "mem-1-2" } });
   });
 
-  it("a skip sends memoryDiscard; no desktop answer within the cap is null", async () => {
+  it("a skip the desktop claimed but hasn't answered: one more wait, then 'may still be skipped', never 'nothing was saved'", async () => {
     stubQueue(() => ({ status: "running", result: null }));
-    const p = sendMemoryDecision("mem-1-2", false);
+    const t = track(sendMemoryDecision("mem-1-2", false));
     await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS + 5_000);
-    expect(await p).toBeNull();
+    expect(t.done).toBe(false); // the second wait
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_RETRY_MS);
+    expect(t.done).toBe(true);
+    expect((t.error as Error).message).toBe(memoryStillPendingMessage(false));
+    expect(t.value).toBeUndefined();
     expect(postedPayload()).toEqual({ memoryDiscard: "mem-1-2" });
+    expect(cancels()).toBe(0); // a claimed command can't be taken back
+  });
+});
+
+describe("decision 5 (FX2): a memory decision is never 'nothing was saved' while it may still run", () => {
+  const saved = [{ id: "lp-1-0", title: "Call me Nic", category: "persona", confidence: "confirmed", outcome: "saved" }];
+  const answer = { status: "done", result: { ok: true, result: { killSwitch: false, memory: { id: "mem-1-2", approved: true, saved } } } };
+  /** The desktop app is open but busy with an earlier item, so the command sits queued. */
+  const busy = (): Poll => ({ status: "pending", result: null, desktopSeenAt: Date.now() / 1000, desktopBusy: true });
+
+  it("still queued when the 30 s run out: cancelled at the gateway, then (and only then) null", async () => {
+    stubQueue(() => busy());
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS - 1_000);
+    expect(cancels()).toBe(0); // a busy desktop is waited for, never given up early
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(t).toMatchObject({ done: true, value: null });
+    expect(cancels()).toBe(1);
+    expect(postedPayload()).toEqual({ memoryApprove: "mem-1-2" });
+  });
+
+  it("the desktop claimed it as the phone tried to take it back (409): waits once more and shows the save", async () => {
+    stubQueue((ms) => (ms < MEMORY_DECISION_CAP_MS + 4_000 ? busy() : answer), undefined, conflict);
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS + 10_000);
+    expect(t).toMatchObject({ done: true, value: { id: "mem-1-2", approved: true, saved } });
+    expect(cancels()).toBe(1);
+  });
+
+  it("claimed and answered during the second wait: the save is shown", async () => {
+    stubQueue((ms) => (ms < MEMORY_DECISION_CAP_MS + 8_000 ? { status: "running", result: null } : answer));
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS + 12_000);
+    expect(t).toMatchObject({ done: true, value: { id: "mem-1-2", approved: true, saved } });
+    expect(cancels()).toBe(0);
+  });
+
+  it("claimed and still not answered after the second wait: 'may still be saved'", async () => {
+    stubQueue(() => ({ status: "running", result: null }));
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS + MEMORY_DECISION_RETRY_MS + 5_000);
+    expect((t.error as Error).message).toBe(memoryStillPendingMessage(true));
+    expect(memoryStillPendingMessage(true)).toContain("may still be saved");
+    expect(memoryStillPendingMessage(true)).not.toContain("nothing was saved");
+  });
+
+  it("the cancel got no answer: 'may still be saved' (unconfirmed), never null", async () => {
+    stubQueue(() => busy(), undefined, unreachable);
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(MEMORY_DECISION_CAP_MS + 5_000);
+    expect((t.error as Error).message).toBe(memoryUnconfirmedMessage(true));
+    expect(cancels()).toBe(2); // one retry of the transient failure
+  });
+
+  it("no desktop app at all: cancelled at once (POST says it's off), null; a failed cancel is unconfirmed", async () => {
+    const off = () => ({ id: "q1", desktopSeenAt: null, desktopBusy: false });
+    stubQueue(() => quiet(), off);
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(t).toMatchObject({ done: true, value: null });
+    expect(cancels()).toBe(1);
+    expect(polls()).toBe(0);
+    h.gateway.mockReset();
+    stubQueue(() => quiet(), off, unreachable);
+    const u = track(sendMemoryDecision("mem-1-2", false));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((u.error as Error).message).toBe(memoryUnconfirmedMessage(false));
+  });
+
+  it("a POST that may have landed (no answer / 5xx) is unconfirmed; one turned away outright throws its error", async () => {
+    stubQueue(() => quiet(), unreachable);
+    await expect(sendMemoryDecision("mem-1-2", true)).rejects.toThrow(memoryUnconfirmedMessage(true));
+    stubQueue(
+      () => quiet(),
+      () => {
+        throw new h.GatewayError("401 Unauthorized", 401);
+      },
+    );
+    await expect(sendMemoryDecision("mem-1-2", true)).rejects.toThrow("401 Unauthorized");
+    expect(cancels()).toBe(0);
+  });
+
+  it("a desktop refusal (expired / already answered) still throws its text", async () => {
+    stubQueue(() => ({ status: "done", result: { ok: false, error: "that memory proposal expired or was already answered" } }));
+    const t = track(sendMemoryDecision("mem-1-2", true));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((t.error as Error).message).toBe("that memory proposal expired or was already answered");
   });
 });

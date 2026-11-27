@@ -270,11 +270,61 @@ function leadsWithSelf(toks: string[], selfNames: [string, string][]): boolean {
   return !!matchNameAt(toks, p, selfNames);
 }
 
-/** The line opens with one of `names` (an agent's), optionally after "hey / hi / ok / yo / so". */
-function leadsWithName(toks: string[], names: [string, string][]): boolean {
+/** Words after "email" that make it the mail noun of a read ("audition email check", "booking email
+ * updates"), not a command to send one ("booking email Sam about the shoot"). Mirrors routing.rs. */
+const MAIL_NOUN_NEXT = ["check", "checks", "read", "update", "updates", "today", "tonight", "yesterday", "from", "inbox", "summary"];
+
+/** In a mail read, the word at `k` right after an opening desk name is "email" used as the mail noun,
+ * so "NAME email …" is a topic ("audition email check"), not "NAME, email …". Mirrors `mail_noun_at`. */
+function mailNounAt(toks: string[], k: number, original: string): boolean {
+  const next = tokAt(toks, k + 1);
+  return tokAt(toks, k) === "email" && (next === undefined || MAIL_NOUN_NEXT.includes(next)) && directTool(original) === "gmail";
+}
+
+/** Marks that end a spoken address ("booking desk, …", "booking: …", "booking - …"). Mirrors routing.rs. */
+const ADDRESS_PAUSES = [",", ":", ";", "!", "?", ".", "—", "–", " - "];
+/** The ADDRESS_LEADS that call out to someone ("hey booking agent …"). "ok" / "okay" / "so" are
+ * fillers ("Okay, booking emails from today?"): they never make the next word an address. */
+const ADDRESS_VOCATIVES = ["hey", "hi", "yo"];
+/** After "hey / hi / yo NAME", the words that keep NAME an address ("hey booking any new emails",
+ * "hey booking agent did Sam reply?"), besides ADDRESS_NEXT and VERBS_B. Any other word ("hey
+ * booking emails from today?") makes NAME a topic word. Mirrors routing.rs. */
+const VOCATIVE_NEXT = ["any", "anything", "did", "do", "does", "have", "has", "is", "are", "was", "were", "can", "could", "would", "will"];
+
+/** Every index of `m` in `s`. */
+function indicesOf(s: string, m: string): number[] {
+  const out: number[] = [];
+  for (let i = s.indexOf(m); i >= 0; i = s.indexOf(m, i + 1)) out.push(i);
+  return out;
+}
+
+/**
+ * The line opens by ADDRESSING one of `names` (an agent's), after any "hey / hi / ok / yo / so"
+ * leads: the name, then a pause mark or the line's end ("booking desk, any new emails?", "Okay,
+ * booking: any emails today?"); or, after a vocative lead only, the name followed by an address
+ * word ("hey booking agent any emails?", "hey booking check my inbox"). A name that opens the line
+ * as a topic word ("booking emails from today?", "Okay, booking emails from today?", "so audition
+ * email check") is no address. `original`: the raw line (its punctuation). Mirrors
+ * `leads_with_name` in routing.rs.
+ */
+function leadsWithName(original: string, toks: string[], names: [string, string][]): boolean {
   let p = 0;
   while (p < toks.length && ADDRESS_LEADS.includes(toks[p])) p += 1;
-  return !!matchNameAt(toks, p, names);
+  const hit = matchNameAt(toks, p, names);
+  if (!hit) return false;
+  const nlen = hit[1];
+  if (toks.slice(0, p).some((w) => ADDRESS_VOCATIVES.includes(w))) {
+    const k = p + nlen + (tokAt(toks, p + nlen) === "please" ? 1 : 0);
+    const w = tokAt(toks, k);
+    const follows = w === undefined || ((ADDRESS_NEXT.includes(w) || VOCATIVE_NEXT.includes(w) || VERBS_B.includes(w)) && !mailNounAt(toks, k, original));
+    if (follows) return true;
+  }
+  // The text after the leads, up to the next pause mark, is exactly the name. A pause inside the
+  // leads ("Okay, …") doesn't count: the first one with more than the leads before it.
+  const before = (i: number) => tokenize(normalize(original.slice(0, i))).length;
+  const pauses = ADDRESS_PAUSES.flatMap((m) => indicesOf(original, m)).sort((a, b) => a - b);
+  const cut = pauses.find((i) => before(i) > p) ?? original.length;
+  return before(cut) === p + nlen;
 }
 
 /** The line ends with a self name ("…, tony", "… tony please") that isn't an object (`NOT_VOCATIVE_BEFORE`). */
@@ -411,19 +461,19 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
       continue;
     }
     const v = tokAt(toks, k);
-    if (v !== undefined && VERBS_B.includes(v)) {
+    if (v !== undefined && VERBS_B.includes(v) && !mailNounAt(toks, k, original)) {
       const task = originalTail(original, k);
       return { role, reason: "you named this agent directly", confidence: "high", kind: "Named", task: task || original };
     }
     break;
   }
   // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar read ("check gmail for
-  // booking emails", "any audition emails?") is Tony's own live tool: a name merely mentioned there
-  // is a topic, not an address. Only opening the line with it ("booking desk, any …") or step (a)
-  // above ("tell booking to …") hands it over.
+  // booking emails", "any audition emails?", "booking emails from today?") is Tony's own live tool:
+  // a name merely mentioned there, even first, is a topic, not an address. Only addressing the desk
+  // ("booking desk, any …", "hey booking agent …") or step (a) above ("tell booking to …") hands it over.
   const mentioned = matchNameAnywhere(toks, names);
   const liveRead = directTool(original);
-  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar") || leadsWithName(toks, names)))
+  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar") || leadsWithName(original, toks, names)))
     return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
   if (matchNameAnywhere(toks, selfNames)) selfHit = true;
   // A self name in an address position (beats a topic below); any other mention is step (d) only.

@@ -65,6 +65,11 @@ def _quiet_server(handler):
     return srv, port
 
 
+
+def said(content: str) -> str:
+    """What Nic said: the last user message without gateway_tony's clock line (and role note)."""
+    return content.split("\n\n" + gt.CLOCK_PREFIX, 1)[0]
+
 class FakeBionic:
     """Bionic's REST surface: /api/v0/models (state per model), /api/v1/models/load, and a streamed
     /v1/chat/completions. Records every request body."""
@@ -331,7 +336,8 @@ class PromptTests(unittest.TestCase):
         for absent in ("ROOT AUTHORITY", "You can hand work to", "local sub-agent", "LEARNING MODE", "[[LEARN", "/no_think", "LIVE DASHBOARD (now)", "TOOLS YOU HAVE"):
             self.assertNotIn(absent, sys_msg)
         self.assertLess(len(sys_msg), 5000)
-        self.assertEqual(msgs[-1], {"role": "user", "content": "what's up"})
+        self.assertEqual(msgs[-1]["role"], "user")
+        self.assertEqual(said(msgs[-1]["content"]), "what's up")
 
     def test_learning_protocol_never_reaches_the_gateway_prompt(self):
         tail = ("\n\nMODE: Learning. These MODE rules override the STYLE length rule.\nCURIOSITY HIGH: ask.\n"
@@ -379,7 +385,28 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(gt.build_messages({"text": "where are we at?", "role": "coder"})[-1]["content"].endswith(
             "(Nic addressed the Coder; that agent only runs when the desktop app is open — say so if it matters.)"))
         for self_role in ("general", "tony", "Tony", ""):
-            self.assertEqual(gt.build_messages({"text": "hi", "role": self_role})[-1]["content"], "hi")
+            self.assertEqual(said(gt.build_messages({"text": "hi", "role": self_role})[-1]["content"]), "hi")
+
+    def test_the_last_user_message_carries_the_local_time_and_the_system_prompt_never_does(self):
+        real = gt._clock
+        try:
+            gt._clock = lambda: time.mktime((2026, 11, 26, 17, 7, 30, 0, 0, -1))
+            a = gt.build_messages({"text": "what time is it?"})
+            self.assertEqual(a[-1]["content"], "what time is it?\n\n(Nic's local time: Thursday, November 26, 2026, 5:07 p.m.)")
+            gt._clock = lambda: time.mktime((2026, 11, 27, 0, 3, 0, 0, 0, -1))
+            b = gt.build_messages({"text": "what time is it?", "role": "coder"})
+            self.assertIn("(Nic's local time: Friday, November 27, 2026, 12:03 a.m.)", b[-1]["content"])
+            self.assertTrue(b[-1]["content"].endswith("say so if it matters.)"))  # the role note stays last
+            # Bionic's prompt cache: the system prompt is byte-identical whatever the clock says.
+            self.assertEqual(a[0]["content"], b[0]["content"])
+            self.assertNotIn(gt.CLOCK_PREFIX, a[0]["content"])
+        finally:
+            gt._clock = real
+
+    def test_history_never_carries_an_old_clock_line(self):
+        msgs = gt.build_messages({"text": "and now?", "history": [{"role": "user", "content": "what time is it?"}, {"role": "assistant", "content": "5:07"}]})
+        self.assertEqual([m["content"] for m in msgs[1:-1]], ["what time is it?", "5:07"])
+        self.assertEqual(sum(gt.CLOCK_PREFIX in m["content"] for m in msgs), 1)
 
     def test_tonys_model_is_never_empty(self):
         self.env.providers(model="")
@@ -795,7 +822,7 @@ class GatewayTonyFlowTests(GatewayCase):
         self.assertEqual((body["model"], body["stream"], body["max_tokens"], body["reasoning_effort"]), (TONY, True, gt.MAX_TOKENS, "none"))
         self.assertEqual([m["role"] for m in body["messages"]], ["system", "user", "assistant", "user"])
         self.assertIn("GATEWAY TURN:", body["messages"][0]["content"])
-        self.assertEqual(body["messages"][-1]["content"], "how's it going?")
+        self.assertEqual(said(body["messages"][-1]["content"]), "how's it going?")
         self.assertEqual(self.fake.load_calls, [], "a warm model is never reloaded")
 
     def test_the_gateway_never_writes_desktop_seen(self):
@@ -957,7 +984,7 @@ class GatewayTonyFlowTests(GatewayCase):
         self.wait_done(first["id"])
         r2 = self.wait_done(second["id"])
         self.assertEqual(r2["result"]["result"]["answeredBy"], "gateway")
-        self.assertEqual([c["body"]["messages"][-1]["content"] for c in self.fake.chat_calls], ["one", "two"])
+        self.assertEqual([said(c["body"]["messages"][-1]["content"]) for c in self.fake.chat_calls], ["one", "two"])
 
     def test_a_post_during_a_watchdog_scan_is_still_claimed(self):
         entered, release = threading.Event(), threading.Event()
@@ -1022,7 +1049,7 @@ class GatewayTonyFlowTests(GatewayCase):
         res = r["result"]
         self.assertEqual((r["status"], res["ok"], res["result"]["answeredBy"]), ("done", True, "gateway"))
         self.assertEqual(res["result"]["answer"], "Hey Nic. All good here.")
-        self.assertEqual(self.fake.chat_calls[0]["body"]["messages"][-1]["content"], "you there?")
+        self.assertEqual(said(self.fake.chat_calls[0]["body"]["messages"][-1]["content"]), "you there?")
         self.assertEqual(self.cancel(d["id"])[0], 409, "finished: still not cancellable")
 
     def test_the_phones_cancel_queues_a_turn_behind_a_busy_gateway_tony_in_order(self):
@@ -1042,7 +1069,7 @@ class GatewayTonyFlowTests(GatewayCase):
         self.fake.gate.set()
         for d in (first, second, third):
             self.assertEqual(self.wait_done(d["id"])["result"]["result"]["answeredBy"], "gateway")
-        self.assertEqual([c["body"]["messages"][-1]["content"] for c in self.fake.chat_calls], ["one", "two", "three"])
+        self.assertEqual([said(c["body"]["messages"][-1]["content"]) for c in self.fake.chat_calls], ["one", "two", "three"])
 
     def test_with_gateway_tony_off_or_not_started_a_cancel_is_a_cancel(self):
         os_api._DESKTOP_SEEN["at"] = time.time()  # nothing claimed at POST

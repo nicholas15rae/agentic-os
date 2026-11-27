@@ -1,8 +1,8 @@
 import { api, gateway, GatewayError } from "@/lib/gateway";
 import { cmd, type ChatMessage, type DispatchResult } from "@/lib/platform";
 import { isAndroidApp, isDesktopApp } from "@/stores/settings";
-import { learnedOf, pendingMemoryOf, type LearnedPathway, type PendingMemory } from "@/features/modes/learning";
-import { bookingsOf, rememberBookings } from "@/features/orchestrator/bookings";
+import { answeredMemoryOf, learnedOf, pendingMemoryOf, type AnsweredMemory, type LearnedPathway, type PendingMemory } from "@/features/modes/learning";
+import { rememberScan } from "@/features/orchestrator/bookings";
 import { SUB_AGENTS, type AgentRole } from "./agents";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve, type RouteKind } from "./router";
 
@@ -19,6 +19,8 @@ export interface DispatchOutcome {
    * desktop's; `sendMemoryDecision` answers it) and the core memories it saved. */
   pendingMemory?: PendingMemory[];
   learned?: LearnedPathway[];
+  /** Phone only: the desktop's answer to a spoken / typed yes / no named the proposals it took. */
+  answeredMemory?: AnsweredMemory;
 }
 
 /** What a phone `dispatch` returned instead of an answer (`DispatchOutcome.notice`). */
@@ -46,6 +48,9 @@ export interface DispatchOptions {
    * ever grows, and never comes after the final result, which `dispatch` returns as before. The
    * desktop app (`dispatch_chat`) never calls it. */
   onPartial?: (soFar: string) => void;
+  /** Phone only, Learning mode: the ids on the card of the thread's newest Tony reply
+   * (`answeringIds`), sent as `answering` so a yes / no answers that card's batch only. */
+  answering?: string[];
 }
 
 /** The desktop's answer to a queued phone item (`result` of `/api/os/inbox/{id}`). `streamPrefix`:
@@ -396,17 +401,56 @@ export async function queueDesktopItem(kind: InboxKind, payload: Record<string, 
 
 /** How long the phone waits for the desktop to answer a memory decision. */
 export const MEMORY_DECISION_CAP_MS = 30_000;
+/** The desktop has the decision (claimed it, or took it as the phone tried to take it back): how
+ * much longer the phone waits for its answer. */
+export const MEMORY_DECISION_RETRY_MS = 30_000;
+
+/** The desktop has the Save / Skip but didn't answer in time: it may still be applied. */
+export const memoryStillPendingMessage = (approve: boolean): string =>
+  `The desktop has your ${approve ? "Save" : "Skip"} but hasn't finished it yet, so it may still be ${approve ? "saved" : "skipped"}. Give it a moment before trying again.`;
+/** Nobody can say whether the desktop got the Save / Skip (the POST or the cancel got no answer). */
+export const memoryUnconfirmedMessage = (approve: boolean): string =>
+  `I couldn't confirm whether the desktop got your ${approve ? "Save" : "Skip"} or take it back, so it may still be ${approve ? "saved" : "skipped"} when the desktop gets to it.`;
+
+/** The desktop's `memory` answer in a command result. */
+function memoryOf(r: DesktopResult): Record<string, unknown> | null {
+  const m = r.memory;
+  return m && typeof m === "object" ? (m as Record<string, unknown>) : null;
+}
 
 /**
  * Phone (decision 5): Save (`approve`) or Skip one of Tony's pending core-memory proposals: an inbox
  * `command` (`memoryApprove` / `memoryDiscard`, applied by the desktop's InboxAction::Command).
- * Resolves with the desktop's `memory` answer ({ id, approved, saved }); null when no desktop
- * answered in time. A desktop refusal (expired / already answered) throws its text.
+ * Resolves with the desktop's `memory` answer ({ id, approved, saved }). Null only when nothing was
+ * or will be applied: no desktop took the command and the gateway took it back (cancelled), or the
+ * desktop answered without a `memory` (it doesn't know the command). It never says "nothing was
+ * saved" for a command that may still run: when the 30 s run out on a command nobody claimed, it is
+ * cancelled first; one the desktop claimed (or took as we cancelled) gets one more wait, and still
+ * no answer throws `memoryStillPendingMessage`; a POST or cancel with no answer throws
+ * `memoryUnconfirmedMessage`. A desktop refusal (expired / already answered) throws its text.
  */
 export async function sendMemoryDecision(id: string, approve: boolean): Promise<Record<string, unknown> | null> {
-  const r = await queueDesktopItem("command", approve ? { memoryApprove: id } : { memoryDiscard: id }, { capMs: MEMORY_DECISION_CAP_MS });
-  const m = r?.memory;
-  return m && typeof m === "object" ? (m as Record<string, unknown>) : null;
+  let posted: InboxPosted;
+  try {
+    posted = await postInboxItem("command", approve ? { memoryApprove: id } : { memoryDiscard: id });
+  } catch (e) {
+    if (postMayHaveQueued(e)) throw new Error(memoryUnconfirmedMessage(approve));
+    throw e;
+  }
+  const w = await awaitDesktopItem(posted.id, "command", { capMs: MEMORY_DECISION_CAP_MS, cancelUnclaimed: true, posted });
+  if (w.state === "done") return memoryOf(w.result);
+  if (w.state === "unclaimed") return null; // no desktop app, and the gateway cancelled it
+  if (w.state === "uncancelled") throw new Error(memoryUnconfirmedMessage(approve));
+  if (!w.claimed) {
+    // Still queued (the desktop is busy with an earlier item): take it back before saying so.
+    const c = await cancelDesktopItem(posted.id);
+    if (c === "cancelled") return null;
+    if (c === "failed") throw new Error(memoryUnconfirmedMessage(approve));
+  }
+  // The desktop has it: once more for its answer.
+  const again = await awaitDesktopItem(posted.id, "command", { capMs: MEMORY_DECISION_RETRY_MS });
+  if (again.state === "done") return memoryOf(again.result);
+  throw new Error(memoryStillPendingMessage(approve));
 }
 
 /** How long the phone waits for the desktop to run an approved card (the gateway drops it after 5 min). */
@@ -530,7 +574,7 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
   // desktop re-resolves a Default turn, `stayWithTony` keeps a Domain hit with Tony too, while a
   // Named match or a registered business still routes. The PWA delegates topics, so it never sends it.
   const w = await sendDesktopTurn(
-    { text, role, explicit, routeKind, routeReason, history, context: "", noDelegate: !!opts.noDelegate, ...(isAndroidApp() ? { stayWithTony: true } : {}) },
+    { text, role, explicit, routeKind, routeReason, history, context: "", noDelegate: !!opts.noDelegate, ...(isAndroidApp() ? { stayWithTony: true } : {}), ...(opts.answering ? { answering: opts.answering } : {}) },
     { onPartial: opts.onPartial },
   );
   if (w.state === "done") {
@@ -541,8 +585,10 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
     // Decision 5: the full OsTurnResult reaches the phone; keep the Learning card and pills.
     const pendingMemory = pendingMemoryOf(w.result.pendingMemory);
     const learned = learnedOf(w.result.learned);
-    // A2: a booking-mail scan's threads, for a calendar-add card on a later turn.
-    if (Array.isArray(w.result.bookings)) rememberBookings(bookingsOf(w.result.bookings));
+    const answeredMemory = answeredMemoryOf(w.result.answeredMemory);
+    // A2: a booking-mail scan's threads, for a calendar-add card on a later turn (absent: no scan,
+    // the remembered list stands; []: a scan found none, so it clears).
+    rememberScan(w.result.bookings);
     return {
       role,
       result: {
@@ -555,6 +601,7 @@ export async function dispatch(text: string, opts: DispatchOptions = {}): Promis
       },
       ...(pendingMemory.length ? { pendingMemory } : {}),
       ...(learned.length ? { learned } : {}),
+      ...(answeredMemory ? { answeredMemory } : {}),
     };
   }
   if (w.state === "timeout") {

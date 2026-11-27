@@ -1288,6 +1288,9 @@ pub struct OsState {
     pub(crate) runtime: Mutex<serde_json::Map<String, serde_json::Value>>,
     /// Tony's modes (Phase 2 Part C): `modes.json` beside os.json + in-memory overrides.
     pub(crate) modes: super::modes::ModeStore,
+    /// Learning mode's pending core-memory proposals and the spoken-answer marker (decision 5):
+    /// one store per app, so desktop, phone and voice answer the same ones.
+    pub(crate) proposals: super::learning::Proposals,
 }
 
 impl OsState {

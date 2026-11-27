@@ -156,9 +156,10 @@ export const SWITCHBOARD_LIST_MAX = 16;
 
 const board = (agents: string[], tools: string[]): ModeSwitchboard => ({ agents, tools });
 export const BUILDER_SWITCHBOARD = board(["prompter", "designer", "coder"], ["filesystem", "git", "fetch", "brave-search", "knowledge-graph", "time", "weather", "spotify"]);
-export const OPERATIONS_SWITCHBOARD = board(["ops", "bizops"], ["gmail", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]);
+/** Google Calendar mirrors Gmail (Rust `OPERATIONS_TOOLS` / `EXECUTIVE_TOOLS`): live wherever Gmail is, frozen where it is. */
+export const OPERATIONS_SWITCHBOARD = board(["ops", "bizops"], ["gmail", "calendar", "whatsapp", "knowledge-graph", "filesystem", "maps", "fetch", "time", "weather", "instagram"]);
 /** The Librarian is not on Executive duty: it runs only as its scheduled script (Rust `EXECUTIVE_AGENTS`). */
-export const EXECUTIVE_SWITCHBOARD = board(["bizops", "finance"], ["knowledge-graph", "gmail", "brave-search", "time", "weather"]);
+export const EXECUTIVE_SWITCHBOARD = board(["bizops", "finance"], ["knowledge-graph", "gmail", "calendar", "brave-search", "time", "weather"]);
 /** Learning: Tony only (the always-live tools stay on). */
 export const LEARNING_SWITCHBOARD = board([], []);
 

@@ -70,7 +70,9 @@ export interface SttStartOpts {
   speakers?: boolean;
   endSilenceMs?: number;
   maxUtteranceMs?: number;
-  /** Live captions wanted right now (default yes); read per caption, so a listen can turn them on/off. */
+  /** Live captions wanted right now; read per caption, so a listen can turn them on/off. Opt-in:
+   * without it a Whisper listen spends no caption pass on the GPU (desktop: no `stt_partial` at
+   * all; phone: the stream still carries the final, with partials off). */
   partials?: () => boolean;
 }
 
@@ -491,16 +493,18 @@ export class WhisperStt implements SttEngine {
   }
 
   /**
-   * Live captions while you speak (`vad.partialMs`, 0 = off). Desktop: the clip so far through Rust
-   * `stt_partial` every partialMs. Phone: the audio streams to the gateway's WebSocket, which sends
-   * captions and, at the end, the final (the upload stays the fallback). Both pause while Tony's
-   * reply streams (his model has the GPU) and in a trailing pause (the final is near).
+   * Live captions while you speak (`vad.partialMs`, 0 = off), for a listen that asks for them
+   * (`opts.partials`; Brainstorm and System Map dictation show none, so they never pay a GPU pass).
+   * Desktop: the clip so far through Rust `stt_partial` every partialMs. Phone: the audio streams to
+   * the gateway's WebSocket, which sends captions and, at the end, the final (the upload stays the
+   * fallback; without captions the stream still saves the upload). Both pause while Tony's reply
+   * streams (his model has the GPU) and in a trailing pause (the final is near).
    */
   private liveHooks(h: SttHandlers, current: () => boolean, partials?: () => boolean): Pick<CaptureOpts, "onSpeechTick" | "onSpeechAudio"> {
     const { vad, gatewayUrl } = useSettings.getState();
     const everyMs = partialMsFrom(vad?.partialMs);
     if (everyMs <= 0) return {};
-    const wanted = () => partials?.() ?? true;
+    const wanted = () => partials?.() ?? false;
     const caption = (t: string, stable: string) => {
       if (current() && micEnabled() && wanted()) h.onPartial(t, stable);
     };
@@ -528,6 +532,7 @@ export class WhisperStt implements SttEngine {
         onSpeechTick: (t) => current() && this.stream?.setPartials(t.quietMs <= PARTIAL_QUIET_MS && !pausedNow()),
       };
     }
+    if (!partials) return {}; // desktop, no captions asked for: no caption loop at all
     const loop = new PartialLoop({
       everyMs,
       capture: newCaptureId(),

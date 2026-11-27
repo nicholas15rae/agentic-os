@@ -647,5 +647,105 @@
     "text": "put it on my calendar for tomorrow",
     "role": "ops",
     "kind": "Domain"
+  },
+  {
+    "desc": "A2 review: a mail read that opens with 'booking' (a topic word, no pause) stays with Tony",
+    "text": "booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'audition' opening a mail read is a topic, not the Booking Desk",
+    "text": "audition email check",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'Booking confirmations in my gmail?' is Tony's booking scan",
+    "text": "Booking confirmations in my gmail?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'hey <desk name>' addresses the desk, even in a mail read",
+    "text": "hey booking agent, any emails?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: the desk name followed by a pause addresses it",
+    "text": "Booking: any emails today?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "A2 review: 'NAME email <someone>' is still a command to the desk ('email' the verb, not the mail noun)",
+    "text": "booking email Sam about the shoot",
+    "role": "booking",
+    "kind": "Named",
+    "taskContains": "about the shoot",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: a filler lead ('Okay,') never makes a booking word an address in a mail read",
+    "text": "Okay, booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'so' is a filler too",
+    "text": "so booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'ok' before 'audition' in a mail read is still Tony's read",
+    "text": "ok audition emails this week?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'So, audition email check' is the mail noun after a filler",
+    "text": "So, audition email check",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: even 'hey' does not address a booking word used as a topic ('booking emails')",
+    "text": "hey booking emails from today?",
+    "role": null,
+    "kind": "Default",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: a filler, then the desk name and a pause, addresses the desk",
+    "text": "Okay, booking: any emails today?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'hey <desk name>' plus an address word still addresses the desk, with no comma",
+    "text": "hey booking agent any emails?",
+    "role": "booking",
+    "kind": "Named",
+    "direct": "gmail"
+  },
+  {
+    "desc": "FX3 review: 'hey <desk name> email <someone>' is a command to the desk",
+    "text": "hey booking email Sam about the shoot",
+    "role": "booking",
+    "kind": "Named",
+    "taskContains": "about the shoot",
+    "direct": "gmail"
   }
 ]

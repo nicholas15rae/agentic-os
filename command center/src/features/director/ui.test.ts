@@ -92,7 +92,8 @@ describe("director chat request", () => {
     expect(h[9]).toEqual({ role: "assistant", content: "m13" });
   });
   it("the os_turn request targets the director tab with no delegation or cards", () => {
-    expect(directorRequest("hi", [], "ctx", "sid")).toEqual({ text: "hi", role: "director", explicit: true, routeKind: "Tab", history: [], context: "ctx", streamId: "sid", noDelegate: true, askCards: false });
+    expect(directorRequest("hi", [], "ctx", "sid")).toEqual({ text: "hi", role: "director", explicit: true, routeKind: "Tab", history: [], context: "ctx", streamId: "sid", noDelegate: true, askCards: false, answering: [] });
+    expect(directorRequest("yes", [], "ctx", "sid", ["mem-1-1"]).answering).toEqual(["mem-1-1"]);
   });
   it("context carries the project, assets, the manifest and the action contract", () => {
     const c = buildDirectorContext(project({ source: { from: "brainstorm", refId: "n1", brief: "30s teaser" } }), ASSETS, manifest());

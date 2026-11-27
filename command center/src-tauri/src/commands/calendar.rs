@@ -6,7 +6,9 @@
 //!
 //! Credentials: `GCAL_SCRIPT_ID` + `GCAL_SCRIPT_KEY` (environment or repo-root `.env`, both
 //! required), else the keychain pair `gcal-script-id` / `gcal-script-key` (Settings, or
-//! `gcal_import_anythingllm`, which also runs once by itself on first use when both are missing).
+//! `gcal_import_anythingllm`, which also runs once by itself on Calendar's first use when both
+//! are missing: a calendar tool call, the card's add or a calendar ask's plan, `ensure_creds`;
+//! never an unrelated turn's tool listing, which only checks `has_creds`).
 //! The values never reach the webview, logs or error strings.
 //!
 //! Writes: `calendar.create_event` refuses unless approved (`PERMISSION_REQUIRED:calendar-create`);
@@ -52,24 +54,54 @@ pub(crate) fn env_pair(state: &DispatchState) -> Option<(String, String)> {
     Some((env("GCAL_SCRIPT_ID")?, env("GCAL_SCRIPT_KEY")?))
 }
 
-/// The credentials, importing AnythingLLM's deployment first when none are set (first use; at
-/// most once per `AUTO_IMPORT_EVERY_MS`). Never logs or returns a value anywhere else.
-pub(crate) fn ensure_creds(state: &DispatchState) -> Option<(String, String)> {
+/// Is the Apps Script pair set (env or keychain)? Never imports: a tool listing (every turn's,
+/// and the Settings registry's) uses this, so only an actual calendar use runs the import.
+pub(crate) fn has_creds(state: &DispatchState) -> bool {
+    creds(state).is_some()
+}
+
+/// The automatic import's throttle: may an import start at `now` after one started at `last`
+/// (0: never)? Claims the slot when it may. At most once per `AUTO_IMPORT_EVERY_MS`.
+fn claim_auto_import(now: u64) -> bool {
+    let last = LAST_AUTO_IMPORT.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < AUTO_IMPORT_EVERY_MS {
+        return false;
+    }
+    LAST_AUTO_IMPORT.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: how often this thread asked for credentials WITH the import allowed.
+    static ENSURE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn ensure_calls() -> u32 {
+    ENSURE_CALLS.with(|c| c.get())
+}
+
+/// The credentials on Calendar's first USE (a calendar tool call, the card's add, a calendar
+/// ask's plan — Nic approved the import for that, never for an unrelated turn's tool listing):
+/// when none are set, AnythingLLM's deployment is imported first (at most once per
+/// `AUTO_IMPORT_EVERY_MS`). The import (a SQLite read with a 3 s busy timeout, then keychain
+/// writes) runs on the blocking pool, never on an async worker. Never logs or returns a value
+/// anywhere else.
+pub(crate) async fn ensure_creds(state: &DispatchState) -> Option<(String, String)> {
+    #[cfg(test)]
+    ENSURE_CALLS.with(|c| c.set(c.get() + 1));
     if let Some(c) = creds(state) {
         return Some(c);
     }
-    let now = super::compaction::now_ms();
-    let last = LAST_AUTO_IMPORT.load(Ordering::Relaxed);
-    if last != 0 && now.saturating_sub(last) < AUTO_IMPORT_EVERY_MS {
+    if !claim_auto_import(super::compaction::now_ms()) {
         return None;
     }
-    LAST_AUTO_IMPORT.store(now, Ordering::Relaxed);
-    match import_from_anythingllm() {
-        Ok(()) => {
+    match tauri::async_runtime::spawn_blocking(auto_import).await {
+        Ok(Ok(())) => {
             eprintln!("[calendar] imported the Google Calendar deployment from AnythingLLM into the keychain");
             creds(state)
         }
-        Err(_) => None,
+        _ => None,
     }
 }
 
@@ -85,7 +117,7 @@ pub(crate) fn source_label(state: &DispatchState) -> &'static str {
 }
 
 async fn script(state: &DispatchState, action: &'static str, args: Value, secs: u64) -> Result<Value, String> {
-    let Some((id, key)) = ensure_creds(state) else {
+    let Some((id, key)) = ensure_creds(state).await else {
         return Err(NO_BACKEND.into());
     };
     let id = id.trim().to_string();
@@ -254,6 +286,10 @@ pub(crate) fn create_body(args: &Value, today: NaiveDate) -> Result<Value, Strin
     let mut body = json!({ "title": title, "sendInvites": false });
     if args.get("allDay").and_then(Value::as_bool) == Some(true) {
         let date = date.ok_or("an all-day event needs a date")?;
+        // Like a timed start: more than a day in the past is refused (the card says "in the past").
+        if date < today - chrono::Duration::days(1) {
+            return Err("that date is in the past".into());
+        }
         body["allDay"] = json!(true);
         body["date"] = json!(date.format("%Y-%m-%d").to_string());
     } else {
@@ -403,6 +439,16 @@ pub async fn gcal_import_anythingllm(state: State<'_, DispatchState>) -> Result<
     })
 }
 
+/// The automatic import `ensure_creds` runs. Tests never read AnythingLLM's database or write
+/// the real keychain.
+fn auto_import() -> Result<(), String> {
+    if cfg!(test) {
+        Err("tests never import".into())
+    } else {
+        import_from_anythingllm()
+    }
+}
+
 fn import_from_anythingllm() -> Result<(), String> {
     use rusqlite::{OpenFlags, OptionalExtension};
     let path = super::gmail::anythingllm_db_path().ok_or("%APPDATA% is not set")?;
@@ -490,9 +536,14 @@ mod tests {
             json!({ "title": "x", "startTime": "2026-11-28T09:00", "endTime": "2026-11-28T08:00" }),
             json!({ "title": "x", "startTime": "2026-11-28T09:00:00Z" }),
             json!({ "title": "x", "startTime": "2026-01-02T09:00" }),
+            json!({ "title": "x", "allDay": true, "date": "2026-11-24" }),
         ] {
             assert!(create_body(&bad, today).is_err(), "{bad}");
         }
+        // Up to a day back is still accepted (the card says "this is in the past"); older is refused.
+        assert!(create_body(&json!({ "title": "x", "startTime": "2026-11-25T09:00" }), today).is_ok());
+        assert!(create_body(&json!({ "title": "x", "allDay": true, "date": "2026-11-25" }), today).is_ok());
+        assert_eq!(create_body(&json!({ "title": "x", "startTime": "2026-11-24T23:00" }), today).unwrap_err(), "that start time is in the past");
     }
 
     #[test]
@@ -542,6 +593,81 @@ mod tests {
         }
         let e = parse_allm_config(r#"{"deploymentId":"bad id!","apiKey":"secret-key"}"#).unwrap_err();
         assert!(!e.contains("secret-key") && !e.contains("bad id"));
+    }
+
+    /// An OsState with Calendar and Gmail switched on, then `f` applied.
+    fn gate_env(f: impl FnOnce(&mut os_core::OsConfig)) -> OsState {
+        let os = OsState::default();
+        os.update(|c| {
+            for m in c.mcps.iter_mut().filter(|m| m.id == "calendar" || m.id == "gmail") {
+                m.enabled = true;
+            }
+            c.privacy.kill_switch = false;
+            f(c);
+            Ok(())
+        })
+        .unwrap();
+        os
+    }
+
+    /// Review note (A2): the one approved write path refuses at every gate before any credential
+    /// lookup or Apps Script call, and its log line names no content.
+    #[test]
+    fn the_approved_add_refuses_at_every_gate_before_any_call() {
+        tauri::async_runtime::block_on(async {
+            let state = DispatchState::default();
+            let bridge = BridgeState::default();
+            let args = json!({ "title": "zqx secret shoot", "startTime": "2030-01-02T09:00", "location": "Stage 9" });
+            let before = ensure_calls();
+            let run = |os: OsState, approved: bool| {
+                let (state, bridge, args) = (&state, &bridge, &args);
+                async move { create_event_approved(state, &os, bridge, args, approved, "card").await }
+            };
+            assert_eq!(run(gate_env(|_| {}), false).await.unwrap_err(), PERMISSION, "not approved");
+            let e = run(gate_env(|c| c.permissions.mcp = super::super::bridge::Tier::Deny), true).await.unwrap_err();
+            assert!(e.starts_with("PERMISSION_DENIED:mcp"), "{e}");
+            let off = gate_env(|c| c.mcps.iter_mut().filter(|m| m.id == "calendar").for_each(|m| m.enabled = false));
+            assert!(run(off, true).await.unwrap_err().contains("Google Calendar is switched off"));
+            let master = gate_env(|c| c.switchboard.frozen_tools = vec!["calendar".into()]);
+            assert_eq!(run(master, true).await.unwrap_err(), "MODE_FROZEN: calendar is frozen on the master switchboard");
+            // The master kill switch: refused by the tool itself, still before any call.
+            let e = run(gate_env(|c| c.privacy.kill_switch = true), true).await.unwrap_err();
+            assert!(e.starts_with("kill switch is on"), "{e}");
+            assert_eq!(ensure_calls(), before, "no gate reached the credentials or the bridge");
+            // Calendar is in Tony's always-on base (section pass): a mode never freezes it, Learning
+            // included, so this one gets past the gates (to the missing test backend).
+            let learning = gate_env(|_| {});
+            learning.modes.set_active(super::super::modes::LEARNING_ID).unwrap();
+            assert!(!run(learning, true).await.unwrap_err().starts_with("MODE_FROZEN"));
+            // The kill-switch refusal is logged (tool, ok, via) without the event's text.
+            let dir = std::env::temp_dir().join(format!("gcal-gate-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let logged = BridgeState::default();
+            logged.init(&dir, dir.join("logs"));
+            let os = gate_env(|c| c.privacy.kill_switch = true);
+            assert!(create_event_approved(&state, &os, &logged, &args, true, "phone").await.is_err());
+            let log: String = std::fs::read_dir(dir.join("logs")).unwrap().filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok()).collect();
+            assert!(log.contains("\"os-tool\"") && log.contains("\"via\":\"phone\"") && log.contains("\"ok\":false"), "{log}");
+            assert!(!log.contains("zqx") && !log.contains("Stage 9"), "{log}");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn a_tool_listing_never_imports_the_calendar_credentials() {
+        let state = DispatchState::default();
+        let before = ensure_calls();
+        // What every turn's tool listing and the Settings registry ask: a plain check.
+        let _ = has_creds(&state);
+        let _ = super::super::mcp::unavailable_reason(&state, &os_core::OsConfig::default(), "calendar");
+        assert_eq!(ensure_calls(), before, "a listing must not reach ensure_creds (the import)");
+        // The throttle: one import per window, then none until it passes.
+        let t0 = 5_000_000_000_000;
+        LAST_AUTO_IMPORT.store(0, Ordering::Relaxed);
+        assert!(claim_auto_import(t0));
+        assert!(!claim_auto_import(t0 + 1_000));
+        assert!(claim_auto_import(t0 + AUTO_IMPORT_EVERY_MS));
+        LAST_AUTO_IMPORT.store(0, Ordering::Relaxed);
     }
 
     #[test]

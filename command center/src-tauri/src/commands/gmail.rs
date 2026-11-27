@@ -493,9 +493,16 @@ pub(crate) fn remember_bookings(b: Vec<Booking>, now_ms: u64) {
 
 /// The bookings of a scan made at or after `since_ms` (this turn's own scan); empty otherwise.
 pub(crate) fn bookings_since(since_ms: u64) -> Vec<Booking> {
+    scan_since(since_ms).unwrap_or_default()
+}
+
+/// This turn's scan (`OsTurnResult.bookings`): `Some` when a scan stored at or after `since_ms`
+/// replaced the remembered list, even with nothing found (`Some([])`, so the phone clears its
+/// copy too); `None` when no scan ran since (a failed search leaves both lists as they were).
+pub(crate) fn scan_since(since_ms: u64) -> Option<Vec<Booking>> {
     match &*LAST_BOOKINGS.lock().unwrap_or_else(|e| e.into_inner()) {
-        Some((at, b)) if *at >= since_ms => b.clone(),
-        _ => vec![],
+        Some((at, b)) if *at >= since_ms => Some(b.clone()),
+        _ => None,
     }
 }
 
@@ -810,7 +817,10 @@ pub async fn gmail_create_draft(state: State<'_, DispatchState>, os: State<'_, O
 }
 
 /// The one approved path for a draft: the desktop card (`gmail_create_draft`) and the phone's
-/// approved `action` inbox item (pipeline.rs `run_approved_action`).
+/// approved `action` inbox item (pipeline.rs `run_approved_action`), where this Rust is the only
+/// authority. The same gates as `calendar::create_event_approved`: approved, the MCP permission
+/// gate, Gmail switched on, not frozen by the mode / master switchboard; the kill switch is
+/// checked by `tool`. Logs no content.
 pub(crate) async fn create_draft_approved(state: &DispatchState, os: &OsState, bridge: &BridgeState, to: String, subject: String, body: String, approved: bool) -> Result<String, String> {
     if !approved {
         return Err("PERMISSION_REQUIRED:gmail-draft".into());
@@ -819,6 +829,10 @@ pub(crate) async fn create_draft_approved(state: &DispatchState, os: &OsState, b
     os_core::gate(bridge, cfg.permissions.mcp, "mcp", true, json!({ "tool": "gmail.create_draft" }))?;
     if !cfg.mcps.iter().any(|m| m.id == "gmail" && m.enabled) {
         return Err("Gmail is switched off — enable it in Settings → Skills & MCP Library".into());
+    }
+    // Gmail is in Tony's always-on base (section pass): only the master switchboard freezes it.
+    if let Some(e) = super::mcp::tony_frozen_reason(&cfg, &os.modes.effective(), "gmail", "gmail").map(|r| format!("{}: {r}", super::modes::MODE_FROZEN)) {
+        return Err(e);
     }
     let out = tool(state, os, "gmail.create_draft", &json!({ "to": to, "subject": subject, "body": body }), true).await;
     bridge.log(json!({ "type": "os-tool", "tool": "gmail.create_draft", "ok": out.is_ok(), "chars": body.len() }));
@@ -1169,6 +1183,11 @@ mod tests {
         assert!(bookings_since(1_000_001).is_empty(), "an older scan isn't this turn's");
         assert_eq!(last_bookings(1_000_000 + BOOKINGS_TTL_MS).len(), 1);
         assert!(last_bookings(1_000_001 + BOOKINGS_TTL_MS).is_empty());
+        // The turn result tells "no scan" from "a scan that found nothing".
+        assert_eq!(scan_since(1_000_001), None, "no scan this turn");
+        remember_bookings(vec![], 2_000_000);
+        assert_eq!(scan_since(2_000_000), Some(vec![]), "this turn's scan found nothing");
+        assert!(last_bookings(2_000_000).is_empty(), "and the desktop's list is cleared");
     }
 
     #[test]

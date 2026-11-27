@@ -8,7 +8,7 @@ import { handleLocalIntent } from "@/features/reminders/intents";
 import { cancelOsAlarm } from "@/features/reminders/os-alarm";
 import type { Reminder } from "@/features/reminders/types";
 import { requestConfirmation } from "@/features/voice/voice-controller";
-import { heuristicPlan } from "@/features/orchestrator/plan";
+import type { ActionPlan } from "@/features/orchestrator/plan";
 
 const ICON = { alarm: AlarmClock, reminder: Bell, countdown: Hourglass, event: CalendarDays };
 
@@ -114,16 +114,32 @@ function useCalendarCreate() {
   return ok;
 }
 
+/**
+ * The n8n `calendar-create` card for a reminder, built directly from the reminder (Nic's own data).
+ * Never through `heuristicPlan`: its "add … to my Google Calendar" text is the calendar-add parser's
+ * line, whose `plan.run` (Tony's "what date…?" / frozen reply) `execute()` runs first, so the n8n
+ * workflow never fired (A2 review). Pure.
+ */
+export function reminderCalendarPlan(r: Pick<Item<Reminder>, "id" | "title" | "dueAt" | "notes">): ActionPlan {
+  const when = new Date(r.dueAt);
+  return {
+    id: crypto.randomUUID(),
+    utterance: `add "${r.title}" to my Google Calendar on ${when.toLocaleString()}`,
+    role: "booking",
+    intent: `add “${r.title}” to your Google Calendar ${formatWhen(r.dueAt)}`,
+    summary: `Add “${r.title}” to Google Calendar — ${formatWhen(r.dueAt)}`,
+    readBack: `Add ${r.title} to your Google Calendar, ${formatWhen(r.dueAt)}. Proceed?`,
+    mutating: true,
+    target: { kind: "n8n", workflow: "calendar-create" },
+    payload: { reminderId: r.id, title: r.title, start: when.toISOString(), end: new Date(r.dueAt + 30 * 60_000).toISOString(), notes: r.notes ?? "" },
+    missing: [],
+    verification: { status: "verified", notes: [], by: "built from your own reminder" },
+    planner: "heuristic",
+    plannerNote: "built from your own reminder",
+  };
+}
+
 /** Writing to Google Calendar changes something outside this machine → the confirmation gate. */
 async function pushToCalendar(r: Item<Reminder>) {
-  const when = new Date(r.dueAt);
-  const plan = heuristicPlan(`add "${r.title}" to my Google Calendar on ${when.toLocaleString()}`, "booking");
-  plan.mutating = true;
-  plan.target = { kind: "n8n", workflow: "calendar-create" };
-  plan.summary = `Add “${r.title}” to Google Calendar — ${formatWhen(r.dueAt)}`;
-  plan.intent = `add “${r.title}” to your Google Calendar ${formatWhen(r.dueAt)}`;
-  plan.readBack = `Add ${r.title} to your Google Calendar, ${formatWhen(r.dueAt)}. Proceed?`;
-  plan.payload = { reminderId: r.id, title: r.title, start: when.toISOString(), end: new Date(r.dueAt + 30 * 60_000).toISOString(), notes: r.notes ?? "" };
-  plan.verification = { status: "verified", notes: [], by: "built from your own reminder" };
-  await requestConfirmation(plan, "text");
+  await requestConfirmation(reminderCalendarPlan(r), "text");
 }

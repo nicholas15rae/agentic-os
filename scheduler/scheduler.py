@@ -204,7 +204,7 @@ def get_history(limit: int = 100) -> list:
 def load_job_definitions() -> list:
     jobs = []
     for f in sorted(JOBS_DIR.glob("*.json")):
-        data = json.loads(f.read_text())
+        data = json.loads(f.read_text(encoding="utf-8"))
         data["_file"] = str(f)
         jobs.append(data)
     return jobs
@@ -231,7 +231,7 @@ def run_skill(skill_name: str, trigger: str = "scheduler", input_text: str = "")
         "trigger": trigger,
         "timestamp": timestamp,
     }
-    with open(audit_file, "a") as f:
+    with open(audit_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
     emit_event({
         "type": "skill_run",

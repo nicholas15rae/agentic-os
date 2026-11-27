@@ -128,7 +128,7 @@ describe("barge-in onError (P4 fix)", () => {
     await turn;
     // `barged` was reset, so the reply ends in the follow-up window (it used to return early).
     expect(h.sttStart).toHaveBeenCalledTimes(3);
-    expect(startOpts(2)).toEqual({ maxSilenceStartMs: 6000 });
+    expect(startOpts(2)).toEqual({ maxSilenceStartMs: 6000, partials: expect.any(Function) }); // captions are opt-in: it asks
     expect(useVoice.getState().state).toBe("listening");
   });
 
@@ -160,7 +160,7 @@ describe("barge-in onError (P4 fix)", () => {
     speech.done();
     await turn;
     const follow = h.sttStart.mock.calls.length - 1;
-    expect(startOpts(follow)).toEqual({ maxSilenceStartMs: 6000 });
+    expect(startOpts(follow)).toEqual({ maxSilenceStartMs: 6000, partials: expect.any(Function) });
     handlers(follow).onPhase("speech");
     expect(h.duckOnSpeech).toHaveBeenLastCalledWith(true);
   });

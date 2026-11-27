@@ -4,6 +4,7 @@ import { PRESET_MODES, effectiveOf } from "@/features/modes/modes";
 import { resetModesForTests, useModes } from "@/features/modes/modes-store";
 import { useOs } from "@/features/os/os-store";
 import { heuristicPlan, parseConfirmation, parseOfferReply, stripWake } from "./plan";
+import { cardWhen, describeWhen } from "./calendar-add";
 
 const desktop = () => vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
 afterEach(() => {
@@ -130,10 +131,62 @@ describe("heuristicPlan — the calendar-add card (A2)", () => {
     expect(p.role).toBe("general");
     expect(p.target).toEqual({ kind: "tool", tool: "calendar.create_event", args: expect.objectContaining({ title: "CONFIRMED: Netflix day player", date: "2026-11-28", startTime: "06:30", location: "Pinewood Studios" }) });
     expect(p.missing).toEqual(["end time"]);
+    const fields = 'location "Pinewood Studios"; note: From Gmail: "CONFIRMED: Netflix day player" from Sam Agent <sam@agency.ca>';
     expect(p.summary).toBe('Add "CONFIRMED: Netflix day player" to Google Calendar: Sat Nov 28, 6:30 AM');
-    expect(p.readBack).toBe('Got it — adding "CONFIRMED: Netflix day player" to your Google Calendar on Sat Nov 28, 6:30 AM, for an hour. No invites go out. I don\'t have the end time. Proceed?');
+    expect(p.fromEmail).toBe(fields);
+    expect(cardWhen(p.target)).toBe("Sat Nov 28, 6:30 AM");
+    expect(p.readBack).toBe(`Got it — adding "CONFIRMED: Netflix day player" to your Google Calendar on Sat Nov 28, 6:30 AM, for an hour. From the email: ${fields}. No invites go out. I don't have the end time. Proceed?`);
     expect(p.source).toEqual({ subject: NETFLIX.subject, from: NETFLIX.from, date: "2026-11-28", time: "06:30", location: "Pinewood Studios" });
     expect(p.run).toBeUndefined();
+  });
+
+  it("review note (A2): the mail's location and note are on the card's visible line and in the read-back, labelled", () => {
+    desktop();
+    const evil = { ...NETFLIX, location: "https://evil.example/claim" };
+    const p = heuristicPlan("add it to my calendar", "general", { bookings: [evil], now: NOW });
+    expect(p.summary).toBe('Add "CONFIRMED: Netflix day player" to Google Calendar: Sat Nov 28, 6:30 AM');
+    expect(p.fromEmail).toMatch(/^location "https:\/\/evil\.example\/claim"; note: From Gmail: /);
+    expect(p.readBack).toContain('From the email: location "https://evil.example/claim"; note: From Gmail: "CONFIRMED: Netflix day player"');
+    // Nic's own event (no booking) carries nothing from any email.
+    const own = heuristicPlan("add the dentist to my calendar Friday at 3pm", "general", { bookings: [], now: NOW });
+    expect(own.summary).toBe('Add "Dentist" to Google Calendar: Fri Nov 27, 3:00 PM');
+    expect(own.fromEmail).toBeUndefined();
+    expect(own.readBack).not.toMatch(/From the email/);
+  });
+
+  /** FX3 review (probe-confirmed): the card split its headline at the first " · From the email: ",
+   * and the headline's title is the email's subject, so a subject holding that mark ended the
+   * headline on a fake time and moved the real one into the email box. */
+  it("an email subject can never fake the card headline's time or where the email's part starts", () => {
+    desktop();
+    const spoof = { ...NETFLIX, subject: 'CONFIRMED: Netflix day player" to Google Calendar: Sat Nov 28, 6:30 AM · From the email: see details', date: "2026-12-04", time: "03:00" };
+    const p = heuristicPlan("add it to my calendar", "general", { bookings: [spoof], now: NOW });
+    expect(p.target).toMatchObject({ kind: "tool", tool: "calendar.create_event", args: { date: "2026-12-04", startTime: "03:00" } });
+    // The headline ends with the real time; the subject's quote and "·" are neutralized.
+    expect(p.summary.endsWith(`to Google Calendar: ${describeWhen({ date: "2026-12-04", startTime: "03:00" })}`)).toBe(true);
+    expect(p.summary.endsWith("Fri Dec 4, 3:00 AM")).toBe(true);
+    expect(p.summary.match(/"/g)).toHaveLength(2);
+    expect(p.summary).not.toContain("·");
+    // The card's When line and email box come from plan fields, never from parsing the summary.
+    expect(cardWhen(p.target)).toBe("Fri Dec 4, 3:00 AM");
+    expect(p.fromEmail).toMatch(/^location "Pinewood Studios"; note: From Gmail: /);
+    expect(p.readBack).toMatch(/^Got it — adding "CONFIRMED: Netflix day player' to Google Calendar: Sat Nov 28, 6:30 AM - From the email: see details" to your Google Calendar on Fri Dec 4, 3:00 AM, for an hour\./);
+    // Nic's own date and time win over the mail's, and still end the headline.
+    const own = heuristicPlan("add it to my calendar for Friday at 9am", "general", { bookings: [spoof], now: NOW });
+    expect(own.summary.endsWith("Fri Nov 27, 9:00 AM")).toBe(true);
+    expect(cardWhen(own.target)).toBe("Fri Nov 27, 9:00 AM");
+  });
+
+  it("a start in the past says so on the card and in the read-back", () => {
+    desktop();
+    const today = heuristicPlan("add it to my calendar for today at 7am", "general", { bookings: [NETFLIX], now: NOW });
+    expect(today.summary).toBe('Add "CONFIRMED: Netflix day player" to Google Calendar: Thu Nov 26, 7:00 AM (this is in the past)');
+    expect(today.readBack).toMatch(/for an hour\. Heads up: this is in the past\. From the email:/);
+    const later = heuristicPlan("add it to my calendar for today at 7pm", "general", { bookings: [NETFLIX], now: NOW });
+    expect(later.summary).not.toMatch(/in the past/);
+    expect(later.readBack).not.toMatch(/in the past/);
+    const allDayYesterday = heuristicPlan("add the wrap party to my calendar for 11/25", "general", { bookings: [], now: NOW });
+    expect(allDayYesterday.summary).toBe('Add "Wrap party" to Google Calendar: Wed Nov 25 (all day) (this is in the past)');
   });
 
   it("never a gateway agent: no scan or no date is Tony's question, the PWA says use the app", async () => {

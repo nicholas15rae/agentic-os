@@ -4,7 +4,7 @@ import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve as resolveRoute } from "@/features/dispatcher/router";
 import { extractJson } from "@/features/orchestrator/extract-json";
 import { parseDraftEmail, type DraftParse } from "@/features/orchestrator/draft-email";
-import { describeWhen, isCalendarAdd, isCalendarQuestion, namesOwnCalendar, parseCalendarAdd, type CalendarArgs, type CalendarParse } from "@/features/orchestrator/calendar-add";
+import { cardText, describeWhen, extraFields, isCalendarAdd, isCalendarQuestion, namesOwnCalendar, parseCalendarAdd, startsInPast, type CalendarArgs, type CalendarParse } from "@/features/orchestrator/calendar-add";
 import { recentBookings, type BookingRef } from "@/features/orchestrator/bookings";
 import { parseInstagramIntent, type InstagramIntent } from "@/features/orchestrator/instagram-intent";
 import { isOsControlPhrase } from "@/features/os/os-intent-parse";
@@ -79,6 +79,11 @@ export interface ActionPlan {
   /** A calendar add built from a booking email: that email's own fields (subject, sender, date,
    * time, location), so the verifier checks the plan against them as well as Nic's words. */
   source?: Pick<BookingRef, "subject" | "from" | "date" | "time" | "location">;
+  /** A calendar add built from a booking email: the fields the email supplied (`location "…";
+   * note: …`), shown in full in the card's own labelled "From the email" box. Kept apart from
+   * `summary` (never parsed back out of it: an email subject is in the headline and could fake
+   * where the email's part starts). */
+  fromEmail?: string;
 }
 
 // ── Heuristics ───────────────────────────────────────────────────────────────
@@ -147,7 +152,7 @@ function cleanIntent(utterance: string): string {
   return toSecondPerson(s.charAt(0).toLowerCase() + s.slice(1));
 }
 
-function readBackFor(p: Pick<ActionPlan, "role" | "intent" | "target" | "missing" | "verification">): string {
+function readBackFor(p: Pick<ActionPlan, "role" | "intent" | "target" | "missing" | "verification" | "source">, now = new Date()): string {
   let s: string;
   if (p.target.kind === "tool" && p.target.tool === "gmail.create_draft") {
     const a = p.target.args;
@@ -160,7 +165,10 @@ function readBackFor(p: Pick<ActionPlan, "role" | "intent" | "target" | "missing
     s = `Ready to reply publicly to Instagram comment ${p.target.args.commentId}: "${p.target.args.message}".`;
   } else if (p.target.kind === "tool" && p.target.tool === "calendar.create_event") {
     const a = p.target.args as unknown as CalendarArgs;
-    s = `Got it — adding "${a.title}" to your Google Calendar on ${describeWhen(a)}${a.startTime && !a.endTime ? ", for an hour" : ""}. No invites go out.`;
+    // A past start, and every word the booking email supplied, are said before Nic approves.
+    const past = startsInPast(a, now) ? " Heads up: this is in the past." : "";
+    const extra = extraFields(a, !!p.source);
+    s = `Got it — adding "${cardText(a.title)}" to your Google Calendar on ${describeWhen(a)}${a.startTime && !a.endTime ? ", for an hour" : ""}.${past}${extra ? ` ${extra}.` : ""} No invites go out.`;
   } else {
     const who = p.target.kind === "n8n" ? `running the ${p.target.workflow} workflow` : `instructing ${SUB_AGENTS[p.role].label}`;
     s = `Got it — ${who} to ${p.intent}.`;
@@ -206,8 +214,9 @@ export function heuristicPlan(utterance: string, role?: AgentRole, opts: Heurist
   if (draft && !deskDraft) return draftPlan(utterance, r, intent, draft);
   // "add it to my calendar": Tony's own Google Calendar card, its fields from the last booking
   // scan plus Nic's words (never a gateway agent, never the model's).
-  const cal = parseCalendarAdd(draftText, opts.bookings ?? recentBookings(), opts.now ?? new Date());
-  if (cal) return calendarPlan(utterance, intent, cal);
+  const now = opts.now ?? new Date();
+  const cal = parseCalendarAdd(draftText, opts.bookings ?? recentBookings(), now);
+  if (cal) return calendarPlan(utterance, intent, cal, now);
   // Any other line about Nic's own calendar stays Tony's: a question ("did you add it to my
   // calendar?") is a read he answers from his calendar tool, and a write the parser can't card
   // ("move the shoot on my calendar") is his plain reply. Never a mutating plan for a gateway
@@ -324,7 +333,7 @@ function draftPlan(utterance: string, role: AgentRole, intent: string, d: DraftP
  * item), or Tony's follow-up question. Always Tony's (the calendar is his tool, whatever topic the
  * line matched). Gaps the mail and Nic's words leave go to `missing`, shown on the card.
  */
-function calendarPlan(utterance: string, intent: string, c: CalendarParse): ActionPlan {
+function calendarPlan(utterance: string, intent: string, c: CalendarParse, now = new Date()): ActionPlan {
   const plan: ActionPlan = {
     id: crypto.randomUUID(),
     utterance,
@@ -352,9 +361,17 @@ function calendarPlan(utterance: string, intent: string, c: CalendarParse): Acti
   plan.target = { kind: "tool", tool: "calendar.create_event", args };
   plan.payload = { ...args };
   plan.missing = c.missing;
-  plan.summary = `Add "${c.args.title}" to Google Calendar: ${describeWhen(c.args)}`;
-  if (c.booking) plan.source = { subject: c.booking.subject, from: c.booking.from, date: c.booking.date, time: c.booking.time, location: c.booking.location };
-  plan.readBack = readBackFor(plan);
+  // The card's headline, built here from the args: it always ends with the real time (a past
+  // start says so), and the title (an email subject, untrusted) can't fake quotes or separators.
+  // The mail's location / description go to `fromEmail`, the card's own labelled box (not only the
+  // collapsed Payload), never into this line.
+  plan.summary = `Add "${cardText(c.args.title)}" to Google Calendar: ${describeWhen(c.args)}${startsInPast(c.args, now) ? " (this is in the past)" : ""}`;
+  if (c.booking) {
+    plan.source = { subject: c.booking.subject, from: c.booking.from, date: c.booking.date, time: c.booking.time, location: c.booking.location };
+    const mail = extraFields(c.args, false);
+    if (mail) plan.fromEmail = mail;
+  }
+  plan.readBack = readBackFor(plan, now);
   return plan;
 }
 

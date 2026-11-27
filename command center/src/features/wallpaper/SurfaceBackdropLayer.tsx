@@ -3,16 +3,11 @@ import { useAtmosphere, useTimePhase } from "@/features/weather/weather-store";
 import { useWallpapers } from "./wallpaper-store";
 import { nextInPool, surfacePool, type Surface } from "./backdrop-model";
 import { useBackdrops, useSurfaceConfig } from "./backdrop-store";
+import { useMotionLevel } from "@/lib/motion";
 
-/** Window visible (minimised / tray-hidden → false). */
+/** Window in use: not hidden / minimised, not calm (lib/motion.ts). Each crossfade is 1.2 s of frames. */
 function useDocVisible(): boolean {
-  const [v, setV] = useState(() => typeof document === "undefined" || !document.hidden);
-  useEffect(() => {
-    const on = () => setV(!document.hidden);
-    document.addEventListener("visibilitychange", on);
-    return () => document.removeEventListener("visibilitychange", on);
-  }, []);
-  return v;
+  return useMotionLevel() === "full";
 }
 
 /**

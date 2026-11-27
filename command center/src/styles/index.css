@@ -44,10 +44,26 @@
   --radius-card: 20px;
   --radius-module: 14px;
 
-  --animate-living-drift: living-drift 60s ease-in-out infinite alternate;
+  /*
+   * GPU budget (WebView2 on the 143 Hz desktop panel, measured 2026-11-26): ANY damage redraws the
+   * whole frame and re-runs every glass panel's backdrop blur, so cost follows frames per second,
+   * not element size. One endlessly pulsing dot cost 12.6 % of the RTX 3060, the continuous drift
+   * 12 %; the same drift in 240 steps (4 updates/s, each well under a pixel) costs 0.4 %. Infinite
+   * animations here therefore step at a fixed low rate, and `[data-motion]` below pauses them.
+   */
+  --animate-living-drift: living-drift 60s steps(240) infinite alternate;
   @keyframes living-drift {
     0% { transform: scale(1.06) translate3d(0, 0, 0); }
     100% { transform: scale(1.12) translate3d(-1.5%, -1%, 0); }
+  }
+  /* Tailwind's spinner and pulse, stepped: 30 and 15 updates per second instead of 143. */
+  --animate-spin: spin 1s steps(30) infinite;
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  --animate-pulse: pulse 2s steps(15) infinite;
+  @keyframes pulse {
+    50% { opacity: 0.5; }
   }
 }
 
@@ -172,6 +188,18 @@
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+/*
+ * Motion level (lib/motion.ts): calm = visible but unfocused / idle for a minute, off = hidden or
+ * minimised. Every infinite animation in the app pauses (it resumes where it stopped). Unlayered,
+ * so it wins over the Tailwind utilities. Finite ones (toasts, fades) are never listed: they must
+ * finish. lib/motion.ts also sweeps document.getAnimations() for infinite ones this list misses.
+ */
+html:is([data-motion="calm"], [data-motion="off"])
+  :is(.animate-spin, .animate-pulse, .animate-ping, .animate-bounce, .animate-living-drift,
+      .sysmap-flow, .sysmap-flow-rev, .sysmap-breathe, .sysmap-blink, .arb-node-pulse, .arb-ring) {
+  animation-play-state: paused;
 }
 
 

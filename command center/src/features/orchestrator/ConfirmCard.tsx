@@ -5,6 +5,7 @@ import { SUB_AGENTS } from "@/features/dispatcher/agents";
 import { useVoice } from "@/features/voice/voice-store";
 import { approve, parkPending, reject } from "@/features/voice/voice-controller";
 import { Waveform } from "@/features/voice/Waveform";
+import { cardWhen } from "@/features/orchestrator/calendar-add";
 
 const TOOL_LABEL: Record<string, string> = {
   "gmail.create_draft": "Gmail · draft (not sent)",
@@ -43,6 +44,10 @@ export function ConfirmCard() {
   const listening = state === "listening" || state === "transcribing";
   // P3 Tier 3: a delegation OFFER — Delegate / Park it / Not now (closing it is always quiet).
   const offer = plan.offer === "delegate";
+  // A calendar add: its real time on its own "When" line, from the args (an email subject in the
+  // headline can't fake it), and the mail-supplied fields in their own labelled box (a plan
+  // field, never parsed out of the summary).
+  const when = cardWhen(plan.target);
 
   return createPortal(
     <div className="fixed inset-0 z-[90] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px] animate-[fade-in_180ms_ease-out]">
@@ -72,9 +77,21 @@ export function ConfirmCard() {
             <VerificationBadge status={v.status} by={v.by} />
           </div>
 
-          <p id="confirm-summary" className="mt-3 text-[22px] font-semibold leading-snug text-white sm:text-2xl">
-            {plan.summary}
-          </p>
+          <div id="confirm-summary">
+            <p className="mt-3 text-[22px] font-semibold leading-snug text-white sm:text-2xl">{plan.summary}</p>
+            {when && (
+              <p className="mt-2 text-sm text-ink">
+                <span className="label-caps mr-1.5 text-teal">When</span>
+                {when}
+              </p>
+            )}
+            {plan.fromEmail && (
+              <p className="mt-2 rounded-[12px] border border-amber/30 bg-amber/5 px-3 py-2 text-sm leading-relaxed text-ink">
+                <span className="label-caps mr-1.5 text-amber-soft">From the email</span>
+                {plan.fromEmail}
+              </p>
+            )}
+          </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[12px] text-ink-2">
             <span className="flex items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1">

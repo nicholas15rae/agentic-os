@@ -368,9 +368,12 @@ pub struct SwitchboardConfig {
 /// Librarian, which runs only as its scheduled script (internal / scheduled Librarian calls are
 /// not switchboard turns and stay ungated).
 pub const DEFAULT_FROZEN_AGENTS: [&str; 2] = ["booking", "librarian"];
+/// Section pass: Ops is an unused placeholder (no schedule, never dispatched, only a Maps tool),
+/// so it starts frozen too until Nic gives it a job. Thaw it on the master switchboard.
+pub const FROZEN_PLACEHOLDER_AGENTS: [&str; 1] = ["ops"];
 
 fn default_frozen_agents() -> Vec<String> {
-    DEFAULT_FROZEN_AGENTS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_FROZEN_AGENTS.iter().chain(FROZEN_PLACEHOLDER_AGENTS.iter()).map(|s| s.to_string()).collect()
 }
 
 impl Default for SwitchboardConfig {
@@ -1026,6 +1029,8 @@ const MIGRATE_WHATSAPP_READ_ONLY: &str = "whatsapp-read-only";
 /// Section pass: the frozen Booking Desk loses every tool pill and skill, and its "messages" /
 /// "texts" routing phrases (Tony reads Gmail and WhatsApp himself).
 const MIGRATE_BOOKING_NO_TOOLS: &str = "booking-no-tools";
+/// Section pass: freeze the Ops placeholder once on an existing install (a later thaw sticks).
+const MIGRATE_FREEZE_OPS: &str = "freeze-ops";
 /// Migration id: Tony's own name left `routing.agents.general.names` (kind Self handles it).
 const MIGRATE_SELF_ROUTING: &str = "self-routing";
 /// Migration id: "Auto-run monthly" became "Auto-regulate Vault & Lifecycle" + a cadence.
@@ -1086,6 +1091,14 @@ pub(crate) fn apply_migrations(cfg: &mut OsConfig) {
     if !cfg.migrations.iter().any(|m| m == MIGRATE_BOOKING_NO_TOOLS) {
         strip_booking_tools(cfg);
         cfg.migrations.push(MIGRATE_BOOKING_NO_TOOLS.into());
+    }
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_FREEZE_OPS) {
+        for a in FROZEN_PLACEHOLDER_AGENTS {
+            if !cfg.switchboard.frozen_agents.iter().any(|f| f == a) {
+                cfg.switchboard.frozen_agents.push(a.into());
+            }
+        }
+        cfg.migrations.push(MIGRATE_FREEZE_OPS.into());
     }
 }
 
@@ -2456,7 +2469,7 @@ mod tests {
         let mut reloaded: OsConfig = serde_json::from_str(&saved).unwrap();
         apply_migrations(&mut reloaded);
         assert!(!reloaded.mcps[0].read_only);
-        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string()]);
+        assert_eq!(reloaded.migrations, vec![MIGRATE_WHATSAPP_READ_ONLY.to_string(), MIGRATE_SELF_ROUTING.to_string(), MIGRATE_VAULT_CADENCE.to_string(), MIGRATE_BIZOPS_SPLIT.to_string(), MIGRATE_BOOKING_NO_TOOLS.to_string(), MIGRATE_FREEZE_OPS.to_string()]);
     }
 
     #[test]
@@ -2608,13 +2621,13 @@ mod tests {
     #[test]
     fn switchboard_defaults_legacy_and_camel_case() {
         let d = OsConfig::default();
-        // Booking and the Librarian (scheduled script only) are frozen on a fresh install.
-        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // Booking, the Librarian (scheduled script only) and the Ops placeholder are frozen on a fresh install.
+        assert_eq!(d.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         let v = serde_json::to_value(&d).unwrap();
-        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
-        // An os.json saved before the switchboard: both frozen, migration still to run.
+        assert_eq!(v["switchboard"], json!({ "version": 1, "frozenAgents": ["booking", "librarian", "ops"], "frozenTools": [] }));
+        // An os.json saved before the switchboard: all three frozen, migration still to run.
         let old: OsConfig = serde_json::from_str(r#"{"osName":"Tony"}"#).unwrap();
-        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        assert_eq!(old.switchboard, SwitchboardConfig { version: 0, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         // A saved choice is kept as is (Nic thawed Booking).
         let thawed: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":[],"frozenTools":["instagram"]}}"#).unwrap();
         assert_eq!((thawed.switchboard.frozen_agents.len(), thawed.switchboard.frozen_tools.clone()), (0, vec!["instagram".to_string()]));
@@ -2720,11 +2733,11 @@ mod tests {
             assert!(!cfg.skills.grants.contains_key(n), "{n}");
         }
         assert_eq!(who("daily-standup"), vec!["ops"], "Tony's grant is dropped, Ops keeps its own");
-        // 4. Booking and the Librarian frozen, version set, saved.
-        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into()], frozen_tools: vec![] });
+        // 4. Booking, the Librarian and the Ops placeholder frozen, version set, saved.
+        assert_eq!(cfg.switchboard, SwitchboardConfig { version: 1, frozen_agents: vec!["booking".into(), "librarian".into(), "ops".into()], frozen_tools: vec![] });
         let on_disk: OsConfig = serde_json::from_str(&std::fs::read_to_string(dir.join("os.json")).unwrap()).unwrap();
         assert_eq!(on_disk.switchboard.version, 1);
-        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string()]);
+        assert_eq!(on_disk.switchboard.frozen_agents, vec!["booking".to_string(), "librarian".to_string(), "ops".to_string()]);
         // 5. Never twice: Nic re-grants git to Tony and re-enables maps; a restart keeps both, no new backup.
         os.update(|c| {
             c.mcps.iter_mut().find(|m| m.id == "git").unwrap().agents = Some(vec!["coder".into(), "general".into()]);
@@ -2740,6 +2753,17 @@ mod tests {
         let n = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-tool-owners")).count();
         assert_eq!(n, 1, "the migration never runs twice");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ops_is_frozen_once_and_a_later_thaw_sticks() {
+        let mut cfg: OsConfig = serde_json::from_str(r#"{"switchboard":{"version":1,"frozenAgents":["booking"],"frozenTools":[]}}"#).unwrap();
+        apply_migrations(&mut cfg);
+        assert_eq!(cfg.switchboard.frozen_agents, vec!["booking".to_string(), "ops".to_string()]);
+        cfg.switchboard.frozen_agents.retain(|a| a != "ops"); // Nic gives Ops a job and thaws it
+        let mut again: OsConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        apply_migrations(&mut again);
+        assert_eq!(again.switchboard.frozen_agents, vec!["booking".to_string()]);
     }
 
     #[test]

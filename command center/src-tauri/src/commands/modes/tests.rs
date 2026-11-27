@@ -439,12 +439,12 @@ fn mirror_and_view_carry_the_mode() {
     // The gateway's end-of-prompt text and the switchboard's inputs.
     assert_eq!(m["mode"]["promptTail"], json!(mode_block(&os.modes.effective())));
     assert!(m["mode"]["promptTail"].as_str().unwrap().contains("ON DUTY: Finance, Operations Manager; every other agent is frozen this mode."));
-    assert_eq!(m["mode"]["switchboard"], json!({ "agents": ["bizops", "finance"], "tools": ["knowledge-graph", "gmail", "brave-search", "time", "weather"], "frozenAgents": ["booking", "librarian"], "frozenTools": [] }));
+    assert_eq!(m["mode"]["switchboard"], json!({ "agents": ["bizops", "finance"], "tools": ["knowledge-graph", "gmail", "brave-search", "time", "weather"], "frozenAgents": ["booking", "librarian", "ops"], "frozenTools": [] }));
     assert_eq!(m["mode"]["nightTraining"], false);
     switch_mode(&os, "surface").unwrap();
     let m = os.mirror_value(&os.snapshot());
     assert_eq!(m["mode"]["switchboard"]["agents"], Value::Null, "no overlay");
-    assert_eq!(m["mode"]["switchboard"]["frozenAgents"], json!(["booking", "librarian"]));
+    assert_eq!(m["mode"]["switchboard"]["frozenAgents"], json!(["booking", "librarian", "ops"]));
     switch_mode(&os, "executive").unwrap();
     override_mode(&os, &OverridePatch { curiosity: Some(Curiosity::High), ..Default::default() });
     assert!(m["voice"].is_object(), "Part B's mirror keys are kept");

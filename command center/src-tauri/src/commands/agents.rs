@@ -3944,7 +3944,10 @@ mod tests {
         assert_eq!(hold(r("coder", "Named"), false, "tell the coder to write a timer script", "operations").role, "coder");
         // On-duty agents and modes with no overlay are untouched; Tony's own turns too.
         assert_eq!(hold(r("coder", "Domain"), false, "write code", "builder"), r("coder", "Domain"));
-        assert_eq!(hold(r("ops", "Domain"), false, "check the droplet", "brainstorm"), r("ops", "Domain"));
+        assert_eq!(hold(r("bizops", "Domain"), false, "how is Corner Bakery doing", "brainstorm"), r("bizops", "Domain"));
+        // Ops is a frozen placeholder (section pass): a droplet question stays with Tony.
+        let h = hold(r("ops", "Domain"), false, "check the droplet", "brainstorm");
+        assert_eq!((h.role.as_str(), h.reason.as_str()), ("general", "Ops is frozen on the master switchboard"));
         assert_eq!(hold(r("general", "Self"), false, "hi", "operations"), r("general", "Self"));
         // Booking is frozen on the master switchboard: never runs, not even from its tab.
         for (kind, explicit, text) in [("Tab", true, "book a table"), ("Named", false, "hey booking desk, check my availability"), ("Domain", false, "casting call availability")] {

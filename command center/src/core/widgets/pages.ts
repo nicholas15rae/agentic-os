@@ -11,11 +11,86 @@ export interface LayoutPage {
   id: string;
   name: string;
   items: WidgetInstance[];
+  /** Section pass (page presets): this page's own wallpaper id (none: the shared rotation). */
+  wallpaper?: string | null;
+  /** One of Tony's modes: switching to that mode opens this page, and opening it switches mode. */
+  mode?: string | null;
 }
 
 export interface PagesState {
   pages: LayoutPage[];
   activePage: string;
+  /** The page the app opens on (default: the first). */
+  startupPage?: string | null;
+}
+
+/** Move a page one step left / right. Pure. */
+export function movePage(s: PagesState, id: string, dir: -1 | 1): PagesState {
+  const i = s.pages.findIndex((p) => p.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= s.pages.length) return s;
+  const pages = [...s.pages];
+  [pages[i], pages[j]] = [pages[j], pages[i]];
+  return { ...s, pages };
+}
+
+/** Copy a page (widgets get fresh ids; the copy has no mode link, so modes stay one-to-one). Pure. */
+export function duplicatePage(s: PagesState, id: string, newId: () => string): PagesState {
+  const src = s.pages.find((p) => p.id === id);
+  if (!src) return s;
+  const pageIds = new Set(s.pages.map((p) => p.id));
+  let pid = `p${newId()}`;
+  while (pageIds.has(pid)) pid = `p${newId()}`;
+  const taken = allIds(s.pages);
+  const items: WidgetInstance[] = [];
+  for (const it of src.items) {
+    let iid = `${it.widgetId}-${newId()}`;
+    while (taken.has(iid)) iid = `${it.widgetId}-${newId()}`;
+    taken.add(iid);
+    items.push({ ...it, instanceId: iid, config: { ...it.config } });
+  }
+  const names = new Set(s.pages.map((p) => p.name));
+  let name = `${src.name} copy`.slice(0, 40);
+  for (let n = 2; names.has(name); n++) name = `${src.name} copy ${n}`.slice(0, 40);
+  const copy: LayoutPage = { ...src, id: pid, name, items, mode: null };
+  const at = s.pages.findIndex((p) => p.id === id) + 1;
+  return { ...s, pages: [...s.pages.slice(0, at), copy, ...s.pages.slice(at)], activePage: pid };
+}
+
+/** Link a page to one of Tony's modes (one page per mode: any other page loses that link). Pure. */
+export function linkMode(s: PagesState, id: string, mode: string | null): PagesState {
+  return { ...s, pages: s.pages.map((p) => (p.id === id ? { ...p, mode } : mode && p.mode === mode ? { ...p, mode: null } : p)) };
+}
+
+/** The page a mode opens, if any. Pure. */
+export const pageForMode = (pages: readonly LayoutPage[], mode: string): LayoutPage | undefined => pages.find((p) => p.mode === mode);
+
+/** The startup page: the chosen one if it still exists, else the first. Pure. */
+export const startupOf = (s: PagesState): string => (s.startupPage && s.pages.some((p) => p.id === s.startupPage) ? s.startupPage : s.pages[0].id);
+
+/** The "Home" view: wallpaper first, a few at-a-glance widgets (the mantra carries the clock). */
+export const HOME_VIEW: Omit<WidgetInstance, "instanceId">[] = [
+  { widgetId: "mantra", col: 4, row: 1, w: 6, h: 2, config: {} },
+  { widgetId: "system-stats", col: 1, row: 1, w: 3, h: 2, config: {} },
+  { widgetId: "agent-nodes", col: 10, row: 1, w: 3, h: 3, config: {} },
+  { widgetId: "weather", col: 10, row: 7, w: 3, h: 2, config: {} },
+];
+
+/** Add a "Home" page first (it becomes the startup page). Pure. */
+export function addHomeView(s: PagesState, newId: () => string): PagesState {
+  const pageIds = new Set(s.pages.map((p) => p.id));
+  let pid = `p${newId()}`;
+  while (pageIds.has(pid)) pid = `p${newId()}`;
+  const taken = allIds(s.pages);
+  const items = HOME_VIEW.map((w) => {
+    let iid = `${w.widgetId}-${newId()}`;
+    while (taken.has(iid)) iid = `${w.widgetId}-${newId()}`;
+    taken.add(iid);
+    return { ...w, instanceId: iid, config: {} };
+  });
+  const names = new Set(s.pages.map((p) => p.name));
+  const name = names.has("Home") ? "Home view" : "Home";
+  return { pages: [{ id: pid, name, items }, ...s.pages], activePage: pid, startupPage: pid };
 }
 
 type Rect = Pick<WidgetInstance, "col" | "row" | "w" | "h">;
@@ -35,6 +110,35 @@ export function findSlot(instances: WidgetInstance[], w: number, h: number): { c
     for (let col = 1; col <= GRID_COLS - w + 1; col++)
       if (fits(instances, { instanceId: "__probe", widgetId: "", col, row, w, h, config: {} })) return { col, row };
   return null;
+}
+
+/**
+ * Section pass: move / resize `id` to `rect`, pushing any widget it would cover into the nearest
+ * free space (closest to where it was, below before above on a tie). Never overlaps anything;
+ * null when the rect is off the board or there is no room for everyone. Pure.
+ */
+export function placePushing(items: WidgetInstance[], id: string, rect: Rect): WidgetInstance[] | null {
+  const me = items.find((i) => i.instanceId === id);
+  if (!me) return null;
+  const next = { ...me, ...rect };
+  if (!inBounds(next)) return null;
+  const others = items.filter((i) => i.instanceId !== id);
+  const board: WidgetInstance[] = [next, ...others.filter((o) => !overlaps(o, next))];
+  const movers = others.filter((o) => overlaps(o, next)).sort((a, b) => a.row - b.row || a.col - b.col);
+  for (const m of movers) {
+    let best: { col: number; row: number; d: number } | null = null;
+    for (let row = 1; row <= GRID_ROWS - m.h + 1; row++)
+      for (let col = 1; col <= GRID_COLS - m.w + 1; col++) {
+        const cand = { ...m, col, row };
+        if (!board.every((b) => !overlaps(b, cand))) continue;
+        // Distance from where it was; a small bias keeps a pushed widget below rather than above.
+        const d = Math.abs(col - m.col) + Math.abs(row - m.row) + (row < m.row ? 0.5 : 0);
+        if (!best || d < best.d) best = { col, row, d };
+      }
+    if (!best) return null;
+    board.push({ ...m, col: best.col, row: best.row });
+  }
+  return items.map((i) => board.find((b) => b.instanceId === i.instanceId)!);
 }
 
 const EMPTY: WidgetInstance[] = [];
@@ -141,10 +245,17 @@ export function sanitizePages(raw: unknown, defaults: WidgetInstance[]): PagesSt
   const r = raw as Partial<PagesState> | null | undefined;
   const pages = (Array.isArray(r?.pages) ? r.pages : [])
     .filter((p): p is LayoutPage => !!p && typeof p.id === "string" && !!p.id && Array.isArray(p.items))
-    .map((p) => ({ id: p.id, name: typeof p.name === "string" && p.name.trim() ? p.name : "Page", items: p.items.filter(isInstance) }));
+    .map((p) => ({
+      id: p.id,
+      name: typeof p.name === "string" && p.name.trim() ? p.name : "Page",
+      items: p.items.filter(isInstance),
+      ...(typeof p.wallpaper === "string" && p.wallpaper ? { wallpaper: p.wallpaper } : {}),
+      ...(typeof p.mode === "string" && p.mode ? { mode: p.mode } : {}),
+    }));
   if (!pages.length) return { pages: [{ id: "p1", name: "Page 1", items: defaults }], activePage: "p1" };
+  const startupPage = typeof r?.startupPage === "string" && pages.some((p) => p.id === r.startupPage) ? r.startupPage : null;
   const activePage = pages.some((p) => p.id === r?.activePage) ? (r!.activePage as string) : pages[0].id;
-  return { pages, activePage };
+  return { pages, activePage, ...(startupPage ? { startupPage } : {}) };
 }
 
 /**

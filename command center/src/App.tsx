@@ -23,6 +23,7 @@ import { useRefresh } from "@/features/lifecycle/refresh";
 import { bootOps } from "@/features/ops/ops-store";
 import { useKillSwitchHotkey } from "@/features/trading/kill-switch";
 import { SecurityGate } from "@/features/security/SecurityGate";
+import { installPageLinks } from "@/core/widgets/page-links";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -95,6 +96,7 @@ function MainApp() {
   useKillSwitchHotkey(); // Ctrl+Shift+X: trading E-stop from any section
   useEffect(installSpotifyReauthNotice, []); // toast when Rust opens a Spotify consent tab by itself
   useEffect(bootOps, []); // business registry + review-digest badge
+  useEffect(installPageLinks, []); // page presets: a page ↔ Tony's mode, a page's own wallpaper
   return (
     <>
       <WallpaperSlideshow />

@@ -81,7 +81,13 @@
   }
   ::selection { background: color-mix(in oklab, var(--color-amber) 40%, transparent); }
   :focus-visible { outline: 2px solid var(--color-teal); outline-offset: 2px; }
-  * { scrollbar-width: thin; scrollbar-color: #2a3040 transparent; }
+  /* Section pass: wider, easier to grab (both directions); WebView2 / Chromium use the ::-webkit rules. */
+  * { scrollbar-width: auto; scrollbar-color: #3a4256 transparent; }
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3a4256; border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; min-height: 40px; }
+  ::-webkit-scrollbar-thumb:hover { background: #56607a; background-clip: padding-box; border: 2px solid transparent; }
+  ::-webkit-scrollbar-corner { background: transparent; }
 }
 
 /* Frosted neo-glass card with edge-lit bevel. */

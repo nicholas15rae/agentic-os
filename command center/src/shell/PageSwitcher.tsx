@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, Home, Image, Link2, MoreHorizontal, Plus, Power, X } from "lucide-react";
 import { useLayout } from "@/core/widgets/layout-store";
+import { startupOf } from "@/core/widgets/pages";
+import { useModes } from "@/features/modes/modes-store";
+import { useWallpapers } from "@/features/wallpaper/wallpaper-store";
 
 /**
  * Dashboard pages: one pill per page, "+ New", rename (double-click, or click the
@@ -74,6 +77,7 @@ export function PageSwitcher({ mobile = false }: { mobile?: boolean }) {
             >
               <span className="max-w-28 truncate">{p.name}</span>
             </button>
+            {editing && active && !mobile && <PageMenu id={p.id} />}
             {editing && pages.length > 1 && (
               <button
                 aria-label={armed === p.id ? `Confirm: remove ${p.name} and its ${p.items.length} widgets` : `Remove ${p.name}`}
@@ -122,5 +126,82 @@ function RenameField({ id, name, mobile, onDone }: { id: string; name: string; m
       }}
       className={`field shrink-0 !rounded-full !py-0 font-mono ${mobile ? "!h-8 w-24 text-[11px]" : "!h-9 w-32 text-[12px]"}`}
     />
+  );
+}
+
+/**
+ * Section pass, page presets: the active page's menu in edit mode. Reorder, duplicate, link to
+ * one of Tony's modes (switching mode opens the page and vice versa), pin the current wallpaper
+ * to the page, make it the startup page, or add the clean "Home" view.
+ */
+function PageMenu({ id }: { id: string }) {
+  const [open, setOpen] = useState(false);
+  const page = useLayout((s) => s.pages.find((p) => p.id === id));
+  const pages = useLayout((s) => s.pages);
+  const startup = useLayout((s) => startupOf(s));
+  const modes = useModes((s) => s.modes).filter((m) => !m.is_novelty);
+  const currentWallpaper = useWallpapers((s) => s.currentId);
+  const L = useLayout.getState();
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => !(e.target as HTMLElement).closest?.("[data-page-menu]") && setOpen(false);
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [open]);
+  if (!page) return null;
+  const idx = pages.findIndex((p) => p.id === id);
+  const item = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-ink-2 hover:bg-white/5 hover:text-ink disabled:opacity-40";
+  return (
+    <span className="relative ml-1" data-page-menu>
+      <button aria-label={`${page.name}: page options`} aria-expanded={open} onClick={() => setOpen((v) => !v)} className="grid size-7 place-items-center rounded-full text-ink-3 hover:text-ink">
+        <MoreHorizontal size={14} />
+      </button>
+      {open && (
+        <div className="glass-chat absolute right-0 top-9 z-50 w-64 rounded-[14px] p-1.5" role="menu" aria-label={`${page.name} options`}>
+          <div className="flex gap-1">
+            <button className={item} disabled={idx <= 0} onClick={() => L.movePage(id, -1)}>
+              <ChevronLeft size={13} /> Move left
+            </button>
+            <button className={item} disabled={idx >= pages.length - 1} onClick={() => L.movePage(id, 1)}>
+              Move right <ChevronRight size={13} />
+            </button>
+          </div>
+          <button className={item} onClick={() => (L.duplicatePage(id), setOpen(false))}>
+            <Copy size={13} /> Duplicate page
+          </button>
+          <label className={`${item} cursor-default`}>
+            <Link2 size={13} /> Tony's mode
+            <select
+              className="ml-auto rounded-md bg-black/30 px-1.5 py-0.5 text-[11px] text-ink outline-none"
+              value={page.mode ?? ""}
+              onChange={(e) => L.setPageMode(id, e.target.value || null)}
+              aria-label="Link this page to one of Tony's modes"
+            >
+              <option value="">None</option>
+              {modes.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {page.wallpaper ? (
+            <button className={item} onClick={() => L.setPageWallpaper(id, null)}>
+              <Image size={13} /> Use the shared wallpaper rotation
+            </button>
+          ) : (
+            <button className={item} onClick={() => L.setPageWallpaper(id, currentWallpaper)}>
+              <Image size={13} /> Keep this wallpaper on this page
+            </button>
+          )}
+          <button className={item} disabled={startup === id} onClick={() => L.setStartupPage(id)}>
+            <Power size={13} /> {startup === id ? "Opens at startup" : "Open this page at startup"}
+          </button>
+          <button className={item} onClick={() => (L.addHomeView(), setOpen(false))}>
+            <Home size={13} /> Add a clean Home view
+          </button>
+        </div>
+      )}
+    </span>
   );
 }

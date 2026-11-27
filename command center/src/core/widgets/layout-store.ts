@@ -3,7 +3,7 @@ import { persist } from "zustand/middleware";
 import { getWidget } from "./registry";
 import { isTauri } from "@/lib/platform";
 import type { WidgetInstance } from "./types";
-import { activeItems, allIds, fits, migrateLayout, moveToPage, nextPageName, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
+import { activeItems, addHomeView, allIds, duplicatePage, linkMode, migrateLayout, movePage, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, startupOf, withUniqueIds, type PagesState } from "./pages";
 
 export { GRID_COLS, GRID_ROWS, activeItems, fits, type LayoutPage } from "./pages";
 
@@ -48,7 +48,7 @@ interface LayoutState extends PagesState {
   /** Lands on the start page (default: active) if it fits, else a later page, else a new page. */
   add: (widgetId: string, config?: Record<string, unknown>, opts?: { pageId?: string }) => AddResult;
   remove: (instanceId: string) => void;
-  /** Returns false (and changes nothing) if the target rect is out of bounds or collides. */
+  /** Moves / resizes, pushing covered neighbours aside; false (nothing changes) when off the board or there is no room. */
   place: (instanceId: string, rect: Pick<WidgetInstance, "col" | "row" | "w" | "h">) => boolean;
   setConfig: (instanceId: string, patch: Record<string, unknown>) => void;
   setGlass: (instanceId: string, ultra: boolean) => void;
@@ -60,6 +60,13 @@ interface LayoutState extends PagesState {
   renamePage: (id: string, name: string) => void;
   setActivePage: (id: string) => void;
   moveToPage: (instanceId: string, pageId: string) => boolean;
+  /** Page presets (section pass). */
+  movePage: (id: string, dir: -1 | 1) => void;
+  duplicatePage: (id: string) => void;
+  setPageMode: (id: string, mode: string | null) => void;
+  setPageWallpaper: (id: string, wallpaper: string | null) => void;
+  setStartupPage: (id: string | null) => void;
+  addHomeView: () => void;
 }
 
 const shortId = () => crypto.randomUUID().slice(0, 6);
@@ -87,12 +94,9 @@ export const useLayout = create<LayoutState>()(
         },
         remove: (instanceId) => updateActive((items) => items.filter((i) => i.instanceId !== instanceId)),
         place: (instanceId, rect) => {
-          const items = activeItems(get());
-          const current = items.find((i) => i.instanceId === instanceId);
-          if (!current) return false;
-          const next = { ...current, ...rect };
-          if (!fits(items, next)) return false;
-          updateActive((list) => list.map((i) => (i.instanceId === instanceId ? next : i)));
+          const next = placePushing(activeItems(get()), instanceId, rect);
+          if (!next) return false;
+          updateActive(() => next);
           return true;
         },
         // By id on whichever page holds it (ids are unique), so a widget's late async save still lands after a page switch.
@@ -129,6 +133,12 @@ export const useLayout = create<LayoutState>()(
         setActivePage: (id) => {
           if (get().pages.some((p) => p.id === id)) set({ activePage: id });
         },
+        movePage: (id, dir) => set((s) => movePage(s, id, dir)),
+        duplicatePage: (id) => set((s) => duplicatePage(s, id, shortId)),
+        setPageMode: (id, mode) => set((s) => linkMode(s, id, mode)),
+        setPageWallpaper: (id, wallpaper) => set((s) => ({ pages: s.pages.map((p) => (p.id === id ? { ...p, wallpaper } : p)) })),
+        setStartupPage: (startupPage) => set({ startupPage }),
+        addHomeView: () => set((s) => addHomeView(s, shortId)),
         moveToPage: (instanceId, pageId) => {
           const s = get();
           const inst = s.pages.flatMap((p) => p.items).find((i) => i.instanceId === instanceId);
@@ -142,9 +152,14 @@ export const useLayout = create<LayoutState>()(
     {
       name: "cc.layout",
       version: 5,
-      partialize: (s) => ({ pages: s.pages, activePage: s.activePage }),
+      partialize: (s) => ({ pages: s.pages, activePage: s.activePage, startupPage: s.startupPage }),
       migrate: (persisted, version) => migrateLayout(persisted, version, DEFAULT_LAYOUT, isTauri() ? PIPELINES_SLOT : null),
-      merge: (persisted, current) => (persisted == null ? current : { ...current, ...sanitizePages(persisted, DEFAULT_LAYOUT) }),
+      // The app opens on the startup page (default: the first), not on whatever page was last open.
+      merge: (persisted, current) => {
+        if (persisted == null) return current;
+        const s = sanitizePages(persisted, DEFAULT_LAYOUT);
+        return { ...current, ...s, activePage: startupOf(s) };
+      },
     },
   ),
 );

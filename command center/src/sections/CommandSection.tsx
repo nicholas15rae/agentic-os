@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FlaskConical, Loader2, Plus, RotateCcw, Sparkles } from "lucide-react";
+import { Loader2, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { WidgetGrid } from "@/core/widgets/WidgetGrid";
 import { availableWidgets } from "@/core/widgets/registry";
 import { activeItems, useLayout, type AddResult } from "@/core/widgets/layout-store";
@@ -9,6 +9,7 @@ import { GlassOpacitySlider } from "@/features/os/OsControls";
 import { startHub, useHub } from "@/features/buildhub/hub-store";
 import { promotedWidgets } from "@/features/buildhub/promoted";
 import { GENERATOR_SYSTEM, validateSpec, type CustomSpec } from "@/widgets/custom/spec";
+import { WidgetDrawer } from "@/core/widgets/WidgetDrawer";
 
 export function CommandSection() {
   const editing = useLayout((s) => s.editing);
@@ -58,6 +59,7 @@ function WidgetTray() {
   const [msg, setMsg] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const [drawer, setDrawer] = useState(false);
   // Promoted Play Place builds stay addable after their tile is removed (desktop; the hub is Tauri-only).
   useEffect(startHub, []);
   const promoted = promotedWidgets(useHub((s) => s.view));
@@ -100,42 +102,10 @@ function WidgetTray() {
 
   return (
     <div className="mx-4 mb-3 space-y-2 md:mx-6 xl:mx-8">
-      {promoted.length > 0 && (
-        <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2" aria-label="Your Play Place builds">
-          <span className="label-caps shrink-0 px-2 text-violet">From Play Place</span>
-          {promoted.map((b) => (
-            <button
-              key={b.buildId}
-              title={b.buildTitle ? `Promoted from the Play Place build “${b.buildTitle}”` : "Promoted from the Play Place"}
-              onClick={() => addAndReport("staged-build", b.title, { buildId: b.buildId, title: b.title })}
-              className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
-            >
-              <Plus size={13} />
-              <FlaskConical size={14} className="text-violet" />
-              {b.title}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2">
-        <span className="label-caps shrink-0 px-2 text-amber-soft">Add</span>
-        {availableWidgets()
-          .filter((w) => w.id !== "custom" && w.id !== "staged-build")
-          .map((w) => {
-            const Icon = w.icon;
-            return (
-              <button
-                key={w.id}
-                title={w.description}
-                onClick={() => addAndReport(w.id, w.title)}
-                className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
-              >
-                <Plus size={13} />
-                <Icon size={14} className="text-teal" />
-                {w.title}
-              </button>
-            );
-          })}
+      <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2">
+        <button onClick={() => setDrawer(true)} className="pill-primary !h-9 shrink-0 !px-3 text-[13px]" title="Search every widget, grouped by kind (your Play Place builds first)">
+          <Plus size={13} /> Add widget
+        </button>
         <GlassAllSwitch />
         <GlassOpacitySlider />
         <button onClick={reset} className="pill-glass !h-9 shrink-0 !px-3 text-[13px]" title="Restores the default layout on the first page, or clears any other page. Other pages are untouched.">
@@ -173,8 +143,18 @@ function WidgetTray() {
       </div>
 
       {msg && <p className="px-2 text-xs text-ink-2">{msg}</p>}
+      {drawer && (
+        <WidgetDrawer
+          promoted={promoted.map((b) => ({ buildId: b.buildId, title: b.title, buildTitle: b.buildTitle }))}
+          onAdd={(id, title, config) => {
+            addAndReport(id, title, config);
+            setDrawer(false);
+          }}
+          onClose={() => setDrawer(false)}
+        />
+      )}
       <p className="hidden px-2 text-xs text-ink-3 md:block">
-        Drag a widget’s label to move it, its corner to resize. Red outline = no room there. Generated widgets are data-only views of your local store — they can’t run code.
+        Drag a widget’s label to move it, its corner to resize; neighbours move aside. Red outline = no room there. Generated widgets are data-only views of your local store — they can’t run code.
       </p>
     </div>
   );

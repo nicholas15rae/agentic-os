@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeItems, findSlot, migrateLayout, moveToPage, nextPageName, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
+import { activeItems, findSlot, migrateLayout, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
 import type { WidgetInstance } from "./types";
 
 const inst = (instanceId: string, col: number, row: number, w: number, h: number, widgetId = "x"): WidgetInstance => ({ instanceId, widgetId, col, row, w, h, config: {} });
@@ -161,5 +161,65 @@ describe("persisted layout", () => {
     const s: PagesState = { pages: [{ id: "p1", name: "Page 1", items: DEFAULTS }], activePage: "p1" };
     expect(activeItems(s)).toBe(DEFAULTS);
     expect(activeItems({ ...s, activePage: "nope" })).toBe(activeItems({ pages: [], activePage: "x" }));
+  });
+});
+
+describe("placePushing (section pass: resizing pushes neighbours aside)", () => {
+  const w = (instanceId: string, col: number, row: number, ww: number, h: number) => ({ instanceId, widgetId: "x", col, row, w: ww, h, config: {} });
+  const noOverlap = (items: ReturnType<typeof w>[]) =>
+    items.every((a, i) => items.every((b, j) => i === j || !(a.col < b.col + b.w && b.col < a.col + a.w && a.row < b.row + b.h && b.row < a.row + a.h)));
+
+  it("growing a widget into its neighbour moves the neighbour, never overlaps", () => {
+    const items = [w("mantra", 4, 1, 6, 3), w("n8n", 4, 4, 6, 2)];
+    const next = placePushing(items, "mantra", { col: 4, row: 1, w: 6, h: 4 })!;
+    expect(next).not.toBeNull();
+    expect(next.find((i) => i.instanceId === "mantra")!.h).toBe(4);
+    expect(noOverlap(next)).toBe(true);
+    const n8n = next.find((i) => i.instanceId === "n8n")!;
+    expect(n8n.row).toBeGreaterThanOrEqual(5);
+  });
+
+  it("free space: nothing else moves", () => {
+    const items = [w("a", 1, 1, 2, 2), w("b", 6, 6, 2, 2)];
+    const next = placePushing(items, "a", { col: 1, row: 1, w: 3, h: 2 })!;
+    expect(next.find((i) => i.instanceId === "b")).toEqual(items[1]);
+  });
+
+  it("no room for everyone, or off the board: refused", () => {
+    const full = [w("a", 1, 1, 12, 4), w("b", 1, 5, 12, 4)];
+    expect(placePushing(full, "a", { col: 1, row: 1, w: 12, h: 5 })).toBeNull();
+    expect(placePushing(full, "a", { col: 10, row: 1, w: 6, h: 2 })).toBeNull();
+  });
+});
+
+describe("page presets (section pass)", () => {
+  let n = 0;
+  const id = () => `n${++n}`;
+  const base = (): PagesState => ({ pages: [{ id: "a", name: "Business", items: [inst("w1", 1, 1, 2, 2)] }, { id: "b", name: "Acting", items: [] }], activePage: "a" });
+
+  it("reorders, duplicates with fresh ids, and keeps one page per mode", async () => {
+    const { movePage, duplicatePage, linkMode, pageForMode, startupOf, addHomeView } = await import("./pages");
+    expect(movePage(base(), "a", 1).pages.map((p) => p.id)).toEqual(["b", "a"]);
+    expect(movePage(base(), "a", -1).pages.map((p) => p.id)).toEqual(["a", "b"]);
+    const d = duplicatePage(base(), "a", id);
+    expect(d.pages.map((p) => p.name)).toEqual(["Business", "Business copy", "Acting"]);
+    expect(d.pages[1].items[0].instanceId).not.toBe("w1");
+    let s = linkMode(base(), "a", "builder");
+    s = linkMode(s, "b", "builder");
+    expect(s.pages.map((p) => p.mode)).toEqual([null, "builder"]);
+    expect(pageForMode(s.pages, "builder")?.id).toBe("b");
+    expect(startupOf(base())).toBe("a");
+    expect(startupOf({ ...base(), startupPage: "b" })).toBe("b");
+    expect(startupOf({ ...base(), startupPage: "gone" })).toBe("a");
+    const h = addHomeView(base(), id);
+    expect(h.pages[0].name).toBe("Home");
+    expect(h.startupPage).toBe(h.pages[0].id);
+    expect(h.pages[0].items.map((i) => i.widgetId).sort()).toEqual(["agent-nodes", "mantra", "system-stats", "weather"]);
+  });
+
+  it("keeps a page's wallpaper, mode and the startup page across a reload", () => {
+    const s = sanitizePages({ pages: [{ id: "a", name: "A", items: [], wallpaper: "wp1", mode: "builder" }], activePage: "a", startupPage: "a" }, []);
+    expect(s.pages[0]).toMatchObject({ wallpaper: "wp1", mode: "builder" });
+    expect(s.startupPage).toBe("a");
   });
 });

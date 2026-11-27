@@ -1,7 +1,8 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { GripVertical, Maximize2, X } from "lucide-react";
 import { getWidget } from "./registry";
-import { GRID_COLS, GRID_ROWS, activeItems, fits, useLayout } from "./layout-store";
+import { GRID_COLS, GRID_ROWS, activeItems, useLayout } from "./layout-store";
+import { placePushing } from "./pages";
 import type { WidgetInstance } from "./types";
 import { useMediaQuery, usePrefersReducedMotion } from "@/lib/use-media-query";
 
@@ -119,7 +120,8 @@ function WidgetCell({
             h: Math.min(max.h, Math.max(min.h, inst.h + dr)),
           };
     setGhost(next);
-    setGhostValid(fits(activeItems(useLayout.getState()), { ...inst, ...next }));
+    // Valid when it fits, pushing neighbours aside if needed.
+    setGhostValid(placePushing(activeItems(useLayout.getState()), inst.instanceId, next) !== null);
   };
 
   const onPointerUp = () => {
@@ -169,7 +171,8 @@ function WidgetCell({
       <section
         aria-label={def.title}
         className={[
-          "relative min-h-0",
+          // Clipped: a widget's content never spills over its neighbours (it scales to fit instead).
+          "relative min-h-0 overflow-hidden",
           def.chromeless && !editing ? "" : ultra ? "glass-ultra rounded-[20px]" : "glass rounded-[20px]",
           "transition-[background-color,backdrop-filter,box-shadow] duration-300",
           compact ? (def.chromeless ? "" : "min-h-40") : "",

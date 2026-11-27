@@ -5,6 +5,7 @@ import { cmd, type InstanceStatus, type PipelinesSettings, type PipelinesView, t
 import { useNow } from "@/lib/cc-api";
 import { gated } from "@/features/bridge/gate";
 import { useToasts } from "@/features/reminders/notify";
+import { useNav } from "@/stores/nav";
 
 /**
  * n8n Pipelines & Drive Sync — a compact live feed (no node graphs).
@@ -105,8 +106,21 @@ export default function Pipelines({ size }: WidgetProps) {
   const online = view?.online ?? false;
   const compact = size.h <= 2;
 
+  // Not connected yet (no instance has an API key): say so and point at the setup, nothing else.
+  if (view && !online && view.instances.every((i) => i.status === "no-key" || !i.hasApiKey)) {
+    return (
+      <div className="flex h-full flex-col items-start justify-center gap-2">
+        <span className="label-caps text-pipe-idle">n8n · not connected</span>
+        <p className="text-[12px] leading-relaxed text-ink-2">Add your n8n API key to see and run your workflows here.</p>
+        <button className="pill-glass !h-8 text-[11px]" onClick={() => useNav.getState().go("settings")}>
+          Set up in Settings → Integrations
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-full min-h-48 flex-col">
+    <div className="flex h-full flex-col">
       {/* Top bar */}
       <header className="mb-2 flex flex-wrap items-center gap-2">
         <span

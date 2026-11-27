@@ -4,8 +4,25 @@ import { Card, Chip, Input } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { intelApi, money, type DiscordHit, type IntelView, type LeaderRow } from "@/features/trading/ibkr";
+import { adjustedHit, bandText, splitBoard } from "@/features/trading/track-record";
 
 const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
+
+/** One leaderboard row. `muted` = fewer than MIN_SCORED scored calls: greyed, listed but not ranked. */
+function LeaderLine({ r, muted = false }: { r: LeaderRow; muted?: boolean }) {
+  const adj = adjustedHit(r);
+  return (
+    <tr className={`border-t border-white/[0.04] ${muted ? "text-ink-3 opacity-60" : ""}`}
+      title={muted ? `${r.calls} scored call(s): not enough to rank` : "Adj. hit = lower bound of the 95% Wilson interval for the hit rate"}>
+      <td className="truncate px-2.5 py-1.5">{r.name}</td>
+      <td className="px-2.5 py-1.5">{r.calls}</td>
+      <td className="px-2.5 py-1.5">{pct(r.hitRate)}</td>
+      <td className={`px-2.5 py-1.5 ${muted ? "" : adj > 0.55 ? "text-teal-soft" : adj < 0.45 ? "text-alert" : ""}`}>{pct(adj)}</td>
+      <td className="whitespace-nowrap px-2.5 py-1.5">{bandText(r)}</td>
+      <td className={`px-2.5 py-1.5 ${muted ? "" : r.avgRet > 0 ? "text-teal-soft" : "text-alert"}`}>{r.avgRet.toFixed(2)}%</td>
+    </tr>
+  );
+}
 const day = (ms: number | null) => (ms ? new Date(ms).toLocaleDateString() : "—");
 
 /**
@@ -37,6 +54,7 @@ export function IntelPanel() {
   const d = data?.discord;
   const lb = board ?? data?.leaderboards;
   const rows: LeaderRow[] = (tab === "authors" ? lb?.authors : lb?.channels) ?? [];
+  const split = splitBoard(rows);
   const j = data?.journal;
 
   return (
@@ -116,25 +134,26 @@ export function IntelPanel() {
             </button>
           </div>
           <div className="mt-2 overflow-x-auto rounded-[12px] border border-white/[0.06]">
-            <table className="w-full text-[12px]">
+            <table className="w-full text-[12px]" aria-label="Track record ranking">
               <thead>
                 <tr className="text-left text-ink-3">
-                  {[tab === "authors" ? "Author" : "Channel", "Calls", "Hit", "Adj. hit", "Avg ret"].map((h) => <th key={h} className="px-2.5 py-1.5 font-medium">{h}</th>)}
+                  {[tab === "authors" ? "Author" : "Channel", "n", "Hit", "Adj. hit", "95% band", "Avg ret"].map((h) => <th key={h} className="px-2.5 py-1.5 font-medium">{h}</th>)}
                 </tr>
               </thead>
               <tbody className="font-mono tabular">
-                {rows.length ? rows.slice(0, 10).map((r) => (
-                  <tr key={r.id} className="border-t border-white/[0.04]" title="Adj. hit = (hits + 5) / (calls + 10): a coin-flip prior so a few lucky calls don't rank first">
-                    <td className="truncate px-2.5 py-1.5">{r.name}</td>
-                    <td className="px-2.5 py-1.5">{r.calls}</td>
-                    <td className="px-2.5 py-1.5">{pct(r.hitRate)}</td>
-                    <td className={`px-2.5 py-1.5 ${r.shrunkHitRate > 0.55 ? "text-teal-soft" : r.shrunkHitRate < 0.45 ? "text-alert" : ""}`}>{pct(r.shrunkHitRate)}</td>
-                    <td className={`px-2.5 py-1.5 ${r.avgRet > 0 ? "text-teal-soft" : "text-alert"}`}>{r.avgRet.toFixed(2)}%</td>
-                  </tr>
-                )) : <tr><td colSpan={5} className="px-2.5 py-4 text-center text-ink-3">No scored calls yet — import history, then Score now.</td></tr>}
+                {split.ranked.slice(0, 10).map((r) => <LeaderLine key={r.id} r={r} />)}
+                {rows.length && !split.ranked.length ? (
+                  <tr className="border-t border-white/[0.04]"><td colSpan={6} className="px-2.5 py-2 text-center font-sans text-[11px] text-ink-3">No {tab === "authors" ? "author" : "channel"} has {split.minScored} scored calls yet, so nothing is ranked.</td></tr>
+                ) : null}
+                {split.notEnough.length ? (
+                  <tr className="border-t border-white/[0.08]"><th colSpan={6} scope="rowgroup" className="px-2.5 pb-0.5 pt-2 text-left font-sans text-[10.5px] font-medium uppercase tracking-wide text-ink-3">Not enough calls yet (under {split.minScored} scored) · not ranked</th></tr>
+                ) : null}
+                {split.notEnough.slice(0, 10).map((r) => <LeaderLine key={r.id} r={r} muted />)}
+                {!rows.length ? <tr><td colSpan={6} className="px-2.5 py-4 text-center text-ink-3">No scored calls yet — import history, then Score now.</td></tr> : null}
               </tbody>
             </table>
           </div>
+          <p className="mt-1 text-[10.5px] text-ink-3">Ranked by adj. hit = lower bound of the 95% Wilson band; a source needs {split.minScored} scored calls to be ranked. n = scored calls at this horizon.</p>
         </section>
 
         <section className="min-w-0" aria-label="Trade journal">

@@ -136,6 +136,13 @@ def split(trades: list[dict[str, Any]], cutoff: str | None) -> tuple[list[dict[s
     return [t for t in trades if t["entryDate"] < cutoff], [t for t in trades if t["entryDate"] >= cutoff]
 
 
+def _std(xs: list[float]) -> float | None:
+    if len(xs) < 2:
+        return None
+    m = sum(xs) / len(xs)
+    return round(math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1)), 4)
+
+
 def metrics(trades: list[dict[str, Any]], risk_pct: float) -> dict[str, Any]:
     n = len(trades)
     wins = [t for t in trades if t["r"] > 0]
@@ -155,6 +162,8 @@ def metrics(trades: list[dict[str, Any]], risk_pct: float) -> dict[str, Any]:
         "avgWinR": avg([t["r"] for t in wins]), "avgLossR": avg([t["r"] for t in losses]),
         "avgWinPct": avg([t["retPct"] for t in wins]), "avgLossPct": avg([t["retPct"] for t in losses]),
         "expectancyR": avg([t["r"] for t in trades]), "totalR": round(sum(t["r"] for t in trades), 4),
+        # Sample standard deviation of R (display only: the track record's 95% expectancy interval).
+        "stdR": _std([t["r"] for t in trades]),
         "maxDrawdownR": round(dd, 4), "maxDrawdownPct": round(dd * risk_pct, 4),
         "from": min((t["entryDate"] for t in trades), default=None), "to": max((t["entryDate"] for t in trades), default=None),
         "note": None if n >= MIN_MEANINGFUL else f"only {n} trade(s): too few to judge",

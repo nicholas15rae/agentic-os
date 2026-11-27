@@ -336,6 +336,47 @@ def trading_rules_view(view: str, request: Request):
         raise _offline(e) from None
 
 
+_TRACK = None
+TRACK_JOURNAL_LIMIT = 200  # the bridge's /intel/journal cap
+
+
+def _track_record_mod():
+    """trading/track_record.py, loaded by path (stdlib only, pure) like market_calendar."""
+    global _TRACK
+    if _TRACK is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("trading_track_record", TRADING_DIR / "track_record.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _TRACK = mod
+    return _TRACK
+
+
+def _cached_spy_bars() -> list:
+    """Engine R's cached SPY daily bars (rule_engine.BarStore). Read-only; never asks IBKR for anything."""
+    d = Path(os.environ.get("TRADING_DATA_DIR") or BASE_DIR / "data" / "trading")
+    try:
+        data = json.loads((d / "bars_cache" / "SPY.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    bars = data.get("bars") if isinstance(data, dict) else None
+    return bars if isinstance(bars, list) else []
+
+
+@router.get("/track-record")
+def trading_track_record():
+    """Engine R paper track record next to the 70/30 backtest splits and SPY buy-and-hold, with a drift flag.
+    Display / analysis only: GETs the bridge's last evaluation + journal, reads the cached SPY bars, writes nothing,
+    and nothing reads it back as a gate (the 100-trade line is information only)."""
+    try:
+        ev = _bridge_get("/rules/evaluation", timeout=8.0)
+        journal = _bridge_get(f"/intel/journal?limit={TRACK_JOURNAL_LIMIT}", timeout=8.0).get("trades") or []
+    except OFFLINE as e:
+        raise _offline(e) from None
+    return _track_record_mod().report(ev, journal, _cached_spy_bars(), now=time.time(), journal_limit=TRACK_JOURNAL_LIMIT)
+
+
 @router.get("/health/last")
 def trading_health_last():
     try:

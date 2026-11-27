@@ -1,9 +1,9 @@
 # STATUS
 
-Updated 2026-11-27 12:40. One page for every Claude Code session and branch.
+Updated 2026-11-27 17:07. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
-## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 ~12:40
+## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 17:07
 
 For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, switched on or rebuilt; Tony is on LM Studio (restored exactly after the 11:13 benchmark). Read `docs/section-26-plan.md`, `docs/section-26-allm-inventory.md`, `docs/section-26-bizops-prompt.md`.
 
@@ -12,6 +12,8 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 **Switches (engine.json beside providers.json), all false:** `enabled`, `route_agents`, `route_tony`. Turning any on is Nic's call.
 
 **Benchmark (11:13, GPU idle):** engine first token 0.38 s median (p90 1.61), total 1.93 s, 6.2 GB VRAM; LM Studio right after 0.25 s / 1.45 s, 7.3 GB. Engine tail = cache misses across slots (tuning question below).
+
+**Before merging:** main has moved on (kill switch shipped, cf44451); merge main into this branch and re-run the tests first, since `agent_runner` checks the kill switch.
 
 **Left:** desktop side of the switch (dispatch.rs chain head + model_swap.rs engine branch, design in the plan); a desktop bridge so gateway agents can run desktop-only tools (gmail, whatsapp, fetch, web.search...: today they answer "needs the desktop app"); engine tuning run (needs Nic's OK); Nic's review of the Biz Ops calls; vault join (Nic); rebuild (Nic); vision via Tony's mmproj (plan only).
 
@@ -216,13 +218,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 11:39 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 17:07 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 30 | `756feda` 2026-11-27 feat(gateway-tony): switch to the built-in engine, built and tested... | 1 files |
+| `section-26-engine` | 31 | `8589cea` 2026-11-27 docs(status): Section 26 handoff: agents + tools, threads, ingest, ... | clean |
 | `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |
@@ -232,10 +234,10 @@ _Refreshed 2026-11-27 11:39 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `cf44451` 2026-11-27 docs(status): kill switch shipped (8647df7), app restarted 16:25; bridge restart waits on Nic
 - `73ed487` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined main tests
 - `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
 - `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
 - `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
 - `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
-- `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
 <!-- /AUTO:BRANCHES -->

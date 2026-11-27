@@ -1,20 +1,34 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { GripVertical, Maximize2, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { AppWindow, Expand, GripVertical, Maximize2, Palette, Shrink, X } from "lucide-react";
 import { getWidget } from "./registry";
-import { GRID_COLS, GRID_ROWS, activeItems, useLayout } from "./layout-store";
+import { GRID_COLS, GRID_ROWS, activeItems, useLayout, type WidgetWindow } from "./layout-store";
 import { placePushing } from "./pages";
-import type { WidgetInstance } from "./types";
+import type { WidgetDefinition, WidgetInstance } from "./types";
+import { ALIGN_CLASS, DEFAULT_GLASS_ALPHA, FIT_MIN, FONT_CLASS, clampScale, frameOf, opacityFor, overflowRatio, type Align, type DisplayMode, type FontChoice, type Frame } from "./look";
+import { useWidgetBadges } from "./widget-badges";
 import { useMediaQuery, usePrefersReducedMotion } from "@/lib/use-media-query";
+import { useWallpapers } from "@/features/wallpaper/wallpaper-store";
 
 /**
  * 12×8 snap grid on desktop/tablet; a single scrolling column on phones.
  * Empty cells are intentional — they let the wallpaper breathe.
  * In edit mode, drag the grip to move and the corner to resize (pointer events,
- * so it works with mouse and touch).
+ * so it works with mouse and touch); neighbours move aside.
+ *
+ * Section pass: every widget has its own look (frame, font, size, colour, alignment, glass
+ * opacity per wallpaper), its content scales down to fit its cell, a tap focuses it (solid and
+ * readable, with an expand button; click away / Esc returns it to glass), and it can be shown
+ * full, compact or as an app icon that opens in a movable, resizable window.
  */
 export function WidgetGrid() {
   const activePage = useLayout((s) => s.activePage);
-  return <PageBoard key={activePage} />;
+  return (
+    <>
+      <PageBoard key={activePage} />
+      <WidgetWindows />
+    </>
+  );
 }
 
 /** One page's board. Keyed by page id, so a page switch remounts it and fades it in. */
@@ -30,14 +44,40 @@ function PageBoard() {
     if (!reduced) gridRef.current?.animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" });
   }, [reduced]);
 
+  // Click away / Esc: the focused widget returns to its resting glass.
+  useEffect(() => {
+    const away = (e: PointerEvent) => {
+      if (!useLayout.getState().focused) return;
+      const t = e.target as HTMLElement | null;
+      if (!t?.closest?.("[data-widget],[data-widget-window]")) useLayout.getState().setFocused(null);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && useLayout.getState().setFocused(null);
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", esc);
+    };
+  }, []);
+
   if (compact) {
     const order = (i: WidgetInstance) => getWidget(i.widgetId)?.compactOrder ?? i.row;
     const ordered = [...instances].sort((a, b) => order(a) - order(b) || a.col - b.col);
+    const icons = ordered.filter((i) => i.display === "icon");
     return (
       <div ref={gridRef} className="flex flex-col gap-3 px-4 pb-40 pt-2">
-        {ordered.map((inst) => (
-          <WidgetCell key={inst.instanceId} inst={inst} editing={editing} compact />
-        ))}
+        {icons.length > 0 && (
+          <div className="grid grid-cols-4 gap-3">
+            {icons.map((inst) => (
+              <WidgetCell key={inst.instanceId} inst={inst} editing={editing} compact />
+            ))}
+          </div>
+        )}
+        {ordered
+          .filter((i) => i.display !== "icon")
+          .map((inst) => (
+            <WidgetCell key={inst.instanceId} inst={inst} editing={editing} compact />
+          ))}
       </div>
     );
   }
@@ -73,6 +113,19 @@ function GridGuides() {
 
 type DragMode = "move" | "resize";
 
+const FRAME_CLASS: Record<Frame, string> = {
+  glass: "glass rounded-[20px]",
+  ultra: "glass-ultra rounded-[20px]",
+  solid: "glass-chat rounded-[20px]",
+  frameless: "",
+};
+
+/** The glass background at a per-wallpaper opacity (only when the widget set one). */
+function glassStyle(frame: Frame, alpha: number): React.CSSProperties | undefined {
+  if (frame !== "glass" || alpha === DEFAULT_GLASS_ALPHA) return undefined;
+  return { background: `linear-gradient(rgba(24, 28, 38, ${alpha}), rgba(24, 28, 38, ${alpha})) padding-box, linear-gradient(to bottom right, rgba(255,255,255,0.16), rgba(255,255,255,0.03)) border-box` };
+}
+
 function WidgetCell({
   inst,
   editing,
@@ -85,10 +138,13 @@ function WidgetCell({
   gridRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const def = getWidget(inst.widgetId);
-  const { place, remove, setConfig, setGlass } = useLayout.getState();
-  const ultra = inst.glass === "ultra";
+  const { place, remove, setGlass, setFocused, openWindow } = useLayout.getState();
+  const focused = useLayout((s) => s.focused === inst.instanceId);
+  const windowed = useLayout((s) => s.windows.some((w) => w.instanceId === inst.instanceId));
+  const wallpaperId = useWallpapers((s) => s.currentId);
   const [ghost, setGhost] = useState<Pick<WidgetInstance, "col" | "row" | "w" | "h"> | null>(null);
   const [ghostValid, setGhostValid] = useState(true);
+  const [styling, setStyling] = useState<DOMRect | null>(null);
   const drag = useRef<{ mode: DragMode; startX: number; startY: number; cellW: number; cellH: number } | null>(null);
 
   const onPointerDown = useCallback(
@@ -108,7 +164,8 @@ function WidgetCell({
     if (!d) return;
     const dc = Math.round((e.clientX - d.startX) / d.cellW);
     const dr = Math.round((e.clientY - d.startY) / d.cellH);
-    const min = def?.minSize ?? { w: 2, h: 1 };
+    // Content scales to fit, so any widget can shrink to a single cell.
+    const min = { w: 1, h: 1 };
     const max = def?.maxSize ?? { w: GRID_COLS, h: GRID_ROWS };
     const next =
       d.mode === "move"
@@ -131,7 +188,10 @@ function WidgetCell({
   };
 
   useEffect(() => {
-    if (!editing) setGhost(null);
+    if (!editing) {
+      setGhost(null);
+      setStyling(null);
+    }
   }, [editing]);
 
   if (!def) {
@@ -145,18 +205,78 @@ function WidgetCell({
     );
   }
 
-  const Widget = def.component;
-  const body = (
-    <WidgetBoundary name={def.title}>
-      <Suspense fallback={<div className="h-full animate-pulse rounded-[14px] bg-white/[0.03]" />}>
-        <Widget
-          instanceId={inst.instanceId}
-          config={{ ...def.defaultConfig, ...inst.config }}
-          setConfig={(patch) => setConfig(inst.instanceId, patch)}
-          size={{ w: inst.w, h: inst.h }}
-        />
-      </Suspense>
-    </WidgetBoundary>
+  const icon = inst.display === "icon";
+  const frame = frameOf(inst, !!def.chromeless);
+  const alpha = opacityFor(inst.look, wallpaperId);
+  const restingFrame = focused ? "solid" : frame;
+  const frameless = restingFrame === "frameless";
+
+  const toolbar = editing && (
+    <>
+      <div className="absolute inset-x-2 top-2 z-20 flex items-center justify-between gap-1">
+        {!compact ? (
+          <button
+            aria-label={`Move ${def.title}`}
+            className="well flex min-w-0 cursor-grab touch-none items-center gap-1 rounded-full px-2 py-1 text-ink-2 active:cursor-grabbing"
+            onPointerDown={onPointerDown("move")}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+          >
+            <GripVertical size={14} />
+            {!icon && <span className="label-caps truncate">{def.title}</span>}
+          </button>
+        ) : (
+          <span className="label-caps truncate text-ink-2">{def.title}</span>
+        )}
+        <div className="ml-auto flex items-center gap-1">
+          {!icon && !def.chromeless && frame !== "solid" && frame !== "frameless" && (
+            <button
+              role="switch"
+              aria-checked={frame === "ultra"}
+              aria-label={`Ultra-glass transparency for ${def.title}`}
+              title={frame === "ultra" ? "Ultra glass: on" : "Ultra glass: off"}
+              onClick={() => setGlass(inst.instanceId, frame !== "ultra")}
+              className={`well flex h-7 items-center gap-1.5 rounded-full pl-1.5 pr-2.5 text-[10px] font-mono uppercase tracking-wider ${frame === "ultra" ? "text-teal" : "text-ink-2"}`}
+            >
+              <span className={`relative h-3.5 w-6 rounded-full transition-colors ${frame === "ultra" ? "bg-teal/80" : "bg-white/15"}`}>
+                <span className={`absolute top-0.5 size-2.5 rounded-full bg-white shadow transition-[left] duration-200 ${frame === "ultra" ? "left-3" : "left-0.5"}`} />
+              </span>
+              Glass
+            </button>
+          )}
+          <button
+            aria-label={`Style ${def.title}`}
+            aria-expanded={!!styling}
+            title="Look: frame, font, size, colour, opacity, icon / compact / full"
+            onClick={(e) => {
+              // Read the widget's box now: the event's target is gone once React runs the updater.
+              const rect = (e.currentTarget.closest("[data-widget]") as HTMLElement | null)?.getBoundingClientRect() ?? null;
+              setStyling((v) => (v ? null : rect));
+            }}
+            className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-ink"
+          >
+            <Palette size={13} />
+          </button>
+          <button aria-label={`Remove ${def.title}`} className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-alert" onClick={() => remove(inst.instanceId)}>
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+      {!compact && (
+        <button
+          aria-label={`Resize ${def.title}`}
+          className="well absolute bottom-2 right-2 z-20 grid size-7 cursor-nwse-resize touch-none place-items-center rounded-full text-ink-2"
+          onPointerDown={onPointerDown("resize")}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+        >
+          <Maximize2 size={12} className="rotate-90" />
+        </button>
+      )}
+      {styling && <StylePanel inst={inst} def={def} wallpaperId={wallpaperId} anchor={styling} onClose={() => setStyling(null)} />}
+    </>
   );
 
   return (
@@ -168,79 +288,345 @@ function WidgetCell({
           style={area(ghost)}
         />
       )}
-      <section
-        aria-label={def.title}
-        className={[
-          // Clipped: a widget's content never spills over its neighbours (it scales to fit instead).
-          "relative min-h-0 overflow-hidden",
-          def.chromeless && !editing ? "" : ultra ? "glass-ultra rounded-[20px]" : "glass rounded-[20px]",
-          "transition-[background-color,backdrop-filter,box-shadow] duration-300",
-          compact ? (def.chromeless ? "" : "min-h-40") : "",
-          editing ? "ring-1 ring-amber/40" : "",
-        ].join(" ")}
-        style={compact ? undefined : area(inst)}
-      >
-        <div className={`h-full ${def.chromeless ? "" : "overflow-auto p-4 xl:p-5"} ${editing ? "pt-11 xl:pt-11" : ""}`}>{body}</div>
-
-        {editing && (
-          <>
-            <div className="absolute inset-x-2 top-2 z-20 flex items-center justify-between">
-              {!compact ? (
-                <button
-                  aria-label={`Move ${def.title}`}
-                  className="well flex cursor-grab touch-none items-center gap-1 rounded-full px-2 py-1 text-ink-2 active:cursor-grabbing"
-                  onPointerDown={onPointerDown("move")}
-                  onPointerMove={onPointerMove}
-                  onPointerUp={onPointerUp}
-                  onPointerCancel={onPointerUp}
-                >
-                  <GripVertical size={14} />
-                  <span className="label-caps">{def.title}</span>
-                </button>
-              ) : (
-                <span className="label-caps text-ink-2">{def.title}</span>
-              )}
-              <div className="ml-auto mr-1.5 flex items-center">
-                {!def.chromeless && (
-                  <button
-                    role="switch"
-                    aria-checked={ultra}
-                    aria-label={`Ultra-glass transparency for ${def.title}`}
-                    title={ultra ? "Ultra glass: on" : "Ultra glass: off"}
-                    onClick={() => setGlass(inst.instanceId, !ultra)}
-                    className={`well flex h-7 items-center gap-1.5 rounded-full pl-1.5 pr-2.5 text-[10px] font-mono uppercase tracking-wider ${ultra ? "text-teal" : "text-ink-2"}`}
-                  >
-                    <span className={`relative h-3.5 w-6 rounded-full transition-colors ${ultra ? "bg-teal/80" : "bg-white/15"}`}>
-                      <span className={`absolute top-0.5 size-2.5 rounded-full bg-white shadow transition-[left] duration-200 ${ultra ? "left-3" : "left-0.5"}`} />
-                    </span>
-                    Glass
-                  </button>
-                )}
-              </div>
-              <button
-                aria-label={`Remove ${def.title}`}
-                className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-alert"
-                onClick={() => remove(inst.instanceId)}
-              >
-                <X size={14} />
+      {icon ? (
+        <section data-widget={inst.instanceId} aria-label={def.title} className={`relative min-h-0 ${editing ? "rounded-[20px] ring-1 ring-amber/40" : ""}`} style={compact ? undefined : area(inst)}>
+          <IconTile inst={inst} def={def} onOpen={() => !editing && openWindow(inst.instanceId)} />
+          {!windowed && (
+            <div hidden aria-hidden className="pointer-events-none absolute size-0 overflow-hidden">
+              <WidgetBody inst={inst} def={def} legible={false} />
+            </div>
+          )}
+          {toolbar}
+        </section>
+      ) : (
+        <section
+          data-widget={inst.instanceId}
+          aria-label={def.title}
+          onClickCapture={() => !editing && !focused && setFocused(inst.instanceId)}
+          onFocusCapture={() => !editing && !focused && setFocused(inst.instanceId)}
+          className={[
+            // Clipped: a widget's content never spills over its neighbours (it scales to fit instead).
+            "group relative min-h-0 overflow-hidden",
+            editing && frameless ? "rounded-[20px] outline-1 outline-dashed outline-white/20" : FRAME_CLASS[restingFrame],
+            "transition-[background-color,backdrop-filter,box-shadow] duration-300",
+            compact ? (frameless ? "" : "min-h-40") : "",
+            editing ? "ring-1 ring-amber/40" : focused ? "ring-1 ring-teal/50" : "",
+          ].join(" ")}
+          style={{ ...(compact ? {} : area(inst)), ...(focused ? {} : glassStyle(frame, alpha)) }}
+        >
+          <div className={`h-full ${frameless ? "" : "p-4 xl:p-5"} ${editing || focused ? "pt-11 xl:pt-11" : ""}`}>
+            {/* #12: one live copy only: a widget opened larger lives in its window meanwhile. */}
+            {windowed ? <div className="grid h-full place-items-center text-xs text-ink-3">Open in a window</div> : <WidgetBody inst={inst} def={def} legible={!focused && restingFrame !== "solid"} />}
+          </div>
+          {focused && !editing && (
+            <div className="absolute right-2 top-2 z-20 flex gap-1">
+              <button aria-label={`Open ${def.title} larger`} title="Open larger" onClick={() => openWindow(inst.instanceId)} className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-ink">
+                <Expand size={12} />
+              </button>
+              <button aria-label={`Return ${def.title} to glass`} title="Back to glass (or click away)" onClick={(e) => (e.stopPropagation(), setFocused(null))} className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-ink">
+                <Shrink size={12} />
               </button>
             </div>
-            {!compact && (
-              <button
-                aria-label={`Resize ${def.title}`}
-                className="well absolute bottom-2 right-2 z-20 grid size-7 cursor-nwse-resize touch-none place-items-center rounded-full text-ink-2"
-                onPointerDown={onPointerDown("resize")}
-                onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp}
-                onPointerCancel={onPointerUp}
-              >
-                <Maximize2 size={12} className="rotate-90" />
-              </button>
-            )}
-          </>
-        )}
-      </section>
+          )}
+          {toolbar}
+        </section>
+      )}
     </>
+  );
+}
+
+/** The widget itself, in its look, with content zoomed down to fit its box (never up). */
+function WidgetBody({ inst, def, legible, forceFull }: { inst: WidgetInstance; def: WidgetDefinition<any>; legible: boolean; forceFull?: boolean }) {
+  const setConfig = useLayout.getState().setConfig;
+  const setBadge = useWidgetBadges((s) => s.set);
+  const look = inst.look ?? {};
+  const scale = clampScale(look.scale);
+  const outer = useRef<HTMLDivElement>(null);
+  const inner = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState(1);
+
+  // A new box size starts again at full size; then shrink while the content overflows. Ratios are
+  // measured inside one element, so they don't depend on the zoom itself (no feedback loop).
+  useLayoutEffect(() => {
+    const o = outer.current;
+    if (!o || typeof ResizeObserver === "undefined") return;
+    let last = `${o.clientWidth}x${o.clientHeight}`;
+    const ro = new ResizeObserver(() => {
+      const k = `${o.clientWidth}x${o.clientHeight}`;
+      if (k !== last) {
+        last = k;
+        setFit(1);
+      }
+    });
+    ro.observe(o);
+    return () => ro.disconnect();
+  }, []);
+  useLayoutEffect(() => setFit(1), [scale, look.font]);
+  useEffect(() => {
+    const i = inner.current;
+    if (!i || typeof MutationObserver === "undefined") return;
+    let t: number | undefined;
+    const mo = new MutationObserver(() => {
+      window.clearTimeout(t);
+      t = window.setTimeout(() => setFit(1), 250);
+    });
+    mo.observe(i, { childList: true, subtree: true, characterData: true });
+    return () => {
+      window.clearTimeout(t);
+      mo.disconnect();
+    };
+  }, []);
+  // Clear this widget's icon badge when it goes away.
+  useEffect(() => () => useWidgetBadges.getState().set(inst.instanceId, null), [inst.instanceId]);
+  useLayoutEffect(() => {
+    const check = () => {
+      const i = inner.current;
+      if (!i || document.hidden) return;
+      const r = overflowRatio(i);
+      if (r > 1.02) setFit((f) => Math.max(FIT_MIN, f / r));
+    };
+    check();
+    // Content that arrives later (a list loading) is caught too; cheap, and paused while hidden.
+    const t = window.setInterval(check, 2000);
+    return () => window.clearInterval(t);
+  }, [fit, scale]);
+
+  const Widget = def.component;
+  const size = forceFull && inst.fullSize ? inst.fullSize : { w: inst.w, h: inst.h };
+  return (
+    <div ref={outer} className="h-full w-full overflow-auto" style={{ scrollbarGutter: "stable" }}>
+      <div
+        ref={inner}
+        className={`h-full w-full ${FONT_CLASS[look.font ?? "sans"]} ${look.align ? ALIGN_CLASS[look.align] : ""} ${legible ? "legible" : ""}`}
+        style={{ zoom: scale * fit, color: look.color || undefined }}
+      >
+        <WidgetBoundary name={def.title}>
+          <Suspense fallback={<div className="h-full animate-pulse rounded-[14px] bg-white/[0.03]" />}>
+            <Widget
+              instanceId={inst.instanceId}
+              config={{ ...def.defaultConfig, ...inst.config }}
+              setConfig={(patch) => setConfig(inst.instanceId, patch)}
+              size={size}
+              display={forceFull ? "full" : (inst.display ?? "full")}
+              setBadge={(b) => setBadge(inst.instanceId, b)}
+            />
+          </Suspense>
+        </WidgetBoundary>
+      </div>
+    </div>
+  );
+}
+
+/** Icon mode: an app-sized tile with the widget's icon, name and badge / live value. */
+function IconTile({ inst, def, onOpen }: { inst: WidgetInstance; def: WidgetDefinition<any>; onOpen: () => void }) {
+  const badge = useWidgetBadges((s) => s.badges[inst.instanceId]);
+  const Icon = def.icon;
+  return (
+    <button onClick={onOpen} className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-center" aria-label={`Open ${def.title}${badge ? ` (${badge})` : ""}`} title={def.title}>
+      <span className="glass relative grid aspect-square w-[min(4.5rem,70%)] place-items-center rounded-[22%]">
+        <Icon size={26} className="text-teal" aria-hidden />
+        {badge && <span className="absolute -right-1.5 -top-1.5 min-w-5 rounded-full bg-amber px-1.5 font-mono text-[10px] leading-5 text-canvas">{badge}</span>}
+      </span>
+      <span className="legible max-w-full truncate px-1 text-[11px] font-medium text-ink">{inst.look?.frame === "frameless" ? "" : def.title}</span>
+    </button>
+  );
+}
+
+const FRAMES: { id: Frame; label: string }[] = [
+  { id: "glass", label: "Glass" },
+  { id: "ultra", label: "Clear" },
+  { id: "solid", label: "Solid" },
+  { id: "frameless", label: "None" },
+];
+const FONTS: { id: FontChoice; label: string }[] = [
+  { id: "sans", label: "Sans" },
+  { id: "mono", label: "Mono" },
+  { id: "display", label: "Display" },
+];
+const ALIGNS: { id: Align; label: string }[] = [
+  { id: "start", label: "Left" },
+  { id: "center", label: "Centre" },
+  { id: "end", label: "Right" },
+];
+const DISPLAYS: { id: DisplayMode; label: string }[] = [
+  { id: "full", label: "Full" },
+  { id: "compact", label: "Compact" },
+  { id: "icon", label: "Icon" },
+];
+
+/** Edit mode → the palette button: this widget's look, saved with the page. */
+function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetInstance; def: WidgetDefinition<any>; wallpaperId: string; anchor: DOMRect; onClose: () => void }) {
+  const { setLook, setDisplay } = useLayout.getState();
+  const [note, setNote] = useState<string | null>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    panel.current?.focus();
+    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+  const look = inst.look ?? {};
+  const frame = frameOf(inst, !!def.chromeless);
+  const seg = (on: boolean) => `rounded-full border px-2.5 py-1 text-[11px] ${on ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`;
+  // Floats above the page (a widget clips its own content), next to the widget, kept on screen.
+  const W = 256;
+  const left = Math.max(8, Math.min(window.innerWidth - W - 8, anchor.right + 8 + W > window.innerWidth ? anchor.left - W - 8 : anchor.right + 8));
+  const top = Math.max(8, Math.min(window.innerHeight - 440, anchor.top));
+  return createPortal(
+    <div ref={panel} tabIndex={-1} className="glass-chat fixed z-[85] w-64 space-y-2.5 rounded-[14px] p-3 text-left outline-none" style={{ left, top }} role="dialog" aria-label={`${def.title} look`} onPointerDown={(e) => e.stopPropagation()}>
+      <div className="flex items-center">
+        <span className="label-caps text-amber-soft">Look</span>
+        <button className="ml-auto text-ink-3 hover:text-ink" onClick={onClose} aria-label="Close the look panel">
+          <X size={13} />
+        </button>
+      </div>
+      <Row label="Show as">
+        {DISPLAYS.map((d) => (
+          <button key={d.id} className={seg((inst.display ?? "full") === d.id)} onClick={() => setNote(setDisplay(inst.instanceId, d.id) ? null : "No room on this page for that size.")}>
+            {d.id === "icon" && <AppWindow size={10} className="mr-1 inline" />}
+            {d.label}
+          </button>
+        ))}
+      </Row>
+      <Row label="Frame">
+        {FRAMES.map((f) => (
+          <button key={f.id} className={seg(frame === f.id)} onClick={() => setLook(inst.instanceId, { frame: f.id })}>
+            {f.label}
+          </button>
+        ))}
+      </Row>
+      {frame === "glass" && (
+        <Row label="Opacity">
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(opacityFor(look, wallpaperId) * 100)}
+            onChange={(e) => setLook(inst.instanceId, { opacity: { [wallpaperId]: Number(e.target.value) / 100 } })}
+            className="w-full"
+            aria-label="Glass opacity on this wallpaper"
+            title="Saved for this wallpaper"
+          />
+        </Row>
+      )}
+      <Row label="Font">
+        {FONTS.map((f) => (
+          <button key={f.id} className={seg((look.font ?? "sans") === f.id)} onClick={() => setLook(inst.instanceId, { font: f.id })}>
+            {f.label}
+          </button>
+        ))}
+      </Row>
+      <Row label="Size">
+        <input type="range" min={60} max={160} step={5} value={Math.round(clampScale(look.scale) * 100)} onChange={(e) => setLook(inst.instanceId, { scale: Number(e.target.value) / 100 })} className="w-full" aria-label="Text and content size" />
+      </Row>
+      <Row label="Align">
+        {ALIGNS.map((a) => (
+          <button key={a.id} className={seg(look.align === a.id)} onClick={() => setLook(inst.instanceId, { align: a.id })}>
+            {a.label}
+          </button>
+        ))}
+      </Row>
+      <Row label="Colour">
+        <input type="color" value={look.color || "#e8ecf4"} onChange={(e) => setLook(inst.instanceId, { color: e.target.value })} aria-label="Text colour" className="h-7 w-10 rounded border border-white/10 bg-transparent" />
+        {look.color && (
+          <button className={seg(false)} onClick={() => setLook(inst.instanceId, { color: "" })}>
+            Theme
+          </button>
+        )}
+      </Row>
+      {note && <p className="text-[11px] text-alert">{note}</p>}
+    </div>,
+    document.body,
+  );
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <p className="mb-1 text-[10px] uppercase tracking-wider text-ink-3">{label}</p>
+      <div className="flex flex-wrap items-center gap-1">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Icon-mode widgets (and "Open larger" from a focused one) as floating windows over the page:
+ * drag the title bar to move, the corner to resize; several at once; close returns to the icon.
+ * Phone: one full-screen sheet at a time.
+ */
+function WidgetWindows() {
+  const windows = useLayout((s) => s.windows);
+  const pages = useLayout((s) => s.pages);
+  const phone = useMediaQuery("(max-width: 767px)");
+  const all = pages.flatMap((p) => p.items);
+  const shown = phone ? windows.slice(-1) : windows;
+  return (
+    <>
+      {shown.map((w) => {
+        const inst = all.find((i) => i.instanceId === w.instanceId);
+        const def = inst && getWidget(inst.widgetId);
+        if (!inst || !def) return null;
+        return <WidgetWindowFrame key={w.instanceId} w={w} inst={inst} def={def} phone={phone} />;
+      })}
+    </>
+  );
+}
+
+function WidgetWindowFrame({ w, inst, def, phone }: { w: WidgetWindow; inst: WidgetInstance; def: WidgetDefinition<any>; phone: boolean }) {
+  const { moveWindow, closeWindow, openWindow } = useLayout.getState();
+  const drag = useRef<{ mode: DragMode; sx: number; sy: number; ox: number; oy: number; ow: number; oh: number } | null>(null);
+  const down = (mode: DragMode) => (e: React.PointerEvent) => {
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    openWindow(w.instanceId); // to the front
+    drag.current = { mode, sx: e.clientX, sy: e.clientY, ox: w.x, oy: w.y, ow: w.w, oh: w.h };
+  };
+  const move = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.sx;
+    const dy = e.clientY - d.sy;
+    if (d.mode === "move") moveWindow(w.instanceId, { x: Math.max(0, Math.min(window.innerWidth - 120, d.ox + dx)), y: Math.max(0, Math.min(window.innerHeight - 60, d.oy + dy)) });
+    else moveWindow(w.instanceId, { w: Math.max(260, d.ow + dx), h: Math.max(180, d.oh + dy) });
+  };
+  const up = () => (drag.current = null);
+  // Esc closes the front window.
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const ws = useLayout.getState().windows;
+      const front = ws.reduce<WidgetWindow | null>((a, b) => (!a || b.z > a.z ? b : a), null);
+      if (front?.instanceId === w.instanceId) closeWindow(w.instanceId);
+    };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [w.instanceId, closeWindow]);
+  const Icon = def.icon;
+  return (
+    <div
+      data-widget-window={w.instanceId}
+      role="dialog"
+      aria-label={def.title}
+      className={`glass-chat fixed flex flex-col overflow-hidden ${phone ? "inset-0 rounded-none pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]" : "rounded-[18px]"}`}
+      style={phone ? { zIndex: 80 } : { left: w.x, top: w.y, width: w.w, height: w.h, zIndex: 70 + w.z }}
+      onPointerDown={() => openWindow(w.instanceId)}
+    >
+      <div className={`flex items-center gap-2 border-b border-white/5 px-3 py-2 ${phone ? "" : "cursor-grab touch-none active:cursor-grabbing"}`} onPointerDown={phone ? undefined : down("move")} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
+        <Icon size={14} className="text-teal" aria-hidden />
+        <span className="label-caps text-ink-2">{def.title}</span>
+        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => closeWindow(w.instanceId)} className="ml-auto grid size-7 place-items-center rounded-full text-ink-2 hover:text-ink" aria-label={`Close ${def.title}`}>
+          <X size={14} />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 p-4">
+        <WidgetBody inst={inst} def={def} legible={false} forceFull />
+      </div>
+      {!phone && (
+        <button aria-label={`Resize the ${def.title} window`} className="absolute bottom-1 right-1 grid size-6 cursor-nwse-resize touch-none place-items-center text-ink-3" onPointerDown={down("resize")} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
+          <Maximize2 size={11} className="rotate-90" />
+        </button>
+      )}
+    </div>
   );
 }
 

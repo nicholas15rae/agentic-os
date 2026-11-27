@@ -1,7 +1,9 @@
 import { CloudFog, CloudRain, Leaf, Moon, Snowflake, Sun, Wand2 } from "lucide-react";
 import { Empty, WidgetHeader } from "@/components/WidgetHeader";
 import { useAtmosphere, useWeather } from "@/features/weather/weather-store";
+import { useEffect } from "react";
 import { useSettings, type WeatherMode } from "@/stores/settings";
+import type { WidgetProps } from "@/core/widgets/types";
 
 export const ATMOSPHERES: { mode: WeatherMode; label: string; icon: typeof Sun }[] = [
   { mode: "auto", label: "Live", icon: Wand2 },
@@ -13,8 +15,11 @@ export const ATMOSPHERES: { mode: WeatherMode; label: string; icon: typeof Sun }
   { mode: "midnight", label: "Midnight", icon: Moon },
 ];
 
-export default function Weather() {
+export default function Weather({ setBadge }: Partial<WidgetProps>) {
   const { now, error } = useWeather();
+  // App-icon badge: the temperature.
+  const temp = now ? `${Math.round(now.tempC)}°` : null;
+  useEffect(() => setBadge?.(temp), [temp, setBadge]);
   const mode = useSettings((s) => s.weatherMode);
   const atmosphere = useAtmosphere();
 

@@ -362,3 +362,16 @@ html:is([data-motion="calm"], [data-motion="off"])
 .phone-lite .pill-glass {
   background: rgba(255, 255, 255, 0.08);
 }
+
+/*
+ * Section pass, legibility: widget panels stay transparent (the wallpaper is the star); the text
+ * carries itself instead: a soft shadow, stronger and a touch bolder over bright wallpapers
+ * (`data-wall-tone`, sampled from the current wallpaper). Focused widgets turn solid and drop it.
+ */
+.legible {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7), 0 0 10px rgba(0, 0, 0, 0.35);
+}
+:root[data-wall-tone="light"] .legible {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.92), 0 0 14px rgba(0, 0, 0, 0.6);
+  font-weight: 500;
+}

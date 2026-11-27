@@ -9,10 +9,11 @@ import { cancelOsAlarm } from "@/features/reminders/os-alarm";
 import type { Reminder } from "@/features/reminders/types";
 import { requestConfirmation } from "@/features/voice/voice-controller";
 import type { ActionPlan } from "@/features/orchestrator/plan";
+import type { WidgetProps } from "@/core/widgets/types";
 
 const ICON = { alarm: AlarmClock, reminder: Bell, countdown: Hourglass, event: CalendarDays };
 
-export default function Reminders() {
+export default function Reminders({ setBadge }: Partial<WidgetProps>) {
   const { items, error, remove, update } = useCollection<Reminder>("reminders");
   const now = useNow(1000);
   const [text, setText] = useState("");
@@ -23,6 +24,9 @@ export default function Reminders() {
     .filter((r) => !r.dismissed && (r.kind === "countdown" ? r.dueAt > now - 86_400_000 : !r.firedAt || r.dueAt > now))
     .sort((a, b) => a.dueAt - b.dueAt)
     .slice(0, 30);
+  // App-icon badge: how many are coming up.
+  const count = upcoming.length ? String(upcoming.length) : null;
+  useEffect(() => setBadge?.(count), [count, setBadge]);
 
   const add = async () => {
     const t = text.trim();

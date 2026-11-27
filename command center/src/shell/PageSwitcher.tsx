@@ -157,7 +157,7 @@ function PageMenu({ id }: { id: string }) {
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="glass-chat absolute right-0 top-9 z-50 w-64 rounded-[14px] p-1.5" role="menu" aria-label={`${page.name} options`}>
+        <div className="glass-chat absolute bottom-9 right-0 z-50 w-64 rounded-[14px] p-1.5" role="menu" aria-label={`${page.name} options`}>
           <div className="flex gap-1">
             <button className={item} disabled={idx <= 0} onClick={() => L.movePage(id, -1)}>
               <ChevronLeft size={13} /> Move left

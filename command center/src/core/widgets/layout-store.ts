@@ -3,6 +3,17 @@ import { persist } from "zustand/middleware";
 import { getWidget } from "./registry";
 import { isTauri } from "@/lib/platform";
 import type { WidgetInstance } from "./types";
+import { mergeLook, type DisplayMode, type WidgetLook } from "./look";
+
+/** A pop-up window of an icon-mode widget (screen px). */
+export interface WidgetWindow {
+  instanceId: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  z: number;
+}
 import { activeItems, addHomeView, allIds, duplicatePage, linkMode, migrateLayout, movePage, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, startupOf, withUniqueIds, type PagesState } from "./pages";
 
 export { GRID_COLS, GRID_ROWS, activeItems, fits, type LayoutPage } from "./pages";
@@ -52,6 +63,18 @@ interface LayoutState extends PagesState {
   place: (instanceId: string, rect: Pick<WidgetInstance, "col" | "row" | "w" | "h">) => boolean;
   setConfig: (instanceId: string, patch: Record<string, unknown>) => void;
   setGlass: (instanceId: string, ultra: boolean) => void;
+  /** Section pass: a widget's own look (merged), and its display mode. */
+  setLook: (instanceId: string, patch: WidgetLook) => void;
+  /** Icon (1×1), compact (its min size) or full (its remembered size); neighbours move aside. False: no room. */
+  setDisplay: (instanceId: string, display: DisplayMode) => boolean;
+  /** Pop-up windows of icon-mode widgets (not saved): several at once, on top of the page. */
+  windows: WidgetWindow[];
+  openWindow: (instanceId: string) => void;
+  closeWindow: (instanceId: string) => void;
+  moveWindow: (instanceId: string, rect: Partial<Omit<WidgetWindow, "instanceId">>) => void;
+  /** Tap to focus (not saved): the widget turns solid and readable until you click away. */
+  focused: string | null;
+  setFocused: (instanceId: string | null) => void;
   setGlassAll: (ultra: boolean) => void;
   /** Resets the active page only: the first page gets the default board back, any other page is cleared. */
   reset: () => void;
@@ -70,6 +93,13 @@ interface LayoutState extends PagesState {
 }
 
 const shortId = () => crypto.randomUUID().slice(0, 6);
+
+/** The Glass switches: the old ultra flag, and a glass / ultra frame picked in the Look panel, agree. */
+const withUltra = (i: WidgetInstance, ultra: boolean): WidgetInstance => ({
+  ...i,
+  glass: ultra ? ("ultra" as const) : undefined,
+  look: i.look?.frame === "glass" || i.look?.frame === "ultra" ? { ...i.look, frame: ultra ? "ultra" : "glass" } : i.look,
+});
 
 export const useLayout = create<LayoutState>()(
   persist(
@@ -108,9 +138,40 @@ export const useLayout = create<LayoutState>()(
                 : p,
             ),
           })),
-        setGlass: (instanceId, ultra) =>
-          updateActive((items) => items.map((i) => (i.instanceId === instanceId ? { ...i, glass: ultra ? ("ultra" as const) : undefined } : i))),
-        setGlassAll: (ultra) => updateActive((items) => items.map((i) => ({ ...i, glass: ultra ? ("ultra" as const) : undefined }))),
+        setGlass: (instanceId, ultra) => updateActive((items) => items.map((i) => (i.instanceId === instanceId ? withUltra(i, ultra) : i))),
+        setLook: (instanceId, patch) =>
+          set((s) => ({ pages: s.pages.map((p) => ({ ...p, items: p.items.map((i) => (i.instanceId === instanceId ? { ...i, look: mergeLook(i.look, patch) } : i)) })) })),
+        setDisplay: (instanceId, display) => {
+          const s = get();
+          const page = s.pages.find((p) => p.items.some((i) => i.instanceId === instanceId));
+          const cur = page?.items.find((i) => i.instanceId === instanceId);
+          if (!page || !cur) return false;
+          const def = getWidget(cur.widgetId);
+          const full = cur.fullSize ?? (cur.display && cur.display !== "full" ? def?.defaultSize : undefined) ?? { w: cur.w, h: cur.h };
+          const half = def?.minSize ?? { w: Math.max(1, Math.ceil(full.w / 2)), h: Math.max(1, Math.ceil(full.h / 2)) };
+          const size = display === "icon" ? { w: 1, h: 1 } : display === "compact" ? { w: Math.min(half.w, full.w), h: Math.min(half.h, full.h) } : full;
+          const moved = placePushing(page.items, instanceId, { col: Math.min(cur.col, 13 - size.w), row: Math.min(cur.row, 9 - size.h), ...size });
+          if (!moved) return false;
+          const items = moved.map((i) => (i.instanceId === instanceId ? { ...i, display: display === "full" ? undefined : display, fullSize: display === "full" ? undefined : full } : i));
+          set({ pages: s.pages.map((p) => (p.id === page.id ? { ...p, items } : p)), windows: display === "icon" ? s.windows : s.windows.filter((w) => w.instanceId !== instanceId) });
+          return true;
+        },
+        windows: [],
+        // z is a rank 1..n (front = n), so windows stay below confirmation cards and toasts.
+        openWindow: (instanceId) =>
+          set((s) => {
+            const open = s.windows.find((w) => w.instanceId === instanceId);
+            if (open && s.windows.every((w) => w === open || w.z < open.z)) return s;
+            const n = s.windows.length;
+            const target: WidgetWindow = open ?? { instanceId, x: 120 + n * 28, y: 90 + n * 28, w: 520, h: 380, z: 0 };
+            const order = [...s.windows].filter((w) => w.instanceId !== instanceId).sort((a, b) => a.z - b.z);
+            return { windows: [...order, target].map((w, i) => ({ ...w, z: i + 1 })) };
+          }),
+        closeWindow: (instanceId) => set((s) => ({ windows: s.windows.filter((w) => w.instanceId !== instanceId) })),
+        moveWindow: (instanceId, rect) => set((s) => ({ windows: s.windows.map((w) => (w.instanceId === instanceId ? { ...w, ...rect } : w)) })),
+        focused: null,
+        setFocused: (focused) => set({ focused }),
+        setGlassAll: (ultra) => updateActive((items) => items.map((i) => withUltra(i, ultra))),
         reset: () => {
           const s = get();
           const first = s.pages[0]?.id === s.activePage;
@@ -131,7 +192,8 @@ export const useLayout = create<LayoutState>()(
           if (n) set((s) => ({ pages: s.pages.map((p) => (p.id === id ? { ...p, name: n } : p)) }));
         },
         setActivePage: (id) => {
-          if (get().pages.some((p) => p.id === id)) set({ activePage: id });
+          // A page switch closes the previous page's widget windows and any focus.
+          if (get().pages.some((p) => p.id === id)) set({ activePage: id, windows: [], focused: null });
         },
         movePage: (id, dir) => set((s) => movePage(s, id, dir)),
         duplicatePage: (id) => set((s) => duplicatePage(s, id, shortId)),

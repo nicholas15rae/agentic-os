@@ -1,6 +1,7 @@
 import type { ComponentType, LazyExoticComponent } from "react";
 import type { LucideIcon } from "lucide-react";
 import type { Platform } from "@/lib/platform";
+import type { DisplayMode, WidgetLook } from "./look";
 
 /**
  * The widget contract. Every widget lives in `src/widgets/<id>/index.ts` and
@@ -14,6 +15,10 @@ export interface WidgetProps<C = Record<string, unknown>> {
   setConfig: (patch: Partial<C>) => void;
   /** Current size in grid units, so widgets can render compact/expanded variants. */
   size: { w: number; h: number };
+  /** Section pass: a short badge / live value for this widget's app icon ("3", "18°"); null clears it. */
+  setBadge?: (badge: string | null) => void;
+  /** How it is shown right now (icon-mode widgets render full size inside their window). */
+  display?: DisplayMode;
 }
 
 export interface WidgetDefinition<C = Record<string, unknown>> {
@@ -49,6 +54,12 @@ export interface WidgetInstance {
   config: Record<string, unknown>;
   /** Ultra-glass: near-transparent panel so the wallpaper shows through. */
   glass?: "ultra";
+  /** Section pass: frame, font, size, colour, alignment, per-wallpaper opacity. */
+  look?: WidgetLook;
+  /** Section pass: full (default), compact, or an app-sized icon that opens as a window. */
+  display?: DisplayMode;
+  /** The full size to come back to from icon / compact. */
+  fullSize?: { w: number; h: number };
 }
 
 export function defineWidget<C extends Record<string, unknown>>(def: WidgetDefinition<C>): WidgetDefinition<C> {

@@ -58,7 +58,7 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | S26: model manager: lists the library, VRAM from nvidia-smi, GGUF-based fit check (Tony's 9B needs ~7.3 GB at 32k: 5.2 weights + 1.0 KV + 0.8 compute), refuses loads that don't fit | section-26-engine | 406619d | No |
 | S26: document store (own SQLite, CPU nomic via the vault's `embed()`, hybrid search; the vault itself untouched) | section-26-engine | 92528ab | No |
 | S26: AnythingLLM export + import, read-only on AnythingLLM. Export `G:\agentic-os-engine\data\engine\allm-export\20261127-101548` (11 workspaces, 227 chats, 7 docs, integrity ok); 7 docs -> 22 chunks, all embedded | section-26-engine | 101fd2a | No |
-| S26: AnythingLLM inventory: 14 functions mapped to their gateway home (docs/section-26-allm-inventory.md); Gmail/Calendar already call Apps Script directly; phone has no AnythingLLM endpoint | section-26-engine | (this commit) | No |
+| S26: AnythingLLM inventory: 14 functions mapped to their gateway home (docs/section-26-allm-inventory.md); Gmail/Calendar already call Apps Script directly; phone has no AnythingLLM endpoint | section-26-engine | e1fe0c1 | No |
 | S26: watchdog (restart a crashed llama-server with the same model, 3 restarts / 5 min limit, waits for the baton, never acts while off) | section-26-engine | d3d1993 | No |
 | S26: Qwen template + tool-call checks; engine defaults thinking OFF (Qwen3.5's template ignores reasoning_effort) | section-26-engine | 08c0d0d | No |
 | S26: `llamacpp` provider listed in dispatch.rs, never in any chain (test pins it) | section-26-engine | b05c691 | No |

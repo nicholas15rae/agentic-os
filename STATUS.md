@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
+Updated 2026-11-27 00:30. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -14,7 +14,7 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
-| Sections 8-10 milestone 2: comms ingest core, echo fold, leased outbox, bridge smoke, WhatsApp ingester, wrap-up endpoint, calendar locations, trips/ETAs, maps socket, saved routes | claude/sections-8-10-m2 | c90924b (PR #8) | Merging now |
+| Sections 8-10 milestone 2: comms ingest core, echo fold, leased outbox, bridge smoke, WhatsApp ingester, wrap-up endpoint, calendar locations, trips/ETAs, maps socket, saved routes | claude/sections-8-10-m2 | c90924b (PR #8) | Yes (9a46031) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
@@ -43,7 +43,7 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
 | Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
-| Communications page and brainstorming | Sections 8-10 milestone 2 | PR #8 merged to main. Next: Tony-Rust track (Comms 4, Brainstorm 2/4/6), then M3 |
+| Communications page and brainstorming | Sections 8-10 milestone 2 | Merged to main (9a46031). Next: Tony-Rust track (Comms 4, Brainstorm 2/4/6), then M3 |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
@@ -141,18 +141,19 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:44 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:53 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/sections-8-10-m2` | 6 | `24669ec` 2026-11-26 docs(status): refresh branch table | 89 files |
-| `claude/elated-kare-67e4c4` | 1 | `0dcc440` 2026-11-26 refactor(command-center): remove the Ops agent; its work is Tony's | clean |
+| `claude/status-m2-merged` | 8 | `9a46031` 2026-11-26 Merge pull request #8 from nicholas15rae/claude/sections-8-10-m2 | 1 files |
+| `claude/sections-8-10-m2` | 7 | `94b8063` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | no worktree |
+| `claude/practical-elbakyan-0f96f1` | 8 | `3215d66` 2026-11-26 fix(trading): kill stand-down clears after any unlock; stop retries... | clean |
+| `claude/elated-kare-67e4c4` | 1 | `90ac158` 2026-11-26 refactor(command-center): remove the Ops agent; its work is Tony's | clean |
 | `claude/upbeat-wing-e87be0` | 7 | `aec8c6d` 2026-11-26 Merge main (e46d0c7: director-suite) into claude/upbeat-wing-e87be0 | clean |
 | `director-suite` | 2 | `351dd2c` 2026-11-26 perf(director): keep the Director's system message byte-stable | 2 files |
-| `claude/practical-elbakyan-0f96f1` | 7 | `cdbd99a` 2026-11-26 Merge main (0c4341f, STATUS.md only) into claude/practical-elbakyan... | 11 files |
-| `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | 170 files |
+| `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | 176 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 

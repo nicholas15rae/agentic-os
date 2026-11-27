@@ -5,6 +5,7 @@ import { addShot, editManifest, flushSave, toggleShotFilmed, useDirector } from 
 import { sendDirectorTurn } from "./director-chat";
 import { SHOT_SLOTS_MAX, allSlotsAttached, clipsFromShotList } from "./manifest";
 import { ShotChecklistView } from "./ShotChecklist";
+import { copyText, shotListText } from "./shot-print";
 import { ShotSlotCard } from "./ShotSlotCard";
 import { ShotSlotEditor } from "./ShotSlotEditor";
 
@@ -25,6 +26,7 @@ export function ShotList() {
   const manifest = useDirector((s) => s.manifest);
   const assets = useDirector((s) => s.assets);
   const chatBusy = useDirector((s) => s.chatBusy);
+  const title = useDirector((s) => s.project?.title ?? "");
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [phone, setPhoneState] = useState(readPhone);
@@ -58,7 +60,7 @@ export function ShotList() {
       action={
         <>
           {slots.length > 0 && (
-            <button onClick={() => setPhone(!phone)} aria-pressed={phone} className="pill-glass !h-8 !w-8 !p-0" title={phone ? "Full shot list" : "Phone view: just the filming checklist"} aria-label={phone ? "Full shot list" : "Phone view"}>
+            <button onClick={() => setPhone(!phone)} aria-pressed={phone} className="pill-glass !h-8 !w-8 !p-0" title={phone ? "Full shot list" : "Phone view: the filming checklist, big type, copy or print"} aria-label={phone ? "Full shot list" : "Phone view"}>
               {phone ? <List size={13} /> : <Smartphone size={13} />}
             </button>
           )}
@@ -76,7 +78,7 @@ export function ShotList() {
       }
     >
       {phone && slots.length ? (
-        <ShotChecklistView slots={slots} onToggle={toggleShotFilmed} />
+        <ShotChecklistView slots={slots} onToggle={toggleShotFilmed} onCopy={() => copyText(shotListText(title, slots))} onPrint={() => window.print()} />
       ) : (
         <>
           {slots.length > 0 && (

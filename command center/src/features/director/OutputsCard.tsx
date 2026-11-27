@@ -1,8 +1,12 @@
+import { useState, type ReactNode } from "react";
+import { Clapperboard, Loader2 } from "lucide-react";
 import { Card, Chip, Select } from "@/components/ui";
 import type { CaptionTrack, ColorLook, Platform, PlatformPreset } from "./contract";
 import { editManifest, useDirector } from "./director-store";
 import { CAPTION_STYLES, CAPTION_WORDS_MAX, COLOR_PRESETS, MAX_OUTPUTS, PLATFORMS, platformWantsCaptions, setCaptions, setColor, setOutputs } from "./manifest";
 import { PLATFORM_LABEL, togglePlatform } from "./review-ui";
+import { VERSION_PLATFORMS, versionOutputs } from "./more-versions";
+import { planVersions } from "./launcher";
 
 const STYLE_LABEL: Record<CaptionTrack["style"], string> = { clean: "Clean", bold_pop: "Bold pop", karaoke: "Karaoke", minimal: "Minimal" };
 const COLOR_LABEL: Record<ColorLook["preset"], string> = { none: "None", warm: "Warm", cool: "Cool", punchy: "Punchy", film: "Film", bw: "Black & white" };
@@ -19,10 +23,12 @@ export interface OutputsViewProps {
   onOutputs: (platforms: Platform[]) => void;
   onCaptions: (patch: Partial<CaptionTrack>) => void;
   onColor: (patch: Partial<ColorLook>) => void;
+  /** Below the card's settings (versions on demand, once a final is approved). */
+  extra?: ReactNode;
 }
 
 /** Outputs for the next render (1–4 platform presets from one approval) + caption style + colour look. Props only. */
-export function OutputsView({ outputs, captions, color, onOutputs, onCaptions, onColor }: OutputsViewProps) {
+export function OutputsView({ outputs, captions, color, onOutputs, onCaptions, onColor, extra }: OutputsViewProps) {
   const selected = outputs.map((o) => o.platform);
   const noCaptions = selected.filter((p) => !platformWantsCaptions(p));
   return (
@@ -85,15 +91,61 @@ export function OutputsView({ outputs, captions, color, onOutputs, onCaptions, o
           </label>
         </div>
       </div>
+      {extra}
     </Card>
+  );
+}
+
+/** Versions on demand (Part 6): from the approved cut, pick other formats; one click adds them to
+ * Outputs and raises a render plan. Nothing renders until Approve & Render. Props only. */
+export function MoreVersionsView({ outputs, busy, onPlan }: { outputs: Platform[]; busy: boolean; onPlan: (picks: Platform[]) => void }) {
+  const [picks, setPicks] = useState<Platform[]>([]);
+  const choices = VERSION_PLATFORMS.filter((p) => !outputs.includes(p));
+  // A pick turned on in Outputs above has no chip here any more: drop it from the plan.
+  const live = picks.filter((p) => (choices as Platform[]).includes(p));
+  if (!choices.length) return null;
+  const r = live.length ? versionOutputs(outputs, live) : null;
+  const blocked = r && "error" in r ? r.error : null;
+  return (
+    <div className="mt-3 rounded-[12px] border border-white/10 p-2.5" role="group" aria-label="More versions">
+      <p className="text-[12px] text-ink">More versions of the approved cut</p>
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
+        {choices.map((p) => {
+          const on = picks.includes(p);
+          return (
+            <Chip key={p} active={on} tone="teal" onClick={() => setPicks(on ? live.filter((x) => x !== p) : [...live, p])}>
+              {PLATFORM_LABEL[p]}
+            </Chip>
+          );
+        })}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={!live.length || !!blocked || busy}
+          onClick={() => {
+            onPlan(live);
+            setPicks([]);
+          }}
+          className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Clapperboard size={12} />} {live.length > 1 ? `Plan ${live.length} versions` : "Plan version"}
+        </button>
+        <span className="text-[10px] text-ink-3">{blocked ?? "Adds them to Outputs and shows a render plan. Nothing renders until Approve & Render."}</span>
+      </div>
+    </div>
   );
 }
 
 export function OutputsCard() {
   const manifest = useDirector((s) => s.manifest);
+  const approved = useDirector((s) => s.deliverables.length > 0);
+  const planBusy = useDirector((s) => s.planBusy);
   if (!manifest) return null;
+  const platforms = manifest.outputs.map((o) => o.platform);
   return (
     <OutputsView
+      extra={approved ? <MoreVersionsView outputs={platforms} busy={planBusy} onPlan={(p) => void planVersions(p)} /> : null}
       outputs={manifest.outputs}
       captions={manifest.captions}
       color={manifest.color}

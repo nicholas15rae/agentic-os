@@ -1,16 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronUp, Cloud, FileAudio, FolderOpen, Image as ImageIcon, Lock, Plus, Upload, Video } from "lucide-react";
 import { Card, Empty, Select } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { DrivePickerModal } from "@/features/cloud/DrivePickerModal";
 import { api, fileSrc } from "./api";
-import type { AssetRole, MediaAsset } from "./contract";
+import type { AssetFlag, AssetRole, MediaAsset } from "./contract";
 import { addAssets, editManifest, select, useDirector } from "./director-store";
 import { ASSET_MIME, DIALOG_FILTERS, hasFiles, ingestDropped } from "./dnd";
 import { INGEST_ROLES, addClip, timecode } from "./manifest";
 import { AssetBadges, AssetDetails, GeneratedChip } from "./AssetDetails";
 import { BinSuggestions } from "./BinSuggestions";
 import { IntakeStatusLine } from "./IntakeStatus";
+import { FLAG_LABEL } from "./review-ui";
 
 export const assetMeta = (a: MediaAsset) => [a.durationSec != null ? timecode(a.durationSec) : null, a.width && a.height ? `${a.width}×${a.height}` : null].filter(Boolean).join(" · ");
 
@@ -28,6 +29,90 @@ export function Thumb({ asset, className = "" }: { asset: MediaAsset; className?
   );
 }
 
+// ── Part 3 B.3: bin filters ──────────────────────────────────────────────────
+
+export interface BinFilter {
+  tag: string | null;
+  /** "any": at least one flag; a kind: that flag; null: no flag filter. */
+  flag: AssetFlag["kind"] | "any" | null;
+  generatedOnly: boolean;
+}
+export const NO_BIN_FILTER: BinFilter = { tag: null, flag: null, generatedOnly: false };
+const filterOn = (f: BinFilter) => f.tag != null || f.flag != null || f.generatedOnly;
+
+/** Pure. tag: asset.tags includes it; flag "any": ≥ 1 flag, a kind: that flag; generatedOnly: asset.generation != null. Keeps order. */
+export function filterAssets(assets: MediaAsset[], f: BinFilter): MediaAsset[] {
+  return assets.filter(
+    (a) =>
+      (f.tag == null || (a.tags ?? []).includes(f.tag)) &&
+      (f.flag == null || (f.flag === "any" ? (a.flags ?? []).length > 0 : (a.flags ?? []).some((x) => x.kind === f.flag))) &&
+      (!f.generatedOnly || a.generation != null),
+  );
+}
+
+/** Tags in use, most used first (ties alphabetical), for the tag Select. Pure. */
+export function binTags(assets: MediaAsset[]): string[] {
+  const n = new Map<string, number>();
+  for (const a of assets) for (const t of new Set(a.tags ?? [])) n.set(t, (n.get(t) ?? 0) + 1);
+  return [...n.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t]) => t);
+}
+
+/** Flag kinds present in the bin, in FLAG_LABEL order. Pure. */
+export function binFlagKinds(assets: MediaAsset[]): AssetFlag["kind"][] {
+  const have = new Set(assets.flatMap((a) => (a.flags ?? []).map((f) => f.kind)));
+  return (Object.keys(FLAG_LABEL) as AssetFlag["kind"][]).filter((k) => have.has(k));
+}
+
+/** One compact row under the bin's header: tag, flag, "Generated", and "Showing 3 of 12 · Clear"
+ * while a filter is on. Null when the bin has fewer than 4 assets and no filter is on. Props only. */
+export function BinFilterBarView({ filter, tags, flagKinds, shown, total, onChange }: { filter: BinFilter; tags: string[]; flagKinds: AssetFlag["kind"][]; shown: number; total: number; onChange: (f: BinFilter) => void }) {
+  const on = filterOn(filter);
+  if (total < 4 && !on) return null;
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-1.5" role="group" aria-label="Bin filters">
+      {(tags.length > 0 || filter.tag != null) && (
+        <Select value={filter.tag ?? ""} onChange={(e) => onChange({ ...filter, tag: e.target.value || null })} className="!h-7 !w-auto max-w-[130px] !py-0 text-[11px]" aria-label="Filter by tag">
+          <option value="">All tags</option>
+          {filter.tag != null && !tags.includes(filter.tag) && <option value={filter.tag}>{filter.tag}</option>}
+          {tags.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </Select>
+      )}
+      {(flagKinds.length > 0 || filter.flag != null) && (
+        <Select value={filter.flag ?? ""} onChange={(e) => onChange({ ...filter, flag: (e.target.value || null) as BinFilter["flag"] })} className="!h-7 !w-auto max-w-[130px] !py-0 text-[11px]" aria-label="Filter by flag">
+          <option value="">All flags</option>
+          <option value="any">Any flag</option>
+          {filter.flag != null && filter.flag !== "any" && !flagKinds.includes(filter.flag) && <option value={filter.flag}>{FLAG_LABEL[filter.flag]}</option>}
+          {flagKinds.map((k) => (
+            <option key={k} value={k}>
+              {FLAG_LABEL[k]}
+            </option>
+          ))}
+        </Select>
+      )}
+      <button
+        type="button"
+        onClick={() => onChange({ ...filter, generatedOnly: !filter.generatedOnly })}
+        aria-pressed={filter.generatedOnly}
+        className={`h-7 rounded-full border px-2.5 text-[11px] ${filter.generatedOnly ? "border-violet/50 bg-violet/10 text-violet" : "border-white/10 text-ink-2 hover:text-ink"}`}
+      >
+        Generated
+      </button>
+      {on && (
+        <span className="ml-auto text-[11px] text-ink-3">
+          Showing {shown} of {total} ·{" "}
+          <button type="button" onClick={() => onChange(NO_BIN_FILTER)} className="text-teal-soft hover:underline">
+            Clear
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function StagingBin() {
   const slug = useDirector((s) => s.slug);
   const assets = useDirector((s) => s.assets);
@@ -39,6 +124,10 @@ export function StagingBin() {
   const projectTitle = useDirector((s) => s.project?.title ?? s.slug ?? "");
   const projectRoot = useDirector((s) => s.project?.root ?? null);
   const [openId, setOpenId] = useState<string | null>(null);
+  // Bin filter: local, reset on project switch, not persisted.
+  const [filter, setFilter] = useState<BinFilter>(NO_BIN_FILTER);
+  useEffect(() => setFilter(NO_BIN_FILTER), [slug]);
+  const shown = filterAssets(assets, filter);
 
   const pick = async () => {
     if (!slug) return;
@@ -75,6 +164,7 @@ export function StagingBin() {
         </>
       }
     >
+      <BinFilterBarView filter={filter} tags={binTags(assets)} flagKinds={binFlagKinds(assets)} shown={shown.length} total={assets.length} onChange={setFilter} />
       <IntakeStatusLine />
       <BinSuggestions />
       <div
@@ -103,9 +193,9 @@ export function StagingBin() {
             </div>
           </div>
         ))}
-        {assets.length ? (
+        {shown.length ? (
           <ul className="space-y-1.5">
-            {assets.map((a) => {
+            {shown.map((a) => {
               const on = selection?.kind === "asset" && selection.id === a.id;
               const open = openId === a.id;
               return (
@@ -173,6 +263,8 @@ export function StagingBin() {
               );
             })}
           </ul>
+        ) : assets.length ? (
+          <Empty>Nothing in the bin matches the filter.</Empty>
         ) : (
           <Empty>Drop clips, photos or audio here, or use Add.</Empty>
         )}

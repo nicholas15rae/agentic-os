@@ -56,12 +56,41 @@ export const api = {
   noteResolve: (a: Args<"media_note_resolve">): Promise<Result<"media_note_resolve">> => xcmd("media_note_resolve", a),
   /** Snap clips to speech + clip / total length checks (reads only; nothing is saved). */
   planCheck: (a: Args<"media_plan_check">): Promise<Result<"media_plan_check">> => xcmd("media_plan_check", a),
+  /** Timed transcript lines per video asset, for the Director's TRANSCRIPT section (reads only). */
+  transcriptLines: (a: Args<"media_transcript_lines">): Promise<Result<"media_transcript_lines">> => xcmd("media_transcript_lines", a),
   reviewGet: (a: Args<"media_review_get">): Promise<Result<"media_review_get">> => xcmd("media_review_get", a),
   /** Stores the Director's round summary / open decisions (text only: nothing renders or resolves). */
   reviewWrite: (a: Args<"media_review_write">): Promise<Result<"media_review_write">> => xcmd("media_review_write", a),
   /** Only ever from Nic's "Approve final" click: copies verified renders to renders/final/<platform>/. */
   approveFinal: (a: Args<"media_approve_final">): Promise<Result<"media_approve_final">> => xcmd("media_approve_final", a),
   deliverablesGet: (a: Args<"media_deliverables_get">): Promise<Result<"media_deliverables_get">> => xcmd("media_deliverables_get", a),
+  // ── Part 3: ComfyUI (comfy.rs) ──
+  comfyStatus: (): Promise<Result<"comfy_status">> => xcmd("comfy_status"),
+  /** Only ever from an Enqueue / Re-roll click. */
+  comfyEnqueue: (a: Args<"comfy_enqueue">): Promise<Result<"comfy_enqueue">> => xcmd("comfy_enqueue", a),
+  comfyCancel: (a: Args<"comfy_cancel">): Promise<Result<"comfy_cancel">> => xcmd("comfy_cancel", a),
+  /** Only ever from the queue's Run now click. */
+  comfyRunNow: (): Promise<Result<"comfy_run_now">> => xcmd("comfy_run_now"),
+  comfyQueue: (): Promise<Result<"comfy_queue_get">> => xcmd("comfy_queue_get"),
+  comfySettingsSet: (a: Args<"comfy_settings_set">): Promise<Result<"comfy_settings_set">> => xcmd("comfy_settings_set", a),
+  // ── Part 3: Versions (media.rs) ──
+  renderSnapshot: (a: Args<"media_render_snapshot">): Promise<Result<"media_render_snapshot">> => xcmd("media_render_snapshot", a),
+  /** Only from the Versions confirm click. */
+  manifestRestore: (a: Args<"media_manifest_restore">): Promise<Result<"media_manifest_restore">> => xcmd("media_manifest_restore", a),
+  // ── Part 4: auditions (scene_reader.rs) ──
+  sceneReaderStatus: (): Promise<Result<"scene_reader_status">> => xcmd("scene_reader_status"),
+  /** Only from a click (reads a copy of Scene Reader's library). */
+  sceneReaderList: (): Promise<Result<"scene_reader_list">> => xcmd("scene_reader_list"),
+  /** Only from the Import click. */
+  sceneReaderImport: (a: Args<"scene_reader_import">): Promise<Result<"scene_reader_import">> => xcmd("scene_reader_import", a),
+  sidesList: (a: Args<"media_sides_list">): Promise<Result<"media_sides_list">> => xcmd("media_sides_list", a),
+  /** Raw body: the sides file; `x-slug` / `x-name` headers (the name percent-encoded: headers are ASCII). */
+  sidesSave: (a: Args<"media_sides_save">): Promise<Result<"media_sides_save">> => rawInvoke("media_sides_save", a.bytes, { "x-slug": a.slug, "x-name": encodeURIComponent(a.name) }),
+  slateCard: (a: Args<"media_slate_card">): Promise<Result<"media_slate_card">> => xcmd("media_slate_card", a),
+  // ── Part 6: style memory (director_style.rs) ──
+  styleGet: (): Promise<Result<"media_style_get">> => xcmd("media_style_get"),
+  /** Only after Nic's Approve final or a note resolve. */
+  styleRecord: (a: Args<"media_style_record">): Promise<Result<"media_style_record">> => xcmd("media_style_record", a),
 };
 
 /** Subscribe to a Director Suite event. No-op on the PWA. */

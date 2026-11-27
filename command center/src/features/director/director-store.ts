@@ -5,10 +5,10 @@
  */
 import { create } from "zustand";
 import { useToasts } from "@/features/reminders/notify";
-import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
+import type { CreativeBrief, Deliverable, DirectorAction, DirectorCommands, DirectorEvents, EditPlanBody, MediaAsset, MediaProject, Moment, Note, ProjectReview, ProjectStatus, RenderPlan, ShotSlot, TimelineManifest, VerifiedRender } from "./contract";
 import { api, onDirectorEvent } from "./api";
 import { revisePlanBody, stripActionBlocks } from "./actions";
-import { briefIdeaFor, checkPlanFor, noopRevisionRefusal, planChangesNothing, planCheck, withCheckedClips, type PlanCheckResult } from "./plan-check";
+import { briefIdeaFor, checkPlanFor, noopRevisionReason, notesResolved, planChangesNothing, planCheck, revisionSummary, withCheckedClips, type PlanCheckResult } from "./plan-check";
 import {
   addSlot,
   applyEditPlan,
@@ -27,6 +27,9 @@ import {
   withNoteResolved,
   type QuickStart,
 } from "./manifest";
+import { versionLabel } from "./versions";
+import { recordStyle } from "./style";
+import { useChatDraft } from "./gaps";
 
 export type Readiness = DirectorCommands["media_readiness"]["result"];
 export type RenderJob = DirectorEvents["media-render"];
@@ -136,13 +139,18 @@ export interface DirectorState {
   briefIdea: string | null;
   /** Reply ids that already had their one automatic corrective turn (director-chat.ts). */
   autoFixed: string[];
+  // ── Part 3 ──
+  /** Two renders shown A/B in the centre column (render ids); null = the normal preview. */
+  compare: { a: string; b: string } | null;
 }
 
-/** What a Director reply replaced (clips, audio, shot list, looks, outputs), for one-click undo. */
+/** What a Director reply (or a version restore) replaced (clips, audio, shot list, looks, outputs), for one-click undo. */
 export interface DirectorUndo {
   id: string;
   slug: string;
   before: Pick<TimelineManifest, "clips" | "audio" | "shotList" | "captions" | "color" | "outputs" | "output" | "clipAudioVolume">;
+  /** What made the undo point (absent = a Director reply). */
+  what?: "director" | "restore";
 }
 
 const LAST_KEY = "cc.director.lastSlug";
@@ -203,6 +211,7 @@ const initial: DirectorState = {
   undo: null,
   briefIdea: null,
   autoFixed: [],
+  compare: null,
 };
 
 export const useDirector = create<DirectorState>(() => ({ ...initial }));
@@ -216,6 +225,7 @@ export function resetDirectorStore() {
   dirty = false;
   inflight = null;
   resetIntake();
+  snapshotCache.clear();
   useDirector.setState({ ...initial }, true);
 }
 
@@ -233,7 +243,10 @@ export async function loadProjects(): Promise<void> {
 export async function openProject(slug: string): Promise<void> {
   if (get().slug && get().slug !== slug) await flushSave();
   const same = get().slug === slug;
-  if (!same) resetIntake();
+  if (!same) {
+    resetIntake();
+    useChatDraft.setState({ draft: null });
+  }
   set({ slug, loading: true, error: null, plan: null, selection: null, previewMode: "working", playhead: 0, previewTime: 0, seek: null, chat: same ? get().chat : [], ...(same ? {} : PROJECT_V2_BLANK) });
   rememberSlug(slug);
   try {
@@ -263,11 +276,12 @@ export function closeProject() {
   void flushSave();
   rememberSlug(null);
   resetIntake();
+  useChatDraft.setState({ draft: null });
   set({ slug: null, project: null, assets: [], manifest: null, renders: [], chat: [], plan: null, selection: null, error: null, ...PROJECT_V2_BLANK });
 }
 
 /** Per-project v2 state, cleared when another project opens. */
-const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null, briefIdea: null, autoFixed: [] };
+const PROJECT_V2_BLANK: Partial<DirectorState> = { review: null, openDecisions: [], matchSuggestions: [], momentSuggestions: [], briefDraft: null, revision: null, deliverables: [], undo: null, briefIdea: null, autoFixed: [], compare: null };
 
 /** media_review_get, never throwing (an older backend or a missing project.json review is null). */
 async function loadReview(slug: string): Promise<ProjectReview | null> {
@@ -410,11 +424,69 @@ export async function undoDirectorEdit(): Promise<boolean> {
   dirty = true;
   const ok = await flushSave("nic", true);
   if (ok) {
-    toast("Director's edit undone", "Your timeline and shot list are back as they were.");
+    if (u.what === "restore") toast("Restore undone", "The timeline is back as it was before the restore.");
+    else toast("Director's edit undone", "Your timeline and shot list are back as they were.");
     void refreshAssets(slug);
   }
   return ok;
 }
+
+// ── Part 3 C: versions ───────────────────────────────────────────────────────
+
+/** Snapshots never change: cached per project + render id (null = made before versions were kept). */
+const snapshotCache = new Map<string, TimelineManifest | null>();
+
+/** The cut a render was made from (media_render_snapshot), cached. Throws when it can't be read. */
+export async function loadSnapshot(renderId: string): Promise<TimelineManifest | null> {
+  const slug = get().slug;
+  if (!slug) return null;
+  const key = `${slug}\n${renderId}`;
+  if (snapshotCache.has(key)) return snapshotCache.get(key) ?? null;
+  const s = await api.renderSnapshot({ slug, renderId });
+  const m = s.manifest ? upgradeManifest(s.manifest) : null;
+  snapshotCache.set(key, m);
+  return m;
+}
+
+/** Only from the Versions confirm click. Saves pending edits first, then makes that render's cut the
+ * working manifest (notes and the shot list stay); the edit before is the undo point. */
+export async function restoreVersion(renderId: string): Promise<boolean> {
+  const slug = get().slug;
+  if (!slug || !get().manifest) return false;
+  if (!(await flushSave())) return false;
+  const before = get().manifest;
+  if (get().slug !== slug || !before) return false;
+  const render = get().renders.find((r) => r.id === renderId);
+  const label = render ? versionLabel(render.path) : "";
+  try {
+    const restored = await api.manifestRestore({ slug, renderId, revision: before.revision });
+    if (get().slug !== slug) return false;
+    clearTimeout(saveTimer);
+    saveTimer = undefined;
+    dirty = false;
+    const id = newId("u");
+    set({ manifest: upgradeManifest(restored), undo: { id, slug, before: undoFields(before), what: "restore" }, plan: null, revision: null });
+    useToasts.getState().push({
+      title: label && label !== "—" ? `Version ${label} restored` : "Version restored",
+      body: "Notes and the shot list stayed.",
+      tone: "info",
+      actions: [{ label: "Undo", run: () => void (get().undo?.id === id ? undoDirectorEdit() : undefined) }],
+    });
+    return true;
+  } catch (e) {
+    if (isStaleError(e)) {
+      toast("Timeline changed elsewhere", "Reloaded the latest saved version; nothing was restored.", "warn");
+      await openProject(slug);
+    } else toast("Couldn't restore this version", errText(e).replace(/^[A-Z_]+: /, ""), "error");
+    return false;
+  }
+}
+
+/** Compare replaces the preview, so the preview's selection becomes render A at 0: a note added while
+ * comparing lands on A at A's time (Compare feeds A's time into previewTime). */
+export const openCompare = (a: string, b: string) =>
+  set(a && b && a !== b ? { compare: { a, b }, selection: { kind: "render", id: a }, previewMode: "final", previewTime: 0 } : { compare: null });
+export const closeCompare = () => set({ compare: null });
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : w.endsWith("ch") ? "es" : "s"}`;
 
@@ -564,18 +636,21 @@ export async function applyDirectorActionsReport(actions: DirectorAction[], forS
         // A revision that changes nothing answers no note: refused, and the notes stay open. "Nothing"
         // is measured against the render the notes are on (Rust's plan snapshot), so a revision
         // that keeps Nic's own edits since that render still counts; without a snapshot, against
-        // the current cut.
-        const unchanged = checked.check?.unchangedSinceRender ?? (cur ? planChangesNothing(cur, body) : false);
+        // the current cut. Framing-only changes (fit, punchIn) count only for notes about framing
+        // (plan-check.ts planChangesNothing; Rust's unchangedSinceRender applies the same rule).
+        const unchanged = checked.check?.unchangedSinceRender ?? (cur ? planChangesNothing(cur, body, notesResolved(cur, a.resolves)) : false);
         if (cur && unchanged) {
           notes.push("Revision not applied: it changes nothing, so your notes stay open");
-          report.refusals.push(noopRevisionRefusal(cur, a.resolves));
+          report.refusals.push(noopRevisionReason(cur, body, a.resolves, checked.check?.unchangedSinceRender === true));
           report.refusedTypes.push(a.type);
           break;
         }
+        // The stored summary never claims clip changes that didn't happen (app-written prefix).
+        const summary = cur ? revisionSummary(cur, body, a.summary) : a.summary;
         if (await applyPlan(body, slug, snap)) {
-          set({ revision: { round: a.round, resolves: a.resolves, summary: a.summary } });
-          // The Director's "what changed" lands on the round it answers (text only).
-          if (a.summary.trim() && alive()) await writeReview({ round: a.round, summary: a.summary });
+          set({ revision: { round: a.round, resolves: a.resolves, summary } });
+          // The "what changed" lands on the round it answers (text only).
+          if (summary.trim() && alive()) await writeReview({ round: a.round, summary: summary.slice(0, 2000) });
           notes.push(`Round ${a.round} revision: ${plural(body.clips.length, "clip")}, answers ${plural(a.resolves.length, "note")} (resolved when you approve the render)`);
           if (alive()) await requestPlan("director");
         }
@@ -640,6 +715,20 @@ export async function updateProject(fields: ProjectFields): Promise<boolean> {
   }
 }
 
+/** Part 3 B.2: a project's status from the projects board (any project, open or not):
+ * media_project_update({ slug, status }); the result replaces its row in `projects` (and `project`
+ * when it is the open one). Toast on refusal. */
+export async function setProjectStatus(slug: string, status: ProjectStatus): Promise<boolean> {
+  try {
+    const p = upgradeProject(await api.projectUpdate({ slug, status }));
+    set((s) => ({ projects: s.projects.map((x) => (x.slug === slug ? p : x)), ...(s.slug === slug ? { project: p } : {}) }));
+    return true;
+  } catch (e) {
+    toast("Couldn't change the project's status", errText(e), "error");
+    return false;
+  }
+}
+
 /** A starting brief for a project that has none: the handoff text (or title) as the idea, the rest guessed. */
 export function defaultBrief(p: MediaProject, m: TimelineManifest | null): CreativeBrief {
   return {
@@ -676,11 +765,12 @@ export async function approveBrief(): Promise<boolean> {
   return updateProject({ brief: { ...b, approved: true, updatedBy: "nic", updatedAt: new Date().toISOString() } });
 }
 
-/** Replace the approved brief with the held Director draft (unapproved until Nic approves it). */
+/** Replace the approved brief with the held Director draft (unapproved until Nic approves it). The
+ * accept is Nic's save, so it never comes back as a Director report (director_reports.rs). */
 export async function acceptBriefDraft(): Promise<boolean> {
   const d = get().briefDraft;
   if (!d) return false;
-  const ok = await updateProject({ brief: d });
+  const ok = await updateProject({ brief: { ...d, updatedBy: "nic", updatedAt: new Date().toISOString() } });
   if (ok) set({ briefDraft: null });
   return ok;
 }
@@ -805,9 +895,13 @@ export async function resolveNote(noteId: string, opts: { manual?: boolean } = {
   try {
     await api.noteResolve(opts.manual ? { slug, noteId, manual: true } : { slug, noteId });
     if (get().slug === slug) set((s) => ({ manifest: s.manifest ? withNoteResolved(s.manifest, noteId) : s.manifest }));
+    // Part 6 style memory: a resolve is a sign-off on this cut (Rust keeps one entry per cut revision).
+    void recordStyle(slug, "notes");
     return true;
   } catch (e) {
-    if (!opts.manual && /UNCHANGED|changes nothing|same cut/i.test(errText(e))) toast("Note left open", "The approved cut is the same as the one this note is on.", "warn");
+    const why = errText(e);
+    if (!opts.manual && /only changes framing/i.test(why)) toast("Note left open", "The approved cut only changes framing (fit or punch-in), and this note isn't about framing.", "warn");
+    else if (!opts.manual && /UNCHANGED|changes nothing|same cut/i.test(why)) toast("Note left open", "The approved cut is the same as the one this note is on.", "warn");
     else toast("Couldn't resolve the note", errText(e), "error");
     return false;
   }
@@ -819,6 +913,7 @@ export async function approveFinal(renderIds: string[]): Promise<Deliverable[] |
   if (!slug || !renderIds.length) return null;
   try {
     const deliverables = await api.approveFinal({ slug, renderIds, approved: true });
+    void recordStyle(slug, "final");
     if (get().slug !== slug) return deliverables;
     set({ deliverables });
     const [data, review] = await Promise.all([api.projectGet({ slug }).catch(() => null), loadReview(slug)]);
@@ -1020,8 +1115,9 @@ export function setUpload(key: string, u: Upload | null) {
 
 // ── Selection / preview ──────────────────────────────────────────────────────
 
+/** Also closes Compare: a selection is shown in the preview, which Compare replaces. */
 export function select(sel: Selection) {
-  set({ selection: sel, previewMode: sel?.kind === "render" ? "final" : "working" });
+  set({ selection: sel, previewMode: sel?.kind === "render" ? "final" : "working", compare: null });
 }
 export const setPreviewMode = (previewMode: DirectorState["previewMode"]) => set({ previewMode });
 export const setPlayhead = (playhead: number) => set({ playhead: Math.max(0, playhead) });
@@ -1029,7 +1125,7 @@ export const setPreviewTime = (previewTime: number) => set({ previewTime: Number
 /** Show `sel` in the preview and seek it to `sec` (seconds into that source). */
 export function seekTo(sel: Selection, sec: number) {
   if (sel) select(sel);
-  set((s) => ({ seek: { sec: Math.max(0, Number.isFinite(sec) ? sec : 0), n: (s.seek?.n ?? 0) + 1 } }));
+  set((s) => ({ compare: null, seek: { sec: Math.max(0, Number.isFinite(sec) ? sec : 0), n: (s.seek?.n ?? 0) + 1 } }));
 }
 export const setReadiness = (readiness: Readiness | null, readinessError: string | null) => set({ readiness, readinessError });
 

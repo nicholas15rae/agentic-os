@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MediaAsset, Note, ShotSlot, TimelineClip } from "./contract";
 import { asset, gen, manifest, project } from "./fixtures.test-util";
-import { ACTION_CONTRACT, CONTEXT_BUDGET, buildDirectorContext } from "./context";
+import { ACTION_CONTRACT, CONTEXT_BUDGET, STYLE_BUDGET, TRANSCRIPT_BUDGET, buildDirectorContext } from "./context";
 import { BRIEF_FIELDS, parseDirectorActions, validateAction } from "./actions";
 
 const FRAMINGS = ["wide", "medium", "mcu", "closeup", "insert"] as const;
@@ -90,6 +90,21 @@ describe("buildDirectorContext v2", () => {
     const { p, assets, m, review } = typical();
     const c = buildDirectorContext(p, assets, m, review);
     expect(c.length).toBeLessThan(CONTEXT_BUDGET);
+    // Without transcripts it stays near the old 9000 ceiling (CONTEXT_BUDGET - TRANSCRIPT_BUDGET),
+    // so growth past it takes at most 200 chars of the TRANSCRIPT section's room. An explicit ceiling.
+    expect(c.length).toBeLessThan(CONTEXT_BUDGET - TRANSCRIPT_BUDGET + 200);
+  });
+
+  it("with every video's transcript it stays under CONTEXT_BUDGET, the section capped at TRANSCRIPT_BUDGET", () => {
+    const { p, assets, m, review } = typical();
+    const lines = assets.filter((a) => a.kind === "video").map((a) => ({ assetId: a.id, more: 0, lines: Array.from({ length: 30 }, (_, k) => ({ start: k * 0.4, end: k * 0.4 + 0.35, text: `Five six seven eight, line ${k}.` })) }));
+    const c = buildDirectorContext(p, assets, m, review, lines);
+    expect(c.length).toBeLessThan(CONTEXT_BUDGET);
+    const section = c.slice(c.indexOf("TRANSCRIPT ("), c.indexOf("\n\nLENGTH:"));
+    expect(section.length).toBeGreaterThan(200);
+    expect(section.length).toBeLessThanOrEqual(TRANSCRIPT_BUDGET);
+    expect(section).toMatch(/more lines not shown/);
+    expect(c.endsWith(ACTION_CONTRACT)).toBe(true);
   });
 
   it("names each generated asset's template and seed on its own line, and nothing for filmed media", () => {
@@ -182,5 +197,41 @@ describe("ACTION_CONTRACT audio rule", () => {
   it("says a video clip carries its own sound and audio can be empty", () => {
     expect(ACTION_CONTRACT).toContain('"audio":[] or [');
     expect(ACTION_CONTRACT).toMatch(/a video clip already plays its own sound/);
+  });
+});
+
+describe("Part 6 STYLE line inside the budget", () => {
+  const STYLE = `STYLE (12 past sign-offs; the brief wins): reels ×8, youtube ×3 · ~30s · clips avg 2.1s · captions bold_pop · look warm · fit fill · notes often on pacing, music, length ${"x".repeat(300)}`;
+
+  it("sits after the brief, clipped to STYLE_BUDGET, and only when given", () => {
+    const { p, assets, m, review } = typical();
+    const c = buildDirectorContext(p, assets, m, review, null, STYLE);
+    const line = c.split("\n").find((l) => l.startsWith("STYLE ("));
+    expect(line).toBeDefined();
+    expect(line!.length).toBeLessThanOrEqual(STYLE_BUDGET);
+    expect(c.indexOf("STYLE (")).toBeGreaterThan(c.indexOf("BRIEF ("));
+    expect(c.indexOf("STYLE (")).toBeLessThan(c.indexOf("SHOT LIST"));
+    expect(buildDirectorContext(p, assets, m, review, null, "  ")).not.toContain("STYLE");
+    expect(buildDirectorContext(p, assets, m, review)).toBe(buildDirectorContext(p, assets, m, review, null, null));
+  });
+
+  it("with every transcript and a STYLE line the whole context stays under CONTEXT_BUDGET; the style room comes out of the transcript's", () => {
+    const { p, assets, m, review } = typical();
+    const lines = assets.filter((a) => a.kind === "video").map((a) => ({ assetId: a.id, more: 0, lines: Array.from({ length: 60 }, (_, k) => ({ start: k * 0.4, end: k * 0.4 + 0.35, text: `Five six seven eight, line ${k}.` })) }));
+    const without = buildDirectorContext(p, assets, m, review, lines);
+    const withStyle = buildDirectorContext(p, assets, m, review, lines, STYLE);
+    expect(withStyle.length).toBeLessThan(CONTEXT_BUDGET);
+    expect(withStyle.endsWith(ACTION_CONTRACT)).toBe(true);
+    const section = (c: string) => c.slice(c.indexOf("TRANSCRIPT ("), c.indexOf("\n\nLENGTH:"));
+    expect(section(withStyle).length).toBeLessThanOrEqual(TRANSCRIPT_BUDGET - STYLE_BUDGET);
+    // The STYLE line plus the transcript take no more than the transcript alone did (give or take
+    // one transcript line: the section fills whole lines only).
+    expect(withStyle.length - without.length).toBeLessThanOrEqual(60);
+  });
+
+  it("without transcripts the STYLE line costs at most its own cap", () => {
+    const { p, assets, m, review } = typical();
+    const c = buildDirectorContext(p, assets, m, review, null, STYLE);
+    expect(c.length).toBeLessThan(CONTEXT_BUDGET - TRANSCRIPT_BUDGET + 200 + STYLE_BUDGET + 2);
   });
 });

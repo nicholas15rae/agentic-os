@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
+Updated 2026-11-27 10:27. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -35,6 +35,15 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 | Director Part 1 (real Director, brief, shot list, intake, edit v2, review loop, hand-off UI) | director-suite | 0a315e1 to 74efc88 | Yes (76df04f) |
 | Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | Yes (76df04f) |
 | Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
+| Director chat system message kept byte-stable for prefix caching (STUDIO STATE moved to the last user message) | director-suite | this commit | Yes (5098ca3) |
+| SDXL Turbo live test passed; harness runs with Command Center open (own crash marker) | director-suite | e0f4410, 6d3f9f5 | Yes (5098ca3) |
+| Director sees timed transcript lines; clips open on the sentence; a fit-only revision no longer resolves a timing note | director-suite | 116fbb2 | Yes (5098ca3) |
+| Part 3 UI: ComfyUI Generate panel, render queue, GPU pill, Re-roll/Tweak; note markers on the timeline; projects board; bin filters; Versions tab with restore and A/B Compare (contract in docs/proposals/director-suite-part3-contract.md). Phone review not built | director-suite | 202ae7c, 386203d | Yes (5098ca3) |
+| A revision may move the cut only ±30% off the brief's length (run 10 halved a Reel); its summary now starts with the real length change | director-suite | see log | Yes (5098ca3) |
+| Part 4: Scene Reader audition import (read-only, from a temp copy of its db; takes copied, never moved), sides drop, slate card, self-tape output. Part 5: Director reports to the inbox (brief ready, footage gaps, ComfyUI batch, review rounds) via publish_note, no voice/comms edits | director-suite | bd403c8 | Yes (5098ca3) |
+| Director's LENGTH line states the plan band and, with a note open, the revision band | director-suite | 6575cc7 | Yes (5098ca3) |
+| Part 6 small items: launcher presets, more versions from one cut, phone shot list, style memory (STYLE line), fill the gaps | director-suite | see log | Yes (5098ca3) |
+| Length refusals name a concrete whole-line fix; live E2E retries a busy LM Studio turn once | director-suite | 74655ad, f900096 | Yes (5098ca3) |
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Section 12 Phone book (grouped by area, linked across Finance, invoices, agencies, auditions, messages; .vcf import) | section-pass-batch3 | 3fe3468 | Yes (6d1084b) |
 | Section 15 part: spaced-repetition flashcards, Today's lesson, curveball setting (off, not wired to Tony) | section-pass-batch3 | 763dab0, 4520f35 | Yes (with this merge), not pushed |
@@ -45,7 +54,7 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 | Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | **No**, not merged, not pushed, app not rebuilt |
 | Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | **No**, not merged, not pushed, app not rebuilt |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
-| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (merged 11-27 09:50 on top of PR #10), not pushed; app rebuild + live check in progress |
+| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (87b6527), not pushed; built into the usual exe 10:22, not running yet (see Waiting on you) |
 
 ## 2. In progress
 
@@ -54,13 +63,20 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 | Tony live-test fixes | All 7 fixes | Committed on `claude/tony-live-test-fixes-5d85d5`. Next: your review, then merge + rebuild. Not merged, not pushed, no rebuild |
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
-| Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
+| Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
-| Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status` merged into main | Testing the combined main, then app rebuild + restart and a live phone inbox check (this session) |
+| Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status` in main (87b6527), tested | Built from main 87b6527 into the usual exe (10:22). Restart + live phone check wait on you: another session's build is running |
 
 ## 3. Waiting on you
+- Director length hint may suggest moving a clip's START earlier (run 14 had no out point free, so it suggested opening clip 1 on the line before). Keep, or out points only?
+- Director picks moments from the transcript alone, so a cut can miss Nic's face (run 15 was one acted scene under narration). Want a face/person check in media-forge (local, CPU) feeding the context?
+- Director Part 6 larger items need your call before building: talk-to-edit (new incremental actions), three speeds incl. Full AI, storyboard first, performance-aware comping (needs Scene Reader data), NetBird private link (gateway), Instagram posting (hosting), tool pill (agents.rs). Part 7 boosters not started.
+- Director voice (Part 5): pick an ElevenLabs voice for the Director (agentVoices.director); voice settings are shared core, so not set.
+- Scene Reader link (Part 4): its app has no HTTP endpoint; the card shows when Studio TTS (:5123) answers. Import reads %APPDATA%\com.scenereader.dev (copy only). OK, or want a real export endpoint in Scene Reader (its repo)?
+- Director Part 3 contract questions (defaults picked, change any): (1) ComfyUI policy select sits on the Queue card and applies to every project; (2) Re-roll of a style-transfer whose job was pruned from the queue is disabled; (3) Restore is offered only from the Versions tab.
+- Director Part 3 phone review needs a gateway (server.py) /api/media proxy behind the security gate: shared core, so not built. OK to build it?
 
 **Decisions**
 - Push main (overnight batch merged, not pushed)?
@@ -82,7 +98,7 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 - Sections 8-10 parked for the app or the phone: wire the Maps hand-off listener into `App.tsx`; add `maps_trips` + trip-words to `platform.ts` NativeCommands; Android work (Comms 6-8, Maps 4 + 12, Brainstorm 12, one APK); voice Talk (Brainstorm 2, 3, 7, 10, 11, 13).
 - Sections 8-10 overnight defaults I picked (safest each time): phone and narrow widgets open on Upcoming, the PC on Map; location only on a tap of "Use my location" (desktop); hand-offs refused unless every link is an https Google Maps link, and the opened link is rebuilt from coordinates; hand-off TTL 30 min (2 min clock skew); trips and seen hand-offs kept in memory only (addresses); refresh 5 min desktop / 2 min gateway / 10 min after an error; wrap phrases count only as a whole line; in Talk only cut / hold / "Tony, end talk" act; memory items only from Nic's lines and only by reference; "later" in the walk leaves an item pending; talk digest never labels Tony's words as Nic's.
 - Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
-- The running app (restarted 11-27 00:31) is main at dffdb71: section-pass, batch3, director-suite, PR #8 (Sections 8-10 m2), Ops removal, crash hardening, recall fix.
+- Which build should run? Since 09:52 the app runs section-pass's unmerged branch build (`F:\claude-scratch\section-pass-target`), started by another session. The usual exe was rebuilt at 10:22 from main 87b6527 (PR #10 + system.status), but main has 30 newer commits since (Tony live-test fixes incl. barge-in, Director Parts 1-5). Rebuild from current main and restart once section-pass is done testing?
 - Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
@@ -98,7 +114,7 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 - Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
-- Keep Tony quiet for ~3 min when the Director runs the live SDXL test (it will message first).
+- Director/ComfyUI: copy the SDXL Turbo checkpoint (6.5 GB) from D: (HDD) to an SSD folder? Its read from D: is most of the 80 s render; on SSD a still should take seconds. Parked: moving model files is your call.
 - Restart the gateway (new Finance records won't save until then). Bionic runs elevated, so only you can quit it.
 - Queue the E46 rebuild in Play Place (steps in `docs/e46-clock-spec-note.md`).
 - Before the next "Sync to AnythingLLM": grant the MCP servers you use directly, or it turns their auto-start off.
@@ -125,7 +141,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 **Director Suite**
 - 1.6 public hosting for Instagram
-- Part 2 live SDXL Turbo test; B-roll template (no video model yet)
+- B-roll template (no video model yet)
 - Part 3: Projects board, Generate panel and render queue, Versions with A/B compare, phone review
 - Part 4 Scene Reader link
 - Part 5 Voice/comms
@@ -147,6 +163,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | claude/tony-live-test-fixes-5d85d5 (+ barge-in) | tsc clean; vitest 2,931/2,931; cargo 1,624 (+2 known CRLF: allm, buildhub; 2 Edge browser tests timed out under load, pass alone); pytest not re-run (no Python changed since the 1,733 run below) | 11-27 02:50 |
 | claude/tony-live-test-fixes-5d85d5 (Tony live-test fixes) | tsc clean; vitest 2,925/2,925; cargo 1,625 (+2 known CRLF: allm, buildhub; 1 Edge browser test timed out under load, passes alone); pytest 1,733 (embed flake + 1 socket abort under load, both pass alone; language hub 41/41 after the last prompt change). Not checked in the running app (no rebuild) | 11-27 02:20 |
 | claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
+| main 87b6527 (PR #10 + system.status) | tsc clean; vitest 3,021/3,021; cargo 1,628 (+2 known CRLF; 6 Edge tests timed out under load, all 67 quality tests pass alone) | 11-27 10:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |
@@ -161,6 +178,17 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | main 9c57359 (Ops removal + PR #8 + director-suite) | tsc clean; vitest 2,906/2,906; cargo 1,621 (+2 known CRLF; 3 Edge tests timed out under load, pass alone) | 11-27 00:30 |
 | main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
 | director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
+| director-suite (116fbb2) | tsc clean; vitest 2,904/2,904; cargo 1,611 (+2 known CRLF); taskworker::quality 67/67 | 11-27 02:30 |
+| director-suite merged into main (5098ca3; gate on e2411fe) | tsc clean; vitest 3,211; cargo 1,617 (+2 known CRLF; taskworker::quality 67/67 alone); Python 863 OK; media-forge 116; Playwright director 9/9. Latency probe (stress MEDIUM, running app): per-probe exec in line with earlier runs (Tony 1.39 s), wall 48 s from a queued Librarian probe | 11-27 10:30 |
+| director-suite (Part 6) | tsc clean; vitest 3,052/3,052; cargo 1,637 (+2 known CRLF); Playwright director 9/9 | 11-27 04:45 |
+| director-suite (6575cc7, Parts 4-5 + bands) | tsc clean; vitest 3,022/3,022; cargo 1,628 (+2 known CRLF; taskworker::quality 67/67 alone); Playwright director 7/7 | 11-27 04:10 |
+| director-suite (Part 3 + revision fix) | tsc clean; vitest 3,005/3,005; cargo 1,613 (+2 known CRLF; taskworker::quality 67/67 alone); media 68; Playwright director specs 5/5 desktop | 11-27 03:30 |
+| ComfyUI SDXL Turbo live test (comfy_live.rs) | PASS: 1 image, ingested with provenance; boot 77 s, render 80 s (checkpoint read from HDD), peak VRAM 10,193 MiB, Qwen reload 212 s (builds running alongside), only Tony loaded after at 32768 ctx x 2; total 6.3 min | 11-27 01:23 |
+| Director live E2E run 15 | PASS 15/15 in 196 s, no auto-fixes or re-asks; idea verbatim; round 1 15.8 s, round 2 11.8 s (inside the revision band, summary states the real length change); captions whole sentences; -14.2 LUFS. Weak spot: the cut is ONE 15.8 s clip (an acted period scene under narration), the Director picks by transcript only and can't see faces | 11-27 05:55 |
+| Director live E2E runs 13-14 | 13: LM Studio turn timeout (replayed fine in 15 s, busy server). 14: six revisions at 9 / 8.4 s vs 10.5-19.5 s, led to the length hint | 11-27 05:00 |
+| Director live E2E run 12 | INCONCLUSIVE: stopped at step 3c when an LM Studio turn hit the 120 s cap (builds were loading the CPU; LM Studio stayed up, Tony at production settings). Length bands not yet tested live; re-run when the machine is quiet | 11-27 04:10 |
+| Director live E2E run 11 | FAIL at step 5b (12/13 steps): the new ±30% revision guard refused 6 revisions (22.7, 19.6, 28.1, 3.9, 25.7, 3.9 s vs 10.5–19.5 s); Qwen never landed in the band. Next: show the band in the Director's LENGTH line before it revises | 11-27 03:45 |
+| Director live E2E run 10 | 15/15 steps. Captions now whole sentences; idea verbatim; round 1 14.0 s. FAIL: the round-2 revision cut it to 7.4 s (revisions only warn on length) and its summary claimed it was extended. 4 auto-fixes + 3 re-asks to hit length (Qwen arithmetic) | 11-27 02:15 |
 | Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
 | sections-8-10 m3 overnight (0d72190) | pytest 1,735; vitest 3,021 (211 files; 132 new maps + brainstorm tests); tsc clean; cargo 1,612 (+2 known CRLF in allm/buildhub, not mine, left alone). Not checked by eye: no dev server allowed overnight, MapLibre needs WebGL | 11-27 02:00 |
 | sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
@@ -179,30 +207,28 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 09:48 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:26 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/tony-live-test-fixes-5d85d5` | 4 | `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test f... | 29 files |
-| `director-suite` | 20 | `1b71fdf` 2026-11-27 docs(status): overnight Director summary, run 15 passed, items waiting | clean |
-| `section-pass-batch3` | 6 | `5c9d089` 2026-11-27 docs(status): overnight batch on section-pass-batch3 (15, 14.6-14.7... | 173 files |
-| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
-| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
+| `section-26-engine` | 10 | `285d583` 2026-11-27 feat(engine): resumable Hugging Face GGUF download + recoverable de... | 4 files |
+| `section-pass-batch3` | 8 | `d2b899e` 2026-11-27 Merge main (87b6527: Tony's system.status tool, Sections 8-10 m3) i... | 25 files |
+| `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
+| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | 1 files |
+| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | 13 files |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
-| `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
-| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | 29 files |
-| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `196b2f8` 2026-11-27 docs(status): Sections 8-10 PR #10 merged into main (c134f9c)
-- `c134f9c` 2026-11-27 Merge pull request #10 from nicholas15rae/claude/sections-8-10-m3
-- `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
-- `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
-- `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
-- `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
+- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
+- `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
+- `5098ca3` 2026-11-27 Merge director-suite into main: Director Suite Parts 1-5 and Part 6 small items
+- `9d37071` 2026-11-27 Merge main (87b6527: Tony's read-only system.status tool) into claude/tony-live-test-fixes-5d85d5
+- `d19546c` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/tony-live-test-fixes-5d85d5
+- `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test fixes on the branch
 <!-- /AUTO:BRANCHES -->

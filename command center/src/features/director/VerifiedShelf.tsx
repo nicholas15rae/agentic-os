@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { BadgeCheck, FolderOpen, Loader2, ShieldCheck } from "lucide-react";
-import { Card, Empty } from "@/components/ui";
+import { Card, Empty, SubTabs } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { RenderCloudActions } from "@/features/cloud/RenderCloudActions";
 import { api } from "./api";
 import { approveFinal, select, useDirector } from "./director-store";
 import { timecode } from "./manifest";
 import { DeliverablesList, defaultHashtags } from "./Deliverables";
+import { Versions } from "./VersionsPanel";
 
 const mb = (b: number) => `${(b / 1_048_576).toFixed(1)} MB`;
 const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
@@ -54,6 +55,7 @@ export function VerifiedShelf() {
   const [picked, setPicked] = useState<string[]>([]);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<"outputs" | "versions">("outputs");
 
   const stop = () => {
     setPicking(false);
@@ -74,14 +76,29 @@ export function VerifiedShelf() {
       title="Verified outputs"
       action={
         renders.length > 0 &&
-        !picking && (
+        !picking &&
+        tab === "outputs" && (
           <button onClick={() => setPicking(true)} className="pill-glass !h-8 !px-3 text-xs" title="Choose the renders that are final (asks before copying)">
             <BadgeCheck size={12} /> Approve final…
           </button>
         )
       }
     >
-      {renders.length ? (
+      {renders.length > 0 && (
+        <div className="mb-2">
+          <SubTabs
+            tabs={[
+              { id: "outputs", label: "Outputs" },
+              { id: "versions", label: "Versions" },
+            ]}
+            value={tab}
+            onChange={setTab}
+          />
+        </div>
+      )}
+      {tab === "versions" && renders.length ? (
+        <Versions />
+      ) : renders.length ? (
         <ul className="space-y-1.5">
           {renders.map((r, i) => {
             const on = previewMode === "final" && (selection?.kind === "render" ? selection.id === r.id : i === 0);
@@ -124,7 +141,7 @@ export function VerifiedShelf() {
       ) : (
         <Empty>No verified renders yet.</Empty>
       )}
-      {picking && <FinalApprovalBar count={picked.length} confirming={confirming} busy={busy} onAsk={() => setConfirming(true)} onConfirm={() => void confirm()} onCancel={confirming ? () => setConfirming(false) : stop} />}
+      {picking && tab === "outputs" && <FinalApprovalBar count={picked.length} confirming={confirming} busy={busy} onAsk={() => setConfirming(true)} onConfirm={() => void confirm()} onCancel={confirming ? () => setConfirming(false) : stop} />}
       <DeliverablesList deliverables={deliverables} renders={renders} hashtags={defaultHashtags(assets.map((a) => a.tags))} done={done} />
     </Card>
   );

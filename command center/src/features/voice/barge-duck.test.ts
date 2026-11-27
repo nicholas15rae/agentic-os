@@ -113,24 +113,63 @@ async function tonySpeaking() {
   return { speech, turn };
 }
 
-describe("barge-in onError (P4 fix)", () => {
-  it("un-ducks Tony, keeps him 'speaking', re-arms the barge-in, and the follow-up listen still opens", async () => {
-    const { speech, turn } = await tonySpeaking();
+/** Live test 11-27: talking over an audible Tony stops him on the spot; the rest of the reply is dropped. */
+describe("barge-in over Tony's voice stops him at once", () => {
+  it("speech onset cancels his audio (no duck), and an STT error afterwards leaves him stopped, not replaying", async () => {
+    const { turn } = await tonySpeaking();
+    const spoken = h.speak.mock.calls.length;
     handlers(0).onPhase("speech"); // you talk over him
-    expect(h.ttsDuck).toHaveBeenLastCalledWith(true);
+    expect(h.ttsCancel).toHaveBeenCalled();
+    expect(h.ttsDuck).not.toHaveBeenCalledWith(true);
+    await turn; // the cancelled say() returns; the superseded turn stays silent
     handlers(0).onError("whisper timed out");
-    expect(h.ttsDuck).toHaveBeenLastCalledWith(false);
-    expect(h.restoreDuck).toHaveBeenCalled();
-    expect(useVoice.getState().state).toBe("speaking"); // not "error" while he's still talking
-    expect(h.sttStart).toHaveBeenCalledTimes(2);
-    expect(startOpts(1)).toMatchObject({ maxSilenceStartMs: 120_000 });
-    speech.done();
-    await turn;
-    // `barged` was reset, so the reply ends in the follow-up window (it used to return early).
-    expect(h.sttStart).toHaveBeenCalledTimes(3);
-    expect(startOpts(2)).toEqual({ maxSilenceStartMs: 6000, partials: expect.any(Function) }); // captions are opt-in: it asks
-    expect(useVoice.getState().state).toBe("listening");
+    expect(useVoice.getState().state).toBe("error");
+    // Nothing more of the old reply is spoken, and no follow-up / barge listen re-opens for it.
+    expect(h.speak).toHaveBeenCalledTimes(spoken);
+    expect(h.sttStart).toHaveBeenCalledTimes(1);
   });
+
+  it("a new command said over him runs once; the old answer is never repeated", async () => {
+    const { turn } = await tonySpeaking();
+    handlers(0).onPhase("speech");
+    await turn;
+    h.speak.mockReset().mockResolvedValue(undefined);
+    h.cmd.mockImplementation(async (name: string) => (name === "os_turn" ? { answer: "It's 9 pm.", steps: [], providerId: "local", latencyMs: 1, routedRole: "general", routeKind: "Self", routeReason: "", redacted: false, reason: "" } : undefined));
+    handlers(0).onFinal("what time is it");
+    await vi.waitFor(() => expect(h.speak).toHaveBeenCalled());
+    const said = h.speak.mock.calls.map((c) => String(c[0]));
+    expect(said.some((t) => t.includes("sunny"))).toBe(false);
+  });
+
+  it("'hold on' / 'stop' / 'cut it' over him is a cut: no new turn, nothing re-said", async () => {
+    for (const line of ["hold on", "Hold on a sec.", "stop", "cut it"]) {
+      const { turn } = await tonySpeaking();
+      handlers(0).onPhase("speech");
+      await turn;
+      const turns = h.cmd.mock.calls.filter((c) => c[0] === "os_turn").length;
+      const spoken = h.speak.mock.calls.length;
+      handlers(0).onFinal(line);
+      await Promise.resolve();
+      expect(h.cmd.mock.calls.filter((c) => c[0] === "os_turn").length, line).toBe(turns);
+      expect(h.speak.mock.calls.length, line).toBe(spoken);
+      expect(useVoice.getState().state, line).toBe("idle");
+      stopVoice();
+      h.sttStart.mockReset();
+    }
+  });
+
+  it("noise over him leaves him stopped (the reply is not resumed)", async () => {
+    const { turn } = await tonySpeaking();
+    const spoken = h.speak.mock.calls.length;
+    handlers(0).onPhase("speech");
+    await turn;
+    handlers(0).onFinal(""); // a cough
+    expect(h.speak).toHaveBeenCalledTimes(spoken);
+    expect(useVoice.getState().state).toBe("idle");
+  });
+});
+
+describe("barge-in onError (P4 fix)", () => {
 
   it("a mic that keeps failing re-arms only a bounded number of times", async () => {
     const { speech, turn } = await tonySpeaking();
@@ -153,10 +192,14 @@ describe("barge-in onError (P4 fix)", () => {
   });
 
   it("the follow-up listen ducks the music only like a passive listen (onWakeListen)", async () => {
-    const { speech, turn } = await tonySpeaking();
+    const first = await tonySpeaking();
     handlers(0).onPhase("speech"); // over Tony: an explicit barge-in
     expect(h.duckOnSpeech).toHaveBeenLastCalledWith(false);
-    handlers(0).onFinal(""); // noise: keep listening over the rest of the reply
+    await first.turn;
+    stopVoice();
+    h.sttStart.mockReset();
+    // A reply that plays out ends in the follow-up window.
+    const { speech, turn } = await tonySpeaking();
     speech.done();
     await turn;
     const follow = h.sttStart.mock.calls.length - 1;

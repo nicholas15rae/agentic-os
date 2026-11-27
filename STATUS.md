@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 02:20. One page for every Claude Code session and branch.
+Updated 2026-11-27 02:50. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -36,13 +36,14 @@ Updated 2026-11-27 02:20. One page for every Claude Code session and branch.
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
 | Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | **No**, not merged, not pushed, app not rebuilt |
+| Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | see Branches | **No**, not merged, not pushed, app not rebuilt |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
 
 ## 2. In progress
 
 | Session | Working on | Current step |
 |---|---|---|
-| Tony live-test fixes | Gmail Primary scope, Comms setting, STT hints, TTS labels, to-do confirm | Committed on `claude/tony-live-test-fixes-5d85d5`. Barge-in parked for you (see Waiting on you). Not merged, not pushed, no rebuild |
+| Tony live-test fixes | All 7 fixes | Committed on `claude/tony-live-test-fixes-5d85d5`. Next: your review, then merge + rebuild. Not merged, not pushed, no rebuild |
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
 | Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
@@ -54,7 +55,7 @@ Updated 2026-11-27 02:20. One page for every Claude Code session and branch.
 
 **Decisions**
 - Tony live-test fixes (`claude/tony-live-test-fixes-5d85d5`): review, then merge + rebuild when you're happy. Choices I made overnight (safest option each time):
-  - **Barge-in (fix 6) is parked, not built.** Your overnight rule says never touch Tony's stop, and this changes it. Ready-to-build plan: (a) add "hold on" to the cut phrases in `reflex-parse.ts` (today it isn't a reflex, so it went to the model as a new line, which is likely why the answer was repeated); (b) when you start talking while Tony is audible, hard-stop TTS at speech onset and drop the rest of the reply (today he only ducks until Whisper returns). Trade-off: on speakers, a cough or his own echo would cut him too. Say go and I'll build it with tests.
+  - Barge-in (fix 6) is built (your go, 11-27). Trade-off to watch on speakers: a cough, or Tony's own voice leaking into the mic, now cuts him off too. The barge-in listen's stricter trigger is unchanged. A hold ("whoa") over his voice now holds your thought, but there's no paused reply left to resume.
   - The booking-mail scan keeps its own query from your instruction file (it already excludes Promotions and Social); only reads and searches got the Primary scope.
   - To-dos had no store, so a confirmed to-do goes to the Ideas & Tasks ledger (Play Place) as a parked item tagged `todo`. Parked items start nothing. In Learning mode a to-do line still goes to Tony's model (Learning skips local intents).
   - The to-do prompt rule rides only on a turn that mentions a to-do, because Tony's system prompt is at its 3,500-char budget. I didn't raise the budget.
@@ -127,6 +128,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| claude/tony-live-test-fixes-5d85d5 (+ barge-in) | tsc clean; vitest 2,931/2,931; cargo 1,624 (+2 known CRLF: allm, buildhub; 2 Edge browser tests timed out under load, pass alone); pytest not re-run (no Python changed since the 1,733 run below) | 11-27 02:50 |
 | claude/tony-live-test-fixes-5d85d5 (Tony live-test fixes) | tsc clean; vitest 2,925/2,925; cargo 1,625 (+2 known CRLF: allm, buildhub; 1 Edge browser test timed out under load, passes alone); pytest 1,733 (embed flake + 1 socket abort under load, both pass alone; language hub 41/41 after the last prompt change). Not checked in the running app (no rebuild) | 11-27 02:20 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |

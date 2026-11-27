@@ -270,3 +270,24 @@ describe("isBareCut (regression)", () => {
     for (const l of ["Stop motion studio app, I want an app that turns sketches into clips", "Let's cut that feature", "Stop button should be red", "and cut that intro", "cut it into three pages and build me a portfolio"]) expect(isBareCut(l), l).toBe(false);
   });
 });
+
+/** Live test 11-27: "hold on" over Tony went to the model as a new line and he repeated himself. */
+describe("'hold on' is a hard stop", () => {
+  it("on its own or leading a line, in every state", () => {
+    for (const ctx of [BUSY, IDLE]) {
+      for (const s of ["hold on", "Hold on.", "Tony, hold on", "hold on hold on", "no, hold on", "Hold on a sec.", "hold on a minute please"]) {
+        expect(parseReflex(s, ctx), s).toEqual({ kind: "cut", rest: "", needsAddress: true });
+        expect(isBareCut(s), s).toBe(true);
+      }
+    }
+  });
+
+  it("what follows it becomes the next line", () => {
+    expect(parseReflex("hold on, what time is it?", BUSY)).toEqual({ kind: "cut", rest: "what time is it?", needsAddress: true });
+    expect(isBareCut("hold on, what time is it?")).toBe(false);
+  });
+
+  it("never mid-sentence or negated", () => {
+    for (const s of ["I'll hold on to the receipt", "tell Sam to hold on to it", "don't hold on", "can you hold onto that"]) expect(parseReflex(s, BUSY), s).toBeNull();
+  });
+});

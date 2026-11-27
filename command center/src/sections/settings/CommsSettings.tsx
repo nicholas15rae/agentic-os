@@ -12,7 +12,7 @@ export function GmailInboxCard() {
     <Card title="Gmail inbox" hint="Which inbox Tony reads and searches. Saved here, so he doesn't have to remember it.">
       <div role="radiogroup" aria-label="Gmail inbox Tony reads" className="space-y-1.5">
         {GMAIL_SCOPES.map((s) => (
-          <label key={s.id} className="flex cursor-pointer items-start gap-3 rounded-[12px] border border-white/[0.07] px-3 py-2 text-sm">
+          <label key={s.id} className="flex cursor-pointer items-start gap-3 r-12 border border-white/[0.07] px-3 py-2 text-sm">
             <input
               type="radio"
               name="gmail-inbox-scope"

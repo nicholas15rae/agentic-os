@@ -55,7 +55,7 @@ export function StagingHub() {
           role="tab"
           aria-selected={tab === id}
           onClick={() => setTab(id)}
-          className={`label-caps flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 !text-[10px] ${tab === id ? "border-amber/50 bg-amber/10 text-amber-soft" : "border-transparent text-ink-3 hover:text-ink-2"} ${id === "repair" && counts.repair ? "!text-alert" : ""}`}
+          className={`label-caps flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 !fs-10 ${tab === id ? "border-amber/50 bg-amber/10 text-amber-soft" : "border-transparent text-ink-3 hover:text-ink-2"} ${id === "repair" && counts.repair ? "!text-alert" : ""}`}
         >
           <Icon size={10} /> {label}
         </button>
@@ -77,7 +77,7 @@ export function StagingHub() {
           : "Builds that failed their smoke test twice (or that you sent here). Fix by hand in the output folder and re-run the check, or re-queue with a fix note."
       }
     >
-      {error && <p className="mb-2 font-mono text-[11px] text-alert">{error}</p>}
+      {error && <p className="mb-2 font-mono fs-11 text-alert">{error}</p>}
       {tab === "trash" ? (
         <TrashList />
       ) : !view ? (
@@ -116,7 +116,7 @@ const copyPath = (p: string) => void navigator.clipboard?.writeText(p).then(() =
 
 function Badge({ children, tone }: { children: React.ReactNode; tone: "amber" | "teal" | "alert" | "holo" | "ink" }) {
   const c = { amber: "border-amber/50 text-amber-soft", teal: "border-teal/50 text-teal-soft", alert: "border-alert/60 text-alert", holo: "border-holo/40 text-holo", ink: "border-white/15 text-ink-2" }[tone];
-  return <span className={`label-caps inline-flex h-5 shrink-0 items-center gap-1 rounded-full border px-2 !text-[9px] ${c}`}>{children}</span>;
+  return <span className={`label-caps inline-flex h-5 shrink-0 items-center gap-1 rounded-full border px-2 !fs-9 ${c}`}>{children}</span>;
 }
 
 function BuildCard({ b }: { b: BuildView }) {
@@ -130,7 +130,8 @@ function BuildCard({ b }: { b: BuildView }) {
   const boxRef = useRef<HTMLElement>(null);
   const focusReq = useMyApps((s) => s.focusBuild);
   useEffect(() => {
-    if (focusReq?.id !== id) return;
+    // A hidden copy (an icon's badge copy) never uses up the request: the visible one handles it.
+    if (focusReq?.id !== id || !boxRef.current?.offsetParent) return;
     boxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     boxRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
     useMyApps.getState().clearFocus();
@@ -154,9 +155,9 @@ function BuildCard({ b }: { b: BuildView }) {
   };
 
   return (
-    <section ref={boxRef} className={`rounded-[16px] border p-3 ${e.status === "paused" ? "border-amber/40 bg-amber/[0.04]" : e.status === "cancelled" ? "border-alert/25 bg-alert/[0.02] opacity-80" : "border-white/[0.08] bg-white/[0.02]"}`}>
+    <section ref={boxRef} className={`r-16 border p-3 ${e.status === "paused" ? "border-amber/40 bg-amber/[0.04]" : e.status === "cancelled" ? "border-alert/25 bg-alert/[0.02] opacity-80" : "border-white/[0.08] bg-white/[0.02]"}`}>
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="font-mono text-[11px] text-ink-3">{waiting ? `#${b.position}` : `Build ${b.seq}`}</span>
+        <span className="font-mono fs-11 text-ink-3">{waiting ? `#${b.position}` : `Build ${b.seq}`}</span>
         <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink" title={e.title}>
           {e.title}
         </h3>
@@ -167,7 +168,7 @@ function BuildCard({ b }: { b: BuildView }) {
           </Badge>
         )}
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 fs-11">
         <span className={`flex items-center gap-1 ${w.live ? "text-teal-soft" : "text-ink-3"}`}>
           <span className={`size-1.5 rounded-full ${w.live ? "animate-pulse bg-teal" : "bg-ink-3"}`} /> {w.label}
         </span>
@@ -178,19 +179,19 @@ function BuildCard({ b }: { b: BuildView }) {
       <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
         <div className={`h-full rounded-full transition-[width] duration-500 ${e.status === "paused" ? "bg-amber/60" : "bg-gradient-to-r from-amber to-teal"}`} style={{ width: `${b.progress}%` }} />
       </div>
-      <p className="mt-1 truncate text-[11px] text-ink-2" title={e.milestones.join(" → ")}>
+      <p className="mt-1 truncate fs-11 text-ink-2" title={e.milestones.join(" → ")}>
         <span className="text-ink-3">Milestone:</span> {currentMilestone(b)}
         {b.stage ? <span className="font-mono text-ink-3"> · {b.stage}</span> : null}
       </p>
 
       <div className="mt-2 flex flex-wrap gap-1.5">
         {e.status === "paused" ? (
-          <button disabled={!!busy} onClick={() => void act("Resume", "build_resume", { buildId: id })} className="pill-primary !h-7 !px-2.5 text-[11px]">
+          <button disabled={!!busy} onClick={() => void act("Resume", "build_resume", { buildId: id })} className="pill-primary !h-7 !px-2.5 fs-11">
             <Play size={11} /> Resume
           </button>
         ) : (
           ["queued", "building", "smoke_testing"].includes(e.status) && (
-            <button disabled={!!busy} onClick={() => void act("Pause", "build_pause", { buildId: id })} className="pill-glass !h-7 !px-2.5 text-[11px]" title="Pause at the next checkpoint: the step in flight finishes and commits, state and logs are kept">
+            <button disabled={!!busy} onClick={() => void act("Pause", "build_pause", { buildId: id })} className="pill-glass !h-7 !px-2.5 fs-11" title="Pause at the next checkpoint: the step in flight finishes and commits, state and logs are kept">
               <Pause size={11} /> Pause
             </button>
           )
@@ -199,18 +200,18 @@ function BuildCard({ b }: { b: BuildView }) {
           <button
             disabled={!!busy}
             onClick={() => confirm(`Cancel “${e.title}”? The step in flight is aborted now (its GPU slot is released and any Claude run is killed). The card, files and logs stay — Re-queue runs it again, Delete purges it.`) && void act("Cancel", "cancel_build_job", { jobId: id })}
-            className="pill-glass !h-7 !px-2.5 text-[11px] !text-alert hover:!border-alert/60"
+            className="pill-glass !h-7 !px-2.5 fs-11 !text-alert hover:!border-alert/60"
             title="Cancel / abort (not Pause): hard-stop the build now"
           >
             {busy === "Cancel" ? <Loader2 size={11} className="animate-spin" /> : <OctagonX size={11} />} Cancel
           </button>
         )}
         {e.status === "cancelled" && (
-          <button disabled={!!busy} onClick={() => void act("Re-queue", "build_requeue", { buildId: id })} className="pill-primary !h-7 !px-2.5 text-[11px]" title="Back into staging (tail of the queue) for a fresh pass">
+          <button disabled={!!busy} onClick={() => void act("Re-queue", "build_requeue", { buildId: id })} className="pill-primary !h-7 !px-2.5 fs-11" title="Back into staging (tail of the queue) for a fresh pass">
             <RotateCcw size={11} /> Re-queue
           </button>
         )}
-        <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 text-[11px]" aria-pressed={peek} title="Live Read-In / Peek View">
+        <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 fs-11" aria-pressed={peek} title="Live Read-In / Peek View">
           {peek ? <EyeOff size={11} /> : <Eye size={11} />} Peek
         </button>
         {waiting && (
@@ -227,12 +228,12 @@ function BuildCard({ b }: { b: BuildView }) {
           </>
         )}
         {ready && (
-          <button disabled={!!busy} onClick={() => void promote()} className="pill-primary !h-7 !px-2.5 text-[11px]" title={e.target_runtime === "internal_widget" ? "Promote to Live Dashboard (smoke test passed)" : "Mark deployed (smoke test passed)"}>
+          <button disabled={!!busy} onClick={() => void promote()} className="pill-primary !h-7 !px-2.5 fs-11" title={e.target_runtime === "internal_widget" ? "Promote to Live Dashboard (smoke test passed)" : "Mark deployed (smoke test passed)"}>
             <Rocket size={11} /> {e.target_runtime === "internal_widget" ? "Promote to Live Dashboard" : "Mark deployed"}
           </button>
         )}
         {e.status !== "deployed" && e.status !== "cancelled" && (
-          <button disabled={!!busy} onClick={() => void act("Repair", "build_to_repair", { buildId: id })} className="pill-glass !h-7 !px-2.5 text-[11px] hover:!border-alert/50" title="Send to Repair Queue">
+          <button disabled={!!busy} onClick={() => void act("Repair", "build_to_repair", { buildId: id })} className="pill-glass !h-7 !px-2.5 fs-11 hover:!border-alert/50" title="Send to Repair Queue">
             <Wrench size={11} /> Repair
           </button>
         )}
@@ -268,7 +269,7 @@ function BuildCard({ b }: { b: BuildView }) {
       {e.human_override.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">
           {e.human_override.map((o, i) => (
-            <li key={i} className="truncate font-mono text-[10px] text-ink-3" title={o.directive.length > 2000 ? `${o.directive.slice(0, 2000)}… (${o.directive.length.toLocaleString()} chars in all)` : o.directive}>
+            <li key={i} className="truncate font-mono fs-10 text-ink-3" title={o.directive.length > 2000 ? `${o.directive.slice(0, 2000)}… (${o.directive.length.toLocaleString()} chars in all)` : o.directive}>
               <span className={o.applied_at ? "text-teal-soft" : "text-amber-soft"}>{o.applied_at ? `✓ injected${o.applied_stage ? ` at ${o.applied_stage}` : ""}` : "⏳ next step"}</span> {o.auto ? "(auto) " : ""}
               {o.directive.length > 160 ? `${o.directive.split("\n")[0].slice(0, 160)}… (${o.directive.length.toLocaleString()} chars)` : o.directive}
             </li>
@@ -277,7 +278,7 @@ function BuildCard({ b }: { b: BuildView }) {
       )}
 
       {e.target_runtime === "external_os" && (
-        <p className="mt-2 rounded-[10px] border border-holo/20 bg-holo/[0.04] px-2 py-1 font-mono text-[10px] text-ink-2">
+        <p className="mt-2 r-10 border border-holo/20 bg-holo/[0.04] px-2 py-1 font-mono fs-10 text-ink-2">
           Local Bridge · {e.output_directory} · Peek for the embedded read-in, or Window for a dedicated preview
         </p>
       )}
@@ -317,23 +318,23 @@ function TrashList() {
     await restoreFromTrash(id);
     setBusy(null);
   };
-  if (error) return <p className="font-mono text-[11px] text-alert">{error}</p>;
+  if (error) return <p className="font-mono fs-11 text-alert">{error}</p>;
   if (!loaded) return <p className="py-3 text-center text-xs text-ink-3">Loading…</p>;
   if (!entries.length) return <Empty>The Trash is empty.</Empty>;
   return (
     <ul className="space-y-1.5">
       {entries.map((e) => (
-        <li key={e.id} className="flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.06] px-3 py-2">
+        <li key={e.id} className="flex flex-wrap items-center gap-2 r-12 border border-white/[0.06] px-3 py-2">
           <span className="text-sm text-ink">{e.title}</span>
           <span className="label-caps text-ink-3">{e.kind === "build" ? "build" : "runner"}</span>
-          <span className="text-[11px] text-ink-3">
+          <span className="fs-11 text-ink-3">
             deleted {new Date(e.deletedAt).toLocaleString()} · {e.items.length} folder(s) · gone for good {expiresIn(e)}
           </span>
           <span className="ml-auto flex gap-1.5">
-            <button disabled={busy === e.id} onClick={() => void restore(e.id)} className="pill-glass !h-7 !px-2.5 text-[11px]" title="Put it back">
+            <button disabled={busy === e.id} onClick={() => void restore(e.id)} className="pill-glass !h-7 !px-2.5 fs-11" title="Put it back">
               {busy === e.id ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />} Restore
             </button>
-            <button disabled={busy === e.id} onClick={() => void purge(e.id, e.title)} className="pill-glass !h-7 !px-2.5 text-[11px] hover:!border-alert/50 hover:!text-alert" title="Delete for good">
+            <button disabled={busy === e.id} onClick={() => void purge(e.id, e.title)} className="pill-glass !h-7 !px-2.5 fs-11 hover:!border-alert/50 hover:!text-alert" title="Delete for good">
               <Trash2 size={11} /> Delete for good
             </button>
           </span>
@@ -399,7 +400,7 @@ function ClearFailed({ count }: { count: number }) {
     useToasts.getState().push({ title: "Cleared", body: `${r.length} build(s) moved to the Trash for ${TRASH_DAYS} days (Staging hub → Trash to restore)`, tone: "info" });
   };
   return (
-    <button disabled={busy} onClick={() => void onClick()} className="label-caps flex h-6 items-center gap-1 rounded-full border border-alert/30 px-2 !text-[9px] text-alert hover:border-alert/60" title="Move every Repair Queue and cancelled build to the Trash">
+    <button disabled={busy} onClick={() => void onClick()} className="label-caps flex h-6 items-center gap-1 rounded-full border border-alert/30 px-2 !fs-9 text-alert hover:border-alert/60" title="Move every Repair Queue and cancelled build to the Trash">
       {busy ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />} Clear failed ({count})
     </button>
   );
@@ -412,7 +413,7 @@ function MaxIterations({ b, busy, onPick }: { b: BuildView; busy: boolean; onPic
   const current = b.max_iter_override ?? (b.max_iterations || 2);
   const choices = ITERATION_CHOICES.includes(current as (typeof ITERATION_CHOICES)[number]) ? ITERATION_CHOICES : [...ITERATION_CHOICES, current].sort((x, y) => x - y);
   return (
-    <label className="flex h-6 items-center gap-1 rounded-full border border-white/10 px-2 font-mono text-[10px] text-ink-3" title="Max iterations: how many Designer/Coder fix loops this build may run before it stops (applies to the running pass too)">
+    <label className="flex h-6 items-center gap-1 rounded-full border border-white/10 px-2 font-mono fs-10 text-ink-3" title="Max iterations: how many Designer/Coder fix loops this build may run before it stops (applies to the running pass too)">
       max iter
       <select value={current} disabled={busy || b.envelope.status === "deployed"} onChange={(ev) => onPick(Number(ev.target.value))} className="bg-transparent text-ink-2 outline-none" aria-label="Max iterations">
         {choices.map((n) => (
@@ -434,11 +435,11 @@ function LogPanel({ b }: { b: BuildView }) {
   const errs = b.logs.filter((l) => l.stream === "stderr").length;
   return (
     <details className="mt-2" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="flex cursor-pointer items-center gap-1 text-[11px] text-teal">
+      <summary className="flex cursor-pointer items-center gap-1 fs-11 text-teal">
         <Terminal size={11} /> Live log ({b.logs.length}
         {errs ? <span className="text-alert"> · {errs} stderr</span> : null})
       </summary>
-      <pre ref={ref} className="well mt-1 max-h-56 overflow-auto rounded-[10px] p-2 font-mono text-[10.5px] leading-relaxed">
+      <pre ref={ref} className="well mt-1 max-h-56 overflow-auto r-10 p-2 font-mono fs-10.5 leading-relaxed">
         {b.logs.map((l, i) => (
           <div key={i} className={l.stream === "stderr" ? "text-alert" : l.stream === "event" ? "text-amber-soft" : "text-ink-2"}>
             <span className="text-ink-3">{new Date(l.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} </span>
@@ -464,7 +465,7 @@ function RepairCard({ b }: { b: BuildView }) {
     return out;
   };
   return (
-    <section className="rounded-[16px] border border-alert/30 bg-alert/[0.03] p-3">
+    <section className="r-16 border border-alert/30 bg-alert/[0.03] p-3">
       <div className="flex flex-wrap items-center gap-1.5">
         <ShieldAlert size={14} className="text-alert" />
         <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{e.title}</h3>
@@ -475,7 +476,7 @@ function RepairCard({ b }: { b: BuildView }) {
       {!!r?.failed_assertions.length && (
         <ul className="mt-1.5 space-y-0.5">
           {r.failed_assertions.map((f, i) => (
-            <li key={i} className="font-mono text-[10.5px] text-ink-2">
+            <li key={i} className="font-mono fs-10.5 text-ink-2">
               ✗ {f}
             </li>
           ))}
@@ -483,18 +484,18 @@ function RepairCard({ b }: { b: BuildView }) {
       )}
       {r?.trace && (
         <details className="mt-1.5">
-          <summary className="cursor-pointer text-[11px] text-teal">Error trace</summary>
-          <pre className="well mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-[10px] p-2 font-mono text-[10.5px] text-ink-2">{r.trace}</pre>
+          <summary className="cursor-pointer fs-11 text-teal">Error trace</summary>
+          <pre className="well mt-1 max-h-48 overflow-auto whitespace-pre-wrap r-10 p-2 font-mono fs-10.5 text-ink-2">{r.trace}</pre>
         </details>
       )}
       <div className="mt-2 flex flex-wrap gap-1.5">
-        <button disabled={!!busy} onClick={() => void act("Smoke test", "build_smoke", { buildId: id }).then((rep) => rep && useToasts.getState().push({ title: rep.passed ? "Check passed" : "Still failing", body: rep.passed ? "Back in staging as Ready for merge." : rep.failed_assertions.join("; "), tone: rep.passed ? "info" : "error" }))} className="pill-primary !h-7 !px-2.5 text-[11px]" title="One-click fix: after editing the files by hand, re-run the check">
+        <button disabled={!!busy} onClick={() => void act("Smoke test", "build_smoke", { buildId: id }).then((rep) => rep && useToasts.getState().push({ title: rep.passed ? "Check passed" : "Still failing", body: rep.passed ? "Back in staging as Ready for merge." : rep.failed_assertions.join("; "), tone: rep.passed ? "info" : "error" }))} className="pill-primary !h-7 !px-2.5 fs-11" title="One-click fix: after editing the files by hand, re-run the check">
           {busy === "Smoke test" ? <Loader2 size={11} className="animate-spin" /> : <ShieldCheck size={11} />} Re-run check
         </button>
-        <button onClick={() => copyPath(e.output_directory)} className="pill-glass !h-7 !px-2.5 text-[11px]" title="Edit the output by hand">
+        <button onClick={() => copyPath(e.output_directory)} className="pill-glass !h-7 !px-2.5 fs-11" title="Edit the output by hand">
           <Copy size={11} /> Output folder
         </button>
-        <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 text-[11px]">
+        <button onClick={() => setPeek((v) => !v)} className="pill-glass !h-7 !px-2.5 fs-11">
           {peek ? <EyeOff size={11} /> : <Eye size={11} />} Peek
         </button>
         <ArchiveButton b={b} busy={busy} setBusy={setBusy} />

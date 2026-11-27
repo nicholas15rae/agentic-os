@@ -3103,7 +3103,17 @@ var AC=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=funct
 /// script replaced its text (`T`, a mutation observer: a script that writes "NaN g" over the same
 /// markup still counts) — only text the scripts put there counts. "null" / "Infinity" /
 /// "Loading" / "--" stay limited to output-like elements.
-const SMOKE_JS: &str = r#"var ST=__STATIC__,T=[];try{new MutationObserver(function(rs){rs.forEach(function(r){var e=r.type==='characterData'?r.target.parentElement:r.target;if(e&&(r.type==='characterData'||r.removedNodes.length)&&T.length<2000&&T.indexOf(e)<0)T.push(e)})}).observe(document,{childList:true,subtree:true,characterData:true})}catch(x){}
+///
+/// Also (section pass, the fortune cookie's crack that never showed): elements that took a click
+/// listener are clicked too (an SVG cookie is no button), and every style value the page sets is
+/// checked with CSS.supports; one the browser rejects (clip-path in SVG path syntax, a unitless
+/// width) is a fix line (`CSS_IGNORED`). Chromium keeps CSS properties behind an interceptor, not
+/// prototype setters, so each element's `.style` is a proxy in the smoke (never in the probes).
+const SMOKE_JS: &str = r#"var CL=[];try{var AEL=EventTarget.prototype.addEventListener;EventTarget.prototype.addEventListener=function(t,f,o){try{if(this instanceof Element&&/^(click|pointerdown|pointerup|mousedown|mouseup|touchstart|touchend)$/.test(String(t))&&CL.length<20&&CL.indexOf(this)<0)CL.push(this)}catch(x){}return AEL.apply(this,arguments)}}catch(x){}
+var SC=0,SN={};try{var kb=function(p){return p.replace(/[A-Z]/g,function(c){return '-'+c.toLowerCase()})};
+var bad=function(p,v){if(SC>=3||v==null||typeof v==='object'||p.indexOf('--')===0||!window.CSS||!CSS.supports)return;var s=String(v).trim();if(!s)return;try{if(!CSS.supports(p,'initial')||CSS.supports(p,s))return}catch(x){return}var m='the browser ignores a style value: '+p+': '+s.slice(0,60)+' (not valid CSS, so it never shows)';if(SN[m])return;SN[m]=1;SC++;rec(m)};
+var WM=new WeakMap();[HTMLElement.prototype,SVGElement.prototype].forEach(function(P){var d=Object.getOwnPropertyDescriptor(P,'style');if(!d||!d.get)return;Object.defineProperty(P,'style',{configurable:true,enumerable:d.enumerable,get:function(){var st=d.get.call(this);var px=WM.get(st);if(!px){px=new Proxy(st,{get:function(t,k){var v=t[k];if(typeof v==='function')return k==='setProperty'?function(q,val){bad(String(q),val);return t.setProperty.apply(t,arguments)}:v.bind(t);return v},set:function(t,k,v){if(typeof k==='string'&&k!=='cssText')bad(kb(k),v);t[k]=v;return true}});WM.set(st,px)}return px},set:d.set?function(v){return d.set.call(this,v)}:undefined})})}catch(x){}
+var ST=__STATIC__,T=[];try{new MutationObserver(function(rs){rs.forEach(function(r){var e=r.type==='characterData'?r.target.parentElement:r.target;if(e&&(r.type==='characterData'||r.removedNodes.length)&&T.length<2000&&T.indexOf(e)<0)T.push(e)})}).observe(document,{childList:true,subtree:true,characterData:true})}catch(x){}
 var H=[];function site(){try{var f=String(new Error().stack||'').split('\n')[3]||'';var m=f.match(/:(\d+):\d+\)?\s*$/);if(m&&H.length<40)H.push(+m[1])}catch(x){}}
 function block(n){try{Object.defineProperty(window,n,{configurable:true,get:function(){site();throw new DOMException(n+' is blocked here (guard storage with try/catch)','SecurityError')}})}catch(x){}}
 block('localStorage');block('sessionStorage');
@@ -3127,7 +3137,8 @@ function go(){var L=E.length;
 try{document.querySelectorAll('input').forEach(function(i){var t=(i.type||'text').toLowerCase();if(t==='number'||t==='range'){i.value='50'}else if(t==='checkbox'||t==='radio'){i.checked=!i.checked}else if(t==='text'||t==='search'||t===''){i.value='Test item'}else{return}
 i.dispatchEvent(new Event('input',{bubbles:true}));i.dispatchEvent(new Event('change',{bubbles:true}))});
 document.querySelectorAll('select').forEach(function(s){if(s.options.length>1){s.selectedIndex=1;s.dispatchEvent(new Event('change',{bubbles:true}))}});
-Array.prototype.slice.call(document.querySelectorAll('button'),0,30).forEach(function(b){if(!b.isConnected||b.disabled)return;b.click()})}catch(x){rec('while using the page: '+x.message)}
+Array.prototype.slice.call(document.querySelectorAll('button'),0,30).forEach(function(b){if(!b.isConnected||b.disabled)return;b.click()});
+CL.forEach(function(el){if(!el.isConnected||/^(BUTTON|A|INPUT|SELECT|TEXTAREA|OPTION|LABEL|FORM|HTML|BODY)$/.test(el.tagName)||el.disabled)return;el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}))})}catch(x){rec('while using the page: '+x.message)}
 setTimeout(function(){document.documentElement.setAttribute('data-tf-smoke',JSON.stringify({errors:E,load:L,storage:H,stuck:PH}))},300)}
 if(!PH.length){go();return}
 setTimeout(function(){var again=[];try{again=stuck()}catch(x){}PH=PH.filter(function(a){return again.some(function(b){return b.sel===a.sel&&b.text===a.text})});go()},1500)},800)});"#;
@@ -3198,6 +3209,7 @@ function reads(el,op){if(el.tagName==='SELECT'){var o=el.options&&el.options[el.
 if(tick(el))return el.checked?['checked','true','on','yes']:['unchecked','false','off','no'];
 if(/^(INPUT|TEXTAREA|OUTPUT)$/.test(el.tagName))return [nm(el.value)];
 return [nm(op==='expect_value'?el.textContent:(el.innerText||el.textContent))]}
+function hit(el){if(typeof el.click==='function')el.click();else el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}))}
 function ev(el,n,b,key){var e;try{if(key!=null){e=new KeyboardEvent(n,{bubbles:b,cancelable:true,key:key})}else if(/^(focus|blur|focusin|focusout)$/.test(n)){e=new FocusEvent(n,{bubbles:b})}else{e=new Event(n,{bubbles:b})}}catch(x){e=new Event(n,{bubbles:b})}el.dispatchEvent(e)}
 function typeIn(el,v){var key=v?String(v).slice(-1):'Unidentified';ev(el,'focus',false);ev(el,'focusin',true);ev(el,'keydown',true,key);el.value=v;ev(el,'input',true);ev(el,'keyup',true,key);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
 function lead(s){var m=String(s).match(/^\D{0,12}?(-?\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):null}
@@ -3259,7 +3271,7 @@ var l=all(st.sel);var el=l?(l[st.nth||0]||null):null;if(!el){done({ok:false,k:'n
 if(i===fa()&&!S.b&&watch())snap(i);
 if(st.op==='set'){if(tick(el)){var on=/^(true|1|on|yes|checked)$/i.test(st.value);if(el.checked!==on){el.click();S.ac=1}}else{var v0=el.value;typeIn(el,st.value);if(el.value!==v0)S.ac=1}}
 else if(st.op==='select'){var o=-1,os=el.options||[];for(var k=0;k<os.length;k++){if(os[k].value===st.value||nm(os[k].textContent).toLowerCase()===nm(st.value).toLowerCase()){o=k;break}}if(o<0){done({ok:false,k:'nooption',at:i,got:nm(el.value)});return}if(el.selectedIndex!==o)S.ac=1;ev(el,'focus',false);el.selectedIndex=o;ev(el,'input',true);ev(el,'change',true);ev(el,'blur',false);ev(el,'focusout',true)}
-else if(st.op==='click'){var c0=tick(el)?el.checked:null;el.click();if(c0===null||el.checked!==c0)S.ac=1}
+else if(st.op==='click'){var c0=tick(el)?el.checked:null;hit(el);if(c0===null||el.checked!==c0)S.ac=1}
 setTimeout(function(){if(E.length>n0){done({ok:false,k:'threw',at:i,got:E[n0]});return}step()},WAIT)}
 addEventListener('load',function(){setTimeout(step,150)});"#;
 
@@ -3582,6 +3594,10 @@ pub enum Smoke {
 /// Load the page in headless Edge (network unreachable, own throwaway profile, storage blocked),
 /// note what still shows a placeholder after load, exercise its controls, and report what threw.
 /// Blocking.
+/// The smoke's line for a style value the browser rejected (an animation or effect that never
+/// shows, e.g. `clip-path: M0,70 L42,38`: SVG path syntax where CSS wants `path()` / `polygon()`).
+pub const CSS_IGNORED: &str = "the browser ignores a style value: ";
+
 pub fn runtime_smoke(page: &Path, timeout: Duration) -> Smoke {
     let Ok(html) = std::fs::read_to_string(page) else { return Smoke::Skipped("the staged page could not be read".into()) };
     match run_edge(&with_harness(&html), "data-tf-smoke", timeout, 5000) {
@@ -3589,7 +3605,19 @@ pub fn runtime_smoke(page: &Path, timeout: Duration) -> Smoke {
         EdgeOut::Failed(r, _) => Smoke::Failed(r),
         EdgeOut::Dom(dom) => match parse_dump(&dom) {
             Some((errs, load, lines)) => Smoke::Ran {
-                errors: errs.iter().enumerate().map(|(i, e)| if i < load { format!("the page throws on load: {e}") } else { format!("the page throws when its controls are used: {e}") }).collect(),
+                errors: errs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        if e.starts_with(CSS_IGNORED) {
+                            e.clone()
+                        } else if i < load {
+                            format!("the page throws on load: {e}")
+                        } else {
+                            format!("the page throws when its controls are used: {e}")
+                        }
+                    })
+                    .collect(),
                 storage_lines: lines,
                 stuck: parse_stuck(&dom),
             },

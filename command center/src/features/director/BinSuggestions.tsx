@@ -21,14 +21,14 @@ export function BinSuggestionsView({ matches, moments, assets, slots, onMatch, o
     return s ? `${s.id} ${s.label}` : id;
   };
   return (
-    <div className="mb-2 rounded-[12px] border border-amber/30 bg-amber/[0.06] p-2" role="group" aria-label="Director suggestions">
-      <p className="flex items-center gap-1 text-[11px] text-amber-soft">
+    <div className="mb-2 r-12 border border-amber/30 bg-amber/[0.06] p-2" role="group" aria-label="Director suggestions">
+      <p className="flex items-center gap-1 fs-11 text-amber-soft">
         <Sparkles size={11} /> Director suggestions: accept or reject each
       </p>
       <ul className="mt-1.5 space-y-1.5">
         {matches.map((m) => (
           <li key={m.id} className="flex items-start gap-1.5">
-            <div className="min-w-0 flex-1 text-[11px]">
+            <div className="min-w-0 flex-1 fs-11">
               <p className="truncate text-ink">
                 {name(m.assetId)} → {slot(m.slotId)}
               </p>
@@ -39,9 +39,9 @@ export function BinSuggestionsView({ matches, moments, assets, slots, onMatch, o
         ))}
         {moments.map((m) => (
           <li key={m.id} className="flex items-start gap-1.5">
-            <div className="min-w-0 flex-1 text-[11px]">
+            <div className="min-w-0 flex-1 fs-11">
               <p className="truncate text-ink">
-                Moment in {name(m.assetId)} · <span className="font-mono text-[10px]">{timecode(m.inSec)}–{timecode(m.outSec)}</span>
+                Moment in {name(m.assetId)} · <span className="font-mono fs-10">{timecode(m.inSec)}–{timecode(m.outSec)}</span>
               </p>
               <p className="text-ink-2">
                 {m.label} · {Math.round(m.score * 100)}%

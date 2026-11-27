@@ -28,7 +28,7 @@ export function MyAppsRail() {
   return (
     <div className="flex w-full flex-col items-center gap-2" aria-label="My Apps" role="group">
       <div className="mt-1 h-px w-9 bg-white/10" />
-      <span className="label-caps !text-[8px] text-ink-3" title="Play Place apps mounted as pages — right-click one to reorder, rename or unpin">
+      <span className="label-caps !fs-8 text-ink-3" title="Play Place apps mounted as pages — right-click one to reorder, rename or unpin">
         My Apps
       </span>
       {apps.map((a, i) => {
@@ -55,7 +55,7 @@ export function MyAppsRail() {
             aria-current={on ? "page" : undefined}
             aria-label={`${a.label} (My Apps ${i + 1} of ${apps.length})`}
             title={`${a.label} — right-click for options`}
-            className={`relative grid size-11 place-items-center rounded-[14px] transition-all duration-200 ${on ? "border border-teal/50 bg-teal/10 text-teal-soft glow-teal" : "text-ink-2 hover:bg-white/5 hover:text-ink"}`}
+            className={`relative grid size-11 place-items-center r-14 transition-all duration-200 ${on ? "border border-teal/50 bg-teal/10 text-teal-soft glow-teal" : "text-ink-2 hover:bg-white/5 hover:text-ink"}`}
           >
             <Icon size={18} />
           </button>
@@ -89,14 +89,14 @@ function AppMenu({ app, x, y, index, count, onClose, onEdit }: { app: MountedApp
         run();
         onClose();
       }}
-      className={`flex w-full items-center gap-2 rounded-[8px] px-2.5 py-1.5 text-left text-[12px] disabled:opacity-40 ${opts.danger ? "text-alert hover:bg-alert/10" : "text-ink-2 hover:bg-white/[0.06] hover:text-ink"}`}
+      className={`flex w-full items-center gap-2 r-8 px-2.5 py-1.5 text-left fs-12 disabled:opacity-40 ${opts.danger ? "text-alert hover:bg-alert/10" : "text-ink-2 hover:bg-white/[0.06] hover:text-ink"}`}
     >
       <Icon size={13} /> {label}
     </button>
   );
   return createPortal(
-    <div ref={ref} role="menu" aria-label={`${app.label} options`} className="glass fixed z-[70] w-52 rounded-[12px] p-1 shadow-xl" style={{ left: Math.min(x + 4, window.innerWidth - 216), top: Math.min(y, window.innerHeight - 260) }}>
-      <p className="truncate px-2.5 pb-1 pt-1.5 text-[11px] font-semibold text-ink">{app.label}</p>
+    <div ref={ref} role="menu" aria-label={`${app.label} options`} className="glass fixed z-[70] w-52 r-12 p-1 shadow-xl" style={{ left: Math.min(x + 4, window.innerWidth - 216), top: Math.min(y, window.innerHeight - 260) }}>
+      <p className="truncate px-2.5 pb-1 pt-1.5 fs-11 font-semibold text-ink">{app.label}</p>
       {item("Open", ExternalLink, () => useNav.getState().openApp(app.id))}
       {item("Edit in Play Place", PencilLine, () => editInPlayPlace(app))}
       {item("Rename & icon…", Settings2, onEdit)}
@@ -130,7 +130,7 @@ function EditDialog({ app, onClose }: { app: MountedApp; onClose: () => void }) 
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
       <form
-        className="glass w-80 rounded-[18px] p-4"
+        className="glass w-80 r-18 p-4"
         onSubmit={(e) => {
           e.preventDefault();
           useMyApps.getState().update(app.id, { label, icon });
@@ -169,10 +169,10 @@ export function MyAppsSheet({ onPick }: { onPick: () => void }) {
               openApp(a.id);
               onPick();
             }}
-            className={`flex min-h-16 flex-col items-center justify-center gap-1 rounded-[14px] ${section === "app" && appId === a.id ? "bg-teal/15 text-teal-soft" : "text-ink-2"}`}
+            className={`flex min-h-16 flex-col items-center justify-center gap-1 r-14 ${section === "app" && appId === a.id ? "bg-teal/15 text-teal-soft" : "text-ink-2"}`}
           >
             <Icon size={20} />
-            <span className="max-w-full truncate px-1 text-[11px]">{a.label}</span>
+            <span className="max-w-full truncate px-1 fs-11">{a.label}</span>
           </button>
         );
       })}

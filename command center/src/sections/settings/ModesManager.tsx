@@ -68,7 +68,7 @@ export function ModeRow({ mode, isActive, deletable, onUse, onDuplicate, onDelet
   };
 
   return (
-    <div className={`rounded-[14px] border p-3 ${isActive ? "border-teal/40 bg-teal/[0.04]" : "border-white/[0.06] bg-white/[0.02]"}`}>
+    <div className={`r-14 border p-3 ${isActive ? "border-teal/40 bg-teal/[0.04]" : "border-white/[0.06] bg-white/[0.02]"}`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="grid size-8 shrink-0 place-items-center rounded-full border border-white/10 text-ink">
           <ModeIcon icon={preset ? mode.icon : icon} size={15} />
@@ -76,7 +76,7 @@ export function ModeRow({ mode, isActive, deletable, onUse, onDuplicate, onDelet
         {preset ? (
           <span className="text-sm font-semibold text-ink">{mode.name}</span>
         ) : (
-          <Input value={name} maxLength={32} onChange={(e) => setName(e.target.value)} onBlur={() => save({ name: name.trim() })} aria-label="Mode name" className="!h-8 !w-48 !py-1 !text-[13px]" />
+          <Input value={name} maxLength={32} onChange={(e) => setName(e.target.value)} onBlur={() => save({ name: name.trim() })} aria-label="Mode name" className="!h-8 !w-48 !py-1 !fs-13" />
         )}
         {preset && <span className="label-caps rounded-full border border-white/15 px-1.5 py-0.5 text-ink-3">Preset</span>}
         {novelty && <span className="label-caps rounded-full border border-amber/40 bg-amber/10 px-1.5 py-0.5 text-amber-light">Novelty</span>}
@@ -116,7 +116,7 @@ export function ModeRow({ mode, isActive, deletable, onUse, onDuplicate, onDelet
         </p>
       ) : (
         <fieldset disabled={preset} className="mt-2 min-w-0 space-y-0.5 disabled:opacity-80">
-          {preset && <p className="mb-1 text-[11px] text-ink-3">Preset: duplicate to customise.</p>}
+          {preset && <p className="mb-1 fs-11 text-ink-3">Preset: duplicate to customise.</p>}
           {!preset && (
             <Field2 label="Icon">
               <div role="radiogroup" aria-label="Mode icon" className="flex items-center gap-1">
@@ -142,7 +142,7 @@ export function ModeRow({ mode, isActive, deletable, onUse, onDuplicate, onDelet
                 onChange={(e) => setIcon(e.target.value)}
                 onBlur={(e) => e.target.value.trim() && save({ icon: e.target.value.trim() })}
                 aria-label="Mode icon (emoji)"
-                className="!h-7 !w-24 !py-0.5 !text-[13px]"
+                className="!h-7 !w-24 !py-0.5 !fs-13"
               />
             </Field2>
           )}
@@ -172,9 +172,9 @@ export function ModeRow({ mode, isActive, deletable, onUse, onDuplicate, onDelet
               onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), e.currentTarget.blur())}
               onBlur={() => save({ prompt_modifier: rules.trim() })}
               placeholder={preset ? "" : "e.g. Keep answers about the build; push back when a plan looks too big."}
-              className="field mt-1 min-h-14 resize-y !py-2 !text-[13px]"
+              className="field mt-1 min-h-14 resize-y !py-2 !fs-13"
             />
-            <span className="mt-0.5 block text-right font-mono text-[10px] text-ink-3">{modifierCount(rules)}</span>
+            <span className="mt-0.5 block text-right font-mono fs-10 text-ink-3">{modifierCount(rules)}</span>
           </label>
         </fieldset>
       )}

@@ -36,7 +36,7 @@ export function ActingFields({ gross, value, onChange, currency }: { gross: numb
   };
   const { commission, net } = commissionCalc(gross, value.pct, value.off);
   return (
-    <div className="col-span-full space-y-2 rounded-[12px] border border-white/[0.06] bg-white/[0.02] p-2.5">
+    <div className="col-span-full space-y-2 r-12 border border-white/[0.06] bg-white/[0.02] p-2.5">
       <div className="flex flex-wrap items-center gap-1.5">
         <Chip active={!value.union} onClick={() => set({ union: false })}>
           Non-union
@@ -50,7 +50,7 @@ export function ActingFields({ gross, value, onChange, currency }: { gross: numb
       </div>
       {value.agentId && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[12px] text-ink-3">Commission</span>
+          <span className="fs-12 text-ink-3">Commission</span>
           {COMMISSION_PICKS.map((p) => (
             <Chip key={p} active={!value.off && !custom && value.pct === p} onClick={() => {
                 setCustom(false);
@@ -62,17 +62,17 @@ export function ActingFields({ gross, value, onChange, currency }: { gross: numb
           <Chip active={!value.off && custom} onClick={() => setCustom(true)}>
             Custom
           </Chip>
-          {custom && !value.off && <Input inputMode="decimal" value={String(value.pct)} onChange={(e) => set({ pct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} aria-label="Custom commission %" className="!h-8 !w-20 !py-0 font-mono text-[12px]" />}
-          <label className="ml-2 flex items-center gap-1.5 text-[12px] text-ink-2">
+          {custom && !value.off && <Input inputMode="decimal" value={String(value.pct)} onChange={(e) => set({ pct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} aria-label="Custom commission %" className="!h-8 !w-20 !py-0 font-mono fs-12" />}
+          <label className="ml-2 flex items-center gap-1.5 fs-12 text-ink-2">
             <input type="checkbox" checked={value.off} onChange={(e) => set({ off: e.target.checked })} className="accent-amber" /> No commission on this one
           </label>
-          <label className="flex items-center gap-1.5 text-[12px] text-ink-2">
+          <label className="flex items-center gap-1.5 fs-12 text-ink-2">
             <input type="checkbox" checked={value.deducted} onChange={(e) => set({ deducted: e.target.checked })} className="accent-amber" /> Agent already took it
           </label>
         </div>
       )}
       {value.agentId && (
-        <p className="font-mono text-[12px] tabular">
+        <p className="font-mono fs-12 tabular">
           <span className="text-amber-light">Commission {value.deducted ? "kept by agent" : "owed"}: {money(commission, currency)}</span>
           <span className="text-ink-3"> · </span>
           <span className="text-teal-soft">You keep {money(net, currency)}</span>

@@ -15,6 +15,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { MIC_LOCKED_MSG, hydrateMic, micEnabled } from "./mic-gate";
 import { MicLockBadge, flashMicLock, useMicIndicator } from "./MicLockBadge";
 import { isMicOff } from "./mic-indicator";
+import { safety } from "@/lib/safety";
 
 /**
  * Persistent floating voice HUD (Gemini/Claude-style bubble), rendered once at
@@ -41,7 +42,7 @@ export function VoiceHUD() {
         role="region"
         aria-label="Voice assistant"
         className={[
-          "glass fixed left-1/2 z-50 -translate-x-1/2 rounded-[22px]",
+          "glass fixed left-1/2 z-50 -translate-x-1/2 r-22",
           "bottom-[calc(env(safe-area-inset-bottom)+5rem)] md:bottom-24",
           "w-[min(760px,calc(100vw-2rem))]",
           "origin-bottom animate-[hud-in_260ms_cubic-bezier(0.23,1,0.32,1)]",
@@ -86,7 +87,7 @@ export function VoiceHUD() {
             <div className="px-4 pb-3 pt-1">
               <CommandInput thread={tonyThread} autoFocus />
             </div>
-            <p className="flex items-center gap-2 px-4 pb-3 font-mono text-[10px] text-ink-3">
+            <p className="flex items-center gap-2 px-4 pb-3 font-mono fs-10 text-ink-3">
               {!voiceCaps.stt && <MicOff size={11} />}
               STT: {voiceCaps.sttName} · TTS: {voiceCaps.ttsName}
             </p>
@@ -132,6 +133,7 @@ function FloatingOrb() {
       )}
       <div className="pointer-events-auto flex items-center">
         <button
+          {...safety("tony-stop")}
           onClick={launchToggle}
           aria-label={state === "listening" ? "Finish speaking" : state === "speaking" ? "Stop speaking" : `Talk to ${name} (Ctrl+Shift+Space)`}
           title={`Talk to ${name} · Ctrl+Shift+Space`}
@@ -167,7 +169,7 @@ function HoldBar() {
   const held = useVoice((s) => s.held);
   if (!held) return null;
   return (
-    <div className="mx-4 mb-2 flex items-start gap-3 rounded-[14px] border border-amber/25 bg-amber/[0.06] px-3 py-2">
+    <div className="mx-4 mb-2 flex items-start gap-3 r-14 border border-amber/25 bg-amber/[0.06] px-3 py-2">
       <div className="min-w-0 flex-1" aria-live="polite">
         <p className="label-caps text-amber-soft">Holding — say “keep going” or “go ahead”</p>
         {held.length ? (

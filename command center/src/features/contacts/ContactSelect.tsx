@@ -13,7 +13,7 @@ export function ContactSelect({
   value,
   onChange,
   label = "Phone-book contact",
-  className = "!h-9 !py-1 text-[13px]",
+  className = "!h-9 !py-1 fs-13",
   none = "— no contact —",
 }: {
   value: string | null | undefined;
@@ -49,10 +49,10 @@ export function ContactChip({ id, className = "" }: { id: string | null | undefi
   const c = useContact(id);
   const { loaded } = usePhoneBookLoaded();
   if (!id) return null;
-  if (!c) return loaded ? <span className={`text-[11px] text-ink-3 ${className}`}>(contact removed)</span> : null;
+  if (!c) return loaded ? <span className={`fs-11 text-ink-3 ${className}`}>(contact removed)</span> : null;
   const phone = c.phones[0]?.number;
   return (
-    <span className={`inline-flex min-w-0 items-center gap-1 text-[11px] text-teal ${className}`} title={`Phone book: ${contactLabel(c)}${c.role ? ` — ${c.role}` : ""}`}>
+    <span className={`inline-flex min-w-0 items-center gap-1 fs-11 text-teal ${className}`} title={`Phone book: ${contactLabel(c)}${c.role ? ` — ${c.role}` : ""}`}>
       <BookUser size={11} className="shrink-0" />
       <span className="truncate">{contactLabel(c)}</span>
       {phone && (

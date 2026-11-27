@@ -1,11 +1,21 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { xcmd } from "@/lib/native-ext";
+import { resolvedFor, useAppearance } from "@/features/appearance/appearance-store";
+import { styleKitVars } from "@/features/appearance/theme";
+import { useNav } from "@/stores/nav";
 
 /** The dynamically loaded sandbox body: the widget's loopback URL in an opaque-origin iframe. */
 /** `bare`: no white backing or border, so a transparent widget shows the wallpaper through it. */
 export default function SandboxFrame({ buildId, title, version, bare = false }: { buildId: string; title: string; version: number; bare?: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const frame = useRef<HTMLIFrameElement>(null);
+  // Style kit: the widget follows Settings → Appearance (its own page's look) live. Values only,
+  // nothing private; the widget's opaque origin means "*" is the only target that reaches it.
+  const section = useNav((s) => s.section);
+  const kit = useAppearance((s) => JSON.stringify({ ...styleKitVars(resolvedFor(s, section)), ...(bare ? { "--cc-page": "transparent" } : {}) }));
+  const post = useCallback(() => frame.current?.contentWindow?.postMessage({ type: "cc-theme", vars: JSON.parse(kit) as Record<string, string> }, "*"), [kit]);
+  useEffect(post, [post]);
   useEffect(() => {
     let live = true;
     xcmd("build_widget_url", { buildId })
@@ -17,6 +27,6 @@ export default function SandboxFrame({ buildId, title, version, bare = false }: 
   }, [buildId]);
   // Surface load failures to the Error Boundary instead of rendering a broken frame.
   if (error) throw error;
-  if (!url) return <div className="grid h-full place-items-center font-mono text-[11px] text-ink-3">starting the sandbox…</div>;
-  return <iframe key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className={bare ? "size-full border-0 bg-transparent" : "size-full rounded-[12px] border border-white/10 bg-white"} />;
+  if (!url) return <div className="grid h-full place-items-center font-mono fs-11 text-ink-3">starting the sandbox…</div>;
+  return <iframe ref={frame} onLoad={post} key={version} src={url} title={`Widget: ${title}`} sandbox="allow-scripts allow-forms" className={bare ? "size-full border-0 bg-transparent" : "size-full r-12 border border-white/10 bg-white"} />;
 }

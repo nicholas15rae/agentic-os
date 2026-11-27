@@ -1,5 +1,6 @@
 import { Loader2, OctagonX } from "lucide-react";
 import { KILL_PRESSES, killButtonProps, killStageLabel } from "@/features/trading/kill-switch-core";
+import { safety } from "@/lib/safety";
 
 export interface KillButtonProps {
   /** Clicks so far in the current 3-click sequence (0 = disarmed). */
@@ -19,8 +20,9 @@ export function KillButton({ pressed, busy, onPress }: KillButtonProps) {
   const label = !armed ? "KILL SWITCH · ARM" : killStageLabel(pressed);
   return (
     <button
+      {...safety("trading-estop")}
       {...killButtonProps({ pressed, busy, onPress })}
-      className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 text-[13px] font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
+      className={`flex h-10 items-center gap-2 rounded-full border-2 border-alert px-4 fs-13 font-bold tracking-wide text-white shadow-[0_0_24px_rgba(239,68,68,0.45)] transition-transform hover:scale-[1.03] active:scale-95 ${remaining === 1 && armed ? "animate-pulse bg-alert" : armed ? "bg-alert" : "bg-alert/85"}`}
     >
       {busy ? <Loader2 size={16} className="animate-spin" /> : <OctagonX size={16} />}
       {label}

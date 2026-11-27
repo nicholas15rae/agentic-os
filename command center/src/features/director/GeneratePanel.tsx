@@ -34,19 +34,19 @@ export function GeneratePanelView(p: GeneratePanelProps) {
   const disabled = !!p.blocker || p.busy;
   const selNote = sel && (!sel.implemented ? sel.unavailableReason : !sel.ready ? sel.note : null);
   return (
-    <section id={GENERATE_PANEL_ID} className="glass rounded-[20px] p-5" aria-label="Generate">
+    <section id={GENERATE_PANEL_ID} className="glass r-20 p-5" aria-label="Generate">
       <button type="button" onClick={() => p.onToggle(!p.open)} className="flex w-full items-center gap-2 text-left" aria-expanded={p.open} aria-controls={`${GENERATE_PANEL_ID}-body`}>
         <Sparkles size={13} className="text-violet" />
         <span className="label-caps text-amber-soft">Generate a still</span>
         <span className={`size-2 rounded-full ${dot}`} title={sel ? (usable(sel) ? `${sel.label} is ready` : (selNote ?? "Not ready")) : "ComfyUI status unavailable"} />
-        {sel && <span className="min-w-0 truncate text-[11px] text-ink-3">{sel.label}</span>}
+        {sel && <span className="min-w-0 truncate fs-11 text-ink-3">{sel.label}</span>}
         <span className="ml-auto text-ink-3">{p.open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</span>
       </button>
 
       {p.open && (
         <div id={`${GENERATE_PANEL_ID}-body`} className="@container mt-3 space-y-2.5">
           {p.tweakingName && (
-            <p className="flex items-center gap-2 text-[11px] text-ink-2">
+            <p className="flex items-center gap-2 fs-11 text-ink-2">
               Tweaking {p.tweakingName}
               <button type="button" onClick={() => onDraft(defaultDraft())} className="text-teal-soft hover:underline">
                 Clear
@@ -56,7 +56,7 @@ export function GeneratePanelView(p: GeneratePanelProps) {
 
           <label className="block space-y-1">
             <span className="label-caps text-ink-3">Template</span>
-            <Select value={d.template} onChange={(e) => onDraft({ template: e.target.value as ComfyTemplateName })} className="!h-8 !py-0 text-[12px]" aria-label="Template">
+            <Select value={d.template} onChange={(e) => onDraft({ template: e.target.value as ComfyTemplateName })} className="!h-8 !py-0 fs-12" aria-label="Template">
               {p.templates.map((t) => (
                 <option key={t.name} value={t.name} disabled={!t.implemented}>
                   {t.label}
@@ -64,25 +64,25 @@ export function GeneratePanelView(p: GeneratePanelProps) {
                 </option>
               ))}
             </Select>
-            {selNote && <span className="block text-[11px] text-amber-soft">{selNote}</span>}
+            {selNote && <span className="block fs-11 text-amber-soft">{selNote}</span>}
           </label>
 
           {!isUpscale && (
             <label className="block space-y-1">
               <span className="flex items-center justify-between">
                 <span className="label-caps text-ink-3">Prompt</span>
-                <span className={`font-mono text-[10px] ${d.prompt.length > COMFY_PROMPT_MAX ? "text-alert" : "text-ink-3"}`}>
+                <span className={`font-mono fs-10 ${d.prompt.length > COMFY_PROMPT_MAX ? "text-alert" : "text-ink-3"}`}>
                   {d.prompt.length} / {COMFY_PROMPT_MAX}
                 </span>
               </span>
-              <textarea value={d.prompt} onChange={(e) => onDraft({ prompt: e.target.value })} rows={3} className="field min-h-[72px] resize-y text-[12px]" placeholder="A neon dance studio at night, wide shot" aria-label="Prompt" />
+              <textarea value={d.prompt} onChange={(e) => onDraft({ prompt: e.target.value })} rows={3} className="field min-h-[72px] resize-y fs-12" placeholder="A neon dance studio at night, wide shot" aria-label="Prompt" />
             </label>
           )}
 
           <label className="block space-y-1">
             <span className="label-caps text-ink-3">Negative</span>
-            <input value={d.negative} onChange={(e) => onDraft({ negative: e.target.value })} className="field !h-8 !py-0 text-[12px]" placeholder="blurry, text" aria-label="Negative prompt" />
-            <span className="block text-[10px] text-ink-3">Has little effect on SDXL Turbo</span>
+            <input value={d.negative} onChange={(e) => onDraft({ negative: e.target.value })} className="field !h-8 !py-0 fs-12" placeholder="blurry, text" aria-label="Negative prompt" />
+            <span className="block fs-10 text-ink-3">Has little effect on SDXL Turbo</span>
           </label>
 
           <div className="grid gap-2 @md:grid-cols-2">
@@ -97,10 +97,10 @@ export function GeneratePanelView(p: GeneratePanelProps) {
                   disabled={d.seed == null}
                   onChange={(e) => onDraft({ seed: e.target.value === "" ? null : Number(e.target.value) })}
                   placeholder="random"
-                  className="field !h-8 min-w-0 flex-1 !py-0 font-mono text-[12px] disabled:opacity-50"
+                  className="field !h-8 min-w-0 flex-1 !py-0 font-mono fs-12 disabled:opacity-50"
                   aria-label="Seed"
                 />
-                <label className="flex shrink-0 items-center gap-1 text-[11px] text-ink-2">
+                <label className="flex shrink-0 items-center gap-1 fs-11 text-ink-2">
                   <input type="checkbox" checked={d.seed == null} onChange={(e) => onDraft({ seed: e.target.checked ? null : randomSeed() })} className="accent-teal" aria-label="Random seed" />
                   Random
                 </label>
@@ -112,7 +112,7 @@ export function GeneratePanelView(p: GeneratePanelProps) {
             {!needsInput && (
               <label className="block space-y-1">
                 <span className="label-caps text-ink-3">Aspect</span>
-                <Select value={d.aspect ?? ""} onChange={(e) => onDraft({ aspect: (e.target.value || null) as ComfyAspect | null })} className="!h-8 !py-0 text-[12px]" aria-label="Aspect">
+                <Select value={d.aspect ?? ""} onChange={(e) => onDraft({ aspect: (e.target.value || null) as ComfyAspect | null })} className="!h-8 !py-0 fs-12" aria-label="Aspect">
                   <option value="">Project{p.projectAspect ? ` (${p.projectAspect})` : ""}</option>
                   {COMFY_ASPECTS.map((a) => (
                     <option key={a} value={a}>
@@ -124,17 +124,17 @@ export function GeneratePanelView(p: GeneratePanelProps) {
             )}
           </div>
 
-          <label className="flex items-center gap-2 text-[11px] text-ink-2">
+          <label className="flex items-center gap-2 fs-11 text-ink-2">
             <span className="w-14 shrink-0">Steps</span>
             <input type="range" min={1} max={COMFY_TURBO_MAX_STEPS} step={1} value={d.steps} onChange={(e) => onDraft({ steps: Number(e.target.value) })} className="min-w-0 flex-1 accent-amber" aria-label="Steps" />
-            <span className="w-6 shrink-0 text-right font-mono text-[10px]">{d.steps}</span>
+            <span className="w-6 shrink-0 text-right font-mono fs-10">{d.steps}</span>
           </label>
 
           {isStyle && (
-            <label className="flex items-center gap-2 text-[11px] text-ink-2">
+            <label className="flex items-center gap-2 fs-11 text-ink-2">
               <span className="w-14 shrink-0">Denoise</span>
               <input type="range" min={COMFY_STYLE_DENOISE[0]} max={COMFY_STYLE_DENOISE[1]} step={0.05} value={d.denoise} onChange={(e) => onDraft({ denoise: Number(e.target.value) })} className="min-w-0 flex-1 accent-amber" aria-label="Denoise" />
-              <span className="w-8 shrink-0 text-right font-mono text-[10px]">{d.denoise.toFixed(2)}</span>
+              <span className="w-8 shrink-0 text-right font-mono fs-10">{d.denoise.toFixed(2)}</span>
             </label>
           )}
 
@@ -153,7 +153,7 @@ export function GeneratePanelView(p: GeneratePanelProps) {
                         aria-pressed={on}
                         aria-label={`Input ${a.name}`}
                         title={a.name}
-                        className={`rounded-[10px] border p-0.5 ${on ? "border-teal/70" : "border-white/10 hover:border-white/25"}`}
+                        className={`r-10 border p-0.5 ${on ? "border-teal/70" : "border-white/10 hover:border-white/25"}`}
                       >
                         <Thumb asset={a} className="h-10 w-14" />
                       </button>
@@ -161,7 +161,7 @@ export function GeneratePanelView(p: GeneratePanelProps) {
                   })}
                 </div>
               ) : (
-                <p className="text-[11px] text-ink-3">Add a still to the bin first.</p>
+                <p className="fs-11 text-ink-3">Add a still to the bin first.</p>
               )}
             </div>
           )}
@@ -171,12 +171,12 @@ export function GeneratePanelView(p: GeneratePanelProps) {
               {p.busy ? <Loader2 size={12} className="animate-spin" /> : "Enqueue"}
             </button>
             {p.blocker && (
-              <span className="text-[11px] text-amber-soft" role="note">
+              <span className="fs-11 text-amber-soft" role="note">
                 {p.blocker}
               </span>
             )}
           </div>
-          {p.policy && <p className="text-[10px] text-ink-3">{POLICY_NOTE[p.policy]}</p>}
+          {p.policy && <p className="fs-10 text-ink-3">{POLICY_NOTE[p.policy]}</p>}
         </div>
       )}
     </section>

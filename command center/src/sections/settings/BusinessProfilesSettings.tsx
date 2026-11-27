@@ -32,7 +32,7 @@ export function BusinessProfilesSettings() {
   const p = doc.profiles[id];
   return (
     <div className="space-y-4">
-      <p className="flex items-start gap-2 rounded-[12px] border border-teal/20 bg-teal/[0.05] px-3 py-2 text-[12px] text-ink-2">
+      <p className="flex items-start gap-2 r-12 border border-teal/20 bg-teal/[0.05] px-3 py-2 fs-12 text-ink-2">
         <Lock size={13} className="mt-0.5 shrink-0 text-teal" />
         These details stay on this machine: they're kept in your local gateway (shared with your phone over your own network) and printed on your invoices. They're never sent anywhere else.
       </p>
@@ -44,7 +44,7 @@ export function BusinessProfilesSettings() {
               ? `Couldn't reach the gateway: ${error}.`
               : `Couldn't load your profiles from the gateway: ${error}. Anything you change here is kept on this device and merged in when it's back.`}
         </p>
-      )}      {importedTo && <p className="text-[12px] text-ink-3">Your earlier business details were copied into {PROFILE_LABEL[importedTo as KnownProfileId] ?? importedTo}. Check the HST number below.</p>}
+      )}      {importedTo && <p className="fs-12 text-ink-3">Your earlier business details were copied into {PROFILE_LABEL[importedTo as KnownProfileId] ?? importedTo}. Check the HST number below.</p>}
       <SubTabs tabs={PROFILE_IDS.map((x) => ({ id: x, label: PROFILE_LABEL[x] }))} value={id} onChange={setId} />
       {!loaded && !error ? <p className="text-sm text-ink-3">Loading…</p> : p && <ProfileEditor key={id} id={id} p={p} saving={saving} />}
     </div>
@@ -57,7 +57,7 @@ function ProfileEditor({ id, p, saving }: { id: KnownProfileId; p: BusinessProfi
   const personal = id === "personal";
   return (
     <>
-      <Card title={`${PROFILE_LABEL[id]} details`} hint={personal ? "Your own name and address, for anything personal you invoice or file." : "Printed on this business's invoices and used for its HST/GST summary."} action={saving ? <span className="text-[11px] text-ink-3">Saving…</span> : undefined}>
+      <Card title={`${PROFILE_LABEL[id]} details`} hint={personal ? "Your own name and address, for anything personal you invoice or file." : "Printed on this business's invoices and used for its HST/GST summary."} action={saving ? <span className="fs-11 text-ink-3">Saving…</span> : undefined}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label={personal ? "Your name" : "Legal business name"}>
             <Input value={p.name} onChange={(e) => up({ name: e.target.value })} />
@@ -125,14 +125,14 @@ function HstField({ p, up }: { p: BusinessProfile; up: (x: Partial<BusinessProfi
       </Field>
       {check.ok ? (
         p.hstConfirmed ? (
-          <p className="flex items-center gap-2 text-[12px] text-teal-soft">
+          <p className="flex items-center gap-2 fs-12 text-teal-soft">
             <CheckCircle2 size={13} /> Confirmed. {check.formatted} prints on invoices.
             <button onClick={() => up({ hstConfirmed: false })} className="ml-2 text-ink-3 hover:text-ink">
               Undo
             </button>
           </p>
         ) : (
-          <div className="flex flex-wrap items-center gap-2 text-[12px] text-amber-light">
+          <div className="flex flex-wrap items-center gap-2 fs-12 text-amber-light">
             <AlertTriangle size={13} /> Not confirmed yet, so invoices leave it off.
             <button onClick={() => up({ hstNumber: check.formatted, hstConfirmed: true })} className="h-7 rounded-full bg-amber px-3 font-semibold text-canvas">
               This is my real {label} number
@@ -141,7 +141,7 @@ function HstField({ p, up }: { p: BusinessProfile; up: (x: Partial<BusinessProfi
         )
       ) : (
         !check.empty && (
-          <p className="flex items-center gap-2 text-[12px] text-alert">
+          <p className="flex items-center gap-2 fs-12 text-alert">
             <AlertTriangle size={13} /> {check.reason}. Invoices leave it off until it's fixed and confirmed.
           </p>
         )
@@ -171,18 +171,18 @@ function LogoField({ p, up }: { p: BusinessProfile; up: (x: Partial<BusinessProf
   };
   return (
     <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-white/5 pt-3">
-      <span className="text-[12px] text-ink-3">Logo</span>
-      {p.logoFileId ? <img src={cc.fileUrl(p.logoFileId)} alt="Logo" className="h-10 max-w-[160px] rounded bg-white/90 object-contain p-1" /> : <span className="text-[12px] text-ink-3">none</span>}
+      <span className="fs-12 text-ink-3">Logo</span>
+      {p.logoFileId ? <img src={cc.fileUrl(p.logoFileId)} alt="Logo" className="h-10 max-w-[160px] rounded bg-white/90 object-contain p-1" /> : <span className="fs-12 text-ink-3">none</span>}
       <button onClick={() => input.current?.click()} disabled={busy} className="pill-glass !h-8 text-xs disabled:opacity-40">
         <ImagePlus size={13} /> {busy ? "Uploading…" : p.logoFileId ? "Replace" : "Upload"}
       </button>
       {p.logoFileId && (
-        <button onClick={() => up({ logoFileId: "" })} className="text-[12px] text-ink-3 hover:text-alert">
+        <button onClick={() => up({ logoFileId: "" })} className="fs-12 text-ink-3 hover:text-alert">
           Remove
         </button>
       )}
       <input ref={input} type="file" accept="image/*" className="hidden" onChange={(e) => void pick(e.target.files?.[0])} />
-      {err && <span className="text-[12px] text-alert">{err}</span>}
+      {err && <span className="fs-12 text-alert">{err}</span>}
     </div>
   );
 }
@@ -201,7 +201,7 @@ function RateInput({ value, set, inherit, label }: { value: number | null; set: 
           const v = e.target.value;
           set(v === "inherit" ? null : v === "custom" ? (value ?? 10) : Number(v));
         }}
-        className="!h-9 !w-auto !py-1 text-[13px]"
+        className="!h-9 !w-auto !py-1 fs-13"
       >
         {inherit && <option value="inherit">Principal's</option>}
         {!inherit && value === null && <option value="inherit">Not set</option>}
@@ -210,7 +210,7 @@ function RateInput({ value, set, inherit, label }: { value: number | null; set: 
         <option value="0">0%</option>
         <option value="custom">Custom</option>
       </Select>
-      {mode === "custom" && <Input type="number" min={0} max={100} step="0.5" value={value ?? 0} onChange={(e) => set(Math.min(100, Math.max(0, Number(e.target.value) || 0)))} className="!h-9 !w-20 !py-1 font-mono text-[13px]" aria-label={`${label} custom %`} />}
+      {mode === "custom" && <Input type="number" min={0} max={100} step="0.5" value={value ?? 0} onChange={(e) => set(Math.min(100, Math.max(0, Number(e.target.value) || 0)))} className="!h-9 !w-20 !py-1 font-mono fs-13" aria-label={`${label} custom %`} />}
     </div>
   );
 }
@@ -233,9 +233,9 @@ function AgencyContact({ agencyId, name }: { agencyId: string; name: string }) {
     }
   };
   return (
-    <span className="flex items-center gap-1 text-[11px] text-ink-3">
+    <span className="flex items-center gap-1 fs-11 text-ink-3">
       Contact
-      <ContactSelect value={linked[0]?.id} label={`${name} contact`} className="!h-9 !w-44 !py-1 text-[13px]" none="— none —" onChange={(c) => void relink(c?.id ?? null)} />
+      <ContactSelect value={linked[0]?.id} label={`${name} contact`} className="!h-9 !w-44 !py-1 fs-13" none="— none —" onChange={(c) => void relink(c?.id ?? null)} />
       {linked.length > 1 && <span title={linked.slice(1).map((c) => c.name).join(", ")}>+{linked.length - 1}</span>}
     </span>
   );
@@ -261,12 +261,12 @@ function AgenciesCard({ agencies, set }: { agencies: Agency[]; set: (a: Agency[]
     <Card title="Agencies" hint="Your principal agent and anyone booking under them. The default commission Finance takes off each booking, union and non-union. A sub-agent left on “Principal's” uses its principal's rate.">
       <ul className="space-y-2">
         {ordered.map((a) => (
-          <li key={a.id} className={`flex flex-wrap items-center gap-2 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 ${a.parentId ? "ml-6" : ""}`}>
-            <Input value={a.name} onChange={(e) => edit(a.id, { name: e.target.value })} className="!h-9 min-w-[140px] flex-1 !py-1 text-[13px]" aria-label="Agency name" />
-            <span className="text-[11px] text-ink-3">{a.parentId ? "sub-agent" : "principal"}</span>
-            <span className="text-[11px] text-ink-3">Union</span>
+          <li key={a.id} className={`flex flex-wrap items-center gap-2 r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2 ${a.parentId ? "ml-6" : ""}`}>
+            <Input value={a.name} onChange={(e) => edit(a.id, { name: e.target.value })} className="!h-9 min-w-[140px] flex-1 !py-1 fs-13" aria-label="Agency name" />
+            <span className="fs-11 text-ink-3">{a.parentId ? "sub-agent" : "principal"}</span>
+            <span className="fs-11 text-ink-3">Union</span>
             <RateInput value={a.commissionUnion} set={(v) => edit(a.id, { commissionUnion: v })} inherit={!!a.parentId} label={`${a.name} union commission`} />
-            <span className="text-[11px] text-ink-3">Non-union</span>
+            <span className="fs-11 text-ink-3">Non-union</span>
             <RateInput value={a.commissionNonUnion} set={(v) => edit(a.id, { commissionNonUnion: v })} inherit={!!a.parentId} label={`${a.name} non-union commission`} />
             <AgencyContact agencyId={a.id} name={a.name} />
             <button onClick={() => remove(a.id)} aria-label={`Remove ${a.name}`} className="grid size-8 place-items-center rounded-full text-ink-3 hover:text-alert">
@@ -277,8 +277,8 @@ function AgenciesCard({ agencies, set }: { agencies: Agency[]; set: (a: Agency[]
         {!agencies.length && <li className="py-3 text-center text-sm text-ink-3">No agencies yet.</li>}
       </ul>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Agency name" className="!h-9 min-w-[160px] flex-1 !py-1 text-[13px]" onKeyDown={(e) => e.key === "Enter" && add()} />
-        <Select value={parent} onChange={(e) => setParent(e.target.value)} className="!h-9 !w-auto !py-1 text-[13px]" aria-label="Books under">
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Agency name" className="!h-9 min-w-[160px] flex-1 !py-1 fs-13" onKeyDown={(e) => e.key === "Enter" && add()} />
+        <Select value={parent} onChange={(e) => setParent(e.target.value)} className="!h-9 !w-auto !py-1 fs-13" aria-label="Books under">
           <option value="">Principal agent</option>
           {principals.map((p) => (
             <option key={p.id} value={p.id}>
@@ -322,7 +322,7 @@ function ContractingCard({ c, set, currency }: { c: ContractingDefaults; set: (c
           />
         </Field>
       </div>
-      {c.defaultWork === "self" && <p className="mt-2 text-[11px] text-ink-3">The sub rate is only used on jobs you mark as subbed out.</p>}
+      {c.defaultWork === "self" && <p className="mt-2 fs-11 text-ink-3">The sub rate is only used on jobs you mark as subbed out.</p>}
     </Card>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FlaskConical, Loader2, Plus, RotateCcw, Sparkles } from "lucide-react";
+import { Loader2, Plus, Sparkles } from "lucide-react";
 import { WidgetGrid } from "@/core/widgets/WidgetGrid";
 import { availableWidgets } from "@/core/widgets/registry";
 import { activeItems, useLayout, type AddResult } from "@/core/widgets/layout-store";
@@ -9,6 +9,11 @@ import { GlassOpacitySlider } from "@/features/os/OsControls";
 import { startHub, useHub } from "@/features/buildhub/hub-store";
 import { promotedWidgets } from "@/features/buildhub/promoted";
 import { GENERATOR_SYSTEM, validateSpec, type CustomSpec } from "@/widgets/custom/spec";
+import { WidgetDrawer } from "@/core/widgets/WidgetDrawer";
+import { LayoutControls } from "@/core/widgets/LayoutSurface";
+import { BriefChecklistCard } from "@/features/buildhub/BriefChecklistCard";
+import { briefPoints, needsPipeline, type BriefChecklist } from "@/features/buildhub/brief-points";
+import { isTauri } from "@/lib/platform";
 
 export function CommandSection() {
   const editing = useLayout((s) => s.editing);
@@ -41,7 +46,7 @@ function GlassAllSwitch() {
       aria-checked={on}
       onClick={() => setGlassAll(!on)}
       title="Make every widget near-transparent so the wallpaper shows through"
-      className={`pill-glass ml-auto !h-9 shrink-0 !px-3 text-[13px] ${on ? "!border-teal/60 text-teal" : ""}`}
+      className={`pill-glass ml-auto !h-9 shrink-0 !px-3 fs-13 ${on ? "!border-teal/60 text-teal" : ""}`}
     >
       <span className={`relative h-4 w-7 rounded-full transition-colors ${on ? "bg-teal/80" : "bg-white/15"}`}>
         <span className={`absolute top-0.5 size-3 rounded-full bg-white shadow transition-[left] duration-200 ${on ? "left-3.5" : "left-0.5"}`} />
@@ -54,10 +59,12 @@ function GlassAllSwitch() {
 /** "Add widget" tray (registry), templates, and the LLM widget generator. */
 function WidgetTray() {
   const add = useLayout((s) => s.add);
-  const reset = useLayout((s) => s.reset);
   const [msg, setMsg] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const [drawer, setDrawer] = useState(false);
+  /** Widget builder: an interactive description waits here as a checklist before anything is built. */
+  const [checklist, setChecklist] = useState<{ text: string; list: BriefChecklist } | null>(null);
   // Promoted Play Place builds stay addable after their tile is removed (desktop; the hub is Tauri-only).
   useEffect(startHub, []);
   const promoted = promotedWidgets(useHub((s) => s.view));
@@ -73,8 +80,8 @@ function WidgetTray() {
 
   const addCustom = (spec: CustomSpec) => addAndReport("custom", spec.title, { spec });
 
-  const generate = async () => {
-    const p = prompt.trim();
+  const generate = async (opts: { quick?: boolean; text?: string } = {}) => {
+    const p = (opts.text ?? prompt).trim();
     if (!p) return;
     setMsg(null);
     // A built-in widget named in the prompt ("spotify") is added directly — no LLM round trip.
@@ -84,6 +91,13 @@ function WidgetTray() {
       setPrompt("");
       return;
     }
+    // Interactive or several things to do: the build pipeline (desktop; the hub is Tauri-only),
+    // shown first as a checklist Nic can edit. The quick card generator only fills templates.
+    const list = briefPoints(p);
+    if (!opts.quick && isTauri() && needsPipeline(p, list.points)) {
+      setChecklist({ text: p, list });
+      return;
+    }
     setBusy(true);
     try {
       const raw = await cc.llmJson<unknown>(GENERATOR_SYSTEM, `${p}\n(Current date: ${new Date().toISOString()})`);
@@ -91,6 +105,7 @@ function WidgetTray() {
       if (!spec) throw new Error("The model's widget didn't validate — try rephrasing, or pick a template.");
       addCustom(spec);
       setPrompt("");
+      setChecklist(null);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -100,50 +115,16 @@ function WidgetTray() {
 
   return (
     <div className="mx-4 mb-3 space-y-2 md:mx-6 xl:mx-8">
-      {promoted.length > 0 && (
-        <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2" aria-label="Your Play Place builds">
-          <span className="label-caps shrink-0 px-2 text-violet">From Play Place</span>
-          {promoted.map((b) => (
-            <button
-              key={b.buildId}
-              title={b.buildTitle ? `Promoted from the Play Place build “${b.buildTitle}”` : "Promoted from the Play Place"}
-              onClick={() => addAndReport("staged-build", b.title, { buildId: b.buildId, title: b.title })}
-              className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
-            >
-              <Plus size={13} />
-              <FlaskConical size={14} className="text-violet" />
-              {b.title}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="glass flex items-center gap-2 overflow-x-auto rounded-[18px] p-2">
-        <span className="label-caps shrink-0 px-2 text-amber-soft">Add</span>
-        {availableWidgets()
-          .filter((w) => w.id !== "custom" && w.id !== "staged-build")
-          .map((w) => {
-            const Icon = w.icon;
-            return (
-              <button
-                key={w.id}
-                title={w.description}
-                onClick={() => addAndReport(w.id, w.title)}
-                className="pill-glass !h-9 shrink-0 !px-3 text-[13px]"
-              >
-                <Plus size={13} />
-                <Icon size={14} className="text-teal" />
-                {w.title}
-              </button>
-            );
-          })}
+      <div className="glass flex flex-wrap items-center gap-2 r-18 p-2">
+        <button onClick={() => setDrawer(true)} className="pill-primary !h-9 shrink-0 !px-3 fs-13" title="Search every widget, grouped by kind (your Play Place builds first)">
+          <Plus size={13} /> Add widget
+        </button>
         <GlassAllSwitch />
         <GlassOpacitySlider />
-        <button onClick={reset} className="pill-glass !h-9 shrink-0 !px-3 text-[13px]" title="Restores the default layout on the first page, or clears any other page. Other pages are untouched.">
-          <RotateCcw size={13} /> Reset this page
-        </button>
+        <LayoutControls />
       </div>
 
-      <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2">
+      <div className="glass flex flex-wrap items-center gap-2 r-18 p-2">
         <span className="label-caps shrink-0 px-2 text-violet">Generate</span>
         <form
           className="flex min-w-64 flex-1 gap-2"
@@ -153,19 +134,19 @@ function WidgetTray() {
           }}
         >
           <input
-            className="field !h-9 !py-1 text-[13px]"
+            className="field !h-9 !py-1 fs-13"
             placeholder="Describe a widget: “HST paid on fuel receipts”, “countdown to my Dec 12 shoot”…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             aria-label="Describe a widget"
           />
-          <button className="pill-primary !h-9 shrink-0 !px-3 text-[13px]" disabled={busy || !prompt.trim()}>
+          <button className="pill-primary !h-9 shrink-0 !px-3 fs-13" disabled={busy || !prompt.trim()}>
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} Generate
           </button>
         </form>
         <div className="flex gap-1.5 overflow-x-auto">
           {TEMPLATES.map((t) => (
-            <button key={t.label} onClick={() => addCustom(t.spec)} className="pill-glass !h-8 shrink-0 !px-3 text-[12px]">
+            <button key={t.label} onClick={() => addCustom(t.spec)} className="pill-glass !h-8 shrink-0 !px-3 fs-12">
               {t.label}
             </button>
           ))}
@@ -173,8 +154,30 @@ function WidgetTray() {
       </div>
 
       {msg && <p className="px-2 text-xs text-ink-2">{msg}</p>}
+      {checklist && (
+        <BriefChecklistCard
+          key={checklist.text}
+          text={checklist.text}
+          initial={checklist.list}
+          onQuick={() => void generate({ quick: true, text: checklist.text })}
+          onClose={() => {
+            setChecklist(null);
+            setPrompt("");
+          }}
+        />
+      )}
+      {drawer && (
+        <WidgetDrawer
+          promoted={promoted.map((b) => ({ buildId: b.buildId, title: b.title, buildTitle: b.buildTitle }))}
+          onAdd={(id, title, config) => {
+            addAndReport(id, title, config);
+            setDrawer(false);
+          }}
+          onClose={() => setDrawer(false)}
+        />
+      )}
       <p className="hidden px-2 text-xs text-ink-3 md:block">
-        Drag a widget’s label to move it, its corner to resize. Red outline = no room there. Generated widgets are data-only views of your local store — they can’t run code.
+        Drag a widget’s label to move it, its corner to resize; neighbours move aside. Red outline = no room there. Generated widgets are data-only views of your local store — they can’t run code.
       </p>
     </div>
   );

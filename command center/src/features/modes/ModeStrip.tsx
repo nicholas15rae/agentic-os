@@ -52,7 +52,7 @@ export function ModeStripView({
         <span className="label-caps text-ink-3">Curiosity</span>
         <Segmented size="sm" label="Tony mode curiosity" value={curiosity} options={CURIOSITY_OPTS} onChange={onCuriosity} />
         {overridden && (
-          <button type="button" onClick={onReset} className="ml-auto flex h-7 items-center gap-1 rounded-full border border-amber/40 px-2.5 text-[11px] text-amber-light">
+          <button type="button" onClick={onReset} className="ml-auto flex h-7 items-center gap-1 rounded-full border border-amber/40 px-2.5 fs-11 text-amber-light">
             <RotateCcw size={11} aria-hidden /> Reset
           </button>
         )}

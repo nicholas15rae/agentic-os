@@ -360,6 +360,17 @@ Non-negotiable rules for every agent:
 
 ---
 
+## App-Wide Rule: Everything Is Customizable (Command Center)
+
+Every session that touches the Command Center UI follows this rule.
+
+- **Finished out of the box, customizable underneath.** Every page ships looking like a finished template, but nothing user-facing is hard-coded: layout, content, labels, look and behaviour can all be changed by Nic.
+- **One shared layout system.** Every page uses the same grid and the same layout component as the home page (`command center/src/core/widgets/`): every panel, card and widget can be dragged, resized, hidden or added back; each page has an Edit layout mode (or long-press) with the home page's controls; panels can snap to the grid or float, be click-through or not, pop out as their own window, pin on top or show on demand, and collapse to an icon. Layouts are saved per page and per mode preset, sync to the phone where the screen allows, and every page has Reset to default. Build features on the shared component; never a one-off layout per page.
+- **Settings → Appearance is the control centre.** Colours, accents, glass and blur, box and card styles, borders, corner radius, shadows, fonts, sizes, spacing and density, icons, widget styles and animations: each with a live preview, app-wide values with per-page overrides, saved themes and Reset to default. Components read these from the shared theme tokens (CSS variables), never hard-coded values.
+- **Export and import.** Layouts and themes can be exported and imported as files.
+- **Safety controls can't be hidden or removed:** the trading kill switch, Tony's stop, and send / action confirmation cards. The layout system marks them locked.
+- **Motion and GPU:** canvas / rAF loops use `frameLoop()` from `src/lib/motion.ts`; infinite CSS animations go in the `[data-motion]` pause list in `styles/index.css`.
+
 ## Setup Instructions for New AI Agents
 
 When you (an AI agent) are dropped into this directory for the first time:

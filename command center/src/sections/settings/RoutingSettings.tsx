@@ -21,7 +21,7 @@ function ChipList({ items, onAdd, onRemove, placeholder }: { items: string[]; on
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {items.map((it) => (
-        <span key={it} className="flex h-7 items-center gap-1 rounded-full border border-teal/40 bg-teal/10 px-2.5 text-[12px] text-teal">
+        <span key={it} className="flex h-7 items-center gap-1 rounded-full border border-teal/40 bg-teal/10 px-2.5 fs-12 text-teal">
           {it}
           <button type="button" aria-label={`Remove ${it}`} onClick={() => onRemove(it)} className="text-teal/70 hover:text-alert">
             <X size={11} />
@@ -39,7 +39,7 @@ function ChipList({ items, onAdd, onRemove, placeholder }: { items: string[]; on
         }}
         onBlur={submit}
         placeholder={placeholder}
-        className="!h-7 !w-36 !py-0 !text-[12px]"
+        className="!h-7 !w-36 !py-0 !fs-12"
       />
     </div>
   );
@@ -47,7 +47,7 @@ function ChipList({ items, onAdd, onRemove, placeholder }: { items: string[]; on
 
 function RoleRow({ role, triggers, onSave }: { role: string; triggers: AgentTriggers; onSave: (t: AgentTriggers) => void }) {
   return (
-    <div className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
+    <div className="r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
       <p className="mb-1.5 text-sm text-ink">{roleLabel(role)}</p>
       <div className="grid gap-2 sm:grid-cols-[1fr_1fr]">
         <Field label="Name triggers">
@@ -97,7 +97,7 @@ export function NarrationControl({
         <div className="min-w-0 flex-1">
           <p className="text-sm text-ink">Narration</p>
           <p className="text-xs text-ink-3">{LEVELS.find((l) => l.id === level)?.hint} Never over you or over Tony's reply: a line waits for quiet and is dropped when stale. Ask “where's the build at?” anytime.</p>
-          {modeName && <p className="mt-0.5 text-[11px] text-amber-soft">Set by {modeName} on switch; your change holds until the next mode switch.</p>}
+          {modeName && <p className="mt-0.5 fs-11 text-amber-soft">Set by {modeName} on switch; your change holds until the next mode switch.</p>}
         </div>
         <div role="radiogroup" aria-label="Narration" className="well flex rounded-full p-0.5">
           {LEVELS.map((l) => (
@@ -107,7 +107,7 @@ export function NarrationControl({
               role="radio"
               aria-checked={level === l.id}
               onClick={() => level !== l.id && save({ feedback: { sensitivity: l.id } })}
-              className={`h-7 rounded-full px-3 font-mono text-[11px] uppercase tracking-wider transition-colors ${level === l.id ? "bg-teal/25 text-teal" : "text-ink-3 hover:text-ink"}`}
+              className={`h-7 rounded-full px-3 font-mono fs-11 uppercase tracking-wider transition-colors ${level === l.id ? "bg-teal/25 text-teal" : "text-ink-3 hover:text-ink"}`}
             >
               {l.label}
             </button>
@@ -117,7 +117,7 @@ export function NarrationControl({
       <div className="mt-2 flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-xs text-ink-2">Narration voices</p>
-          <p className="text-[11px] text-ink-3">Roster: each agent speaks in its own voice from Settings → Voice. Local Kokoro: the same per-agent voices on Kokoro only, sparing the ElevenLabs quota.</p>
+          <p className="fs-11 text-ink-3">Roster: each agent speaks in its own voice from Settings → Voice. Local Kokoro: the same per-agent voices on Kokoro only, sparing the ElevenLabs quota.</p>
         </div>
         <div role="radiogroup" aria-label="Narration voices" className="well flex rounded-full p-0.5">
           {(
@@ -133,7 +133,7 @@ export function NarrationControl({
               aria-checked={engine === id}
               disabled={level === 0}
               onClick={() => engine !== id && save({ feedback: { narrationEngine: id } })}
-              className={`h-7 rounded-full px-3 font-mono text-[11px] uppercase tracking-wider transition-colors disabled:opacity-40 ${engine === id ? "bg-amber/25 text-amber-light" : "text-ink-3 hover:text-ink"}`}
+              className={`h-7 rounded-full px-3 font-mono fs-11 uppercase tracking-wider transition-colors disabled:opacity-40 ${engine === id ? "bg-amber/25 text-amber-light" : "text-ink-3 hover:text-ink"}`}
             >
               {label}
             </button>
@@ -195,11 +195,11 @@ export function RoutingSettings() {
         })}
       </div>
 
-      <div className="mt-3 rounded-[12px] border border-amber/20 bg-amber/[0.04] px-3 py-2.5">
+      <div className="mt-3 r-12 border border-amber/20 bg-amber/[0.04] px-3 py-2.5">
         <p className="label-caps mb-1.5 flex items-center gap-1.5 text-amber-soft">
           <Sparkles size={12} /> Test a phrase
         </p>
-        <Input value={testPhrase} onChange={(e) => setTestPhrase(e.target.value)} placeholder="tell the coder to fix the build" className="!text-[13px]" />
+        <Input value={testPhrase} onChange={(e) => setTestPhrase(e.target.value)} placeholder="tell the coder to fix the build" className="!fs-13" />
         {result && (
           <p className="mt-2 text-xs text-ink-2">
             → <span className="font-mono text-ink">{result.role ? roleLabel(result.role) : "no agent (default)"}</span>

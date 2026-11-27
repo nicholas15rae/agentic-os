@@ -58,7 +58,7 @@ export function ThresholdMeter({ variant = "full" }: { variant?: "full" | "compa
   }, [metering]);
 
   return (
-    <div className={compact ? "flex min-w-[220px] flex-1 items-center gap-2 text-[11px] text-ink-3" : "space-y-1.5"}>
+    <div className={compact ? "flex min-w-[220px] flex-1 items-center gap-2 fs-11 text-ink-3" : "space-y-1.5"}>
       {compact && <span className="shrink-0">Gate</span>}
       <div className={`relative flex-1 ${compact ? "h-4" : "h-6"} ${enabled ? "" : "opacity-40"}`}>
         <div className="absolute inset-0 overflow-hidden rounded-full bg-white/[0.06]">
@@ -79,7 +79,7 @@ export function ThresholdMeter({ variant = "full" }: { variant?: "full" | "compa
           aria-valuetext={`${activationDb} dB`}
         />
       </div>
-      <div className={`flex items-center gap-2 font-mono ${compact ? "shrink-0 text-ink-2" : "text-[11px] text-ink-2"}`}>
+      <div className={`flex items-center gap-2 font-mono ${compact ? "shrink-0 text-ink-2" : "fs-11 text-ink-2"}`}>
         <span>gate {activationDb} dB</span>
         {enabled ? <span ref={you} className="text-ink-3" /> : <span className="text-alert/80">MIC OFF: meter paused</span>}
       </div>

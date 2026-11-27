@@ -19,7 +19,7 @@ export function IconPicker({ value, onChange }: { value: AppIcon; onChange: (i: 
             aria-label={name}
             title={name}
             onClick={() => onChange(name)}
-            className={`grid size-7 place-items-center rounded-[8px] border transition-colors ${on ? "border-amber/60 bg-amber/15 text-amber-light" : "border-white/10 text-ink-2 hover:text-ink"}`}
+            className={`grid size-7 place-items-center r-8 border transition-colors ${on ? "border-amber/60 bg-amber/15 text-amber-light" : "border-white/10 text-ink-2 hover:text-ink"}`}
           >
             <Icon size={14} />
           </button>
@@ -33,11 +33,11 @@ export function IconPicker({ value, onChange }: { value: AppIcon; onChange: (i: 
 export function MountFields({ label, icon, onLabel, onIcon, placeholder }: { label: string; icon: AppIcon; onLabel: (s: string) => void; onIcon: (i: AppIcon) => void; placeholder?: string }) {
   return (
     <div className="space-y-2">
-      <label className="block text-[11px] text-ink-2">
+      <label className="block fs-11 text-ink-2">
         Sidebar label
         <input value={label} onChange={(e) => onLabel(e.target.value)} maxLength={LABEL_MAX} placeholder={placeholder} className="field mt-1 !h-8 !py-1 text-xs" />
       </label>
-      <div className="text-[11px] text-ink-2">
+      <div className="fs-11 text-ink-2">
         Icon
         <div className="mt-1">
           <IconPicker value={icon} onChange={onIcon} />
@@ -86,7 +86,7 @@ export function PinButton({ target, size = "sm" }: { target: MountTarget; size?:
     useToasts.getState().push({ title: "Unpinned", body: `“${mounted?.label ?? target.title}” left the sidebar. Its files are untouched.`, tone: "info" });
   };
   const Icon = iconOf(mounted?.icon ?? "app");
-  const h = size === "md" ? "!h-9 text-xs" : "!h-7 !px-2.5 text-[11px]";
+  const h = size === "md" ? "!h-9 text-xs" : "!h-7 !px-2.5 fs-11";
 
   return (
     <div ref={box} className="relative">
@@ -101,7 +101,7 @@ export function PinButton({ target, size = "sm" }: { target: MountTarget; size?:
         {mounted ? <Icon size={11} /> : <Pin size={11} />} {mounted ? "Pinned" : "Pin to Sidebar"}
       </button>
       {open && (
-        <div role="dialog" aria-label="Sidebar page" className="glass absolute right-0 top-full z-30 mt-1 w-72 rounded-[14px] p-3 shadow-xl">
+        <div role="dialog" aria-label="Sidebar page" className="glass absolute right-0 top-full z-30 mt-1 w-72 r-14 p-3 shadow-xl">
           <p className="label-caps mb-2 text-ink-3">Command Center page</p>
           <MountFields label={label} icon={icon} onLabel={setLabel} onIcon={setIcon} placeholder={target.title} />
           <div className="mt-3 flex gap-1.5">

@@ -27,7 +27,7 @@ import { METRIC_ROWS, PARAM_ORDER, VERDICT, compareTone, diffLines, diffText, er
 const TONE_TEXT: Record<"teal" | "alert" | "amber", string> = { teal: "text-teal-soft", alert: "text-alert", amber: "text-amber-light" };
 const CELL_TONE: Record<Exclude<Tone, null>, string> = { better: "text-teal-soft", worse: "text-alert", same: "text-ink-2" };
 const when = (s: number) => new Date(s * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-const empty = "rounded-[12px] border border-dashed border-white/[0.08] px-3 py-4 text-center text-[12px] text-ink-3";
+const empty = "r-12 border border-dashed border-white/[0.08] px-3 py-4 text-center fs-12 text-ink-3";
 
 /** Engine R: the deterministic rule engine. Pending rule changes (typed APPROVE), the 70/30 report, limits, scans, the log. */
 export function EngineRPanel(_props: EngineRPanelProps) {
@@ -98,13 +98,13 @@ export function EngineRPanel(_props: EngineRPanelProps) {
   return (
     <Card title="Engine R · rules">
       {status === "loading" && <div className="h-5 w-2/3 animate-pulse rounded bg-white/[0.06]" aria-label="Loading Engine R" />}
-      {status === "error" && error && <p className="text-[12px] text-alert">{viewErrorText(error)}</p>}
+      {status === "error" && error && <p className="fs-12 text-alert">{viewErrorText(error)}</p>}
 
       {data && (
         <>
           <div className="flex flex-wrap items-center gap-2" role="toolbar" aria-label="Engine R controls">
             <button
-              className={`flex h-8 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold ${data.enabled ? "border-teal/50 bg-teal/15 text-teal-soft" : "border-white/15 bg-white/[0.04] text-ink-3"}`}
+              className={`flex h-8 items-center gap-1.5 rounded-full border px-3 fs-11 font-semibold ${data.enabled ? "border-teal/50 bg-teal/15 text-teal-soft" : "border-white/15 bg-white/[0.04] text-ink-3"}`}
               disabled={!!ui.busy}
               aria-pressed={data.enabled}
               aria-label={data.enabled ? "Engine R is on: turn off" : "Engine R is off: turn on"}
@@ -113,33 +113,33 @@ export function EngineRPanel(_props: EngineRPanelProps) {
             >
               {busyIs("toggle") ? <Loader2 size={12} className="animate-spin" /> : <Power size={12} />} {data.enabled ? "ON" : "OFF"}
             </button>
-            <button className="pill-glass !h-8 text-[11px]" disabled={!!ui.busy} onClick={() => void scan()} title="Evaluate the active rule now and show what it would do. Sends nothing to the desk.">
+            <button className="pill-glass !h-8 fs-11" disabled={!!ui.busy} onClick={() => void scan()} title="Evaluate the active rule now and show what it would do. Sends nothing to the desk.">
               {busyIs("scan") ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />} Dry-run scan
             </button>
-            <button className="pill-glass !h-8 text-[11px]" disabled={!!ui.busy} onClick={() => void evaluate()} title="Re-fetch ~3 years of IBKR daily bars (TWS must be up) and rebuild the 70/30 report. Can take minutes.">
+            <button className="pill-glass !h-8 fs-11" disabled={!!ui.busy} onClick={() => void evaluate()} title="Re-fetch ~3 years of IBKR daily bars (TWS must be up) and rebuild the 70/30 report. Can take minutes.">
               {busyIs("evaluate") ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Refresh 70/30
             </button>
           </div>
 
-          <p className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-ink-3">
+          <p className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 fs-11 text-ink-3">
             <span>active <span className="font-mono text-ink-2">v{data.active.version}</span> {data.active.rule}</span>
             {lim && <span>scan <span className="text-ink-2">{lim.scan_time_et} ET</span> weekdays</span>}
             <span>entries today <span className="font-mono text-ink-2">{data.entriesToday}{lim ? `/${lim.max_trades_per_day}` : ""}</span></span>
             <span>desk mode <span className="text-ink-2">{mode ?? "…"}</span></span>
           </p>
-          {data.blocked && <p className="mt-1.5 text-[12px] text-amber-light">Blocked: {data.blocked}</p>}
-          {data.limitsError && <p className="mt-1.5 text-[12px] text-alert">limits.json: {data.limitsError}. Engine R won't scan until it's fixed.</p>}
+          {data.blocked && <p className="mt-1.5 fs-12 text-amber-light">Blocked: {data.blocked}</p>}
+          {data.limitsError && <p className="mt-1.5 fs-12 text-alert">limits.json: {data.limitsError}. Engine R won't scan until it's fixed.</p>}
 
           {ui.confirm === "enable" && (
-            <div className="mt-3 rounded-[14px] border border-amber/50 bg-amber/10 p-3 text-[12px]">
+            <div className="mt-3 r-14 border border-amber/50 bg-amber/10 p-3 fs-12">
               <p className="text-ink">
                 {mode === "FULL_AUTO"
                   ? "The desk is in FULL_AUTO: once on, Engine R's daily scan sends its entries to the paper account without asking. Turn it on?"
                   : "The desk mode is unknown right now. Turn Engine R on anyway?"}
               </p>
               <div className="mt-2 flex gap-2">
-                <button className="pill-primary !h-8 text-[11px]" onClick={() => void toggle(true)}>Confirm</button>
-                <button className="pill-glass !h-8 text-[11px]" onClick={() => setUi((u) => ({ ...u, confirm: null }))}>Cancel</button>
+                <button className="pill-primary !h-8 fs-11" onClick={() => void toggle(true)}>Confirm</button>
+                <button className="pill-glass !h-8 fs-11" onClick={() => setUi((u) => ({ ...u, confirm: null }))}>Cancel</button>
               </div>
             </div>
           )}
@@ -172,21 +172,21 @@ export function EngineRPanel(_props: EngineRPanelProps) {
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
             <section className="min-w-0" aria-label="Active rule">
               <p className="label-caps mb-1.5 text-ink-3">Active rule · v{data.active.version}</p>
-              <div className="flex flex-wrap gap-1.5 text-[11px]">
+              <div className="flex flex-wrap gap-1.5 fs-11">
                 {PARAM_ORDER.map((k) => (
                   <span key={k} className="rounded-full border border-white/[0.08] px-2 py-0.5 text-ink-3" title={data.schema[k]?.help}>
                     {k} <span className="font-mono text-ink-2">{paramValue(data.active.params[k])}</span>
                   </span>
                 ))}
               </div>
-              <p className="mt-1.5 break-words text-[11px] text-ink-3">
+              <p className="mt-1.5 break-words fs-11 text-ink-3">
                 {when(data.active.created)} · by {data.active.approvedBy} · {data.active.reason}
               </p>
             </section>
             <section className="min-w-0" aria-label="Hard limits">
               <p className="label-caps mb-1.5 text-ink-3">Hard limits · yours only</p>
               {lim ? (
-                <div className="flex flex-wrap gap-1.5 text-[11px]">
+                <div className="flex flex-wrap gap-1.5 fs-11">
                   {(
                     [
                       ["Daily loss", `${lim.max_daily_loss_base.toLocaleString()} → ${lim.on_daily_loss === "kill_switch" ? "kill switch" : "stop entries"}`],
@@ -203,7 +203,7 @@ export function EngineRPanel(_props: EngineRPanelProps) {
                   ))}
                 </div>
               ) : (
-                <p className="text-[12px] text-alert">No valid limits loaded.</p>
+                <p className="fs-12 text-alert">No valid limits loaded.</p>
               )}
             </section>
           </div>
@@ -251,33 +251,33 @@ function PendingCard({
 }) {
   const ev = c.evaluation;
   return (
-    <article className="min-w-0 rounded-[14px] border border-amber/30 bg-amber/[0.05] p-3" aria-label={`Rule change ${c.changeId}`}>
+    <article className="min-w-0 r-14 border border-amber/30 bg-amber/[0.05] p-3" aria-label={`Rule change ${c.changeId}`}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         {diffLines(c.diff).map((d) => (
-          <span key={d.param} className="font-mono text-[12.5px] text-ink">
+          <span key={d.param} className="font-mono fs-12.5 text-ink">
             {d.param} <span className="text-ink-3">{d.from}</span> → <span className="text-amber-light">{d.to}</span>
           </span>
         ))}
-        <span className="ml-auto text-[11px] text-ink-3">
+        <span className="ml-auto fs-11 text-ink-3">
           {c.source} · {when(c.created)} · on v{c.baseVersion}
         </span>
       </div>
       {c.baseVersion !== activeVersion && (
-        <p className="mt-1 text-[11px] text-amber-light">Written against v{c.baseVersion}; the active rule is v{activeVersion}. Approving re-checks it and refuses it as stale if the parameter has moved.</p>
+        <p className="mt-1 fs-11 text-amber-light">Written against v{c.baseVersion}; the active rule is v{activeVersion}. Approving re-checks it and refuses it as stale if the parameter has moved.</p>
       )}
 
       <div className="mt-2">
-        <p className={`flex items-center gap-1 text-[10.5px] uppercase tracking-wide ${c.rationale.untrusted ? "text-amber-light" : "text-ink-3"}`}>
+        <p className={`flex items-center gap-1 fs-10.5 uppercase tracking-wide ${c.rationale.untrusted ? "text-amber-light" : "text-ink-3"}`}>
           {c.rationale.untrusted && <ShieldAlert size={11} />} Rationale{c.rationale.untrusted ? " · untrusted model text" : ""}
         </p>
-        <p className={`mt-0.5 whitespace-pre-wrap break-words text-[12px] text-ink-2 ${c.rationale.untrusted ? "border-l-2 border-amber/40 pl-2" : ""}`}>{c.rationale.text || "—"}</p>
+        <p className={`mt-0.5 whitespace-pre-wrap break-words fs-12 text-ink-2 ${c.rationale.untrusted ? "border-l-2 border-amber/40 pl-2" : ""}`}>{c.rationale.text || "—"}</p>
       </div>
 
       {isChangeEvaluation(ev) ? (
         <div className="mt-3">
-          <p className={`text-[12px] font-semibold ${TONE_TEXT[VERDICT[ev.verdict.label].tone]}`}>{VERDICT[ev.verdict.label].text}</p>
+          <p className={`fs-12 font-semibold ${TONE_TEXT[VERDICT[ev.verdict.label].tone]}`}>{VERDICT[ev.verdict.label].text}</p>
           {ev.verdict.notes.length > 0 && (
-            <ul className="mt-0.5 list-disc pl-4 text-[11.5px] text-ink-2">
+            <ul className="mt-0.5 list-disc pl-4 fs-11.5 text-ink-2">
               {ev.verdict.notes.map((n) => <li key={n}>{n}</li>)}
             </ul>
           )}
@@ -285,23 +285,23 @@ function PendingCard({
             <CompareTable title="Build set · oldest ~70%" current={ev.current.build} proposed={ev.proposed.build} />
             <CompareTable title="Test set · newest ~30%, unseen" current={ev.current.test} proposed={ev.proposed.test} />
           </div>
-          <p className="mt-1 text-[10.5px] text-ink-3">
+          <p className="mt-1 fs-10.5 text-ink-3">
             cutoff {ev.cutoff ?? "—"} · {ev.range.from ?? "?"} to {ev.range.to ?? "?"} · same cutoff for both sets
           </p>
         </div>
       ) : (
-        <p className="mt-2 text-[12px] text-amber-light">No backtest for this change: {ev && "error" in ev ? ev.error : "not scored"}</p>
+        <p className="mt-2 fs-12 text-amber-light">No backtest for this change: {ev && "error" in ev ? ev.error : "not scored"}</p>
       )}
 
       {deciding ? (
         <form
-          className="mt-3 space-y-2 rounded-[12px] border border-white/[0.08] bg-black/20 p-2.5"
+          className="mt-3 space-y-2 r-12 border border-white/[0.08] bg-black/20 p-2.5"
           onSubmit={(e) => {
             e.preventDefault();
             if (canApprove(deciding.phrase)) onApprove(deciding.phrase, deciding.note);
           }}
         >
-          <Input value={deciding.note} onChange={(e) => onEdit({ note: e.target.value })} placeholder="Note (optional): why" aria-label="Decision note" maxLength={300} className="!h-8 !w-full !py-1 text-[12px]" />
+          <Input value={deciding.note} onChange={(e) => onEdit({ note: e.target.value })} placeholder="Note (optional): why" aria-label="Decision note" maxLength={300} className="!h-8 !w-full !py-1 fs-12" />
           <div className="flex flex-wrap items-center gap-2">
             <Input
               value={deciding.phrase}
@@ -310,22 +310,22 @@ function PendingCard({
               aria-label={`Type ${APPROVE_PHRASE} to confirm`}
               autoComplete="off"
               spellCheck={false}
-              className="!h-8 !w-40 !py-1 font-mono text-[12px]"
+              className="!h-8 !w-40 !py-1 font-mono fs-12"
             />
-            <button type="submit" className="pill-primary !h-8 text-[11px]" disabled={!canApprove(deciding.phrase) || locked} aria-label="Approve change">
+            <button type="submit" className="pill-primary !h-8 fs-11" disabled={!canApprove(deciding.phrase) || locked} aria-label="Approve change">
               {busy === "approve" ? <Loader2 size={12} className="animate-spin" /> : null} Approve
             </button>
-            <button type="button" className="pill-glass !h-8 text-[11px]" disabled={locked} onClick={() => onReject(deciding.note)} aria-label="Reject change">
+            <button type="button" className="pill-glass !h-8 fs-11" disabled={locked} onClick={() => onReject(deciding.note)} aria-label="Reject change">
               {busy === "reject" ? <Loader2 size={12} className="animate-spin" /> : null} Reject
             </button>
-            <button type="button" className="pill-glass !h-8 text-[11px]" disabled={locked} onClick={onCancel}>
+            <button type="button" className="pill-glass !h-8 fs-11" disabled={locked} onClick={onCancel}>
               Cancel
             </button>
           </div>
-          <p className="text-[10.5px] text-ink-3">Approving writes a new rule version that Engine R uses from its next scan. Asks for your PIN.</p>
+          <p className="fs-10.5 text-ink-3">Approving writes a new rule version that Engine R uses from its next scan. Asks for your PIN.</p>
         </form>
       ) : (
-        <button className="pill-glass mt-3 !h-8 text-[11px]" disabled={locked} onClick={onOpen} aria-label={`Decide on ${diffText(c.diff)}`}>
+        <button className="pill-glass mt-3 !h-8 fs-11" disabled={locked} onClick={onOpen} aria-label={`Decide on ${diffText(c.diff)}`}>
           Decide…
         </button>
       )}
@@ -336,9 +336,9 @@ function PendingCard({
 function CompareTable({ title, current, proposed }: { title: string; current: SetMetrics; proposed: SetMetrics }) {
   const notes = [...new Set([current.note && `current: ${current.note}`, proposed.note && `proposed: ${proposed.note}`].filter(Boolean))];
   return (
-    <div className="min-w-0 rounded-[10px] border border-white/[0.06] p-2">
-      <table className="w-full text-[11.5px]" aria-label={title}>
-        <caption className="pb-1 text-left text-[10.5px] uppercase tracking-wide text-ink-3">{title}</caption>
+    <div className="min-w-0 r-10 border border-white/[0.06] p-2">
+      <table className="w-full fs-11.5" aria-label={title}>
+        <caption className="pb-1 text-left fs-10.5 uppercase tracking-wide text-ink-3">{title}</caption>
         <thead>
           <tr className="text-left text-ink-3">
             <th className="py-0.5 pr-1 font-medium" scope="col">Metric</th>
@@ -359,16 +359,16 @@ function CompareTable({ title, current, proposed }: { title: string; current: Se
           })}
         </tbody>
       </table>
-      {notes.length > 0 && <p className="mt-1 text-[10.5px] text-ink-3">{notes.join(" · ")}</p>}
+      {notes.length > 0 && <p className="mt-1 fs-10.5 text-ink-3">{notes.join(" · ")}</p>}
     </div>
   );
 }
 
 function SplitTable({ title, build, test }: { title: string; build: SetMetrics; test: SetMetrics }) {
   return (
-    <div className="min-w-0 rounded-[10px] border border-white/[0.06] p-2">
-      <table className="w-full text-[11.5px]" aria-label={title}>
-        <caption className="pb-1 text-left text-[10.5px] uppercase tracking-wide text-ink-3">{title}</caption>
+    <div className="min-w-0 r-10 border border-white/[0.06] p-2">
+      <table className="w-full fs-11.5" aria-label={title}>
+        <caption className="pb-1 text-left fs-10.5 uppercase tracking-wide text-ink-3">{title}</caption>
         <thead>
           <tr className="text-left text-ink-3">
             <th className="py-0.5 pr-1 font-medium" scope="col">Metric</th>
@@ -386,7 +386,7 @@ function SplitTable({ title, build, test }: { title: string; build: SetMetrics; 
           ))}
         </tbody>
       </table>
-      {(build.note || test.note) && <p className="mt-1 text-[10.5px] text-ink-3">{[build.note && `build: ${build.note}`, test.note && `test: ${test.note}`].filter(Boolean).join(" · ")}</p>}
+      {(build.note || test.note) && <p className="mt-1 fs-10.5 text-ink-3">{[build.note && `build: ${build.note}`, test.note && `test: ${test.note}`].filter(Boolean).join(" · ")}</p>}
     </div>
   );
 }
@@ -395,7 +395,7 @@ function SplitTable({ title, build, test }: { title: string; build: SetMetrics; 
 function TrackRecordSection() {
   const { data, error } = usePoll<TrackRecord>(trackRecordApi.get, 60_000);
   if (!isTrackRecord(data)) {
-    return error ? <p className="mt-4 text-[11px] text-ink-3">Track record unavailable ({error}).</p> : null;
+    return error ? <p className="mt-4 fs-11 text-ink-3">Track record unavailable ({error}).</p> : null;
   }
   const t = data;
   const cols: { label: string; set: TrackSet | null; spy: SpyBaseline | null }[] = [
@@ -408,9 +408,9 @@ function TrackRecordSection() {
   return (
     <section className="mt-4" aria-label="Track record over backtest">
       <p className="label-caps mb-1.5 text-ink-3">Track record over backtest{t.version != null ? ` · v${t.version}` : ""}</p>
-      <p className={`text-[12px] ${DRIFT_TONE[t.drift.status]}`} role="status">{t.drift.message}</p>
-      <div className="mt-1.5 overflow-x-auto rounded-[10px] border border-white/[0.06] p-2">
-        <table className="w-full text-[11.5px]" aria-label="Paper vs backtest vs SPY">
+      <p className={`fs-12 ${DRIFT_TONE[t.drift.status]}`} role="status">{t.drift.message}</p>
+      <div className="mt-1.5 overflow-x-auto r-10 border border-white/[0.06] p-2">
+        <table className="w-full fs-11.5" aria-label="Paper vs backtest vs SPY">
           <thead>
             <tr className="text-left text-ink-3">
               <th className="py-0.5 pr-1 font-medium" scope="col">Metric</th>
@@ -431,7 +431,7 @@ function TrackRecordSection() {
           </tbody>
         </table>
       </div>
-      <p className="mt-1 break-words text-[10.5px] text-ink-3">
+      <p className="mt-1 break-words fs-10.5 text-ink-3">
         {[
           t.goal.text,
           t.drift.interval ? `test 95% interval ${rText(t.drift.interval.low)} to ${rText(t.drift.interval.high)} (n ${t.drift.interval.n})` : "",
@@ -453,12 +453,12 @@ function EvaluationSection({ ev, activeVersion, error }: { ev: EvaluationReport 
         <p className={empty}>No daily bars cached yet, so there is nothing to backtest. Press Refresh 70/30 while TWS is up; the bars are cached after that.</p>
       ) : isEvaluationReport(ev) ? (
         <>
-          {ev.version !== activeVersion && <p className="mb-1.5 text-[11px] text-amber-light">This report is for v{ev.version}; the active rule is v{activeVersion}. Refresh 70/30 to score it.</p>}
+          {ev.version !== activeVersion && <p className="mb-1.5 fs-11 text-amber-light">This report is for v{ev.version}; the active rule is v{activeVersion}. Refresh 70/30 to score it.</p>}
           <div className="grid gap-2 sm:grid-cols-2">
             <SplitTable title="Backtest · IBKR daily bars" build={ev.backtest.build} test={ev.backtest.test} />
             <SplitTable title="Paper journal · Engine R trades" build={ev.paper.build} test={ev.paper.test} />
           </div>
-          <p className="mt-1 break-words text-[10.5px] text-ink-3">
+          <p className="mt-1 break-words fs-10.5 text-ink-3">
             {[
               `cutoff ${ev.backtest.cutoff ?? "—"}`,
               ev.backtest.range.from && ev.backtest.range.to ? `${ev.backtest.range.from} to ${ev.backtest.range.to}` : "",
@@ -481,11 +481,11 @@ export function ScanSection({ scan }: { scan: RuleScan | null }) {
       <p className="label-caps mb-1.5 text-ink-3">Last scan{scan ? ` · ${scan.kind}${scan.submit ? "" : " dry run"} · ${when(scan.at)}` : ""}</p>
       {scan ? (
         <>
-          <p className={`text-[12px] ${scan.status === "blocked" ? "text-amber-light" : "text-ink-2"}`}>
+          <p className={`fs-12 ${scan.status === "blocked" ? "text-amber-light" : "text-ink-2"}`}>
             {scan.status.replace("_", " ")}{scan.version != null ? ` · v${scan.version}` : ""}{scan.detail ? ` · ${scan.detail}` : ""}
           </p>
           {scan.rows.length > 0 && (
-            <ul className="mt-1 space-y-0.5 text-[11.5px]">
+            <ul className="mt-1 space-y-0.5 fs-11.5">
               {scan.rows.map((r) => {
                 const v = scanRowView(r); // a desk-refused row says so, in the alert tone, and its order line reads "not sent"
                 return (
@@ -521,29 +521,29 @@ function AnalystSection({ a }: { a: AnalystView }) {
       <summary className="label-caps cursor-pointer text-ink-3">
         After-hours analyst · {a.enabled ? "on" : "off"} · {a.runs.length} recent run{a.runs.length === 1 ? "" : "s"}
       </summary>
-      <p className="mt-1.5 text-[11px] text-ink-3">{a.window}{a.blocked ? ` · now: ${a.blocked}` : ""}. It can only file pending suggestions; it never sees the test set.</p>
+      <p className="mt-1.5 fs-11 text-ink-3">{a.window}{a.blocked ? ` · now: ${a.blocked}` : ""}. It can only file pending suggestions; it never sees the test set.</p>
       {a.runs.length ? (
         <ul className="mt-1.5 space-y-1.5">
           {a.runs.map((r) => (
-            <li key={r.runId} className="rounded-[12px] border border-white/[0.06]">
-              <button className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px]" onClick={() => setOpen((o) => (o === r.runId ? null : r.runId))} aria-expanded={open === r.runId}>
-                <span className="font-mono text-[11px] text-ink-3">{when(r.started)}</span>
+            <li key={r.runId} className="r-12 border border-white/[0.06]">
+              <button className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left fs-12" onClick={() => setOpen((o) => (o === r.runId ? null : r.runId))} aria-expanded={open === r.runId}>
+                <span className="font-mono fs-11 text-ink-3">{when(r.started)}</span>
                 <span className={r.status === "done" ? "text-teal-soft" : r.status === "error" ? "text-alert" : "text-ink-3"}>{r.status}</span>
                 <span className="min-w-0 truncate text-ink-3">{r.detail}</span>
                 <ChevronDown size={12} className={`ml-auto shrink-0 text-ink-3 transition-transform ${open === r.runId ? "rotate-180" : ""}`} />
               </button>
               {open === r.runId && (
-                <div className="space-y-1.5 border-t border-white/[0.04] px-2.5 py-2 text-[12px]">
+                <div className="space-y-1.5 border-t border-white/[0.04] px-2.5 py-2 fs-12">
                   {r.review && (
                     <div>
-                      <p className={`text-[10.5px] uppercase tracking-wide ${r.review.untrusted ? "text-amber-light" : "text-ink-3"}`}>Review{r.review.untrusted ? " · untrusted model text" : ""}</p>
+                      <p className={`fs-10.5 uppercase tracking-wide ${r.review.untrusted ? "text-amber-light" : "text-ink-3"}`}>Review{r.review.untrusted ? " · untrusted model text" : ""}</p>
                       <p className="whitespace-pre-wrap break-words text-ink-2">{r.review.summary}</p>
-                      {r.review.observations.length > 0 && <ul className="list-disc pl-4 text-[11.5px] text-ink-2">{r.review.observations.map((o, i) => <li key={i}>{o}</li>)}</ul>}
+                      {r.review.observations.length > 0 && <ul className="list-disc pl-4 fs-11.5 text-ink-2">{r.review.observations.map((o, i) => <li key={i}>{o}</li>)}</ul>}
                     </div>
                   )}
-                  {r.results?.length ? <p className="text-[11.5px] text-ink-2">Filed: {r.results.map((x) => diffText(x.diff)).join(" · ")}</p> : null}
-                  {r.suggestions?.errors.length ? <p className="text-[11px] text-alert">Refused: {r.suggestions.errors.join(" · ")}</p> : null}
-                  {r.modelS != null && <p className="font-mono text-[10.5px] text-ink-3">model {r.modelS.toFixed(0)} s{r.waitedS ? ` · waited ${r.waitedS.toFixed(0)} s for the GPU` : ""}</p>}
+                  {r.results?.length ? <p className="fs-11.5 text-ink-2">Filed: {r.results.map((x) => diffText(x.diff)).join(" · ")}</p> : null}
+                  {r.suggestions?.errors.length ? <p className="fs-11 text-alert">Refused: {r.suggestions.errors.join(" · ")}</p> : null}
+                  {r.modelS != null && <p className="font-mono fs-10.5 text-ink-3">model {r.modelS.toFixed(0)} s{r.waitedS ? ` · waited ${r.waitedS.toFixed(0)} s for the GPU` : ""}</p>}
                 </div>
               )}
             </li>
@@ -559,16 +559,16 @@ function AnalystSection({ a }: { a: AnalystView }) {
 /** Mounted only while the log is open, so it polls only then. */
 function LogList() {
   const { data, error } = usePoll<{ rows: AuditRow[] }>(() => engineRApi.log(100), 30_000);
-  if (error && !data) return <p className="mt-2 text-[12px] text-alert">Log unavailable ({error})</p>;
-  if (!data) return <p className="mt-2 text-[12px] text-ink-3">Loading…</p>;
+  if (error && !data) return <p className="mt-2 fs-12 text-alert">Log unavailable ({error})</p>;
+  if (!data) return <p className="mt-2 fs-12 text-ink-3">Loading…</p>;
   if (!data.rows.length) return <p className={`mt-2 ${empty}`}>Nothing logged yet.</p>;
   return (
-    <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto text-[11.5px]">
+    <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto fs-11.5">
       {data.rows.map((row) => {
         const l = logLine(row);
         return (
-          <li key={row.id} className="min-w-0 rounded-[8px] border border-white/[0.04] px-2 py-1" title={l.title || undefined}>
-            <p className="flex flex-wrap gap-x-2 font-mono text-[10.5px] text-ink-3">
+          <li key={row.id} className="min-w-0 r-8 border border-white/[0.04] px-2 py-1" title={l.title || undefined}>
+            <p className="flex flex-wrap gap-x-2 font-mono fs-10.5 text-ink-3">
               <span>#{row.id} {when(row.ts)}</span>
               <span className="text-ink-2">{row.kind}</span>
               <span>{row.verdict}</span>
@@ -576,7 +576,7 @@ function LogList() {
             </p>
             {l.text && (
               <p className="break-words text-ink-2">
-                {l.untrusted && <span className="mr-1 text-[10px] uppercase text-amber-light">untrusted ·</span>}
+                {l.untrusted && <span className="mr-1 fs-10 uppercase text-amber-light">untrusted ·</span>}
                 {l.text}
               </p>
             )}

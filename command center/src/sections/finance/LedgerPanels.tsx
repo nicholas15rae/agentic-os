@@ -15,7 +15,7 @@ import { ActingFields, emptyActing, type ActingValue } from "./ActingFields";
 import { AreaSelect, AreaTag, EditButton, EditFields, QuestionMark, SelectOther, type FieldSpec } from "./fields";
 import { bookIncome } from "./book";
 
-const small = "!h-9 !py-1 text-[13px]";
+const small = "!h-9 !py-1 fs-13";
 
 /** The HST rate an area charges: its profile rate once its HST number is confirmed, else 0. */
 export function areaTaxRate(area: string | undefined): number {
@@ -66,13 +66,13 @@ export function ChequesPanel() {
       </form>
       <ul className="space-y-1.5">
         {rows.map((c) => (
-          <li key={c.id} className="group flex flex-wrap items-center gap-3 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
-            <span className="font-mono text-[12px] text-ink-3">{new Date(c.receivedAt).toLocaleDateString()}</span>
+          <li key={c.id} className="group flex flex-wrap items-center gap-3 r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
+            <span className="font-mono fs-12 text-ink-3">{new Date(c.receivedAt).toLocaleDateString()}</span>
             <AreaTag area={c.area} onAssign={(area) => void update(c.id, { area })} />
             <span className="min-w-0 flex-1 truncate text-ink">
               {c.payer} <QuestionMark q={c.question} />
             </span>
-            {c.chequeNumber && <span className="font-mono text-[11px] text-ink-3">#{c.chequeNumber}</span>}
+            {c.chequeNumber && <span className="font-mono fs-11 text-ink-3">#{c.chequeNumber}</span>}
             <span className="font-mono text-ink tabular">{money(c.amount, currency)}</span>
             <label className="flex items-center gap-1.5 text-xs text-ink-2">
               <input type="checkbox" checked={c.deposited} onChange={(e) => void update(c.id, { deposited: e.target.checked, depositedAt: e.target.checked ? Date.now() : undefined })} className="accent-teal" />
@@ -170,18 +170,18 @@ export function IncomePanel() {
       </form>
       <ul className="space-y-1.5">
         {rows.map((i) => (
-          <li key={i.id} className="group flex flex-wrap items-center gap-3 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
-            <span className="font-mono text-[12px] text-ink-3">{i.date}</span>
+          <li key={i.id} className="group flex flex-wrap items-center gap-3 r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
+            <span className="font-mono fs-12 text-ink-3">{i.date}</span>
             <AreaTag area={i.area} onAssign={(area) => void patch(i, { area })} />
             <span className="min-w-0 flex-1 truncate text-ink">
               {i.client} <span className="text-ink-3">· {i.description || i.method}</span> <QuestionMark q={i.question} />
             </span>
             {i.agentId && (
-              <span className="text-[11px] text-ink-3">
+              <span className="fs-11 text-ink-3">
                 {i.union ? "union" : "non-union"} · {i.commissionOff ? "no commission" : `${i.commissionPct ?? 0}%`}
               </span>
             )}
-            <span className="font-mono text-[11px] text-ink-3">+{money(i.taxCollected, currency)} HST</span>
+            <span className="font-mono fs-11 text-ink-3">+{money(i.taxCollected, currency)} HST</span>
             <span className="font-mono text-teal-soft tabular">{money(i.amount, currency)}</span>
             {i.imageFileId && (
               <a href={cc.fileUrl(i.imageFileId)} target="_blank" rel="noreferrer" aria-label="View scan" className="text-ink-3 hover:text-teal">
@@ -257,11 +257,11 @@ export function GoalsPanel() {
           void add();
         }}
       >
-        <Input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder="Goal (Tax reserve, E46 build…)" className="!h-9 !py-1 text-[13px]" aria-label="Goal name" />
-        <Input inputMode="decimal" value={d.target} onChange={(e) => setD({ ...d, target: e.target.value })} placeholder="Target $" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Target" />
-        <Input inputMode="decimal" value={d.percent} onChange={(e) => setD({ ...d, percent: e.target.value })} placeholder="% income" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Percent of income" />
-        <Input inputMode="decimal" value={d.monthly} onChange={(e) => setD({ ...d, monthly: e.target.value })} placeholder="$ / month" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Monthly amount" />
-        <Input inputMode="numeric" value={d.day} onChange={(e) => setD({ ...d, day: e.target.value })} placeholder="Day" className="!h-9 !py-1 font-mono text-[13px]" aria-label="Reminder day of month" />
+        <Input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder="Goal (Tax reserve, E46 build…)" className="!h-9 !py-1 fs-13" aria-label="Goal name" />
+        <Input inputMode="decimal" value={d.target} onChange={(e) => setD({ ...d, target: e.target.value })} placeholder="Target $" className="!h-9 !py-1 font-mono fs-13" aria-label="Target" />
+        <Input inputMode="decimal" value={d.percent} onChange={(e) => setD({ ...d, percent: e.target.value })} placeholder="% income" className="!h-9 !py-1 font-mono fs-13" aria-label="Percent of income" />
+        <Input inputMode="decimal" value={d.monthly} onChange={(e) => setD({ ...d, monthly: e.target.value })} placeholder="$ / month" className="!h-9 !py-1 font-mono fs-13" aria-label="Monthly amount" />
+        <Input inputMode="numeric" value={d.day} onChange={(e) => setD({ ...d, day: e.target.value })} placeholder="Day" className="!h-9 !py-1 font-mono fs-13" aria-label="Reminder day of month" />
         <button className="pill-primary !h-9 text-xs">
           <Plus size={13} /> Goal
         </button>
@@ -270,7 +270,7 @@ export function GoalsPanel() {
         {items.map((g) => {
           const pct = g.target ? Math.min(100, (g.saved / g.target) * 100) : 0;
           return (
-            <li key={g.id} className="group rounded-[14px] border border-white/[0.07] bg-white/[0.02] p-3">
+            <li key={g.id} className="group r-14 border border-white/[0.07] bg-white/[0.02] p-3">
               <div className="flex items-center gap-2">
                 <PiggyBank size={15} style={{ color: g.color }} />
                 <span className="flex-1 truncate font-medium text-ink">{g.name}</span>
@@ -281,7 +281,7 @@ export function GoalsPanel() {
               <div className="well mt-2 h-2 overflow-hidden rounded-full">
                 <div className="h-full rounded-full transition-[width] duration-700" style={{ width: `${pct}%`, background: g.color }} />
               </div>
-              <div className="mt-1.5 flex items-center justify-between font-mono text-[12px] tabular">
+              <div className="mt-1.5 flex items-center justify-between font-mono fs-12 tabular">
                 <span className="text-ink">
                   {money(g.saved, currency)} <span className="text-ink-3">/ {money(g.target, currency)}</span>
                 </span>
@@ -312,7 +312,7 @@ function AddToGoal({ onAdd }: { onAdd: (n: number) => void }) {
         setV("");
       }}
     >
-      <Input inputMode="decimal" value={v} onChange={(e) => setV(e.target.value)} placeholder="+ / − amount" className="!h-8 !py-1 font-mono text-[12px]" aria-label="Adjust saved amount" />
+      <Input inputMode="decimal" value={v} onChange={(e) => setV(e.target.value)} placeholder="+ / − amount" className="!h-8 !py-1 font-mono fs-12" aria-label="Adjust saved amount" />
       <button className="pill-glass !h-8 shrink-0 text-xs">Update</button>
     </form>
   );

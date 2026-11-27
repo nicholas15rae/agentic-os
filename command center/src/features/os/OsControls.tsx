@@ -30,7 +30,7 @@ export function ComputeModeSwitch({ compact = false }: { compact?: boolean }) {
             aria-checked={on}
             title={`${m.label} — ${m.hint}`}
             onClick={() => !on && void patch({ compute: { mode: m.id } })}
-            className={`flex h-9 items-center gap-1.5 rounded-full px-3 font-mono text-[11px] font-semibold tracking-wider transition-colors ${
+            className={`flex h-9 items-center gap-1.5 rounded-full px-3 font-mono fs-11 font-semibold tracking-wider transition-colors ${
               on ? (m.id === "local" ? "bg-teal/20 text-teal" : m.id === "cloud" ? "bg-volt/15 text-volt" : "bg-amber/20 text-amber-light") : "text-ink-3 hover:text-ink"
             }`}
           >
@@ -75,6 +75,7 @@ export function KillSwitch() {
   const label = on ? "Lockdown" : armed ? killStageLabel(pressed) : "Kill switch";
   return (
     <button
+      {...safety("kill-switch")}
       role="switch"
       aria-checked={on}
       aria-label={on ? "Kill switch on (lockdown)" : armed ? `Kill switch: click to ${killStageLabel(pressed)}` : "Kill switch: click 3 times to engage"}
@@ -124,10 +125,10 @@ export function GlassOpacitySlider({ className = "" }: { className?: string }) {
   const v = useSettings((s) => s.glassOpacity);
   const set = useSettings((s) => s.set);
   return (
-    <label className={`pill-glass !h-9 shrink-0 gap-2 !px-3 text-[13px] ${className}`} title="Ultra-glass opacity — 0–5 % is a crystal-clear HUD over the wallpaper">
+    <label className={`pill-glass !h-9 shrink-0 gap-2 !px-3 fs-13 ${className}`} title="Ultra-glass opacity — 0–5 % is a crystal-clear HUD over the wallpaper">
       <span className="label-caps text-ink-3">Opacity</span>
       <input type="range" min={0} max={100} step={1} value={v} onChange={(e) => set({ glassOpacity: Number(e.target.value) })} className="w-24 accent-teal" aria-label="Ultra-glass opacity" />
-      <span className="w-9 text-right font-mono text-[11px] text-ink-2">{v}%</span>
+      <span className="w-9 text-right font-mono fs-11 text-ink-2">{v}%</span>
     </label>
   );
 }
@@ -139,6 +140,7 @@ import { cmd as cmd2, isTauri as isTauri2, onNativeEvent as onNativeEvent2, type
 import { useCueRun } from "@/features/cues/player";
 import { toggleGabagool } from "@/features/cues/cue-runtime";
 import { requestSettingsTab } from "@/sections/settings/settings-tab";
+import { safety } from "@/lib/safety";
 
 /** "ACTIVE GPU SLOT" — who holds the local GPU baton, and what's queued. */
 export function ActiveSlotPill() {
@@ -155,7 +157,7 @@ export function ActiveSlotPill() {
   const queued = v.queuedForeground + v.queuedBackground;
   return (
     <span
-      className={`glass-thin flex h-11 items-center gap-2 rounded-full px-3.5 font-mono text-[10px] tracking-wider ${busy ? "text-amber-light" : "text-ink-3"}`}
+      className={`glass-thin flex h-11 items-center gap-2 rounded-full px-3.5 font-mono fs-10 tracking-wider ${busy ? "text-amber-light" : "text-ink-3"}`}
       title={busy ? `GPU: ${v.active.join(", ")}${queued ? ` · queued: ${v.queuedForeground} Tony, ${v.queuedBackground} background` : ""}` : `GPU idle · ${v.capacity} slot${v.capacity === 1 ? "" : "s"}`}
     >
       <span className={`size-2 rounded-full ${busy ? "animate-pulse bg-amber" : "bg-teal/70"}`} />
@@ -178,7 +180,7 @@ export function DropletBadge() {
   if (!d || d.state === "disabled") return null;
   const tone = d.state === "connected" ? "text-teal" : d.state === "offline" ? "text-alert" : "text-amber-soft";
   return (
-    <span className={`glass-thin hidden h-11 items-center gap-1.5 rounded-full px-3.5 font-mono text-[10px] tracking-wider lg:flex ${tone}`} title={`${d.detail}${d.latencyMs ? ` · ${d.latencyMs}ms` : ""}`}>
+    <span className={`glass-thin hidden h-11 items-center gap-1.5 rounded-full px-3.5 font-mono fs-10 tracking-wider lg:flex ${tone}`} title={`${d.detail}${d.latencyMs ? ` · ${d.latencyMs}ms` : ""}`}>
       <Cloud size={13} /> DROPLET: {d.state.toUpperCase()}
     </span>
   );
@@ -192,7 +194,7 @@ export function GabagoolPill() {
       onClick={toggleGabagool}
       aria-pressed={!!running}
       title={running ? `Stop “${running}”` : "Enter Gabagool Mode"}
-      className={`flex h-11 items-center gap-1.5 rounded-full px-3.5 font-mono text-[10px] font-semibold tracking-wider transition-colors ${running ? "bg-amber/90 text-canvas glow-amber" : "glass-thin text-ink-2 hover:text-ink"}`}
+      className={`flex h-11 items-center gap-1.5 rounded-full px-3.5 font-mono fs-10 font-semibold tracking-wider transition-colors ${running ? "bg-amber/90 text-canvas glow-amber" : "glass-thin text-ink-2 hover:text-ink"}`}
     >
       🍝 <span className="hidden 2xl:inline">{running ? "GABAGOOL ON" : "GABAGOOL MODE"}</span>
     </button>

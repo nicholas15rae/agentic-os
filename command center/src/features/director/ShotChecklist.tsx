@@ -18,7 +18,7 @@ export function ShotChecklistView({ slots, onToggle, onCopy, onPrint }: { slots:
   return (
     <div className="shot-print" data-testid="shot-print">
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <p className="mr-auto text-[14px] text-ink-2" role="status">
+        <p className="mr-auto fs-14 text-ink-2" role="status">
           {done} of {slots.length} filmed
         </p>
         {onCopy && (
@@ -43,19 +43,19 @@ export function ShotChecklistView({ slots, onToggle, onCopy, onPrint }: { slots:
                 aria-checked={s.filmed}
                 aria-label={`Filmed: ${s.label}`}
                 onClick={() => onToggle(s.id)}
-                className={`flex min-h-[64px] w-full items-start gap-3 rounded-[16px] border px-3 py-3 text-left transition-colors ${s.filmed ? "border-teal/50 bg-teal/10" : "border-white/15 bg-white/[0.02]"}`}
+                className={`flex min-h-[64px] w-full items-start gap-3 r-16 border px-3 py-3 text-left transition-colors ${s.filmed ? "border-teal/50 bg-teal/10" : "border-white/15 bg-white/[0.02]"}`}
               >
                 <span className={`mt-0.5 grid size-9 shrink-0 place-items-center rounded-full border-2 ${s.filmed ? "border-teal bg-teal text-black" : "border-white/30"}`}>{s.filmed && <Check size={18} />}</span>
                 <span className="min-w-0 flex-1">
-                  <span className={`block text-[17px] font-semibold leading-snug ${s.filmed ? "text-ink-2 line-through" : "text-ink"}`}>
+                  <span className={`block fs-17 font-semibold leading-snug ${s.filmed ? "text-ink-2 line-through" : "text-ink"}`}>
                     {i + 1}. {s.label}
                   </span>
-                  {(s.framing || s.targetSec != null) && <span className="mt-0.5 block text-[13px] font-medium text-amber-soft">{[framingLabel(s.framing), s.targetSec != null ? `${s.targetSec}s` : ""].filter(Boolean).join(" · ")}</span>}
-                  {what && <span className="mt-1 block text-[15px] leading-snug text-ink-2">{what}</span>}
+                  {(s.framing || s.targetSec != null) && <span className="mt-0.5 block fs-13 font-medium text-amber-soft">{[framingLabel(s.framing), s.targetSec != null ? `${s.targetSec}s` : ""].filter(Boolean).join(" · ")}</span>}
+                  {what && <span className="mt-1 block fs-15 leading-snug text-ink-2">{what}</span>}
                   {s.phoneTips.length > 0 && (
                     <span className="mt-1 block space-y-0.5">
                       {s.phoneTips.map((t) => (
-                        <span key={t} className="block text-[13px] leading-snug text-ink-3">
+                        <span key={t} className="block fs-13 leading-snug text-ink-3">
                           · {t}
                         </span>
                       ))}

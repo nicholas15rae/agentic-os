@@ -14,7 +14,7 @@ export function Toasts() {
           <div
             key={t.id}
             role={t.tone === "alarm" ? "alertdialog" : "status"}
-            className={`glass pointer-events-auto flex w-[min(440px,100%)] items-start gap-3 rounded-[16px] p-3.5 animate-[toast-in_220ms_cubic-bezier(0.23,1,0.32,1)] ${
+            className={`glass pointer-events-auto flex w-[min(440px,100%)] items-start gap-3 r-16 p-3.5 animate-[toast-in_220ms_cubic-bezier(0.23,1,0.32,1)] ${
               t.tone === "alarm" ? "border-amber/60 glow-amber" : t.tone === "error" ? "border-alert/50" : t.tone === "warn" ? "border-amber/50" : ""
             }`}
           >

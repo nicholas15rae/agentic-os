@@ -68,7 +68,7 @@ export function FastCues({ cues, create, update, remove }: { cues: Item<CueWidge
   };
 
   return (
-    <section className="mt-4 rounded-[16px] border border-white/10 bg-white/[0.02] p-4" aria-label="Instant cues">
+    <section className="mt-4 r-16 border border-white/10 bg-white/[0.02] p-4" aria-label="Instant cues">
       <div className="mb-2 flex flex-wrap items-center gap-3">
         <span className="flex items-center gap-1.5 text-sm font-medium text-ink">
           <Zap size={13} /> Instant cues — answered without a model
@@ -131,7 +131,7 @@ export function FastCues({ cues, create, update, remove }: { cues: Item<CueWidge
       )}
       {err && <p className="mt-1 text-xs text-alert">{err}</p>}
       <div className="mt-2 flex items-center gap-2">
-        {check?.phrase && <span className="font-mono text-[11px] text-ink-3">matches “{check.phrase}”</span>}
+        {check?.phrase && <span className="font-mono fs-11 text-ink-3">matches “{check.phrase}”</span>}
         <button onClick={() => void add()} disabled={!check?.ok} className="pill-primary ml-auto !h-8 text-xs disabled:opacity-50">
           <Plus size={13} /> Make this a fast cue
         </button>
@@ -142,11 +142,11 @@ export function FastCues({ cues, create, update, remove }: { cues: Item<CueWidge
           {fastCues.map((c) => {
             const f = c.fast as FastCueSpec;
             return (
-              <li key={c.id} className={`flex flex-wrap items-center gap-2 rounded-[10px] border border-white/[0.06] px-3 py-1.5 text-sm ${c.enabled ? "" : "opacity-60"}`}>
+              <li key={c.id} className={`flex flex-wrap items-center gap-2 r-10 border border-white/[0.06] px-3 py-1.5 text-sm ${c.enabled ? "" : "opacity-60"}`}>
                 <button role="switch" aria-checked={c.enabled} aria-label={`Enable fast cue ${f.phrase}`} onClick={() => void update(c.id, { enabled: !c.enabled })} className={`relative h-4 w-7 shrink-0 rounded-full ${c.enabled ? "bg-teal/80" : "bg-white/15"}`}>
                   <span className={`absolute top-0.5 size-3 rounded-full bg-white transition-[left] ${c.enabled ? "left-[14px]" : "left-0.5"}`} />
                 </button>
-                <span className="font-mono text-[12px] text-ink">“{f.phrase}”</span>
+                <span className="font-mono fs-12 text-ink">“{f.phrase}”</span>
                 <span className="text-xs text-ink-3">→ {targetLabel(f.target)}</span>
                 {f.target === "reply" && f.reply && <span className="truncate text-xs text-ink-2">“{f.reply}”</span>}
                 <button onClick={() => confirm(`Delete the fast cue “${f.phrase}”?`) && void remove(c.id)} aria-label={`Delete fast cue ${f.phrase}`} className="pill-glass ml-auto !h-7 !w-7 !p-0 hover:!border-alert/50">

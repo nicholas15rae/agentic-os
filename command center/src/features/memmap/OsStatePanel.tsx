@@ -55,7 +55,7 @@ export function OsStatePanel({ className = "" }: { className?: string }) {
 
   return (
     <Panel title="OS backend architecture" className={`shrink-0 ${className}`} bodyClassName="!pt-2">
-      <p className="label-caps mb-1.5 !text-[9px] text-ink-3">Current OS state</p>
+      <p className="label-caps mb-1.5 !fs-9 text-ink-3">Current OS state</p>
       <div className="space-y-1.5">
         <Row k="Deployments" tone={deployTone} title={deployTip || why} v={sum && sum.servicesTotal ? `${sum.servicesUp}/${sum.servicesTotal} services up` : null} why={snap ? "No services configured" : why} />
         <Row
@@ -87,11 +87,11 @@ function Row({ k, v, why, tone, title, onClick }: { k: string; v: ReactNode | nu
       <span className="mt-[5px] flex">
         <Dot tone={tone} />
       </span>
-      <span className="label-caps mt-px shrink-0 !text-[9.5px] text-ink-3">{k}</span>
-      <span className="ml-auto min-w-0 text-right font-mono text-[10.5px] leading-tight text-ink tabular [overflow-wrap:anywhere]">{v == null || v === "" ? <Dash why={why} /> : v}</span>
+      <span className="label-caps mt-px shrink-0 !fs-9.5 text-ink-3">{k}</span>
+      <span className="ml-auto min-w-0 text-right font-mono fs-10.5 leading-tight text-ink tabular [overflow-wrap:anywhere]">{v == null || v === "" ? <Dash why={why} /> : v}</span>
     </>
   );
-  const cls = "flex w-full min-w-0 items-start gap-2 rounded-[8px] border border-white/[0.05] bg-white/[0.02] px-2 py-1.5";
+  const cls = "flex w-full min-w-0 items-start gap-2 r-8 border border-white/[0.05] bg-white/[0.02] px-2 py-1.5";
   return onClick ? (
     <button type="button" onClick={onClick} title={title} className={`${cls} text-left transition-colors hover:border-holo/40`}>
       {inner}
@@ -163,10 +163,10 @@ function OsSwitches() {
             : `On (hybrid): offload to the cloud when VRAM ≥ ${vram != null ? `${vram}%` : "the threshold"} or the context is heavy. Off: stay local.`
         }
         why={offline}
-        extra={vram != null && <span className="font-mono text-[9.5px] text-ink-3" title="VRAM threshold (read-only here; edit it in Settings → OS)">VRAM ≥ {vram}%</span>}
+        extra={vram != null && <span className="font-mono fs-9.5 text-ink-3" title="VRAM threshold (read-only here; edit it in Settings → OS)">VRAM ≥ {vram}%</span>}
       />
-      {desktop && blocked && <p className="rounded-[8px] border border-ember/30 bg-ember/10 px-2 py-1 font-mono text-[10px] text-ember">{blocked}</p>}
-      {desktop && cfg && error && <p className="rounded-[8px] border border-alert/30 bg-alert/10 px-2 py-1 font-mono text-[10px] text-alert">{error}</p>}
+      {desktop && blocked && <p className="r-8 border border-ember/30 bg-ember/10 px-2 py-1 font-mono fs-10 text-ember">{blocked}</p>}
+      {desktop && cfg && error && <p className="r-8 border border-alert/30 bg-alert/10 px-2 py-1 font-mono fs-10 text-alert">{error}</p>}
     </div>
   );
 }
@@ -207,10 +207,10 @@ function Switch({
       </button>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="label-caps !text-[9.5px] text-ink-2">{label}</span>
-          <span className={`ml-auto font-mono text-[10px] ${locked ? "text-alert" : on ? "text-holo" : "text-ember"}`}>{state ?? <Dash why={why ?? "Unavailable"} />}</span>
+          <span className="label-caps !fs-9.5 text-ink-2">{label}</span>
+          <span className={`ml-auto font-mono fs-10 ${locked ? "text-alert" : on ? "text-holo" : "text-ember"}`}>{state ?? <Dash why={why ?? "Unavailable"} />}</span>
         </div>
-        <p className="mt-0.5 text-[10.5px] leading-snug text-ink-3">{hint}</p>
+        <p className="mt-0.5 fs-10.5 leading-snug text-ink-3">{hint}</p>
         {extra}
       </div>
     </div>

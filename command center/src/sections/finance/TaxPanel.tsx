@@ -64,13 +64,13 @@ export function TaxPanel() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={year} onChange={(e) => setYear(e.target.value)} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Tax year">
+        <Select value={year} onChange={(e) => setYear(e.target.value)} className="!h-8 !w-auto !py-0 fs-12" aria-label="Tax year">
           {years.map((y) => (
             <option key={y}>{y}</option>
           ))}
           <option value="all">All years</option>
         </Select>
-        <span className="text-[11px] text-ink-3">{filter.area === "all" ? "All areas" : label(filter.area)} · estimates for planning, not tax advice: check with your accountant.</span>
+        <span className="fs-11 text-ink-3">{filter.area === "all" ? "All areas" : label(filter.area)} · estimates for planning, not tax advice: check with your accountant.</span>
         <button onClick={exportAccountant} className="pill-glass ml-auto !h-8 text-xs">
           <FileText size={13} /> Export for accountant
         </button>
@@ -87,7 +87,7 @@ export function TaxPanel() {
 
       <Card title="By area" hint="Expenses are before tax; mileage is km × your rate (an estimate). A record marked “question for accountant” is counted as entered; nothing here decides what's deductible.">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-[13px]">
+          <table className="w-full min-w-[760px] fs-13">
             <thead>
               <tr className="label-caps text-left text-ink-3 [&>th]:px-2 [&>th]:pb-2">
                 <th>Area</th>
@@ -149,7 +149,7 @@ function SmallSupplierCard({ ss, m }: { ss: ReturnType<typeof smallSupplier>; m:
   const tone = ss.level === "over" ? "border-alert/60 bg-alert/10" : ss.level === "near" ? "border-amber/50 bg-amber/10" : "border-white/[0.07]";
   return (
     <Card title="Small-supplier threshold">
-      <div className={`rounded-[14px] border p-3 ${tone}`}>
+      <div className={`r-14 border p-3 ${tone}`}>
         <div className="flex flex-wrap items-baseline gap-2">
           {ss.level !== "ok" && <AlertTriangle size={14} className={ss.level === "over" ? "text-alert" : "text-amber"} />}
           <span className="font-mono text-lg tabular text-ink">{m(ss.total)}</span>
@@ -160,8 +160,8 @@ function SmallSupplierCard({ ss, m }: { ss: ReturnType<typeof smallSupplier>; m:
         <div className="well mt-2 h-2 overflow-hidden rounded-full">
           <div className={`h-full rounded-full ${ss.level === "over" ? "bg-alert" : ss.level === "near" ? "bg-amber" : "bg-teal"}`} style={{ width: `${Math.min(100, ss.pct)}%` }} />
         </div>
-        <p className="mt-2 font-mono text-[11px] text-ink-3">{ss.quarters.map((q) => `${q.key}: ${m(q.revenue)}`).join(" · ")}</p>
-        <p className="mt-1 text-[12px] text-ink-2">
+        <p className="mt-2 font-mono fs-11 text-ink-3">{ss.quarters.map((q) => `${q.key}: ${m(q.revenue)}`).join(" · ")}</p>
+        <p className="mt-1 fs-12 text-ink-2">
           {ss.level === "over"
             ? "You're over $30,000: you likely have to register for HST and start charging it. Talk to your accountant now."
             : ss.level === "near"
@@ -227,7 +227,7 @@ function HstReturn({ areaIds, income, receipts }: { areaIds: string[]; income: I
             {p}
           </Chip>
         ))}
-        <Select value={k} onChange={(e) => setKey(e.target.value)} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Reporting period">
+        <Select value={k} onChange={(e) => setKey(e.target.value)} className="!h-8 !w-auto !py-0 fs-12" aria-label="Reporting period">
           {(keys.length ? keys : [k]).map((x) => (
             <option key={x}>{x}</option>
           ))}
@@ -239,7 +239,7 @@ function HstReturn({ areaIds, income, receipts }: { areaIds: string[]; income: I
         <Stat label={t.net >= 0 ? "Net owing" : "Net refund"} value={m(Math.abs(t.net))} tone={t.net > 0 ? "amber" : "teal"} />
       </div>
       {Object.keys(t.byCategory).length > 0 && (
-        <p className="mb-2 font-mono text-[11px] text-ink-3">
+        <p className="mb-2 font-mono fs-11 text-ink-3">
           {Object.entries(t.byCategory)
             .map(([c, v]) => `${c}: ${m(v.hst)}`)
             .join(" · ")}
@@ -247,10 +247,10 @@ function HstReturn({ areaIds, income, receipts }: { areaIds: string[]; income: I
       )}
       <ul className="space-y-1">
         {shown.map((l) => (
-          <li key={`${l.collection}:${l.id}`} className={`flex items-center gap-3 rounded-[10px] px-2 py-1 text-[13px] ${l.inReturn ? "" : "opacity-50"}`}>
+          <li key={`${l.collection}:${l.id}`} className={`flex items-center gap-3 r-10 px-2 py-1 fs-13 ${l.inReturn ? "" : "opacity-50"}`}>
             <input type="checkbox" checked={l.inReturn} onChange={(e) => void toggle(l, e.target.checked)} className="accent-teal" aria-label={`Include ${l.who} in the return`} />
-            <span className="font-mono text-[12px] text-ink-3">{l.date}</span>
-            <span className={`text-[11px] ${l.kind === "sale" ? "text-teal" : "text-amber-light"}`}>{l.kind === "sale" ? "sale" : "purchase"}</span>
+            <span className="font-mono fs-12 text-ink-3">{l.date}</span>
+            <span className={`fs-11 ${l.kind === "sale" ? "text-teal" : "text-amber-light"}`}>{l.kind === "sale" ? "sale" : "purchase"}</span>
             <span className="min-w-0 flex-1 truncate text-ink">
               {l.who} <span className="text-ink-3">· {l.category}</span>
             </span>
@@ -270,7 +270,7 @@ function QboExport({ income, receipts, commissions, invoices }: { income: Income
   return (
     <Card title="QuickBooks Online export" hint="CSV files you upload in QuickBooks yourself (Banking → Upload from file; Sales → Import invoices). There's no QuickBooks connection. Pick the same date format QuickBooks asks for.">
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={fmt} onChange={(e) => setFmt(e.target.value as QboDateFormat)} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Date format">
+        <Select value={fmt} onChange={(e) => setFmt(e.target.value as QboDateFormat)} className="!h-8 !w-auto !py-0 fs-12" aria-label="Date format">
           <option value="MM/DD/YYYY">MM/DD/YYYY</option>
           <option value="DD/MM/YYYY">DD/MM/YYYY</option>
         </Select>
@@ -283,7 +283,7 @@ function QboExport({ income, receipts, commissions, invoices }: { income: Income
         <button className="pill-glass !h-8 text-xs" disabled={!invoices.length} onClick={() => downloadText("qbo-invoices.csv", qboInvoicesCsv(invoices, fmt))}>
           <Download size={13} /> Invoices
         </button>
-        <span className="text-[11px] text-ink-3">
+        <span className="fs-11 text-ink-3">
           {lines.length} transactions · {invoices.length} invoices (following the filters above)
         </span>
       </div>

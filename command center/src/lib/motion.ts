@@ -29,10 +29,13 @@ export interface MotionInputs {
   idleMs: number;
   /** Settings → Appearance → "Calm when idle". Off = never calm. */
   calmWhenIdle: boolean;
+  /** Settings → Appearance → Motion: reduced caps at calm, off stops every loop. */
+  pref?: "full" | "reduced" | "off";
 }
 
 export function resolveMotion(i: MotionInputs): MotionLevel {
-  if (!i.visible) return "off";
+  if (!i.visible || i.pref === "off") return "off";
+  if (i.pref === "reduced") return "calm";
   if (i.calmWhenIdle && (!i.focused || i.idleMs >= IDLE_MS)) return "calm";
   return "full";
 }
@@ -78,6 +81,9 @@ export interface MotionEnv {
   clearTimer(id: unknown): void;
   calmWhenIdle(): boolean;
   onCalmSetting(fn: () => void): Off;
+  /** Settings → Appearance → Motion, and a subscription to its changes. */
+  motionPref?(): "full" | "reduced" | "off";
+  onMotionPref?(fn: () => void): Off;
   /** Desktop shell: window shown / hidden (`window-visibility`) and focus changes. */
   onNativeVisibility?(fn: (visible: boolean) => void): Off;
   onNativeFocus?(fn: (focused: boolean) => void): Off;
@@ -105,7 +111,7 @@ export function installMotionWatcher(env: MotionEnv): Off {
     if (timer !== undefined) env.clearTimer(timer);
     timer = undefined;
     const idleMs = env.now() - lastInput;
-    const next = resolveMotion({ visible: nativeVisible && !env.isHidden(), focused: focused(), idleMs, calmWhenIdle: env.calmWhenIdle() });
+    const next = resolveMotion({ visible: nativeVisible && !env.isHidden(), focused: focused(), idleMs, calmWhenIdle: env.calmWhenIdle(), pref: env.motionPref?.() });
     setMotionLevel(next);
     if (env.root) env.root.dataset.motion = next;
     // Full and calm-capable: wake up when the idle window could run out.
@@ -133,6 +139,7 @@ export function installMotionWatcher(env: MotionEnv): Off {
   };
   offs.push(env.onWin("focus", refocus), env.onWin("blur", refocus));
   offs.push(env.onCalmSetting(recompute));
+  if (env.onMotionPref) offs.push(env.onMotionPref(recompute));
   if (env.onNativeVisibility)
     offs.push(env.onNativeVisibility((v) => {
       nativeVisible = v;
@@ -296,7 +303,7 @@ export const SWEEP_MS = 2_000;
 // ── Browser wiring ──────────────────────────────────────────────────────────
 
 /** Install once at startup (main.tsx). Desktop: also follows the Rust window events. */
-export function installBrowserMotionWatcher(opts: { calmWhenIdle(): boolean; onCalmSetting(fn: () => void): Off; isTauri: boolean }): Off {
+export function installBrowserMotionWatcher(opts: { calmWhenIdle(): boolean; onCalmSetting(fn: () => void): Off; motionPref?(): "full" | "reduced" | "off"; onMotionPref?(fn: () => void): Off; isTauri: boolean }): Off {
   const nativeSubs: ((visible: boolean) => void)[] = [];
   const focusSubs: ((focused: boolean) => void)[] = [];
   const pending: Promise<Off>[] = [];
@@ -320,6 +327,8 @@ export function installBrowserMotionWatcher(opts: { calmWhenIdle(): boolean; onC
     clearTimer: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
     calmWhenIdle: opts.calmWhenIdle,
     onCalmSetting: opts.onCalmSetting,
+    motionPref: opts.motionPref,
+    onMotionPref: opts.onMotionPref,
     root: document.documentElement,
     ...(opts.isTauri
       ? {

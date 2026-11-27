@@ -52,11 +52,11 @@ export function ReviewPanelView(p: ReviewPanelViewProps) {
       title="Review"
       action={
         round ? (
-          <span className={`rounded-full border px-2 text-[11px] ${ROUND_TONE[round.status]}`} title="Two review rounds: your notes get one revision, then the Director lists what's still open">
+          <span className={`rounded-full border px-2 fs-11 ${ROUND_TONE[round.status]}`} title="Two review rounds: your notes get one revision, then the Director lists what's still open">
             Round {round.round} of 2 · {round.status}
           </span>
         ) : (
-          <span className="text-[11px] text-ink-3">No verified render yet</span>
+          <span className="fs-11 text-ink-3">No verified render yet</span>
         )
       }
     >
@@ -65,20 +65,20 @@ export function ReviewPanelView(p: ReviewPanelViewProps) {
           {(p.review?.rounds ?? [])
             .filter((r) => r.summary.trim())
             .map((r) => (
-              <div key={r.round} className="rounded-[12px] border border-white/[0.08] bg-white/[0.02] p-2">
+              <div key={r.round} className="r-12 border border-white/[0.08] bg-white/[0.02] p-2">
                 <p className="label-caps text-ink-3">Director · round {r.round}</p>
-                <p className="mt-0.5 whitespace-pre-wrap text-[12px] leading-snug text-ink-2">{r.summary}</p>
+                <p className="mt-0.5 whitespace-pre-wrap fs-12 leading-snug text-ink-2">{r.summary}</p>
               </div>
             ))}
         </div>
       )}
 
       {p.revision && (
-        <div className="mb-3 rounded-[12px] border border-amber/50 bg-amber/10 p-2.5" role="group" aria-label="Waiting revision">
-          <p className="text-[12px] text-ink">
+        <div className="mb-3 r-12 border border-amber/50 bg-amber/10 p-2.5" role="group" aria-label="Waiting revision">
+          <p className="fs-12 text-ink">
             Round {p.revision.round} revision ready. It answers {p.revision.resolves.length} note{p.revision.resolves.length === 1 ? "" : "s"}; they resolve when you approve its render.
           </p>
-          {p.revision.summary && <p className="mt-1 text-[12px] text-ink-2">{p.revision.summary}</p>}
+          {p.revision.summary && <p className="mt-1 fs-12 text-ink-2">{p.revision.summary}</p>}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {p.hasPlan ? (
               <button onClick={p.onApproveRevision} disabled={p.planBusy || !p.renderReady} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50" title={p.renderReady ? "Approve the plan and render it on the CPU" : "Rendering needs media-forge ready and ffmpeg found"}>
@@ -103,7 +103,7 @@ export function ReviewPanelView(p: ReviewPanelViewProps) {
           void add();
         }}
       >
-        <input value={text} onChange={(e) => setText(e.target.value)} maxLength={2000} placeholder={p.placement.renderId ? `Note on ${p.renderName(p.placement.renderId)}${where}` : `Note on the timeline${where}`} className="field !h-9 !py-0 text-[12px]" aria-label="New review note" />
+        <input value={text} onChange={(e) => setText(e.target.value)} maxLength={2000} placeholder={p.placement.renderId ? `Note on ${p.renderName(p.placement.renderId)}${where}` : `Note on the timeline${where}`} className="field !h-9 !py-0 fs-12" aria-label="New review note" />
         <button type="submit" disabled={!text.trim() || busy} className="pill-glass !h-9 shrink-0 !px-3 text-xs disabled:opacity-50" title={`Add the note${where || " (no time: nothing is playing)"}`}>
           {busy ? <Loader2 size={12} className="animate-spin" /> : <MessageSquarePlus size={12} />} Add note{where}
         </button>
@@ -112,13 +112,13 @@ export function ReviewPanelView(p: ReviewPanelViewProps) {
       {notes.length ? (
         <ul className="mt-2 space-y-1">
           {notes.map((n) => (
-            <li key={n.id} className={`flex items-start gap-2 rounded-[10px] px-1.5 py-1 ${n.resolved ? "opacity-55" : "hover:bg-white/[0.03]"}`}>
-              <button onClick={() => p.onSeek(n)} disabled={n.atSec == null} className="w-[62px] shrink-0 text-left font-mono text-[11px] text-teal-soft hover:underline disabled:text-ink-3 disabled:no-underline" title={n.atSec == null ? "No time on this note" : "Play from here"}>
+            <li key={n.id} className={`flex items-start gap-2 r-10 px-1.5 py-1 ${n.resolved ? "opacity-55" : "hover:bg-white/[0.03]"}`}>
+              <button onClick={() => p.onSeek(n)} disabled={n.atSec == null} className="w-[62px] shrink-0 text-left font-mono fs-11 text-teal-soft hover:underline disabled:text-ink-3 disabled:no-underline" title={n.atSec == null ? "No time on this note" : "Play from here"}>
                 {n.atSec == null ? "—" : timecode(n.atSec)}
               </button>
               <div className="min-w-0 flex-1">
-                <p className={`text-[12px] leading-snug ${n.resolved ? "text-ink-3 line-through" : "text-ink"}`}>{n.text}</p>
-                <p className="text-[10px] text-ink-3">{n.renderId ? p.renderName(n.renderId) : "timeline"}</p>
+                <p className={`fs-12 leading-snug ${n.resolved ? "text-ink-3 line-through" : "text-ink"}`}>{n.text}</p>
+                <p className="fs-10 text-ink-3">{n.renderId ? p.renderName(n.renderId) : "timeline"}</p>
               </div>
               {!n.resolved && (
                 <button onClick={() => p.onResolve(n.id)} className="grid size-6 shrink-0 place-items-center rounded-full border border-white/10 text-ink-2 hover:text-teal" title="Resolve" aria-label={`Resolve note: ${n.text.slice(0, 40)}`}>
@@ -131,14 +131,14 @@ export function ReviewPanelView(p: ReviewPanelViewProps) {
       ) : (
         <Empty>No notes yet. Pause on a moment and add one.</Empty>
       )}
-      {notes.length > 0 && <p className="mt-1 text-[11px] text-ink-3">{open} open</p>}
+      {notes.length > 0 && <p className="mt-1 fs-11 text-ink-3">{open} open</p>}
 
       {p.openDecisions.length > 0 && (
-        <div className="mt-3 rounded-[12px] border border-white/[0.1] bg-white/[0.02] p-2.5">
+        <div className="mt-3 r-12 border border-white/[0.1] bg-white/[0.02] p-2.5">
           <p className="label-caps flex items-center gap-1 text-amber-soft">
             <TriangleAlert size={11} /> Open decisions{round && round.round >= 2 ? " after round 2" : ""}
           </p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[12px] text-ink-2">
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 fs-12 text-ink-2">
             {p.openDecisions.map((d) => (
               <li key={d}>{d}</li>
             ))}

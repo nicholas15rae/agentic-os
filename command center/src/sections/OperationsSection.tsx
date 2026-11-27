@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { useOperationsLayout } from "./operations/panels";
 import { Archive, Briefcase, ChevronDown, ChevronRight, Plus, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
-import { Card, Empty, Field, Input, Stat, SubTabs, money } from "@/components/ui";
+import { Card, Empty, Field, Input, Stat, money } from "@/components/ui";
 import { gated } from "@/features/bridge/gate";
 import { useToasts } from "@/features/reminders/notify";
 import { ocmd } from "@/features/ops/api";
@@ -18,7 +21,7 @@ import { isTauri } from "@/lib/platform";
 
 type Tab = "businesses" | "review" | "audit" | "settings";
 
-/** One plain line per tab, shown under the tabs. */
+/** One plain line per block (the old tabs), shown at the top of its panel. */
 const TAB_HELP: Record<Tab, string> = {
   businesses: "Each business you run, kept apart: its own notes, workspace and books. Tony routes a request to the one it names.",
   review: "Things waiting for your yes: notes flagged for mentioning another business, empty or half-written files, and purges. Nothing is deleted until you approve it here.",
@@ -26,30 +29,64 @@ const TAB_HELP: Record<Tab, string> = {
   settings: "When you hear about the Review Queue: a daily digest at your hour (or sooner when it piles up), and optionally a counts-only alert to a webhook.",
 };
 
-/** Operations: the business registry, the HITL review queue, the audit trail and digest settings. */
+/**
+ * Operations: the business registry, the HITL review queue, the audit trail and digest settings,
+ * as panels on the shared layout system (move, resize, hide, add back, per mode, Reset to default).
+ */
 export function OperationsSection() {
-  const [tab, setTab] = useState<Tab>("businesses");
-  const pending = useOps((s) => s.review?.pending ?? 0);
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "businesses", label: "Businesses" },
-    { id: "review", label: pending ? `Review Queue · ${pending}` : "Review Queue" },
-    { id: "audit", label: "Audit" },
-    { id: "settings", label: "Digest & alerts" },
-  ];
   useEffect(() => {
     void useOps.getState().refresh();
     void useOps.getState().refreshReview();
   }, []);
+  return <LayoutSurface store={useOperationsLayout} label="Operations" />;
+}
+
+/** A panel body: the block's help line, then the block (desktop app only). */
+function Block({ tab, children }: { tab: Tab; children: React.ReactNode }) {
   return (
-    <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <SubTabs tabs={tabs} value={tab} onChange={setTab} />
-      <p className="-mt-2 text-[12px] text-ink-3">{TAB_HELP[tab]}</p>
-      {!isTauri() && <Empty>Operations runs on the desktop app.</Empty>}
-      {isTauri() && tab === "businesses" && <Businesses />}
-      {isTauri() && tab === "review" && <ReviewQueue />}
-      {isTauri() && tab === "audit" && <Audit />}
-      {isTauri() && tab === "settings" && <DigestSettings />}
+    <div className="space-y-4">
+      <p className="fs-12 text-ink-3">{TAB_HELP[tab]}</p>
+      {isTauri() ? children : <Empty>Operations runs on the desktop app.</Empty>}
     </div>
+  );
+}
+
+/** Browser / phone: the page's notice. */
+export function OpsDesktopNotice() {
+  return <Empty>Operations runs on the desktop app.</Empty>;
+}
+
+export function OpsBusinesses() {
+  return (
+    <Block tab="businesses">
+      <Businesses />
+    </Block>
+  );
+}
+
+export function OpsReview({ markSeen = true }: { markSeen?: boolean } = {}) {
+  return (
+    <Block tab="review">
+      <div data-no-hold>
+        <ReviewQueue markSeen={markSeen} />
+      </div>
+    </Block>
+  );
+}
+
+export function OpsAudit() {
+  return (
+    <Block tab="audit">
+      <Audit />
+    </Block>
+  );
+}
+
+export function OpsDigest() {
+  return (
+    <Block tab="settings">
+      <DigestSettings />
+    </Block>
   );
 }
 
@@ -69,7 +106,7 @@ function Businesses() {
   };
   const now = useNow(60_000);
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-no-hold>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         <Stat label="Businesses" value={businesses.length} sub={`${active} active`} tone="teal" />
         <Stat label="Isolation" value="Per business" sub="workspace · memory · ledger" />
@@ -84,7 +121,8 @@ function Businesses() {
       {businesses.map((b) => (
         <BusinessCard key={b.businessId} b={b} inputs={inputs} now={now} />
       ))}
-      {adding && <AddBusinessModal onClose={() => setAdding(false)} />}
+      {/* Portaled: the panel may sit in a glass frame, a window or a zoomed cell. */}
+      {adding && createPortal(<AddBusinessModal onClose={() => setAdding(false)} />, document.body)}
     </div>
   );
 }
@@ -149,7 +187,7 @@ function BusinessCard({ b, inputs, now }: { b: Business; inputs: CardInputs; now
         <>
           <span className={`label-caps ${tone}`}>{provisionLabel(b)}</span>
           {b.status === "provisioning" && (
-            <button onClick={provision} disabled={busy} className="flex items-center gap-1 text-[12px] text-ink-2 hover:text-ink disabled:opacity-40">
+            <button onClick={provision} disabled={busy} className="flex items-center gap-1 fs-12 text-ink-2 hover:text-ink disabled:opacity-40">
               <RefreshCw size={12} /> Finish setup
             </button>
           )}
@@ -158,7 +196,7 @@ function BusinessCard({ b, inputs, now }: { b: Business; inputs: CardInputs; now
               <Archive size={14} />
             </button>
           ) : (
-            <button onClick={unarchive} disabled={busy} className="text-[12px] text-ink-2 hover:text-ink">
+            <button onClick={unarchive} disabled={busy} className="fs-12 text-ink-2 hover:text-ink">
               Restore
             </button>
           )}
@@ -168,7 +206,7 @@ function BusinessCard({ b, inputs, now }: { b: Business; inputs: CardInputs; now
       {(b.description || b.category) && (
         <p className="mb-3 text-sm text-ink-2">
           {b.description}
-          {b.category && <span className="ml-2 rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-3">{b.category}</span>}
+          {b.category && <span className="ml-2 rounded-full border border-white/10 px-2 py-0.5 fs-10 uppercase tracking-wider text-ink-3">{b.category}</span>}
         </p>
       )}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
@@ -182,22 +220,22 @@ function BusinessCard({ b, inputs, now }: { b: Business; inputs: CardInputs; now
           hint={stats.nextDeadline.at === null ? stats.nextDeadline.hint : stats.nextDeadline.what}
         />
       </div>
-      <p className="mt-2 text-[11px] text-ink-3">Mail: {mail.map((e) => (e.address ? (e.label ? `${e.label} <${e.address}>` : e.address) : "the main account")).join(", ")}</p>
-      {b.provision.lastError && b.status === "provisioning" && <p className="mt-3 rounded-[10px] border border-alert/30 bg-alert/10 px-3 py-2 text-[12px] text-alert">{b.provision.lastError}</p>}
+      <p className="mt-2 fs-11 text-ink-3">Mail: {mail.map((e) => (e.address ? (e.label ? `${e.label} <${e.address}>` : e.address) : "the main account")).join(", ")}</p>
+      {b.provision.lastError && b.status === "provisioning" && <p className="mt-3 r-10 border border-alert/30 bg-alert/10 px-3 py-2 fs-12 text-alert">{b.provision.lastError}</p>}
       {!editing ? (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           {b.aliases.map((a) => (
-            <span key={a} className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-ink-2">
+            <span key={a} className="rounded-full border border-white/10 px-2 py-0.5 fs-11 text-ink-2">
               {a}
             </span>
           ))}
-          <span className="text-[11px] text-ink-3">· {b.crossDomainBlocklist.length} protected client / vendor names</span>
+          <span className="fs-11 text-ink-3">· {b.crossDomainBlocklist.length} protected client / vendor names</span>
           <button
             onClick={() => {
               setForm(draftOf(b));
               setEditing(true);
             }}
-            className="ml-auto text-[12px] text-amber-light hover:underline"
+            className="ml-auto fs-12 text-amber-light hover:underline"
           >
             Edit
           </button>
@@ -217,26 +255,26 @@ function BusinessCard({ b, inputs, now }: { b: Business; inputs: CardInputs; now
             <Input value={form.aliases} onChange={(e) => setForm({ ...form, aliases: e.target.value })} />
           </Field>
           <Field label="Email accounts (one per line; empty = the main account)">
-            <textarea value={form.emails} onChange={(e) => setForm({ ...form, emails: e.target.value })} rows={2} placeholder="Born Fortuna <orders@example.com>" className="field resize-none font-mono text-[12px]" />
+            <textarea value={form.emails} onChange={(e) => setForm({ ...form, emails: e.target.value })} rows={2} placeholder="Born Fortuna <orders@example.com>" className="field resize-none font-mono fs-12" />
           </Field>
           <Field label="Its clients, vendors, products (one per line)" className="sm:col-span-2">
             <textarea value={form.blocklist} onChange={(e) => setForm({ ...form, blocklist: e.target.value })} rows={3} className="field resize-none" />
           </Field>
           <div className="flex justify-end gap-2 sm:col-span-2">
-            <button onClick={() => setEditing(false)} className="h-9 rounded-full px-3 text-[12px] text-ink-2">
+            <button onClick={() => setEditing(false)} className="h-9 rounded-full px-3 fs-12 text-ink-2">
               Cancel
             </button>
-            <button onClick={save} disabled={busy || !form.displayName.trim()} className="h-9 rounded-full bg-amber px-4 text-[12px] font-semibold text-canvas disabled:opacity-40">
+            <button onClick={save} disabled={busy || !form.displayName.trim()} className="h-9 rounded-full bg-amber px-4 fs-12 font-semibold text-canvas disabled:opacity-40">
               Save
             </button>
           </div>
         </div>
       )}
-      <button onClick={() => setAdvanced((a) => !a)} className="mt-3 flex items-center gap-1 text-[11px] text-ink-3 hover:text-ink-2" aria-expanded={advanced}>
+      <button onClick={() => setAdvanced((a) => !a)} className="mt-3 flex items-center gap-1 fs-11 text-ink-3 hover:text-ink-2" aria-expanded={advanced}>
         {advanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Advanced
       </button>
       {advanced && (
-        <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1.5 text-[12px] sm:grid-cols-2">
+        <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1.5 fs-12 sm:grid-cols-2">
           <Row k="Business id" v={b.businessId} />
           <Row k="Workspace / RAG" v={b.workspaceSlug} />
           <Row k="Ledger tag" v={b.financeLedgerTag} />
@@ -254,10 +292,10 @@ function draftOf(b: Business) {
 
 function KeyNumber({ label, value, hint }: { label: string; value: React.ReactNode; hint: string }) {
   return (
-    <div className="rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2" title={hint}>
-      <p className="text-[10px] uppercase tracking-wider text-ink-3">{label}</p>
+    <div className="r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2" title={hint}>
+      <p className="fs-10 uppercase tracking-wider text-ink-3">{label}</p>
       <p className="mt-0.5 truncate font-mono text-sm text-ink tabular">{value}</p>
-      {value === "—" && <p className="truncate text-[10px] text-ink-3">{hint}</p>}
+      {value === "—" && <p className="truncate fs-10 text-ink-3">{hint}</p>}
     </div>
   );
 }
@@ -297,12 +335,12 @@ function Audit() {
         <StatusTile ok={!integrity?.failClosed} title={integrity?.failClosed ? "Rules integrity: halted" : "Rules integrity: verified"} detail={integrity?.failClosed ?? `${integrity?.files.length ?? 0} rules files match the copies built into the app`} />
         <StatusTile ok={!!audit?.chain.ok} title={audit?.chain.ok ? "Audit chain: intact" : "Audit chain: broken"} detail={audit?.chain.ok ? `${audit.chain.rows} rows, each linked to the one before` : (audit?.chain.error ?? "…")} />
       </div>
-      <Card title="Audit trail" hint="Append-only. Every flag, quarantine, purge, restore, hand-off and webhook digest." action={<button onClick={() => void load()} className="text-[12px] text-ink-3 hover:text-ink">Refresh</button>}>
+      <Card title="Audit trail" hint="Append-only. Every flag, quarantine, purge, restore, hand-off and webhook digest." action={<button onClick={() => void load()} className="fs-12 text-ink-3 hover:text-ink">Refresh</button>}>
         {!audit?.rows.length ? (
           <Empty>No audit entries yet.</Empty>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-[12px]">
+          <div className="overflow-x-auto" data-no-hold>
+            <table className="w-full text-left fs-12">
               <thead className="label-caps text-ink-3">
                 <tr>
                   <th className="py-1.5 pr-3">#</th>
@@ -337,11 +375,11 @@ function Audit() {
 
 function StatusTile({ ok, title, detail }: { ok: boolean; title: string; detail: string }) {
   return (
-    <div className={`flex items-start gap-3 rounded-[16px] border p-4 ${ok ? "border-teal/25 bg-teal/[0.05]" : "border-alert/40 bg-alert/10"}`}>
+    <div className={`flex items-start gap-3 r-16 border p-4 ${ok ? "border-teal/25 bg-teal/[0.05]" : "border-alert/40 bg-alert/10"}`}>
       {ok ? <ShieldCheck size={18} className="mt-0.5 shrink-0 text-teal" /> : <ShieldAlert size={18} className="mt-0.5 shrink-0 text-alert" />}
       <div className="min-w-0">
         <p className={`text-sm font-semibold ${ok ? "text-ink" : "text-alert"}`}>{title}</p>
-        <p className="mt-0.5 break-words text-[12px] text-ink-3">{detail}</p>
+        <p className="mt-0.5 break-words fs-12 text-ink-3">{detail}</p>
       </div>
     </div>
   );
@@ -403,10 +441,10 @@ function DigestSettings() {
                 <input type="checkbox" checked={cfg.webhookEnabled} onChange={(e) => void saveCfg({ webhookEnabled: e.target.checked })} />
                 Send digests to the webhook
               </label>
-              <button onClick={() => void act(() => ocmd("review_webhook_test"), "Test digest sent")} className="text-[12px] text-ink-2 hover:text-ink">
+              <button onClick={() => void act(() => ocmd("review_webhook_test"), "Test digest sent")} className="fs-12 text-ink-2 hover:text-ink">
                 Send a test
               </button>
-              <button onClick={() => void act(() => ocmd("review_webhook_clear"), "Webhook removed")} className="text-[12px] text-alert/80 hover:text-alert">
+              <button onClick={() => void act(() => ocmd("review_webhook_clear"), "Webhook removed")} className="fs-12 text-alert/80 hover:text-alert">
                 Remove
               </button>
             </div>

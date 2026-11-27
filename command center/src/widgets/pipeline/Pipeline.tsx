@@ -56,24 +56,24 @@ export default function Pipeline() {
         {active.map((i) => {
           const urgent = i.dueAt && i.dueAt - now < 86_400_000 && i.dueAt > now && i.status !== "booked";
           return (
-            <li key={i.id} className={`group rounded-[12px] border px-2.5 py-2 ${urgent ? "border-alert/50 bg-alert/[0.06]" : "border-white/[0.06] bg-white/[0.02]"}`}>
+            <li key={i.id} className={`group r-12 border px-2.5 py-2 ${urgent ? "border-alert/50 bg-alert/[0.06]" : "border-white/[0.06] bg-white/[0.02]"}`}>
               <div className="flex items-center gap-2">
                 <span className="label-caps shrink-0 text-ink-3">{i.kind}</span>
-                <p className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                <p className="min-w-0 flex-1 truncate fs-13 text-ink">
                   {i.title}
                   {i.role && <span className="text-ink-3"> · {i.role}</span>}
                 </p>
-                {i.dueAt && <span className={`shrink-0 font-mono text-[11px] tabular ${urgent ? "text-alert" : "text-ink-2"}`}>{i.dueAt > now ? countdown(i.dueAt, now) : "due"}</span>}
+                {i.dueAt && <span className={`shrink-0 font-mono fs-11 tabular ${urgent ? "text-alert" : "text-ink-2"}`}>{i.dueAt > now ? countdown(i.dueAt, now) : "due"}</span>}
               </div>
               <div className="mt-1.5 flex items-center gap-1.5">
                 <button
                   onClick={() => void update(i.id, { status: STATUSES[(STATUSES.indexOf(i.status) + 1) % STATUSES.length] })}
                   title="Advance status"
-                  className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${STATUS_TONE[i.status]}`}
+                  className={`rounded-full border px-2 py-0.5 font-mono fs-10 uppercase tracking-wider ${STATUS_TONE[i.status]}`}
                 >
                   {i.status}
                 </button>
-                {i.casting && <span className="truncate text-[11px] text-ink-3">{i.casting}</span>}
+                {i.casting && <span className="truncate fs-11 text-ink-3">{i.casting}</span>}
                 <ContactChip id={i.castingContactId} className="max-w-[45%]" />
                 <button aria-label={`Delete ${i.title}`} onClick={() => void remove(i.id)} className="ml-auto grid size-6 place-items-center rounded-full text-ink-3 opacity-100 hover:text-alert md:opacity-0 md:group-hover:opacity-100">
                   <Trash2 size={11} />
@@ -101,20 +101,20 @@ function AddForm({ onAdd }: { onAdd: (d: PipelineItem) => void }) {
         onAdd({ ...d, dueAt: Number.isNaN(dueAt) ? undefined : dueAt });
       }}
     >
-      <input className="field col-span-2 !h-8 !py-1 text-[13px]" placeholder="Production" value={d.title} onChange={(e) => setD({ ...d, title: e.target.value })} autoFocus aria-label="Production" />
-      <input className="field !h-8 !py-1 text-[13px]" placeholder="Role" value={d.role} onChange={(e) => setD({ ...d, role: e.target.value })} aria-label="Role" />
-      <Select className="!h-8 !py-1 text-[13px]" value={d.kind} onChange={(e) => setD({ ...d, kind: e.target.value as PipelineItem["kind"] })} aria-label="Type">
+      <input className="field col-span-2 !h-8 !py-1 fs-13" placeholder="Production" value={d.title} onChange={(e) => setD({ ...d, title: e.target.value })} autoFocus aria-label="Production" />
+      <input className="field !h-8 !py-1 fs-13" placeholder="Role" value={d.role} onChange={(e) => setD({ ...d, role: e.target.value })} aria-label="Role" />
+      <Select className="!h-8 !py-1 fs-13" value={d.kind} onChange={(e) => setD({ ...d, kind: e.target.value as PipelineItem["kind"] })} aria-label="Type">
         {["audition", "self-tape", "callback", "booking", "shoot"].map((k) => (
           <option key={k}>{k}</option>
         ))}
       </Select>
-      <input className="field !h-8 !py-1 text-[13px]" placeholder="Casting / agent" value={d.casting} onChange={(e) => setD({ ...d, casting: e.target.value })} aria-label="Casting" />
-      <input type="datetime-local" className="field !h-8 !py-1 text-[12px]" value={due} onChange={(e) => setDue(e.target.value)} aria-label="Deadline" />
+      <input className="field !h-8 !py-1 fs-13" placeholder="Casting / agent" value={d.casting} onChange={(e) => setD({ ...d, casting: e.target.value })} aria-label="Casting" />
+      <input type="datetime-local" className="field !h-8 !py-1 fs-12" value={due} onChange={(e) => setDue(e.target.value)} aria-label="Deadline" />
       <ContactSelect
         value={d.castingContactId}
         label="Casting contact (phone book)"
         none="Casting contact from the phone book…"
-        className="col-span-2 !h-8 !py-1 text-[12px]"
+        className="col-span-2 !h-8 !py-1 fs-12"
         onChange={(c) => setD({ ...d, castingContactId: c?.id, casting: d.casting || (c ? c.company || c.name : "") })}
       />
       <button className="pill-primary col-span-2 !h-8 text-xs">Add</button>

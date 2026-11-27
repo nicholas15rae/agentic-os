@@ -20,8 +20,8 @@ import { ContactChip, ContactSelect } from "@/features/contacts/ContactSelect";
 import { linkOrCreate } from "@/features/contacts/phonebook-store";
 import { areaTaxRate } from "./LedgerPanels";
 
-const small = "!h-9 !py-1 text-[13px]";
-const row = "group flex flex-wrap items-center gap-3 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm";
+const small = "!h-9 !py-1 fs-13";
+const row = "group flex flex-wrap items-center gap-3 r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm";
 const del = "text-ink-3 opacity-100 hover:text-alert md:opacity-0 md:group-hover:opacity-100";
 const defaultArea = (a: string) => (a !== "all" && a !== "untagged" ? a : "");
 
@@ -99,7 +99,7 @@ export function PendingPanel() {
         <button className="pill-primary !h-9 text-xs">
           <Plus size={13} /> Add
         </button>
-        <div className="col-span-full flex flex-wrap items-center gap-3 text-[12px] text-ink-2">
+        <div className="col-span-full flex flex-wrap items-center gap-3 fs-12 text-ink-2">
           <span className="flex min-w-[220px] items-center gap-1.5">
             From the phone book
             <ContactSelect
@@ -120,20 +120,20 @@ export function PendingPanel() {
           const late = !p.paid && p.date < localIso(Date.now());
           return (
             <li key={p.id} className={`${row} ${p.paid ? "opacity-60" : ""}`}>
-              <span className={`font-mono text-[12px] ${late ? "text-alert" : "text-ink-3"}`}>{p.date}</span>
+              <span className={`font-mono fs-12 ${late ? "text-alert" : "text-ink-3"}`}>{p.date}</span>
               <AreaTag area={p.area} onAssign={(area) => void update(p.id, { area })} />
               <span className="min-w-0 flex-1 truncate text-ink">
                 {p.who} {p.what && <span className="text-ink-3">· {p.what}</span>} <QuestionMark q={p.question} />
               </span>
               <ContactChip id={p.contactId} className="max-w-[180px]" />
               {p.phone && (
-                <a href={`tel:${p.phone.replace(/[^\d+]/g, "")}`} className="flex items-center gap-1 font-mono text-[11px] text-ink-3 hover:text-teal">
+                <a href={`tel:${p.phone.replace(/[^\d+]/g, "")}`} className="flex items-center gap-1 font-mono fs-11 text-ink-3 hover:text-teal">
                   <Phone size={11} /> {p.phone}
                 </a>
               )}
               <span className="font-mono text-ink tabular">{money(p.amount, currency)}</span>
               {p.paid ? (
-                <span className="text-[11px] text-teal">paid · in Income</span>
+                <span className="fs-11 text-teal">paid · in Income</span>
               ) : (
                 <button onClick={() => void markPaid(p)} disabled={busy === p.id} className="pill-glass !h-8 text-xs">
                   {busy === p.id ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />} Mark paid
@@ -146,7 +146,7 @@ export function PendingPanel() {
               {editing === p.id && (
                 <>
                   <EditFields spec={PENDING_FIELDS} value={p as unknown as Record<string, unknown>} onPatch={(x) => void update(p.id, x as Partial<Pending>)} onClose={() => setEditing(null)} />
-                  <span className="flex w-full items-center gap-1.5 text-[12px] text-ink-2">
+                  <span className="flex w-full items-center gap-1.5 fs-12 text-ink-2">
                     Phone-book contact
                     <ContactSelect value={p.contactId} className={`${small} min-w-0 max-w-xs flex-1`} onChange={(c) => void update(p.id, { contactId: c?.id ?? undefined })} />
                   </span>
@@ -187,10 +187,10 @@ export function CommissionsPanel() {
       <Card title="Owed to agents" hint="Every paid acting booking through an agent adds what you owe them. Mark it paid when you send it (or tick “agent already took it” when you log the booking).">
         <div className="grid gap-2 sm:grid-cols-3">
           {totals.map((t) => (
-            <div key={t.agentId} className="rounded-[14px] border border-white/[0.07] bg-white/[0.02] p-3">
+            <div key={t.agentId} className="r-14 border border-white/[0.07] bg-white/[0.02] p-3">
               <p className="truncate text-sm text-ink">{t.agentName}</p>
               <p className={`font-mono text-lg tabular ${t.owed > 0 ? "text-amber-light" : "text-teal-soft"}`}>{money(t.owed, currency)}</p>
-              <p className="text-[11px] text-ink-3">
+              <p className="fs-11 text-ink-3">
                 {t.unpaidCount} unpaid · {money(t.paid, currency)} paid so far
               </p>
             </div>
@@ -201,10 +201,10 @@ export function CommissionsPanel() {
       <Card
         title="Commissions"
         action={
-          <span className="flex items-center gap-1.5 text-[11px] text-ink-3">
+          <span className="flex items-center gap-1.5 fs-11 text-ink-3">
             Mark paid by
             <span className="w-36">
-              <SelectOther label="Paid by" value={method} options={["e-transfer", "cheque", "cash"]} onChange={setMethod} className="!h-8 !py-0 text-[12px]" />
+              <SelectOther label="Paid by" value={method} options={["e-transfer", "cheque", "cash"]} onChange={setMethod} className="!h-8 !py-0 fs-12" />
             </span>
           </span>
         }
@@ -212,13 +212,13 @@ export function CommissionsPanel() {
         <ul className="space-y-1.5">
           {rows.map((c) => (
             <li key={c.id} className={`${row} ${c.paid ? "opacity-60" : ""}`}>
-              <span className="font-mono text-[12px] text-ink-3">{c.date}</span>
+              <span className="font-mono fs-12 text-ink-3">{c.date}</span>
               <span className="min-w-0 flex-1 truncate text-ink">
                 {c.agentName} <span className="text-ink-3">· {c.client} · {c.pct}% of {money(c.gross, currency)}</span> <QuestionMark q={c.question} />
               </span>
               <span className="font-mono text-amber-light tabular">{money(c.amount, currency)}</span>
               {c.paid ? (
-                <button className="text-[11px] text-teal hover:text-ink" title="Mark unpaid" onClick={() => void update(c.id, { paid: false, paidAt: undefined, paidMethod: undefined })}>
+                <button className="fs-11 text-teal hover:text-ink" title="Mark unpaid" onClick={() => void update(c.id, { paid: false, paidAt: undefined, paidMethod: undefined })}>
                   paid · {c.paidMethod === "deducted" ? "agent kept it" : c.paidMethod}
                 </button>
               ) : (
@@ -296,8 +296,8 @@ export function ExpensesPanel() {
         {manual.length > 0 && (
           <ul className="mt-3 space-y-1">
             {manual.map((r) => (
-              <li key={r.id} className="flex items-center gap-3 text-[13px]">
-                <span className="font-mono text-[12px] text-ink-3">{r.date}</span>
+              <li key={r.id} className="flex items-center gap-3 fs-13">
+                <span className="font-mono fs-12 text-ink-3">{r.date}</span>
                 <AreaTag area={r.area} onAssign={(area) => void receipts.update(r.id, { area })} />
                 <span className="min-w-0 flex-1 truncate text-ink">
                   {r.vendor} <span className="text-ink-3">· {r.category}</span>
@@ -380,13 +380,13 @@ function MileageLog() {
               <MapPin size={12} /> Get distance from maps
             </button>
           )}
-          {routing && <span className="text-[11px] text-ink-3">{routing}</span>}
+          {routing && <span className="fs-11 text-ink-3">{routing}</span>}
         </div>
       </form>
       {totals.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
           {totals.map((t) => (
-            <span key={t.area} className="rounded-full border border-white/10 px-2.5 py-1 font-mono text-[11px] text-ink-2">
+            <span key={t.area} className="rounded-full border border-white/10 px-2.5 py-1 font-mono fs-11 text-ink-2">
               {label(t.area)}: {t.km} km · {money(t.value, currency)} (estimate)
             </span>
           ))}
@@ -395,13 +395,13 @@ function MileageLog() {
       <ul className="mt-3 space-y-1.5">
         {rows.map((t) => (
           <li key={t.id} className={row}>
-            <span className="font-mono text-[12px] text-ink-3">{t.date}</span>
+            <span className="font-mono fs-12 text-ink-3">{t.date}</span>
             <AreaTag area={t.area} onAssign={(area) => void update(t.id, { area })} />
             <span className="min-w-0 flex-1 truncate text-ink">
               {t.from} → {t.to}
               {t.roundTrip ? " and back" : ""} <span className="text-ink-3">· {t.purpose}</span> <QuestionMark q={t.question} />
             </span>
-            <span className="font-mono text-[12px] text-ink-2 tabular" title={t.kmSource === "maps" ? "From maps: an estimate" : "Typed in"}>
+            <span className="font-mono fs-12 text-ink-2 tabular" title={t.kmSource === "maps" ? "From maps: an estimate" : "Typed in"}>
               {t.km} km{t.kmSource === "maps" ? " ≈" : ""}
             </span>
             <span className="font-mono text-ink tabular">{money(mileageValue(t.km, rate), currency)}</span>

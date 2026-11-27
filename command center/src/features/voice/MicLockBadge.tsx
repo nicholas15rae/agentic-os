@@ -4,6 +4,7 @@ import { Lock, Mic, MicOff, Square } from "lucide-react";
 import { requestMicEnabled, useMic } from "./mic-gate";
 import { useVoice, type VoiceState } from "./voice-store";
 import { isMicOff, micIndicator, type MicIndicator } from "./mic-indicator";
+import { safety } from "@/lib/safety";
 
 /**
  * The mic's locked-off indicator (Phase 2 Part D). Solid, static red when the line is dead —
@@ -70,7 +71,7 @@ export function MicLockBadgeView({ kind, variant = "chip", flash = false, onTogg
       <span>{TEXT[kind]}</span>
     </>
   );
-  const base = `flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 font-mono text-[10px] font-bold tracking-wider ${CHIP_TONE[kind]} ${ring} ${className}`;
+  const base = `flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 font-mono fs-10 font-bold tracking-wider ${CHIP_TONE[kind]} ${ring} ${className}`;
   if (variant === "button") {
     const off = isMicOff(kind);
     return (
@@ -161,6 +162,7 @@ export function MicButtonView({ state, locked, size = 44, onClick }: { state: Vo
   const live = state === "listening" || state === "speaking";
   return (
     <button
+      {...safety("tony-stop")}
       type="button"
       aria-label={state === "listening" ? "Stop listening" : state === "speaking" ? "Stop speaking" : "Start listening"}
       onClick={onClick}

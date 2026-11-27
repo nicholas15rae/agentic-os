@@ -114,7 +114,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
     // Flex, not grid + place-items: an auto grid track grew to the card's max-w-sm (384px) and
     // pushed it off a 360px phone screen.
     <div className="flex h-dvh items-center justify-center overflow-y-auto bg-[#0b0d11] p-4" role="main" aria-label="Command Center locked">
-      <div className="glass w-full max-w-sm rounded-[22px] p-6 text-center">
+      <div className="glass w-full max-w-sm r-22 p-6 text-center">
         <div className={`mx-auto grid h-14 w-14 place-items-center rounded-full ${hard ? "bg-alert/20 text-alert" : "bg-teal/15 text-teal"}`}>
           {hard ? <ShieldAlert size={26} /> : <Lock size={24} />}
         </div>
@@ -125,7 +125,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
           <div className="mt-4 space-y-2 text-left text-xs leading-relaxed text-ink-2">
             {status.hardLockReason && <p className="text-ink-3">Reason: {status.hardLockReason}</p>}
             <p>Every session and token was revoked and trading execution is locked. This can't be undone from the app. In a terminal on this PC:</p>
-            <code className="block rounded-lg bg-black/40 px-3 py-2 font-mono text-[11px] text-amber-light">gabagool-cli clear-lock</code>
+            <code className="block rounded-lg bg-black/40 px-3 py-2 font-mono fs-11 text-amber-light">gabagool-cli clear-lock</code>
           </div>
         ) : !status.pinSet && (status.platform === "android" || status.platform === "ios") ? (
           <PinSetup minLength={status.pinMinLength} />
@@ -134,7 +134,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
             <p className="flex items-center gap-1.5 text-amber-soft">
               <Terminal size={13} /> No PIN set yet. In a terminal:
             </p>
-            <code className="block rounded-lg bg-black/40 px-3 py-2 font-mono text-[11px] text-amber-light">gabagool-cli init{"\n"}gabagool-cli set-pin</code>
+            <code className="block rounded-lg bg-black/40 px-3 py-2 font-mono fs-11 text-amber-light">gabagool-cli init{"\n"}gabagool-cli set-pin</code>
             <button className="pill-glass mt-2 w-full justify-center" onClick={() => void useSecurity.getState().refresh()}>
               Check again
             </button>
@@ -142,7 +142,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
         ) : (
           <>
             {s.needsSecondFactor || secondDone ? (
-              <ol className="mt-4 space-y-1 text-left text-[11px] text-ink-3">
+              <ol className="mt-4 space-y-1 text-left fs-11 text-ink-3">
                 <li className={secondDone ? "text-teal" : "text-ink-2"}>1 · {secondDone ? `Confirmed (${s.secondFactor})` : "Biometrics or your phone"}</li>
                 <li className={secondDone ? "text-ink-2" : ""}>2 · Your PIN</li>
               </ol>
@@ -156,11 +156,11 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
                   {waiting ? "Approve on your phone…" : "Log in with my phone"}
                 </button>
                 {waiting ? (
-                  <p className="text-[11px] text-ink-2">
+                  <p className="fs-11 text-ink-2">
                     On your phone, type <b className="font-mono text-base text-amber-light">{waiting.code}</b> and confirm with your fingerprint.
                   </p>
                 ) : (
-                  <p className="text-[11px] text-ink-3">Or use your PIN below.</p>
+                  <p className="fs-11 text-ink-3">Or use your PIN below.</p>
                 )}
               </div>
             )}
@@ -179,7 +179,7 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
                   </button>
                 )}
                 {needSecond && !status.biometricAvailable && !status.companionPaired && (
-                  <p className="text-[11px] text-ink-3">No biometrics or paired phone here: the PIN alone resumes (audited and alerted).</p>
+                  <p className="fs-11 text-ink-3">No biometrics or paired phone here: the PIN alone resumes (audited and alerted).</p>
                 )}
               </div>
             )}
@@ -209,11 +209,11 @@ export function LockScreen({ status }: { status: SecurityStatus }) {
                 {busy === "pin" ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
               </button>
             </form>
-            {lockoutLeft > 0 && <p className="mt-2 text-[11px] text-alert">Locked out — try again in {lockoutLeft}s.</p>}
+            {lockoutLeft > 0 && <p className="mt-2 fs-11 text-alert">Locked out — try again in {lockoutLeft}s.</p>}
           </>
         )}
-        {error && <p className="mt-3 text-[11px] text-alert" role="alert">{error}</p>}
-        <p className="mt-4 font-mono text-[10px] text-ink-3">{status.deviceId}</p>
+        {error && <p className="mt-3 fs-11 text-alert" role="alert">{error}</p>}
+        <p className="mt-4 font-mono fs-10 text-ink-3">{status.deviceId}</p>
       </div>
     </div>
   );
@@ -263,7 +263,7 @@ function PinSetup({ minLength }: { minLength: number }) {
       <p>Set a PIN for this phone ({minLength}+ digits). You'll use it with your fingerprint to approve desktop unlocks.</p>
       {field(a, setA, "New PIN")}
       {field(b, setB, "Repeat PIN")}
-      {error && <p className="text-[11px] text-alert">{error}</p>}
+      {error && <p className="fs-11 text-alert">{error}</p>}
       <button type="submit" className="pill-glass w-full justify-center" disabled={busy || !a || !b}>
         {busy ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />} Set PIN
       </button>

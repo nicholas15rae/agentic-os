@@ -51,10 +51,10 @@ export function slotFormPatch(f: SlotForm): SlotPatch {
 export function ShotSlotEditor({ slot, onSave, onCancel }: { slot: ShotSlot | null; onSave: (p: SlotPatch) => void; onCancel: () => void }) {
   const [f, setF] = useState<SlotForm>(() => toForm(slot));
   const set = <K extends keyof SlotForm>(k: K, v: SlotForm[K]) => setF((x) => ({ ...x, [k]: v }));
-  const cls = "field !h-8 !py-0 text-[12px]";
+  const cls = "field !h-8 !py-0 fs-12";
   return (
     <form
-      className="space-y-1.5 rounded-[14px] border border-teal/30 bg-teal/[0.04] p-2.5"
+      className="space-y-1.5 r-14 border border-teal/30 bg-teal/[0.04] p-2.5"
       aria-label={slot ? `Edit ${slot.label}` : "New shot"}
       onSubmit={(e) => {
         e.preventDefault();
@@ -63,12 +63,12 @@ export function ShotSlotEditor({ slot, onSave, onCancel }: { slot: ShotSlot | nu
     >
       <input autoFocus value={f.label} onChange={(e) => set("label", e.target.value)} placeholder="Label (e.g. 15s hook)" className={cls} aria-label="Shot label" />
       <div className="grid grid-cols-3 gap-1.5">
-        <Select value={f.kind} onChange={(e) => set("kind", e.target.value as MediaKind)} className="!h-8 !py-0 text-[12px]" aria-label="Media kind">
+        <Select value={f.kind} onChange={(e) => set("kind", e.target.value as MediaKind)} className="!h-8 !py-0 fs-12" aria-label="Media kind">
           <option value="video">video</option>
           <option value="image">image</option>
           <option value="audio">audio</option>
         </Select>
-        <Select value={f.framing} onChange={(e) => set("framing", e.target.value as Framing | "")} className="!h-8 !py-0 text-[12px]" aria-label="Framing">
+        <Select value={f.framing} onChange={(e) => set("framing", e.target.value as Framing | "")} className="!h-8 !py-0 fs-12" aria-label="Framing">
           <option value="">framing…</option>
           {FRAMINGS.map((x) => (
             <option key={x} value={x}>
@@ -80,19 +80,19 @@ export function ShotSlotEditor({ slot, onSave, onCancel }: { slot: ShotSlot | nu
       </div>
       <div className="flex gap-1" role="radiogroup" aria-label="Who supplies it">
         {SLOT_SOURCES.map((s) => (
-          <button key={s} type="button" role="radio" aria-checked={f.source === s} onClick={() => set("source", s)} className={`h-7 flex-1 rounded-full border text-[11px] ${f.source === s ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 text-ink-2"}`}>
+          <button key={s} type="button" role="radio" aria-checked={f.source === s} onClick={() => set("source", s)} className={`h-7 flex-1 rounded-full border fs-11 ${f.source === s ? "border-amber/60 bg-amber/15 text-ink" : "border-white/10 text-ink-2"}`}>
             {s}
           </button>
         ))}
       </div>
       <input value={f.action} onChange={(e) => set("action", e.target.value)} placeholder="Action: what happens in the shot" className={cls} aria-label="Action" />
-      <textarea value={f.instructions} onChange={(e) => set("instructions", e.target.value)} rows={2} placeholder="Notes for the shot" className="field min-h-[44px] resize-y text-[12px]" aria-label="Instructions" />
-      <textarea value={f.phoneTips} onChange={(e) => set("phoneTips", e.target.value)} rows={2} placeholder={`Phone tips, one per line (up to ${MAX_PHONE_TIPS})`} className="field min-h-[44px] resize-y text-[12px]" aria-label="Phone tips" />
+      <textarea value={f.instructions} onChange={(e) => set("instructions", e.target.value)} rows={2} placeholder="Notes for the shot" className="field min-h-[44px] resize-y fs-12" aria-label="Instructions" />
+      <textarea value={f.phoneTips} onChange={(e) => set("phoneTips", e.target.value)} rows={2} placeholder={`Phone tips, one per line (up to ${MAX_PHONE_TIPS})`} className="field min-h-[44px] resize-y fs-12" aria-label="Phone tips" />
       <div className="flex gap-1.5">
-        <button type="submit" className="pill-primary !h-7 !px-2.5 text-[11px]">
+        <button type="submit" className="pill-primary !h-7 !px-2.5 fs-11">
           <Check size={11} /> {slot ? "Save shot" : "Add shot"}
         </button>
-        <button type="button" onClick={onCancel} className="pill-glass !h-7 !px-2.5 text-[11px]">
+        <button type="button" onClick={onCancel} className="pill-glass !h-7 !px-2.5 fs-11">
           Cancel
         </button>
       </div>

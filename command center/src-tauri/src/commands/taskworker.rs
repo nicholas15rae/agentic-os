@@ -832,11 +832,12 @@ fn spec_digest(e: &Envelope) -> String {
 pub fn prompt_design(e: &Envelope, fixes: &[String]) -> String {
     let fix = if fixes.is_empty() { String::new() } else { format!("\nFix these issues from the last review:\n- {}\n", clip(&fixes.join("\n- "), FIX_IN)) };
     format!(
-        "{}\nTitle: {}\nSpec: {}\nLibrarian brief:\n{}\n{fix}Write the visual blueprint (NO HTML, NO code). Reply ONLY with JSON:\n{{\"design_artifacts\": {{\"layout_structure\": \"component tree and spatial flow\", \"design_tokens\": {{\"palette\": {{}}, \"typography\": {{}}, \"spacing_and_radii\": {{}}}}, \"components\": [{{\"name\": \"...\", \"purpose\": \"...\", \"states\": [\"default\", \"loading\", \"error\"], \"styling_notes\": \"concrete CSS guidance (plain CSS in one <style>, no CDN or framework)\"}}], \"motion_and_ux_notes\": \"...\", \"assumptions\": [\"...\"]}}, \"voice_summary\": \"...\"}}",
+        "{}\nTitle: {}\nSpec: {}\nLibrarian brief:\n{}\n{fix}{}Write the visual blueprint (NO HTML, NO code); a dashboard widget's design_tokens map onto the style kit's variables. Reply ONLY with JSON:\n{{\"design_artifacts\": {{\"layout_structure\": \"component tree and spatial flow\", \"design_tokens\": {{\"palette\": {{}}, \"typography\": {{}}, \"spacing_and_radii\": {{}}}}, \"components\": [{{\"name\": \"...\", \"purpose\": \"...\", \"states\": [\"default\", \"loading\", \"error\"], \"styling_notes\": \"concrete CSS guidance (plain CSS in one <style>, no CDN or framework)\"}}], \"motion_and_ux_notes\": \"...\", \"assumptions\": [\"...\"]}}, \"voice_summary\": \"...\"}}",
         header(e, "design"),
         e.title,
         spec_digest(e),
-        fence("librarian brief", &librarian_brief(e))
+        fence("librarian brief", &librarian_brief(e)),
+        style_kit(e)
     )
 }
 
@@ -855,6 +856,27 @@ pub fn prompt_merge(e: &Envelope, fixes: &[String]) -> String {
     )
 }
 
+/// The dashboard's style kit (Settings → Appearance tokens). Generated dashboard widgets style
+/// themselves only through these variables, so they follow Nic's theme live: the Command Center
+/// posts the current values into the widget's iframe (`SandboxFrame`). Keep the names and
+/// defaults in step with `styleKitVars` / `STYLE_KIT_DEFAULTS` in features/appearance/theme.ts
+/// (appearance.test.ts reads this constant).
+pub const STYLE_KIT: &str = "STYLE KIT (this widget sits on Nic's Command Center dashboard): style it ONLY through these CSS variables, declared with exactly these defaults in :root, so it follows his theme: --cc-accent: #ff7a2f; --cc-accent-2: #00e5c3; --cc-card: rgba(24, 28, 38, 0.62); --cc-text: #f8fafc; --cc-text-2: #a1a8b8; --cc-text-3: #5a6275; --cc-radius: 20px; --cc-font: ui-sans-serif, system-ui, sans-serif; --cc-font-scale: 1; --cc-border: rgba(255, 255, 255, 0.16); --cc-page: #10131a. Body background var(--cc-page) (the dashboard sets it transparent where the wallpaper shows through); panels use var(--cc-card) with a 1px var(--cc-border) border and var(--cc-radius) corners; buttons and highlights var(--cc-accent); text var(--cc-text) / --cc-text-2 / --cc-text-3; font-family var(--cc-font); every font-size calc(Npx * var(--cc-font-scale)). Include this script exactly, so theme changes reach the widget: <script>addEventListener('message',function(e){var d=e.data;if(d&&d.type==='cc-theme'&&d.vars)for(var k in d.vars)if(k.indexOf('--cc-')===0)document.documentElement.style.setProperty(k,String(d.vars[k]));});</script>";
+
+/// A Play Place dashboard-widget build (its contract says so). Pure.
+pub fn is_dashboard_widget(e: &Envelope) -> bool {
+    e.raw_intent.text.contains("BUILD CONTRACT (") && e.raw_intent.text.contains("- Target: INTERNAL WIDGET")
+}
+
+/// The style kit line for a dashboard widget's design / code prompts (empty otherwise). Pure.
+fn style_kit(e: &Envelope) -> String {
+    if is_dashboard_widget(e) {
+        format!("{STYLE_KIT}\n")
+    } else {
+        String::new()
+    }
+}
+
 const PROTOTYPE_RULES: &str = "ONE complete, self-contained HTML document that works offline: all CSS in one <style>, all JS in inline <script> (vanilla, no CDN, no <script src>, no <link> stylesheets or web fonts), realistic sample data, every control wired and actually updating the page, mobile-first, no external images. Every id the script looks up must exist in the markup. Wrap every localStorage access in try/catch so the page still starts when storage is blocked. No TODOs, no lorem ipsum. Keep it compact.";
 
 pub fn prompt_code(e: &Envelope, fixes: &[String]) -> String {
@@ -871,14 +893,15 @@ pub fn prompt_code(e: &Envelope, fixes: &[String]) -> String {
     let fix = if fix.is_empty() { String::new() } else { format!("\nMUST FIX from the last review:\n- {}\n", clip(&fix.join("\n- "), FIX_IN)) };
     let tokens = compact(&e.design_artifacts["design_tokens"], 1200);
     format!(
-        "{}\nBuild \"{}\" as index.html.\nNic's own words (the brief summarises them; where they disagree, follow his latest words):\n{}\n{}Build brief:\n{}\nMust include: {}\nDesign tokens: {tokens}\nAcceptance criteria: {}\n{fix}Rules: {PROTOTYPE_RULES}\nOutput: the whole file in ONE ```html fenced block, then a ```json block: {{\"known_issues\": [], \"voice_summary\": \"...\"}}",
+        "{}\nBuild \"{}\" as index.html.\nNic's own words (the brief summarises them; where they disagree, follow his latest words):\n{}\n{}Build brief:\n{}\nMust include: {}\nDesign tokens: {tokens}\nAcceptance criteria (every one must work; the first ones are Nic's own points and each is checked in a real browser): {}\n{fix}Rules: {PROTOTYPE_RULES}\n{}Output: the whole file in ONE ```html fenced block, then a ```json block: {{\"known_issues\": [], \"voice_summary\": \"...\"}}",
         header(e, "code"),
         e.title,
         intent_recap(e),
         literals_rule(e),
         clip(b["build_brief"].as_str().unwrap_or(""), CODER_BRIEF_IN),
         str_list(&b["must_include"], 16, 120).join(", "),
-        str_list(&e.prompt_spec["acceptance_criteria"], 10, 160).join("; "),
+        build_criteria(e).iter().map(|c| clip(c, 160)).collect::<Vec<_>>().join("; "),
+        style_kit(e),
     )
 }
 
@@ -887,14 +910,57 @@ pub fn prompt_audit(e: &Envelope, report: &Value, digest: &str) -> String {
         "{}\nTruth audit of the staged build (you read; you never change anything).\nRead-report from the system: {}\nAcceptance criteria: {}\nEarlier pre-flight brief:\n{}\nBuild digest:\n{}\nReply ONLY with JSON:\n{{\"read_only_confirmed\": true, \"retrieved_context\": [], \"value_add_brief\": \"what the Prompter should know before signing off, under 80 words\", \"discrepancies_flagged\": [{{\"severity\": \"info | warning | conflict\", \"detail\": \"...\", \"affected_agent\": \"prompter | designer | coder | tony\"}}], \"voice_summary\": \"...\"}}",
         header(e, "audit"),
         compact(report, 800),
-        str_list(&e.prompt_spec["acceptance_criteria"], 10, 160).join("; "),
+        build_criteria(e).iter().map(|c| clip(c, 160)).collect::<Vec<_>>().join("; "),
         fence("librarian brief", &librarian_brief(e)),
         fence("build digest", digest)
     )
 }
 
-/// What verify checks: the acceptance criteria (else the requirements, else Nic's request
-/// itself), then the intent checks pinned from Nic's own values (`quality::intent_checks`).
+/// The standing checks every hub contract lists; the smoke test proves them itself.
+const STANDING_CHECKS: [&str; 4] = ["Renders with no console errors", "No secrets, no calls to private hosts", "Runs inside a sandboxed iframe (no parent / top access)", "Opens on its own from app/index.html"];
+
+/// The points of Nic's brief a Play Place hub build pinned as acceptance criteria (its BUILD
+/// CONTRACT, `buildhub::contract_block`), minus the standing checks. Empty for any other task. Pure.
+pub fn contract_criteria(raw: &str) -> Vec<String> {
+    const LIST: &str = "- Acceptance criteria:\n";
+    let Some(start) = raw.find("BUILD CONTRACT (") else { return Vec::new() };
+    let rest = &raw[start..];
+    let Some(at) = rest.find(LIST) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for line in rest[at + LIST.len()..].lines() {
+        let Some(c) = line.strip_prefix("  - ") else { break };
+        let c = c.trim();
+        if c.is_empty() || STANDING_CHECKS.iter().any(|s| s.eq_ignore_ascii_case(c)) || out.iter().any(|o| o.eq_ignore_ascii_case(c)) {
+            continue;
+        }
+        out.push(c.chars().take(200).collect());
+    }
+    out.truncate(quality::MAX_CRITERIA);
+    out
+}
+
+/// The build's criteria: every point of Nic's brief first (each must be proven), then the spec's
+/// own acceptance criteria (else its requirements) while there is room. Pure.
+pub fn build_criteria(e: &Envelope) -> Vec<String> {
+    let mut c = contract_criteria(&e.raw_intent.text);
+    let mut spec = str_list(&e.prompt_spec["acceptance_criteria"], quality::MAX_CRITERIA, 200);
+    if spec.is_empty() {
+        spec = str_list(&e.prompt_spec["requirements"], quality::MAX_CRITERIA, 200);
+    }
+    for s in spec {
+        if c.len() >= quality::MAX_CRITERIA {
+            break;
+        }
+        if !c.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+            c.push(s);
+        }
+    }
+    c
+}
+
+/// What verify checks: every point of Nic's brief (a hub build's contract), then the spec's
+/// acceptance criteria (else its requirements, else Nic's request itself), then the intent checks
+/// pinned from Nic's own values (`quality::intent_checks`).
 pub fn verify_criteria(e: &Envelope) -> Vec<String> {
     verify_plan(e).0
 }
@@ -902,10 +968,7 @@ pub fn verify_criteria(e: &Envelope) -> Vec<String> {
 /// The numbered criteria and what each needs from its probe (behavioural → a probe that ran and
 /// passed; an intent check → its pinned value). Pure.
 pub fn verify_plan(e: &Envelope) -> (Vec<String>, Vec<quality::Need>) {
-    let mut c = str_list(&e.prompt_spec["acceptance_criteria"], quality::MAX_CRITERIA, 200);
-    if c.is_empty() {
-        c = str_list(&e.prompt_spec["requirements"], quality::MAX_CRITERIA, 200);
-    }
+    let mut c = build_criteria(e);
     if c.is_empty() {
         c.push("every feature, default and constraint in Nic's request works".into());
     }

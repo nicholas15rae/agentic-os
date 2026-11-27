@@ -115,8 +115,8 @@ describe("projects board", () => {
   it("board: five columns with counts, cards with a status chip", () => {
     const h = view();
     for (const s of Object.values(STATUS_LABEL)) expect(h).toContain(`aria-label="${s} column"`);
-    expect(h).toMatch(/Editing<\/span><span class="font-mono text-\[11px\] text-ink-3">2</);
-    expect(h).toMatch(/Brief<\/span><span class="font-mono text-\[11px\] text-ink-3">0</);
+    expect(h).toMatch(/Editing<\/span><span class="font-mono fs-11 text-ink-3">2</);
+    expect(h).toMatch(/Brief<\/span><span class="font-mono fs-11 text-ink-3">0</);
     expect(h).toContain('aria-label="Alpha reel status: Editing"');
     expect(h).toContain('aria-haspopup="menu"');
     expect(h).toContain("7d ago");

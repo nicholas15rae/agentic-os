@@ -10,7 +10,7 @@ import { newAreaId, UNTAGGED } from "@/features/finance/areas";
 import { useAreas } from "@/features/finance/filter-store";
 
 const OTHER = "__other__";
-const small = "!h-9 !py-1 text-[13px]";
+const small = "!h-9 !py-1 fs-13";
 
 /** A dropdown whose last choice is "Other…": pick it and type your own value. */
 export function SelectOther({
@@ -116,14 +116,14 @@ export function AreaTag({ area, onAssign }: { area?: string; onAssign: (a: strin
   if (open) return <AreaSelect value={undefined} onChange={(a) => {
           setOpen(false);
           onAssign(a);
-        }} className="!h-7 !w-36 !py-0 text-[12px]" />;
+        }} className="!h-7 !w-36 !py-0 fs-12" />;
   const untagged = !area || area === UNTAGGED;
   return (
     <button
       type="button"
       onClick={() => setOpen(true)}
       title={untagged ? "Assign an area" : "Change area"}
-      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${untagged ? "border-amber/50 text-amber-light" : "border-white/10 text-ink-3 hover:text-ink"}`}
+      className={`shrink-0 rounded-full border px-2 py-0.5 fs-10 uppercase tracking-wider ${untagged ? "border-amber/50 text-amber-light" : "border-white/10 text-ink-3 hover:text-ink"}`}
     >
       {untagged ? "Untagged · assign" : label(area)}
     </button>
@@ -139,11 +139,11 @@ export type FieldSpec =
 /** Every field of a record, editable in place; each change saves on its own (blur / pick). */
 export function EditFields({ spec, value, onPatch, onClose }: { spec: readonly FieldSpec[]; value: Record<string, unknown>; onPatch: (patch: Record<string, unknown>) => void; onClose: () => void }) {
   return (
-    <div className="mt-2 w-full rounded-[12px] border border-amber/25 bg-amber/[0.04] p-2.5">
+    <div className="mt-2 w-full r-12 border border-amber/25 bg-amber/[0.04] p-2.5">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {spec.map((f) => (
           <label key={f.key} className="block min-w-0 space-y-1">
-            <span className="label-caps text-[10px] text-ink-3">{f.label}</span>
+            <span className="label-caps fs-10 text-ink-3">{f.label}</span>
             <FieldInput f={f} v={value[f.key]} onPatch={onPatch} />
           </label>
         ))}

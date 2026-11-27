@@ -16,8 +16,8 @@ const base = (p: string) => p.split(/[\\/]/).pop() ?? p;
 export function FinalApprovalBar({ count, confirming, busy, onConfirm, onAsk, onCancel }: { count: number; confirming: boolean; busy: boolean; onConfirm: () => void; onAsk: () => void; onCancel: () => void }) {
   if (confirming)
     return (
-      <div className="mt-2 rounded-[12px] border border-teal/40 bg-teal/[0.06] p-2.5" role="alertdialog" aria-label="Confirm final approval">
-        <p className="text-[12px] text-ink">
+      <div className="mt-2 r-12 border border-teal/40 bg-teal/[0.06] p-2.5" role="alertdialog" aria-label="Confirm final approval">
+        <p className="fs-12 text-ink">
           Approve {count} render{count === 1 ? "" : "s"} as final? They're copied to renders/final/ and the project is marked done.
         </p>
         <div className="mt-2 flex gap-1.5">
@@ -32,7 +32,7 @@ export function FinalApprovalBar({ count, confirming, busy, onConfirm, onAsk, on
     );
   return (
     <div className="mt-2 flex items-center gap-1.5">
-      <span className="text-[11px] text-ink-2">{count ? `${count} selected` : "Tick the renders that are final"}</span>
+      <span className="fs-11 text-ink-2">{count ? `${count} selected` : "Tick the renders that are final"}</span>
       <button onClick={onAsk} disabled={!count} className="pill-primary ml-auto !h-8 !px-3 text-xs disabled:opacity-50">
         <BadgeCheck size={12} /> Approve final
       </button>
@@ -104,7 +104,7 @@ export function VerifiedShelf() {
             const on = previewMode === "final" && (selection?.kind === "render" ? selection.id === r.id : i === 0);
             const ticked = picked.includes(r.id);
             return (
-              <li key={r.id} className={`rounded-[12px] border p-2 ${on ? "border-teal/40 bg-teal/5" : "border-white/[0.08]"}`}>
+              <li key={r.id} className={`r-12 border p-2 ${on ? "border-teal/40 bg-teal/5" : "border-white/[0.08]"}`}>
                 <div className="flex items-center gap-2">
                   {picking && (
                     <input
@@ -117,17 +117,17 @@ export function VerifiedShelf() {
                     />
                   )}
                   <button onClick={() => select({ kind: "render", id: r.id })} className="min-w-0 flex-1 text-left" title={r.verify.checks.join("\n")}>
-                    <p className="flex items-center gap-1 truncate text-[13px] text-ink">
+                    <p className="flex items-center gap-1 truncate fs-13 text-ink">
                       <ShieldCheck size={12} className="shrink-0 text-teal" /> {base(r.path)}
                     </p>
-                    <p className="font-mono text-[10px] text-ink-3">
+                    <p className="font-mono fs-10 text-ink-3">
                       {timecode(r.durationSec)} · {r.width}×{r.height} · {mb(r.sizeBytes)}
                       {r.loudnessLufs != null ? ` · ${r.loudnessLufs.toFixed(1)} LUFS` : ""}
                     </p>
                   </button>
                   <button
                     onClick={() => void api.reveal({ path: r.path }).catch((e) => useToasts.getState().push({ title: "Couldn't open the folder", body: String(e), tone: "error" }))}
-                    className="pill-glass !h-7 !px-2 shrink-0 text-[11px]"
+                    className="pill-glass !h-7 !px-2 shrink-0 fs-11"
                     title="Open folder"
                   >
                     <FolderOpen size={11} /> Open folder

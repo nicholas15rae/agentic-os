@@ -33,7 +33,7 @@ export function LearnView({ compact = false }: { compact?: boolean }) {
 
   return (
     <div className="space-y-3">
-      <section className="glass space-y-3 rounded-[20px] p-3 md:p-4" aria-label="Language track">
+      <section className="glass space-y-3 r-20 p-3 md:p-4" aria-label="Language track">
         <div className="flex flex-wrap items-center gap-2">
           <GraduationCap size={16} className="text-amber-light" />
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="Your tracks">
@@ -47,7 +47,7 @@ export function LearnView({ compact = false }: { compact?: boolean }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Segmented<Level> label="Level" value={track.level} options={LEVELS.map((l) => ({ id: l.id, label: l.label }))} onChange={(level) => bumpTrack(lang, { level })} size="sm" />
-          <span className="font-mono text-[11px] text-ink-3">
+          <span className="font-mono fs-11 text-ink-3">
             {track.got} got it · {track.again} review · {track.lessons} lessons
           </span>
         </div>
@@ -134,7 +134,7 @@ function Coach({ lang, level, compact }: { lang: string; level: Level; compact: 
   heardRef.current = heard;
 
   return (
-    <section className="glass flex flex-col rounded-[20px] p-3 md:p-4" aria-label="Conversational coach">
+    <section className="glass flex flex-col r-20 p-3 md:p-4" aria-label="Conversational coach">
       <div className="mb-2 flex items-center gap-2">
         <h2 className="label-caps text-amber-soft">Coach · {langName(lang)}</h2>
         {msgs.length > 0 && (
@@ -151,7 +151,7 @@ function Coach({ lang, level, compact }: { lang: string; level: Level; compact: 
         )}
         {msgs.map((m) => (m.role === "user" ? <LearnerLine key={m.key} m={m} lang={lang} /> : <TutorLine key={m.key} m={m} lang={lang} />))}
         {busy && (
-          <p role="status" className="flex items-center gap-2 px-1 text-[13px] text-ink-3">
+          <p role="status" className="flex items-center gap-2 px-1 fs-13 text-ink-3">
             <Loader2 size={13} className="animate-spin" /> Coach is thinking…
           </p>
         )}
@@ -192,15 +192,15 @@ function LearnerLine({ m, lang }: { m: TutorMsg; lang: string }) {
   const [saved, setSaved] = useState(false);
   const note = m.reply?.coach_note;
   return (
-    <div className="ml-auto max-w-[88%] rounded-[16px] rounded-br-[6px] bg-amber/10 p-3">
-      <p className="text-[14px] text-ink">{m.text}</p>
+    <div className="ml-auto max-w-[88%] r-16 rounded-br-[6px] bg-amber/10 p-3">
+      <p className="fs-14 text-ink">{m.text}</p>
       {note && (
         <div className="mt-1.5">
-          <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-amber-light">
+          <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex items-center gap-1 fs-11 font-semibold uppercase tracking-wider text-amber-light">
             Coach note <ChevronDown size={12} className={`transition-transform ${open ? "rotate-180" : ""}`} />
           </button>
           {open && (
-            <dl className="mt-1.5 space-y-1 text-[12.5px] text-ink-2">
+            <dl className="mt-1.5 space-y-1 fs-12.5 text-ink-2">
               {note.corrections && <Row k="Corrections" v={note.corrections} />}
               {note.better_phrasing && (
                 <div className="flex items-start gap-2">
@@ -240,10 +240,10 @@ function TutorLine({ m, lang }: { m: TutorMsg; lang: string }) {
   const [saved, setSaved] = useState(false);
   const saveEntry = useHub((s) => s.saveEntry);
   return (
-    <div className="max-w-[92%] rounded-[16px] rounded-bl-[6px] border border-white/[0.06] bg-white/[0.03] p-3">
-      <p className="text-[15px] font-medium leading-snug text-ink">{r.reply}</p>
-      {r.reply_phonetic && <p className="mt-0.5 font-mono text-[12px] text-amber-soft">{r.reply_phonetic}</p>}
-      {showEn && r.reply_english && <p className="mt-1 text-[13px] text-ink-2">{r.reply_english}</p>}
+    <div className="max-w-[92%] r-16 rounded-bl-[6px] border border-white/[0.06] bg-white/[0.03] p-3">
+      <p className="fs-15 font-medium leading-snug text-ink">{r.reply}</p>
+      {r.reply_phonetic && <p className="mt-0.5 font-mono fs-12 text-amber-soft">{r.reply_phonetic}</p>}
+      {showEn && r.reply_english && <p className="mt-1 fs-13 text-ink-2">{r.reply_english}</p>}
       <div className="mt-2 flex items-center gap-1.5">
         <PlayButton text={r.reply} lang={lang} />
         <button type="button" onClick={() => setShowEn((s) => !s)} aria-pressed={showEn} className="pill-glass !h-8 text-xs" title="Show the English meaning">
@@ -300,7 +300,7 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
   if (deck.length) return <Flashcards cards={deck} onDone={() => setDeck([])} onComplete={deckSource === "daily" ? () => markDailyDone() : undefined} />;
 
   return (
-    <section className="glass space-y-3 rounded-[20px] p-3 md:p-4" aria-label="Drills">
+    <section className="glass space-y-3 r-20 p-3 md:p-4" aria-label="Drills">
       <div className="flex flex-wrap gap-1.5" role="group" aria-label="Lesson type">
         {LESSON_KINDS.map((k) => (
           <Chip key={k.id} active={kind === k.id} onClick={() => setKind(k.id)} tone={k.id === "library" ? "teal" : "amber"}>
@@ -311,7 +311,7 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
       {kind !== "library" ? (
         <Input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder={LESSON_KINDS.find((k) => k.id === kind)?.hint} aria-label="Lesson topic" className="!h-10" />
       ) : (
-        <p className="text-[12px] text-ink-3">{saved.length ? `${saved.length} saved ${langName(lang)} phrase${saved.length === 1 ? "" : "s"} to build from.` : `Nothing saved in ${langName(lang)} yet — save phrases from Translate or the coach first.`}</p>
+        <p className="fs-12 text-ink-3">{saved.length ? `${saved.length} saved ${langName(lang)} phrase${saved.length === 1 ? "" : "s"} to build from.` : `Nothing saved in ${langName(lang)} yet — save phrases from Translate or the coach first.`}</p>
       )}
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={() => void generate()} disabled={busy || (kind === "library" && !saved.length)} className="pill-primary !h-10 text-sm disabled:opacity-40">
@@ -320,7 +320,7 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
         {saved.length > 0 && (
           <button type="button" onClick={() => setDeck(libraryDeck(flashcardOrder(saved, Date.now(), 20)))} className="pill-glass !h-10 text-sm" title="Due cards first (spaced repetition)">
             <Layers size={14} /> Flashcards from Library
-            {due > 0 && <span className="font-mono text-[11px] text-teal-light">{due} due</span>}
+            {due > 0 && <span className="font-mono fs-11 text-teal-light">{due} due</span>}
           </button>
         )}
       </div>
@@ -328,7 +328,7 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
       {lesson && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <h3 className="text-[15px] font-semibold text-ink">{lesson.title}</h3>
+            <h3 className="fs-15 font-semibold text-ink">{lesson.title}</h3>
             <button
               type="button"
               className="pill-glass ml-auto !h-8 text-xs"
@@ -339,12 +339,12 @@ function Drills({ lang, level }: { lang: string; level: Level }) {
           </div>
           <ul className="space-y-1.5">
             {lesson.items.map((i, n) => (
-              <li key={n} className="flex items-start gap-2 rounded-[14px] border border-white/[0.06] bg-white/[0.02] p-2.5">
+              <li key={n} className="flex items-start gap-2 r-14 border border-white/[0.06] bg-white/[0.02] p-2.5">
                 <div className="min-w-0 flex-1">
-                  <p className="text-[15px] font-medium text-ink">{i.target}</p>
-                  {i.phonetic && <p className="font-mono text-[11.5px] text-amber-soft">{i.phonetic}</p>}
-                  <p className="text-[12.5px] text-ink-2">{i.english}</p>
-                  {i.note && <p className="text-[11.5px] text-ink-3">{i.note}</p>}
+                  <p className="fs-15 font-medium text-ink">{i.target}</p>
+                  {i.phonetic && <p className="font-mono fs-11.5 text-amber-soft">{i.phonetic}</p>}
+                  <p className="fs-12.5 text-ink-2">{i.english}</p>
+                  {i.note && <p className="fs-11.5 text-ink-3">{i.note}</p>}
                 </div>
                 <PlayButton text={i.target} lang={lang} />
                 <SaveButton
@@ -394,7 +394,7 @@ function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone:
 
   if (!card) {
     return (
-      <section className="glass space-y-3 rounded-[20px] p-5 text-center" aria-label="Flashcards done">
+      <section className="glass space-y-3 r-20 p-5 text-center" aria-label="Flashcards done">
         <p className="text-lg font-semibold text-ink">Deck done</p>
         <p className="text-sm text-ink-2">
           {stats.got} got it · {stats.again} to review again
@@ -419,8 +419,8 @@ function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone:
   };
 
   return (
-    <section className="glass space-y-4 rounded-[20px] p-4 md:p-6" aria-label="Flashcards">
-      <div className="flex items-center gap-2 text-[12px] text-ink-3">
+    <section className="glass space-y-4 r-20 p-4 md:p-6" aria-label="Flashcards">
+      <div className="flex items-center gap-2 fs-12 text-ink-3">
         <span className="font-mono">
           {i + 1} / {queue.length}
         </span>
@@ -435,14 +435,14 @@ function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone:
           End
         </button>
       </div>
-      <div className="grid min-h-40 place-items-center rounded-[18px] border border-white/[0.06] bg-white/[0.02] p-5 text-center">
+      <div className="grid min-h-40 place-items-center r-18 border border-white/[0.06] bg-white/[0.02] p-5 text-center">
         <div className="space-y-2">
-          <p className="text-[13px] uppercase tracking-wider text-ink-3">How do you say</p>
+          <p className="fs-13 uppercase tracking-wider text-ink-3">How do you say</p>
           <p className="text-xl font-semibold text-ink">{card.english}</p>
           {shown && (
             <div className="space-y-1 pt-2">
               <p className="text-2xl font-semibold text-amber-light">{card.target}</p>
-              {card.phonetic && <p className="font-mono text-[13px] text-amber-soft">{card.phonetic}</p>}
+              {card.phonetic && <p className="font-mono fs-13 text-amber-soft">{card.phonetic}</p>}
             </div>
           )}
         </div>
@@ -454,22 +454,22 @@ function Flashcards({ cards, onDone, onComplete }: { cards: DrillCard[]; onDone:
             setShown(true);
             void speak(card.target, card.lang).then(useHub.getState().setEngine);
           }}
-          className="pill-primary !h-12 w-full text-[15px]"
+          className="pill-primary !h-12 w-full fs-15"
         >
           <Eye size={16} /> Reveal &amp; play
         </button>
       ) : (
         <div className={`grid gap-2 ${card.entryId ? "grid-cols-[auto_1fr_1fr_1fr]" : "grid-cols-[auto_1fr_1fr]"}`}>
           <PlayButton text={card.target} lang={card.lang} />
-          <button type="button" onClick={() => void answer("again")} className="pill-glass !h-12 text-[14px]">
+          <button type="button" onClick={() => void answer("again")} className="pill-glass !h-12 fs-14">
             <RotateCcw size={15} /> Review again
           </button>
           {card.entryId && (
-            <button type="button" onClick={() => void answer("hard")} className="pill-glass !h-12 text-[14px]" title="Got it, but it was hard (shorter interval)">
+            <button type="button" onClick={() => void answer("hard")} className="pill-glass !h-12 fs-14" title="Got it, but it was hard (shorter interval)">
               <Turtle size={15} /> Hard
             </button>
           )}
-          <button type="button" onClick={() => void answer("good")} className="pill-primary !h-12 text-[14px]">
+          <button type="button" onClick={() => void answer("good")} className="pill-primary !h-12 fs-14">
             <ThumbsUp size={15} /> Got it
           </button>
         </div>
@@ -498,11 +498,11 @@ function TodayLesson({ lang }: { lang: string }) {
       "daily",
     );
   return (
-    <section className="glass flex flex-wrap items-center gap-2 rounded-[20px] p-3 md:p-4" aria-label="Today's lesson">
+    <section className="glass flex flex-wrap items-center gap-2 r-20 p-3 md:p-4" aria-label="Today's lesson">
       <CalendarCheck size={16} className="text-teal-light" />
       <div className="min-w-0 flex-1">
-        <h2 className="text-[14px] font-semibold text-ink">Today&apos;s lesson · {langName(lang)}</h2>
-        <p className="text-[12px] text-ink-3">
+        <h2 className="fs-14 font-semibold text-ink">Today&apos;s lesson · {langName(lang)}</h2>
+        <p className="fs-12 text-ink-3">
           {lesson.items.length} card{lesson.items.length === 1 ? "" : "s"} · ~{lesson.minutes} min{lesson.due ? ` · ${lesson.due} due` : ""}
         </p>
       </div>
@@ -529,7 +529,7 @@ function CurveballSlider() {
   const cur = CURVEBALL_LEVELS[idx];
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <label htmlFor="lang-curveballs" className="text-[12px] font-medium text-ink-2">
+      <label htmlFor="lang-curveballs" className="fs-12 font-medium text-ink-2">
         Curveballs in Tony chats
       </label>
       <input
@@ -543,7 +543,7 @@ function CurveballSlider() {
         aria-valuetext={cur.label}
         className="w-36 accent-amber"
       />
-      <span className="font-mono text-[11px] text-ink-3">
+      <span className="font-mono fs-11 text-ink-3">
         {cur.label} · {cur.hint}
         {level !== "off" ? " · saved; Tony hookup pending" : ""}
       </span>

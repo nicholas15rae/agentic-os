@@ -83,7 +83,7 @@ export function EffectsCard() {
           <Toggle on={effects.enabled} label="Effects on" onChange={(enabled) => patch({ enabled })} />
           <Segmented label="Effects intensity" value={effects.intensity} options={INTENSITY} disabled={!effects.enabled} onChange={(intensity) => patch({ intensity })} />
         </div>
-        {suppressed && <p className="text-[11px] text-ink-3">Particles are off on this device (reduced motion or the Android app).</p>}
+        {suppressed && <p className="fs-11 text-ink-3">Particles are off on this device (reduced motion or the Android app).</p>}
       </div>
     </Card>
   );

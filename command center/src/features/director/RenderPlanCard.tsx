@@ -10,24 +10,24 @@ import { timecode } from "./manifest";
 export function RenderPlanView({ plan, busy, renderReady, onApprove, onModify }: { plan: RenderPlan; busy: boolean; renderReady: boolean; onApprove: () => void; onModify: () => void }) {
   const warnings = (plan.warnings ?? []).filter((w) => typeof w === "string" && w.trim());
   return (
-    <section className="glass rounded-[20px] border-amber/50 p-4 ring-1 ring-amber/40" aria-label="Render plan">
+    <section className="glass r-20 border-amber/50 p-4 ring-1 ring-amber/40" aria-label="Render plan">
       <div className="mb-2 flex items-center gap-2">
         <Clapperboard size={15} className="text-amber-soft" />
         <h2 className="label-caps text-amber-soft">Render plan</h2>
-        <span className="ml-auto font-mono text-[10px] text-ink-3">
+        <span className="ml-auto font-mono fs-10 text-ink-3">
           {plan.planId} · rev {plan.manifestRevision} · by {plan.proposedBy}
         </span>
       </div>
       <p className="label-caps mt-2 text-ink-3">Sources</p>
-      <ol className="mt-1 space-y-0.5 text-[12px] text-ink-2">
+      <ol className="mt-1 space-y-0.5 fs-12 text-ink-2">
         {plan.sources.map((s, i) => (
           <li key={`${s.assetId}-${i}`} className="flex gap-2">
             <span className="w-4 shrink-0 font-mono text-ink-3">{i + 1}</span>
             <span className="min-w-0 flex-1">
               <span className="block truncate">{s.name}</span>
-              {s.framing?.trim() && <span className="block truncate font-mono text-[10px] text-ink-3" title="Framing: the crop and fit this render uses">{s.framing}</span>}
+              {s.framing?.trim() && <span className="block truncate font-mono fs-10 text-ink-3" title="Framing: the crop and fit this render uses">{s.framing}</span>}
             </span>
-            <span className="shrink-0 font-mono text-[11px] text-ink-3">
+            <span className="shrink-0 font-mono fs-11 text-ink-3">
               {timecode(s.inSec)}–{timecode(s.outSec)}
             </span>
           </li>
@@ -36,11 +36,11 @@ export function RenderPlanView({ plan, busy, renderReady, onApprove, onModify }:
       {plan.audio.length > 0 && (
         <>
           <p className="label-caps mt-2 text-ink-3">Audio layers</p>
-          <ul className="mt-1 space-y-0.5 text-[12px] text-ink-2">
+          <ul className="mt-1 space-y-0.5 fs-12 text-ink-2">
             {plan.audio.map((a, i) => (
               <li key={`${a.assetId}-${i}`} className="flex gap-2">
                 <span className="min-w-0 flex-1 truncate">{a.name}</span>
-                <span className="shrink-0 font-mono text-[11px] text-ink-3">
+                <span className="shrink-0 font-mono fs-11 text-ink-3">
                   @{timecode(a.startSec)} · vol {a.volume.toFixed(2)}
                 </span>
               </li>
@@ -49,9 +49,9 @@ export function RenderPlanView({ plan, busy, renderReady, onApprove, onModify }:
         </>
       )}
       <p className="label-caps mt-2 text-ink-3">Output</p>
-      <p className="mt-1 font-mono text-[12px] text-ink">{plan.outputName}</p>
-      <p className="font-mono text-[11px] text-ink-2">{plan.outputSpec}</p>
-      <p className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-teal-soft">
+      <p className="mt-1 font-mono fs-12 text-ink">{plan.outputName}</p>
+      <p className="font-mono fs-11 text-ink-2">{plan.outputSpec}</p>
+      <p className="mt-2 flex items-center gap-1.5 font-mono fs-11 text-teal-soft">
         <Cpu size={11} /> render_mode: {plan.renderMode}
       </p>
       {warnings.length > 0 && (
@@ -59,7 +59,7 @@ export function RenderPlanView({ plan, busy, renderReady, onApprove, onModify }:
           <p className="label-caps flex items-center gap-1.5 text-amber-soft">
             <AlertTriangle size={11} /> Before you approve
           </p>
-          <ul className="mt-1 space-y-0.5 text-[11px] text-amber-soft">
+          <ul className="mt-1 space-y-0.5 fs-11 text-amber-soft">
             {warnings.map((w, i) => (
               <li key={i}>{w}</li>
             ))}
@@ -74,7 +74,7 @@ export function RenderPlanView({ plan, busy, renderReady, onApprove, onModify }:
           <PencilLine size={13} /> Modify Plan
         </button>
       </div>
-      {!renderReady && <p className="mt-2 text-[11px] text-amber-soft">Rendering is off until media-forge is green.</p>}
+      {!renderReady && <p className="mt-2 fs-11 text-amber-soft">Rendering is off until media-forge is green.</p>}
     </section>
   );
 }

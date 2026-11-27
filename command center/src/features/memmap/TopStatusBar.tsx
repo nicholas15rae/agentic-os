@@ -30,8 +30,8 @@ export function TopStatusBar({ className = "" }: { className?: string }) {
   const noData = error ?? "Waiting for the first system snapshot";
 
   return (
-    <header className={`flex flex-wrap items-center gap-x-4 gap-y-2 rounded-[14px] border border-holo/20 bg-[rgba(7,11,17,0.82)] px-4 py-2.5 shadow-[0_0_24px_-12px_rgba(0,210,255,0.35)] ${className}`}>
-      <h1 className="label-caps w-full min-w-0 truncate !text-[11px] text-holo xl:w-auto">
+    <header className={`flex flex-wrap items-center gap-x-4 gap-y-2 r-14 border border-holo/20 bg-[rgba(7,11,17,0.82)] px-4 py-2.5 shadow-[0_0_24px_-12px_rgba(0,210,255,0.35)] ${className}`}>
+      <h1 className="label-caps w-full min-w-0 truncate !fs-11 text-holo xl:w-auto">
         {osName.toUpperCase()} OS <span className="text-ink-3">//</span> <span className="text-ink">Gabagool Command Center</span>
       </h1>
 
@@ -98,7 +98,7 @@ function Stat({ label, title, children }: { label: string; title?: string; child
   return (
     <div className="flex items-baseline gap-1.5" title={title}>
       <dt className="label-caps text-ink-3">{label}</dt>
-      <dd className="font-mono text-[12px] text-ink tabular">{children}</dd>
+      <dd className="font-mono fs-12 text-ink tabular">{children}</dd>
     </div>
   );
 }

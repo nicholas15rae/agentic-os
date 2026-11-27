@@ -54,8 +54,8 @@ export function PipelinesCard() {
           }
         }}
       >
-        <Input value={inst.label} onChange={(e) => setInst({ ...inst, label: e.target.value })} placeholder="Label (Remote Droplet)" className="!h-9 !py-1 text-[13px]" aria-label="Instance label" />
-        <Input value={inst.url} onChange={(e) => setInst({ ...inst, url: e.target.value })} placeholder="http://100.64.0.10:5678/api/v1" className="!h-9 !py-1 font-mono text-[12px]" aria-label="Instance URL" required />
+        <Input value={inst.label} onChange={(e) => setInst({ ...inst, label: e.target.value })} placeholder="Label (Remote Droplet)" className="!h-9 !py-1 fs-13" aria-label="Instance label" />
+        <Input value={inst.url} onChange={(e) => setInst({ ...inst, url: e.target.value })} placeholder="http://100.64.0.10:5678/api/v1" className="!h-9 !py-1 font-mono fs-12" aria-label="Instance URL" required />
         <button className="pill-glass !h-9 text-xs">
           <Plus size={13} /> Add instance
         </button>
@@ -68,7 +68,7 @@ export function PipelinesCard() {
             defaultValue={s.gdriveSyncWebhookUrl}
             onBlur={(e) => e.target.value !== s.gdriveSyncWebhookUrl && void save({ gdriveSyncWebhookUrl: e.target.value })}
             placeholder="http://127.0.0.1:5678/webhook/gdrive-sync"
-            className="font-mono !text-[12px]"
+            className="font-mono !fs-12"
             spellCheck={false}
           />
         </Field>
@@ -82,10 +82,10 @@ export function PipelinesCard() {
         {s.gdriveTrackedPaths.map((p, i) => {
           const resolved = p === "@os-config" ? null : s.resolvedPaths.find((r) => r.path === p);
           return (
-            <li key={p} className="flex items-center gap-2 rounded-[10px] border border-white/[0.06] px-3 py-1.5 font-mono text-[12px]">
+            <li key={p} className="flex items-center gap-2 r-10 border border-white/[0.06] px-3 py-1.5 font-mono fs-12">
               <span className={`size-1.5 rounded-full ${p === "@os-config" || resolved?.exists ? "bg-pipe-ok" : "bg-pipe-idle"}`} />
               <span className="min-w-0 flex-1 truncate text-ink">{p === "@os-config" ? "@os-config — providers.json, permissions.json, gateway config (no secrets)" : p}</span>
-              {resolved && !resolved.exists && <span className="text-[10px] text-ink-3">missing — skipped</span>}
+              {resolved && !resolved.exists && <span className="fs-10 text-ink-3">missing — skipped</span>}
               <button aria-label={`Stop tracking ${p}`} onClick={() => void save({ gdriveTrackedPaths: s.gdriveTrackedPaths.filter((_, j) => j !== i) })} className="text-ink-3 hover:text-alert">
                 <X size={13} />
               </button>
@@ -100,7 +100,7 @@ export function PipelinesCard() {
           if (newPath.trim()) void save({ gdriveTrackedPaths: [...s.gdriveTrackedPaths, newPath.trim()] }).then(() => setNewPath(""));
         }}
       >
-        <Input value={newPath} onChange={(e) => setNewPath(e.target.value)} placeholder="D:\Art Apps\agentic os\brain" className="!h-9 !py-1 font-mono text-[12px]" aria-label="Folder to back up" />
+        <Input value={newPath} onChange={(e) => setNewPath(e.target.value)} placeholder="D:\Art Apps\agentic os\brain" className="!h-9 !py-1 font-mono fs-12" aria-label="Folder to back up" />
         <button className="pill-glass !h-9 shrink-0 text-xs">
           <Plus size={13} /> Track
         </button>
@@ -111,7 +111,7 @@ export function PipelinesCard() {
           <input type="checkbox" checked={s.autoSyncEnabled} onChange={(e) => void save({ autoSyncEnabled: e.target.checked })} className="accent-teal" />
           AUTO_SYNC_ENABLED — back up every
         </label>
-        <Input type="number" min={0.25} max={168} step={0.25} key={`h${s.autoSyncHours}`} defaultValue={s.autoSyncHours} onBlur={(e) => Number(e.target.value) !== s.autoSyncHours && void save({ autoSyncHours: Number(e.target.value) })} className="!h-8 !w-20 !py-1 font-mono text-[12px]" aria-label="Auto-sync interval hours" />
+        <Input type="number" min={0.25} max={168} step={0.25} key={`h${s.autoSyncHours}`} defaultValue={s.autoSyncHours} onBlur={(e) => Number(e.target.value) !== s.autoSyncHours && void save({ autoSyncHours: Number(e.target.value) })} className="!h-8 !w-20 !py-1 font-mono fs-12" aria-label="Auto-sync interval hours" />
         <span>hours</span>
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={s.syncOnExit} onChange={(e) => void save({ syncOnExit: e.target.checked })} className="accent-teal" disabled={!s.autoSyncEnabled} />
@@ -126,10 +126,10 @@ export function PipelinesCard() {
 function InstanceRow({ i, onChange }: { i: PipelinesSettings["instances"][number]; onChange: () => void }) {
   const [key, setKey] = useState("");
   return (
-    <li className="rounded-[12px] border border-white/[0.07] bg-white/[0.02] p-2.5">
+    <li className="r-12 border border-white/[0.07] bg-white/[0.02] p-2.5">
       <div className="flex items-center gap-2 text-sm">
         <span className="font-medium text-ink">{i.label}</span>
-        <span className="truncate font-mono text-[11px] text-ink-3">{i.baseUrl}</span>
+        <span className="truncate font-mono fs-11 text-ink-3">{i.baseUrl}</span>
         {i.custom && (
           <button aria-label={`Remove ${i.label}`} onClick={async () => (await cmd("provider_remove", { id: i.id }), onChange())} className="ml-auto text-ink-3 hover:text-alert">
             <Trash2 size={13} />
@@ -147,7 +147,7 @@ function InstanceRow({ i, onChange }: { i: PipelinesSettings["instances"][number
         }}
       >
         {i.hasApiKey ? <ShieldCheck size={14} className="shrink-0 text-pipe-ok" /> : <KeyRound size={14} className="shrink-0 text-amber" />}
-        <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={i.hasApiKey ? "API key stored in keychain — paste to replace" : "n8n API key"} className="field !h-8 !py-1 font-mono text-[12px]" aria-label={`${i.label} n8n API key`} />
+        <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={i.hasApiKey ? "API key stored in keychain — paste to replace" : "n8n API key"} className="field !h-8 !py-1 font-mono fs-12" aria-label={`${i.label} n8n API key`} />
         <button className="pill-glass !h-8 shrink-0 text-xs" disabled={!key}>
           Save
         </button>
@@ -180,12 +180,12 @@ export function BridgeCard() {
     >
       <div className="grid gap-2 sm:grid-cols-2">
         {SCOPES.map((s) => (
-          <label key={s.id} className="flex items-center gap-3 rounded-[12px] border border-white/[0.06] px-3 py-2">
+          <label key={s.id} className="flex items-center gap-3 r-12 border border-white/[0.06] px-3 py-2">
             <span className="min-w-0 flex-1">
               <span className="block text-sm text-ink">{s.label}</span>
-              <span className="block truncate text-[11px] text-ink-3">{s.hint}</span>
+              <span className="block truncate fs-11 text-ink-3">{s.hint}</span>
             </span>
-            <Select value={b.policy[s.id]} onChange={async (e) => setB(await cmd("bridge_set", { scope: s.id, tier: e.target.value as BridgeTier }))} className="!h-8 !w-24 !py-0 text-[12px]" aria-label={`${s.label} tier`}>
+            <Select value={b.policy[s.id]} onChange={async (e) => setB(await cmd("bridge_set", { scope: s.id, tier: e.target.value as BridgeTier }))} className="!h-8 !w-24 !py-0 fs-12" aria-label={`${s.label} tier`}>
               <option value="allow">Allow</option>
               <option value="ask">Ask</option>
               <option value="deny">Deny</option>

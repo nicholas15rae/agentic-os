@@ -62,7 +62,7 @@ export function AgentInbox({ agent, compact = false }: { agent?: string; compact
               aria-label={`${m.read ? "" : "Unread: "}message from ${agentName(m.agent)}`}
               onClick={() => !m.read && read({ ids: [m.id] })}
               onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && !m.read && read({ ids: [m.id] })}
-              className={`flex items-start gap-3 rounded-[12px] border px-3 py-2.5 transition-colors ${m.read ? "border-white/[0.06]" : m.urgent ? "border-alert/50 bg-alert/[0.07]" : "border-amber/30 bg-amber/[0.06]"}`}
+              className={`flex items-start gap-3 r-12 border px-3 py-2.5 transition-colors ${m.read ? "border-white/[0.06]" : m.urgent ? "border-alert/50 bg-alert/[0.07]" : "border-amber/30 bg-amber/[0.06]"}`}
             >
               <span className={`mt-1.5 size-2 shrink-0 rounded-full ${m.read ? "bg-transparent" : m.urgent ? "bg-alert" : "bg-amber"}`} aria-hidden />
               <div className="min-w-0 flex-1">
@@ -78,10 +78,10 @@ export function AgentInbox({ agent, compact = false }: { agent?: string; compact
                       <Zap size={10} aria-hidden /> Interrupted
                     </span>
                   )}
-                  <span className="ml-auto shrink-0 font-mono text-[10px] text-ink-3">{time(m.at)}</span>
+                  <span className="ml-auto shrink-0 font-mono fs-10 text-ink-3">{time(m.at)}</span>
                 </div>
                 <p className="mt-0.5 text-sm leading-relaxed text-ink-2">{m.text}</p>
-                {m.spokenAt && m.voice && <p className="mt-0.5 text-[10px] text-ink-3">Heard {time(m.spokenAt)} in {m.voice === "general" ? "Tony's" : `${roleLabel(m.voice)}'s`} voice</p>}
+                {m.spokenAt && m.voice && <p className="mt-0.5 fs-10 text-ink-3">Heard {time(m.spokenAt)} in {m.voice === "general" ? "Tony's" : `${roleLabel(m.voice)}'s`} voice</p>}
               </div>
               <button
                 type="button"

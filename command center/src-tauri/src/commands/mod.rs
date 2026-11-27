@@ -1,5 +1,6 @@
 pub mod agent_prompts;
 pub mod trash;
+pub mod ui_file;
 pub mod phone_secrets;
 pub mod agents;
 pub mod alarm;

@@ -78,7 +78,7 @@ export function TvChart({ symbol, interval, height = 440 }: TvChartProps) {
   }, [symbol, interval]);
 
   return (
-    <div style={{ height }} className="relative w-full overflow-hidden rounded-[12px]">
+    <div style={{ height }} className="relative w-full overflow-hidden r-12">
       <div ref={host} className="h-full w-full" data-testid="tv-chart-host" />
       {err && <p className="absolute inset-0 grid place-items-center text-sm text-ink-3">TradingView unavailable — {err}</p>}
     </div>

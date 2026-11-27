@@ -46,20 +46,20 @@ export function OutputsView({ outputs, captions, color, onOutputs, onCaptions, o
       </div>
       <ul className="mt-2 space-y-0.5">
         {outputs.map((o) => (
-          <li key={o.platform} className="flex gap-2 text-[11px]">
+          <li key={o.platform} className="flex gap-2 fs-11">
             <span className="w-16 shrink-0 text-ink-2">{PLATFORM_LABEL[o.platform]}</span>
-            <span className="font-mono text-[10px] text-ink-3">{presetSpec(o)}</span>
+            <span className="font-mono fs-10 text-ink-3">{presetSpec(o)}</span>
           </li>
         ))}
       </ul>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <label className="flex items-center gap-1.5 text-[12px] text-ink">
+          <label className="flex items-center gap-1.5 fs-12 text-ink">
             <input type="checkbox" checked={captions.enabled} onChange={(e) => onCaptions({ enabled: e.target.checked })} className="accent-teal" />
             Captions
           </label>
-          <Select value={captions.style} disabled={!captions.enabled} onChange={(e) => onCaptions({ style: e.target.value as CaptionTrack["style"] })} className="!h-8 !py-0 text-[12px] disabled:opacity-50" aria-label="Caption style">
+          <Select value={captions.style} disabled={!captions.enabled} onChange={(e) => onCaptions({ style: e.target.value as CaptionTrack["style"] })} className="!h-8 !py-0 fs-12 disabled:opacity-50" aria-label="Caption style">
             {CAPTION_STYLES.map((s) => (
               <option key={s} value={s}>
                 {STYLE_LABEL[s]}
@@ -67,27 +67,27 @@ export function OutputsView({ outputs, captions, color, onOutputs, onCaptions, o
             ))}
           </Select>
           <div className="flex items-center gap-1.5">
-            <Select value={captions.position} disabled={!captions.enabled} onChange={(e) => onCaptions({ position: e.target.value as CaptionTrack["position"] })} className="!h-8 !py-0 text-[12px] disabled:opacity-50" aria-label="Caption position">
+            <Select value={captions.position} disabled={!captions.enabled} onChange={(e) => onCaptions({ position: e.target.value as CaptionTrack["position"] })} className="!h-8 !py-0 fs-12 disabled:opacity-50" aria-label="Caption position">
               <option value="lower">Lower third</option>
               <option value="middle">Middle</option>
             </Select>
-            <input type="number" min={1} max={CAPTION_WORDS_MAX} value={captions.maxWordsPerLine} disabled={!captions.enabled} onChange={(e) => onCaptions({ maxWordsPerLine: Number(e.target.value) })} className="field !h-8 !w-16 shrink-0 !py-0 text-[12px] disabled:opacity-50" aria-label="Words per line" title="Words per line" />
+            <input type="number" min={1} max={CAPTION_WORDS_MAX} value={captions.maxWordsPerLine} disabled={!captions.enabled} onChange={(e) => onCaptions({ maxWordsPerLine: Number(e.target.value) })} className="field !h-8 !w-16 shrink-0 !py-0 fs-12 disabled:opacity-50" aria-label="Words per line" title="Words per line" />
           </div>
-          {captions.enabled && noCaptions.length > 0 && <p className="text-[10px] text-ink-3">{noCaptions.map((p) => PLATFORM_LABEL[p]).join(", ")} renders without captions.</p>}
+          {captions.enabled && noCaptions.length > 0 && <p className="fs-10 text-ink-3">{noCaptions.map((p) => PLATFORM_LABEL[p]).join(", ")} renders without captions.</p>}
         </div>
         <div className="space-y-1.5">
-          <p className="text-[12px] text-ink">Colour look</p>
-          <Select value={color.preset} onChange={(e) => onColor({ preset: e.target.value as ColorLook["preset"] })} className="!h-8 !py-0 text-[12px]" aria-label="Colour look">
+          <p className="fs-12 text-ink">Colour look</p>
+          <Select value={color.preset} onChange={(e) => onColor({ preset: e.target.value as ColorLook["preset"] })} className="!h-8 !py-0 fs-12" aria-label="Colour look">
             {COLOR_PRESETS.map((c) => (
               <option key={c} value={c}>
                 {COLOR_LABEL[c]}
               </option>
             ))}
           </Select>
-          <label className="flex items-center gap-2 text-[11px] text-ink-2">
+          <label className="flex items-center gap-2 fs-11 text-ink-2">
             Strength
             <input type="range" min={0} max={1} step={0.05} value={color.strength} disabled={color.preset === "none"} onChange={(e) => onColor({ strength: Number(e.target.value) })} className="min-w-0 flex-1 accent-amber disabled:opacity-40" aria-label="Colour strength" />
-            <span className="w-8 shrink-0 text-right font-mono text-[10px]">{Math.round(color.strength * 100)}%</span>
+            <span className="w-8 shrink-0 text-right font-mono fs-10">{Math.round(color.strength * 100)}%</span>
           </label>
         </div>
       </div>
@@ -107,8 +107,8 @@ export function MoreVersionsView({ outputs, busy, onPlan }: { outputs: Platform[
   const r = live.length ? versionOutputs(outputs, live) : null;
   const blocked = r && "error" in r ? r.error : null;
   return (
-    <div className="mt-3 rounded-[12px] border border-white/10 p-2.5" role="group" aria-label="More versions">
-      <p className="text-[12px] text-ink">More versions of the approved cut</p>
+    <div className="mt-3 r-12 border border-white/10 p-2.5" role="group" aria-label="More versions">
+      <p className="fs-12 text-ink">More versions of the approved cut</p>
       <div className="mt-1.5 flex flex-wrap gap-1.5">
         {choices.map((p) => {
           const on = picks.includes(p);
@@ -131,7 +131,7 @@ export function MoreVersionsView({ outputs, busy, onPlan }: { outputs: Platform[
         >
           {busy ? <Loader2 size={12} className="animate-spin" /> : <Clapperboard size={12} />} {live.length > 1 ? `Plan ${live.length} versions` : "Plan version"}
         </button>
-        <span className="text-[10px] text-ink-3">{blocked ?? "Adds them to Outputs and shows a render plan. Nothing renders until Approve & Render."}</span>
+        <span className="fs-10 text-ink-3">{blocked ?? "Adds them to Outputs and shows a render plan. Nothing renders until Approve & Render."}</span>
       </div>
     </div>
   );

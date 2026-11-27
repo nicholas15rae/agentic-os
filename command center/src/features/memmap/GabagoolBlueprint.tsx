@@ -259,11 +259,11 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
 
   return (
     <div
-      className={`relative block w-full overflow-hidden rounded-[10px] border bg-[rgba(5,9,14,0.86)] text-left shadow-[0_0_18px_-8px_rgba(0,210,255,0.5)] ${xray ? "border-ember/45" : "border-holo/30"} ${className}`}
+      className={`relative block w-full overflow-hidden r-10 border bg-[rgba(5,9,14,0.86)] text-left shadow-[0_0_18px_-8px_rgba(0,210,255,0.5)] ${xray ? "border-ember/45" : "border-holo/30"} ${className}`}
       title="GABAGOOL BLUEPRINT // exploded M54B25 inline-six with live telemetry"
     >
       <div className="flex items-center justify-between gap-2 border-b border-holo/15 px-2 py-1">
-        <p className="label-caps truncate !text-[9px] text-holo">
+        <p className="label-caps truncate !fs-9 text-holo">
           Sub-component <span className="text-ink-3">//</span> <span className="normal-case tracking-normal text-ink-3">Gabagool blueprint</span>
         </p>
         <button
@@ -271,7 +271,7 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
           onClick={() => setSettings({ systemMapMode: xray ? "streamlined" : "xray" })}
           aria-pressed={xray}
           title={xray ? "Dev X-Ray: ports, paths, IPC and per-hop ms. Click for Streamlined OS." : "Streamlined OS: status colours and plain words. Click for Dev X-Ray."}
-          className={`label-caps shrink-0 rounded-[4px] border px-1 !text-[8px] transition-colors ${xray ? "border-ember/50 text-ember" : "border-holo/30 text-ink-2 hover:border-holo/60 hover:text-holo"}`}
+          className={`label-caps shrink-0 r-4 border px-1 !fs-8 transition-colors ${xray ? "border-ember/50 text-ember" : "border-holo/30 text-ink-2 hover:border-holo/60 hover:text-holo"}`}
         >
           {xray ? "X-Ray" : "OS"}
         </button>
@@ -281,8 +281,8 @@ export function GabagoolBlueprint({ className = "" }: { className?: string }) {
         {rows.map((r) => (
           <div key={r.key} title={r.why} className="min-w-0">
             <div className="flex items-baseline justify-between gap-1">
-              <dt className="label-caps !text-[8px] text-ink-3">{r.label}</dt>
-              <dd className="font-mono text-[10px] tabular-nums" style={{ color: `rgb(${MODULE_RGB[r.module]})` }}>
+              <dt className="label-caps !fs-8 text-ink-3">{r.label}</dt>
+              <dd className="font-mono fs-10 tabular-nums" style={{ color: `rgb(${MODULE_RGB[r.module]})` }}>
                 {r.value}
               </dd>
             </div>

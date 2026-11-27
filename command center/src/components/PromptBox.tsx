@@ -54,10 +54,10 @@ export function PromptBox(p: PromptBoxProps) {
     void p.onSubmit(text);
   };
 
-  const text = size === "md" ? "text-sm" : "text-[12px]";
+  const text = size === "md" ? "text-sm" : "fs-12";
   return (
     <div
-      className={`relative w-full rounded-[12px] border bg-well transition-[border-color,box-shadow] duration-150 focus-within:border-teal focus-within:shadow-[0_0_12px_rgba(0,229,195,0.25)] ${drag ? "border-amber/70 bg-amber/[0.06]" : "border-white/[0.08]"}`}
+      className={`relative w-full r-12 border bg-well transition-[border-color,box-shadow] duration-150 focus-within:border-teal focus-within:shadow-[0_0_12px_rgba(0,229,195,0.25)] ${drag ? "border-amber/70 bg-amber/[0.06]" : "border-white/[0.08]"}`}
       {...dropHandlers(setDrag, (t) => insertText(ref.current, t, { fallback: onChange }))}
     >
       <textarea
@@ -77,11 +77,11 @@ export function PromptBox(p: PromptBoxProps) {
       <div className="flex flex-wrap items-center gap-1 px-1.5 pb-1.5">
         {p.adornment}
         <Tools label={label} value={value} historyKey={p.historyKey} editor={ref} onChange={onChange} onExpand={() => setExpanded(true)} />
-        <span className={`ml-auto truncate pl-1 font-mono text-[10px] ${value ? "text-ink-2" : "text-ink-3"}`} aria-live="polite" title="Exactly what will be sent">
+        <span className={`ml-auto truncate pl-1 font-mono fs-10 ${value ? "text-ink-2" : "text-ink-3"}`} aria-live="polite" title="Exactly what will be sent">
           {value ? countLabel(value) : "0 chars"}
         </span>
-        <span className="hidden font-mono text-[10px] text-ink-3 md:inline">· {MOD}+Enter to send</span>
-        <button type="button" onClick={submit} disabled={!sendable} title={p.submitTitle ?? `${p.submitLabel ?? "Send"} (${MOD}+Enter)`} className="pill-glass ml-1 !h-7 shrink-0 !px-2.5 text-[11px] disabled:opacity-50">
+        <span className="hidden font-mono fs-10 text-ink-3 md:inline">· {MOD}+Enter to send</span>
+        <button type="button" onClick={submit} disabled={!sendable} title={p.submitTitle ?? `${p.submitLabel ?? "Send"} (${MOD}+Enter)`} className="pill-glass ml-1 !h-7 shrink-0 !px-2.5 fs-11 disabled:opacity-50">
           {busy ? <Loader2 size={11} className="animate-spin" /> : (p.submitIcon ?? <Send size={11} />)} {p.submitLabel ?? "Send"}
         </button>
       </div>
@@ -238,9 +238,9 @@ function HistoryMenu({ scope, className, size, onPick }: { scope: string; classN
         <History size={size} />
       </button>
       {open && (
-        <div role="menu" className="glass absolute bottom-full left-0 z-30 mb-1 w-[min(420px,80vw)] rounded-[12px] p-1.5 shadow-xl">
+        <div role="menu" className="glass absolute bottom-full left-0 z-30 mb-1 w-[min(420px,80vw)] r-12 p-1.5 shadow-xl">
           {!items.length ? (
-            <p className="px-2 py-1.5 text-[11px] text-ink-3">Nothing sent from here yet.</p>
+            <p className="px-2 py-1.5 fs-11 text-ink-3">Nothing sent from here yet.</p>
           ) : (
             <>
               <ul className="max-h-64 overflow-y-auto">
@@ -253,11 +253,11 @@ function HistoryMenu({ scope, className, size, onPick }: { scope: string; classN
                         onPick(t);
                         setOpen(false);
                       }}
-                      className="block w-full rounded-[8px] px-2 py-1.5 text-left text-[11px] text-ink-2 hover:bg-white/[0.06] hover:text-ink"
+                      className="block w-full r-8 px-2 py-1.5 text-left fs-11 text-ink-2 hover:bg-white/[0.06] hover:text-ink"
                       title="Load into the box to tweak and re-send"
                     >
                       <span className="line-clamp-2 whitespace-pre-wrap break-words">{t}</span>
-                      <span className="font-mono text-[9.5px] text-ink-3">{t.length.toLocaleString()} chars</span>
+                      <span className="font-mono fs-9.5 text-ink-3">{t.length.toLocaleString()} chars</span>
                     </button>
                   </li>
                 ))}
@@ -268,7 +268,7 @@ function HistoryMenu({ scope, className, size, onPick }: { scope: string; classN
                   clearHistory(scope);
                   setItems([]);
                 }}
-                className="mt-1 w-full rounded-[8px] px-2 py-1 text-left font-mono text-[10px] text-ink-3 hover:text-alert"
+                className="mt-1 w-full r-8 px-2 py-1 text-left font-mono fs-10 text-ink-3 hover:text-alert"
               >
                 Clear history
               </button>
@@ -303,16 +303,16 @@ function ExpandedEditor(p: PromptBoxProps & { sendable: boolean; onClose: () => 
       }}
       onMouseDown={(e) => e.target === e.currentTarget && p.onClose()}
     >
-      <div className="glass flex h-[88dvh] w-[min(1100px,96vw)] flex-col rounded-[20px] p-4">
+      <div className="glass flex h-[88dvh] w-[min(1100px,96vw)] flex-col r-20 p-4">
         <div className="mb-2 flex items-center gap-2">
           <Maximize2 size={14} className="text-amber-soft" />
-          <h2 className="truncate text-[15px] font-semibold text-ink">{p.label}</h2>
-          <span className="ml-auto font-mono text-[11px] text-ink-3">{countLabel(p.value)}</span>
+          <h2 className="truncate fs-15 font-semibold text-ink">{p.label}</h2>
+          <span className="ml-auto font-mono fs-11 text-ink-3">{countLabel(p.value)}</span>
           <button type="button" onClick={p.onClose} className="pill-glass !h-8 !w-8 !p-0" aria-label="Close the editor (the text is kept)" title="Close (Esc) — the text is kept">
             <X size={14} />
           </button>
         </div>
-        <div className={`min-h-0 flex-1 rounded-[12px] border bg-well ${drag ? "border-amber/70" : "border-white/[0.08] focus-within:border-teal"}`} {...dropHandlers(setDrag, (t) => insertText(ref.current, t, { fallback: p.onChange }))}>
+        <div className={`min-h-0 flex-1 r-12 border bg-well ${drag ? "border-amber/70" : "border-white/[0.08] focus-within:border-teal"}`} {...dropHandlers(setDrag, (t) => insertText(ref.current, t, { fallback: p.onChange }))}>
           <textarea
             ref={ref}
             value={p.value}
@@ -321,13 +321,13 @@ function ExpandedEditor(p: PromptBoxProps & { sendable: boolean; onClose: () => 
             placeholder={p.placeholder}
             aria-label={`${p.label} (full-size)`}
             spellCheck
-            className="size-full resize-none overflow-y-auto bg-transparent p-4 font-mono text-[13px] leading-relaxed text-ink outline-none placeholder:text-ink-3"
+            className="size-full resize-none overflow-y-auto bg-transparent p-4 font-mono fs-13 leading-relaxed text-ink outline-none placeholder:text-ink-3"
           />
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Tools big label={p.label} value={p.value} historyKey={p.historyKey} editor={ref} onChange={p.onChange} />
           {p.adornment}
-          <span className="ml-auto font-mono text-[11px] text-ink-3">Enter = new line · {MOD}+Enter to send · Esc closes (text kept)</span>
+          <span className="ml-auto font-mono fs-11 text-ink-3">Enter = new line · {MOD}+Enter to send · Esc closes (text kept)</span>
           <button type="button" onClick={p.onSend} disabled={!p.sendable} className="pill-primary !h-9 text-xs disabled:opacity-50">
             {p.busy ? <Loader2 size={13} className="animate-spin" /> : (p.submitIcon ?? <Send size={13} />)} {p.submitLabel ?? "Send"}
           </button>

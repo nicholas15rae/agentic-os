@@ -80,8 +80,8 @@ export function PullBar({
               void create();
             }}
           >
-            <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setNaming(false)} placeholder="Project title" aria-label="New project title" className="field !h-8 !w-40 !py-0 text-[12px]" />
-            <button type="submit" disabled={!title.trim() || creating} className="pill-glass !h-8 !px-2.5 text-[11px] disabled:opacity-50">
+            <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setNaming(false)} placeholder="Project title" aria-label="New project title" className="field !h-8 !w-40 !py-0 fs-12" />
+            <button type="submit" disabled={!title.trim() || creating} className="pill-glass !h-8 !px-2.5 fs-11 disabled:opacity-50">
               {creating ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />} Create
             </button>
           </form>
@@ -92,7 +92,7 @@ export function PullBar({
               if (e.target.value === NEW) setNaming(true);
               else onProject?.(e.target.value || null);
             }}
-            className="!h-8 !w-auto max-w-[200px] !py-0 text-[12px]"
+            className="!h-8 !w-auto max-w-[200px] !py-0 fs-12"
             aria-label="Import into project"
           >
             <option value="">Choose a project…</option>
@@ -105,7 +105,7 @@ export function PullBar({
             <option value={NEW}>New project…</option>
           </Select>
         ))}
-      <Select value={role} onChange={(e) => onRole(e.target.value as AssetRole)} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Role for imported files">
+      <Select value={role} onChange={(e) => onRole(e.target.value as AssetRole)} className="!h-8 !w-auto !py-0 fs-12" aria-label="Role for imported files">
         {INGEST_ROLES.map((r) => (
           <option key={r} value={r}>
             {r}
@@ -123,9 +123,9 @@ export function PullBar({
       >
         {pulling ? <Loader2 size={12} className="animate-spin" /> : <CloudDownload size={12} />}
         {compact ? "Import" : "Import to project"}
-        {selected.length > 0 && <span className="font-mono text-[10px]">({selected.length})</span>}
+        {selected.length > 0 && <span className="font-mono fs-10">({selected.length})</span>}
       </button>
-      {tooMany && <span className="text-[11px] text-amber-soft">Up to {MAX_PULL_FILES} at a time.</span>}
+      {tooMany && <span className="fs-11 text-amber-soft">Up to {MAX_PULL_FILES} at a time.</span>}
     </div>
   );
 }

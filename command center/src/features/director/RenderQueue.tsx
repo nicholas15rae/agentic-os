@@ -44,7 +44,7 @@ export function RenderQueueView(p: RenderQueueProps) {
       action={
         <>
           {p.policy && (
-            <Select value={p.policy} disabled={p.busy.policy} onChange={(e) => p.onPolicy(e.target.value as ComfyPolicy)} className="!h-8 !w-auto !py-0 text-[12px] disabled:opacity-50" aria-label="When ComfyUI runs" title="Applies to every project">
+            <Select value={p.policy} disabled={p.busy.policy} onChange={(e) => p.onPolicy(e.target.value as ComfyPolicy)} className="!h-8 !w-auto !py-0 fs-12 disabled:opacity-50" aria-label="When ComfyUI runs" title="Applies to every project">
               {POLICIES.map((x) => (
                 <option key={x} value={x}>
                   {POLICY_LABEL[x]}
@@ -58,16 +58,16 @@ export function RenderQueueView(p: RenderQueueProps) {
         </>
       }
     >
-      {p.admission && p.admission !== "running" && <p className="mb-2 text-[11px] text-ink-3">ComfyUI: {p.admission}</p>}
+      {p.admission && p.admission !== "running" && <p className="mb-2 fs-11 text-ink-3">ComfyUI: {p.admission}</p>}
       <ul className="space-y-1.5">
         {rows.map((r) => (
-          <li key={`${r.kind}-${r.id}`} className="well rounded-[12px] px-2.5 py-2" aria-label={`Queue item ${r.title}`}>
+          <li key={`${r.kind}-${r.id}`} className="well r-12 px-2.5 py-2" aria-label={`Queue item ${r.title}`}>
             <div className="flex items-center gap-2">
               {r.kind === "export" ? <Cpu size={12} className="shrink-0 text-ink-3" /> : <Sparkles size={12} className="shrink-0 text-violet" />}
-              <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={r.title}>
+              <span className="min-w-0 flex-1 truncate fs-12 text-ink" title={r.title}>
                 {r.title}
               </span>
-              <span className={`shrink-0 rounded-full border px-1.5 text-[10px] ${TONE[r.display.tone]}`}>{r.display.label}</span>
+              <span className={`shrink-0 rounded-full border px-1.5 fs-10 ${TONE[r.display.tone]}`}>{r.display.label}</span>
               {r.canCancel && (
                 <button
                   type="button"
@@ -81,7 +81,7 @@ export function RenderQueueView(p: RenderQueueProps) {
                 </button>
               )}
             </div>
-            {r.display.detail && <p className="mt-0.5 text-[11px] text-ink-3">{r.display.detail}</p>}
+            {r.display.detail && <p className="mt-0.5 fs-11 text-ink-3">{r.display.detail}</p>}
             {r.kind === "export" && r.pct != null && (
               <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(r.pct)} aria-label="Export progress">
                 <div className="h-full bg-amber" style={{ width: `${Math.max(0, Math.min(100, r.pct))}%` }} />
@@ -90,7 +90,7 @@ export function RenderQueueView(p: RenderQueueProps) {
             {r.kind === "comfy" && r.outputAssetIds.length > 0 && (
               <div className="mt-1 flex flex-wrap gap-1">
                 {r.outputAssetIds.map((id, i) => (
-                  <button key={id} type="button" onClick={() => p.onShowOutput(id)} className="flex items-center gap-1 text-[11px] text-teal-soft hover:underline">
+                  <button key={id} type="button" onClick={() => p.onShowOutput(id)} className="flex items-center gap-1 fs-11 text-teal-soft hover:underline">
                     <ImageIcon size={10} /> Show output{r.outputAssetIds.length > 1 ? ` ${i + 1}` : ""}
                   </button>
                 ))}
@@ -100,7 +100,7 @@ export function RenderQueueView(p: RenderQueueProps) {
         ))}
       </ul>
       {capped.hidden > 0 && (
-        <button type="button" onClick={() => setShowAll((v) => !v)} className="mt-2 text-[11px] text-teal-soft hover:underline">
+        <button type="button" onClick={() => setShowAll((v) => !v)} className="mt-2 fs-11 text-teal-soft hover:underline">
           {showAll ? "Show fewer" : `Show all (${capped.hidden} more)`}
         </button>
       )}

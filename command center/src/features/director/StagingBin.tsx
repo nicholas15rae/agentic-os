@@ -23,7 +23,7 @@ export function AssetIcon({ kind, size = 16 }: { kind: MediaAsset["kind"]; size?
 export function Thumb({ asset, className = "" }: { asset: MediaAsset; className?: string }) {
   const src = asset.thumbPath ? fileSrc(asset.thumbPath) : asset.kind === "image" ? fileSrc(asset.path) : "";
   return (
-    <div className={`grid shrink-0 place-items-center overflow-hidden rounded-[8px] bg-black/40 ${className}`}>
+    <div className={`grid shrink-0 place-items-center overflow-hidden r-8 bg-black/40 ${className}`}>
       {src ? <img src={src} alt="" className="size-full object-cover" draggable={false} /> : <AssetIcon kind={asset.kind} />}
     </div>
   );
@@ -71,7 +71,7 @@ export function BinFilterBarView({ filter, tags, flagKinds, shown, total, onChan
   return (
     <div className="mb-2 flex flex-wrap items-center gap-1.5" role="group" aria-label="Bin filters">
       {(tags.length > 0 || filter.tag != null) && (
-        <Select value={filter.tag ?? ""} onChange={(e) => onChange({ ...filter, tag: e.target.value || null })} className="!h-7 !w-auto max-w-[130px] !py-0 text-[11px]" aria-label="Filter by tag">
+        <Select value={filter.tag ?? ""} onChange={(e) => onChange({ ...filter, tag: e.target.value || null })} className="!h-7 !w-auto max-w-[130px] !py-0 fs-11" aria-label="Filter by tag">
           <option value="">All tags</option>
           {filter.tag != null && !tags.includes(filter.tag) && <option value={filter.tag}>{filter.tag}</option>}
           {tags.map((t) => (
@@ -82,7 +82,7 @@ export function BinFilterBarView({ filter, tags, flagKinds, shown, total, onChan
         </Select>
       )}
       {(flagKinds.length > 0 || filter.flag != null) && (
-        <Select value={filter.flag ?? ""} onChange={(e) => onChange({ ...filter, flag: (e.target.value || null) as BinFilter["flag"] })} className="!h-7 !w-auto max-w-[130px] !py-0 text-[11px]" aria-label="Filter by flag">
+        <Select value={filter.flag ?? ""} onChange={(e) => onChange({ ...filter, flag: (e.target.value || null) as BinFilter["flag"] })} className="!h-7 !w-auto max-w-[130px] !py-0 fs-11" aria-label="Filter by flag">
           <option value="">All flags</option>
           <option value="any">Any flag</option>
           {filter.flag != null && filter.flag !== "any" && !flagKinds.includes(filter.flag) && <option value={filter.flag}>{FLAG_LABEL[filter.flag]}</option>}
@@ -97,12 +97,12 @@ export function BinFilterBarView({ filter, tags, flagKinds, shown, total, onChan
         type="button"
         onClick={() => onChange({ ...filter, generatedOnly: !filter.generatedOnly })}
         aria-pressed={filter.generatedOnly}
-        className={`h-7 rounded-full border px-2.5 text-[11px] ${filter.generatedOnly ? "border-violet/50 bg-violet/10 text-violet" : "border-white/10 text-ink-2 hover:text-ink"}`}
+        className={`h-7 rounded-full border px-2.5 fs-11 ${filter.generatedOnly ? "border-violet/50 bg-violet/10 text-violet" : "border-white/10 text-ink-2 hover:text-ink"}`}
       >
         Generated
       </button>
       {on && (
-        <span className="ml-auto text-[11px] text-ink-3">
+        <span className="ml-auto fs-11 text-ink-3">
           Showing {shown} of {total} ·{" "}
           <button type="button" onClick={() => onChange(NO_BIN_FILTER)} className="text-teal-soft hover:underline">
             Clear
@@ -147,7 +147,7 @@ export function StagingBin() {
       title="Staging Bin"
       action={
         <>
-          <Select value={role} onChange={(e) => setRole(e.target.value as AssetRole)} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Role for new files">
+          <Select value={role} onChange={(e) => setRole(e.target.value as AssetRole)} className="!h-8 !w-auto !py-0 fs-12" aria-label="Role for new files">
             {INGEST_ROLES.map((r) => (
               <option key={r} value={r}>
                 {r}
@@ -180,11 +180,11 @@ export function StagingBin() {
           setOver(false);
           void ingestDropped(slug, Array.from(e.dataTransfer.files), role);
         }}
-        className={`rounded-[14px] border border-dashed p-2 transition-colors ${over ? "border-teal/70 bg-teal/5" : "border-white/10"}`}
+        className={`r-14 border border-dashed p-2 transition-colors ${over ? "border-teal/70 bg-teal/5" : "border-white/10"}`}
       >
         {Object.entries(uploads).map(([k, u]) => (
-          <div key={k} className="mb-2 rounded-[10px] bg-white/[0.03] p-2">
-            <p className="truncate text-[12px] text-ink-2">
+          <div key={k} className="mb-2 r-10 bg-white/[0.03] p-2">
+            <p className="truncate fs-12 text-ink-2">
               <Upload size={11} className="mr-1 inline" />
               {u.name}
             </p>
@@ -207,31 +207,31 @@ export function StagingBin() {
                     e.dataTransfer.effectAllowed = "copy";
                   }}
                   onClick={() => select({ kind: "asset", id: a.id })}
-                  className={`group flex cursor-grab items-center gap-2 rounded-[12px] border p-1.5 active:cursor-grabbing ${on ? "border-amber/40 bg-amber/10" : "border-transparent hover:bg-white/5"}`}
+                  className={`group flex cursor-grab items-center gap-2 r-12 border p-1.5 active:cursor-grabbing ${on ? "border-amber/40 bg-amber/10" : "border-transparent hover:bg-white/5"}`}
                 >
                   <Thumb asset={a} className="h-10 w-16" />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] text-ink" title={a.name}>
+                    <p className="truncate fs-13 text-ink" title={a.name}>
                       {a.name}
                     </p>
                     <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                      <span className="rounded-full border border-white/10 px-1.5 font-mono text-[10px] text-ink-2">
+                      <span className="rounded-full border border-white/10 px-1.5 font-mono fs-10 text-ink-2">
                         {a.kind}/{a.role}
                       </span>
                       {a.readOnly && (
-                        <span className="flex items-center gap-0.5 rounded-full border border-teal/30 px-1.5 text-[10px] text-teal-soft" title="The original copy in raw/ is read-only">
+                        <span className="flex items-center gap-0.5 rounded-full border border-teal/30 px-1.5 fs-10 text-teal-soft" title="The original copy in raw/ is read-only">
                           <Lock size={9} /> Raw · read-only
                         </span>
                       )}
                       <GeneratedChip asset={a} />
-                      <span className="font-mono text-[10px] text-ink-3">{assetMeta(a)}</span>
+                      <span className="font-mono fs-10 text-ink-3">{assetMeta(a)}</span>
                       <AssetBadges asset={a} />
                       {a.tags.slice(0, 3).map((t) => (
-                        <span key={t} className="rounded-full border border-teal/25 px-1.5 text-[10px] text-teal-soft">
+                        <span key={t} className="rounded-full border border-teal/25 px-1.5 fs-10 text-teal-soft">
                           {t}
                         </span>
                       ))}
-                      {a.tags.length > 3 && <span className="text-[10px] text-ink-3">+{a.tags.length - 3}</span>}
+                      {a.tags.length > 3 && <span className="fs-10 text-ink-3">+{a.tags.length - 3}</span>}
                     </div>
                   </div>
                   <button

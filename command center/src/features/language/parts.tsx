@@ -11,7 +11,7 @@ export const toastError = (title: string, e: unknown) => useToasts.getState().pu
 
 export function LangSelect({ value, onChange, auto, label, className = "" }: { value: string; onChange: (v: string) => void; auto?: boolean; label: string; className?: string }) {
   return (
-    <Select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label} className={`!h-10 !py-1 text-[13px] ${className}`}>
+    <Select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label} className={`!h-10 !py-1 fs-13 ${className}`}>
       {auto && <option value="auto">Auto-detect</option>}
       {LANGUAGES.map((l) => (
         <option key={l.code} value={l.code}>
@@ -95,7 +95,7 @@ export function EngineBadge() {
   const e = useHub((s) => s.lastEngine);
   if (!e) return null;
   return (
-    <span role="status" title={e.reason ? `Fell back: ${e.reason}` : undefined} className={`max-w-[60vw] truncate rounded-full border bg-[rgba(11,13,17,0.6)] px-2 py-0.5 font-mono text-[10px] ${e.fallback ? "border-amber/40 text-amber-light" : "border-teal/40 text-teal"}`}>
+    <span role="status" title={e.reason ? `Fell back: ${e.reason}` : undefined} className={`max-w-[60vw] truncate rounded-full border bg-[rgba(11,13,17,0.6)] px-2 py-0.5 font-mono fs-10 ${e.fallback ? "border-amber/40 text-amber-light" : "border-teal/40 text-teal"}`}>
       voice: {e.label}
       {e.reason ? ` — ${e.reason}` : ""}
     </span>
@@ -147,7 +147,7 @@ export function RecordButton({
       onPointerUp={() => h.up()}
       onPointerCancel={() => h.cancel()}
       onClick={(e) => h.click(e.detail)}
-      className={`relative flex w-full select-none items-center justify-center gap-3 rounded-[20px] border px-4 font-semibold backdrop-blur-md transition-colors touch-none ${big ? "min-h-24 text-lg" : "min-h-16 text-[15px]"} ${
+      className={`relative flex w-full select-none items-center justify-center gap-3 r-20 border px-4 font-semibold backdrop-blur-md transition-colors touch-none ${big ? "min-h-24 text-lg" : "min-h-16 fs-15"} ${
         recording ? "border-alert/70 bg-[linear-gradient(rgba(255,90,95,0.25),rgba(255,90,95,0.25)),rgba(11,13,17,0.8)] text-ink" : ring
       } disabled:opacity-50`}
       style={recording ? { boxShadow: `0 0 0 ${2 + level * 14}px rgba(255,90,95,0.18)` } : undefined}
@@ -155,7 +155,7 @@ export function RecordButton({
       {busy && !recording ? <Loader2 className="animate-spin" size={big ? 26 : 20} /> : recording ? <Square size={big ? 24 : 18} /> : <Mic size={big ? 26 : 20} />}
       <span className="flex flex-col items-start leading-tight">
         <span>{recording ? "Listening… tap to stop" : label}</span>
-        {sub && !recording && <span className="text-[11px] font-normal opacity-75">{sub}</span>}
+        {sub && !recording && <span className="fs-11 font-normal opacity-75">{sub}</span>}
       </span>
     </button>
   );

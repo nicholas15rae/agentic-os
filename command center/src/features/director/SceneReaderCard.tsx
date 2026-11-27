@@ -44,9 +44,9 @@ export function SceneReaderCardView(p: SceneReaderCardProps) {
         {p.projects && p.projects.length === 0 && <p className="text-xs text-ink-3">No voiceover projects in Scene Reader yet.</p>}
         {p.projects && p.projects.length > 0 && (
           <div className="space-y-3">
-            <label className="block text-[12px] text-ink-2">
+            <label className="block fs-12 text-ink-2">
               Project
-              <select className="field mt-1 !h-9 !py-0 text-[13px]" value={p.openId ?? ""} onChange={(e) => p.onOpen(e.target.value || null)} aria-label="Scene Reader project">
+              <select className="field mt-1 !h-9 !py-0 fs-13" value={p.openId ?? ""} onChange={(e) => p.onOpen(e.target.value || null)} aria-label="Scene Reader project">
                 {p.projects.map((x) => (
                   <option key={x.id} value={x.id}>
                     {x.title} ({x.takes.length} take{x.takes.length === 1 ? "" : "s"})
@@ -64,16 +64,16 @@ export function SceneReaderCardView(p: SceneReaderCardProps) {
                       const on = picked.includes(t.id);
                       return (
                         <li key={t.id}>
-                          <label className={`flex items-center gap-2 rounded-[10px] border px-2 py-1.5 text-[13px] ${t.available ? "border-white/10" : "border-white/5 opacity-50"}`}>
+                          <label className={`flex items-center gap-2 r-10 border px-2 py-1.5 fs-13 ${t.available ? "border-white/10" : "border-white/5 opacity-50"}`}>
                             <input type="checkbox" checked={on} disabled={!t.available} onChange={() => p.onToggle(open, t)} aria-label={`Take ${t.name}`} />
                             <Mic size={12} className="shrink-0 text-ink-3" />
                             <span className="min-w-0 flex-1 truncate text-ink">{t.name}</span>
                             {t.best && (
-                              <span className="flex items-center gap-0.5 text-[11px] text-amber-soft">
+                              <span className="flex items-center gap-0.5 fs-11 text-amber-soft">
                                 <Star size={10} /> Best
                               </span>
                             )}
-                            <span className="text-[11px] text-ink-3">{t.available ? secs(t.durSec) : "file missing"}</span>
+                            <span className="fs-11 text-ink-3">{t.available ? secs(t.durSec) : "file missing"}</span>
                           </label>
                         </li>
                       );

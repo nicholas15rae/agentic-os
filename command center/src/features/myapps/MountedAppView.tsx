@@ -24,7 +24,7 @@ export function MountedAppView() {
   if (!app) return <Gone title="This page isn't in My Apps any more" body="It was unpinned. Pin it again from its Play Place card." />;
   return (
     <div className="relative h-full w-full px-2 pb-24 md:px-3 md:pb-3">
-      <div className="h-full overflow-hidden rounded-[14px] border border-white/[0.08] bg-white">
+      <div className="h-full overflow-hidden r-14 border border-white/[0.08] bg-white">
         <SandboxBoundary key={`${app.id}:${reload}`} label={app.label} onReset={() => setReload((n) => n + 1)}>
           {app.kind === "build" ? <BuildApp app={app} reload={reload} /> : <CardApp app={app} reload={reload} />}
         </SandboxBoundary>
@@ -40,8 +40,8 @@ function ActionPill({ app, onReload }: { app: MountedApp; onReload: () => void }
   return (
     <div className="glass-thin absolute right-4 top-2 z-10 flex items-center gap-1 rounded-full py-1 pl-3 pr-1 opacity-60 shadow-lg transition-opacity duration-200 hover:opacity-100 focus-within:opacity-100 md:right-5">
       <Icon size={12} className="text-amber-soft" />
-      <span className="max-w-40 truncate text-[11px] font-medium text-ink">{app.label}</span>
-      <button onClick={edit} className="pill-glass !h-6 !px-2 text-[10.5px]" title="Back to its Play Place card, Steer box focused">
+      <span className="max-w-40 truncate fs-11 font-medium text-ink">{app.label}</span>
+      <button onClick={edit} className="pill-glass !h-6 !px-2 fs-10.5" title="Back to its Play Place card, Steer box focused">
         <PencilLine size={11} /> Edit in Play Place
       </button>
       <button onClick={onReload} className="pill-glass !h-6 !w-6 !p-0" title="Reload the app" aria-label="Reload the app">
@@ -85,7 +85,7 @@ function CardApp({ app, reload }: { app: MountedApp; reload: number }) {
 }
 
 function Loading() {
-  return <div className="grid h-full place-items-center bg-canvas font-mono text-[11px] text-ink-3">starting the app…</div>;
+  return <div className="grid h-full place-items-center bg-canvas font-mono fs-11 text-ink-3">starting the app…</div>;
 }
 
 function Gone({ title, body, app }: { title: string; body: string; app?: MountedApp }) {

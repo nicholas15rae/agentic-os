@@ -78,17 +78,17 @@ export function DevicesCard() {
   };
 
   return (
-    <div className="mt-3 rounded-[12px] border border-white/[0.06] p-3" aria-label="Where you're logged in">
+    <div className="mt-3 r-12 border border-white/[0.06] p-3" aria-label="Where you're logged in">
       <p className="label-caps mb-2 text-ink-3">Where you're logged in</p>
-      {error && <p className="mb-2 font-mono text-[11px] text-alert">{error}</p>}
+      {error && <p className="mb-2 font-mono fs-11 text-alert">{error}</p>}
       {!rows ? (
-        <p className="text-[11px] text-ink-3">Loading…</p>
+        <p className="fs-11 text-ink-3">Loading…</p>
       ) : (
         <ul className="space-y-1">
           {rows.map((d) => {
             const Icon = ICON[d.kind] ?? Monitor;
             return (
-              <li key={d.id} className={`flex flex-wrap items-center gap-2 text-[12px] ${d.revokedAt ? "opacity-50" : ""}`} data-device={d.id}>
+              <li key={d.id} className={`flex flex-wrap items-center gap-2 fs-12 ${d.revokedAt ? "opacity-50" : ""}`} data-device={d.id}>
                 <Icon size={13} className="text-ink-3" aria-hidden />
                 <span className="text-ink">{d.name}</span>
                 <span className="text-ink-3">
@@ -97,7 +97,7 @@ export function DevicesCard() {
                   {d.kind === "shared" ? " · uses the shared token (sign out = New phone token in Settings → OS)" : ""}
                 </span>
                 {canSignOut(d) && (
-                  <button className="pill-glass ml-auto !h-7 !px-2.5 text-[11px] hover:!border-alert/50 hover:!text-alert" disabled={busy === d.id} onClick={() => void signOut(d)}>
+                  <button className="pill-glass ml-auto !h-7 !px-2.5 fs-11 hover:!border-alert/50 hover:!text-alert" disabled={busy === d.id} onClick={() => void signOut(d)}>
                     {busy === d.id ? <Loader2 size={11} className="animate-spin" /> : <LogOut size={11} />} Sign out
                   </button>
                 )}
@@ -107,26 +107,26 @@ export function DevicesCard() {
         </ul>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Input className="!h-8 flex-1 text-[12px]" placeholder="New device name (e.g. Galaxy S22)" value={name} onChange={(e) => setName(e.target.value)} aria-label="New device name" />
-        <Select className="!h-8 !w-auto text-[12px]" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} aria-label="Device kind">
+        <Input className="!h-8 flex-1 fs-12" placeholder="New device name (e.g. Galaxy S22)" value={name} onChange={(e) => setName(e.target.value)} aria-label="New device name" />
+        <Select className="!h-8 !w-auto fs-12" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} aria-label="Device kind">
           <option value="phone">Phone</option>
           <option value="laptop">Laptop</option>
           <option value="tablet">Tablet</option>
           <option value="other">Other</option>
         </Select>
-        <button className="pill-glass !h-8 text-[11px]" disabled={busy === "add"} onClick={() => void add()}>
+        <button className="pill-glass !h-8 fs-11" disabled={busy === "add"} onClick={() => void add()}>
           {busy === "add" ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />} Add device
         </button>
       </div>
       {issued && (
-        <div className="mt-2 rounded-[10px] border border-amber/30 bg-amber/[0.06] p-2 text-[11px] text-ink-2">
+        <div className="mt-2 r-10 border border-amber/30 bg-amber/[0.06] p-2 fs-11 text-ink-2">
           Token for <b>{issued.name}</b> (shown once; paste it into that device's gateway token field):
           <div className="mt-1 flex items-center gap-2">
             <code className="flex-1 break-all font-mono text-amber-light">{issued.token}</code>
             <button className="pill-glass !h-7 !px-2" onClick={() => void navigator.clipboard?.writeText(issued.token)} aria-label="Copy the token">
               <ClipboardCopy size={11} />
             </button>
-            <button className="pill-glass !h-7 !px-2 text-[11px]" onClick={() => setIssued(null)}>
+            <button className="pill-glass !h-7 !px-2 fs-11" onClick={() => setIssued(null)}>
               Done
             </button>
           </div>

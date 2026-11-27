@@ -7,7 +7,7 @@ import { MONTH_NAMES, MONTHS, newAreaId, UNTAGGED } from "@/features/finance/are
 import { useAreas, useFinanceFilter } from "@/features/finance/filter-store";
 import { prefixFor } from "@/features/finance/invoice-number";
 
-const sel = "!h-8 !w-auto !py-0 text-[12px]";
+const sel = "!h-8 !w-auto !py-0 fs-12";
 
 /** The area switcher and filters (agent, month, year) every Finance tab follows. */
 export function AreaBar({ years }: { years: string[] }) {
@@ -56,11 +56,11 @@ export function AreaBar({ years }: { years: string[] }) {
           ))}
         </Select>
         {busy && (
-          <button onClick={reset} className="text-[11px] text-ink-3 hover:text-ink">
+          <button onClick={reset} className="fs-11 text-ink-3 hover:text-ink">
             Clear
           </button>
         )}
-        <button onClick={() => setManage(!manage)} aria-expanded={manage} className="ml-auto flex items-center gap-1 text-[11px] text-ink-3 hover:text-ink">
+        <button onClick={() => setManage(!manage)} aria-expanded={manage} className="ml-auto flex items-center gap-1 fs-11 text-ink-3 hover:text-ink">
           <Settings2 size={12} /> Areas & rates
         </button>
       </div>
@@ -76,12 +76,12 @@ function ManageAreas() {
   const kmRate = useProfiles((s) => s.doc.finance?.kmRate ?? 0.72);
   const [name, setName] = useState("");
   return (
-    <div className="glass-thin space-y-2 rounded-[14px] p-3">
-      <p className="text-[11px] text-ink-3">Business details (name, HST number, address) are in Settings → Business. The set-aside % is your own estimate for planning, not tax advice.</p>
+    <div className="glass-thin space-y-2 r-14 p-3">
+      <p className="fs-11 text-ink-3">Business details (name, HST number, address) are in Settings → Business. The set-aside % is your own estimate for planning, not tax advice.</p>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[560px] text-[12px]">
+        <table className="w-full min-w-[560px] fs-12">
           <thead>
-            <tr className="label-caps text-left text-[10px] text-ink-3 [&>th]:pb-1 [&>th]:pr-2">
+            <tr className="label-caps text-left fs-10 text-ink-3 [&>th]:pb-1 [&>th]:pr-2">
               <th>Area name</th>
               <th>HST filing</th>
               <th>Set aside %</th>
@@ -94,10 +94,10 @@ function ManageAreas() {
               return (
                 <tr key={a.id} className="[&>td]:py-1 [&>td]:pr-2">
                   <td>
-                    <Input defaultValue={p?.label ?? ""} placeholder={PROFILE_LABEL[a.id as KnownProfileId] ?? a.id} onBlur={(e) => patch(a.id, { label: e.target.value.trim() })} aria-label={`Name for ${a.label}`} className="!h-8 !py-0 text-[12px]" />
+                    <Input defaultValue={p?.label ?? ""} placeholder={PROFILE_LABEL[a.id as KnownProfileId] ?? a.id} onBlur={(e) => patch(a.id, { label: e.target.value.trim() })} aria-label={`Name for ${a.label}`} className="!h-8 !py-0 fs-12" />
                   </td>
                   <td>
-                    <Select value={p?.hstPeriod ?? "quarterly"} onChange={(e) => patch(a.id, { hstPeriod: e.target.value as HstPeriod })} className="!h-8 !py-0 text-[12px]" aria-label={`HST filing for ${a.label}`}>
+                    <Select value={p?.hstPeriod ?? "quarterly"} onChange={(e) => patch(a.id, { hstPeriod: e.target.value as HstPeriod })} className="!h-8 !py-0 fs-12" aria-label={`HST filing for ${a.label}`}>
                       <option value="monthly">Monthly</option>
                       <option value="quarterly">Quarterly</option>
                       <option value="yearly">Yearly</option>
@@ -112,7 +112,7 @@ function ManageAreas() {
                         if (Number.isFinite(n) && n >= 0 && n <= 90) patch(a.id, { setAsidePct: n });
                       }}
                       aria-label={`Set aside % for ${a.label}`}
-                      className="!h-8 !w-20 !py-0 font-mono text-[12px]"
+                      className="!h-8 !w-20 !py-0 font-mono fs-12"
                     />
                   </td>
                   <td>
@@ -121,7 +121,7 @@ function ManageAreas() {
                       placeholder={prefixFor(a.id)}
                       onBlur={(e) => patch(a.id, { invoicePrefix: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) })}
                       aria-label={`Invoice prefix for ${a.label}`}
-                      className="!h-8 !w-24 !py-0 font-mono text-[12px]"
+                      className="!h-8 !w-24 !py-0 font-mono fs-12"
                     />
                   </td>
                 </tr>
@@ -141,12 +141,12 @@ function ManageAreas() {
             setName("");
           }}
         >
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="New area (e.g. Rentals)" aria-label="New area name" className="!h-8 !py-0 text-[12px]" />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="New area (e.g. Rentals)" aria-label="New area name" className="!h-8 !py-0 fs-12" />
           <button className="pill-glass !h-8 shrink-0 text-xs">
             <Plus size={12} /> Add area
           </button>
         </form>
-        <label className="ml-auto flex items-center gap-1.5 text-[12px] text-ink-2">
+        <label className="ml-auto flex items-center gap-1.5 fs-12 text-ink-2">
           Mileage $ / km
           <Input
             inputMode="decimal"
@@ -156,7 +156,7 @@ function ManageAreas() {
               if (Number.isFinite(n) && n >= 0 && n <= 10) useProfiles.getState().patchFinance({ kmRate: n });
             }}
             aria-label="Mileage rate per km"
-            className="!h-8 !w-20 !py-0 font-mono text-[12px]"
+            className="!h-8 !w-20 !py-0 font-mono fs-12"
           />
         </label>
       </div>

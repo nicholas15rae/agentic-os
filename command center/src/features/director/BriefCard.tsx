@@ -122,9 +122,9 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
 
   const status = brief ? (
     brief.approved ? (
-      <span className="rounded-full border border-teal/40 px-2 text-[11px] text-teal-soft">Approved</span>
+      <span className="rounded-full border border-teal/40 px-2 fs-11 text-teal-soft">Approved</span>
     ) : (
-      <span className="rounded-full border border-amber/40 px-2 text-[11px] text-amber-soft">Waiting for your approval</span>
+      <span className="rounded-full border border-amber/40 px-2 fs-11 text-amber-soft">Waiting for your approval</span>
     )
   ) : null;
 
@@ -143,9 +143,9 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
       }
     >
       {draft && (
-        <div className="mb-3 rounded-[12px] border border-amber/40 bg-amber/10 p-2.5" role="group" aria-label="Director's brief draft">
-          <p className="text-[12px] text-ink">The Director drafted a new brief. Your approved one stays until you accept this.</p>
-          <dl className="mt-1.5 space-y-0.5 text-[11px]">
+        <div className="mb-3 r-12 border border-amber/40 bg-amber/10 p-2.5" role="group" aria-label="Director's brief draft">
+          <p className="fs-12 text-ink">The Director drafted a new brief. Your approved one stays until you accept this.</p>
+          <dl className="mt-1.5 space-y-0.5 fs-11">
             {FIELDS.filter((f) => !brief || briefValue(draft, f.key) !== briefValue(brief, f.key)).map((f) => (
               <div key={f.key} className="flex gap-1.5">
                 <dt className="w-16 shrink-0 text-ink-3">{f.label}</dt>
@@ -154,10 +154,10 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
             ))}
           </dl>
           <div className="mt-2 flex gap-1.5">
-            <button onClick={onAcceptDraft} className="pill-primary !h-7 !px-2.5 text-[11px]">
+            <button onClick={onAcceptDraft} className="pill-primary !h-7 !px-2.5 fs-11">
               <Check size={11} /> Accept draft
             </button>
-            <button onClick={onRejectDraft} className="pill-glass !h-7 !px-2.5 text-[11px]">
+            <button onClick={onRejectDraft} className="pill-glass !h-7 !px-2.5 fs-11">
               <X size={11} /> Reject
             </button>
           </div>
@@ -177,9 +177,9 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
         >
           <label className="block space-y-1">
             <span className="label-caps text-ink-3">Your idea, in your words</span>
-            <textarea value={idea} onChange={(e) => setIdea(e.target.value)} rows={4} placeholder="What are you making, for whom, and how should it feel?" className="field min-h-[80px] resize-y text-[12px]" aria-label="Your idea" />
+            <textarea value={idea} onChange={(e) => setIdea(e.target.value)} rows={4} placeholder="What are you making, for whom, and how should it feel?" className="field min-h-[80px] resize-y fs-12" aria-label="Your idea" />
           </label>
-          <p className="text-[11px] text-ink-3">The brief keeps this exactly as you wrote it; the Director fills in the rest and marks what it guessed.</p>
+          <p className="fs-11 text-ink-3">The brief keeps this exactly as you wrote it; the Director fills in the rest and marks what it guessed.</p>
           <div className="flex gap-1.5">
             <button type="submit" disabled={!idea.trim() || chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
               {chatBusy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Ask the Director
@@ -191,7 +191,7 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
         </form>
       ) : !brief && !editing ? (
         <div className="space-y-2 text-center">
-          <p className="text-[12px] text-ink-2">No brief yet. The Director can draft one from your idea, or you can write it.</p>
+          <p className="fs-12 text-ink-2">No brief yet. The Director can draft one from your idea, or you can write it.</p>
           <div className="flex flex-wrap justify-center gap-1.5">
             <button onClick={() => setAsking(true)} disabled={chatBusy} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
               {chatBusy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} Draft a brief
@@ -210,14 +210,14 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
           }}
         >
           <Labeled label="Idea" guessed={base.guessed.includes("idea")}>
-            <textarea value={form.idea} onChange={(e) => field("idea", e.target.value)} rows={3} className="field min-h-[60px] resize-y text-[12px]" aria-label="Idea" />
+            <textarea value={form.idea} onChange={(e) => field("idea", e.target.value)} rows={3} className="field min-h-[60px] resize-y fs-12" aria-label="Idea" />
           </Labeled>
           <Labeled label="Goal" guessed={base.guessed.includes("goal")}>
-            <input value={form.goal} onChange={(e) => field("goal", e.target.value)} className="field !h-8 !py-0 text-[12px]" aria-label="Goal" />
+            <input value={form.goal} onChange={(e) => field("goal", e.target.value)} className="field !h-8 !py-0 fs-12" aria-label="Goal" />
           </Labeled>
           <div className="grid grid-cols-3 gap-1.5">
             <Labeled label="Platform" guessed={base.guessed.includes("platform")}>
-              <Select value={form.platform} onChange={(e) => field("platform", e.target.value as Platform)} className="!h-8 !py-0 text-[12px]" aria-label="Platform">
+              <Select value={form.platform} onChange={(e) => field("platform", e.target.value as Platform)} className="!h-8 !py-0 fs-12" aria-label="Platform">
                 {PLATFORMS.map((p) => (
                   <option key={p} value={p}>
                     {PLATFORM_LABEL[p]}
@@ -226,10 +226,10 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
               </Select>
             </Labeled>
             <Labeled label="Length (s)" guessed={base.guessed.includes("lengthSec")}>
-              <input type="number" min={5} max={600} value={form.lengthSec} onChange={(e) => field("lengthSec", e.target.value)} className="field !h-8 !py-0 text-[12px]" aria-label="Length in seconds" />
+              <input type="number" min={5} max={600} value={form.lengthSec} onChange={(e) => field("lengthSec", e.target.value)} className="field !h-8 !py-0 fs-12" aria-label="Length in seconds" />
             </Labeled>
             <Labeled label="Aspect" guessed={base.guessed.includes("aspect")}>
-              <Select value={form.aspect} onChange={(e) => field("aspect", e.target.value as Aspect)} className="!h-8 !py-0 text-[12px]" aria-label="Aspect">
+              <Select value={form.aspect} onChange={(e) => field("aspect", e.target.value as Aspect)} className="!h-8 !py-0 fs-12" aria-label="Aspect">
                 {ASPECTS.map((a) => (
                   <option key={a} value={a}>
                     {a}
@@ -239,10 +239,10 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
             </Labeled>
           </div>
           <Labeled label="Tone" guessed={base.guessed.includes("tone")}>
-            <input value={form.tone} onChange={(e) => field("tone", e.target.value)} className="field !h-8 !py-0 text-[12px]" aria-label="Tone" />
+            <input value={form.tone} onChange={(e) => field("tone", e.target.value)} className="field !h-8 !py-0 fs-12" aria-label="Tone" />
           </Labeled>
           <Labeled label="References" guessed={base.guessed.includes("references")}>
-            <input value={form.references} onChange={(e) => field("references", e.target.value)} placeholder="Links or names, comma separated" className="field !h-8 !py-0 text-[12px]" aria-label="References" />
+            <input value={form.references} onChange={(e) => field("references", e.target.value)} placeholder="Links or names, comma separated" className="field !h-8 !py-0 fs-12" aria-label="References" />
           </Labeled>
           <div className="flex gap-1.5 pt-1">
             <button type="submit" disabled={busy || !form.idea.trim()} className="pill-primary !h-8 !px-3 text-xs disabled:opacity-50">
@@ -258,7 +258,7 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
           <>
             <dl className="space-y-1.5">
               {FIELDS.map((f) => (
-                <div key={f.key} className="flex gap-2 text-[12px]">
+                <div key={f.key} className="flex gap-2 fs-12">
                   <dt className="label-caps w-[72px] shrink-0 pt-0.5 text-ink-3">{f.label}</dt>
                   <dd className="min-w-0 flex-1 break-words text-ink-2">
                     <button onClick={begin} className="text-left hover:text-ink" title={`Edit ${f.label.toLowerCase()}`}>
@@ -283,7 +283,7 @@ export function BriefView({ brief, draft, chatBusy, starter, onSave, onApprove, 
 
 function GuessedChip() {
   return (
-    <span className="ml-1.5 inline-block rounded-full border border-amber/40 px-1.5 align-middle text-[10px] text-amber-soft" title="The Director filled this with a default: check it">
+    <span className="ml-1.5 inline-block rounded-full border border-amber/40 px-1.5 align-middle fs-10 text-amber-soft" title="The Director filled this with a default: check it">
       guessed
     </span>
   );

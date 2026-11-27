@@ -25,9 +25,10 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`field ${props.className ?? ""}`} />;
 }
 
-export function Card({ title, hint, action, children, className = "" }: { title?: string; hint?: ReactNode; action?: ReactNode; children: ReactNode; className?: string }) {
+/** `fill`: the card fills its panel and its body is a flex column (for a FillBox chart). */
+export function Card({ title, hint, action, children, className = "", fill = false }: { title?: string; hint?: ReactNode; action?: ReactNode; children: ReactNode; className?: string; fill?: boolean }) {
   return (
-    <section className={`glass rounded-[20px] p-5 ${className}`}>
+    <section className={`glass r-20 p-5 ${fill ? "flex h-full min-h-0 flex-col" : ""} ${className}`}>
       {(title || action) && (
         <div className="mb-1 flex flex-wrap items-center gap-2">
           {title && <h2 className="label-caps text-amber-soft">{title}</h2>}
@@ -35,7 +36,7 @@ export function Card({ title, hint, action, children, className = "" }: { title?
         </div>
       )}
       {hint && <p className="mb-3 text-xs leading-relaxed text-ink-3">{hint}</p>}
-      <div className={title && !hint ? "mt-3" : ""}>{children}</div>
+      <div className={`${title && !hint ? "mt-3" : ""} ${fill ? "flex min-h-0 flex-1 flex-col" : ""}`}>{children}</div>
     </section>
   );
 }
@@ -47,7 +48,7 @@ export function Chip({ active, onClick, children, tone = "amber" }: { active?: b
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`h-8 shrink-0 rounded-full border px-3 text-[12px] transition-colors ${active ? on : "border-white/10 bg-[rgba(11,13,17,0.45)] text-ink-2 hover:text-ink"}`}
+      className={`h-8 shrink-0 rounded-full border px-3 fs-12 transition-colors ${active ? on : "border-white/10 bg-[rgba(11,13,17,0.45)] text-ink-2 hover:text-ink"}`}
     >
       {children}
     </button>
@@ -57,10 +58,10 @@ export function Chip({ active, onClick, children, tone = "amber" }: { active?: b
 export function Stat({ label, value, sub, tone = "ink" }: { label: string; value: ReactNode; sub?: ReactNode; tone?: "ink" | "teal" | "amber" | "alert" }) {
   const color = { ink: "text-ink", teal: "text-teal-soft", amber: "text-amber-light", alert: "text-alert" }[tone];
   return (
-    <div className="min-w-0 rounded-[14px] border border-white/[0.06] bg-white/[0.02] p-3">
+    <div className="min-w-0 r-14 border border-white/[0.06] bg-white/[0.02] p-3">
       <p className="label-caps truncate text-ink-3">{label}</p>
       <p className={`mt-1 truncate font-mono text-xl font-semibold tabular ${color}`}>{value}</p>
-      {sub && <p className="mt-0.5 truncate text-[11px] text-ink-3">{sub}</p>}
+      {sub && <p className="mt-0.5 truncate fs-11 text-ink-3">{sub}</p>}
     </div>
   );
 }
@@ -74,7 +75,7 @@ export function SubTabs<T extends string>({ tabs, value, onChange }: { tabs: { i
           role="tab"
           aria-selected={value === t.id}
           onClick={() => onChange(t.id)}
-          className={`shrink-0 rounded-full px-3.5 py-1.5 text-[13px] transition-colors ${value === t.id ? "border border-white/10 bg-raised text-ink" : "text-ink-2 hover:text-ink"}`}
+          className={`shrink-0 rounded-full px-3.5 py-1.5 fs-13 transition-colors ${value === t.id ? "border border-white/10 bg-raised text-ink" : "text-ink-2 hover:text-ink"}`}
         >
           {t.label}
         </button>

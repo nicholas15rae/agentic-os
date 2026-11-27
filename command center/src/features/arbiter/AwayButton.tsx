@@ -18,7 +18,7 @@ export function AwayButtonView({ away, onToggle, disabled }: { away: boolean; on
       disabled={disabled}
       onClick={onToggle}
       title={away ? "Away Mode ON: background work has the GPU. Click to give Tony priority again." : "Away Mode: hand the GPU to background work (Tony steps out of the loop)"}
-      className={`flex h-11 items-center gap-1.5 rounded-full px-3 text-[12px] font-semibold transition-colors disabled:opacity-40 ${
+      className={`flex h-11 items-center gap-1.5 rounded-full px-3 fs-12 font-semibold transition-colors disabled:opacity-40 ${
         away ? "bg-alert/90 text-canvas shadow-[0_0_18px_rgba(255,80,80,0.45)]" : "glass-thin text-ink-2 hover:text-alert"
       }`}
     >

@@ -39,11 +39,11 @@ export default function Contracting() {
           </button>
         }
       />
-      <div className="mb-2 grid grid-cols-2 gap-1.5 font-mono text-[11px]">
-        <p className="rounded-[10px] border border-white/[0.06] px-2 py-1 text-ink-3">
+      <div className="mb-2 grid grid-cols-2 gap-1.5 font-mono fs-11">
+        <p className="r-10 border border-white/[0.06] px-2 py-1 text-ink-3">
           Bids out <span className="float-right text-amber-light tabular">{money(bidValue, currency)}</span>
         </p>
-        <p className="rounded-[10px] border border-white/[0.06] px-2 py-1 text-ink-3">
+        <p className="r-10 border border-white/[0.06] px-2 py-1 text-ink-3">
           Won <span className="float-right text-teal-soft tabular">{money(wonValue, currency)}</span>
         </p>
       </div>
@@ -52,22 +52,22 @@ export default function Contracting() {
         {sorted.map((p) => {
           const due = p.followUpAt && p.followUpAt <= now;
           return (
-            <li key={p.id} className={`group rounded-[12px] border px-2.5 py-2 ${due ? "border-amber/50 bg-amber/[0.07]" : "border-white/[0.06] bg-white/[0.02]"}`}>
+            <li key={p.id} className={`group r-12 border px-2.5 py-2 ${due ? "border-amber/50 bg-amber/[0.07]" : "border-white/[0.06] bg-white/[0.02]"}`}>
               <div className="flex items-center gap-2">
-                <p className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                <p className="min-w-0 flex-1 truncate fs-13 text-ink">
                   {p.client} <span className="text-ink-3">· {p.job}</span>
                 </p>
-                <span className="shrink-0 font-mono text-[12px] text-ink tabular">{money(p.estimate, currency)}</span>
+                <span className="shrink-0 font-mono fs-12 text-ink tabular">{money(p.estimate, currency)}</span>
               </div>
               <div className="mt-1.5 flex items-center gap-1.5">
                 <button
                   onClick={() => void update(p.id, { status: STATUSES[(STATUSES.indexOf(p.status) + 1) % STATUSES.length] })}
                   title="Advance status"
-                  className="rounded-full border border-white/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-ink-2 hover:text-ink"
+                  className="rounded-full border border-white/15 px-2 py-0.5 font-mono fs-10 uppercase tracking-wider text-ink-2 hover:text-ink"
                 >
                   {p.status}
                 </button>
-                {p.followUpAt && <span className={`truncate text-[10.5px] ${due ? "text-amber-light" : "text-ink-3"}`}>follow up {formatWhen(p.followUpAt, now)}</span>}
+                {p.followUpAt && <span className={`truncate fs-10.5 ${due ? "text-amber-light" : "text-ink-3"}`}>follow up {formatWhen(p.followUpAt, now)}</span>}
                 <div className="ml-auto flex opacity-100 md:opacity-0 md:group-hover:opacity-100">
                   {["won", "in-progress"].includes(p.status) && (
                     <button aria-label="Create invoice draft" title="Create invoice draft" onClick={() => void toInvoice(p)} className="grid size-6 place-items-center rounded-full text-ink-3 hover:text-teal">
@@ -117,10 +117,10 @@ function AddForm({ onAdd }: { onAdd: (p: Project) => void }) {
         onAdd({ client: d.client.trim(), job: d.job.trim(), estimate: Number(d.estimate) || 0, status: "estimating", followUpAt: Number.isNaN(f) ? undefined : f });
       }}
     >
-      <input className="field !h-8 !py-1 text-[13px]" placeholder="Client" value={d.client} onChange={(e) => setD({ ...d, client: e.target.value })} autoFocus aria-label="Client" />
-      <input className="field !h-8 !py-1 text-[13px]" placeholder="Job" value={d.job} onChange={(e) => setD({ ...d, job: e.target.value })} aria-label="Job" />
-      <input className="field !h-8 !py-1 text-[13px]" inputMode="decimal" placeholder="Estimate $" value={d.estimate} onChange={(e) => setD({ ...d, estimate: e.target.value })} aria-label="Estimate" />
-      <input type="datetime-local" className="field !h-8 !py-1 text-[12px]" value={d.follow} onChange={(e) => setD({ ...d, follow: e.target.value })} aria-label="Follow up" />
+      <input className="field !h-8 !py-1 fs-13" placeholder="Client" value={d.client} onChange={(e) => setD({ ...d, client: e.target.value })} autoFocus aria-label="Client" />
+      <input className="field !h-8 !py-1 fs-13" placeholder="Job" value={d.job} onChange={(e) => setD({ ...d, job: e.target.value })} aria-label="Job" />
+      <input className="field !h-8 !py-1 fs-13" inputMode="decimal" placeholder="Estimate $" value={d.estimate} onChange={(e) => setD({ ...d, estimate: e.target.value })} aria-label="Estimate" />
+      <input type="datetime-local" className="field !h-8 !py-1 fs-12" value={d.follow} onChange={(e) => setD({ ...d, follow: e.target.value })} aria-label="Follow up" />
       <button className="pill-primary col-span-2 !h-8 text-xs">Add job</button>
     </form>
   );

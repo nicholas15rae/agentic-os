@@ -53,7 +53,7 @@ export function MemoryProposalCard({ turnId, items, end, expiresAt }: { turnId: 
   };
   if (!items.length) return null;
   return (
-    <div className={`mt-1 w-full rounded-[10px] border p-2 text-[11px] ${shown ? "border-white/10 bg-white/[0.02]" : "border-teal/25 bg-teal/[0.04]"}`} aria-label="Core memory proposal">
+    <div className={`mt-1 w-full r-10 border p-2 fs-11 ${shown ? "border-white/10 bg-white/[0.02]" : "border-teal/25 bg-teal/[0.04]"}`} aria-label="Core memory proposal">
       <div className="mb-1 flex items-center gap-2">
         <BookMarked size={11} className={shown ? "text-ink-3" : "text-teal"} aria-hidden />
         <span className="label-caps text-ink-3">Core memory</span>
@@ -68,10 +68,10 @@ export function MemoryProposalCard({ turnId, items, end, expiresAt }: { turnId: 
             <span className={`min-w-0 flex-1 break-words ${shown ? "text-ink-2" : "text-ink"}`}>{p.text}</span>
             {!shown && (
               <span className="flex shrink-0 gap-1.5">
-                <button type="button" disabled={busy !== null} onClick={() => void decide(p, true)} className="pill-primary !h-7 !px-3 text-[11px]">
+                <button type="button" disabled={busy !== null} onClick={() => void decide(p, true)} className="pill-primary !h-7 !px-3 fs-11">
                   <Check size={11} aria-hidden /> Save
                 </button>
-                <button type="button" disabled={busy !== null} onClick={() => void decide(p, false)} className="pill-glass !h-7 !px-3 text-[11px]">
+                <button type="button" disabled={busy !== null} onClick={() => void decide(p, false)} className="pill-glass !h-7 !px-3 fs-11">
                   <X size={11} aria-hidden /> Skip
                 </button>
               </span>

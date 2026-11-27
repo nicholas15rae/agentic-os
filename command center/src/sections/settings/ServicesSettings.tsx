@@ -57,7 +57,7 @@ export function ModelSelect({ provider, onChange, label = "Model" }: { provider:
           <Input
             autoFocus
             placeholder="custom model id"
-            className="font-mono !text-[13px]"
+            className="font-mono !fs-13"
             onKeyDown={(e) => {
               if (e.key === "Enter") commit((e.target as HTMLInputElement).value);
               if (e.key === "Escape") setAdding(false);
@@ -65,7 +65,7 @@ export function ModelSelect({ provider, onChange, label = "Model" }: { provider:
             onBlur={(e) => commit(e.target.value)}
           />
         ) : (
-          <Select value={provider.model} onChange={(e) => e.target.value !== provider.model && onChange(e.target.value)} className="font-mono !text-[13px]">
+          <Select value={provider.model} onChange={(e) => e.target.value !== provider.model && onChange(e.target.value)} className="font-mono !fs-13">
             {!options.length && <option value="">(no models — start it, or add a custom ID)</option>}
             {options.map((m) => (
               <option key={m} value={m}>
@@ -75,14 +75,14 @@ export function ModelSelect({ provider, onChange, label = "Model" }: { provider:
             ))}
           </Select>
         )}
-        <button type="button" aria-label="Add a custom model ID" title="+ Custom ID" onClick={() => setAdding(true)} className="grid size-10 shrink-0 place-items-center rounded-[12px] border border-white/10 text-ink-2 hover:text-ink">
+        <button type="button" aria-label="Add a custom model ID" title="+ Custom ID" onClick={() => setAdding(true)} className="grid size-10 shrink-0 place-items-center r-12 border border-white/10 text-ink-2 hover:text-ink">
           <Plus size={14} />
         </button>
-        <button type="button" aria-label="Reload models" title={err ?? "Reload models"} onClick={() => load(true)} className={`grid size-10 shrink-0 place-items-center rounded-[12px] border border-white/10 ${err ? "text-alert" : "text-ink-2"} hover:text-ink`}>
+        <button type="button" aria-label="Reload models" title={err ?? "Reload models"} onClick={() => load(true)} className={`grid size-10 shrink-0 place-items-center r-12 border border-white/10 ${err ? "text-alert" : "text-ink-2"} hover:text-ink`}>
           <RefreshCw size={14} />
         </button>
       </div>
-      {err && <span className="block truncate text-[11px] text-alert/80">{err} — showing saved ids</span>}
+      {err && <span className="block truncate fs-11 text-alert/80">{err} — showing saved ids</span>}
     </Field>
   );
 }
@@ -132,9 +132,9 @@ export function OrchestratorCard() {
     >
       <ol className="space-y-2">
         {chain.map((p, i) => (
-          <li key={p.id} className="rounded-[14px] border border-white/[0.07] bg-white/[0.02] p-3">
+          <li key={p.id} className="r-14 border border-white/[0.07] bg-white/[0.02] p-3">
             <div className="mb-2 flex items-center gap-2">
-              <span className="grid size-6 place-items-center rounded-full bg-amber/15 font-mono text-[11px] text-amber-light">{i + 1}</span>
+              <span className="grid size-6 place-items-center rounded-full bg-amber/15 font-mono fs-11 text-amber-light">{i + 1}</span>
               <HealthDot id={p.id} />
               <span className="font-medium text-ink">{p.label}</span>
               <span className="label-caps text-ink-3">{p.kind}</span>
@@ -153,7 +153,7 @@ export function OrchestratorCard() {
             <div className="grid gap-2 sm:grid-cols-[1.3fr_1fr_auto]">
               <ModelSelect provider={p} onChange={(model) => void patch({ id: p.id, model })} label={p.kind === "agentic-os" ? "Agent" : "Model"} />
               <Field label="Endpoint">
-                <Input defaultValue={p.baseUrl} onBlur={(e) => e.target.value !== p.baseUrl && void patch({ id: p.id, baseUrl: e.target.value })} className="font-mono !text-[12px]" spellCheck={false} />
+                <Input defaultValue={p.baseUrl} onBlur={(e) => e.target.value !== p.baseUrl && void patch({ id: p.id, baseUrl: e.target.value })} className="font-mono !fs-12" spellCheck={false} />
               </Field>
               <div className="flex items-end">
                 <button onClick={() => void test(p)} className="pill-glass !h-10 w-full text-xs">
@@ -161,14 +161,14 @@ export function OrchestratorCard() {
                 </button>
               </div>
             </div>
-            {testing[p.id] && <p className={`mt-1.5 font-mono text-[11px] ${testing[p.id].startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{testing[p.id]}</p>}
+            {testing[p.id] && <p className={`mt-1.5 font-mono fs-11 ${testing[p.id].startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{testing[p.id]}</p>}
             {p.needsKey && <KeyRow p={p} onChange={load} />}
           </li>
         ))}
       </ol>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {spare.length > 0 && (
-          <Select value="" onChange={(e) => e.target.value && void policy({ chain: [...view.policy.chain, e.target.value] })} className="!h-9 !w-auto !py-1 text-[13px]" aria-label="Add to chain">
+          <Select value="" onChange={(e) => e.target.value && void policy({ chain: [...view.policy.chain, e.target.value] })} className="!h-9 !w-auto !py-1 fs-13" aria-label="Add to chain">
             <option value="">+ Add backend to chain…</option>
             {spare.map((p) => (
               <option key={p.id} value={p.id}>
@@ -177,11 +177,11 @@ export function OrchestratorCard() {
             ))}
           </Select>
         )}
-        <button onClick={() => setAdding((a) => !a)} className="pill-glass !h-9 text-[13px]">
+        <button onClick={() => setAdding((a) => !a)} className="pill-glass !h-9 fs-13">
           <Plus size={13} /> Custom endpoint
         </button>
         {spare.filter((p) => p.custom).map((p) => (
-          <button key={p.id} onClick={() => void apply(cmd("provider_remove", { id: p.id }))} className="pill-glass !h-9 text-[13px] hover:!border-alert/50">
+          <button key={p.id} onClick={() => void apply(cmd("provider_remove", { id: p.id }))} className="pill-glass !h-9 fs-13 hover:!border-alert/50">
             <Trash2 size={12} /> {p.label}
           </button>
         ))}
@@ -198,7 +198,7 @@ function AddEndpoint({ onDone }: { onDone: () => void }) {
   const [err, setErr] = useState<string | null>(null);
   return (
     <form
-      className="mt-3 grid gap-2 rounded-[14px] border border-white/[0.07] p-3 sm:grid-cols-2"
+      className="mt-3 grid gap-2 r-14 border border-white/[0.07] p-3 sm:grid-cols-2"
       onSubmit={async (e) => {
         e.preventDefault();
         const id = d.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "custom";
@@ -230,10 +230,10 @@ function AddEndpoint({ onDone }: { onDone: () => void }) {
         <input type="checkbox" checked={d.needsKey} onChange={(e) => setD({ ...d, needsKey: e.target.checked })} className="accent-amber" /> Needs an API key
       </label>
       <div className="flex justify-end gap-2">
-        <button type="button" onClick={onDone} className="pill-glass !h-9 text-[13px]">
+        <button type="button" onClick={onDone} className="pill-glass !h-9 fs-13">
           Cancel
         </button>
-        <button className="pill-primary !h-9 text-[13px]">Add endpoint</button>
+        <button className="pill-primary !h-9 fs-13">Add endpoint</button>
       </div>
       {err && <p className="text-xs text-alert sm:col-span-2">{err}</p>}
     </form>
@@ -292,7 +292,7 @@ export function VerifierCard() {
         </label>
       )}
       {same && !ext && (
-        <p className="mt-2 rounded-[10px] border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber-light">
+        <p className="mt-2 r-10 border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber-light">
           The verifier is the same model as your planner, so it’s checking its own work. Load a second, different model in LM Studio (it can serve several) and pick it here for a real second opinion.
         </p>
       )}
@@ -322,7 +322,7 @@ function KeyRow({ p, onChange }: { p: ProviderInfo; onChange: () => void }) {
       }}
     >
       {p.hasKey ? <ShieldCheck size={14} className="shrink-0 text-teal" /> : <KeyRound size={14} className="shrink-0 text-amber" />}
-      <input type="password" autoComplete="off" className="field !h-9 !py-1 font-mono text-[13px]" placeholder={p.hasKey ? "Key stored in keychain — paste to replace" : "Paste API key"} value={key} onChange={(e) => setKey(e.target.value)} aria-label={`${p.label} API key`} />
+      <input type="password" autoComplete="off" className="field !h-9 !py-1 font-mono fs-13" placeholder={p.hasKey ? "Key stored in keychain — paste to replace" : "Paste API key"} value={key} onChange={(e) => setKey(e.target.value)} aria-label={`${p.label} API key`} />
       <button className="pill-glass !h-9 shrink-0 text-xs" disabled={!key}>
         Save
       </button>

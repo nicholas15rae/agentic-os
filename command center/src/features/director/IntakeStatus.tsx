@@ -10,15 +10,15 @@ export const INTAKE_POLL_MS = 5_000;
 
 /** The watched inbox line (pure): where to drop files, what's waiting, what's processing, the last error. */
 export function IntakeStatusView({ info, error, autoMatch, onReveal, onAutoMatch }: { info: IntakeInfo | null; error: string | null; autoMatch: boolean; onReveal: (path: string) => void; onAutoMatch: (on: boolean) => void }) {
-  if (!info) return error ? <p className="mb-2 text-[11px] text-ink-3">Inbox status unavailable: {error}</p> : null;
+  if (!info) return error ? <p className="mb-2 fs-11 text-ink-3">Inbox status unavailable: {error}</p> : null;
   return (
-    <div className="mb-2 rounded-[12px] border border-white/[0.08] bg-white/[0.02] p-2 text-[11px] text-ink-2" role="status" aria-label="Inbox status">
+    <div className="mb-2 r-12 border border-white/[0.08] bg-white/[0.02] p-2 fs-11 text-ink-2" role="status" aria-label="Inbox status">
       <div className="flex items-center gap-1.5">
         <FolderInput size={12} className="shrink-0 text-ink-3" />
-        <span className="min-w-0 flex-1 truncate font-mono text-[10px]" title={info.inbox}>
+        <span className="min-w-0 flex-1 truncate font-mono fs-10" title={info.inbox}>
           {info.inbox}
         </span>
-        <button onClick={() => onReveal(info.inbox)} className="pill-glass !h-6 shrink-0 !px-2 text-[10px]" title="Open the inbox folder: files dropped there are staged automatically">
+        <button onClick={() => onReveal(info.inbox)} className="pill-glass !h-6 shrink-0 !px-2 fs-10" title="Open the inbox folder: files dropped there are staged automatically">
           Reveal
         </button>
       </div>

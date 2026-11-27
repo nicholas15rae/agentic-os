@@ -65,10 +65,10 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
   const cloudOnPhone = !!info && !info.local && !isTauri();
 
   return (
-    <section className="glass space-y-4 rounded-[20px] p-4 md:p-5" aria-label="Voice settings">
+    <section className="glass space-y-4 r-20 p-4 md:p-5" aria-label="Voice settings">
       <div className="flex items-center gap-2">
         <h2 className="label-caps text-amber-soft">Voice</h2>
-        <span className="text-[11px] text-ink-3">How the Hub speaks translations, the coach and flashcards.</span>
+        <span className="fs-11 text-ink-3">How the Hub speaks translations, the coach and flashcards.</span>
         <button type="button" onClick={onClose} aria-label="Close voice settings" className="pill-glass ml-auto !h-8 !w-8 !p-0">
           <X size={14} />
         </button>
@@ -77,7 +77,7 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
       <div className="grid gap-3 md:grid-cols-2">
         <label className="block space-y-1.5">
           <span className="label-caps text-ink-3">Engine</span>
-          <Select value={voice.engine} onChange={(e) => save({ ...voice, engine: e.target.value })} aria-label="Voice engine" className="!h-10 text-[13px]">
+          <Select value={voice.engine} onChange={(e) => save({ ...voice, engine: e.target.value })} aria-label="Voice engine" className="!h-10 fs-13">
             {engines.map((e) => (
               <option key={e.id} value={e.id}>
                 {engineName(e)}
@@ -89,7 +89,7 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         {info && !info.local && (
           <label className="block space-y-1.5">
             <span className="label-caps text-ink-3">Model</span>
-            <Select value={voice.model ?? ""} onChange={(e) => save({ ...voice, model: e.target.value || null })} aria-label="Voice model" className="!h-10 text-[13px]">
+            <Select value={voice.model ?? ""} onChange={(e) => save({ ...voice, model: e.target.value || null })} aria-label="Voice model" className="!h-10 fs-13">
               <option value="">Provider default ({info.model || "—"})</option>
               {models.map((m) => (
                 <option key={m} value={m}>
@@ -101,7 +101,7 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
-      <p className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-ink-3">
+      <p className="flex items-start gap-1.5 fs-11.5 leading-relaxed text-ink-3">
         {isBrowser ? (
           <>
             <Cpu size={12} className="mt-0.5 shrink-0" /> Uses this device's built-in voices; each device keeps its own picks.
@@ -119,12 +119,12 @@ export function VoicePanel({ onClose }: { onClose: () => void }) {
       </p>
 
       {loading && (
-        <p role="status" className="flex items-center gap-2 text-[12px] text-ink-3">
+        <p role="status" className="flex items-center gap-2 fs-12 text-ink-3">
           <Loader2 size={12} className="animate-spin" /> Loading voices…
         </p>
       )}
-      {voiceError && !cloudOnPhone && <p className="text-[12px] text-alert">Couldn't list voices: {voiceError}</p>}
-      {cloudOnPhone && <p className="text-[12px] text-amber-light">This engine runs from the desktop only; on this phone the Hub uses Kokoro or the browser voice.</p>}
+      {voiceError && !cloudOnPhone && <p className="fs-12 text-alert">Couldn't list voices: {voiceError}</p>}
+      {cloudOnPhone && <p className="fs-12 text-amber-light">This engine runs from the desktop only; on this phone the Hub uses Kokoro or the browser voice.</p>}
 
       <VoiceRows
         isBrowser={isBrowser}
@@ -198,9 +198,9 @@ function VoiceRows({
             : resolveVoice(voice, previewLang, engines);
         const sample = r.code === "*" ? "Hello! This is how I sound." : r.sample;
         return (
-          <div key={r.code} role="listitem" className={`flex items-center gap-2 rounded-[12px] px-2 py-1.5 ${r.code === "*" ? "bg-white/[0.04]" : ""}`}>
-            <span className={`w-36 shrink-0 truncate text-[13px] ${r.code === "*" ? "font-semibold text-ink" : "text-ink-2"}`}>{r.name}</span>
-            <Select value={picks[r.code] ?? ""} onChange={(e) => onPick(r.code, e.target.value)} aria-label={`${r.name} voice`} className="!h-9 min-w-0 flex-1 !py-0 text-[12.5px]">
+          <div key={r.code} role="listitem" className={`flex items-center gap-2 r-12 px-2 py-1.5 ${r.code === "*" ? "bg-white/[0.04]" : ""}`}>
+            <span className={`w-36 shrink-0 truncate fs-13 ${r.code === "*" ? "font-semibold text-ink" : "text-ink-2"}`}>{r.name}</span>
+            <Select value={picks[r.code] ?? ""} onChange={(e) => onPick(r.code, e.target.value)} aria-label={`${r.name} voice`} className="!h-9 min-w-0 flex-1 !py-0 fs-12.5">
               <option value="">{auto}</option>
               {opts.map((o) => (
                 <option key={o.id} value={o.id}>

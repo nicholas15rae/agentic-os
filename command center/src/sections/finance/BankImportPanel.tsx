@@ -88,16 +88,16 @@ export function BankImportPanel() {
           <span className="w-44">
             <SelectOther label="Account" value={account} options={["Chequing", "Savings", "Credit card", "Business chequing"]} onChange={setAccount} placeholder="Account name" />
           </span>
-          {fileName && raw && <span className="text-[12px] text-ink-3">{fileName}</span>}
+          {fileName && raw && <span className="fs-12 text-ink-3">{fileName}</span>}
         </div>
         {msg && <p className="mt-2 text-xs text-amber-light">{msg}</p>}
         {raw && map && <ColumnMapper rows={raw} map={map} onChange={setMap} />}
         {preview && (
           <div className="mt-3">
-            <p className="text-[12px] text-ink-2">
+            <p className="fs-12 text-ink-2">
               {preview.lines.length} lines read{preview.skipped ? ` · ${preview.skipped} rows skipped (no date or amount)` : ""}. First few:
             </p>
-            <ul className="mt-1 space-y-0.5 font-mono text-[12px] text-ink-2">
+            <ul className="mt-1 space-y-0.5 font-mono fs-12 text-ink-2">
               {preview.lines.slice(0, 5).map((l, i) => (
                 <li key={i}>
                   {l.date} · {l.description} · <span className={l.amount < 0 ? "text-alert" : "text-teal"}>{money(l.amount, currency)}</span>
@@ -122,7 +122,7 @@ export function BankImportPanel() {
             <Chip active={show === "all"} onClick={() => setShow("all")}>
               All
             </Chip>
-            <Select value={String(windowDays)} onChange={(e) => setWindowDays(Number(e.target.value))} className="!h-8 !w-auto !py-0 text-[12px]" aria-label="Date window">
+            <Select value={String(windowDays)} onChange={(e) => setWindowDays(Number(e.target.value))} className="!h-8 !w-auto !py-0 fs-12" aria-label="Date window">
               {[2, 5, 10, 30].map((d) => (
                 <option key={d} value={d}>
                   ± {d} days
@@ -134,13 +134,13 @@ export function BankImportPanel() {
       >
         <ul className="space-y-1.5">
           {rows.map(({ l, m }) => (
-            <li key={l.id} className="flex flex-wrap items-center gap-3 rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
-              <span className="font-mono text-[12px] text-ink-3">{l.date}</span>
-              <span className="text-[11px] text-ink-3">{l.account}</span>
+            <li key={l.id} className="flex flex-wrap items-center gap-3 r-12 border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
+              <span className="font-mono fs-12 text-ink-3">{l.date}</span>
+              <span className="fs-11 text-ink-3">{l.account}</span>
               <span className="min-w-0 flex-1 truncate text-ink">{l.description}</span>
               <span className={`font-mono tabular ${l.amount < 0 ? "text-ink" : "text-teal-soft"}`}>{money(l.amount, currency)}</span>
               {m ? (
-                <span className="flex items-center gap-1.5 text-[11px] text-teal">
+                <span className="flex items-center gap-1.5 fs-11 text-teal">
                   <CheckCircle2 size={12} /> {m.label}
                   {l.status !== "matched" && (
                     <button className="text-ink-3 underline hover:text-ink" onClick={() => void lines.update(l.id, { status: "matched", match: m })}>
@@ -153,7 +153,7 @@ export function BankImportPanel() {
                   <AreaTag area={l.area} onAssign={(area) => void lines.update(l.id, { area })} />
                   {l.amount < 0 && (
                     <button
-                      className="pill-glass !h-7 text-[11px]"
+                      className="pill-glass !h-7 fs-11"
                       title="Log it as an expense (you can edit it in the Tax table)"
                       onClick={async () => {
                         const r = await receipts.create({ vendor: l.description.slice(0, 80), date: l.date, subtotal: -l.amount, gst: null, hst: null, pst: null, qst: null, tip: null, total: -l.amount, currency, category: l.category || "other", verified: false, source: "statement", area: l.area, notes: `From statement (${l.account})` });
@@ -164,12 +164,12 @@ export function BankImportPanel() {
                     </button>
                   )}
                   <span className="w-28">
-                    <SelectOther label="Category" value={l.category ?? ""} options={CATEGORIES} onChange={(category) => void lines.update(l.id, { category })} className="!h-7 !py-0 text-[11px]" />
+                    <SelectOther label="Category" value={l.category ?? ""} options={CATEGORIES} onChange={(category) => void lines.update(l.id, { category })} className="!h-7 !py-0 fs-11" />
                   </span>
-                  <button className="flex items-center gap-1 text-[11px] text-ink-3 hover:text-ink" onClick={() => void lines.update(l.id, { status: "reviewed" })} title="Checked: nothing to log">
+                  <button className="flex items-center gap-1 fs-11 text-ink-3 hover:text-ink" onClick={() => void lines.update(l.id, { status: "reviewed" })} title="Checked: nothing to log">
                     <CheckCircle2 size={11} /> ok
                   </button>
-                  <button className="flex items-center gap-1 text-[11px] text-ink-3 hover:text-ink" onClick={() => void lines.update(l.id, { status: "ignored" })} title="Personal / transfer: ignore">
+                  <button className="flex items-center gap-1 fs-11 text-ink-3 hover:text-ink" onClick={() => void lines.update(l.id, { status: "ignored" })} title="Personal / transfer: ignore">
                     <EyeOff size={11} /> ignore
                   </button>
                 </>
@@ -189,12 +189,12 @@ function ColumnMapper({ rows, map, onChange }: { rows: string[][]; map: ColumnMa
   const names = (map.hasHeader ? rows[0] : []).concat();
   const cols = Array.from({ length: width }, (_, i) => ({ value: String(i), label: `${i + 1}: ${names[i] || rows[map.hasHeader ? 1 : 0]?.[i] || ""}`.slice(0, 30) }));
   const pickCol = (key: "date" | "description" | "amount" | "debit" | "credit", optional = false) => (
-    <label className="flex items-center gap-1 text-[12px] text-ink-2">
+    <label className="flex items-center gap-1 fs-12 text-ink-2">
       {key}
       <Select
         value={map[key] == null ? "" : String(map[key])}
         onChange={(e) => onChange({ ...map, [key]: e.target.value === "" ? undefined : Number(e.target.value) })}
-        className="!h-8 !w-auto !py-0 text-[12px]"
+        className="!h-8 !w-auto !py-0 fs-12"
         aria-label={`${key} column`}
       >
         {optional && <option value="">—</option>}
@@ -208,9 +208,9 @@ function ColumnMapper({ rows, map, onChange }: { rows: string[][]; map: ColumnMa
   );
   const single = map.amount != null;
   return (
-    <div className="glass-thin mt-3 space-y-2 rounded-[14px] p-3">
+    <div className="glass-thin mt-3 space-y-2 r-14 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-1.5 text-[12px] text-ink-2">
+        <label className="flex items-center gap-1.5 fs-12 text-ink-2">
           <input type="checkbox" checked={map.hasHeader} onChange={(e) => onChange({ ...map, hasHeader: e.target.checked })} className="accent-teal" /> First row is headings
         </label>
         <Chip active={single} onClick={() => onChange({ ...map, amount: map.amount ?? 2, debit: undefined, credit: undefined })}>
@@ -229,14 +229,14 @@ function ColumnMapper({ rows, map, onChange }: { rows: string[][]; map: ColumnMa
             {pickCol("credit", true)}
           </>
         )}
-        <label className="flex items-center gap-1.5 text-[12px] text-ink-2">
+        <label className="flex items-center gap-1.5 fs-12 text-ink-2">
           <input type="checkbox" checked={!!map.invert} onChange={(e) => onChange({ ...map, invert: e.target.checked })} className="accent-teal" /> Flip signs (card shows purchases as +)
         </label>
-        <label className="flex items-center gap-1.5 text-[12px] text-ink-2">
+        <label className="flex items-center gap-1.5 fs-12 text-ink-2">
           <input type="checkbox" checked={!!map.dayFirst} onChange={(e) => onChange({ ...map, dayFirst: e.target.checked })} className="accent-teal" /> Dates are day/month
         </label>
       </div>
-      <p className="text-[11px] text-ink-3">“debit” = money out, “credit” = money in.</p>
+      <p className="fs-11 text-ink-3">“debit” = money out, “credit” = money in.</p>
     </div>
   );
 }

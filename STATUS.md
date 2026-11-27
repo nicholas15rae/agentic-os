@@ -1,19 +1,21 @@
 # STATUS
 
-Updated 2026-11-27 10:50. One page for every Claude Code session and branch.
+Updated 2026-11-27 11:45. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
-## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), 11-27 ~10:50
+## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 ~11:45
 
-For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, switched on or rebuilt. Read `docs/section-26-plan.md` (plan, progress, findings, item 15 + vision designs) and `docs/section-26-allm-inventory.md`.
+For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, switched on or rebuilt; Tony is on LM Studio. Read `docs/section-26-plan.md` (plan, progress, findings, item 15 + vision designs), `docs/section-26-allm-inventory.md` and `docs/section-26-bizops-prompt.md`.
 
-**Done (all committed, tests green):** pinned llama.cpp b12317 CUDA in `D:\llama.cpp\b12317`; runner on :1238 (off: `engine.json` enabled=false, thinking off by default); model manager with GGUF fit check; watchdog; GPU baton yield/reclaim; gateway `/api/engine/*` (loopback only) + boot hook (idle while off); `llamacpp` provider (in no chain); doc store (not the vault) with the 7 AnythingLLM docs imported; AnythingLLM export `data\engine\allm-export\20261127-101548`; inventory; agent-table proposal; HF download + Recycle-Bin delete; Settings card (needs rebuild).
+**Done (committed, tests green):** pinned llama.cpp b12317 CUDA in `D:\llama.cpp\b12317`; runner on :1238 (off: `engine.json` enabled=false; thinking off by default); model manager + GGUF fit check; watchdog; GPU baton yield/reclaim; gateway `/api/engine/*` (loopback only) + boot hook (idle while off); `llamacpp` provider (in no chain); doc store (not the vault), 7 AnythingLLM docs imported; AnythingLLM export `data\engine\allm-export\20261127-101548`, **secrets scrubbed** (keep until Nic confirms; never delete without his OK); inventory; agent-table proposal with **Nic's tool owners** applied; Tony's gateway prompt = the only Tony prompt; **Biz Ops shared prompt draft** + builder; HF download + Recycle-Bin delete; Settings card (needs rebuild); CPU smoke test.
 
-**Benchmark (model server, Tony's real messages):** LM Studio first token **0.37 s** median, total **1.71 s**. Engine on GPU: **not run** (needs Bionic's model unloaded, Nic). Engine on CPU smoke test: runs, 3/3 live checks, first token 1.0 s.
+**Nic's 11-27 answers (applied):** benchmark later; Coder owns filesystem + fetch, Director reads `G:\ai-hub\media\projects`, Designer reads its project folder (to be named), Tony owns knowledge-graph writes, others read-only, Tony uses Brave not fetch; one shared Biz Ops prompt by business tag; Tony's gateway prompt only; keep the export, gitignored, no Drive sync, no plaintext secrets.
 
-**Left:** step 5 GPU bench (Nic); rebuild (Nic); answers to the Questions for Nic below; item 15 switch (design in the plan: gateway Tony + model_swap.rs need engine branches); item 14 vault join (Nic); A1/A4/A5/A7 migration steps from the inventory; vision via Tony's own mmproj (plan only).
+**Benchmark:** LM Studio first token **0.37 s** median, total **1.71 s**. Engine on GPU: **not run** (Nic will say when). CPU smoke: 3/3 live checks.
 
-**Commands:** `python -m engine.bench_tony --target engine`, `python -m engine.template_check --live engine`, `python -m engine.smoke_cpu`, `python -m engine.models fit|list|vram`, `python -m engine.allm_import report <export>`.
+**Left:** GPU bench (Nic); rebuild (Nic); Nic's review of the Biz Ops draft + the open questions below; item 15 switch (design in the plan; gateway Tony + model_swap.rs need engine branches); wiring the agent table into the gateway (agents calling the engine, tool access enforced from `toolAccess`); A5 thread store, A7 ingest path; item 14 vault join (Nic); vision via Tony's mmproj.
+
+**Commands:** `python -m engine.bench_tony --target engine`, `python -m engine.template_check --live engine`, `python -m engine.smoke_cpu`, `python -m engine.models fit|list|vram`, `python -m engine.allm_import report|redact <export>`, `python -m engine.agents_migrate <export>`, `python -m engine.bizops <tag>`.
 
 ## 1. Done
 
@@ -64,11 +66,12 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | S26: Settings -> Services -> Built-in engine card (status, VRAM, models + fit, load/unload, settings, download, delete); needs a rebuild to see | section-26-engine | 0162a7d | No |
 | S26: gateway `/api/engine/*` (loopback only), boot hook, GPU baton yield/reclaim | section-26-engine | 24dbfe8 | No |
 | S26: agent-table proposal from os.json + the export (read-only, not wired) | section-26-engine | 840aadc | No |
-| S26: CPU-only smoke test of the real llama-server (no GPU): 3/3 live checks, first token 1.0 s on CPU | section-26-engine | (this commit) | No |
+| S26: CPU-only smoke test of the real llama-server (no GPU): 3/3 live checks, first token 1.0 s on CPU | section-26-engine | 1569272 | No |
 | S26: AnythingLLM export holds no API key or token in plain text (6/6 live secrets scrubbed, VACUUMed; new exports scrub automatically); gitignored; no Drive sync on this PC | section-26-engine | 47ae063 | No |
 | S26: your tool owners in the agent proposal (Coder owns filesystem + fetch, Tony owns knowledge-graph writes, readers read-only; one writer per tool, tested) | section-26-engine | 145949e | No |
 | S26: Tony's gateway prompt is the only Tony prompt; Booking takes the detailed Booking Desk prompt (to confirm) | section-26-engine | 95e021a | No |
-| S26: Biz Ops shared prompt DRAFT (Acting, Contracting, BF Supplements sections by business tag); both business workspaces map to it | section-26-engine | (this commit) | No |
+| S26: Biz Ops shared prompt DRAFT (Acting, Contracting, BF Supplements sections by business tag); both business workspaces map to it | section-26-engine | 5a66c07 | No |
+| S26: Biz Ops prompt builder (only the tagged business's section; refuses scope bleed) | section-26-engine | 5a6df42 | No |
 
 ## 2. In progress
 
@@ -166,7 +169,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
-| section-26-engine (840aadc) | full pytest 1,794 pass, 1 skip; engine tests 65/65; vitest 3,027/3,027, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in dispatch); CPU smoke test 3/3 | 11-27 10:50 |
+| section-26-engine (5a6df42) | full pytest 1,810 pass, 1 skip; engine tests 75/75; vitest 3,027/3,027, tsc clean (at 0162a7d; no TS since); cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in dispatch); CPU smoke 3/3 | 11-27 11:45 |
 | claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
@@ -205,15 +208,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 10:49 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:58 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 17 | `95e021a` 2026-11-27 feat(engine): Tony's gateway prompt is the only Tony prompt; Bookin... | 4 files |
+| `section-26-engine` | 19 | `5a6df42` 2026-11-27 feat(engine): Biz Ops prompt builder: shared rules + only the tagge... | 1 files |
+| `section-pass` | 23 | `febc6e9` 2026-11-27 fix(section-pass): build checks catch an animation that never shows | 297 files |
 | `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | no worktree |
-| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | 2 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |

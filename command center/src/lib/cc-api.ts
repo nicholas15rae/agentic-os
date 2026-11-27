@@ -74,7 +74,7 @@ export const cc = {
   },
   reindex: () => gateway<{ queued: number }>("/api/cc/vault/reindex", { method: "POST" }),
   backupNow: () => gateway<BackupInfo>("/api/cc/backup", { method: "POST", timeoutMs: 120_000 }),
-  backups: () => gateway<{ dir: string; last: BackupInfo | null; backups: { name: string; size: number; at: number }[] }>("/api/cc/backups"),
+  backups: () => gateway<BackupList>("/api/cc/backups"),
   candles: (symbol: string, interval: string, range: string) =>
     gateway<MarketData>(`/api/cc/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${interval}&range=${range}`, { timeoutMs: 20_000 }),
   fileUrl: (id: string) => `${useSettings.getState().gatewayUrl.replace(/\/+$/, "")}/api/cc/files/${id}`,
@@ -101,6 +101,26 @@ export interface BackupInfo {
   size: number;
   at: number;
   reason: string;
+  /** false = it failed its self-check (kept aside as failed-cc-*.zip). Absent on older gateways. */
+  ok?: boolean;
+  verified?: { ok: boolean; problems: string[]; entries?: number; files?: number; note?: string };
+}
+
+export interface BackupList {
+  dir: string;
+  last: BackupInfo | null;
+  lastGood?: BackupInfo | null;
+  /** Set while the most recent backup failed its self-check. */
+  failure?: BackupInfo | null;
+  backups: { name: string; size: number; at: number }[];
+  failed?: { name: string; size: number; at: number }[];
+}
+
+/** One line for a backup result: where it went and whether it checked out. */
+export function backupSummary(b: BackupInfo): string {
+  if (b.ok === false) return `Backup FAILED its check (kept aside as ${b.file}): ${b.verified?.problems.join("; ") ?? "unknown problem"}`;
+  const v = b.verified;
+  return `Backed up to ${b.file}${v?.ok ? ` · verified (${v.entries ?? 0} entries, ${v.files ?? 0} files)` : ""}`;
 }
 
 export interface OcrFields {

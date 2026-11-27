@@ -95,7 +95,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "intervalHours": 24,
         "keep": 14,
-        "dir": str(BASE_DIR / "backups" / "command-center"),
+        # "" = `_default_backup_dir()`, resolved per call against the store in use (see there).
+        "dir": "",
     },
     # Gateway Tony (gateway_tony.py): while no desktop app works the inbox, the gateway answers a
     # phone turn as Tony on his own local model. false is the rollback switch: phone turns then wait
@@ -160,13 +161,31 @@ def _deep_merge(base: dict, patch: dict) -> dict:
     return out
 
 
+def _default_backup_dir() -> Path:
+    """The real store backs up to <repo>/backups/command-center; any other store (CC_DATA_DIR
+    scratch gateway, a test's IsolatedCC swapping CC_DIR at runtime) backs up inside itself.
+    Resolved per call: on 2026-11-18 and 2026-11-26 the backup scheduler (started when server.py
+    is imported) backed up a test's empty temp store into the real folder and ran retention there."""
+    real = BASE_DIR / "data" / "command-center"
+    try:
+        is_real = Path(CC_DIR).resolve() == real.resolve()
+    except OSError:
+        is_real = False
+    return BASE_DIR / "backups" / "command-center" if is_real else Path(CC_DIR) / "backups"
+
+
 def load_config() -> dict:
+    cfg = None
     if CONFIG_PATH.exists():
         try:
-            return _deep_merge(DEFAULT_CONFIG, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            cfg = _deep_merge(DEFAULT_CONFIG, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception:
-            pass
-    return json.loads(json.dumps(DEFAULT_CONFIG))
+            cfg = None
+    if cfg is None:
+        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    if not str(cfg.get("backup", {}).get("dir") or "").strip():
+        cfg["backup"]["dir"] = str(_default_backup_dir())
+    return cfg
 
 
 def save_config(cfg: dict) -> None:
@@ -1305,13 +1324,87 @@ def candles(symbol: str, interval: str = "5m", range: str = "5d"):
 
 # ── backups ──────────────────────────────────────────────────────────────────
 
+# A backup this much smaller than the last good one is suspect (a store that went empty, a
+# files folder that vanished) and is kept aside instead of rotating good backups out.
+BACKUP_SHRINK_RATIO = 0.25
+_ROW_TABLES = ("items", "files", "vault", "kv", "os_queue", "comms_messages", "comms_contacts")
+
+
+def _backup_db_rows(db_path: Path) -> dict[str, int]:
+    """Row counts of the tables a real store fills (missing tables count as 0)."""
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {t: int(conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]) if t in have else 0 for t in _ROW_TABLES}
+    finally:
+        conn.close()
+
+
+def verify_backup(zpath: Path, live_rows: dict[str, int], live_files: int, previous_good: Optional[dict] = None) -> dict:
+    """Open the zip and check it holds what the live store held: a readable archive, a database
+    that passes integrity_check with the same row counts, every stored file, and a size in line
+    with the last good backup. Returns {ok, problems[], ...}; never raises."""
+    problems: list[str] = []
+    out: dict[str, Any] = {"size": zpath.stat().st_size if zpath.exists() else 0}
+    tmp = zpath.with_name(f".verify-{zpath.stem}.db")
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            bad = z.testzip()
+            if bad:
+                problems.append(f"corrupt entry in the zip: {bad}")
+            names = z.namelist()
+            out["entries"] = len(names)
+            out["files"] = sum(1 for n in names if n.startswith("files/"))
+            if "cc.db" not in names:
+                problems.append("cc.db missing from the zip")
+            else:
+                with z.open("cc.db") as src, open(tmp, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                conn = sqlite3.connect(f"file:{tmp.as_posix()}?mode=ro", uri=True)
+                try:
+                    ic = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                finally:
+                    conn.close()
+                if ic != "ok":
+                    problems.append(f"database integrity_check: {ic}")
+                rows = _backup_db_rows(tmp)
+                out["rows"] = rows
+                for t, n in live_rows.items():
+                    if rows.get(t, 0) < n:
+                        problems.append(f"{t}: {rows.get(t, 0)} rows in the backup, {n} in the live store")
+    except (zipfile.BadZipFile, OSError, sqlite3.Error) as e:
+        problems.append(f"unreadable: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    if out.get("files", 0) < live_files:
+        problems.append(f"{out.get('files', 0)} stored files in the zip, {live_files} on disk")
+    prev = (previous_good or {}).get("size") or 0
+    if sum(live_rows.values()) == 0:
+        # A brand-new install is empty and fine; a store that HAD data and is now empty is not.
+        if prev:
+            problems.append("the live store is empty (is this gateway pointed at the right data folder?)")
+        else:
+            out["note"] = "empty store (first backup of a new install)"
+    if prev and out["size"] < prev * BACKUP_SHRINK_RATIO:
+        problems.append(f"{out['size']:,} bytes, under {int(BACKUP_SHRINK_RATIO * 100)}% of the last good backup ({prev:,} bytes)")
+    out["ok"] = not problems
+    out["problems"] = problems
+    return out
+
+
 def run_backup(reason: str = "manual") -> dict:
     cfg = load_config()["backup"]
     out_dir = Path(cfg["dir"]).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     zpath = out_dir / f"cc-{stamp}.zip"
-    tmp_db = CC_DIR / f".backup-{stamp}.db"
+    n = 2
+    while zpath.exists() or zpath.with_name(f"failed-{zpath.name}").exists():  # two backups in one second
+        zpath = out_dir / f"cc-{stamp}-{n}.zip"
+        n += 1
+    tmp_db = CC_DIR / f".backup-{zpath.stem}.db"
+    live_rows: dict[str, int] = {}
+    live_files = 0
     try:
         # Consistent online copy of the live database.
         dst = sqlite3.connect(tmp_db)
@@ -1320,6 +1413,9 @@ def run_backup(reason: str = "manual") -> dict:
                 src.backup(dst)
         finally:
             dst.close()
+        # What the copy must hold: counted from the snapshot itself, so a write between the copy
+        # and the check can't fail it.
+        live_rows = _backup_db_rows(tmp_db)
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(tmp_db, "cc.db")
             if CONFIG_PATH.exists():
@@ -1332,14 +1428,33 @@ def run_backup(reason: str = "manual") -> dict:
                 for f in FILES_DIR.rglob("*"):
                     if f.is_file():
                         z.write(f, f"files/{f.relative_to(FILES_DIR).as_posix()}")
+                        live_files += 1
     finally:
         tmp_db.unlink(missing_ok=True)
-    # Retention.
+    check = verify_backup(zpath, live_rows, live_files, kv_get("backup.lastGood"))
+    info = {"file": str(zpath), "size": check["size"], "at": time.time(), "reason": reason, "verified": check}
+    if not check["ok"]:
+        # Keep it for inspection under a name retention never counts, leave every good backup
+        # alone, and raise the alarm (Vault page banner via /backups, gateway log).
+        failed = zpath.with_name(f"failed-{zpath.name}")
+        try:
+            zpath.replace(failed)
+            info["file"] = str(failed)
+        except OSError:
+            pass
+        info["ok"] = False
+        kv_set("backup.last", info)
+        kv_set("backup.lastFailure", info)
+        print(f"[command-center] BACKUP FAILED verification ({reason}): {'; '.join(check['problems'])}")
+        return info
+    info["ok"] = True
+    # Retention: verified backups only, and only after this one verified.
     zips = sorted(out_dir.glob("cc-*.zip"))
     for old in zips[: max(0, len(zips) - int(cfg.get("keep", 14)))]:
         old.unlink(missing_ok=True)
-    info = {"file": str(zpath), "size": zpath.stat().st_size, "at": time.time(), "reason": reason}
     kv_set("backup.last", info)
+    kv_set("backup.lastGood", info)
+    kv_set("backup.lastFailure", None)
     return info
 
 
@@ -1368,10 +1483,15 @@ def list_backups():
     cfg = load_config()["backup"]
     d = Path(cfg["dir"]).expanduser()
     files = sorted(d.glob("cc-*.zip"), reverse=True) if d.exists() else []
+    failed = sorted(d.glob("failed-cc-*.zip"), reverse=True) if d.exists() else []
     return {
         "dir": str(d),
         "last": kv_get("backup.last"),
+        "lastGood": kv_get("backup.lastGood"),
+        # Set while the most recent backup failed its self-check (cleared by the next good one).
+        "failure": kv_get("backup.lastFailure"),
         "backups": [{"name": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime} for f in files[:100]],
+        "failed": [{"name": f.name, "size": f.stat().st_size, "at": f.stat().st_mtime} for f in failed[:20]],
     }
 
 

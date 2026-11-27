@@ -713,7 +713,8 @@ pub fn status_from(cfg: &super::os_core::OsConfig, garbage: &super::garbage::Sta
     let s = state().lock().unwrap();
     let cadence = Cadence::parse(&m.cadence);
     let now = Local::now().naive_local();
-    let last_sweep = [s.last_sweep_at, garbage.heartbeat_at.map(|h| h / 1000).unwrap_or(0)].into_iter().max().filter(|t| *t > 0);
+    // A real pass only: deferrals heartbeat (health) but are not sweeps.
+    let last_sweep = [s.last_sweep_at, garbage.last_pass_at.map(|h| h / 1000).unwrap_or(0)].into_iter().max().filter(|t| *t > 0);
     HygieneStatus {
         daemon_running: garbage.running,
         heartbeat_at: garbage.heartbeat_at,

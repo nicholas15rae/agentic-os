@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { ExternalLink, X } from "lucide-react";
 import type { SystemSnapshot, TraceStep, TraceZone } from "@/lib/platform";
 import { useNav } from "@/stores/nav";
@@ -23,6 +25,9 @@ export function ZoneInspector() {
   const zone = useZoneUi((s) => s.selected);
   const select = useZoneUi((s) => s.select);
   const close = useRef<HTMLButtonElement>(null);
+  // lg+: a drawer over its (relative) panel. Narrower: a bottom sheet, portaled to the body so no
+  // panel's scroller or zoom clips or shifts it.
+  const lg = useMediaQuery("(min-width: 1024px)");
 
   useEffect(() => {
     if (!zone) return;
@@ -35,10 +40,10 @@ export function ZoneInspector() {
   }, [zone]);
 
   if (!zone) return null;
-  return (
+  const drawer = (
     <aside
       aria-label={`${ZONE_TITLE[zone]} inspector`}
-      className="fixed inset-x-2 bottom-2 z-40 flex max-h-[78vh] flex-col r-14 border border-holo/30 bg-[rgba(5,9,14,0.97)] shadow-[0_0_32px_-10px_rgba(0,210,255,0.55)] lg:absolute lg:inset-0 lg:z-20 lg:max-h-none"
+      className={`flex flex-col r-14 border border-holo/30 bg-[rgba(5,9,14,0.97)] shadow-[0_0_32px_-10px_rgba(0,210,255,0.55)] ${lg ? "absolute inset-0 z-20" : "fixed inset-x-2 bottom-2 z-40 max-h-[78vh]"}`}
     >
       <header className="flex min-h-9 items-center gap-2 border-b border-holo/15 px-3 py-2">
         <h2 className="label-caps min-w-0 flex-1 truncate text-holo" title={ZONE_TITLE[zone]}>
@@ -67,6 +72,7 @@ export function ZoneInspector() {
       </div>
     </aside>
   );
+  return lg || typeof document === "undefined" ? drawer : createPortal(drawer, document.body);
 }
 
 function ZoneBody({ zone }: { zone: TraceZone }) {

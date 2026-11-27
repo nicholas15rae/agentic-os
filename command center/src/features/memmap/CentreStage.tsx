@@ -60,13 +60,13 @@ function useShorterThan(el: React.RefObject<HTMLElement | null>, px: number, rem
  * stage is too narrow to clear the engine and cargo cards), or above the chassis when narrow;
  * `badgeState` passes Phase 3 telemetry through to it.
  */
-export function CentreStage({ narrow, className = "", badgeState }: { narrow: boolean; className?: string; badgeState?: GabagoulBadgeState }) {
+export function CentreStage({ narrow, className = "", badgeState, flow = true }: { narrow: boolean; className?: string; badgeState?: GabagoulBadgeState; /** Draw the routing flowchart strip (off while it is its own panel). */ flow?: boolean }) {
   const stage = useRef<HTMLDivElement>(null);
   const short = useShorterThan(stage, SHORT_STAGE_PX, narrow);
   if (narrow) {
     return (
       <div className={`space-y-2 ${className}`}>
-        <RoutingFlowchart orient="v" />
+        {flow && <RoutingFlowchart orient="v" />}
         <div data-slot="viewport" className="r-14 border border-holo/20 bg-[rgba(4,8,13,0.7)] p-2">
           <div className="mb-2 flex justify-center">
             <GabagoulBadge state={badgeState} />
@@ -80,7 +80,7 @@ export function CentreStage({ narrow, className = "", badgeState }: { narrow: bo
   }
   return (
     <div className={`flex min-h-0 flex-col gap-2 ${className}`}>
-      <RoutingFlowchart />
+      {flow && <RoutingFlowchart />}
       <div
         ref={stage}
         className="@container relative min-h-[340px] flex-1 overflow-hidden r-14 border border-holo/20 bg-[radial-gradient(ellipse_at_50%_55%,rgba(0,210,255,0.10),rgba(4,8,13,0.55)_65%)]"

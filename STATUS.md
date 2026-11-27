@@ -58,7 +58,7 @@ Updated 2026-11-27 10:27. One page for every Claude Code session and branch.
 | Tony live-test fixes | All 7 fixes | Committed on `claude/tony-live-test-fixes-5d85d5`. Next: your review, then merge + rebuild. Not merged, not pushed, no rebuild |
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
-| Director suite build | Merged into main (5098ca3), not pushed | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
+| Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
@@ -201,16 +201,16 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 10:25 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:26 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 10 | `285d583` 2026-11-27 feat(engine): resumable Hugging Face GGUF download + recoverable de... | clean |
+| `section-26-engine` | 10 | `285d583` 2026-11-27 feat(engine): resumable Hugging Face GGUF download + recoverable de... | 4 files |
 | `section-pass-batch3` | 8 | `d2b899e` 2026-11-27 Merge main (87b6527: Tony's system.status tool, Sections 8-10 m3) i... | 25 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
-| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
+| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | 1 files |
 | `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | 13 files |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
@@ -219,10 +219,10 @@ _Refreshed 2026-11-27 10:25 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
 - `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
 - `5098ca3` 2026-11-27 Merge director-suite into main: Director Suite Parts 1-5 and Part 6 small items
 - `9d37071` 2026-11-27 Merge main (87b6527: Tony's read-only system.status tool) into claude/tony-live-test-fixes-5d85d5
 - `d19546c` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/tony-live-test-fixes-5d85d5
 - `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test fixes on the branch
-- `e802ad3` 2026-11-27 fix(voice): barge-in stops Tony at once; "hold on" is a hard stop
 <!-- /AUTO:BRANCHES -->

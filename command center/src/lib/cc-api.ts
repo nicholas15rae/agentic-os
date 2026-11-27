@@ -403,6 +403,8 @@ export const collections = {
     return saved;
   },
   snapshot: <T>(c: Collection) => storeFor(c).snapshot as Item<T>[],
+  /** Read-only: the collection has synced at least once without an error (Tony's instant cues only answer from loaded data). */
+  loaded: (c: Collection) => storeFor(c).loaded && !storeFor(c).error,
   sync: (c: Collection) => sync(c),
 };
 

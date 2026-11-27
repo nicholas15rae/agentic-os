@@ -33,6 +33,8 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 | Director Part 2 ComfyUI (GPU baton, templates, provenance); models downloaded | director-suite | a454ee3 | Yes (76df04f) |
 | Director Part 1 quality fixes: per-clip framing, plan check before apply, one-page auto-fix, idea kept in Nic's words | director-suite | 45f715c, eeb2509, eff4f43 | Yes (76df04f) |
 | Director chat system message kept byte-stable for prefix caching (STUDIO STATE moved to the last user message) | director-suite | this commit | No |
+| SDXL Turbo live test passed; harness runs with Command Center open (own crash marker) | director-suite | e0f4410, 6d3f9f5 | No |
+| Director sees timed transcript lines; clips open on the sentence; a fit-only revision no longer resolves a timing note | director-suite | 116fbb2 | No |
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
 
@@ -42,7 +44,7 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 |---|---|---|
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
-| Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | main merged back in (85f0ea8). Next: SDXL test, then Part 3 UI |
+| Director suite build | OVERNIGHT AUTOPILOT: live E2E run 10 on the demo reel (checks the transcript + snap fixes), then Part 3 UI (Generate panel, queue) | Part 1 open issues committed (116fbb2); SDXL test passed (6d3f9f5) |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
@@ -65,7 +67,7 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 - Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
-- Keep Tony quiet for ~3 min when the Director runs the live SDXL test (it will message first).
+- Director/ComfyUI: copy the SDXL Turbo checkpoint (6.5 GB) from D: (HDD) to an SSD folder? Its read from D: is most of the 80 s render; on SSD a still should take seconds. Parked: moving model files is your call.
 - Restart the gateway (new Finance records won't save until then). Bionic runs elevated, so only you can quit it.
 - Queue the E46 rebuild in Play Place (steps in `docs/e46-clock-spec-note.md`).
 - Before the next "Sync to AnythingLLM": grant the MCP servers you use directly, or it turns their auto-start off.
@@ -94,7 +96,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 **Director Suite**
 - 1.6 public hosting for Instagram
-- Part 2 live SDXL Turbo test; B-roll template (no video model yet)
+- B-roll template (no video model yet)
 - Part 3: Projects board, Generate panel and render queue, Versions with A/B compare, phone review
 - Part 4 Scene Reader link
 - Part 5 Voice/comms
@@ -123,6 +125,8 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | section-pass-batch3 | Python 756 pass | 11-27 00:44 UTC |
 | main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
 | director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
+| director-suite (116fbb2) | tsc clean; vitest 2,904/2,904; cargo 1,611 (+2 known CRLF); taskworker::quality 67/67 | 11-27 02:30 |
+| ComfyUI SDXL Turbo live test (comfy_live.rs) | PASS: 1 image, ingested with provenance; boot 77 s, render 80 s (checkpoint read from HDD), peak VRAM 10,193 MiB, Qwen reload 212 s (builds running alongside), only Tony loaded after at 32768 ctx x 2; total 6.3 min | 11-27 01:23 |
 | Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
@@ -139,27 +143,31 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 23:31 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 02:06 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/elated-kare-67e4c4` | 1 | `2dce584` 2026-11-26 WIP: remove the Ops agent (to be squashed) | clean |
-| `director-suite` | 1 | `85f0ea8` 2026-11-26 Merge main (e46d0c7) into director-suite | 2 files |
-| `claude/practical-elbakyan-0f96f1` | 7 | `cdbd99a` 2026-11-26 Merge main (0c4341f, STATUS.md only) into claude/practical-elbakyan... | clean |
-| `section-pass` | 5 | `af74985` 2026-11-26 Merge main (a0e730c + batch3) into section-pass | 1 files |
-| `claude/upbeat-wing-e87be0` | 6 | `11f777c` 2026-11-26 docs(status): test gate PR #9 results after merging main eefaf0a | clean |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 207 files |
+| `director-suite` | 5 | `116fbb2` 2026-11-27 feat(director): transcript lines in context, sentence-start snap, f... | 1 files |
+| `claude/tony-live-test-fixes-5d85d5` | 2 | `2ff21d9` 2026-11-27 docs(status): Tony live-test fixes landed on claude/tony-live-test-... | clean |
+| `section-pass-batch3` | 3 | `f138a9b` 2026-11-27 feat(vault): second backup copies, vault password prompt, Tony sear... | 13 files |
+| `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | clean |
+| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
+| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
+| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
+| `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
+| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
+- `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
+- `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
+- `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
+- `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
 - `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
-- `d62333d` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main
-- `7724507` 2026-11-26 docs(status): director-suite merged into main; 11.10 recorded
-- `44bfcc0` 2026-11-26 Merge branch 'main' into merge/director-suite-into-main
-- `76df04f` 2026-11-26 Merge director-suite (Director Parts 1-2) into main
-- `a0e730c` 2026-11-26 docs(status): section-pass and section-pass-batch3 merged into main
 <!-- /AUTO:BRANCHES -->

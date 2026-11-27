@@ -72,6 +72,9 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 | S26: Tony's gateway prompt is the only Tony prompt; Booking takes the detailed Booking Desk prompt (to confirm) | section-26-engine | 95e021a | No |
 | S26: Biz Ops shared prompt DRAFT (Acting, Contracting, BF Supplements sections by business tag); both business workspaces map to it | section-26-engine | 5a66c07 | No |
 | S26: Biz Ops prompt builder (only the tagged business's section; refuses scope bleed) | section-26-engine | 5a6df42 | No |
+| S26: **step 5 GPU benchmark** (engine vs LM Studio) with Tony restored exactly (same 6 load settings, answered in 1.7 s); VRAM estimate calibrated | section-26-engine | 7d08994 | No |
+| S26: Designer reads the repo widget folders only; Booking's future access recorded (read-only WhatsApp, draft-only Gmail, Tony owns both; stays frozen) | section-26-engine | f2e8545 | No |
+| S26: Drive sync never uploads the AnythingLLM export, `data/engine` or backup archives (`never_syncs`, tested); OneDrive covers only your user folders, not G: | section-26-engine | acbad0b | No |
 
 ## 2. In progress
 
@@ -88,13 +91,10 @@ For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, swi
 
 ## 3. Waiting on you
 
-**Questions for Nic (Section 26, section-26-engine)** (your 11-27 answers are applied; these are what's left)
-- GPU benchmark of the engine: waiting for you to say the GPU is free (you unload Tony's model in Bionic).
-- **Biz Ops shared prompt: DRAFT for your review** in `docs/section-26-bizops-prompt.md` (shared rules + one section each for Acting, Trades & Contracting, BF Supplements; only the tagged business's section is sent). 4 small questions at its end.
-- **Tony's prompt vs his AnythingLLM prompt (your answer 4):** nothing merged. The AnythingLLM workspace mapped to Tony (`my-workspace`) does not hold a Tony prompt: it holds the detailed **Booking Desk** prompt (casting posts, Gmail drafts, templates A/B). Diff, gateway prompt vs that workspace: 0 lines in common (similarity 1.6% with the `booking` workspace's short prompt; nothing Tony-related). Tony's gateway prompt stays as it is. OK?
-- Booking (frozen): the proposal gives it the detailed `my-workspace` prompt instead of the short `booking` one. Its prompt reads WhatsApp and saves Gmail drafts, but the registry grants `whatsapp` and `gmail` only to Tony. When Booking is unfrozen: Booking read-only on whatsapp + draft-only gmail, with Tony keeping ownership?
-- Designer's filesystem read access: which project folder? None exists, so it has no access until you name one (Director reads `G:\ai-hub\media\projects`).
-- `backup.sh` (manual) tars all of `data/`, so local backups also hold the AnythingLLM export (no secrets in it now). Exclude `data/engine/allm-export` there? I didn't edit the backup script.
+**Questions for Nic (Section 26, section-26-engine)** (answers through your 2nd 11-27 message are applied; these are my calls for you to review)
+- **Biz Ops draft, my calls on its 4 questions (kept UNUSED until you approve):** (1) Name "Biz Ops" and the old workspaces' tone: kept, because the scope rules are already proven in the two live workspaces and one name across businesses keeps routing simple. (2) Acting: casting posts and Gmail drafts stay with the **Booking Desk**, so Biz Ops points there. Booking already owns that flow and its templates, and two agents drafting the same emails would double up. (3) Section title **"BF Supplements"**, since that's what you call it; the registry name stays "Supplements & E-Commerce" for matching. (4) `instagram`: Biz Ops keeps it **read-only / draft posts only**, never posts; same pattern as Booking's draft-only Gmail.
+- Play Place has no assets folder in the repo (its items live in the gateway's shared store, next to the vault), so Designer gets only `command center\src\widgets` and `recovered-widgets`. Name a Play Place folder if you want one added.
+- Engine tuning (optional): the engine's first-token tail is worse than LM Studio's (p90 1.61 s vs 0.27 s back to back), most likely prompt-cache misses across its 2 slots. Each tuning run unloads Tony for ~3 min (Bionic's reload took 100 s). OK to try `--cache-ram` / one unified KV slot set in one more run when the GPU is idle?
 
 
 **Decisions**
@@ -195,7 +195,10 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 **Section 26 bench: Tony at the model server, real phone-turn messages, 4 prompts x 3 (11-27 10:31)**
 - LM Studio / Bionic (today): first token **0.37 s** median (p90 1.11, min 0.22; first turn of each prompt 0.83); total **1.71 s** median (p90 3.53); 11/12 under 1.5 s
-- Built-in engine on GPU: not run yet (needs Bionic's model unloaded: your call). On CPU only (smoke test, no GPU): first token 1.0 s, total 3.4 s for a short reply; live checks 3/3
+- **Built-in engine on GPU (11:13, Tony's 9B, 32k x 2, same prompts): first token 0.38 s median** (p90 1.61, min 0.23; first turn of each prompt 0.56); **total 1.93 s** median (p90 3.50); 10/12 under 1.5 s; live checks 3/3; **6.2 GB VRAM vs LM Studio's 7.3 GB**; loads in 19 s
+- LM Studio again right after (11:15, warm): first token **0.25 s** median (p90 0.27); total **1.45 s** (p90 2.02); 12/12 under 1.5 s
+- Verdict: about level on a typical turn, better on cold turns, worse tail (cache misses across slots, tuneable); uses 1.1 GB less VRAM. Tony restored exactly after the run.
+- CPU-only smoke test: first token 1.0 s, total 3.4 s for a short reply; live checks 3/3
 - Live template checks on Bionic: thinking off, native tool call, JSON router: 3/3 OK
 
 **Tony, time to first word (11-26)**
@@ -208,27 +211,26 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 10:58 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 11:20 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 19 | `5a6df42` 2026-11-27 feat(engine): Biz Ops prompt builder: shared rules + only the tagge... | 1 files |
-| `section-pass` | 23 | `febc6e9` 2026-11-27 fix(section-pass): build checks catch an animation that never shows | 297 files |
-| `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | no worktree |
+| `section-26-engine` | 24 | `acbad0b` 2026-11-27 fix(pipelines): Drive sync never uploads the AnythingLLM export, en... | 1 files |
+| `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
-| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
+| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `73ed487` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined main tests
+- `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
 - `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
 - `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
 - `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
 - `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
-- `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
-- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
 <!-- /AUTO:BRANCHES -->

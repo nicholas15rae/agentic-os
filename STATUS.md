@@ -18,7 +18,7 @@ Updated 2026-11-27 10:46. One page for every Claude Code session and branch.
 | Overnight: Maps widget front end (Map / Upcoming / Saved tabs, trips with leave-by, saved routes with Delete? Yes/No, safe Google Maps links, phone hand-off logic) | claude/sections-8-10-m3 | 6acc15f (PR #10) | Yes (c134f9c); not in the running app until the next rebuild |
 | Overnight: Brainstorm Talk pure helpers (talk intent, digest, wrap-up walk, destinations; no bulk approve, memory by reference only) | claude/sections-8-10-m3 | 0d72190 (PR #10) | Yes (c134f9c) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
-| Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
+| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | Yes: merged into main after review round 5 (all round-4 MEDIUMs confirmed fixed; 1 new MEDIUM left, see Waiting on you). Bridge restart still needed |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -65,8 +65,9 @@ Updated 2026-11-27 10:46. One page for every Claude Code session and branch.
 | Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
 | Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
-| Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
+| Stop the UI burning GPU | Shipping the kill switch | Merged into main; full suites, then push, app rebuild + restart (after checking which build is running) |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
+| Port 46778f9 / kill switch (practical-elbakyan) | Done; session closed | Round 4 fixed in 5a55ebc; merged into main by the GPU session. Round-5 follow-ups listed under Waiting on you |
 
 ## 3. Waiting on you
 - Director length hint may suggest moving a clip's START earlier (run 14 had no out point free, so it suggested opening clip 1 on the line before). Keep, or out points only?
@@ -96,6 +97,23 @@ Updated 2026-11-27 10:46. One page for every Claude Code session and branch.
 - Sections 8-10 parked because another session owns the code: Comms screens (Comms 9; the phone-book session is in CommsSection) and the Director Ideas board (Brainstorm 14, Director page).
 - Sections 8-10 parked for the app or the phone: wire the Maps hand-off listener into `App.tsx`; add `maps_trips` + trip-words to `platform.ts` NativeCommands; Android work (Comms 6-8, Maps 4 + 12, Brainstorm 12, one APK); voice Talk (Brainstorm 2, 3, 7, 10, 11, 13).
 - Sections 8-10 overnight defaults I picked (safest each time): phone and narrow widgets open on Upcoming, the PC on Map; location only on a tap of "Use my location" (desktop); hand-offs refused unless every link is an https Google Maps link, and the opened link is rebuilt from coordinates; hand-off TTL 30 min (2 min clock skew); trips and seen hand-offs kept in memory only (addresses); refresh 5 min desktop / 2 min gateway / 10 min after an error; wrap phrases count only as a whole line; in Talk only cut / hold / "Tony, end talk" act; memory items only from Nic's lines and only by reference; "later" in the walk leaves an item pending; talk digest never labels Tony's words as Nic's.
+- **Kill switch / options guard** (`claude/practical-elbakyan-0f96f1`): round 4 is fixed in 5a55ebc (you said "fix them now"). Review round 5 (GPU session) confirmed all 3 round-4 MEDIUMs fixed and merged it into main. **The trading bridge needs a restart to load it** (not done: your call). Things to know:
+  - A manual order in TWS on an expiring option leg is now named in the guard's report (and audited). If it sits on a short leg, the guard keeps the long legs until you cancel or replace it.
+  - Dry runs (09:00 health check, the UI button) now connect as client id 26. Set `IBKR_CLIENT_ID_KILL_DRY` if 26 is taken on your TWS.
+  - A second E-stop press during a kill waits for it. It runs again only if the first never connected. If the first connected but failed, the press reports that and sends nothing; then run `python trading/kill_switch.py`.
+  Not fixed:
+  - Normal guard passes still net against an open-order list the bridge hasn't confirmed (openOrdersAt missing).
+  - Unlock-disabled-mid-kill has no render test; the server's refusal is tested.
+  - The hotkey doesn't read the in-flight count; the desk serializes kills, and the toast says "already running".
+  - An unfilled closed_stop LMT exit is never re-armed (predates this work).
+  - TWS's take-profit handling when a partly filled entry is cancelled is unconfirmed.
+  - Real Windows key-repeat inside WebView2 is untested (only CDP key events).
+  Round-5 follow-ups (port session closed; full findings `kill-switch-review-round5-5a55ebc.json` in the GPU session's notes folder):
+  - MEDIUM: a premium stop partly held back by a manual resting SELL (e.g. GTC SELL 1 of 2 at 9.50) sells only the rest, is marked closed_stop and reports nothing; the held-back contract is never re-checked. Still safer than before (no over-sell).
+  - Low: a kill that raises after its network steps (audit or incident write) counts as "never connected", so a waiting second press re-runs it; the rerun rule should be "placed no KILL- order".
+  - Low: the stand-down doesn't stop Engine A's auto scan; reset() unlinks the lock before its ADVISORY write lands.
+  - Low: untested: closes_now side-only / size-only checks, Unlock-disabled-mid-kill, red-button toast titles.
+- System Python: `ib_async` 2.1.0 is installed (you asked). pip downgraded `tzdata` from 2026.6 to 2025.3 (ib_async pins <2026). The gateway runs on system Python and uses the 2025.3 time-zone rules after its next restart.
 - Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
 - The running app (restarted 11-27 10:41 by the recall session) is main 0418649: Tony live-test fixes, Director Parts 1-5, system.status, PR #10. Not in it yet: main's 14 newer commits (the section-pass-batch3 overnight batch). Checks for you in the running app (from the Tony live-test session): Settings has a Comms tab set to "Primary only"; "check my email" reads Primary only; "add Melissa Lee invoice to my to-do list" asks before it saves; saying "hold on" while Tony talks stops him.
 - Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
@@ -193,7 +211,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | sections-8-10 m3 overnight (0d72190) | pytest 1,735; vitest 3,021 (211 files; 132 new maps + brainstorm tests); tsc clean; cargo 1,612 (+2 known CRLF in allm/buildhub, not mine, left alone). Not checked by eye: no dev server allowed overnight, MapLibre needs WebGL | 11-27 02:00 |
 | sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
-| Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
+| claude/practical-elbakyan-0f96f1 (5a55ebc, round 4) | tsc clean; vitest 2,937/2,937; test:scripts 12/12; test_trading_* 731/731 (system Python), venv 727/731 (3 known python-multipart, 1 temp-dir cleanup race, now tolerated and 5/5 alone); run_all 950 OK; cargo --lib 1,614 (+2 known CRLF; 7 real-browser tests failed under parallel load, all pass alone); 27 Python + 1 UI mutations all caught | 11-27 10:30 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
@@ -207,15 +225,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 10:43 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 11:06 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 14 | `1569272` 2026-11-27 docs(engine): Section 26 handoff, CPU smoke test, item 15 + vision ... | 2 files |
+| `section-26-engine` | 21 | `82f1331` 2026-11-27 docs(status): fill in the inventory commit id | clean |
+| `section-pass` | 23 | `febc6e9` 2026-11-27 fix(section-pass): build checks catch an animation that never shows | 297 files |
 | `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | no worktree |
-| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | 2 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
@@ -224,10 +242,10 @@ _Refreshed 2026-11-27 10:43 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
 - `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
 - `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
 - `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
 - `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
 - `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
-- `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
 <!-- /AUTO:BRANCHES -->

@@ -179,6 +179,19 @@ const FAILURE_LABELS: Record<FailureCode, string> = {
 
 /** "Rejected by IBKR: TWS rejected the order: ..." for a rejected / failed row; null otherwise.
  *  Old rows without `failure` fall back to their stored error text or first failing check. */
+/** A failed order whose cancel couldn't be sent (the executor's "could NOT be sent, so it may still be working"):
+ *  it may still be working at TWS, so it must never be shown as "not sent". */
+export function mayStillBeWorking(text: string | null | undefined): boolean {
+  return /may still be working/i.test(text ?? "");
+}
+
+/** The SEMI_AUTO approve toast's title: an order whose cancel couldn't be sent may still be working, not "not sent". */
+export function approveToastTitle(r: { ok?: boolean; status?: string; error?: string; failure?: { label?: string; detail?: string } | null }): string {
+  if (r.ok) return "Order sent to paper";
+  if (mayStillBeWorking(r.error) || mayStillBeWorking(r.failure?.detail)) return "Order may still be working at TWS";
+  return `Not sent: ${r.failure?.label ?? r.status ?? "error"}`;
+}
+
 export function failureText(r: Pick<DeskIntent, "status" | "failure" | "result" | "decision">): string | null {
   if (r.status !== "rejected" && r.status !== "failed") return null;
   const f = r.failure;
@@ -233,6 +246,9 @@ export interface KillIncident {
   flatten: { symbol: string; action: string; qty: number; status?: string }[];
   errors: string[];
   failsafe?: boolean;
+  /** Desk.kill: a live kill was already running, so this press sent nothing (never flatten twice at once); the rest is
+   *  that kill's incident, its `ok` included. */
+  alreadyRunning?: boolean;
 }
 
 export interface ScanRow {

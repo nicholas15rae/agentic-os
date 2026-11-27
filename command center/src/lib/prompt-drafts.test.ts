@@ -61,6 +61,12 @@ describe("editing shortcuts belong to the focused field", () => {
     expect(key("a", ta, { ctrlKey: false })).toBe(false);
     expect(key("ArrowLeft", ta, { ctrlKey: true, altKey: true })).toBe(false); // Ctrl+Alt+← pages
   });
+  it("never claims Ctrl+Shift+X (the trading E-stop); cut and redo stay the field's", () => {
+    expect(key("X", ta, { ctrlKey: true, shiftKey: true })).toBe(false);
+    expect(key("x", text, { metaKey: true, shiftKey: true })).toBe(false);
+    expect(key("x", ta)).toBe(true); // Ctrl+X
+    expect(key("Z", ta, { ctrlKey: true, shiftKey: true })).toBe(true); // Ctrl+Shift+Z
+  });
 });
 
 describe("mounted app routes", () => {

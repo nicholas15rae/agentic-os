@@ -38,10 +38,11 @@ PAPER_ACCOUNT_PREFIXES = ("DU", "DF")
 LIVE_SUPPORTED = False
 
 MODES = ("PAPER", "LIVE")
-WORKERS = ("bridge", "data", "exec", "kill", "overseer", "overseer_act", "cli", "cli_act", "snapshot", "status")
+WORKERS = ("bridge", "data", "exec", "kill", "overseer", "overseer_act", "cli", "cli_act", "snapshot", "status", "kill_dry")
 # 20-25: desk-cli and its overseer (trading/tws_adapter.py); each is also held under an OS lease there.
+# 26: the kill switch's read-only dry run, kept off 19 so a rehearsal can never block a live E-stop.
 DEFAULT_CLIENT_IDS = {"bridge": 11, "data": 12, "exec": 13, "kill": 19,
-                      "overseer": 20, "overseer_act": 21, "cli": 22, "cli_act": 23, "snapshot": 24, "status": 25}
+                      "overseer": 20, "overseer_act": 21, "cli": 22, "cli_act": 23, "snapshot": 24, "status": 25, "kill_dry": 26}
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:

@@ -51,6 +51,7 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 | Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status` merged into main | Testing the combined main, then app rebuild + restart and a live phone inbox check (this session) |
+| Section 26 engine (section-26-engine, worktree G:\agentic-os-engine) | Built-in llama.cpp engine beside LM Studio / AnythingLLM, off by default. Plan: docs/section-26-plan.md | Approved: 1 baseline bench, 2 engine runner, 3 model manager, 4 provider entry, 6 doc store, 7 AnythingLLM import. Held: 5 new-engine bench, 8 rebuild |
 
 ## 3. Waiting on you
 

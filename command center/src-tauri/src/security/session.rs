@@ -63,6 +63,8 @@ pub struct Policy {
     pub entry_second: bool,
     pub resume_double: bool,
     pub pin_fallback: bool,
+    /// A verified phone approval unlocks on its own (`companion.unlocksAlone`).
+    pub companion_alone: bool,
 }
 
 impl Policy {
@@ -77,6 +79,7 @@ impl Policy {
             entry_second: c.entry.require_second_factor,
             resume_double: c.resume.require_double_verification,
             pin_fallback: c.resume.pin_fallback_when_offline,
+            companion_alone: c.companion.enabled && c.companion.unlocks_alone,
         }
     }
 }
@@ -178,6 +181,23 @@ impl Sessions {
         self.live.is_some()
     }
 
+    /// The live session's (id, verified, activity), for the restart snapshot (`persist`).
+    pub fn snapshot(&self) -> Option<(String, f64, f64)> {
+        self.live.as_ref().map(|l| (l.id.clone(), l.verified, l.activity))
+    }
+
+    /// Bring a verified snapshot back (app restart): live again with no elevations. Never over a
+    /// hard lock or an already-live session.
+    pub fn restore(&mut self, id: String, verified: f64, activity: f64) -> bool {
+        if self.is_live() || self.is_hard_locked() {
+            return false;
+        }
+        self.live = Some(Live { id, verified, activity, elevations: BTreeMap::new() });
+        self.resuming = None;
+        self.second = None;
+        true
+    }
+
     /// Why it's locked (None while live).
     pub fn reason(&self) -> Option<LockReason> {
         (!self.is_live()).then_some(self.reason)
@@ -231,10 +251,15 @@ impl Sessions {
         r
     }
 
-    /// User input (the caller ticks first, so an expired session stays locked).
+    /// User input (the caller ticks first, so an expired session stays locked). Section pass: it
+    /// also keeps every live step-up elevation alive while Nic is active (its idle timer), still
+    /// capped by the elevation's max lifetime; only an unused elevation lapses.
     pub fn touch(&mut self, now: f64) {
         if let Some(l) = self.live.as_mut() {
             l.activity = now;
+            for e in l.elevations.values_mut() {
+                e.used = now;
+            }
         }
     }
 
@@ -308,6 +333,13 @@ impl Sessions {
         }
         self.check_lockout(now)?;
         if f == Factor::Biometric && self.reason == LockReason::Startup && !p.entry_second {
+            self.failures = 0;
+            self.open(now, new_id);
+            return Ok(BioOutcome::Unlocked);
+        }
+        // Phone approval login: the paired phone's signed, one-time approval (its own fingerprint
+        // check) logs in on its own, at start or after any lock; the PIN is the fallback.
+        if f == Factor::Companion && p.companion_alone && self.reason != LockReason::Revoked && !(self.reason == LockReason::Startup && p.entry_second) {
             self.failures = 0;
             self.open(now, new_id);
             return Ok(BioOutcome::Unlocked);
@@ -429,10 +461,28 @@ mod tests {
         assert!(s.is_live());
         let mut s = Sessions::default();
         assert_eq!(s.second_factor(Factor::Biometric, &p, 0.0, "b".into()).unwrap(), BioOutcome::Unlocked);
-        // Companion alone is never enough: it's held for the PIN.
+        // With `companion.unlocksAlone` off, the phone alone is never enough: it's held for the PIN.
+        let held = Policy { companion_alone: false, ..pol() };
         let mut s = Sessions::default();
-        assert_eq!(s.second_factor(Factor::Companion, &p, 0.0, "c".into()).unwrap(), BioOutcome::SecondNoted);
+        assert_eq!(s.second_factor(Factor::Companion, &held, 0.0, "c".into()).unwrap(), BioOutcome::SecondNoted);
         assert!(!s.is_live());
+        // By default (section pass) the phone's approval logs in on its own, at start and after a lock.
+        let mut s = Sessions::default();
+        assert_eq!(s.second_factor(Factor::Companion, &p, 0.0, "c".into()).unwrap(), BioOutcome::Unlocked);
+        assert!(s.is_live());
+        s.lock(LockReason::Idle);
+        assert_eq!(s.second_factor(Factor::Companion, &p, 5.0, "c".into()).unwrap(), BioOutcome::Unlocked);
+        assert!(s.is_live());
+        let mut hard = Sessions::default();
+        hard.hard_lock();
+        assert_eq!(hard.second_factor(Factor::Companion, &p, 0.0, "c".into()).unwrap_err(), Refusal::HardLocked, "never over the remote failsafe");
+        // After a revocation (or a released hard lock) the phone is only the second factor again.
+        hard.release_hard_lock();
+        assert_eq!(hard.second_factor(Factor::Companion, &p, 1.0, "c".into()).unwrap(), BioOutcome::SecondNoted);
+        assert!(!hard.is_live());
+        let strict = Policy { entry_second: true, ..p.clone() };
+        let mut s = Sessions::default();
+        assert_eq!(s.second_factor(Factor::Companion, &strict, 0.0, "c".into()).unwrap(), BioOutcome::SecondNoted, "entry needs two factors");
     }
 
     #[test]
@@ -464,7 +514,7 @@ mod tests {
 
     #[test]
     fn stale_second_factor_and_offline_fallback() {
-        let p = pol();
+        let p = Policy { companion_alone: false, ..pol() };
         let mut s = unlocked(0.0);
         s.lock(LockReason::Manual);
         s.second_factor(Factor::Companion, &p, 10.0, "x".into()).unwrap();
@@ -492,8 +542,46 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_session_is_live_without_elevations_and_never_over_a_hard_lock() {
+        let p = pol();
+        let mut s = unlocked(0.0);
+        s.elevate("trading", true, &p, 1.0).unwrap();
+        let (id, verified, activity) = s.snapshot().unwrap();
+        let mut fresh = Sessions::default();
+        assert!(fresh.restore(id.clone(), verified, activity));
+        assert_eq!(fresh.session_id(), Some(id.as_str()));
+        assert_eq!(fresh.use_elevation("trading", &p, 2.0), None, "step-ups never survive a restart");
+        assert!(!fresh.restore("again".into(), 0.0, 0.0), "already live");
+        let mut hard = Sessions::default();
+        hard.hard_lock();
+        assert!(!hard.restore(id, verified, activity));
+        assert!(Sessions::default().snapshot().is_none());
+    }
+
+    #[test]
+    fn activity_keeps_a_step_up_alive_until_its_max() {
+        // The defaults (section pass): 15 min unused, 60 min max.
+        let p = pol();
+        assert_eq!((p.elev_idle_s, p.elev_max_s), (900.0, 3600.0));
+        let mut s = unlocked(0.0);
+        s.elevate("settings", true, &p, 0.0).unwrap();
+        // Nic keeps working (input every 10 min, never touching Settings): the step-up stays.
+        for t in [600.0, 1200.0, 1800.0, 2400.0, 3000.0] {
+            assert_eq!(s.tick(&p, t), None);
+            s.touch(t);
+        }
+        assert!(s.use_elevation("settings", &p, 3300.0).is_some(), "still elevated after 55 min of activity");
+        assert_eq!(s.use_elevation("settings", &p, 3600.0), None, "the max lifetime still caps it");
+        // Without activity it lapses after the idle window.
+        let mut s = unlocked(0.0);
+        s.elevate("finance", true, &p, 0.0).unwrap();
+        s.tick(&p, 901.0);
+        assert_eq!(s.use_elevation("finance", &p, 901.0), None);
+    }
+
+    #[test]
     fn elevation_reverts_to_read_only() {
-        let p = pol(); // 5 min idle, 10 min max
+        let p = Policy { elev_idle_s: 300.0, elev_max_s: 600.0, ..pol() }; // 5 min idle, 10 min max
         let mut s = unlocked(0.0);
         assert_eq!(s.use_elevation("trading", &p, 1.0), None, "read-only by default");
         assert_eq!(s.elevate("trading", true, &p, 10.0).unwrap(), 310.0);
@@ -537,7 +625,7 @@ mod tests {
         let mut locked = Sessions::default();
         assert_eq!(locked.elevate_companion("trading", &p, 1.0).unwrap_err(), Refusal::NoSession);
         let mut s = unlocked(0.0);
-        assert_eq!(s.elevate_companion("trading", &p, 10.0).unwrap(), 310.0);
+        assert_eq!(s.elevate_companion("trading", &p, 10.0).unwrap(), 910.0, "15 min unused by default");
         assert!(s.use_elevation("trading", &p, 20.0).is_some());
         assert_eq!(s.use_elevation("finance", &p, 20.0), None, "only the approved module");
         s.hard_lock();

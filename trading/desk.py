@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import comms
+import failures
 import kill_switch
 from audit import AuditLog
 from config import data_dir
@@ -48,7 +49,8 @@ import outcomes
 from discord_ingest import DiscordStore, import_inbox
 from engines.equities_commodities import EngineA, Watchlist
 from engines.options_engine import EngineB, flatten_plan
-from security_detail import NY, Context, Decision, evaluate, market_stats_from_bars, regular_hours_fallback, session_open_from_hours
+from security_detail import (NY, Context, Decision, evaluate, market_stats_from_bars, regular_hours_fallback, session_open_from_hours,
+                             us_market_closed_reason)
 
 log = logging.getLogger("trading.desk")
 
@@ -210,8 +212,11 @@ class Desk:
             r = c.execute("SELECT intent_id, status, intent, decision, result, created, updated FROM intents WHERE intent_id = ?", (intent_id,)).fetchone()
         if not r:
             return None
-        return {"intentId": r[0], "status": r[1], "intent": json.loads(r[2]), "decision": json.loads(r[3]),
-                "result": json.loads(r[4]) if r[4] else None, "created": r[5], "updated": r[6]}
+        decision, result = json.loads(r[3]), json.loads(r[4]) if r[4] else None
+        return {"intentId": r[0], "status": r[1], "intent": json.loads(r[2]), "decision": decision,
+                "result": result, "created": r[5], "updated": r[6],
+                # why it didn't trade (rejected / failed only); derived from the error text for rows stored before it existed
+                "failure": failures.classify(r[1], result, decision)}
 
     def _put(self, intent: OrderIntent, status: str, decision: Decision, result: Any = None) -> None:
         now = self.clock()
@@ -303,6 +308,8 @@ class Desk:
         snap = self.bridge.snapshot()
         acct = snap.get("account") or {}
         quote, session = await self._quote(intent)  # underlying quote + its trading session
+        if session and us_market_closed_reason(intent, self.clock()):
+            session = False  # the static NYSE calendar overrides: holiday / after a 13:00 half-day close
         option_legs, option_limits = None, None
         if intent.is_option:
             try:
@@ -336,10 +343,10 @@ class Desk:
             ref = raw.get("intent_id", "") if isinstance(raw, dict) else ""
             self.audit.append("intent_schema_rejected", {"error": str(e), "raw": raw if isinstance(raw, dict) else str(raw)[:500]},
                               ref=str(ref)[:64], verdict="REJECTED", actor=actor)
-            return {"ok": False, "status": "rejected", "error": f"schema: {e}"}
+            return {"ok": False, "status": "rejected", "error": f"schema: {e}", "failure": failures.failure("schema", f"schema: {e}")}
         if intent.source in LLM_SOURCES:
             self.audit.append("llm_trade_refused", {"intent": intent.to_dict(), "why": LLM_REFUSAL}, ref=intent.intent_id, verdict="REFUSED", actor=actor)
-            return {"ok": False, "status": "rejected", "error": LLM_REFUSAL}
+            return {"ok": False, "status": "rejected", "error": LLM_REFUSAL, "failure": failures.failure("policy", LLM_REFUSAL)}
         async with self._lock:
             ctx = await self.build_context(intent)
             decision = evaluate(intent, ctx)
@@ -349,12 +356,14 @@ class Desk:
             if decision.trip_kill:
                 await self.kill("daily drawdown circuit breaker", "security_detail", dry_run=False)
             if not decision.executable:
+                why = failures.from_checks(decision.checks)
                 if not ctx.seen_intent:
-                    self._put(intent, "rejected", decision)
-                return {"ok": False, "status": "rejected", "decision": decision.to_dict()}
+                    self._put(intent, "rejected", decision, {"failure": why})
+                return {"ok": False, "status": "rejected", "decision": decision.to_dict(), "failure": why}
             if st["agentHalted"] and intent.source in AUTONOMOUS_SOURCES:
-                self._put(intent, "rejected", decision, {"error": "autonomous trading halted"})
-                return {"ok": False, "status": "rejected", "error": "autonomous trading is halted", "decision": decision.to_dict()}
+                why = failures.failure("kill_switch", "autonomous trading halted (kill switch / Financer halt / overseer)")
+                self._put(intent, "rejected", decision, {"error": "autonomous trading halted", "failure": why})
+                return {"ok": False, "status": "rejected", "error": "autonomous trading is halted", "decision": decision.to_dict(), "failure": why}
             if st["mode"] == "ADVISORY":
                 self._put(intent, "hypothetical", decision)
                 return {"ok": True, "status": "hypothetical", "decision": decision.to_dict()}
@@ -363,7 +372,8 @@ class Desk:
                 return {"ok": True, "status": "pending_approval", "decision": decision.to_dict()}
             refused = self._pretrade(intent, decision, ctx, actor)
             if refused:
-                self._put(intent, "rejected", decision, {"pretrade": refused})
+                refused["failure"] = failures.classify("rejected", {"pretrade": refused}, None)
+                self._put(intent, "rejected", decision, {"pretrade": refused, "failure": refused["failure"]})
                 return refused
             return await self._execute(intent, decision, actor)
 
@@ -396,9 +406,11 @@ class Desk:
         try:
             res = await self.executor.place(intent, decision.quantity)
         except (ExecutionRefused, Exception) as e:  # noqa: BLE001
-            self._set_status(intent.intent_id, "failed", {"error": f"{type(e).__name__}: {e}"})
-            self.audit.append("order_failed", {"error": str(e)}, ref=intent.intent_id, verdict="FAILED", actor=actor)
-            return {"ok": False, "status": "failed", "error": str(e), "decision": decision.to_dict()}
+            err = f"{type(e).__name__}: {e}"
+            why = failures.from_error(err)
+            self._set_status(intent.intent_id, "failed", {"error": err, "failure": why})
+            self.audit.append("order_failed", {"error": str(e), "failure": why}, ref=intent.intent_id, verdict="FAILED", actor=actor)
+            return {"ok": False, "status": "failed", "error": str(e), "decision": decision.to_dict(), "failure": why}
         self._set_status(intent.intent_id, "submitted", res)
         self.audit.append("order_submitted", {"quantity": decision.quantity, **res}, ref=intent.intent_id, verdict="SUBMITTED", actor=actor)
         return {"ok": True, "status": "submitted", "result": res, "decision": decision.to_dict()}
@@ -416,19 +428,21 @@ class Desk:
                 return {"ok": False, "status": "expired"}
             intent = parse_intent(row["intent"])
             if intent.source in LLM_SOURCES:  # a card queued before the LLM was retired as a trader
-                self._set_status(intent_id, "rejected", {"error": LLM_REFUSAL})
+                self._set_status(intent_id, "rejected", {"error": LLM_REFUSAL, "failure": failures.failure("policy", LLM_REFUSAL)})
                 self.audit.append("llm_trade_refused", {"intent": intent.to_dict(), "why": LLM_REFUSAL, "path": "approve"}, ref=intent_id,
                                   verdict="REFUSED", actor=actor)
-                return {"ok": False, "status": "rejected", "error": LLM_REFUSAL}
+                return {"ok": False, "status": "rejected", "error": LLM_REFUSAL, "failure": failures.failure("policy", LLM_REFUSAL)}
             ctx = await self.build_context(intent, exclude_self=True)
             decision = evaluate(intent, ctx)
             self.audit.append("approval", {"decision": decision.to_dict()}, ref=intent_id, verdict=decision.verdict, actor=actor)
             if not decision.executable:
-                self._set_status(intent_id, "rejected", {"recheck": decision.to_dict()})
-                return {"ok": False, "status": "rejected", "decision": decision.to_dict()}
+                why = failures.from_checks(decision.checks)
+                self._set_status(intent_id, "rejected", {"recheck": decision.to_dict(), "failure": why})
+                return {"ok": False, "status": "rejected", "decision": decision.to_dict(), "failure": why}
             refused = self._pretrade(intent, decision, ctx, actor)
             if refused:
-                self._set_status(intent_id, "rejected", {"pretrade": refused.get("pretrade") or refused.get("error")})
+                refused["failure"] = failures.classify("rejected", {"pretrade": refused}, None)
+                self._set_status(intent_id, "rejected", {"pretrade": refused.get("pretrade") or refused.get("error"), "failure": refused["failure"]})
                 return refused
             return await self._execute(intent, decision, actor)
 

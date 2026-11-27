@@ -292,7 +292,8 @@ export interface NativeCommands {
   gpu_slot_view: { args: undefined; result: SlotView };
   model_lab_list: { args: undefined; result: LabModel[] };
   model_bench: { args: { model: string; context?: number }; result: BenchResult };
-  model_use: { args: { model: string }; result: string[] };
+  /** Refuses `FIT_WARN:<tight|spills|unknown>: …` for a model that doesn't fit the GPU comfortably, unless `force` (after an explicit confirm). */
+  model_use: { args: { model: string; force?: boolean }; result: string[] };
   // ── System Map dev task queue (devqueue.db in the app config dir; works without the gateway) ──
   /** Category / priority are inferred from the text when omitted. `trace` (a failing step, for
    * `kind: "fix"`) and `ui` (whitelisted `DevUiState` keys) go into the Rust-built, secret-scrubbed snapshot. */
@@ -905,6 +906,12 @@ export interface AllmSyncReport {
   fixed?: string[];
   /** Existing AnythingLLM entries its agents can run with no read-only / role limit (never removed). */
   keptWritable?: string[];
+  /** Entries no AnythingLLM-backed agent is granted: kept, but set to autoStart false (Section 20.12). */
+  parked?: string[];
+  /** Needed entries Tony marks read-only: readOnly true and never auto-started (AnythingLLM can't enforce it). */
+  readOnly?: string[];
+  /** Entries this sync had parked / made read-only (marked) that are needed again: auto-start back on. */
+  unparked?: string[];
 }
 
 /** `librarian_preflight` (mcp.rs `LibrarianGuard`). */
@@ -922,6 +929,8 @@ export interface LibrarianGuard {
 }
 
 export interface OsConfig {
+  /** Section pass: servers each mode adds to Tony's always-on base (Rust `tony_mode_tools`). */
+  tonyModeTools?: Record<string, string[]>;
   osName: string;
   wakeWords: string[];
   identityPath: string;

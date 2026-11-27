@@ -6,6 +6,8 @@ import { useServicesHealth } from "@/features/services/use-health";
 import { isDesktopApp } from "@/stores/settings";
 import { modelsFor, useProviders } from "./use-providers";
 import { useOs } from "@/features/os/os-store";
+import { gateway } from "@/lib/gateway";
+import { desktopMeshRows, MESH_PATH_POLL_MS, type MeshPeerRow } from "@/features/hud/mesh-path";
 
 /** Custom model ids the user added per provider (kept across restarts). */
 const CUSTOM_KEY = "cc.models.custom";
@@ -370,6 +372,60 @@ export function GatewayStatusCard() {
         </button>
       )}
       {busy && busy !== "Starting…" && <p className="w-full text-xs text-alert">{busy}</p>}
+      {desktop && gw?.up && <NetBirdPhoneStatus />}
+    </div>
+  );
+}
+
+/** The phone's NetBird link to this PC (direct or relayed, with ping), from the gateway's
+ *  `GET /api/net/path` (net_api.py: the desktop, on loopback, gets every peer). */
+function NetBirdPhoneStatus() {
+  const [rows, setRows] = useState<MeshPeerRow[] | null | undefined>(undefined);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => {
+      if (document.hidden) return;
+      void gateway<unknown>("/api/net/path", { timeoutMs: 8_000 })
+        .then((r) => {
+          if (!live) return;
+          setRows(desktopMeshRows(r));
+          setErr(null);
+        })
+        .catch((e) => {
+          if (!live) return;
+          setRows(null);
+          setErr(e instanceof Error ? e.message : String(e));
+        });
+    };
+    load();
+    const iv = setInterval(load, MESH_PATH_POLL_MS);
+    document.addEventListener("visibilitychange", load);
+    return () => {
+      live = false;
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", load);
+    };
+  }, []);
+  const tone = (t: MeshPeerRow["tone"]) => (t === "direct" ? "text-teal" : t === "relay" ? "text-amber-light" : "text-ink-3");
+  return (
+    <div className="w-full rounded-lg border border-white/5 px-3 py-2 text-xs" data-testid="netbird-phone-status">
+      <span className="label-caps text-ink-3">Phone over NetBird</span>
+      {rows === undefined && <Loader2 size={12} className="ml-2 inline animate-spin text-ink-3" />}
+      {rows === null && <p className="mt-1 text-ink-3">NetBird status unavailable{err ? ` — ${err}` : ""}.</p>}
+      {rows && !rows.length && <p className="mt-1 text-ink-3">No NetBird peers: the phone isn't on the mesh.</p>}
+      {rows && rows.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {rows.map((r) => (
+            <li key={`${r.name}-${r.ip}`} className="flex items-center gap-2" title={r.title}>
+              <span className={`size-1.5 rounded-full ${r.tone === "direct" ? "bg-teal" : r.tone === "relay" ? "bg-amber-light" : "bg-ink-3"}`} />
+              <span className="font-mono text-ink-2">{r.name}</span>
+              {r.ip && <span className="font-mono text-ink-3">{r.ip}</span>}
+              <span className={`ml-auto font-mono ${tone(r.tone)}`}>{r.tone === "direct" ? `direct · ${r.text}` : r.tone === "relay" ? `relayed · ${r.text}` : r.text}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

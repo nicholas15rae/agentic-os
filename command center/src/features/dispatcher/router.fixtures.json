@@ -1,6 +1,6 @@
 [
   {
-    "desc": "explicit delegation verb + two-word name + connective, remainder becomes task",
+    "desc": "frozen Booking Desk (Section 20.1): addressed by name it is Named (the switchboard holds it with Tony's FROZEN note)",
     "text": "hey tony, tell my booking agent to check my last five whatsapp messages",
     "role": "booking",
     "kind": "Named",
@@ -21,7 +21,7 @@
     "kind": "Named"
   },
   {
-    "desc": "vocative address form: NAME (please)? VERB at the start of the utterance",
+    "desc": "frozen Booking Desk: the vocative address is Named; the switchboard keeps it with Tony",
     "text": "booking desk, please check my calendar for tomorrow",
     "role": "booking",
     "kind": "Named",
@@ -35,13 +35,13 @@
     "kind": "Named"
   },
   {
-    "desc": "name mentioned mid-sentence with no delegation verb pattern",
+    "desc": "frozen Booking Desk: a bare name mention is still Named (held with Tony + note)",
     "text": "my booking agent hasn't replied yet",
     "role": "booking",
     "kind": "Named"
   },
   {
-    "desc": "a bare name mention beats a domain trigger (finance name vs the bizops invoice domain)",
+    "desc": "a bare name mention beats a domain trigger (finance name; the invoice is Finance's anyway)",
     "text": "any update from finance on the invoice",
     "role": "finance",
     "kind": "Named"
@@ -127,19 +127,27 @@
     "desc": "'check what's up with the droplet' is a droplet question, never a WhatsApp read ('with' after 'up' blocks the before-cue)",
     "text": "check what's up with the droplet",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
     "desc": "'check what's up on the droplet' is a droplet question ('on' + more words after 'up' blocks the before-cue)",
     "text": "check what's up on the droplet",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
-    "desc": "'check what's up on my calendar' is a calendar question, not a WhatsApp read (A2: Tony's own calendar read)",
+    "desc": "'check what's up on my calendar' is a calendar question (Tony's topic and his live read), not WhatsApp",
     "text": "check what's up on my calendar",
-    "role": "ops",
-    "kind": "Domain",
+    "role": "general",
+    "kind": "Self",
     "direct": "calendar"
   },
   {
@@ -174,22 +182,23 @@
     "kind": "Default"
   },
   {
-    "desc": "number-word normalization feeding a multi-word domain phrase",
+    "desc": "'last five messages' is Tony's own WhatsApp read, never the Booking Desk",
     "text": "give me the last five messages",
-    "role": "booking",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default",
+    "direct": "whatsapp"
   },
   {
-    "desc": "domain score tie broken by role order (booking 'wardrobe' 8 = ops 'schedule' 8 → booking)",
+    "desc": "schedule / wardrobe are Tony's topics now (Section 20.1 / 20.2)",
     "text": "schedule a wardrobe fitting",
-    "role": "booking",
-    "kind": "Domain"
+    "role": "general",
+    "kind": "Self"
   },
   {
-    "desc": "'messages' alone is no longer a Booking topic: 'schedule' makes it ops",
+    "desc": "schedule / reminder are Tony's topics (calendar, schedule, reminders = Tony)",
     "text": "schedule a reminder about my messages",
-    "role": "ops",
-    "kind": "Domain"
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "designer domain trigger",
@@ -198,10 +207,10 @@
     "kind": "Domain"
   },
   {
-    "desc": "librarian domain trigger (no overlap with its own name triggers)",
+    "desc": "the Librarian is frozen on the master switchboard: its topics never fire",
     "text": "find document about that contract",
-    "role": "librarian",
-    "kind": "Domain"
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "prompter domain trigger",
@@ -210,9 +219,9 @@
     "kind": "Domain"
   },
   {
-    "desc": "bizops domain trigger (business paperwork left ops)",
+    "desc": "invoices are Finance's ('invoice' 7 beats the ops job-quote 'quote' 5)",
     "text": "pull up the invoice and the quote",
-    "role": "bizops",
+    "role": "finance",
     "kind": "Domain"
   },
   {
@@ -269,10 +278,10 @@
     "direct": "gmail"
   },
   {
-    "desc": "direct: new emails from someone",
+    "desc": "'my agent' (acting agency) is Tony's topic; his live Gmail read answers it",
     "text": "any new emails from my agent",
-    "role": null,
-    "kind": "Default",
+    "role": "general",
+    "kind": "Self",
     "direct": "gmail"
   },
   {
@@ -290,7 +299,7 @@
     "direct": "spotify"
   },
   {
-    "desc": "direct: an explicit delegation still names the agent (the caller keeps Named)",
+    "desc": "frozen Booking Desk: an explicit delegation still names it (the caller keeps Named; the switchboard holds it)",
     "text": "ask the booking desk for any whatsapp updates",
     "role": "booking",
     "kind": "Named",
@@ -309,10 +318,10 @@
     "kind": "Default"
   },
   {
-    "desc": "not direct: drafting an email",
+    "desc": "not direct: drafting an email; 'my agent' is Tony's topic",
     "text": "draft an email to my agent",
-    "role": null,
-    "kind": "Default"
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "not direct: 'message' in a coding request",
@@ -416,17 +425,21 @@
     "desc": "self: Tony's own topic alone does not beat another agent's topic (only his name does)",
     "text": "system status of the droplet",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
-    "desc": "named: an explicit delegation through Tony still delegates",
+    "desc": "frozen Booking Desk: named through Tony is Named; the switchboard keeps it with Tony",
     "text": "hey tony, ask the booking desk to check my availability",
     "role": "booking",
     "kind": "Named",
     "taskContains": "check my availability"
   },
   {
-    "desc": "named: a bare agent-name mention next to Tony's name still delegates (Named, not Domain)",
+    "desc": "frozen Booking Desk: a name mention next to Tony's name is Named, not his topic",
     "text": "tony, my booking agent hasn't replied about the wardrobe",
     "role": "booking",
     "kind": "Named"
@@ -444,11 +457,11 @@
     "kind": "Domain"
   },
   {
-    "desc": "regression: the OS renamed Friday — 'for friday' is a date, not a vocative; the booking topic wins",
+    "desc": "the OS renamed Friday: 'for friday' is a date, and plain self-tape / availability are Tony's topics",
     "text": "check my self-tape availability for friday",
     "osName": "Friday",
-    "role": "booking",
-    "kind": "Domain"
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "a trailing self name after a preposition is an object, not a vocative ('in the orchestrator')",
@@ -484,7 +497,11 @@
     "desc": "a self name mid-line (no address position) does not beat a topic",
     "text": "the dispatcher keeps timing out, is the droplet healthy",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
   },
   {
     "desc": "address: the line opens with a self name after an interjection ('ok jarvis')",
@@ -549,10 +566,10 @@
     "kind": "Domain"
   },
   {
-    "desc": "plain self-tape stays a booking (casting logistics) trigger, not the director",
+    "desc": "plain self-tape (scheduling one) is Tony's; recording / editing one is the Director's",
     "text": "check my self-tape availability for friday",
-    "role": "booking",
-    "kind": "Domain"
+    "role": "general",
+    "kind": "Self"
   },
   {
     "desc": "a business alias routes to the Operations Manager",
@@ -570,7 +587,17 @@
     "desc": "ops stays infrastructure",
     "text": "is the droplet healthy and is docker up",
     "role": "ops",
-    "kind": "Domain"
+    "kind": "Domain",
+    "frozen": [
+      "booking",
+      "librarian"
+    ]
+  },
+  {
+    "desc": "Ops starts frozen (an unused placeholder), so an infra question is Tony's until Nic thaws it",
+    "text": "is the droplet healthy and is docker up",
+    "role": null,
+    "kind": "Default"
   },
   {
     "desc": "A2: a Gmail booking read stays with Tony (no name, booking words only)",
@@ -587,17 +614,17 @@
     "direct": "gmail"
   },
   {
-    "desc": "A2: 'audition' (a Booking name) inside a mail read stays with Tony",
+    "desc": "A2: 'audition' (Tony's acting topic now) inside a mail read stays with Tony",
     "text": "any audition emails?",
-    "role": null,
-    "kind": "Default",
+    "role": "general",
+    "kind": "Self",
     "direct": "gmail"
   },
   {
-    "desc": "A2: a casting-call mail read is at most a topic; the live-tool backstop keeps it with Tony",
+    "desc": "A2: a casting-call mail read is Tony's topic and his live Gmail read",
     "text": "check my inbox for the casting call",
-    "role": "booking",
-    "kind": "Domain",
+    "role": "general",
+    "kind": "Self",
     "direct": "gmail"
   },
   {
@@ -608,43 +635,62 @@
     "direct": "gmail"
   },
   {
-    "desc": "A2: the desk addressed at the start of a mail read still gets it",
+    "desc": "A2: the frozen desk addressed at the start of a mail read is Named (held with Tony)",
     "text": "booking desk, any new emails about the shoot?",
     "role": "booking",
     "kind": "Named",
     "direct": "gmail"
   },
   {
-    "desc": "A2: 'tell booking to …' still delegates a mail read",
+    "desc": "A2: 'tell booking to…' no longer delegates (frozen, no names); callback is Tony's topic",
     "text": "tell booking to check my email for the callback",
-    "role": "booking",
-    "kind": "Named",
+    "role": "general",
+    "kind": "Self",
     "taskContains": "check my email",
     "direct": "gmail"
   },
   {
-    "desc": "A2: a mention outside a mail read still names the desk",
+    "desc": "frozen Booking Desk: a mention outside a mail read names the desk",
     "text": "what did the booking desk say about the shoot",
     "role": "booking",
     "kind": "Named"
   },
   {
-    "desc": "A2: a calendar read is Tony's own live tool (ops topic, Direct wins)",
+    "desc": "A2: a calendar read is Tony's own topic and live tool",
     "text": "what's on my calendar tomorrow",
-    "role": "ops",
-    "kind": "Domain",
+    "role": "general",
+    "kind": "Self",
     "direct": "calendar"
   },
   {
-    "desc": "A2: a calendar add is a write, never a direct read",
+    "desc": "A2: a calendar add is a write (never a direct read); the calendar is Tony's topic",
     "text": "add the Netflix shoot to my calendar",
-    "role": "ops",
-    "kind": "Domain"
+    "role": "general",
+    "kind": "Self"
   },
   {
-    "desc": "A2: 'put it on my calendar' is a write too",
+    "desc": "A2: 'put it on my calendar' is a write too; Tony's topic",
     "text": "put it on my calendar for tomorrow",
-    "role": "ops",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "explicit delegation verb + agent suffix + connective (a live agent), remainder becomes task",
+    "text": "hey tony, tell my designer agent to check the layout",
+    "role": "designer",
+    "kind": "Named",
+    "taskContains": "check the layout"
+  },
+  {
+    "desc": "contracting, job quotes and subcontractors are Tony's while Ops is frozen (the future Job Desk)",
+    "text": "send the masonry quote to the subcontractor",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "Section 20.2: Instagram is Biz Ops' ('instagram' 9 beats the Director's 'reel' 4)",
+    "text": "post the new reel to instagram",
+    "role": "bizops",
     "kind": "Domain"
   },
   {
@@ -657,8 +703,8 @@
   {
     "desc": "A2 review: 'audition' opening a mail read is a topic, not the Booking Desk",
     "text": "audition email check",
-    "role": null,
-    "kind": "Default",
+    "role": "general",
+    "kind": "Self",
     "direct": "gmail"
   },
   {
@@ -677,14 +723,14 @@
   },
   {
     "desc": "A2 review: the desk name followed by a pause addresses it",
-    "text": "Booking: any emails today?",
+    "text": "Booking desk: any emails today?",
     "role": "booking",
     "kind": "Named",
     "direct": "gmail"
   },
   {
     "desc": "A2 review: 'NAME email <someone>' is still a command to the desk ('email' the verb, not the mail noun)",
-    "text": "booking email Sam about the shoot",
+    "text": "booking desk email Sam about the shoot",
     "role": "booking",
     "kind": "Named",
     "taskContains": "about the shoot",
@@ -707,15 +753,15 @@
   {
     "desc": "FX3 review: 'ok' before 'audition' in a mail read is still Tony's read",
     "text": "ok audition emails this week?",
-    "role": null,
-    "kind": "Default",
+    "role": "general",
+    "kind": "Self",
     "direct": "gmail"
   },
   {
     "desc": "FX3 review: 'So, audition email check' is the mail noun after a filler",
     "text": "So, audition email check",
-    "role": null,
-    "kind": "Default",
+    "role": "general",
+    "kind": "Self",
     "direct": "gmail"
   },
   {
@@ -727,7 +773,7 @@
   },
   {
     "desc": "FX3 review: a filler, then the desk name and a pause, addresses the desk",
-    "text": "Okay, booking: any emails today?",
+    "text": "Okay, booking desk: any emails today?",
     "role": "booking",
     "kind": "Named",
     "direct": "gmail"
@@ -741,10 +787,52 @@
   },
   {
     "desc": "FX3 review: 'hey <desk name> email <someone>' is a command to the desk",
-    "text": "hey booking email Sam about the shoot",
+    "text": "hey booking agent email Sam about the shoot",
     "role": "booking",
     "kind": "Named",
     "taskContains": "about the shoot",
     "direct": "gmail"
+  },
+  {
+    "desc": "Section 20.2: money, HST and commissions are Finance's",
+    "text": "log the hst on the commission cheque",
+    "role": "finance",
+    "kind": "Domain"
+  },
+  {
+    "desc": "Section 20.1: recording a self-tape is the Director's (the longer phrase beats Tony's 'self-tape')",
+    "text": "record my self-tape for the audition",
+    "role": "director",
+    "kind": "Domain"
+  },
+  {
+    "desc": "Section 20.2: acting (bookings, the agency) is Tony's for now",
+    "text": "did imperious send the bookings",
+    "role": "general",
+    "kind": "Self"
+  },
+  {
+    "desc": "Section 20.1: the frozen Librarian addressed by name is Named (held with Tony + note)",
+    "text": "ask the librarian to search vault for my notes",
+    "role": "librarian",
+    "kind": "Named"
+  },
+  {
+    "desc": "Section 20.1: the frozen Librarian addressed by name is Named, before any live topic",
+    "text": "librarian, find document about the rust repo",
+    "role": "librarian",
+    "kind": "Named"
+  },
+  {
+    "desc": "Section 20.1: a frozen Librarian TOPIC never fires; the live coder topic wins",
+    "text": "find document about the rust repo",
+    "role": "coder",
+    "kind": "Domain"
+  },
+  {
+    "desc": "Section 20.1: a frozen Librarian topic alone falls through to nothing",
+    "text": "find document about the lease",
+    "role": null,
+    "kind": "Default"
   }
 ]

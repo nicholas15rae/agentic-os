@@ -5,7 +5,9 @@
 //!                      time-to-first-token, tokens/s and VRAM, answer a real prompt
 //!   model_use        — make it Tony's brain: providers.json + AnythingLLM default +
 //!                      every AnythingLLM workspace on LM Studio, so a second model is
-//!                      never auto-loaded next to it (the VRAM-spill trap).
+//!                      never auto-loaded next to it (the VRAM-spill trap). Refuses a model
+//!                      that is only "tight" or "spills to RAM" here (or whose fit can't be
+//!                      checked) with `FIT_WARN:` unless `force` (the UI's explicit confirm).
 //!   model_compare    — A/B a candidate against Tony's model on Tony's own prompts inside ONE
 //!                      maintenance slot, then put Tony's model back (compare.rs; never model_use)
 
@@ -47,6 +49,16 @@ pub fn fit_context(size_gb: f64, vram_total_gb: f64) -> (u64, &'static str) {
     }
 }
 
+/// Why `fit` (from `fit_context`) needs an explicit confirm before the model becomes Tony's brain,
+/// or `None` when it fits. Pure. The message starts with `FIT_WARN:` so the UI can ask.
+pub fn brain_fit_warning(name: &str, fit: &str, context: u64) -> Option<String> {
+    match fit {
+        "fits" => None,
+        "tight" => Some(format!("FIT_WARN:tight: {name} only fits the GPU at a {}k context; Tony's turns may slow down or spill into system RAM", context / 1024)),
+        _ => Some(format!("FIT_WARN:spills: {name} won't fit the GPU even at {}k context; it spills into system RAM and every answer crawls", context / 1024)),
+    }
+}
+
 fn vram_total_gb() -> f64 {
     super::system::query_gpu().map(|g| g.vram_total_mb as f64 / 1024.0).unwrap_or(12.0)
 }
@@ -68,7 +80,11 @@ pub struct LabModel {
 
 #[tauri::command]
 pub async fn model_lab_list(state: State<'_, DispatchState>) -> Result<Vec<LabModel>, String> {
-    let base = api_base(&state)?;
+    lab_models(&state).await
+}
+
+async fn lab_models(state: &DispatchState) -> Result<Vec<LabModel>, String> {
+    let base = api_base(state)?;
     let v: Value = state.http.get(format!("{base}/api/v1/models")).timeout(Duration::from_secs(8)).send().await.map_err(short)?.json().await.map_err(short)?;
     let total = tauri::async_runtime::spawn_blocking(vram_total_gb).await.unwrap_or(12.0);
     let tony = state.provider("lmstudio").map(|p| p.model).unwrap_or_default();
@@ -223,9 +239,17 @@ pub async fn model_bench(state: State<'_, DispatchState>, os: State<'_, OsState>
     Ok(bench(&state, &os, &model, context).await)
 }
 
-/// Make `model` Tony's brain everywhere (one model on the GPU).
+/// Make `model` Tony's brain everywhere (one model on the GPU). A model that doesn't fit the card
+/// comfortably (or whose fit can't be checked) is refused with `FIT_WARN:` unless `force`.
 #[tauri::command]
-pub async fn model_use(state: State<'_, DispatchState>, os: State<'_, OsState>, model: String) -> Result<Vec<String>, String> {
+pub async fn model_use(state: State<'_, DispatchState>, os: State<'_, OsState>, model: String, force: Option<bool>) -> Result<Vec<String>, String> {
+    if !force.unwrap_or(false) {
+        let list = lab_models(&state).await.map_err(|e| format!("FIT_WARN:unknown: couldn't check whether {model} fits the GPU ({e})"))?;
+        let m = list.iter().find(|m| m.key == model).ok_or_else(|| format!("FIT_WARN:unknown: {model} isn't in LM Studio's model list, so its fit can't be checked"))?;
+        if let Some(w) = brain_fit_warning(if m.name.is_empty() { &m.key } else { &m.name }, &m.fit, m.context) {
+            return Err(w);
+        }
+    }
     use_model(&state, &os.snapshot(), model).await
 }
 
@@ -330,6 +354,36 @@ mod tests {
         assert_eq!(fit_context(6.5, 12.0).0, 32_768 - 16_384); // 9B: 2.2 GB budget → 16k
         assert_eq!(fit_context(3.4, 12.0).0, 32_768); // 4B
         assert_eq!(fit_context(9.0, 12.0).1, "spills to RAM — slow"); // 14B on 12 GB
+    }
+
+    #[test]
+    fn only_a_comfortable_fit_skips_the_brain_confirm() {
+        assert_eq!(brain_fit_warning("Qwen 9B", "fits", 16_384), None);
+        let (ctx, fit) = fit_context(7.6, 12.0);
+        let t = brain_fit_warning("Gemma 12B", fit, ctx).unwrap();
+        assert!(t.starts_with("FIT_WARN:tight:") && t.contains("Gemma 12B"), "{t}");
+        let (ctx, fit) = fit_context(9.0, 12.0);
+        assert!(brain_fit_warning("14B", fit, ctx).unwrap().starts_with("FIT_WARN:spills:"));
+    }
+
+    #[test]
+    fn model_use_refuses_without_force_when_the_fit_is_unknown() {
+        tauri::async_runtime::block_on(async {
+            let st = DispatchState::default();
+            let _ = st.update(|c| {
+                for p in c.providers.iter_mut().filter(|p| p.id == "lmstudio") {
+                    p.base_url = "http://127.0.0.1:9/v1".into();
+                }
+                Ok(())
+            });
+            // The command's own guard (no Tauri State in a unit test): the list can't load.
+            let e = lab_models(&st).await.map_err(|e| format!("FIT_WARN:unknown: ({e})")).err().unwrap();
+            assert!(e.starts_with("FIT_WARN:unknown"));
+            let src = include_str!("modellab.rs");
+            let cmd = src.split("pub async fn model_use(").nth(1).unwrap();
+            let guard = cmd.find("if !force.unwrap_or(false)").unwrap();
+            assert!(guard < cmd.find("use_model(&state").unwrap(), "the fit check runs before the switch");
+        });
     }
 
     /// `MODEL=… cargo test --lib live_model_use -- --ignored --nocapture`

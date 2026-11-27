@@ -1200,6 +1200,11 @@ pub(crate) fn dismissed_ids(conn: &Connection) -> Result<std::collections::HashS
     Ok(rows.filter_map(Result::ok).filter_map(|k| k.strip_prefix("dismissed:").map(String::from)).collect())
 }
 
+pub(crate) fn meta_del(conn: &Connection, key: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM envelope_meta WHERE key = ?1", params![key]).map_err(sql_err)?;
+    Ok(())
+}
+
 pub(crate) fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute("INSERT INTO envelope_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value]).map_err(sql_err)?;
     Ok(())

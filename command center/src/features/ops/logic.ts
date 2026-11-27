@@ -1,6 +1,6 @@
 /** Pure helpers for the Operations UI (mirrors of the Rust validation, so the form explains a
  * refusal before the round-trip; Rust stays the authority). */
-import type { Business, NewBusiness, ReviewGroup } from "./types";
+import type { Business, BusinessEmail, NewBusiness, ReviewGroup } from "./types";
 
 /** Rust `validate_business_id` (the agent-id list included). */
 const ROLE_IDS = ["general", "tony", "librarian", "coder", "booking", "ops", "bizops", "prompter", "designer", "director", "finance", "finance_librarian", "security", "observer"];
@@ -10,8 +10,37 @@ export function businessIdError(id: string): string | null {
   if (!/^[a-z][a-z0-9_]{1,31}$/.test(id) || id.endsWith("_") || id.includes("__")) return "2–32 of a-z, 0-9 and single inner underscores, starting with a letter";
   if (DEVICE.test(id)) return "that's a reserved Windows name";
   if (ROLE_IDS.includes(id)) return "that's an agent id";
+  if (id === "personal") return "that's the Personal finance area";
   return null;
 }
+
+/** Rust `business_for_email`: the business a mailbox is linked to, or null (the main account). */
+export function businessForEmail(businesses: readonly Business[], address: string): Business | null {
+  const a = address.trim().toLowerCase();
+  if (!a) return null;
+  return businesses.find((b) => (b.emails ?? []).some((e) => e.address.toLowerCase() === a)) ?? null;
+}
+
+/** Rust `emails_for`: a business's own mailboxes, or the main account when it has none; null = unknown business. */
+export function emailsFor(businesses: readonly Business[], businessId: string): BusinessEmail[] | null {
+  const b = businesses.find((x) => x.businessId === businessId);
+  if (!b) return null;
+  return b.emails?.length ? b.emails : [{ label: "main", address: "" }];
+}
+
+/** "Born Fortuna <orders@bornfortuna.ca>, main@x.ca" → links (one per comma or line; label optional). */
+export function parseEmails(s: string): BusinessEmail[] {
+  const out: BusinessEmail[] = [];
+  for (const part of s.split(/[\n,]/).map((x) => x.trim()).filter(Boolean)) {
+    const m = /^(.*?)\s*<([^>]+)>$/.exec(part);
+    const label = m ? m[1].trim() : "";
+    const address = (m ? m[2] : part).trim().toLowerCase();
+    if (!out.some((o) => o.address === address)) out.push({ label, address });
+  }
+  return out;
+}
+
+export const formatEmails = (emails: readonly BusinessEmail[] | undefined) => (emails ?? []).map((e) => (e.label ? `${e.label} <${e.address}>` : e.address)).join("\n");
 
 /** A suggested id from a display name: "Corner Bakery & Café" → "corner_bakery_cafe". */
 export function suggestId(name: string): string {

@@ -70,6 +70,39 @@ def init() -> None:
               id TEXT PRIMARY KEY, kind TEXT, payload TEXT, status TEXT, result TEXT, created REAL, updated REAL);
             """
         )
+    _ensure_contacts_schema()
+
+
+# Phone book (section 12). comms_contacts stays what it was — one row per number (thread key),
+# its name and the Instant Send trust flag, auto-created by the phone bridge — and gains one
+# column, contact_id, pointing at the phone-book entry that number belongs to. The entries
+# themselves (several phones / emails each) live in comms_phonebook. Purely additive: CREATE IF
+# NOT EXISTS + guarded ADD COLUMN, never a DROP. Contact data is data: it is never indexed into
+# the vault (agent context) and never read as instructions.
+_contacts_ready: set[str] = set()
+
+
+def _ensure_contacts_schema() -> None:
+    key = str(cc.DB_PATH)
+    if key in _contacts_ready:
+        return
+    with _schema_lock:
+        if key in _contacts_ready:
+            return
+        with cc._db_lock, cc.db() as c:
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS comms_contacts(address TEXT PRIMARY KEY, name TEXT, trusted INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS comms_phonebook(
+                  id TEXT PRIMARY KEY, name TEXT NOT NULL, company TEXT, role TEXT, phones TEXT, emails TEXT,
+                  notes TEXT, grp TEXT, agency_id TEXT, source TEXT, created REAL, updated REAL);
+                """
+            )
+            have = {r["name"] for r in c.execute("PRAGMA table_info(comms_contacts)")}
+            if "contact_id" not in have:
+                c.execute("ALTER TABLE comms_contacts ADD COLUMN contact_id TEXT")
+            c.execute("CREATE INDEX IF NOT EXISTS comms_contacts_cid ON comms_contacts(contact_id)")
+        _contacts_ready.add(key)
 
 
 # Additive schema (claim/lease columns, task mirror). cc.db has no migration ladder, so each
@@ -281,7 +314,11 @@ def _broadcast(event: dict) -> None:
 
 
 def _contact_name(c, address: str) -> Optional[str]:
-    r = c.execute("SELECT name FROM comms_contacts WHERE address=?", (_thread_key(address),)).fetchone()
+    """The number's name: its phone-book entry's when it has one, else the bridge's."""
+    r = c.execute(
+        "SELECT COALESCE(p.name, k.name) AS name FROM comms_contacts k LEFT JOIN comms_phonebook p ON p.id = k.contact_id WHERE k.address=?",
+        (_thread_key(address),),
+    ).fetchone()
     return r["name"] if r else None
 
 
@@ -292,6 +329,7 @@ def comms_sms(data: Any = Body(...)):
     msgs = data.get("messages") if isinstance(data, dict) and "messages" in data else (data if isinstance(data, list) else [data])
     added = 0
     to_index: list[tuple] = []
+    _ensure_contacts_schema()
     with cc._db_lock, cc.db() as c:
         for m in msgs[:2000]:
             if not isinstance(m, dict) or not str(m.get("body") or "").strip():
@@ -304,7 +342,12 @@ def comms_sms(data: Any = Body(...)):
             mid = str(m.get("id") or f"{channel}:{_thread_key(address)}:{int(ts)}:{hash(body) & 0xFFFFFFFF:x}")
             contact = str(m.get("contact") or m.get("name") or "") or _contact_name(c, address) or address
             if m.get("contact"):
-                c.execute("INSERT INTO comms_contacts(address,name) VALUES(?,?) ON CONFLICT(address) DO UPDATE SET name=excluded.name", (_thread_key(address), contact))
+                # Auto-created bridge contact. A number already filed in the phone book keeps
+                # the name you gave it there.
+                c.execute(
+                    "INSERT INTO comms_contacts(address,name) VALUES(?,?) ON CONFLICT(address) DO UPDATE SET name=CASE WHEN contact_id IS NULL THEN excluded.name ELSE name END",
+                    (_thread_key(address), contact),
+                )
             cur = c.execute(
                 "INSERT OR IGNORE INTO comms_messages(id,thread,contact,address,direction,body,ts,channel,read) VALUES(?,?,?,?,?,?,?,?,?)",
                 (mid, _thread_key(address, channel), contact, address, direction, body, ts, channel, 1 if direction == "out" else 0),
@@ -338,6 +381,7 @@ def _vault_comms(mid, contact, address, direction, body, ts, channel):
 def comms_calls_post(data: Any = Body(...)):
     calls = data.get("calls") if isinstance(data, dict) and "calls" in data else (data if isinstance(data, list) else [data])
     added = 0
+    _ensure_contacts_schema()
     with cc._db_lock, cc.db() as c:
         for k in calls[:2000]:
             if not isinstance(k, dict):
@@ -357,6 +401,7 @@ def comms_calls_post(data: Any = Body(...)):
 
 @comms_router.get("/threads")
 def comms_threads(limit: int = Query(100, le=500)):
+    _ensure_contacts_schema()
     with cc.db() as c:
         rows = c.execute(
             """SELECT m.thread, m.contact, m.address, m.body, m.ts, m.direction, m.channel,
@@ -367,7 +412,30 @@ def comms_threads(limit: int = Query(100, le=500)):
             (limit,),
         ).fetchall()
         trusted = {r["address"] for r in c.execute("SELECT address FROM comms_contacts WHERE trusted=1")}
-    return {"threads": [{**dict(r), "trusted": r["thread"] in trusted} for r in rows]}
+        linked = _linked_by_key(c, [r["thread"] for r in rows])
+    out = []
+    for r in rows:
+        t = {**dict(r), "trusted": r["thread"] in trusted}
+        p = linked.get(r["thread"])
+        # The phone-book entry the number belongs to (ids only link; the thread is unchanged).
+        t.update({"contactId": p["id"], "contactName": p["name"], "company": p["company"] or "", "role": p["role"] or ""} if p else {"contactId": None})
+        out.append(t)
+    return {"threads": out}
+
+
+def _linked_by_key(c, keys: list[str]) -> dict[str, dict]:
+    if not keys:
+        return {}
+    out: dict[str, dict] = {}
+    for i in range(0, len(keys), 400):
+        part = keys[i:i + 400]
+        q = ",".join("?" * len(part))
+        for r in c.execute(
+            f"SELECT k.address, p.id, p.name, p.company, p.role FROM comms_contacts k JOIN comms_phonebook p ON p.id = k.contact_id WHERE k.address IN ({q})",
+            part,
+        ):
+            out[r["address"]] = dict(r)
+    return out
 
 
 @comms_router.get("/threads/{thread}/messages")
@@ -393,10 +461,15 @@ def comms_calls(limit: int = Query(100, le=1000)):
 
 @comms_router.get("/contacts")
 def comms_contacts(q: str = ""):
+    """One row per number (the trust list). `name` is the phone-book name when the number is filed."""
+    _ensure_contacts_schema()
+    like = f"%{q}%"
     with cc.db() as c:
         rows = c.execute(
-            "SELECT address, name, trusted FROM comms_contacts WHERE name LIKE ? OR address LIKE ? ORDER BY name LIMIT 200",
-            (f"%{q}%", f"%{q}%"),
+            "SELECT k.address, COALESCE(p.name, k.name) AS name, k.trusted, k.contact_id AS contactId "
+            "FROM comms_contacts k LEFT JOIN comms_phonebook p ON p.id = k.contact_id "
+            "WHERE k.name LIKE ? OR k.address LIKE ? OR p.name LIKE ? OR p.company LIKE ? ORDER BY name LIMIT 200",
+            (like, like, like, like),
         ).fetchall()
     return {"contacts": [dict(r) for r in rows]}
 
@@ -435,6 +508,7 @@ def comms_contact_put(data: dict = Body(...)):
     raw = str(data.get("address") or "").strip()
     if not raw:
         raise HTTPException(400, "address required")
+    _ensure_contacts_schema()
     address = _thread_key(raw)
     trusted = bool(data.get("trusted"))
     channel = str(data.get("channel") or "sms").strip().lower()
@@ -447,12 +521,244 @@ def comms_contact_put(data: dict = Body(...)):
     with cc._db_lock, cc.db() as c:
         prev = c.execute("SELECT trusted FROM comms_contacts WHERE address=?", (address,)).fetchone()
         c.execute(
-            "INSERT INTO comms_contacts(address,name,trusted) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET name=COALESCE(excluded.name,name), trusted=excluded.trusted",
+            "INSERT INTO comms_contacts(address,name,trusted) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET "
+            "name=CASE WHEN contact_id IS NULL THEN COALESCE(excluded.name,name) ELSE name END, trusted=excluded.trusted",
             (address, data.get("name"), 1 if trusted else 0),
         )
     if bool(prev and prev["trusted"]) != trusted:
         _audit({"action": "comms_trust_on" if trusted else "comms_trust_off", "address": address, "channel": channel})
     return {"ok": True}
+
+
+# ── phone book (section 12) ─────────────────────────────────────────────────
+
+PB_MAX = 5000
+PB_LIST_MAX = 10
+_PB_KEYS = {"id", "name", "company", "role", "phones", "emails", "notes", "group", "agencyId", "source"}
+_PB_SOURCES = {"manual", "vcard", "phone", "bridge", "finance", "messages"}
+_PB_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def pb_phone_key(number: str) -> str:
+    """The dedupe / lookup key of a phone number: the key a text thread uses (last 10 digits)."""
+    digits = re.sub(r"\D", "", number or "")
+    return digits[-10:] if len(digits) >= 7 else ""
+
+
+def pb_email_key(email: str) -> str:
+    e = (email or "").strip().lower()
+    return e if _PB_EMAIL_RE.match(e) else ""
+
+
+def _pb_text(v: Any, field: str, n: int) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+        raise HTTPException(400, f"{field}: text")
+    return str(v).strip()[:n]
+
+
+def _pb_list(v: Any, field: str, value_key: str, check) -> list[dict]:
+    """[{label, <value_key>}] (plain strings are accepted too). Blank entries and repeats are dropped."""
+    if v is None:
+        return []
+    if not isinstance(v, list) or len(v) > PB_LIST_MAX:
+        raise HTTPException(400, f"{field}: a list of up to {PB_LIST_MAX}")
+    out, seen = [], set()
+    for i, x in enumerate(v):
+        if isinstance(x, str):
+            x = {value_key: x}
+        if not isinstance(x, dict) or set(x) - {"label", value_key}:
+            raise HTTPException(400, f"{field}[{i}]: {{label, {value_key}}}")
+        val = _pb_text(x.get(value_key), f"{field}[{i}].{value_key}", 120)
+        if not val:
+            continue
+        key = check(val)
+        if not key:
+            raise HTTPException(400, f"{field}[{i}]: not a valid {value_key}")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"label": _pb_text(x.get("label"), f"{field}[{i}].label", 30), value_key: val})
+    return out
+
+
+def pb_clean(data: Any) -> dict:
+    """Validate one phone-book entry. Strict keys; every value is stored as plain text."""
+    if not isinstance(data, dict):
+        raise HTTPException(400, "contact: an object")
+    extra = set(data) - _PB_KEYS
+    if extra:
+        raise HTTPException(400, f"contact: unknown field(s) {', '.join(sorted(extra))}")
+    phones = _pb_list(data.get("phones"), "phones", "number", pb_phone_key)
+    emails = _pb_list(data.get("emails"), "emails", "address", pb_email_key)
+    company = _pb_text(data.get("company"), "company", 120)
+    name = _pb_text(data.get("name"), "name", 120) or company or (phones[0]["number"] if phones else "") or (emails[0]["address"] if emails else "")
+    if not name:
+        raise HTTPException(400, "name (or a company, phone or email) required")
+    agency = data.get("agencyId")
+    if agency is not None and (not isinstance(agency, str) or (agency and not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", agency))):
+        raise HTTPException(400, "agencyId: an agency id or null")
+    source = _pb_text(data.get("source"), "source", 20) or "manual"
+    if source not in _PB_SOURCES:
+        raise HTTPException(400, f"source: one of {', '.join(sorted(_PB_SOURCES))}")
+    cid = data.get("id")
+    if cid is not None and (not isinstance(cid, str) or not _PB_ID_RE.match(cid)):
+        raise HTTPException(400, "id: letters, digits, _ or -")
+    return {
+        "id": cid,
+        "name": name,
+        "company": company,
+        "role": _pb_text(data.get("role"), "role", 80),
+        "phones": phones,
+        "emails": emails,
+        "notes": _pb_text(data.get("notes"), "notes", 4000),
+        "group": _pb_text(data.get("group"), "group", 60),
+        "agencyId": agency or None,
+        "source": source,
+    }
+
+
+def _pb_row(r) -> dict:
+    return {
+        "id": r["id"], "name": r["name"], "company": r["company"] or "", "role": r["role"] or "",
+        "phones": json.loads(r["phones"] or "[]"), "emails": json.loads(r["emails"] or "[]"),
+        "notes": r["notes"] or "", "group": r["grp"] or "", "agencyId": r["agency_id"] or None,
+        "source": r["source"] or "manual", "created": r["created"], "updated": r["updated"],
+    }
+
+
+def _pb_link_numbers(c, cid: str, name: str, phones: list[dict]) -> None:
+    """Point each of the entry's numbers (comms_contacts rows) at it. A number it no longer has is
+    unlinked; the row, its bridge name and its Instant Send flag stay."""
+    keys = [k for k in (pb_phone_key(p["number"]) for p in phones) if k]
+    for k in keys:
+        c.execute(
+            "INSERT INTO comms_contacts(address,name,contact_id) VALUES(?,?,?) "
+            "ON CONFLICT(address) DO UPDATE SET name=excluded.name, contact_id=excluded.contact_id",
+            (k, name, cid),
+        )
+    marks = ",".join("?" * len(keys))
+    c.execute("UPDATE comms_contacts SET contact_id=NULL WHERE contact_id=?" + (f" AND address NOT IN ({marks})" if keys else ""), (cid, *keys))
+
+
+def pb_save(data: Any) -> dict:
+    """Create (no id, or an id not in the book yet) or replace one entry."""
+    _ensure_contacts_schema()
+    e = pb_clean(data)
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        old = c.execute("SELECT created, source FROM comms_phonebook WHERE id=?", (e["id"],)).fetchone() if e["id"] else None
+        if not old:
+            if c.execute("SELECT COUNT(*) FROM comms_phonebook").fetchone()[0] >= PB_MAX:
+                raise HTTPException(400, f"the phone book is full ({PB_MAX})")
+            e["id"] = e["id"] or uuid.uuid4().hex
+        c.execute(
+            "INSERT INTO comms_phonebook(id,name,company,role,phones,emails,notes,grp,agency_id,source,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, company=excluded.company, role=excluded.role, phones=excluded.phones, "
+            "emails=excluded.emails, notes=excluded.notes, grp=excluded.grp, agency_id=excluded.agency_id, updated=excluded.updated",
+            (e["id"], e["name"], e["company"], e["role"], json.dumps(e["phones"], ensure_ascii=False), json.dumps(e["emails"], ensure_ascii=False),
+             e["notes"], e["group"], e["agencyId"], e["source"], old["created"] if old else now, now),
+        )
+        _pb_link_numbers(c, e["id"], e["name"], e["phones"])
+        r = c.execute("SELECT * FROM comms_phonebook WHERE id=?", (e["id"],)).fetchone()
+    return _pb_row(r)
+
+
+def pb_list(q: str = "") -> dict:
+    _ensure_contacts_schema()
+    like = f"%{q.strip()}%"
+    with cc.db() as c:
+        rows = c.execute(
+            "SELECT * FROM comms_phonebook WHERE name LIKE ? OR company LIKE ? OR role LIKE ? OR phones LIKE ? OR emails LIKE ? OR notes LIKE ? "
+            "ORDER BY name COLLATE NOCASE",
+            (like,) * 6,
+        ).fetchall()
+        # Numbers the phone bridge knows that aren't filed in the phone book (auto-created contacts).
+        loose = c.execute(
+            "SELECT address, name, trusted FROM comms_contacts WHERE contact_id IS NULL AND (name LIKE ? OR address LIKE ?) "
+            "ORDER BY name COLLATE NOCASE LIMIT 500",
+            (like, like),
+        ).fetchall()
+        trusted = {r["contact_id"] for r in c.execute("SELECT DISTINCT contact_id FROM comms_contacts WHERE trusted=1 AND contact_id IS NOT NULL")}
+    return {
+        "contacts": [{**_pb_row(r), "trusted": r["id"] in trusted} for r in rows],
+        "unfiled": [{**dict(r), "trusted": bool(r["trusted"])} for r in loose],
+    }
+
+
+def pb_delete(cid: str) -> dict:
+    """Delete one entry. Records that link to it (finance, invoices, auditions, agencies) keep their
+    contactId and are never touched; its numbers keep their bridge name and Instant Send flag."""
+    _ensure_contacts_schema()
+    with cc._db_lock, cc.db() as c:
+        cur = c.execute("DELETE FROM comms_phonebook WHERE id=?", (cid,))
+        c.execute("UPDATE comms_contacts SET contact_id=NULL WHERE contact_id=?", (cid,))
+    if not cur.rowcount:
+        raise HTTPException(404, "no such contact")
+    return {"ok": True}
+
+
+def pb_import(data: Any) -> dict:
+    """Bulk add (vCard / phone import). An entry whose phone or email (normalised) is already in the
+    phone book is skipped, as is a repeat within the batch and one with neither. Nothing is merged
+    or overwritten."""
+    if not isinstance(data, dict) or not isinstance(data.get("contacts"), list):
+        raise HTTPException(400, "{contacts: [...]} required")
+    items = data["contacts"]
+    if len(items) > 2000:
+        raise HTTPException(400, "up to 2000 contacts per import")
+    source = data.get("source") or "vcard"
+    cleaned = []
+    for i, x in enumerate(items):
+        if not isinstance(x, dict):
+            raise HTTPException(400, f"contacts[{i}]: an object")
+        try:
+            cleaned.append(pb_clean({**{k: v for k, v in x.items() if k != "id"}, "source": source}))
+        except HTTPException as e:
+            raise HTTPException(400, f"contacts[{i}]: {e.detail}")
+    _ensure_contacts_schema()
+    known_p: set[str] = set()
+    known_e: set[str] = set()
+    with cc.db() as c:
+        for r in c.execute("SELECT phones, emails FROM comms_phonebook"):
+            known_p.update(pb_phone_key(p.get("number", "")) for p in json.loads(r["phones"] or "[]"))
+            known_e.update(pb_email_key(m.get("address", "")) for m in json.loads(r["emails"] or "[]"))
+    known_p.discard("")
+    known_e.discard("")
+    added, skipped = [], []
+    for e in cleaned:
+        pk = {pb_phone_key(p["number"]) for p in e["phones"]} - {""}
+        ek = {pb_email_key(m["address"]) for m in e["emails"]} - {""}
+        if (pk & known_p) or (ek & known_e) or not (pk or ek):
+            skipped.append(e["name"])
+            continue
+        e.pop("id", None)
+        added.append(pb_save(e)["id"])
+        known_p |= pk
+        known_e |= ek
+    return {"added": len(added), "skipped": len(skipped), "ids": added, "skippedNames": skipped[:200]}
+
+
+@comms_router.get("/phonebook")
+def comms_phonebook(q: str = ""):
+    return pb_list(q)
+
+
+@comms_router.post("/phonebook")
+def comms_phonebook_save(data: Any = Body(...)):
+    return pb_save(data)
+
+
+@comms_router.post("/phonebook/import")
+def comms_phonebook_import(data: Any = Body(...)):
+    return pb_import(data)
+
+
+@comms_router.delete("/phonebook/{cid}")
+def comms_phonebook_delete(cid: str):
+    return pb_delete(cid)
 
 
 def _trusted(address: str) -> bool:
@@ -564,7 +870,15 @@ def _ws_authorized(ws: WebSocket) -> bool:
     token = TOKEN_FILE.read_text(encoding="utf-8").strip()
     sent = ws.headers.get("authorization", "")
     sent = sent[7:].strip() if sent.lower().startswith("bearer ") else ws.query_params.get("token", "")
-    return bool(token) and hmac.compare_digest(sent.encode(), token.encode())
+    if token and sent and hmac.compare_digest(sent.encode(), token.encode()):
+        return True
+    # Section pass: a per-device token (device_registry) works here too.
+    import device_registry
+    dev = device_registry.match(sent) if sent else None
+    if dev is None:
+        return False
+    device_registry.seen(dev["id"], ws.client.host if ws.client else "", ws.headers.get("user-agent", ""))
+    return True
 
 
 @comms_router.websocket("/ws")
@@ -1397,11 +1711,78 @@ _configure_gateway_tony()
 
 models_router = APIRouter(prefix="/api/models", tags=["models"])
 
-MODEL_DIRS = [r"D:\AI Models Productivity", r"D:\AI Models Media and Vision", r"D:\ai model voices"]
+# Section 20.14: every root is configurable (os.pathsep-separated env vars, read at call time);
+# the defaults are the folders that exist on this machine. Nothing here is ever deleted.
+#   CC_MODEL_DIRS     flat roots: each sub-folder is one model
+#   CC_LMSTUDIO_DIRS  LM Studio / Bionic libraries (<publisher>/<model>); the first is the one
+#                     GGUF folders are junctioned into (also CC_LMSTUDIO_DIR)
+#   CC_HF_CACHES      Hugging Face hub caches (models--<org>--<name>); HF_HUB_CACHE / HF_HOME too
+_DEFAULT_MODEL_DIRS = [r"D:\AI Models Productivity", r"D:\AI Models Media and Vision", r"D:\ai model voices", r"D:\Ai Uncensored Models"]
 # Bionic's downloadsFolder (moved to C: 2026-11-25; the D: models are junctioned in under local-d
-# and lmstudio-community).
-LMSTUDIO_DIR = Path(r"C:\Users\nicho\.lmstudio\models")
+# and lmstudio-community), then the old D: library.
+_DEFAULT_LMSTUDIO_DIRS = [str(Path.home() / ".lmstudio" / "models"), r"D:\LM Studio"]
+_DEFAULT_HF_CACHES = [str(Path.home() / ".cache" / "huggingface" / "hub"), r"D:\HuggingFace\hub", r"G:\ai-hub\models\faster-whisper"]
 LINK_PUBLISHER = "local-d"
+
+
+def _env_paths(name: str) -> list[str]:
+    return [p.strip() for p in os.environ.get(name, "").split(os.pathsep) if p.strip()]
+
+
+def _dedupe(paths: list[str]) -> list[str]:
+    seen, out = set(), []
+    for p in paths:
+        k = os.path.normcase(os.path.normpath(p))
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
+
+
+def model_dirs() -> list[str]:
+    return _dedupe(_env_paths("CC_MODEL_DIRS") or _DEFAULT_MODEL_DIRS)
+
+
+def lmstudio_dirs() -> list[str]:
+    first = os.environ.get("CC_LMSTUDIO_DIR", "").strip()
+    return _dedupe(([first] if first else []) + (_env_paths("CC_LMSTUDIO_DIRS") or _DEFAULT_LMSTUDIO_DIRS))
+
+
+def hf_caches() -> list[str]:
+    hub = []
+    if os.environ.get("HF_HUB_CACHE", "").strip():
+        hub.append(os.environ["HF_HUB_CACHE"].strip())
+    if os.environ.get("HF_HOME", "").strip():
+        hub.append(str(Path(os.environ["HF_HOME"].strip()) / "hub"))
+    return _dedupe(hub + (_env_paths("CC_HF_CACHES") or _DEFAULT_HF_CACHES))
+
+
+def lmstudio_dir() -> Path:
+    """Where GGUF folders are junctioned in (the first LM Studio library)."""
+    return Path(lmstudio_dirs()[0])
+
+
+# Back-compat module names (read once at import; the scan itself re-reads the env).
+MODEL_DIRS = model_dirs()
+LMSTUDIO_DIR = lmstudio_dir()
+
+
+def _drive(p: str) -> str:
+    d = os.path.splitdrive(p)[0]
+    return d.upper() if d else ""
+
+
+def model_roots() -> list[dict]:
+    """Every configured root with its kind, drive and whether it exists (C:, D:, G:, F: …)."""
+    rows = [("models", p) for p in model_dirs()] + [("lmstudio", p) for p in lmstudio_dirs()] + [("hf-cache", p) for p in hf_caches()]
+
+    def exists(p: str) -> bool:
+        try:
+            return Path(p).is_dir()
+        except OSError:  # an unreadable root reads as missing, never fails the listing
+            return False
+
+    return [{"path": p, "kind": k, "drive": _drive(p), "exists": exists(p)} for k, p in rows]
 _WEIGHT_EXT = {".gguf": "gguf", ".safetensors": "safetensors", ".bin": "pytorch-bin", ".pth": "pytorch", ".pt": "pytorch", ".onnx": "onnx", ".ckpt": "checkpoint", ".msgpack": "flax", ".h5": "tensorflow", ".npz": "numpy", ".tflite": "tflite"}
 
 
@@ -1416,10 +1797,13 @@ def _category(name: str) -> str:
     return "Productivity & Coding LLMs"
 
 
-def _scan_folder(d: Path) -> dict:
-    files, size, formats, ggufs, partial = 0, 0, set(), [], False
-    for root, _dirs, names in os.walk(d):
+def _scan_folder(d: Path, lms: Optional[Path] = None) -> dict:
+    files, size, formats, ggufs, partial, index_only = 0, 0, set(), [], False, False
+    for root, dirs, names in os.walk(d):
+        dirs[:] = [x for x in dirs if x != ".git"]  # a git-lfs checkout's own objects aren't weights
         for n in names:
+            if n.lower().endswith((".safetensors.index.json", ".bin.index.json")):
+                index_only = True
             p = Path(root) / n
             try:
                 sz = p.stat().st_size
@@ -1434,39 +1818,108 @@ def _scan_folder(d: Path) -> dict:
                 formats.add(_WEIGHT_EXT[ext])
                 if ext == ".gguf" and not n.lower().startswith("mmproj"):
                     ggufs.append({"file": str(p.relative_to(d)), "gb": round(sz / 1e9, 2)})
-    linked = (LMSTUDIO_DIR / LINK_PUBLISHER / d.name).exists()
-    in_lms = str(d).lower().startswith(str(LMSTUDIO_DIR).lower())
+    lms = lms or lmstudio_dir()
+    linked = (lms / LINK_PUBLISHER / d.name).exists()
+    in_lms = any(str(d).lower().startswith(x.lower()) for x in lmstudio_dirs())
     status = "gguf" if ggufs else ("partial-download" if partial else ("needs-conversion" if formats else ("unknown-format" if size > 500_000_000 else "incomplete")))
+    # A weights index (model.safetensors.index.json) with no shard next to it: the config and
+    # tokenizer came down, the weights never did (e.g. Hermes-3-Llama-3.1-8B's git-lfs clone).
+    shards_missing = index_only and not formats and not ggufs
     return {
         "name": d.name, "path": str(d), "category": _category(d.name), "sizeGb": round(size / 1e9, 2), "files": files,
         "formats": sorted(formats), "ggufs": ggufs, "status": status,
-        "lmstudioLoadable": bool(ggufs), "registered": linked or in_lms,
-        "note": {"gguf": "Loadable in LM Studio / Bionic", "needs-conversion": "Hugging Face weights — convert to GGUF (or use with a Python runtime) to load in Bionic", "incomplete": "No weight files — download looks unfinished", "unknown-format": "Large files in a format the scanner doesn't recognize", "partial-download": "Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`"}[status],
+        "lmstudioLoadable": bool(ggufs), "registered": linked or in_lms, "drive": _drive(str(d)),
+        "note": "No weight files: only the config, tokenizer and the weights index came down (the shards are missing)" if shards_missing and status == "incomplete" else {"gguf": "Loadable in LM Studio / Bionic", "needs-conversion": "Hugging Face weights — convert to GGUF (or use with a Python runtime) to load in Bionic", "incomplete": "No weight files — download looks unfinished", "unknown-format": "Large files in a format the scanner doesn't recognize", "partial-download": "Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`"}[status],
     }
 
 
 @models_router.get("/local-scan")
 def local_scan():
     import os as _os  # noqa: F401  (os.walk via module-level import below)
-    out = []
-    for base in MODEL_DIRS:
-        b = Path(base)
-        if not b.is_dir():
-            continue
+    return scan_models()
+
+
+def _real(p: Path) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(p))
+    except OSError:
+        return os.path.normcase(str(p))
+
+
+def scan_models() -> dict:
+    """The whole library: flat model roots, every LM Studio library (C: and D:), the Hugging Face
+    caches. A folder reached twice (a junction into another root) is listed once. One unreadable
+    root (permissions, a dead junction, a drive that went away mid-scan) never fails the scan:
+    it is skipped with a note in `errors` (and on its `roots` row)."""
+    out, seen = [], set()
+    errors: list[dict] = []
+    lms = lmstudio_dir()
+
+    def add(d: Path, root: str, **extra):
+        k = _real(d)
+        if k in seen:
+            return
+        seen.add(k)
+        out.append({**_scan_folder(d, lms), "root": root, **extra})
+
+    def each_root(kind: str, bases: list[str], scan) -> None:
+        for base in bases:
+            mark = len(out)
+            try:
+                b = Path(base)
+                if b.is_dir():
+                    scan(b, base)
+            except OSError as e:
+                for row in out[mark:]:  # a half-scanned root is dropped whole
+                    seen.discard(_real(Path(row["path"])))
+                del out[mark:]
+                errors.append({"root": base, "kind": kind, "error": f"{type(e).__name__}: {e}"[:300]})
+
+    def flat(b: Path, base: str) -> None:
         for d in sorted(b.iterdir()):
             if d.is_dir():
-                out.append({**_scan_folder(d), "root": base})
-    # Bionic's own library too (already loadable).
-    if LMSTUDIO_DIR.is_dir():
-        for pub in LMSTUDIO_DIR.iterdir():
+                add(d, base)
+
+    each_root("models", model_dirs(), flat)
+
+    # The LM Studio / Bionic libraries (already loadable); local-d only holds junctions to the above.
+    def lmstudio(b: Path, base: str) -> None:
+        for pub in sorted(b.iterdir()):
             if pub.is_dir() and pub.name != LINK_PUBLISHER:
-                for d in pub.iterdir():
+                for d in sorted(pub.iterdir()):
                     if d.is_dir():
-                        out.append({**_scan_folder(d), "root": str(LMSTUDIO_DIR), "registered": True})
+                        add(d, base, registered=True)
+
+    each_root("lmstudio", lmstudio_dirs(), lmstudio)
+
+    # Hugging Face caches: models--<org>--<name>, scanned through their snapshots (the blobs are
+    # hash-named and would read as a partial download).
+    def hf(b: Path, base: str) -> None:
+        for d in sorted(b.glob("models--*")):
+            snaps = d / "snapshots"
+            if not snaps.is_dir():
+                continue
+            k = _real(d)
+            if k in seen:
+                continue
+            seen.add(k)
+            row = _scan_folder(snaps, lms)
+            if any(p.suffix in (".incomplete", ".part") for p in (d / "blobs").glob("*")) and row["status"] != "gguf":
+                row.update(status="partial-download", note="Interrupted Hugging Face download (.part / cache blobs) — resume it with `hf download`")
+            name = d.name[len("models--"):].replace("--", "/")
+            out.append({**row, "name": name, "path": str(d), "category": _category(name), "drive": _drive(str(d)), "root": base})
+
+    each_root("hf-cache", hf_caches(), hf)
     groups: dict[str, list] = {}
     for m in out:
         groups.setdefault(m["category"], []).append(m)
-    return {"dirs": MODEL_DIRS, "lmstudioDir": str(LMSTUDIO_DIR), "count": len(out), "groups": groups, "scannedAt": time.time()}
+    roots = model_roots()
+    for r in roots:
+        err = next((e["error"] for e in errors if e["root"] == r["path"] and e["kind"] == r["kind"]), None)
+        if err:
+            r["error"] = err
+    return {"dirs": model_dirs(), "lmstudioDir": str(lms), "lmstudioDirs": lmstudio_dirs(), "hfCaches": hf_caches(), "roots": roots,
+            "drives": sorted({r["drive"] for r in roots if r["exists"] and r["drive"]}), "count": len(out), "groups": groups, "errors": errors, "scannedAt": time.time()}
 
 
 @models_router.post("/sync-lmstudio")
@@ -1475,9 +1928,9 @@ def sync_lmstudio():
     (LMSTUDIO_DIR\local-d\<folder>) with a directory junction — no copying."""
     import subprocess
     linked, skipped, errors = [], [], []
-    target_root = LMSTUDIO_DIR / LINK_PUBLISHER
+    target_root = lmstudio_dir() / LINK_PUBLISHER
     target_root.mkdir(parents=True, exist_ok=True)
-    for base in MODEL_DIRS:
+    for base in model_dirs():
         b = Path(base)
         if not b.is_dir():
             continue

@@ -77,6 +77,13 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
             t(id, super::calendar::CREATE, "Add an event to Google Calendar (no invites). Only after the user's confirmation card.", &["title", "startTime?", "endTime?", "date?", "allDay?", "location?", "description?"]),
         ],
         "spotify" => spotify_tools(id),
+        // ONE read-only tool (tool count matters): a plain summary from the gateway, never rows.
+        "finance" => vec![t(
+            id,
+            FINANCE_ASK,
+            "Answer a money question from Nic's Finance records (read-only, CA$). question_kind: owed_to_agent|income|expenses|pending|commissions|invoices_unpaid|hst|reminders; area: acting|contracting|bf supplements|personal; agent: an acting agency (\"ML Talent\"); period: this_month|last_month|this_quarter|this_year|YYYY-MM.",
+            &["question_kind", "area?", "agent?", "period?"],
+        )],
         "maps" => vec![
             t(id, "maps.route", "Driving route + ETA (OpenStreetMap; baseline, no live traffic) and draw it on the Route Map. destination: address, place or \"lat,lng\"; origin defaults to home; stops: optional list of places in order.", &["destination", "origin?", "stops?"]),
             t(id, "maps.geocode", "Find an address or place on the map (lat/lng and full address).", &["query"]),
@@ -434,6 +441,58 @@ const SPOTIFY_ROUTER_TOOLS: [&str; 23] = super::spotify_intent::ALL_TOOLS;
 /// What a sub-agent's router sees of Spotify: reads only.
 const SPOTIFY_READ_TOOLS: [&str; 6] = super::spotify_intent::READ_TOOLS;
 
+/// Section 20.11: the Spotify tools Tony's LLM router sees by name — now playing, play (a song,
+/// an artist, a playlist by name, or search-and-play), resume, pause, next. Everything else of
+/// Spotify's sits behind ONE `spotify.more` entry (`tony_spotify_view`). The deterministic
+/// grammar, cues and the widget keep the full set.
+pub(crate) const TONY_SPOTIFY_CORE: [&str; 5] = ["spotify.now_playing", "spotify.play", "spotify.resume", "spotify.pause", "spotify.next"];
+/// The one router entry that reaches the other Spotify tools (`expand_spotify_more`).
+pub(crate) const SPOTIFY_MORE: &str = "spotify.more";
+
+/// The `spotify.more` entry, naming the actions it reaches (`hidden`: full tool names).
+pub(crate) fn spotify_more_info(hidden: &[&str]) -> ToolInfo {
+    let actions: Vec<&str> = hidden.iter().map(|n| n.trim_start_matches("spotify.")).collect();
+    t("spotify", SPOTIFY_MORE, &format!("Any other Spotify action: action is one of {}; args are that action's own arguments. Spotify only.", actions.join(", ")), &["action", "args?"])
+}
+
+/// What Tony's router is offered of Spotify: `TONY_SPOTIFY_CORE` by name, and `more` in place of
+/// every other offered Spotify tool (only when there is one). Non-Spotify tools and order kept.
+pub(crate) fn tony_spotify_view<'a>(offered: Vec<&'a ToolInfo>, more: &'a ToolInfo) -> Vec<&'a ToolInfo> {
+    let hidden = |t: &ToolInfo| t.server == "spotify" && t.name.starts_with("spotify.") && !TONY_SPOTIFY_CORE.contains(&t.name.as_str());
+    if !offered.iter().any(|t| hidden(t)) {
+        return offered;
+    }
+    let mut out: Vec<&ToolInfo> = Vec::with_capacity(offered.len());
+    for t in offered {
+        if hidden(t) {
+            if !out.iter().any(|x| x.name == SPOTIFY_MORE) {
+                out.push(more);
+            }
+        } else {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// The Spotify tools `spotify.more` stands for in `offered` (full names, order kept).
+pub(crate) fn spotify_hidden<'a>(offered: &[&'a ToolInfo]) -> Vec<&'a str> {
+    offered.iter().filter(|t| t.server == "spotify" && !TONY_SPOTIFY_CORE.contains(&t.name.as_str()) && t.name != SPOTIFY_MORE).map(|t| t.name.as_str()).collect()
+}
+
+/// `spotify.more {action, args}` → the real tool and its args. The action must be one of the
+/// tools this turn already offers (`available`, so the library-words rule and every grant / gate
+/// still apply: the call itself goes through `call_tool` under the real name). Pure.
+pub(crate) fn expand_spotify_more(args: &Value, available: &[&ToolInfo]) -> Result<(String, Value), String> {
+    let action = args["action"].as_str().map(str::trim).filter(|a| !a.is_empty()).ok_or("spotify.more needs an action")?;
+    let name = format!("spotify.{}", action.trim_start_matches("spotify.").to_ascii_lowercase());
+    if name == SPOTIFY_MORE || !available.iter().any(|t| t.name == name) {
+        return Err(format!("spotify.more: \"{action}\" is not a Spotify action offered this turn"));
+    }
+    let inner = if args["args"].is_object() { args["args"].clone() } else { json!({}) };
+    Ok((name, inner))
+}
+
 /// `name` is a Spotify write the router may run (not a read).
 pub(crate) fn is_spotify_actuator(name: &str) -> bool {
     SPOTIFY_ROUTER_TOOLS.contains(&name) && super::spotify_intent::is_write_tool(name)
@@ -517,21 +576,31 @@ pub(crate) const TONY_SET_MODE: &str = "tony.set_mode";
 /// role policy beyond that; every other agent id must be valid and the tool must pass its role
 /// policy: the Librarian's exact allowlist, and no data-changing tool for any read-only role.
 pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> Option<String> {
-    role_refusal_with(cfg, name, agent, true)
+    role_refusal_with(cfg, name, agent, true, &[])
 }
 
 /// `role_refusal`; `grants: false` skips the grant lists (Nic's own UI acting as Tony, and the
 /// worker's scripted calls), never the role policy.
-fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: bool) -> Option<String> {
+/// `tony_extra`: the active mode's extra servers for Tony (`os_core::tony_mode_extras`).
+fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: bool, tony_extra: &[String]) -> Option<String> {
+    // Finance is read by Tony and the finance role only, whatever the grants or the caller say.
+    if let Some(e) = finance_reader_refusal(name, agent) {
+        return Some(e);
+    }
     let ungranted = |a: &str, who: &str| -> Option<String> {
         if !grants || name == "skills.read" || name == TONY_SET_MODE {
             return None;
         }
         let sid = server_of_tool(name);
         let s = cfg.mcps.iter().find(|m| m.id == sid)?;
-        (!s.grants(a)).then(|| format!("{ROLE_PREFIX}{a} — {who} is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name))
+        let extra = a == "general" && tony_extra.iter().any(|x| x == &s.id);
+        (!s.grants(a) && !extra).then(|| format!("{ROLE_PREFIX}{a} — {who} is not granted {} ({sid}), so {name} is blocked; grant it in Settings → Skills & MCP Library", s.name))
     };
     if is_tony(agent) {
+        // Tony's own turns only: Nic's UI acting as Tony (`grants: false`) is not Tony choosing a tool.
+        if let Some(e) = tony_owner_refusal(name).filter(|_| grants) {
+            return Some(e);
+        }
         return ungranted("general", &cfg.os_name);
     }
     if name == TONY_SET_MODE {
@@ -555,6 +624,74 @@ fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: b
         return Some(format!("{READ_ONLY_ROLE_PREFIX}{a} — {name} is blocked for the {a} agent: {why}"));
     }
     None
+}
+
+// ── Finance (Section 11 item 10: Tony can read Finance) ──────────────────────
+
+/// Tony's one read-only Finance tool: a plain summary from the gateway
+/// (`GET /api/cc/finance/summary`, finance_summary.py), never raw rows. Writes stay on the
+/// Finance screens behind the unlock / PIN step-up.
+pub(crate) const FINANCE_ASK: &str = "finance.ask";
+/// The `finance.ask` question kinds (finance_summary.py `QUESTION_KINDS`).
+pub(crate) const FINANCE_KINDS: [&str; 8] = ["owed_to_agent", "income", "expenses", "pending", "commissions", "invoices_unpaid", "hst", "reminders"];
+
+/// Every agent but Tony and the finance role is refused the Finance server's tools, whatever its
+/// grants say (a grant to "all" or to the Coder never reaches the books). Pure.
+pub(crate) fn finance_reader_refusal(name: &str, agent: &str) -> Option<String> {
+    if server_of_tool(name) != "finance" || is_tony(agent) || agent.trim().eq_ignore_ascii_case("finance") {
+        return None;
+    }
+    Some(format!("{ROLE_PREFIX}{} — Finance is read by Tony and the Finance agent only, so {name} is blocked", agent.trim().to_ascii_lowercase()))
+}
+
+/// `finance.ask`'s arguments → the gateway query string (validated, encoded). Pure.
+/// `kind` is accepted for `question_kind`; area / agent / period are short free text the gateway
+/// resolves (an unknown one comes back as its 400 reason).
+pub(crate) fn finance_query(args: &Value) -> Result<String, String> {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim).unwrap_or("").to_string();
+    let kind = Some(s("question_kind")).filter(|k| !k.is_empty()).unwrap_or_else(|| s("kind")).to_ascii_lowercase().replace([' ', '-'], "_");
+    if !FINANCE_KINDS.contains(&kind.as_str()) {
+        return Err(format!("finance.ask: question_kind must be one of {}", FINANCE_KINDS.join(", ")));
+    }
+    let mut q = url::form_urlencoded::Serializer::new(String::new());
+    q.append_pair("kind", &kind);
+    for (k, max) in [("area", 60usize), ("agent", 60), ("period", 20)] {
+        let v = s(k);
+        if v.chars().count() > max {
+            return Err(format!("finance.ask: {k} is too long (at most {max} characters)"));
+        }
+        if !v.is_empty() {
+            q.append_pair(k, &v);
+        }
+    }
+    Ok(q.finish())
+}
+
+/// The kill switch blocks a gateway that isn't on this machine (a mesh / remote URL). Pure.
+pub(crate) fn finance_gateway_blocked(cfg: &OsConfig, gateway_url: &str) -> bool {
+    cfg.privacy.kill_switch && !os_core::is_loopback_host(&os_core::host_of(gateway_url))
+}
+
+/// `finance.ask`: GET the gateway's summary (read-only), its `text` only, capped at 1.5 KB.
+async fn finance_ask(state: &DispatchState, cfg: &OsConfig, args: &Value) -> Result<String, String> {
+    let q = finance_query(args)?;
+    if finance_gateway_blocked(cfg, &state.snapshot().gateway.url) {
+        return Err("kill switch is on — the gateway isn't on this machine, so Finance can't be read".into());
+    }
+    let v = super::pipeline::gw(state, cfg, reqwest::Method::GET, &format!("/api/cc/finance/summary?{q}"), None).await.map_err(|e| format!("Finance: {e}"))?;
+    let text = v["text"].as_str().filter(|t| !t.trim().is_empty()).ok_or("Finance: the gateway sent no summary (restart the gateway to serve /api/cc/finance/summary)")?;
+    Ok(text.chars().take(1500).collect())
+}
+
+/// One owner per integration (Section 21.1), whatever the grants say: the Director's media
+/// servers are never Tony's, and Tony only reads `TONY_READ_ONLY_SERVERS` (Instagram replies and
+/// publishing are Biz Ops'). `None` = no objection. Pure.
+pub(crate) fn tony_owner_refusal(name: &str) -> Option<String> {
+    let sid = server_of_tool(name);
+    if os_core::DIRECTOR_ONLY_SERVERS.contains(&sid) {
+        return Some(format!("{ROLE_PREFIX}general — Tony is not granted {sid} (the Director's alone), so {name} is blocked"));
+    }
+    (os_core::TONY_READ_ONLY_SERVERS.contains(&sid) && changes_data(name)).then(|| format!("{READ_ONLY_ROLE_PREFIX}general — Tony only reads {sid}; {name} changes data and is Biz Ops' job"))
 }
 
 /// Prefix of a refused GPU request on a media server (shown to the agent, which retries on CPU).
@@ -618,7 +755,15 @@ pub async fn tool_set_with(state: &DispatchState, os: &OsState, agent: &str, wai
     if !is_tony && super::roles::policy_for(agent).is_none() {
         return ToolSet { all: vec![], offered: vec![], line: vec![] };
     }
-    let servers = servers_for(&cfg, &os.modes.effective(), agent);
+    let eff = os.modes.effective();
+    let mut servers = servers_for(&cfg, &eff, agent);
+    if is_tony {
+        // A mode extra that isn't connected yet (Operations' Instagram with no token) is simply
+        // not offered: no failed listing, no error in the queue (Section 18.6). His base still
+        // reports a missing backend as before. Cheap: no network.
+        let extras = os_core::tony_mode_extras(&cfg, &eff.mode_id);
+        servers.retain(|s| !unconnected_extra(s, extras, || unavailable_reason(state, &cfg, &s.id)));
+    }
     // A cold server costs a turn at most `wait`: its listing keeps going in the background and
     // lands in the cache for the next turn. The outer timeout is only a backstop and never
     // writes FAILED.
@@ -671,11 +816,30 @@ fn last_good_listing(state: &DispatchState, os: &OsState, s: &McpServer, err: &s
     cached_listing(os, &s.id, server_fingerprint(s, token.as_deref())).filter(|(at, _)| sticky_fresh_enough(*at, os_core::now_secs())).map(|(_, t)| visible_tools(s, t))
 }
 
+/// A server Tony gets ONLY from the active mode's extras (not his base grant) whose backend
+/// isn't set up (`reason` = `unavailable_reason`). Pure apart from `reason`.
+pub(crate) fn unconnected_extra(s: &McpServer, extras: &[String], reason: impl FnOnce() -> Option<String>) -> bool {
+    !s.grants("general") && extras.iter().any(|x| x == &s.id) && reason().is_some()
+}
+
 /// Pure part of `tool_set`: the enabled, granted servers `agent` may list this turn (a frozen
 /// server is not offered; its settings and cached listing are left as they are).
 pub(crate) fn servers_for(cfg: &OsConfig, e: &super::modes::Effective, agent: &str) -> Vec<McpServer> {
-    let who = if is_tony(agent) { "general" } else { agent };
-    cfg.mcps.iter().filter(|s| s.enabled && s.grants(who) && super::modes::tool_live(e, &cfg.switchboard, &s.id)).cloned().collect()
+    if is_tony(agent) {
+        // Tony: his base (always on) plus the active mode's extras (os.json `tonyModeTools`).
+        let extra = os_core::tony_mode_extras(cfg, &e.mode_id);
+        return cfg
+            .mcps
+            .iter()
+            .filter(|s| s.enabled && !os_core::DIRECTOR_ONLY_SERVERS.contains(&s.id.as_str()) && super::modes::tony_server_live(&cfg.switchboard, &s.id, s.grants("general"), extra))
+            .cloned()
+            .collect();
+    }
+    // A frozen agent (master switchboard or the mode) gets no tools at all.
+    if !super::modes::agent_live(e, &cfg.switchboard, agent) {
+        return vec![];
+    }
+    cfg.mcps.iter().filter(|s| s.enabled && s.grants(agent) && super::modes::tool_live(e, &cfg.switchboard, &s.id)).cloned().collect()
 }
 
 /// Pure tail of `tool_set`: the listed tools of `servers_for`, plus the synthetic ones, cut by
@@ -689,7 +853,13 @@ pub(crate) fn assemble_tools(cfg: &OsConfig, agent: &str, listed: Vec<ToolInfo>)
     if is_tony {
         all.push(t("tony", TONY_SET_MODE, "Switch your own work mode when the user asks for a different way of working (\"act like my coach\" → coach, \"high-level strategy\" → executive, \"let's just chat\" → surface). mode: surface|builder|operations|coach|brainstorm|executive|learning.", &["mode"]));
     }
-    let all = role_filter(all, agent);
+    let mut all = role_filter(all, agent);
+    // Finance's read tool is never even offered to an agent that would be refused it.
+    all.retain(|t| finance_reader_refusal(&t.name, agent).is_none());
+    if is_tony {
+        // Tony never sees a tool he may not run (Instagram writes, the Director's servers).
+        all.retain(|t| tony_owner_refusal(&t.name).is_none());
+    }
     let offered = router_filter(&all, is_tony);
     ToolSet { all, line: offered.clone(), offered }
 }
@@ -1040,7 +1210,8 @@ pub(crate) async fn warm_live(app: &tauri::AppHandle) {
         return;
     }
     let e = os.modes.effective();
-    for s in cfg.mcps.iter().filter(|s| s.enabled && s.transport == "stdio" && super::modes::tool_live(&e, &cfg.switchboard, &s.id)) {
+    let tony = servers_for(&cfg, &e, "general");
+    for s in cfg.mcps.iter().filter(|s| s.enabled && s.transport == "stdio" && (super::modes::tool_live(&e, &cfg.switchboard, &s.id) || tony.iter().any(|t| t.id == s.id))) {
         let _ = tools_of(&state, &os, s, false, Duration::ZERO).await;
     }
 }
@@ -1175,16 +1346,41 @@ pub(crate) fn frozen_refusal(cfg: &OsConfig, e: &super::modes::Effective, name: 
     (origin == CallOrigin::Turn).then(|| super::modes::tool_frozen_error(e, &cfg.switchboard, server_of_tool(name))).flatten()
 }
 
+/// `frozen_refusal` for `agent`: Tony's base and his mode extras are never mode-frozen (only the
+/// master switchboard freezes them); everyone else follows the mode's overlay.
+pub(crate) fn frozen_refusal_for(cfg: &OsConfig, e: &super::modes::Effective, name: &str, origin: CallOrigin, agent: &str) -> Option<String> {
+    if origin != CallOrigin::Turn {
+        return None;
+    }
+    let sid = server_of_tool(name);
+    if is_tony(agent) {
+        return tony_frozen_reason(cfg, e, sid, sid).map(|r| format!("{}: {r}", super::modes::MODE_FROZEN));
+    }
+    super::modes::tool_frozen_error(e, &cfg.switchboard, sid)
+}
+
+/// Why server `sid` is frozen for TONY this turn (`label` names it), or `None`. His base and
+/// the mode's extras answer only to the master switchboard; anything else follows the overlay.
+pub(crate) fn tony_frozen_reason(cfg: &OsConfig, e: &super::modes::Effective, sid: &str, label: &str) -> Option<String> {
+    let base = cfg.mcps.iter().any(|m| m.id == sid && m.grants("general"));
+    if base || os_core::tony_mode_extras(cfg, &e.mode_id).iter().any(|x| x == sid) {
+        let master = super::modes::Effective { switchboard: None, ..e.clone() };
+        return super::modes::tool_frozen_reason(&master, &cfg.switchboard, sid, label);
+    }
+    super::modes::tool_frozen_reason(e, &cfg.switchboard, sid, label)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeState, name: &str, args: &Value, approved: bool, agent: &str, start_wait: Option<Duration>, origin: CallOrigin) -> Result<String, String> {
     let cfg = os.snapshot();
     // Role gate first (Part 4): an ungranted server (Tony included) / an off-allowlist or mutating tool.
-    if let Some(e) = role_refusal_with(&cfg, name, agent, origin_checks_grants(origin, agent)) {
+    let eff = os.modes.effective();
+    if let Some(e) = role_refusal_with(&cfg, name, agent, origin_checks_grants(origin, agent), os_core::tony_mode_extras(&cfg, &eff.mode_id)) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
     }
     // The switchboard: a turn never reaches a frozen server, even with a known tool name.
-    if let Some(e) = frozen_refusal(&cfg, &os.modes.effective(), name, origin) {
+    if let Some(e) = frozen_refusal_for(&cfg, &eff, name, origin, agent) {
         trace_tool(state, os, name, 0, Some(&e));
         return Err(e);
     }
@@ -1260,6 +1456,8 @@ async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             maps if maps.starts_with("maps.") && server_on("maps") => super::maps::tool(state, os, maps, args).await,
             // Replies / publishing never run from here (whatever `approved` says): only the approved-card commands.
             ig if ig.starts_with("instagram.") && server_on("instagram") => super::instagram::tool(state, os, ig, args, false).await,
+            // Read-only (a GET of the gateway's summary); works sealed or unlocked, never writes.
+            FINANCE_ASK if server_on("finance") => finance_ask(state, &cfg, args).await,
             "skills.read" => read_skill(&cfg, &arg("name"), agent),
             other => {
                 let (sid, tool) = other.split_once('.').ok_or("unknown tool")?;
@@ -2047,6 +2245,45 @@ pub struct AllmSyncReport {
     /// Tony limits them (read-only or role-scoped here), or that Tony doesn't manage at all
     /// (unknown ids, ids shadowing a Tony builtin). Never removed; listed so Settings can warn.
     pub kept_writable: Vec<String>,
+    /// Existing entries no AnythingLLM-backed agent is granted (Section 20.12): kept with their
+    /// settings and keys but switched to `anythingllm.autoStart: false`, so AnythingLLM's agents
+    /// can't run them until someone starts them by hand.
+    pub parked: Vec<String>,
+    /// Entries a backed agent needs but Tony marks read-only: AnythingLLM can't enforce
+    /// read-only, so they carry `anythingllm.readOnly: true` and never auto-start.
+    pub read_only: Vec<String>,
+    /// Entries this sync parked / made read-only earlier (marked `parkedBy` / `readOnlyBy`) that
+    /// a backed agent needs again (writable): `autoStart` back to true, the markers dropped. An
+    /// `autoStart: false` the user set themselves (no marker) is never touched.
+    pub unparked: Vec<String>,
+}
+
+/// The agents that run on AnythingLLM (Section 20.12): every role with a workspace mapping plus
+/// Biz Ops (its per-business workspaces), minus Tony (his tools run natively here), the agents
+/// frozen on the master switchboard and the roles unmapped from live delegation. Sorted. Pure.
+pub(crate) fn allm_agents(cfg: &OsConfig) -> Vec<String> {
+    let mut out: Vec<String> = cfg.anythingllm.workspaces.iter().filter(|(_, slug)| !slug.trim().is_empty()).map(|(r, _)| r.clone()).chain(std::iter::once("bizops".to_string())).collect();
+    out.retain(|a| !is_tony(a) && !os_core::LIVE_UNMAPPED_ROLES.contains(&a.as_str()) && !super::routing::frozen_role(cfg, a));
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Server ids some agent in `agents` is granted (enabled servers only; "all" / no list = everyone).
+pub(crate) fn allm_needed(mcps: &[McpServer], agents: &[String]) -> std::collections::BTreeSet<String> {
+    mcps.iter().filter(|m| m.enabled && agents.iter().any(|a| m.grants(a))).map(|m| m.id.clone()).collect()
+}
+
+/// `anythingllm.<key> = v` on an entry; true when it changed.
+fn allm_flag(entry: &mut Value, key: &str, v: bool) -> bool {
+    let Some(o) = entry.as_object_mut() else { return false };
+    let a = o.entry("anythingllm").or_insert_with(|| json!({}));
+    let Some(a) = a.as_object_mut() else { return false };
+    if a.get(key) == Some(&json!(v)) {
+        return false;
+    }
+    a.insert(key.into(), json!(v));
+    true
 }
 
 /// Tony limits this server (read-only, or granted to specific agents only), so its full tool
@@ -2074,6 +2311,72 @@ fn allm_needs_token(url: &str, headers: Option<&serde_json::Map<String, Value>>)
     remote_auth(&probe).is_some() && !headers.is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
 }
 
+/// The marker value this sync writes into `anythingllm.parkedBy` / `anythingllm.readOnlyBy`
+/// when IT switched an entry's `autoStart` off / set `readOnly`, so only those are ever undone.
+pub(crate) const ALLM_MARK: &str = "agentic-os";
+const ALLM_PARKED_BY: &str = "parkedBy";
+const ALLM_READ_ONLY_BY: &str = "readOnlyBy";
+
+/// Does `entry.anythingllm.<key>` carry this sync's marker?
+fn allm_marked(entry: &Value, key: &str) -> bool {
+    entry.get("anythingllm").and_then(|a| a.get(key)).and_then(|v| v.as_str()) == Some(ALLM_MARK)
+}
+
+/// Set `entry.anythingllm.<key>` to this sync's marker.
+fn allm_mark(entry: &mut Value, key: &str) {
+    if let Some(a) = entry.as_object_mut().map(|o| o.entry("anythingllm").or_insert_with(|| json!({}))).and_then(|a| a.as_object_mut()) {
+        a.insert(key.into(), json!(ALLM_MARK));
+    }
+}
+
+/// Remove `entry.anythingllm.<keys>`.
+fn allm_unset(entry: &mut Value, keys: &[&str]) {
+    if let Some(a) = entry.get_mut("anythingllm").and_then(|a| a.as_object_mut()) {
+        for k in keys {
+            a.remove(*k);
+        }
+    }
+}
+
+/// Park an entry: `autoStart: false`, marked `parkedBy` only when THIS call switched it off (an
+/// `autoStart: false` already there, the user's own or a token gate, stays unmarked). True when
+/// the entry changed.
+fn allm_park(entry: &mut Value) -> bool {
+    if allm_flag(entry, "autoStart", false) {
+        allm_mark(entry, ALLM_PARKED_BY);
+        return true;
+    }
+    false
+}
+
+/// Undo what this sync did to a needed, writable entry: a `readOnlyBy` marker drops the
+/// `readOnly` flag it set, a `parkedBy` marker turns `autoStart` back on. Unmarked flags (the
+/// user's) are left alone. True when the entry changed.
+fn allm_unpark(entry: &mut Value) -> bool {
+    let mut changed = false;
+    if allm_marked(entry, ALLM_READ_ONLY_BY) {
+        allm_unset(entry, &["readOnly", ALLM_READ_ONLY_BY]);
+        changed = true;
+    }
+    if allm_marked(entry, ALLM_PARKED_BY) {
+        allm_flag(entry, "autoStart", true);
+        allm_unset(entry, &[ALLM_PARKED_BY]);
+        changed = true;
+    }
+    changed
+}
+
+/// Mark a needed server read-only (Tony limits it): `readOnly: true` and `autoStart: false`, each
+/// marked when this call set it. True when the entry changed.
+fn allm_make_read_only(entry: &mut Value) -> bool {
+    let a = allm_flag(entry, "readOnly", true);
+    if a {
+        allm_mark(entry, ALLM_READ_ONLY_BY);
+    }
+    let b = allm_park(entry);
+    a || b
+}
+
 fn allm_no_autostart(entry: &mut Value) {
     if let Some(o) = entry.as_object_mut() {
         let a = o.entry("anythingllm").or_insert_with(|| json!({}));
@@ -2089,7 +2392,18 @@ fn allm_no_autostart(entry: &mut Value) {
 /// an entry AnythingLLM already has (apart from repairing a `streamable-http`
 /// type only this sync can have written); never converts a `builtin` server
 /// (it has no command line to give AnythingLLM) or a disabled one.
-fn merge_allm_servers(existing: &Value, mcps: &[McpServer]) -> (Value, AllmSyncReport) {
+///
+/// Scoped to `agents` (the AnythingLLM-backed agents, `allm_agents`; Section 20.12). AnythingLLM
+/// keeps ONE MCP file for every workspace, so the only lever here is which servers it may run:
+/// a server none of `agents` is granted is never added, and an existing entry for one (a Tony id
+/// or an AnythingLLM-only entry) is parked (`autoStart: false`, marked `parkedBy: "agentic-os"`;
+/// nothing is deleted). A needed server Tony marks read-only is written / kept with
+/// `readOnly: true` (marked `readOnlyBy`) and never auto-starts (AnythingLLM has no read-only
+/// mode). Parking is reversible: a marked entry that is needed (and writable) again gets
+/// `autoStart: true` back and loses its markers; an unmarked `autoStart: false` is the user's. Per workspace, only the chat mode limits it: a Query-mode
+/// workspace (the Librarian's) runs no agent tools at all.
+fn merge_allm_servers(existing: &Value, mcps: &[McpServer], agents: &[String]) -> (Value, AllmSyncReport) {
+    let needed = allm_needed(mcps, agents);
     let mut servers = existing.get("mcpServers").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     let mut report = AllmSyncReport::default();
     // AnythingLLM accepts only sse | streamable | http and rejects the whole entry otherwise.
@@ -2106,8 +2420,28 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer]) -> (Value, AllmSyncR
         }
         report.fixed.push(id);
     }
-    for (id, _) in servers.iter() {
-        let managed = mcps.iter().find(|m| &m.id == id && m.transport != "builtin");
+    let ids: Vec<String> = servers.keys().cloned().collect();
+    for id in ids {
+        let Some(entry) = servers.get_mut(&id) else { continue };
+        let tony_ro = mcps.iter().any(|m| m.id == id && m.read_only);
+        if !needed.contains(&id) {
+            if allm_park(entry) {
+                report.parked.push(id.clone());
+            }
+            continue;
+        }
+        if tony_ro {
+            if allm_make_read_only(entry) {
+                report.read_only.push(id.clone());
+            }
+            continue;
+        }
+        // Needed and writable again: undo only what this sync parked / made read-only.
+        if allm_unpark(entry) {
+            report.unparked.push(id.clone());
+        }
+        // Still runnable by AnythingLLM's agents: flag it when Tony limits it (or doesn't manage it).
+        let managed = mcps.iter().find(|m| m.id == id && m.transport != "builtin");
         if !managed.is_some_and(|m| allm_restricted(m).is_none()) {
             report.kept_writable.push(id.clone());
         }
@@ -2124,10 +2458,9 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer]) -> (Value, AllmSyncR
             report.kept.push(m.id.clone());
             continue;
         }
-        // Never ADD a write-capable copy of a server Tony limits: AnythingLLM's agent has no
-        // read-only or per-role scoping, so every workspace (the Librarian's too) would get it.
-        if let Some(why) = allm_restricted(m) {
-            report.skipped.push(format!("{} ({why}: not synced)", m.id));
+        // Only what an AnythingLLM-backed agent is granted is ever added.
+        if !needed.contains(&m.id) {
+            report.skipped.push(format!("{} (no AnythingLLM agent is granted it: not synced)", m.id));
             continue;
         }
         let entry = match m.transport.as_str() {
@@ -2145,12 +2478,23 @@ fn merge_allm_servers(existing: &Value, mcps: &[McpServer]) -> (Value, AllmSyncR
                 continue;
             }
         };
+        let mut entry = entry;
+        if m.read_only {
+            allm_make_read_only(&mut entry);
+            report.read_only.push(m.id.clone());
+        }
         servers.insert(m.id.clone(), entry);
         report.added.push(m.id.clone());
     }
     let mut out = if existing.is_object() { existing.clone() } else { json!({}) };
     out["mcpServers"] = Value::Object(servers);
     (out, report)
+}
+
+/// Did the merge change the file (an add, a repair, a park, a read-only mark or an un-park)?
+/// Otherwise the file is left exactly as it is (no `.bak` churn).
+fn allm_file_changed(r: &AllmSyncReport) -> bool {
+    !(r.added.is_empty() && r.fixed.is_empty() && r.parked.is_empty() && r.read_only.is_empty() && r.unparked.is_empty())
 }
 
 /// Parse AnythingLLM's MCP file. Only a missing file counts as empty: an unreadable one,
@@ -2181,8 +2525,8 @@ pub fn mcp_sync_anythingllm(os: State<'_, OsState>) -> Result<AllmSyncReport, St
     let cfg = os.snapshot();
     let path = anythingllm_mcp_path().ok_or("%APPDATA% is not set")?;
     let existing = parse_allm_file(std::fs::read_to_string(&path))?;
-    let (next, report) = merge_allm_servers(&existing, &cfg.mcps);
-    if report.added.is_empty() && report.fixed.is_empty() {
+    let (next, report) = merge_allm_servers(&existing, &cfg.mcps, &allm_agents(&cfg));
+    if !allm_file_changed(&report) {
         // Nothing to add or repair — leave the file exactly as it is (no `.bak` churn).
         return Ok(report);
     }
@@ -2263,10 +2607,43 @@ pub(crate) async fn librarian_guard_with(reader: &super::allm::AllmReader, slug:
 /// Librarian stage.
 pub(crate) async fn librarian_preflight_run(state: &DispatchState, cfg: &OsConfig) -> Result<LibrarianGuard, String> {
     let slug = cfg.anythingllm.workspaces.get("librarian").filter(|s| !s.is_empty()).cloned().ok_or("no AnythingLLM workspace is mapped to the Librarian (Settings → Services)")?;
-    let writable = anythingllm_mcp_path().and_then(|p| parse_allm_file(std::fs::read_to_string(p)).ok()).map(|v| merge_allm_servers(&v, &cfg.mcps).1.kept_writable).unwrap_or_default();
+    let writable = anythingllm_mcp_path().and_then(|p| parse_allm_file(std::fs::read_to_string(p)).ok()).map(|v| merge_allm_servers(&v, &cfg.mcps, &allm_agents(cfg)).1.kept_writable).unwrap_or_default();
     let reader = super::allm::AllmReader::new(super::allm::AllmConn::local(state, cfg)?);
-    Ok(librarian_guard_with(&reader, &slug, writable).await)
+    let g = librarian_guard_with(&reader, &slug, writable.clone()).await;
+    if !g.agent_capable {
+        return Ok(g);
+    }
+    // Section pass: the Librarian is read-only, so an agent-capable chat mode (automatic /
+    // agent: AnythingLLM's own agent skills and MCP servers, some of which write files, git or
+    // SQLite) is switched straight back to Query — the one field changed, then re-read.
+    let writer = super::allm::AllmWriter::for_librarian_lock(super::allm::AllmConn::local(state, cfg)?);
+    match writer.update_workspace(&slug, json!({ "chatMode": LIBRARIAN_CHAT_MODE }), 10).await {
+        Ok(_) => {
+            eprintln!("[librarian] \"{slug}\" was in chatMode {:?}; switched to {LIBRARIAN_CHAT_MODE}", g.chat_mode);
+            super::events::publish_note("librarian", "discrepancy", "milestone", "The Librarian workspace was in an agent-capable chat mode; it is back on Query.", None);
+            Ok(librarian_guard_with(&reader, &slug, writable).await)
+        }
+        Err(e) => {
+            eprintln!("[librarian] couldn't switch \"{slug}\" to {LIBRARIAN_CHAT_MODE}: {e}");
+            Ok(g)
+        }
+    }
 }
+
+/// Startup: one quiet guard pass 20 s in (AnythingLLM may still be starting), so an
+/// agent-capable Librarian workspace goes back to Query without opening Settings.
+pub async fn librarian_lock_at_start(app: tauri::AppHandle) {
+    use tauri::Manager;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let state = app.state::<DispatchState>();
+    let os = app.state::<OsState>();
+    if let Err(e) = librarian_preflight_run(&state, &os.snapshot()).await {
+        eprintln!("[librarian] start-up Query check skipped: {e}");
+    }
+}
+
+/// The Librarian workspace's only allowed AnythingLLM chat mode (no agent skills, no MCP).
+pub(crate) const LIBRARIAN_CHAT_MODE: &str = "query";
 
 /// Settings → Skills & MCP Library "Librarian guard" line.
 #[tauri::command]
@@ -2452,7 +2829,7 @@ mod tests {
         assert!(parse_allm_file(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))).is_err(), "sharing violation / unreadable");
         assert_eq!(parse_allm_file(Err(std::io::Error::from(std::io::ErrorKind::NotFound))).unwrap(), json!({ "mcpServers": {} }));
         let v = parse_allm_file(Ok("\u{feff}{\"mcpServers\":{\"mine\":{\"command\":\"a\"}},\"other\":1}".into())).expect("BOM is fine");
-        let (next, _) = merge_allm_servers(&v, &[McpServer { id: "new".into(), transport: "stdio".into(), command: "b".into(), enabled: true, ..Default::default() }]);
+        let (next, _) = merge_allm_servers(&v, &[McpServer { id: "new".into(), transport: "stdio".into(), command: "b".into(), enabled: true, ..Default::default() }], &coder());
         assert_eq!(next["other"], 1, "unknown top-level keys survive");
         assert!(next["mcpServers"]["mine"].is_object() && next["mcpServers"]["new"].is_object());
     }
@@ -2506,6 +2883,53 @@ mod tests {
         assert!(is_mutating_tool("gmail.create_draft"));
         // The booking-scan exemption is by exact name: any other "booking" tool is still a write.
         assert!(is_mutating_tool("crm.booking_scan") && is_mutating_tool("gmail.book_slot") && is_mutating_tool("calendar.booking_create"));
+    }
+
+    /// Section 11.10: ONE read-only Finance tool, offered to Tony's router, refused for every agent
+    /// but Tony and the finance role (whatever the grants), with validated compact args.
+    #[test]
+    fn finance_ask_is_one_read_tool_for_tony_and_finance_only() {
+        let tools = builtin_tools("finance");
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [FINANCE_ASK]);
+        assert_eq!(tools[0].args, ["question_kind", "area?", "agent?", "period?"]);
+        assert!(tools[0].description.len() < 400, "compact: tool count and size matter");
+        assert!(!is_mutating_tool(FINANCE_ASK) && offered_to_router(FINANCE_ASK, true));
+        assert_eq!(server_of_tool(FINANCE_ASK), "finance");
+        // Who may call it: Tony (any self alias) and the finance role; never anyone else, even
+        // when Nic's grants say "all".
+        let mut cfg = OsConfig::default();
+        assert!(role_refusal(&cfg, FINANCE_ASK, "general").is_none());
+        assert!(role_refusal(&cfg, FINANCE_ASK, "tony").is_none());
+        assert!(role_refusal(&cfg, FINANCE_ASK, "finance").unwrap().starts_with(ROLE_PREFIX), "not granted by default");
+        cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["all".into()]);
+        assert!(role_refusal(&cfg, FINANCE_ASK, "finance").is_none(), "granted: the finance role may read");
+        for a in ["coder", "ops", "bizops", "librarian", "prompter", "director", "booking", "trader"] {
+            let e = role_refusal(&cfg, FINANCE_ASK, a).unwrap_or_default();
+            assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony and the Finance agent only"), "{a}: {e}");
+            // Even the worker's scripted path (grants skipped) is refused.
+            assert!(role_refusal_with(&cfg, FINANCE_ASK, a, false, &[]).is_some(), "{a}");
+        }
+        assert!(finance_reader_refusal("weather.current", "coder").is_none());
+        // Tony's turn lists it (his base grant); a sub-agent's never does.
+        let e = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "builder".into(), ..Default::default() }, &Default::default());
+        assert!(servers_for(&cfg, &e, "general").iter().any(|s| s.id == "finance"));
+        let set = assemble_tools(&cfg, "general", tools.clone());
+        assert!(set.offered.iter().any(|t| t.name == FINANCE_ASK));
+        assert!(assemble_tools(&cfg, "coder", tools.clone()).all.is_empty(), "never offered to a refused agent");
+        assert_eq!(assemble_tools(&cfg, "finance", tools.clone()).all.len(), 1);
+        // Args: the kind is required and checked; free text is encoded and capped.
+        assert_eq!(finance_query(&json!({ "question_kind": "owed_to_agent", "agent": "ML Talent" })).unwrap(), "kind=owed_to_agent&agent=ML+Talent");
+        assert_eq!(finance_query(&json!({ "kind": "Invoices Unpaid", "period": "this_month" })).unwrap(), "kind=invoices_unpaid&period=this_month");
+        assert_eq!(finance_query(&json!({ "question_kind": "income", "area": "a&b=c" })).unwrap(), "kind=income&area=a%26b%3Dc");
+        assert!(finance_query(&json!({ "question_kind": "pay_agent" })).is_err());
+        assert!(finance_query(&json!({})).is_err());
+        assert!(finance_query(&json!({ "question_kind": "income", "agent": "x".repeat(61) })).is_err());
+        // The kill switch blocks a gateway off this machine, never the local one.
+        cfg.privacy.kill_switch = true;
+        assert!(!finance_gateway_blocked(&cfg, "http://127.0.0.1:8080"));
+        assert!(finance_gateway_blocked(&cfg, "http://100.64.0.7:8080"));
+        cfg.privacy.kill_switch = false;
+        assert!(!finance_gateway_blocked(&cfg, "http://100.64.0.7:8080"));
     }
 
     #[test]
@@ -2790,20 +3214,21 @@ mod tests {
         let ids_in = |cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str| servers_for(cfg, e, agent).into_iter().map(|s| s.id).collect::<Vec<_>>();
         let ids = |e: &super::super::modes::Effective, agent: &str| ids_in(&cfg, e, agent);
         // No overlay: Tony gets exactly his own servers (never the Director's media servers).
-        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "calendar", "whatsapp"]);
+        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
         assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
         assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
-        // Builder: gmail / WhatsApp are frozen for Tony; the Coder keeps its three.
-        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "spotify"]);
+        // Builder (section pass): Tony keeps his whole base and gains filesystem + git; the Coder keeps its three.
+        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
         assert_eq!(ids(&eff("builder"), "coder"), ["fetch", "filesystem", "git"]);
-        assert_eq!(ids(&eff("builder"), "director"), ["filesystem"], "the media servers are frozen in Builder");
-        // Learning: only the always-live clock.
-        assert_eq!(ids(&eff("learning"), "general"), ["time"]);
+        // The Director is off duty in Builder: a frozen agent gets no tools at all (section pass).
+        assert!(ids(&eff("builder"), "director").is_empty(), "off duty in Builder");
+        // Learning: Tony's base stays on (section pass); nothing extra.
+        assert_eq!(ids(&eff("learning"), "general"), ids(&eff("brainstorm"), "general"));
         // A globally frozen server is gone in every mode; a disabled one stays off whatever the mode.
         let mut cfg = cfg.clone();
         cfg.switchboard.frozen_tools = vec!["spotify".into()];
         cfg.mcps.iter_mut().find(|m| m.id == "weather").unwrap().enabled = false;
-        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "calendar", "whatsapp"]);
+        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "finance", "whatsapp"]);
         // Synthetic tools: the mode switch is always Tony's; skills.read follows skill grants.
         let set = assemble_tools(&cfg, "general", vec![]);
         assert_eq!(set.all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [TONY_SET_MODE]);
@@ -2843,6 +3268,11 @@ mod tests {
         assert_eq!(v["ok"], true);
     }
 
+    /// One AnythingLLM-backed agent (the Coder).
+    fn coder() -> Vec<String> {
+        vec!["coder".into()]
+    }
+
     fn mcp_stdio(id: &str, enabled: bool) -> McpServer {
         McpServer { id: id.into(), name: id.into(), transport: "stdio".into(), command: "uv".into(), args: vec!["run".into(), "main.py".into()], enabled, ..Default::default() }
     }
@@ -2868,7 +3298,7 @@ mod tests {
             mcp_stdio("disabled-one", false),
             mcp_stdio("whatsapp", true),
         ];
-        let (next, report) = merge_allm_servers(&existing, &mcps);
+        let (next, report) = merge_allm_servers(&existing, &mcps, &coder());
         assert_eq!(report.added, vec!["whatsapp".to_string()]);
         assert_eq!(report.kept, vec!["git".to_string()]);
         assert_eq!(report.skipped, vec!["disabled-one (disabled)".to_string()]);
@@ -2883,7 +3313,7 @@ mod tests {
 
     #[test]
     fn allm_sync_starts_from_empty_when_file_is_missing() {
-        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[mcp_stdio("whatsapp", true)]);
+        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[mcp_stdio("whatsapp", true)], &coder());
         assert_eq!(report.added, vec!["whatsapp".to_string()]);
         assert!(report.kept.is_empty());
         assert_eq!(next["mcpServers"]["whatsapp"]["command"], json!("uv"));
@@ -2892,7 +3322,7 @@ mod tests {
     #[test]
     fn allm_sync_http_server_gets_a_streamable_entry() {
         let http = McpServer { id: "custom-http".into(), name: "Custom".into(), transport: "http".into(), url: "http://127.0.0.1:9000/mcp".into(), enabled: true, ..Default::default() };
-        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[http]);
+        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[http], &coder());
         assert_eq!(report.added, vec!["custom-http".to_string()]);
         assert_eq!(next["mcpServers"]["custom-http"]["url"], json!("http://127.0.0.1:9000/mcp"));
         // AnythingLLM accepts only sse | streamable | http.
@@ -2903,7 +3333,7 @@ mod tests {
     #[test]
     fn allm_sync_token_host_is_written_without_autostart() {
         let sentry = McpServer { id: "sentry".into(), name: "Sentry".into(), transport: "http".into(), url: "https://mcp.sentry.dev/mcp".into(), enabled: true, ..Default::default() };
-        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[sentry.clone()]);
+        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[sentry.clone()], &coder());
         assert_eq!(report.added, vec!["sentry".to_string()]);
         assert_eq!(report.skipped, vec!["sentry (needs token: set Authorization in AnythingLLM)".to_string()]);
         assert_eq!(next["mcpServers"]["sentry"]["anythingllm"]["autoStart"], json!(false));
@@ -2911,7 +3341,7 @@ mod tests {
         // With the user's own Authorization header it starts normally.
         let mut own = sentry;
         own.env.insert("Authorization".into(), "Bearer user-set".into());
-        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[own]);
+        let (next, report) = merge_allm_servers(&json!({ "mcpServers": {} }), &[own], &coder());
         assert!(report.skipped.is_empty());
         assert!(next["mcpServers"]["sentry"].get("anythingllm").is_none());
     }
@@ -2926,7 +3356,9 @@ mod tests {
                 "local": { "command": "uvx", "args": ["x"] }
             }
         });
-        let (next, report) = merge_allm_servers(&existing, &[]);
+        // The ids are in Tony's registry for every agent, so the Coder needs them: nothing is parked.
+        let open: Vec<McpServer> = ["context7", "github", "mine", "local"].iter().map(|id| McpServer { id: id.to_string(), transport: "builtin".into(), enabled: true, ..Default::default() }).collect();
+        let (next, report) = merge_allm_servers(&existing, &open, &coder());
         let mut fixed = report.fixed.clone();
         fixed.sort();
         assert_eq!(fixed, vec!["context7".to_string(), "github".to_string()]);
@@ -2939,7 +3371,7 @@ mod tests {
         assert_eq!(next["mcpServers"]["mine"], existing["mcpServers"]["mine"]);
         assert_eq!(next["mcpServers"]["local"], existing["mcpServers"]["local"]);
         // Already repaired: nothing to do the second time.
-        let (_, again) = merge_allm_servers(&next, &[]);
+        let (_, again) = merge_allm_servers(&next, &open, &coder());
         assert!(again.fixed.is_empty());
     }
 
@@ -3021,9 +3453,9 @@ mod tests {
         // the Librarian's exact allowlist.
         assert!(!origin_checks_grants(CallOrigin::Internal, "librarian"));
         for tool in ["web.search", "fetch.url"] {
-            assert_eq!(role_refusal_with(&cfg, tool, "librarian", false), None, "{tool}");
+            assert_eq!(role_refusal_with(&cfg, tool, "librarian", false, &[]), None, "{tool}");
         }
-        assert!(role_refusal_with(&cfg, "git.status", "librarian", false).unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "the allowlist still applies");
+        assert!(role_refusal_with(&cfg, "git.status", "librarian", false, &[]).unwrap().starts_with(READ_ONLY_ROLE_PREFIX), "the allowlist still applies");
     }
 
     #[test]
@@ -3035,7 +3467,7 @@ mod tests {
                 assert_eq!(role_refusal(&cfg, tool, agent), None, "{agent:?} {tool}");
             }
             // …but he respects grants: the Coder's git, the Director's media servers are not his.
-            for tool in ["git.status", "fs.read", "fetch.url", "shotcut.start_render", "media-forge.probe_media", "maps.route", "instagram.get_profile"] {
+            for tool in ["git.status", "fs.read", "fetch.url", "shotcut.start_render", "media-forge.probe_media", "instagram.get_profile"] {
                 let e = role_refusal(&cfg, tool, agent).unwrap_or_else(|| panic!("{agent:?} {tool} must be refused"));
                 assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony is not granted"), "{e}");
             }
@@ -3044,8 +3476,8 @@ mod tests {
         // Nic's own UI (Settings testers) acting as Tony isn't held to Tony's grants.
         assert!(!origin_checks_grants(CallOrigin::Ui, "tony") && origin_checks_grants(CallOrigin::Ui, "coder"));
         assert!(origin_checks_grants(CallOrigin::Turn, "tony") && origin_checks_grants(CallOrigin::Direct, "tony"));
-        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false), None);
-        assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder")).is_some());
+        assert_eq!(role_refusal_with(&cfg, "maps.route", "tony", false, &[]), None);
+        assert!(role_refusal_with(&cfg, "maps.route", "coder", origin_checks_grants(CallOrigin::Ui, "coder"), &[]).is_some());
         for m in cfg.mcps.iter_mut().filter(|m| m.id == "spotify") {
             m.agents = Some(vec!["all".into()]);
         }
@@ -3078,8 +3510,9 @@ mod tests {
             let refused = role_refusal(&cfg, "whatsapp.send_message", agent).or_else(|| read_only_refusal(&cfg, "whatsapp.send_message"));
             assert!(refused.is_some_and(|e| e.starts_with("PERMISSION_")), "{agent}");
         }
-        // Booking / Ops still read WhatsApp; the Librarian is not granted it at all.
-        assert_eq!(role_refusal(&cfg, "whatsapp.list_messages", "booking"), None);
+        // Tony reads WhatsApp; the frozen Booking Desk and the Librarian are not granted it at all.
+        assert_eq!(role_refusal(&cfg, "whatsapp.list_messages", "general"), None);
+        assert!(role_refusal(&cfg, "whatsapp.list_messages", "booking").unwrap().starts_with(ROLE_PREFIX));
         assert_eq!(read_only_refusal(&cfg, "whatsapp.list_messages"), None);
         assert!(role_refusal(&cfg, "whatsapp.list_messages", "librarian").unwrap().starts_with(ROLE_PREFIX));
     }
@@ -3117,8 +3550,12 @@ mod tests {
         }
     }
 
+    /// Section 20.12: AnythingLLM's (global) MCP file carries only what an AnythingLLM-backed
+    /// agent is granted. Unneeded entries are parked (autoStart false, nothing deleted), a needed
+    /// read-only server is marked readOnly and never auto-starts, a role-scoped server its role
+    /// needs is added.
     #[test]
-    fn allm_sync_skips_read_only_and_role_scoped_servers() {
+    fn allm_sync_writes_only_what_a_backed_agent_needs() {
         let mut sqlite = mcp_stdio("sqlite", true);
         sqlite.read_only = true;
         let mut serena = mcp_stdio("serena", true);
@@ -3127,19 +3564,168 @@ mod tests {
         open.agents = Some(vec!["all".into()]);
         let mut wa = mcp_stdio("whatsapp", true);
         wa.read_only = true;
-        let existing = json!({ "mcpServers": { "whatsapp": { "command": "uv", "args": [] }, "ai-hub": { "command": "npx", "args": [] }, "git": { "command": "uvx", "args": ["mcp-server-git"] } } });
-        let (next, report) = merge_allm_servers(&existing, &[sqlite, serena, open, wa, mcp_builtin("git", true)]);
-        assert_eq!(report.added, vec!["open".to_string()]);
-        assert!(report.skipped.contains(&"sqlite (read-only in Tony: not synced)".to_string()), "{:?}", report.skipped);
-        assert!(report.skipped.contains(&"serena (role-scoped in Tony: not synced)".to_string()), "{:?}", report.skipped);
-        assert!(next["mcpServers"].get("sqlite").is_none() && next["mcpServers"].get("serena").is_none());
-        // Existing entries are never removed; the write-capable ones are reported.
-        assert_eq!(report.kept, vec!["whatsapp".to_string()]);
-        assert_eq!(next["mcpServers"]["whatsapp"], existing["mcpServers"]["whatsapp"]);
-        let mut kw = report.kept_writable.clone();
-        kw.sort();
-        assert_eq!(kw, ["ai-hub", "git", "whatsapp"], "unknown, builtin-shadowing and read-only-in-Tony entries");
-        assert_eq!(serde_json::to_value(&report).unwrap()["keptWritable"].as_array().unwrap().len(), 3);
+        wa.agents = Some(vec!["general".into()]);
+        let mut shot = mcp_stdio("shotcut", true);
+        shot.agents = Some(vec!["director".into()]);
+        let mut git = mcp_builtin("git", true);
+        git.agents = Some(vec!["coder".into()]);
+        let existing = json!({ "mcpServers": {
+            "whatsapp": { "command": "uv", "args": [] },
+            "ai-hub": { "command": "npx", "args": [], "env": { "KEY": "keep" } },
+            "git": { "command": "uvx", "args": ["mcp-server-git"] }
+        } });
+        let (next, report) = merge_allm_servers(&existing, &[sqlite, serena, open, wa, shot, git], &coder());
+        let mut added = report.added.clone();
+        added.sort();
+        assert_eq!(added, ["open", "serena", "sqlite"], "the Coder's role-scoped server is added; the Director's isn't");
+        assert!(next["mcpServers"].get("shotcut").is_none());
+        assert!(report.skipped.contains(&"shotcut (no AnythingLLM agent is granted it: not synced)".to_string()), "{:?}", report.skipped);
+        // Read-only in Tony: marked, never auto-started.
+        assert_eq!(next["mcpServers"]["sqlite"]["anythingllm"], json!({ "readOnly": true, "autoStart": false, "readOnlyBy": ALLM_MARK, "parkedBy": ALLM_MARK }));
+        assert_eq!(report.read_only, ["sqlite"]);
+        // Tony's own WhatsApp and AnythingLLM's unknown ai-hub: parked, settings and keys kept.
+        let mut parked = report.parked.clone();
+        parked.sort();
+        assert_eq!(parked, ["ai-hub", "whatsapp"]);
+        assert_eq!(next["mcpServers"]["ai-hub"]["env"]["KEY"], "keep");
+        assert_eq!(next["mcpServers"]["ai-hub"]["anythingllm"]["autoStart"], false);
+        assert_eq!(next["mcpServers"]["whatsapp"]["command"], "uv");
+        // git (the Coder's, a Tony builtin shadowed by AnythingLLM's own entry) keeps running; flagged.
+        assert!(next["mcpServers"]["git"].get("anythingllm").is_none());
+        assert_eq!(report.kept_writable, ["git"]);
+        // Idempotent: a second pass changes nothing.
+        let (again_v, again) = merge_allm_servers(&next, &[], &coder());
+        assert!(again.added.is_empty() && again.read_only.is_empty());
+        assert_eq!(again_v["mcpServers"]["ai-hub"], next["mcpServers"]["ai-hub"]);
+    }
+
+    /// Parking is reversible: park → re-grant → unpark (autoStart back on, marker gone, the file
+    /// counts as changed); a read-only mark is undone when Tony lifts read-only; an
+    /// `autoStart: false` the user set (no marker) is never touched.
+    #[test]
+    fn allm_sync_unparks_only_what_it_parked() {
+        let existing = json!({ "mcpServers": {
+            "serena": { "command": "uvx", "args": [] },
+            "mine": { "command": "npx", "args": [], "anythingllm": { "autoStart": false } }
+        } });
+        let mut serena = mcp_stdio("serena", true);
+        serena.agents = Some(vec!["director".into()]);
+        let mut mine = mcp_stdio("mine", true);
+        mine.agents = Some(vec!["director".into()]);
+        // Not granted to the Coder: serena is parked and marked; the user's own false is left as is.
+        let (parked_v, r) = merge_allm_servers(&existing, &[serena.clone(), mine.clone()], &coder());
+        assert_eq!(r.parked, ["serena"]);
+        assert_eq!(parked_v["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": false, "parkedBy": ALLM_MARK }));
+        assert_eq!(parked_v["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false }));
+        assert!(allm_file_changed(&r));
+        // Re-granted to the Coder: serena comes back; "mine" (user-set false, no marker) stays off.
+        serena.agents = Some(vec!["coder".into()]);
+        mine.agents = Some(vec!["coder".into()]);
+        let (back, r) = merge_allm_servers(&parked_v, &[serena.clone(), mine.clone()], &coder());
+        assert_eq!(r.unparked, ["serena"]);
+        assert!(r.added.is_empty() && r.parked.is_empty() && r.read_only.is_empty(), "{r:?}");
+        assert!(allm_file_changed(&r), "an un-park alone must still write the file");
+        assert_eq!(back["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": true }));
+        assert_eq!(back["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false }));
+        // Steady state: nothing changes, nothing written.
+        let (_, r) = merge_allm_servers(&back, &[serena.clone(), mine.clone()], &coder());
+        assert!(!allm_file_changed(&r) && r.unparked.is_empty(), "{r:?}");
+        // Read-only in Tony → marked read-only and parked; lifted → both undone.
+        serena.read_only = true;
+        let (ro, r) = merge_allm_servers(&back, &[serena.clone()], &coder());
+        assert_eq!(r.read_only, ["serena"]);
+        assert_eq!(ro["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": false, "readOnly": true, "readOnlyBy": ALLM_MARK, "parkedBy": ALLM_MARK }));
+        serena.read_only = false;
+        let (rw, r) = merge_allm_servers(&ro, &[serena.clone()], &coder());
+        assert_eq!(r.unparked, ["serena"]);
+        assert_eq!(rw["mcpServers"]["serena"]["anythingllm"], json!({ "autoStart": true }));
+        // A user-set false on a read-only entry: readOnly is marked, autoStart stays the user's.
+        let user_off = json!({ "mcpServers": { "mine": { "command": "npx", "args": [], "anythingllm": { "autoStart": false } } } });
+        let mut mine_ro = mine.clone();
+        mine_ro.read_only = true;
+        let (v, _) = merge_allm_servers(&user_off, &[mine_ro], &coder());
+        assert_eq!(v["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false, "readOnly": true, "readOnlyBy": ALLM_MARK }));
+        let (v, r) = merge_allm_servers(&v, &[mine.clone()], &coder());
+        assert_eq!(r.unparked, ["mine"]);
+        assert_eq!(v["mcpServers"]["mine"]["anythingllm"], json!({ "autoStart": false }), "the user's autoStart false survives");
+    }
+
+    /// Which agents count as AnythingLLM-backed: mapped roles + Biz Ops, never Tony, a frozen
+    /// agent or a role unmapped from live delegation.
+    #[test]
+    fn allm_agents_are_the_live_mapped_roles() {
+        let cfg = OsConfig::default();
+        // Ops starts frozen (a placeholder), so it is not AnythingLLM-backed until thawed.
+        assert_eq!(allm_agents(&cfg), ["bizops", "coder", "designer", "director", "finance", "prompter"]);
+        let mut c = OsConfig::default();
+        c.switchboard.frozen_agents.push("designer".into());
+        assert!(!allm_agents(&c).contains(&"designer".to_string()));
+        // Default grants: what those agents need (Tony-only servers never ride along).
+        let mut d = OsConfig::default();
+        d.switchboard.frozen_agents.retain(|a| a != "ops"); // Ops holds the Maps grant once thawed
+        for m in d.mcps.iter_mut() {
+            m.enabled = true;
+        }
+        let needed = allm_needed(&d.mcps, &allm_agents(&d));
+        for id in ["filesystem", "git", "fetch", "knowledge-graph", "maps", "instagram", "shotcut", "media-forge"] {
+            assert!(needed.contains(id), "{id}");
+        }
+        for id in ["whatsapp", "gmail", "spotify", "weather", "time", "calendar", "brave-search"] {
+            assert!(!needed.contains(id), "{id} is Tony's alone");
+        }
+    }
+
+    /// Section 20.11: Tony's router sees the Spotify core by name plus one `spotify.more`, which
+    /// dispatches to any other offered Spotify tool (and only those).
+    #[test]
+    fn tony_spotify_view_folds_the_rest_into_more() {
+        let all = spotify_tools("spotify");
+        let mut tools: Vec<ToolInfo> = vec![t("weather", "weather.current", "w", &[])];
+        tools.extend(all.clone());
+        let offered: Vec<&ToolInfo> = tools.iter().collect();
+        let more = spotify_more_info(&spotify_hidden(&offered));
+        let view = tony_spotify_view(offered.clone(), &more);
+        let names: Vec<&str> = view.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["weather.current", "spotify.now_playing", "spotify.more", "spotify.play", "spotify.pause", "spotify.resume", "spotify.next"]);
+        assert_eq!(view.iter().filter(|t| t.server == "spotify").count(), 6);
+        assert!(more.description.contains("volume") && more.description.contains("like_track") && !more.description.contains("now_playing"));
+        // Dispatch: the real tool, its own args.
+        assert_eq!(expand_spotify_more(&json!({ "action": "volume", "args": { "percent": 30 } }), &offered).unwrap(), ("spotify.volume".to_string(), json!({ "percent": 30 })));
+        assert_eq!(expand_spotify_more(&json!({ "action": "spotify.shuffle" }), &offered).unwrap(), ("spotify.shuffle".to_string(), json!({})));
+        assert!(expand_spotify_more(&json!({ "action": "more" }), &offered).is_err());
+        assert!(expand_spotify_more(&json!({ "action": "delete_account" }), &offered).is_err());
+        assert!(expand_spotify_more(&json!({}), &offered).is_err());
+        // Only what this turn offers (no library words: no playlist edits).
+        let reads: Vec<&ToolInfo> = offered.iter().copied().filter(|t| t.name != "spotify.add_to_playlist").collect();
+        assert!(expand_spotify_more(&json!({ "action": "add_to_playlist" }), &reads).is_err());
+        // Nothing hidden: the list is untouched.
+        let core: Vec<&ToolInfo> = offered.iter().copied().filter(|t| TONY_SPOTIFY_CORE.contains(&t.name.as_str()) || t.server != "spotify").collect();
+        assert_eq!(tony_spotify_view(core.clone(), &more).len(), core.len());
+    }
+
+    /// Section 21.1: Tony never gets the Director's media servers and only reads Instagram.
+    #[test]
+    fn tony_owner_refusals() {
+        assert!(tony_owner_refusal("shotcut.render").is_some());
+        assert!(tony_owner_refusal("media-forge.trim").is_some());
+        assert!(tony_owner_refusal("instagram.publish_post").is_some());
+        assert!(tony_owner_refusal("instagram.reply_comment").is_some());
+        assert!(tony_owner_refusal("instagram.get_profile").is_none());
+        assert!(tony_owner_refusal("instagram.list_media").is_none());
+        assert!(tony_owner_refusal("gmail.create_draft").is_none());
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut() {
+            m.enabled = true;
+            if m.id == "shotcut" {
+                m.agents = Some(vec!["general".into(), "director".into()]);
+            }
+        }
+        let e = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "surface".into(), ..Default::default() }, &Default::default());
+        assert!(!servers_for(&cfg, &e, "general").iter().any(|s| s.id == "shotcut"), "never Tony's, whatever the grant says");
+        assert!(role_refusal(&cfg, "instagram.publish_post", "general").is_some());
+        let listed = vec![t("instagram", "instagram.get_profile", "p", &[]), t("instagram", "instagram.publish_post", "p", &["caption"])];
+        let set = assemble_tools(&cfg, "general", listed);
+        assert_eq!(set.all.iter().map(|t| t.name.as_str()).filter(|n| n.starts_with("instagram")).collect::<Vec<_>>(), ["instagram.get_profile"]);
     }
 
     #[test]
@@ -3352,5 +3938,107 @@ mod tony_mode_tool_tests {
         let cfg = os_core::OsConfig::default();
         assert!(role_refusal(&cfg, TONY_SET_MODE, "general").is_none());
         assert!(role_refusal(&cfg, TONY_SET_MODE, "coder").is_some_and(|e| e.starts_with(ROLE_PREFIX)));
+    }
+
+    // ── Section pass: Tony's tools by mode, frozen agents get none ──────────────
+
+    fn mode_eff(id: &str) -> super::super::modes::Effective {
+        super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: id.into(), ..Default::default() }, &Default::default())
+    }
+
+    fn tony_ids(cfg: &OsConfig, mode: &str) -> Vec<String> {
+        let mut v: Vec<String> = servers_for(cfg, &mode_eff(mode), "general").into_iter().map(|s| s.id).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn tonys_base_is_on_in_every_mode_and_each_mode_adds_its_own() {
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut() {
+            m.enabled = true;
+        }
+        let base = ["brave-search", "calendar", "finance", "gmail", "knowledge-graph", "maps", "spotify", "time", "weather", "whatsapp"];
+        for mode in ["surface", "brainstorm", "coach", "learning", "builder", "operations", "executive"] {
+            let ids = tony_ids(&cfg, mode);
+            for b in base {
+                assert!(ids.iter().any(|i| i == b), "{mode}: base {b} missing from {ids:?}");
+            }
+        }
+        let extras = |mode: &str| tony_ids(&cfg, mode).into_iter().filter(|i| !base.contains(&i.as_str())).collect::<Vec<_>>();
+        assert_eq!(extras("builder"), ["filesystem", "git"]);
+        assert_eq!(extras("operations"), ["fetch", "instagram"], "maps is in his base now (Section 21.1)");
+        assert_eq!(extras("executive"), ["fetch"]);
+        assert!(extras("learning").is_empty() && extras("brainstorm").is_empty());
+        // The master switchboard still wins.
+        cfg.switchboard.frozen_tools = vec!["gmail".into(), "git".into()];
+        let b = tony_ids(&cfg, "builder");
+        assert!(!b.contains(&"gmail".to_string()) && !b.contains(&"git".to_string()), "{b:?}");
+        // Editable: a mode Nic gives Tony more tools in.
+        cfg.switchboard.frozen_tools.clear();
+        cfg.tony_mode_tools.insert("coach".into(), vec!["fetch".into()]);
+        assert!(tony_ids(&cfg, "coach").contains(&"fetch".to_string()));
+    }
+
+    #[test]
+    fn tonys_mode_tools_pass_the_call_time_gates() {
+        let cfg = OsConfig::default();
+        let builder = mode_eff("builder");
+        let extra = os_core::tony_mode_extras(&cfg, "builder");
+        assert_eq!(role_refusal_with(&cfg, "git.status", "tony", true, extra), None, "Builder gives Tony git");
+        assert!(role_refusal_with(&cfg, "git.status", "tony", true, &[]).is_some(), "not his outside Builder");
+        // His base is never frozen by a mode (Builder's overlay doesn't list gmail)…
+        assert_eq!(frozen_refusal_for(&cfg, &builder, "gmail.recent", CallOrigin::Turn, "tony"), None);
+        assert_eq!(frozen_refusal_for(&cfg, &mode_eff("learning"), "web.search", CallOrigin::Turn, "general"), None);
+        // …but a sub-agent's call still is.
+        assert!(frozen_refusal_for(&cfg, &builder, "gmail.recent", CallOrigin::Turn, "coder").is_some());
+    }
+
+    #[test]
+    fn an_unconnected_mode_extra_is_not_offered_but_base_tools_are() {
+        let cfg = OsConfig::default();
+        let ig = cfg.mcps.iter().find(|m| m.id == "instagram").cloned().expect("instagram server");
+        let gmail = cfg.mcps.iter().find(|m| m.id == "gmail").cloned().expect("gmail server");
+        let ops = os_core::tony_mode_extras(&cfg, "operations");
+        assert!(ops.iter().any(|x| x == "instagram"));
+        let no_token = || Some(super::super::instagram::NO_TOKEN.to_string());
+        assert!(!ig.grants("general"), "Instagram is a mode extra for Tony, not his base");
+        assert!(unconnected_extra(&ig, ops, no_token), "no token: Operations doesn't offer it");
+        assert!(!unconnected_extra(&ig, ops, || None), "connected: offered");
+        assert!(!unconnected_extra(&ig, &[], no_token), "not an extra in this mode: not this rule's call");
+        assert!(!unconnected_extra(&gmail, ops, || Some("no backend".into())), "his base still reports a missing backend");
+    }
+
+    #[test]
+    fn a_frozen_agent_gets_no_tools() {
+        let mut cfg = OsConfig::default();
+        for m in cfg.mcps.iter_mut() {
+            m.enabled = true;
+            m.agents = Some(vec!["all".into()]);
+        }
+        // Booking is frozen on the master switchboard by default: nothing, even with "all".
+        assert!(servers_for(&cfg, &mode_eff("brainstorm"), "booking").is_empty());
+        // Ops is off duty in Builder mode: nothing either.
+        assert!(servers_for(&cfg, &mode_eff("builder"), "ops").is_empty());
+        assert!(!servers_for(&cfg, &mode_eff("builder"), "coder").is_empty());
+    }
+
+    #[test]
+    fn booking_loses_every_pill_once() {
+        let mut cfg = OsConfig::default();
+        cfg.mcps.iter_mut().find(|m| m.id == "gmail").unwrap().agents = Some(vec!["general".into(), "booking".into()]);
+        cfg.mcps.iter_mut().find(|m| m.id == "maps").unwrap().agents = Some(vec!["Booking".into()]);
+        cfg.skills.grants.insert("x".into(), vec!["booking".into()]);
+        cfg.routing.agents.get_mut("booking").unwrap().domains = vec!["last 5 messages".into(), "check my texts".into(), "self-tape".into()];
+        os_core::strip_booking_tools(&mut cfg);
+        assert_eq!(cfg.mcps.iter().find(|m| m.id == "gmail").unwrap().agents.as_deref(), Some(&["general".to_string()][..]));
+        assert_eq!(cfg.mcps.iter().find(|m| m.id == "maps").unwrap().agents.as_deref(), Some(&["none".to_string()][..]), "never [] (= everyone)");
+        assert!(!cfg.mcps.iter().any(|m| m.grants("booking") && m.agents.as_ref().is_some_and(|a| !a.iter().any(|x| x == "all"))));
+        assert!(!cfg.skills.grants.contains_key("x"));
+        assert_eq!(cfg.routing.agents["booking"].domains, ["self-tape"]);
+        // And the defaults never give it anything.
+        for id in os_core::TOOL_OWNER_SERVERS {
+            assert!(!os_core::default_mcp_grants(id).iter().any(|a| a == "booking"), "{id}");
+        }
     }
 }

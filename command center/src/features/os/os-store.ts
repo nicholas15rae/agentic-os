@@ -4,6 +4,8 @@ import { cmd, isTauri, type OsConfig, type OsConfigPatch } from "@/lib/platform"
 import { isAndroidApp, useSettings } from "@/stores/settings";
 import { desktopConfig, PHONE_READ_ONLY } from "@/sections/settings/use-providers";
 import { roleLabel } from "@/features/dispatcher/roles";
+import { setRouterFrozenAgents } from "@/features/dispatcher/router";
+import { osSwitchboard } from "./switchboard";
 
 /**
  * The OS core config (identity, compute mode, droplet, skills/MCP, privacy,
@@ -67,6 +69,10 @@ export const useOs = create<OsStore>((set) => ({
     }
   },
 }));
+
+// The router never picks an agent frozen on the master switchboard (Section 20.1): keep its
+// frozen set in step with the loaded config (no config yet = Rust's default set).
+useOs.subscribe((s) => setRouterFrozenAgents(s.cfg ? osSwitchboard(s.cfg).frozenAgents : null));
 
 /** os.json's master switchboard (`cfg.switchboard`; see ./switchboard). */
 export type { OsSwitchboard } from "./switchboard";

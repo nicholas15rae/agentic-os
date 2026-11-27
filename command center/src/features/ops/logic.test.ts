@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { businessIdError, digestLine, idsOf, keepActive, newBusinessFrom, parseTerms, provisionLabel, reasonLabel, suggestId } from "./logic";
+import { businessForEmail, businessIdError, digestLine, emailsFor, formatEmails, idsOf, keepActive, newBusinessFrom, parseEmails, parseTerms, provisionLabel, reasonLabel, suggestId } from "./logic";
 import { activeBusinessForTurn, useOps } from "./ops-store";
 import type { Business, QItem, ReviewGroup } from "./types";
 
@@ -105,5 +105,26 @@ describe("review digest helpers", () => {
     expect(digestLine([])).toBe("Nothing waiting for review");
     expect(reasonLabel("cross_domain")).toBe("Mentions another business");
     expect(reasonLabel("new_code")).toBe("new code");
+  });
+});
+
+describe("email per business (mirrors Rust business_for_email / emails_for)", () => {
+  it("links a mailbox to one business; no link = the main account", () => {
+    const bf = { ...biz("supplements_ecom"), emails: [{ label: "Born Fortuna", address: "orders@bornfortuna.ca" }] };
+    const all = [biz("trades_contracting"), bf, biz("acting")];
+    expect(businessForEmail(all, " Orders@BornFortuna.ca ")?.businessId).toBe("supplements_ecom");
+    expect(businessForEmail(all, "me@gmail.com")).toBeNull();
+    expect(businessForEmail(all, "")).toBeNull();
+    expect(emailsFor(all, "supplements_ecom")).toEqual(bf.emails);
+    expect(emailsFor(all, "acting")).toEqual([{ label: "main", address: "" }]);
+    expect(emailsFor(all, "nope")).toBeNull();
+    expect(businessIdError("personal")).toMatch(/Personal/);
+  });
+
+  it("parses and formats the card's email box", () => {
+    const parsed = parseEmails("Born Fortuna <Orders@BornFortuna.ca>\nmain@x.ca, main@x.ca");
+    expect(parsed).toEqual([{ label: "Born Fortuna", address: "orders@bornfortuna.ca" }, { label: "", address: "main@x.ca" }]);
+    expect(parseEmails(formatEmails(parsed))).toEqual(parsed);
+    expect(formatEmails(undefined)).toBe("");
   });
 });

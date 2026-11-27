@@ -373,6 +373,12 @@ When you (an AI agent) are dropped into this directory for the first time:
 7. **Route tasks** according to the Agent Responsibilities table above
 8. **After each task**: update `learnings.md`, append to `audit/audit.log`, update cost tracking
 
+### STATUS.md (every agent, every commit or merge)
+- `STATUS.md` in the repo root is the one status page across all sessions and branches.
+- After each commit or merge, update its Done / In progress / Waiting on you / Not started / Test results sections in your worktree. Short and plain. Commit it with your work.
+- Then run `python scripts/update_status.py` to refresh the branch block between the `AUTO:BRANCHES` markers. Don't hand-edit that block.
+- On a STATUS.md merge conflict, keep the newer lines from both sides, then re-run the script.
+
 ### When Creating/Modifying Code
 - Use `skills/_template/` as reference for new skills
 - Follow existing skill structure: SKILL.md + learnings.md + eval.json + context/

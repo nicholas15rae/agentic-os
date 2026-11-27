@@ -61,12 +61,10 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   // `general` (Tony) has no name triggers: addressing him is `SELF_NAMES` → kind "Self".
   autoSwitch: true,
   agents: {
-    // No bare "whatsapp" / "messages": a WhatsApp read is Tony's own live tool (`directTool`), and
-    // "messages" alone pulled every chat-ish line (and Whisper's "what's up" greeting) to Booking.
-    booking: {
-      names: ["booking", "booking desk", "booking agent", "casting", "audition", "talent agent", "B&Co"],
-      domains: ["last 5 messages", "check my texts", "casting call", "self-tape", "wardrobe", "availability", "draft email to agent"],
-    },
+    // Section 20.1: the frozen Booking Desk has no topics; acting logistics are Tony's, recording /
+    // editing a self-tape the Director's. Its own names stay, so addressing it is Named and the
+    // switchboard holds the turn with Tony's FROZEN note (mirrors os_core.rs `BOOKING_NAMES`).
+    booking: { names: ["booking desk", "booking agent", "B&Co"], domains: [] },
     prompter: {
       names: ["prompter", "prompt builder", "spec writer", "architect prompt"],
       domains: ["write a prompt", "build a prompt", "break it into phases", "master prompt", "prompt for claude"],
@@ -81,27 +79,63 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
     },
     director: {
       names: ["director", "editor", "media agent", "video editor"],
-      domains: ["edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll"],
+      domains: [
+        "edit video", "self-tape edit", "render", "captions", "reel", "short-form", "thumbnail", "headshot", "photo edit", "b-roll",
+        "record a self-tape", "record my self-tape", "film a self-tape", "film my self-tape", "self-tape recording", "edit my self-tape", "edit the self-tape",
+      ],
     },
     librarian: {
       names: ["librarian", "memory", "vault", "researcher"],
       domains: ["search vault", "rag", "knowledge graph", "find document", "notes", "lookup"],
     },
+    // Section 20.2: ops = infra; bizops = the store / brand; money = finance; calendar, schedule,
+    // reminders and (for now) acting = Tony. Contracting (the future Job Desk) is Tony's too while
+    // Ops is a frozen placeholder (mirrors os_core.rs `OPS_PHRASES_TO_TONY`).
     ops: {
       names: ["ops", "infra", "infrastructure"],
-      domains: ["droplet", "docker", "n8n", "server status", "schedule", "calendar"],
+      domains: ["droplet", "docker", "n8n", "server status"],
     },
     bizops: {
       names: ["bizops", "operations manager", "ops manager", "business manager", "operations", "business"],
-      domains: ["invoice", "quote", "job site", "subcontractor", "inventory", "fulfillment", "open orders", "bf supplements", "supplements", "contracting", "masonry", "ecommerce"],
+      domains: ["inventory", "fulfillment", "open orders", "bf supplements", "supplements", "born fortuna", "instagram", "ecommerce", "online store"],
     },
     finance: {
       names: ["finance", "finance agent", "bookkeeper", "bookkeeping", "accountant"],
-      domains: ["ledger", "expenses", "receipt", "receipts", "cash flow", "profit", "p&l", "my books"],
+      domains: ["ledger", "expenses", "receipt", "receipts", "invoice", "invoices", "cheque", "cheques", "money", "hst", "commission", "commissions", "cash flow", "profit", "p&l", "my books"],
     },
-    general: { names: [], domains: ["system status", "switch model"] },
+    general: {
+      names: [],
+      domains: [
+        "system status", "switch model", "calendar", "schedule", "reminder", "reminders", "remind me",
+        "audition", "auditions", "casting", "casting call", "casting email", "casting emails", "self-tape", "self tape", "callback", "wardrobe", "availability",
+        "bookings", "talent agent", "my agent", "agency", "imperious", "draft email to agent",
+        "job desk", "contracting", "masonry", "job site", "job sites", "subcontractor", "subcontractors", "quote", "quotes", "estimate", "estimates",
+      ],
+    },
   },
 };
+
+/** What Rust seeds a fresh master switchboard with (os_core.rs `DEFAULT_FROZEN_AGENTS` + `FROZEN_PLACEHOLDER_AGENTS`). */
+const DEFAULT_ROUTER_FROZEN: readonly string[] = ["booking", "librarian", "ops"]; // + FROZEN_PLACEHOLDER_AGENTS
+/** The master switchboard's frozen agents the router skips (Section 20.1). The os store keeps it
+ * in sync with os.json (`setRouterFrozenAgents`); until the config loads it is Rust's default. */
+let routerFrozen: readonly string[] = DEFAULT_ROUTER_FROZEN;
+
+/** Keep the router's frozen set in step with os.json's `switchboard.frozenAgents`. */
+export function setRouterFrozenAgents(list: readonly string[] | null | undefined): void {
+  routerFrozen = list ? list.map((a) => a.trim().toLowerCase()).filter(Boolean) : DEFAULT_ROUTER_FROZEN;
+}
+
+/** Test hook: back to Rust's default frozen set. */
+export function resetRouterFrozenAgents(): void {
+  routerFrozen = DEFAULT_ROUTER_FROZEN;
+}
+
+/** `role` is frozen on the master switchboard: its topics never route (a name still does, so the
+ * switchboard can hold it with a note). Tony never is. Mirrors `frozen_role` in routing.rs. */
+export function isFrozenRole(role: string, frozen: readonly string[] = routerFrozen): boolean {
+  return role !== "general" && frozen.some((f) => f.trim().toLowerCase() === role.toLowerCase());
+}
 
 /** Whisper's "WhatsApp" → "what's up" is only the app when a word right before it names a place
  * or a target ("on / my / check / open / from / via what's up") … No "in" / "the": "I'm in,
@@ -209,6 +243,8 @@ function namePairs(cfg: RoutingConfig, osName: string): [string, string][] {
   const out: [string, string][] = [];
   for (const [key, t] of Object.entries(cfg.agents)) {
     const role = isSelfRoleId(key, osName) ? "general" : key;
+    // A frozen agent's NAMES still fire (kind Named): the switchboard holds the turn with Tony and
+    // adds the FROZEN note. Only its topics are skipped (step (c)).
     for (const n of t.names) {
       const norm = normalize(n);
       if (norm) out.push([role, norm]);
@@ -380,6 +416,8 @@ export interface ResolveOpts {
   /** Read the topic only: a self address no longer beats a Domain match (the agent a
    * brainstorm was about: tier.ts `offerTarget`, the voice controller's Tier-2 `agentKept`). */
   ignoreSelfAddress?: boolean;
+  /** The frozen agents whose TOPICS are skipped (names still resolve); default: the master switchboard's (`setRouterFrozenAgents`). */
+  frozen?: readonly string[];
 }
 
 /** Does `phrase` occur as a contiguous run of whole tokens anywhere in `toks`? */
@@ -423,6 +461,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   const original = text.trim();
   const norm = normalize(original);
   const toks = tokenize(norm);
+  const frozen = opts.frozen ?? routerFrozen;
   const all = namePairs(cfg, osName);
   const names = all.filter(([r]) => r !== "general");
   const selfNames = all.filter(([r]) => r === "general");
@@ -473,7 +512,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   // ("booking desk, any …", "hey booking agent …") or step (a) above ("tell booking to …") hands it over.
   const mentioned = matchNameAnywhere(toks, names);
   const liveRead = directTool(original);
-  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar") || leadsWithName(original, toks, names)))
+  if (mentioned && (!(liveRead === "gmail" || liveRead === "calendar" || liveRead === "finance") || leadsWithName(original, toks, names)))
     return { role: mentioned, reason: "this agent was named in the request", confidence: "medium", kind: "Named", task: original };
   if (matchNameAnywhere(toks, selfNames)) selfHit = true;
   // A self name in an address position (beats a topic below); any other mention is step (d) only.
@@ -483,6 +522,7 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   let best: [string, number] | null = null;
   let selfTopic = false;
   for (const role of DOMAIN_TIEBREAK) {
+    if (isFrozenRole(role, frozen)) continue;
     const t = cfg.agents[role];
     if (!t) continue;
     const score = domainScore(toks, t.domains);
@@ -504,6 +544,47 @@ export function resolve(text: string, cfg: RoutingConfig, osName = "", opts: Res
   if (selfHit || selfAddress || selfTopic) return { role: "general", reason: "you addressed the OS itself", confidence: "high", kind: "Self", task: original };
   // (e) nothing matched.
   return { role: null, reason: "no name or trigger matched", confidence: "low", kind: "Default", task: original };
+}
+
+// ── Trigger overlap (Settings → Routing, Section 20.2) ──────────────────────
+
+export interface TriggerMatch {
+  role: string;
+  /** The role's own trigger phrases (names and topics) found in the text, as configured. */
+  phrases: string[];
+  frozen: boolean;
+}
+
+/** Every role whose names or topics occur in `text` as whole words (self-alias keys count as
+ * `general`), frozen ones included and marked. Pure; independent of the resolver's priorities. */
+export function matchingAgents(text: string, cfg: RoutingConfig, osName = "", frozen: readonly string[] = routerFrozen): TriggerMatch[] {
+  const toks = tokenize(normalize(text.trim()));
+  const by = new Map<string, string[]>();
+  for (const [key, t] of Object.entries(cfg.agents)) {
+    const role = isSelfRoleId(key, osName) ? "general" : key;
+    for (const p of [...t.names, ...t.domains]) {
+      const n = normalize(p);
+      if (n && containsPhrase(toks, n)) by.set(role, [...(by.get(role) ?? []), p]);
+    }
+  }
+  return [...by.entries()].map(([role, phrases]) => ({ role, phrases, frozen: isFrozenRole(role, frozen) }));
+}
+
+/** Trigger phrases that, said on their own, match more than one role's triggers (one row per
+ * phrase, the roles in matrix order). Frozen roles never route, so they are left out. Pure. */
+export function overlappingPhrases(cfg: RoutingConfig, osName = "", frozen: readonly string[] = routerFrozen): { phrase: string; roles: string[] }[] {
+  const seen = new Set<string>();
+  const out: { phrase: string; roles: string[] }[] = [];
+  for (const t of Object.values(cfg.agents)) {
+    for (const p of [...t.names, ...t.domains]) {
+      const n = normalize(p);
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      const roles = matchingAgents(p, cfg, osName, frozen).filter((m) => !m.frozen).map((m) => m.role);
+      if (roles.length > 1) out.push({ phrase: p, roles });
+    }
+  }
+  return out;
 }
 
 // ── Direct live-tool questions ──────────────────────────────────────────────
@@ -532,9 +613,25 @@ const DIRECT_CALENDAR_READ = /\b(?:check|read|any|anything|whats|what is|what do
 const DIRECT_WEATHER = /\bhow (?:hot|cold|warm) is it\b|\b(?:is it|will it|gonna|going to) (?:rain|snow)\b|\btemperature (?:outside|today|tonight|tomorrow|in|out)\b|\bwhats the temperature\b|\b(?:need|bring|take|grab) (?:an |my |the )?umbrella\b|\b(?:whats|what is|hows|how is|check|tell me|give me|show me|get me|any)(?: (?:the|todays|tomorrows|tonights|my|local))? (?:weather|forecast)\b|\b(?:weather|forecast) (?:today|tonight|tomorrow|now|outside|like|later|this|in|for|at|on)\b|^(?:the )?(?:weather|forecast)$/;
 /** Work context ("the mail server config", "the sales forecast for Q3"): not an inbox / weather read. */
 const DIRECT_NOT_LIVE = /\b(?:widget|server|config|api|bug|code|app|script|dashboard|spreadsheet|sheet|sales|revenue|budget|quarter|q[1-4]|filter|settings?)\b/;
+/** A bare messages read ("check my messages", "any new texts", "last 5 messages"): WhatsApp, read by
+ * Tony himself — never the agent-report inbox, recent chats or the Booking Desk. Only plain filler
+ * words may sit between the read word and the noun, so "my agent messages" never matches. */
+const DIRECT_MESSAGES = /\b(?:check|read|any|show|see|new|unread|latest|last|recent|did i get|have i got|got any)\b(?: (?:me|my|the|new|unread|latest|last|recent|\d{1,2}))* (?:messages?|texts?)\b/;
 const DIRECT_SPOTIFY = /\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b/;
+/** Money READ questions Tony answers from Finance himself (`finance.ask`, read-only): what he owes
+ * an agent, what an area made or spent, what's pending, unpaid invoices, HST dates, the money to-do
+ * list. Writes stay on the Finance screens (DIRECT_WRITE / DIRECT_FINANCE_WRITE). */
+const DIRECT_FINANCE =
+  /\b(?:what|how much|who) (?:do |did )?(?:i|we) (?:still )?owe\b|\bcommissions? (?:do |did )?(?:i|we) (?:still )?owe\b|\bhow much commission\b|\bwho (?:still )?owes me\b|\bhow much (?:money )?(?:am i|is) (?:still )?owed\b|\bhow much (?:money )?(?:did|have|has|do|does) (?:i|we|acting|contracting|trades|bf supplements|supplements|the store|my business|personal)(?: \w+)? (?:make|made|earn|earned|bring in|brought in|spend|spent|gross|grossed)\b|\bhow much (?:income|revenue|profit) (?:did|have|has|do)\b|\b(?:whats|what is|anything|any money|any payments?)(?: still)? pending\b|\bpending (?:money|payments?|income)\b|\bwhen (?:is|are) (?:my |the |our |next )*(?:hst|gst)(?: return| payment| filing| remittance)? due\b|\b(?:hst|gst) (?:return |payment |filing |remittance )?(?:is |are )?due\b|\bhow much (?:hst|gst) do i owe\b|\bwhen do i (?:file|pay) (?:my |the )?(?:hst|gst)\b|\b(?:unpaid|outstanding|overdue|open) invoices?\b|\binvoices? (?:are |still )*(?:unpaid|outstanding|overdue|open)\b|\bwho hasnt paid\b|\b(?:money|finance|financial) (?:reminders?|to do|todo)\b/;
+/** "How much did contracting make": "make" as earning, not a write. Dropped before DIRECT_WRITE. */
+const DIRECT_FINANCE_MAKE = /\bhow much (?:money )?(?:did|have|has|do|does) (?:i|we|acting|contracting|trades|bf supplements|supplements|the store|my business|personal)(?: \w+)? make\b/g;
+/** Finance writes DIRECT_WRITE doesn't list ("log the HST on that invoice", "record a cheque"). */
+const DIRECT_FINANCE_WRITE = /\b(?:log|record|enter|track|scan|import|export|categori[sz]e|deposit|charge|bill|split|refund|transfer|send)\b/;
+/** Not a money question: another live tool's or a work item's subject ("any pending emails",
+ * "what orders are pending", "the overdue invoices widget"). */
+const DIRECT_FINANCE_NOT = /\b(?:emails?|inbox|mail|gmail|whatsapp|messages?|texts?|calendar|tasks?|todos?|tickets?|builds?|prs?|pull requests?|reviews?|queue|orders?|deliver(?:y|ies)|packages?|shipments?|updates?|widget|server|config|api|bug|code|app|script|spreadsheet|filter|settings?|button|tests?)\b/;
 
-export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify";
+export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotify" | "finance";
 
 /**
  * "Any WhatsApp updates?", "check my inbox", "will it rain tomorrow", "what's playing":
@@ -543,7 +640,7 @@ export type DirectTool = "whatsapp" | "gmail" | "calendar" | "weather" | "spotif
  */
 export function directTool(text: string): DirectTool | null {
   const n = normalize(text);
-  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " "))) return null;
+  if (!n || DIRECT_WRITE.test(n.replace(DIRECT_UPDATE_NOUN, " ").replace(DIRECT_FINANCE_MAKE, " "))) return null;
   if (/\bwhatsapp\b/.test(n)) {
     const lower = text.toLowerCase();
     const saysApp = lower.includes("sapp") || lower.includes("s app");
@@ -555,5 +652,7 @@ export function directTool(text: string): DirectTool | null {
   if (!work && DIRECT_CALENDAR.test(n) && DIRECT_CALENDAR_READ.test(n) && !DIRECT_CALENDAR_WRITE.test(n)) return "calendar";
   if (!work && DIRECT_WEATHER.test(n)) return "weather";
   if (DIRECT_SPOTIFY.test(n)) return "spotify";
+  if (DIRECT_FINANCE.test(n) && !DIRECT_FINANCE_WRITE.test(n) && !DIRECT_FINANCE_NOT.test(n)) return "finance";
+  if (!work && DIRECT_MESSAGES.test(n)) return "whatsapp";
   return null;
 }

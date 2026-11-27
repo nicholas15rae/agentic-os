@@ -61,6 +61,7 @@ pub fn compose(ev: &Event, device: &str) -> Alert {
         "kill_switch" => "Kill switch engaged".to_string(),
         "trading_kill_switch" => "Trading kill switch tripped".to_string(),
         "pin_changed" => "Security PIN changed".to_string(),
+        "unknown_device" => "Unknown device tried to reach the gateway".to_string(),
         other => other.replace('_', " "),
     };
     let module = ev.module.map(|m| format!(" [{m}]")).unwrap_or_default();

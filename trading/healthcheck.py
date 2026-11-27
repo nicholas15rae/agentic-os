@@ -13,7 +13,11 @@ stage is broken. Nothing is ever sent to the broker:
 Each check returns PASS / WARN / FAIL / SKIP with a one-line detail. Overall is
 the worst status. Run from the UI ("Run check"), the gateway
 (POST /api/trading/health/check), the CLI (`python trading/healthcheck.py`), or
-automatically every weekday at 09:00 New York before the open.
+automatically every trading day at 09:00 New York before the open (not on NYSE holidays).
+
+One connection state everywhere: the stored result's broker.bridge row is replaced by the LIVE
+bridge state whenever it is read (`with_live_bridge`), and the result is marked stale ("as of
+HH:MM") when the connection changed since it ran; the morning loop then re-runs the whole check.
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ NY = ZoneInfo("America/New_York")
 # "agent" is gone: the LLM Trading Agent loop is retired. Engine R scans on the CPU; the analyst ticks every minute.
 LOOP_LIMITS = {"drawdown_monitor": 60, "options_guard": 240, "auto_scan": 120, "intel": 240, "rule_engine": 120, "analyst": 300}
 FRESH_TELEMETRY_S = 20
+RERUN_STABLE_S = 60        # the live state must hold this long before an automatic re-run
+RERUN_MIN_GAP_S = 600      # and automatic re-runs are at least this far apart
 
 
 @dataclasses.dataclass
@@ -102,6 +108,22 @@ def lan_exposed(port: int = 7497, timeout: float = 2.0) -> list[str]:
     return [ip for ip in sorted(a for a in addrs if not a.startswith("127.")) if api_handshake_accepted(ip, port, timeout)]
 
 
+def bridge_check(snap: dict[str, Any], now: float) -> tuple[str, str]:
+    """The broker.bridge row from a bridge snapshot (shared by run_checks and the live overlay)."""
+    from config import is_paper_account
+
+    if snap.get("state") != "CONNECTED":
+        why = snap.get("downReason") or "; ".join(snap.get("reasons") or []) or snap.get("lastError") or "is TWS running and logged in to paper?"
+        return FAIL, f"bridge {snap.get('state')}: {why}"
+    age = now - (snap.get("updatedAt") or 0)
+    acct = (snap.get("account") or {}).get("account") or ""
+    if not is_paper_account(acct):
+        return FAIL, f"connected account {acct!r} is not a paper account"
+    if age > FRESH_TELEMETRY_S:
+        return WARN, f"telemetry {age:.0f}s old"
+    return PASS, f"{acct} · client {snap.get('clientId')} · {'read-only' if snap.get('readOnly') else 'read/write'} · NetLiq {(snap.get('account') or {}).get('netLiquidation')}"
+
+
 def agent_model_probe(gateway: str = "http://127.0.0.1:8080") -> dict[str, Any]:
     import urllib.request
 
@@ -113,7 +135,7 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
                      lan_probe: Callable[[], list[str]] = lan_exposed,
                      tws_probe: Callable[[], bool] = tws_listening,
                      model_probe: Callable[[], dict[str, Any]] = agent_model_probe) -> dict[str, Any]:
-    from config import is_paper_account, load_config, resolve_endpoint
+    from config import load_config, resolve_endpoint
     from fx import merged_rates
     from intents import parse_intent
     import kill_switch
@@ -190,17 +212,7 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
     snap = desk.bridge.snapshot()
     connected = snap.get("state") == "CONNECTED"
 
-    def bridge():
-        if not connected:
-            return FAIL, f"bridge {snap.get('state')}: {'; '.join(snap.get('reasons') or []) or snap.get('lastError') or 'is TWS running and logged in to paper?'}"
-        age = now - (snap.get("updatedAt") or 0)
-        acct = (snap.get("account") or {}).get("account") or ""
-        if not is_paper_account(acct):
-            return FAIL, f"connected account {acct!r} is not a paper account"
-        if age > FRESH_TELEMETRY_S:
-            return WARN, f"telemetry {age:.0f}s old"
-        return PASS, f"{acct} · client {snap.get('clientId')} · {'read-only' if snap.get('readOnly') else 'read/write'} · NetLiq {(snap.get('account') or {}).get('netLiquidation')}"
-    await step("broker", "bridge", bridge)
+    await step("broker", "bridge", lambda: bridge_check(snap, now))
 
     async def fx():
         base = (snap.get("account") or {}).get("currency")
@@ -382,6 +394,7 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
     await step("runtime", "background_loops", loops)
 
     result = {"at": now, "atNy": datetime.fromtimestamp(now, NY).strftime("%Y-%m-%d %H:%M %Z"), "overall": overall(checks),
+              "bridgeState": snap.get("state"),
               "counts": {s: sum(1 for c in checks if c.status == s) for s in (PASS, WARN, FAIL, SKIP)},
               "checks": [c.to_dict() for c in checks]}
     out = desk.d / "healthcheck"
@@ -392,26 +405,76 @@ async def run_checks(desk: Any, *, dry_run_kill: bool = True, now: float | None 
     return result
 
 
-def last_result(d: Path) -> dict[str, Any] | None:
+def last_result(d: Path, live: dict[str, Any] | None = None, now: float | None = None) -> dict[str, Any] | None:
+    """The stored result; with `live` (a bridge snapshot) its connection row is the live one (see with_live_bridge)."""
     try:
-        return json.loads((d / "healthcheck" / "latest.json").read_text(encoding="utf-8"))
+        res = json.loads((d / "healthcheck" / "latest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return with_live_bridge(res, live, now if now is not None else time.time()) if live is not None else res
+
+
+def _stored_bridge(res: dict[str, Any]) -> dict[str, Any] | None:
+    return next((c for c in res.get("checks") or [] if c.get("stage") == "broker" and c.get("name") == "bridge"), None)
+
+
+def with_live_bridge(res: dict[str, Any], snap: dict[str, Any], now: float) -> dict[str, Any]:
+    """Replace the stored broker.bridge row with the live bridge state, so the health card can never say FAIL
+    while the account card says Connected (or the reverse). If the connection changed since the check ran,
+    the result is marked stale: its later stages (SKIPped, or run while it was different) are "as of HH:MM"."""
+    res = json.loads(json.dumps(res))
+    status, detail = bridge_check(snap, now)
+    old = res.get("checks") or []
+    idx = next((i for i, c in enumerate(old) if c.get("stage") == "broker" and c.get("name") == "bridge"), None)
+    stored = old[idx] if idx is not None else None
+    row = {"stage": "broker", "name": "bridge", "status": status, "detail": detail, "ms": 0, "live": True}
+    checks = [c for i, c in enumerate(old) if i != idx]
+    checks.insert(idx if idx is not None else len(checks), row)
+    as_of = datetime.fromtimestamp(float(res.get("at") or now), NY).strftime("%H:%M")
+    was = stored.get("status") if stored else None
+    res.update(checks=checks, asOfNy=as_of, live={"bridge": status, "state": snap.get("state"), "at": now}, stale=was != status)
+    if was != status:
+        res["staleReason"] = (f"connection changed since the check at {as_of} ET (then {was or 'not checked'}, now {status}): "
+                              "the other rows are as of then; run the check again")
+    res["overall"] = overall([Check(c.get("stage", ""), c.get("name", ""), c["status"], "") for c in checks if c.get("status") in ORDER])
+    res["counts"] = {s: sum(1 for c in checks if c.get("status") == s) for s in (PASS, WARN, FAIL, SKIP)}
+    return res
+
+
+def rerun_due(stored: dict[str, Any] | None, snap: dict[str, Any], now: float, last_auto: float) -> bool:
+    """Re-run the full check automatically: the live connection disagrees with the stored result,
+    the live state has held for RERUN_STABLE_S, and the last automatic re-run is RERUN_MIN_GAP_S old."""
+    if not stored or now - last_auto < RERUN_MIN_GAP_S:
+        return False
+    row = _stored_bridge(stored)
+    live_status, _ = bridge_check(snap, now)
+    if row and row.get("status") == live_status:
+        return False
+    since = snap.get("connectedSince") if snap.get("state") == "CONNECTED" else snap.get("downSince")
+    return since is not None and now - float(since) >= RERUN_STABLE_S
 
 
 async def morning_loop(desk: Any) -> None:
-    """Weekdays at 09:00 New York: one full check before the open."""
+    """Trading days at 09:00 New York: one full check before the open (skipped on NYSE holidays).
+    Every minute, also re-run it when the live connection no longer matches the stored result."""
+    import market_calendar
+
     last_day = ""
+    last_auto = 0.0
     while True:
         await asyncio.sleep(60)
-        t = datetime.fromtimestamp(desk.clock(), NY)
+        now = desk.clock()
+        t = datetime.fromtimestamp(now, NY)
         day = t.strftime("%Y-%m-%d")
-        if t.weekday() < 5 and (t.hour, t.minute) >= (9, 0) and t.hour < 10 and day != last_day:
-            last_day = day
-            try:
+        try:
+            if market_calendar.is_trading_day(t.date()) and (t.hour, t.minute) >= (9, 0) and t.hour < 10 and day != last_day:
+                last_day = day
                 await run_checks(desk)
-            except Exception:  # noqa: BLE001
-                pass
+            elif rerun_due(last_result(desk.d), desk.bridge.snapshot(), now, last_auto):
+                last_auto = now
+                await run_checks(desk)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main() -> int:

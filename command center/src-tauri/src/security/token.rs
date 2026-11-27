@@ -96,16 +96,18 @@ pub fn verify_webhook(secret: &[u8], ts: &str, body: &[u8], sig: &str, now: f64,
     }
 }
 
-pub fn companion_message(id: &str, nonce: &str, device: &str) -> String {
-    format!("approve|{id}|{nonce}|{device}")
+/// What the phone signs: the request, its nonce, the phone's id and the matching code the user
+/// typed from the desktop screen (the gateway never sees the code).
+pub fn companion_message(id: &str, nonce: &str, device: &str, code: &str) -> String {
+    format!("approve|{id}|{nonce}|{device}|{code}")
 }
 
-pub fn companion_sign(pair_key: &[u8], id: &str, nonce: &str, device: &str) -> String {
-    super::hex(&hmac_bytes(pair_key, companion_message(id, nonce, device).as_bytes()))
+pub fn companion_sign(pair_key: &[u8], id: &str, nonce: &str, device: &str, code: &str) -> String {
+    super::hex(&hmac_bytes(pair_key, companion_message(id, nonce, device, code).as_bytes()))
 }
 
-pub fn companion_verify(pair_key: &[u8], id: &str, nonce: &str, device: &str, sig_hex: &str) -> bool {
-    super::unhex(sig_hex).is_some_and(|tag| hmac_verify(pair_key, companion_message(id, nonce, device).as_bytes(), &tag))
+pub fn companion_verify(pair_key: &[u8], id: &str, nonce: &str, device: &str, code: &str, sig_hex: &str) -> bool {
+    super::unhex(sig_hex).is_some_and(|tag| hmac_verify(pair_key, companion_message(id, nonce, device, code).as_bytes(), &tag))
 }
 
 fn alert_message(id: &str, ts: u64, severity: &str, title: &str, body: &str) -> String {
@@ -176,10 +178,11 @@ mod tests {
     #[test]
     fn companion_and_secret_eq() {
         let k = b"pair";
-        let sig = companion_sign(k, "req1", "n1", "phone-1");
-        assert!(companion_verify(k, "req1", "n1", "phone-1", &sig));
-        assert!(!companion_verify(k, "req1", "n2", "phone-1", &sig));
-        assert!(!companion_verify(b"x", "req1", "n1", "phone-1", &sig));
+        let sig = companion_sign(k, "req1", "n1", "phone-1", "42");
+        assert!(companion_verify(k, "req1", "n1", "phone-1", "42", &sig));
+        assert!(!companion_verify(k, "req1", "n2", "phone-1", "42", &sig));
+        assert!(!companion_verify(k, "req1", "n1", "phone-1", "24", &sig), "the wrong matching code fails");
+        assert!(!companion_verify(b"x", "req1", "n1", "phone-1", "42", &sig));
         assert!(secret_eq("abc", "abc") && !secret_eq("abc", "abd") && !secret_eq("abc", "abcd"));
     }
 }

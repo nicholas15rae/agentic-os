@@ -612,7 +612,7 @@ pub(crate) async fn stream_in_slot(reader: &AllmReader, threads: &Threads<'_>, g
 
 /// Writes to AnythingLLM. Only the memory lifecycle, Tony's documenter, the Model Lab and the
 /// workspace-prompt setter may build one (`for_memory` / `for_documenter` / `for_model_lab` /
-/// `for_prompts`; enforced by a unit test).
+/// `for_prompts`), plus Biz Ops provisioning and the Librarian's Query lock; enforced by a unit test.
 pub(crate) struct AllmWriter(AllmConn);
 
 impl AllmWriter {
@@ -635,6 +635,11 @@ impl AllmWriter {
     /// never the Booking workspaces).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn for_prompts(conn: AllmConn) -> Self {
+        Self(conn)
+    }
+
+    /// mcp.rs only: lock the Librarian's workspace to Query mode (`librarian_lock_query`).
+    pub(crate) fn for_librarian_lock(conn: AllmConn) -> Self {
         Self(conn)
     }
 
@@ -1123,12 +1128,13 @@ mod tests {
     fn raw_calls_and_writer_constructors_are_confined() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("commands");
         let raw = regex::Regex::new(r"(^|[^A-Za-z0-9_])(allm|allm_key)\(").unwrap();
-        let allowed: [(&str, &[&str]); 5] = [
+        let allowed: [(&str, &[&str]); 6] = [
             ("AllmWriter::for_memory(", &["memory.rs"]),
             ("AllmWriter::for_documenter(", &["documenter.rs", "pipeline.rs"]),
             ("AllmWriter::for_model_lab(", &["modellab.rs"]),
             ("AllmWriter::for_prompts(", &["agent_prompts.rs"]),
             ("AllmWriter::for_ops_provision(", &["business_registry.rs"]),
+            ("AllmWriter::for_librarian_lock(", &["mcp.rs"]),
         ];
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();

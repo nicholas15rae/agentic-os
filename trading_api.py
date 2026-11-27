@@ -80,8 +80,47 @@ async def _json(request: Request) -> dict:
     return data
 
 
-def offline_status(reason: str) -> dict:
+_OFFLINE_SINCE: float | None = None  # first /status that found the bridge process unreachable
+_CALENDAR = None
+
+
+def _market_calendar():
+    """trading/market_calendar.py, loaded by path (stdlib only; the gateway doesn't import the trading venv).
+    None when it can't load (e.g. no tz database for zoneinfo): the HUD then just shows no market line."""
+    global _CALENDAR
+    if _CALENDAR is None:
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location("trading_market_calendar", TRADING_DIR / "market_calendar.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            mod.market_status(time.time())  # zoneinfo data present?
+            _CALENDAR = mod
+        except Exception:  # noqa: BLE001
+            _CALENDAR = False
+    return _CALENDAR or None
+
+
+def offline_alert(reason: str, since: float, now: float, threshold_s: float = 120.0) -> dict | None:
+    """Same rule as ibkr_bridge.down_alert: down > threshold during the US regular session → the red banner."""
+    cal = _market_calendar()
+    if cal is None or not cal.regular_session_open(now):
+        return None
+    t = cal.ny_now(now)
+    start = t.replace(hour=cal.OPEN.hour, minute=cal.OPEN.minute, second=0, microsecond=0).timestamp()
+    down_for = now - max(since, start)
+    if down_for < threshold_s:
+        return None
+    return {"level": "critical", "code": "bridge_down", "since": since,
+            "sinceNy": cal.ny_now(since).strftime("%a %H:%M ET"), "minutes": int(down_for // 60), "reason": reason,
+            "message": f"trading bridge offline for {int(down_for // 60)} min during market hours: no trade can be placed"}
+
+
+def offline_status(reason: str, since: float | None = None) -> dict:
     """Same shape as the bridge snapshot, so the HUD has one code path."""
+    now = time.time()
+    cal = _market_calendar()
     return {
         "state": "BRIDGE_OFFLINE",
         "mode": "PAPER",
@@ -92,7 +131,11 @@ def offline_status(reason: str) -> dict:
         "reasons": [reason],
         "lastError": None,
         "connectedSince": None,
-        "updatedAt": time.time(),
+        "downSince": since,
+        "downReason": reason,
+        "market": cal.market_status(now) if cal else None,
+        "alert": offline_alert(reason, since, now) if since is not None else None,
+        "updatedAt": now,
         "account": None,
         "fx": {},
         "pnl": {"daily": None, "unrealized": None, "realized": None},
@@ -104,10 +147,15 @@ def offline_status(reason: str) -> dict:
 
 @router.get("/status")
 def trading_status():
+    global _OFFLINE_SINCE
     try:
-        return _bridge_get("/status")
+        snap = _bridge_get("/status")
+        _OFFLINE_SINCE = None
+        return snap
     except (urllib.error.URLError, OSError, ValueError) as e:
-        return offline_status(f"bridge not reachable on 127.0.0.1:{_bridge_port()} ({type(e).__name__})")
+        if _OFFLINE_SINCE is None:
+            _OFFLINE_SINCE = time.time()
+        return offline_status(f"bridge not reachable on 127.0.0.1:{_bridge_port()} ({type(e).__name__})", _OFFLINE_SINCE)
 
 
 OFFLINE = (urllib.error.URLError, OSError, ValueError)

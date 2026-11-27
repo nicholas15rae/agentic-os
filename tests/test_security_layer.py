@@ -248,6 +248,42 @@ class SecurityLayerTests(unittest.TestCase):
         self.assertEqual(inbox["alerts"][-1]["sig"], sig)
         (d / "companion.paired").unlink()
 
+    def test_unknown_device_is_audited_once_per_host(self):
+        sa._UNKNOWN_SEEN.clear()
+        p = sa.sec_dir() / "security_audit.jsonl"
+        before = len(p.read_text().splitlines()) if p.exists() else 0
+        e = sa.note_unknown_device("100.70.1.2", "on the mesh with no gateway token", "/api/cc/config?x=secret", now=1000.0)
+        self.assertEqual((e["event"], e["severity"], e["outcome"], e["source"]), ("unknown_device", "warn", "failure", "gateway:100.70.1.2"))
+        self.assertEqual(e["detail"]["path"], "/api/cc/config", "no query string in the trail")
+        self.assertIsNone(sa.note_unknown_device("100.70.1.2", "again", "/api/x", now=1100.0), "throttled per host")
+        self.assertIsNotNone(sa.note_unknown_device("192.168.1.9", "outside the NetBird mesh", "/", now=1100.0))
+        self.assertIsNotNone(sa.note_unknown_device("100.70.1.2", "later", "/", now=1000.0 + sa.UNKNOWN_DEVICE_EVERY_S))
+        self.assertEqual(len(p.read_text().splitlines()), before + 3)
+        self.assertTrue(sa.verify_chain()[0])
+        self.assertIn("unknown_device", sa._TITLES)
+
+    def test_unknown_device_alert_follows_the_one_time_migration(self):
+        # Same rule as config.rs `migrate_value`: an explicit, unmigrated list also alerts on
+        # unknown_device; once Rust recorded the migration, the saved list is final.
+        self.assertIn("unknown_device", sa.alert_events({}))
+        self.assertIn("unknown_device", sa.alert_events({"alerts": {"events": ["hard_lock"]}}))
+        self.assertEqual(sa.alert_events({"alerts": {"events": ["hard_lock"]}, "migrations": [sa.MIGRATE_UNKNOWN_DEVICE_ALERT]}), ["hard_lock"])
+        self.assertEqual(sa.alert_events({"alerts": {"events": ["hard_lock", "unknown_device"]}}), ["hard_lock", "unknown_device"])
+        # Through maybe_alert and the real file: an old explicit list still raises the alert.
+        d = Path(tempfile.mkdtemp(prefix="cc-sec-alert-"))
+        try:
+            (d / "security.config.json").write_text(json.dumps({"alerts": {"enabled": True, "channels": [], "events": ["hard_lock"]}}), encoding="utf-8")
+            sa._LAST_ALERT.pop("unknown_device", None)
+            entry = {"event": "unknown_device", "severity": "warn", "deviceId": "gateway", "source": "gateway:1.2.3.4", "detail": {}}
+            t = sa.maybe_alert(entry, d)
+            self.assertIsNotNone(t)
+            t.join(5)
+            (d / "security.config.json").write_text(json.dumps({"migrations": [sa.MIGRATE_UNKNOWN_DEVICE_ALERT], "alerts": {"enabled": True, "channels": [], "events": ["hard_lock"]}}), encoding="utf-8")
+            sa._LAST_ALERT.pop("unknown_device", None)
+            self.assertIsNone(sa.maybe_alert(entry, d), "a deliberate removal after the migration sticks")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

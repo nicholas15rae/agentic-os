@@ -6,7 +6,8 @@ import { PHONE_LITE } from "@/lib/phone-lite";
 import type { WidgetInstance } from "./types";
 import { mergeLook, type DisplayMode, type WidgetLook } from "./look";
 import { activeItems, addHomeView, addTravelPage, allIds, duplicatePage, linkMode, migrateLayout, movePage, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, startupOf, type PagesState } from "./pages";
-import { canHide, canRemovePage, ensureLocked, lockedIn, resetItems, safeLook, withoutLockedOnPage } from "./locks";
+import { canClickThrough, canHide, canRemovePage, ensureLocked, lockedIn, resetItems, safeLook, withoutLockedOnPage } from "./locks";
+import { clampFloat, floatFromGrid, gridItems, sanitizeFloats, withoutFloats, type FloatRect } from "./floating";
 import { SHARED, backToShared, customize, sanitizeVariants, switchTo, type VariantState } from "./variants";
 
 export { GRID_COLS, GRID_ROWS, activeItems, fits, type LayoutPage } from "./pages";
@@ -116,6 +117,14 @@ export interface LayoutState extends PagesState, VariantState {
   removeWhere: (pred: (i: WidgetInstance) => boolean) => RemovedTile[];
   /** Put items back where `removeWhere` found them (skips a page that is gone or an id already there). */
   putBack: (tiles: RemovedTile[]) => void;
+  /** Window options: float off the grid (null: back onto the grid; false when there is no room). */
+  setFloat: (instanceId: string, float: boolean) => boolean;
+  /** Move / resize a floating panel (fractions of the board; kept usable, a safety control kept wholly on). */
+  moveFloat: (instanceId: string, rect: Partial<FloatRect>) => void;
+  /** Clicks pass through to what is under it (never a safety control). */
+  setClickThrough: (instanceId: string, on: boolean) => void;
+  /** A floating panel stays above the other floating panels. */
+  setPinned: (instanceId: string, on: boolean) => void;
   /** Export / import (Settings → Appearance): the saved layout, and a layout from a file (validated, unknown widgets dropped, safety controls kept). */
   exportLayout: () => SavedLayout;
   importLayout: (raw: unknown) => void;
@@ -172,6 +181,15 @@ export interface SurfaceSpec {
   initial?: PagesState;
 }
 
+/** The panel without its floating fields (back on the grid). */
+function onGrid(i: WidgetInstance): WidgetInstance {
+  const { float: _f, pinned: _p, clickThrough: _c, ...rest } = i;
+  void _f;
+  void _p;
+  void _c;
+  return rest;
+}
+
 const snapshot = (s: PagesState): PagesState => ({ pages: s.pages, activePage: s.activePage, startupPage: s.startupPage ?? null });
 
 /** One layout store per surface: the same engine, actions and safety locks on every page. */
@@ -201,10 +219,12 @@ export function createLayoutStore(spec: SurfaceSpec) {
             if (!def) return { ok: false, reason: "Unknown widget" };
             const sizes = [def.defaultSize, def.minSize].filter((z): z is { w: number; h: number } => !!z);
             const s = get();
-            const r = placeWidget(s, { widgetId, sizes, config: { ...def.defaultConfig, ...config }, pageId: opts?.pageId }, shortId);
+            // Floating panels don't take grid cells: place among the grid panels only.
+            const { grid, restore } = withoutFloats(s);
+            const r = placeWidget(grid, { widgetId, sizes, config: { ...def.defaultConfig, ...config }, pageId: opts?.pageId }, shortId);
             if (!r.ok) return { ok: false, reason: r.reason };
             if (r.created && opts?.noNewPage) return { ok: false, reason: "No room on this page: hide or shrink a panel first" };
-            set(r.state);
+            set(restore(r.state));
             return { ok: true, pageId: r.pageId, created: r.created };
           },
           remove: (instanceId) => {
@@ -212,9 +232,10 @@ export function createLayoutStore(spec: SurfaceSpec) {
             updateActive((items) => items.filter((i) => i.instanceId !== instanceId));
           },
           place: (instanceId, rect) => {
-            const next = placePushing(activeItems(get()), instanceId, rect);
+            const items = activeItems(get());
+            const next = placePushing(gridItems(items), instanceId, rect);
             if (!next) return false;
-            updateActive(() => next);
+            updateActive((cur) => [...next, ...cur.filter((i) => i.float)]);
             return true;
           },
           // By id on whichever page holds it (ids are unique), so a widget's late async save still lands after a page switch.
@@ -236,12 +257,15 @@ export function createLayoutStore(spec: SurfaceSpec) {
             if (!page || !cur) return false;
             // A safety control never collapses to an icon (that would hide it behind a tap).
             if (display === "icon" && !canHide(cur, isLockedWidget)) return false;
+            // Icon / compact are grid sizes: a floating panel snaps to the grid first.
+            if (cur.float && display !== "full") return false;
             const def = getWidget(cur.widgetId);
             const full = cur.fullSize ?? (cur.display && cur.display !== "full" ? def?.defaultSize : undefined) ?? { w: cur.w, h: cur.h };
             const half = def?.minSize ?? { w: Math.max(1, Math.ceil(full.w / 2)), h: Math.max(1, Math.ceil(full.h / 2)) };
             const size = display === "icon" ? { w: 1, h: 1 } : display === "compact" ? { w: Math.min(half.w, full.w), h: Math.min(half.h, full.h) } : full;
-            const moved = placePushing(page.items, instanceId, { col: Math.min(cur.col, 13 - size.w), row: Math.min(cur.row, 9 - size.h), ...size });
-            if (!moved) return false;
+            const placed = placePushing(gridItems(page.items), instanceId, { col: Math.min(cur.col, 13 - size.w), row: Math.min(cur.row, 9 - size.h), ...size });
+            if (!placed) return false;
+            const moved = [...placed, ...page.items.filter((i) => i.float && i.instanceId !== instanceId)];
             const items = moved.map((i) => (i.instanceId === instanceId ? { ...i, display: display === "full" ? undefined : display, fullSize: display === "full" ? undefined : full } : i));
             set({ pages: s.pages.map((p) => (p.id === page.id ? { ...p, items } : p)), windows: display === "icon" ? s.windows : s.windows.filter((w) => w.instanceId !== instanceId) });
             return true;
@@ -357,14 +381,69 @@ export function createLayoutStore(spec: SurfaceSpec) {
               });
               return { pages: into(s, s.variant).pages, variants: Object.fromEntries(Object.entries(s.variants).map(([k, v]) => [k, into(v, k)])) };
             }),
+          setFloat: (instanceId, float) => {
+            const s = get();
+            const page = s.pages.find((p) => p.items.some((i) => i.instanceId === instanceId));
+            const cur = page?.items.find((i) => i.instanceId === instanceId);
+            if (!page || !cur) return false;
+            const locked = isLockedWidget(cur.widgetId);
+            let items: WidgetInstance[] | null;
+            if (float) {
+              if (cur.display && cur.display !== "full") return false;
+              items = page.items.map((i) => (i.instanceId === instanceId ? { ...i, float: clampFloat(floatFromGrid(i), locked) } : i));
+            } else {
+              // Back onto the grid at its old cell; neighbours move aside (false: no room).
+              const back = { ...cur, float: undefined, pinned: undefined, clickThrough: undefined };
+              const others = gridItems(page.items.filter((i) => i.instanceId !== instanceId));
+              const moved = placePushing([...others, back], instanceId, { col: cur.col, row: cur.row, w: cur.w, h: cur.h });
+              items = moved ? [...moved.map((i) => (i.instanceId === instanceId ? onGrid(i) : i)), ...page.items.filter((i) => i.float && i.instanceId !== instanceId)] : null;
+            }
+            if (!items) return false;
+            set({ pages: s.pages.map((p) => (p.id === page.id ? { ...p, items } : p)) });
+            return true;
+          },
+          moveFloat: (instanceId, rect) =>
+            set((s) => ({
+              pages: s.pages.map((p) => ({
+                ...p,
+                items: p.items.map((i) => (i.instanceId === instanceId && i.float ? { ...i, float: clampFloat({ ...i.float, ...rect }, isLockedWidget(i.widgetId)) } : i)),
+              })),
+            })),
+          setClickThrough: (instanceId, on) =>
+            set((s) => ({
+              pages: s.pages.map((p) => ({
+                ...p,
+                items: p.items.map((i) => {
+                  if (i.instanceId !== instanceId) return i;
+                  if (on && (!canClickThrough(i.widgetId, isLockedWidget) || !i.float)) return i;
+                  const next = { ...i };
+                  if (on) next.clickThrough = true;
+                  else delete next.clickThrough;
+                  return next;
+                }),
+              })),
+            })),
+          setPinned: (instanceId, on) =>
+            set((s) => ({
+              pages: s.pages.map((p) => ({
+                ...p,
+                items: p.items.map((i) => {
+                  if (i.instanceId !== instanceId || !i.float) return i;
+                  const next = { ...i };
+                  if (on) next.pinned = true;
+                  else delete next.pinned;
+                  return next;
+                }),
+              })),
+            })),
           exportLayout: () => {
             const s = get();
             return { pages: s.pages, activePage: s.activePage, startupPage: s.startupPage ?? null, variant: s.variant, variants: s.variants };
           },
           importLayout: (raw) => {
-            const live = ensureLocked(knownOnly(sanitizePages(raw, template)), template, isLockedWidget, shortId);
+            const live = sanitizeFloats(ensureLocked(knownOnly(sanitizePages(raw, template)), template, isLockedWidget, shortId), isLockedWidget);
             const v = sanitizeVariants(raw, template);
-            const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, ensureLocked(knownOnly(p), template, isLockedWidget, shortId)]));
+            const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, sanitizeFloats(ensureLocked(knownOnly(p), template, isLockedWidget, shortId), isLockedWidget)]));
             set({ ...live, startupPage: live.startupPage ?? null, ...v, variants, activePage: startupOf(live), lastReset: null, ...fresh });
           },
           moveToPage: (instanceId, pageId) => {
@@ -391,9 +470,9 @@ export function createLayoutStore(spec: SurfaceSpec) {
         // Safety controls a save (or an import) lost are put back.
         merge: (persisted, current) => {
           if (persisted == null) return current;
-          const s = ensureLocked(sanitizePages(persisted, template), template, isLockedWidget, shortId);
+          const s = sanitizeFloats(ensureLocked(sanitizePages(persisted, template), template, isLockedWidget, shortId), isLockedWidget);
           const v = sanitizeVariants(persisted, template);
-          const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, ensureLocked(p, template, isLockedWidget, shortId)]));
+          const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, sanitizeFloats(ensureLocked(p, template, isLockedWidget, shortId), isLockedWidget)]));
           return { ...current, ...s, ...v, variants, activePage: startupOf(s) };
         },
       },

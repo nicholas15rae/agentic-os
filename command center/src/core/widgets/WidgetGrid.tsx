@@ -5,6 +5,7 @@ import { getWidget } from "./registry";
 import { GRID_COLS, GRID_ROWS, activeItems, type WidgetWindow } from "./layout-store";
 import { useSurface } from "./surface-context";
 import { LOCKED_MIN_SCALE } from "./locks";
+import { gridItems } from "./floating";
 import { useDefaultFrame } from "@/features/appearance/use-tokens";
 import { isLockedWidget } from "./registry";
 import { placePushing } from "./pages";
@@ -122,7 +123,7 @@ function PageBoard() {
   return (
     <div
       ref={gridRef}
-      className="relative grid h-full gap-4 px-6 pb-4 xl:gap-5 xl:px-8"
+      className="relative grid h-full gap-4 px-6 pb-4 [--gpb:1rem] [--gpx:1.5rem] xl:gap-5 xl:px-8 xl:[--gpx:2rem]"
       {...holdProps}
       style={{ gridTemplateColumns: `repeat(${GRID_COLS}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${GRID_ROWS}, minmax(0, 1fr))` }}
     >
@@ -191,7 +192,9 @@ function WidgetCell({
   const [ghost, setGhost] = useState<Pick<WidgetInstance, "col" | "row" | "w" | "h"> | null>(null);
   const [ghostValid, setGhostValid] = useState(true);
   const [styling, setStyling] = useState<DOMRect | null>(null);
-  const drag = useRef<{ mode: DragMode; startX: number; startY: number; cellW: number; cellH: number } | null>(null);
+  const drag = useRef<{ mode: DragMode; startX: number; startY: number; cellW: number; cellH: number; gridW: number; gridH: number; float?: { x: number; y: number; w: number; h: number } } | null>(null);
+  // Window options: a floating panel sits over the board (desktop grid only; the phone column lists it).
+  const floating = !compact && !!inst.float;
 
   const onPointerDown = useCallback(
     (mode: DragMode) => (e: React.PointerEvent) => {
@@ -200,14 +203,21 @@ function WidgetCell({
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       const rect = grid.getBoundingClientRect();
-      drag.current = { mode, startX: e.clientX, startY: e.clientY, cellW: rect.width / GRID_COLS, cellH: rect.height / GRID_ROWS };
+      drag.current = { mode, startX: e.clientX, startY: e.clientY, cellW: rect.width / GRID_COLS, cellH: rect.height / GRID_ROWS, gridW: rect.width, gridH: rect.height, float: inst.float };
     },
-    [gridRef],
+    [gridRef, inst.float],
   );
 
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
+    // A floating panel moves / resizes freely (fractions of the board), clamped by the store.
+    if (d.float) {
+      const fx = (e.clientX - d.startX) / d.gridW;
+      const fy = (e.clientY - d.startY) / d.gridH;
+      useLayout.getState().moveFloat(inst.instanceId, d.mode === "move" ? { x: d.float.x + fx, y: d.float.y + fy } : { w: d.float.w + fx, h: d.float.h + fy });
+      return;
+    }
     const dc = Math.round((e.clientX - d.startX) / d.cellW);
     const dr = Math.round((e.clientY - d.startY) / d.cellH);
     // Content scales to fit, so any widget can shrink to a single cell.
@@ -224,7 +234,7 @@ function WidgetCell({
           };
     setGhost(next);
     // Valid when it fits, pushing neighbours aside if needed.
-    setGhostValid(placePushing(activeItems(useLayout.getState()), inst.instanceId, next) !== null);
+    setGhostValid(placePushing(gridItems(activeItems(useLayout.getState())), inst.instanceId, next) !== null);
   };
 
   const onPointerUp = () => {
@@ -341,7 +351,7 @@ function WidgetCell({
         />
       )}
       {icon ? (
-        <section data-widget={inst.instanceId} aria-label={def.title} className={`relative min-h-0 ${editing ? "r-20 ring-1 ring-amber/40" : ""}`} style={compact ? undefined : area(inst)}>
+        <section data-widget={inst.instanceId} aria-label={def.title} className={`relative min-h-0 ${editing ? "r-20 ring-1 ring-amber/40" : ""}`} style={compact ? undefined : floating ? floatStyle(inst) : area(inst)}>
           <IconTile inst={inst} def={def} onOpen={() => !editing && openWindow(inst.instanceId)} />
           {!windowed && (
             <div hidden aria-hidden className="pointer-events-none absolute size-0 overflow-hidden">
@@ -365,7 +375,12 @@ function WidgetCell({
             compact ? (frameless ? "" : "min-h-40") : "",
             editing ? "ring-1 ring-amber/40" : focused ? "ring-1 ring-teal/50" : "",
           ].join(" ")}
-          style={{ ...(compact ? (def.compactHeight ? { height: def.compactHeight } : {}) : area(inst)), ...(focused ? {} : glassStyle(frame, alpha)) }}
+          style={{
+            ...(compact ? (def.compactHeight ? { height: def.compactHeight } : {}) : floating ? floatStyle(inst) : { ...area(inst), ...(locked ? { zIndex: LOCKED_Z } : {}) }),
+            ...(focused ? {} : glassStyle(frame, alpha)),
+            // Clicks pass through to what's under it (never a safety control; never while editing).
+            ...(inst.clickThrough && floating && !editing && !locked ? { pointerEvents: "none" as const } : {}),
+          }}
         >
           <div className={`h-full ${frameless ? "" : "p-4 xl:p-5"} ${editing || focused ? "pt-11 xl:pt-11" : ""}`}>
             {/* #12: one live copy only: a widget opened larger lives in its window meanwhile. */}
@@ -510,7 +525,7 @@ const DISPLAYS: { id: DisplayMode; label: string }[] = [
 
 /** Edit mode → the palette button: this widget's look, saved with the page. */
 function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetInstance; def: WidgetDefinition<any>; wallpaperId: string; anchor: DOMRect; onClose: () => void }) {
-  const { setLook, setDisplay } = useSurface().getState();
+  const { setLook, setDisplay, setFloat, setPinned, setClickThrough } = useSurface().getState();
   const locked = isLockedWidget(inst.widgetId);
   const [note, setNote] = useState<string | null>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -535,8 +550,31 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
           <X size={13} />
         </button>
       </div>
+      <Row label="Place">
+        <button className={seg(!inst.float)} onClick={() => setNote(setFloat(inst.instanceId, false) ? null : "No room on the grid at its old spot: make room first.")}>
+          Snap to grid
+        </button>
+        <button className={seg(!!inst.float)} onClick={() => setNote(setFloat(inst.instanceId, true) ? null : "Show it as Full first, then float it.")} title="Drag it anywhere over the page">
+          Float
+        </button>
+        {inst.float && (
+          <button className={seg(!!inst.pinned)} onClick={() => setPinned(inst.instanceId, !inst.pinned)} title="Stay above the other floating panels">
+            Pin on top
+          </button>
+        )}
+      </Row>
+      {!locked && inst.float && (
+        <Row label="Clicks">
+          <button className={seg(!inst.clickThrough)} onClick={() => setClickThrough(inst.instanceId, false)}>
+            Normal
+          </button>
+          <button className={seg(!!inst.clickThrough)} onClick={() => setClickThrough(inst.instanceId, true)} title="Clicks go to what's under it (Edit layout still reaches it)">
+            Pass through
+          </button>
+        </Row>
+      )}
       <Row label="Show as">
-        {DISPLAYS.filter((d) => !(locked && d.id === "icon")).map((d) => (
+        {DISPLAYS.filter((d) => !(locked && d.id === "icon") && !(inst.float && d.id !== "full")).map((d) => (
           <button key={d.id} className={seg((inst.display ?? "full") === d.id)} onClick={() => setNote(setDisplay(inst.instanceId, d.id) ? null : "No room on this page for that size.")}>
             {d.id === "icon" && <AppWindow size={10} className="mr-1 inline" />}
             {d.label}
@@ -688,6 +726,22 @@ function WidgetWindowFrame({ w, inst, def, phone }: { w: WidgetWindow; inst: Wid
     </div>
   );
 }
+
+/** A floating panel's box over the board (the grid is its positioned parent); pinned ones on top. */
+const floatStyle = (i: WidgetInstance): React.CSSProperties => {
+  const f = i.float!;
+  // Inside the grid's padding (--gpx / --gpb on the board), so floating starts exactly where the cell was.
+  return {
+    position: "absolute",
+    left: `calc(var(--gpx) + ${f.x} * (100% - 2 * var(--gpx)))`,
+    top: `calc(${f.y} * (100% - var(--gpb)))`,
+    width: `calc(${f.w} * (100% - 2 * var(--gpx)))`,
+    height: `calc(${f.h} * (100% - var(--gpb)))`,
+    zIndex: isLockedWidget(i.widgetId) ? LOCKED_Z : i.pinned ? 30 : 20,
+  };
+};
+/** Safety controls are drawn above every floating panel, pinned ones included. */
+const LOCKED_Z = 40;
 
 const area = (r: Pick<WidgetInstance, "col" | "row" | "w" | "h">): React.CSSProperties => ({
   gridColumn: `${r.col} / span ${r.w}`,

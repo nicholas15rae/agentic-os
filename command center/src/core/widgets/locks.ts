@@ -1,4 +1,5 @@
 import { fits, placeWidget, withUniqueIds, type PagesState } from "./pages";
+import { gridItems } from "./floating";
 import type { WidgetInstance } from "./types";
 
 /**
@@ -43,7 +44,8 @@ export function ensureLocked(s: PagesState, template: WidgetInstance[], isLocked
   // A control saved off the board (or overlapping another) is taken off and placed again below.
   let state: PagesState = {
     ...s,
-    pages: s.pages.map((p) => ({ ...p, items: p.items.filter((i) => !isLocked(i.widgetId) || fits(p.items, i)) })),
+    // A floating control keeps its float (sanitizeFloats clamps it); one on the grid must fit among the grid panels.
+    pages: s.pages.map((p) => ({ ...p, items: p.items.filter((i) => !isLocked(i.widgetId) || !!i.float || fits(gridItems(p.items), i)) })),
   };
   // `carry`: controls the user added that a reset / "use the shared layout" would otherwise drop.
   const wanted = [...template, ...carry.filter((c) => !template.some((t) => t.widgetId === c.widgetId))];
@@ -52,7 +54,7 @@ export function ensureLocked(s: PagesState, template: WidgetInstance[], isLocked
     if (state.pages.some((p) => p.items.some((i) => i.widgetId === t.widgetId))) continue;
     // Its old spot first when that is free, else the first page with room (else a new page).
     const first = state.pages[0];
-    if (first && fits(first.items, t) && !state.pages.some((p) => p.items.some((i) => i.instanceId === t.instanceId))) {
+    if (first && fits(gridItems(first.items), t) && !state.pages.some((p) => p.items.some((i) => i.instanceId === t.instanceId))) {
       state = { ...state, pages: state.pages.map((p) => (p.id === first.id ? { ...p, items: [...p.items, { ...t, display: undefined, fullSize: undefined }] } : p)) };
       continue;
     }

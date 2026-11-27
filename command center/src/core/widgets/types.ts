@@ -75,6 +75,10 @@ export interface WidgetInstance {
   display?: DisplayMode;
   /** The full size to come back to from icon / compact. */
   fullSize?: { w: number; h: number };
+  /** Window options: floating off the grid (fractions of the board), clicks passing through, pinned above other floats. */
+  float?: { x: number; y: number; w: number; h: number };
+  clickThrough?: boolean;
+  pinned?: boolean;
 }
 
 export function defineWidget<C extends Record<string, unknown>>(def: WidgetDefinition<C>): WidgetDefinition<C> {

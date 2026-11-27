@@ -2064,6 +2064,11 @@ pub fn comfy_settings_set(patch: SettingsPatch) -> Result<ComfySettings, String>
     Ok(s)
 }
 
+/// The opt-in live smoke test (#[ignore]d, COMFY_LIVE=1): comfy_live.rs.
+#[cfg(test)]
+#[path = "comfy_live.rs"]
+mod live;
+
 #[cfg(test)]
 mod tests {
     use super::*;

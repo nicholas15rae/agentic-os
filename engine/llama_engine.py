@@ -69,6 +69,10 @@ class EngineSettings:
     prompt_cache: bool = True            # slot save/restore folder + cache_prompt
     keep_warm: bool = True               # warm-up generation after every load
     jinja: bool = True                   # the GGUF's own chat template (tool calls need it)
+    # Thinking off unless a request turns it on. Qwen3.5's template reads only `enable_thinking`
+    # (LM Studio maps `reasoning_effort`, llama-server does not), so without this every client that
+    # only sends reasoning_effort (dispatch.rs) or nothing (n8n, Scene Reader) would think first.
+    thinking_default: bool = False
     threads: int = 0                     # 0 = llama-server's default
     extra_args: list[str] = field(default_factory=list)
 
@@ -145,6 +149,8 @@ def build_args(s: EngineSettings, model_path: Optional[str] = None) -> list[str]
          "--no-webui", "--log-colors", "off", "--metrics"]
     if s.jinja:
         a.append("--jinja")
+        if not s.thinking_default:
+            a += ["--chat-template-kwargs", '{"enable_thinking":false}']
     if s.cache_reuse > 0:
         a += ["--cache-reuse", str(s.cache_reuse)]
     if s.prompt_cache:

@@ -14,7 +14,7 @@ import { MobileTabs, SideRail } from "@/shell/Navigation";
 import { ReelDock } from "@/shell/ReelDock";
 import { PageSwitcher } from "@/shell/PageSwitcher";
 import { useNav, type Section } from "@/stores/nav";
-import { useSettings } from "@/stores/settings";
+import { isDesktopApp, useSettings } from "@/stores/settings";
 import { useLayout } from "@/core/widgets/layout-store";
 import { useMyApps } from "@/features/myapps/store";
 import { cc } from "@/lib/cc-api";
@@ -26,6 +26,7 @@ import { useKillSwitchHotkey } from "@/features/trading/kill-switch";
 import { SecurityGate } from "@/features/security/SecurityGate";
 import { installPageLinks } from "@/core/widgets/page-links";
 import { installWallTone } from "@/features/wallpaper/wall-tone";
+import { installUiPull, installUiPush } from "@/features/appearance/ui-sync";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -99,6 +100,8 @@ function MainApp() {
   useOsBoot();
   useCueScheduler();
   useConfigSnapshot();
+  // Layout step 6: the desktop shares its layouts and themes; the phone follows them.
+  useEffect(() => (isDesktopApp() ? installUiPush() : installUiPull()), []);
   useKillSwitchHotkey(); // Ctrl+Shift+X: trading E-stop from any section
   useEffect(installSpotifyReauthNotice, []); // toast when Rust opens a Spotify consent tab by itself
   useEffect(bootOps, []); // business registry + review-digest badge

@@ -6,7 +6,7 @@ import { PHONE_LITE } from "@/lib/phone-lite";
 import type { WidgetInstance } from "./types";
 import { mergeLook, type DisplayMode, type WidgetLook } from "./look";
 import { activeItems, addHomeView, addTravelPage, allIds, duplicatePage, linkMode, migrateLayout, movePage, moveToPage, nextPageName, placePushing, placeWidget, removePage, sanitizePages, startupOf, type PagesState } from "./pages";
-import { canClickThrough, canHide, canRemovePage, ensureLocked, lockedIn, resetItems, safeLook, withoutLockedOnPage } from "./locks";
+import { anyLocked, canClickThrough, canHide, canRemovePage, ensureLocked, lockedIn, resetItems, safeLook, uniqueIds, withoutLockedOnPage } from "./locks";
 import { clampFloat, floatFromGrid, gridItems, sanitizeFloats, withoutFloats, type FloatRect } from "./floating";
 import { SHARED, backToShared, customize, sanitizeVariants, switchTo, type VariantState } from "./variants";
 
@@ -127,7 +127,8 @@ export interface LayoutState extends PagesState, VariantState {
   setPinned: (instanceId: string, on: boolean) => void;
   /** Export / import (Settings → Appearance): the saved layout, and a layout from a file (validated, unknown widgets dropped, safety controls kept). */
   exportLayout: () => SavedLayout;
-  importLayout: (raw: unknown) => void;
+  /** `keepView` (phone sync): keep the page you are on and open windows / focus that still exist. */
+  importLayout: (raw: unknown, opts?: { keepView?: boolean }) => void;
 }
 
 /** What a surface saves (and what an `agentic-os-ui.json` file carries per surface). */
@@ -195,6 +196,8 @@ const snapshot = (s: PagesState): PagesState => ({ pages: s.pages, activePage: s
 /** One layout store per surface: the same engine, actions and safety locks on every page. */
 export function createLayoutStore(spec: SurfaceSpec) {
   const template = spec.defaults;
+  /** Every load / import goes through this: unique ids, safety controls kept and on the board, floats sane. */
+  const cleanLayout = (p: PagesState, known: boolean): PagesState => sanitizeFloats(ensureLocked(uniqueIds(known ? knownOnly(p) : p, isLockedWidget, shortId), template, isLockedWidget, shortId), isLockedWidget);
   const seeded = (): PagesState => ensureLocked(spec.initial ?? { pages: [{ id: "p1", name: "Page 1", items: template }], activePage: "p1" }, template, isLockedWidget, shortId);
   return create<LayoutState>()(
     persist(
@@ -228,7 +231,7 @@ export function createLayoutStore(spec: SurfaceSpec) {
             return { ok: true, pageId: r.pageId, created: r.created };
           },
           remove: (instanceId) => {
-            if (!canHide(findInst(instanceId), isLockedWidget)) return;
+            if (!canHide(findInst(instanceId), isLockedWidget) || anyLocked(get(), instanceId, isLockedWidget)) return;
             updateActive((items) => items.filter((i) => i.instanceId !== instanceId));
           },
           place: (instanceId, rect) => {
@@ -440,16 +443,24 @@ export function createLayoutStore(spec: SurfaceSpec) {
             const s = get();
             return { pages: s.pages, activePage: s.activePage, startupPage: s.startupPage ?? null, variant: s.variant, variants: s.variants };
           },
-          importLayout: (raw) => {
-            const live = sanitizeFloats(ensureLocked(knownOnly(sanitizePages(raw, template)), template, isLockedWidget, shortId), isLockedWidget);
+          importLayout: (raw, opts) => {
+            const live = cleanLayout(sanitizePages(raw, template), true);
             const v = sanitizeVariants(raw, template);
-            const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, sanitizeFloats(ensureLocked(knownOnly(p), template, isLockedWidget, shortId), isLockedWidget)]));
+            const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, cleanLayout(p, true)]));
+            const s = get();
+            if (opts?.keepView) {
+              // A sync: stay where you are, keep windows and focus whose panels still exist.
+              const ids = new Set(live.pages.flatMap((p) => p.items.map((i) => i.instanceId)));
+              const activePage = live.pages.some((p) => p.id === s.activePage) ? s.activePage : startupOf(live);
+              set({ ...live, startupPage: live.startupPage ?? null, ...v, variants, activePage, lastReset: null, windows: s.windows.filter((w) => ids.has(w.instanceId)), focused: s.focused && ids.has(s.focused) ? s.focused : null });
+              return;
+            }
             set({ ...live, startupPage: live.startupPage ?? null, ...v, variants, activePage: startupOf(live), lastReset: null, ...fresh });
           },
           moveToPage: (instanceId, pageId) => {
             const s = get();
             const inst = s.pages.flatMap((p) => p.items).find((i) => i.instanceId === instanceId);
-            if (!canHide(inst, isLockedWidget)) return false;
+            if (!canHide(inst, isLockedWidget) || anyLocked(s, instanceId, isLockedWidget)) return false;
             const next = moveToPage(s, instanceId, pageId, inst ? getWidget(inst.widgetId)?.minSize : undefined);
             if (!next) return false;
             set(next);
@@ -470,9 +481,9 @@ export function createLayoutStore(spec: SurfaceSpec) {
         // Safety controls a save (or an import) lost are put back.
         merge: (persisted, current) => {
           if (persisted == null) return current;
-          const s = sanitizeFloats(ensureLocked(sanitizePages(persisted, template), template, isLockedWidget, shortId), isLockedWidget);
+          const s = cleanLayout(sanitizePages(persisted, template), false);
           const v = sanitizeVariants(persisted, template);
-          const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, sanitizeFloats(ensureLocked(p, template, isLockedWidget, shortId), isLockedWidget)]));
+          const variants = Object.fromEntries(Object.entries(v.variants).map(([k, p]) => [k, cleanLayout(p, false)]));
           return { ...current, ...s, ...v, variants, activePage: startupOf(s) };
         },
       },
@@ -505,7 +516,7 @@ export function surfaceStore(spec: SurfaceSpec): LayoutStore {
   if (!s) {
     s = createLayoutStore(spec);
     stores.set(spec.surface, s);
-    onNewSurface?.(s);
+    for (const fn of onNewSurface) fn(s);
   }
   return s;
 }
@@ -513,8 +524,9 @@ export function surfaceStore(spec: SurfaceSpec): LayoutStore {
 /** Every surface's store made so far (home first). */
 export const allSurfaceStores = (): LayoutStore[] => [...stores.values()];
 
-let onNewSurface: ((s: LayoutStore) => void) | null = null;
-/** Called for each surface store made later (the mode link applies the current mode to it). */
-export function onSurfaceCreated(fn: ((s: LayoutStore) => void) | null) {
-  onNewSurface = fn;
+const onNewSurface = new Set<(s: LayoutStore) => void>();
+/** Called for each surface store made later (the mode link, the phone sync push). Returns the unsubscribe. */
+export function onSurfaceCreated(fn: (s: LayoutStore) => void): () => void {
+  onNewSurface.add(fn);
+  return () => void onNewSurface.delete(fn);
 }

@@ -5,6 +5,8 @@ import { SECTIONS } from "@/stores/nav";
 import { allThemes, resolvedFor, useAppearance } from "@/features/appearance/appearance-store";
 import { applyTokens } from "@/features/appearance/install";
 import { DEFAULT_TOKENS, OPTIONS_OF, RANGE_OF, type ThemeTokens, type TokenKey } from "@/features/appearance/theme";
+import { followDesktop, lastPushError, pullUi, setFollowDesktop } from "@/features/appearance/ui-sync";
+import { isDesktopApp } from "@/stores/settings";
 import { applyUiFile, saveUiFile, parseUiFile, readBackup, restoreBackup, type UiFile } from "@/features/appearance/ui-file";
 
 /**
@@ -37,6 +39,7 @@ export function AppearanceStudio() {
           <Preview page={scope || null} />
         </div>
       </Card>
+      {!isDesktopApp() && <FollowDesktopCard />}
       <FileCard />
     </>
   );
@@ -270,6 +273,43 @@ function Preview({ page }: { page: string | null }) {
   );
 }
 
+/** Phone / browser: follow the desktop's layouts and themes (on by default). */
+function FollowDesktopCard() {
+  const [on, setOn] = useState(followDesktop);
+  const [msg, setMsg] = useState<string | null>(null);
+  return (
+    <Card title="Follow the desktop" hint="The desktop shares its layouts (every page and mode) and themes through the gateway. With this on, this device takes the desktop's newest copy when it opens and every minute; panels it can't show are left out. Turn it off to keep this device's own layout.">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-2 fs-13 text-ink">
+          <input
+            type="checkbox"
+            checked={on}
+            onChange={(e) => {
+              setFollowDesktop(e.target.checked);
+              setOn(e.target.checked);
+              setMsg(null);
+            }}
+          />{" "}
+          Follow the desktop's layouts and themes
+        </label>
+        {on && (
+          <button
+            className="pill-glass !h-8 !px-3 fs-12"
+            onClick={() =>
+              void pullUi()
+                .then((done) => setMsg(done.length ? `Updated: ${done.join(", ")}.` : "Already up to date."))
+                .catch((e) => setMsg(e instanceof Error ? e.message : String(e)))
+            }
+          >
+            Check now
+          </button>
+        )}
+      </div>
+      {msg && <p className="mt-2 fs-12 text-ink-2">{msg}</p>}
+    </Card>
+  );
+}
+
 function FileCard() {
   const [msg, setMsg] = useState<string | null>(null);
   const [pending, setPending] = useState<UiFile | null>(null);
@@ -346,6 +386,7 @@ function FileCard() {
         </div>
       )}
       {msg && <p className="mt-2 fs-12 text-ink-2">{msg}</p>}
+      {isDesktopApp() && lastPushError() && <p className="mt-2 fs-12 text-amber-soft">Phone sync: {lastPushError()}</p>}
     </Card>
   );
 }

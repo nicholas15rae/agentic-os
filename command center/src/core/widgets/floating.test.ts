@@ -111,3 +111,17 @@ describe("window options: float, pass clicks through, pin on top", () => {
     expect(store.getState().setFloat("a", true)).toBe(false);
   });
 });
+
+describe("unique ids (a decoy can't share the kill switch's id)", () => {
+  const store = createLayoutStore({ surface: "float-test-ids", defaults: TEMPLATE });
+  it("a clashing id is renamed; removing the decoy leaves the safety control", () => {
+    store.getState().importLayout({ pages: [{ id: "p1", name: "P", items: [inst("ks", "f-panel", 1, 1), inst("ks", "f-estop", 10, 1)] }], activePage: "p1" });
+    const items = store.getState().pages[0].items;
+    expect(new Set(items.map((i) => i.instanceId)).size).toBe(items.length);
+    const decoy = items.find((i) => i.widgetId === "f-panel")!;
+    expect(decoy.instanceId).not.toBe("ks");
+    store.getState().remove(decoy.instanceId);
+    store.getState().remove("ks");
+    expect(store.getState().pages[0].items.some((i) => i.widgetId === "f-estop")).toBe(true);
+  });
+});

@@ -79,7 +79,7 @@ export interface ImportChoice {
 }
 
 /** Apply a parsed file (what `choice` allows), after backing up the current state. Returns what changed. */
-export function applyUiFile(file: UiFile, choice: ImportChoice = { themes: true, layouts: true }, backup = true): string[] {
+export function applyUiFile(file: UiFile, choice: ImportChoice = { themes: true, layouts: true }, backup = true, keepView = false): string[] {
   // Nothing to apply: keep the existing backup (it may be the only way back from an earlier import).
   if (!((choice.themes && file.appearance) || (choice.layouts && file.layouts))) return [];
   if (backup) saveBackup();
@@ -92,7 +92,7 @@ export function applyUiFile(file: UiFile, choice: ImportChoice = { themes: true,
     const stores = new Map(allSurfaceStores().map((st) => [st.getState().surface, st]));
     for (const [surface, raw] of Object.entries(file.layouts)) {
       const st = stores.get(surface);
-      if (st) st.getState().importLayout(raw);
+      if (st) st.getState().importLayout(raw, { keepView });
       // A page not opened yet this session: saved for it; its store validates it when it loads.
       else writeStorage(`cc.layout.${surface}`, JSON.stringify({ state: raw, version: 1 }));
       done.push(surface);

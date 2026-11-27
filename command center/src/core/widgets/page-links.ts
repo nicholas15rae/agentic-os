@@ -44,7 +44,7 @@ export function installPageLinks(): () => void {
   };
   const applyMode = (mode: string) => allSurfaceStores().forEach((st) => applyTo(st, mode));
   if (useModes.getState().loaded) applyMode(useModes.getState().activeId);
-  onSurfaceCreated((st) => useModes.getState().loaded && applyTo(st, useModes.getState().activeId));
+  const offCreated = onSurfaceCreated((st) => useModes.getState().loaded && applyTo(st, useModes.getState().activeId));
 
   const offMode = useModes.subscribe((m, prev) => {
     if (m.activeId === prev.activeId && m.loaded === prev.loaded) return;
@@ -66,7 +66,7 @@ export function installPageLinks(): () => void {
 
   applyWallpaper();
   return () => {
-    onSurfaceCreated(null);
+    offCreated();
     offMode();
     offPage();
   };

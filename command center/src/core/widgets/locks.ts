@@ -76,6 +76,40 @@ export function withoutLockedOnPage(s: PagesState, pageId: string, isLocked: IsL
   return { ...s, pages: s.pages.map((p) => (p.id === pageId ? { ...p, items: p.items.filter((i) => !isLocked(i.widgetId)) } : p)) };
 }
 
+/**
+ * Every instance id unique across the layout (a bad save or a crafted sync could reuse the kill
+ * switch's id on a decoy, so removing the decoy would remove it too). Safety controls keep their
+ * id; any other clash gets a fresh one. Pure.
+ */
+export function uniqueIds(s: PagesState, isLocked: IsLocked, newId: () => string): PagesState {
+  const taken = new Set<string>();
+  for (const p of s.pages) for (const i of p.items) if (isLocked(i.widgetId)) taken.add(i.instanceId);
+  const lockedSeen = new Set<string>();
+  return {
+    ...s,
+    pages: s.pages.map((p) => ({
+      ...p,
+      items: p.items.map((i) => {
+        if (isLocked(i.widgetId) && !lockedSeen.has(i.instanceId)) {
+          lockedSeen.add(i.instanceId);
+          return i;
+        }
+        if (!taken.has(i.instanceId)) {
+          taken.add(i.instanceId);
+          return i;
+        }
+        let id = `${i.widgetId}-${newId()}`;
+        while (taken.has(id)) id = `${i.widgetId}-${newId()}`;
+        taken.add(id);
+        return { ...i, instanceId: id };
+      }),
+    })),
+  };
+}
+
+/** True when any panel with this id is a safety control. */
+export const anyLocked = (s: PagesState, instanceId: string, isLocked: IsLocked) => s.pages.some((p) => p.items.some((i) => i.instanceId === instanceId && isLocked(i.widgetId)));
+
 /** Keeps at least `keep` px of a free-floating rect on screen (for free placement and pop-outs). */
 export function clampOnScreen(r: { x: number; y: number; w: number; h: number }, vw: number, vh: number, keep = 64) {
   const w = Math.min(r.w, vw);

@@ -77,6 +77,13 @@ pub(crate) fn builtin_tools(id: &str) -> Vec<ToolInfo> {
             t(id, super::calendar::CREATE, "Add an event to Google Calendar (no invites). Only after the user's confirmation card.", &["title", "startTime?", "endTime?", "date?", "allDay?", "location?", "description?"]),
         ],
         "spotify" => spotify_tools(id),
+        // ONE read-only tool (tool count matters): a plain summary from the gateway, never rows.
+        "finance" => vec![t(
+            id,
+            FINANCE_ASK,
+            "Answer a money question from Nic's Finance records (read-only, CA$). question_kind: owed_to_agent|income|expenses|pending|commissions|invoices_unpaid|hst|reminders; area: acting|contracting|bf supplements|personal; agent: an acting agency (\"ML Talent\"); period: this_month|last_month|this_quarter|this_year|YYYY-MM.",
+            &["question_kind", "area?", "agent?", "period?"],
+        )],
         "maps" => vec![
             t(id, "maps.route", "Driving route + ETA (OpenStreetMap; baseline, no live traffic) and draw it on the Route Map. destination: address, place or \"lat,lng\"; origin defaults to home; stops: optional list of places in order.", &["destination", "origin?", "stops?"]),
             t(id, "maps.geocode", "Find an address or place on the map (lat/lng and full address).", &["query"]),
@@ -576,6 +583,10 @@ pub(crate) fn role_refusal(cfg: &os_core::OsConfig, name: &str, agent: &str) -> 
 /// worker's scripted calls), never the role policy.
 /// `tony_extra`: the active mode's extra servers for Tony (`os_core::tony_mode_extras`).
 fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: bool, tony_extra: &[String]) -> Option<String> {
+    // Finance is read by Tony and the finance role only, whatever the grants or the caller say.
+    if let Some(e) = finance_reader_refusal(name, agent) {
+        return Some(e);
+    }
     let ungranted = |a: &str, who: &str| -> Option<String> {
         if !grants || name == "skills.read" || name == TONY_SET_MODE {
             return None;
@@ -613,6 +624,63 @@ fn role_refusal_with(cfg: &os_core::OsConfig, name: &str, agent: &str, grants: b
         return Some(format!("{READ_ONLY_ROLE_PREFIX}{a} — {name} is blocked for the {a} agent: {why}"));
     }
     None
+}
+
+// ── Finance (Section 11 item 10: Tony can read Finance) ──────────────────────
+
+/// Tony's one read-only Finance tool: a plain summary from the gateway
+/// (`GET /api/cc/finance/summary`, finance_summary.py), never raw rows. Writes stay on the
+/// Finance screens behind the unlock / PIN step-up.
+pub(crate) const FINANCE_ASK: &str = "finance.ask";
+/// The `finance.ask` question kinds (finance_summary.py `QUESTION_KINDS`).
+pub(crate) const FINANCE_KINDS: [&str; 8] = ["owed_to_agent", "income", "expenses", "pending", "commissions", "invoices_unpaid", "hst", "reminders"];
+
+/// Every agent but Tony and the finance role is refused the Finance server's tools, whatever its
+/// grants say (a grant to "all" or to the Coder never reaches the books). Pure.
+pub(crate) fn finance_reader_refusal(name: &str, agent: &str) -> Option<String> {
+    if server_of_tool(name) != "finance" || is_tony(agent) || agent.trim().eq_ignore_ascii_case("finance") {
+        return None;
+    }
+    Some(format!("{ROLE_PREFIX}{} — Finance is read by Tony and the Finance agent only, so {name} is blocked", agent.trim().to_ascii_lowercase()))
+}
+
+/// `finance.ask`'s arguments → the gateway query string (validated, encoded). Pure.
+/// `kind` is accepted for `question_kind`; area / agent / period are short free text the gateway
+/// resolves (an unknown one comes back as its 400 reason).
+pub(crate) fn finance_query(args: &Value) -> Result<String, String> {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim).unwrap_or("").to_string();
+    let kind = Some(s("question_kind")).filter(|k| !k.is_empty()).unwrap_or_else(|| s("kind")).to_ascii_lowercase().replace([' ', '-'], "_");
+    if !FINANCE_KINDS.contains(&kind.as_str()) {
+        return Err(format!("finance.ask: question_kind must be one of {}", FINANCE_KINDS.join(", ")));
+    }
+    let mut q = url::form_urlencoded::Serializer::new(String::new());
+    q.append_pair("kind", &kind);
+    for (k, max) in [("area", 60usize), ("agent", 60), ("period", 20)] {
+        let v = s(k);
+        if v.chars().count() > max {
+            return Err(format!("finance.ask: {k} is too long (at most {max} characters)"));
+        }
+        if !v.is_empty() {
+            q.append_pair(k, &v);
+        }
+    }
+    Ok(q.finish())
+}
+
+/// The kill switch blocks a gateway that isn't on this machine (a mesh / remote URL). Pure.
+pub(crate) fn finance_gateway_blocked(cfg: &OsConfig, gateway_url: &str) -> bool {
+    cfg.privacy.kill_switch && !os_core::is_loopback_host(&os_core::host_of(gateway_url))
+}
+
+/// `finance.ask`: GET the gateway's summary (read-only), its `text` only, capped at 1.5 KB.
+async fn finance_ask(state: &DispatchState, cfg: &OsConfig, args: &Value) -> Result<String, String> {
+    let q = finance_query(args)?;
+    if finance_gateway_blocked(cfg, &state.snapshot().gateway.url) {
+        return Err("kill switch is on — the gateway isn't on this machine, so Finance can't be read".into());
+    }
+    let v = super::pipeline::gw(state, cfg, reqwest::Method::GET, &format!("/api/cc/finance/summary?{q}"), None).await.map_err(|e| format!("Finance: {e}"))?;
+    let text = v["text"].as_str().filter(|t| !t.trim().is_empty()).ok_or("Finance: the gateway sent no summary (restart the gateway to serve /api/cc/finance/summary)")?;
+    Ok(text.chars().take(1500).collect())
 }
 
 /// One owner per integration (Section 21.1), whatever the grants say: the Director's media
@@ -786,6 +854,8 @@ pub(crate) fn assemble_tools(cfg: &OsConfig, agent: &str, listed: Vec<ToolInfo>)
         all.push(t("tony", TONY_SET_MODE, "Switch your own work mode when the user asks for a different way of working (\"act like my coach\" → coach, \"high-level strategy\" → executive, \"let's just chat\" → surface). mode: surface|builder|operations|coach|brainstorm|executive|learning.", &["mode"]));
     }
     let mut all = role_filter(all, agent);
+    // Finance's read tool is never even offered to an agent that would be refused it.
+    all.retain(|t| finance_reader_refusal(&t.name, agent).is_none());
     if is_tony {
         // Tony never sees a tool he may not run (Instagram writes, the Director's servers).
         all.retain(|t| tony_owner_refusal(&t.name).is_none());
@@ -1386,6 +1456,8 @@ async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeStat
             maps if maps.starts_with("maps.") && server_on("maps") => super::maps::tool(state, os, maps, args).await,
             // Replies / publishing never run from here (whatever `approved` says): only the approved-card commands.
             ig if ig.starts_with("instagram.") && server_on("instagram") => super::instagram::tool(state, os, ig, args, false).await,
+            // Read-only (a GET of the gateway's summary); works sealed or unlocked, never writes.
+            FINANCE_ASK if server_on("finance") => finance_ask(state, &cfg, args).await,
             "skills.read" => read_skill(&cfg, &arg("name"), agent),
             other => {
                 let (sid, tool) = other.split_once('.').ok_or("unknown tool")?;
@@ -2813,6 +2885,53 @@ mod tests {
         assert!(is_mutating_tool("crm.booking_scan") && is_mutating_tool("gmail.book_slot") && is_mutating_tool("calendar.booking_create"));
     }
 
+    /// Section 11.10: ONE read-only Finance tool, offered to Tony's router, refused for every agent
+    /// but Tony and the finance role (whatever the grants), with validated compact args.
+    #[test]
+    fn finance_ask_is_one_read_tool_for_tony_and_finance_only() {
+        let tools = builtin_tools("finance");
+        assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [FINANCE_ASK]);
+        assert_eq!(tools[0].args, ["question_kind", "area?", "agent?", "period?"]);
+        assert!(tools[0].description.len() < 400, "compact: tool count and size matter");
+        assert!(!is_mutating_tool(FINANCE_ASK) && offered_to_router(FINANCE_ASK, true));
+        assert_eq!(server_of_tool(FINANCE_ASK), "finance");
+        // Who may call it: Tony (any self alias) and the finance role; never anyone else, even
+        // when Nic's grants say "all".
+        let mut cfg = OsConfig::default();
+        assert!(role_refusal(&cfg, FINANCE_ASK, "general").is_none());
+        assert!(role_refusal(&cfg, FINANCE_ASK, "tony").is_none());
+        assert!(role_refusal(&cfg, FINANCE_ASK, "finance").unwrap().starts_with(ROLE_PREFIX), "not granted by default");
+        cfg.mcps.iter_mut().find(|m| m.id == "finance").unwrap().agents = Some(vec!["all".into()]);
+        assert!(role_refusal(&cfg, FINANCE_ASK, "finance").is_none(), "granted: the finance role may read");
+        for a in ["coder", "ops", "bizops", "librarian", "prompter", "director", "booking", "trader"] {
+            let e = role_refusal(&cfg, FINANCE_ASK, a).unwrap_or_default();
+            assert!(e.starts_with(ROLE_PREFIX) && e.contains("Tony and the Finance agent only"), "{a}: {e}");
+            // Even the worker's scripted path (grants skipped) is refused.
+            assert!(role_refusal_with(&cfg, FINANCE_ASK, a, false, &[]).is_some(), "{a}");
+        }
+        assert!(finance_reader_refusal("weather.current", "coder").is_none());
+        // Tony's turn lists it (his base grant); a sub-agent's never does.
+        let e = super::super::modes::effective(&super::super::modes::ModesFile { active_mode_id: "builder".into(), ..Default::default() }, &Default::default());
+        assert!(servers_for(&cfg, &e, "general").iter().any(|s| s.id == "finance"));
+        let set = assemble_tools(&cfg, "general", tools.clone());
+        assert!(set.offered.iter().any(|t| t.name == FINANCE_ASK));
+        assert!(assemble_tools(&cfg, "coder", tools.clone()).all.is_empty(), "never offered to a refused agent");
+        assert_eq!(assemble_tools(&cfg, "finance", tools.clone()).all.len(), 1);
+        // Args: the kind is required and checked; free text is encoded and capped.
+        assert_eq!(finance_query(&json!({ "question_kind": "owed_to_agent", "agent": "ML Talent" })).unwrap(), "kind=owed_to_agent&agent=ML+Talent");
+        assert_eq!(finance_query(&json!({ "kind": "Invoices Unpaid", "period": "this_month" })).unwrap(), "kind=invoices_unpaid&period=this_month");
+        assert_eq!(finance_query(&json!({ "question_kind": "income", "area": "a&b=c" })).unwrap(), "kind=income&area=a%26b%3Dc");
+        assert!(finance_query(&json!({ "question_kind": "pay_agent" })).is_err());
+        assert!(finance_query(&json!({})).is_err());
+        assert!(finance_query(&json!({ "question_kind": "income", "agent": "x".repeat(61) })).is_err());
+        // The kill switch blocks a gateway off this machine, never the local one.
+        cfg.privacy.kill_switch = true;
+        assert!(!finance_gateway_blocked(&cfg, "http://127.0.0.1:8080"));
+        assert!(finance_gateway_blocked(&cfg, "http://100.64.0.7:8080"));
+        cfg.privacy.kill_switch = false;
+        assert!(!finance_gateway_blocked(&cfg, "http://100.64.0.7:8080"));
+    }
+
     #[test]
     fn calendar_tools_split_reads_and_the_carded_create() {
         let names: Vec<String> = builtin_tools("calendar").into_iter().map(|t| t.name).collect();
@@ -3095,11 +3214,11 @@ mod tests {
         let ids_in = |cfg: &OsConfig, e: &super::super::modes::Effective, agent: &str| servers_for(cfg, e, agent).into_iter().map(|s| s.id).collect::<Vec<_>>();
         let ids = |e: &super::super::modes::Effective, agent: &str| ids_in(&cfg, e, agent);
         // No overlay: Tony gets exactly his own servers (never the Director's media servers).
-        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "whatsapp"]);
+        assert_eq!(ids(&eff("brainstorm"), "general"), ["weather", "time", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
         assert_eq!(ids(&eff("brainstorm"), "tony"), ids(&eff("brainstorm"), "general"));
         assert_eq!(ids(&eff("brainstorm"), "director"), ["filesystem", "shotcut", "media-forge"]);
         // Builder (section pass): Tony keeps his whole base and gains filesystem + git; the Coder keeps its three.
-        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "whatsapp"]);
+        assert_eq!(ids(&eff("builder"), "general"), ["weather", "time", "filesystem", "git", "knowledge-graph", "brave-search", "gmail", "spotify", "maps", "calendar", "finance", "whatsapp"]);
         assert_eq!(ids(&eff("builder"), "coder"), ["fetch", "filesystem", "git"]);
         // The Director is off duty in Builder: a frozen agent gets no tools at all (section pass).
         assert!(ids(&eff("builder"), "director").is_empty(), "off duty in Builder");
@@ -3109,7 +3228,7 @@ mod tests {
         let mut cfg = cfg.clone();
         cfg.switchboard.frozen_tools = vec!["spotify".into()];
         cfg.mcps.iter_mut().find(|m| m.id == "weather").unwrap().enabled = false;
-        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "whatsapp"]);
+        assert_eq!(ids_in(&cfg, &eff("brainstorm"), "general"), ["time", "knowledge-graph", "brave-search", "gmail", "maps", "calendar", "finance", "whatsapp"]);
         // Synthetic tools: the mode switch is always Tony's; skills.read follows skill grants.
         let set = assemble_tools(&cfg, "general", vec![]);
         assert_eq!(set.all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), [TONY_SET_MODE]);
@@ -3839,7 +3958,7 @@ mod tony_mode_tool_tests {
         for m in cfg.mcps.iter_mut() {
             m.enabled = true;
         }
-        let base = ["brave-search", "calendar", "gmail", "knowledge-graph", "maps", "spotify", "time", "weather", "whatsapp"];
+        let base = ["brave-search", "calendar", "finance", "gmail", "knowledge-graph", "maps", "spotify", "time", "weather", "whatsapp"];
         for mode in ["surface", "brainstorm", "coach", "learning", "builder", "operations", "executive"] {
             let ids = tony_ids(&cfg, mode);
             for b in base {

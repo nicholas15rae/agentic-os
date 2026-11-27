@@ -52,6 +52,18 @@ describe("tool load", () => {
     expect(sharedServers([srv("maps", ["general", "ops", "coder"])], ["general", "ops", "coder"])).toEqual([{ server: "maps", owners: ["general", "ops", "coder"] }]);
   });
 
+  it("counts Tony's one read-only Finance tool; no other agent is ever handed it (Section 11.10)", () => {
+    const finance = { ...listing("finance", 0), tools: [{ name: "finance.ask", description: "Answer a money question from Nic's Finance records (read-only, CA$).", server: "finance", args: ["question_kind", "area?", "agent?", "period?"] }] } as ServerTools;
+    const m = [...mcps, srv("finance", ["general"])];
+    const tony = agentServers({ mcps: m }, "general", { ...base, modeId: "learning", modeTools: [] });
+    expect(tony).toContain("finance");
+    expect(loadOf("general", tony, [finance]).tools).toBe(1);
+    // Granted to "all" (or to the Coder) by mistake: Rust refuses it, so the load never counts it.
+    const open = [srv("finance", null)];
+    expect(agentServers({ mcps: open }, "coder", { ...base, modeId: "builder" })).toEqual([]);
+    expect(agentServers({ mcps: open }, "finance", { ...base, modeId: "executive" })).toEqual(["finance"]);
+  });
+
   it("Tony's Spotify load is the core five plus one spotify.more (Section 20.11)", () => {
     const names = ["now_playing", "get_queue", "recently_played", "top_items", "list_playlists", "get_playlist_tracks", "play", "pause", "resume", "next", "previous", "seek", "restart_track", "volume", "shuffle", "repeat", "transfer_device", "queue_add", "create_playlist", "add_to_playlist", "remove_from_playlist", "like_track", "unlike_track"];
     const spotify = { ...listing("spotify", 0), tools: names.map((n) => ({ name: `spotify.${n}`, description: "x".repeat(60), server: "spotify", args: [] })) } as ServerTools;

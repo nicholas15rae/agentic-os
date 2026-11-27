@@ -520,13 +520,13 @@ pub fn resolve(text: &str, cfg: &OsConfig) -> Route {
         }
         break;
     }
-    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar read ("check gmail
-    // for booking emails", "any audition emails?", "booking emails from today?") is Tony's own
-    // live tool: a name merely mentioned there, even first, is a topic, not an address. Only
+    // (b) any (non-self) name trigger mentioned anywhere. A mail / calendar / money read ("check
+    // gmail for booking emails", "any audition emails?", "what do I owe my accountant?") is Tony's
+    // own live tool: a name merely mentioned there, even first, is a topic, not an address. Only
     // addressing the desk ("booking desk, any …", "hey booking agent …") or step (a) above
     // ("tell booking to …") hands it over.
     if let Some(role) = match_name_anywhere(&toks, &names) {
-        if !matches!(direct_tool(&original), Some("gmail" | "calendar")) || leads_with_name(&original, &toks, &names) {
+        if !matches!(direct_tool(&original), Some("gmail" | "calendar" | "finance")) || leads_with_name(&original, &toks, &names) {
             return Route { role: Some(role), reason: "this agent was named in the request".into(), confidence: "medium".into(), kind: RouteKind::Named, task: original };
         }
     }
@@ -611,14 +611,29 @@ const DIRECT_NOT_LIVE: &str = r"\b(?:widget|server|config|api|bug|code|app|scrip
 /// Mirrors router.ts `DIRECT_MESSAGES`.
 const DIRECT_MESSAGES: &str = r"\b(?:check|read|any|show|see|new|unread|latest|last|recent|did i get|have i got|got any)\b(?: (?:me|my|the|new|unread|latest|last|recent|\d{1,2}))* (?:messages?|texts?)\b";
 const DIRECT_SPOTIFY: &str = r"\b(?:whats playing|what is playing|now playing|what song is this|whats this song|what song is playing|which song is this)\b";
+/// Money READ questions Tony answers from Finance himself (`finance.ask`, read-only): what he
+/// owes an agent, what an area made or spent, what's pending, unpaid invoices, HST dates, the
+/// money to-do list. Writes stay on the Finance screens (DIRECT_WRITE / DIRECT_FINANCE_WRITE).
+const DIRECT_FINANCE: &str = r"\b(?:what|how much|who) (?:do |did )?(?:i|we) (?:still )?owe\b|\bcommissions? (?:do |did )?(?:i|we) (?:still )?owe\b|\bhow much commission\b|\bwho (?:still )?owes me\b|\bhow much (?:money )?(?:am i|is) (?:still )?owed\b|\bhow much (?:money )?(?:did|have|has|do|does) (?:i|we|acting|contracting|trades|bf supplements|supplements|the store|my business|personal)(?: \w+)? (?:make|made|earn|earned|bring in|brought in|spend|spent|gross|grossed)\b|\bhow much (?:income|revenue|profit) (?:did|have|has|do)\b|\b(?:whats|what is|anything|any money|any payments?)(?: still)? pending\b|\bpending (?:money|payments?|income)\b|\bwhen (?:is|are) (?:my |the |our |next )*(?:hst|gst)(?: return| payment| filing| remittance)? due\b|\b(?:hst|gst) (?:return |payment |filing |remittance )?(?:is |are )?due\b|\bhow much (?:hst|gst) do i owe\b|\bwhen do i (?:file|pay) (?:my |the )?(?:hst|gst)\b|\b(?:unpaid|outstanding|overdue|open) invoices?\b|\binvoices? (?:are |still )*(?:unpaid|outstanding|overdue|open)\b|\bwho hasnt paid\b|\b(?:money|finance|financial) (?:reminders?|to do|todo)\b";
+/// "How much did contracting make": "make" as earning, not a write. Dropped before DIRECT_WRITE.
+const DIRECT_FINANCE_MAKE: &str = r"\bhow much (?:money )?(?:did|have|has|do|does) (?:i|we|acting|contracting|trades|bf supplements|supplements|the store|my business|personal)(?: \w+)? make\b";
+/// Finance writes DIRECT_WRITE doesn't list ("log the HST on that invoice", "record a cheque").
+const DIRECT_FINANCE_WRITE: &str = r"\b(?:log|record|enter|track|scan|import|export|categori[sz]e|deposit|charge|bill|split|refund|transfer|send)\b";
+/// Not a money question: another live tool's or a work item's subject ("any pending emails",
+/// "what orders are pending", "the overdue invoices widget").
+const DIRECT_FINANCE_NOT: &str = r"\b(?:emails?|inbox|mail|gmail|whatsapp|messages?|texts?|calendar|tasks?|todos?|tickets?|builds?|prs?|pull requests?|reviews?|queue|orders?|deliver(?:y|ies)|packages?|shipments?|updates?|widget|server|config|api|bug|code|app|script|spreadsheet|filter|settings?|button|tests?)\b";
 
 fn direct_re(slot: &'static std::sync::OnceLock<regex::Regex>, pat: &str) -> &'static regex::Regex {
     slot.get_or_init(|| regex::Regex::new(pat).unwrap())
 }
 
-/// The live tool a read question is for: "whatsapp" | "gmail" | "calendar" | "weather" | "spotify".
-/// Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
+/// The live tool a read question is for: "whatsapp" | "gmail" | "calendar" | "weather" | "spotify"
+/// | "finance". Mirrored exactly by `directTool()` in router.ts (shared fixtures, `direct` field).
 pub fn direct_tool(text: &str) -> Option<&'static str> {
+    static FINANCE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FINANCE_WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FINANCE_NOT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FINANCE_MAKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static WRITE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static WA: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static WA_READ: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -635,7 +650,8 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     static NOT_LIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static MESSAGES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let n = normalize(text);
-    if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&direct_re(&UPDATE_NOUN, DIRECT_UPDATE_NOUN).replace_all(&n, " ")) {
+    let reads = direct_re(&UPDATE_NOUN, DIRECT_UPDATE_NOUN).replace_all(&n, " ");
+    if n.is_empty() || direct_re(&WRITE, DIRECT_WRITE).is_match(&direct_re(&FINANCE_MAKE, DIRECT_FINANCE_MAKE).replace_all(&reads, " ")) {
         return None;
     }
     if direct_re(&WA, r"\bwhatsapp\b").is_match(&n) {
@@ -658,6 +674,9 @@ pub fn direct_tool(text: &str) -> Option<&'static str> {
     }
     if direct_re(&SPOTIFY, DIRECT_SPOTIFY).is_match(&n) {
         return Some("spotify");
+    }
+    if direct_re(&FINANCE, DIRECT_FINANCE).is_match(&n) && !direct_re(&FINANCE_WRITE, DIRECT_FINANCE_WRITE).is_match(&n) && !direct_re(&FINANCE_NOT, DIRECT_FINANCE_NOT).is_match(&n) {
+        return Some("finance");
     }
     if !work && direct_re(&MESSAGES, DIRECT_MESSAGES).is_match(&n) {
         return Some("whatsapp");
@@ -916,6 +935,48 @@ mod tests {
             }
             assert_eq!(direct_tool(&f.text), f.direct.as_deref(), "direct tool mismatch for {:?}", f.text);
         }
+    }
+
+    /// Section 11.10: money READ questions are Tony's own Finance tool; writes and other
+    /// subjects never are (mirrors router.test.ts).
+    #[test]
+    fn direct_tool_finance_reads_only() {
+        for text in [
+            "what do I owe ML Talent?",
+            "how much do I still owe Imperious",
+            "how much did contracting make this month?",
+            "how much have I made this year",
+            "how much did I spend last month",
+            "what's still pending?",
+            "who owes me money",
+            "when is HST due?",
+            "when is my next HST return due",
+            "any unpaid invoices?",
+            "which invoices are still unpaid",
+            "how much commission do I owe",
+            "what are my money reminders",
+        ] {
+            assert_eq!(direct_tool(text), Some("finance"), "{text}");
+        }
+        for text in [
+            "log the hst on the commission cheque",
+            "mark the ML Talent commission as paid",
+            "record a 400 dollar cheque from Lee",
+            "pay ML Talent what I owe them",
+            "send Smith a reminder about the unpaid invoice",
+            "add 42 dollars to the gear budget",
+            "what orders are pending on the online store",
+            "any pending emails?",
+            "fix the overdue invoices widget",
+            "make a new invoice for Smith",
+        ] {
+            assert_ne!(direct_tool(text), Some("finance"), "{text}");
+        }
+        // A Finance name merely mentioned in a money read is a topic; opening with it addresses it.
+        let cfg = OsConfig::default();
+        assert_ne!(resolve("what do I owe my accountant?", &cfg).kind, RouteKind::Named);
+        let r = resolve("bookkeeper, what do I owe ML Talent?", &cfg);
+        assert_eq!((r.role.as_deref(), r.kind), (Some("finance"), RouteKind::Named));
     }
 
     #[test]

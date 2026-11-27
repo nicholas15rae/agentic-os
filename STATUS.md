@@ -55,13 +55,28 @@ Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
 | Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
 | Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (87b6527), on origin; live since the 10:41 restart (main 0418649): "is the droplet up?" on the phone path answered "up, 62 ms" |
+| Section 5 cleanup: no Librarian in the build chain, one true build status, archive | section-pass | d94c6cd | Yes (f555484), pushed |
+| Section 6 home grid: push-aside, widget drawer, page presets, widget looks, tap to focus, icons + windows | section-pass | b5b98ee, 604c334 | Yes (f555484), pushed |
+| Everything-is-customizable rule (AGENTS.md) + shared layout plan (docs/shared-layout-plan.md) | section-pass | 76eb094 | Yes (f555484), pushed |
+| Layout step 1: shared layout engine for every page, Reset this page / all pages / Undo, per-mode layouts, safety controls locked (kill switches, Tony's stop, confirmations) | section-pass | b51b7a7 (+ main merged in af74985) | Yes (f555484), pushed |
+| Layout step 2: Settings → Appearance: design tokens, Reset to default first (Undo), page overrides, 4 + saved themes, live preview, export / import of layouts + themes | section-pass | 7f69d01 | Yes (f555484), pushed |
+| Layout step 3: widget builder: brief checklist, interactive widgets built by the Play Place pipeline, every point verified in a real browser, style kit; fortune cookie tested on the checking side | section-pass | 9d02fa4 | Yes (f555484), pushed |
+| Layout step 4, page 1: Play Place on the shared layout (panels, per mode, Reset, deep links reveal their panel) | section-pass | 675571e | Yes (f555484), pushed |
+| Layout step 4, page 2: Agents on the shared layout (threads, conversation, reports, library) | section-pass | 9364ec3 | Yes (f555484), pushed |
+| Layout step 4, pages 3-6: Comms, Operations, Finance, Trading on the shared layout (Trading's execution desk / kill switch locked); icon windows open full size, charts fill their panel | section-pass | 5825204, 8430a52, 68e1c2b, cbc9d7f, e757697 | Yes (f555484), pushed |
+| Layout step 4, page 7: Settings on the shared layout (your pick: tab bar + one content panel) | section-pass | d445421 | Yes (f555484), pushed |
+| Layout step 4, pages 8-11: Language Hub, Vault, Wallpapers, System Map (Blueprint) on the shared layout | section-pass | 5488588, de2a4bd, c0b088f, a597bb0 | Yes (f555484), pushed |
+| Layout step 5: window options: float, pin on top, click-through (safety controls always on top, on the board, never click-through); native pop-out parked | section-pass | 52938a5 | Yes (f555484), pushed |
+| Layout step 6: phone sync of layouts and themes through the gateway (desktop shares on change; phone follows, keeps its page, never mid-edit; 'Follow the desktop' switch) | section-pass | 74f9e0d | Yes (f555484), pushed |
+| Fortune-cookie live build (section-pass app, 11-27 10:06-10:25): every brief point reached the verifier and the widget used the style kit; it went to Repair because click probes on its SVG cookie misfired (checker bug, fixed) and the local verifier quoted code not in the page | section-pass | 96829e3 | Yes (f555484), pushed |
+| Build checks catch an animation that never shows (style values the browser rejects, e.g. the cookie's clip-path; elements with click handlers are clicked in the smoke) | section-pass | febc6e9 | Yes (f555484), pushed |
 
 ## 2. In progress
 
 | Session | Working on | Current step |
 |---|---|---|
 | Tony live-test fixes | All 7 fixes | Merged into main (9d37071). The "Stop Tony parroting" session is rebuilding from main 0418649 and restarting the app; it will check Tony afterwards. Pushed to origin |
-| Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
+| Gabagoul functional pass (section-pass) | Merged into main (f555484) and pushed, 11-27 | Done. Open items are under Waiting on you (fortune-cookie rerun, pop-out windows, hold-to-switch, Play Place redesign, Brainstorm and Director pages). Clean |
 | Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
 | Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
@@ -79,6 +94,9 @@ Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
 - Director Part 3 phone review needs a gateway (server.py) /api/media proxy behind the security gate: shared core, so not built. OK to build it?
 
 **Decisions**
+- section-pass converted Comms and Operations to the shared layout. The Communications/brainstorming and Remove-Ops sessions also touch those pages: expect merge conflicts in `CommsSection.tsx` / `OperationsSection.tsx`; Brainstorm and Director were left alone for them.
+- section-pass (now in main): fortune-cookie rerun wanted LATER (Nic, 11-27): when you say go, rebuild main, restart the app on it, then you send Fix on the Fortune cookie tile (Tony in Builder).
+- section-pass, parked for you: (1) native pop-out windows for panels (need a section-pass app build to test); (2) Section 7 hold-to-switch on Tony's button (that button is also Tony's stop, a safety control: your call how it should work); (3) Play Place redesign (Section 5: you asked to see the plan first); (4) Brainstorm and Director pages on the shared layout (other sessions own them).
 - Push main (overnight batch merged, not pushed)?
 - Parked overnight (safety or hardware): 14.5 Full auto gate (PIN + phone approval, live-trading control), 14.8 IBKR data everywhere, 14.9; 15.2 camera translate (phone), 15.3 pronunciation (GPU Whisper), 15.4 accents (Scene Reader), 15.7 vocabulary images (ComfyUI); 16.3 recovery key (would change the vault encryption); wiring language curveballs into Tony's turn.
 - Instant cues: "what's pending" deliberately stays Tony's Finance read (live data); only reminders / to-do are instant.
@@ -196,7 +214,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Live app after the 23:19 restart | 3 phone turns: fresh greeting and dinner answers (no stored reply copied), Joelle Bandits -> Chris recalled; first words 4.5 s cold, then 1.6 s and 1.0 s | 11-26 23:21 |
 | Live app after the 23:40 restart (main 0c4341f) | Up, no panic.log lines; 2 phone turns answered by the desktop: live weather (not the stored reply), Chris recalled; first words 3.4 s cold, then 0.8 s | 11-26 23:42 |
 | Live app after the 00:31 restart (main dffdb71) | Up, no panic.log lines; Ops migration ran (0 `"ops"` entries left); 2 phone turns answered by the desktop. "Is the droplet up?" now goes to Tony but gets a vague reply, since a phone turn has no live dashboard. First words 3.4 s cold, then 0.6 s | 11-27 00:33 |
-| section-pass | Rust 1,433, vitest 2,499, gateway pytest pass | 11-27 02:09 UTC |
+| main f555484 (section-pass merged, = section-pass f8ce963 tree) | tsc clean; vitest 3,488/3,488; cargo 1,700 (+1 known CRLF test that fails on main too) | 11-27 UTC |
 | section-pass-batch3 (overnight, before merging main) | tsc clean; vitest 2,831/2,831; Python 870 OK; Rust 1,491 (+2 known CRLF; real-browser tests pass alone) | 11-27 |
 | claude/elated-kare-67e4c4 (Ops removal, on e46d0c7; main since changed STATUS.md only) | tsc clean; vitest 2,887/2,887; cargo 1,596 (+2 known CRLF; browser tests passed); pytest language hub + memory scrolls + gateway + fw_server 253/253 | 11-26 23:45 |
 | main 9c57359 (Ops removal + PR #8 + director-suite) | tsc clean; vitest 2,906/2,906; cargo 1,621 (+2 known CRLF; 3 Edge tests timed out under load, pass alone) | 11-27 00:30 |
@@ -231,26 +249,25 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 17:18 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 17:31 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 33 | `73c7e57` 2026-11-27 feat(engine): read-only connection check for the transfer (python -... | 162 files |
-| `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
+| `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | clean |
+| `section-26-engine` | 34 | `436316e` 2026-11-27 Merge main (cf44451: kill switch) into section-26-engine before the... | 13 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
-| `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `3d2e38d` 2026-11-27 Merge claude/gifted-pascal-abdde6 (GPU session) into main, keeping main's STATUS.md
+- `8bb443a` 2026-11-27 docs(status): trading bridge restarted 17:17 on the kill-switch code
 - `cf44451` 2026-11-27 docs(status): kill switch shipped (8647df7), app restarted 16:25; bridge restart waits on Nic
 - `73ed487` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined main tests
 - `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
 - `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
-- `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
-- `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
 <!-- /AUTO:BRANCHES -->

@@ -375,3 +375,18 @@ html:is([data-motion="calm"], [data-motion="off"])
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.92), 0 0 14px rgba(0, 0, 0, 0.6);
   font-weight: 500;
 }
+
+/*
+ * App-wide rule (AGENTS.md): safety controls (the trading kill switch, the outbound kill switch,
+ * Tony's stop and the confirmation cards) are never hidden, see-through or click-through, whatever
+ * a layout, look, theme or import sets. `lib/safety.ts` marks them.
+ */
+[data-safety] {
+  visibility: visible !important;
+  pointer-events: auto !important;
+  filter: none !important;
+  mix-blend-mode: normal !important;
+  clip-path: none !important;
+}
+/* Opacity isn't forced (that would also kill the E-stop's last-click pulse and the cards' fade-in);
+   themes and looks never set it on these controls: Appearance tokens skip [data-safety]. */

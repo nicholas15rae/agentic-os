@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { xcmd } from "@/lib/native-ext";
 import { useToasts } from "@/features/reminders/notify";
-import { useLayout } from "@/core/widgets/layout-store";
+import { allSurfaceStores, type RemovedTile } from "@/core/widgets/layout-store";
 import { useMyApps, type MountedApp } from "@/features/myapps/store";
 import type { DeleteReport, TrashEntry } from "./types";
 
@@ -30,38 +30,23 @@ export function expiresIn(e: Pick<TrashEntry, "expiresAt">, now = Date.now()): s
   return days <= 0 ? "today" : days === 1 ? "in 1 day" : `in ${days} days`;
 }
 
-/** What a deleted build had on screen (home-page tiles, its My Apps pin), so a restore puts it back. */
+/** What a deleted build had on screen (its tiles on every page and per-mode layout, its My Apps pin), so a restore puts it back. */
 export interface RemovedUi {
-  tiles: { pageId: string; item: unknown }[];
+  tiles: RemovedTile[];
   pin?: MountedApp;
 }
 
 /** Take a build's promoted tiles off every page and its pin off My Apps; returns what was removed. */
 export function removeBuildUi(buildId: string): RemovedUi {
-  const tiles: RemovedUi["tiles"] = [];
-  useLayout.setState((s) => ({
-    pages: s.pages.map((p) => ({
-      ...p,
-      items: p.items.filter((i) => {
-        const hit = (i.config as { buildId?: unknown } | undefined)?.buildId === buildId;
-        if (hit) tiles.push({ pageId: p.id, item: i });
-        return !hit;
-      }),
-    })),
-  }));
+  const tiles = allSurfaceStores().flatMap((st) => st.getState().removeWhere((i) => (i.config as { buildId?: unknown } | undefined)?.buildId === buildId));
   const pin = useMyApps.getState().apps.find((a) => a.kind === "build" && a.ref === buildId);
   if (pin) useMyApps.getState().unmount(pin.id);
   return { tiles, pin };
 }
 
 function putBackUi(ui: RemovedUi) {
-  if (ui.tiles.length)
-    useLayout.setState((s) => ({
-      pages: s.pages.map((p) => {
-        const back = ui.tiles.filter((t) => t.pageId === p.id).map((t) => t.item as (typeof p.items)[number]);
-        return back.length ? { ...p, items: [...p.items, ...back.filter((b) => !p.items.some((x) => x.instanceId === b.instanceId))] } : p;
-      }),
-    }));
+  // Older saves have no surface (home) and no variant (the live layout).
+  if (ui.tiles.length) for (const st of allSurfaceStores()) st.getState().putBack(ui.tiles.filter((t) => (t.surface ?? "home") === st.getState().surface));
   const pin = ui.pin;
   if (pin) useMyApps.setState((s) => (s.apps.some((a) => a.id === pin.id) ? s : { apps: [...s.apps, pin] }));
 }

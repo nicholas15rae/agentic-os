@@ -5,6 +5,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
 import { tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
 import { KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killStageLabel, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
+import { safety } from "@/lib/safety";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -85,6 +86,7 @@ export function TradingDesk() {
             </button>
           )}
           <button
+            {...safety("trading-estop")}
             onClick={pressKill}
             disabled={busy === "kill"}
             aria-label={armed ? `Kill switch armed: ${remaining} more click${remaining === 1 ? "" : "s"} to lock trading, cancel all orders, sell all positions at market` : `Kill switch: click ${KILL_PRESSES} times to lock trading, cancel all orders, flatten all positions`}

@@ -1,12 +1,13 @@
 import { Link2, Loader2, X } from "lucide-react";
 import { cancelShare, confirmShare, useCloud } from "./cloud-store";
+import { safety } from "@/lib/safety";
 
 export const SHARE_EXPLAINER = "Anyone with the link can view this file. They can't edit it, and you can turn the link off in Google Drive.";
 
 /** Share confirm card (props only). "Create link" is the only control that leads to `cloud_share`. */
 export function ShareConfirmView({ name, busy, onConfirm, onCancel }: { name: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
   return (
-    <section className="glass mt-2 rounded-[16px] border-amber/50 p-3 ring-1 ring-amber/40" role="alertdialog" aria-label="Confirm share link">
+    <section {...safety("confirm-card")} className="glass mt-2 rounded-[16px] border-amber/50 p-3 ring-1 ring-amber/40" role="alertdialog" aria-label="Confirm share link">
       <div className="flex items-center gap-1.5">
         <Link2 size={14} className="text-amber-soft" />
         <h3 className="label-caps text-amber-soft">Create a share link?</h3>

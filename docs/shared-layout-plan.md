@@ -73,8 +73,21 @@ One JSON file (`agentic-os-ui.json`): `{ version, themes, activeTheme, surfaces 
 5. **Window options:** free placement, click-through, pop-out windows, pin on top. (M)
 6. **Phone sync** of layouts and themes. (M)
 
-## Open questions for Nic
+## Decisions (Nic, 2026-11-27)
 
-- Where is the "hold-to-switch" follow-up for Section 7? It isn't in the repo or STATUS.md.
-- Pop-out windows: OK to add Tauri multi-window support (a second webview per popped-out panel)?
-- Per-mode layouts: start every mode on the shared default (recommended), or copy the current layout into each mode?
+- Order: as above (engine, Appearance/style kit, builder, pages one by one, window options, phone sync).
+- Pop-out: native Tauri windows per popped-out panel (pin on top possible).
+- Per mode: every mode uses the page's shared default layout until "Customize for this mode".
+- Section 7 "hold-to-switch": press and hold Tony's button (or the phone shortcut) to pick a mode instead of talking. It uses the same mode list and, where a page is linked to a mode, the same page switch.
+- Plan approved with two additions:
+  1. **Reset to default comes first**, before any page is converted: per page (Reset this page, Reset all pages, Undo) in step 1, and at the token / theme level as the first part of step 2.
+  2. **Safety controls are locked from the start** (step 1): the trading kill switch, Tony's stop / interrupt and the send confirmations can't be hidden, moved off-screen, made click-through or styled invisible.
+- Commit after each step and update STATUS.md.
+
+## Step 1 as built
+
+- `createLayoutStore(spec)` / `surfaceStore(spec)` (`core/widgets/layout-store.ts`): one store per surface, home stays `cc.layout`, others `cc.layout.<surface>`.
+- `LayoutSurface` + `LayoutControls` (`core/widgets/LayoutSurface.tsx`): the grid from a context (`surface-context.ts`); the top bar's edit toggle acts on the page on screen; press and hold (500 ms, touch) enters edit mode.
+- Per-mode layouts (`variants.ts`): shared until "Customize for <mode>", "Use the shared layout" drops the copy; `page-links.ts` applies the mode to every surface.
+- Reset: Reset this page, Reset all pages, Undo reset (this session).
+- Locks: `locked` widgets (`locks.ts`) can move and resize but are never removed, made an icon, moved to another page, deleted with their page, recoloured or shrunk below 90 %, click-through or off-screen; lost ones are put back on load. The real controls carry `data-safety` (`lib/safety.ts`) and a CSS rule keeps them visible, opaque and clickable whatever a theme sets.

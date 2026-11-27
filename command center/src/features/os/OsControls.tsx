@@ -75,6 +75,7 @@ export function KillSwitch() {
   const label = on ? "Lockdown" : armed ? killStageLabel(pressed) : "Kill switch";
   return (
     <button
+      {...safety("kill-switch")}
       role="switch"
       aria-checked={on}
       aria-label={on ? "Kill switch on (lockdown)" : armed ? `Kill switch: click to ${killStageLabel(pressed)}` : "Kill switch: click 3 times to engage"}
@@ -139,6 +140,7 @@ import { cmd as cmd2, isTauri as isTauri2, onNativeEvent as onNativeEvent2, type
 import { useCueRun } from "@/features/cues/player";
 import { toggleGabagool } from "@/features/cues/cue-runtime";
 import { requestSettingsTab } from "@/sections/settings/settings-tab";
+import { safety } from "@/lib/safety";
 
 /** "ACTIVE GPU SLOT" — who holds the local GPU baton, and what's queued. */
 export function ActiveSlotPill() {

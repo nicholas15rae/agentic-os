@@ -1,8 +1,11 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AppWindow, Expand, GripVertical, Maximize2, Palette, Shrink, X } from "lucide-react";
+import { AppWindow, Expand, GripVertical, Lock, Maximize2, Palette, Shrink, X } from "lucide-react";
 import { getWidget } from "./registry";
-import { GRID_COLS, GRID_ROWS, activeItems, useLayout, type WidgetWindow } from "./layout-store";
+import { GRID_COLS, GRID_ROWS, activeItems, type WidgetWindow } from "./layout-store";
+import { useSurface } from "./surface-context";
+import { LOCKED_MIN_SCALE } from "./locks";
+import { isLockedWidget } from "./registry";
 import { placePushing } from "./pages";
 import type { WidgetDefinition, WidgetInstance } from "./types";
 import { ALIGN_CLASS, DEFAULT_GLASS_ALPHA, FIT_MIN, FONT_CLASS, clampScale, frameOf, opacityFor, overflowRatio, type Align, type DisplayMode, type FontChoice, type Frame } from "./look";
@@ -22,6 +25,7 @@ import { useWallpapers } from "@/features/wallpaper/wallpaper-store";
  * full, compact or as an app icon that opens in a movable, resizable window.
  */
 export function WidgetGrid() {
+  const useLayout = useSurface();
   const activePage = useLayout((s) => s.activePage);
   return (
     <>
@@ -33,6 +37,7 @@ export function WidgetGrid() {
 
 /** One page's board. Keyed by page id, so a page switch remounts it and fades it in. */
 function PageBoard() {
+  const useLayout = useSurface();
   // `activeItems` returns the stored array, so this only re-renders when the page's items change.
   const instances = useLayout(activeItems);
   const editing = useLayout((s) => s.editing);
@@ -58,14 +63,45 @@ function PageBoard() {
       window.removeEventListener("pointerdown", away, true);
       window.removeEventListener("keydown", esc);
     };
-  }, []);
+  }, [useLayout]);
+
+  // Touch: press and hold an empty spot or a widget for half a second to edit the layout.
+  const hold = useRef<{ t: number; x: number; y: number } | null>(null);
+  const holdStart = (e: React.PointerEvent) => {
+    holdEnd();
+    if (editing || e.pointerType === "mouse" || !e.isPrimary) return;
+    const t = e.target as HTMLElement | null;
+    // Holding a button, slider or field (or anything in a portal opened from a widget) is that control's.
+    if (!t || !e.currentTarget.contains(t) || t.closest(HOLD_IGNORE)) return;
+    const x = e.clientX;
+    const y = e.clientY;
+    hold.current = {
+      x,
+      y,
+      t: window.setTimeout(() => {
+        hold.current = null;
+        useLayout.getState().setEditing(true);
+        navigator.vibrate?.(12);
+      }, LONG_PRESS_MS),
+    };
+  };
+  const holdMove = (e: React.PointerEvent) => {
+    const h = hold.current;
+    if (h && Math.hypot(e.clientX - h.x, e.clientY - h.y) > 10) holdEnd();
+  };
+  const holdEnd = () => {
+    if (hold.current) window.clearTimeout(hold.current.t);
+    hold.current = null;
+  };
+  useEffect(() => holdEnd, []);
+  const holdProps = { onPointerDown: holdStart, onPointerMove: holdMove, onPointerUp: holdEnd, onPointerCancel: holdEnd };
 
   if (compact) {
     const order = (i: WidgetInstance) => getWidget(i.widgetId)?.compactOrder ?? i.row;
     const ordered = [...instances].sort((a, b) => order(a) - order(b) || a.col - b.col);
     const icons = ordered.filter((i) => i.display === "icon");
     return (
-      <div ref={gridRef} className="flex flex-col gap-3 px-4 pb-40 pt-2">
+      <div ref={gridRef} className="flex flex-col gap-3 px-4 pb-40 pt-2" {...holdProps}>
         {icons.length > 0 && (
           <div className="grid grid-cols-4 gap-3">
             {icons.map((inst) => (
@@ -86,6 +122,7 @@ function PageBoard() {
     <div
       ref={gridRef}
       className="relative grid h-full gap-4 px-6 pb-4 xl:gap-5 xl:px-8"
+      {...holdProps}
       style={{ gridTemplateColumns: `repeat(${GRID_COLS}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${GRID_ROWS}, minmax(0, 1fr))` }}
     >
       {editing && <GridGuides />}
@@ -95,6 +132,11 @@ function PageBoard() {
     </div>
   );
 }
+
+/** Press-and-hold to enter Edit layout on touch screens. */
+export const LONG_PRESS_MS = 500;
+/** Presses that belong to a control, never to the layout hold. */
+export const HOLD_IGNORE = "button,a,input,textarea,select,label,[role=slider],[role=button],[role=switch],[contenteditable],[data-safety],[data-no-hold]";
 
 function GridGuides() {
   return (
@@ -137,7 +179,9 @@ function WidgetCell({
   compact?: boolean;
   gridRef?: React.RefObject<HTMLDivElement | null>;
 }) {
+  const useLayout = useSurface();
   const def = getWidget(inst.widgetId);
+  const locked = isLockedWidget(inst.widgetId);
   const { place, remove, setGlass, setFocused, openWindow } = useLayout.getState();
   const focused = useLayout((s) => s.focused === inst.instanceId);
   const windowed = useLayout((s) => s.windows.some((w) => w.instanceId === inst.instanceId));
@@ -258,9 +302,15 @@ function WidgetCell({
           >
             <Palette size={13} />
           </button>
-          <button aria-label={`Remove ${def.title}`} className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-alert" onClick={() => remove(inst.instanceId)}>
-            <X size={14} />
-          </button>
+          {locked ? (
+            <span className="well grid size-7 place-items-center rounded-full text-amber-soft" title="Safety control: it can move, but it can't be hidden or removed" aria-label={`${def.title} is a safety control`}>
+              <Lock size={12} />
+            </span>
+          ) : (
+            <button aria-label={`Remove ${def.title}`} className="well grid size-7 place-items-center rounded-full text-ink-2 hover:text-alert" onClick={() => remove(inst.instanceId)}>
+              <X size={14} />
+            </button>
+          )}
         </div>
       </div>
       {!compact && (
@@ -301,6 +351,7 @@ function WidgetCell({
       ) : (
         <section
           data-widget={inst.instanceId}
+          data-safety={locked ? "panel" : undefined}
           aria-label={def.title}
           onClickCapture={() => !editing && !focused && setFocused(inst.instanceId)}
           onFocusCapture={() => !editing && !focused && setFocused(inst.instanceId)}
@@ -337,7 +388,7 @@ function WidgetCell({
 
 /** The widget itself, in its look, with content zoomed down to fit its box (never up). */
 function WidgetBody({ inst, def, legible, forceFull }: { inst: WidgetInstance; def: WidgetDefinition<any>; legible: boolean; forceFull?: boolean }) {
-  const setConfig = useLayout.getState().setConfig;
+  const setConfig = useSurface().getState().setConfig;
   const setBadge = useWidgetBadges((s) => s.set);
   const look = inst.look ?? {};
   const scale = clampScale(look.scale);
@@ -398,7 +449,7 @@ function WidgetBody({ inst, def, legible, forceFull }: { inst: WidgetInstance; d
       <div
         ref={inner}
         className={`h-full w-full ${FONT_CLASS[look.font ?? "sans"]} ${look.align ? ALIGN_CLASS[look.align] : ""} ${legible ? "legible" : ""}`}
-        style={{ zoom: scale * fit, color: look.color || undefined }}
+        style={{ zoom: def.locked ? Math.max(LOCKED_MIN_SCALE, scale * fit) : scale * fit, color: (!def.locked && look.color) || undefined }}
       >
         <WidgetBoundary name={def.title}>
           <Suspense fallback={<div className="h-full animate-pulse rounded-[14px] bg-white/[0.03]" />}>
@@ -456,7 +507,8 @@ const DISPLAYS: { id: DisplayMode; label: string }[] = [
 
 /** Edit mode → the palette button: this widget's look, saved with the page. */
 function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetInstance; def: WidgetDefinition<any>; wallpaperId: string; anchor: DOMRect; onClose: () => void }) {
-  const { setLook, setDisplay } = useLayout.getState();
+  const { setLook, setDisplay } = useSurface().getState();
+  const locked = isLockedWidget(inst.widgetId);
   const [note, setNote] = useState<string | null>(null);
   const panel = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -481,7 +533,7 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
         </button>
       </div>
       <Row label="Show as">
-        {DISPLAYS.map((d) => (
+        {DISPLAYS.filter((d) => !(locked && d.id === "icon")).map((d) => (
           <button key={d.id} className={seg((inst.display ?? "full") === d.id)} onClick={() => setNote(setDisplay(inst.instanceId, d.id) ? null : "No room on this page for that size.")}>
             {d.id === "icon" && <AppWindow size={10} className="mr-1 inline" />}
             {d.label}
@@ -526,6 +578,7 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
           </button>
         ))}
       </Row>
+      {!locked && (
       <Row label="Colour">
         <input type="color" value={look.color || "#e8ecf4"} onChange={(e) => setLook(inst.instanceId, { color: e.target.value })} aria-label="Text colour" className="h-7 w-10 rounded border border-white/10 bg-transparent" />
         {look.color && (
@@ -534,6 +587,7 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
           </button>
         )}
       </Row>
+      )}
       {note && <p className="text-[11px] text-alert">{note}</p>}
     </div>,
     document.body,
@@ -555,6 +609,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  * Phone: one full-screen sheet at a time.
  */
 function WidgetWindows() {
+  const useLayout = useSurface();
   const windows = useLayout((s) => s.windows);
   const pages = useLayout((s) => s.pages);
   const phone = useMediaQuery("(max-width: 767px)");
@@ -573,6 +628,7 @@ function WidgetWindows() {
 }
 
 function WidgetWindowFrame({ w, inst, def, phone }: { w: WidgetWindow; inst: WidgetInstance; def: WidgetDefinition<any>; phone: boolean }) {
+  const useLayout = useSurface();
   const { moveWindow, closeWindow, openWindow } = useLayout.getState();
   const drag = useRef<{ mode: DragMode; sx: number; sy: number; ox: number; oy: number; ow: number; oh: number } | null>(null);
   const down = (mode: DragMode) => (e: React.PointerEvent) => {
@@ -600,7 +656,7 @@ function WidgetWindowFrame({ w, inst, def, phone }: { w: WidgetWindow; inst: Wid
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
-  }, [w.instanceId, closeWindow]);
+  }, [w.instanceId, closeWindow, useLayout]);
   const Icon = def.icon;
   return (
     <div

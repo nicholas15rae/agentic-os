@@ -3,6 +3,7 @@ import { Select } from "@/components/ui";
 import type { CloudFolderRef } from "./contract";
 import { cancelPush, confirmPush, setPushFolder, useCloud } from "./cloud-store";
 import { baseName, formatBytes } from "./format";
+import { safety } from "@/lib/safety";
 
 export const MY_DRIVE = "My Drive";
 
@@ -32,7 +33,7 @@ export function PushConfirmView({
 }) {
   const choices = uniqueFolders([folder, ...folderChoices]);
   return (
-    <section className="glass mt-2 rounded-[16px] border-amber/50 p-3 ring-1 ring-amber/40" role="alertdialog" aria-label="Confirm upload to Google Drive">
+    <section {...safety("confirm-card")} className="glass mt-2 rounded-[16px] border-amber/50 p-3 ring-1 ring-amber/40" role="alertdialog" aria-label="Confirm upload to Google Drive">
       <div className="flex items-center gap-1.5">
         <CloudUpload size={14} className="text-amber-soft" />
         <h3 className="label-caps text-amber-soft">Upload to Drive?</h3>

@@ -13,7 +13,7 @@ export interface PromotedItem {
  * Section pass: "Add widget" as a searchable drawer grouped by category (replaces the sideways
  * scrolling Add row, which got cut off). Your Play Place builds come first.
  */
-export function WidgetDrawer({ promoted, onAdd, onClose }: { promoted: readonly PromotedItem[]; onAdd: (widgetId: string, title: string, config?: Record<string, unknown>) => void; onClose: () => void }) {
+export function WidgetDrawer({ promoted, onAdd, onClose, surface = "home" }: { promoted: readonly PromotedItem[]; onAdd: (widgetId: string, title: string, config?: Record<string, unknown>) => void; onClose: () => void; surface?: string }) {
   const [q, setQ] = useState("");
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.focus(), []);
@@ -23,7 +23,7 @@ export function WidgetDrawer({ promoted, onAdd, onClose }: { promoted: readonly 
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const defs = availableWidgets().filter((w) => w.id !== "custom" && w.id !== "staged-build");
+  const defs = availableWidgets(surface).filter((w) => w.id !== "custom" && w.id !== "staged-build");
   const items = useMemo<DrawerItem[]>(
     () => [
       ...promoted.map((b) => ({ key: `staged-build:${b.buildId}`, title: b.title, description: b.buildTitle ? `Promoted from the Play Place build “${b.buildTitle}”` : "Promoted from the Play Place", category: "Your builds" as const })),

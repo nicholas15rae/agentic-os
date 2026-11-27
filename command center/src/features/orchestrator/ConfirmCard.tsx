@@ -6,6 +6,7 @@ import { useVoice } from "@/features/voice/voice-store";
 import { approve, parkPending, reject } from "@/features/voice/voice-controller";
 import { Waveform } from "@/features/voice/Waveform";
 import { cardWhen } from "@/features/orchestrator/calendar-add";
+import { safety } from "@/lib/safety";
 
 const TOOL_LABEL: Record<string, string> = {
   "gmail.create_draft": "Gmail · draft (not sent)",
@@ -50,7 +51,7 @@ export function ConfirmCard() {
   const when = cardWhen(plan.target);
 
   return createPortal(
-    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px] animate-[fade-in_180ms_ease-out]">
+    <div {...safety("confirm-card")} className="fixed inset-0 z-[90] grid place-items-center bg-black/45 p-4 backdrop-blur-[2px] animate-[fade-in_180ms_ease-out]">
       <style>{`@keyframes fade-in{from{opacity:0}to{opacity:1}}@keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}@keyframes drain{from{transform:scaleX(1)}to{transform:scaleX(0)}}`}</style>
       <div
         ref={cardRef}

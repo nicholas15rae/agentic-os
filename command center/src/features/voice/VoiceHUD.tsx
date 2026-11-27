@@ -15,6 +15,7 @@ import { useToasts } from "@/features/reminders/notify";
 import { MIC_LOCKED_MSG, hydrateMic, micEnabled } from "./mic-gate";
 import { MicLockBadge, flashMicLock, useMicIndicator } from "./MicLockBadge";
 import { isMicOff } from "./mic-indicator";
+import { safety } from "@/lib/safety";
 
 /**
  * Persistent floating voice HUD (Gemini/Claude-style bubble), rendered once at
@@ -132,6 +133,7 @@ function FloatingOrb() {
       )}
       <div className="pointer-events-auto flex items-center">
         <button
+          {...safety("tony-stop")}
           onClick={launchToggle}
           aria-label={state === "listening" ? "Finish speaking" : state === "speaking" ? "Stop speaking" : `Talk to ${name} (Ctrl+Shift+Space)`}
           title={`Talk to ${name} · Ctrl+Shift+Space`}

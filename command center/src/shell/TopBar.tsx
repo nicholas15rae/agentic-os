@@ -3,6 +3,7 @@ import { AwayButton } from "@/features/arbiter/AwayButton";
 import { Command, LayoutGrid, Check } from "lucide-react";
 import { useSettings } from "@/stores/settings";
 import { useNav } from "@/stores/nav";
+import { useActiveSurface } from "@/core/widgets/surface-context";
 import { useLayout } from "@/core/widgets/layout-store";
 import { AtmosphereSwitch } from "@/widgets/weather/Weather";
 import { STATE_LABEL, useVoice } from "@/features/voice/voice-store";
@@ -19,8 +20,10 @@ export function TopBar() {
   const identity = useSettings((s) => s.identity);
   const weatherMode = useSettings((s) => s.weatherMode);
   const section = useNav((s) => s.section);
-  const editing = useLayout((s) => s.editing);
-  const setEditing = useLayout((s) => s.setEditing);
+  // The page on screen: home, or a page drawn with the shared LayoutSurface.
+  const surface = useActiveSurface((s) => s.store);
+  const editing = surface((s) => s.editing);
+  const setEditing = surface((s) => s.setEditing);
   const wakeMode = useSettings((s) => s.wakeMode);
   const voiceState = useVoice((s) => s.state);
   // Phase 2 Part D: a locked-off mic replaces the state dot with a static red MicOff at every width.
@@ -77,7 +80,7 @@ export function TopBar() {
         <AtmosphereSwitch mode={weatherMode} className="glass-thin !bg-[rgba(11,13,17,0.42)]" />
       </div>
 
-      {section === "command" && (
+      {(section === "command" || surface !== useLayout) && (
         <div className="ml-auto md:ml-0">
           <EditToggle editing={editing} setEditing={setEditing} />
         </div>

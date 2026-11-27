@@ -39,6 +39,14 @@ export interface WidgetDefinition<C = Record<string, unknown>> {
   compactOrder?: number;
   /** Draw without a glass card (e.g. the mantra hero that sits directly on the wallpaper). */
   chromeless?: boolean;
+  /** Shared layout system: the pages this can be placed on (default: ["home"]). */
+  surfaces?: string[];
+  /**
+   * A safety control (trading kill switch, Tony's stop, send confirmations): it can be moved and
+   * resized but never removed, collapsed to an icon, moved to another page, made click-through,
+   * moved off-screen or styled invisible.
+   */
+  locked?: boolean;
   /** Lazy so each widget is its own chunk and a crash in one never takes down the grid. */
   component: LazyExoticComponent<ComponentType<WidgetProps<C>>>;
 }

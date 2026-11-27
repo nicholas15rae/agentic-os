@@ -23,6 +23,7 @@ import { MicLockBadge } from "@/features/voice/MicLockBadge";
 import { hudMicChips } from "@/features/voice/mic-indicator";
 import { applyOptimistic, type HudCommand, type OsStatus } from "./hud-status";
 import { MESH_PATH_POLL_MS, meshPathChip, type MeshPathChip } from "./mesh-path";
+import { safety } from "@/lib/safety";
 
 const LanguageHub = lazy(() => import("@/features/language/LanguageHub").then((m) => ({ default: m.LanguageHub })));
 
@@ -227,6 +228,7 @@ function StatusBar({ lockdown, hud }: { lockdown: boolean; hud: Hud }) {
         )}
       </button>
       <button
+        {...safety("kill-switch")}
         role="switch"
         aria-checked={kill}
         onClick={() => void send({ killSwitch: !kill })}

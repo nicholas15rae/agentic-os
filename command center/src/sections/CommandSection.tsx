@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, Plus, RotateCcw, Sparkles } from "lucide-react";
+import { Loader2, Plus, Sparkles } from "lucide-react";
 import { WidgetGrid } from "@/core/widgets/WidgetGrid";
 import { availableWidgets } from "@/core/widgets/registry";
 import { activeItems, useLayout, type AddResult } from "@/core/widgets/layout-store";
@@ -10,6 +10,7 @@ import { startHub, useHub } from "@/features/buildhub/hub-store";
 import { promotedWidgets } from "@/features/buildhub/promoted";
 import { GENERATOR_SYSTEM, validateSpec, type CustomSpec } from "@/widgets/custom/spec";
 import { WidgetDrawer } from "@/core/widgets/WidgetDrawer";
+import { LayoutControls } from "@/core/widgets/LayoutSurface";
 
 export function CommandSection() {
   const editing = useLayout((s) => s.editing);
@@ -55,7 +56,6 @@ function GlassAllSwitch() {
 /** "Add widget" tray (registry), templates, and the LLM widget generator. */
 function WidgetTray() {
   const add = useLayout((s) => s.add);
-  const reset = useLayout((s) => s.reset);
   const [msg, setMsg] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
@@ -108,9 +108,7 @@ function WidgetTray() {
         </button>
         <GlassAllSwitch />
         <GlassOpacitySlider />
-        <button onClick={reset} className="pill-glass !h-9 shrink-0 !px-3 text-[13px]" title="Restores the default layout on the first page, or clears any other page. Other pages are untouched.">
-          <RotateCcw size={13} /> Reset this page
-        </button>
+        <LayoutControls />
       </div>
 
       <div className="glass flex flex-wrap items-center gap-2 rounded-[18px] p-2">

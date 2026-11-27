@@ -55,9 +55,12 @@ export interface ParsedActions {
   prose: string;
 }
 
-/** The raw JSON text of every ```director-action block, in order. */
+/** A leading line a model copies from a format example ("{json}", "json"), not JSON itself. */
+const PLACEHOLDER_LINE = /^(?:\{\s*json\s*\}|json)[^\S\r\n]*\r?\n/i;
+
+/** The raw JSON text of every ```director-action block, in order (a copied placeholder line dropped). */
 export function extractActionBlocks(text: string): string[] {
-  return [...text.matchAll(FENCE_RE)].map((m) => m[1].trim());
+  return [...text.matchAll(FENCE_RE)].map((m) => m[1].trim().replace(PLACEHOLDER_LINE, "").trim());
 }
 
 export function stripActionBlocks(text: string): string {
@@ -313,7 +316,7 @@ function editPlanBody(o: Record<string, unknown>, ctx: ActionContext, where0: st
     if (!isObj(l)) return fail(`${where}: must be an object`);
     onlyKeys(l, ["assetId", "startSec", "inSec", "outSec", "volume", "fadeInMs", "fadeOutMs", "duckUnderVoice"], where);
     const a = asset(l.assetId, where);
-    if (a.kind !== "audio") fail(`${where}: "${a.id}" is not an audio asset`);
+    if (a.kind !== "audio") fail(`${where}: "${a.id}" is not an audio asset (a video clip plays its own sound: leave "audio" [] unless there is a music or voiceover asset)`);
     const inSec = l.inSec === undefined ? 0 : num(l, "inSec", where);
     const outSec = l.outSec === undefined ? (a.durationSec ?? 86_400) : num(l, "outSec", where);
     const r = clampRange(a, inSec, outSec);

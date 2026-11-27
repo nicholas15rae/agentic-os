@@ -118,3 +118,30 @@ describe("validation", () => {
     expect(r.errors[1]).toMatch(/^block 3: unknown action type/);
   });
 });
+
+// Live E2E 2026-11-26: Qwen 3.5-9B copied the contract's "{json}" placeholder line into every block
+// ("block 1: not valid JSON" twice, so no brief). A copied placeholder line is dropped; real JSON is untouched.
+describe("copied placeholder line", () => {
+  const brief = '{"type":"draft_brief","brief":{"idea":"Cut my reel","platform":"reels","lengthSec":15,"aspect":"9:16","guessed":["lengthSec"]}}';
+  it("drops a leading {json} / json line before the object", () => {
+    for (const lead of ["{json}\n", "{ json }\r\n", "json\n"]) {
+      const r = parseDirectorActions("ok\n```director-action\n" + lead + brief + "\n```", { assets: [] });
+      expect(r.errors).toEqual([]);
+      expect(r.actions.map((a) => a.type)).toEqual(["draft_brief"]);
+    }
+  });
+  it("still refuses anything else that isn't JSON", () => {
+    expect(parseDirectorActions("```director-action\n{brief}\n" + brief + "\n```", { assets: [] }).errors).toEqual(["block 1: not valid JSON"]);
+  });
+});
+
+// Live E2E 2026-11-26: with only a video asset, Qwen put the video in "audio" (twice) and the plan
+// was refused; the error now says what to do instead.
+describe("video asset in audio", () => {
+  it("is refused with a fix the model can act on", () => {
+    const v = ASSETS.find((a) => a.kind === "video")!;
+    const r = validateAction({ type: "propose_edit_plan", clips: [{ assetId: v.id, inSec: 0, outSec: 1 }], audio: [{ assetId: v.id }], output: {}, note: "" }, { assets: ASSETS });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/leave "audio" \[\]/);
+  });
+});

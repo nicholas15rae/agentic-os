@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 01:30. One page for every Claude Code session and branch.
+Updated 2026-11-27 10:35. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -16,7 +16,7 @@ Updated 2026-11-27 01:30. One page for every Claude Code session and branch.
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
 | Sections 8-10 milestone 2: comms ingest core, echo fold, leased outbox, bridge smoke, WhatsApp ingester, wrap-up endpoint, calendar locations, trips/ETAs, maps socket, saved routes | claude/sections-8-10-m2 | c90924b (PR #8) | Yes (9a46031) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
-| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd (+ merge b0451af) | **No**, in review; merge parked overnight |
+| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | **No**: sent to the GPU session to verify, merge and restart |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -47,25 +47,19 @@ Updated 2026-11-27 01:30. One page for every Claude Code session and branch.
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Merged to main (9a46031). Next: Tony-Rust track (Comms 4, Brainstorm 2/4/6), then M3 |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
-| Port 46778f9 / kill switch (practical-elbakyan) | Kill switch + options guard review loop | 6fcd6cd verified by the GPU session (round 4): it found 3 medium issues and some low ones, all **parked overnight** (safety controls, autopilot rule 4), listed under Waiting on you. Nothing in flight |
+| Port 46778f9 / kill switch (practical-elbakyan) | Kill switch + options guard review loop | Round 4 fixed in 5a55ebc, with the reviewers' corrected fixes. The GPU session verifies, merges and restarts. Nothing in flight here |
 
 ## 3. Waiting on you
 
 **Decisions**
-- **Kill switch / options guard** (`claude/practical-elbakyan-0f96f1`, parked overnight because it's a safety control). Keep iterating on the round-4 findings below, or merge what's there? Merge, push and app restart are parked too. After a merge, the trading bridge needs a restart to load the new code. Full findings: `side-session-notes\local_6565b031-...\kill-switch-round4-findings-6fcd6cd.json` (in Claude-Data). Medium, all confirmed:
-  1. Any other client's resting order counts as cover. A manual TWS BUY on a vertical's short leg makes the expiry guard skip the short and still sell the long: naked short into expiry. Fix: count only GUARD-/KILL-/MSL-/DMS-/CLI- as closing now; for foreign orders, hold the underlying and report it.
-  2. If a kill's halt write fails, `state.json` stays FULL_AUTO, and a RESET then resumes entries while the guard is still stood down. Fix: retry the halt after the kill; reset() always writes ADVISORY.
-  3. A dry run in flight (healthcheck 09:00-10:00 ET, rerun_due, the UI button) holds kill client id 19, so a live kill then fails to connect (TWS 326), and the one-live-kill rule ignores the retry. Fix: give dry runs their own client id; make a second live kill wait for the first and re-run it if it failed.
-  4. (Not adversarially verified.) The bridge's `openOrdersAt` has no test.
-  Low:
-  - reset() accepts an open-order list taken before the kill placed its orders.
-  - Normal guard passes net against a missing openOrdersAt.
-  - The desk-level netting clauses and the KILL_SETTLE_S minimum are untested.
-  - exit_fills is read before working_qty; an earlier day's exit fill can be missed; the real Executor.exit_fills is untested.
-  - The in-flight flag is a single boolean.
-  - Unlock isn't disabled during a live kill, and reset doesn't refuse while one runs.
-  - createKillArm is fully mocked in TradingDesk.kill.test; the hotkey flag, approve toast and alreadyRunning texts are untested.
-  Older gaps:
+- **Kill switch / options guard** (`claude/practical-elbakyan-0f96f1`): round 4 is fixed in 5a55ebc (you said "fix them now"). The GPU session verifies it, then merges, pushes and restarts. After the merge the trading bridge needs a restart to load it. Things to know:
+  - A manual order in TWS on an expiring option leg is now named in the guard's report (and audited). If it sits on a short leg, the guard keeps the long legs until you cancel or replace it.
+  - Dry runs (09:00 health check, the UI button) now connect as client id 26. Set `IBKR_CLIENT_ID_KILL_DRY` if 26 is taken on your TWS.
+  - A second E-stop press during a kill waits for it. It runs again only if the first never connected. If the first connected but failed, the press reports that and sends nothing; then run `python trading/kill_switch.py`.
+  Not fixed:
+  - Normal guard passes still net against an open-order list the bridge hasn't confirmed (openOrdersAt missing).
+  - Unlock-disabled-mid-kill has no render test; the server's refusal is tested.
+  - The hotkey doesn't read the in-flight count; the desk serializes kills, and the toast says "already running".
   - An unfilled closed_stop LMT exit is never re-armed (predates this work).
   - TWS's take-profit handling when a partly filled entry is cancelled is unconfirmed.
   - Real Windows key-repeat inside WebView2 is untested (only CDP key events).
@@ -152,7 +146,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
 | sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
-| claude/practical-elbakyan-0f96f1 (b0451af = 6fcd6cd + main 77993c2) | tsc clean; vitest 2,931/2,931; test:scripts 12/12; test_trading_* 705/705 (system Python), 702/705 venv (3 known python-multipart); run_all 924 OK; cargo --lib 1,618 (+2 known CRLF; 3 browser tests hung under parallel load, each passes alone) | 11-27 01:25 |
+| claude/practical-elbakyan-0f96f1 (5a55ebc, round 4) | tsc clean; vitest 2,937/2,937; test:scripts 12/12; test_trading_* 731/731 (system Python), venv 727/731 (3 known python-multipart, 1 temp-dir cleanup race, now tolerated and 5/5 alone); run_all 950 OK; cargo --lib 1,614 (+2 known CRLF; 7 real-browser tests failed under parallel load, all pass alone); 27 Python + 1 UI mutations all caught | 11-27 10:30 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
@@ -166,28 +160,28 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 01:31 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:33 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/practical-elbakyan-0f96f1` | 10 | `b0451af` 2026-11-27 Merge main (77993c2) into claude/practical-elbakyan-0f96f1 | 1 files |
+| `claude/practical-elbakyan-0f96f1` | 12 | `5a55ebc` 2026-11-27 fix(trading): round-4 kill switch and options guard fixes | 1 files |
+| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | clean |
+| `section-26-engine` | 11 | `0162a7d` 2026-11-27 feat(settings): Built-in engine card: status, VRAM bar, model list ... | 10 files |
+| `section-pass-batch3` | 9 | `4ca35ee` 2026-11-27 Merge main (9d37071: Tony live-test fixes, barge-in) into section-p... | 71 files |
+| `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
-| `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
-| `section-pass` | 19 | `a597bb0` 2026-11-27 feat(section-pass): System Map (Blueprint) on the shared layout (la... | 5 files |
-| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
-| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
-| `director-suite` | 3 | `e0f4410` 2026-11-27 test(comfy): opt-in live SDXL Turbo smoke through run_batch, outsid... | 13 files |
+| `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
-- `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
-- `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
-- `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
-- `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
-- `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
+- `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
+- `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
+- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
+- `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
+- `5098ca3` 2026-11-27 Merge director-suite into main: Director Suite Parts 1-5 and Part 6 small items
+- `9d37071` 2026-11-27 Merge main (87b6527: Tony's read-only system.status tool) into claude/tony-live-test-fixes-5d85d5
 <!-- /AUTO:BRANCHES -->

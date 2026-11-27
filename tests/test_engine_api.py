@@ -130,3 +130,16 @@ class AgentRouteTests(unittest.TestCase):
             r = self.local.get("/api/engine/agents").json()
         self.assertTrue(r["agents"]["coder"]["hasPrompt"])
         self.assertNotIn("SECRET PROMPT TEXT", json.dumps(r))
+
+
+class DocRouteTests(unittest.TestCase):
+    def test_note_route_is_tony_only_and_desktop_only(self):
+        app = FastAPI()
+        app.include_router(api.router)
+        local, remote = TestClient(app, client=("127.0.0.1", 5000)), TestClient(app, client=("100.84.1.20", 5000))
+        self.assertEqual(remote.post("/api/engine/docs/note", json={"role": "tony", "title": "t", "text": "x"}).status_code, 403)
+        self.assertEqual(remote.post("/api/engine/docs/scrolls/sync").status_code, 403)
+        r = local.post("/api/engine/docs/note", json={"role": "coder", "title": "t", "text": "x"})
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("only Tony", r.json()["detail"])
+        self.assertEqual(local.post("/api/engine/docs/note", json={"role": "tony", "title": "", "text": "x"}).status_code, 400)

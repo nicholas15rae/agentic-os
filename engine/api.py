@@ -201,6 +201,27 @@ def docs_search(request: Request, q: str, k: int = 8):
     return DocStore().search(q, max(1, min(k, 50)))
 
 
+@router.post("/docs/note")
+def docs_note(request: Request, body: dict):
+    """Index a note Tony saved (documenter.rs rules: Tony only, title, <= 256 KB)."""
+    _guard(request)
+    from engine import ingest
+    try:
+        return {"status": ingest.ingest_note(str(body.get("role") or ""), str(body.get("title") or ""), str(body.get("text") or ""))}
+    except ingest.IngestRefused as e:
+        raise HTTPException(403 if "may not write" in str(e) else 400, str(e))
+
+
+@router.post("/docs/scrolls/sync")
+def docs_scrolls_sync(request: Request):
+    _guard(request)
+    from engine import ingest
+    try:
+        return ingest.sync_scrolls()
+    except ingest.IngestRefused as e:
+        raise HTTPException(404, str(e))
+
+
 @router.get("/watchdog")
 def watchdog_log(request: Request, n: int = 50):
     _guard(request)

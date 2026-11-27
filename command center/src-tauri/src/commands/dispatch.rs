@@ -1127,8 +1127,11 @@ async fn call(state: &DispatchState, osc: &os_core::OsConfig, policy: &Policy, p
     let base = p.base_url.trim_end_matches('/');
 
     if p.kind == Kind::AgenticOs {
-        // server.py: POST /api/chat {agent, message} → {status, response: {content}}
-        let last = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+        // server.py: POST /api/chat {agent, message} → {status, response: {content}}. It takes the
+        // last user message alone: Nic's words (and a delegated reply), never Tony's turn-context
+        // block (dashboard, tool data, recall), exactly what it got when that block sat in the
+        // system message it drops.
+        let last = messages.iter().rev().find(|m| m.role == "user").map(|m| super::agents::strip_turn_context(&m.content).to_string()).unwrap_or_default();
         let mut rb = state.http.post(format!("{base}/api/chat")).timeout(timeout).json(&serde_json::json!({ "agent": p.model, "message": last }));
         if let Some(t) = os_core::mesh_bearer(osc) {
             rb = rb.bearer_auth(t);
@@ -1152,6 +1155,15 @@ async fn call(state: &DispatchState, osc: &os_core::OsConfig, policy: &Policy, p
     }
 
     // OpenAI-compatible /chat/completions (LM Studio, AnythingLLM, vLLM, Ollama, OpenRouter).
+    // AnythingLLM's shim embeds the last user message as its RAG search query: Tony's turn-context
+    // block goes back into the system message there, so the search sees Nic's words only.
+    let folded;
+    let messages = if is_allm_shim(p) {
+        folded = super::agents::fold_turn_context(messages);
+        &folded[..]
+    } else {
+        messages
+    };
     let mut rb = state
         .http
         .post(format!("{base}/chat/completions"))
@@ -1204,6 +1216,12 @@ pub(crate) fn usable_text_from_message(msg: &Value) -> Option<String> {
         return Some(strip_think(r));
     }
     None
+}
+
+/// AnythingLLM's OpenAI-compatible shim (`/api/v1/openai`, the default `anythingllm` provider): it
+/// runs its workspace RAG search on the last user message. Pure.
+pub(crate) fn is_allm_shim(p: &Provider) -> bool {
+    p.id == "anythingllm" || p.base_url.trim_end_matches('/').ends_with("/api/v1/openai")
 }
 
 /// Planner / router / verifier calls (short budget) that carry a system prompt expect

@@ -310,6 +310,16 @@ pub fn route(app: Option<&tauri::AppHandle>, os: &super::os_core::OsState, d: &T
     }
 }
 
+/// Why a Tier-2 brainstorm turn's packet is held (`hold`).
+pub const BRAINSTORM_HELD: &str = "Brainstorm turn: nothing is dispatched; ask Tony to build it to send it";
+
+/// A packet that must not run this turn, whatever the mode (a Tier-2 brainstorm turn: Nic is
+/// thinking out loud, so nothing is handed off, parked for a yes or queued). Shown as held, like
+/// Solo mode's; `None` when the packet asks for no dispatch (pure).
+pub fn hold(d: &TonyDispatch, reason: &str) -> Option<DispatchView> {
+    d.requires_dispatch.then(|| DispatchView { id: format!("pkt-{}", super::arbiter::now_ms()), state: "held".into(), priority: d.priority.clone(), reason: reason.into(), tasks: task_rows(d, &BTreeMap::new()) })
+}
+
 /// The packet's targets the switchboard froze this turn (target agent → "<Agent> is frozen in
 /// <Mode> mode"). Their tasks are held, never run; tasks that depend on them are blocked (pure).
 pub fn frozen_targets(d: &TonyDispatch, e: &super::modes::Effective, g: &super::os_core::SwitchboardConfig) -> BTreeMap<String, String> {
@@ -544,6 +554,19 @@ mod tests {
         let f = frozen_targets(&d, &eff("brainstorm"), &super::super::os_core::SwitchboardConfig::default());
         assert_eq!(f.keys().map(String::as_str).collect::<Vec<_>>(), vec!["librarian"]);
         assert_eq!(f["librarian"], "Librarian is frozen on the master switchboard");
+    }
+
+    #[test]
+    fn a_brainstorm_hold_shows_every_task_held_and_runs_nothing() {
+        let d = TonyDispatch { spoken_reply: "ok".into(), requires_dispatch: true, priority: "urgent".into(), tasks: vec![pkt("build", "coder", &[]), pkt("audit", "security", &["build"])] };
+        let v = hold(&d, BRAINSTORM_HELD).expect("a dispatching packet is shown");
+        assert_eq!((v.state.as_str(), v.priority.as_str(), v.reason.as_str()), ("held", "urgent", BRAINSTORM_HELD));
+        assert!(v.tasks.iter().all(|t| t["status"] == "held"), "{:?}", v.tasks);
+        assert!(!pending().lock().unwrap().values().any(|p| p == &d), "never parked for a yes");
+        // Nothing to dispatch: no card, as `route`.
+        assert!(hold(&TonyDispatch { requires_dispatch: false, tasks: vec![], ..d.clone() }, BRAINSTORM_HELD).is_none());
+        let l = BRAINSTORM_HELD.to_lowercase();
+        assert!(!l.contains("json") && !l.contains("gabagool"));
     }
 
     #[test]

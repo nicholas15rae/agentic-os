@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
+Updated 2026-11-26 23:09. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -16,7 +16,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
-| Test gate: run_all.py finds every test module itself and runs them in parallel (550 s -> 80-145 s), solo rerun for load flakes | claude/upbeat-wing-e87be0 | b1abe56 | No, PR open |
+| Test gate: run_all.py finds every test module itself and runs them in parallel (550 s -> 80-145 s), solo rerun for load flakes; fixes test_device_registry's import | claude/upbeat-wing-e87be0 | b1abe56, 2d60807 | No, PR #9 open |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -52,7 +52,7 @@ Updated 2026-11-26 23:20. One page for every Claude Code session and branch.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
 - `hermes-output-cleanup` (15f2ceb, Nov 18): rebase and merge, or drop?
-- Test gate (`claude/upbeat-wing-e87be0`): review and merge its PR.
+- Test gate: review and merge PR #9 (`claude/upbeat-wing-e87be0`).
 - OK to run the WhatsApp bridge port patch script.
 - Director: Instagram public hosting approach; ElevenLabs voice for the Director (later).
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.
@@ -121,6 +121,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Director live E2E | 15/15 steps (run 5, 388 s), but output quality failed (9.6 s cut, double letterbox, round 2 unchanged) | 11-26 19:43 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
+| Test gate PR #9 (2d60807 on main a0e730c) | run_all 1,571 OK in 115 s, 62 modules, 8 workers; trading venv group 645 OK (3 skipped) | 11-26 23:05 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
@@ -134,28 +135,27 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 22:46 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 23:09 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/upbeat-wing-e87be0` | 2 | `3fdea38` 2026-11-26 docs(status): test gate 28c60f3 (every module, parallel), its test ... | clean |
-| `merge/section-pass-into-main` | 21 | `37ba367` 2026-11-26 Merge branch 'main' into merge/section-pass-into-main | 1 files |
-| `section-pass` | 10 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | clean |
-| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | clean |
-| `section-pass-batch3` | 15 | `e0419ee` 2026-11-26 Merge main (recall fix fa69ab2) into section-pass-batch3 | 69 files |
+| `director-suite` | 19 | `8532c7b` 2026-11-26 docs(status): Director Part 1 fixes, run 9 E2E, main merged (4e986f1) | clean |
+| `claude/upbeat-wing-e87be0` | 3 | `2d60807` 2026-11-26 test(device_registry): put the repo root on sys.path before importi... | 1 files |
+| `merge/director-suite-into-main` | 18 | `76df04f` 2026-11-26 Merge director-suite (Director Parts 1-2) into main | clean |
+| `section-pass` | 3 | `76eb094` 2026-11-26 docs(section-pass): everything-is-customizable rule + shared layout... | 25 files |
+| `claude/sections-8-10-m2` | 4 | `004c129` 2026-11-26 Merge remote-tracking branch 'origin/main' into claude/sections-8-1... | 206 files |
 | `claude/practical-elbakyan-0f96f1` | 4 | `0330e8f` 2026-11-26 fix(trading): trim a stopless partial fill; scan table shows desk-r... | 12 files |
-| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 18 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
-- `66df342` 2026-11-26 docs(status): main pushed to origin (3ee3dd6): crash hardening and recall fix
-- `3ee3dd6` 2026-11-26 docs(status): record the recall fix merge into main (8278f76)
-- `8278f76` 2026-11-26 Merge fa69ab2: Tony recall stops parroting old replies
-- `e0f7ee7` 2026-11-26 docs(status): crash hardening 1cd5333, 4073bd9 timing, sessions
-- `4bc4e2d` 2026-11-26 Merge main (STATUS.md + update_status.py) into feat/language-hub
-- `1cd5333` 2026-11-26 fix(command-center): log panics to a file, never start the app over a dying WebView2
+- `eefaf0a` 2026-11-26 Merge main (a0e730c: section-pass + section-pass-batch3 merged) into section-pass-batch3
+- `e0419ee` 2026-11-26 Merge main (recall fix fa69ab2) into section-pass-batch3
+- `889ffb9` 2026-11-26 Merge main into section-pass-batch3
+- `7166d26` 2026-11-26 feat(tony): Tony reads Finance with one read-only tool (section 11.10)
+- `3fe3468` 2026-11-26 feat(comms): phone book grouped by area, linked across Finance, invoices, agencies and auditions (section 12)
+- `cebcdbf` 2026-11-26 fix(business,security): profiles sync safely across devices; PIN step-up for new finance records and profiles
 <!-- /AUTO:BRANCHES -->

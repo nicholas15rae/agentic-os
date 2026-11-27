@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
+Updated 2026-11-27 18:07. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -70,6 +70,7 @@ Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
 | Layout step 6: phone sync of layouts and themes through the gateway (desktop shares on change; phone follows, keeps its page, never mid-edit; 'Follow the desktop' switch) | section-pass | 74f9e0d | Yes (f555484), pushed |
 | Fortune-cookie live build (section-pass app, 11-27 10:06-10:25): every brief point reached the verifier and the widget used the style kit; it went to Repair because click probes on its SVG cookie misfired (checker bug, fixed) and the local verifier quoted code not in the page | section-pass | 96829e3 | Yes (f555484), pushed |
 | Build checks catch an animation that never shows (style values the browser rejects, e.g. the cookie's clip-path; elements with click handlers are clicked in the smoke) | section-pass | febc6e9 | Yes (f555484), pushed |
+| Phone APK rebuilt from main 4866634 (arm64 debug, 431 MB) and installed on the S22 over the 11-25 build: same signing key, so app data and the gateway token are kept | claude/phone-apk-agentic-os-764f34 | 4866634 (no code change) | Yes, built from main |
 
 ## 2. In progress
 
@@ -147,7 +148,7 @@ Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
 **Manual steps**
 - After the next rebuild + restart: set a mirror folder on another drive (Vault, Second copies), press Re-index vault, re-run the Engine R evaluation (fills the track record's spread).
 - Ops removal: done live. The Ops lines are out of handoff-cues.json and the STT hint (backups `*.20261126-231018-before-ops-removal`), and os.json was migrated at the 00:31 restart (backup `os.json.bak-20261127-003126-ops-removed`).
-- Phone: connect it to install the APK (built from 4073bd9). Later rebuild with camera permission for QR pairing.
+- Phone: the S22 has the APK from main 4866634 (installed 11-27 18:01). Unlock it and open the app to check it looks right (it launched with the screen locked). Later rebuild with camera permission for QR pairing.
 - S22: turn off RCS "Chat features"; set up a device session on the S22 and the PC.
 - TWS: log in by hand after each reboot and at IBKR's weekly re-login. Keep "Read-Only API" unticked.
 - Director/ComfyUI: copy the SDXL Turbo checkpoint (6.5 GB) from D: (HDD) to an SSD folder? Its read from D: is most of the 80 s render; on SSD a still should take seconds. Parked: moving model files is your call.
@@ -196,6 +197,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| Phone APK, main 4866634 on the S22 (SM-S901W) | `tauri android build --apk --target aarch64 --debug` OK; `adb install -r` Success; app process up, plugins loaded, no FATAL/panic in logcat. Screen not checked (phone locked) | 11-27 18:01 |
 | main 8647df7 (kill switch merge) | tsc clean; vitest 3,352/3,352; pytest run_all 988 OK; all test_trading_* 748 OK; cargo 1,693 (+2 known CRLF; 1 real-browser test failed under load, passes alone) | 11-27 11:05 |
 | Live app (10:41 build, main 0418649), the system.status session's own check | 2 phone-style inbox turns, both answered by the desktop: "Tony, is the droplet up?" -> "Yeah, the Droplet is up and running, Nic..." (system.status 382 ms; droplet 61 ms, from the app's own 15-second check 2 s earlier); "is Docker running?" -> "Yeah, Docker is running good." First words 1.8 s and 1.2 s | 11-27 11:01 |
 | main 8647df7 (+ kill switch / options guard hardening) | tsc clean; vitest 3,352/3,352; cargo 1,694 (+2 known CRLF; Edge tests passed) | 11-27 11:30 |
@@ -249,14 +251,16 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 17:31 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 18:08 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | clean |
-| `section-26-engine` | 34 | `436316e` 2026-11-27 Merge main (cf44451: kill switch) into section-26-engine before the... | 13 files |
+| `section-26-engine` | 65 | `2b44e0f` 2026-11-27 feat(tony): latency fast path behind fastpath.json (all OFF): small... | 1 files |
+| `claude/phone-apk-agentic-os-764f34` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | 1 files |
+| `feat/language-hub` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | clean |
+| `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | no worktree |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |

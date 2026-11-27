@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 01:11. One page for every Claude Code session and branch.
+Updated 2026-11-27 01:25. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -48,6 +48,7 @@ Updated 2026-11-27 01:11. One page for every Claude Code session and branch.
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Merged to main (9a46031). Next: Tony-Rust track (Comms 4, Brainstorm 2/4/6), then M3 |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
+| Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status`: built and tested on the branch (6eae983) | Done on the branch. Waiting on Nic: merge, rebuild + restart, then a live phone inbox check. Overnight rules: not merged, pushed or restarted. Safe choices: probes only (never deploys to the droplet or runs `netbird up`); the droplet isn't contacted when switched off or the kill switch is on (the flag is only read, never changed); no gateway or Python changes |
 
 ## 3. Waiting on you
 
@@ -118,7 +119,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
-| claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
+| claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
 | feat/language-hub (1cd5333) | cargo 1,414 (+2 known CRLF); PowerShell cc-app-restart 18/18, ai-startup 6 + 11 + 20 + 7 | 11-26 22:00 |

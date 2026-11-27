@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import sys
 import urllib.request
 from pathlib import Path
@@ -242,20 +243,27 @@ def main() -> int:
         return f"{len(out)} chars back"
 
     # ---- 6. desktop side -----------------------------------------------------------------
-    @check("desktop providers.json (the app's live chain)")
+    @check("desktop build lists the built-in engine provider")
     def _():
-        p = le.APP_CFG_DIR / "providers.json"
-        ids = [x.get("id") for x in json.loads(p.read_text(encoding="utf-8")).get("providers", [])]
-        if "llamacpp" in ids:
-            return f"{ids}"
-        return "WARN", f"{ids}: no llamacpp yet (appears after the rebuild; never in the chain)"
-
-    @check("desktop chat chain switch (dispatch.rs / model_swap.rs)")
-    def _():
+        # providers.json gains every built-in provider on load (dispatch.rs parse_providers), so
+        # the running app lists llamacpp once it's built from this branch; the file catches up on
+        # the next Settings save. Never in the chain while route_tony is off.
         src = (ROOT / "command center" / "src-tauri" / "src" / "commands" / "dispatch.rs").read_text(encoding="utf-8")
-        if "route_tony" in src:
-            return "built"
-        return "WARN", "not built yet: desktop Tony stays on LM Studio even with route_tony on (gateway Tony would switch)"
+        if 'p("llamacpp"' not in src:
+            return "FAIL", "dispatch.rs has no llamacpp default"
+        exe = ROOT / "command center" / "src-tauri" / "target" / "release" / "command-center.exe"
+        if not exe.exists():
+            return "WARN", f"built-in provider in source; no release build at {exe} yet"
+        return f"in the build ({exe.name}, {time.strftime('%m-%d %H:%M', time.localtime(exe.stat().st_mtime))})"
+
+    @check("desktop chat chain switch (engine_route.rs + model_swap.rs), OFF")
+    def _():
+        d = ROOT / "command center" / "src-tauri" / "src" / "commands"
+        er, ms, dp = (d / "engine_route.rs").read_text(encoding="utf-8"), (d / "model_swap.rs").read_text(encoding="utf-8"), (d / "dispatch.rs").read_text(encoding="utf-8")
+        missing = [n for n, ok in (("engine_route::effective", "pub fn effective" in er), ("chat_snapshot", "fn chat_snapshot" in dp), ("model_swap engine branch", "verify_engine_with" in ms)) if not ok]
+        if missing:
+            return "FAIL", f"missing: {missing}"
+        return ("WARN", "built, but route_tony is ON") if s.enabled and s.route_tony else "built; desktop Tony follows route_tony (off: LM Studio)"
 
     # ---- print ---------------------------------------------------------------------------
     width = max(len(n) for _, n, _ in results)

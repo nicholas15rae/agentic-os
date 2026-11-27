@@ -13,7 +13,7 @@
 import { recordIpc } from "./ipc-ring";
 import { MicLockedError, micEnabled } from "@/features/voice/mic-gate";
 import type { Curiosity, DispatchPolicy, ModesView, TonyMode, Verbosity } from "@/features/modes/modes";
-import type { EngineSwitchView } from "@/features/engine/engine";
+import type { EngineSwitchView, FastPathSettings } from "@/features/engine/engine";
 
 export type Platform = "desktop" | "pwa";
 
@@ -331,6 +331,9 @@ export interface NativeCommands {
   engine_switch_get: { args: undefined; result: EngineSwitchView };
   /** Turning Tony (or the gateway agents) ON is refused unless the engine is enabled and answering. */
   engine_switch_set: { args: { patch: { enabled?: boolean; routeTony?: boolean; routeAgents?: boolean } }; result: EngineSwitchView };
+  /** Tony's latency fast path (fastpath.json; all OFF by default). */
+  fastpath_get: { args: undefined; result: FastPathSettings };
+  fastpath_set: { args: { value: FastPathSettings }; result: FastPathSettings };
 }
 
 /**
@@ -456,6 +459,8 @@ export interface GpuStats {
   utilPct: number;
   vramUsedMb: number;
   vramTotalMb: number;
+  /** GPU core temperature (°C), when reported. */
+  tempC?: number;
 }
 
 export interface SystemStats {

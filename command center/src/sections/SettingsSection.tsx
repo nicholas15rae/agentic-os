@@ -15,6 +15,7 @@ import { MemoryLifecycleCard, MemoryScrollsCard } from "./settings/MemorySetting
 import { AiProvidersCard, CliHubCard, ComputeRouterCard, ModelLabCard, ModelLibraryCard } from "./settings/HubSettings";
 import { EngineCard } from "./settings/EngineCard";
 import { EngineSwitchCard } from "./settings/EngineSwitchCard";
+import { FastPathCard } from "./settings/FastPathCard";
 import { CueStudio } from "./settings/CueStudio";
 import { BusinessProfilesSettings } from "./settings/BusinessProfilesSettings";
 import { VoiceDetectionCard } from "./settings/VadSettings";
@@ -110,6 +111,7 @@ export function SettingsContent() {
         (desktop ? (
           <>
             <EngineSwitchCard />
+            <FastPathCard />
             <EngineCard />
           </>
         ) : (

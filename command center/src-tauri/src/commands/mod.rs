@@ -25,6 +25,7 @@ pub mod procstats;
 pub mod stagger;
 pub mod dispatch;
 pub mod engine_route;
+pub mod fastpath;
 pub mod downtime;
 pub mod documenter;
 pub mod elevenlabs;

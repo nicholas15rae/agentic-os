@@ -1512,6 +1512,8 @@ struct Prefetch {
     pending_spotify: Option<PendingSpotifyCall>,
     /// A Spotify reply that IS the answer (D26): the turn returns it verbatim, no LLM call.
     verbatim: Option<String>,
+    /// `verbatim` came from a Section 26 instant cue (fastpath.rs), not Spotify.
+    instant: bool,
 }
 
 impl Prefetch {
@@ -1822,6 +1824,32 @@ async fn prefetch_tools(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // line changes neither with the line Nic said nor with a server that is slow this turn.
     out.tools = set.line;
     let mut tools = set.offered;
+    // ── Section 26 fast path (fastpath.json, all OFF by default) ── Tony only, after the TOOLS
+    // line is set (so his cached prompt prefix holds): an instant cue answers with no model run,
+    // and a whole line of small talk runs no planner or router.
+    if super::mcp::is_tony(agent) {
+        let fp = state.config_dir().map(|d| super::fastpath::read(&d)).unwrap_or_default();
+        if fp.instant_cues {
+            if let Some(cue) = super::fastpath::instant_cue(text, &cfg.os_name) {
+                use super::fastpath::{cached_stats, cached_weather, Cue};
+                let tool = super::fastpath::cue_tool(cue);
+                // Only what Tony may use this turn (a frozen or switched-off server isn't asked).
+                let offered = cue == Cue::Stats || tools.iter().any(|t| t.name == tool);
+                let weather = (fp.stats_cache && cue == Cue::Weather).then(cached_weather).flatten();
+                let stats = (fp.stats_cache && cue == Cue::Stats).then(cached_stats).flatten();
+                if let Some(a) = offered.then(|| super::fastpath::answer(cue, chrono::Local::now(), weather.as_deref(), stats.as_ref())).flatten() {
+                    out.steps.push(step("tool", "os", tool, "instant cue (no model run)", true, 0));
+                    out.used = Some(tool.into());
+                    out.verbatim = Some(a);
+                    out.instant = true;
+                    return out;
+                }
+            }
+        }
+        if fp.small_talk_skips_tools && super::fastpath::small_talk(text, &cfg.os_name) {
+            return out;
+        }
+    }
     // Cue precedence (G20): "volume 30" while Gabagool plays is the cue's — neither the grammar
     // nor the router may turn it into a Spotify volume change.
     if super::spotify_intent::cue_owns_volume(text, &cfg.os_name, cue_playing) {
@@ -2580,7 +2608,16 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
                 use tauri::Emitter;
                 let _ = app.emit("tony-token", json!({ "streamId": sid, "delta": reply }));
             }
-            let res = spotify_turn(reply, tool_used.clone(), "spotify reply (verbatim)", None, steps);
+            // An inbox (phone) turn gets its first words at once too.
+            if pre.instant {
+                if let Some(s) = sink {
+                    s(&reply);
+                }
+            }
+            let mut res = spotify_turn(reply, tool_used.clone(), if pre.instant { "instant cue (no model run)" } else { "spotify reply (verbatim)" }, None, steps);
+            if pre.instant {
+                res.provider_id = "instant".into();
+            }
             log_turn(bridge, &role, &text, &res, &known);
             return Ok(res);
         }

@@ -222,3 +222,10 @@ export function benchLine(b: BenchSummary | null | undefined): string {
 export function testReplyLine(t: TestReply): string {
   return `first word ${t.firstTokenSecs == null ? "–" : `${t.firstTokenSecs.toFixed(2)} s`} · whole reply ${t.totalSecs.toFixed(2)} s`;
 }
+
+/** fastpath.rs `FastPath` (all false by default). */
+export interface FastPathSettings {
+  smallTalkSkipsTools: boolean;
+  instantCues: boolean;
+  statsCache: boolean;
+}

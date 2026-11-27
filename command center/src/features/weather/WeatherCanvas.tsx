@@ -1,11 +1,15 @@
 import { useEffect, useRef } from "react";
-import { useAtmosphere, useWeather, type Atmosphere } from "./weather-store";
+import { EFFECT_MULT, useAtmosphere, type Atmosphere } from "./weather-store";
 import { usePrefersReducedMotion } from "@/lib/use-media-query";
+import { useSettings } from "@/stores/settings";
 import { frameLoop } from "@/lib/motion";
 
 /**
  * "Living weather" particle layer, ported from the Stitch export and made
  * DPR-aware, resize-safe and pausable. Sits between the wallpaper and widgets.
+ * Settings → effects: off draws nothing; intensity scales the particle counts. Reduced motion and
+ * PHONE_LITE (the Android app) still draw nothing. The weather refresh lives in the app shell
+ * (useWeatherRefresh in App.tsx), so data keeps flowing with effects off.
  */
 interface P {
   x: number; y: number; vx: number; vy: number;
@@ -38,17 +42,16 @@ export function WeatherCanvas() {
   const ref = useRef<HTMLCanvasElement>(null);
   const mode = useAtmosphere();
   const reduced = usePrefersReducedMotion();
-  const refresh = useWeather((s) => s.refresh);
-
-  useEffect(() => {
-    void refresh();
-    const t = setInterval(() => void refresh(), 15 * 60_000);
-    return () => clearInterval(t);
-  }, [refresh]);
+  const enabled = useSettings((s) => s.effects.enabled);
+  const mult = EFFECT_MULT[useSettings((s) => s.effects.intensity)] ?? 1;
 
   useEffect(() => {
     const canvas = ref.current;
-    if (!canvas || reduced) return;
+    if (!canvas || reduced || !enabled) {
+      // Turning effects off mid-animation: wipe the last drawn frame.
+      canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -62,7 +65,7 @@ export function WeatherCanvas() {
       canvas.height = h * dpr;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       // Fewer particles on phones.
-      const n = Math.round(COUNTS[mode] * (w < 768 ? 0.5 : 1));
+      const n = Math.round(COUNTS[mode] * mult * (w < 768 ? 0.5 : 1));
       parts = Array.from({ length: n }, () => spawn(mode, w, h));
     };
     resize();
@@ -125,7 +128,7 @@ export function WeatherCanvas() {
       loop.stop();
       window.removeEventListener("resize", resize);
     };
-  }, [mode, reduced]);
+  }, [mode, reduced, enabled, mult]);
 
   return <canvas ref={ref} aria-hidden className="pointer-events-none fixed inset-0 -z-[5] size-full [backface-visibility:hidden] [transform:translateZ(0)] [contain:strict]" />;
 }

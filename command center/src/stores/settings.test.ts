@@ -90,3 +90,37 @@ describe("settings v6 migration (P4: spotifyDuck → mediaDuck)", () => {
     expect(useSettings.getState().conversation).not.toHaveProperty("spotifyDuck");
   });
 });
+
+describe("settings v8 (top-bar clock + weather effects)", () => {
+  it("resets a saved manual atmosphere to Live once, for any older snapshot", () => {
+    expect(migrateSettings({ weatherMode: "rain" }, 7).weatherMode).toBe("auto");
+    expect(migrateSettings({ weatherMode: "snow", osName: "Tony" }, 3).weatherMode).toBe("auto");
+    expect(migrateSettings({ weatherMode: "rain", osName: "Tony" }, 7).osName).toBe("Tony"); // siblings untouched
+  });
+
+  it("leaves a v8 manual pick alone (the reset runs once only)", () => {
+    expect(migrateSettings({ weatherMode: "rain" }, 8).weatherMode).toBe("rain");
+  });
+
+  it("does not invent a weatherMode for an empty snapshot", () => {
+    expect(migrateSettings(undefined, 7)).toEqual({});
+    expect(migrateSettings({}, 7)).not.toHaveProperty("weatherMode");
+  });
+
+  it("defaults: effects on at normal, 12-hour clock with date and temperature", () => {
+    const s = useSettings.getState();
+    expect(s.effects).toEqual({ enabled: true, intensity: "normal" });
+    expect(s.clock).toEqual({ hourCycle: "h12", showDate: true, showTemp: true });
+    expect(s.weatherMode).toBe("auto");
+  });
+
+  it("an old snapshot without effects / clock gets them backfilled; partial objects keep their values", () => {
+    const old = migrateSettings({ weatherMode: "fog", osName: "Tony" }, 7);
+    const merged = deepMergeDefaults(old, useSettings.getState());
+    expect(merged.effects).toEqual({ enabled: true, intensity: "normal" });
+    expect(merged.clock).toEqual({ hourCycle: "h12", showDate: true, showTemp: true });
+    const partial = deepMergeDefaults({ clock: { hourCycle: "h23" }, effects: { enabled: false } } as never, useSettings.getState());
+    expect(partial.clock).toEqual({ hourCycle: "h23", showDate: true, showTemp: true });
+    expect(partial.effects).toEqual({ enabled: false, intensity: "normal" });
+  });
+});

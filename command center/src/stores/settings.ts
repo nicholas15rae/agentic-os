@@ -4,6 +4,12 @@ import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, migrateSensitivity } fr
 
 export type WeatherMode = "auto" | "clear" | "rain" | "snow" | "autumn" | "midnight" | "fog";
 
+/** Top-bar clock: 12-hour (default, decision 29) or 24-hour. */
+export type HourCycle = "h12" | "h23";
+
+/** Weather particle density: a multiplier on the particle counts (features/weather/weather.contract.ts EFFECT_MULT). */
+export type EffectsIntensity = "low" | "normal" | "high";
+
 /** Brainstorm Listen Mode dictation profile — how long a pause ends a thought, and the hard cap per utterance. */
 export type ListenProfile = "snappy" | "relaxed" | "continuous";
 
@@ -41,7 +47,12 @@ export interface SettingsState {
   wallpaperSync: boolean;
   /** Seconds a mutating action waits for yes/no before cancelling itself. */
   confirmTimeoutSec: number;
+  /** "auto" = follow live weather (v8 resets a saved manual pick to "auto" once). */
   weatherMode: WeatherMode;
+  /** Weather particles: off draws nothing (like reduced motion); intensity scales the counts. Reduced motion / PHONE_LITE still win. */
+  effects: { enabled: boolean; intensity: EffectsIntensity };
+  /** Top-bar clock (shell/TopBarClock): 12/24 h, and whether the date and the temperature show when there is room. */
+  clock: { hourCycle: HourCycle; showDate: boolean; showTemp: boolean };
   /** Null = ask the browser for geolocation. */
   weatherLocation: { lat: number; lon: number; label: string } | null;
   identity: { callsign: string; subtitle: string };
@@ -192,6 +203,8 @@ const defaults: Omit<SettingsState, "set"> = {
   wallpaperSync: true,
   confirmTimeoutSec: 30,
   weatherMode: "auto",
+  effects: { enabled: true, intensity: "normal" },
+  clock: { hourCycle: "h12", showDate: true, showTemp: true },
   weatherLocation: null,
   identity: { callsign: "E46 // GABAGOUL", subtitle: "TONY ACTIVE" },
   mantra: {
@@ -228,7 +241,7 @@ export function deepMergeDefaults<T>(partial: DeepPartial<T> | null | undefined,
 }
 
 /**
- * Persisted-settings migration (exported for tests). v7: see below. v6 (P4): `conversation.spotifyDuck{level}` —
+ * Persisted-settings migration (exported for tests). v8: see below. v7: see below. v6 (P4): `conversation.spotifyDuck{level}` —
  * an ABSOLUTE "duck TO level%" — becomes `conversation.mediaDuck{reductionPct}`, "duck BY %".
  * `enabled` and `onWakeListen` carry over; `reductionPct` is forced to 15 and the old `level` /
  * `restoreMs` (tuned for the old deep duck) are dropped, so "15" can never be reread as a new meaning.
@@ -255,6 +268,11 @@ export function migrateSettings(persisted: unknown, from: number): SettingsState
       s.vad = { ...rest, activationDb: migrateSensitivity(typeof sensitivity === "number" ? sensitivity : 60), bargeMarginDb: DEFAULT_BARGE_MARGIN_DB } as SettingsState["vad"];
     }
   }
+  // v8 (top-bar clock + weather effects, decision 31): a manual atmosphere picked in the old top-bar
+  // switch used to win forever, so reset it to Live ONCE. The Manual indicator (WeatherPanel status
+  // line, the clock's effects dot) keeps any later manual pick visible. `effects` / `clock` are new
+  // nested objects, backfilled by `merge`.
+  if (from < 8 && s.weatherMode !== undefined) s.weatherMode = "auto";
   // `merge` (below) backfills any still-missing fields right after this runs.
   return s as unknown as SettingsState;
 }
@@ -267,7 +285,7 @@ export const useSettings = create<SettingsState>()(
     }),
     {
       name: "cc.settings",
-      version: 7,
+      version: 8,
       migrate: migrateSettings,
       // Deep-merge (not zustand's default shallow merge) so a persisted nested object missing a
       // newer field (e.g. an old `brainstorm` without `listenProfile`) is backfilled from defaults

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { useEffect, type CSSProperties, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 import { useModes } from "./modes-store";
@@ -7,6 +7,7 @@ import { isOverridden } from "./mode-ui";
 import { NOVELTY_MODE_ID, type EffectiveMode } from "./modes";
 import { ModePanel, ModePanelView, type ModePanelViewProps } from "@/widgets/tony-mode/ModePanel";
 import { useCueRun } from "@/features/cues/player";
+import { POPOVER_CARD, POPOVER_W, useAnchoredPopover } from "@/shell/useAnchoredPopover";
 
 /**
  * Top-bar Tony mode switch (Phase 2 Part D): a split pill — (a) the mode trigger that opens the
@@ -16,12 +17,11 @@ import { useCueRun } from "@/features/cues/player";
  * The popover is portaled to <body> at z-40 (below the VoiceHUD z-50, the modals z-75…z-85, the ConfirmCard z-90 and the Toasts z-95),
  * position:fixed under the trigger, with an opaque panel and no backdrop filter: it sits over
  * the System Map's WebGL canvas, where a backdrop filter breaks compositing.
+ * Open/position/dismiss live in the shared shell/useAnchoredPopover hook (same behaviour).
  */
 
-export const POPOVER_W = 320;
-
-/** Opaque card: no backdrop filter, no glass (it paints over WebGL). */
-const POPOVER_CARD = "rounded-[14px] border border-white/10 bg-[rgba(11,13,17,0.94)] p-2 shadow-[0_18px_48px_rgba(0,0,0,0.55)]";
+// Kept exported from here: mode-pill.test.ts imports them from this module.
+export { POPOVER_W, popoverPosition } from "@/shell/useAnchoredPopover";
 
 /** The pill's two segments (presentational). */
 export function ModePillView({
@@ -82,56 +82,11 @@ export function ModePopoverView({ style, ...panel }: Omit<ModePanelViewProps, "s
   );
 }
 
-/** Where the popover sits: under the trigger, right-aligned to it, kept inside the viewport. */
-export function popoverPosition(r: { left: number; right: number; bottom: number }, vw: number): { top: number; left: number } {
-  const left = Math.min(Math.max(8, r.right - POPOVER_W), Math.max(8, vw - POPOVER_W - 8));
-  return { top: r.bottom + 8, left };
-}
-
 export function ModePill() {
   const effective = useModes((s) => s.effective);
   const overrides = useModes((s) => s.overrides);
   const gabagoolOn = useCueRun((s) => !!s.running && s.builtin === "gabagool");
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const pop = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    const place = () => {
-      const r = trigger.current?.getBoundingClientRect();
-      if (r) setPos(popoverPosition(r, window.innerWidth));
-    };
-    place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        setOpen(false);
-        trigger.current?.focus();
-      }
-    };
-    const onDown = (e: PointerEvent) => {
-      const t = e.target as Node;
-      if (!pop.current?.contains(t) && !trigger.current?.contains(t)) setOpen(false);
-    };
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("pointerdown", onDown, true);
-    return () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("pointerdown", onDown, true);
-    };
-  }, [open]);
+  const { open, setOpen, triggerRef: trigger, popRef: pop, pos, width } = useAnchoredPopover(POPOVER_W);
 
   useEffect(() => {
     if (open && !useModes.getState().loaded) void useModes.getState().load();
@@ -145,7 +100,7 @@ export function ModePill() {
       {open &&
         pos &&
         createPortal(
-          <div ref={pop} className="fixed z-40" style={{ top: pos.top, left: pos.left, width: POPOVER_W }}>
+          <div ref={pop} className="fixed z-40" style={{ top: pos.top, left: pos.left, width }}>
             <div role="dialog" aria-label="Tony mode" className={POPOVER_CARD}>
               <ModePanel size={{ w: 3, h: 4 }} onDone={() => setOpen(false)} />
             </div>

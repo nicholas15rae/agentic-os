@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { LayoutSurface } from "@/core/widgets/LayoutSurface";
+import { useOperationsLayout } from "./operations/panels";
 import { Archive, Briefcase, ChevronDown, ChevronRight, Plus, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
-import { Card, Empty, Field, Input, Stat, SubTabs, money } from "@/components/ui";
+import { Card, Empty, Field, Input, Stat, money } from "@/components/ui";
 import { gated } from "@/features/bridge/gate";
 import { useToasts } from "@/features/reminders/notify";
 import { ocmd } from "@/features/ops/api";
@@ -18,7 +21,7 @@ import { isTauri } from "@/lib/platform";
 
 type Tab = "businesses" | "review" | "audit" | "settings";
 
-/** One plain line per tab, shown under the tabs. */
+/** One plain line per block (the old tabs), shown at the top of its panel. */
 const TAB_HELP: Record<Tab, string> = {
   businesses: "Each business you run, kept apart: its own notes, workspace and books. Tony routes a request to the one it names.",
   review: "Things waiting for your yes: notes flagged for mentioning another business, empty or half-written files, and purges. Nothing is deleted until you approve it here.",
@@ -26,30 +29,64 @@ const TAB_HELP: Record<Tab, string> = {
   settings: "When you hear about the Review Queue: a daily digest at your hour (or sooner when it piles up), and optionally a counts-only alert to a webhook.",
 };
 
-/** Operations: the business registry, the HITL review queue, the audit trail and digest settings. */
+/**
+ * Operations: the business registry, the HITL review queue, the audit trail and digest settings,
+ * as panels on the shared layout system (move, resize, hide, add back, per mode, Reset to default).
+ */
 export function OperationsSection() {
-  const [tab, setTab] = useState<Tab>("businesses");
-  const pending = useOps((s) => s.review?.pending ?? 0);
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "businesses", label: "Businesses" },
-    { id: "review", label: pending ? `Review Queue · ${pending}` : "Review Queue" },
-    { id: "audit", label: "Audit" },
-    { id: "settings", label: "Digest & alerts" },
-  ];
   useEffect(() => {
     void useOps.getState().refresh();
     void useOps.getState().refreshReview();
   }, []);
+  return <LayoutSurface store={useOperationsLayout} label="Operations" />;
+}
+
+/** A panel body: the block's help line, then the block (desktop app only). */
+function Block({ tab, children }: { tab: Tab; children: React.ReactNode }) {
   return (
-    <div className="mx-auto h-full w-full max-w-5xl space-y-4 overflow-y-auto px-4 pb-32 md:px-6 md:pb-8">
-      <SubTabs tabs={tabs} value={tab} onChange={setTab} />
-      <p className="-mt-2 fs-12 text-ink-3">{TAB_HELP[tab]}</p>
-      {!isTauri() && <Empty>Operations runs on the desktop app.</Empty>}
-      {isTauri() && tab === "businesses" && <Businesses />}
-      {isTauri() && tab === "review" && <ReviewQueue />}
-      {isTauri() && tab === "audit" && <Audit />}
-      {isTauri() && tab === "settings" && <DigestSettings />}
+    <div className="space-y-4">
+      <p className="fs-12 text-ink-3">{TAB_HELP[tab]}</p>
+      {isTauri() ? children : <Empty>Operations runs on the desktop app.</Empty>}
     </div>
+  );
+}
+
+/** Browser / phone: the page's notice. */
+export function OpsDesktopNotice() {
+  return <Empty>Operations runs on the desktop app.</Empty>;
+}
+
+export function OpsBusinesses() {
+  return (
+    <Block tab="businesses">
+      <Businesses />
+    </Block>
+  );
+}
+
+export function OpsReview({ markSeen = true }: { markSeen?: boolean } = {}) {
+  return (
+    <Block tab="review">
+      <div data-no-hold>
+        <ReviewQueue markSeen={markSeen} />
+      </div>
+    </Block>
+  );
+}
+
+export function OpsAudit() {
+  return (
+    <Block tab="audit">
+      <Audit />
+    </Block>
+  );
+}
+
+export function OpsDigest() {
+  return (
+    <Block tab="settings">
+      <DigestSettings />
+    </Block>
   );
 }
 
@@ -69,7 +106,7 @@ function Businesses() {
   };
   const now = useNow(60_000);
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-no-hold>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         <Stat label="Businesses" value={businesses.length} sub={`${active} active`} tone="teal" />
         <Stat label="Isolation" value="Per business" sub="workspace · memory · ledger" />
@@ -84,7 +121,8 @@ function Businesses() {
       {businesses.map((b) => (
         <BusinessCard key={b.businessId} b={b} inputs={inputs} now={now} />
       ))}
-      {adding && <AddBusinessModal onClose={() => setAdding(false)} />}
+      {/* Portaled: the panel may sit in a glass frame, a window or a zoomed cell. */}
+      {adding && createPortal(<AddBusinessModal onClose={() => setAdding(false)} />, document.body)}
     </div>
   );
 }
@@ -301,7 +339,7 @@ function Audit() {
         {!audit?.rows.length ? (
           <Empty>No audit entries yet.</Empty>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" data-no-hold>
             <table className="w-full text-left fs-12">
               <thead className="label-caps text-ink-3">
                 <tr>

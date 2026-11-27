@@ -52,15 +52,16 @@ async function restore(ids: string[]) {
  * The HITL digest: every pending purge and Security flag in one calm list, grouped by business
  * and reason. Nothing is deleted until you approve it; Restore puts the exact bytes back.
  */
-export function ReviewQueue() {
+/** `markSeen`: showing it clears the digest dot (false for a hidden copy, e.g. a collapsed panel's badge copy). */
+export function ReviewQueue({ markSeen = true }: { markSeen?: boolean } = {}) {
   const review = useOps((s) => s.review);
   const refreshReview = useOps((s) => s.refreshReview);
   const markDigestSeen = useOps((s) => s.markDigestSeen);
 
   useEffect(() => {
-    markDigestSeen();
+    if (markSeen) markDigestSeen();
     void refreshReview();
-  }, [markDigestSeen, refreshReview]);
+  }, [markSeen, markDigestSeen, refreshReview]);
 
   if (!review) return <Empty>Loading the review queue…</Empty>;
   const all = idsOf(review.groups);

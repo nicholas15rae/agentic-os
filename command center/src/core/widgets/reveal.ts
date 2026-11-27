@@ -18,6 +18,9 @@ export function revealPanel(store: LayoutStore, widgetId: string, label: string)
   }
   if (page.id !== s.activePage) s.setActivePage(page.id);
   if (inst.display === "icon") store.getState().openWindow(inst.instanceId);
+  // The phone column (and any board taller than the screen) scrolls to it.
+  else if (typeof document !== "undefined")
+    requestAnimationFrame(() => document.querySelector(`[data-widget="${CSS.escape(inst.instanceId)}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" }));
   return true;
 }
 

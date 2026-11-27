@@ -40,6 +40,9 @@ type LedgerTab = "ideas" | "fixes";
  * a sandboxed iframe (opaque origin — it can't touch the OS or your files),
  * plus the Ideas & Tasks Ledger they came from.
  */
+/** The last card link revealed (module-wide, so a remount doesn't reveal it again). */
+let revealedCard: string | null = null;
+
 export function PlayPlaceSection() {
   const clearUnseen = usePipelines((s) => s.clearUnseen);
   useEffect(() => clearUnseen(), [clearUnseen]);
@@ -48,7 +51,10 @@ export function PlayPlaceSection() {
   const card = useFocus((s) => s.card);
   const build = useMyApps((s) => s.focusBuild);
   useEffect(() => {
-    if (card) revealPanel(usePlayPlaceLayout, "pp-play-cards", "Play Place");
+    // Once per link (the card stays highlighted, but a later visit keeps the layout you chose).
+    if (!card || card === revealedCard) return;
+    revealedCard = card;
+    revealPanel(usePlayPlaceLayout, "pp-play-cards", "Play Place");
   }, [card]);
   useEffect(() => {
     if (build) revealPanel(usePlayPlaceLayout, "pp-staging-hub", "Play Place");

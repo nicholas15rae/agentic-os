@@ -137,6 +137,20 @@ export interface RemovedTile {
 
 const shortId = () => crypto.randomUUID().slice(0, 6);
 
+/**
+ * A new window's rect: the widget's full size in grid cells at about the board's cell size
+ * (12 × 8 over the window), at least 420 × 300 and never past the screen; cascaded by `n`.
+ */
+export function windowRect(size: { w: number; h: number } | undefined, n: number, vw = typeof window === "undefined" ? 1280 : window.innerWidth, vh = typeof window === "undefined" ? 800 : window.innerHeight) {
+  const cellW = vw / 12;
+  const cellH = Math.max(60, (vh - 120) / 8);
+  const w = Math.round(Math.min(vw - 32, Math.max(420, (size?.w ?? 5) * cellW)));
+  const h = Math.round(Math.min(vh - 32, Math.max(300, (size?.h ?? 4) * cellH + 48)));
+  const x = Math.round(Math.max(16, Math.min(vw - w - 16, (vw - w) / 2 + n * 28)));
+  const y = Math.round(Math.max(16, Math.min(vh - h - 16, (vh - h) / 2 + n * 28)));
+  return { x, y, w, h };
+}
+
 /** The Glass switches: the old ultra flag, and a glass / ultra frame picked in the Look panel, agree. */
 const withUltra = (i: WidgetInstance, ultra: boolean): WidgetInstance => ({
   ...i,
@@ -239,7 +253,8 @@ export function createLayoutStore(spec: SurfaceSpec) {
               const open = s.windows.find((w) => w.instanceId === instanceId);
               if (open && s.windows.every((w) => w === open || w.z < open.z)) return s;
               const n = s.windows.length;
-              const target: WidgetWindow = open ?? { instanceId, x: 120 + n * 28, y: 90 + n * 28, w: 520, h: 380, z: 0 };
+              const inst = s.pages.flatMap((p) => p.items).find((i) => i.instanceId === instanceId);
+              const target: WidgetWindow = open ?? { instanceId, ...windowRect(inst ? (inst.fullSize ?? getWidget(inst.widgetId)?.defaultSize) : undefined, n), z: 0 };
               const order = [...s.windows].filter((w) => w.instanceId !== instanceId).sort((a, b) => a.z - b.z);
               return { windows: [...order, target].map((w, i) => ({ ...w, z: i + 1 })) };
             }),

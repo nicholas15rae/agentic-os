@@ -25,9 +25,10 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`field ${props.className ?? ""}`} />;
 }
 
-export function Card({ title, hint, action, children, className = "" }: { title?: string; hint?: ReactNode; action?: ReactNode; children: ReactNode; className?: string }) {
+/** `fill`: the card fills its panel and its body is a flex column (for a FillBox chart). */
+export function Card({ title, hint, action, children, className = "", fill = false }: { title?: string; hint?: ReactNode; action?: ReactNode; children: ReactNode; className?: string; fill?: boolean }) {
   return (
-    <section className={`glass r-20 p-5 ${className}`}>
+    <section className={`glass r-20 p-5 ${fill ? "flex h-full min-h-0 flex-col" : ""} ${className}`}>
       {(title || action) && (
         <div className="mb-1 flex flex-wrap items-center gap-2">
           {title && <h2 className="label-caps text-amber-soft">{title}</h2>}
@@ -35,7 +36,7 @@ export function Card({ title, hint, action, children, className = "" }: { title?
         </div>
       )}
       {hint && <p className="mb-3 text-xs leading-relaxed text-ink-3">{hint}</p>}
-      <div className={title && !hint ? "mt-3" : ""}>{children}</div>
+      <div className={`${title && !hint ? "mt-3" : ""} ${fill ? "flex min-h-0 flex-1 flex-col" : ""}`}>{children}</div>
     </section>
   );
 }

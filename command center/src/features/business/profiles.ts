@@ -66,13 +66,32 @@ export interface BusinessProfile {
   invoiceStyle: InvoiceStyle;
   agencies?: Agency[];
   contracting?: ContractingDefaults;
+  /** Finance: the area's display name ("" / absent = the built-in name). Renameable; custom areas need one. */
+  label?: string;
+  /** Finance: how often this area files its HST return (only used once the HST number is confirmed). */
+  hstPeriod?: HstPeriod;
+  /** Finance: % of profit to set aside for income tax (an estimate, not advice). */
+  setAsidePct?: number;
+  /** Finance: invoice number prefix ("CON" → CON-2026-001). "" / absent = the area default. */
+  invoicePrefix?: string;
 }
+
+export type HstPeriod = "monthly" | "quarterly" | "yearly";
+
+/** Finance-wide settings kept with the profiles (one row on the gateway). */
+export interface FinanceSettings {
+  /** $ per km for the mileage log (your own number; CRA publishes the allowance yearly). */
+  kmRate: number;
+}
+
+export const DEFAULT_FINANCE: FinanceSettings = { kmRate: 0.72 };
 
 export interface ProfilesDoc {
   version: 1;
   /** The old single localStorage profile was copied in (once, across devices). */
   legacyImported: boolean;
   profiles: Record<string, BusinessProfile>;
+  finance?: FinanceSettings;
 }
 
 /** The old `useSettings().business` shape. */
@@ -118,7 +137,7 @@ export function withDefaults(doc: ProfilesDoc | null | undefined): ProfilesDoc {
     const got = doc?.profiles?.[id];
     profiles[id] = got ? { ...base, ...got, ...(base.agencies && !got.agencies ? { agencies: base.agencies } : {}), ...(base.contracting && !got.contracting ? { contracting: base.contracting } : {}) } : base;
   }
-  return { version: 1, legacyImported: !!doc?.legacyImported, profiles };
+  return { version: 1, legacyImported: !!doc?.legacyImported, profiles, finance: { ...DEFAULT_FINANCE, ...(doc?.finance ?? {}) } };
 }
 
 /** Which profile the old single profile belongs to: Contracting unless its name says otherwise. */

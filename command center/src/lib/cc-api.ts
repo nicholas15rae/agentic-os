@@ -23,10 +23,14 @@ export type Collection =
   | "checks"
   | "receipts"
   | "documents"
-  | "widgets";
+  | "widgets"
+  | "commissions"
+  | "mileage"
+  | "pending"
+  | "statement_lines";
 
 /** Finance records: Nic's screens only, never an agent's context. Mirrors FINANCE_COLLECTIONS in command_center_api.py. */
-export const FINANCE_COLLECTIONS: readonly Collection[] = ["receipts", "invoices", "checks", "income"];
+export const FINANCE_COLLECTIONS: readonly Collection[] = ["receipts", "invoices", "checks", "income", "commissions", "mileage", "pending", "statement_lines"];
 export const isFinanceCollection = (c: string): boolean => (FINANCE_COLLECTIONS as readonly string[]).includes(c);
 
 export interface Meta {
@@ -57,8 +61,11 @@ export const cc = {
   kvSet: (key: string, value: unknown) => gateway(`/api/cc/kv/${key}`, { method: "PUT", ...json({ value }) }),
   config: () => gateway<CcConfig>("/api/cc/config"),
   setConfig: (patch: DeepPartial<CcConfig>) => gateway<CcConfig>("/api/cc/config", { method: "PUT", ...json(patch) }),
-  ocr: (fileId: string, kind: "receipt" | "invoice" | "check") =>
+  ocr: (fileId: string, kind: "receipt" | "invoice" | "check" | "etransfer" | "paystub") =>
     gateway<OcrResult>("/api/cc/ocr", { method: "POST", ...json({ fileId, kind }), timeoutMs: 180_000 }),
+  /** A bank / card statement (already parsed in the app) stored read-only; re-imported lines are skipped. */
+  statementImport: (body: { importId: string; account: string; lines: { date: string; description: string; amount: number }[] }) =>
+    gateway<{ added: number; skipped: number; importId: string }>("/api/cc/finance/statement-import", { method: "POST", ...json(body), timeoutMs: 60_000 }),
   organize: (id: string) => gateway<Item<unknown>>("/api/cc/brainstorm/organize", { method: "POST", ...json({ id }), timeoutMs: 180_000 }),
   llmJson: <T>(system: string, prompt: string) => gateway<T>("/api/cc/llm/json", { method: "POST", ...json({ system, prompt }), timeoutMs: 120_000 }),
   /** Nic's own vault search. With no collections, finance is included only when `includeFinance` is set. */

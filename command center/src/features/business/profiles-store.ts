@@ -5,7 +5,7 @@
 import { create } from "zustand";
 import { gateway } from "@/lib/gateway";
 import { useSettings } from "@/stores/settings";
-import { commissionFrom, importLegacy, profileForArea, withDefaults, type BusinessProfile, type ProfileId, type ProfilesDoc } from "./profiles";
+import { commissionFrom, DEFAULT_FINANCE, emptyProfile, importLegacy, profileForArea, withDefaults, type BusinessProfile, type FinanceSettings, type ProfileId, type ProfilesDoc } from "./profiles";
 
 const PATH = "/api/cc/business/profiles";
 
@@ -20,13 +20,20 @@ interface ProfilesState {
   load: () => Promise<void>;
   /** Merge into one profile and save (debounced). */
   patch: (id: ProfileId, patch: Partial<BusinessProfile>) => void;
+  /** Finance: add a new area (a profile with a label). */
+  addArea: (id: string, label: string) => void;
+  /** Finance-wide settings (per-km rate). */
+  patchFinance: (patch: Partial<FinanceSettings>) => void;
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 let inflight: Promise<void> | null = null;
 
 async function put(doc: ProfilesDoc): Promise<ProfilesDoc> {
-  const r = await gateway<{ value: ProfilesDoc }>(PATH, { method: "PUT", body: JSON.stringify({ value: doc }) });
+  // Default finance settings aren't sent, so a gateway from before Finance areas still accepts the doc.
+  const { finance, ...rest } = doc;
+  const value = finance && finance.kmRate !== DEFAULT_FINANCE.kmRate ? doc : rest;
+  const r = await gateway<{ value: ProfilesDoc }>(PATH, { method: "PUT", body: JSON.stringify({ value }) });
   return withDefaults(r.value);
 }
 
@@ -54,24 +61,37 @@ export const useProfiles = create<ProfilesState>()((set, get) => ({
     })();
     return inflight;
   },
+  addArea: (id, label) => {
+    if (get().doc.profiles[id]) return;
+    get().patch(id, { ...emptyProfile(id), label });
+  },
+  patchFinance: (patch) => {
+    const cur = get().doc;
+    save({ ...cur, finance: { ...cur.finance!, ...patch } });
+  },
   patch: (id, patch) => {
     const cur = get().doc;
-    const doc: ProfilesDoc = { ...cur, profiles: { ...cur.profiles, [id]: { ...cur.profiles[id], ...patch } } };
-    set({ doc });
-    if (!get().loaded) return; // never overwrite the gateway's copy before reading it
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(async () => {
-      timer = null;
-      set({ saving: true });
-      try {
-        await put(get().doc);
-        set({ saving: false, error: null });
-      } catch (e) {
-        set({ saving: false, error: e instanceof Error ? e.message : String(e) });
-      }
-    }, 600);
+    save({ ...cur, profiles: { ...cur.profiles, [id]: { ...(cur.profiles[id] ?? emptyProfile(id)), ...patch } } });
   },
 }));
+
+/** Set the doc now, save it to the gateway (debounced). */
+function save(doc: ProfilesDoc) {
+  const { getState: get, setState: set } = useProfiles;
+  set({ doc });
+  if (!get().loaded) return; // never overwrite the gateway's copy before reading it
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(async () => {
+    timer = null;
+    set({ saving: true });
+    try {
+      await put(get().doc);
+      set({ saving: false, error: null });
+    } catch (e) {
+      set({ saving: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }, 600);
+}
 
 /** The profile an invoice of `area` prints with (default Contracting). Sync: whatever is loaded. */
 export const profileFor = (area?: string | null) => profileForArea(useProfiles.getState().doc, area);

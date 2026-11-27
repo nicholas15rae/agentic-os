@@ -33,6 +33,17 @@ OUT = ROOT / "data" / "engine" / "agents.proposed.json"
 BUILTIN_PROMPTS = {"prompter", "designer", "coder", "librarian"}  # agent_prompts.rs role_prompt
 REMOVED = {"ops"}  # Ops agent removed 11-26 (its work is Tony's)
 
+# Nic's tool owners (11-27): one owner gets write access; named readers get read-only, optionally
+# limited to folders; everyone else loses the tool. Tools not listed keep their single grant as the
+# owner. "general" is Tony.
+TOOL_POLICY: dict[str, dict] = {
+    "filesystem": {"owner": "coder",
+                   "readers": {"director": [r"G:\ai-hub\media\projects"],
+                               "designer": []}},  # no Designer project folder exists yet: Nic names it
+    "fetch": {"owner": "coder", "readers": {}},  # Tony uses Brave Search instead
+    "knowledge-graph": {"owner": "general", "readers": {"librarian": None, "prompter": None}},  # None = no folder limit
+}
+
 
 def _export_workspaces(export_dir: Path) -> dict[str, dict]:
     c = sqlite3.connect(f"file:{(export_dir / 'anythingllm.db').as_posix()}?mode=ro", uri=True)
@@ -65,8 +76,21 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
     for a in names:
         slug = ws_map.get(a)
         ws = export.get(slug or "", {})
-        tools = [m["id"] for m in mcps if m.get("enabled", True) and a in (m.get("agents") or [])]
-        ro = [m["id"] for m in mcps if m["id"] in tools and m.get("readOnly")]
+        access = []
+        for m in mcps:
+            if not m.get("enabled", True):
+                continue
+            tid, pol = m["id"], TOOL_POLICY.get(m["id"])
+            if pol:
+                if a == pol["owner"]:
+                    access.append({"tool": tid, "access": "read" if m.get("readOnly") else "write"})
+                elif a in pol["readers"]:
+                    roots = pol["readers"][a]
+                    access.append({"tool": tid, "access": "read", **({"roots": roots} if roots is not None else {})})
+            elif a in (m.get("agents") or []):
+                access.append({"tool": tid, "access": "read" if m.get("readOnly") else "write"})
+        tools = [x["tool"] for x in access]
+        ro = [x["tool"] for x in access if x["access"] == "read"]
         notes = []
         if a in BUILTIN_PROMPTS:
             src, prompt = "agent_prompts.rs role_prompt (built in)", None
@@ -84,15 +108,19 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
         agents[a] = {
             "names": (agents_cfg.get(a) or {}).get("names", []), "domains": (agents_cfg.get(a) or {}).get("domains", []),
             "promptSource": src, "prompt": prompt, "model": ws.get("model"), "temperature": ws.get("temperature"),
-            "history": ws.get("history"), "tools": tools, "readOnlyTools": ro,
+            "history": ws.get("history"), "tools": tools, "readOnlyTools": ro, "toolAccess": access,
             "skills": sorted(k for k, v in grants.items() if a in (v or [])),
             "memory": {"workspace": slug, "threads": ws.get("threads", 0), "chats": ws.get("chats", 0), "documents": ws.get("documents", 0)},
             "frozen": a in frozen, "migrate": a not in REMOVED, "notes": notes,
         }
     for m in mcps:
         owners = [x for x in (m.get("agents") or []) if x not in REMOVED]
-        if len(owners) > 1:
+        if len(owners) > 1 and m["id"] not in TOOL_POLICY:
             questions.append(f"tool '{m['id']}' is granted to {len(owners)} agents ({', '.join(owners)}): which one owns it?")
+    for tid, pol in TOOL_POLICY.items():
+        for reader, roots in pol["readers"].items():
+            if roots == []:
+                questions.append(f"'{tid}' read-only for {reader}: which project folder? (no access until named)")
     unmapped = sorted(set(export) - set(ws_map.values()))
     if unmapped:
         questions.append(f"AnythingLLM workspaces no agent maps to (kept in the export, not migrated): {', '.join(unmapped)}")

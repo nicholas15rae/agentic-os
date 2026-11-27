@@ -19,7 +19,10 @@ card). The one exception is Instant Send: a text with `origin: "ui-typed"`
 (typed by hand in the Chat box) to a contact whose key is trusted exactly.
 Turning trust on needs `confirmed: true` too and is audit-logged; Instagram,
 Messenger and RCS contacts can never be trusted. (The origin is a claim the
-gateway can't verify: the token is the real boundary.)
+gateway can't verify: the token is the real boundary.) Instagram, Messenger and
+RCS are read-only here (replies open the chat on the phone), thread and contact
+keys are channel-aware, notification captures never write contacts, and while
+the desktop's kill switch is on (mirrored in os-state.json) nothing is sent.
 """
 from __future__ import annotations
 
@@ -31,7 +34,9 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 import uuid
+import zlib
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -83,6 +88,19 @@ _OS_QUEUE_COLUMNS = (
     ("partial", "TEXT"), ("partial_seq", "INTEGER"), ("partial_token", "TEXT"),
     ("claimed_by", "TEXT"),
 )
+# Comms step 3 (build plan Sections 8-10), same guarded pattern:
+#   comms_messages: source (who pushed it), status (an outbox reply: queued|sent|delivered|failed|
+#     expired), meta (notification JSON, <= 2 KB), echo_id (the phone's own copy of a desktop send
+#     that was folded into this row, so a reply shows one bubble)
+#   comms_outbox: claimed_by / lease_until (the native bridge's 60 s claim), expires (TTL),
+#     origin (who started the send), thread, meta (an `open` item's open hint)
+#   comms_calls: source; comms_contacts: channel
+_COMMS_COLUMNS = {
+    "comms_messages": (("source", "TEXT"), ("status", "TEXT"), ("meta", "TEXT"), ("echo_id", "TEXT")),
+    "comms_outbox": (("claimed_by", "TEXT"), ("lease_until", "REAL"), ("expires", "REAL"), ("origin", "TEXT"), ("thread", "TEXT"), ("meta", "TEXT")),
+    "comms_calls": (("source", "TEXT"),),
+    "comms_contacts": (("channel", "TEXT"),),
+}
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
 
@@ -100,12 +118,26 @@ def _ensure_schema() -> None:
             for name, typ in _OS_QUEUE_COLUMNS:
                 if name not in have:
                     c.execute(f"ALTER TABLE os_queue ADD COLUMN {name} {typ}")
+            for table, cols in _COMMS_COLUMNS.items():
+                have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+                for name, typ in cols:
+                    if name not in have:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
             c.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS os_queue_status ON os_queue(status, created);
                 CREATE TABLE IF NOT EXISTS task_mirror(
                   task_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL, updated_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS task_mirror_updated ON task_mirror(updated_at);
+                CREATE INDEX IF NOT EXISTS comms_msg_channel ON comms_messages(channel, ts);
+                CREATE INDEX IF NOT EXISTS comms_outbox_status ON comms_outbox(status, created);
+                CREATE TABLE IF NOT EXISTS comms_sources(
+                  source TEXT NOT NULL, device TEXT NOT NULL, last_seen REAL, last_ingest REAL, perms TEXT,
+                  battery INTEGER, app_version TEXT, counts TEXT, PRIMARY KEY(source, device));
+                -- Meta API seam (design only, nothing writes it yet): a channel identity -> thread.
+                CREATE TABLE IF NOT EXISTS comms_identities(
+                  channel TEXT NOT NULL, source TEXT NOT NULL, external_id TEXT NOT NULL, thread TEXT, display TEXT,
+                  PRIMARY KEY(channel, source, external_id));
                 """
             )
         _schema_ready.add(key)
@@ -113,10 +145,48 @@ def _ensure_schema() -> None:
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def _thread_key(address: str, channel: str = "sms") -> str:
+# Channel-aware keys (thread AND contact). SMS keys are unchanged (a phone number's last 10
+# digits); WhatsApp keys are the JID, lowercased (a phone number becomes its JID, see below). Every other channel gets its own prefix, so an Instagram
+# sender called "Mom" or "4165551234" can never land in, rename or borrow the trust of an SMS
+# contact: those names are chosen by the sender, not by Nic.
+#   instagram "ig:<name>", messenger "fbm:<name>", rcs "rcs:<name>" (RCS reaches us only through
+#   notifications, whose title is a display name), and a WhatsApp message captured from a phone
+#   notification "wan:<name>" (a display name, never a JID). Groups key on the conversation title.
+_KEY_PREFIX = {"instagram": "ig:", "messenger": "fbm:", "rcs": "rcs:"}
+NOTIF_WHATSAPP_PREFIX = "wan:"
+READ_ONLY_KEY_PREFIXES = ("ig:", "fbm:", "rcs:", NOTIF_WHATSAPP_PREFIX)
+_INVISIBLE = re.compile("[\u0000-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁩﻿]")
+_NAME_KEY_MAX = 120
+
+
+def _norm_name(s: Any) -> str:
+    """A display name as a key: NFKC, no control / bidi / zero-width characters, whitespace
+    collapsed, casefolded, capped. ("Sam 2" and "sam​  2" are the same key.)"""
+    t = _INVISIBLE.sub("", unicodedata.normalize("NFKC", str(s or "")))
+    return " ".join(t.split()).casefold()[:_NAME_KEY_MAX] or "unknown"
+
+
+# WhatsApp threads key on the JID (Comms step 5), so the desktop's send (recipient "+1 416…") and
+# the PC ingester's copy (chat_jid "1416…@s.whatsapp.net") are one thread. A bare phone number
+# becomes <digits>@s.whatsapp.net, the same JID the bridge itself sends to; group (@g.us) and
+# @lid JIDs are used as they are, lowercased.
+WA_USER_SERVER = "@s.whatsapp.net"
+_WA_PHONE = re.compile(r"\+?[0-9][0-9 ().-]{5,24}")
+
+
+def _thread_key(address: str, channel: str = "sms", *, title: Optional[str] = None, group: bool = False, notif: bool = False) -> str:
+    ch = str(channel or "sms").strip().lower()
+    prefix = _KEY_PREFIX.get(ch) or (NOTIF_WHATSAPP_PREFIX if notif and ch == "whatsapp" else None)
+    if prefix:
+        name = title if group and str(title or "").strip() else address
+        return prefix + _norm_name(name)
     a = (address or "").strip()
     if "@" in a:  # WhatsApp JID / email
         return a.lower()
+    if ch == "whatsapp" and _WA_PHONE.fullmatch(a):
+        digits = re.sub(r"\D", "", a)
+        if 7 <= len(digits) <= 15:
+            return digits + WA_USER_SERVER
     digits = re.sub(r"\D", "", a)
     return digits[-10:] if len(digits) >= 10 else (digits or a.lower() or "unknown")
 
@@ -280,42 +350,290 @@ def _broadcast(event: dict) -> None:
         fut.add_done_callback(lambda f, ws=ws: _drop_if_failed(f, ws))
 
 
-def _contact_name(c, address: str) -> Optional[str]:
-    r = c.execute("SELECT name FROM comms_contacts WHERE address=?", (_thread_key(address),)).fetchone()
+# ── Channels and sources ─────────────────────────────────────────────────────
+#
+# Who may push what (POST /ingest, and the older /sms and /call-log aliases):
+#   android-native  the phone app's SMS / call-log sync          sms (+ calls)
+#   android-notif   the phone app's notification capture        instagram, messenger, rcs, whatsapp
+#   tasker          the Tasker recipe (/sms and /call-log)       any channel (it predates channels)
+#   desktop         the desktop app's own WhatsApp send record   whatsapp, sms
+#   wa-mcp          the PC WhatsApp ingester (Comms step 5)      whatsapp
+#   ig-graph        the Meta API seam (design only)              instagram
+#   outbox          internal: a reply queued by POST /send       sms (never accepted from a client)
+# Notification sources never write comms_contacts (their names are chosen by the sender), and only
+# SMS and WhatsApp rows from the other sources may name a contact.
+CHANNELS = ("sms", "rcs", "whatsapp", "instagram", "messenger")
+READ_ONLY_CHANNELS = frozenset({"instagram", "messenger", "rcs"})
+CONTACT_CHANNELS = frozenset({"sms", "whatsapp"})
+NOTIF_SOURCES = frozenset({"android-notif"})
+SOURCE_CHANNELS: dict[str, frozenset] = {
+    "android-native": frozenset({"sms"}),
+    "android-notif": frozenset({"instagram", "messenger", "rcs", "whatsapp"}),
+    "tasker": frozenset(CHANNELS),
+    "desktop": frozenset({"whatsapp", "sms"}),
+    "wa-mcp": frozenset({"whatsapp"}),
+    "ig-graph": frozenset({"instagram"}),
+    "outbox": frozenset({"sms"}),
+}
+INTERNAL_SOURCES = frozenset({"outbox"})
+CALL_SOURCES = frozenset({"android-native", "tasker"})
+# A desktop-sent reply (POST /send, or the desktop's WhatsApp send) comes back from the phone's or
+# the WhatsApp bridge's own sync as an outgoing row with another id. That copy is folded into the
+# desktop's row: same thread, channel and body, inside the window below, once per desktop row.
+ECHO_SOURCES = frozenset({"android-native", "tasker", "wa-mcp"})
+ECHO_TARGET_SOURCES = ("outbox", "desktop")
+ECHO_WINDOW_SECS = 60.0
+INGEST_MAX = 2000
+BODY_MAX = 8000
+META_MAX_BYTES = 2048
+_INGEST_ID = re.compile(r"[\x21-\x7e]{1,200}")
+_DEVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
+_PERM_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
+_PKG = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
+_HANDLE = re.compile(r"[A-Za-z0-9._]{1,30}")
+# The only deep links a capture may hand the phone: an Instagram or Messenger chat by handle.
+_DEEPLINK = re.compile(r"https://(?:ig\.me/m/[A-Za-z0-9._]{1,30}|m\.me/[A-Za-z0-9.]{1,64})")
+_META_FIELDS = ("pkg", "notifKey", "conversationTitle", "isGroup", "deeplink", "kind", "handle", "shortcutId")
+_META_STR_MAX = 200
+CHANNEL_PKG = {"instagram": "com.instagram.android", "messenger": "com.facebook.orca", "whatsapp": "com.whatsapp"}
+
+
+def _bad(status: int, msg: str):
+    raise HTTPException(status, msg)
+
+
+def _device(v: Any, *, required: bool = True) -> Optional[str]:
+    d = str(v or "").strip()
+    if not d and not required:
+        return None
+    if not _DEVICE.fullmatch(d):
+        _bad(400, "device must be 1-64 letters, digits, spaces, '.', '_' or '-'")
+    return d
+
+
+def _source(v: Any) -> str:
+    s = str(v or "").strip().lower()
+    if s not in SOURCE_CHANNELS or s in INTERNAL_SOURCES:
+        _bad(400, f"source must be one of {sorted(set(SOURCE_CHANNELS) - INTERNAL_SOURCES)}")
+    return s
+
+
+def _clean_meta(raw: Any) -> Optional[dict]:
+    """Only the known notification fields, each type-checked; links only to an Instagram /
+    Messenger chat; at most META_MAX_BYTES of JSON (longest values dropped first)."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    for k in _META_FIELDS:
+        v = raw.get(k)
+        if k == "isGroup":
+            if isinstance(v, bool):
+                out[k] = v
+            continue
+        if not isinstance(v, str):
+            continue
+        v = _INVISIBLE.sub("", v).strip()[:_META_STR_MAX]
+        if not v:
+            continue
+        if (k == "pkg" and not _PKG.fullmatch(v)) or (k == "deeplink" and not _DEEPLINK.fullmatch(v)) or (k == "handle" and not _HANDLE.fullmatch(v)) or (k == "kind" and v not in ("text", "media")):
+            continue
+        out[k] = v
+    while out and len(json.dumps(out, ensure_ascii=False).encode()) > META_MAX_BYTES:
+        out.pop(max((k for k in out if isinstance(out[k], str)), key=lambda k: len(out[k])))
+    return out or None
+
+
+def _open_hint(channel: str, meta: Optional[dict]) -> dict:
+    """How the phone opens this chat: the live notification, then a reliable handle's link, then
+    the app's inbox (the phone app applies the same order and re-checks the handle rule)."""
+    meta = meta or {}
+    hint = {"pkg": meta.get("pkg") or CHANNEL_PKG.get(channel), "strategy": "app-inbox"}
+    if meta.get("deeplink"):
+        hint.update(deeplink=meta["deeplink"], strategy="username-link")
+    if meta.get("notifKey"):
+        hint.update(notifKey=meta["notifKey"], strategy="content-intent")
+    if meta.get("handle"):
+        hint["handle"] = meta["handle"]
+    return hint
+
+
+def _channels_param(v: str) -> Optional[list[str]]:
+    """`channel=instagram,messenger` → those channels (400 for an unknown one); empty → None."""
+    chs = sorted({x.strip().lower() for x in (v or "").split(",") if x.strip()})
+    bad = [x for x in chs if x not in CHANNELS]
+    if bad:
+        _bad(400, f"channel must be among {list(CHANNELS)}")
+    return chs or None
+
+
+def _in(col: str, values: list[str]) -> str:
+    return f"{col} IN ({','.join('?' * len(values))})"
+
+
+def _loads_meta(raw: Any) -> Optional[dict]:
+    v = _loads(raw, None) if isinstance(raw, str) else None
+    return v if isinstance(v, dict) else None
+
+
+def _read_only_thread(channel: Optional[str], thread: str) -> bool:
+    return (channel or "") in READ_ONLY_CHANNELS or str(thread or "").startswith(READ_ONLY_KEY_PREFIXES)
+
+
+def _message_view(r) -> dict:
+    d = {k: r[k] for k in r.keys() if k != "echo_id"}
+    if "meta" in d:
+        d["meta"] = _loads_meta(d["meta"])
+    return d
+
+
+def _contact_name(c, key: str) -> Optional[str]:
+    r = c.execute("SELECT name FROM comms_contacts WHERE address=?", (key,)).fetchone()
     return r["name"] if r else None
+
+
+def _touch_source(c, source: str, device: Optional[str], now: float, counts: Optional[dict] = None) -> None:
+    """An ingest proves the device is alive; it also counts what it added, per channel."""
+    if not device or source in INTERNAL_SOURCES:
+        return
+    r = c.execute("SELECT counts FROM comms_sources WHERE source=? AND device=?", (source, device)).fetchone()
+    total = _loads(r["counts"], {}) if r else {}
+    if not isinstance(total, dict):
+        total = {}
+    for ch, n in (counts or {}).items():
+        total[ch] = int(total.get(ch) or 0) + n
+    c.execute(
+        "INSERT INTO comms_sources(source,device,last_seen,last_ingest,counts) VALUES(?,?,?,?,?) "
+        "ON CONFLICT(source,device) DO UPDATE SET last_seen=excluded.last_seen, last_ingest=excluded.last_ingest, counts=excluded.counts",
+        (source, device, now, now, json.dumps(total)),
+    )
+
+
+def _find_echo(c, thread: str, channel: str, body: str, ts: float) -> Optional[str]:
+    """The desktop-sent row this incoming outgoing copy belongs to, if any. An outbox reply goes out
+    some time after it was queued (up to its TTL), a desktop WhatsApp send right away.
+    A row that failed or expired never takes an echo: the same text arriving from the phone then
+    is Nic resending it by hand, a real send that keeps its own bubble."""
+    late = OUTBOX_TTL["sms"] + ECHO_WINDOW_SECS
+    r = c.execute(
+        f"""SELECT id FROM comms_messages
+            WHERE thread=? AND channel=? AND direction='out' AND body=? AND echo_id IS NULL
+              AND COALESCE(status,'queued') NOT IN ('failed','expired')
+              AND {_in('source', list(ECHO_TARGET_SOURCES))}
+              AND ts <= ? AND ts >= ? - (CASE source WHEN 'outbox' THEN ? ELSE ? END)
+            ORDER BY ABS(ts - ?) LIMIT 1""",
+        (thread, channel, body, *ECHO_TARGET_SOURCES, ts + ECHO_WINDOW_SECS, ts, late, ECHO_WINDOW_SECS, ts),
+    ).fetchone()
+    return r["id"] if r else None
+
+
+def _ingest_messages(msgs: list, source: str, *, legacy: bool, device: Optional[str] = None, status: Optional[str] = None) -> dict:
+    """The one write path for messages (POST /ingest, /sms, and /send's own record).
+    `legacy` (/sms, /send): an id is generated when missing. Returns {added, dup, rejected}."""
+    _ensure_schema()
+    allowed = SOURCE_CHANNELS[source]
+    notif = source in NOTIF_SOURCES
+    added = dup = rejected = 0
+    counts: dict[str, int] = {}
+    to_index: list[tuple] = []
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        for m in msgs[:INGEST_MAX]:
+            if not isinstance(m, dict) or not str(m.get("body") or "").strip():
+                rejected += 1
+                continue
+            channel = str(m.get("channel") or "sms").strip().lower()
+            if channel not in CHANNELS or channel not in allowed:
+                rejected += 1
+                continue
+            address = str(m.get("address") or m.get("from") or m.get("to") or "").strip()[:200]
+            ts = _ts(m.get("ts") or m.get("date"))
+            body = str(m["body"])[:BODY_MAX]
+            direction = "out" if str(m.get("direction") or m.get("type") or "in").lower() in ("out", "sent", "outgoing", "2") else "in"
+            meta = _clean_meta(m.get("meta"))
+            thread = _thread_key(address, channel, title=(meta or {}).get("conversationTitle"), group=bool((meta or {}).get("isGroup")), notif=notif)
+            raw_id = m.get("id")
+            if legacy and not str(raw_id or "").strip():
+                # crc32, not hash(): str hashes change per process, so a re-posted text would not dedupe.
+                mid = f"{channel}:{thread}:{int(ts)}:{zlib.crc32(body.encode('utf-8')):x}"
+            elif legacy:
+                mid = str(raw_id).strip()[:200]
+            elif isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) and _INGEST_ID.fullmatch(str(raw_id)):
+                mid = str(raw_id)
+            else:
+                rejected += 1
+                continue
+            if c.execute("SELECT 1 FROM comms_messages WHERE id=?", (mid,)).fetchone():
+                dup += 1
+                continue
+            if direction == "out" and source in ECHO_SOURCES:
+                echo_of = _find_echo(c, thread, channel, body, ts)
+                if echo_of:
+                    c.execute(
+                        "UPDATE comms_messages SET echo_id=?, status=CASE WHEN status IS NULL OR status='queued' THEN 'sent' ELSE status END WHERE id=?",
+                        (mid, echo_of),
+                    )
+                    dup += 1
+                    continue
+            given = str(m.get("contact") or m.get("name") or "").strip()[:120]
+            contact = given or _contact_name(c, thread) or address or thread
+            if given and channel in CONTACT_CHANNELS and not notif:
+                c.execute(
+                    "INSERT INTO comms_contacts(address,name,channel) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET name=excluded.name",
+                    (thread, given, channel),
+                )
+            c.execute(
+                "INSERT INTO comms_messages(id,thread,contact,address,direction,body,ts,channel,read,source,status,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (mid, thread, contact, address, direction, body, ts, channel, 1 if direction == "out" else 0, source, status, json.dumps(meta, ensure_ascii=False) if meta else None),
+            )
+            added += 1
+            counts[channel] = counts.get(channel, 0) + 1
+            to_index.append((mid, contact, address, direction, body, ts, channel))
+            _broadcast({"type": "sms", "id": mid, "thread": thread, "contact": contact, "direction": direction, "body": body[:280], "ts": ts, "channel": channel, "source": source})
+        _touch_source(c, source, device, now, counts)
+    for row in to_index:  # after the write transaction above has committed
+        _vault_comms(*row)
+    return {"added": added, "dup": dup, "rejected": rejected}
+
+
+def _sms_list(data: Any) -> list:
+    return data.get("messages") if isinstance(data, dict) and "messages" in data else (data if isinstance(data, list) else [data])
 
 
 @comms_router.post("/sms")
 def comms_sms(data: Any = Body(...)):
-    """Phone bridge → desktop. Accepts one message or {messages:[…]}.
-    Fields: address, body, ts (s or ms), direction in|out, contact?, channel? (sms|rcs|whatsapp), id?"""
-    msgs = data.get("messages") if isinstance(data, dict) and "messages" in data else (data if isinstance(data, list) else [data])
-    added = 0
-    to_index: list[tuple] = []
-    with cc._db_lock, cc.db() as c:
-        for m in msgs[:2000]:
-            if not isinstance(m, dict) or not str(m.get("body") or "").strip():
-                continue
-            address = str(m.get("address") or m.get("from") or m.get("to") or "")
-            channel = str(m.get("channel") or "sms").lower()
-            ts = _ts(m.get("ts") or m.get("date"))
-            body = str(m["body"])[:8000]
-            direction = "out" if str(m.get("direction") or m.get("type") or "in").lower() in ("out", "sent", "outgoing", "2") else "in"
-            mid = str(m.get("id") or f"{channel}:{_thread_key(address)}:{int(ts)}:{hash(body) & 0xFFFFFFFF:x}")
-            contact = str(m.get("contact") or m.get("name") or "") or _contact_name(c, address) or address
-            if m.get("contact"):
-                c.execute("INSERT INTO comms_contacts(address,name) VALUES(?,?) ON CONFLICT(address) DO UPDATE SET name=excluded.name", (_thread_key(address), contact))
-            cur = c.execute(
-                "INSERT OR IGNORE INTO comms_messages(id,thread,contact,address,direction,body,ts,channel,read) VALUES(?,?,?,?,?,?,?,?,?)",
-                (mid, _thread_key(address, channel), contact, address, direction, body, ts, channel, 1 if direction == "out" else 0),
-            )
-            if cur.rowcount:
-                added += 1
-                to_index.append((mid, contact, address, direction, body, ts, channel))
-                _broadcast({"type": "sms", "id": mid, "thread": _thread_key(address, channel), "contact": contact, "direction": direction, "body": body[:280], "ts": ts})
-    for row in to_index:  # after the write transaction above has committed
-        _vault_comms(*row)
-    return {"ok": True, "added": added}
+    """Phone bridge → desktop (the Tasker recipe; the desktop's WhatsApp send record). One message
+    or {messages:[…]}. Fields: address, body, ts (s or ms), direction in|out, contact?, channel?, id?.
+    An optional top-level `source` (default tasker) follows the /ingest rules."""
+    source = "tasker"
+    if isinstance(data, dict) and data.get("source") is not None:
+        source = _source(data.get("source"))
+    msgs = _sms_list(data)
+    if not isinstance(msgs, list):
+        _bad(400, "messages must be a list")
+    return {"ok": True, **_ingest_messages(msgs, source, legacy=True)}
+
+
+@comms_router.post("/ingest")
+def comms_ingest(data: dict = Body(...)):
+    """The native phone bridge (and later the WhatsApp ingester): {source, device, messages?:
+    IngestMessage[], calls?: Call[]}. Every message needs a stable id (a retried spool batch is
+    deduped on it). meta {pkg, notifKey, conversationTitle, isGroup, deeplink, kind, handle,
+    shortcutId} is kept for the open-on-phone hint. Notification sources never write contacts."""
+    source = _source(data.get("source"))
+    device = _device(data.get("device"))
+    msgs, calls = data.get("messages"), data.get("calls")
+    if msgs is None and calls is None:
+        _bad(400, "messages or calls required")
+    for name, v in (("messages", msgs), ("calls", calls)):
+        if v is not None and not isinstance(v, list):
+            _bad(400, f"{name} must be a list")
+        if isinstance(v, list) and len(v) > INGEST_MAX:
+            _bad(413, f"at most {INGEST_MAX} {name} per call")
+    if calls and source not in CALL_SOURCES:
+        _bad(400, f"calls come only from {sorted(CALL_SOURCES)}")
+    out = _ingest_messages(msgs or [], source, legacy=False, device=device)
+    call_res = _ingest_calls(calls, source, device=device) if calls else {"added": 0}
+    return {"ok": True, **out, "calls": call_res["added"]}
 
 
 def _vault_comms(mid, contact, address, direction, body, ts, channel):
@@ -334,47 +652,77 @@ def _vault_comms(mid, contact, address, direction, body, ts, channel):
         pass
 
 
-@comms_router.post("/call-log")
-def comms_calls_post(data: Any = Body(...)):
-    calls = data.get("calls") if isinstance(data, dict) and "calls" in data else (data if isinstance(data, list) else [data])
+def _ingest_calls(calls: list, source: str, *, device: Optional[str] = None) -> dict:
+    _ensure_schema()
     added = 0
+    now = time.time()
     with cc._db_lock, cc.db() as c:
-        for k in calls[:2000]:
+        for k in calls[:INGEST_MAX]:
             if not isinstance(k, dict):
                 continue
-            address = str(k.get("address") or k.get("number") or "")
+            address = str(k.get("address") or k.get("number") or "")[:200]
             ts = _ts(k.get("ts") or k.get("date"))
             d = str(k.get("direction") or k.get("type") or "in").lower()
-            direction = "missed" if d in ("missed", "3", "rejected") else "out" if d in ("out", "outgoing", "2") else "in"
-            cid = str(k.get("id") or f"call:{_thread_key(address)}:{int(ts)}")
-            contact = str(k.get("contact") or k.get("name") or "") or _contact_name(c, address) or address
-            cur = c.execute("INSERT OR IGNORE INTO comms_calls(id,contact,address,direction,ts,duration) VALUES(?,?,?,?,?,?)", (cid, contact, address, direction, ts, int(k.get("duration") or 0)))
+            direction = "missed" if d in ("missed", "3", "5", "rejected") else "out" if d in ("out", "outgoing", "2") else "in"
+            key = _thread_key(address)
+            cid = str(k.get("id") or f"call:{key}:{int(ts)}")[:200]
+            contact = str(k.get("contact") or k.get("name") or "")[:120] or _contact_name(c, key) or address
+            try:
+                duration = int(k.get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+            cur = c.execute("INSERT OR IGNORE INTO comms_calls(id,contact,address,direction,ts,duration,source) VALUES(?,?,?,?,?,?,?)", (cid, contact, address, direction, ts, duration, source))
             if cur.rowcount:
                 added += 1
                 _broadcast({"type": "call", "id": cid, "contact": contact, "direction": direction, "ts": ts})
-    return {"ok": True, "added": added}
+        if added:
+            _touch_source(c, source, device, now, {"calls": added})
+    return {"added": added}
+
+
+@comms_router.post("/call-log")
+def comms_calls_post(data: Any = Body(...)):
+    calls = data.get("calls") if isinstance(data, dict) and "calls" in data else (data if isinstance(data, list) else [data])
+    if not isinstance(calls, list):
+        _bad(400, "calls must be a list")
+    return {"ok": True, **_ingest_calls(calls, "tasker")}
 
 
 @comms_router.get("/threads")
-def comms_threads(limit: int = Query(100, le=500)):
+def comms_threads(limit: int = Query(100, le=500), channel: str = ""):
+    """Latest message per thread. `channel=instagram,messenger` limits it to those channels (the
+    latest message and the unread count are then counted within them)."""
+    _ensure_schema()
+    chs = _channels_param(channel)
+    cu, cx, cm = (f" AND {_in(a + '.channel', chs)}" if chs else "" for a in ("u", "x", "m"))
+    args = (*(chs or ()), *(chs or ()), *(chs or ()), limit)
     with cc.db() as c:
         rows = c.execute(
-            """SELECT m.thread, m.contact, m.address, m.body, m.ts, m.direction, m.channel,
-                      (SELECT COUNT(*) FROM comms_messages u WHERE u.thread=m.thread AND u.read=0) AS unread
+            f"""SELECT m.thread, m.contact, m.address, m.body, m.ts, m.direction, m.channel, m.source, m.meta,
+                      (SELECT COUNT(*) FROM comms_messages u WHERE u.thread=m.thread AND u.read=0{cu}) AS unread
                FROM comms_messages m
-               WHERE m.ts = (SELECT MAX(ts) FROM comms_messages x WHERE x.thread = m.thread)
+               WHERE m.ts = (SELECT MAX(ts) FROM comms_messages x WHERE x.thread = m.thread{cx}){cm}
                GROUP BY m.thread ORDER BY m.ts DESC LIMIT ?""",
-            (limit,),
+            args,
         ).fetchall()
         trusted = {r["address"] for r in c.execute("SELECT address FROM comms_contacts WHERE trusted=1")}
-    return {"threads": [{**dict(r), "trusted": r["thread"] in trusted} for r in rows]}
+    out = []
+    for r in rows:
+        d = {k: r[k] for k in r.keys() if k != "meta"}
+        ro = _read_only_thread(r["channel"], r["thread"])
+        d["readOnly"] = ro
+        d["trusted"] = (not ro) and r["thread"] in trusted
+        d["openHint"] = _open_hint(r["channel"], _loads_meta(r["meta"])) if ro or r["source"] in NOTIF_SOURCES else None
+        out.append(d)
+    return {"threads": out}
 
 
 @comms_router.get("/threads/{thread}/messages")
 def comms_messages(thread: str, limit: int = Query(200, le=2000)):
+    _ensure_schema()
     with cc.db() as c:
         rows = c.execute("SELECT * FROM comms_messages WHERE thread=? ORDER BY ts DESC LIMIT ?", (thread, limit)).fetchall()
-    return {"messages": [dict(r) for r in reversed(rows)]}
+    return {"messages": [_message_view(r) for r in reversed(rows)]}
 
 
 @comms_router.post("/threads/{thread}/read")
@@ -393,17 +741,79 @@ def comms_calls(limit: int = Query(100, le=1000)):
 
 @comms_router.get("/contacts")
 def comms_contacts(q: str = ""):
+    _ensure_schema()
     with cc.db() as c:
         rows = c.execute(
-            "SELECT address, name, trusted FROM comms_contacts WHERE name LIKE ? OR address LIKE ? ORDER BY name LIMIT 200",
+            "SELECT address, name, trusted, channel FROM comms_contacts WHERE name LIKE ? OR address LIKE ? ORDER BY name LIMIT 200",
             (f"%{q}%", f"%{q}%"),
         ).fetchall()
     return {"contacts": [dict(r) for r in rows]}
 
 
+# ── Phone bridge health: POST /heartbeat, GET /sources ──────────────────────
+# The native bridge posts a heartbeat every 5 min (and every ingest counts as one). Three missed
+# heartbeats make a source stale, which the desktop's Phone bridge tab shows.
+SOURCE_STALE_SECS = 900.0
+_PERMS_MAX = 32
+
+
+@comms_router.post("/heartbeat")
+def comms_heartbeat(data: dict = Body(...)):
+    """{source, device, perms: {sms, callLog, notifAccess, postNotif, contacts: bool…},
+    batteryUnrestricted?: bool, appVersion?: str} → {ok, serverTime}"""
+    _ensure_schema()
+    source = _source(data.get("source"))
+    device = _device(data.get("device"))
+    perms = data.get("perms") if data.get("perms") is not None else {}
+    if not isinstance(perms, dict) or len(perms) > _PERMS_MAX or not all(isinstance(k, str) and _PERM_KEY.fullmatch(k) and isinstance(v, bool) for k, v in perms.items()):
+        _bad(400, f"perms must be an object of at most {_PERMS_MAX} named booleans")
+    battery = data.get("batteryUnrestricted")
+    if battery is not None and not isinstance(battery, bool):
+        _bad(400, "batteryUnrestricted must be a boolean")
+    version = data.get("appVersion")
+    if version is not None and (not isinstance(version, str) or len(version) > 40):
+        _bad(400, "appVersion must be a string of at most 40 characters")
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        c.execute(
+            "INSERT INTO comms_sources(source,device,last_seen,perms,battery,app_version) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(source,device) DO UPDATE SET last_seen=excluded.last_seen, perms=excluded.perms, battery=excluded.battery, "
+            "app_version=COALESCE(excluded.app_version, app_version)",
+            (source, device, now, json.dumps(perms), None if battery is None else int(battery), version),
+        )
+    _broadcast({"type": "source", "source": source, "device": device, "lastSeen": now})
+    return {"ok": True, "serverTime": now}
+
+
+@comms_router.get("/sources")
+def comms_sources():
+    _ensure_schema()
+    now = time.time()
+    with cc.db() as c:
+        rows = c.execute("SELECT * FROM comms_sources ORDER BY last_seen DESC").fetchall()
+    return {
+        "sources": [
+            {
+                "source": r["source"],
+                "device": r["device"],
+                "lastSeen": r["last_seen"],
+                "lastIngest": r["last_ingest"],
+                "stale": now - _num(r["last_seen"]) > SOURCE_STALE_SECS,
+                "perms": _loads(r["perms"], {}),
+                "batteryUnrestricted": None if r["battery"] is None else bool(r["battery"]),
+                "appVersion": r["app_version"],
+                "counts": _loads(r["counts"], {}),
+            }
+            for r in rows
+        ],
+        "serverTime": now,
+        "staleAfter": SOURCE_STALE_SECS,
+    }
+
+
 # Instant Send (decision 5): read-only / notification-captured channels can never be trusted, and
 # only a reply typed by hand in the Chat box may use trust to skip the card.
-UNTRUSTABLE_CHANNELS = frozenset({"instagram", "messenger", "rcs"})
+UNTRUSTABLE_CHANNELS = READ_ONLY_CHANNELS
 INSTANT_SEND_ORIGIN = "ui-typed"
 AUDIT_FILE = Path(__file__).resolve().parent / "audit" / "audit.log"  # server.append_audit's file
 
@@ -432,14 +842,17 @@ def _confirmed(data: dict) -> bool:
 
 @comms_router.post("/contacts")
 def comms_contact_put(data: dict = Body(...)):
+    _ensure_schema()
     raw = str(data.get("address") or "").strip()
     if not raw:
         raise HTTPException(400, "address required")
-    address = _thread_key(raw)
-    trusted = bool(data.get("trusted"))
     channel = str(data.get("channel") or "sms").strip().lower()
+    if channel not in CHANNELS:
+        raise HTTPException(400, f"channel must be one of {list(CHANNELS)}")
+    address = _thread_key(raw, channel)
+    trusted = bool(data.get("trusted"))
     if trusted:
-        if channel in UNTRUSTABLE_CHANNELS:
+        if channel in UNTRUSTABLE_CHANNELS or address.startswith(READ_ONLY_KEY_PREFIXES):
             raise HTTPException(400, f"{channel} contacts can't be trusted for Instant Send")
         if not _confirmed(data):
             # Turning Instant Send on is itself a confirmation-card action.
@@ -447,8 +860,8 @@ def comms_contact_put(data: dict = Body(...)):
     with cc._db_lock, cc.db() as c:
         prev = c.execute("SELECT trusted FROM comms_contacts WHERE address=?", (address,)).fetchone()
         c.execute(
-            "INSERT INTO comms_contacts(address,name,trusted) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET name=COALESCE(excluded.name,name), trusted=excluded.trusted",
-            (address, data.get("name"), 1 if trusted else 0),
+            "INSERT INTO comms_contacts(address,name,trusted,channel) VALUES(?,?,?,?) ON CONFLICT(address) DO UPDATE SET name=COALESCE(excluded.name,name), trusted=excluded.trusted, channel=COALESCE(channel, excluded.channel)",
+            (address, data.get("name"), 1 if trusted else 0, channel),
         )
     if bool(prev and prev["trusted"]) != trusted:
         _audit({"action": "comms_trust_on" if trusted else "comms_trust_off", "address": address, "channel": channel})
@@ -458,7 +871,7 @@ def comms_contact_put(data: dict = Body(...)):
 def _trusted(address: str) -> bool:
     """Exact match on the normalized contact key (never a LIKE / substring)."""
     key = _thread_key(address)
-    if not str(address or "").strip() or key == "unknown":
+    if not str(address or "").strip() or key == "unknown" or key.startswith(READ_ONLY_KEY_PREFIXES):
         return False
     with cc.db() as c:
         r = c.execute("SELECT trusted FROM comms_contacts WHERE address=?", (key,)).fetchone()
@@ -471,21 +884,115 @@ def _instant_send_ok(kind: str, data: dict, address: str) -> bool:
     return kind == "sms" and _send_origin(data.get("origin")) == INSTANT_SEND_ORIGIN and channel not in UNTRUSTABLE_CHANNELS and _trusted(address)
 
 
+# ── Kill switch ──────────────────────────────────────────────────────────────
+# The desktop mirrors privacy.killSwitch into <CC_DIR>/os-state.json on every settings change and
+# at start (os_core.rs OsState::persist → mirror_json; a phone's kill-switch command reaches it
+# through /api/os/inbox and lands there the same way). While it is on the gateway queues no text
+# or call and hands none out (GET /outbox, claim). A missing or unreadable mirror counts as on.
+OS_STATE_FILE = "os-state.json"
+KILL_SWITCH_DETAIL = "KILL_SWITCH: the kill switch is on, so nothing is sent from the phone"
+
+
+def _kill_switch_on() -> bool:
+    try:
+        st = json.loads((Path(cc.CC_DIR) / OS_STATE_FILE).read_text(encoding="utf-8"))
+        ks = (st.get("privacy") or {}).get("killSwitch") if isinstance(st, dict) else None
+    except Exception:
+        return True
+    return ks if isinstance(ks, bool) else True
+
+
+# ── Outbox: the phone sends texts, dials calls and opens chats ───────────────
+#
+# kinds: sms (POST /send), call (POST /call), open (POST /open-on-phone: open a chat on the
+# phone; it sends nothing to anyone, so it needs no card and the kill switch doesn't hold it).
+# pending → sent | delivered | failed | dialed | opened (POST /outbox/{id}/ack), or expired: an
+# item nobody finished within its TTL is never sent late. The native bridge claims an item first
+# (POST /outbox/{id}/claim, a 60 s lease): a second claimer gets 409, an expired item 410, and an
+# item whose lease ran out without an ack is offered again. Tasker never claims: it polls GET
+# /outbox (which hides leased items and, unless `kinds` asks for it, `open` items) and acks.
+OUTBOX_KINDS = ("sms", "call", "open")
+OUTBOX_TTL = {"sms": 600.0, "call": 120.0, "open": 900.0}
+OUTBOX_LEASE_SECS = 60.0
+ACK_STATUSES = ("sent", "failed", "dialed", "delivered", "opened")
+OUTBOX_EXPIRED_DETAIL = "expired before the phone sent it"
+SEND_CHANNEL = "sms"
+_DIAL_ADDRESS = re.compile(r"\+?[0-9*#][0-9*# ().-]{1,30}")
+KILL_SWITCH_KINDS = ("sms", "call")
+
+
+def _dial_address(address: str) -> None:
+    digits = re.sub(r"\D", "", address)
+    if not _DIAL_ADDRESS.fullmatch(address) or not 3 <= len(digits) <= 15:
+        raise HTTPException(400, "address must be a phone number")
+
+
+def _outbox_view(r) -> dict:
+    d = dict(r)
+    d["meta"] = _loads_meta(d.get("meta"))
+    if d.get("expires") is None:
+        d["expires"] = _num(d.get("created")) + OUTBOX_TTL.get(d.get("kind") or "", OUTBOX_TTL["sms"])
+    return d
+
+
+def _sweep_outbox(c, now: float) -> list[str]:
+    """Pending items past their TTL become `expired` (a live lease finishes first); a queued
+    reply's thread row says so too. Returns the expired ids (the caller broadcasts them)."""
+    gone = []
+    for r in c.execute("SELECT id, kind, created, expires, lease_until FROM comms_outbox WHERE status='pending'").fetchall():
+        exp = r["expires"] if r["expires"] is not None else _num(r["created"], now) + OUTBOX_TTL.get(r["kind"] or "", OUTBOX_TTL["sms"])
+        if now <= exp or _num(r["lease_until"]) > now:
+            continue
+        cur = c.execute(
+            "UPDATE comms_outbox SET status='expired', detail=?, lease_until=NULL, updated=? WHERE id=? AND status='pending'",
+            (OUTBOX_EXPIRED_DETAIL, now, r["id"]),
+        )
+        if cur.rowcount:
+            c.execute("UPDATE comms_messages SET status='expired' WHERE id=? AND (status IS NULL OR status='queued')", (f"out:{r['id']}",))
+            gone.append(r["id"])
+            log.warning("comms outbox %s (%s) %s", r["id"], r["kind"], OUTBOX_EXPIRED_DETAIL)
+    return gone
+
+
+def _broadcast_expired(ids: list[str]) -> None:
+    for oid in ids:
+        _broadcast({"type": "outbox-ack", "id": oid, "status": "expired"})
+
+
 def _queue_out(kind: str, data: dict) -> dict:
+    _ensure_schema()
     address = str(data.get("address") or "").strip()
     if not address:
         raise HTTPException(400, "address required")
+    channel = str(data.get("channel") or SEND_CHANNEL).strip().lower()
+    if channel != SEND_CHANNEL:
+        if channel in READ_ONLY_CHANNELS:
+            raise HTTPException(400, f"{channel} is read-only here: reply on the phone (POST /api/comms/open-on-phone)")
+        if channel == "whatsapp":
+            raise HTTPException(400, "WhatsApp is sent from the desktop app, not through the phone outbox")
+        raise HTTPException(400, f"channel must be {SEND_CHANNEL}")
+    _dial_address(address)
     if kind == "sms" and not str(data.get("body") or "").strip():
         raise HTTPException(400, "body required")
+    if _kill_switch_on():
+        raise HTTPException(423, KILL_SWITCH_DETAIL)
     if not _confirmed(data) and not _instant_send_ok(kind, data, address):
         # The 30-second confirmation card in the UI sets confirmed:true. Never auto-send: voice,
         # Tony and agents always need the card, even to a trusted contact.
         raise HTTPException(428, "Confirmation required (Instant Send covers only replies typed by hand to a trusted contact)")
     oid = uuid.uuid4().hex
     now = time.time()
-    row = {"id": oid, "kind": kind, "address": address, "contact": data.get("contact") or address, "body": str(data.get("body") or "")[:2000], "channel": data.get("channel") or "sms", "status": "pending", "created": now, "updated": now, "detail": ""}
+    row = {
+        "id": oid, "kind": kind, "address": address, "contact": data.get("contact") or address, "body": str(data.get("body") or "")[:2000],
+        "channel": SEND_CHANNEL, "status": "pending", "created": now, "updated": now, "detail": "", "claimed_by": None, "lease_until": None,
+        "expires": now + OUTBOX_TTL[kind], "origin": _send_origin(data.get("origin")), "thread": _thread_key(address, SEND_CHANNEL), "meta": None,
+    }
     with cc._db_lock, cc.db() as c:
-        c.execute("INSERT INTO comms_outbox(id,kind,address,contact,body,channel,status,created,updated,detail) VALUES(:id,:kind,:address,:contact,:body,:channel,:status,:created,:updated,:detail)", row)
+        c.execute(
+            "INSERT INTO comms_outbox(id,kind,address,contact,body,channel,status,created,updated,detail,expires,origin,thread) "
+            "VALUES(:id,:kind,:address,:contact,:body,:channel,:status,:created,:updated,:detail,:expires,:origin,:thread)",
+            row,
+        )
     _broadcast({"type": "outbox", **row})
     return row
 
@@ -494,48 +1001,206 @@ def _queue_out(kind: str, data: dict) -> dict:
 def comms_send(data: dict = Body(...)):
     """Queue an SMS for the phone bridge to send (it polls /outbox or listens on /ws)."""
     row = _queue_out("sms", data)
-    # Record it in the thread right away (marked as queued) so the inbox shows it.
-    comms_sms({"messages": [{"id": f"out:{row['id']}", "address": row["address"], "contact": row["contact"], "body": row["body"], "ts": row["created"], "direction": "out", "channel": row["channel"]}]})
+    # Record it in the thread right away (marked as queued) so the inbox shows it. Only a contact
+    # name the caller gave is passed on (the row's fallback is the number, which would rename them).
+    _ingest_messages(
+        [{"id": f"out:{row['id']}", "address": row["address"], "contact": str(data.get("contact") or "").strip(), "body": row["body"], "ts": row["created"], "direction": "out", "channel": row["channel"]}],
+        "outbox", legacy=True, status="queued",
+    )
     return row
 
 
 @comms_router.post("/call")
 def comms_call(data: dict = Body(...)):
-    """Ask the phone bridge to dial a number."""
+    """Ask the phone bridge to dial a number (decision 11: the phone shows "Tap to call")."""
     return _queue_out("call", data)
 
 
+@comms_router.post("/open-on-phone")
+def comms_open_on_phone(data: dict = Body(...)):
+    """Open this thread's chat on the phone (Instagram / Messenger / RCS replies happen there).
+    Sends nothing to anyone, so no card. A second request for the same thread while one is still
+    pending returns that one."""
+    _ensure_schema()
+    thread = str(data.get("thread") or "").strip()
+    if not thread or len(thread) > 200:
+        raise HTTPException(400, "thread required")
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        expired = _sweep_outbox(c, now)
+        m = c.execute("SELECT * FROM comms_messages WHERE thread=? ORDER BY ts DESC LIMIT 1", (thread,)).fetchone()
+        if not m:
+            raise HTTPException(404, "no such thread")
+        same = c.execute("SELECT * FROM comms_outbox WHERE kind='open' AND thread=? AND status='pending' ORDER BY created DESC LIMIT 1", (thread,)).fetchone()
+        if same:
+            row = _outbox_view(same)
+        else:
+            hint = _open_hint(m["channel"] or "sms", _loads_meta(m["meta"]))
+            row = {
+                "id": uuid.uuid4().hex, "kind": "open", "address": m["address"], "contact": m["contact"], "body": "", "channel": m["channel"],
+                "status": "pending", "created": now, "updated": now, "detail": "", "claimed_by": None, "lease_until": None,
+                "expires": now + OUTBOX_TTL["open"], "origin": _send_origin(data.get("origin") or "ui-card"), "thread": thread, "meta": json.dumps(hint),
+            }
+            c.execute(
+                "INSERT INTO comms_outbox(id,kind,address,contact,body,channel,status,created,updated,detail,expires,origin,thread,meta) "
+                "VALUES(:id,:kind,:address,:contact,:body,:channel,:status,:created,:updated,:detail,:expires,:origin,:thread,:meta)",
+                row,
+            )
+            row = {**row, "meta": hint}
+    _broadcast_expired(expired)
+    if not same:
+        # Its own event type: a client that treats every "outbox" event as a text never sees it.
+        _broadcast({"type": "open-on-phone", **row})
+    return {**row, "dup": bool(same)}
+
+
+def _kinds_param(v: str) -> list[str]:
+    ks = sorted({x.strip().lower() for x in (v or "").split(",") if x.strip()})
+    if any(k not in OUTBOX_KINDS for k in ks):
+        raise HTTPException(400, f"kinds must be among {list(OUTBOX_KINDS)}")
+    return ks or ["call", "sms"]
+
+
 @comms_router.get("/outbox")
-def comms_outbox(status: str = "pending"):
-    with cc.db() as c:
-        rows = c.execute("SELECT * FROM comms_outbox WHERE status=? ORDER BY created", (status,)).fetchall()
-    return {"items": [dict(r) for r in rows]}
+def comms_outbox(status: str = "pending", kinds: str = ""):
+    """Items for the phone. `pending` hides leased items; `kinds` defaults to sms,call (what the
+    Tasker recipe knows); while the kill switch is on no text or call is handed out."""
+    _ensure_schema()
+    ks = _kinds_param(kinds)
+    killed = _kill_switch_on()
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        expired = _sweep_outbox(c, now)
+        if status == "pending":
+            rows = c.execute(
+                f"SELECT * FROM comms_outbox WHERE status='pending' AND COALESCE(lease_until,0) <= ? AND {_in('kind', ks)} ORDER BY created",
+                (now, *ks),
+            ).fetchall()
+        else:
+            rows = c.execute(f"SELECT * FROM comms_outbox WHERE status=? AND {_in('kind', ks)} ORDER BY created", (status, *ks)).fetchall()
+    _broadcast_expired(expired)
+    items = [_outbox_view(r) for r in rows]
+    if killed and status == "pending":
+        items = [i for i in items if i["kind"] not in KILL_SWITCH_KINDS]
+    return {"items": items, "killSwitch": killed}
+
+
+@comms_router.post("/outbox/{oid}/claim")
+def comms_outbox_claim(oid: str, data: Optional[dict] = Body(None)):
+    """{device} → the item, leased to that device for 60 s (the same device may renew it).
+    404 unknown, 409 leased by another device or already finished, 410 expired, 423 kill switch."""
+    _ensure_schema()
+    device = _device((data or {}).get("device"))
+    killed = _kill_switch_on()
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        expired = _sweep_outbox(c, now)
+        r = c.execute("SELECT * FROM comms_outbox WHERE id=?", (oid,)).fetchone()
+        err: Optional[tuple[int, str]] = None
+        if not r:
+            err = (404, "no such outbox item")
+        elif r["status"] == "expired":
+            err = (410, OUTBOX_EXPIRED_DETAIL)
+        elif r["status"] != "pending":
+            err = (409, f"already {r['status']}")
+        elif r["kind"] in KILL_SWITCH_KINDS and killed:
+            err = (423, KILL_SWITCH_DETAIL)
+        elif _num(r["lease_until"]) > now and r["claimed_by"] != device:
+            err = (409, "claimed by another device")
+        else:
+            c.execute("UPDATE comms_outbox SET claimed_by=?, lease_until=?, updated=? WHERE id=? AND status='pending'", (device, now + OUTBOX_LEASE_SECS, now, oid))
+            r = c.execute("SELECT * FROM comms_outbox WHERE id=?", (oid,)).fetchone()
+    _broadcast_expired(expired)
+    if err:
+        raise HTTPException(*err)
+    row = _outbox_view(r)
+    _broadcast({"type": "outbox-claim", "id": oid, "device": device, "leaseUntil": row["lease_until"]})
+    return row
 
 
 @comms_router.post("/outbox/{oid}/ack")
 def comms_ack(oid: str, data: dict = Body(...)):
+    """{status: sent|failed|dialed|delivered|opened, detail?, device?}. 404 unknown, 410 expired,
+    409 while another device holds the lease. A text's thread row gets the same status."""
+    _ensure_schema()
     status = str(data.get("status") or "sent")
-    if status not in ("sent", "failed", "dialed", "delivered"):
+    if status not in ACK_STATUSES:
         raise HTTPException(400, "bad status")
+    device = _device(data.get("device"), required=False)
+    now = time.time()
     with cc._db_lock, cc.db() as c:
-        c.execute("UPDATE comms_outbox SET status=?, detail=?, updated=? WHERE id=?", (status, str(data.get("detail") or "")[:300], time.time(), oid))
+        expired = _sweep_outbox(c, now)
+        r = c.execute("SELECT * FROM comms_outbox WHERE id=?", (oid,)).fetchone()
+        err: Optional[tuple[int, str]] = None
+        if not r:
+            err = (404, "no such outbox item")
+        elif r["status"] == "expired":
+            err = (410, OUTBOX_EXPIRED_DETAIL)
+        elif device and r["claimed_by"] and r["claimed_by"] != device and _num(r["lease_until"]) > now:
+            err = (409, "claimed by another device")
+        else:
+            c.execute("UPDATE comms_outbox SET status=?, detail=?, lease_until=NULL, updated=? WHERE id=?", (status, str(data.get("detail") or "")[:300], now, oid))
+            if r["kind"] == "sms" and status in ("sent", "delivered", "failed"):
+                c.execute("UPDATE comms_messages SET status=? WHERE id=?", (status, f"out:{oid}"))
+    _broadcast_expired(expired)
+    if err:
+        raise HTTPException(*err)
     _broadcast({"type": "outbox-ack", "id": oid, "status": status})
     return {"ok": True}
 
 
+# Transport self-test (scripts/comms-bridge-smoke.ps1, later the phone app's self-test): it posts
+# a fake SMS and call whose ids start with `selftest:` and then deletes them here. Any token
+# holder may call this, the phone over NetBird included (so it is not loopback-only), but it can
+# only ever touch ids with that prefix, and it removes their vault copies (`comms:selftest:…`)
+# in the same call so no self-test text is left for the Librarian.
+SELFTEST_PREFIX = "selftest:"
+_SELFTEST_RUN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+@comms_router.delete("/selftest")
+def comms_selftest_delete(run: str = ""):
+    """Delete self-test rows: every `selftest:` id, or with `run` only `selftest:<run>:…`."""
+    run = run.strip()
+    if run and not _SELFTEST_RUN.fullmatch(run):
+        raise HTTPException(400, "run must be 1-64 letters, digits, '-' or '_'")
+    prefix = SELFTEST_PREFIX + (f"{run}:" if run else "")
+    vault_prefix = f"comms:{prefix}"
+    # substr() rather than LIKE: an id's own '%' or '_' can never widen the match.
+    with cc._db_lock, cc.db() as c:
+        msgs = c.execute("DELETE FROM comms_messages WHERE substr(id, 1, ?) = ?", (len(prefix), prefix)).rowcount
+        calls = c.execute("DELETE FROM comms_calls WHERE substr(id, 1, ?) = ?", (len(prefix), prefix)).rowcount
+        vault = c.execute(
+            "DELETE FROM vault WHERE collection = 'comms' AND substr(item_id, 1, ?) = ?", (len(vault_prefix), vault_prefix)
+        ).rowcount
+    return {"ok": True, "prefix": prefix, "messages": msgs, "calls": calls, "vault": vault}
+
+
 @comms_router.get("/search")
-def comms_search(q: str = "", contact: str = "", limit: int = Query(12, le=50)):
-    """Librarian recall: exact quotes + timestamps. Contact matches name or number."""
+def comms_search(q: str = "", contact: str = "", channel: str = "", limit: int = Query(12, le=50)):
+    """Librarian recall: exact quotes + timestamps. Contact matches name or number.
+    Without `channel` only SMS and WhatsApp from the phone's own sync are searched: Instagram,
+    Messenger, RCS and anything captured from a notification carry sender-chosen names (an
+    Instagram "Mom" must not answer "what did Mom say"), so recall asks for them by channel
+    (`channel=instagram`), and every such hit is marked `untrusted`."""
+    _ensure_schema()
+    chs = _channels_param(channel)
     terms = [t for t in re.findall(r"[\w']+", q.lower()) if len(t) > 2]
+    where: list[str] = []
+    args: list = []
+    if chs:
+        where.append(_in("channel", chs))
+        args += chs
+    else:
+        where.append(f"COALESCE(channel,'sms') NOT IN ({','.join('?' * len(READ_ONLY_CHANNELS))}) AND COALESCE(source,'') NOT IN ({','.join('?' * len(NOTIF_SOURCES))})")
+        args += sorted(READ_ONLY_CHANNELS) + sorted(NOTIF_SOURCES)
+    if contact.strip():
+        digits = re.sub(r"\D", "", contact)
+        where.append("(contact LIKE ? OR address LIKE ?" + (" OR thread LIKE ?" if digits else "") + ")")
+        args += [f"%{contact.strip()}%", f"%{contact.strip()}%"] + ([f"%{digits[-10:]}%"] if digits else [])
     with cc.db() as c:
-        sql = "SELECT * FROM comms_messages"
-        args: list = []
-        if contact.strip():
-            digits = re.sub(r"\D", "", contact)
-            sql += " WHERE (contact LIKE ? OR address LIKE ?" + (" OR thread LIKE ?" if digits else "") + ")"
-            args += [f"%{contact.strip()}%", f"%{contact.strip()}%"] + ([f"%{digits[-10:]}%"] if digits else [])
-        sql += " ORDER BY ts DESC LIMIT 3000"
-        rows = [dict(r) for r in c.execute(sql, args).fetchall()]
+        sql = "SELECT * FROM comms_messages WHERE " + " AND ".join(where) + " ORDER BY ts DESC LIMIT 3000"
+        rows = [_message_view(r) for r in c.execute(sql, args).fetchall()]
     scored = []
     for r in rows:
         low = (r["body"] or "").lower()
@@ -548,8 +1213,12 @@ def comms_search(q: str = "", contact: str = "", limit: int = Query(12, le=50)):
     return {
         "query": q,
         "contact": contact,
+        "channel": chs,
         "scanned": len(rows),
-        "results": [{**h, "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))} for h in hits],
+        "results": [
+            {**h, "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"])), "untrusted": _read_only_thread(h.get("channel"), h.get("thread")) or h.get("source") in NOTIF_SOURCES}
+            for h in hits
+        ],
     }
 
 

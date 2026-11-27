@@ -77,4 +77,5 @@ pub mod telemetry;
 pub mod trace;
 pub mod tony_dispatch;
 pub mod transcript;
+pub mod trips;
 pub mod voice;

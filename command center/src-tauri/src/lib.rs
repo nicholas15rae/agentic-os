@@ -303,6 +303,9 @@ pub fn run() {
                 tauri::async_runtime::spawn(commands::garbage::daemon(app.handle().clone()));
                 // HITL review queue: Garbage's business sweep + the batched digest / webhook.
                 tauri::async_runtime::spawn(commands::review_queue::daemon(app.handle().clone()));
+                // Maps trips: recompute the next 48 h of calendar trips (~10 min) and publish the
+                // snapshot to the loopback gateway for the phone, widget on screen or not.
+                tauri::async_runtime::spawn(commands::trips::publisher_loop(app.handle().clone()));
                 #[cfg(desktop)]
                 if let Err(e) = build_tray(app) {
                     eprintln!("[tray] {e}");
@@ -531,6 +534,9 @@ pub fn run() {
             maps::map_reverse,
             maps::maps_status,
             maps::map_open_in_maps,
+            commands::trips::maps_trips,
+            commands::trips::maps_trip_words,
+            commands::trips::maps_trip_words_set,
             instagram::instagram_status,
             instagram::instagram_refresh_token,
             instagram::instagram_reply_comment,

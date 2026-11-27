@@ -15,9 +15,13 @@
 //! only `gcal_create_event` (the confirmation card) and the phone's approved `action` inbox item
 //! (`create_event_approved`) pass `approved`. Always the deployment's default (primary) calendar,
 //! never guests or invites (`sendInvites: false` is forced), America/Toronto times.
+//!
+//! Structured read: `fetch_events` returns a window's events as `CalEvent` data for the Maps
+//! trips view, behind the same gates as the tool (kill switch, MCP permission, Calendar on,
+//! modes freeze). Its event text is display-only and never handed to an agent.
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -217,7 +221,7 @@ fn clean(s: &str, max: usize) -> String {
 /// `name` is a `calendar.*` builtin. `approved` matters only for `create_event`.
 pub(crate) async fn tool(state: &DispatchState, os: &OsState, name: &str, args: &Value, approved: bool) -> Result<String, String> {
     if os.snapshot().privacy.kill_switch {
-        return Err("kill switch is on — Google Calendar is a cloud service".into());
+        return Err(KILLED.into());
     }
     let today = chrono::Local::now().date_naive();
     match name {
@@ -375,6 +379,225 @@ pub(crate) fn format_events(data: &Value, label: &str, query: &str) -> String {
     format!("{} event(s) for {label}{filter}:\n{}", events.len(), lines.join("\n"))
 }
 
+// ── Structured read (Maps trips) ────────────────────────────────────────────
+//
+// `fetch_events`: the events in a window as data, for the Maps trips view (`trips.rs`). Read-only,
+// behind the calendar tool's own gates (kill switch, the MCP permission tier, Calendar switched
+// on, modes / switchboard freeze), and it logs no content. Event text (title, location,
+// description) can come from third-party invites, so it is DISPLAY-ONLY: never handed to an
+// agent, never followed. The Apps Script reply shape is unverified for `id` and `description`
+// (the known fixture has neither), so both are optional and every field is parsed defensively;
+// an entry without a usable start is skipped, never an error.
+
+/// Most events one structured read returns (also the `get_events` limit it sends).
+pub(crate) const MAX_EVENTS: usize = 25;
+/// Reply entries looked at, at most (a huge reply is never walked in full).
+const SCAN_MAX: usize = 200;
+const ID_MAX: usize = 256;
+/// The longest window one structured read asks for.
+const WINDOW_MAX_DAYS: i64 = 31;
+// Used by the Maps trips view (`trips.rs`, Maps step 6); until it lands only tests call it.
+#[allow(dead_code)]
+/// The name a structured read is permission-gated and logged as (never any event text).
+pub(crate) const EVENTS: &str = "calendar.events";
+const KILLED: &str = "kill switch is on — Google Calendar is a cloud service";
+
+/// One calendar event as data. Times are RFC 3339 in Toronto's offset at that instant
+/// ("2026-11-27T10:00:00-05:00") plus the exact epoch milliseconds. An all-day event starts at
+/// Toronto midnight. `id` and `description` are optional: the deployment may not send them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalEvent {
+    pub id: Option<String>,
+    pub title: String,
+    pub start: String,
+    pub start_ms: i64,
+    pub end: Option<String>,
+    pub end_ms: Option<i64>,
+    pub all_day: bool,
+    pub location: Option<String>,
+    pub description: Option<String>,
+}
+
+// Used by the Maps trips view (`trips.rs`, Maps step 6); until it lands only tests call it.
+#[allow(dead_code)]
+impl CalEvent {
+    /// A stable key: the calendar's id, else "h:" + a SHA-256 prefix of title and start (which
+    /// changes if the event is retitled or moved — the cost of a reply without ids). Pure.
+    pub(crate) fn key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        match &self.id {
+            Some(id) => id.clone(),
+            None => {
+                let h = Sha256::digest(format!("{}\u{0}{}", self.title, self.start_ms).as_bytes());
+                format!("h:{}", h[..8].iter().map(|b| format!("{b:02x}")).collect::<String>())
+            }
+        }
+    }
+}
+
+/// Toronto's UTC offset (hours) at the UTC instant `utc`, exact through both DST changes (the
+/// skipped and the repeated hour included): EDT only when the instant is past the spring change
+/// read as EST AND before the fall change read as EDT. Pure.
+pub(crate) fn toronto_offset_at_utc(utc: NaiveDateTime) -> i32 {
+    let as_est = utc - chrono::Duration::hours(5);
+    let as_edt = utc - chrono::Duration::hours(4);
+    if toronto_offset_hours(as_est.date(), as_est.time()) == -4 && toronto_offset_hours(as_edt.date(), as_edt.time()) == -4 {
+        -4
+    } else {
+        -5
+    }
+}
+
+/// A UTC instant as Toronto RFC 3339 with the offset in force then. Pure.
+fn toronto_rfc3339_of_utc(utc: NaiveDateTime) -> String {
+    let h = toronto_offset_at_utc(utc);
+    let local = utc + chrono::Duration::hours(h as i64);
+    format!("{}-{:02}:00", local.format("%Y-%m-%dT%H:%M:%S"), h.abs())
+}
+
+/// A Toronto wall-clock time → the UTC instant (the repeated fall hour reads as EDT). Pure.
+fn toronto_wall_to_utc(at: NaiveDateTime) -> NaiveDateTime {
+    at - chrono::Duration::hours(toronto_offset_hours(at.date(), at.time()) as i64)
+}
+
+/// One reply time → (UTC instant, was it a bare date?). Accepts RFC 3339 with an offset or Z
+/// (".000Z" too), a Toronto wall-clock "YYYY-MM-DDTHH:MM[:SS]", a bare "YYYY-MM-DD" (Toronto
+/// midnight), epoch milliseconds, or Google's `{dateTime | date}` object. Else None. Pure.
+fn reply_time(v: &Value) -> Option<(NaiveDateTime, bool)> {
+    match v {
+        Value::String(s) => {
+            let s = s.trim();
+            if let Ok(d) = chrono::DateTime::parse_from_rfc3339(s) {
+                return Some((d.naive_utc(), false));
+            }
+            if let Some(t) = parse_local(s, None) {
+                return Some((toronto_wall_to_utc(t), false));
+            }
+            let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+            Some((toronto_wall_to_utc(NaiveDateTime::new(d, midnight())), true))
+        }
+        // Milliseconds only in a plausible range (1973 – 5138): seconds or junk are refused.
+        Value::Number(n) => n
+            .as_i64()
+            .filter(|ms| (100_000_000_000..100_000_000_000_000).contains(ms))
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|d| (d.naive_utc(), false)),
+        Value::Object(o) => o.get("dateTime").and_then(reply_time).or_else(|| o.get("date").and_then(reply_time).map(|(t, _)| (t, true))),
+        _ => None,
+    }
+}
+
+/// One line of display text: control characters and newlines out, capped, trimmed. Pure.
+fn one_line(s: &str, max: usize) -> String {
+    clean(s, max).replace('\n', " ").trim().to_string()
+}
+
+/// One reply entry → a `CalEvent`, or None when it has no usable start. Pure.
+fn cal_event_of(e: &Value) -> Option<CalEvent> {
+    let text = |keys: &[&str]| keys.iter().find_map(|k| e.get(*k).and_then(Value::as_str)).map(str::trim).filter(|s| !s.is_empty());
+    let flag = e.get("isAllDayEvent").and_then(Value::as_bool).or_else(|| e.get("allDay").and_then(Value::as_bool));
+    let first = |keys: [&str; 3]| keys.iter().find_map(|k| e.get(*k).and_then(reply_time));
+    let (start_utc, date_only) = if flag == Some(true) { first(["startDate", "startTime", "start"]) } else { first(["startTime", "startDate", "start"]) }?;
+    let all_day = flag.unwrap_or(date_only);
+    let end_utc = if all_day { first(["endDate", "endTime", "end"]) } else { first(["endTime", "endDate", "end"]) }.map(|(t, _)| t).filter(|t| *t >= start_utc);
+    let id = match e.get("id").or_else(|| e.get("eventId")) {
+        Some(Value::String(s)) => Some(one_line(s, ID_MAX)),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+    .filter(|s| !s.is_empty());
+    let title = text(&["title", "summary"]).map(|t| one_line(t, TITLE_MAX)).filter(|t| !t.is_empty()).unwrap_or_else(|| "(untitled)".into());
+    Some(CalEvent {
+        id,
+        title,
+        start: toronto_rfc3339_of_utc(start_utc),
+        start_ms: start_utc.and_utc().timestamp_millis(),
+        end: end_utc.map(toronto_rfc3339_of_utc),
+        end_ms: end_utc.map(|t| t.and_utc().timestamp_millis()),
+        all_day,
+        location: text(&["location"]).map(|l| one_line(l, LOCATION_MAX)).filter(|l| !l.is_empty()),
+        description: text(&["description"]).map(|d| clean(d, DESCRIPTION_MAX)).filter(|d| !d.is_empty()),
+    })
+}
+
+/// `get_events` data (`{events: […]}` or a bare list) as events: entries without a usable start
+/// skipped, sorted by start (reply order among equals), at most `MAX_EVENTS`. Pure.
+pub(crate) fn cal_events_of(data: &Value) -> Vec<CalEvent> {
+    let list = data.get("events").and_then(Value::as_array).or_else(|| data.as_array());
+    let mut out: Vec<CalEvent> = list.into_iter().flatten().take(SCAN_MAX).filter_map(cal_event_of).collect();
+    out.sort_by_key(|e| e.start_ms);
+    out.truncate(MAX_EVENTS);
+    out
+}
+
+/// The `get_events` body for Toronto dates [from, to): at most `WINDOW_MAX_DAYS`. Pure.
+pub(crate) fn events_body(from: NaiveDate, to: NaiveDate) -> Result<Value, String> {
+    if to <= from || to - from > chrono::Duration::days(WINDOW_MAX_DAYS) {
+        return Err(format!("a calendar window must end after it starts, within {WINDOW_MAX_DAYS} days"));
+    }
+    Ok(json!({
+        "startDate": toronto_rfc3339(NaiveDateTime::new(from, midnight())),
+        "endDate": toronto_rfc3339(NaiveDateTime::new(to, midnight())),
+        "limit": MAX_EVENTS,
+    }))
+}
+
+/// The gates every calendar USE passes after the kill switch: the MCP permission tier (an Ask
+/// tier refuses a call nobody approved), Calendar switched on, the modes / switchboard freeze.
+fn use_gates(cfg: &os_core::OsConfig, os: &OsState, bridge: &BridgeState, tool: &str, approved: bool) -> Result<(), String> {
+    os_core::gate(bridge, cfg.permissions.mcp, "mcp", approved, json!({ "tool": tool }))?;
+    if !cfg.mcps.iter().any(|m| m.id == "calendar" && m.enabled) {
+        return Err("Google Calendar is switched off — enable it in Settings → Skills & MCP Library".into());
+    }
+    if let Some(e) = super::modes::tool_frozen_error(&os.modes.effective(), &cfg.switchboard, "calendar") {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The structured read with the bridge injected (tests). Every gate runs before `call`.
+pub(crate) async fn fetch_events_with<F, Fut>(os: &OsState, bridge: &BridgeState, from: NaiveDate, to: NaiveDate, call: F) -> Result<Vec<CalEvent>, String>
+where
+    F: Fn(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let cfg = os.snapshot();
+    if cfg.privacy.kill_switch {
+        return Err(KILLED.into());
+    }
+    // Nobody approves a background read, so an Ask tier refuses it (PERMISSION_REQUIRED:mcp).
+    use_gates(&cfg, os, bridge, EVENTS, false)?;
+    let body = events_body(from, to)?;
+    let data = call("get_events", body).await?;
+    Ok(cal_events_of(&data))
+}
+
+// Used by the Maps trips view (`trips.rs`, Maps step 6); until it lands only tests call it.
+#[allow(dead_code)]
+/// The events on Toronto dates [from, to) as data (see the section note: display-only).
+pub(crate) async fn fetch_events(state: &DispatchState, os: &OsState, bridge: &BridgeState, from: NaiveDate, to: NaiveDate) -> Result<Vec<CalEvent>, String> {
+    fetch_events_with(os, bridge, from, to, |a, v| script(state, a, v, 15)).await
+}
+
+// Used by the Maps trips view (`trips.rs`, Maps step 6); until it lands only tests call it.
+#[allow(dead_code)]
+/// A structured read's refusal → the Maps view's `calendar` state: "blocked" (kill switch, MCP
+/// permission), "off", "frozen", "no-backend", else "error". Pure.
+pub(crate) fn read_state(e: &str) -> &'static str {
+    if e == KILLED || e.starts_with("PERMISSION_") {
+        "blocked"
+    } else if e.starts_with("Google Calendar is switched off") {
+        "off"
+    } else if e.starts_with(super::modes::MODE_FROZEN) {
+        "frozen"
+    } else if e == NO_BACKEND || e.contains("deployment ID is malformed") {
+        "no-backend"
+    } else {
+        "error"
+    }
+}
+
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -398,14 +621,7 @@ pub(crate) async fn create_event_approved(state: &DispatchState, os: &OsState, b
     if !approved {
         return Err(PERMISSION.into());
     }
-    let cfg = os.snapshot();
-    os_core::gate(bridge, cfg.permissions.mcp, "mcp", true, json!({ "tool": CREATE }))?;
-    if !cfg.mcps.iter().any(|m| m.id == "calendar" && m.enabled) {
-        return Err("Google Calendar is switched off — enable it in Settings → Skills & MCP Library".into());
-    }
-    if let Some(e) = super::modes::tool_frozen_error(&os.modes.effective(), &cfg.switchboard, "calendar") {
-        return Err(e);
-    }
+    use_gates(&os.snapshot(), os, bridge, CREATE, true)?;
     let out = tool(state, os, CREATE, args, true).await;
     bridge.log(json!({ "type": "os-tool", "tool": CREATE, "ok": out.is_ok(), "via": via }));
     out
@@ -666,6 +882,189 @@ mod tests {
         assert!(!claim_auto_import(t0 + 1_000));
         assert!(claim_auto_import(t0 + AUTO_IMPORT_EVERY_MS));
         LAST_AUTO_IMPORT.store(0, Ordering::Relaxed);
+    }
+
+    // ── Structured read (Maps step 5) ──
+
+    /// The known Apps Script `get_events` shape (no id, no description) plus the fields an
+    /// unverified deployment may add.
+    fn events_fixture() -> Value {
+        json!({ "totalEvents": 5, "events": [
+            { "title": "Hold: Bell spot", "startDate": "2026-11-29T05:00:00.000Z", "endDate": "2026-11-30T05:00:00.000Z", "isAllDayEvent": true },
+            { "title": "Fitting", "startTime": "2026-11-27T15:00:00.000Z", "endTime": "2026-11-27T16:00:00.000Z", "isAllDayEvent": false, "location": "Wardrobe, Stage 4" },
+            { "id": "abc123@google.com", "title": "Audition\u{7} – Netflix\nday player", "startTime": "2026-11-28T09:30:00-05:00", "endTime": "2026-11-28T10:00:00-05:00",
+              "location": "  100 Queen St W,\nToronto  ", "description": "Sides attached.\nBring headshot.\u{0}" },
+            { "title": "no start at all", "location": "Nowhere" },
+            { "title": "bad start", "startTime": "next tuesday" }
+        ] })
+    }
+
+    #[test]
+    fn cal_events_of_parses_the_reply_defensively() {
+        let ev = cal_events_of(&events_fixture());
+        assert_eq!(ev.len(), 3, "entries without a usable start are skipped: {ev:?}");
+        // Sorted by start, Toronto offsets.
+        assert_eq!(
+            ev[0],
+            CalEvent {
+                id: None,
+                title: "Fitting".into(),
+                start: "2026-11-27T10:00:00-05:00".into(),
+                start_ms: 1_795_791_600_000,
+                end: Some("2026-11-27T11:00:00-05:00".into()),
+                end_ms: Some(1_795_795_200_000),
+                all_day: false,
+                location: Some("Wardrobe, Stage 4".into()),
+                description: None,
+            }
+        );
+        let a = &ev[1];
+        assert_eq!(a.id.as_deref(), Some("abc123@google.com"));
+        assert_eq!(a.title, "Audition  – Netflix day player", "control characters and newlines out");
+        assert_eq!((a.start.as_str(), a.end.as_deref()), ("2026-11-28T09:30:00-05:00", Some("2026-11-28T10:00:00-05:00")));
+        assert_eq!(a.location.as_deref(), Some("100 Queen St W, Toronto"));
+        assert_eq!(a.description.as_deref(), Some("Sides attached.\nBring headshot."), "description keeps its line breaks");
+        let h = &ev[2];
+        assert!(h.all_day && h.location.is_none() && h.description.is_none());
+        assert_eq!((h.start.as_str(), h.end.as_deref()), ("2026-11-29T00:00:00-05:00", Some("2026-11-30T00:00:00-05:00")));
+        // Camel-case JSON for the webview / snapshot, and it round-trips.
+        let v = serde_json::to_value(&ev[1]).unwrap();
+        assert!(v["startMs"].is_i64() && v["allDay"] == false && v.get("start_ms").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<CalEvent>(v).unwrap(), ev[1]);
+    }
+
+    #[test]
+    fn cal_events_of_accepts_other_shapes_and_caps() {
+        // A bare list; summary; Google's {dateTime | date}; a wall-clock time; epoch ms; a bare date;
+        // a numeric id; an empty title and location; an end before the start dropped.
+        let ev = cal_events_of(&json!([
+            { "summary": "Job: kitchen reno walkthrough", "start": { "dateTime": "2026-12-01T14:00:00-05:00" }, "end": { "dateTime": "2026-12-01T15:00:00-05:00" }, "id": 42 },
+            { "title": "All day via date", "start": { "date": "2026-12-02" } },
+            { "title": "Wall clock", "startTime": "2026-12-03T08:15", "endTime": "2026-12-03T07:00", "location": "   " },
+            { "title": "", "startTime": 1_796_000_000_000_i64 },
+            { "title": "seconds are refused", "startTime": 1_796_000_000_i64 },
+            "not an object",
+            null
+        ]));
+        assert_eq!(ev.len(), 4, "{ev:?}");
+        assert_eq!(ev[0].title, "(untitled)");
+        assert_eq!(ev[0].start_ms, 1_796_000_000_000);
+        assert_eq!((ev[1].id.as_deref(), ev[1].title.as_str(), ev[1].start.as_str()), (Some("42"), "Job: kitchen reno walkthrough", "2026-12-01T14:00:00-05:00"));
+        assert!(ev[2].all_day && ev[2].start == "2026-12-02T00:00:00-05:00" && ev[2].end.is_none());
+        assert_eq!(ev[3].start, "2026-12-03T08:15:00-05:00");
+        assert!(ev[3].end.is_none() && ev[3].location.is_none(), "an end before the start and a blank location are dropped");
+        // Nothing usable: empty, never an error.
+        for junk in [json!(null), json!({}), json!({ "events": "x" }), json!("text"), json!({ "events": [] })] {
+            assert!(cal_events_of(&junk).is_empty(), "{junk}");
+        }
+        // Capped at MAX_EVENTS, the earliest kept; long fields capped.
+        let many: Vec<Value> = (0..40).rev().map(|i| json!({ "title": "x".repeat(500), "startTime": format!("2026-12-{:02}T09:00", 1 + i % 28), "description": "d".repeat(5000), "location": "l".repeat(900), "id": "i".repeat(900) })).collect();
+        let ev = cal_events_of(&json!({ "events": many }));
+        assert_eq!(ev.len(), MAX_EVENTS);
+        assert!(ev.windows(2).all(|w| w[0].start_ms <= w[1].start_ms));
+        assert_eq!(ev[0].start, "2026-12-01T09:00:00-05:00");
+        let e = &ev[0];
+        assert_eq!((e.title.len(), e.location.as_ref().unwrap().len(), e.description.as_ref().unwrap().len(), e.id.as_ref().unwrap().len()), (TITLE_MAX, LOCATION_MAX, DESCRIPTION_MAX, ID_MAX));
+    }
+
+    #[test]
+    fn utc_instants_read_in_toronto_through_both_dst_changes() {
+        let u = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        // Spring 2026-03-08: 07:00Z is 03:00 EDT; 06:59Z is still 01:59 EST.
+        assert_eq!(toronto_rfc3339_of_utc(u("2026-03-08 06:59")), "2026-03-08T01:59:00-05:00");
+        assert_eq!(toronto_rfc3339_of_utc(u("2026-03-08 07:00")), "2026-03-08T03:00:00-04:00");
+        // Fall 2026-11-01: 05:59Z is 01:59 EDT; 06:00Z is the repeated 01:00, now EST.
+        assert_eq!(toronto_rfc3339_of_utc(u("2026-11-01 05:59")), "2026-11-01T01:59:00-04:00");
+        assert_eq!(toronto_rfc3339_of_utc(u("2026-11-01 06:00")), "2026-11-01T01:00:00-05:00");
+        assert_eq!(toronto_rfc3339_of_utc(u("2026-07-01 16:00")), "2026-07-01T12:00:00-04:00");
+        // A summer wall-clock reply time reads as EDT.
+        let ev = cal_events_of(&json!([{ "title": "Shoot", "startTime": "2026-07-02T06:00" }]));
+        assert_eq!(ev[0].start, "2026-07-02T06:00:00-04:00");
+    }
+
+    #[test]
+    fn a_missing_id_gets_a_stable_hash_key() {
+        let ev = cal_events_of(&events_fixture());
+        assert_eq!(ev[1].key(), "abc123@google.com");
+        let k = ev[0].key();
+        assert!(k.starts_with("h:") && k.len() == 18, "{k}");
+        assert_eq!(k, cal_events_of(&events_fixture())[0].key(), "the same event keys the same on every read");
+        let mut moved = ev[0].clone();
+        moved.start_ms += 60_000;
+        assert_ne!(moved.key(), k);
+    }
+
+    #[test]
+    fn fetch_sends_a_toronto_window_and_refuses_bad_windows() {
+        tauri::async_runtime::block_on(async {
+            let os = gate_env(|_| {});
+            let bridge = BridgeState::default();
+            let (calls, fake_bridge) = fake(events_fixture());
+            let ev = fetch_events_with(&os, &bridge, d("2026-11-26"), d("2026-11-28"), &fake_bridge).await.unwrap();
+            assert_eq!(ev.len(), 3);
+            assert_eq!(calls.lock().unwrap()[0], ("get_events".to_string(), json!({ "startDate": "2026-11-26T00:00:00-05:00", "endDate": "2026-11-28T00:00:00-05:00", "limit": MAX_EVENTS })));
+            // A summer window carries EDT.
+            assert_eq!(events_body(d("2026-07-01"), d("2026-07-02")).unwrap()["startDate"], "2026-07-01T00:00:00-04:00");
+            for (from, to) in [("2026-11-26", "2026-11-26"), ("2026-11-28", "2026-11-26"), ("2026-11-26", "2026-12-28")] {
+                assert!(fetch_events_with(&os, &bridge, d(from), d(to), &fake_bridge).await.is_err(), "{from}..{to}");
+            }
+            assert_eq!(calls.lock().unwrap().len(), 1, "a bad window never reaches the bridge");
+            // A bridge error passes through.
+            let failing = |_: &'static str, _: Value| std::future::ready(Err::<Value, String>("Calendar Apps Script error: Invalid API key".into()));
+            assert_eq!(fetch_events_with(&os, &bridge, d("2026-11-26"), d("2026-11-27"), failing).await.unwrap_err(), "Calendar Apps Script error: Invalid API key");
+        });
+    }
+
+    /// The plan's decision: the structured read honours the MCP permission tier, like the tool.
+    /// Every gate refuses before any credential lookup or Apps Script call, and no event text or
+    /// window is logged.
+    #[test]
+    fn the_structured_read_refuses_at_every_gate_before_any_call() {
+        use super::super::bridge::Tier;
+        tauri::async_runtime::block_on(async {
+            let bridge = BridgeState::default();
+            let (calls, fake_bridge) = fake(events_fixture());
+            let read = |os: OsState| {
+                let (bridge, fake_bridge) = (&bridge, &fake_bridge);
+                async move { fetch_events_with(&os, bridge, d("2026-11-26"), d("2026-11-28"), fake_bridge).await }
+            };
+            let killed = read(gate_env(|c| c.privacy.kill_switch = true)).await.unwrap_err();
+            assert_eq!(read_state(&killed), "blocked", "{killed}");
+            let denied = read(gate_env(|c| c.permissions.mcp = Tier::Deny)).await.unwrap_err();
+            assert!(denied.starts_with("PERMISSION_DENIED:mcp") && read_state(&denied) == "blocked", "{denied}");
+            let ask = read(gate_env(|c| c.permissions.mcp = Tier::Ask)).await.unwrap_err();
+            assert!(ask.starts_with("PERMISSION_REQUIRED:mcp") && read_state(&ask) == "blocked", "an unapproved background read under Ask: {ask}");
+            let off = read(gate_env(|c| c.mcps.iter_mut().filter(|m| m.id == "calendar").for_each(|m| m.enabled = false))).await.unwrap_err();
+            assert_eq!(read_state(&off), "off", "{off}");
+            let master = read(gate_env(|c| c.switchboard.frozen_tools = vec!["calendar".into()])).await.unwrap_err();
+            assert_eq!((master.as_str(), read_state(&master)), ("MODE_FROZEN: calendar is frozen on the master switchboard", "frozen"));
+            let learning = gate_env(|_| {});
+            learning.modes.set_active(super::super::modes::LEARNING_ID).unwrap();
+            assert_eq!(read_state(&read(learning).await.unwrap_err()), "frozen");
+            assert!(calls.lock().unwrap().is_empty(), "no gate reached the bridge");
+            assert_eq!(read_state(NO_BACKEND), "no-backend");
+            assert_eq!(read_state("Calendar Apps Script error: Invalid API key"), "error");
+
+            // The real path: refused before `ensure_creds` (no import, no keychain, no network).
+            let state = DispatchState::default();
+            let before = ensure_calls();
+            for os in [gate_env(|c| c.privacy.kill_switch = true), gate_env(|c| c.permissions.mcp = Tier::Deny), gate_env(|c| c.mcps.iter_mut().for_each(|m| m.enabled = false))] {
+                assert!(fetch_events(&state, &os, &bridge, d("2026-11-26"), d("2026-11-28")).await.is_err());
+            }
+            assert_eq!(ensure_calls(), before, "no gate reached the credentials");
+
+            // The permission log line names the read, never a window or event text.
+            let dir = std::env::temp_dir().join(format!("gcal-read-{}-{}", std::process::id(), super::super::compaction::now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let logged = BridgeState::default();
+            logged.init(&dir, dir.join("logs"));
+            let os = gate_env(|c| c.permissions.mcp = Tier::Ask);
+            assert!(fetch_events_with(&os, &logged, d("2026-11-26"), d("2026-11-28"), &fake_bridge).await.is_err());
+            let log: String = std::fs::read_dir(dir.join("logs")).unwrap().filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok()).collect();
+            assert!(log.contains("\"permission\"") && log.contains(EVENTS), "{log}");
+            assert!(!log.contains("startDate") && !log.contains("11-28T") && !log.contains("Fitting"), "{log}");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[test]

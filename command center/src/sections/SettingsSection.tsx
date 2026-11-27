@@ -13,6 +13,7 @@ import { ComputeCard, DropletCard, MarketDataCard, OsIdentityCard, OsPermissions
 import { McpRegistryCard, SkillsLibraryCard } from "./settings/LibrarySettings";
 import { MemoryLifecycleCard, MemoryScrollsCard } from "./settings/MemorySettings";
 import { AiProvidersCard, CliHubCard, ComputeRouterCard, ModelLabCard, ModelLibraryCard } from "./settings/HubSettings";
+import { EngineCard } from "./settings/EngineCard";
 import { CueStudio } from "./settings/CueStudio";
 import { BusinessProfilesSettings } from "./settings/BusinessProfilesSettings";
 import { VoiceDetectionCard } from "./settings/VadSettings";
@@ -73,6 +74,7 @@ export function SettingsSection() {
           {desktop ? (
             <>
               <ModelLabCard />
+              <EngineCard />
               <ComputeRouterCard />
               <ComputeCard />
               <DropletCard />

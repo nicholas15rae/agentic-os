@@ -12,6 +12,7 @@ Updated 2026-11-26 21:25. One page for every Claude Code session and branch.
 | Gateway: launcher refusal shown as "unsafe" | main | ae86c7b | Yes |
 | Command Center GPU idle fix (hidden window 25-33% to 0%) | claude/gifted-pascal | 44856ca | Yes (5ee2580) |
 | Sections 8-10 milestone 1: trust fix, live weather, top-bar clock, effects popover, findable Maps | claude/sections-8-10-m1 | 2a2a040 (PR #7) | Yes (bcd8c35) |
+| STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes (ff, not pushed) |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | No |
 | Section 3 Ops frozen | section-pass | 06e958c | No |
@@ -123,26 +124,25 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-26 21:24 by `python scripts/update_status.py`._
+_Refreshed 2026-11-26 21:33 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/status-md-tracking-472ac5` | 1 | `0fcb2cf` 2026-11-26 docs: STATUS.md across all sessions and branches, plus scripts/upda... | clean |
-| `section-pass-batch3` | 11 | `cebcdbf` 2026-11-26 fix(business,security): profiles sync safely across devices; PIN st... | clean |
-| `claude/practical-elbakyan-0f96f1` | 1 | `5751989` 2026-11-26 fix(trading): kill switch ignores held keys; ack wait never strips ... | clean |
-| `section-pass` | 6 | `aa6966a` 2026-11-26 feat(section-pass): logins survive restarts, phone approval login, ... | 7 files |
-| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 16 files |
+| `section-pass-batch3` | 11 | `cebcdbf` 2026-11-26 fix(business,security): profiles sync safely across devices; PIN st... | 14 files |
+| `claude/practical-elbakyan-0f96f1` | 1 | `5751989` 2026-11-26 fix(trading): kill switch ignores held keys; ack wait never strips ... | 3 files |
+| `section-pass` | 6 | `aa6966a` 2026-11-26 feat(section-pass): logins survive restarts, phone approval login, ... | 11 files |
+| `director-suite` | 14 | `edcbeff` 2026-11-26 perf(director): voiceover level meter on frameLoop (GPU budget rule) | 17 files |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `691e280` 2026-11-26 docs(status): refresh branch table
+- `0fcb2cf` 2026-11-26 docs: STATUS.md across all sessions and branches, plus scripts/update_status.py
 - `4073bd9` 2026-11-26 Merge feat/language-hub (35e30e5: Tony latency fixes) into main
 - `3fe4835` 2026-11-26 Merge 8bd7990: Engine R stops reporting desk-refused orders as trades
 - `ae86c7b` 2026-11-26 fix(gateway): report a launcher safe_argv refuses as unsafe, not "not installed"
 - `bcd8c35` 2026-11-26 Merge pull request #7 from nicholas15rae/claude/sections-8-10-m1
-- `5ee2580` 2026-11-26 Merge the Command Center GPU idle fix (44856ca) into main
-- `266dfcb` 2026-11-26 Merge feat/language-hub (thoughtform -> ops -> IBKR -> language hub stack) into main
 <!-- /AUTO:BRANCHES -->

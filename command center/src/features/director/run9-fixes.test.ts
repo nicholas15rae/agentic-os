@@ -249,7 +249,14 @@ describe("framing notes (pure; Rust note_is_about_framing is the same rule)", ()
     expect(pc.revisionSummary(cur, captions, "  ")).toBe("");
     expect(pc.revisionSummary(cur, { clips: planClips("fill"), audio: [], output: {}, note: "" } as never, "Retimed.")).toMatch(/^Clips unchanged \(same footage and in\/out points as the current cut, which keeps the edits made since the noted render\)\. The Director wrote: Retimed\.$/);
     const trimmed = { clips: planClips("fill", [26.5, 48.11, 100.25]), audio: [], output: {}, note: "" } as never;
-    expect(pc.revisionSummary(cur, trimmed, " Trimmed the middle. ")).toBe("Trimmed the middle.");
+    // Clips changed: the real length change comes first, written by the app (live E2E run 10).
+    const out = pc.revisionSummary(cur, trimmed, " Extended the payoff to meet 15s. ");
+    const m = /^Length (\d+\.\d) s → (\d+\.\d) s\. The Director wrote: Extended the payoff to meet 15s\.$/.exec(out);
+    expect(m, out).not.toBeNull();
+    expect(Number(m![1]) - Number(m![2])).toBeCloseTo(2.1, 1);
+    // Under half a second of change: the Director's words alone.
+    const nudged = { clips: planClips("fill", [26.5, 50.0, 100.25]), audio: [], output: {}, note: "" } as never;
+    expect(pc.revisionSummary(cur, nudged, "Nudged.")).toBe("Nudged.");
   });
 });
 
@@ -281,10 +288,11 @@ describe("run 9 round 2: a fit-only revision of a timing note", () => {
     expect(m.reviewWrite).toHaveBeenCalledWith({ slug: "demo", round: 1, summary });
   });
 
-  it("a revision that really retimes a clip keeps the Director's own summary", async () => {
+  it("a revision that really retimes a clip keeps the Director's summary, after the real length change", async () => {
     await open(manifest({ clips: ROUND1_CLIPS, notes: [TIMING] }));
     const r = await store.applyDirectorActionsReport([revise(["n-1"], "fill", [26.5, 48.11, 100.25])]);
     expect(r.refusals).toEqual([]);
-    expect(st().revision?.summary).toMatch(/^Extended the middle B-Roll clip/);
+    // The middle clip was shortened by 2.1 s while the Director's words say "Extended".
+    expect(st().revision?.summary).toMatch(/^Length \d+\.\d s → \d+\.\d s\. The Director wrote: Extended the middle B-Roll clip/);
   });
 });

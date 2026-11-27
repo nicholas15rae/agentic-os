@@ -11,6 +11,7 @@
 import type { EditPlanBody, MediaProject, Note, PlanCheck, PlanCheckClip, PlanCheckPlan, TimelineClip, TimelineManifest } from "./contract";
 import { api } from "./api";
 import { applyEditPlan, CLIP_FITS } from "./manifest";
+import { crossfadeOverlap } from "./context";
 
 export { CLIP_FITS };
 export type { ClipFit } from "./contract";
@@ -198,7 +199,13 @@ export function noopRevisionReason(m: TimelineManifest, body: EditPlanBody, reso
 export function revisionSummary(m: TimelineManifest, body: EditPlanBody, summary: string): string {
   const next = applyEditPlan(m, body);
   const text = summary.trim();
-  if (!text || !same(next.clips.map(unframed), m.clips.map(unframed))) return text;
+  if (!text) return text;
+  if (!same(next.clips.map(unframed), m.clips.map(unframed))) {
+    // The model's words about length can be wrong (live E2E run 10: "extended … to meet 15s" on a
+    // cut that went 14.0 → 7.4 s), so the real change is stated first, by code.
+    const [a, b] = [netLength(m.clips), netLength(next.clips)];
+    return a > 0 && Math.abs(a - b) >= 0.5 ? `Length ${a.toFixed(1)} s → ${b.toFixed(1)} s. The Director wrote: ${text}` : text;
+  }
   const spec = (o: TimelineManifest["output"]) => ({ ...o, name: "" });
   const changed = [
     !same(next.clips, m.clips) ? "framing (fit or punch-in)" : "",
@@ -212,6 +219,9 @@ export function revisionSummary(m: TimelineManifest, body: EditPlanBody, summary
     : "Clips unchanged (same footage and in/out points as the current cut, which keeps the edits made since the noted render).";
   return `${prefix} The Director wrote: ${text}`;
 }
+
+/** The cut's length as rendered: clip lengths minus crossfade overlap (context.ts LENGTH line). Pure. */
+export const netLength = (clips: TimelineClip[]): number => Math.max(0, clipsTotal(clips) - crossfadeOverlap(clips));
 
 /** A trailing (or leading) "draft the brief"-style instruction, and its leftover punctuation. */
 const TRAILING_ASK = /(?:^|(?<=[.!?:;\n]))\s*(?:(?:ok(?:ay)?|so|now|then|and|please|can you|could you|would you|pls)[\s,]+)*(?:draft|write|make|create|do|give me|put together|start|set up|whip up)\s+(?:me\s+|up\s+)?(?:a|an|the|my|our|this)?\s*(?:creative\s+)?brief\b[^.!?:\n]*[.!?]*\s*$/i;

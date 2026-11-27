@@ -3266,6 +3266,9 @@ pub(crate) fn plan_check_core(clips: Vec<TimelineClip>, assets: &[MediaAsset], s
 /// `plan_check_core`; `revision` = a revise_edit answering Nic's notes: a note may ask for a new
 /// length, so a total off the brief is a warning (the Director should suggest a brief change)
 /// rather than a refusal. Platform caps still refuse.
+/// How far a revision may move the cut's length off the brief (fraction of the brief's length).
+pub(crate) const REVISION_LENGTH_TOLERANCE: f64 = 0.3;
+
 pub(crate) fn plan_check_core_with(clips: Vec<TimelineClip>, assets: &[MediaAsset], speech: &dyn Fn(&MediaAsset) -> Option<Speech>, base: &TimelineManifest, target: Option<f64>, revision: bool) -> PlanCheck {
     let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
     let (mut warnings, mut refusals) = (vec![], vec![]);
@@ -3321,8 +3324,14 @@ pub(crate) fn plan_check_core_with(clips: Vec<TimelineClip>, assets: &[MediaAsse
         let tol = (t * 0.1).max(1.5);
         if (total - t).abs() > tol {
             let (verb, by) = if total < t { ("add", t - total) } else { ("remove", total - t) };
-            if revision {
+            // A revision answering notes may drift further (a "tighten" note shortens it), but
+            // not without limit: live E2E run 10 had a "tighten" revision halve a 15 s Reel to
+            // 7.4 s. Within ±30% (at least 3 s) it is a warning; beyond, a refusal.
+            let rev_tol = (t * REVISION_LENGTH_TOLERANCE).max(3.0).max(tol);
+            if revision && (total - t).abs() <= rev_tol {
                 warnings.push(format!("the revised cut is {} s but the brief asks for {} s: kept, since it answers Nic's notes; if the notes ask for a new length, suggest that Nic change the brief's length to match", secs(total), secs(t)));
+            } else if revision {
+                refusals.push(format!("the revised cut is {} s but the brief asks for {} s: a revision may move the length to anything from {} to {} s; {verb} about {} s, or suggest that Nic change the brief's length first", secs(total), secs(t), secs((t - rev_tol).max(0.0)), secs(t + rev_tol), secs(if total < t { t - rev_tol - total } else { total - t - rev_tol })));
             } else {
                 refusals.push(format!("the cut is {} s but the brief asks for {} s: {verb} about {} s (anything from {} to {} s is fine)", secs(total), secs(t), secs(by), secs(t - tol), secs(t + tol)));
             }
@@ -5945,12 +5954,18 @@ mod framing_tests {
         let wire: CheckPlan = serde_json::from_value(json!({ "outputs": [{ "platform": "tiktok", "aspect": "9:16", "loudnessLufs": -14, "maxSizeMb": null, "maxSec": 60 }], "resolves": ["n-1"] })).unwrap();
         assert_eq!((wire.outputs.unwrap()[0].max_sec, wire.resolves), (Some(60.0), vec!["n-1".to_string()]));
         assert!(serde_json::from_value::<CheckPlan>(json!({ "evil": 1 })).is_err());
-        // A revision answering notes may change the length: a warning, not a refusal. Caps still refuse.
-        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 60.0)], &assets, &speech, &base, Some(30.0), true);
+        // A revision answering notes may change the length within ±30%: a warning, not a refusal.
+        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 38.0)], &assets, &speech, &base, Some(30.0), true);
         assert!(r.refusals.is_empty(), "{:?}", r.refusals);
-        assert!(r.warnings[0].starts_with("the revised cut is 60 s but the brief asks for 30 s: kept, since it answers Nic's notes"), "{:?}", r.warnings);
-        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 75.0)], &assets, &speech, &m, Some(30.0), true);
-        assert_eq!(r.refusals, ["the cut is 75 s, over the tiktok limit of 60 s: remove at least 15 s"]);
+        assert!(r.warnings[0].starts_with("the revised cut is 38 s but the brief asks for 30 s: kept, since it answers Nic's notes"), "{:?}", r.warnings);
+        // Beyond that it is refused (live E2E run 10: a "tighten" revision halved a 15 s Reel).
+        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 60.0)], &assets, &speech, &base, Some(30.0), true);
+        assert!(r.refusals[0].starts_with("the revised cut is 60 s but the brief asks for 30 s: a revision may move the length to anything from 21 to 39 s; remove about 21 s"), "{:?}", r.refusals);
+        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 7.4)], &assets, &speech, &base, Some(15.0), true);
+        assert!(r.refusals[0].starts_with("the revised cut is 7.4 s but the brief asks for 15 s: a revision may move the length to anything from 10.5 to 19.5 s; add about 3.1 s"), "{:?}", r.refusals);
+        // Inside the revision band, a platform cap still refuses.
+        let r = plan_check_core_with(vec![clip("c1", "w", 0.0, 65.0)], &assets, &speech, &m, Some(55.0), true);
+        assert_eq!(r.refusals, ["the cut is 65 s, over the tiktok limit of 60 s: remove at least 5 s"]);
         let r = plan_check_core(vec![clip("c1", "w", 0.0, 60.0)], &assets, &speech, &base, Some(30.0));
         assert!(r.refusals[0].starts_with("the cut is 60 s but the brief asks for 30 s"), "{:?}", r.refusals);
     }

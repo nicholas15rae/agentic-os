@@ -35,6 +35,8 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 | Director chat system message kept byte-stable for prefix caching (STUDIO STATE moved to the last user message) | director-suite | this commit | No |
 | SDXL Turbo live test passed; harness runs with Command Center open (own crash marker) | director-suite | e0f4410, 6d3f9f5 | No |
 | Director sees timed transcript lines; clips open on the sentence; a fit-only revision no longer resolves a timing note | director-suite | 116fbb2 | No |
+| Part 3 UI: ComfyUI Generate panel, render queue, GPU pill, Re-roll/Tweak; note markers on the timeline; projects board; bin filters; Versions tab with restore and A/B Compare (contract in docs/proposals/director-suite-part3-contract.md). Phone review not built | director-suite | 202ae7c, 386203d | No |
+| A revision may move the cut only ±30% off the brief's length (run 10 halved a Reel); its summary now starts with the real length change | director-suite | see log | No |
 | 11.10 Tony reads Finance (one read-only tool, finance summary endpoint) | section-pass-batch3 | 7166d26 | Yes (eefaf0a), pushed |
 | Merge main (a0e730c) into director-suite, no conflicts | director-suite | 4e986f1 | Yes (with this merge) |
 
@@ -44,13 +46,15 @@ Updated 2026-11-27 00:10. One page for every Claude Code session and branch.
 |---|---|---|
 | Gabagoul functional pass (section-pass) | Section 5 Staging hub | Committed work is in main. Next: merge main into section-pass before more commits |
 | Gabagoul functional pass (section-pass-batch3) | Section 12 Phone book | 11.10 done and in main |
-| Director suite build | OVERNIGHT AUTOPILOT: Part 3 UI (contract, ComfyUI Generate panel + queue + baton pill, note markers, projects board, bin filters, versions A/B). Phone parked | Workflow running, uncommitted. Next: fix revision length drift found in E2E run 10 |
+| Director suite build | OVERNIGHT AUTOPILOT: Part 3 UI landed (386203d) and the revision length fix. Next: live E2E run 11, then Parts 4-5 planning | Clean |
 | Communications page and brainstorming | Sections 8-10 milestone 2 | Building brainstorm wrap-up endpoint. Maps/trips/calendar/WhatsApp ingest done but uncommitted. Then merge main, tests, PR |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Remove the duplicate Ops agent | Reroute Ops (incl. job desk quotes) to Tony and the Business pipeline | Started 11-26 22:15. Lists what Ops does that nothing else covers, asks you before deleting |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 
 ## 3. Waiting on you
+- Director Part 3 contract questions (defaults picked, change any): (1) ComfyUI policy select sits on the Queue card and applies to every project; (2) Re-roll of a style-transfer whose job was pruned from the queue is disabled; (3) Restore is offered only from the Versions tab.
+- Director Part 3 phone review needs a gateway (server.py) /api/media proxy behind the security gate: shared core, so not built. OK to build it?
 
 **Decisions**
 - The running app (23:19) is built from 66df342: recall fix and crash hardening, but not main's 26 newer commits (section-pass, batch3). Rebuild from main? `feat/language-hub` in the base checkout would need main merged in first.
@@ -126,6 +130,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | main after director-suite + finance merge | tsc clean; vitest 2,887/2,887; cargo 1,595 (+2 known CRLF); pytest 1,568 (embed flake); media-forge 115; semantic review of the merge: 0 clashes | 11-27 00:05 |
 | director-suite (4e986f1, after merging main) | vitest 2,863; Rust 1,583 (+2 known CRLF; 7 browser tests flaky under load, 67/67 alone) | 11-26 23:20 |
 | director-suite (116fbb2) | tsc clean; vitest 2,904/2,904; cargo 1,611 (+2 known CRLF); taskworker::quality 67/67 | 11-27 02:30 |
+| director-suite (Part 3 + revision fix) | tsc clean; vitest 3,005/3,005; cargo 1,613 (+2 known CRLF; taskworker::quality 67/67 alone); media 68; Playwright director specs 5/5 desktop | 11-27 03:30 |
 | ComfyUI SDXL Turbo live test (comfy_live.rs) | PASS: 1 image, ingested with provenance; boot 77 s, render 80 s (checkpoint read from HDD), peak VRAM 10,193 MiB, Qwen reload 212 s (builds running alongside), only Tony loaded after at 32768 ctx x 2; total 6.3 min | 11-27 01:23 |
 | Director live E2E run 10 | 15/15 steps. Captions now whole sentences; idea verbatim; round 1 14.0 s. FAIL: the round-2 revision cut it to 7.4 s (revisions only warn on length) and its summary claimed it was extended. 4 auto-fixes + 3 re-asks to hit length (Qwen arithmetic) | 11-27 02:15 |
 | Director live E2E | run 9: 15/15 steps, 13.8 s Reel, frame filled, idea verbatim; audit 9/12 pass. Open: fit-only revision resolved a timing note | 11-26 22:40 |
@@ -144,15 +149,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 02:06 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 03:20 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `director-suite` | 5 | `116fbb2` 2026-11-27 feat(director): transcript lines in context, sentence-start snap, f... | 1 files |
+| `director-suite` | 9 | `386203d` 2026-11-27 feat(director): Part 3 UI: ComfyUI Generate panel, render queue, GP... | 4 files |
+| `section-pass-batch3` | 6 | `5c9d089` 2026-11-27 docs(status): overnight batch on section-pass-batch3 (15, 14.6-14.7... | clean |
 | `claude/tony-live-test-fixes-5d85d5` | 2 | `2ff21d9` 2026-11-27 docs(status): Tony live-test fixes landed on claude/tony-live-test-... | clean |
-| `section-pass-batch3` | 3 | `f138a9b` 2026-11-27 feat(vault): second backup copies, vault password prompt, Tony sear... | 13 files |
 | `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | clean |
 | `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
 | `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |

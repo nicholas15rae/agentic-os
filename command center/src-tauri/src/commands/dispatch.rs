@@ -253,6 +253,29 @@ pub struct Config {
     /// each row's `ownVoice` says (the rows keep their settings for when it goes off).
     #[serde(default)]
     pub agent_voices_all_tony: bool,
+    /// One-time providers.json migrations already applied (`apply_provider_migrations`), so a
+    /// setting the user changes back afterwards is never overwritten again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<String>,
+}
+
+/// Section 20.3: only Tony auto-speaks; specialists speak their final reports through the
+/// queued per-agent report voices (Comms inbox), never their live chatter.
+pub(crate) const MIGRATE_AUTOSPEAK_TONY_ONLY: &str = "autospeak-tony-only";
+
+/// Apply the one-time providers.json migrations. Returns true when anything changed.
+pub(crate) fn apply_provider_migrations(cfg: &mut Config) -> bool {
+    let mut changed = false;
+    if !cfg.migrations.iter().any(|m| m == MIGRATE_AUTOSPEAK_TONY_ONLY) {
+        for (role, v) in cfg.agent_voices.iter_mut() {
+            if role != "general" && v.auto_speak {
+                v.auto_speak = false;
+            }
+        }
+        cfg.migrations.push(MIGRATE_AUTOSPEAK_TONY_ONLY.into());
+        changed = true;
+    }
+    changed
 }
 
 /// Agent ids a voice-roster entry (or any other per-agent config in this
@@ -344,13 +367,13 @@ impl Default for Config {
         Self {
             providers: vec![
                 // Heavy lifting: your local (uncensored) model in LM Studio.
-                p("lmstudio", "LM Studio", Kind::Local, "http://127.0.0.1:1234/v1", "local-model", false),
+                p("lmstudio", "LM Studio", Kind::Local, "http://127.0.0.1:1235/v1", "local-model", false),
                 p("anythingllm", "AnythingLLM RAG", Kind::Local, "http://127.0.0.1:3001/api/v1/openai", "my-workspace", true),
                 // Reach the droplet over NetBird; replace with its 100.x address.
                 p("droplet", "Cloud Droplet", Kind::Cloud, "http://100.64.0.10:8000/v1", "deepseek-r1-distill", true),
                 // Zero-cost verifier on LM Studio. Load a DIFFERENT model than the planner
                 // for an independent second opinion, then pick it in Settings.
-                p("verifier", "Verifier (local LM Studio)", Kind::Local, "http://127.0.0.1:1234/v1", "local-model", false),
+                p("verifier", "Verifier (local LM Studio)", Kind::Local, "http://127.0.0.1:1235/v1", "local-model", false),
                 p("agentic-os", "Agentic OS (opencode)", Kind::AgenticOs, "http://127.0.0.1:8080", "opencode", false),
                 // whisper.cpp: `whisper-server -m ggml-base.en.bin --port 8178 --inference-path /v1/audio/transcriptions`
                 whisper,
@@ -377,6 +400,8 @@ impl Default for Config {
             pipelines: PipelinesConfig::default(),
             agent_voices: BTreeMap::new(),
             agent_voices_all_tony: false,
+            // A fresh install starts with every migration's outcome already in place.
+            migrations: vec![MIGRATE_AUTOSPEAK_TONY_ONLY.into()],
         }
     }
 }
@@ -437,6 +462,9 @@ fn parse_providers(text: &str) -> Result<Config, String> {
     // (and a hermes model) so Settings stops advertising it. Saved by the caller.
     if migrate_hermes(&mut cfg) {
         eprintln!("[dispatch] migrated stale hermes provider label/model");
+    }
+    if apply_provider_migrations(&mut cfg) {
+        eprintln!("[dispatch] applied providers.json migrations: {}", cfg.migrations.join(", "));
     }
     for d in &Config::default().providers {
         if !cfg.providers.iter().any(|p| p.id == d.id) {
@@ -1042,8 +1070,13 @@ pub(crate) async fn run_chat(
             Some(_) if chain.iter().any(|p| p.kind != Kind::Local) => chain.into_iter().filter(|p| p.kind != Kind::Local).collect(),
             _ => chain,
         };
-        let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
-        let (mut shaped, notes) = os_core::shape_chain(&osc, chain, vram, chars, false);
+        // Interactive turns (Tony's chat) never auto-overflow; background work may.
+        let (mut shaped, notes) = if priority == Priority::Interactive {
+            os_core::shape_tony_turn(&osc, chain)
+        } else {
+            let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
+            os_core::shape_chain(&osc, chain, vram, chars, false)
+        };
         let mut r = busy.map(|w| format!("background + {w} → off-GPU")).unwrap_or_else(|| "chain".into());
         if !notes.is_empty() {
             r = format!("{r} · {}", notes.join(", "));
@@ -1524,10 +1557,11 @@ pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messa
     let cfg = state.snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
-    let chars: usize = messages.iter().map(|m| m.content.len()).sum();
-    let vram = if osc.compute.mode == os_core::ComputeMode::Hybrid { os_core::vram_pct().await } else { None };
-    let shaped = first.clone().map(|p| os_core::shape_chain(&osc, vec![p], vram, chars, false).0).unwrap_or_default();
-    let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && p.id != "anythingllm" && !os_core::is_remote(p)) else {
+    // Tony's turn never auto-overflows (section 20-21 safe defaults: `shape_tony_turn`).
+    let shaped = first.clone().map(|p| os_core::shape_tony_turn(&osc, vec![p]).0).unwrap_or_default();
+    // An AnythingLLM shim (any id: `is_allm_shim`) never streams: only `call` folds Tony's turn
+    // context out of the last user message, which the shim embeds as its search query.
+    let Some(p) = shaped.into_iter().next().filter(|p| p.kind == Kind::Local && !is_allm_shim(p) && !os_core::is_remote(p)) else {
         return run_chat(state, os, messages, Priority::Interactive, None, max_secs).await;
     };
     let started = Instant::now();

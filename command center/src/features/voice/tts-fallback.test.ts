@@ -48,6 +48,17 @@ describe("FallbackTts", () => {
     expect(backup.calls).toHaveLength(1); // backup wasn't touched again
   });
 
+  it("a frozen agent stays silent: no system-voice fallback", async () => {
+    const primary = fakeEngine("primary");
+    primary.speak = async () => {
+      throw new Error("FROZEN_VOICE: booking is frozen on the master switchboard and has no voice");
+    };
+    const backup = fakeEngine("backup");
+    const tts = new FallbackTts(primary, backup);
+    await tts.speak("booking report", { agent: "booking", voice: "x" });
+    expect(backup.calls).toHaveLength(0);
+  });
+
   it("retries the primary without an explicit voice before falling back", async () => {
     const primary: TtsEngine & { calls: (string | undefined)[][] } = fakeEngine("primary");
     let first = true;

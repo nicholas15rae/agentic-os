@@ -94,7 +94,7 @@ export default function RouteMap() {
 
   return (
     <div className="flex h-full flex-col">
-      <WidgetHeader title="Route Map" status={route ? <span className="label-caps text-ink-3">OSM · no live traffic</span> : null} />
+      <WidgetHeader title="Maps" status={route ? <span className="label-caps text-ink-3">OSM · no live traffic</span> : null} />
       {!isTauri() ? (
         <Empty>The route map runs in the desktop app.</Empty>
       ) : (

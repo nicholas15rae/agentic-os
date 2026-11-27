@@ -26,6 +26,8 @@ import { useProviders } from "@/sections/settings/use-providers";
 import { useNav } from "@/stores/nav";
 import { isDesktopApp, useSettings } from "@/stores/settings";
 import { audioContext, createEngines, synthBytes, type SpeakOpts } from "./engines";
+import { onSpeechStart } from "./speech-start";
+import { reportActivity } from "@/features/security/activity";
 import { nextStreamChunk, perSentenceOpts, synthArgs, utteranceIdFor } from "./tts-text";
 import { fallbackNotice } from "./tts-fallback-notice";
 import { introLine } from "./handoff";
@@ -40,12 +42,13 @@ import { detectRoute, detectedRoute, effectiveRoute } from "./audio-route";
 import { hydrateMic, micEnabled, onMicChange, requestMicEnabled, MIC_LOCKED_MSG } from "./mic-gate";
 import { syncThresholdFromOs } from "./threshold";
 import { cutMedia, holdMedia, releaseMedia, type HeldMedia } from "./media-hold";
-import { startNarrator, type NarratorSnapshot } from "./narrator";
+import { chatterMuted, startNarrator, type NarratorSnapshot } from "./narrator";
+import { createDroppedTasks, resumeOffer, type TaskLine } from "./dropped-tasks";
 import { directorReport, inboxLine, isReportEvent, newTradingAlerts, parseInboxAsk, REPORT_MODEL, reportFromEvent, reportVoice, startReportPlayer, type AgentReport, type RenderEvent, type SpeechOutcome } from "./agent-reports";
 import { useAgentInbox } from "@/features/comms/agent-inbox";
 import { tradingApi } from "@/features/trading/ibkr";
 import { onDirectorEvent } from "@/features/director/api";
-import { currentFreeze, isToolLiveNow, useModes } from "@/features/modes/modes-store";
+import { currentFreeze, isTonyToolLiveNow, useModes } from "@/features/modes/modes-store";
 import { calmModeError, frozenOfferLine, isLearningMode, MODE_NOT_AUTO, MODE_SURFACE_ONLY, tier3Action } from "@/features/modes/modes";
 import { answeringIds, pillPathways, stripLearnTags } from "@/features/modes/learning";
 import { spokenSoFar } from "@/features/dispatcher/tony-dispatch";
@@ -311,6 +314,8 @@ function speechHandlers() {
         if (overTony || sayDepth > 0) {
           // Over a vocal handoff cue too: a surviving delegated turn would outlive its mic
           // generation and wedge the voice state (review #29, left for Nic to decide).
+          // A task that turn was still working on is kept: Tony offers to finish it afterwards.
+          droppedTasks.supersede();
           cancelStreams();
           supersedeTurn();
         }
@@ -696,6 +701,61 @@ const addressesTony = (line: string, cfg: RoutingConfig) => stripWake(line) !== 
 /** `shown`: the line to show in the chat when it differs from `text` (a compound mode switch
  * re-enters with only the instruction after the switch). */
 export async function handleInput(text: string, opts: { channel: Channel; thread?: ThreadId; origin?: TurnOrigin; shown?: string }): Promise<void> {
+  const t = text.trim();
+  if (!t) return;
+  // Talking to Tony is using the app: it keeps the idle lock and open PIN step-ups from lapsing.
+  reportActivity();
+  // An open "want me to finish …?" offer: a yes re-runs the dropped task, a no closes it.
+  const ans = !hold.active && !store().pending && !opts.shown ? droppedTasks.answer(t) : null;
+  if (ans?.kind === "resume") return handleInput(ans.task.line, { ...opts, thread: (opts.thread ?? ans.task.thread) as ThreadId, shown: t });
+  if (ans?.kind === "decline") {
+    const thread = (opts.thread ?? ans.task.thread) as ThreadId;
+    store().pushTurn({ who: "user", text: t, thread });
+    store().pushTurn({ who: "agent", from: "os", role: "general", text: "Okay, I'll leave it.", thread });
+    return;
+  }
+  const gen = micGen;
+  Object.assign(ttfw, { start: performance.now(), at: Date.now(), gen, ms: null, thread: opts.thread ?? tonyThread() });
+  const task = droppedTasks.begin(t, opts.thread ?? tonyThread(), gen);
+  try {
+    await handleTurn(text, opts);
+  } finally {
+    droppedTasks.end(task);
+    if (gen === micGen) {
+      const offer = droppedTasks.takeOffer(t);
+      if (offer) offerDroppedTask(offer, opts.channel);
+    }
+  }
+}
+
+/** Time to first word (section pass): line in → Tony's first audio out, per turn, as a meta tag
+ * ("lmstudio · 3811ms · first word 1240ms"). Only the turn's own generation counts. */
+const ttfw = { start: 0, at: 0, gen: -1, ms: null as number | null, thread: "" as string };
+onSpeechStart(() => {
+  if (ttfw.gen !== micGen || ttfw.ms !== null || !ttfw.start) return;
+  ttfw.ms = Math.round(performance.now() - ttfw.start);
+  // The answer is already on screen (spoken after it was shown): tag it now.
+  const at = ttfw.at;
+  const last = [...store().turns].reverse().find((x) => x.thread === ttfw.thread && x.who === "agent" && x.at >= at);
+  if (last?.meta && last.meta !== "streaming…") store().updateTurn(last.id, { meta: withFirstWord(last.meta) });
+});
+/** `meta` plus this turn's first-word time, when known (and not already tagged). */
+function withFirstWord(meta: string): string {
+  return ttfw.ms === null || /first word/.test(meta) ? meta : `${meta} · first word ${ttfw.ms}ms`;
+}
+
+/** Dropped tasks (section pass): what the superseded turns were still working on. */
+const droppedTasks = createDroppedTasks();
+
+/** Ask about a dropped task under the new answer: "Finish it" button, or a spoken / typed yes. */
+function offerDroppedTask(task: TaskLine, channel: Channel) {
+  const text = resumeOffer(task);
+  store().pushTurn({ who: "agent", from: "os", role: "general", text, meta: "dropped task", thread: task.thread as ThreadId, actions: [{ label: "Finish it", run: `resume:${task.id}` }] });
+  // Spoken only when nothing else is (no follow-up listen open): the chat line and the button stay either way.
+  if (channel === "voice" && store().state === "idle" && micEnabled()) void say(text, { agent: "general" }).catch(() => undefined);
+}
+
+async function handleTurn(text: string, opts: { channel: Channel; thread?: ThreadId; origin?: TurnOrigin; shown?: string }): Promise<void> {
   const v = store();
   const t = text.trim();
   if (!t) return;
@@ -720,11 +780,11 @@ export async function handleInput(text: string, opts: { channel: Channel; thread
   const intent = parseOsLine(t);
   let sp: SpotifyIntent | null = intent ? null : await parseSpotifyLine(t);
   if (sp && cueOwnsVolume(sp, cuePlayingNow(), t)) sp = null; // "volume 30" during Gabagool ⇒ Tony, as before
-  // The Spotify fast path only runs while the spotify server is live this turn: frozen by the
-  // mode's switchboard (Learning freezes every external tool) or on the master switchboard, the
-  // line falls through to Tony's turn, where Rust gives the frozen reason.
+  // The Spotify fast path only runs while Spotify is live for Tony this turn (his base: every mode,
+  // Learning included; frozen only on the master switchboard or when he doesn't own it). Otherwise
+  // the line falls through to Tony's turn, where Rust gives the frozen reason.
+  if (sp && !isTonyToolLiveNow("spotify")) sp = null;
   const learning = isLearningMode(useModes.getState().effective);
-  if (sp && (learning || !isToolLiveNow("spotify"))) sp = null;
   if (store().pending) {
     if (intent && worksWhileConfirming(intent)) return controlWhileConfirming(t, intent, opts.channel);
     if (sp?.tool === "spotify.pause") return controlWhileConfirming(t, sp, opts.channel);
@@ -1292,8 +1352,8 @@ async function phoneVoiceRun(plan: ActionPlan, thread: ThreadId, gen: number) {
     // already streamed stays as he said it, and the notice is a line of its own.
     store().updateTurn(live, { meta: "interrupted" });
     store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os" });
-  } else if (live) store().updateTurn(live, { text, role: plan.role, meta, from: "os", at: Date.now(), ...memory });
-  else store().pushTurn({ who: "agent", text, role: plan.role, meta, thread, from: "os", ...memory });
+  } else if (live) store().updateTurn(live, { text, role: plan.role, meta: withFirstWord(meta), from: "os", at: Date.now(), ...memory });
+  else store().pushTurn({ who: "agent", text, role: plan.role, meta: withFirstWord(meta), thread, from: "os", ...memory });
   clientTrace.ui(traceId, "reply shown");
   if (!isLive()) return;
   // A notice is said whole after what's already queued; an answer only adds what wasn't said
@@ -1610,6 +1670,14 @@ export function requestBuild(text: string, title: string, thread: ThreadId = ton
 
 /** One-tap answers rendered under a message: a failed build's Retry / Offload (pipeline-store). */
 export function runTurnAction(run: string, thread: ThreadId) {
+  // resume:<id>: finish a task dropped when the subject changed.
+  const resume = /^resume:(.+)$/.exec(run);
+  if (resume) {
+    const task = droppedTasks.claim(resume[1]);
+    if (task) void handleInput(task.line, { channel: "text", thread: task.thread as ThreadId, shown: `Finish it: ${task.line}` });
+    else store().pushTurn({ who: "system", text: "That offer has expired — ask again.", tone: "warn", thread });
+    return;
+  }
   // retry:<task_id>  ·  offload:<engine>:<task_id>
   const retry = /^retry:(.+)$/.exec(run);
   const offload = /^offload:([a-z-]+):(.+)$/.exec(run);
@@ -1894,7 +1962,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId, addre
   const finalExplicit = explicit && finalRole === role;
   const relayThread = renderSteps(r.steps, finalRole, finalExplicit);
   const linked = r.delegatedTo && !finalExplicit && relayThread !== thread ? relayThread : undefined;
-  const meta = [r.providerId, r.tool && `tool ${r.tool}`, r.redacted && "privacy-diffused", `${r.latencyMs}ms`].filter(Boolean).join(" · ");
+  const meta = withFirstWord([r.providerId, r.tool && `tool ${r.tool}`, r.redacted && "privacy-diffused", `${r.latencyMs}ms`].filter(Boolean).join(" · "));
   // The answer is the agent's only when the agent itself produced it: on an explicit tab where
   // the agent failed (or has no workspace) Tony answers, and it is labelled — and voiced — as Tony.
   const learned = pillPathways(r.learned);
@@ -2604,7 +2672,13 @@ export const narrator = isDesktopApp()
         return [...(st.wakeWords ?? []), st.osName || "Tony", "tony", "jarvis"];
       },
       // A finished background job is an agent REPORT (own voice, Comms inbox), never a narration line.
-      subscribe: (h) => onNativeEvent<AgentEvent>("agent-event", (ev) => (isReportEvent(ev) ? pushEventReport(ev) : h(ev))),
+      subscribe: (h) =>
+        onNativeEvent<AgentEvent>("agent-event", (ev) => {
+          if (isReportEvent(ev)) return pushEventReport(ev);
+          // Agent Chatter off: agent ↔ agent back-and-forth (handoff / verbose lines) stays text-only.
+          if (chatterMuted(ev.severity, useSettings.getState().routing.vocalHandoffs)) return;
+          h(ev);
+        }),
     })
   : null;
 

@@ -31,7 +31,7 @@ describe("vault search scope (agent context never gets finance records)", () => 
   });
 
   it("the finance list mirrors the gateway's", () => {
-    expect([...FINANCE_COLLECTIONS].sort()).toEqual(["checks", "income", "invoices", "receipts"]);
+    expect([...FINANCE_COLLECTIONS].sort()).toEqual(["checks", "commissions", "income", "invoices", "mileage", "pending", "receipts", "statement_lines"]);
     expect(isFinanceCollection("notes")).toBe(false);
   });
 });

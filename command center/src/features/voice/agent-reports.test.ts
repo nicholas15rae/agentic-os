@@ -144,12 +144,16 @@ describe("Tony's inbox line", () => {
     expect(inboxLine([{ agent: "coder", read: false }])).toBe("You've got a message from the Coder.");
     expect(inboxLine([{ agent: "coder", read: true }])).toBe("No new messages, Nic.");
   });
-  it("parses the asks, leaves texts and emails alone", () => {
-    expect(parseInboxAsk("Any messages?")).toEqual({ play: false });
-    expect(parseInboxAsk("hey tony, do I have any new messages")).toEqual({ play: false });
-    expect(parseInboxAsk("What are my messages")).toEqual({ play: false });
-    expect(parseInboxAsk("play my messages")).toEqual({ play: true });
-    expect(parseInboxAsk("read me the messages please")).toEqual({ play: true });
+  it("parses the agent-report asks, leaves texts, emails and plain messages alone", () => {
+    expect(parseInboxAsk("Any agent reports?")).toEqual({ play: false });
+    expect(parseInboxAsk("hey tony, do I have any new agent messages")).toEqual({ play: false });
+    expect(parseInboxAsk("What are my reports")).toEqual({ play: false });
+    expect(parseInboxAsk("play my agent reports")).toEqual({ play: true });
+    expect(parseInboxAsk("read me the agent messages please")).toEqual({ play: true });
+    // A plain messages read is Gmail / WhatsApp (Tony's own tools), never the report inbox.
+    expect(parseInboxAsk("Any messages?")).toBeNull();
+    expect(parseInboxAsk("check my messages")).toBeNull();
+    expect(parseInboxAsk("play my messages")).toBeNull();
     expect(parseInboxAsk("any text messages")).toBeNull();
     expect(parseInboxAsk("send a message to Sam")).toBeNull();
     expect(parseInboxAsk("check my email messages")).toBeNull();

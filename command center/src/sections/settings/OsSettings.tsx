@@ -7,6 +7,12 @@ import { setWakeMode } from "@/features/voice/voice-controller";
 import { useSettings } from "@/stores/settings";
 import { CfgError, SecretRow, TierSelect, Toggle, useOsCfg } from "./os-ui";
 import { ROLE_IDS, roleLabel, type RoleId } from "@/features/dispatcher/roles";
+import { HELPDESK_QUESTION, HELPDESK_TURNS } from "@/features/helpdesk/helpdesk-review";
+import { formatReviewCost, overseerChars, reviewCost } from "@/features/helpdesk/review-cost";
+
+/** A typical help-desk review for the estimate: the last 8 turns at ~600 characters each. */
+const TYPICAL_TURN_CHARS = 600;
+const typicalReviewChars = () => overseerChars(HELPDESK_QUESTION, Array.from({ length: HELPDESK_TURNS }, () => ({ role: "user" as const, content: "x".repeat(TYPICAL_TURN_CHARS) })));
 
 /** Text input that saves on blur (re-keyed so it resets to the saved value). */
 function BlurInput({ value, onSave, ...rest }: { value: string; onSave: (v: string) => void } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "onBlur" | "defaultValue">) {
@@ -169,6 +175,9 @@ const ROLE_ORDER: RoleId[] = ["librarian", "coder", "booking", "ops", "bizops", 
 const ROLE_LABEL_OVERRIDES: Partial<Record<RoleId, string>> = { general: "Tony (own RAG)", prompter: "Prompter / dispatcher" };
 const ROLES: [RoleId, string][] = [...ROLE_ORDER, ...ROLE_IDS.filter((id) => !ROLE_ORDER.includes(id))].map((id) => [id, ROLE_LABEL_OVERRIDES[id] ?? roleLabel(id)]);
 
+/** Rust `os_core::LIVE_UNMAPPED_ROLES` (Section 20.8): never a live delegation target. */
+const LIVE_UNMAPPED_ROLES: RoleId[] = ["booking", "librarian"];
+
 export function WorkspacesCard() {
   const { cfg, error, save } = useOsCfg();
   const [ws, setWs] = useState<{ slug: string; name: string }[] | null>(null);
@@ -189,7 +198,7 @@ export function WorkspacesCard() {
     >
       <div className="grid gap-3 sm:grid-cols-2">
         {ROLES.map(([role, label]) => (
-          <Field key={role} label={label}>
+          <Field key={role} label={LIVE_UNMAPPED_ROLES.includes(role) ? `${label} · held from live delegation` : label}>
             <Select value={map[role] ?? ""} onChange={(e) => save({ anythingllm: { workspaces: { ...map, [role]: e.target.value } } })} className="font-mono !text-[13px]">
               <option value="">— not delegated —</option>
               {[...new Set([...(ws?.map((w) => w.slug) ?? []), ...(map[role] ? [map[role]] : [])])].map((s) => (
@@ -210,6 +219,9 @@ export function WorkspacesCard() {
           <BlurInput value={String(cfg.anythingllm.timeoutSecs)} onSave={(v) => Number(v) > 0 && save({ anythingllm: { timeoutSecs: Math.round(Number(v)) } })} className="font-mono" inputMode="numeric" />
         </Field>
       </div>
+      <p className="mt-2 text-xs text-ink-3">
+        {LIVE_UNMAPPED_ROLES.map((r) => roleLabel(r)).join(" and ")}: chat and voice turns never delegate to these workspaces ({cfg.osName} answers). The mapping stays for the scheduled Librarian scripts. Each delegated turn waits up to the sub-agent timeout ({cfg.anythingllm.timeoutSecs} s).
+      </p>
       {err && <p className="mt-2 text-xs text-alert">{err}</p>}
       {ws && <p className="mt-2 text-xs text-ink-3">Found {ws.length} workspace{ws.length === 1 ? "" : "s"}: {ws.map((w) => w.slug).join(", ")}</p>}
       <CfgError error={error} />
@@ -376,7 +388,7 @@ export function OverseerCard() {
   return (
     <Card
       title="Overseer escalation"
-      hint={`“Ask Overseer” on any message sends that exchange (privacy-diffused) for a second opinion. Claude API calls use ${o.claudeModel} with server-side refusal fallbacks enabled.`}
+      hint={`The Overseer reviews escalated turns and manual-mode cards (privacy-diffused). The Agents tab’s “Something’s off” help desk always uses the Claude CLI. Claude API calls use ${o.claudeModel} with server-side refusal fallbacks enabled.`}
       action={
         <button
           className="pill-glass !h-8 text-xs"
@@ -408,6 +420,9 @@ export function OverseerCard() {
           <BlurInput value={o.geminiModel} onSave={(v) => save({ overseer: { geminiModel: v } })} className="font-mono !text-[12px]" />
         </Field>
       </div>
+      <p className="mt-2 text-xs text-ink-3">
+        Cost: <span className="font-mono text-ink-2">{formatReviewCost(reviewCost(typicalReviewChars(), o.claudeModel))}</span> at {o.claudeModel} API prices for a typical “Something's off” review ({HELPDESK_TURNS} turns of ~{TYPICAL_TURN_CHARS} characters; tokens ≈ characters / 4, plus a ~500-token answer). Estimates; through the Claude CLI on a subscription it isn't billed per token.
+      </p>
       {probe && <p className={`mt-2 font-mono text-[11px] ${probe.startsWith("✓") ? "text-teal" : "text-ink-2"}`}>{probe}</p>}
       <div className="mt-2">
         <Toggle on={o.autoEscalate} onChange={(v) => save({ overseer: { autoEscalate: v } })} label="Auto-escalate when the local chain fails" />

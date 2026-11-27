@@ -423,6 +423,27 @@ pub fn current_idle_wait(app: &tauri::AppHandle, quiet_mins: u32, manual: bool) 
     idle_wait(&view, open, fix, audio, LAST_INTERACTIVE_MS.load(Ordering::Relaxed), now_ms(), quiet_mins as u64 * 60_000, manual)
 }
 
+/// Is the USER busy (a voice turn / Tony speaking, or an interactive turn inside the quiet
+/// window)? Unlike `current_idle_wait` it ignores builds, queued tasks, the GPU baton and Claude
+/// fixes: cheap file maintenance (the Garbage daemon) must not be starved by a task that sits
+/// queued or stuck for days.
+pub fn user_busy_reason(app: &tauri::AppHandle, quiet_mins: u32) -> Option<String> {
+    use tauri::Manager;
+    let audio = app.state::<crate::audio::commands::AudioEngineState>().activity();
+    user_busy(audio, LAST_INTERACTIVE_MS.load(Ordering::Relaxed), now_ms(), quiet_mins as u64 * 60_000).map(|w| w.reason())
+}
+
+/// Pure part of `user_busy_reason`.
+pub fn user_busy(audio: Option<(bool, bool, bool)>, last_ms: u64, now_ms: u64, quiet_ms: u64) -> Option<IdleWait> {
+    if let Some((turn, playing, _speech)) = audio {
+        if turn || playing {
+            return Some(IdleWait::Voice);
+        }
+    }
+    let since = now_ms.saturating_sub(last_ms);
+    (last_ms > 0 && since < quiet_ms).then(|| IdleWait::Quiet { secs_left: (quiet_ms - since).div_ceil(1000) })
+}
+
 /// `idle_reason` over the running app's live signals.
 pub fn current_idle_reason(app: &tauri::AppHandle, quiet_mins: u32, manual: bool) -> Option<String> {
     current_idle_wait(app, quiet_mins, manual).map(|w| w.reason())

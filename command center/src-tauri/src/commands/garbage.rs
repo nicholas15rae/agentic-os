@@ -2,7 +2,7 @@
 //!
 //! - Not in `AgentRole` / `TaskPacket`, never routed to, never calls a model: 0 VRAM.
 //! - Started at boot (`lib.rs`). Two triggers:
-//!   1. **Schedule + quotas**: every `TICK` it applies TTLs and a size quota to its allowlisted
+//!   1. **Schedule + quotas**: hourly at most (`every`), only when the user is idle, it applies TTLs and a size quota to its allowlisted
 //!      roots (oldest first until under quota).
 //!   2. **Purge handshake**: `handshake(packet_id)` from Security when a packet closes (done or
 //!      failed closed) wipes that packet's scratch at once.
@@ -21,7 +21,28 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-pub const TICK: Duration = Duration::from_secs(300);
+/// Floor for the scheduled hygiene pass (`roster.garbage_minutes` can only lengthen it). It used
+/// to tick every 5 min and retry every 60 s whenever another daemon held the stagger slot, which
+/// read as "sweeping every minute"; the librarian plan wants hourly, idle-only maintenance.
+pub const MIN_EVERY_MINUTES: u32 = 60;
+/// First scheduled pass after boot (handshake purges still run at once).
+const BOOT_DELAY: Duration = Duration::from_secs(300);
+/// Retry after a deferral (user busy, another daemon in the stagger slot).
+const DEFER_RETRY: Duration = Duration::from_secs(600);
+/// Quiet window (minutes since the last interactive turn) a scheduled pass waits for.
+const QUIET_MINS: u32 = 5;
+/// A pass put off this long (always busy) runs anyway.
+const MAX_DEFER: Duration = Duration::from_secs(6 * 3600);
+
+/// The effective scheduled cadence for a configured `roster.garbage_minutes`.
+pub fn every(minutes: u32) -> Duration {
+    Duration::from_secs(u64::from(minutes.max(MIN_EVERY_MINUTES)) * 60)
+}
+
+/// Minutes shown in the UI for a configured value (the clamped, real cadence).
+pub fn every_minutes(minutes: u32) -> u32 {
+    minutes.max(MIN_EVERY_MINUTES)
+}
 /// Packet scratch older than this is purged even without a handshake.
 pub const SCRATCH_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Packet scratch quota (bytes): over it, the oldest packet dirs go first.
@@ -58,6 +79,10 @@ pub struct Status {
     /// Unix ms of the last tick / handshake handled.
     pub heartbeat_at: Option<u64>,
     pub last_purge_at: Option<u64>,
+    /// Unix ms of the last scheduled pass that actually ran (a deferral is only a heartbeat).
+    pub last_pass_at: Option<u64>,
+    /// Why the last scheduled pass was put off, cleared when one runs.
+    pub deferred: Option<String>,
     pub last_result: Value,
     pub handshakes: u64,
     pub refused: u64,
@@ -216,16 +241,26 @@ fn now_ms() -> u64 {
     super::arbiter::now_ms()
 }
 
-/// The daemon (lib.rs boot): handshakes as they come, a scheduled pass every `TICK`.
+/// The daemon (lib.rs boot): handshakes as they come, a scheduled idle-only pass every `every(..)`.
 pub async fn daemon(app: tauri::AppHandle) {
     use tauri::Manager;
     let Ok(dir) = app.path().app_config_dir() else { return };
     let a = Allow::for_config(&dir);
     let Some(mut rx) = chan().1.lock().unwrap().take() else { return };
-    status().lock().unwrap().running = true;
-    // Next scheduled pass: TICK after a pass (or a market-hours hold), RETRY after a stagger refusal.
-    const RETRY: Duration = Duration::from_secs(60);
-    let mut next = tokio::time::Instant::now();
+    {
+        let mut s = status().lock().unwrap();
+        s.running = true;
+        s.heartbeat_at = Some(now_ms());
+    }
+    // Next scheduled pass: `every(roster.garbage_minutes)` after a pass (or a market-hours hold),
+    // DEFER_RETRY while the user is active or another daemon holds the stagger slot.
+    let mut next = tokio::time::Instant::now() + BOOT_DELAY;
+    let mut deferred_since: Option<tokio::time::Instant> = None;
+    let defer = |why: String| {
+        let mut s = status().lock().unwrap();
+        s.heartbeat_at = Some(now_ms());
+        s.deferred = Some(why);
+    };
     loop {
         tokio::select! {
             Some(id) = rx.recv() => {
@@ -245,28 +280,43 @@ pub async fn daemon(app: tauri::AppHandle) {
                 super::arbiter::get().handoff("security", "garbage", &format!("purge handshake {id}"));
             }
             _ = tokio::time::sleep_until(next) => {
-                next = tokio::time::Instant::now() + TICK;
+                let r = app.state::<super::os_core::OsState>().snapshot().roster.clone();
+                next = tokio::time::Instant::now() + every(r.garbage_minutes);
                 if super::integrity::ensure().is_err() {
                     continue;
                 }
-                // Alive either way: a held / staggered pass still counts as a heartbeat (system_health).
+                // Alive either way: a held / deferred pass still counts as a heartbeat (system_health),
+                // but never as a sweep (`last_pass_at`).
                 if let Some(why) = super::stagger::garbage_hold_reason(now_ms()) {
                     super::stagger::note_deferred("garbage", &why);
-                    status().lock().unwrap().heartbeat_at = Some(now_ms());
+                    defer(why);
                     continue;
                 }
-                if super::stagger::claim("garbage", super::stagger::gap_seconds()).is_err() {
-                    status().lock().unwrap().heartbeat_at = Some(now_ms());
-                    next = tokio::time::Instant::now() + RETRY;
+                // Idle-only: no voice turn or Tony speaking, and the quiet window over. Builds and
+                // queued tasks don't count (one stuck task would starve maintenance forever), and
+                // after MAX_DEFER of continuous deferral the pass runs anyway (it is cheap file work).
+                let starved = deferred_since.is_some_and(|t: tokio::time::Instant| t.elapsed() >= MAX_DEFER);
+                if let Some(why) = super::compaction::user_busy_reason(&app, QUIET_MINS).filter(|_| !starved) {
+                    super::stagger::note_deferred("garbage", &why);
+                    defer(why);
+                    deferred_since.get_or_insert_with(tokio::time::Instant::now);
+                    next = tokio::time::Instant::now() + DEFER_RETRY;
                     continue;
                 }
-                let r = app.state::<super::os_core::OsState>().snapshot().roster.clone();
+                deferred_since = None;
+                if let Err(why) = super::stagger::claim("garbage", super::stagger::gap_seconds()) {
+                    defer(why);
+                    next = tokio::time::Instant::now() + DEFER_RETRY;
+                    continue;
+                }
                 let (a2, keep, grad) = (a.clone(), r.dump_keep_days, r.graduate_after_days);
                 let res = super::arbiter::get().run_task("garbage", "hygiene pass", async move {
                     tauri::async_runtime::spawn_blocking(move || Ok(pass(&a2, keep, grad, SCRATCH_QUOTA, SystemTime::now()))).await.map_err(|e| e.to_string())?
                 }).await;
                 let mut s = status().lock().unwrap();
                 s.heartbeat_at = Some(now_ms());
+                s.last_pass_at = Some(now_ms());
+                s.deferred = None;
                 if let Ok(v) = res {
                     let did = ["scratchPurged", "dumpsPurged", "archivesCompressed"].iter().any(|k| v[*k].as_u64().unwrap_or(0) > 0);
                     if did {
@@ -281,6 +331,27 @@ pub async fn daemon(app: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_pass_is_hourly_at_most_often() {
+        // The old 30-min roster value (and anything shorter) is lifted to the hourly floor.
+        assert_eq!(every(1), Duration::from_secs(3600));
+        assert_eq!(every(30), Duration::from_secs(3600));
+        assert_eq!(every_minutes(30), 60);
+        // A longer setting is honoured.
+        assert_eq!(every(180), Duration::from_secs(3 * 3600));
+        assert_eq!(every_minutes(180), 180);
+        // Deferrals retry far slower than the old 60 s loop, and can't starve the pass for good.
+        assert!(DEFER_RETRY >= Duration::from_secs(600));
+        assert!(MAX_DEFER <= Duration::from_secs(6 * 3600));
+        // Only the USER defers it: a queued / stuck build never does (user_busy has no task input).
+        use super::super::compaction::{user_busy, IdleWait};
+        let now = 10_000_000;
+        assert!(user_busy(None, 0, now, 300_000).is_none(), "never interacted: idle");
+        assert!(user_busy(None, now - 400_000, now, 300_000).is_none(), "quiet window over");
+        assert!(matches!(user_busy(None, now - 60_000, now, 300_000), Some(IdleWait::Quiet { .. })));
+        assert!(matches!(user_busy(Some((false, true, false)), 0, now, 300_000), Some(IdleWait::Voice)));
+    }
 
     fn setup(tag: &str) -> (PathBuf, Allow) {
         let dir = std::env::temp_dir().join(format!("garbage-{tag}-{}-{}", std::process::id(), now_ms()));

@@ -283,3 +283,14 @@ describe("regressions: double 'Queued' and coalescing that ate 'ready for review
     expect(q[0].text).toBe("Newer milestone");
   });
 });
+
+describe("Agent Chatter off (section pass)", () => {
+  it("mutes agent back-and-forth, keeps milestones and critical lines", async () => {
+    const { chatterMuted } = await import("./narrator");
+    expect(chatterMuted("handoff", false)).toBe(true);
+    expect(chatterMuted("verbose", false)).toBe(true);
+    expect(chatterMuted("milestone", false)).toBe(false);
+    expect(chatterMuted("critical", false)).toBe(false);
+    expect(chatterMuted("handoff", true)).toBe(false);
+  });
+});

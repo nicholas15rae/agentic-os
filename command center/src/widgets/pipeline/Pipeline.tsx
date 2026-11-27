@@ -4,6 +4,7 @@ import { WidgetHeader } from "@/components/WidgetHeader";
 import { Select, fromLocalInput } from "@/components/ui";
 import { useCollection, useNow } from "@/lib/cc-api";
 import { countdown } from "@/features/reminders/when";
+import { ContactChip, ContactSelect } from "@/features/contacts/ContactSelect";
 
 export interface PipelineItem {
   title: string; // project / production
@@ -12,6 +13,8 @@ export interface PipelineItem {
   status: "received" | "prepping" | "submitted" | "callback" | "booked" | "passed";
   dueAt?: number;
   casting?: string;
+  /** The casting contact in the phone book (a link only; deleting the contact leaves this as it is). */
+  castingContactId?: string;
   notes?: string;
   script?: string; // pasted sides / script text (embedded in the vault)
 }
@@ -71,6 +74,7 @@ export default function Pipeline() {
                   {i.status}
                 </button>
                 {i.casting && <span className="truncate text-[11px] text-ink-3">{i.casting}</span>}
+                <ContactChip id={i.castingContactId} className="max-w-[45%]" />
                 <button aria-label={`Delete ${i.title}`} onClick={() => void remove(i.id)} className="ml-auto grid size-6 place-items-center rounded-full text-ink-3 opacity-100 hover:text-alert md:opacity-0 md:group-hover:opacity-100">
                   <Trash2 size={11} />
                 </button>
@@ -106,6 +110,13 @@ function AddForm({ onAdd }: { onAdd: (d: PipelineItem) => void }) {
       </Select>
       <input className="field !h-8 !py-1 text-[13px]" placeholder="Casting / agent" value={d.casting} onChange={(e) => setD({ ...d, casting: e.target.value })} aria-label="Casting" />
       <input type="datetime-local" className="field !h-8 !py-1 text-[12px]" value={due} onChange={(e) => setDue(e.target.value)} aria-label="Deadline" />
+      <ContactSelect
+        value={d.castingContactId}
+        label="Casting contact (phone book)"
+        none="Casting contact from the phone book…"
+        className="col-span-2 !h-8 !py-1 text-[12px]"
+        onChange={(c) => setD({ ...d, castingContactId: c?.id, casting: d.casting || (c ? c.company || c.name : "") })}
+      />
       <button className="pill-primary col-span-2 !h-8 text-xs">Add</button>
     </form>
   );

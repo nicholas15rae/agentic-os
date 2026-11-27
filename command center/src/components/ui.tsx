@@ -29,9 +29,9 @@ export function Card({ title, hint, action, children, className = "" }: { title?
   return (
     <section className={`glass rounded-[20px] p-5 ${className}`}>
       {(title || action) && (
-        <div className="mb-1 flex items-center gap-2">
+        <div className="mb-1 flex flex-wrap items-center gap-2">
           {title && <h2 className="label-caps text-amber-soft">{title}</h2>}
-          {action && <div className="ml-auto flex items-center gap-2">{action}</div>}
+          {action && <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">{action}</div>}
         </div>
       )}
       {hint && <p className="mb-3 text-xs leading-relaxed text-ink-3">{hint}</p>}

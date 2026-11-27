@@ -1,3 +1,4 @@
+import { ownsServer, toggleOwner } from "@/features/os/switchboard";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Cloud, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, Wrench, X } from "lucide-react";
 import { Card, Field, Input, Select } from "@/components/ui";
@@ -184,20 +185,21 @@ export function McpRegistryCard() {
     // explicit button below covers the case where this races the save.
     syncAllm();
   };
-  // Tony isn't part of this list at all — he bypasses grants entirely (see
-  // `McpServer::grants` in os_core.rs) — so expanding "all" here only ever
-  // spells out the 6 sub-agents, never an inert "tony" entry. `null`/missing/
+  // Tony respects grants (`McpServer::grants("general")`): his pill is his base, toggled with
+  // `toggleOwner` (Tony + every sub-agent spelled out). The sub-agent pills below keep the
+  // older "all" handling: expanding "all" spells out the sub-agents. `null`/missing/
   // empty all mean "all" on the Rust side too, so normalize to an explicit
   // `["all"]` before toggling — otherwise clicking one specific pill from an
   // unrestricted server would (wrongly) read as "restrict to just this one".
   const setGrants = (id: string, agent: string) =>
     setMcps(cfg.mcps.map((x) => (x.id === id ? { ...x, agents: toggleGrant(x.agents && x.agents.length > 0 ? x.agents : ["all"], agent, SUB_AGENT_IDS) } : x)));
+  const setTonyGrant = (id: string) => setMcps(cfg.mcps.map((x) => (x.id === id ? { ...x, agents: toggleOwner(x.agents, "general", ["general", ...SUB_AGENT_IDS]) } : x)));
   const quick: Record<string, Record<string, unknown>> = { "weather.current": {}, "time.now": {}, "kg.search": { query: "Nic" }, "git.status": { path: cfg.fsRoots[0] ?? "" } };
 
   return (
     <Card
       title={`${cfg.osName}'s MCP registry`}
-      hint="The OS's own tools. Built-ins run natively in Rust (no process to spawn); add any stdio or HTTP MCP server and its tools appear here and become available to the OS. Pills choose which agents may use each server's tools (Tony always has every one); tools themselves are read-only from the model's side."
+      hint="The OS's own tools. Built-ins run natively in Rust (no process to spawn); add any stdio or HTTP MCP server and its tools appear here and become available to the OS. Pills choose which agents may use each server's tools. Tony's pill is his always-on base; what each mode adds for him is under Settings → Master switchboard. Frozen agents get no tools."
       action={
         <>
           <button onClick={() => load(true)} className="pill-glass !h-8 text-xs" disabled={loading}>
@@ -232,6 +234,21 @@ export function McpRegistryCard() {
               {(sync.report!.keptWritable?.length ?? 0) > 0 && (
                 <>
                   ; <span className="text-alert">unrestricted in AnythingLLM</span> (not removed): <span className="font-mono text-ink">{sync.report!.keptWritable!.join(", ")}</span>
+                </>
+              )}
+              {(sync.report!.parked?.length ?? 0) > 0 && (
+                <>
+                  ; parked (no AnythingLLM agent is granted them, auto-start off, nothing deleted): <span className="font-mono text-ink">{sync.report!.parked!.join(", ")}</span>
+                </>
+              )}
+              {(sync.report!.readOnly?.length ?? 0) > 0 && (
+                <>
+                  ; read-only in Tony (not auto-started): <span className="font-mono text-ink">{sync.report!.readOnly!.join(", ")}</span>
+                </>
+              )}
+              {(sync.report!.unparked?.length ?? 0) > 0 && (
+                <>
+                  ; needed again (auto-start back on): <span className="font-mono text-ink">{sync.report!.unparked!.join(", ")}</span>
                 </>
               )}
             </>
@@ -293,15 +310,14 @@ export function McpRegistryCard() {
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {AGENTS.filter(([id]) => id !== "claude").map(([id, label]) => {
                   const isTony = id === "tony";
-                  const active = isTony || mcpGrants(m.agents, id);
+                  const active = isTony ? ownsServer(m.agents, "general") : mcpGrants(m.agents, id);
                   return (
                     <button
                       key={id}
                       aria-pressed={active}
-                      disabled={isTony}
-                      onClick={() => !isTony && setGrants(m.id, id)}
-                      className={`h-6 rounded-full border px-2 text-[11px] transition-colors ${active ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-3 hover:text-ink"} ${isTony ? "cursor-default opacity-80" : ""}`}
-                      title={isTony ? `${cfg.osName} has full access` : `${active ? "Revoke from" : "Grant to"} ${id === "all" ? "every agent" : label}`}
+                      onClick={() => (isTony ? setTonyGrant(m.id) : setGrants(m.id, id))}
+                      className={`h-6 rounded-full border px-2 text-[11px] transition-colors ${active ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-3 hover:text-ink"}`}
+                      title={isTony ? `${active ? "Take" : "Give"} this server ${active ? "out of" : "into"} ${cfg.osName}'s always-on base` : `${active ? "Revoke from" : "Grant to"} ${id === "all" ? "every agent" : label}`}
                     >
                       {id === "tony" ? cfg.osName : label}
                     </button>

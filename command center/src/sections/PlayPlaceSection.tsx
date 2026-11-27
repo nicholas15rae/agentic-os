@@ -11,6 +11,9 @@ import { requestBuild, requestPipeline } from "@/features/voice/voice-controller
 import { useFocus } from "@/features/os/focus-store";
 import { useOsName } from "@/features/os/os-store";
 import { useToasts } from "@/features/reminders/notify";
+import { deletedToast } from "@/features/buildhub/trash";
+import { runTruth } from "@/features/buildhub/build-truth";
+import { useHub } from "@/features/buildhub/hub-store";
 import { devFixMode } from "@/features/memmap/format";
 import { useModes } from "@/features/modes/modes-store";
 import { StagingHub } from "@/features/buildhub/StagingHub";
@@ -83,9 +86,36 @@ export function PipelineBars() {
   const recent = Object.values(usePipelines((s) => s.recent))
     .sort((a, b) => b.at - a.at)
     .slice(0, 3);
+  const builds = useHub((s) => s.view?.builds) ?? [];
+  const [clearing, setClearing] = useState(false);
   if (!runs.length && !recent.length) return null;
+  // Finished runs whose Staging Hub build has settled: the hub card is their truth now.
+  const stale = recent.filter((r) => runTruth(r, builds).stale);
+  const clearStale = async () => {
+    setClearing(true);
+    for (const r of stale) {
+      try {
+        // Files stay (the hub build uses them); the row goes to the Trash, so it can come back.
+        await xcmd("runner_dismiss", { taskId: r.id, purgeFiles: false });
+        forgetRun(r.id);
+      } catch {
+        /* left on the list */
+      }
+    }
+    setClearing(false);
+  };
   return (
-    <Card title="Build runners" hint={runs.length ? `${runs.length} running` : "Recent runs"}>
+    <Card
+      title="Build runners"
+      hint={runs.length ? `${runs.length} running` : "Recent runs"}
+      action={
+        stale.length > 0 && isTauri() ? (
+          <button className="pill-glass !h-7 !px-2.5 text-[11px]" disabled={clearing} onClick={() => void clearStale()} title="Remove finished runs whose Staging Hub build already decided (kept in the Trash)">
+            {clearing ? <Loader2 size={11} className="animate-spin" /> : <Archive size={11} />} Clear settled ({stale.length})
+          </button>
+        ) : undefined
+      }
+    >
       <ul className="space-y-2">
         {runs.map((r) => (
           <RunRow key={r.id} r={r} />
@@ -101,25 +131,32 @@ export function PipelineBars() {
 function RunRow({ r }: { r: PipelineRun }) {
   const failed = r.status === "failed";
   const ready = r.status === "review_ready";
+  // One true state: a run that belongs to a Staging Hub build shows the hub's status.
+  const builds = useHub((s) => s.view?.builds) ?? [];
+  const truth = runTruth(r, builds);
+  const okTone = truth.tone === "ok";
+  const badTone = truth.tone === "bad";
   return (
     <li>
       <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
-        {ready ? <Sparkles size={12} className="text-teal" /> : failed ? <RotateCcw size={12} className="text-alert" /> : <Loader2 size={12} className="animate-spin text-amber-soft" />}
+        {okTone ? <Sparkles size={12} className="text-teal" /> : badTone ? <RotateCcw size={12} className="text-alert" /> : <Loader2 size={12} className="animate-spin text-amber-soft" />}
         <span className="text-ink">{r.title || "Prototype"}</span>
-        <span className={`label-caps ${failed ? "text-alert" : ready ? "text-teal" : "text-amber-soft"}`}>{r.status.replace("_", " ")}</span>
+        <span className={`label-caps ${badTone ? "text-alert" : okTone ? "text-teal" : "text-amber-soft"}`} title={truth.hub ? "Status of its Staging Hub build" : undefined}>
+          {truth.label}
+        </span>
         {!ready && !failed && <span className="font-mono text-ink-3">{ownerLabel(r.owner)}</span>}
-        {r.iteration > 0 && (
+        {truth.showIteration && (
           <span className="font-mono text-ink-3" title="Designer/Coder loop: iteration n of max">
             iter {r.iteration}/{r.maxIterations}
           </span>
         )}
         <span className="ml-auto font-mono text-ink-2">{r.pct}%</span>
       </div>
-      <p className="mb-1 truncate text-[11px] text-ink-3" title={r.label}>
-        {failed && r.error ? r.error : r.label}
+      <p className="mb-1 truncate text-[11px] text-ink-3" title={truth.note ?? r.label}>
+        {truth.note ?? (failed && r.error ? r.error : r.label)}
       </p>
       {ready && <StagingLink slug={r.slug} />}
-      {failed && isTauri() && (
+      {truth.canRetry && isTauri() && (
         <button onClick={() => void retryTask(r.id, r.title)} className="pill-glass !h-7 !px-3 text-[11px]">
           <RotateCcw size={11} /> Retry
         </button>
@@ -160,13 +197,13 @@ function RunnerControls({ r, live }: { r: PipelineRun; live: boolean }) {
     setBusy(null);
   };
   const del = async () => {
-    const ask = live ? `“${r.title || "Prototype"}” is still running. Abort it and delete it from the runner list (and its staging folder)?` : `Delete “${r.title || "Prototype"}” from the runner list, with its staging folder?`;
-    if (!confirm(ask)) return;
+    // Into the Trash (30 days, Undo on the toast); only a live run asks first.
+    if (live && !confirm(`“${r.title || "Prototype"}” is still running. Abort it and move it to the Trash?`)) return;
     setBusy("delete");
     try {
       const rep = await xcmd("runner_dismiss", { taskId: r.id, purgeFiles: true });
       forgetRun(r.id);
-      toast({ title: "Runner deleted", body: [rep.aborted ? "aborted first" : null, rep.purged.length ? `${rep.purged.length} folder(s) removed` : null, rep.kept ? `kept ${rep.kept}` : null].filter(Boolean).join(" · ") || "removed", tone: "info" });
+      deletedToast(r.title || "Prototype", rep);
     } catch (e) {
       toast({ title: "Delete", body: e instanceof Error ? e.message : String(e), tone: "error" });
     }
@@ -408,7 +445,7 @@ function LiveCardView({ card, compact, focused, onArchive, onDiscard }: { card: 
   );
 }
 
-/** Ideas & Tasks Ledger (Tony → Prompter → Librarian), plus the Dev Fix · Claude Queue tab (P6). */
+/** Ideas & Tasks Ledger (Tony → Prompter → Designer → Coder), plus the Dev Fix · Claude Queue tab (P6). */
 export function IdeasLedger({ compact = false }: { compact?: boolean }) {
   const [tab, setTab] = useState<LedgerTab>("ideas");
   const name = useOsName();
@@ -421,7 +458,7 @@ export function IdeasLedger({ compact = false }: { compact?: boolean }) {
   const hint = compact
     ? undefined
     : tab === "ideas"
-      ? `Ideas you park with ${name} (“add it to the ledger”) wait here. Run (after you approve the card) queues a build: Prompter → Librarian → Designer → Coder, landing in the repo's staging folder for review. ${name} keeps notes in memory/tony.`
+      ? `Ideas you park with ${name} (“add it to the ledger”) wait here. Run (after you approve the card) queues a build: Prompter → Designer → Coder, landing in the repo's staging folder for review. ${name} keeps notes in memory/tony.`
       : "Fixes for Claude Code (devqueue.db, mirrored to .agenticos/claude-fix-queue.json for /fix-queue). “Run with Claude Code” asks first, works in its own worktree, never commits — and only the app's own checks mark a fix Done.";
   return (
     <Card title="Ideas & tasks ledger" action={tabs} hint={hint}>
@@ -503,7 +540,7 @@ function IdeasList({ compact }: { compact: boolean }) {
                     onClick={() => void requestPipeline(i.id, i.title, "general")}
                     disabled={solo}
                     className="pill-primary !h-7 !px-3 text-[11px] disabled:opacity-50"
-                    title={solo ? SOLO_BUILD_HINT : "Prompter → Librarian → Designer → Coder, after you approve the card"}
+                    title={solo ? SOLO_BUILD_HINT : "Prompter → Designer → Coder, after you approve the card"}
                   >
                     <Play size={11} /> {action === "rebuild" ? "Rebuild prototype" : i.status === "prototyping" || i.status === "failed" ? "Retry build" : "Run pipeline"}
                   </button>

@@ -90,3 +90,56 @@ describe("settings v6 migration (P4: spotifyDuck → mediaDuck)", () => {
     expect(useSettings.getState().conversation).not.toHaveProperty("spotifyDuck");
   });
 });
+
+describe("settings v8 (top-bar clock + weather effects)", () => {
+  it("resets a saved manual atmosphere to Live once, for any older snapshot", () => {
+    expect(migrateSettings({ weatherMode: "rain" }, 7).weatherMode).toBe("auto");
+    expect(migrateSettings({ weatherMode: "snow", osName: "Tony" }, 3).weatherMode).toBe("auto");
+    expect(migrateSettings({ weatherMode: "rain", osName: "Tony" }, 7).osName).toBe("Tony"); // siblings untouched
+  });
+
+  it("leaves a v8 manual pick alone (the reset runs once only)", () => {
+    expect(migrateSettings({ weatherMode: "rain" }, 8).weatherMode).toBe("rain");
+  });
+
+  it("does not invent a weatherMode for an empty snapshot", () => {
+    expect(migrateSettings(undefined, 7)).toEqual({});
+    expect(migrateSettings({}, 7)).not.toHaveProperty("weatherMode");
+  });
+
+  it("defaults: effects on at normal, 12-hour clock with date and temperature", () => {
+    const s = useSettings.getState();
+    expect(s.effects).toEqual({ enabled: true, intensity: "normal" });
+    expect(s.clock).toEqual({ hourCycle: "h12", showDate: true, showTemp: true });
+    expect(s.weatherMode).toBe("auto");
+  });
+
+  it("an old snapshot without effects / clock gets them backfilled; partial objects keep their values", () => {
+    const old = migrateSettings({ weatherMode: "fog", osName: "Tony" }, 7);
+    const merged = deepMergeDefaults(old, useSettings.getState());
+    expect(merged.effects).toEqual({ enabled: true, intensity: "normal" });
+    expect(merged.clock).toEqual({ hourCycle: "h12", showDate: true, showTemp: true });
+    const partial = deepMergeDefaults({ clock: { hourCycle: "h23" }, effects: { enabled: false } } as never, useSettings.getState());
+    expect(partial.clock).toEqual({ hourCycle: "h23", showDate: true, showTemp: true });
+    expect(partial.effects).toEqual({ enabled: false, intensity: "normal" });
+  });
+});
+
+describe("v9: Agent Chatter off by default", () => {
+  it("is off for a fresh install and reset once for an existing one", () => {
+    expect(useSettings.getInitialState?.().routing.vocalHandoffs ?? false).toBe(false);
+    const s = migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 8);
+    expect(s.routing).toEqual({ announcerHandoff: true, vocalHandoffs: false });
+    // Turned back on after v9: kept.
+    expect(migrateSettings({ routing: { announcerHandoff: true, vocalHandoffs: true } }, 9).routing.vocalHandoffs).toBe(true);
+  });
+});
+
+describe("v10: live captions off by default", () => {
+  it("resets only the old 600 ms default, once", () => {
+    expect(migrateSettings({ vad: { partialMs: 600, endSilenceMs: 700 } }, 9).vad.partialMs).toBe(0);
+    expect(migrateSettings({ vad: { partialMs: 600, endSilenceMs: 700 } }, 9).vad.endSilenceMs).toBe(700);
+    expect(migrateSettings({ vad: { partialMs: 400 } }, 9).vad.partialMs).toBe(400); // Nic's own spacing stays
+    expect(migrateSettings({ vad: { partialMs: 600 } }, 10).vad.partialMs).toBe(600); // already migrated
+  });
+});

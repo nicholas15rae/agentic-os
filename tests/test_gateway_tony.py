@@ -580,6 +580,13 @@ class DesktopToolsGateTests(unittest.TestCase):
                      "Hey Tony, what’s my schedule like tomorrow?", "what's on for tomorrow", "am I free on Friday?"):
             self.assertTrue(gt.needs_desktop_tools(text), text)
 
+    def test_a_messages_read_is_whatsapp_on_the_desktop(self):
+        for text in ("check my messages", "any new messages?", "read my last five messages", "check my WhatsApp", "any new texts"):
+            self.assertTrue(gt.needs_desktop_tools(text), text)
+        for text in ("send a message to Sam", "the messages in this design feel off", "check my agent messages"):
+            self.assertFalse(gt.needs_desktop_tools(text), text)
+        self.assertIn("WhatsApp", gt.DESKTOP_TOOLS_LINE)
+
     def test_talk_about_email_or_calendars_still_gets_the_model(self):
         for text in ("help me write an email to a casting director", "what is a good email subject line for a self-tape",
                      "what's Sam's email address?", "tell me about the Mayan calendar", "did the mail come today",

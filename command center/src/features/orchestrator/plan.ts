@@ -1,3 +1,4 @@
+import { tonyModeTools } from "@/features/os/tool-load";
 import { cmd, isTauri, type ChatMessage, type WorkflowInfo } from "@/lib/platform";
 import { SUB_AGENTS, type AgentRole } from "@/features/dispatcher/agents";
 import { DEFAULT_ROUTING_CONFIG, directTool, resolve as resolveRoute } from "@/features/dispatcher/router";
@@ -10,7 +11,7 @@ import { isOsControlPhrase } from "@/features/os/os-intent-parse";
 import { isCommitCue, parseDefer } from "@/features/dialogue/tier";
 import { roleLabel } from "@/features/dispatcher/roles";
 import { frozenToolReason, toolGloballyFrozen } from "@/features/modes/modes";
-import { currentFreeze, isToolLiveNow, useModes } from "@/features/modes/modes-store";
+import { currentFreeze, isTonyToolLiveNow, isToolLiveNow, useModes } from "@/features/modes/modes-store";
 import { useOs } from "@/features/os/os-store";
 import { ownsServer } from "@/features/os/switchboard";
 import { isDesktopApp, useSettings } from "@/stores/settings";
@@ -262,14 +263,18 @@ export function heuristicPlan(utterance: string, role?: AgentRole, opts: Heurist
  * Ownership is only read once the OS config has loaded; without it Rust's own gate decides.
  */
 export function actionBlockedReply(server: string, label: string, role: AgentRole): string | null {
-  if (!isToolLiveNow(server)) {
+  // Tony: his base and the mode's extras answer only to the master switchboard; a server he
+  // doesn't have falls through to the ownership line below.
+  const cfg0 = useOs.getState().cfg;
+  const tonyHas = role === "general" && !!cfg0 && (cfg0.mcps?.some((m) => m.id === server && ownsServer(m.agents, "general")) || (tonyModeTools(cfg0)[useModes.getState().effective.mode_id] ?? []).includes(server));
+  if (role === "general" ? tonyHas && !isTonyToolLiveNow(server) : !isToolLiveNow(server)) {
     const freeze = currentFreeze();
     const reason = frozenToolReason(useModes.getState().effective, server, freeze, label) ?? `${label} is frozen`;
     const thaw = toolGloballyFrozen(server, freeze) ? "Turn it back on in the switchboard and I can use it." : "Switch modes and I can use it.";
     return `${reason}, so I left it alone. ${thaw}`;
   }
   const entry = useOs.getState().cfg?.mcps?.find((m) => m.id === server);
-  if (!entry || ownsServer(entry.agents, role)) return null;
+  if (!entry || ownsServer(entry.agents, role) || tonyHas) return null;
   const owner = entry.agents?.find((a) => a !== "all");
   if (!owner) return null;
   const who = roleLabel(owner);
@@ -409,6 +414,9 @@ function instagramPlan(utterance: string, role: AgentRole, intent: string, ig: I
     plan.run = async () => ({ text, meta: "instagram" });
     return plan;
   }
+  // One owner per integration (Section 21.1): Tony only reads Instagram; posting and replying are
+  // Biz Ops' (Rust `TONY_READ_ONLY_SERVERS` refuses the same writes for Tony).
+  if (role === "general") return replyOnly(plan, "Posting and replying on Instagram is Biz Ops' job. Ask Biz Ops and it will raise the card.", "instagram · Biz Ops only");
   const blocked = actionBlockedReply("instagram", "Instagram", role);
   if (blocked) return replyOnly(plan, blocked, "instagram · not available");
   plan.mutating = true;

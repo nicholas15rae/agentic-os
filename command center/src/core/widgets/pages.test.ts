@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeItems, findSlot, migrateLayout, moveToPage, nextPageName, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
+import { MAPS_WIDGET_ID, TRAVEL_SLOT, activeItems, addTravelPage, findSlot, migrateLayout, moveToPage, nextPageName, placeWidget, removePage, sanitizePages, withUniqueIds, type PagesState } from "./pages";
 import type { WidgetInstance } from "./types";
 
 const inst = (instanceId: string, col: number, row: number, w: number, h: number, widgetId = "x"): WidgetInstance => ({ instanceId, widgetId, col, row, w, h, config: {} });
@@ -161,5 +161,61 @@ describe("persisted layout", () => {
     const s: PagesState = { pages: [{ id: "p1", name: "Page 1", items: DEFAULTS }], activePage: "p1" };
     expect(activeItems(s)).toBe(DEFAULTS);
     expect(activeItems({ ...s, activePage: "nope" })).toBe(activeItems({ pages: [], activePage: "x" }));
+  });
+});
+
+describe("v6 Travel page", () => {
+  const v5: PagesState = {
+    pages: [
+      { id: "p1", name: "Page 1", items: [inst("mantra", 4, 1, 6, 3, "mantra"), inst("k", 1, 1, 3, 3)] },
+      { id: "px", name: "Mine", items: [inst("a", 1, 1, 2, 2)] },
+    ],
+    activePage: "px",
+  };
+  const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+
+  it("v5 → v6 appends Travel with Maps, keeping every page, item and the active page", () => {
+    const before = clone(v5);
+    const out = migrateLayout(clone(v5), 5, DEFAULTS, PIPES, true);
+    expect(out.pages.slice(0, 2)).toEqual(before.pages);
+    expect(out.activePage).toBe("px");
+    expect(out.pages).toHaveLength(3);
+    expect(out.pages[2]).toEqual({ id: "travel", name: "Travel", items: [{ instanceId: "route-map-travel", widgetId: MAPS_WIDGET_ID, ...TRAVEL_SLOT, config: {} }] });
+  });
+
+  it("is idempotent: re-running never adds a second Travel page", () => {
+    const once = migrateLayout(clone(v5), 5, DEFAULTS, PIPES, true);
+    const twice = migrateLayout(clone(once), 5, DEFAULTS, PIPES, true);
+    expect(twice).toEqual(once);
+    expect(addTravelPage(once)).toBe(once);
+    // Stored at v6 already: nothing to do, even if the user deleted the Travel page.
+    expect(migrateLayout(clone(v5), 6, DEFAULTS, PIPES, true)).toEqual(v5);
+  });
+
+  it("skips when Maps is already on a page or a page is already called Travel", () => {
+    const has: PagesState = { pages: [{ id: "p1", name: "Page 1", items: [inst("m", 7, 1, 4, 3, MAPS_WIDGET_ID)] }], activePage: "p1" };
+    expect(addTravelPage(has)).toBe(has);
+    const named: PagesState = { pages: [{ id: "p1", name: "Page 1", items: [] }, { id: "q", name: " travel ", items: [] }], activePage: "p1" };
+    expect(addTravelPage(named)).toBe(named);
+  });
+
+  it("never reuses a taken page id or instance id", () => {
+    const s: PagesState = { pages: [{ id: "travel", name: "Trips", items: [inst("route-map-travel", 1, 1, 2, 2, "custom")] }], activePage: "travel" };
+    const out = addTravelPage(s);
+    expect(out.pages[0]).toBe(s.pages[0]);
+    expect(out.pages[1]).toMatchObject({ id: "travel-2", name: "Travel", items: [{ instanceId: "route-map-travel-2" }] });
+    expect(out.activePage).toBe("travel");
+  });
+
+  it("older versions migrate to v5 first, then gain Travel", () => {
+    const out = migrateLayout({ instances: [inst("k", 1, 1, 3, 3)] }, 4, DEFAULTS, PIPES, true);
+    expect(out.pages.map((p) => p.name)).toEqual(["Page 1", "Travel"]);
+    expect(out.pages[0].items.map((i) => i.instanceId)).toEqual(["k"]);
+    expect(out.activePage).toBe("p1");
+  });
+
+  it("off (the PWA): no Travel page", () => {
+    expect(migrateLayout(clone(v5), 5, DEFAULTS, PIPES, false)).toEqual(v5);
+    expect(migrateLayout(clone(v5), 5, DEFAULTS, PIPES)).toEqual(v5);
   });
 });

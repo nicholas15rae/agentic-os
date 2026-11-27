@@ -80,6 +80,8 @@ export interface BuildView {
   preview_version: number;
   /** Max Iterations picked for this build (null: the Settings budget). */
   max_iter_override?: number | null;
+  /** Section pass: archived out of the Staging hub list (promoted widgets: in the Widgets library). */
+  archived_at?: number | null;
   committing: boolean;
   /** 1-based place among the builds still waiting (null once handed to an agent). */
   position: number | null;
@@ -125,4 +127,19 @@ export interface DeleteReport {
   purged: string[];
   /** A folder deliberately left alone (and why). */
   kept: string | null;
+  /** Section pass: the Trash entry holding the card and folders (restore with `trash_restore`). */
+  trashId?: string | null;
+  /** Folders that couldn't be moved (in use): left in place, untouched. */
+  left?: string[];
+}
+
+/** One Trash entry (Rust `trash::TrashEntry`): recoverable for 30 days. */
+export interface TrashEntry {
+  id: string;
+  kind: "build" | "runner";
+  title: string;
+  deletedAt: number;
+  expiresAt: number;
+  taskId?: string | null;
+  items: { from: string; stored: string }[];
 }

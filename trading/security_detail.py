@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import market_calendar
 from config import PAPER_PORT
 from intents import OrderIntent, RiskLimits
 from trading_rag import is_hypothesis_citation
@@ -120,9 +121,23 @@ def session_open_from_hours(liquid_hours: str, tz_id: str, now: float) -> bool |
 
 
 def regular_hours_fallback(now: float) -> bool:
-    """Mon-Fri 09:30-16:00 New York. Holidays are NOT known here — only used when liquidHours is missing."""
+    """US regular session from the static calendar (market_calendar): Mon-Fri 09:30-16:00 New York,
+    shut on NYSE holidays, 13:00 close on half days. Used when liquidHours is missing."""
+    return market_calendar.regular_session_open(now)
+
+
+def us_market_closed_reason(intent: OrderIntent, now: float) -> str | None:
+    """A US (USD) instrument on a day/time the calendar says the market is shut → why; else None.
+    Checked in the gate on top of TWS liquidHours, so a holiday can never be traded, extended hours or not."""
+    if intent.currency != "USD":
+        return None
     t = datetime.fromtimestamp(now, NY)
-    return t.weekday() < 5 and (t.hour, t.minute) >= (9, 30) and t.hour < 16
+    d = t.date()
+    if market_calendar.holiday(d):
+        return f"market closed: holiday ({market_calendar.holiday(d)})"
+    if market_calendar.early_close(d) and t.time() >= market_calendar.EARLY_CLOSE:
+        return f"market closed: early close 1:00 PM ET ({market_calendar.early_close(d)})"
+    return None
 
 
 def market_stats_from_bars(bars: list[dict[str, Any]]) -> dict[str, float] | None:
@@ -202,8 +217,11 @@ def evaluate(intent: OrderIntent, ctx: Context) -> Decision:
     check("cooldown", not hot, f"{intent.symbol} traded {int(ctx.now - max(r['ts'] for r in hot))}s ago (cooldown {lim.symbol_cooldown_s}s)" if hot else "clear")
     check("daily_order_cap", ctx.orders_today < lim.max_orders_per_day, f"{ctx.orders_today}/{lim.max_orders_per_day} orders today")
 
-    # 5. Market hours
-    if lim.allow_extended_hours:
+    # 5. Market hours (the static NYSE calendar wins over everything: no trade on a holiday / after a half-day close)
+    closed_why = us_market_closed_reason(intent, ctx.now)
+    if closed_why:
+        check("market_hours", False, closed_why)
+    elif lim.allow_extended_hours:
         check("market_hours", True, "extended hours allowed by limits")
     elif ctx.session_open is None:
         check("market_hours", False, "trading hours unknown")

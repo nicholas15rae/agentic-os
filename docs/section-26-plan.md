@@ -91,3 +91,77 @@ switch that is **off by default**, and nothing cuts over without Nic.
 
 Per-agent LoRA adapters hot-swapped on one base model. Kept compatible: one base model per slot, the
 request shape leaves room for llama-server's `lora` field (`--lora` + per-request scales). Not built.
+
+## Progress (11-27, autonomous session)
+
+| Item | State | Where |
+|---|---|---|
+| 1 Baseline bench | Done 10:31: LM Studio first token 0.37 s median, total 1.71 s (STATUS.md) | `engine/bench_tony.py` |
+| 2 Engine runner | Done, off. llama.cpp b12317 CUDA 12.4 installed + sha256-verified in `D:\llama.cpp\b12317` | `engine/install_llama.py`, `engine/llama_engine.py` |
+| 3 Model manager | Done. Fit check from GGUF metadata (Qwen3.5 9B @ 32k x 2: 7.3 GB) | `engine/gguf_meta.py`, `engine/models.py` |
+| 4 Provider entry | Done (`llamacpp`, not in any chain) | `dispatch.rs` |
+| 5 New-engine bench | **Waiting for Nic** (needs Bionic's model unloaded) | |
+| 6 Doc store | Done (separate from the vault) | `engine/docstore.py` |
+| 7 AnythingLLM export/import | Done; export 20261127-101548 | `engine/allm_import.py` |
+| 9 Inventory | Done | `docs/section-26-allm-inventory.md` |
+| 11 Template / tool calls | Static checks done; live on Bionic 3/3 OK (reference for the engine) | `engine/template_check.py` |
+| 12 Watchdog | Done | `engine/watchdog.py` |
+| 13 GPU baton | Engine side done (`/api/engine/yield`, `/reclaim`); `model_swap.rs` calls them at cutover | `engine/baton.py` |
+| 17 Standard API | llama-server's own OpenAI endpoint on :1238; gateway control routes `/api/engine/*` (loopback only) | `engine/api.py`, `server.py` |
+| 19 Model screen | Settings → Services → "Built-in engine" (needs an app rebuild to see) | `EngineCard.tsx`, `features/engine/engine.ts` |
+| 8 App rebuild | **Waiting for Nic** | |
+| 10 Agent migration | Proposal generator done (read-only; not wired). 3 questions for Nic (tool owners, bizops prompt, Tony's workspace prompt) | `engine/agents_migrate.py` |
+| 14, 15, 16 | Not started (vault intake, switchboard, phone check) | see inventory |
+
+### Findings that matter at cutover
+
+1. **Thinking control.** Qwen3.5's template reads only `enable_thinking`. LM Studio maps
+   `reasoning_effort: "none"`, llama-server does not. The gateway sends both (fine); `dispatch.rs`
+   sends only `reasoning_effort`, so the engine now defaults thinking OFF
+   (`--chat-template-kwargs {"enable_thinking":false}`); a request can still turn it on.
+2. **Prompt cache.** The template drops the empty think block from earlier assistant turns, so the
+   last exchange is re-read each turn (system prompt and older history stay cached). Same in LM Studio.
+3. **VRAM.** Engine and Bionic can't both hold the 9B (10.5 GB used by Bionic now). Cutover = unload in
+   Bionic, load in the engine; the fit check refuses anything else.
+4. **Tool calls.** The app never sends native `tools`; Tony uses the JSON router prompt. Native
+   Qwen XML tool calls work only with `--jinja` (on), for outside clients (n8n).
+
+## Item 18: vision / OCR plan (plan only)
+
+Today: `command_center_api.ocr` sends receipt / document images as `image_url` to LM Studio with
+`llm.visionModel` (empty = whatever is loaded). Tony's Qwen3.5 9B GGUF ships a vision projector
+(`mmproj-Qwen3.5-9B-BF16.gguf`, 0.86 GB), so the cheapest path needs **no second model**:
+
+1. Engine setting `mmproj` = that projector. The fit check already counts it (`projectorMiB`):
+   7.3 + 0.9 = 8.2 GB, still under the card with Bionic gone.
+2. OCR posts to the engine's `/v1/chat/completions` with `image_url` (llama-server's multimodal
+   input), model = Tony's alias: one model serves chat and OCR, no swap, no baton round trip.
+3. Fallback for heavy batches (a box of receipts): the baton. `yield_gpu("ocr batch")`, run a
+   dedicated VL model (Qwen2-VL 7B is on D:) through the model manager, `reclaim_gpu()`.
+4. CPU fallback when the GPU is lent out (ComfyUI): a small VL GGUF with `-ngl 0` on another port;
+   slow (tens of seconds per receipt) but it never blocks Tony.
+5. Test set: 10 real receipts from the vault's scans (Nic picks; finance data stays local), compare
+   totals / dates / vendors against LM Studio's current answers before switching.
+
+## Item 15: switchboard toggle, design (not built: it is Tony's request path)
+
+Switching Tony is more than a `providers.json` base_url change, because gateway Tony and
+`model_swap.rs` talk to **Bionic's own API**, which llama-server does not serve:
+
+| Today (Bionic) | Call | Engine equivalent |
+|---|---|---|
+| `gateway_tony.model_state` | `GET /api/v0/models` (state per model) | `GET /health` (200 / 503 loading) + `GET /v1/models` (the alias) |
+| `gateway_tony._cold_load` | `POST /api/v1/models/load` with `load_body` | `POST /api/engine/load` (gateway) or `ModelManager.load` |
+| `model_swap.rs` unload_all / load_tony / verify_only_tony | LM Studio REST | `POST /api/engine/yield` / `reclaim` + `GET /api/engine/status` |
+| `allm_audit.loaded_lmstudio_model` | `GET /api/v1/models` | `GET /api/engine/status` |
+| Chat | `POST /v1/chat/completions` | same (OpenAI-compatible), thinking off by default |
+
+Proposed switch: one setting `engine.json routeTony` (default false) read per turn, plus a per-path
+switchboard row (gateway Tony, desktop Tony chain, workers, Model Lab). With it on:
+1. `tony_model()` returns the engine base; `model_state` / `_cold_load` take an engine branch.
+2. `dispatch.rs`: `llamacpp` replaces `lmstudio` at the head of `policy.chain` (one migration,
+   reversible); `is_allm_shim` unchanged.
+3. `model_swap.rs`: an engine branch using yield / reclaim.
+4. Rollback = the same switch off (Bionic must reload Tony's model: `model_swap::restore_tony`).
+Proof before switching: Model Lab compare (`modellab/compare.rs`, engine as side B), the live
+template checks (3/3 on Bionic today), `bench_tony --target engine`, the Heavy stress probe.

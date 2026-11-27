@@ -40,7 +40,7 @@ the codebase. On the Python side, `memory_scrolls/allm.py` is the one client.
 | A10 | **Calendar agent** (Apps Script) | `calendar.rs`, same pattern (`gcal_import_anythingllm`, runs once on first use) | Already in the app, as A9 | Nothing to move |
 | A11 | **Chat provider #2 in the failover chain** | `dispatch.rs` provider `anythingllm` (`:3001/api/v1/openai`), `policy.chain = [lmstudio, anythingllm, agentic-os, droplet]` | Drop from the chain at cutover; the built-in engine (`llamacpp`, :1238) takes lmstudio's slot | At cutover (Nic) |
 | A12 | **Model settings** (LM Studio as AnythingLLM's LLM provider, token limit) | `allm.rs` `update-env`, `modellab.rs`, `model_swap.rs` | Engine settings (`engine.json`: ctx, GPU layers, KV, prompt cache, keep-warm) | Engine side done (off) |
-| A13 | **Phone** | No AnythingLLM endpoint in the gateway or phone code (only `memory_scrolls/` and `scripts/offload_rag_to_scrolls.py` on the Python side) | Phone talks only to the gateway already | Verify again at cutover |
+| A13 | **Phone** | No AnythingLLM endpoint in the gateway or phone code (only `memory_scrolls/` and `scripts/offload_rag_to_scrolls.py` on the Python side). UI: every AnythingLLM call is a Rust command in desktop-only Settings cards; the phone's Desktop Mirror only displays the URL | Phone talks only to the gateway already | Checked 11-27; again at cutover |
 | A14 | **Agent skills / flows** | Empty in the export | Nothing to move | — |
 
 ## Order of migration (each behind the switchboard toggle, old path kept)

@@ -1,7 +1,19 @@
 # STATUS
 
-Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
+Updated 2026-11-27 10:50. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
+
+## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), 11-27 ~10:50
+
+For the next session (Claude Ultra, Monday). Nothing here is merged, pushed, switched on or rebuilt. Read `docs/section-26-plan.md` (plan, progress, findings, item 15 + vision designs) and `docs/section-26-allm-inventory.md`.
+
+**Done (all committed, tests green):** pinned llama.cpp b12317 CUDA in `D:\llama.cpp\b12317`; runner on :1238 (off: `engine.json` enabled=false, thinking off by default); model manager with GGUF fit check; watchdog; GPU baton yield/reclaim; gateway `/api/engine/*` (loopback only) + boot hook (idle while off); `llamacpp` provider (in no chain); doc store (not the vault) with the 7 AnythingLLM docs imported; AnythingLLM export `data\engine\allm-export\20261127-101548`; inventory; agent-table proposal; HF download + Recycle-Bin delete; Settings card (needs rebuild).
+
+**Benchmark (model server, Tony's real messages):** LM Studio first token **0.37 s** median, total **1.71 s**. Engine on GPU: **not run** (needs Bionic's model unloaded, Nic). Engine on CPU smoke test: runs, 3/3 live checks, first token 1.0 s.
+
+**Left:** step 5 GPU bench (Nic); rebuild (Nic); answers to the Questions for Nic below; item 15 switch (design in the plan: gateway Tony + model_swap.rs need engine branches); item 14 vault join (Nic); A1/A4/A5/A7 migration steps from the inventory; vision via Tony's own mmproj (plan only).
+
+**Commands:** `python -m engine.bench_tony --target engine`, `python -m engine.template_check --live engine`, `python -m engine.smoke_cpu`, `python -m engine.models fit|list|vram`, `python -m engine.allm_import report <export>`.
 
 ## 1. Done
 
@@ -45,6 +57,14 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 | S26: document store (own SQLite, CPU nomic via the vault's `embed()`, hybrid search; the vault itself untouched) | section-26-engine | 92528ab | No |
 | S26: AnythingLLM export + import, read-only on AnythingLLM. Export `G:\agentic-os-engine\data\engine\allm-export\20261127-101548` (11 workspaces, 227 chats, 7 docs, integrity ok); 7 docs -> 22 chunks, all embedded | section-26-engine | 101fd2a | No |
 | S26: AnythingLLM inventory: 14 functions mapped to their gateway home (docs/section-26-allm-inventory.md); Gmail/Calendar already call Apps Script directly; phone has no AnythingLLM endpoint | section-26-engine | (this commit) | No |
+| S26: watchdog (restart a crashed llama-server with the same model, 3 restarts / 5 min limit, waits for the baton, never acts while off) | section-26-engine | d3d1993 | No |
+| S26: Qwen template + tool-call checks; engine defaults thinking OFF (Qwen3.5's template ignores reasoning_effort) | section-26-engine | 08c0d0d | No |
+| S26: `llamacpp` provider listed in dispatch.rs, never in any chain (test pins it) | section-26-engine | b05c691 | No |
+| S26: resumable Hugging Face GGUF download + Recycle-Bin delete (typed confirm) | section-26-engine | 285d583 | No |
+| S26: Settings -> Services -> Built-in engine card (status, VRAM, models + fit, load/unload, settings, download, delete); needs a rebuild to see | section-26-engine | 0162a7d | No |
+| S26: gateway `/api/engine/*` (loopback only), boot hook, GPU baton yield/reclaim | section-26-engine | 24dbfe8 | No |
+| S26: agent-table proposal from os.json + the export (read-only, not wired) | section-26-engine | 840aadc | No |
+| S26: CPU-only smoke test of the real llama-server (no GPU): 3/3 live checks, first token 1.0 s on CPU | section-26-engine | (this commit) | No |
 
 ## 2. In progress
 
@@ -57,12 +77,13 @@ Updated 2026-11-27 09:50. One page for every Claude Code session and branch.
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 | Tony's droplet status tool (claude/unruffled-mayer-1247f9) | `system.status` merged into main | Testing the combined main, then app rebuild + restart and a live phone inbox check (this session) |
-| Section 26 engine (section-26-engine, worktree G:\agentic-os-engine) | Built-in llama.cpp engine beside LM Studio / AnythingLLM, off by default. Plan: docs/section-26-plan.md | Working alone (Nic away, go-ahead 11-27). Done: plan, bench, llama.cpp b12317, runner, model manager, doc store, AnythingLLM export/import. Next: provider entry (cargo running), AnythingLLM inventory, watchdog, Qwen template/tool-call check |
+| Section 26 engine (section-26-engine, worktree G:\agentic-os-engine) | Built-in llama.cpp engine beside LM Studio / AnythingLLM, off | Stopped at a clean commit with a handoff (top of this page). Waiting on you: GPU bench, rebuild, questions |
 
 ## 3. Waiting on you
 
 **Questions for Nic (Section 26, section-26-engine)**
 - Step 5 benchmark (new engine) not run: Bionic holds Tony's model (~10.5 of 12 GB), so the engine can only load after Bionic unloads it, which takes Tony offline and changes LM Studio state (yours). When you're ready: unload in Bionic, then `python -m engine.models load "D:\LM Studio\lmstudio-community\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf" --force`, `python -m engine.bench_tony --target engine`, `python -m engine.models unload`, reload in Bionic.
+- Agent migration (item 10), from `python -m engine.agents_migrate <export>` (proposal in data/engine/agents.proposed.json, not wired): (a) one owner per tool: `filesystem` is granted to coder, designer, director, librarian, prompter; `fetch` to coder + prompter; `knowledge-graph` to general, librarian, prompter. Who owns each? (b) `bizops` has no prompt anywhere; the two business workspaces (bizops_trades_contracting, bizops_supplements_ecom) map to no agent. Per-business prompts from business_registry, or one bizops prompt? (c) Tony's 'general' workspace is `my-workspace` (named "Booking" in AnythingLLM) and carries a prompt there: keep Tony's gateway prompt as the only one?
 - The AnythingLLM export holds everything incl. the Finance workspace's chats and the Gmail/Calendar agent configs (local, gitignored, same machine). Chats are NOT made searchable. OK to keep it there until you confirm nothing is missing?
 
 
@@ -138,7 +159,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
-| section-26-engine (101fd2a) | engine tests 34/34; full pytest 1,734 pass, 1 skip, 1 load flake (test_command_center_embed one_piece: passes alone) on 87b6527 + engine | 11-27 10:20 |
+| section-26-engine (840aadc) | full pytest 1,794 pass, 1 skip; engine tests 65/65; vitest 3,027/3,027, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in dispatch); CPU smoke test 3/3 | 11-27 10:50 |
 | claude/unruffled-mayer-1247f9 (system.status, on main 77993c2) | tsc clean; vitest 2,906/2,906; cargo 1,634 (+2 known CRLF; browser tests passed). Rerun 01:25 before the STATUS commit: the same, but 1 Edge test timed out under load and passed alone. Real report on this PC: 8/8 up, droplet 59 ms, whole check 0.5 s. Bionic, real phone-turn messages: "is the droplet up?" 3/3 right; doctored droplet-down 5/5 right, no fix offers or dispatches (without the answer note: 2/3 offered a restart, 1 dispatched a Coder ssh restart) | 11-27 01:05 |
 | main after section-pass + batch3 merge | tsc clean; vitest 2,697/2,697; cargo 1,462 (+2 known CRLF; browser tests pass unloaded); pytest 1,566 (embed flake passes alone); cc-app-restart 18/18 | 11-26 23:15 |
 | main (35e30e5) | cargo 1,410 (+2 known CRLF), vitest 2,475, pytest 1,473 (+1 flake) | 11-26 |
@@ -162,6 +183,11 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
+**Section 26 bench: Tony at the model server, real phone-turn messages, 4 prompts x 3 (11-27 10:31)**
+- LM Studio / Bionic (today): first token **0.37 s** median (p90 1.11, min 0.22; first turn of each prompt 0.83); total **1.71 s** median (p90 3.53); 11/12 under 1.5 s
+- Built-in engine on GPU: not run yet (needs Bionic's model unloaded: your call). On CPU only (smoke test, no GPU): first token 1.0 s, total 3.4 s for a short reply; live checks 3/3
+- Live template checks on Bionic: thinking off, native tool call, JSON router: 3/3 OK
+
 **Tony, time to first word (11-26)**
 - Phone, desktop answering: **1.33 s** median (was 2.7 s); done 2.17 s
 - Phone, app closed, gateway answers: 0.66-1.29 s
@@ -172,18 +198,17 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 10:18 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 10:37 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 5 | `101fd2a` 2026-11-27 feat(engine): AnythingLLM export + document import (read-only on An... | 3 files |
-| `section-pass-batch3` | 8 | `d2b899e` 2026-11-27 Merge main (87b6527: Tony's system.status tool, Sections 8-10 m3) i... | 25 files |
-| `director-suite` | 22 | `e2411fe` 2026-11-27 Merge main (9d37071) into director-suite | clean |
+| `section-26-engine` | 13 | `840aadc` 2026-11-27 feat(engine): propose the gateway agent table from os.json + the An... | 3 files |
+| `claude/practical-elbakyan-0f96f1` | 13 | `8c3b02a` 2026-11-27 docs(status): kill switch round 4 fixed (5a55ebc), tests, what's left | clean |
+| `section-pass` | 22 | `96829e3` 2026-11-27 fix(section-pass): click probes work on SVG shapes | clean |
+| `section-pass-batch3` | 9 | `4ca35ee` 2026-11-27 Merge main (9d37071: Tony live-test fixes, barge-in) into section-p... | 71 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
-| `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
-| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | 13 files |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
@@ -191,10 +216,10 @@ _Refreshed 2026-11-27 10:18 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
+- `e6260c0` 2026-11-27 docs(status): director-suite pushed to origin
+- `0418649` 2026-11-27 docs(status): system.status in main and built; which build runs waits on Nic
+- `0b336c7` 2026-11-27 docs(status): director-suite merged into main (5098ca3)
+- `5098ca3` 2026-11-27 Merge director-suite into main: Director Suite Parts 1-5 and Part 6 small items
 - `9d37071` 2026-11-27 Merge main (87b6527: Tony's read-only system.status tool) into claude/tony-live-test-fixes-5d85d5
-- `d19546c` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/tony-live-test-fixes-5d85d5
-- `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test fixes on the branch
-- `e802ad3` 2026-11-27 fix(voice): barge-in stops Tony at once; "hold on" is a hard stop
-- `2ff21d9` 2026-11-27 docs(status): Tony live-test fixes landed on claude/tony-live-test-fixes-5d85d5 (1318759); barge-in parked
-- `1318759` 2026-11-27 fix(tony): live-test fixes: Gmail Primary scope, Comms setting, STT tab hints, TTS labels, confirmed to-dos
 <!-- /AUTO:BRANCHES -->

@@ -6,6 +6,7 @@ import { describeSecurityError, securityApi, type AuditEntry, type SessionTimeou
 import { onSecurityRefusal } from "./store";
 import { useSecurity } from "./store";
 import { useCompanionInbox } from "./SecurityGate";
+import { DevicesCard } from "./Devices";
 
 const TONE: Record<AuditEntry["severity"], string> = { info: "text-ink-3", warn: "text-amber-soft", critical: "text-alert" };
 
@@ -51,8 +52,10 @@ export function SecurityCard() {
         <span className="font-mono text-ink-3">{status.deviceId}</span>
       </div>
 
+      {status.platform !== "android" && status.platform !== "ios" && !status.companionDevice && <DevicesCard />}
+
       <TimeoutEditor
-        current={{ idleLockMinutes: status.idleLockMinutes, reauthMinutes: status.reauthMinutes, elevationIdleMinutes: status.elevationIdleMinutes, elevationMaxMinutes: status.elevationMaxMinutes }}
+        current={{ idleLockMinutes: status.idleLockMinutes, reauthMinutes: status.reauthMinutes, elevationIdleMinutes: status.elevationIdleMinutes, elevationMaxMinutes: status.elevationMaxMinutes, persistAcrossRestarts: status.persistAcrossRestarts ?? false }}
         onSaved={setStatus}
       />
 
@@ -95,7 +98,7 @@ export function SecurityCard() {
   );
 }
 
-const TIMEOUT_FIELDS: { key: keyof SessionTimeouts; label: string; min: number; max: number; hint: string }[] = [
+const TIMEOUT_FIELDS: { key: Exclude<keyof SessionTimeouts, "persistAcrossRestarts">; label: string; min: number; max: number; hint: string }[] = [
   { key: "idleLockMinutes", label: "Lock after idle", min: 1, max: 120, hint: "No input (or talk with Tony) for this long locks the app" },
   { key: "reauthMinutes", label: "Re-verify every", min: 5, max: 240, hint: "Locks after this long since you last unlocked, even while active" },
   { key: "elevationIdleMinutes", label: "Step-up unused", min: 1, max: 30, hint: "Trading / Finance / Settings go back to read-only after this long without activity" },
@@ -107,8 +110,8 @@ function TimeoutEditor({ current, onSaved }: { current: SessionTimeouts; onSaved
   const [draft, setDraft] = useState<SessionTimeouts>(current);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
-  useEffect(() => setDraft(current), [current.idleLockMinutes, current.reauthMinutes, current.elevationIdleMinutes, current.elevationMaxMinutes]);
-  const dirty = TIMEOUT_FIELDS.some((f) => draft[f.key] !== current[f.key]);
+  useEffect(() => setDraft(current), [current.idleLockMinutes, current.reauthMinutes, current.elevationIdleMinutes, current.elevationMaxMinutes, current.persistAcrossRestarts]);
+  const dirty = TIMEOUT_FIELDS.some((f) => draft[f.key] !== current[f.key]) || draft.persistAcrossRestarts !== current.persistAcrossRestarts;
   const save = async () => {
     setBusy(true);
     setNote(null);
@@ -148,6 +151,10 @@ function TimeoutEditor({ current, onSaved }: { current: SessionTimeouts; onSaved
           </label>
         ))}
       </div>
+      <label className="mt-2 flex items-center gap-2 text-[11px] text-ink-2" title="An unlocked session comes back after the app restarts, if it is still inside the idle and re-verify windows and nothing locked it in between. Step-ups never carry over.">
+        <input type="checkbox" checked={!!draft.persistAcrossRestarts} onChange={(e) => setDraft({ ...draft, persistAcrossRestarts: e.target.checked })} />
+        Stay unlocked across app restarts
+      </label>
       <div className="mt-2 flex items-center gap-2">
         <button className="pill-glass !h-8 text-[11px]" disabled={busy || !dirty} onClick={() => void save()}>
           {busy ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Save timeouts

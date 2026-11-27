@@ -27,6 +27,7 @@ pub mod companion;
 pub mod config;
 pub mod failsafe;
 pub mod gate;
+pub mod persist;
 pub mod pin;
 pub mod session;
 pub mod shared;

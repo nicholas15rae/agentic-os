@@ -29,6 +29,12 @@ pub struct Runtime {
     bio_cache: Mutex<(f64, bool)>,
 }
 
+/// Serializes the restart snapshot's save / clear (a save that read a live session can never land
+/// after a lock's clear), and remembers whether this run wrote one since the last revoke.
+static PERSIST: Mutex<bool> = Mutex::new(false);
+/// The keychain refused a key rotation: no more snapshots this run (fail closed).
+static PERSIST_OFF: AtomicBool = AtomicBool::new(false);
+
 static RT: OnceLock<Runtime> = OnceLock::new();
 
 pub fn rt() -> &'static Runtime {
@@ -95,6 +101,8 @@ pub struct Status {
     pub biometric_available: bool,
     pub companion_enabled: bool,
     pub companion_paired: bool,
+    /// Section pass: the paired phone's approval logs in on its own (PIN = fallback).
+    pub companion_unlocks: bool,
     /// This device holds a companion signing key (it's someone's companion phone).
     pub companion_device: bool,
     pub platform: &'static str,
@@ -105,6 +113,8 @@ pub struct Status {
     pub reauth_minutes: f64,
     pub elevation_idle_minutes: f64,
     pub elevation_max_minutes: f64,
+    /// Section pass: an unlocked session survives an app restart (desktop).
+    pub persist_across_restarts: bool,
     pub now: f64,
 }
 
@@ -131,11 +141,15 @@ pub fn status(app: &AppHandle) -> Status {
     let p = Policy::from_config(&cfg);
     let now = super::now();
     let r = rt();
-    let session = {
+    let (locked, session) = {
         let mut s = r.sessions();
-        s.tick(&p, now);
-        s.view(&p, now)
+        let l = s.tick(&p, now);
+        (l, s.view(&p, now))
     };
+    // A session past its deadline locks here like everywhere else: revoke, audit, clear the snapshot.
+    if let Some(reason) = locked {
+        after_auto_lock(reason);
+    }
     let st = shared::read(&dir);
     let modules = cfg
         .modules
@@ -151,6 +165,7 @@ pub fn status(app: &AppHandle) -> Status {
         biometric_available: bio_available(app),
         companion_enabled: cfg.companion.enabled,
         companion_paired: companion::pair_key(&dir).is_some(),
+        companion_unlocks: cfg.companion.enabled && cfg.companion.unlocks_alone,
         companion_device: companion::device_key(&dir).is_some(),
         platform: platform(),
         device_id: super::device_id(&dir),
@@ -160,12 +175,78 @@ pub fn status(app: &AppHandle) -> Status {
         reauth_minutes: cfg.session.reauth_minutes,
         elevation_idle_minutes: cfg.elevation.idle_minutes,
         elevation_max_minutes: cfg.elevation.max_minutes,
+        persist_across_restarts: cfg.persist_enabled(),
         now,
     }
 }
 
 fn emit(app: &AppHandle) {
-    let _ = app.emit(STATE_EVENT, status(app));
+    // Status first: its tick may lock an overdue session (and then clears the snapshot itself).
+    let st = status(app);
+    persist_now(app);
+    let _ = app.emit(STATE_EVENT, st);
+}
+
+/// Where this app instance keeps its restart snapshot (`persist`): its own local data folder.
+fn persist_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_local_data_dir().ok().map(|d| d.join("security"))
+}
+
+/// Keep the restart snapshot in step with the session: saved while live, deleted on any lock.
+fn persist_now(app: &AppHandle) {
+    let Some(dir) = persist_dir(app) else { return };
+    let cfg = config::get();
+    let mut saved = PERSIST.lock().unwrap_or_else(|p| p.into_inner());
+    // Snapshot and epoch read together, under the sessions guard.
+    let live = if cfg.persist_enabled() && !rt().is_hard() && !PERSIST_OFF.load(Ordering::SeqCst) {
+        let s = rt().sessions();
+        s.snapshot().map(|x| (x, rt().epoch.load(Ordering::SeqCst)))
+    } else {
+        None
+    };
+    match live {
+        Some(((id, verified, activity), epoch)) => {
+            super::persist::save(&dir, &super::persist::Snapshot { v: 1, id, verified, activity, epoch });
+            *saved = true;
+        }
+        None => {
+            super::persist::clear(&dir);
+            // A lock: rotate the sealing key so no earlier copy of the file can come back.
+            if *saved {
+                if !super::persist::revoke() {
+                    PERSIST_OFF.store(true, Ordering::SeqCst);
+                    eprintln!("[security] couldn't rotate the session key; restart persistence is off for this run");
+                }
+                *saved = false;
+            }
+        }
+    }
+}
+
+/// Start-up: bring back a session saved before the restart, when it is still valid.
+fn restore_session(app: &AppHandle, cfg: &config::SecurityConfig) {
+    let Some(dir) = persist_dir(app) else { return };
+    if !cfg.persist_enabled() || rt().is_hard() {
+        super::persist::clear(&dir);
+        return;
+    }
+    let Some(s) = super::persist::load(&dir) else { return };
+    let p = Policy::from_config(cfg);
+    let now = super::now();
+    match super::persist::refuse(&s, now, rt().epoch.load(Ordering::SeqCst), p.idle_s, p.reauth_s) {
+        None => {
+            if rt().sessions().restore(s.id.clone(), s.verified, s.activity) {
+                audit::log("session_restored", Severity::Info, Outcome::Success, None, "desktop", json!({ "verifiedAgoS": (now - s.verified) as u64, "idleS": (now - s.activity) as u64 }));
+            }
+        }
+        Some(why) => {
+            super::persist::clear(&dir);
+            if !super::persist::revoke() {
+                PERSIST_OFF.store(true, Ordering::SeqCst);
+            }
+            audit::log("session_not_restored", Severity::Info, Outcome::Info, None, "desktop", json!({ "why": why }));
+        }
+    }
 }
 
 fn emit_global() {
@@ -223,6 +304,7 @@ pub fn install(app: &AppHandle, repo: Option<PathBuf>, config_dir: &Path) {
     if !cfg.enabled {
         eprintln!("[security] WARNING: security.config.json has enabled=false; the app lock is OFF");
     }
+    restore_session(app, &cfg);
     let app = app.clone();
     std::thread::Builder::new()
         .name("security-watch".into())
@@ -334,6 +416,9 @@ pub fn security_touch() {
     };
     if let Some(reason) = locked {
         after_auto_lock(reason);
+    } else if let Some(app) = rt().app.get() {
+        // Fresh activity in the restart snapshot (the webview throttles touches to 30 s).
+        persist_now(app);
     }
 }
 
@@ -396,6 +481,8 @@ pub async fn security_biometric(app: AppHandle) -> Result<Status, String> {
 pub struct CompanionTicket {
     pub id: String,
     pub expires_at: f64,
+    /// The 2-digit number the desktop shows and the phone user types (never sent to the gateway).
+    pub code: String,
 }
 
 /// Ask the paired phone to approve: an unlock (locked app, `module` absent) or a step-up for a
@@ -426,10 +513,10 @@ pub async fn security_companion_request(app: AppHandle, module: Option<String>) 
         }
     };
     let dir = super::dir();
-    let (id, expires_at) = companion::request(&cfg.companion.gateway_url, &dir, &super::device_id(&dir), &purpose, cfg.companion.approval_timeout_seconds).await?;
+    let (id, expires_at, code) = companion::request(&cfg.companion.gateway_url, &dir, &super::device_id(&dir), &purpose, cfg.companion.approval_timeout_seconds).await?;
     audit::log("companion_requested", Severity::Info, Outcome::Info, module.as_deref(), "desktop-ui", json!({ "id": id, "purpose": purpose }));
     let _ = app;
-    Ok(CompanionTicket { id, expires_at })
+    Ok(CompanionTicket { id, expires_at, code })
 }
 
 #[tauri::command]
@@ -448,10 +535,14 @@ pub async fn security_companion_poll(app: AppHandle, id: String) -> Result<serde
                 return Ok(json!({ "state": "approved", "grant": g }));
             }
             let res = rt().sessions().second_factor(Factor::Companion, &policy(), super::now(), token::random_hex(12));
-            res.map_err(|e| e.message())?;
-            audit::log("second_factor_ok", Severity::Info, Outcome::Success, None, "desktop-ui", json!({ "factor": "companion", "companion": device }));
+            let unlocked = res.map_err(|e| e.message())? == BioOutcome::Unlocked;
+            if unlocked {
+                audit::log("login_success", Severity::Info, Outcome::Success, None, "companion", json!({ "factor": "companion", "companion": device, "purpose": purpose }));
+            } else {
+                audit::log("second_factor_ok", Severity::Info, Outcome::Success, None, "desktop-ui", json!({ "factor": "companion", "companion": device }));
+            }
             emit(&app);
-            Ok(json!({ "state": "approved" }))
+            Ok(json!({ "state": "approved", "unlocked": unlocked }))
         }
         Ok(companion::PollState::Denied) => {
             audit::log("login_failure", Severity::Warn, Outcome::Failure, None, "desktop-ui", json!({ "factor": "companion", "error": "denied on the phone" }));
@@ -603,12 +694,13 @@ pub struct CompanionSignature {
 
 /// Companion phone: approve a desktop's unlock request (own biometric check first).
 #[tauri::command]
-pub async fn security_companion_sign(app: AppHandle, id: String, nonce: String, desktop: Option<String>, purpose: Option<String>) -> Result<CompanionSignature, String> {
+pub async fn security_companion_sign(app: AppHandle, id: String, nonce: String, desktop: Option<String>, purpose: Option<String>, code: Option<String>) -> Result<CompanionSignature, String> {
     if rt().is_hard() || !rt().sessions().is_live() {
         return Err(Refusal::NoSession.message());
     }
-    if id.len() > 64 || nonce.len() > 64 {
-        return Err("malformed request".into());
+    let code = code.unwrap_or_default();
+    if id.len() > 64 || nonce.len() > 64 || code.len() != 2 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("type the 2-digit number shown on your desktop".into());
     }
     let prompt = match purpose.as_deref().and_then(|p| p.strip_prefix("step_up:")) {
         Some(m) => format!("Allow changes to {m} on your desktop Command Center"),
@@ -617,7 +709,7 @@ pub async fn security_companion_sign(app: AppHandle, id: String, nonce: String, 
     super::biometric::verify(&app, &prompt).await?;
     let dir = super::dir();
     let device_id = super::device_id(&dir);
-    let sig = companion::sign(&dir, &id, &nonce, &device_id)?;
+    let sig = companion::sign(&dir, &id, &nonce, &device_id, &code)?;
     audit::log("companion_approved", Severity::Info, Outcome::Success, None, "companion", json!({ "id": id, "desktop": desktop, "purpose": purpose }));
     Ok(CompanionSignature { sig, device_id })
 }
@@ -630,6 +722,9 @@ pub struct Timeouts {
     pub reauth_minutes: f64,
     pub elevation_idle_minutes: f64,
     pub elevation_max_minutes: f64,
+    /// Stay unlocked across app restarts (None: leave the setting as it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_across_restarts: Option<bool>,
 }
 
 /// `text` (security.config.json) with the four timeouts replaced, clamped like every load; every
@@ -640,12 +735,15 @@ pub fn with_timeouts(text: &str, t: &Timeouts) -> Result<(String, Timeouts), Str
     let session = obj.entry("session").or_insert_with(|| json!({}));
     session["idleLockMinutes"] = json!(t.idle_lock_minutes);
     session["reauthMinutes"] = json!(t.reauth_minutes);
+    if let Some(p) = t.persist_across_restarts {
+        session["persistAcrossRestarts"] = json!(p);
+    }
     let elev = obj.entry("elevation").or_insert_with(|| json!({}));
     elev["idleMinutes"] = json!(t.elevation_idle_minutes);
     elev["maxMinutes"] = json!(t.elevation_max_minutes);
     let c: config::SecurityConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
     let c = c.clamped();
-    let applied = Timeouts { idle_lock_minutes: c.session.idle_lock_minutes, reauth_minutes: c.session.reauth_minutes, elevation_idle_minutes: c.elevation.idle_minutes, elevation_max_minutes: c.elevation.max_minutes };
+    let applied = Timeouts { idle_lock_minutes: c.session.idle_lock_minutes, reauth_minutes: c.session.reauth_minutes, elevation_idle_minutes: c.elevation.idle_minutes, elevation_max_minutes: c.elevation.max_minutes, persist_across_restarts: t.persist_across_restarts.map(|_| c.session.persist_across_restarts) };
     // Store the clamped values, so the file says what is actually in force.
     v["session"]["idleLockMinutes"] = json!(applied.idle_lock_minutes);
     v["session"]["reauthMinutes"] = json!(applied.reauth_minutes);
@@ -741,7 +839,7 @@ mod timeout_tests {
     #[test]
     fn timeouts_are_written_clamped_and_everything_else_is_kept() {
         let text = r#"{"enabled":true,"session":{"idleLockMinutes":15,"reauthMinutes":60},"elevation":{"idleMinutes":5,"maxMinutes":10,"allowCompanion":false},"pin":{"maxAttempts":7}}"#;
-        let want = Timeouts { idle_lock_minutes: 30.0, reauth_minutes: 120.0, elevation_idle_minutes: 15.0, elevation_max_minutes: 60.0 };
+        let want = Timeouts { idle_lock_minutes: 30.0, reauth_minutes: 120.0, elevation_idle_minutes: 15.0, elevation_max_minutes: 60.0, persist_across_restarts: Some(false) };
         let (out, applied) = with_timeouts(text, &want).unwrap();
         assert_eq!(applied, want);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -749,7 +847,8 @@ mod timeout_tests {
         assert_eq!(v["pin"]["maxAttempts"], 7);
         assert_eq!(v["session"]["idleLockMinutes"], 30.0);
         // Out of range: clamped, and the file says what is in force.
-        let wild = Timeouts { idle_lock_minutes: 999.0, reauth_minutes: 1.0, elevation_idle_minutes: 90.0, elevation_max_minutes: 5.0 };
+        assert_eq!(v["session"]["persistAcrossRestarts"], false);
+        let wild = Timeouts { idle_lock_minutes: 999.0, reauth_minutes: 1.0, elevation_idle_minutes: 90.0, elevation_max_minutes: 5.0, persist_across_restarts: None };
         let (out, applied) = with_timeouts(text, &wild).unwrap();
         assert_eq!((applied.idle_lock_minutes, applied.reauth_minutes, applied.elevation_idle_minutes), (120.0, 5.0, 30.0));
         assert!(applied.elevation_max_minutes >= applied.elevation_idle_minutes);

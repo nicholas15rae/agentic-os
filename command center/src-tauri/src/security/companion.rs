@@ -72,6 +72,20 @@ struct Pending {
     nonce: String,
     expires: f64,
     purpose: String,
+    /// The matching number shown on the desktop; the phone's signature covers it.
+    code: String,
+}
+
+/// A fresh 2-digit matching code (10–99). Pure given the random byte.
+pub fn matching_code(byte: u8) -> String {
+    format!("{}", 10 + (byte as u32 % 90))
+}
+
+/// Refuse a new request while another of the same kind (unlock / a step-up) is still waiting:
+/// no stream of prompts to approve by mistake. Pure.
+pub fn busy(pending: &[(String, f64)], purpose: &str, now: f64) -> bool {
+    let unlock = |p: &str| !p.starts_with("step_up:");
+    pending.iter().any(|(p, exp)| *exp > now && (p == purpose || (unlock(p) && unlock(purpose))))
 }
 
 static PENDING: Mutex<Option<HashMap<String, Pending>>> = Mutex::new(None);
@@ -106,10 +120,18 @@ pub fn phone_recent(seen: f64, now: f64) -> bool {
 }
 
 /// Post a new approval request; returns `(id, expiresAt)`.
-pub async fn request(gateway: &str, dir: &Path, device: &str, purpose: &str, ttl: f64) -> Result<(String, f64), String> {
+pub async fn request(gateway: &str, dir: &Path, device: &str, purpose: &str, ttl: f64) -> Result<(String, f64, String), String> {
     if pair_key(dir).is_none() {
         return Err("COMPANION_UNPAIRED: run `gabagool-cli pair-companion` and enter the key on the phone".into());
     }
+    {
+        let g = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+        let waiting: Vec<(String, f64)> = g.as_ref().map(|m| m.values().map(|p| (p.purpose.clone(), p.expires)).collect()).unwrap_or_default();
+        if busy(&waiting, purpose, super::now()) {
+            return Err("COMPANION_BUSY: a phone approval is already waiting; answer it on the phone or let it expire".into());
+        }
+    }
+    let code = matching_code(super::unhex(&super::token::random_hex(1)).and_then(|b| b.first().copied()).unwrap_or(42));
     let id = super::token::random_hex(12);
     let nonce = super::token::random_hex(16);
     let expires = super::now() + ttl;
@@ -127,8 +149,8 @@ pub async fn request(gateway: &str, dir: &Path, device: &str, purpose: &str, ttl
     let m = g.get_or_insert_with(HashMap::new);
     let now = super::now();
     m.retain(|_, p| p.expires > now);
-    m.insert(id.clone(), Pending { nonce, expires, purpose: purpose.to_string() });
-    Ok((id, expires))
+    m.insert(id.clone(), Pending { nonce, expires, purpose: purpose.to_string(), code: code.clone() });
+    Ok((id, expires, code))
 }
 
 #[derive(Debug, PartialEq)]
@@ -163,7 +185,7 @@ pub async fn poll(gateway: &str, dir: &Path, id: &str) -> Result<PollState, Stri
             let sig = v["sig"].as_str().unwrap_or("");
             let key = pair_key(dir).ok_or("COMPANION_UNPAIRED: no pairing key")?;
             forget(id);
-            if device.is_empty() || !super::token::companion_verify(&key, id, &p.nonce, &device, sig) {
+            if device.is_empty() || !super::token::companion_verify(&key, id, &p.nonce, &device, &p.code, sig) {
                 return Err("COMPANION_BAD_SIGNATURE: the approval was not signed by the paired phone".into());
             }
             Ok(PollState::Approved { device, purpose: p.purpose })
@@ -187,14 +209,28 @@ fn forget(id: &str) {
 }
 
 /// Phone side: sign an approval (after its own biometric check, done by the caller).
-pub fn sign(dir: &Path, id: &str, nonce: &str, device: &str) -> Result<String, String> {
+pub fn sign(dir: &Path, id: &str, nonce: &str, device: &str, code: &str) -> Result<String, String> {
     let key = device_key(dir).ok_or("COMPANION_UNPAIRED: enter the pairing key from `gabagool-cli pair-companion` first")?;
-    Ok(super::token::companion_sign(&key, id, nonce, device))
+    Ok(super::token::companion_sign(&key, id, nonce, device, code))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matching_codes_are_two_digits_and_one_request_waits_at_a_time() {
+        for b in [0u8, 1, 89, 90, 255] {
+            let c = matching_code(b);
+            assert_eq!(c.len(), 2, "{c}");
+        }
+        let now = 100.0;
+        let waiting = vec![("unlock".to_string(), 150.0)];
+        assert!(busy(&waiting, "idle", now), "a second unlock prompt waits");
+        assert!(!busy(&waiting, "step_up:trading", now), "a step-up is its own lane");
+        assert!(!busy(&[("unlock".into(), 90.0)], "unlock", now), "an expired one doesn't count");
+        assert!(busy(&[("step_up:trading".into(), 150.0)], "step_up:trading", now));
+    }
 
     #[test]
     fn companion_counts_only_when_the_phone_polled_recently() {

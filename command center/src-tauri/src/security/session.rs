@@ -63,6 +63,8 @@ pub struct Policy {
     pub entry_second: bool,
     pub resume_double: bool,
     pub pin_fallback: bool,
+    /// A verified phone approval unlocks on its own (`companion.unlocksAlone`).
+    pub companion_alone: bool,
 }
 
 impl Policy {
@@ -77,6 +79,7 @@ impl Policy {
             entry_second: c.entry.require_second_factor,
             resume_double: c.resume.require_double_verification,
             pin_fallback: c.resume.pin_fallback_when_offline,
+            companion_alone: c.companion.enabled && c.companion.unlocks_alone,
         }
     }
 }
@@ -176,6 +179,23 @@ impl Default for Sessions {
 impl Sessions {
     pub fn is_live(&self) -> bool {
         self.live.is_some()
+    }
+
+    /// The live session's (id, verified, activity), for the restart snapshot (`persist`).
+    pub fn snapshot(&self) -> Option<(String, f64, f64)> {
+        self.live.as_ref().map(|l| (l.id.clone(), l.verified, l.activity))
+    }
+
+    /// Bring a verified snapshot back (app restart): live again with no elevations. Never over a
+    /// hard lock or an already-live session.
+    pub fn restore(&mut self, id: String, verified: f64, activity: f64) -> bool {
+        if self.is_live() || self.is_hard_locked() {
+            return false;
+        }
+        self.live = Some(Live { id, verified, activity, elevations: BTreeMap::new() });
+        self.resuming = None;
+        self.second = None;
+        true
     }
 
     /// Why it's locked (None while live).
@@ -317,6 +337,13 @@ impl Sessions {
             self.open(now, new_id);
             return Ok(BioOutcome::Unlocked);
         }
+        // Phone approval login: the paired phone's signed, one-time approval (its own fingerprint
+        // check) logs in on its own, at start or after any lock; the PIN is the fallback.
+        if f == Factor::Companion && p.companion_alone && self.reason != LockReason::Revoked && !(self.reason == LockReason::Startup && p.entry_second) {
+            self.failures = 0;
+            self.open(now, new_id);
+            return Ok(BioOutcome::Unlocked);
+        }
         self.second = Some((f, now));
         Ok(BioOutcome::SecondNoted)
     }
@@ -434,10 +461,28 @@ mod tests {
         assert!(s.is_live());
         let mut s = Sessions::default();
         assert_eq!(s.second_factor(Factor::Biometric, &p, 0.0, "b".into()).unwrap(), BioOutcome::Unlocked);
-        // Companion alone is never enough: it's held for the PIN.
+        // With `companion.unlocksAlone` off, the phone alone is never enough: it's held for the PIN.
+        let held = Policy { companion_alone: false, ..pol() };
         let mut s = Sessions::default();
-        assert_eq!(s.second_factor(Factor::Companion, &p, 0.0, "c".into()).unwrap(), BioOutcome::SecondNoted);
+        assert_eq!(s.second_factor(Factor::Companion, &held, 0.0, "c".into()).unwrap(), BioOutcome::SecondNoted);
         assert!(!s.is_live());
+        // By default (section pass) the phone's approval logs in on its own, at start and after a lock.
+        let mut s = Sessions::default();
+        assert_eq!(s.second_factor(Factor::Companion, &p, 0.0, "c".into()).unwrap(), BioOutcome::Unlocked);
+        assert!(s.is_live());
+        s.lock(LockReason::Idle);
+        assert_eq!(s.second_factor(Factor::Companion, &p, 5.0, "c".into()).unwrap(), BioOutcome::Unlocked);
+        assert!(s.is_live());
+        let mut hard = Sessions::default();
+        hard.hard_lock();
+        assert_eq!(hard.second_factor(Factor::Companion, &p, 0.0, "c".into()).unwrap_err(), Refusal::HardLocked, "never over the remote failsafe");
+        // After a revocation (or a released hard lock) the phone is only the second factor again.
+        hard.release_hard_lock();
+        assert_eq!(hard.second_factor(Factor::Companion, &p, 1.0, "c".into()).unwrap(), BioOutcome::SecondNoted);
+        assert!(!hard.is_live());
+        let strict = Policy { entry_second: true, ..p.clone() };
+        let mut s = Sessions::default();
+        assert_eq!(s.second_factor(Factor::Companion, &strict, 0.0, "c".into()).unwrap(), BioOutcome::SecondNoted, "entry needs two factors");
     }
 
     #[test]
@@ -469,7 +514,7 @@ mod tests {
 
     #[test]
     fn stale_second_factor_and_offline_fallback() {
-        let p = pol();
+        let p = Policy { companion_alone: false, ..pol() };
         let mut s = unlocked(0.0);
         s.lock(LockReason::Manual);
         s.second_factor(Factor::Companion, &p, 10.0, "x".into()).unwrap();
@@ -494,6 +539,23 @@ mod tests {
         assert_eq!(s.unlock_pin(true, true, &p, 2.0, "x".into()).unwrap_err(), Refusal::LockedOut { until }, "even the right PIN waits");
         assert!(s.unlock_pin(true, true, &p, until, "x".into()).is_ok());
         assert_eq!(s.elevate("trading", false, &p, until + 1.0).unwrap_err(), Refusal::BadPin { remaining: p.max_attempts - 1 });
+    }
+
+    #[test]
+    fn a_restored_session_is_live_without_elevations_and_never_over_a_hard_lock() {
+        let p = pol();
+        let mut s = unlocked(0.0);
+        s.elevate("trading", true, &p, 1.0).unwrap();
+        let (id, verified, activity) = s.snapshot().unwrap();
+        let mut fresh = Sessions::default();
+        assert!(fresh.restore(id.clone(), verified, activity));
+        assert_eq!(fresh.session_id(), Some(id.as_str()));
+        assert_eq!(fresh.use_elevation("trading", &p, 2.0), None, "step-ups never survive a restart");
+        assert!(!fresh.restore("again".into(), 0.0, 0.0), "already live");
+        let mut hard = Sessions::default();
+        hard.hard_lock();
+        assert!(!hard.restore(id, verified, activity));
+        assert!(Sessions::default().snapshot().is_none());
     }
 
     #[test]

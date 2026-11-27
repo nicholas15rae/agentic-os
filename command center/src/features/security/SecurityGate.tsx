@@ -112,6 +112,7 @@ function CompanionApprovals() {
   const [reqs, setReqs] = useState<CompanionRequest[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [code, setCode] = useState("");
   useEffect(() => {
     let alive = true;
     const notified = new Set<string>();
@@ -142,9 +143,10 @@ function CompanionApprovals() {
     setError(null);
     try {
       const body: Record<string, unknown> = { id: q.id, approve };
-      if (approve) Object.assign(body, await securityApi.companionSign(q.id, q.nonce, q.device, q.purpose));
+      if (approve) Object.assign(body, await securityApi.companionSign(q.id, q.nonce, q.device, q.purpose, code.trim()));
       await gateway("/api/security/companion/respond", { method: "POST", body: JSON.stringify(body) });
       setReqs((r) => r.filter((x) => x.id !== q.id));
+      setCode("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -162,12 +164,24 @@ function CompanionApprovals() {
       <p className="mt-2 text-xs leading-relaxed text-ink-2">
         <span className="font-mono">{q.device}</span> wants to {describePurpose(q.purpose)}. Approve only if that's you.
       </p>
+      <label className="mt-2 block text-[11px] text-ink-2">
+        Type the number your desktop shows
+        <input
+          inputMode="numeric"
+          pattern="[0-9]*"
+          maxLength={2}
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 2))}
+          className="field mt-1 text-center font-mono text-lg tracking-[0.3em]"
+          aria-label="Matching number from the desktop"
+        />
+      </label>
       {error && <p className="mt-2 text-[11px] text-alert">{error}</p>}
       <div className="mt-3 flex justify-end gap-2">
         <button className="pill-glass" disabled={!!busy} onClick={() => void answer(q, false)}>
           <X size={13} /> Deny
         </button>
-        <button className="pill-glass !text-teal" disabled={!!busy} onClick={() => void answer(q, true)}>
+        <button className="pill-glass !text-teal" disabled={!!busy || code.length !== 2} onClick={() => void answer(q, true)}>
           <Check size={13} /> Approve
         </button>
       </div>

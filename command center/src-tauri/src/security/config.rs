@@ -41,6 +41,9 @@ pub struct SessionCfg {
     /// Hard re-verification window: after this long since the last verification the session
     /// locks regardless of activity.
     pub reauth_minutes: f64,
+    /// Section pass: an unlocked session survives an app restart (signed snapshot, desktop only;
+    /// the idle / re-verify windows and any lock or revocation still apply).
+    pub persist_across_restarts: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -90,6 +93,10 @@ pub struct BiometricCfg {
 #[serde(rename_all = "camelCase", default)]
 pub struct CompanionCfg {
     pub enabled: bool,
+    /// Section pass ("like IB Key"): a signed approval from the paired phone (after its own
+    /// fingerprint check) unlocks on its own, at start and after a lock; the PIN stays the
+    /// fallback. Off: the phone only counts as the second factor before the PIN.
+    pub unlocks_alone: bool,
     /// Gateway the companion phone polls (desktop posts approval requests here).
     pub gateway_url: String,
     pub approval_timeout_seconds: f64,
@@ -248,7 +255,7 @@ impl Default for SecurityConfig {
 }
 impl Default for SessionCfg {
     fn default() -> Self {
-        Self { idle_lock_minutes: 15.0, reauth_minutes: 60.0 }
+        Self { idle_lock_minutes: 15.0, reauth_minutes: 60.0, persist_across_restarts: true }
     }
 }
 impl Default for PinCfg {
@@ -279,7 +286,7 @@ impl Default for BiometricCfg {
 }
 impl Default for CompanionCfg {
     fn default() -> Self {
-        Self { enabled: true, gateway_url: "http://127.0.0.1:8080".into(), approval_timeout_seconds: 90.0 }
+        Self { enabled: true, unlocks_alone: true, gateway_url: "http://127.0.0.1:8080".into(), approval_timeout_seconds: 90.0 }
     }
 }
 impl Default for AlertsCfg {
@@ -327,6 +334,11 @@ fn clampf(v: f64, lo: f64, hi: f64, dflt: f64) -> f64 {
 }
 
 impl SecurityConfig {
+    /// Sessions survive a restart: on in the config, the lock layer on, and a desktop build.
+    pub fn persist_enabled(&self) -> bool {
+        self.enabled && self.session.persist_across_restarts && !cfg!(any(target_os = "android", target_os = "ios"))
+    }
+
     /// Bound every tunable to a sane range (pure).
     pub fn clamped(mut self) -> Self {
         let d = SecurityConfig::default();

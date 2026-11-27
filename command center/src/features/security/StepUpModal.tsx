@@ -18,6 +18,7 @@ export function StepUpModal() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phone, setPhone] = useState<"idle" | "waiting">("idle");
+  const [code, setCode] = useState<string | null>(null);
   const ticket = useRef<string | null>(null);
   // A new / closed step-up abandons any phone request still waiting.
   useEffect(() => {
@@ -40,6 +41,7 @@ export function StepUpModal() {
     try {
       const t = await securityApi.companionRequest(stepUp.module);
       ticket.current = t.id;
+      setCode(t.code);
       setPhone("waiting");
       while (ticket.current === t.id && Date.now() / 1000 < t.expiresAt + 2) {
         await new Promise((r) => setTimeout(r, 1500));
@@ -113,7 +115,11 @@ export function StepUpModal() {
             {error}
           </p>
         )}
-        {phone === "waiting" && <p className="mt-2 text-[11px] text-ink-2">Waiting for your phone: open the Command Center app there and approve with your fingerprint.</p>}
+        {phone === "waiting" && (
+          <p className="mt-2 text-[11px] text-ink-2">
+            On your phone, type <b className="font-mono text-base text-amber-light">{code}</b> and approve with your fingerprint.
+          </p>
+        )}
         <div className="mt-4 flex flex-wrap justify-end gap-2">
           {canPhone && (
             <button type="button" className="pill-glass" disabled={busy || phone === "waiting"} onClick={() => void askPhone()}>

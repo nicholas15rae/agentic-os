@@ -508,7 +508,15 @@ def _ws_authorized(ws: WebSocket) -> bool:
     token = TOKEN_FILE.read_text(encoding="utf-8").strip()
     sent = ws.headers.get("authorization", "")
     sent = sent[7:].strip() if sent.lower().startswith("bearer ") else ws.query_params.get("token", "")
-    return bool(token) and hmac.compare_digest(sent.encode(), token.encode())
+    if token and sent and hmac.compare_digest(sent.encode(), token.encode()):
+        return True
+    # Section pass: a per-device token (device_registry) works here too.
+    import device_registry
+    dev = device_registry.match(sent) if sent else None
+    if dev is None:
+        return False
+    device_registry.seen(dev["id"], ws.client.host if ws.client else "", ws.headers.get("user-agent", ""))
+    return True
 
 
 @comms_router.websocket("/ws")

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -62,6 +63,25 @@ WHEN_UNFROZEN: dict[str, list[dict]] = {
 }
 
 
+AGENT_PROMPTS_RS = ROOT / "command center" / "src-tauri" / "src" / "commands" / "agent_prompts.rs"
+_RUST_CONST = re.compile(r'pub const ([A-Z_]+): &str = (?:r#"(.*?)"#|"((?:[^"\\]|\\.)*)");', re.S)
+_RUST_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+
+
+def builtin_prompts(rust_src: str) -> dict[str, str]:
+    """The built-in role prompts exactly as agent_prompts.rs `role_prompt(agent, false)` builds them:
+    body + blank line + APP_CONTRACT + space + the role note."""
+    consts = {}
+    for name, raw, plain in _RUST_CONST.findall(rust_src):
+        consts[name] = raw if raw else re.sub(r"\\(.)", lambda m: _RUST_ESCAPES.get(m.group(1), m.group(1)), plain)
+    out = {}
+    for agent in BUILTIN_PROMPTS:
+        body, note, contract = consts.get(agent.upper()), consts.get(agent.upper() + "_NOTE", ""), consts.get("APP_CONTRACT")
+        if body and contract:
+            out[agent] = f"{body}\n\n{contract}" + (f" {note}" if note else "")
+    return out
+
+
 def _export_workspaces(export_dir: Path) -> dict[str, dict]:
     c = sqlite3.connect(f"file:{(export_dir / 'anythingllm.db').as_posix()}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
@@ -82,7 +102,7 @@ def _export_workspaces(export_dir: Path) -> dict[str, dict]:
         c.close()
 
 
-def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
+def propose(os_cfg: dict, export: dict[str, dict], builtin: Optional[dict[str, str]] = None) -> dict:
     agents_cfg = (os_cfg.get("routing") or {}).get("agents") or {}
     ws_map = (os_cfg.get("anythingllm") or {}).get("workspaces") or {}
     mcps = [m for m in (os_cfg.get("mcps") or []) if isinstance(m, dict)]
@@ -119,7 +139,7 @@ def propose(os_cfg: dict, export: dict[str, dict]) -> dict:
             src, prompt = f"shared Biz Ops prompt: {BIZOPS_DRAFT}", None
             notes.append("maps the business workspaces: " + ", ".join(w for w in BIZOPS_WORKSPACES if w in export or w == "bizops_acting"))
         elif a in BUILTIN_PROMPTS:
-            src, prompt = "agent_prompts.rs role_prompt (built in)", None
+            src, prompt = "agent_prompts.rs role_prompt (built in)", (builtin or {}).get(a)
             if ws.get("prompt"):
                 notes.append("AnythingLLM carries a copy of the built-in prompt; the built-in one wins")
         elif a == "general":
@@ -166,7 +186,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args(argv)
     os_cfg = json.loads(Path(a.os_json).read_text(encoding="utf-8"))
-    res = propose(os_cfg, _export_workspaces(Path(a.export_dir)))
+    builtin = builtin_prompts(AGENT_PROMPTS_RS.read_text(encoding="utf-8")) if AGENT_PROMPTS_RS.exists() else {}
+    res = propose(os_cfg, _export_workspaces(Path(a.export_dir)), builtin)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")

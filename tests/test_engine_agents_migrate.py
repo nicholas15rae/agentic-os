@@ -123,3 +123,23 @@ class UnfrozenBookingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuiltinPromptTests(unittest.TestCase):
+    RS = r'''pub const CODER: &str = r#"You are the Coder.
+Build "clean" code."#;
+pub const APP_CONTRACT: &str = "APP CONTRACT: reply with JSON.";
+pub const CODER_NOTE: &str = "Files go to G:\\ai-hub\\staging, never \"elsewhere\".";
+'''
+
+    def test_built_like_role_prompt(self):
+        from engine.agents_migrate import builtin_prompts
+        b = builtin_prompts(self.RS)
+        self.assertEqual(b["coder"], 'You are the Coder.\nBuild "clean" code.\n\nAPP CONTRACT: reply with JSON. Files go to G:' + "\\" + 'ai-hub' + "\\" + 'staging, never "elsewhere".')
+        self.assertNotIn("designer", b)  # no constant, no prompt
+
+    def test_real_file_has_all_four(self):
+        from engine.agents_migrate import AGENT_PROMPTS_RS, builtin_prompts
+        b = builtin_prompts(AGENT_PROMPTS_RS.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(b), ["coder", "designer", "librarian", "prompter"])
+        self.assertTrue(all("APP CONTRACT" in v for v in b.values()))

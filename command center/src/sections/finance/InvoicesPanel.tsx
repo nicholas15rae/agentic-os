@@ -13,6 +13,7 @@ import { nextInvoiceNumber, numberTaken, prefixFor } from "@/features/finance/in
 import { invoicePdf } from "@/features/finance/pdf";
 import { AreaSelect, AreaTag, QuestionMark, SelectOther } from "./fields";
 import { bookIncome } from "./book";
+import { ContactSelect } from "@/features/contacts/ContactSelect";
 
 const STATUS_TONE: Record<Invoice["status"], string> = {
   draft: "border-white/15 text-ink-2",
@@ -207,6 +208,21 @@ function InvoiceEditor({ initial, defaultArea, onClose }: { initial: Item<Invoic
               }}
               className={`font-mono ${taken ? "!border-alert" : ""}`}
               required
+            />
+          </Field>
+          <Field label="Bill to (phone book)">
+            <ContactSelect
+              value={inv.contactId}
+              className=""
+              none="— type the client below —"
+              // Picking a contact fills the bill-to; what's typed stays editable and is what prints.
+              onChange={(c) =>
+                setInv(
+                  c
+                    ? { ...inv, contactId: c.id, client: c.company || c.name, clientEmail: c.emails[0]?.address ?? inv.clientEmail }
+                    : { ...inv, contactId: undefined },
+                )
+              }
             />
           </Field>
           <Field label="Client">

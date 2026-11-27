@@ -17,6 +17,10 @@ import {
   type ContractingDefaults,
   type KnownProfileId,
 } from "@/features/business/profiles";
+import { ContactSelect } from "@/features/contacts/ContactSelect";
+import { agencyContacts } from "@/features/contacts/phonebook";
+import { usePhoneBook, usePhoneBookLoaded } from "@/features/contacts/phonebook-store";
+import { useToasts } from "@/features/reminders/notify";
 
 /** Settings → Business: one profile per business + Personal, on the local gateway. */
 export function BusinessProfilesSettings() {
@@ -211,6 +215,32 @@ function RateInput({ value, set, inherit, label }: { value: number | null; set: 
   );
 }
 
+/**
+ * The agency's phone-book contact. The link lives on the contact (its `agencyId`), not in this
+ * profile, so the profile document is unchanged; removing either one leaves the other as it is.
+ */
+function AgencyContact({ agencyId, name }: { agencyId: string; name: string }) {
+  const { contacts } = usePhoneBookLoaded();
+  const linked = agencyContacts(contacts, agencyId);
+  const relink = async (pick: string | null) => {
+    const st = usePhoneBook.getState();
+    try {
+      for (const c of linked) if (c.id !== pick) await st.save({ ...c, agencyId: null });
+      const c = pick ? contacts.find((x) => x.id === pick) : null;
+      if (c && c.agencyId !== agencyId) await st.save({ ...c, agencyId, group: c.group || "acting", company: c.company || name });
+    } catch (e) {
+      useToasts.getState().push({ title: "Contact not linked", body: e instanceof Error ? e.message : String(e), tone: "error" });
+    }
+  };
+  return (
+    <span className="flex items-center gap-1 text-[11px] text-ink-3">
+      Contact
+      <ContactSelect value={linked[0]?.id} label={`${name} contact`} className="!h-9 !w-44 !py-1 text-[13px]" none="— none —" onChange={(c) => void relink(c?.id ?? null)} />
+      {linked.length > 1 && <span title={linked.slice(1).map((c) => c.name).join(", ")}>+{linked.length - 1}</span>}
+    </span>
+  );
+}
+
 function AgenciesCard({ agencies, set }: { agencies: Agency[]; set: (a: Agency[]) => void }) {
   const [name, setName] = useState("");
   const [parent, setParent] = useState("");
@@ -238,6 +268,7 @@ function AgenciesCard({ agencies, set }: { agencies: Agency[]; set: (a: Agency[]
             <RateInput value={a.commissionUnion} set={(v) => edit(a.id, { commissionUnion: v })} inherit={!!a.parentId} label={`${a.name} union commission`} />
             <span className="text-[11px] text-ink-3">Non-union</span>
             <RateInput value={a.commissionNonUnion} set={(v) => edit(a.id, { commissionNonUnion: v })} inherit={!!a.parentId} label={`${a.name} non-union commission`} />
+            <AgencyContact agencyId={a.id} name={a.name} />
             <button onClick={() => remove(a.id)} aria-label={`Remove ${a.name}`} className="grid size-8 place-items-center rounded-full text-ink-3 hover:text-alert">
               <Trash2 size={13} />
             </button>

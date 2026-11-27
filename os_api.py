@@ -66,6 +66,39 @@ def init() -> None:
               id TEXT PRIMARY KEY, kind TEXT, payload TEXT, status TEXT, result TEXT, created REAL, updated REAL);
             """
         )
+    _ensure_contacts_schema()
+
+
+# Phone book (section 12). comms_contacts stays what it was — one row per number (thread key),
+# its name and the Instant Send trust flag, auto-created by the phone bridge — and gains one
+# column, contact_id, pointing at the phone-book entry that number belongs to. The entries
+# themselves (several phones / emails each) live in comms_phonebook. Purely additive: CREATE IF
+# NOT EXISTS + guarded ADD COLUMN, never a DROP. Contact data is data: it is never indexed into
+# the vault (agent context) and never read as instructions.
+_contacts_ready: set[str] = set()
+
+
+def _ensure_contacts_schema() -> None:
+    key = str(cc.DB_PATH)
+    if key in _contacts_ready:
+        return
+    with _schema_lock:
+        if key in _contacts_ready:
+            return
+        with cc._db_lock, cc.db() as c:
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS comms_contacts(address TEXT PRIMARY KEY, name TEXT, trusted INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS comms_phonebook(
+                  id TEXT PRIMARY KEY, name TEXT NOT NULL, company TEXT, role TEXT, phones TEXT, emails TEXT,
+                  notes TEXT, grp TEXT, agency_id TEXT, source TEXT, created REAL, updated REAL);
+                """
+            )
+            have = {r["name"] for r in c.execute("PRAGMA table_info(comms_contacts)")}
+            if "contact_id" not in have:
+                c.execute("ALTER TABLE comms_contacts ADD COLUMN contact_id TEXT")
+            c.execute("CREATE INDEX IF NOT EXISTS comms_contacts_cid ON comms_contacts(contact_id)")
+        _contacts_ready.add(key)
 
 
 # Additive schema (claim/lease columns, task mirror). cc.db has no migration ladder, so each
@@ -277,7 +310,11 @@ def _broadcast(event: dict) -> None:
 
 
 def _contact_name(c, address: str) -> Optional[str]:
-    r = c.execute("SELECT name FROM comms_contacts WHERE address=?", (_thread_key(address),)).fetchone()
+    """The number's name: its phone-book entry's when it has one, else the bridge's."""
+    r = c.execute(
+        "SELECT COALESCE(p.name, k.name) AS name FROM comms_contacts k LEFT JOIN comms_phonebook p ON p.id = k.contact_id WHERE k.address=?",
+        (_thread_key(address),),
+    ).fetchone()
     return r["name"] if r else None
 
 
@@ -288,6 +325,7 @@ def comms_sms(data: Any = Body(...)):
     msgs = data.get("messages") if isinstance(data, dict) and "messages" in data else (data if isinstance(data, list) else [data])
     added = 0
     to_index: list[tuple] = []
+    _ensure_contacts_schema()
     with cc._db_lock, cc.db() as c:
         for m in msgs[:2000]:
             if not isinstance(m, dict) or not str(m.get("body") or "").strip():
@@ -300,7 +338,12 @@ def comms_sms(data: Any = Body(...)):
             mid = str(m.get("id") or f"{channel}:{_thread_key(address)}:{int(ts)}:{hash(body) & 0xFFFFFFFF:x}")
             contact = str(m.get("contact") or m.get("name") or "") or _contact_name(c, address) or address
             if m.get("contact"):
-                c.execute("INSERT INTO comms_contacts(address,name) VALUES(?,?) ON CONFLICT(address) DO UPDATE SET name=excluded.name", (_thread_key(address), contact))
+                # Auto-created bridge contact. A number already filed in the phone book keeps
+                # the name you gave it there.
+                c.execute(
+                    "INSERT INTO comms_contacts(address,name) VALUES(?,?) ON CONFLICT(address) DO UPDATE SET name=CASE WHEN contact_id IS NULL THEN excluded.name ELSE name END",
+                    (_thread_key(address), contact),
+                )
             cur = c.execute(
                 "INSERT OR IGNORE INTO comms_messages(id,thread,contact,address,direction,body,ts,channel,read) VALUES(?,?,?,?,?,?,?,?,?)",
                 (mid, _thread_key(address, channel), contact, address, direction, body, ts, channel, 1 if direction == "out" else 0),
@@ -334,6 +377,7 @@ def _vault_comms(mid, contact, address, direction, body, ts, channel):
 def comms_calls_post(data: Any = Body(...)):
     calls = data.get("calls") if isinstance(data, dict) and "calls" in data else (data if isinstance(data, list) else [data])
     added = 0
+    _ensure_contacts_schema()
     with cc._db_lock, cc.db() as c:
         for k in calls[:2000]:
             if not isinstance(k, dict):
@@ -353,6 +397,7 @@ def comms_calls_post(data: Any = Body(...)):
 
 @comms_router.get("/threads")
 def comms_threads(limit: int = Query(100, le=500)):
+    _ensure_contacts_schema()
     with cc.db() as c:
         rows = c.execute(
             """SELECT m.thread, m.contact, m.address, m.body, m.ts, m.direction, m.channel,
@@ -363,7 +408,30 @@ def comms_threads(limit: int = Query(100, le=500)):
             (limit,),
         ).fetchall()
         trusted = {r["address"] for r in c.execute("SELECT address FROM comms_contacts WHERE trusted=1")}
-    return {"threads": [{**dict(r), "trusted": r["thread"] in trusted} for r in rows]}
+        linked = _linked_by_key(c, [r["thread"] for r in rows])
+    out = []
+    for r in rows:
+        t = {**dict(r), "trusted": r["thread"] in trusted}
+        p = linked.get(r["thread"])
+        # The phone-book entry the number belongs to (ids only link; the thread is unchanged).
+        t.update({"contactId": p["id"], "contactName": p["name"], "company": p["company"] or "", "role": p["role"] or ""} if p else {"contactId": None})
+        out.append(t)
+    return {"threads": out}
+
+
+def _linked_by_key(c, keys: list[str]) -> dict[str, dict]:
+    if not keys:
+        return {}
+    out: dict[str, dict] = {}
+    for i in range(0, len(keys), 400):
+        part = keys[i:i + 400]
+        q = ",".join("?" * len(part))
+        for r in c.execute(
+            f"SELECT k.address, p.id, p.name, p.company, p.role FROM comms_contacts k JOIN comms_phonebook p ON p.id = k.contact_id WHERE k.address IN ({q})",
+            part,
+        ):
+            out[r["address"]] = dict(r)
+    return out
 
 
 @comms_router.get("/threads/{thread}/messages")
@@ -389,10 +457,15 @@ def comms_calls(limit: int = Query(100, le=1000)):
 
 @comms_router.get("/contacts")
 def comms_contacts(q: str = ""):
+    """One row per number (the trust list). `name` is the phone-book name when the number is filed."""
+    _ensure_contacts_schema()
+    like = f"%{q}%"
     with cc.db() as c:
         rows = c.execute(
-            "SELECT address, name, trusted FROM comms_contacts WHERE name LIKE ? OR address LIKE ? ORDER BY name LIMIT 200",
-            (f"%{q}%", f"%{q}%"),
+            "SELECT k.address, COALESCE(p.name, k.name) AS name, k.trusted, k.contact_id AS contactId "
+            "FROM comms_contacts k LEFT JOIN comms_phonebook p ON p.id = k.contact_id "
+            "WHERE k.name LIKE ? OR k.address LIKE ? OR p.name LIKE ? OR p.company LIKE ? ORDER BY name LIMIT 200",
+            (like, like, like, like),
         ).fetchall()
     return {"contacts": [dict(r) for r in rows]}
 
@@ -402,12 +475,245 @@ def comms_contact_put(data: dict = Body(...)):
     address = _thread_key(str(data.get("address") or ""))
     if not address:
         raise HTTPException(400, "address required")
+    _ensure_contacts_schema()
     with cc._db_lock, cc.db() as c:
         c.execute(
-            "INSERT INTO comms_contacts(address,name,trusted) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET name=COALESCE(excluded.name,name), trusted=excluded.trusted",
+            "INSERT INTO comms_contacts(address,name,trusted) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET "
+            "name=CASE WHEN contact_id IS NULL THEN COALESCE(excluded.name,name) ELSE name END, trusted=excluded.trusted",
             (address, data.get("name"), 1 if data.get("trusted") else 0),
         )
     return {"ok": True}
+
+
+# ── phone book (section 12) ─────────────────────────────────────────────────
+
+PB_MAX = 5000
+PB_LIST_MAX = 10
+_PB_KEYS = {"id", "name", "company", "role", "phones", "emails", "notes", "group", "agencyId", "source"}
+_PB_SOURCES = {"manual", "vcard", "phone", "bridge", "finance", "messages"}
+_PB_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def pb_phone_key(number: str) -> str:
+    """The dedupe / lookup key of a phone number: the key a text thread uses (last 10 digits)."""
+    digits = re.sub(r"\D", "", number or "")
+    return digits[-10:] if len(digits) >= 7 else ""
+
+
+def pb_email_key(email: str) -> str:
+    e = (email or "").strip().lower()
+    return e if _PB_EMAIL_RE.match(e) else ""
+
+
+def _pb_text(v: Any, field: str, n: int) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+        raise HTTPException(400, f"{field}: text")
+    return str(v).strip()[:n]
+
+
+def _pb_list(v: Any, field: str, value_key: str, check) -> list[dict]:
+    """[{label, <value_key>}] (plain strings are accepted too). Blank entries and repeats are dropped."""
+    if v is None:
+        return []
+    if not isinstance(v, list) or len(v) > PB_LIST_MAX:
+        raise HTTPException(400, f"{field}: a list of up to {PB_LIST_MAX}")
+    out, seen = [], set()
+    for i, x in enumerate(v):
+        if isinstance(x, str):
+            x = {value_key: x}
+        if not isinstance(x, dict) or set(x) - {"label", value_key}:
+            raise HTTPException(400, f"{field}[{i}]: {{label, {value_key}}}")
+        val = _pb_text(x.get(value_key), f"{field}[{i}].{value_key}", 120)
+        if not val:
+            continue
+        key = check(val)
+        if not key:
+            raise HTTPException(400, f"{field}[{i}]: not a valid {value_key}")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"label": _pb_text(x.get("label"), f"{field}[{i}].label", 30), value_key: val})
+    return out
+
+
+def pb_clean(data: Any) -> dict:
+    """Validate one phone-book entry. Strict keys; every value is stored as plain text."""
+    if not isinstance(data, dict):
+        raise HTTPException(400, "contact: an object")
+    extra = set(data) - _PB_KEYS
+    if extra:
+        raise HTTPException(400, f"contact: unknown field(s) {', '.join(sorted(extra))}")
+    phones = _pb_list(data.get("phones"), "phones", "number", pb_phone_key)
+    emails = _pb_list(data.get("emails"), "emails", "address", pb_email_key)
+    company = _pb_text(data.get("company"), "company", 120)
+    name = _pb_text(data.get("name"), "name", 120) or company or (phones[0]["number"] if phones else "") or (emails[0]["address"] if emails else "")
+    if not name:
+        raise HTTPException(400, "name (or a company, phone or email) required")
+    agency = data.get("agencyId")
+    if agency is not None and (not isinstance(agency, str) or (agency and not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", agency))):
+        raise HTTPException(400, "agencyId: an agency id or null")
+    source = _pb_text(data.get("source"), "source", 20) or "manual"
+    if source not in _PB_SOURCES:
+        raise HTTPException(400, f"source: one of {', '.join(sorted(_PB_SOURCES))}")
+    cid = data.get("id")
+    if cid is not None and (not isinstance(cid, str) or not _PB_ID_RE.match(cid)):
+        raise HTTPException(400, "id: letters, digits, _ or -")
+    return {
+        "id": cid,
+        "name": name,
+        "company": company,
+        "role": _pb_text(data.get("role"), "role", 80),
+        "phones": phones,
+        "emails": emails,
+        "notes": _pb_text(data.get("notes"), "notes", 4000),
+        "group": _pb_text(data.get("group"), "group", 60),
+        "agencyId": agency or None,
+        "source": source,
+    }
+
+
+def _pb_row(r) -> dict:
+    return {
+        "id": r["id"], "name": r["name"], "company": r["company"] or "", "role": r["role"] or "",
+        "phones": json.loads(r["phones"] or "[]"), "emails": json.loads(r["emails"] or "[]"),
+        "notes": r["notes"] or "", "group": r["grp"] or "", "agencyId": r["agency_id"] or None,
+        "source": r["source"] or "manual", "created": r["created"], "updated": r["updated"],
+    }
+
+
+def _pb_link_numbers(c, cid: str, name: str, phones: list[dict]) -> None:
+    """Point each of the entry's numbers (comms_contacts rows) at it. A number it no longer has is
+    unlinked; the row, its bridge name and its Instant Send flag stay."""
+    keys = [k for k in (pb_phone_key(p["number"]) for p in phones) if k]
+    for k in keys:
+        c.execute(
+            "INSERT INTO comms_contacts(address,name,contact_id) VALUES(?,?,?) "
+            "ON CONFLICT(address) DO UPDATE SET name=excluded.name, contact_id=excluded.contact_id",
+            (k, name, cid),
+        )
+    marks = ",".join("?" * len(keys))
+    c.execute("UPDATE comms_contacts SET contact_id=NULL WHERE contact_id=?" + (f" AND address NOT IN ({marks})" if keys else ""), (cid, *keys))
+
+
+def pb_save(data: Any) -> dict:
+    """Create (no id, or an id not in the book yet) or replace one entry."""
+    _ensure_contacts_schema()
+    e = pb_clean(data)
+    now = time.time()
+    with cc._db_lock, cc.db() as c:
+        old = c.execute("SELECT created, source FROM comms_phonebook WHERE id=?", (e["id"],)).fetchone() if e["id"] else None
+        if not old:
+            if c.execute("SELECT COUNT(*) FROM comms_phonebook").fetchone()[0] >= PB_MAX:
+                raise HTTPException(400, f"the phone book is full ({PB_MAX})")
+            e["id"] = e["id"] or uuid.uuid4().hex
+        c.execute(
+            "INSERT INTO comms_phonebook(id,name,company,role,phones,emails,notes,grp,agency_id,source,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, company=excluded.company, role=excluded.role, phones=excluded.phones, "
+            "emails=excluded.emails, notes=excluded.notes, grp=excluded.grp, agency_id=excluded.agency_id, updated=excluded.updated",
+            (e["id"], e["name"], e["company"], e["role"], json.dumps(e["phones"], ensure_ascii=False), json.dumps(e["emails"], ensure_ascii=False),
+             e["notes"], e["group"], e["agencyId"], e["source"], old["created"] if old else now, now),
+        )
+        _pb_link_numbers(c, e["id"], e["name"], e["phones"])
+        r = c.execute("SELECT * FROM comms_phonebook WHERE id=?", (e["id"],)).fetchone()
+    return _pb_row(r)
+
+
+def pb_list(q: str = "") -> dict:
+    _ensure_contacts_schema()
+    like = f"%{q.strip()}%"
+    with cc.db() as c:
+        rows = c.execute(
+            "SELECT * FROM comms_phonebook WHERE name LIKE ? OR company LIKE ? OR role LIKE ? OR phones LIKE ? OR emails LIKE ? OR notes LIKE ? "
+            "ORDER BY name COLLATE NOCASE",
+            (like,) * 6,
+        ).fetchall()
+        # Numbers the phone bridge knows that aren't filed in the phone book (auto-created contacts).
+        loose = c.execute(
+            "SELECT address, name, trusted FROM comms_contacts WHERE contact_id IS NULL AND (name LIKE ? OR address LIKE ?) "
+            "ORDER BY name COLLATE NOCASE LIMIT 500",
+            (like, like),
+        ).fetchall()
+        trusted = {r["contact_id"] for r in c.execute("SELECT DISTINCT contact_id FROM comms_contacts WHERE trusted=1 AND contact_id IS NOT NULL")}
+    return {
+        "contacts": [{**_pb_row(r), "trusted": r["id"] in trusted} for r in rows],
+        "unfiled": [{**dict(r), "trusted": bool(r["trusted"])} for r in loose],
+    }
+
+
+def pb_delete(cid: str) -> dict:
+    """Delete one entry. Records that link to it (finance, invoices, auditions, agencies) keep their
+    contactId and are never touched; its numbers keep their bridge name and Instant Send flag."""
+    _ensure_contacts_schema()
+    with cc._db_lock, cc.db() as c:
+        cur = c.execute("DELETE FROM comms_phonebook WHERE id=?", (cid,))
+        c.execute("UPDATE comms_contacts SET contact_id=NULL WHERE contact_id=?", (cid,))
+    if not cur.rowcount:
+        raise HTTPException(404, "no such contact")
+    return {"ok": True}
+
+
+def pb_import(data: Any) -> dict:
+    """Bulk add (vCard / phone import). An entry whose phone or email (normalised) is already in the
+    phone book is skipped, as is a repeat within the batch and one with neither. Nothing is merged
+    or overwritten."""
+    if not isinstance(data, dict) or not isinstance(data.get("contacts"), list):
+        raise HTTPException(400, "{contacts: [...]} required")
+    items = data["contacts"]
+    if len(items) > 2000:
+        raise HTTPException(400, "up to 2000 contacts per import")
+    source = data.get("source") or "vcard"
+    cleaned = []
+    for i, x in enumerate(items):
+        if not isinstance(x, dict):
+            raise HTTPException(400, f"contacts[{i}]: an object")
+        try:
+            cleaned.append(pb_clean({**{k: v for k, v in x.items() if k != "id"}, "source": source}))
+        except HTTPException as e:
+            raise HTTPException(400, f"contacts[{i}]: {e.detail}")
+    _ensure_contacts_schema()
+    known_p: set[str] = set()
+    known_e: set[str] = set()
+    with cc.db() as c:
+        for r in c.execute("SELECT phones, emails FROM comms_phonebook"):
+            known_p.update(pb_phone_key(p.get("number", "")) for p in json.loads(r["phones"] or "[]"))
+            known_e.update(pb_email_key(m.get("address", "")) for m in json.loads(r["emails"] or "[]"))
+    known_p.discard("")
+    known_e.discard("")
+    added, skipped = [], []
+    for e in cleaned:
+        pk = {pb_phone_key(p["number"]) for p in e["phones"]} - {""}
+        ek = {pb_email_key(m["address"]) for m in e["emails"]} - {""}
+        if (pk & known_p) or (ek & known_e) or not (pk or ek):
+            skipped.append(e["name"])
+            continue
+        e.pop("id", None)
+        added.append(pb_save(e)["id"])
+        known_p |= pk
+        known_e |= ek
+    return {"added": len(added), "skipped": len(skipped), "ids": added, "skippedNames": skipped[:200]}
+
+
+@comms_router.get("/phonebook")
+def comms_phonebook(q: str = ""):
+    return pb_list(q)
+
+
+@comms_router.post("/phonebook")
+def comms_phonebook_save(data: Any = Body(...)):
+    return pb_save(data)
+
+
+@comms_router.post("/phonebook/import")
+def comms_phonebook_import(data: Any = Body(...)):
+    return pb_import(data)
+
+
+@comms_router.delete("/phonebook/{cid}")
+def comms_phonebook_delete(cid: str):
+    return pb_delete(cid)
 
 
 def _trusted(address: str) -> bool:

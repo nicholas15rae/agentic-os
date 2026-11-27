@@ -27,6 +27,8 @@ export interface Invoice extends Tagged {
   client: string;
   clientEmail?: string;
   clientAddress?: string;
+  /** Bill-to picked from the phone book (a link only; client / email stay on the invoice as printed). */
+  contactId?: string;
   items: InvoiceLine[];
   /** Sales tax % applied to the subtotal (13 = Ontario HST). */
   taxRate: number;
@@ -139,8 +141,10 @@ export interface Pending extends Tagged {
   paid: boolean;
   paidAt?: number;
   incomeId?: string;
-  /** "Save contact" — for now just keeps name + phone on this record. */
+  /** "Save contact" was ticked: the person was filed in the phone book (see contactId). */
   saveContact?: boolean;
+  /** The phone-book entry (Communications → Phone book) this is from. A link only: deleting the contact leaves this record as it is. */
+  contactId?: string;
 }
 
 /** One line of an imported bank / card statement (read-only copy; only the review fields change). */

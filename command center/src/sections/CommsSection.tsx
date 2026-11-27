@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Delete, Loader2, MessageSquare, Phone, PhoneCall, PhoneIncoming, PhoneMissed, PhoneOutgoing, RefreshCw, Search, Send, ShieldCheck, Zap } from "lucide-react";
+import { ArrowLeft, BookUser, Delete, Loader2, MessageSquare, Phone, PhoneCall, PhoneIncoming, PhoneMissed, PhoneOutgoing, RefreshCw, Search, Send, ShieldCheck, UserPlus, Zap } from "lucide-react";
 import { Card, Empty, Input, SubTabs } from "@/components/ui";
 import { gateway } from "@/lib/gateway";
 import { cmd, isTauri } from "@/lib/platform";
@@ -10,6 +10,8 @@ import { useToasts } from "@/features/reminders/notify";
 import { isDesktopApp } from "@/stores/settings";
 import { AgentInbox } from "@/features/comms/AgentInbox";
 import { unreadCount, useAgentInbox } from "@/features/comms/agent-inbox";
+import { PhoneBook } from "@/features/contacts/PhoneBookPanel";
+import { linkOrCreate } from "@/features/contacts/phonebook-store";
 
 interface Thread {
   thread: string;
@@ -21,6 +23,11 @@ interface Thread {
   channel: string;
   unread: number;
   trusted: boolean;
+  /** The phone-book entry this number is filed under (os_api comms_threads), if any. */
+  contactId?: string | null;
+  contactName?: string;
+  company?: string;
+  role?: string;
 }
 interface Message {
   id: string;
@@ -85,7 +92,7 @@ export function CommsSection() {
   );
 }
 
-type Tab = "agents" | "messages" | "dialer" | "whatsapp" | "setup";
+type Tab = "agents" | "messages" | "dialer" | "phonebook" | "whatsapp" | "setup";
 
 export function CommsPanel({ compact = false }: { compact?: boolean }) {
   // Agent reports are made on the desktop: their inbox lives there.
@@ -96,6 +103,7 @@ export function CommsPanel({ compact = false }: { compact?: boolean }) {
     ...(agents ? [{ id: "agents" as Tab, label: unread ? `Agents (${unread})` : "Agents" }] : []),
     { id: "messages", label: "Messages" },
     { id: "dialer", label: "Calls" },
+    { id: "phonebook", label: "Phone book" },
     ...(isTauri() ? [{ id: "whatsapp" as Tab, label: "WhatsApp" }] : []),
     ...(compact ? [] : [{ id: "setup" as Tab, label: "Phone bridge" }]),
   ];
@@ -105,6 +113,7 @@ export function CommsPanel({ compact = false }: { compact?: boolean }) {
       {tab === "agents" && <AgentInbox />}
       {tab === "messages" && <Inbox compact={compact} />}
       {tab === "dialer" && <Dialer />}
+      {tab === "phonebook" && <PhoneBook />}
       {tab === "whatsapp" && <WhatsAppPanel />}
       {tab === "setup" && <BridgeSetup />}
     </div>
@@ -125,7 +134,7 @@ function Inbox({ compact }: { compact: boolean }) {
   const load = useCallback(() => void gateway<{ threads: Thread[] }>("/api/comms/threads").then((r) => (setThreads(r.threads), setErr(null))).catch((e) => setErr(String(e))), []);
   useEffect(load, [load]);
   useCommsLive(load);
-  const list = useMemo(() => (threads ?? []).filter((t) => !q || `${t.contact} ${t.address} ${t.body}`.toLowerCase().includes(q.toLowerCase())), [threads, q]);
+  const list = useMemo(() => (threads ?? []).filter((t) => !q || `${t.contactName ?? ""} ${t.company ?? ""} ${t.contact} ${t.address} ${t.body}`.toLowerCase().includes(q.toLowerCase())), [threads, q]);
   const current = threads?.find((t) => t.thread === sel) ?? null;
 
   const showList = !compact || !sel;
@@ -151,7 +160,8 @@ function Inbox({ compact }: { compact: boolean }) {
                   className={`w-full rounded-[12px] px-3 py-2 text-left transition-colors ${sel === t.thread ? "bg-amber/10" : "hover:bg-white/5"}`}
                 >
                   <div className="flex items-center gap-2">
-                    <span className={`truncate text-sm ${t.unread ? "font-semibold text-ink" : "text-ink"}`}>{t.contact}</span>
+                    <span className={`truncate text-sm ${t.unread ? "font-semibold text-ink" : "text-ink"}`}>{t.contactName || t.contact}</span>
+                    {t.company && <span className="truncate text-[11px] text-ink-3">{t.company}</span>}
                     {t.channel !== "sms" && <span className="label-caps text-teal">{t.channel}</span>}
                     {t.trusted && <ShieldCheck size={11} className="text-teal" />}
                     <span className="ml-auto shrink-0 font-mono text-[10px] text-ink-3">{when(t.ts)}</span>
@@ -215,6 +225,21 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
     }
   };
 
+  const name = thread.contactName || thread.contact;
+  const [filing, setFiling] = useState(false);
+  const file = async () => {
+    setFiling(true);
+    try {
+      await linkOrCreate({ name: thread.contact !== thread.address ? thread.contact : "", phone: thread.address, source: "messages" });
+      useToasts.getState().push({ title: "Added to the phone book", body: "Set its group, company and notes in Phone book.", tone: "info" });
+      onChange();
+    } catch (e) {
+      useToasts.getState().push({ title: "Not added", body: String(e), tone: "error" });
+    } finally {
+      setFiling(false);
+    }
+  };
+
   const toggleTrust = () => void gateway("/api/comms/contacts", { method: "POST", body: JSON.stringify({ address: thread.address, name: thread.contact, trusted: !thread.trusted }) }).then(onChange);
 
   return (
@@ -226,10 +251,19 @@ function Chat({ thread, onBack, onChange }: { thread: Thread; onBack?: () => voi
           </button>
         )}
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-ink">{thread.contact}</p>
+          <p className="truncate text-sm font-semibold text-ink">
+            {name}
+            {thread.contactId && <BookUser size={11} className="ml-1 inline text-teal" aria-label="In the phone book" />}
+          </p>
+          {(thread.company || thread.role) && <p className="truncate text-[11px] text-ink-2">{[thread.company, thread.role].filter(Boolean).join(" · ")}</p>}
           <p className="font-mono text-[11px] text-ink-3">{thread.address} · {whatsapp ? "WhatsApp" : "SMS"}</p>
         </div>
-        <a href={`tel:${thread.address.replace(/[^\d+]/g, "")}`} className="pill-glass ml-auto !h-8 !w-8 !p-0" aria-label={`Call ${thread.contact}`} title="Call">
+        {!thread.contactId && !whatsapp && (
+          <button onClick={() => void file()} disabled={filing} className="pill-glass ml-auto !h-8 text-[11px]" title="Add this number to the phone book">
+            {filing ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />} Phone book
+          </button>
+        )}
+        <a href={`tel:${thread.address.replace(/[^\d+]/g, "")}`} className={`pill-glass !h-8 !w-8 !p-0 ${!thread.contactId && !whatsapp ? "" : "ml-auto"}`} aria-label={`Call ${name}`} title="Call">
           <Phone size={13} />
         </a>
         <button onClick={toggleTrust} className={`pill-glass !h-8 text-[11px] ${thread.trusted ? "!border-teal/60 text-teal" : ""}`} title="Instant Send: replies to this contact skip the confirmation card">

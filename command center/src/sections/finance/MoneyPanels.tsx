@@ -16,6 +16,8 @@ import { CATEGORIES, PAY_METHODS, type Commission, type MileageTrip, type Pendin
 import { useSettings } from "@/stores/settings";
 import { AreaSelect, AreaTag, EditButton, EditFields, QuestionMark, SelectOther, type FieldSpec } from "./fields";
 import { bookIncome } from "./book";
+import { ContactChip, ContactSelect } from "@/features/contacts/ContactSelect";
+import { linkOrCreate } from "@/features/contacts/phonebook-store";
 import { areaTaxRate } from "./LedgerPanels";
 
 const small = "!h-9 !py-1 text-[13px]";
@@ -40,7 +42,7 @@ export function PendingPanel() {
   const { items, create, update, remove } = useCollection<Pending>("pending");
   const filter = useFinanceFilter((s) => s.filter);
   const currency = useSettings((s) => s.business.currency);
-  const [d, setD] = useState({ amount: "", date: localIso(Date.now() + 7 * 86_400_000), who: "", phone: "", what: "", area: defaultArea(filter.area), saveContact: false });
+  const [d, setD] = useState({ amount: "", date: localIso(Date.now() + 7 * 86_400_000), who: "", phone: "", what: "", area: defaultArea(filter.area), saveContact: false, contactId: "" });
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const rows = applyFilter(items, filter).sort((a, b) => Number(a.paid) - Number(b.paid) || a.date.localeCompare(b.date));
@@ -75,8 +77,17 @@ export function PendingPanel() {
           e.preventDefault();
           const amount = Number(d.amount);
           if (!d.who || !amount) return;
-          await create({ amount, date: d.date, who: d.who, phone: d.phone || undefined, what: d.what || undefined, area: d.area || undefined, paid: false, saveContact: d.saveContact || undefined });
-          setD({ ...d, amount: "", who: "", phone: "", what: "", saveContact: false });
+          // "Save contact" files the person in the phone book (or finds them there) and links them.
+          let contactId = d.contactId || undefined;
+          if (d.saveContact && !contactId) {
+            try {
+              contactId = (await linkOrCreate({ name: d.who, phone: d.phone || undefined, group: d.area || undefined, source: "finance" })).id;
+            } catch {
+              /* the payment is still recorded; the contact can be linked later */
+            }
+          }
+          await create({ amount, date: d.date, who: d.who, phone: d.phone || undefined, what: d.what || undefined, area: d.area || undefined, paid: false, saveContact: d.saveContact || undefined, contactId });
+          setD({ ...d, amount: "", who: "", phone: "", what: "", saveContact: false, contactId: "" });
         }}
       >
         <Input inputMode="decimal" value={d.amount} onChange={(e) => setD({ ...d, amount: e.target.value })} placeholder="Amount" className={`${small} font-mono`} aria-label="Amount" />
@@ -88,9 +99,21 @@ export function PendingPanel() {
         <button className="pill-primary !h-9 text-xs">
           <Plus size={13} /> Add
         </button>
-        <label className="col-span-full flex items-center gap-1.5 text-[12px] text-ink-2">
-          <input type="checkbox" checked={d.saveContact} onChange={(e) => setD({ ...d, saveContact: e.target.checked })} className="accent-teal" /> Save contact (keeps the name and phone with this record for now)
-        </label>
+        <div className="col-span-full flex flex-wrap items-center gap-3 text-[12px] text-ink-2">
+          <span className="flex min-w-[220px] items-center gap-1.5">
+            From the phone book
+            <ContactSelect
+              value={d.contactId}
+              className={`${small} min-w-0 flex-1`}
+              onChange={(c) => setD(c ? { ...d, contactId: c.id, who: d.who || c.company || c.name, phone: d.phone || c.phones[0]?.number || "" } : { ...d, contactId: "" })}
+            />
+          </span>
+          {!d.contactId && (
+            <label className="flex items-center gap-1.5">
+              <input type="checkbox" checked={d.saveContact} onChange={(e) => setD({ ...d, saveContact: e.target.checked })} className="accent-teal" /> Save contact (adds them to the phone book and links them)
+            </label>
+          )}
+        </div>
       </form>
       <ul className="space-y-1.5">
         {rows.map((p) => {
@@ -102,6 +125,7 @@ export function PendingPanel() {
               <span className="min-w-0 flex-1 truncate text-ink">
                 {p.who} {p.what && <span className="text-ink-3">· {p.what}</span>} <QuestionMark q={p.question} />
               </span>
+              <ContactChip id={p.contactId} className="max-w-[180px]" />
               {p.phone && (
                 <a href={`tel:${p.phone.replace(/[^\d+]/g, "")}`} className="flex items-center gap-1 font-mono text-[11px] text-ink-3 hover:text-teal">
                   <Phone size={11} /> {p.phone}
@@ -119,7 +143,15 @@ export function PendingPanel() {
               <button aria-label={`Delete pending from ${p.who}`} onClick={() => void remove(p.id)} className={del}>
                 <Trash2 size={13} />
               </button>
-              {editing === p.id && <EditFields spec={PENDING_FIELDS} value={p as unknown as Record<string, unknown>} onPatch={(x) => void update(p.id, x as Partial<Pending>)} onClose={() => setEditing(null)} />}
+              {editing === p.id && (
+                <>
+                  <EditFields spec={PENDING_FIELDS} value={p as unknown as Record<string, unknown>} onPatch={(x) => void update(p.id, x as Partial<Pending>)} onClose={() => setEditing(null)} />
+                  <span className="flex w-full items-center gap-1.5 text-[12px] text-ink-2">
+                    Phone-book contact
+                    <ContactSelect value={p.contactId} className={`${small} min-w-0 max-w-xs flex-1`} onChange={(c) => void update(p.id, { contactId: c?.id ?? undefined })} />
+                  </span>
+                </>
+              )}
             </li>
           );
         })}

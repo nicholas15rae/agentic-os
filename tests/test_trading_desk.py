@@ -381,6 +381,9 @@ class DeskTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.desk.set_mode("FULL_AUTO", "t", confirm=True)
         self.assertEqual(self.submit(intent_id="intent-0002", symbol="QQQ")["status"], "rejected")
+        # The bridge shows a fresh open-order list with no KILL- order left, so the reset lifts the guard stand-down
+        # and re-arming works. (Without that proof, re-arming stays refused: Desk._stood_down fails closed.)
+        self.desk.bridge = FakeBridge(openOrdersAt=NOW)
         self.desk.reset("RESET", "t")
         self.desk.set_mode("FULL_AUTO", "t", confirm=True)
         self.assertEqual(self.desk.view()["audit"]["ok"], True)

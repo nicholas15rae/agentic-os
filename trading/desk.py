@@ -36,13 +36,14 @@ import comms
 import failures
 import kill_switch
 from audit import AuditLog
-from config import data_dir
+from config import data_dir, load_config
 from executor import ExecutionRefused, Executor
 from fx import FxSource, merged_rates
 from intents import IntentError, OrderIntent, RiskLimits, load_limits, parse_intent
 from quantgress import last_report as quantgress_last_report
 from trading_rag import TradingRag
 import journal as jr
+from telemetry import exec_key, open_qty
 from callbook import CallBook
 import options as opt
 import outcomes
@@ -69,11 +70,10 @@ GUARD_RETRY_MAX_S = 300.0  # ...up to this (expiry day leaves no room for longer
 KILL_SETTLE_S = 120.0  # after a kill with nothing left locked: how long its flatten's market orders get before the guard resumes
 
 
-def open_qty(o: dict[str, Any]) -> float:
-    """Still-working size of a bridge openOrders row. Before TWS sends an orderStatus, `remaining` reads 0 on a live
-    order, so a not-done row without a positive remaining counts as quantity - filled (as reconcile._open_qty)."""
-    rem = float(o.get("remaining") or 0)
-    return rem if rem > 0 else max(float(o.get("quantity") or 0) - float(o.get("filled") or 0), 0.0)
+ORDERS_STALE_S = 30.0  # the bridge refreshes openOrders every ~5 s: older than this and the list can't be trusted
+# Closing orders the options guard can't cancel (other TWS clients: kill switch, overseer, desk-cli) or already owns:
+# netted out of its own exits, so a line is never sold twice (reconcile.KNOWN_REF_PREFIXES).
+GUARD_NETTED_PREFIXES = ("GUARD-", "KILL-", "MSL-", "DMS-", "CLI-")
 
 DESK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS intents (
@@ -172,6 +172,10 @@ class Desk:
         self._killed = False  # set by a live kill(); cleared by reset() or _stood_down(): the options guard stands down meanwhile
         self._kill_running = False
         self._kill_done_at = 0.0
+        try:
+            self._exec_client = int(load_config().client_ids.get("exec", 13))  # the executor's TWS client id
+        except Exception:  # noqa: BLE001
+            self._exec_client = 13
         self._lock = asyncio.Lock()
         self._db = self.d / "desk.db"
         with self._conn() as c:
@@ -237,6 +241,14 @@ class Desk:
                 (intent.intent_id, status, intent.symbol, intent.action, decision.quantity or intent.quantity,
                  json.dumps(intent.to_dict()), json.dumps(decision.to_dict()), json.dumps(result, default=str) if result is not None else None, now, now),
             )
+
+    def _note_exit_fills(self, intent_id: str, exit_fills: dict[str, float], seen: dict[str, float]) -> None:
+        """Merge newly seen exit executions (keyed by exec_key, so a correction replaces the fill it corrects) into
+        `exit_fills` and persist them on the intent row when anything changed."""
+        changed = {k: v for k, v in seen.items() if exit_fills.get(k) != v}
+        if changed:
+            exit_fills.update(changed)
+            self._merge_result(intent_id, {"exitFills": exit_fills})
 
     def _merge_result(self, intent_id: str, patch: dict[str, Any]) -> None:
         """Add keys to an intent's stored result without touching its status or `updated` (recent-activity checks)."""
@@ -479,7 +491,8 @@ class Desk:
             if kill_switch.is_locked(self.d):
                 raise PermissionError("trading is LOCKED — reset the kill switch first")
             if self._stood_down():  # a kill just ran (its flatten still settling): don't re-arm with the guard stood down
-                raise PermissionError("the kill switch just ran: reset it, or wait for its flatten to settle, before re-arming")
+                raise PermissionError("the kill switch just ran and its flatten isn't confirmed done yet (still working at TWS, "
+                                      "or the bridge can't show its open orders): wait for that before re-arming")
             if not confirm:
                 raise PermissionError(f"switching to {mode} needs confirm=true")
         prev = self.state()["mode"]
@@ -492,32 +505,64 @@ class Desk:
         return s
 
     async def kill(self, reason: str, actor: str, dry_run: bool = False) -> dict[str, Any]:
-        if not dry_run:
-            # Sever the agent BEFORE the network steps so nothing new is queued meanwhile. The options guard and the
-            # executor's risk-reducing path stand down too, in-process, so even a failed lock stamp can't let a guard
-            # exit race the kill's flatten (kill_switch.allows_risk_reducing is the cross-process signal).
-            self._killed = True
-            self._kill_running = True
-            self.executor.stand_down = True
-            self._save_state(mode="ADVISORY", agentHalted=True)
-            with self._conn() as c:
-                c.execute("UPDATE intents SET status='expired', updated=? WHERE status='pending_approval'", (self.clock(),))
-        try:
-            return await kill_switch.execute_kill(reason=reason, actor=actor, dry_run=dry_run, connect=self._kill_connect, audit=self.audit, d=self.d,
+        if dry_run:
+            return await kill_switch.execute_kill(reason=reason, actor=actor, dry_run=True, connect=self._kill_connect, audit=self.audit, d=self.d,
                                                  market_order=self._kill_market_order)
+        if self._kill_running:
+            # A second live E-stop while one runs (button + hotkey, two devices): never flatten twice at once.
+            self.audit.append("kill_already_running", {"reason": reason}, ref="kill", verdict="IGNORED", actor=actor)
+            return {"ok": True, "alreadyRunning": True, "dryRun": False, "note": "A kill is already running: nothing more was sent.",
+                    "steps": [], "cancelled": [], "flatten": [], "errors": []}
+        # The options guard and the executor's risk-reducing path stand down, in-process, so even a failed lock stamp
+        # can't let a guard exit race the kill's flatten (kill_switch.allows_risk_reducing is the cross-process signal).
+        self._killed = True
+        self._kill_running = True
+        self.executor.stand_down = True
+        pre_errors: list[str] = []
+        try:
+            # Sever the agent BEFORE the network steps so nothing new is queued meanwhile. Best-effort: e.g. a state.json
+            # replace refused by Windows (another process has it open) must never stop the lock / cancel / flatten.
+            try:
+                self._save_state(mode="ADVISORY", agentHalted=True)
+            except Exception as e:  # noqa: BLE001
+                pre_errors.append(f"halt state: {type(e).__name__}: {e}")
+            try:
+                with self._conn() as c:
+                    c.execute("UPDATE intents SET status='expired', updated=? WHERE status='pending_approval'", (self.clock(),))
+            except Exception as e:  # noqa: BLE001
+                pre_errors.append(f"expire pending cards: {type(e).__name__}: {e}")
+            inc = await kill_switch.execute_kill(reason=reason, actor=actor, dry_run=False, connect=self._kill_connect, audit=self.audit, d=self.d,
+                                                 market_order=self._kill_market_order)
+            if pre_errors:
+                inc.setdefault("errors", []).extend(pre_errors)
+                inc["ok"] = False
+                self.audit.append("kill_preamble_failed", {"errors": pre_errors}, ref=str(inc.get("incidentId", "")), verdict="ERROR", actor=actor)
+            return inc
         finally:
-            if not dry_run:
-                self._kill_running = False
-                self._kill_done_at = self.clock()
+            self._kill_running = False
+            self._kill_done_at = self.clock()
+
+    def _kill_orders_working(self) -> bool | None:
+        """Is the kill's flatten still working at TWS (any KILL- order with open quantity)? None = can't tell: the bridge
+        isn't connected, or its open-order list is missing or stale. Outside the session those MKT DAY orders queue until
+        the open, so a timer alone can't say the flatten is done."""
+        snap = self.bridge.snapshot()
+        at = snap.get("openOrdersAt")
+        if snap.get("state") != "CONNECTED" or not at or self.clock() - float(at) > ORDERS_STALE_S:
+            return None
+        return any((o.get("orderRef") or "").startswith("KILL-") and open_qty(o) > 0 for o in snap.get("openOrders") or [])
 
     def _stood_down(self) -> bool:
-        """The in-process stand-down after a kill: True while the kill runs, while anything is locked, and for
-        KILL_SETTLE_S after it finished (its market orders filling). Then it clears itself, audited, however the lock
-        went away: Desk.reset, desk-cli unlock (another process), or a kill whose lock step failed (no lock at all).
-        Otherwise unlock + re-arm would resume entries with the options guard silently off."""
+        """The in-process stand-down after a kill. It holds while the kill runs, while anything is locked, for at least
+        KILL_SETTLE_S after it finished, and while its flatten orders (KILL-) are still working or that can't be checked
+        (fail closed). Then it clears itself, audited, however the lock went away: Desk.reset, desk-cli unlock (another
+        process), or a kill whose lock step failed. Otherwise unlock + re-arm would resume entries with the options
+        guard silently off; lifting it on a timer alone would let the guard sell a line the kill's queued flatten sells."""
         if not self._killed:
             return False
         if self._kill_running or kill_switch.is_locked(self.d) or self.clock() - self._kill_done_at < KILL_SETTLE_S:
+            return True
+        if self._kill_orders_working() is not False:
             return True
         self._killed = False
         self.executor.stand_down = False
@@ -526,8 +571,11 @@ class Desk:
 
     def reset(self, confirm: str, actor: str) -> dict[str, Any]:
         out = kill_switch.reset_lock(confirm, actor, self.audit, self.d)
-        self._killed = False
-        self.executor.stand_down = False
+        # An explicit reset lifts the stand-down at once, unless the kill is still running or its flatten is still
+        # working (or can't be checked): then _stood_down() lifts it when that's done.
+        if not self._kill_running and self._kill_orders_working() is False:
+            self._killed = False
+            self.executor.stand_down = False
         self._save_state(agentHalted=False)  # mode stays ADVISORY; re-arming is a separate, confirmed step
         return out
 
@@ -700,10 +748,14 @@ class Desk:
             return report
         olim = self.option_limits()
         positions, orders, fills = snap.get("positions") or [], snap.get("openOrders") or [], snap.get("fills") or []
-        guard_working = [o for o in orders if (o.get("orderRef") or "").startswith("GUARD-")]
+        # Closing orders the guard must net out of its own exits: its own GUARD- ones, and ones it can't cancel (another TWS
+        # client's: the kill switch's KILL-, the overseer's MSL-/DMS-, desk-cli's CLI-). Not the desk's own resting
+        # take-profit (executor client, ref = intent id): cancel_working takes that out before an exit.
+        netted = [o for o in orders if (o.get("orderRef") or "").startswith(GUARD_NETTED_PREFIXES)
+                  or (o.get("clientId") is not None and o.get("clientId") != self._exec_client)]
         under = lambda con_id, sym: next((x.get("underlying") or x.get("symbol") for x in positions if x.get("conId") == con_id), sym)  # noqa: E731
         # 1. Expiry flatten (shorts bought back before longs are sold).
-        plan = flatten_plan(positions, guard_working, self.clock(), olim)
+        plan = flatten_plan(positions, netted, self.clock(), olim)
         if plan:
             if contract_factory is None:
                 from ib_async import Contract as contract_factory  # noqa: N813
@@ -769,30 +821,33 @@ class Desk:
             # cover today), so a later day still sees them.
             leg_con = held[0].get("conId")
             exit_fills = dict((row.get("result") if isinstance(row.get("result"), dict) else {}).get("exitFills") or {})
-            new = {str(f["execId"]): float(f.get("shares") or 0) for f in fills
-                   if f.get("orderRef") == ref and f.get("conId") == leg_con and f.get("execId") and str(f["execId"]) not in exit_fills}
-            if new:
-                exit_fills.update(new)
-                self._merge_result(iid, {"exitFills": exit_fills})
-            filled = sum(exit_fills.values())
-            want = min(int(held[0]["position"]), (row["decision"]["quantity"] or intent.quantity) - filled)
+            self._note_exit_fills(iid, exit_fills, {exec_key(f["execId"]): float(f.get("shares") or 0) for f in fills
+                                                    if f.get("orderRef") == ref and f.get("conId") == leg_con and f.get("execId")})
+            # Other closing orders on the long leg (the kill's queued flatten, the overseer's, a GUARD-EXP) shrink what
+            # is left to sell; so does this stop's own working exit.
+            other = sum(open_qty(o) for o in netted if o.get("orderRef") != ref and o.get("conId") == leg_con and o.get("action") == "SELL")
             working = sum(open_qty(o) for o in orders if o.get("orderRef") == ref)
-            qty = int(want - working)
+            need = lambda work: int(min(int(held[0]["position"]) - other, (row["decision"]["quantity"] or intent.quantity)  # noqa: E731
+                                        - sum(exit_fills.values())) - work)
+            qty = need(working)
             if qty <= 0:
-                report["waiting"].append({"key": key, "intentId": iid, "why": f"stop {ref} already done or working (filled {filled:g}, working {working:g})"})
+                report["waiting"].append({"key": key, "intentId": iid, "why": f"stop {ref} already done or working "
+                                          f"(filled {sum(exit_fills.values()):g}, working {working:g}, other exits {other:g})"})
                 continue
             wait = self._guard_backoff(key)
             if wait:
                 report["waiting"].append({"key": key, "intentId": iid, "retryAt": wait})
                 continue
             try:
-                # The bridge's snapshot is polled; TWS's own list right now is the last word on what's still working.
+                # The bridge's view is polled, and it only sees another client's fills as TWS's master client: the
+                # executor's own executions and open orders, right now, are the last word.
+                self._note_exit_fills(iid, exit_fills, await self.executor.exit_fills(ref, leg_con))
                 fresh = await self.executor.working_qty(ref)
-                if fresh > working:
-                    qty = int(want - fresh)
-                    if qty <= 0:
-                        report["waiting"].append({"key": key, "intentId": iid, "why": f"stop {ref} still working at TWS ({fresh:g})"})
-                        continue
+                qty = need(max(working, fresh))
+                if qty <= 0:
+                    report["waiting"].append({"key": key, "intentId": iid, "why": f"stop {ref} already done or working at TWS "
+                                              f"(filled {sum(exit_fills.values()):g}, working {max(working, fresh):g})"})
+                    continue
                 await self.executor.cancel_working(ref=iid)  # the resting take-profit
                 ib = await self.executor._ensure(risk_reducing=True)
                 contract = await self.executor._contract(ib, intent, {})

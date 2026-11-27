@@ -144,13 +144,26 @@ def flatten_plan(positions: list[dict[str, Any]], open_orders: list[dict[str, An
     """Closing orders for option positions that must not be held into expiry.
 
     Shorts (negative positions) are bought back first, then longs are sold, so a
-    vertical is never momentarily a naked short. Lines that already have a
-    working order are skipped (no duplicate exits).
+    vertical is never momentarily a naked short. `open_orders` are closing orders
+    the guard must not duplicate (its own GUARD- exits, and ones it can't cancel:
+    the kill switch's, the overseer's, desk-cli's): their open quantity on the
+    closing side is netted out, so no line is sold twice. A row without a side or
+    a size covers the whole line (fail closed).
     """
-    working = {o.get("conId") for o in open_orders}
-    due = [p for p in positions if p.get("secType") == "OPT" and p.get("position") and p.get("expiry")
-           and must_flatten(p["expiry"], now, lim) and p.get("conId") not in working]
-    due.sort(key=lambda p: (p["position"] > 0, p.get("underlying") or "", p.get("expiry")))
-    return [{"conId": p["conId"], "symbol": p.get("symbol"), "expiry": p["expiry"],
-             "action": "BUY" if p["position"] < 0 else "SELL", "qty": abs(p["position"]),
-             "reason": f"expiry guard: {dte(p['expiry'], now)} DTE"} for p in due]
+    from telemetry import open_qty
+
+    rows = []
+    for p in positions:
+        if not (p.get("secType") == "OPT" and p.get("position") and p.get("expiry") and must_flatten(p["expiry"], now, lim)):
+            continue
+        action = "BUY" if p["position"] < 0 else "SELL"
+        on_line = [o for o in open_orders if o.get("conId") == p.get("conId")]
+        if any(not o.get("action") or not (o.get("quantity") or o.get("remaining")) for o in on_line):
+            continue  # unknown side / size: treat as covering the line
+        qty = abs(p["position"]) - sum(open_qty(o) for o in on_line if o.get("action") == action)
+        if qty > 0:
+            rows.append(((p["position"] > 0, p.get("underlying") or "", p["expiry"]),
+                         {"conId": p["conId"], "symbol": p.get("symbol"), "expiry": p["expiry"], "action": action,
+                          "qty": qty, "reason": f"expiry guard: {dte(p['expiry'], now)} DTE"}))
+    rows.sort(key=lambda r: r[0])
+    return [r[1] for r in rows]

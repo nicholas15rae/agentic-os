@@ -71,16 +71,6 @@ export function isRepeatActivation(e: Pick<KeyboardEvent, "key" | "repeat">): bo
   return e.repeat && (e.key === "Enter" || e.key === " ");
 }
 
-/** One deliberate click on the red button: the next count, and whether this click trips it (the last of KILL_PRESSES).
- *  TradingDesk's 4 s timer resets `pressed` to 0 between clicks. */
-export function advanceKillPress(pressed: number, presses = KILL_PRESSES): { pressed: number; fire: boolean } {
-  const next = pressed + 1;
-  return next < presses ? { pressed: next, fire: false } : { pressed: 0, fire: true };
-}
-
-/** Only a live kill in flight disables the E-stop: it stays usable during a dry run or a reset. */
-export const killButtonBusy = (busy: string | null): boolean => busy === "kill";
-
 /** The red button's onKeyDown: a held Enter / Space must not click it again. */
 export function guardKillButtonKeydown(e: Pick<KeyboardEvent, "key" | "repeat" | "preventDefault">): void {
   if (isRepeatActivation(e)) e.preventDefault();
@@ -158,6 +148,7 @@ export function createKillKeyListener(deps: {
 }
 
 export function summarizeIncident(r: KillIncident & { note?: string }): string {
+  if (r.alreadyRunning) return r.note ?? "A kill is already running: nothing more was sent.";
   if (r.failsafe) return r.note ?? "Lock written by the gateway; cancel/flatten started.";
   const bad = r.steps?.filter((s) => !s.ok).map((s) => `${s.step}: ${s.detail}`) ?? [];
   const head = `${r.dryRun ? "Dry run" : "Locked"} · ${r.cancelled?.length ?? 0} order(s) ${r.dryRun ? "to cancel" : "cancelled"} · ${r.flatten?.length ?? 0} position(s) ${r.dryRun ? "to flatten" : "flattening"}`;

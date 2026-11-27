@@ -92,7 +92,8 @@ def write_lock(reason: str, actor: str, incident_id: str, d: Path | None = None)
         now = time.time()
         data = {"locked": True, "at": now, "reason": reason, "actor": actor, "incidentId": incident_id, "killedAt": now}
         _write_json(p, data)  # with or without the file lock; if this raises, execute_kill records it and still cancels / flattens
-        return data
+        # Written without the file lock: a concurrent breaker write could replace it. Say so (in-memory only).
+        return {**data, "stampFailed": f"lock written without the file lock ({no_lock})"} if no_lock else data
 
 
 def _stamp_killed(p: Path, existing: dict[str, Any], incident_id: str, reason: str, no_lock: str) -> dict[str, Any]:
@@ -225,8 +226,11 @@ async def execute_kill(
         try:
             inc["lock"] = write_lock(reason, actor, incident_id, d)
             stamp = inc["lock"].get("stampFailed")
-            step("lock", True, f"TRADING_LOCKED written ({lock_path(d)})" + (f"; kill stamp failed: {stamp}" if stamp else ""))
+            step("lock", True, f"TRADING_LOCKED written ({lock_path(d)})")
             if stamp:
+                # Its own failed step, so the operator sees it (incident ok=False): the lock holds, but another process
+                # may not know a flatten ran (the bridge's in-process stand-down still covers its own options guard).
+                step("lock_stamp", False, stamp)
                 inc["errors"].append(f"lock stamp: {stamp}")
         except Exception as e:  # noqa: BLE001
             step("lock", False, f"{type(e).__name__}: {e}")

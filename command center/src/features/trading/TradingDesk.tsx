@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, ShieldCheck, ShieldAlert } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import { useToasts } from "@/features/reminders/notify";
 import { usePoll } from "@/lib/use-poll";
-import { failureText, tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
+import { approveToastTitle, failureText, tradingApi, type DeskIntent, type DeskView, type ExecMode } from "@/features/trading/ibkr";
 import { KillButton } from "@/features/trading/KillButton";
-import { advanceKillPress, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, killButtonBusy, summarizeIncident, tripKillSwitch } from "@/features/trading/kill-switch";
+import { createKillArm, KILL_CONFIRM_MS, KILL_HOTKEY_LABEL, KILL_PRESSES, summarizeIncident, tripKillSwitch, useKillInFlight } from "@/features/trading/kill-switch";
 
 const MODES: { id: ExecMode; label: string; hint: string }[] = [
   { id: "ADVISORY", label: "Advisory", hint: "Signals and hypothetical trades only. Nothing is sent." },
@@ -40,14 +40,29 @@ export function TradingDesk() {
     }
   };
 
-  const kill = (dryRun: boolean) =>
-    run(dryRun ? "dry" : "kill", async () => {
-      const r = await tripKillSwitch(dryRun ? "dry run from Trading UI" : "red button in Trading UI (confirmed)", dryRun);
-      toast({ title: dryRun ? (r.ok ? "Kill-switch dry run passed" : "Kill-switch dry run found problems") : "Trading LOCKED", body: summarizeIncident(r), tone: dryRun && r.ok ? "info" : "error" });
+  const dryRun = () =>
+    run("dry", async () => {
+      const r = await tripKillSwitch("dry run from Trading UI", true);
+      toast({ title: r.ok ? "Kill-switch dry run passed" : "Kill-switch dry run found problems", body: summarizeIncident(r), tone: r.ok ? "info" : "error" });
     });
 
-  // Multi-press: KILL_PRESSES clicks, each within KILL_CONFIRM_MS of the last (the timer restarts on every
-  // click); a pause longer than that disarms it. Only the last click fires.
+  // The live kill's in-flight flag is its own (useKillInFlight, set by tripKillSwitch for either E-stop), not the shared
+  // `busy` slot: a dry run finishing mid-kill must not re-enable the E-stop (a second press would flatten again).
+  const killing = useKillInFlight((s) => s.on);
+  const liveKill = async () => {
+    try {
+      const r = await tripKillSwitch("red button in Trading UI (confirmed)", false);
+      toast({ title: r.alreadyRunning ? "Kill switch already running" : "Trading LOCKED", body: summarizeIncident(r), tone: "error" });
+    } catch (e) {
+      toast({ title: "Kill switch call failed", body: `${e instanceof Error ? e.message : String(e)}. Use Ctrl+Shift+X or the bridge CLI.`, tone: "error" });
+    } finally {
+      refresh();
+    }
+  };
+
+  // KILL_PRESSES deliberate clicks, each within KILL_CONFIRM_MS of the last: createKillArm (tested) enforces it,
+  // so a click after a longer pause starts over. The timer only resets the label once the window has passed.
+  const arm = useRef(createKillArm()).current;
   const [pressed, setPressed] = useState(0);
   const armed = pressed > 0;
   useEffect(() => {
@@ -56,9 +71,14 @@ export function TradingDesk() {
     return () => window.clearTimeout(t);
   }, [armed, pressed]);
   const pressKill = () => {
-    const r = advanceKillPress(pressed);
-    setPressed(r.pressed);
-    if (r.fire) void kill(false);
+    const r = arm.press(Date.now());
+    if (r.kind === "arming") return setPressed(KILL_PRESSES - r.remaining);
+    setPressed(0);
+    void liveKill();
+  };
+  const cancelKill = () => {
+    arm.cancel();
+    setPressed(0);
   };
 
   const locked = !!data?.lock;
@@ -69,19 +89,19 @@ export function TradingDesk() {
       action={
         <div className="flex items-center gap-2">
           <button
-            onClick={() => void kill(true)}
-            disabled={!!busy}
+            onClick={() => void dryRun()}
+            disabled={!!busy || killing}
             className="pill-glass !h-8 text-[11px]"
             title="Rehearse the E-stop: connects read-only and lists what would be cancelled and flattened. Changes nothing."
           >
             {busy === "dry" ? <Loader2 size={12} className="animate-spin" /> : null} Dry run
           </button>
           {armed && (
-            <button onClick={() => setPressed(0)} className="pill-glass !h-8 text-[11px]" aria-label="Cancel kill switch">
+            <button onClick={cancelKill} className="pill-glass !h-8 text-[11px]" aria-label="Cancel kill switch">
               Cancel
             </button>
           )}
-          <KillButton pressed={pressed} busy={killButtonBusy(busy)} onPress={pressKill} />
+          <KillButton pressed={pressed} busy={killing} onPress={pressKill} />
         </div>
       }
     >
@@ -166,7 +186,7 @@ export function TradingDesk() {
               {data.pending.map((p) => (
                 <TradeCard key={p.intentId} p={p} busy={busy === p.intentId} onApprove={() => void run(p.intentId, async () => {
                   const r = await tradingApi.approve(p.intentId);
-                  toast({ title: r.ok ? "Order sent to paper" : `Not sent: ${r.failure?.label ?? r.status ?? "error"}`, body: r.failure?.detail ?? r.error ?? r.decision?.reasons.join(" · ") ?? "", tone: r.ok ? "info" : "warn" });
+                  toast({ title: approveToastTitle(r), body: r.failure?.detail ?? r.error ?? r.decision?.reasons.join(" · ") ?? "", tone: r.ok ? "info" : "warn" });
                 })} onReject={() => void run(p.intentId, () => tradingApi.reject(p.intentId))} />
               ))}
             </div>

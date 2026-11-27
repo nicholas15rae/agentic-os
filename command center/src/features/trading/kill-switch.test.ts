@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { isEditingShortcut } from "@/lib/editing-keys";
 import {
-  advanceKillPress,
   classifyKillKey,
   createKillArm,
   createKillKeyListener,
@@ -9,7 +8,6 @@ import {
   isKillHotkey,
   isRepeatActivation,
   KILL_PRESSES,
-  killButtonBusy,
   killButtonProps,
   summarizeIncident,
   type KillToast,
@@ -85,20 +83,6 @@ describe("the kill chord gets past the text-editing guard", () => {
           expect(isKillHotkey(e)).toBe(true);
           expect(isEditingShortcut(e)).toBe(false); // else installEditingKeyGuard swallows it before the kill listener
         }
-  });
-});
-
-describe("red button: press counting and busy (TradingDesk.pressKill / KillButton busy)", () => {
-  it("trips only on the KILL_PRESSES-th deliberate click, then starts over", () => {
-    expect(KILL_PRESSES).toBe(3);
-    expect(advanceKillPress(0)).toEqual({ pressed: 1, fire: false });
-    expect(advanceKillPress(1)).toEqual({ pressed: 2, fire: false });
-    expect(advanceKillPress(2)).toEqual({ pressed: 0, fire: true });
-    expect(advanceKillPress(0, 2)).toEqual({ pressed: 1, fire: false });
-  });
-  it("stays usable during a dry run or a reset; only a live kill in flight disables it", () => {
-    expect(killButtonBusy("kill")).toBe(true);
-    for (const b of [null, "dry", "reset", "mode"]) expect(killButtonBusy(b)).toBe(false);
   });
 });
 
@@ -209,5 +193,26 @@ describe("summarizeIncident", () => {
     const s = summarizeIncident({ ...base, dryRun: false, ok: false, steps: [{ step: "connect", ok: false, detail: "refused" }] });
     expect(s).toContain("connect: refused");
     expect(summarizeIncident({ ...base, dryRun: false, steps: [], failsafe: true, note: "lock written by the gateway" })).toBe("lock written by the gateway");
+  });
+});
+
+describe("tripKillSwitch sets the live-kill in-flight flag", () => {
+  it("on for a live kill until it settles; a dry run leaves it alone", async () => {
+    vi.resetModules();
+    let release!: () => void;
+    vi.doMock("@/features/trading/ibkr", () => ({ tradingApi: { kill: vi.fn(() => new Promise((r) => (release = () => r({ ok: true })))) } }));
+    vi.doMock("@/features/reminders/notify", () => ({ useToasts: () => () => undefined }));
+    const ks = await import("./kill-switch");
+    const live = ks.tripKillSwitch("t", false);
+    expect(ks.useKillInFlight.getState().on).toBe(true);
+    release();
+    await live;
+    expect(ks.useKillInFlight.getState().on).toBe(false);
+    const dry = ks.tripKillSwitch("t", true);
+    expect(ks.useKillInFlight.getState().on).toBe(false);
+    release();
+    await dry;
+    vi.doUnmock("@/features/trading/ibkr");
+    vi.doUnmock("@/features/reminders/notify");
   });
 });

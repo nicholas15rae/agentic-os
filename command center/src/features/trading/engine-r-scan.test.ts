@@ -42,6 +42,18 @@ describe("scan rows: a desk-refused order never reads as a trade", () => {
     expect(html).not.toContain("Not sent");
   });
 
+  it("pins the 'may still be working' matcher to the executor's real texts", () => {
+    const failed = (error: string) => ({ ...sent("SPY", "failed"), desk: { status: "failed", reasons: [], error } });
+    for (const e of [
+      "TWS didn't acknowledge the order within 15s; the cancel for #4 could NOT be sent, so it may still be working [#4 LMT PendingSubmit; #5 STP PendingSubmit]",
+      "TWS rejected the order: Warning 321: The API interface is currently in Read-Only mode.; the cancel for #4 could NOT be sent, so it may still be working [#4 LMT ValidationError]",
+    ]) expect(scanRowView(failed(e)).unsure).toBe(true);
+    for (const e of [
+      "TWS didn't acknowledge the order within 15s; cancelled to avoid an orphan [#4 LMT PendingSubmit]",
+      "TWS rejected the order: Error 201: Order rejected - reason: no trading permissions",
+    ]) expect(scanRowView(failed(e))).toMatchObject({ refused: true, unsure: false });
+  });
+
   it("matches the Python side's list of no-trade desk statuses", () => {
     const py = readFileSync(fileURLToPath(new URL("../../../../trading/rule_engine.py", import.meta.url)), "utf8");
     const m = /^ENTRY_STATUSES_EXCLUDED = \(([^)]*)\)/m.exec(py);

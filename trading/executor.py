@@ -369,6 +369,20 @@ class Executor:
             total += rem if rem > 0 else max(float(t.order.totalQuantity or 0) - float(t.orderStatus.filled or 0), 0.0)
         return total
 
+    async def exit_fills(self, ref: str, con_id: Any) -> dict[str, float]:
+        """This client's executions today for orderRef `ref` on contract `con_id`, {exec_key: shares} (a correction
+        replaces the fill it corrects). The executor placed the exits, so its own reqExecutions sees them; the bridge
+        (client 11) only would as TWS's master API client."""
+        from telemetry import exec_key
+
+        ib = await self._ensure(risk_reducing=True)
+        out: dict[str, float] = {}
+        for f in await ib.reqExecutionsAsync() or []:
+            ex = f.execution
+            if (getattr(ex, "orderRef", "") or "") == ref and getattr(f.contract, "conId", None) == con_id:
+                out[exec_key(ex.execId)] = float(ex.shares or 0)
+        return out
+
     async def cancel_ids(self, order_ids: list[int], wait_s: float = 10.0, sleep: Any = None) -> list[dict[str, Any]]:
         """Cancel THIS client's (13) working orders by id — for desk-cli / the overseer, which can't cancel
         another client id's orders. Risk-reducing, so allowed while LOCKED (the endpoint gate still applies;

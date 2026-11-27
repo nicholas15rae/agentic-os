@@ -3,7 +3,7 @@
  * Model-written text is only ever returned as plain strings for React to escape; nothing here parses it.
  */
 import { GatewayError } from "@/lib/gateway";
-import type { AuditRow } from "@/features/trading/ibkr";
+import { mayStillBeWorking, type AuditRow } from "@/features/trading/ibkr";
 import { APPROVE_PHRASE, type CompareLabel, type RuleDiff, type RuleParamName, type RuleParams, type RuleScanRow, type SetMetrics } from "@/features/trading/EngineRPanel.contract";
 
 /** rules.PARAM_SCHEMA order (the panel lists parameters and diffs in this order). */
@@ -123,7 +123,7 @@ export interface ScanRowView {
 
 export function scanRowView(r: Pick<RuleScanRow, "action" | "desk">): ScanRowView {
   const st = r.desk?.status;
-  if (r.action === "submitted" && st === "failed" && /may still be working/i.test(r.desk?.error ?? ""))
+  if (r.action === "submitted" && st === "failed" && mayStillBeWorking(r.desk?.error))
     return { label: "desk failed · may still be working", tone: "text-amber-light", refused: false, unsure: true };
   if (r.action === "submitted" && st && DESK_REFUSED.has(st)) return { label: `desk ${st}`, tone: "text-alert", refused: true, unsure: false };
   return { label: r.action.replace("_", " "), tone: SCAN_TONE[r.action] ?? "text-ink-3", refused: false, unsure: false };

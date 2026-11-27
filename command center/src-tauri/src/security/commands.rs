@@ -622,6 +622,62 @@ pub async fn security_companion_sign(app: AppHandle, id: String, nonce: String, 
     Ok(CompanionSignature { sig, device_id })
 }
 
+/// The four session timeouts Settings → Security edits (minutes).
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Timeouts {
+    pub idle_lock_minutes: f64,
+    pub reauth_minutes: f64,
+    pub elevation_idle_minutes: f64,
+    pub elevation_max_minutes: f64,
+}
+
+/// `text` (security.config.json) with the four timeouts replaced, clamped like every load; every
+/// other field is kept as written. Pure.
+pub fn with_timeouts(text: &str, t: &Timeouts) -> Result<(String, Timeouts), String> {
+    let mut v: serde_json::Value = if text.trim().is_empty() { json!({}) } else { serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("security.config.json is unreadable ({e})"))? };
+    let obj = v.as_object_mut().ok_or("security.config.json is not an object")?;
+    let session = obj.entry("session").or_insert_with(|| json!({}));
+    session["idleLockMinutes"] = json!(t.idle_lock_minutes);
+    session["reauthMinutes"] = json!(t.reauth_minutes);
+    let elev = obj.entry("elevation").or_insert_with(|| json!({}));
+    elev["idleMinutes"] = json!(t.elevation_idle_minutes);
+    elev["maxMinutes"] = json!(t.elevation_max_minutes);
+    let c: config::SecurityConfig = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    let c = c.clamped();
+    let applied = Timeouts { idle_lock_minutes: c.session.idle_lock_minutes, reauth_minutes: c.session.reauth_minutes, elevation_idle_minutes: c.elevation.idle_minutes, elevation_max_minutes: c.elevation.max_minutes };
+    // Store the clamped values, so the file says what is actually in force.
+    v["session"]["idleLockMinutes"] = json!(applied.idle_lock_minutes);
+    v["session"]["reauthMinutes"] = json!(applied.reauth_minutes);
+    v["elevation"]["idleMinutes"] = json!(applied.elevation_idle_minutes);
+    v["elevation"]["maxMinutes"] = json!(applied.elevation_max_minutes);
+    Ok((serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?, applied))
+}
+
+/// Settings → Security: change the session timeouts (needs a settings step-up). Hot-reloaded.
+#[tauri::command]
+pub fn security_set_timeouts(app: AppHandle, timeouts: Timeouts) -> Result<Status, String> {
+    if rt().is_hard() {
+        return Err(hard_err());
+    }
+    let p = policy();
+    if rt().sessions().use_elevation("settings", &p, super::now()).is_none() {
+        return Err("STEP_UP_REQUIRED:settings: confirm with your PIN to change the timeouts".into());
+    }
+    let path = super::dir().join(config::FILE);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let (out, applied) = with_timeouts(&text, &timeouts)?;
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    audit::log("timeouts_changed", Severity::Warn, Outcome::Success, Some("settings"), "desktop-ui", serde_json::to_value(&applied).unwrap_or_default());
+    emit(&app);
+    Ok(status(&app))
+}
+
 /// Companion phone: store the pairing key shown by `gabagool-cli pair-companion` (needs a
 /// settings step-up on this device).
 #[tauri::command]
@@ -676,4 +732,31 @@ pub async fn security_pin_setup(app: AppHandle, pin: String) -> Result<Status, S
     audit::log("pin_changed", Severity::Warn, Outcome::Success, None, "mobile-setup", json!({ "stored": place, "first": true }));
     emit(&app);
     Ok(status(&app))
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn timeouts_are_written_clamped_and_everything_else_is_kept() {
+        let text = r#"{"enabled":true,"session":{"idleLockMinutes":15,"reauthMinutes":60},"elevation":{"idleMinutes":5,"maxMinutes":10,"allowCompanion":false},"pin":{"maxAttempts":7}}"#;
+        let want = Timeouts { idle_lock_minutes: 30.0, reauth_minutes: 120.0, elevation_idle_minutes: 15.0, elevation_max_minutes: 60.0 };
+        let (out, applied) = with_timeouts(text, &want).unwrap();
+        assert_eq!(applied, want);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["elevation"]["allowCompanion"], false, "other fields kept");
+        assert_eq!(v["pin"]["maxAttempts"], 7);
+        assert_eq!(v["session"]["idleLockMinutes"], 30.0);
+        // Out of range: clamped, and the file says what is in force.
+        let wild = Timeouts { idle_lock_minutes: 999.0, reauth_minutes: 1.0, elevation_idle_minutes: 90.0, elevation_max_minutes: 5.0 };
+        let (out, applied) = with_timeouts(text, &wild).unwrap();
+        assert_eq!((applied.idle_lock_minutes, applied.reauth_minutes, applied.elevation_idle_minutes), (120.0, 5.0, 30.0));
+        assert!(applied.elevation_max_minutes >= applied.elevation_idle_minutes);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["session"]["idleLockMinutes"], 120.0);
+        // A missing file starts from the defaults.
+        assert!(with_timeouts("", &want).is_ok());
+        assert!(with_timeouts("not json", &want).is_err());
+    }
 }

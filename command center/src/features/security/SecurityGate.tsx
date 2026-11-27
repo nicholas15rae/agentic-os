@@ -8,9 +8,8 @@ import { systemNotify } from "@/features/reminders/notify";
 import { useSecurity } from "./store";
 import { LockScreen } from "./LockScreen";
 import { StepUpModal } from "./StepUpModal";
+import { reportActivity } from "./activity";
 
-/** User input reports activity to Rust at most this often (the idle auto-lock lives in Rust). */
-const TOUCH_EVERY_MS = 30_000;
 
 /**
  * App entry gate (desktop / mobile app). The app only mounts while Rust says the session is
@@ -64,17 +63,12 @@ function DesktopGate({ children }: { children: ReactNode }) {
   );
 }
 
-/** Throttled `security_touch` on real input (pointer, keys, wheel, touch) while unlocked. */
+/** Throttled `security_touch` on real input (pointer, keys, wheel, touch) while unlocked; Tony's
+ * turns report through the same throttle (`reportActivity`). */
 function useActivity(live: boolean) {
   useEffect(() => {
     if (!live) return;
-    let last = 0;
-    const on = () => {
-      const now = Date.now();
-      if (now - last < TOUCH_EVERY_MS) return;
-      last = now;
-      void securityApi.touch().catch(() => undefined);
-    };
+    const on = () => void reportActivity();
     const evs = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
     for (const e of evs) window.addEventListener(e, on, { passive: true, capture: true });
     on();

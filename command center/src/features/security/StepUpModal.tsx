@@ -27,7 +27,7 @@ export function StepUpModal() {
   if (!stepUp) return null;
   const canPhone = !!status?.companionPaired && !status.companionDevice;
   const label = MODULE_LABEL[stepUp.module] ?? stepUp.module;
-  const mins = status?.elevationIdleMinutes ?? 5;
+  const mins = status?.elevationIdleMinutes ?? 15;
 
   const close = (ok: boolean) => {
     ticket.current = null;

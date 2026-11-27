@@ -358,6 +358,7 @@ pub fn run() {
             security::commands::security_audit_recent,
             security::commands::security_companion_sign,
             security::commands::security_companion_store_key,
+            security::commands::security_set_timeouts,
             security::commands::security_companion_check_alerts,
             security::commands::security_pin_setup,
             system::system_stats,

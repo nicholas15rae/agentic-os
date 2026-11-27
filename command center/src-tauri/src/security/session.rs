@@ -231,10 +231,15 @@ impl Sessions {
         r
     }
 
-    /// User input (the caller ticks first, so an expired session stays locked).
+    /// User input (the caller ticks first, so an expired session stays locked). Section pass: it
+    /// also keeps every live step-up elevation alive while Nic is active (its idle timer), still
+    /// capped by the elevation's max lifetime; only an unused elevation lapses.
     pub fn touch(&mut self, now: f64) {
         if let Some(l) = self.live.as_mut() {
             l.activity = now;
+            for e in l.elevations.values_mut() {
+                e.used = now;
+            }
         }
     }
 
@@ -492,8 +497,29 @@ mod tests {
     }
 
     #[test]
+    fn activity_keeps_a_step_up_alive_until_its_max() {
+        // The defaults (section pass): 15 min unused, 60 min max.
+        let p = pol();
+        assert_eq!((p.elev_idle_s, p.elev_max_s), (900.0, 3600.0));
+        let mut s = unlocked(0.0);
+        s.elevate("settings", true, &p, 0.0).unwrap();
+        // Nic keeps working (input every 10 min, never touching Settings): the step-up stays.
+        for t in [600.0, 1200.0, 1800.0, 2400.0, 3000.0] {
+            assert_eq!(s.tick(&p, t), None);
+            s.touch(t);
+        }
+        assert!(s.use_elevation("settings", &p, 3300.0).is_some(), "still elevated after 55 min of activity");
+        assert_eq!(s.use_elevation("settings", &p, 3600.0), None, "the max lifetime still caps it");
+        // Without activity it lapses after the idle window.
+        let mut s = unlocked(0.0);
+        s.elevate("finance", true, &p, 0.0).unwrap();
+        s.tick(&p, 901.0);
+        assert_eq!(s.use_elevation("finance", &p, 901.0), None);
+    }
+
+    #[test]
     fn elevation_reverts_to_read_only() {
-        let p = pol(); // 5 min idle, 10 min max
+        let p = Policy { elev_idle_s: 300.0, elev_max_s: 600.0, ..pol() }; // 5 min idle, 10 min max
         let mut s = unlocked(0.0);
         assert_eq!(s.use_elevation("trading", &p, 1.0), None, "read-only by default");
         assert_eq!(s.elevate("trading", true, &p, 10.0).unwrap(), 310.0);
@@ -537,7 +563,7 @@ mod tests {
         let mut locked = Sessions::default();
         assert_eq!(locked.elevate_companion("trading", &p, 1.0).unwrap_err(), Refusal::NoSession);
         let mut s = unlocked(0.0);
-        assert_eq!(s.elevate_companion("trading", &p, 10.0).unwrap(), 310.0);
+        assert_eq!(s.elevate_companion("trading", &p, 10.0).unwrap(), 910.0, "15 min unused by default");
         assert!(s.use_elevation("trading", &p, 20.0).is_some());
         assert_eq!(s.use_elevation("finance", &p, 20.0), None, "only the approved module");
         s.hard_lock();

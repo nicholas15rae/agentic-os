@@ -27,6 +27,7 @@ import { useNav } from "@/stores/nav";
 import { isDesktopApp, useSettings } from "@/stores/settings";
 import { audioContext, createEngines, synthBytes, type SpeakOpts } from "./engines";
 import { onSpeechStart } from "./speech-start";
+import { reportActivity } from "@/features/security/activity";
 import { nextStreamChunk, perSentenceOpts, synthArgs, utteranceIdFor } from "./tts-text";
 import { fallbackNotice } from "./tts-fallback-notice";
 import { introLine } from "./handoff";
@@ -695,6 +696,8 @@ const addressesTony = (line: string, cfg: RoutingConfig) => stripWake(line) !== 
 export async function handleInput(text: string, opts: { channel: Channel; thread?: ThreadId; origin?: TurnOrigin; shown?: string }): Promise<void> {
   const t = text.trim();
   if (!t) return;
+  // Talking to Tony is using the app: it keeps the idle lock and open PIN step-ups from lapsing.
+  reportActivity();
   // An open "want me to finish …?" offer: a yes re-runs the dropped task, a no closes it.
   const ans = !hold.active && !store().pending && !opts.shown ? droppedTasks.answer(t) : null;
   if (ans?.kind === "resume") return handleInput(ans.task.line, { ...opts, thread: (opts.thread ?? ans.task.thread) as ThreadId, shown: t });

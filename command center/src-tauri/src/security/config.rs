@@ -268,7 +268,8 @@ impl Default for ResumeCfg {
 }
 impl Default for ElevationCfg {
     fn default() -> Self {
-        Self { idle_minutes: 5.0, max_minutes: 10.0, allow_companion: true }
+        // Section pass: 15 min unused / 60 min max (was 5 / 10, which read as a logout every 5 min).
+        Self { idle_minutes: 15.0, max_minutes: 60.0, allow_companion: true }
     }
 }
 impl Default for BiometricCfg {

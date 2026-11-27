@@ -76,7 +76,17 @@ export const securityApi = {
   companionCheckAlerts: (alerts: InboxAlert[]) => native<boolean[]>("security_companion_check_alerts", { alerts }),
   pinSetup: (pin: string) => native<SecurityStatus>("security_pin_setup", { pin }),
   companionStoreKey: (key: string) => native<SecurityStatus>("security_companion_store_key", { key }),
+  /** Settings → Security: the session timeouts, in minutes (needs a settings step-up). */
+  setTimeouts: (timeouts: SessionTimeouts) => native<SecurityStatus>("security_set_timeouts", { timeouts }),
 };
+
+/** Rust `commands::Timeouts` (minutes). Clamped there: idle lock 1–120, re-verify 5–240, step-up idle 1–30, step-up max 1–60. */
+export interface SessionTimeouts {
+  idleLockMinutes: number;
+  reauthMinutes: number;
+  elevationIdleMinutes: number;
+  elevationMaxMinutes: number;
+}
 
 /** A desktop alert waiting in the gateway's companion inbox (`sig` empty = raised by the gateway). */
 export interface InboxAlert {

@@ -17,20 +17,20 @@
 //!     for writing); os.json is parsed in memory (`parse_os_config_lenient` pointed at the scratch
 //!     copy, so even a parse-failure backup lands in scratch). Nothing is ever saved back.
 //!   * GPU slot: a standalone `GpuSlot` (run_batch takes it with `acquire_maintenance`). The app's
-//!     in-process arbiter is NOT involved, so the app must be closed (checked; see below).
+//!     in-process arbiter is NOT involved (see the crash-marker note below).
 //!   * lease: the real gateway maintenance lease (`model_swap::lease_heartbeat`, live gateway URL +
 //!     mesh bearer). While it is up the gateway holds Tony's `llm_chat` (phone Tony answers with
 //!     his "testing a model" line). The app's slot mirror normally releases it when the slot is
 //!     dropped; here the test releases it itself, and only when the gateway still shows our holder.
 //!   * preempt: no arbiter here. Creating the file `<scratch>\comfy-live-preempt` stops the batch
 //!     (interrupt → requeue → restore), the way a Tony preempt does in the app.
-//!   * crash marker: the SAME file the app uses (`<config dir>\comfy-crash.json`), so a crash
-//!     mid-test is recovered by the app's runner on its next start (kill our ComfyUI if it still
-//!     runs, then `verify_only_tony`). The ComfyUI child is in a kill-on-close Job Object, so it
-//!     dies with the test process anyway.
-//!   * Command Center must NOT be running: its runner loop would see this run's marker as a
-//!     leftover crash, kill the ComfyUI we started and reload Tony mid-render. Checked before
-//!     anything is touched.
+//!   * crash marker: the test's OWN file (`<scratch>\comfy-crash.json`), so it runs with
+//!     Command Center open: the app's runner never sees it (2026-11-27, Nic away overnight;
+//!     closing the app was the alternative). A leftover app marker is still a blocker. The
+//!     ComfyUI child is in a kill-on-close Job Object, so it dies with the test process; the
+//!     crash/timeout cleanup below puts Tony back.
+//!   * Command Center may be running. If its own work calls LM Studio mid-render, LM Studio
+//!     JIT-loads a model and run_batch's JIT check fails the job and restores Tony.
 //!   * media: a MediaState like media_e2e.rs (scratch media.db, the real projects root). With
 //!     `COMFY_LIVE_MEDIA_DB=app` it opens the app's own media.db instead (only when its schema
 //!     version equals this build's, so nothing is migrated), and the asset then shows in the
@@ -39,8 +39,6 @@
 //!   * aspect: the project manifest's aspect (default 16:9, media `default_manifest`), as in the app.
 //!   * lease check: `TestIo::preflight` (run before the marker and the unload) re-reads the gateway
 //!     and aborts unless it shows OUR maintenance lease, so Tony is never unloaded without a window.
-//!   * Command Center starting mid-run counts as a preempt (checked every 5 s), so the batch
-//!     restores at once instead of racing the app's own crash recovery.
 //!   * cleanup (batch crashed or timed out): its own lease heartbeat while it runs; VRAM settles
 //!     before Tony reloads; `restore_tony` only when the marker says LLMs were touched (and Tony
 //!     isn't already back), `verify_only_tony` otherwise. The hard timeout never aborts the batch
@@ -72,8 +70,6 @@ const RESTORE_PHASE: &str = "putting Tony back";
 /// TestIo::preflight: gateway lease reads before giving up.
 const LEASE_TRIES: u32 = 3;
 const LEASE_RETRY: Duration = Duration::from_millis(500);
-/// How often preempt() re-checks for a Command Center process.
-const APP_CHECK_EVERY: Duration = Duration::from_secs(5);
 const PREEMPT_FILE: &str = "comfy-live-preempt";
 const DEFAULT_SCRATCH: &str = r"F:\claude-scratch\comfy-live";
 const APP_ID: &str = "os.agentic.commandcenter";
@@ -89,8 +85,13 @@ fn app_config_dir() -> Result<PathBuf, String> {
 }
 
 /// The crash marker the app's runner reads (comfy.rs `init`: `config_dir.join("comfy-crash.json")`).
-fn marker_path(cfg_dir: &Path) -> PathBuf {
+fn app_marker_path(cfg_dir: &Path) -> PathBuf {
     cfg_dir.join("comfy-crash.json")
+}
+
+/// This test's own crash marker (never the app's, so a running app ignores it).
+fn test_marker_path(scratch: &Path) -> PathBuf {
+    scratch.join("comfy-crash.json")
 }
 
 // ── Pure helpers (unit-tested below) ────────────────────────────────────────
@@ -364,8 +365,6 @@ struct TestIo {
     t0: Instant,
     events: Mutex<Vec<Value>>,
     assets: Mutex<Vec<Value>>,
-    /// preempt(): when Command Center was last looked for, and what was found.
-    app_check: Mutex<Option<(Instant, Option<String>)>>,
 }
 
 impl TestIo {
@@ -462,23 +461,10 @@ impl BatchIo for TestIo {
     fn kill_pid(&self, pid: u32) {
         crate::proc::kill_tree(pid)
     }
-    /// No arbiter outside the app: the preempt file, or Command Center starting mid-run (its
-    /// runner would treat this run's marker as a leftover and reload Tony; better to restore now
-    /// than race it). The gateway lease (heartbeat) already holds Tony's `llm_chat` meanwhile.
+    /// No arbiter outside the app: the preempt file. The gateway lease (heartbeat) holds Tony's
+    /// `llm_chat` meanwhile; an in-app LLM call shows up as a JIT load, which run_batch handles.
     fn preempt(&self, _since: u64) -> Option<String> {
-        if let Some(r) = preempt_file_reason(&self.scratch) {
-            return Some(r);
-        }
-        let mut g = lk(&self.app_check);
-        if let Some((at, why)) = g.as_ref() {
-            if at.elapsed() < APP_CHECK_EVERY {
-                return why.clone();
-            }
-        }
-        let pids = command_center_pids();
-        let why = (!pids.is_empty()).then(|| format!("Command Center started mid-run (pid {pids:?})"));
-        *g = Some((Instant::now(), why.clone()));
-        why
+        preempt_file_reason(&self.scratch)
     }
     fn heartbeat(&self, label: &str) -> Task<u32> {
         let holder = model_swap::maintenance_holder(label);
@@ -596,15 +582,16 @@ async fn gates(live: &LiveCfg, lm: &Result<model_swap::Lm, String>, scratch: &Pa
         blockers.push(needs_text(&missing));
     }
     // App state that would fight the run
-    let marker = marker_path(&live.cfg_dir);
+    let marker = app_marker_path(&live.cfg_dir);
     let marker_v = read_marker(&marker);
     if marker.exists() {
         blockers.push(format!("a crash marker is already at {} (an earlier batch didn't finish); let the app recover it first", marker.display()));
     }
-    let app = command_center_pids();
-    if !app.is_empty() {
-        blockers.push(format!("Command Center is running (pid {app:?}): its runner would treat this run's crash marker as a leftover and reload Tony mid-render; close it first"));
+    let own = test_marker_path(scratch);
+    if own.exists() {
+        blockers.push(format!("this test's crash marker is still at {} (an earlier run died): check only Tony is loaded, then delete it", own.display()));
     }
+    let app = command_center_pids();
     if let Some(r) = preempt_file_reason(scratch) {
         blockers.push(format!("{r}; delete it to run"));
     }
@@ -667,7 +654,7 @@ fn full_run(live: LiveCfg, lm: model_swap::Lm, scratch: &Path, t0: Instant, gate
         paths: ComfyPaths::live(),
         roots,
         proc_: Mutex::default(),
-        marker: marker_path(&live.cfg_dir),
+        marker: test_marker_path(scratch),
         scratch: scratch.to_path_buf(),
         http: http.clone(),
         lease_url: live.lease_url.clone(),
@@ -677,7 +664,6 @@ fn full_run(live: LiveCfg, lm: model_swap::Lm, scratch: &Path, t0: Instant, gate
         t0,
         events: Mutex::default(),
         assets: Mutex::default(),
-        app_check: Mutex::default(),
     });
     let ctl = Arc::new(Control::default());
     let slot = Arc::new(super::super::scheduler::GpuSlot::default());
@@ -823,6 +809,7 @@ fn live_sdxl_turbo_smoke() {
         eprintln!("COMFY_LIVE is not 1: skipping the live ComfyUI smoke test");
         return;
     }
+    let _sampler = SamplerReaper;
     let t0 = Instant::now();
     let scratch = scratch();
     std::fs::create_dir_all(&scratch).unwrap_or_else(|e| panic!("scratch {}: {e}", scratch.display()));
@@ -841,6 +828,25 @@ fn live_sdxl_turbo_smoke() {
         panic!("not starting: nothing was touched. Blockers:\n  {}", blockers.join("\n  "));
     }
     full_run(live, lm.expect("checked by the gates"), &scratch, t0, gate_report);
+}
+
+/// system.rs's resident `nvidia-smi -lms` sampler is a plain child process: when a test binary
+/// exits it is orphaned and keeps running (and keeps a redirected stdout open, so the shell
+/// waiting on the run never returns). On drop (also on panic), kill our own nvidia-smi children.
+struct SamplerReaper;
+
+impl Drop for SamplerReaper {
+    fn drop(&mut self) {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+        for (pid, p) in sys.processes() {
+            if p.parent() == Some(me) && p.name().to_string_lossy().eq_ignore_ascii_case("nvidia-smi.exe") {
+                crate::proc::kill_tree(pid.as_u32());
+            }
+        }
+    }
 }
 
 // ── Unit tests for the pure helpers (always run) ────────────────────────────

@@ -11,6 +11,8 @@
    -> Docker Desktop + Kokoro TTS :8880 + n8n :5678 -> Bionic / LM Studio :1235
    (also the verifier model) -> AnythingLLM :3001 -> Ollama :11434
    -> llama-server :1236 (only when MODEL_PATH is set in ai-stack.config.ps1)
+   -> WhatsApp bridge 127.0.0.1:8097 + its inbox ingester (OFF unless -WithWhatsApp or
+   $WA_AUTOSTART = $true in ai-stack.config.ps1; needs scripts\patch-whatsapp-bridge.ps1)
 
  Output of everything it starts goes to logs\<service>.out.log / .err.log
  (rolled to .1-.3 at 5 MB). PIDs it starts go to logs\command-center.pids.json
@@ -22,6 +24,7 @@
    -RestartGateway   stop and start the gateway (use when it started before NetBird
                      was up and so isn't listening on the mesh address)
    -SkipModels       don't launch Bionic / AnythingLLM / Ollama / llama-server
+   -WithWhatsApp     also start the patched WhatsApp bridge and the ingester this time
    -DryRun           only check and report; start nothing
 =============================================================================
 #>
@@ -29,6 +32,7 @@ param(
     [switch]$WithDesktopApp,
     [switch]$RestartGateway,
     [switch]$SkipModels,
+    [switch]$WithWhatsApp,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Continue'
@@ -210,6 +214,50 @@ New-Svc 'instance2' 'llama-server (Tony)' "127.0.0.1:$INSTANCE2_PORT" 180 (& $L 
         throw 'SKIP:started by G:\ai-startup\start-ai-stack.ps1 (picks the llama.cpp build) - run that for :1236'
     } | Out-Null
 
+# WhatsApp (G:\ai-hub\whatsapp-mcp): off unless -WithWhatsApp or $WA_AUTOSTART. The bridge's REST
+# API has no auth, so it is started only once patched to 127.0.0.1:$WA_BRIDGE_PORT; the ingester
+# reads its messages.db read-only and posts to the gateway on loopback.
+$script:WaWanted = [bool]($WA_AUTOSTART -or $WithWhatsApp)
+$WA_OFF = 'SKIP:off - run with -WithWhatsApp, or set $WA_AUTOSTART = $true in G:\ai-startup\ai-stack.config.ps1'
+function Get-WaBridgeOwner {
+    $owner = Get-ListenPids $WA_BRIDGE_PORT | Select-Object -First 1
+    if ($owner) { Get-Process -Id $owner -ErrorAction SilentlyContinue }
+}
+function Get-WaIngestProc {
+    @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'comms_whatsapp_ingest\.py' }) | Select-Object -First 1
+}
+New-Svc 'whatsapp' 'WhatsApp bridge' "127.0.0.1:$WA_BRIDGE_PORT" 60 (& $L 'whatsapp-bridge') `
+    {
+        $p = Get-WaBridgeOwner
+        if ($p -and $p.Path -and ($p.Path -ieq $WA_BRIDGE_EXE)) { 'binds ' + ((Get-ListenAddrs $WA_BRIDGE_PORT) -join ', ') }
+    } `
+    {
+        if (-not $script:WaWanted) { throw $WA_OFF }
+        $p = Get-WaBridgeOwner
+        if ($p) { throw "port $WA_BRIDGE_PORT is held by '$($p.ProcessName)' (pid $($p.Id)), not $WA_BRIDGE_EXE" }
+        $goSrc = Join-Path $WA_BRIDGE_DIR 'main.go'
+        if (-not (Test-Path $WA_BRIDGE_EXE)) { throw "SKIP:not built - in $WA_BRIDGE_DIR run: go env -w CGO_ENABLED=1; go build -o whatsapp-bridge.exe ." }
+        $src = if (Test-Path $goSrc) { Get-Content $goSrc -Raw } else { '' }
+        if ($src -notmatch [regex]::Escape('fmt.Sprintf("127.0.0.1:%d", port)') -or $src -notmatch "startRESTServer\(client, messageStore, $WA_BRIDGE_PORT\)") {
+            throw "main.go is not patched for 127.0.0.1:$WA_BRIDGE_PORT - run scripts\patch-whatsapp-bridge.ps1, rebuild, re-run"
+        }
+        if ((Get-Item $WA_BRIDGE_EXE).LastWriteTime -lt (Get-Item $goSrc).LastWriteTime) { throw 'whatsapp-bridge.exe is older than main.go - rebuild it (go build -o whatsapp-bridge.exe .)' }
+        # Hidden, it can't show a pairing QR: pair once in a console first (the session lives in store\whatsapp.db).
+        if (-not (Test-Path (Join-Path $WA_BRIDGE_DIR 'store\whatsapp.db'))) { throw 'not paired - run whatsapp-bridge.exe once in a console and scan the QR (WhatsApp > Linked devices)' }
+        Start-CcService 'whatsapp-bridge' $WA_BRIDGE_EXE '' $WA_BRIDGE_DIR | Out-Null
+    } | Out-Null
+
+New-Svc 'wa-ingest' 'WhatsApp inbox ingester' 'messages.db -> gateway' 30 (& $L 'wa-ingest') `
+    { $p = Get-WaIngestProc; if ($p) { "pid $($p.ProcessId), read-only, every 20 s" } } `
+    {
+        if (-not $script:WaWanted) { throw $WA_OFF }
+        if (-not (Test-Path $WA_INGEST_SCRIPT)) { throw "no $WA_INGEST_SCRIPT" }
+        if (-not (Test-Path $WA_MESSAGES_DB)) { throw "SKIP:no $WA_MESSAGES_DB yet (the bridge creates it)" }
+        $py = if (Test-Path $GATEWAY_PYTHON) { $GATEWAY_PYTHON } else { (Get-Command python -ErrorAction Stop).Source }
+        Start-CcService 'wa-ingest' $py ("`"$WA_INGEST_SCRIPT`" --loop --db `"$WA_MESSAGES_DB`" --gateway http://127.0.0.1:$GATEWAY_PORT") $CC_ROOT | Out-Null
+    } | Out-Null
+
 # Whisper model from the app's providers.json (falls back to any ggml-*.bin).
 $script:WhisperPort = 8178; $script:WhisperModelsDir = 'G:\whisper\models'; $wModel = 'base.en'
 try {
@@ -300,6 +348,10 @@ $q = Get-Svc 'quantgress'; Invoke-Launch $q
 if ($q.State -eq 'waiting') { Say '  starting Quantgress before the gateway...'; $q.Timeout = 45; Wait-Svcs @($q) }
 
 foreach ($s in $svcs) { if ($s.State -eq 'pending') { Invoke-Launch $s; if ($s.Note -eq 'started') { Say "  launching $($s.Name)..." } } }
+# A dry run never reaches the launch blocks, so say "off" rather than "would be started".
+if (-not $script:WaWanted) {
+    foreach ($k in 'whatsapp', 'wa-ingest') { $s = Get-Svc $k; if ($s.State -eq 'down') { $s.State = 'skipped'; $s.Note = $WA_OFF.Substring(5) } }
+}
 # The phone and bridge rows follow the gateway: they only "start" when the gateway does.
 $gwState = (Get-Svc 'gateway').State
 foreach ($k in 'phone', 'bridge') {
@@ -319,6 +371,13 @@ if (-not $DryRun) { Wait-Svcs $svcs }
 $gw = Get-Svc 'gateway'; $ph = Get-Svc 'phone'
 if ($gw.State -eq 'up' -and $meshIp -and -not ((Get-ListenAddrs $GATEWAY_PORT) -contains $meshIp)) {
     $ph.State = 'failed'; $ph.Note = 'gateway is not listening on the NetBird IP (it started before NetBird) - run with -RestartGateway'
+}
+
+# The WhatsApp bridge's API has no auth: anything but loopback (the NetBird IP above all) is a failure.
+$wa = Get-Svc 'whatsapp'
+$waAddrs = @(Get-ListenAddrs $WA_BRIDGE_PORT | Where-Object { $_ -ne '127.0.0.1' })
+if ($wa.State -eq 'up' -and $waAddrs.Count) {
+    $wa.State = 'failed'; $wa.Note = "listening on $($waAddrs -join ', ') - its API has no auth; stop it and run scripts\patch-whatsapp-bridge.ps1"
 }
 
 # TWS open but not logged in yet isn't a failure: it is waiting for you (the bridge connects once you log in).

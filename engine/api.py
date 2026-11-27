@@ -222,6 +222,75 @@ def docs_scrolls_sync(request: Request):
         raise HTTPException(404, str(e))
 
 
+BENCH_DIR_NAME = "bench"
+
+
+def last_bench(bench_dir) -> dict:
+    """The newest saved numbers: the engine's GPU benchmark (bench_swap, `*-swap.json`) and LM
+    Studio's (bench_tony, `*-lmstudio.json`). Missing / unreadable: that side is None."""
+    from pathlib import Path
+    out: dict[str, Any] = {"engine": None, "lmstudio": None}
+    d = Path(bench_dir)
+    for key, pat in (("engine", "*-swap.json"), ("lmstudio", "*-lmstudio.json")):
+        for p in sorted(d.glob(pat), reverse=True):
+            try:
+                j = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if key == "engine":
+                b = next((s for s in j.get("steps", []) if s.get("step") == "benchmark"), None)
+                vram = next((s.get("engineMiB") for s in j.get("steps", []) if s.get("step") == "engine loaded"), None)
+                if not b:
+                    continue
+                out[key] = {"started": j.get("started"), "summary": {k: v for k, v in b.items() if k not in ("at", "step")}, "vramMiB": vram, "file": p.name}
+            else:
+                out[key] = {"started": j.get("started"), "summary": j.get("summary"), "file": p.name}
+            break
+    return out
+
+
+@router.get("/bench/last")
+def bench_last(request: Request):
+    _guard(request)
+    return last_bench(Engine(load_settings()).data / BENCH_DIR_NAME)
+
+
+TEST_PROMPT = "Hey Tony, quick check: are you there?"
+
+
+def test_reply(s: EngineSettings, text: str, stream=None, build=None, clock=time.monotonic) -> dict:
+    """One of Tony's real turns (his system prompt, gateway_tony.build_messages) on the engine,
+    timed: first token and total. Nothing is stored in his thread or memory."""
+    if stream is None or build is None:
+        import command_center_api as cc
+        import gateway_tony as gt
+        stream, build = stream or cc.llm_stream, build or gt.build_messages
+    msgs = build({"text": text})
+    t0 = clock()
+    first: list[float] = []
+
+    def on_delta(piece: str) -> None:
+        if piece and not first:
+            first.append(clock() - t0)
+
+    reply = stream(msgs, model=s.alias, base_url=s.base_url, max_tokens=200, first_token_s=30.0, total_s=90.0, on_delta=on_delta)
+    return {"firstTokenSecs": round(first[0], 3) if first else None, "totalSecs": round(clock() - t0, 3), "text": (reply or "")[:600], "model": s.alias, "baseUrl": s.base_url}
+
+
+@router.post("/test")
+def test_reply_route(request: Request, body: Optional[dict] = None):
+    """The Engine screen's Test reply button. Refused unless the engine answers."""
+    _guard(request)
+    s = load_settings()
+    if Engine(s).health() != "ok":
+        raise HTTPException(409, "the built-in engine isn't running (Load a model first)")
+    text = str((body or {}).get("text") or TEST_PROMPT).strip()[:500]
+    try:
+        return test_reply(s, text)
+    except (TimeoutError, RuntimeError, OSError, ValueError) as e:
+        raise HTTPException(502, str(e)[:300])
+
+
 @router.get("/watchdog")
 def watchdog_log(request: Request, n: int = 50):
     _guard(request)

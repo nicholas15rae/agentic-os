@@ -14,6 +14,7 @@ import { McpRegistryCard, SkillsLibraryCard } from "./settings/LibrarySettings";
 import { MemoryLifecycleCard, MemoryScrollsCard } from "./settings/MemorySettings";
 import { AiProvidersCard, CliHubCard, ComputeRouterCard, ModelLabCard, ModelLibraryCard } from "./settings/HubSettings";
 import { EngineCard } from "./settings/EngineCard";
+import { EngineSwitchCard } from "./settings/EngineSwitchCard";
 import { CueStudio } from "./settings/CueStudio";
 import { BusinessProfilesSettings } from "./settings/BusinessProfilesSettings";
 import { VoiceDetectionCard } from "./settings/VadSettings";
@@ -31,9 +32,10 @@ import { AppearanceStudio } from "./settings/AppearanceStudio";
 import { ReadOnlyBanner } from "@/features/security/ReadOnlyBanner";
 import { SecurityCard } from "@/features/security/SecurityCard";
 
-export type Tab = "services" | "voice" | "modes" | "comms" | "integrations" | "business" | "appearance" | "security";
+export type Tab = "services" | "engine" | "voice" | "modes" | "comms" | "integrations" | "business" | "appearance" | "security";
 export const TABS: { id: Tab; label: string }[] = [
   { id: "services", label: "Services" },
+  { id: "engine", label: "Engine / Models" },
   { id: "voice", label: "Voice & Triggers" },
   { id: "modes", label: "Modes & Switchboard" },
   { id: "comms", label: "Comms" },
@@ -86,7 +88,6 @@ export function SettingsContent() {
           {desktop ? (
             <>
               <ModelLabCard />
-              <EngineCard />
               <ComputeRouterCard />
               <ComputeCard />
               <DropletCard />
@@ -105,6 +106,15 @@ export function SettingsContent() {
           <ConfirmGateCard />
         </>
       )}
+      {tab === "engine" &&
+        (desktop ? (
+          <>
+            <EngineSwitchCard />
+            <EngineCard />
+          </>
+        ) : (
+          <DesktopOnly what="The built-in engine (switches, models, VRAM)" />
+        ))}
       {tab === "voice" && (
         <>
           <VoiceDetectionCard />

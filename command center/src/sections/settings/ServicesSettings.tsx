@@ -8,6 +8,7 @@ import { modelsFor, useProviders } from "./use-providers";
 import { useOs } from "@/features/os/os-store";
 import { gateway } from "@/lib/gateway";
 import { desktopMeshRows, MESH_PATH_POLL_MS, type MeshPeerRow } from "@/features/hud/mesh-path";
+import { useEngineSwitch } from "@/features/engine/use-engine-switch";
 
 /** Custom model ids the user added per provider (kept across restarts). */
 const CUSTOM_KEY = "cc.models.custom";
@@ -101,6 +102,8 @@ export function OrchestratorCard() {
   const { view, load, patch, policy, apply, error, saving } = useProviders();
   const [testing, setTesting] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
+  const engine = useEngineSwitch();
+  const onEngine = engine?.chat === "engine";
   useEffect(() => void load(), [load]);
   if (!view) return <Card title="Orchestrator & models">{error ?? "Loading providers…"}</Card>;
 
@@ -130,6 +133,9 @@ export function OrchestratorCard() {
       hint="Requests go to the first backend that answers; the rest are automatic fallbacks. Switch models live — no restart. Keys stay bound to each host, so changing a URL can never send a key elsewhere."
       action={saving ? <Loader2 size={14} className="animate-spin text-ink-3" /> : null}
     >
+      <p className={`mb-2 fs-12 ${onEngine ? "text-teal" : "text-ink-3"}`}>
+        Tony's chat: {onEngine ? `built-in engine (${engine?.route?.baseUrl ?? ""}, ${engine?.health}) in place of LM Studio` : "LM Studio (legacy)"} · switch it under Settings → Engine / Models
+      </p>
       <ol className="space-y-2">
         {chain.map((p, i) => (
           <li key={p.id} className="r-14 border border-white/[0.07] bg-white/[0.02] p-3">
@@ -138,6 +144,7 @@ export function OrchestratorCard() {
               <HealthDot id={p.id} />
               <span className="font-medium text-ink">{p.label}</span>
               <span className="label-caps text-ink-3">{p.kind}</span>
+              {onEngine && p.id === "lmstudio" && <span className="fs-11 text-teal">Tony's turns use the built-in engine here</span>}
               <div className="ml-auto flex items-center gap-0.5">
                 <IconBtn label="Move up" disabled={i === 0} onClick={() => move(i, -1)}>
                   <ArrowUp size={13} />

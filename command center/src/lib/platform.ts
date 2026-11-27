@@ -13,6 +13,7 @@
 import { recordIpc } from "./ipc-ring";
 import { MicLockedError, micEnabled } from "@/features/voice/mic-gate";
 import type { Curiosity, DispatchPolicy, ModesView, TonyMode, Verbosity } from "@/features/modes/modes";
+import type { EngineSwitchView } from "@/features/engine/engine";
 
 export type Platform = "desktop" | "pwa";
 
@@ -325,6 +326,11 @@ export interface NativeCommands {
   /** Cached 10 s in Rust; `deep: true` re-probes and re-lists every external MCP server. */
   system_introspect: { args: { deep?: boolean }; result: SystemSnapshot };
   app_uptime: { args: undefined; result: AppUptime };
+  // ── Section 26: the built-in engine's switches (engine.json beside providers.json; all OFF by default) ──
+  /** Where Tony's chat / compaction / memory run now, plus the engine's /health. */
+  engine_switch_get: { args: undefined; result: EngineSwitchView };
+  /** Turning Tony (or the gateway agents) ON is refused unless the engine is enabled and answering. */
+  engine_switch_set: { args: { patch: { enabled?: boolean; routeTony?: boolean; routeAgents?: boolean } }; result: EngineSwitchView };
 }
 
 /**

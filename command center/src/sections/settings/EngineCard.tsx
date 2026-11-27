@@ -103,8 +103,8 @@ export function EngineCard() {
 
   return (
     <Card
-      title="Built-in engine (llama.cpp)"
-      hint="Section 26. Runs beside LM Studio, off by default: Tony, the gateway and the phone stay on LM Studio until you switch them. Desktop only."
+      title="Built-in engine: models"
+      hint="Your model folders. Load or swap the engine's model, pick Tony's, see each model's size and VRAM fit. Desktop only."
       action={
         <button onClick={() => void scan()} className="pill-glass inline-flex items-center gap-1 text-xs" disabled={busy !== null}>
           {busy === "scan" ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />} Rescan
@@ -145,13 +145,6 @@ export function EngineCard() {
         <details className="mb-3 text-sm">
           <summary className="cursor-pointer text-ink-2">Engine settings</summary>
           <div className="mt-2 space-y-1">
-            <Toggle
-              on={cfg.enabled}
-              onChange={(v) => void save({ enabled: v })}
-              tone="amber"
-              label="Engine on"
-              hint="Lets the gateway start llama-server at boot with the watchdog. It does NOT switch Tony: that's a separate step, and only when you decide."
-            />
             <div className="grid gap-2 sm:grid-cols-3">
               <Field label="Context (tokens)">
                 <input className="field" type="number" min={512} step={1024} defaultValue={cfg.ctx} onBlur={(e) => Number(e.target.value) !== cfg.ctx && void save({ ctx: Number(e.target.value) })} />
@@ -200,10 +193,17 @@ export function EngineCard() {
               <span className={`text-xs ${TONE[f.tone]}`} title={f.title}>
                 {f.text}
               </span>
+              {cfg?.model_path === m.path ? (
+                <span className="text-xs text-amber-soft" title="The engine starts this model for Tony">Tony's model</span>
+              ) : (
+                <button onClick={() => void save({ model_path: m.path })} className="pill-glass inline-flex items-center gap-1 text-xs" disabled={busy !== null || !m.fit?.fitsEmptyCard} title={!m.fit?.fitsEmptyCard ? "Too big for the card at these settings" : "The engine starts this model for Tony (at boot, after a GPU hand-off, and on Load)"}>
+                  Set as Tony's model
+                </button>
+              )}
               {m.loaded ? (
                 <span className="text-xs text-teal">loaded</span>
               ) : (
-                <button onClick={() => void load(m)} className="pill-glass inline-flex items-center gap-1 text-xs" disabled={busy !== null || !cfg?.enabled || !m.fit?.fits} title={!cfg?.enabled ? "Turn the engine on first" : !m.fit?.fits ? "Doesn't fit next to what's on the card now" : "Swap the engine to this model"}>
+                <button onClick={() => void load(m)} className="pill-glass inline-flex items-center gap-1 text-xs" disabled={busy !== null || !cfg?.enabled || !m.fit?.fits} title={!cfg?.enabled ? "Turn the engine on first (switches card above)" : !m.fit?.fits ? "Won't fit next to what's on the card now: loading is blocked" : "Swap the engine to this model"}>
                   {busy === `load:${m.path}` ? <Loader2 className="size-3.5 animate-spin" /> : "Load"}
                 </button>
               )}

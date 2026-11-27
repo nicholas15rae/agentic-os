@@ -151,3 +151,74 @@ export function progressText(j: DownloadJob): string {
   if (j.total) return `${mb(j.done)} / ${mb(j.total)} (${Math.floor((j.done / j.total) * 100)} %)`;
   return mb(j.done);
 }
+
+// ── Section 26: switches, backend indicators, test reply, last benchmark ─────
+
+/** engine_route.rs `SwitchView` (the desktop reads engine.json itself, so it works on any gateway). */
+export interface EngineSwitchView {
+  route: { enabled: boolean; routeTony: boolean; routeAgents: boolean; baseUrl: string; alias: string } | null;
+  chat: "engine" | "lmstudio";
+  memory: "anythingllm";
+  compaction: "engine" | "lmstudio";
+  health: "ok" | "loading" | "down" | "error";
+  served: string | null;
+  path: string;
+}
+
+export interface BenchSummary {
+  ttft_median?: number;
+  ttft_p90?: number;
+  total_median?: number;
+  total_p90?: number;
+  hit_target?: number;
+  ok?: number;
+  n?: number;
+}
+
+export interface BenchLast {
+  engine: { started: string; summary: BenchSummary; vramMiB?: number | null; file: string } | null;
+  lmstudio: { started: string; summary: BenchSummary | null; file: string } | null;
+}
+
+export interface TestReply {
+  firstTokenSecs: number | null;
+  totalSecs: number;
+  text: string;
+  model: string;
+  baseUrl: string;
+}
+
+/** The at-a-glance row: who answers Tony's chat, who holds memory / documents. */
+export function backendRows(v: EngineSwitchView | null): { label: string; value: string; tone: "ok" | "warn" | "muted" }[] {
+  if (!v) return [{ label: "Chat", value: "checking…", tone: "muted" }];
+  const onEngine = v.chat === "engine";
+  const engineNote = onEngine && v.health !== "ok" ? ` (engine ${v.health}: replies fall back down the chain)` : "";
+  return [
+    { label: "Tony's chat", value: onEngine ? `Built-in engine${engineNote}` : "LM Studio (legacy)", tone: onEngine ? (v.health === "ok" ? "ok" : "warn") : "muted" },
+    { label: "Memory compaction", value: v.compaction === "engine" ? "Built-in engine" : "LM Studio (legacy)", tone: v.compaction === "engine" ? "ok" : "muted" },
+    { label: "Memory & documents (RAG)", value: "AnythingLLM + vault (legacy; the engine's doc store is ready on the gateway, not joined yet)", tone: "muted" },
+    { label: "Gateway agents", value: v.route?.routeAgents && v.route.enabled ? "Built-in engine" : "AnythingLLM workspaces (legacy)", tone: v.route?.routeAgents && v.route.enabled ? "ok" : "muted" },
+  ];
+}
+
+/** Why the Route-Tony switch can't be turned on yet, or null when it can (the Rust side checks too). */
+export function routeTonyBlocker(v: EngineSwitchView | null): string | null {
+  if (!v) return "Checking the engine…";
+  if (v.chat === "engine") return null; // turning OFF is always allowed
+  if (!v.route?.enabled) return "Turn the engine on first.";
+  if (v.health !== "ok" || !v.served) return `Load a model first (engine ${v.health}).`;
+  return null;
+}
+
+const s = (n: number | undefined) => (n == null ? "–" : `${n.toFixed(2)} s`);
+
+/** "first word 0.38 s (p90 1.61) · reply 1.93 s · 10/12 under 1.5 s". */
+export function benchLine(b: BenchSummary | null | undefined): string {
+  if (!b || b.ttft_median == null) return "no run yet";
+  const hit = b.hit_target != null && b.ok != null ? ` · ${b.hit_target}/${b.ok} under 1.5 s` : "";
+  return `first word ${s(b.ttft_median)} (p90 ${s(b.ttft_p90)}) · reply ${s(b.total_median)}${hit}`;
+}
+
+export function testReplyLine(t: TestReply): string {
+  return `first word ${t.firstTokenSecs == null ? "–" : `${t.firstTokenSecs.toFixed(2)} s`} · whole reply ${t.totalSecs.toFixed(2)} s`;
+}

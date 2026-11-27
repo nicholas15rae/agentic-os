@@ -4,6 +4,7 @@ import { Card, Field, Input, Select } from "@/components/ui";
 import { cmd, onNativeEvent, type CompactOutcome, type CompactionStatus, type HarvestPeriodName, type HygieneStatus, type IdleBadge, type LedgerEntry, type LifecycleCadence, type MemoryScrollsConfig } from "@/lib/platform";
 import { gated } from "@/features/bridge/gate";
 import { CfgError, SecretRow, Toggle, useOsCfg } from "./os-ui";
+import { useEngineSwitch } from "@/features/engine/use-engine-switch";
 import { archiveSourceLabel, canCompact, clampInt, effectiveScrollsDir, formatBytes, formatOutcome, formatPending, outcomeTone, SCROLLS_BOUNDS } from "./memory-scrolls-format";
 import { VAULT_PASSWORD_ROW_ID, VaultPasswordBanner } from "./VaultPasswordBanner";
 import { badgeTone, cadenceLabel, cadencePeriod, presetOf, pressureFill, pressureLabel, pressureTone, relTime, SCROLLS_PRESETS, WEEKDAYS } from "./hygiene-format";
@@ -363,6 +364,7 @@ const SCROLLS_DEFAULTS: MemoryScrollsConfig = { scrollsDir: "", archiveDir: "", 
  * the host `memory_scrolls compact` now; a busy system (voice, a build, the GPU) defers it.
  */
 export function MemoryScrollsCard() {
+  const engine = useEngineSwitch();
   const { cfg, error, save } = useOsCfg();
   const [status, setStatus] = useState<CompactionStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -537,7 +539,7 @@ export function MemoryScrollsCard() {
         </dd>
         {st && (
           <>
-            <dt className="text-ink-3">LM Studio</dt>
+            <dt className="text-ink-3">{engine?.compaction === "engine" ? "Built-in engine" : "LM Studio"}</dt>
             <dd className="text-ink-2">{st.lm.loaded_model ?? "no model loaded (compaction defers; it never loads one)"}</dd>
           </>
         )}

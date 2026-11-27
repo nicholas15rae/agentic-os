@@ -51,3 +51,46 @@ describe("engine screen helpers", () => {
     expect(progressText({ key: "k", state: "exists", done: 0, total: null })).toBe("already on disk");
   });
 });
+
+describe("engine switches (Section 26)", () => {
+  const view = (o: Partial<import("./engine").EngineSwitchView> = {}): import("./engine").EngineSwitchView => ({
+    route: { enabled: false, routeTony: false, routeAgents: false, baseUrl: "http://127.0.0.1:1238/v1", alias: "qwen/qwen3.5-9b" },
+    chat: "lmstudio",
+    memory: "anythingllm",
+    compaction: "lmstudio",
+    health: "down",
+    served: null,
+    path: "engine.json",
+    ...o,
+  });
+
+  it("shows the legacy backends while off", async () => {
+    const { backendRows } = await import("./engine");
+    const rows = backendRows(view());
+    expect(rows[0].value).toBe("LM Studio (legacy)");
+    expect(rows.every((r) => r.tone === "muted")).toBe(true);
+    expect(backendRows(null)[0].value).toBe("checking…");
+  });
+
+  it("shows the engine (and a down engine) once Tony is routed", async () => {
+    const { backendRows } = await import("./engine");
+    const on = { enabled: true, routeTony: true, routeAgents: false, baseUrl: "x", alias: "a" };
+    expect(backendRows(view({ chat: "engine", compaction: "engine", health: "ok", route: on }))[0]).toMatchObject({ value: "Built-in engine", tone: "ok" });
+    expect(backendRows(view({ chat: "engine", health: "down", route: on }))[0].tone).toBe("warn");
+  });
+
+  it("blocks Route Tony until the engine is on and serving", async () => {
+    const { routeTonyBlocker } = await import("./engine");
+    expect(routeTonyBlocker(view())).toMatch(/engine on first/);
+    expect(routeTonyBlocker(view({ route: { ...view().route!, enabled: true } }))).toMatch(/Load a model/);
+    expect(routeTonyBlocker(view({ route: { ...view().route!, enabled: true }, health: "ok", served: "qwen" }))).toBeNull();
+    expect(routeTonyBlocker(view({ chat: "engine" }))).toBeNull();
+  });
+
+  it("formats the benchmark and the test reply", async () => {
+    const { benchLine, testReplyLine } = await import("./engine");
+    expect(benchLine(null)).toBe("no run yet");
+    expect(benchLine({ ttft_median: 0.382, ttft_p90: 1.61, total_median: 1.929, hit_target: 10, ok: 12 })).toBe("first word 0.38 s (p90 1.61 s) · reply 1.93 s · 10/12 under 1.5 s");
+    expect(testReplyLine({ firstTokenSecs: 0.4, totalSecs: 1.5, text: "", model: "", baseUrl: "" })).toBe("first word 0.40 s · whole reply 1.50 s");
+  });
+});

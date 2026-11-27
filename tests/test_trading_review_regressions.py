@@ -1,6 +1,7 @@
 """Regression tests for the adversarial review of desk-cli / overseer (one test per confirmed finding)."""
 
 import asyncio
+import importlib.util
 import json
 import sys
 import unittest
@@ -224,6 +225,7 @@ class UnlockBinding(unittest.TestCase):
             e.close()
 
 
+@unittest.skipUnless(importlib.util.find_spec("ib_async"), "needs ib_async (pinned in trading\\.venv, the bridge's Python)")
 class AdapterFreshness(unittest.TestCase):
     def _adapter(self, ib):
         import tempfile

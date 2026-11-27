@@ -1,4 +1,5 @@
 """Per-device gateway tokens (section pass): add, match, revoke, last seen, desktop-only routes."""
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import device_registry as dr
+# device_registry.py is in the repo root. Without this the import only worked when an earlier
+# module in the same process had put the root on sys.path (tests/run_all.py runs each alone).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import device_registry as dr  # noqa: E402
 
 
 class RegistryTests(unittest.TestCase):

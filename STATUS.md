@@ -19,6 +19,7 @@ Updated 2026-11-27 09:00. One page for every Claude Code session and branch.
 | Overnight: Brainstorm Talk pure helpers (talk intent, digest, wrap-up walk, destinations; no bulk approve, memory by reference only) | claude/sections-8-10-m3 | 0d72190 (PR #10) | Yes (c134f9c) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
 | Kill-switch follow-ups (auto-repeat, held Enter, ack wait, bracket cancel) | claude/practical-elbakyan | 5751989 | **No**, in review |
+| Test gate: run_all.py finds every test module itself and runs them in parallel (550 s -> 80-145 s), solo rerun for load flakes; fixes test_device_registry's import | claude/upbeat-wing-e87be0 | b1abe56, 2d60807 | No, PR #9 open |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -48,7 +49,7 @@ Updated 2026-11-27 09:00. One page for every Claude Code session and branch.
 | Director suite build | Live SDXL Turbo test (ComfyUI via the GPU baton) | Part 1 fixes and committed work are in main. Next: SDXL test, then Part 3 UI; merge main into director-suite before more commits |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
 | Stop the UI burning GPU | Reviewing 5751989 | Then merge to main, push main, rebuild + restart app |
-| Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
+| Test gate (PR #9) | Keeping PR #9 mergeable (Auto-fix on) | Waiting for your review. On a conflict: merge origin/main, keep the discovery run_all.py, full gate, push to the PR branch |
 
 ## 3. Waiting on you
 
@@ -65,7 +66,7 @@ Updated 2026-11-27 09:00. One page for every Claude Code session and branch.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
 - `hermes-output-cleanup` (15f2ceb, Nov 18): rebase and merge, or drop?
-- Approve the run_all.py commit once the 9-min answer is in.
+- Test gate: review and merge PR #9 (`claude/upbeat-wing-e87be0`).
 - OK to run the WhatsApp bridge port patch script.
 - Director: Instagram public hosting approach; ElevenLabs voice for the Director (later).
 - Is `D:\Art Apps\agentic os\brain` still real? The old D: copy looks stale.
@@ -120,6 +121,9 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 - Models plan
 - Note: the "+ Beat" control from 11-22 doesn't appear as its own commit. Check that it landed.
 
+**Test gate follow-up** (parked: test_os_inbox is in the gateway/Tony area other sessions work in)
+- Make test_os_inbox's long-poll timing asserts (0.5-0.75 s bounds) wait on events, so PR #9's solo rerun is rarely needed
+
 ## 5. Test results
 
 | Suite | Latest | Where / when |
@@ -143,6 +147,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | sections-8-10 m2 after main merge | pytest 1,721 (comms lock flake fixed in IsolatedCC), vitest 2,716, tsc clean, cargo all but 2 known CRLF | 11-27 00:05 |
 | sections-8-10 m1 | vitest 2,563, Rust 50/50, Python comms 10/10 | 11-26 20:13 |
 | Trading (5751989) | run_all 766 OK; vitest trading 340/340; engines 39/39 | 11-26 |
+| Test gate PR #9 (main 196b2f8 merged in) | run_all 1,737 OK in 105 s, 68 modules, 8 workers; trading venv group 645 OK (3 skipped) | 11-27 09:51 |
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
@@ -156,32 +161,29 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 09:47 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 09:51 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/status-m3-merged` | 4 | `c134f9c` 2026-11-27 Merge pull request #10 from nicholas15rae/claude/sections-8-10-m3 | 1 files |
-| `claude/tony-live-test-fixes-5d85d5` | 4 | `4dac65d` 2026-11-27 docs(status): barge-in fix landed (e802ad3), all 7 Tony live-test f... | clean |
-| `director-suite` | 20 | `1b71fdf` 2026-11-27 docs(status): overnight Director summary, run 15 passed, items waiting | clean |
-| `section-pass-batch3` | 6 | `5c9d089` 2026-11-27 docs(status): overnight batch on section-pass-batch3 (15, 14.6-14.7... | 173 files |
-| `claude/sections-8-10-m3` | 3 | `14ad8bf` 2026-11-27 docs(status): Sections 8-10 overnight results, defaults chosen, par... | no worktree |
+| `director-suite` | 21 | `1325971` 2026-11-27 Merge main (87b6527) into director-suite | clean |
+| `section-pass-batch3` | 7 | `5822544` 2026-11-27 Merge main (77993c2: Ops removal, Sections 8-10 m2) into section-pa... | 36 files |
+| `claude/tony-live-test-fixes-5d85d5` | 5 | `d19546c` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/tony-live-te... | clean |
 | `section-pass` | 21 | `74f9e0d` 2026-11-27 feat(section-pass): phone sync of layouts and themes (layout step 6) | clean |
-| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | clean |
+| `claude/practical-elbakyan-0f96f1` | 11 | `a5dc7d9` 2026-11-27 docs(status): kill switch round 4 parked overnight; what landed, te... | 4 files |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | clean |
-| `claude/unruffled-mayer-1247f9` | 3 | `efca40d` 2026-11-27 docs(status): system.status In progress row, waiting on Nic (overni... | clean |
-| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | clean |
+| `claude/upbeat-wing-e87be0` | 10 | `fa79cc3` 2026-11-27 docs(status): test gate PR #9 overnight state; inbox timing follow-... | 29 files |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | clean |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
 | `hermes-output-cleanup` | 1 | `15f2ceb` 2026-11-18 fix: parse Hermes v0.23 chat replies and strip ANSI colour codes | no worktree |
 
 **Latest on main**
 
+- `87b6527` 2026-11-27 Merge 6eae983: Tony's read-only system.status tool
+- `196b2f8` 2026-11-27 docs(status): Sections 8-10 PR #10 merged into main (c134f9c)
+- `c134f9c` 2026-11-27 Merge pull request #10 from nicholas15rae/claude/sections-8-10-m3
 - `77993c2` 2026-11-27 docs(status): app rebuilt from main dffdb71, Ops migration ran at the 00:31 restart
 - `dffdb71` 2026-11-27 docs(status): Ops removal merged into main (9c57359), combined main tested
 - `9c57359` 2026-11-27 Merge 90ac158: remove the Ops agent; its work is Tony's
-- `b68cd1b` 2026-11-27 Merge origin/main (PR #8, Sections 8-10 m2) into main
-- `d69d0df` 2026-11-26 docs(status): app rebuilt from main 0c4341f and restarted 23:40
-- `e46d0c7` 2026-11-26 Merge branch 'director-suite' into merge/director-suite-into-main
 <!-- /AUTO:BRANCHES -->

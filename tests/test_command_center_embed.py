@@ -22,7 +22,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_os_inbox import IsolatedCC  # noqa: E402
+from test_os_inbox import IsolatedCC, until  # noqa: E402
 
 import command_center_api as cc  # noqa: E402
 
@@ -454,7 +454,9 @@ class QueryPriorityTests(_OwnStubs):
         out = {}
         bg = threading.Thread(target=lambda: out.setdefault("bg", cc.embed([note], background=True)))
         bg.start()
-        time.sleep(0.15)  # the note is being indexed
+        # The note is being indexed: its first piece holds the stub's one slot. (A fixed sleep here
+        # lost the race on a loaded machine: the query went in before the first piece.)
+        until(self.cpu.slot.locked, timeout=10, what="the note's first piece in the CPU slot")
         t0 = time.monotonic()
         vecs, _ = cc.embed(["deck stain"])
         waited = time.monotonic() - t0

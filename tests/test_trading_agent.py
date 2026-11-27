@@ -2,6 +2,7 @@
 slots / events, and scoring against Engine A and the always-long-SPY baseline. No GPU, no TWS."""
 
 import asyncio
+import importlib.util
 import json
 import sys
 import tempfile
@@ -324,6 +325,21 @@ class GatewayDeadlockTests(unittest.TestCase):
         self.assertEqual(bad, [], "use await asyncio.to_thread(...) in async routes")
 
 
+def gateway_app_missing() -> list:
+    """The packages the gateway's FastAPI app needs that this interpreter lacks. The gateway runs
+    under system Python, which has them; trading\\.venv (the bridge's) does not."""
+    missing = [] if importlib.util.find_spec("python_multipart") else ["python-multipart"]
+    try:
+        import fastapi.testclient  # noqa: F401  (starlette's TestClient raises RuntimeError without httpx2)
+    except (ImportError, RuntimeError):
+        missing.append("httpx2 (starlette's TestClient)")
+    return missing
+
+
+GATEWAY_APP_MISSING = gateway_app_missing()
+
+
+@unittest.skipIf(GATEWAY_APP_MISSING, f"needs {', '.join(GATEWAY_APP_MISSING)} (the gateway's packages, in system Python)")
 class AgentThinkReasoningTests(unittest.TestCase):
     """POST /api/trading/agent/think through the real cca.llm_chat, with the HTTP call to LM Studio
     captured. llm_chat turns reasoning off unless think=True, so the route must forward the opt-in

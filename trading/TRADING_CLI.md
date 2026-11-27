@@ -293,5 +293,8 @@ Tests: `tests/test_trading_{ledger,reconcile,pretrade,master_stop,safety_actions
 against the mocked TWS in `tests/fake_tws.py`.
 
 ```powershell
-& .\trading\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_trading_*.py"
+& .\trading\.venv\Scripts\python.exe tests\run_all.py "test_trading_*.py"
 ```
+
+`python tests/run_all.py` (system Python) runs these too, as part of the full gate. A test that
+needs a package this interpreter lacks skips with the reason, and the runner lists it at the end.

@@ -283,7 +283,8 @@ class MemoryGraphTests(unittest.TestCase):
         (self.h.tmp / "brain" / "graph-note.md").write_text(
             "zephyrquadrant graph connectivity notes", encoding="utf-8"
         )
-        status, _ = self.h.api("POST", "/api/memory/reindex")
+        # A full reindex is real work; the harness's 15 s default timed out once on a loaded machine.
+        status, _ = self.h.api("POST", "/api/memory/reindex", timeout=60)
         self.assertEqual(status, 200)
         status, data = self.h.api("GET", "/api/memory/graph")
         self.assertEqual(status, 200)

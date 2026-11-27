@@ -987,7 +987,9 @@ class LongPollConcurrencyTests(QueueCase):
         n = 45  # more than anyio's 40 worker threads
         bgs = [self.bg_get(f"/api/os/inbox/{qid}?wait=4&after=0") for _ in range(n)]
         try:
-            until(lambda: self.waiters() == n, timeout=10, what=f"{n} long-polls")
+            # Setup, not the property: 45 threads connecting can take a while on a loaded machine.
+            # The property is the < 1.0 s answers below while they're all parked.
+            until(lambda: self.waiters() == n, timeout=30, what=f"{n} long-polls")
             for method, path, body in (
                 ("POST", "/api/os/inbox", {"kind": "turn", "payload": {"text": "x"}}),  # sync route
                 ("GET", f"/api/os/inbox/{qid}", None),

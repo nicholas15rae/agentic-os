@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 16:30. One page for every Claude Code session and branch.
+Updated 2026-11-27 17:20. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -18,7 +18,7 @@ Updated 2026-11-27 16:30. One page for every Claude Code session and branch.
 | Overnight: Maps widget front end (Map / Upcoming / Saved tabs, trips with leave-by, saved routes with Delete? Yes/No, safe Google Maps links, phone hand-off logic) | claude/sections-8-10-m3 | 6acc15f (PR #10) | Yes (c134f9c); not in the running app until the next rebuild |
 | Overnight: Brainstorm Talk pure helpers (talk intent, digest, wrap-up walk, destinations; no bulk approve, memory by reference only) | claude/sections-8-10-m3 | 0d72190 (PR #10) | Yes (c134f9c) |
 | STATUS.md + scripts/update_status.py + AGENTS.md upkeep rule | claude/status-md-tracking | 691e280 | Yes, pushed to origin |
-| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | Yes (8647df7), pushed to origin; review round 5 confirmed all round-4 MEDIUMs fixed (1 new MEDIUM left, see Waiting on you). App UI live since the 16:25 restart; **trading bridge not restarted yet** (still runs the old kill-switch Python) |
+| Kill switch + options guard hardening (port of 46778f9 and 4 review rounds): held keys and held Enter can't trip it; the hotkey works in text fields; the ack wait never strips a filled entry's stop; options exits wait for TWS's ack; guard retries back off and never double an exit; the guard waits for the kill's own flatten; one live kill at a time. Round 4 (you said fix them, 11-27): another client's resting order never counts as cover (no naked short; the order is named); a failed halt is retried and reset always lands in ADVISORY; dry runs use their own client id (26); a second press waits for the running kill | claude/practical-elbakyan-0f96f1 | 5751989, e055457, ea09c98, 0330e8f, 5a1ce1a, 3215d66, 6fcd6cd, 5a55ebc (+ merge b0451af) | Yes (8647df7), pushed to origin; review round 5 confirmed all round-4 MEDIUMs fixed (1 new MEDIUM left, see Waiting on you). App UI live since the 16:25 restart; trading bridge restarted 17:17 on it (main checkout fast-forwarded to cf44451) |
 | Sections 1-2 Comms + MCP registry | section-pass, section-pass-batch3 | f672898 | Yes (76e04da) |
 | Section 3 Ops frozen | section-pass | 06e958c | Yes (76e04da) |
 | Section 4 logins: survive restarts, phone approval, per-device sign-out | section-pass | 9c07592, aa6966a | Yes (76e04da) |
@@ -65,7 +65,7 @@ Updated 2026-11-27 16:30. One page for every Claude Code session and branch.
 | Gabagoul functional pass (section-pass-batch3) | Overnight 11-27 batch (15, 14.6-14.7, 16.2/16.3/16.6, S20.10) | Merged into main, not pushed. Left: 21 setup walkthroughs; parked items below |
 | Director suite build | Merged into main (5098ca3) and pushed to origin | Next: your decisions in section 3 (voice, phone review, Scene Reader, face check, Part 6/7 go-ahead) |
 | Communications page and brainstorming | Sections 8-10 overnight (branch claude/sections-8-10-m3) | Merged to main as PR #10 (c134f9c). Done: Maps 3, 9, 10, 11 (pure part); Brainstorm 8. The rest is parked (see Waiting on you) |
-| Stop the UI burning GPU | Done | Kill switch merged (8647df7), pushed, app restarted 16:25 on 8647df7 (hidden: GPU 0.00%). Nothing in flight |
+| Stop the UI burning GPU | Done | Kill switch merged (8647df7), pushed, app restarted 16:25 on 8647df7 (hidden: GPU 0.00%), bridge restarted 17:17 on the new code. Nothing in flight |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 | Port 46778f9 / kill switch (practical-elbakyan) | Done; session closed | Round 4 fixed in 5a55ebc; merged into main by the GPU session. Round-5 follow-ups listed under Waiting on you |
 
@@ -116,7 +116,7 @@ Updated 2026-11-27 16:30. One page for every Claude Code session and branch.
 - System Python: `ib_async` 2.1.0 is installed (you asked). pip downgraded `tzdata` from 2026.6 to 2025.3 (ib_async pins <2026). The gateway runs on system Python and uses the 2025.3 time-zone rules after its next restart.
 - Ops removal: the AnythingLLM `ops` workspace (0 threads) is left in place, unmapped. Delete it in AnythingLLM?
 - The running app (restarted 11-27 16:25 by the GPU session) is main 8647df7: everything on main up to 4e69152 (section-pass-batch3 overnight batch included) plus the kill switch + options guard hardening. The earlier checks still apply: Settings has a Comms tab set to "Primary only"; "check my email" reads Primary only; "add Melissa Lee invoice to my to-do list" asks before it saves; saying "hold on" while Tony talks stops him.
-- **Restart the trading bridge** (:8091) to load the new kill-switch / options-guard Python? It needs TWS logged in. Until then the bridge runs the old kill switch; the app's E-stop UI is the new one.
+- Trading bridge restarted 11-27 17:17 (your OK) on the new kill-switch / options-guard code: the main checkout (G:gentic os, feat/language-hub) was fast-forwarded to main cf44451 first; reconnected to TWS paper as client 11 in 3 s and publishes openOrdersAt. The gateway was not restarted: it still runs its older loaded code until its next restart (already pending above for Finance records).
 - Check in the running app (00:31 build): pair a phone by QR then approve with the 2-digit code; phone captions with Live captions on; a wrong-token phone gets 401 and an unknown-device alert.
 - Security card now limits idle lock to 5-120 min and re-verify to 30-720 min.
 - Tony's Tier-1 memory holds dozens of copies of the six latency-test lines. They're harmless now, but prune them?
@@ -231,13 +231,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 16:26 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 17:18 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 31 | `8589cea` 2026-11-27 docs(status): Section 26 handoff: agents + tools, threads, ingest, ... | clean |
+| `section-26-engine` | 33 | `73c7e57` 2026-11-27 feat(engine): read-only connection check for the transfer (python -... | 162 files |
 | `section-pass` | 24 | `a0ad5f7` 2026-11-27 Merge main (4e69152) into section-pass | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/gifted-pascal-abdde6` | 1 | `6da6551` 2026-11-27 docs(status): kill-switch review round 4, merge parked overnight | no worktree |
@@ -247,10 +247,10 @@ _Refreshed 2026-11-27 16:26 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `cf44451` 2026-11-27 docs(status): kill switch shipped (8647df7), app restarted 16:25; bridge restart waits on Nic
 - `73ed487` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined main tests
 - `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
 - `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
 - `766dbf1` 2026-11-27 Merge section-pass-batch3: overnight batch (15 Language SRS, 14.6-14.7 track record + rankings, 16.2/16.3/16.6 mirrors + vault password + vault.search, S20.10 instant cues)
 - `d06baeb` 2026-11-27 docs(status): Tony live-test fixes pushed to origin (main e547863)
-- `e547863` 2026-11-27 docs(status): Tony live-test fixes merged into main (9d37071); restart handed to the parroting session's 0418649 build
 <!-- /AUTO:BRANCHES -->

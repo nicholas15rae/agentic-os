@@ -33,6 +33,8 @@ const IDEA: &str = "Cut my demo reel into a 15-second Instagram Reel that gets m
 const NOTE: &str = "Tighten the middle and end on a stronger beat.";
 const TURN_SECS: u64 = 120;
 const PROMPT_CAP: usize = 24_000;
+/** How many times Nic types the ask again when a step's card never lands (each re-ask may get the page's own auto-fix). */
+const NIC_REASKS: u32 = 2;
 
 fn cc_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("command center").to_path_buf()
@@ -164,6 +166,21 @@ impl Drop for StdioForge {
 struct Chat {
     role: &'static str,
     text: String,
+    /// A page-sent auto-fix line (director-chat chatHistory labels it as the app's).
+    auto_fix: bool,
+}
+
+/// director-chat.ts AUTO_FIX_HISTORY_LABEL.
+const AUTO_FIX_HISTORY_LABEL: &str = "(sent by the app, not Nic)";
+
+/// What sendDirectorTurn knows about a turn (the step runner's turn.json).
+#[derive(Default, Clone)]
+struct TurnInfo {
+    nic_line: Option<String>,
+    brief_idea: Option<String>,
+    only: Option<Vec<String>>,
+    /// The page's one automatic corrective turn: `shown` is what the chat shows and logs.
+    fix_shown: Option<String>,
 }
 
 struct Run {
@@ -180,11 +197,20 @@ struct Run {
     chat: Vec<Chat>,
     facts: serde_json::Map<String, Value>,
     pending_plan: Option<(RenderPlan, Vec<String>)>,
+    /// The live media-forge once started (plans measure black bars through it).
+    forge: Option<std::rc::Rc<StdioForge>>,
+    /// Automatic corrective turns the page sent (director-chat.ts, at most one per Nic turn).
+    auto_retries: u32,
+    /// Lines Nic had to type again because a reply (after its auto-fix) still lacked the action.
+    nic_reasks: u32,
 }
 
 /// One Director turn's outcome after Rust applied its effects.
 struct TurnOut {
+    /// Action types that applied (did something other than be refused).
     types: Vec<String>,
+    /// The page's one auto-fix turn ({ prompt, shown, only }), if this reply needs one.
+    auto_fix: Option<Value>,
 }
 
 impl Run {
@@ -244,23 +270,67 @@ impl Run {
     /// `wanted`: the action this line asks for; one corrective follow-up if the reply had invalid
     /// blocks or lacked it.
     fn turn(&mut self, label: &str, nic: &str, wanted: &str) -> Result<TurnOut, String> {
-        let mut out = self.one_turn(label, nic, wanted)?;
-        let bad = self.turns.last().map(|t| t["errors"].as_array().map_or(0, |a| a.len())).unwrap_or(0);
-        if bad > 0 || !out.types.iter().any(|t| t == wanted) {
-            let errs: Vec<String> = self.turns.last().and_then(|t| t["errors"].as_array().cloned()).unwrap_or_default().iter().filter_map(|e| e.as_str().map(String::from)).collect();
-            let fix = if errs.is_empty() {
-                format!("I don't see a {wanted} block in that reply. Send it as a ```director-action block, please.")
-            } else {
-                format!("These action blocks didn't apply:\n{}\nFix them and send the {wanted} block again.", errs.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n"))
-            };
-            self.errors.push(format!("turn {label}: corrective follow-up sent ({} invalid block(s), wanted {wanted} present: {})", errs.len(), out.types.iter().any(|t| t == wanted)));
-            let again = self.one_turn(&format!("{label}-fix"), &fix, wanted)?;
+        let mut out = self.send_turn(label, nic, wanted)?;
+        for k in 1..=NIC_REASKS {
+            if out.types.iter().any(|t| t == wanted) {
+                break;
+            }
+            // Not the app's doing: Nic, seeing no card, would ask again. Typed by Nic, so it
+            // goes through sendDirectorTurn like any line (and may get its own auto-fix).
+            self.nic_reasks += 1;
+            self.errors.push(format!("turn {label}: no {wanted} applied (after the page's auto-fix, if any): Nic asks again ({k} of {NIC_REASKS})"));
+            let tag = if k == 1 { format!("{label}-reask") } else { format!("{label}-reask{k}") };
+            let again = self.send_turn(&tag, &format!("I don't see a {wanted} card yet. Please send it as a director-action block."), wanted)?;
             out.types.extend(again.types);
         }
         Ok(out)
     }
 
-    fn one_turn(&mut self, label: &str, nic: &str, wanted: &str) -> Result<TurnOut, String> {
+    /// sendDirectorTurn (director-chat.ts): Nic's line, then at most ONE automatic corrective turn
+    /// when the reply had invalid blocks, a refused plan or a no-op revision. The fix applies only
+    /// the failed types (fixAllowlist) and is never fixed again.
+    fn send_turn(&mut self, label: &str, nic: &str, wanted: &str) -> Result<TurnOut, String> {
+        let info = TurnInfo { nic_line: Some(nic.to_string()), ..Default::default() };
+        let mut out = self.one_turn(label, nic, wanted, &info)?;
+        if let Some(fix) = out.auto_fix.take() {
+            self.auto_retries += 1;
+            let only: Option<Vec<String>> = fix["only"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            let prompt = fix["prompt"].as_str().unwrap_or("").to_string();
+            let finfo = TurnInfo { nic_line: info.nic_line.clone(), brief_idea: None, only, fix_shown: Some(fix["shown"].as_str().unwrap_or("").to_string()) };
+            let again = self.one_turn(&format!("{label}-autofix"), &prompt, wanted, &finfo)?;
+            out.types.extend(again.types);
+        }
+        Ok(out)
+    }
+
+    /// media_plan_check on each plan the reply holds, as checkedBody sends it (clips + checkPlanFor).
+    /// An IPC-level failure applies the plan unchecked with a warning, as plan-check.ts does.
+    fn plan_checks(&mut self, label: &str, dir: &Path) -> Result<Vec<Value>, String> {
+        let plans = self.ts_step("plans", dir)?;
+        let mut out = vec![];
+        for p in plans["plans"].as_array().cloned().unwrap_or_default() {
+            let r = (|| -> Result<PlanCheck, String> {
+                let clips: Vec<CheckClip> = serde_json::from_value(p["clips"].clone()).map_err(|e| format!("clips: {e}"))?;
+                let plan: Option<CheckPlan> = match p.get("plan") {
+                    Some(v) if !v.is_null() => Some(serde_json::from_value(v.clone()).map_err(|e| format!("plan: {e}"))?),
+                    _ => None,
+                };
+                plan_check_with(&self.st, &self.slug, clips, plan)
+            })();
+            out.push(match r {
+                Ok(r) => serde_json::to_value(&r).map_err(|e| e.to_string())?,
+                Err(e) => {
+                    self.errors.push(format!("turn {label}: media_plan_check failed ({e}): the page applies that plan unchecked"));
+                    let clips = p["clips"].clone();
+                    json!({ "clips": clips, "totalSec": 0, "targetSec": null, "warnings": [format!("the plan check didn't run ({e}): applied as written")], "refusals": [] })
+                }
+            });
+        }
+        std::fs::write(dir.join("plan-check.json"), serde_json::to_string_pretty(&out).unwrap()).map_err(|e| e.to_string())?;
+        Ok(out)
+    }
+
+    fn one_turn(&mut self, label: &str, nic: &str, wanted: &str, info: &TurnInfo) -> Result<TurnOut, String> {
         let t = Instant::now();
         let dir = self.e2e.join(format!("turn-{label}"));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -268,7 +338,21 @@ impl Run {
         let ctx = self.ts_step("context", &dir)?;
         let context = ctx["context"].as_str().unwrap_or("").to_string();
         // director-chat.ts chatHistory: the last 10 non-empty messages (Director = its prose).
-        let hist: Vec<HistoryMsg> = self.chat.iter().filter(|m| !m.text.trim().is_empty()).rev().take(10).collect::<Vec<_>>().into_iter().rev().map(|m| HistoryMsg { role: if m.role == "nic" { "user".into() } else { "assistant".into() }, content: m.text.clone() }).collect();
+        let hist: Vec<HistoryMsg> = self
+            .chat
+            .iter()
+            .filter(|m| !m.text.trim().is_empty())
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|m| HistoryMsg { role: if m.role == "nic" { "user".into() } else { "assistant".into() }, content: if m.auto_fix { format!("{AUTO_FIX_HISTORY_LABEL} {}", m.text) } else { m.text.clone() } })
+            .collect();
+        // What the chat shows and logs for this line: an auto-fix shows its short "[auto-fix]" line.
+        let shown = info.fix_shown.clone().unwrap_or_else(|| nic.to_string());
+        let is_fix = info.fix_shown.is_some();
+        std::fs::write(dir.join("turn.json"), serde_json::to_string_pretty(&json!({ "nicLine": info.nic_line, "briefIdea": info.brief_idea, "only": info.only, "isFix": is_fix })).unwrap()).map_err(|e| e.to_string())?;
         let req = DirectorTurnRequest { text: nic.into(), history: hist, context: context.clone(), stream_id: None };
         let mut msgs = director_messages(&req, None)?;
         if let Some(first) = msgs.first_mut() {
@@ -280,7 +364,7 @@ impl Run {
             return Err(format!("turn {label}: prompt {total} chars would overflow to the droplet"));
         }
         std::fs::write(dir.join("prompt.json"), serde_json::to_string_pretty(&msgs.iter().map(|m| json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>()).unwrap()).map_err(|e| e.to_string())?;
-        let _ = chat_log(&self.st, &self.slug, Some(("nic".into(), nic.into())));
+        let _ = chat_log(&self.st, &self.slug, Some(("nic".into(), shown.clone())));
         let call = self.chat_call(&msgs);
         let (answer, latency, usage) = match call {
             Ok(x) => x,
@@ -291,22 +375,28 @@ impl Run {
         };
         std::fs::write(dir.join("reply.txt"), &answer).map_err(|e| e.to_string())?;
         let _ = chat_log(&self.st, &self.slug, Some(("director".into(), answer.clone())));
+        // checkedBody: the plan check runs on every plan before it applies (snapping, refusals,
+        // the revision no-op test via unchangedSinceRender).
+        let has_plan = answer.contains("propose_edit_plan") || answer.contains("revise_edit");
+        let checks = if has_plan { self.plan_checks(label, &dir)? } else { vec![] };
         let applied = self.ts_step("apply", &dir)?;
         let prose = applied["parsed"]["prose"].as_str().unwrap_or("").to_string();
-        self.chat.push(Chat { role: "nic", text: nic.into() });
-        self.chat.push(Chat { role: "director", text: if prose.is_empty() { "(actions only)".into() } else { prose } });
+        self.chat.push(Chat { role: "nic", text: shown.clone(), auto_fix: is_fix });
+        self.chat.push(Chat { role: "director", text: if prose.is_empty() { "(actions only)".into() } else { prose }, auto_fix: false });
         let actions = applied["parsed"]["actions"].as_array().cloned().unwrap_or_default();
-        let types: Vec<String> = actions.iter().filter_map(|a| a["type"].as_str().map(String::from)).collect();
+        let types: Vec<String> = applied["appliedTypes"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
         let effects = applied["effects"].as_array().cloned().unwrap_or_default();
         let results = self.apply_effects(&effects);
-        eprintln!("[e2e] turn {label}: {latency} ms, actions {types:?}, errors {}", applied["parsed"]["errors"]);
+        let auto_fix = applied["autoFix"].clone();
+        eprintln!("[e2e] turn {label}: {latency} ms, applied {types:?}, errors {}, refusals {}, autoFix {}", applied["parsed"]["errors"], applied["refusals"], !auto_fix.is_null());
         self.turns.push(json!({
-            "turn": label, "nic": nic, "wanted": wanted, "systemChars": system_chars, "contextChars": context.chars().count(), "promptChars": total,
+            "turn": label, "nic": shown, "sentToModel": nic, "isAutoFix": is_fix, "only": info.only, "wanted": wanted, "systemChars": system_chars, "contextChars": context.chars().count(), "promptChars": total,
             "historyMsgs": msgs.len().saturating_sub(2), "latencyMs": latency, "wallMs": ms(t), "usage": usage,
-            "reply": answer, "actions": actions, "errors": applied["parsed"]["errors"], "notes": applied["notes"],
+            "reply": answer, "actions": actions, "appliedTypes": types, "ignored": applied["parsed"]["ignored"], "errors": applied["parsed"]["errors"], "notes": applied["notes"],
+            "planChecks": checks, "warnings": applied["warnings"], "refusals": applied["refusals"], "autoFix": auto_fix,
             "effects": effects.iter().map(|e| json!({ "kind": e["kind"], "why": e["why"], "by": e["by"] })).collect::<Vec<_>>(), "effectResults": results,
         }));
-        Ok(TurnOut { types })
+        Ok(TurnOut { types, auto_fix: if auto_fix.is_null() || is_fix { None } else { Some(auto_fix) } })
     }
 
     /// Carry out the page's effects through the real media.rs functions (what api.* would invoke).
@@ -337,9 +427,14 @@ impl Run {
                     review_write(&self.st, &self.slug, e["round"].as_u64().unwrap_or(1) as u8, e["summary"].as_str().map(String::from), ds).map(|r| json!({ "rounds": r.rounds.len() }))
                 }
                 "render_plan" => {
-                    let plan = build_plan(&self.st, &self.slug, "director")?;
+                    // requestPlan → media_render_plan → build_plan_with (framing auto: detect_bars via the live forge).
+                    let plan = match &self.forge {
+                        Some(f) => build_plan_with(&self.st, &**f, &self.slug, "director")?,
+                        None => build_plan(&self.st, &self.slug, "director")?,
+                    };
                     let resolves: Vec<String> = e["resolves"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
-                    let j = json!({ "planId": plan.plan_id, "outputSpec": plan.output_spec, "sources": plan.sources.len() });
+                    let framing: Vec<String> = plan.sources.iter().enumerate().map(|(k, s)| format!("clip {}: {}", k + 1, s.framing)).collect();
+                    let j = json!({ "planId": plan.plan_id, "outputSpec": plan.output_spec, "sources": plan.sources.len(), "framing": framing, "warnings": plan.warnings });
                     self.pending_plan = Some((plan, resolves));
                     Ok(j)
                 }
@@ -383,7 +478,10 @@ impl Run {
                     mark_plan_used(&self.st, &plan.plan_id);
                     // approvePlan: a waiting revision's notes resolve with Nic's render approval.
                     for n in &resolves {
-                        note_resolve(&self.st, &self.slug, n)?;
+                        match note_resolve(&self.st, &self.slug, n) {
+                            Err(e) if e.starts_with("UNCHANGED_PLAN") => self.errors.push(format!("note {n} stayed open: {e}")),
+                            r => r?,
+                        }
                     }
                 }
                 let mut last_stage = String::new();
@@ -461,7 +559,7 @@ fn e2e_live_demo_reel() {
     let root = PathBuf::from(&p.root);
     let e2e = root.join("working").join("e2e");
     std::fs::create_dir_all(&e2e).unwrap();
-    let mut run = Run { t0, st, cfg: os_core::OsConfig::default(), slug: p.slug.clone(), root: root.clone(), e2e: e2e.clone(), steps: vec![], turns: vec![], errors: vec![], stubs: vec![], chat: vec![], facts: Default::default(), pending_plan: None };
+    let mut run = Run { t0, st, cfg: os_core::OsConfig::default(), slug: p.slug.clone(), root: root.clone(), e2e: e2e.clone(), steps: vec![], turns: vec![], errors: vec![], stubs: vec![], chat: vec![], facts: Default::default(), pending_plan: None, forge: None, auto_retries: 0, nic_reasks: 0 };
     run.stubs.push(format!("media.db is a fresh scratch db ({}) so the intake tick only sees this project and the app's db is never migrated; the project folder is in the real projects root but the running app's project list won't show it", scratch.join("media.db").display()));
     run.stubs.push("LM Studio called directly (non-streamed) instead of dispatch::run_chat_streamed; same messages, reasoning_effort none, temperature 0.4 (the app sends no temperature)".into());
     run.stubs.push("Nic's clicks (approve brief, accept every match / moment, Approve & Render, Approve final) are made by the harness through the same media.rs functions the IPC commands call".into());
@@ -475,6 +573,12 @@ fn e2e_live_demo_reel() {
     let after = file_sig(Path::new(SOURCE));
     run.facts.insert("sourceUnchanged".into(), json!(after == Some(src_sig)));
     run.facts.insert("totalMs".into(), json!(ms(run.t0)));
+    run.facts.insert("autoRetries".into(), json!(run.auto_retries));
+    run.facts.insert("nicReasks".into(), json!(run.nic_reasks));
+    if let Ok(p) = load_project(&run.st, &run.slug) {
+        let idea = p.brief.as_ref().map(|b| b.idea.clone());
+        run.facts.insert("briefIdea".into(), json!({ "idea": idea, "verbatim": idea.as_deref() == Some(IDEA) }));
+    }
     let _ = std::fs::copy(scratch.join("media.db"), e2e.join("media.db"));
     write_report(&run);
     eprintln!("[e2e] report: {}", e2e.join("report.md").display());
@@ -490,7 +594,8 @@ fn drive(run: &mut Run) -> Result<(), String> {
     std::fs::copy(SOURCE, &dst).map_err(|e| format!("copy the reel into the inbox: {e}"))?;
     run.step("2a copy reel into inbox", t, true, json!({ "bytes": std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0) }));
     let t = Instant::now();
-    let forge = StdioForge::start(&run.e2e.join("media-forge.stderr.log"))?;
+    let forge = std::rc::Rc::new(StdioForge::start(&run.e2e.join("media-forge.stderr.log"))?);
+    run.forge = Some(forge.clone());
     let status = forge.call("media_status", &json!({})).unwrap_or(Value::Null);
     run.step("2b start media-forge (worktree code, stdio MCP)", t, true, json!({ "mediaStatus": status }));
     let t = Instant::now();
@@ -502,7 +607,7 @@ fn drive(run: &mut Run) -> Result<(), String> {
     let mut ticks = 0;
     loop {
         ticks += 1;
-        intake_tick_once(&run.st, &run.cfg, &forge, &emit)?;
+        intake_tick_once(&run.st, &run.cfg, &*forge, &emit)?;
         let assets = list_assets(&run.st, &run.slug)?;
         let queued = run.st.transcribe_queue.lock().unwrap().len();
         if !assets.is_empty() && queued == 0 && !dst.exists() {
@@ -593,7 +698,8 @@ Draft the brief.");
     let r1 = run.render(&forge, "4 render round 1 (CPU libx264, verified)")?;
     let r1 = r1.first().cloned().ok_or("no round-1 render")?;
     let review = review_get(&run.st, &run.slug)?;
-    run.facts.insert("round1".into(), json!({ "render": r1, "review": review }));
+    let m1 = load_manifest_strict(&run.root, &run.slug)?;
+    run.facts.insert("round1".into(), json!({ "render": r1, "review": review, "clips": m1.clips, "expectedSec": expected_duration(&m1) }));
 
     // ── step 5: Nic's note at ~5 s, Director revise_edit, round 2, approve final ──
     let t = Instant::now();
@@ -611,8 +717,10 @@ Draft the brief.");
     out?;
     let r2 = run.render(&forge, "5c render round 2 (CPU libx264, verified)")?;
     let review = review_get(&run.st, &run.slug)?;
-    let notes_after = load_manifest_strict(&run.root, &run.slug)?.notes;
-    run.facts.insert("round2".into(), json!({ "renders": r2, "review": review, "notes": notes_after }));
+    let m2 = load_manifest_strict(&run.root, &run.slug)?;
+    let same_clips = plans_equivalent(&m1, &m2);
+    let same_bytes = r2.first().is_some_and(|r| r.size_bytes == r1.size_bytes);
+    run.facts.insert("round2".into(), json!({ "renders": r2, "review": review, "notes": m2.notes, "clips": m2.clips, "expectedSec": expected_duration(&m2), "sameClipsAsRound1": same_clips, "sameBytesAsRound1": same_bytes }));
     let t = Instant::now();
     let ids: Vec<String> = r2.iter().map(|r| r.id.clone()).collect();
     let dels = approve_final(&run.st, &run.slug, &ids, true)?;
@@ -664,8 +772,9 @@ fn write_report(run: &Run) {
     md.push_str("\n## Director turns\n");
     for t in &run.turns {
         md.push_str(&format!(
-            "\n### {} — Nic: \"{}\"\n\nPrompt {} chars (system {}, context {}), latency {} ms, usage `{}`.\nActions: `{}`. Errors: `{}`.\n\n```text\n{}\n```\n",
+            "\n### {} — {}: \"{}\"\n\nPrompt {} chars (system {}, context {}), latency {} ms, usage `{}`.\nActions: `{}` (applied: `{}`). Errors: `{}`.\nPlan-check warnings: `{}`. Refusals: `{}`. Auto-fix requested: {}.\n\n```text\n{}\n```\n",
             t["turn"].as_str().unwrap_or(""),
+            if t["isAutoFix"] == true { "the page (auto-fix)" } else { "Nic" },
             t["nic"].as_str().unwrap_or(""),
             t["promptChars"],
             t["systemChars"],
@@ -673,7 +782,11 @@ fn write_report(run: &Run) {
             t["latencyMs"],
             t["usage"],
             t["actions"].as_array().map(|a| a.iter().filter_map(|x| x["type"].as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+            t["appliedTypes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
             t["errors"],
+            t["warnings"],
+            t["refusals"],
+            if t["autoFix"].is_null() { "no" } else { "yes" },
             t["reply"].as_str().or(t["modelError"].as_str()).unwrap_or("").replace("```", "'''"),
         ));
     }

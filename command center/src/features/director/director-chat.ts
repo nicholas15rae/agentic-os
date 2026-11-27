@@ -13,9 +13,10 @@
  */
 import { onNativeEvent, type ChatMessage } from "@/lib/platform";
 import { api } from "./api";
-import type { DirectorAction, DirectorTurnRequest } from "./contract";
+import type { AssetTranscriptLines, DirectorAction, DirectorTurnRequest } from "./contract";
 import { extractActionBlocks, parseDirectorActions } from "./actions";
 import { buildDirectorContext } from "./context";
+import { styleLineFor } from "./style";
 import { applyDirectorActionsReport, AUTO_FIX_SHOWN, AUTO_FIX_TAG, isAutoFixLine, setBriefIdea, useDirector, type ChatMsg } from "./director-store";
 
 export const HISTORY_TURNS = 10;
@@ -142,8 +143,25 @@ interface RunOpts {
   autoFix?: { shown: string };
 }
 
+type TranscriptLinesFn = (a: { slug: string }) => Promise<AssetTranscriptLines[]>;
+
+/** The project's timed transcript lines for the TRANSCRIPT section (media_transcript_lines; Rust
+ * reads the files and caches them by mtime). Empty when the backend has no such command (an older
+ * build, a test double) or the read fails: the turn goes on without the section. */
+export async function transcriptLinesFor(slug: string): Promise<AssetTranscriptLines[]> {
+  const fn = (api as { transcriptLines?: TranscriptLinesFn }).transcriptLines;
+  if (typeof fn !== "function") return [];
+  try {
+    const r = await fn({ slug });
+    return Array.isArray(r) ? r : [];
+  } catch {
+    return [];
+  }
+}
+
 /** One model call + apply, with chatBusy already held by the caller. Null = no reply to judge. */
 async function runTurn(slug: string, body: string, opts: RunOpts): Promise<(TurnProblems & { replyId: string }) | null> {
+  const [transcripts, style] = await Promise.all([transcriptLinesFor(slug), styleLineFor()]);
   const { project, assets, manifest, chat, review } = st();
   if (st().slug !== slug || !project || !manifest) return null;
   const history = chatHistory(chat);
@@ -164,7 +182,7 @@ async function runTurn(slug: string, body: string, opts: RunOpts): Promise<(Turn
     patchMsg(replyId, { text: cut >= 0 ? buffered.slice(0, cut).trimEnd() : buffered });
   });
 
-  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest, review), streamId);
+  const req = directorRequest(body, history, buildDirectorContext(project, assets, manifest, review, transcripts, style), streamId);
   try {
     const r = await api.turn({ req });
     const answer = (r.answer || buffered).trim();

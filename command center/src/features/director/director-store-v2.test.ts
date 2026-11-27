@@ -99,6 +99,8 @@ describe("draft_brief", () => {
     expect(st().briefDraft).toMatchObject({ idea: "Nic's own words", approved: false });
     expect(notes[0]).toMatch(/held/);
     expect(await store.acceptBriefDraft()).toBe(true);
+    // Nic's accept click is Nic's save (Rust reports only the Director's own drafts).
+    expect(m.projectUpdate).toHaveBeenLastCalledWith({ slug: "demo", brief: expect.objectContaining({ idea: "Nic's own words", approved: false, updatedBy: "nic" }) });
     expect(st().briefDraft).toBeNull();
     store.useDirector.setState({ briefDraft: { ...approved, approved: false } });
     store.rejectBriefDraft();

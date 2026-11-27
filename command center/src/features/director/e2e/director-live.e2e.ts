@@ -31,13 +31,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { env } from "node:process";
 import { describe, expect, it, vi } from "vitest";
-import type { CreativeBrief, DirectorAction, EditPlanBody, MediaAsset, MediaProject, Moment, ProjectReview, TimelineManifest } from "../contract";
+import type { AssetTranscriptLines, CreativeBrief, DirectorAction, EditPlanBody, MediaAsset, MediaProject, Moment, ProjectReview, TimelineManifest } from "../contract";
 import { parseDirectorActions, revisePlanBody } from "../actions";
 import { buildDirectorContext } from "../context";
 import { attachSlot, applyEditPlan, newId, setShotList, upgradeAsset, upgradeManifest, upgradeProject } from "../manifest";
 import type { reviseRefusal as ReviseRefusal } from "../director-store";
 import type * as Chat from "../director-chat";
-import { briefIdeaFor, checkPlanFor, noopRevisionRefusal, planChangesNothing, withCheckedClips, type CheckedClip, type PlanCheckResult } from "../plan-check";
+import { briefIdeaFor, checkPlanFor, noopRevisionReason, notesResolved, planChangesNothing, revisionSummary, withCheckedClips, type CheckedClip, type PlanCheckResult } from "../plan-check";
 import type { PlanCheckPlan } from "../contract";
 
 // director-store / director-chat reach the webview (toasts → voice, Tauri IPC); none of that is
@@ -118,10 +118,10 @@ export interface EffectsOut {
 const live = env.E2E_LIVE === "1";
 const dir = env.E2E_DIR ?? "";
 
-function load(): { project: MediaProject; assets: MediaAsset[]; manifest: TimelineManifest; review: ProjectReview | null } {
-  const s = JSON.parse(readFileSync(join(dir, "snapshot.json"), "utf8")) as Snapshot;
+function load(): { project: MediaProject; assets: MediaAsset[]; manifest: TimelineManifest; review: ProjectReview | null; transcripts: AssetTranscriptLines[] } {
+  const s = JSON.parse(readFileSync(join(dir, "snapshot.json"), "utf8")) as Snapshot & { transcripts?: AssetTranscriptLines[] };
   const project = upgradeProject(s.project);
-  return { project, assets: s.assets.map(upgradeAsset), manifest: upgradeManifest(s.manifest), review: s.review ?? project.review ?? null };
+  return { project, assets: s.assets.map(upgradeAsset), manifest: upgradeManifest(s.manifest), review: s.review ?? project.review ?? null, transcripts: Array.isArray(s.transcripts) ? s.transcripts : [] };
 }
 
 /** applyDirectorActions (director-store.ts), pure: the same branches, with Nic accepting every match and moment. */
@@ -245,17 +245,19 @@ export function effectsFor(actions: DirectorAction[], project: MediaProject, ass
         const body = checked(revisePlanBody(a), a.type);
         if (!body) break;
         // (cast: TS narrows a closure-assigned `let` to its initial null)
-        if ((lastCheck as PlanCheckResult | null)?.unchangedSinceRender ?? planChangesNothing(m, body)) {
-          const why = noopRevisionRefusal(m, a.resolves);
+        const fromRender = (lastCheck as PlanCheckResult | null)?.unchangedSinceRender;
+        if (fromRender ?? planChangesNothing(m, body, notesResolved(m, a.resolves))) {
+          const why = noopRevisionReason(m, body, a.resolves, fromRender === true);
           effects.push({ kind: "refused", action: a.type, why });
           notes.push("Revision not applied: it changes nothing, so your notes stay open");
           refusals.push(why);
           refusedTypes.push(a.type);
           break;
         }
+        const summary = revisionSummary(m, body, a.summary);
         m = applyEditPlan(m, body);
         effects.push({ kind: "manifest_save", by: "director", manifest: m, why: "revise_edit" });
-        if (a.summary.trim()) effects.push({ kind: "review_write", round: a.round, summary: a.summary });
+        if (summary.trim()) effects.push({ kind: "review_write", round: a.round, summary: summary.slice(0, 2000) });
         effects.push({ kind: "render_plan", resolves: a.resolves });
         notes.push(`Round ${a.round} revision: ${body.clips.length} clips, answers ${a.resolves.length} note(s)`);
         break;
@@ -279,9 +281,9 @@ const readJson = <T>(name: string): T | null => (existsSync(join(dir, name)) ? (
 describe.skipIf(!live)("director live e2e step", () => {
   it(`runs ${env.E2E_STEP ?? "?"}`, () => {
     expect(dir).not.toBe("");
-    const { project, assets, manifest, review } = load();
+    const { project, assets, manifest, review, transcripts } = load();
     if (env.E2E_STEP === "context") {
-      const context = buildDirectorContext(project, assets, manifest, review);
+      const context = buildDirectorContext(project, assets, manifest, review, transcripts);
       writeFileSync(join(dir, "out-context.json"), JSON.stringify({ context, chars: context.length }, null, 2));
       return;
     }

@@ -365,6 +365,8 @@ pub fn run() {
                 tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
                 // Section 26: the stats cache (idle while fastpath.json statsCache is off).
                 commands::fastpath::spawn(app.handle().clone());
+                // Section 26: the engine's routes come back after a reboot (idle while the engine is off).
+                commands::engine_route::spawn_keeper(app.handle().clone());
                 // Section pass: the Librarian workspace is kept on Query mode (checked once at start).
                 tauri::async_runtime::spawn(mcp::librarian_lock_at_start(app.handle().clone()));
                 tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));

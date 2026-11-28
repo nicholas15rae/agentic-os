@@ -401,3 +401,84 @@ mod call_tests {
         assert_eq!(engine_bases(SIDECAR), vec![SIDECAR.to_string()]);
     }
 }
+
+// ── Keeper: the engine's routes come back after a reboot ──────────────────────
+
+/// The checkout that holds `engine/serve.py`, found from this exe's folder upward (the app runs
+/// from `<root>\command center\src-tauri\target\release\`). None: not a checkout with the engine.
+pub fn sidecar_root(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors().skip(1).take(8).find(|d| d.join("engine").join("serve.py").is_file()).map(Path::to_path_buf)
+}
+
+/// Should the keeper start the sidecar (pure)? Only while the engine is switched on and neither
+/// the gateway (404 = old code; no answer = down) nor a sidecar serves the engine's routes.
+pub fn keeper_should_start(enabled: bool, gateway_serves: bool, sidecar_up: bool) -> bool {
+    enabled && !gateway_serves && !sidecar_up
+}
+
+async fn answers(http: &reqwest::Client, url: &str) -> bool {
+    matches!(http.get(url).timeout(Duration::from_secs(3)).send().await, Ok(r) if r.status().is_success())
+}
+
+/// Started once at app start-up: 15 s after launch, then every minute. Nothing happens while
+/// engine.json `enabled` is false. The sidecar is spawned DETACHED like the gateway (it outlives
+/// the app); its boot() starts Tony's model on the engine when enabled.
+pub fn spawn_keeper(app: tauri::AppHandle) {
+    use tauri::Manager;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        loop {
+            let st = app.state::<DispatchState>();
+            if let Some(route) = st.engine_route().filter(|r| r.enabled) {
+                let gw = st.snapshot().gateway;
+                let gateway_serves = answers(&st.http, &format!("{}/api/engine/settings", gw.url.trim_end_matches('/'))).await;
+                let sidecar_up = answers(&st.http, &format!("{SIDECAR}/api/engine/sidecar")).await;
+                if keeper_should_start(route.enabled, gateway_serves, sidecar_up) {
+                    match std::env::current_exe().ok().as_deref().and_then(sidecar_root) {
+                        Some(root) => {
+                            let py = super::compaction::python_program(&gw.command);
+                            let mut cmd = std::process::Command::new(&py);
+                            cmd.args(["-m", "engine.serve", "--port", "8081"]).current_dir(&root).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::process::CommandExt;
+                                cmd.creation_flags(0x0800_0000 | 0x0000_0008); // CREATE_NO_WINDOW | DETACHED_PROCESS
+                            }
+                            match cmd.spawn() {
+                                Ok(c) => eprintln!("[engine] started the engine sidecar (pid {}) from {}", c.id(), root.display()),
+                                Err(e) => eprintln!("[engine] could not start the engine sidecar ({py}): {e}"),
+                            }
+                        }
+                        None => eprintln!("[engine] engine is on but no checkout with engine/serve.py next to this app"),
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod keeper_tests {
+    use super::*;
+
+    #[test]
+    fn keeper_starts_only_when_on_and_nobody_serves() {
+        assert!(keeper_should_start(true, false, false));
+        assert!(!keeper_should_start(false, false, false), "engine off: never");
+        assert!(!keeper_should_start(true, true, false), "the gateway serves the routes");
+        assert!(!keeper_should_start(true, false, true), "a sidecar is already up");
+    }
+
+    #[test]
+    fn sidecar_root_walks_up_from_the_exe() {
+        let base = std::env::temp_dir().join(format!("cc-sidecar-root-{}", std::process::id()));
+        let exe_dir = base.join("command center").join("src-tauri").join("target").join("release");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        std::fs::create_dir_all(base.join("engine")).unwrap();
+        assert_eq!(sidecar_root(&exe_dir.join("command-center.exe")), None);
+        std::fs::write(base.join("engine").join("serve.py"), "").unwrap();
+        assert_eq!(sidecar_root(&exe_dir.join("command-center.exe")).as_deref(), Some(base.as_path()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

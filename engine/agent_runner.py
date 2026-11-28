@@ -314,9 +314,10 @@ def openai_chat(base: str, model: str, timeout: float = 120.0) -> Callable[[list
     return chat
 
 
-def load_table(path: Path = TABLE) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def load_table(path: Path | None = None) -> dict:
+    # The default is read at call time, so a patched TABLE (tests) is the one used.
+    return json.loads((path or TABLE).read_text(encoding="utf-8"))
 
 
-def load_os(path: Path = OS_JSON) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def load_os(path: Path | None = None) -> dict:
+    return json.loads((path or OS_JSON).read_text(encoding="utf-8"))

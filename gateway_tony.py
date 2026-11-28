@@ -785,7 +785,9 @@ def engine_route() -> Optional[tuple[str, str]]:
     turn; any problem reading the settings means Bionic (the switch can only fail closed)."""
     try:
         from engine.llama_engine import load_settings
-        s = load_settings()
+        # The same folder as every other gateway setting (providers.json), not the engine
+        # module's own copy of the path: a repointed APP_CFG_DIR (tests) must reach this too.
+        s = load_settings(_app_dir())
     except Exception:
         return None
     if not (s.enabled and s.route_tony):

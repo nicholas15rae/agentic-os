@@ -47,6 +47,17 @@ class SwitchTests(unittest.TestCase):
         (self.cfg / "engine.json").write_text("{broken")
         self.assertIsNone(gt.engine_route())  # fails closed
 
+    def test_switch_is_read_from_the_gateway_config_dir(self):
+        # Only the gateway's folder is repointed here; the engine module's own path is a folder
+        # whose engine.json says ON. The switch must follow the gateway's folder (off).
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        (Path(other.name) / "engine.json").write_text(json.dumps({"enabled": True, "route_tony": True}))
+        with mock.patch.object(le, "APP_CFG_DIR", Path(other.name)):
+            self.assertIsNone(gt.engine_route())
+            self.settings(enabled=True, route_tony=True)
+            self.assertEqual(gt.engine_route(), ("qwen/qwen3.5-9b", "http://127.0.0.1:1238/v1"))
+
     def test_off_never_touches_the_engine_branch(self):
         calls = []
         with mock.patch.object(cc, "_http_json", side_effect=lambda url, *a, **k: calls.append(url) or {"data": [{"id": "qwen/qwen3.5-9b", "state": "loaded"}]}):

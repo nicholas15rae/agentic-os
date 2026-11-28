@@ -18,6 +18,12 @@ export function VoiceLatencyFields() {
         label="Stream the first sentence"
         hint="Tony starts talking on the first slice of ElevenLabs audio instead of after the whole sentence. Same voice and model. Measured: about 0.3 s instead of 0.45-0.87 s."
       />
+      <Toggle
+        on={!!lat?.earlyStt}
+        onChange={(x) => set({ earlyStt: x })}
+        label="Start Whisper in the pause"
+        hint="Desktop: Whisper starts on what you said after 150 ms of quiet, so the text is ready when your turn ends. Speak again and it starts over. Same transcript; one extra Whisper pass when you pause mid-thought."
+      />
     </div>
   );
 }

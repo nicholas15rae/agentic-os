@@ -34,6 +34,7 @@ import type { SpeakOpts, TtsEngine } from "./tts-types";
 import { FallbackTts } from "./tts-fallback";
 import { PinCache, unpinEverywhere } from "./tts-pin";
 import { playStream, streamable, type StreamHandle, type StreamStart } from "./tts-stream";
+import { EarlyFinal } from "./stt-early";
 
 /** Tauri's invoke + Channel for `tts_stream` (loaded lazily, like `native`). */
 async function streamIpc() {
@@ -477,6 +478,8 @@ export class WhisperStt implements SttEngine {
   /** This capture's live captions (desktop) and its stream to the gateway (phone). */
   private partials: PartialLoop | null = null;
   private stream: PhoneSttStream | null = null;
+  /** Latency pass: Whisper started in your pause (`latency.earlyStt`, desktop only). */
+  private early: EarlyFinal | null = null;
 
   constructor() {
     // Load Silero now so the first utterance is already judged by the neural VAD.
@@ -490,6 +493,16 @@ export class WhisperStt implements SttEngine {
     this.handlers = h;
     h.onPhase?.("waiting");
     const current = () => this.handlers === h;
+    const live = this.liveHooks(h, current, opts?.partials);
+    const early = !isAndroidApp() && useSettings.getState().latency?.earlyStt ? new EarlyFinal((pcm, rate) => transcribeWav(encodeWav16k(pcm, rate))) : null;
+    this.early = early;
+    const captionTick = live.onSpeechTick;
+    const onSpeechTick: CaptureOpts["onSpeechTick"] = early
+      ? (t) => {
+          if (current() && micEnabled()) early.tick(t);
+          captionTick?.(t);
+        }
+      : captionTick;
     this.mic
       .start({
         record: true,
@@ -501,7 +514,8 @@ export class WhisperStt implements SttEngine {
         onSpeechStart: () => current() && h.onPhase?.("speech"),
         onNoSpeech: () => current() && h.onFinal(""),
         onUtteranceEnd: (pcm, rate) => void this.transcribe(pcm, rate, h),
-        ...this.liveHooks(h, current, opts?.partials),
+        ...live,
+        onSpeechTick,
       })
       .catch((e) => current() && h.onError(e instanceof MicLockedError ? MIC_LOCKED_MSG : micErrorMessage(e)));
   }
@@ -566,6 +580,8 @@ export class WhisperStt implements SttEngine {
 
   /** No caption after this, and the phone's stream (if any) is dropped. */
   private endLive() {
+    this.early?.reset();
+    this.early = null;
     this.partials?.close();
     this.partials = null;
     this.stream?.abort();
@@ -611,6 +627,19 @@ export class WhisperStt implements SttEngine {
         return;
       } catch {
         // No stream / an error / too slow: today's single upload below.
+        if (this.handlers !== h) return;
+        if (!micEnabled()) return h.onFinal("");
+      }
+    }
+    // Latency pass: Whisper already decoded this clip in your pause; nothing was said since.
+    const early = this.early?.take(pcm);
+    this.early = null;
+    if (early) {
+      try {
+        const text = await early;
+        if (this.handlers === h) h.onFinal(micEnabled() ? text.trim() : "");
+        return;
+      } catch {
         if (this.handlers !== h) return;
         if (!micEnabled()) return h.onFinal("");
       }

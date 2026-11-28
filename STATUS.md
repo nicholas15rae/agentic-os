@@ -22,7 +22,7 @@ State: Section 26 is merged into main, keeper 492853e included. `G:\agentic-os-e
 Every fix is behind its own switch, **off by default**, and none is live: the app isn't rebuilt (you asked). The after numbers come from `python scripts/bench_voice_latency.py tts|stt|early|prefill`, run against the live ElevenLabs, Whisper and engine. Not merged into main.
 
 - [x] 1. **Stream ElevenLabs** (`latency.streamTts`, Settings → Voice detection → Latency). The first sentence of a reply comes as 24 kHz PCM through Rust `tts_stream` over a Tauri channel, and plays from its first 100 ms of audio. Tony's cloned voice and `eleven_v4_turbo` are unchanged (no flash). The other sentences come whole, as before. Anything that wouldn't reach ElevenLabs right now (kill switch, breaker cooldown, another engine, an error before the first byte) falls back to today's path. A hold replays the sentence whole.
-- [ ] 2. Whisper early start
+- [x] 2. **Whisper early start** (`latency.earlyStt`, desktop). After 150 ms of quiet, the clip so far goes to Whisper (the same `stt_transcribe` call). If the turn ends with no new word and the final clip starts with that same audio, that text is the final. A word in between throws it away. A failed early decode falls back to today's decode. Bench on real Tony clips: Whisper wait median 0.54 s → 0.17 s at a 500 ms end wait (0 s at 700 ms). Transcripts were the same apart from one comma
 - [ ] 3. Silero end-of-turn 0.5 s with a guard
 - [ ] 4. Trim Tony's turn setup
 - [ ] 5. Before / after table
@@ -308,6 +308,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| latency pass step 2 (early Whisper) | vitest 3,562/3,562 (+5 stt-early); tsc clean. Bench (`early --end 500/700`): 0.54 → 0.17 s / 0.51 → 0 s. Not checked in the app | 11-28 09:40 |
 | latency pass step 1 (stream TTS) | vitest 3,557/3,557 (+6 tts-stream); tsc clean; cargo elevenlabs 11/11; cargo check OK. Live bench: streamed PCM playable at 0.27-0.33 s vs whole MP3 0.45-0.87 s. Not checked in the app (no rebuild) | 11-28 09:40 |
 | main + section-26-engine keeper (merge 11-27 22:30, re-merged with origin/main 6108a01 11-28) | tsc clean; vitest 3,551/3,551 after the re-merge (3,498 before); pytest tests/ 1,978 pass, 1 skip; cargo lib 1,719 pass, 2 known CRLF source scans (allm, buildhub) | 11-27 22:30 |
 | section-26-engine (keeper, 20:00) | cargo lib 1,716 pass; 5 failed under load = 1 known CRLF scan (allm) + 4 real-browser tests that pass alone (re-run 4/4 ok); engine_route 9/9; pytest + vitest unchanged since 2b44e0f (1,975 / 3,498 pass) | 11-27 20:00 |
@@ -381,12 +382,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-28 09:37 by `python scripts/update_status.py`._
+_Refreshed 2026-11-28 09:39 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/section-26-merge-latency-61c93b` | 1 | `7c1f7c5` 2026-11-28 feat(voice): stream Tony's first sentence from ElevenLabs as PCM (l... | 5 files |
 | `claude/tony-honesty-6769c2` | 1 | `04d268e` 2026-11-28 fix(tony): no pretend tool calls (honesty fix 1, switch honestyGuard) | 4 files |
 | `claude/login-widget-navigation-8ae672` | 15 | `c692448` 2026-11-27 fix(phone): camera for QR pairing, plus a typed pairing code | 6 files |
 | `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 7 files |

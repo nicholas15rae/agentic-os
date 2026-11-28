@@ -331,3 +331,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// ── Engine control calls (the Engine / Models screen) ──────────────────────────
+
+/// The engine sidecar (`python -m engine.serve`): the engine's routes from the branch's code while
+/// the real gateway runs code without them.
+pub const SIDECAR: &str = "http://127.0.0.1:8081";
+
+/// Only the engine's own routes go through `engine_call` (pure).
+pub fn engine_path_ok(method: &str, path: &str) -> bool {
+    matches!(method, "GET" | "POST" | "PUT") && path.starts_with("/api/engine/") && !path.contains("..") && !path.contains('#') && path.len() < 512
+}
+
+/// Where to try, in order: the gateway, then the sidecar (pure).
+pub fn engine_bases(gateway: &str) -> Vec<String> {
+    let g = gateway.trim_end_matches('/').to_string();
+    if g == SIDECAR {
+        vec![g]
+    } else {
+        vec![g, SIDECAR.to_string()]
+    }
+}
+
+/// One `/api/engine/*` call: the gateway first; a 404 there (its code has no engine routes yet)
+/// or no answer at all tries the sidecar. Err = "<status> <detail>" like the gateway client.
+#[tauri::command]
+pub async fn engine_call(state: tauri::State<'_, DispatchState>, method: String, path: String, body: Option<Value>, timeout_secs: Option<u64>) -> Result<Value, String> {
+    let method = method.to_ascii_uppercase();
+    if !engine_path_ok(&method, &path) {
+        return Err("only /api/engine/* routes".into());
+    }
+    let secs = timeout_secs.unwrap_or(15).clamp(1, 600);
+    let mut last = String::from("engine routes not reachable (gateway and sidecar)");
+    for base in engine_bases(&state.snapshot().gateway.url) {
+        let url = format!("{base}{path}");
+        let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+        let mut rq = state.http.request(m, &url).timeout(Duration::from_secs(secs));
+        if let Some(b) = &body {
+            rq = rq.json(b);
+        }
+        match rq.send().await {
+            Ok(r) if r.status().as_u16() == 404 => last = format!("404 at {base} (no engine routes there)"),
+            Ok(r) => {
+                let code = r.status();
+                let v = r.json::<Value>().await.unwrap_or(Value::Null);
+                if code.is_success() {
+                    return Ok(v);
+                }
+                return Err(format!("{} {}", code.as_u16(), v["detail"].as_str().unwrap_or("")));
+            }
+            Err(e) => last = format!("{base}: {}", super::dispatch::short(e)),
+        }
+    }
+    Err(last)
+}
+
+#[cfg(test)]
+mod call_tests {
+    use super::*;
+
+    #[test]
+    fn only_engine_routes_and_gateway_first() {
+        assert!(engine_path_ok("GET", "/api/engine/models?fit=1"));
+        assert!(engine_path_ok("POST", "/api/engine/test"));
+        for (m, p) in [("GET", "/api/os/inbox"), ("DELETE", "/api/engine/status"), ("GET", "/api/engine/../os/gpu"), ("GET", "http://evil/api/engine/x")] {
+            assert!(!engine_path_ok(m, p), "{m} {p}");
+        }
+        assert_eq!(engine_bases("http://127.0.0.1:8080/"), vec!["http://127.0.0.1:8080".to_string(), SIDECAR.to_string()]);
+        assert_eq!(engine_bases(SIDECAR), vec![SIDECAR.to_string()]);
+    }
+}

@@ -532,6 +532,7 @@ pub fn run() {
             review_queue::review_webhook_clear,
             review_queue::review_webhook_test,
             commands::engine_route::engine_switch_get,
+            commands::engine_route::engine_call,
             commands::fastpath::fastpath_get,
             commands::fastpath::fastpath_set,
             commands::engine_route::engine_switch_set,

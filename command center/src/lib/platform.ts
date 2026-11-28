@@ -332,6 +332,8 @@ export interface NativeCommands {
   /** Turning Tony (or the gateway agents) ON is refused unless the engine is enabled and answering. */
   engine_switch_set: { args: { patch: { enabled?: boolean; routeTony?: boolean; routeAgents?: boolean } }; result: EngineSwitchView };
   /** Tony's latency fast path (fastpath.json; all OFF by default). */
+  /** `/api/engine/*` via Rust: the gateway, else the engine sidecar on 127.0.0.1:8081. */
+  engine_call: { args: { method: string; path: string; body?: unknown; timeoutSecs?: number }; result: unknown };
   fastpath_get: { args: undefined; result: FastPathSettings };
   fastpath_set: { args: { value: FastPathSettings }; result: FastPathSettings };
 }

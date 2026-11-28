@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Gauge, Loader2, Zap } from "lucide-react";
 import { Card } from "@/components/ui";
 import { cmd } from "@/lib/platform";
-import { gateway } from "@/lib/gateway";
+import { engineApi } from "@/features/engine/engine-api";
 import { benchLine, backendRows, routeTonyBlocker, testReplyLine, type BenchLast, type EngineSwitchView, type TestReply } from "@/features/engine/engine";
 import { Toggle } from "./os-ui";
 
@@ -31,7 +31,7 @@ export function EngineSwitchCard() {
 
   useEffect(() => {
     void refresh();
-    void gateway<BenchLast>("/api/engine/bench/last").then(setBench, () => setBench(null));
+    void engineApi<BenchLast>("/api/engine/bench/last").then(setBench, () => setBench(null));
     const t = setInterval(() => void refresh(), 5000);
     return () => clearInterval(t);
   }, [refresh]);
@@ -52,7 +52,7 @@ export function EngineSwitchCard() {
     setBusy("test");
     setMsg(null);
     try {
-      setTest(await gateway<TestReply>("/api/engine/test", { method: "POST", body: "{}", timeoutMs: 120_000 }));
+      setTest(await engineApi<TestReply>("/api/engine/test", { method: "POST", body: "{}", timeoutMs: 120_000 }));
     } catch (e) {
       setMsg(String(e));
     } finally {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Cpu, Download, Loader2, Power, RefreshCw, Trash2 } from "lucide-react";
 import { Card, Field, Select } from "@/components/ui";
-import { gateway } from "@/lib/gateway";
+import { engineApi } from "@/features/engine/engine-api";
 import {
   deleteConfirmed,
   fitLabel,
@@ -38,19 +38,19 @@ export function EngineCard() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, c] = await Promise.all([gateway<EngineStatus>("/api/engine/status"), gateway<EngineSettings>("/api/engine/settings")]);
+      const [s, c] = await Promise.all([engineApi<EngineStatus>("/api/engine/status"), engineApi<EngineSettings>("/api/engine/settings")]);
       setSt(s);
       setCfg(c);
-      setJobs(await gateway<DownloadJob[]>("/api/engine/downloads"));
+      setJobs(await engineApi<DownloadJob[]>("/api/engine/downloads"));
     } catch (e) {
-      setMsg(`Engine routes not reachable: ${String(e)} (the gateway needs a restart to load them)`);
+      setMsg(`Engine routes not reachable: ${String(e)} (start the engine sidecar: python -m engine.serve, or a gateway with this branch)`);
     }
   }, []);
 
   const scan = useCallback(async () => {
     setBusy("scan");
     try {
-      const l = await gateway<Library>("/api/engine/models?fit=1", { timeoutMs: 120_000 });
+      const l = await engineApi<Library>("/api/engine/models?fit=1", { timeoutMs: 120_000 });
       setLib(l);
       setHf((h) => (h.dest || !l.chat[0] ? h : { ...h, dest: l.chat[0].root }));
     } catch (e) {
@@ -82,20 +82,20 @@ export function EngineCard() {
   };
 
   const save = (patch: Partial<EngineSettings>) =>
-    act("save", async () => setCfg(await gateway<EngineSettings>("/api/engine/settings", { method: "PUT", body: JSON.stringify(patch) })), scan);
+    act("save", async () => setCfg(await engineApi<EngineSettings>("/api/engine/settings", { method: "PUT", body: JSON.stringify(patch) })), scan);
 
-  const load = (m: LibraryModel) => act(`load:${m.path}`, () => gateway("/api/engine/load", { method: "POST", body: JSON.stringify({ path: m.path }), timeoutMs: 300_000 }), scan);
-  const unload = () => act("unload", () => gateway("/api/engine/unload", { method: "POST" }), scan);
+  const load = (m: LibraryModel) => act(`load:${m.path}`, () => engineApi("/api/engine/load", { method: "POST", body: JSON.stringify({ path: m.path }), timeoutMs: 300_000 }), scan);
+  const unload = () => act("unload", () => engineApi("/api/engine/unload", { method: "POST" }), scan);
 
   const startDownload = () => {
     const p = parseHfInput(hf.repo, hf.file);
     if ("error" in p) return setMsg(p.error);
-    void act("download", () => gateway("/api/engine/download", { method: "POST", body: JSON.stringify({ ...p, destRoot: hf.dest }) }));
+    void act("download", () => engineApi("/api/engine/download", { method: "POST", body: JSON.stringify({ ...p, destRoot: hf.dest }) }));
   };
 
   const confirmDelete = () => {
     if (!del) return;
-    void act("delete", () => gateway("/api/engine/delete", { method: "POST", body: JSON.stringify({ path: del.path, confirm: del.typed }) }), scan).then(() => setDel(null));
+    void act("delete", () => engineApi("/api/engine/delete", { method: "POST", body: JSON.stringify({ path: del.path, confirm: del.typed }) }), scan).then(() => setDel(null));
   };
 
   const bar = st?.vram && !st.vram.error ? vramBar(st.vram) : null;

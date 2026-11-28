@@ -5,7 +5,7 @@ Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 
 ## HANDOFF: UI fixes round (branch `claude/ui-fixes-round-4f8159`, from main 0a3cb36), updated 11-28 09:25
 
-Five items from Nic's UI fixes list, one commit each. Not merged, not pushed, no rebuild (Nic's call).
+Five items from Nic's UI fixes list (plus Nic's mid-run mascot change), one commit each. **Merged into local main 11-28 (fast-forward to 0a4e2dc), Nic's go-ahead. Not pushed; app not rebuilt** (both Nic's call).
 - [x] 1. Sub-pages for every section: tabs under the edit bar once a section has a 2nd page (or in Edit layout: + Page, rename, reorder, remove); sideways swipe and Ctrl+Alt+←/→; Look panel "Move to page"; Add panel offers another page's panels again (never a 2nd safety control). One-page sections look as before.
 - [x] 2. Live pop-up characters: overlay layer (z-60, under windows / modals / confirm cards / toasts); only the character takes clicks, its bubble never does; corner picked to avoid `[data-safety]`, nav and the page dock (re-checked every 4 s); idle = short blink/bob bursts every ~10 s (nothing loops); reduced motion drops the motion. Gabagool (original drawing, slice + gold coin) pops on 'got it done' toasts (Staged/Saved/Sent/Done…), streaks at 3/5/10, a once-a-day hello, and taps. Right-click / hold: Mute, Hide, Settings. Settings → Appearance → Live characters: show, mute, how often (taps only / rarely / now and then / often), corner, Try it, Reset. `characterEvent()` is the hook for the real coins (Section 28, not built).
 - [x] 3. Fortune cookie crack: the old build set clip-path to SVG path syntax (ignored by the browser), so it never cracked; history kept the previous text; New Fortune wiped history; no daily fortune. Rebuilt by hand: folded-cookie drawing, wobble, two halves swing apart, paper slip slides out; same fortune all day, Another fortune, history of 5, 6 lucky numbers, reduced motion. Source `command center/assets-src/widgets/fortune-cookie/index.html`, copied to `staging/fortune-cookie/index.html` (old one kept as `.iterations/3-pre-uifix.html`). Its pipeline status still says failed (Repair): Nic promotes it after a look.
@@ -140,12 +140,12 @@ For the next session (Claude Ultra, Monday). Nothing is merged into main or push
 | Fortune-cookie live build (section-pass app, 11-27 10:06-10:25): every brief point reached the verifier and the widget used the style kit; it went to Repair because click probes on its SVG cookie misfired (checker bug, fixed) and the local verifier quoted code not in the page | section-pass | 96829e3 | Yes (f555484), pushed |
 | Build checks catch an animation that never shows (style values the browser rejects, e.g. the cookie's clip-path; elements with click handlers are clicked in the smoke) | section-pass | febc6e9 | Yes (f555484), pushed |
 | Phone APK rebuilt from main 4866634 (arm64 debug, 431 MB) and installed on the S22 over the 11-25 build: same signing key, so app data and the gateway token are kept | claude/phone-apk-agentic-os-764f34 | 4866634 (no code change) | Yes, built from main |
-| UI fixes 1: sub-pages for every section (tabs, swipe, Ctrl+Alt+arrows, Move to page, per-page Add panel) | claude/ui-fixes-round-4f8159 | 2eccbda | No |
-| UI fixes 2: live pop-up characters, Gabagool coins mascot first (overlay layer, mute / hide / frequency, safety-control avoidance) | claude/ui-fixes-round-4f8159 | 80b180b | No |
-| UI fixes 3: fortune cookie rebuilt (real crack animation, daily fortune, history, lucky numbers); staging copy updated, still in Repair until Nic promotes | claude/ui-fixes-round-4f8159 | 17969b1 | No |
-| UI fixes 4: Play Place steers back (kind, pitch, sharp questions, brief, taste profile) | claude/ui-fixes-round-4f8159 | 75b9e74 | No |
-| UI fixes 5: widget tap animations (global switch, per-widget style + strength, reduced motion) | claude/ui-fixes-round-4f8159 | d6bb57d | No |
-| Coin mascot: occasional pop-ins from the screen edge (quiet during calls / typing / full screen / Trading / DND; click for menu) | claude/ui-fixes-round-4f8159 | see log | No |
+| UI fixes 1: sub-pages for every section (tabs, swipe, Ctrl+Alt+arrows, Move to page, per-page Add panel) | claude/ui-fixes-round-4f8159 | 2eccbda | Yes (local main 0a4e2dc), not pushed |
+| UI fixes 2: live pop-up characters, Gabagool coins mascot first (overlay layer, mute / hide / frequency, safety-control avoidance) | claude/ui-fixes-round-4f8159 | 80b180b | Yes (local main 0a4e2dc), not pushed |
+| UI fixes 3: fortune cookie rebuilt (real crack animation, daily fortune, history, lucky numbers); staging copy updated, still in Repair until Nic promotes | claude/ui-fixes-round-4f8159 | 17969b1 | Yes (local main 0a4e2dc), not pushed |
+| UI fixes 4: Play Place steers back (kind, pitch, sharp questions, brief, taste profile) | claude/ui-fixes-round-4f8159 | 75b9e74 | Yes (local main 0a4e2dc), not pushed |
+| UI fixes 5: widget tap animations (global switch, per-widget style + strength, reduced motion) | claude/ui-fixes-round-4f8159 | d6bb57d | Yes (local main 0a4e2dc), not pushed |
+| Coin mascot: occasional pop-ins from the screen edge (quiet during calls / typing / full screen / Trading / DND; click for menu) | claude/ui-fixes-round-4f8159 | 0a4e2dc | Yes (local main), not pushed |
 
 ## 2. In progress
 
@@ -355,7 +355,6 @@ _Refreshed 2026-11-28 09:26 by `python scripts/update_status.py`._
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/ui-fixes-round-4f8159` | 5 | `d6bb57d` 2026-11-27 feat(widgets): tap animations with a global switch and per-widget s... | 10 files |
 | `claude/login-widget-navigation-8ae672` | 15 | `c692448` 2026-11-27 fix(phone): camera for QR pairing, plus a typed pairing code | 6 files |
 | `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 7 files |
 | `section-26-engine` | 1 | `492853e` 2026-11-27 feat(engine): keeper restarts the engine sidecar after a reboot; ha... | clean |
@@ -366,10 +365,10 @@ _Refreshed 2026-11-28 09:26 by `python scripts/update_status.py`._
 
 **Latest on main**
 
-- `0a3cb36` 2026-11-27 docs(status): handoff: S26 merged on this branch, tests, switches changed, gateway restart plan
-- `8852576` 2026-11-27 fix(engine): tests never read the live engine.json; gateway Tony reads the switch from its own config dir
-- `33841f2` 2026-11-27 Merge section-26-engine: built-in engine, Engine / Models screen, Tony's fast path (every switch off)
-- `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: drop finished 6 and 23 from Not started, clear stale push question
-- `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on the S22
-- `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed
+- `0a4e2dc` 2026-11-28 feat(characters): coin mascot pops in now and then instead of staying on screen
+- `d6bb57d` 2026-11-27 feat(widgets): tap animations with a global switch and per-widget style and strength (UI fixes 5)
+- `75b9e74` 2026-11-27 feat(playplace): Play Place steers back before building (UI fixes 4)
+- `17969b1` 2026-11-27 fix(widgets): fortune cookie crack animation (UI fixes 3)
+- `80b180b` 2026-11-27 feat(characters): live pop-up characters, Gabagool coins mascot first (UI fixes 2)
+- `2eccbda` 2026-11-27 feat(layout): sub-pages for every section (UI fixes 1)
 <!-- /AUTO:BRANCHES -->

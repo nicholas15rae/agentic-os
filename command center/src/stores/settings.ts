@@ -108,6 +108,14 @@ export interface SettingsState {
    */
   vad: { activationDb: number; bargeMarginDb: number; endSilenceMs: number; maxUtteranceMs: number; partialMs?: number };
   /**
+   * Latency pass (Section 26 follow-up), every switch off by default (Settings → Voice → Latency):
+   * `streamTts` plays Tony's first sentence as ElevenLabs streams it (features/voice/tts-stream.ts);
+   * `earlyStt` starts Whisper in your pause, before the end-of-turn wait is over (stt-early.ts);
+   * `smartEnd` ends your turn after `smartEndMs` of quiet instead of `vad.endSilenceMs`, but only
+   * when Silero is deciding and the words so far don't trail off mid-sentence (end-of-turn.ts).
+   */
+  latency: { streamTts: boolean; earlyStt: boolean; smartEnd: boolean; smartEndMs: number };
+  /**
    * Conversation: reopen the mic after Tony answers; let you talk over him.
    * `bargeEndSilenceMs`: end-of-speech pause for a listen opened over Tony (Phase 2 reflexes).
    * `audioRoute`: headset vs open speakers ("auto" reads the default output device's name).
@@ -196,6 +204,7 @@ const defaults: Omit<SettingsState, "set"> = {
   calmWhenIdle: true,
   gatewayToken: "",
   vad: { activationDb: DEFAULT_ACTIVATION_DB, bargeMarginDb: DEFAULT_BARGE_MARGIN_DB, endSilenceMs: 700, maxUtteranceMs: 15000, partialMs: 0 },
+  latency: { streamTts: false, earlyStt: false, smartEnd: false, smartEndMs: 500 },
   conversation: { followUp: true, followUpSecs: 6, bargeIn: true, bargeEndSilenceMs: 500, audioRoute: "auto", mediaDuck: { ...MEDIA_DUCK_DEFAULTS } },
   routing: { announcerHandoff: true, vocalHandoffs: false },
   reminders: { osFallback: true },

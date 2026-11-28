@@ -17,6 +17,16 @@ State: Section 26 is merged into main, keeper 492853e included. `G:\agentic-os-e
 6. Check it worked: in Settings -> Engine / Models the model row should say "loaded"; then press "Test reply".
 7. The app: you asked for no rebuild, so it still runs `G:\agentic-os-engine\command center\src-tauri\target\release\command-center.exe` (the 19:23 build, pid 4032). That build has all of Section 26 except the sidecar keeper. You don't have to restart it. The Part 2 latency switches only reach the app after a rebuild from main.
 
+## HANDOFF: Latency pass (branch `claude/section-26-merge-latency-61c93b`, from main b803a9f), updated 11-28
+
+Every fix is behind its own switch, **off by default**, and none is live: the app isn't rebuilt (you asked). The after numbers come from `python scripts/bench_voice_latency.py tts|stt|early|prefill`, run against the live ElevenLabs, Whisper and engine. Not merged into main.
+
+- [x] 1. **Stream ElevenLabs** (`latency.streamTts`, Settings → Voice detection → Latency). The first sentence of a reply comes as 24 kHz PCM through Rust `tts_stream` over a Tauri channel, and plays from its first 100 ms of audio. Tony's cloned voice and `eleven_v4_turbo` are unchanged (no flash). The other sentences come whole, as before. Anything that wouldn't reach ElevenLabs right now (kill switch, breaker cooldown, another engine, an error before the first byte) falls back to today's path. A hold replays the sentence whole.
+- [ ] 2. Whisper early start
+- [ ] 3. Silero end-of-turn 0.5 s with a guard
+- [ ] 4. Trim Tony's turn setup
+- [ ] 5. Before / after table
+
 ## HANDOFF: UI fixes round (branch `claude/ui-fixes-round-4f8159`, from main 0a3cb36), updated 11-28 09:25
 
 Five items from Nic's UI fixes list (plus Nic's mid-run mascot change), one commit each. **Merged into main 11-28 and pushed to origin (daabcf8), Nic's go-ahead. App not rebuilt** (Nic's call).
@@ -298,6 +308,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| latency pass step 1 (stream TTS) | vitest 3,557/3,557 (+6 tts-stream); tsc clean; cargo elevenlabs 11/11; cargo check OK. Live bench: streamed PCM playable at 0.27-0.33 s vs whole MP3 0.45-0.87 s. Not checked in the app (no rebuild) | 11-28 09:40 |
 | main + section-26-engine keeper (merge 11-27 22:30, re-merged with origin/main 6108a01 11-28) | tsc clean; vitest 3,551/3,551 after the re-merge (3,498 before); pytest tests/ 1,978 pass, 1 skip; cargo lib 1,719 pass, 2 known CRLF source scans (allm, buildhub) | 11-27 22:30 |
 | section-26-engine (keeper, 20:00) | cargo lib 1,716 pass; 5 failed under load = 1 known CRLF scan (allm) + 4 real-browser tests that pass alone (re-run 4/4 ok); engine_route 9/9; pytest + vitest unchanged since 2b44e0f (1,975 / 3,498 pass) | 11-27 20:00 |
 | claude/ui-fixes-round-4f8159, mascot pop-ins | vitest 3,551/3,551 (21 character tests); tsc clean; browser preview: none at rest, Try it peeks in from the right, click opens menu and he stays past 5 s, click-away sends him off | 11-28 09:25 |
@@ -370,13 +381,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-28 09:30 by `python scripts/update_status.py`._
+_Refreshed 2026-11-28 09:37 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/ui-fixes-round-4f8159` | 8 | `6108a01` 2026-11-28 docs(status): UI fixes round pushed to origin/main | clean |
+| `claude/tony-honesty-6769c2` | 1 | `04d268e` 2026-11-28 fix(tony): no pretend tool calls (honesty fix 1, switch honestyGuard) | 4 files |
 | `claude/login-widget-navigation-8ae672` | 15 | `c692448` 2026-11-27 fix(phone): camera for QR pairing, plus a typed pairing code | 6 files |
 | `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 7 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
@@ -386,10 +397,10 @@ _Refreshed 2026-11-28 09:30 by `python scripts/update_status.py`._
 
 **Latest on main**
 
+- `b803a9f` 2026-11-28 Merge origin/main (UI fixes round) into the Section 26 keeper merge
 - `4d2fb0d` 2026-11-28 Merge section-26-engine: engine keeper restarts the sidecar after a reboot
 - `0a3cb36` 2026-11-27 docs(status): handoff: S26 merged on this branch, tests, switches changed, gateway restart plan
 - `8852576` 2026-11-27 fix(engine): tests never read the live engine.json; gateway Tony reads the switch from its own config dir
 - `33841f2` 2026-11-27 Merge section-26-engine: built-in engine, Engine / Models screen, Tony's fast path (every switch off)
 - `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: drop finished 6 and 23 from Not started, clear stale push question
-- `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on the S22
 <!-- /AUTO:BRANCHES -->

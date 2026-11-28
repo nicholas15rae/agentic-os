@@ -576,6 +576,7 @@ pub fn run() {
             voice::mic_get,
             voice::stt_configure,
             voice::tts_synthesize,
+            voice::tts_stream,
             voice::tts_voices,
             voice::tts_voice_upload,
             audio::commands::audio_engine_devices,

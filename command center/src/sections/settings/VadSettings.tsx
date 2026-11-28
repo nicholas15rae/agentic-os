@@ -9,6 +9,7 @@ import { DEFAULT_PARTIAL_MS, partialMsChoices, partialMsFrom } from "@/features/
 import { isTauri } from "@/lib/platform";
 import { useSettings } from "@/stores/settings";
 import { transcribeWav } from "@/features/voice/engines";
+import { VoiceLatencyFields } from "./VoiceLatencyFields";
 
 /**
  * `vad.partialMs`: live captions while you speak, one Whisper pass on the clip so far every this
@@ -205,6 +206,7 @@ export function VoiceDetectionCard() {
           </div>
         )}
       </div>
+      <VoiceLatencyFields />
     </Card>
   );
 }

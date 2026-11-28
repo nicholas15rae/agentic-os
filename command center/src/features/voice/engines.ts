@@ -33,6 +33,20 @@ export async function transcribeWav(wav: Uint8Array): Promise<string> {
 import type { SpeakOpts, TtsEngine } from "./tts-types";
 import { FallbackTts } from "./tts-fallback";
 import { PinCache, unpinEverywhere } from "./tts-pin";
+import { playStream, streamable, type StreamHandle, type StreamStart } from "./tts-stream";
+
+/** Tauri's invoke + Channel for `tts_stream` (loaded lazily, like `native`). */
+async function streamIpc() {
+  const core = await import("@tauri-apps/api/core");
+  return {
+    invoke: (c: string, a: Record<string, unknown>) => core.invoke<StreamStart>(c, a),
+    channel: (on: (b: ArrayBuffer) => void) => {
+      const ch = new core.Channel<ArrayBuffer | number[]>();
+      ch.onmessage = (m) => on(m instanceof ArrayBuffer ? m : new Uint8Array(m).buffer);
+      return ch;
+    },
+  };
+}
 
 // Re-exported so existing importers (`voice-controller.ts` et al.) are unaffected by
 // the split — these three live in their own files so they're testable under Vitest
@@ -784,6 +798,8 @@ export class KokoroTts implements TtsEngine {
   /** The source pause() stopped (its onended must replay, not advance — even after a quick resume). */
   private pausedSrc: AudioBufferSourceNode | null = null;
   private waiters: (() => void)[] = [];
+  /** The first sentence while it streams (`latency.streamTts`). */
+  private streaming: StreamHandle | null = null;
 
   duck(on: boolean) {
     this.ducked = on;
@@ -802,6 +818,7 @@ export class KokoroTts implements TtsEngine {
     } catch {
       /* not started */
     }
+    this.streaming?.stop(); // speak() replays the streamed sentence whole on resume
   }
 
   resume() {
@@ -848,8 +865,29 @@ export class KokoroTts implements TtsEngine {
     // fresh one, so a failing ElevenLabs call trips this line once instead of per sentence.
     const uOpts: SpeakOpts | undefined = opts?.cache || opts?.utteranceId ? opts : { ...opts, utteranceId: crypto.randomUUID() };
     // Fire all synth requests now; play strictly in order as each resolves.
-    const pending = perSentenceOpts(text, uOpts).map(({ s, opts: sOpts }) => this.synth(s, sOpts).then((bytes) => ac.decodeAudioData(bytes)));
+    const parts = perSentenceOpts(text, uOpts);
+    const decoded = (i: number) => this.synth(parts[i].s, parts[i].opts).then((bytes) => ac.decodeAudioData(bytes));
+    // Latency pass: the first sentence streams (its request goes out first, so it leads the
+    // ElevenLabs lane); the rest are fetched whole as before.
+    let stream: StreamHandle | null = null;
+    if (parts.length && !this.paused && streamable(parts[0].opts, !!useSettings.getState().latency?.streamTts, isAndroidApp())) {
+      const ipc = await streamIpc();
+      if (gen !== this.generation) return;
+      const o = parts[0].opts;
+      stream = playStream(ac, gain, { text: parts[0].s, agent: o?.agent, previousText: o?.previousText, utteranceId: o?.utteranceId, model: o?.model }, ipc.invoke, ipc.channel, () => speechStarted());
+      this.streaming = stream;
+    }
+    const pending: Promise<AudioBuffer>[] = parts.map((_, i) => (i === 0 && stream ? (null as unknown as Promise<AudioBuffer>) : decoded(i)));
     try {
+      if (stream) {
+        const r = await stream.done;
+        if (this.streaming === stream) this.streaming = null;
+        if (gen !== this.generation) return;
+        // Declined (another engine, a cooldown…): the old way. Held mid-sentence: replay it whole.
+        if (!r.streamed || !r.buffer) pending[0] = decoded(0);
+        else if (r.stopped) pending[0] = Promise.resolve(r.buffer);
+        else pending.shift();
+      }
       for (let i = 0; i < pending.length; ) {
         const audio = await pending[i];
         if (gen !== this.generation) return;
@@ -864,7 +902,7 @@ export class KokoroTts implements TtsEngine {
           src.onended = () => resolve(this.pausedSrc !== src);
           this.current = src;
           src.start();
-          if (i === 0) speechStarted();
+          if (i === 0 && !stream) speechStarted();
         });
         if (gen !== this.generation) return;
         if (finished) i++;
@@ -891,6 +929,8 @@ export class KokoroTts implements TtsEngine {
       /* already stopped */
     }
     this.current = null;
+    this.streaming?.stop();
+    this.streaming = null;
     voiceLevel.current = 0;
     this.flushWaiters(); // a speak() waiting out a hold ends (its generation is stale)
   }

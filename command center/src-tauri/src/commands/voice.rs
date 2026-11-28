@@ -1212,6 +1212,94 @@ pub async fn tts_synthesize(
     Ok(Response::new(bytes))
 }
 
+/// `tts_stream`'s answer. `streamed: false` = nothing was sent and nothing was spent: the webview
+/// speaks the line with `tts_synthesize` as before (its local fallback, notices and breaker
+/// included). `reason` is for logs only.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsStreamStart {
+    pub streamed: bool,
+    pub sample_rate: u32,
+    pub bytes: usize,
+    pub reason: String,
+}
+
+impl TtsStreamStart {
+    fn no(reason: &str) -> Self {
+        Self { streamed: false, sample_rate: 0, bytes: 0, reason: reason.into() }
+    }
+}
+
+/// Latency pass, step 1 (`latency.streamTts`, off by default): a live reply's FIRST sentence,
+/// streamed. ElevenLabs sends 24 kHz PCM and every chunk goes to the webview the moment it lands
+/// (`on_chunk`), so Tony starts talking on the first ~100 ms of audio instead of after the whole
+/// sentence's MP3. Same voice, model, lane and breaker as `tts_synthesize`; only roster lines
+/// (no explicit voice, no cache pin, no local-only) come here, and anything that would not go to
+/// ElevenLabs right now (another engine, the kill switch, a breaker cooldown, a frozen agent, a
+/// failure before the first byte) answers `streamed: false` without speaking, so the caller's
+/// `tts_synthesize` handles it exactly as today. A failure mid-stream is an error: the caller
+/// keeps what already played.
+#[tauri::command]
+pub async fn tts_stream(
+    state: State<'_, DispatchState>,
+    os: State<'_, super::os_core::OsState>,
+    text: String,
+    agent: Option<String>,
+    previous_text: Option<String>,
+    utterance_id: Option<String>,
+    model: Option<String>,
+    on_chunk: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<TtsStreamStart, String> {
+    let _touch = super::compaction::Touch::start();
+    let utt = valid_utterance_id(utterance_id);
+    let text = text.trim();
+    if !text_len_ok(text) {
+        return Err("text must be 1–2000 characters".into());
+    }
+    let cfg = state.snapshot();
+    let role = agent.as_deref().map(canon_role);
+    if role.as_deref().is_some_and(|r| frozen_voice(r, &os.snapshot().switchboard.frozen_agents)) {
+        return Ok(TtsStreamStart::no("frozen"));
+    }
+    let kokoro = cfg.providers.iter().any(|x| x.kind == Kind::Tts && x.engine.as_deref() == Some("kokoro"));
+    let roster = roster_entry_for(&cfg.agent_voices, role.as_deref(), kokoro);
+    let (p, roster_voice, roster_model) = match &roster {
+        Some(av) => match cfg.providers.iter().find(|x| x.kind == Kind::Tts && x.engine.as_deref() == Some(av.engine.as_str())).cloned() {
+            Some(b) => (b, av.voice.clone(), av.model.clone()),
+            None => (tts_provider(&state)?, av.voice.clone(), av.model.clone()),
+        },
+        None => (tts_provider(&state)?, None, None),
+    };
+    if p.engine.as_deref() != Some("elevenlabs") {
+        return Ok(TtsStreamStart::no("not elevenlabs"));
+    }
+    if os.snapshot().privacy.kill_switch {
+        return Ok(TtsStreamStart::no("kill switch"));
+    }
+    let Some(chosen) = roster_voice.or_else(|| p.voice.clone()) else { return Ok(TtsStreamStart::no("no voice")) };
+    if with_breaker(|b| b.blocked(utt.as_deref(), &chosen, Instant::now())).is_some() {
+        return Ok(TtsStreamStart::no("breaker"));
+    }
+    let model_override = model.as_deref().map(str::trim).filter(|m| elevenlabs::MODELS.contains(m));
+    let model = model_override.or(roster_model.as_deref().filter(|m| !m.is_empty()));
+    let mut sent = 0usize;
+    let r = elevenlabs::synthesize_as(&state, &p, text, &chosen, model, previous_text.as_deref(), elevenlabs::PCM_FORMAT, |c| {
+        sent += c.len();
+        // The webview went away (a cancel / reload): stop reading.
+        on_chunk.send(tauri::ipc::InvokeResponseBody::Raw(c.to_vec())).is_ok()
+    })
+    .await;
+    match r {
+        Ok(n) => Ok(TtsStreamStart { streamed: true, sample_rate: elevenlabs::PCM_RATE, bytes: n, reason: String::new() }),
+        // Nothing played yet: the breaker hears it, and tts_synthesize speaks the line instead.
+        Err(e) if sent == 0 => {
+            with_breaker(|b| b.record_failure(utt.as_deref(), &chosen, e.status, e.retry_after, Instant::now()));
+            Ok(TtsStreamStart::no(&e.reason()))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Kokoro / XTTS on this machine.
 pub(crate) async fn synth_local(state: &DispatchState, p: &Provider, text: &str, voice: Option<String>) -> Result<Vec<u8>, String> {
     let key = state.key_for(p)?;

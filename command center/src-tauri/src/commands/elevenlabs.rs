@@ -49,6 +49,19 @@ fn tail_chars(s: &str, max: usize) -> String {
 /// Stitching extras are only added for `supports_stitching` models; a blank
 /// context string is never sent.
 pub(crate) fn tts_request(model: &str, text: &str, language: Option<&str>, previous_text: Option<&str>, next_text: Option<&str>) -> (String, serde_json::Value) {
+    tts_request_as(MP3_FORMAT, model, text, language, previous_text, next_text)
+}
+
+/// Today's format: one whole MP3 per sentence (the webview decodes the complete file).
+pub(crate) const MP3_FORMAT: &str = "mp3_44100_128";
+/// The streamed first sentence (latency pass, `latency.streamTts`): raw 16-bit mono PCM at
+/// 24 kHz, so the webview can play each chunk as it lands (an MP3 needs the whole file). Same
+/// voice and model; only the container changes.
+pub(crate) const PCM_FORMAT: &str = "pcm_24000";
+pub(crate) const PCM_RATE: u32 = 24_000;
+
+/// `tts_request` with the output format named (MP3_FORMAT or PCM_FORMAT). Pure.
+pub(crate) fn tts_request_as(format: &str, model: &str, text: &str, language: Option<&str>, previous_text: Option<&str>, next_text: Option<&str>) -> (String, serde_json::Value) {
     let mut body = serde_json::json!({
         "text": text,
         "model_id": model,
@@ -67,8 +80,8 @@ pub(crate) fn tts_request(model: &str, text: &str, language: Option<&str>, previ
             body["next_text"] = next.chars().take(1000).collect::<String>().into();
         }
     }
-    let query = if stitching { "output_format=mp3_44100_128&optimize_streaming_latency=3" } else { "output_format=mp3_44100_128" };
-    (query.to_string(), body)
+    let query = if stitching { format!("output_format={format}&optimize_streaming_latency=3") } else { format!("output_format={format}") };
+    (query, body)
 }
 
 /// A failed `synthesize`, with the numeric status kept so the TTS breaker
@@ -343,6 +356,20 @@ fn log_rate_limit(voice_id: &str, model: &str, retry_after: Option<u64>, queued_
 }
 
 pub async fn synthesize(state: &DispatchState, p: &Provider, text: &str, voice_id: &str, model_override: Option<&str>, previous_text: Option<&str>) -> Result<Vec<u8>, ElevenError> {
+    let mut bytes = Vec::new();
+    synthesize_as(state, p, text, voice_id, model_override, previous_text, MP3_FORMAT, |c| {
+        bytes.extend_from_slice(c);
+        true
+    })
+    .await?;
+    Ok(bytes)
+}
+
+/// Streams one sentence in `format`: `on_chunk` gets each piece as ElevenLabs sends it (return
+/// false to stop reading). Same lane, key, voice check, request and errors as `synthesize`; an
+/// error before the first chunk carries the status, so the caller's breaker sees it. Returns the
+/// bytes delivered.
+pub async fn synthesize_as(state: &DispatchState, p: &Provider, text: &str, voice_id: &str, model_override: Option<&str>, previous_text: Option<&str>, format: &str, mut on_chunk: impl FnMut(&[u8]) -> bool) -> Result<usize, ElevenError> {
     let queued = std::time::Instant::now();
     // Held until the whole body is read: the stream is the request ElevenLabs counts.
     let _lane = LANE.acquire().await.map_err(|_| ElevenError::local("ElevenLabs voice queue closed"))?;
@@ -353,7 +380,7 @@ pub async fn synthesize(state: &DispatchState, p: &Provider, text: &str, voice_i
     let (key, _) = api_key(state, p);
     let key = key.ok_or_else(|| ElevenError::local(format!("no ElevenLabs key — set {ENV_KEY} or run the ElevenLabs onboarding")))?;
     let model = model_override.filter(|m| !m.is_empty()).unwrap_or_else(|| if p.model.is_empty() || p.model == "-" { "eleven_v4" } else { p.model.as_str() });
-    let (query, body) = tts_request(model, text, p.language.as_deref(), previous_text, None);
+    let (query, body) = tts_request_as(format, model, text, p.language.as_deref(), previous_text, None);
     let res = state
         .http
         .post(format!("{}/v1/text-to-speech/{voice_id}/stream?{query}", base(p)))
@@ -377,14 +404,34 @@ pub async fn synthesize(state: &DispatchState, p: &Provider, text: &str, voice_i
         return Err(ElevenError { status: Some(status), message, detail, retry_after, timeout: false });
     }
     let mut stream = res.bytes_stream();
-    let mut bytes = Vec::new();
+    let mut n = 0usize;
     while let Some(chunk) = stream.next().await {
-        bytes.extend_from_slice(&chunk.map_err(|e| {
+        let chunk = chunk.map_err(|e| {
             let timeout = e.is_timeout();
             ElevenError { timeout, ..ElevenError::local(if timeout { "ElevenLabs timed out" } else { "ElevenLabs stream interrupted" }) }
-        })?);
+        })?;
+        n += chunk.len();
+        if !on_chunk(&chunk) {
+            break;
+        }
     }
-    Ok(bytes)
+    Ok(n)
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn the_stream_only_changes_the_format() {
+        for model in ["eleven_v4_turbo", "eleven_turbo_v2_5", "eleven_v3"] {
+            let (mq, mb) = tts_request(model, "Hi Nic.", Some("en"), Some("Before."), None);
+            let (pq, pb) = tts_request_as(PCM_FORMAT, model, "Hi Nic.", Some("en"), Some("Before."), None);
+            assert_eq!(mb, pb, "{model}: same body");
+            assert_eq!(mq.replace(MP3_FORMAT, PCM_FORMAT), pq, "{model}");
+            assert!(pq.starts_with("output_format=pcm_24000"));
+        }
+    }
 }
 
 #[cfg(test)]

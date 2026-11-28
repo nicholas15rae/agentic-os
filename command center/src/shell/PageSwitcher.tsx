@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, Home, Image, Link2, MoreHorizontal, Plus, Power, X } from "lucide-react";
 import { useLayout } from "@/core/widgets/layout-store";
 import { startupOf } from "@/core/widgets/pages";
+import { useActiveSurface } from "@/core/widgets/surface-context";
 import { useModes } from "@/features/modes/modes-store";
 import { useWallpapers } from "@/features/wallpaper/wallpaper-store";
 
@@ -30,6 +31,8 @@ export function PageSwitcher({ mobile = false }: { mobile?: boolean }) {
       if (!e.ctrlKey || !e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
       const el = e.target as HTMLElement | null;
       if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+      // A section on screen steps through its own pages (SubPageTabs), not the dashboard's.
+      if (useActiveSurface.getState().store !== useLayout) return;
       const { pages: list, activePage: cur, setActivePage } = useLayout.getState();
       const i = list.findIndex((p) => p.id === cur);
       const next = list[i + (e.key === "ArrowRight" ? 1 : -1)];

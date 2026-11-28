@@ -20,7 +20,12 @@ export interface WidgetLook {
   align?: Align;
   /** Glass opacity 0–1, per wallpaper id (a widget can read differently on each wallpaper). */
   opacity?: Record<string, number>;
+  /** UI fixes 5: how it animates when tapped ("none" = off for this widget), and how strongly (0.25–1.5). */
+  tapAnim?: TapAnim;
+  tapStrength?: number;
 }
+
+export type TapAnim = "none" | "bounce" | "flip" | "glow" | "expand";
 
 export const SCALE_MIN = 0.6;
 export const SCALE_MAX = 1.6;
@@ -45,6 +50,7 @@ export function mergeLook(cur: WidgetLook | undefined, patch: WidgetLook): Widge
   const next: WidgetLook = { ...cur, ...patch };
   if (patch.opacity) next.opacity = { ...cur?.opacity, ...patch.opacity };
   if (next.scale !== undefined) next.scale = clampScale(next.scale);
+  if (next.tapStrength !== undefined) next.tapStrength = Number.isFinite(next.tapStrength) ? Math.min(1.5, Math.max(0.25, next.tapStrength)) : 1;
   return next;
 }
 

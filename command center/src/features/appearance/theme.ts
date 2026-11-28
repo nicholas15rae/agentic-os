@@ -10,6 +10,8 @@
 export type CardStyle = "glass" | "solid" | "outline";
 export type FontChoice = "jakarta" | "system" | "rounded" | "serif" | "mono";
 export type MotionPref = "full" | "reduced" | "off";
+/** UI fixes 5: widgets' tap animations, app-wide (a page can override it). */
+export type AnimationsPref = "on" | "off";
 export type WidgetFrame = "glass" | "ultra" | "solid" | "frameless";
 
 export interface ThemeTokens {
@@ -45,6 +47,8 @@ export interface ThemeTokens {
   /** How a new widget is framed. */
   widgetFrame: WidgetFrame;
   motion: MotionPref;
+  /** Widgets animate when tapped (each widget picks its own style and strength in its Look panel). */
+  animations: AnimationsPref;
 }
 
 /** Exactly the look the app shipped with (styles/index.css before tokens). */
@@ -69,6 +73,7 @@ export const DEFAULT_TOKENS: ThemeTokens = {
   iconStroke: 2,
   widgetFrame: "glass",
   motion: "full",
+  animations: "on",
 };
 
 export type TokenKey = keyof ThemeTokens;
@@ -91,6 +96,7 @@ const ENUMS: Partial<Record<TokenKey, readonly string[]>> = {
   font: ["jakarta", "system", "rounded", "serif", "mono"],
   widgetFrame: ["glass", "ultra", "solid", "frameless"],
   motion: ["full", "reduced", "off"],
+  animations: ["on", "off"],
 };
 /** The slider bounds the control centre shows (same as validation). */
 export const RANGE_OF = RANGES as Record<string, [number, number]>;

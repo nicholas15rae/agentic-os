@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 22:20. One page for every Claude Code session and branch.
+Updated 2026-11-28 09:45. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## RESTART STEPS: Nic's one final restart (written 11-27 22:20 by `claude/section-26-merge-latency-61c93b`)
@@ -16,6 +16,16 @@ State: Section 26 is merged into main, keeper 492853e included. `G:\agentic-os-e
    Because `enabled` is on, its `boot()` loads Tony's model on the engine, which takes about 35 s. Phone Tony moves to the engine at the same time, since gateway Tony reads `route_tony`.
 6. Check it worked: in Settings -> Engine / Models the model row should say "loaded"; then press "Test reply".
 7. The app: you asked for no rebuild, so it still runs `G:\agentic-os-engine\command center\src-tauri\target\release\command-center.exe` (the 19:23 build, pid 4032). That build has all of Section 26 except the sidecar keeper. You don't have to restart it. The Part 2 latency switches only reach the app after a rebuild from main.
+
+## HANDOFF: UI fixes round (branch `claude/ui-fixes-round-4f8159`, from main 0a3cb36), updated 11-28 09:25
+
+Five items from Nic's UI fixes list (plus Nic's mid-run mascot change), one commit each. **Merged into main 11-28 and pushed to origin (daabcf8), Nic's go-ahead. App not rebuilt** (Nic's call).
+- [x] 1. Sub-pages for every section: tabs under the edit bar once a section has a 2nd page (or in Edit layout: + Page, rename, reorder, remove); sideways swipe and Ctrl+Alt+←/→; Look panel "Move to page"; Add panel offers another page's panels again (never a 2nd safety control). One-page sections look as before.
+- [x] 2. Live pop-up characters: overlay layer (z-60, under windows / modals / confirm cards / toasts); only the character takes clicks, its bubble never does; corner picked to avoid `[data-safety]`, nav and the page dock (re-checked every 4 s); idle = short blink/bob bursts every ~10 s (nothing loops); reduced motion drops the motion. Gabagool (original drawing, slice + gold coin) pops on 'got it done' toasts (Staged/Saved/Sent/Done…), streaks at 3/5/10, a once-a-day hello, and taps. Right-click / hold: Mute, Hide, Settings. Settings → Appearance → Live characters: show, mute, how often (taps only / rarely / now and then / often), corner, Try it, Reset. `characterEvent()` is the hook for the real coins (Section 28, not built).
+- [x] 3. Fortune cookie crack: the old build set clip-path to SVG path syntax (ignored by the browser), so it never cracked; history kept the previous text; New Fortune wiped history; no daily fortune. Rebuilt by hand: folded-cookie drawing, wobble, two halves swing apart, paper slip slides out; same fortune all day, Another fortune, history of 5, 6 lucky numbers, reduced motion. Source `command center/assets-src/widgets/fortune-cookie/index.html`, copied to `staging/fortune-cookie/index.html` (old one kept as `.iterations/3-pre-uifix.html`). Its pipeline status still says failed (Repair): Nic promotes it after a look.
+- [x] 4. Play Place steers back: Ideas ledger → 'Shape a new idea'. It reads the rough idea, says which kind it is (live character / widget / its own app) and which words decided it, pitches its pick plus a better fit (e.g. 'This would work better as a pop-up character than a box. Want that instead?' with a Yes, that button), asks 3 sharp questions per kind (+ a feeling question for very short ideas), shows the brief (idea in Nic's words + that kind's house rules + answers + taste), then Build raises the usual confirmation card (mode gate respected). New local taste profile (`cc.taste`): answers teach it, shown with forget / reset; the start of Section 5 item 13 (not yet shared with Designer / Director). Standalone builds still go through the same pipeline with an 'own folder, not wired in' brief: a real export path (Section 5 item 15) isn't built.
+- [x] 5. Animated widgets: a tap plays Bounce (default), Flip, Glow or Expand, short and ending where it started. Settings → Appearance → Widget animations On/Off (app-wide, per page override). Each widget's Look panel: Tap animation style + strength, saved with the page and its mode preset. Off under OS reduced motion or Motion Reduced/Off; page panels and the hero default to None; safety controls never animate; nothing animates in Edit layout.
+- [x] 6. (Nic, mid-run) Coin mascot is now occasional pop-ins: nothing at rest; he peeks in from his screen edge with a lean, says one line, ducks back out after 5 s. Triggers: coins (`characterEvent({kind:'reward'})`, Section 28 hook), things finished (good-news toasts; streaks 3/5/10), a random 'Hey, what's up?' at most once an hour. Never during a live Tony voice conversation, typing (focused field or a key in the last 4 s), full screen, the Trading page, or DND. Click = his menu (Mute pop-ups / Hide characters / Character settings / Bye for now), he stays while it's open; ignored he leaves. Frequency Off / Rare / Normal (old saves mapped). Reduced motion = fade. Same art and lines. **Note:** the app has no phone-call or DND state yet; `setQuiet('call'|'dnd', on)` is the hook for when they exist.
 
 ## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 20:05
 
@@ -149,6 +159,12 @@ Biggest remaining wins (not built, Nic's call): play ElevenLabs on its first byt
 | Fortune-cookie live build (section-pass app, 11-27 10:06-10:25): every brief point reached the verifier and the widget used the style kit; it went to Repair because click probes on its SVG cookie misfired (checker bug, fixed) and the local verifier quoted code not in the page | section-pass | 96829e3 | Yes (f555484), pushed |
 | Build checks catch an animation that never shows (style values the browser rejects, e.g. the cookie's clip-path; elements with click handlers are clicked in the smoke) | section-pass | febc6e9 | Yes (f555484), pushed |
 | Phone APK rebuilt from main 4866634 (arm64 debug, 431 MB) and installed on the S22 over the 11-25 build: same signing key, so app data and the gateway token are kept | claude/phone-apk-agentic-os-764f34 | 4866634 (no code change) | Yes, built from main |
+| UI fixes 1: sub-pages for every section (tabs, swipe, Ctrl+Alt+arrows, Move to page, per-page Add panel) | claude/ui-fixes-round-4f8159 | 2eccbda | Yes (main daabcf8), pushed |
+| UI fixes 2: live pop-up characters, Gabagool coins mascot first (overlay layer, mute / hide / frequency, safety-control avoidance) | claude/ui-fixes-round-4f8159 | 80b180b | Yes (main daabcf8), pushed |
+| UI fixes 3: fortune cookie rebuilt (real crack animation, daily fortune, history, lucky numbers); staging copy updated, still in Repair until Nic promotes | claude/ui-fixes-round-4f8159 | 17969b1 | Yes (main daabcf8), pushed |
+| UI fixes 4: Play Place steers back (kind, pitch, sharp questions, brief, taste profile) | claude/ui-fixes-round-4f8159 | 75b9e74 | Yes (main daabcf8), pushed |
+| UI fixes 5: widget tap animations (global switch, per-widget style + strength, reduced motion) | claude/ui-fixes-round-4f8159 | d6bb57d | Yes (main daabcf8), pushed |
+| Coin mascot: occasional pop-ins from the screen edge (quiet during calls / typing / full screen / Trading / DND; click for menu) | claude/ui-fixes-round-4f8159 | 0a4e2dc | Yes (main daabcf8), pushed |
 
 ## 2. In progress
 
@@ -282,8 +298,14 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
-| main + section-26-engine keeper (merge, 11-27 22:30) | tsc clean; vitest 3,498/3,498; pytest tests/ 1,978 pass, 1 skip; cargo lib 1,719 pass, 2 known CRLF source scans (allm, buildhub) | 11-27 22:30 |
+| main + section-26-engine keeper (merge 11-27 22:30, re-merged with origin/main 6108a01 11-28) | tsc clean; vitest 3,551/3,551 after the re-merge (3,498 before); pytest tests/ 1,978 pass, 1 skip; cargo lib 1,719 pass, 2 known CRLF source scans (allm, buildhub) | 11-27 22:30 |
 | section-26-engine (keeper, 20:00) | cargo lib 1,716 pass; 5 failed under load = 1 known CRLF scan (allm) + 4 real-browser tests that pass alone (re-run 4/4 ok); engine_route 9/9; pytest + vitest unchanged since 2b44e0f (1,975 / 3,498 pass) | 11-27 20:00 |
+| claude/ui-fixes-round-4f8159, mascot pop-ins | vitest 3,551/3,551 (21 character tests); tsc clean; browser preview: none at rest, Try it peeks in from the right, click opens menu and he stays past 5 s, click-away sends him off | 11-28 09:25 |
+| claude/ui-fixes-round-4f8159, item 5 | vitest 3,546/3,546 (+6 tap animations); tsc clean; browser preview: tap on Weather plays the bounce keyframes; switch off = no animation | 11-27 23:00 |
+| claude/ui-fixes-round-4f8159, item 4 | vitest 3,540/3,540 (+16 steer / taste); tsc clean; browser preview: frog-tracker idea → Widget suggested + pop-up character pitch, Yes, that switches kind and questions, Build held by the mode gate | 11-27 22:40 |
+| claude/ui-fixes-round-4f8159, item 3 | widget test 3/3; browser preview: crack opens (halves at ±17°), today's fortune stable across re-crack, Another fortune adds to history, no duplicates | 11-27 22:20 |
+| claude/ui-fixes-round-4f8159, item 2 | vitest 3,521/3,521 (+16 characters); tsc clean; browser preview: hello popped above the dock, bubble lets clicks through (elementFromPoint), right-click menu, Settings card | 11-27 22:05 |
+| claude/ui-fixes-round-4f8159, item 1 | vitest 3,505/3,505 (+7 sub-pages); tsc clean; Finance page checked in the browser preview (add page, switch, back to Page 1) | 11-27 20:35 |
 | Phone APK, main 4866634 on the S22 (SM-S901W) | `tauri android build --apk --target aarch64 --debug` OK; `adb install -r` Success; app process up, plugins loaded, no FATAL/panic in logcat. Screen not checked (phone locked) | 11-27 18:01 |
 | section-26-engine (2b44e0f, origin/main 3d2e38d merged) | pytest 1,975 pass, 1 skip; cargo lib 1,715 pass, 3 known (2 real-browser under load, 1 CRLF scan: allm); vitest 3,498/3,498; tsc clean; release build OK (11 m 51 s) | 11-27 18:15 |
 | section-26-engine (756feda) | full pytest 1,841 pass, 1 skip; engine tests 101 + switch 5; test_gateway_tony 80/80; vitest engine 6/6, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in code I changed); pipelines 4/4; GPU bench + CPU smoke 3/3 | 11-27 12:40 |
@@ -348,15 +370,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-28 09:28 by `python scripts/update_status.py`._
+_Refreshed 2026-11-28 09:30 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/ui-fixes-round-4f8159` | 8 | `6108a01` 2026-11-28 docs(status): UI fixes round pushed to origin/main | clean |
 | `claude/login-widget-navigation-8ae672` | 15 | `c692448` 2026-11-27 fix(phone): camera for QR pairing, plus a typed pairing code | 6 files |
 | `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 7 files |
-| `section-26-engine` | 1 | `492853e` 2026-11-27 feat(engine): keeper restarts the engine sidecar after a reboot; ha... | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
@@ -364,10 +386,10 @@ _Refreshed 2026-11-28 09:28 by `python scripts/update_status.py`._
 
 **Latest on main**
 
-- `6108a01` 2026-11-28 docs(status): UI fixes round pushed to origin/main
-- `daabcf8` 2026-11-28 docs(status): UI fixes round merged into local main (not pushed, not rebuilt)
-- `0a4e2dc` 2026-11-28 feat(characters): coin mascot pops in now and then instead of staying on screen
-- `d6bb57d` 2026-11-27 feat(widgets): tap animations with a global switch and per-widget style and strength (UI fixes 5)
-- `75b9e74` 2026-11-27 feat(playplace): Play Place steers back before building (UI fixes 4)
-- `17969b1` 2026-11-27 fix(widgets): fortune cookie crack animation (UI fixes 3)
+- `4d2fb0d` 2026-11-28 Merge section-26-engine: engine keeper restarts the sidecar after a reboot
+- `0a3cb36` 2026-11-27 docs(status): handoff: S26 merged on this branch, tests, switches changed, gateway restart plan
+- `8852576` 2026-11-27 fix(engine): tests never read the live engine.json; gateway Tony reads the switch from its own config dir
+- `33841f2` 2026-11-27 Merge section-26-engine: built-in engine, Engine / Models screen, Tony's fast path (every switch off)
+- `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: drop finished 6 and 23 from Not started, clear stale push question
+- `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on the S22
 <!-- /AUTO:BRANCHES -->

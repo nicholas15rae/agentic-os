@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Check, Copy, LayoutGrid, Plus, RotateCcw, Undo2 } from "lucide-react";
 import { SurfaceContext, useClaimSurface, useSurface } from "./surface-context";
 import { WidgetGrid } from "./WidgetGrid";
+import { SubPageTabs } from "./SubPageTabs";
+import { SWIPE_IGNORE, drawerExclude, neighbourPage, scrollsSideways, swipeStep } from "./subpages";
 import { WidgetDrawer } from "./WidgetDrawer";
 import { customizedModes, SHARED } from "./variants";
 import type { LayoutStore } from "./layout-store";
@@ -18,11 +20,30 @@ import { useModes } from "@/features/modes/modes-store";
  */
 export function LayoutSurface({ store, label }: { store: LayoutStore; label?: string }) {
   useClaimSurface(store);
+  // UI fixes 1: a sideways swipe on the board turns this section's page (touch only; never while
+  // editing, never when the finger started on a slider, a field, a map or something that scrolls sideways).
+  const swipe = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    const el = e.target as Element | null;
+    const s = store.getState();
+    swipe.current = e.touches.length === 1 && t && s.pages.length > 1 && !s.editing && !el?.closest?.(SWIPE_IGNORE) && !scrollsSideways(el, e.currentTarget) ? { x: t.clientX, y: t.clientY } : null;
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    const start = swipe.current;
+    swipe.current = null;
+    const t = e.changedTouches[0];
+    if (!start || !t) return;
+    const s = store.getState();
+    const next = neighbourPage(s.pages, s.activePage, swipeStep(t.clientX - start.x, t.clientY - start.y));
+    if (next) s.setActivePage(next);
+  };
   return (
     <SurfaceContext.Provider value={store}>
       <div className="flex h-full min-h-0 flex-col" data-surface={store.getState().surface} aria-label={label}>
         <SurfaceEditBar />
-        <div className="min-h-0 flex-1 overflow-y-auto md:overflow-visible">
+        <SubPageTabs label={label} />
+        <div className="min-h-0 flex-1 overflow-y-auto md:overflow-visible" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} onTouchCancel={() => (swipe.current = null)}>
           <WidgetGrid />
         </div>
       </div>
@@ -54,7 +75,7 @@ function SurfaceEditBar() {
         <WidgetDrawer
           surface={surface}
           promoted={[]}
-          exclude={useL.getState().pages.flatMap((p) => p.items.map((i) => i.widgetId))}
+          exclude={drawerExclude(useL.getState())}
           onClose={() => setDrawer(false)}
           onAdd={(id, title, config) => {
             const r = useL.getState().add(id, config, { noNewPage: true });

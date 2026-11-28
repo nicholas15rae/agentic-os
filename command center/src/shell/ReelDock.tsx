@@ -10,7 +10,7 @@ export function ReelDock() {
   const enabled = items.filter((i) => i.enabled && i.src);
 
   return (
-    <div className="hidden items-center gap-2 px-6 pb-4 md:flex xl:px-8">
+    <div data-char-avoid className="hidden items-center gap-2 px-6 pb-4 md:flex xl:px-8">
       <span className="label-caps hidden text-amber-soft xl:block">Reel</span>
       <button aria-label="Previous wallpaper" onClick={() => next(-1)} className="glass-thin grid size-9 place-items-center rounded-full text-ink-2 hover:text-ink">
         <ChevronLeft size={16} />

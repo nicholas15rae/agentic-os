@@ -8,6 +8,7 @@ import { DEFAULT_TOKENS, OPTIONS_OF, RANGE_OF, type ThemeTokens, type TokenKey }
 import { followDesktop, lastPushError, pullUi, setFollowDesktop } from "@/features/appearance/ui-sync";
 import { isDesktopApp } from "@/stores/settings";
 import { applyUiFile, saveUiFile, parseUiFile, readBackup, restoreBackup, type UiFile } from "@/features/appearance/ui-file";
+import { CharactersCard } from "@/features/characters/CharactersCard";
 
 /**
  * Settings → Appearance, the control centre (AGENTS.md, "Everything Is Customizable"): every design
@@ -39,6 +40,7 @@ export function AppearanceStudio() {
           <Preview page={scope || null} />
         </div>
       </Card>
+      <CharactersCard />
       {!isDesktopApp() && <FollowDesktopCard />}
       <FileCard />
     </>
@@ -161,6 +163,7 @@ const CHOICES: [TokenKey, string, Record<string, string>][] = [
   ["font", "Font", { jakarta: "Jakarta", system: "System", rounded: "Rounded", serif: "Serif", mono: "Mono" }],
   ["widgetFrame", "New widgets", { glass: "Glass", ultra: "Ultra glass", solid: "Solid", frameless: "Frameless" }],
   ["motion", "Motion", { full: "Full", reduced: "Reduced", off: "Off" }],
+  ["animations", "Widget animations", { on: "On", off: "Off" }],
 ];
 
 function TokenEditor({ page }: { page: string | null }) {

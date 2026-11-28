@@ -6,7 +6,8 @@ import { GRID_COLS, GRID_ROWS, activeItems, type WidgetWindow } from "./layout-s
 import { useSurface } from "./surface-context";
 import { LOCKED_MIN_SCALE } from "./locks";
 import { gridItems } from "./floating";
-import { useDefaultFrame } from "@/features/appearance/use-tokens";
+import { useDefaultFrame, useWidgetAnimations } from "@/features/appearance/use-tokens";
+import { STRENGTH_MAX, STRENGTH_MIN, TAP_ANIMS, TAP_LABEL, clampStrength, tapAnimOf, tapMotion } from "./tap-anim";
 import { isLockedWidget } from "./registry";
 import { placePushing } from "./pages";
 import type { WidgetDefinition, WidgetInstance } from "./types";
@@ -195,6 +196,17 @@ function WidgetCell({
   const drag = useRef<{ mode: DragMode; startX: number; startY: number; cellW: number; cellH: number; gridW: number; gridH: number; float?: { x: number; y: number; w: number; h: number } } | null>(null);
   // Window options: a floating panel sits over the board (desktop grid only; the phone column lists it).
   const floating = !compact && !!inst.float;
+  // UI fixes 5: a small animation when tapped (its own style and strength; off app-wide, per page, or under reduced motion).
+  const animOn = useWidgetAnimations();
+  const playing = useRef<Animation | null>(null);
+  const onTap = (e: React.PointerEvent<HTMLElement>) => {
+    if (editing || !animOn || !def || !e.isPrimary || e.button > 0) return;
+    const m = tapMotion(tapAnimOf(inst.look, def), clampStrength(inst.look?.tapStrength), getComputedStyle(document.documentElement).getPropertyValue("--cc-accent2-rgb").trim() || undefined);
+    const el = e.currentTarget;
+    if (!m || typeof el.animate !== "function") return;
+    playing.current?.cancel(); // a quick second tap starts again instead of stacking
+    playing.current = el.animate(m.keyframes, m.options);
+  };
 
   const onPointerDown = useCallback(
     (mode: DragMode) => (e: React.PointerEvent) => {
@@ -351,7 +363,7 @@ function WidgetCell({
         />
       )}
       {icon ? (
-        <section data-widget={inst.instanceId} aria-label={def.title} className={`relative min-h-0 ${editing ? "r-20 ring-1 ring-amber/40" : ""}`} style={compact ? undefined : floating ? floatStyle(inst) : area(inst)}>
+        <section data-widget={inst.instanceId} aria-label={def.title} onPointerDown={onTap} className={`relative min-h-0 ${editing ? "r-20 ring-1 ring-amber/40" : ""}`} style={compact ? undefined : floating ? floatStyle(inst) : area(inst)}>
           <IconTile inst={inst} def={def} onOpen={() => !editing && openWindow(inst.instanceId)} />
           {!windowed && (
             <div hidden aria-hidden className="pointer-events-none absolute size-0 overflow-hidden">
@@ -365,6 +377,7 @@ function WidgetCell({
           data-widget={inst.instanceId}
           data-safety={locked ? "panel" : undefined}
           aria-label={def.title}
+          onPointerDown={onTap}
           onClickCapture={() => !editing && !focused && !def.panel && setFocused(inst.instanceId)}
           onFocusCapture={() => !editing && !focused && !def.panel && setFocused(inst.instanceId)}
           className={[
@@ -525,7 +538,10 @@ const DISPLAYS: { id: DisplayMode; label: string }[] = [
 
 /** Edit mode → the palette button: this widget's look, saved with the page. */
 function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetInstance; def: WidgetDefinition<any>; wallpaperId: string; anchor: DOMRect; onClose: () => void }) {
-  const { setLook, setDisplay, setFloat, setPinned, setClickThrough } = useSurface().getState();
+  const useL = useSurface();
+  const { setLook, setDisplay, setFloat, setPinned, setClickThrough, moveToPage } = useL.getState();
+  // UI fixes 1: a panel can go to another of this page's sub-pages (a safety control stays put).
+  const otherPages = useL((s) => s.pages).filter((p) => !p.items.some((i) => i.instanceId === inst.instanceId));
   const locked = isLockedWidget(inst.widgetId);
   const [note, setNote] = useState<string | null>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -536,14 +552,15 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
   const look = inst.look ?? {};
+  const animOn = useWidgetAnimations();
   const frame = frameOf(inst, !!def.chromeless || !!def.panel, useDefaultFrame());
   const seg = (on: boolean) => `rounded-full border px-2.5 py-1 fs-11 ${on ? "border-teal/60 bg-teal/15 text-teal" : "border-white/10 text-ink-2 hover:text-ink"}`;
   // Floats above the page (a widget clips its own content), next to the widget, kept on screen.
   const W = 256;
   const left = Math.max(8, Math.min(window.innerWidth - W - 8, anchor.right + 8 + W > window.innerWidth ? anchor.left - W - 8 : anchor.right + 8));
-  const top = Math.max(8, Math.min(window.innerHeight - 440, anchor.top));
+  const top = Math.max(8, Math.min(window.innerHeight - 560, anchor.top));
   return createPortal(
-    <div ref={panel} tabIndex={-1} className="glass-chat fixed z-[85] w-64 space-y-2.5 r-14 p-3 text-left outline-none" style={{ left, top }} role="dialog" aria-label={`${def.title} look`} onPointerDown={(e) => e.stopPropagation()}>
+    <div ref={panel} tabIndex={-1} className="glass-chat fixed z-[85] max-h-[calc(100dvh-16px)] w-64 space-y-2.5 overflow-y-auto r-14 p-3 text-left outline-none" style={{ left, top }} role="dialog" aria-label={`${def.title} look`} onPointerDown={(e) => e.stopPropagation()}>
       <div className="flex items-center">
         <span className="label-caps text-amber-soft">Look</span>
         <button className="ml-auto text-ink-3 hover:text-ink" onClick={onClose} aria-label="Close the look panel">
@@ -563,6 +580,15 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
           </button>
         )}
       </Row>
+      {!locked && otherPages.length > 0 && (
+        <Row label="Move to page">
+          {otherPages.map((p) => (
+            <button key={p.id} className={seg(false)} onClick={() => (moveToPage(inst.instanceId, p.id) ? onClose() : setNote(`No room on ${p.name}: make room there first.`))}>
+              {p.name}
+            </button>
+          ))}
+        </Row>
+      )}
       {!locked && inst.float && (
         <Row label="Clicks">
           <button className={seg(!inst.clickThrough)} onClick={() => setClickThrough(inst.instanceId, false)}>
@@ -619,6 +645,29 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
           </button>
         ))}
       </Row>
+      {!locked && (
+        <Row label="Tap animation">
+          {TAP_ANIMS.map((a) => (
+            <button key={a} className={seg(tapAnimOf(look, def) === a)} onClick={() => setLook(inst.instanceId, { tapAnim: a })}>
+              {TAP_LABEL[a]}
+            </button>
+          ))}
+          {tapAnimOf(look, def) !== "none" && (
+            <input
+              type="range"
+              min={STRENGTH_MIN * 100}
+              max={STRENGTH_MAX * 100}
+              step={5}
+              value={Math.round(clampStrength(look.tapStrength) * 100)}
+              onChange={(e) => setLook(inst.instanceId, { tapStrength: Number(e.target.value) / 100 })}
+              className="mt-1 w-full"
+              aria-label="Tap animation strength"
+              title="How strong the tap animation is"
+            />
+          )}
+          {!animOn && <p className="fs-10 text-ink-3">Widget animations are off for this page (Settings → Appearance, or reduced motion).</p>}
+        </Row>
+      )}
       {!locked && (
       <Row label="Colour">
         <input type="color" value={look.color || "#e8ecf4"} onChange={(e) => setLook(inst.instanceId, { color: e.target.value })} aria-label="Text colour" className="h-7 w-10 rounded border border-white/10 bg-transparent" />

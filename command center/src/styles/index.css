@@ -225,6 +225,31 @@
   animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important;
 }
 
+/*
+ * Live characters (features/characters): nothing at rest. A character peeks in from its screen
+ * edge with a little lean (data-phase="in"), the coin flips once, and it ducks back out the way it
+ * came (data-phase="out", faster than it came). Every keyframe runs once, so the GPU idles the rest
+ * of the time. Reduced motion (data-calm, or the OS / Appearance setting) fades instead.
+ */
+.char-sprite { filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35)); }
+.char-sprite[data-phase="in"][data-side="right"] { animation: char-peek-r 520ms cubic-bezier(0.34, 1.4, 0.64, 1) both; }
+.char-sprite[data-phase="in"][data-side="left"] { animation: char-peek-l 520ms cubic-bezier(0.34, 1.4, 0.64, 1) both; }
+.char-sprite[data-phase="out"][data-side="right"] { animation: char-duck-r 240ms cubic-bezier(0.4, 0, 1, 1) both; }
+.char-sprite[data-phase="out"][data-side="left"] { animation: char-duck-l 240ms cubic-bezier(0.4, 0, 1, 1) both; }
+.char-sprite[data-calm="true"][data-phase="in"] { animation: char-fade-in 220ms ease-out both; }
+.char-sprite[data-calm="true"][data-phase="out"] { animation: char-fade-out 200ms ease-in both; }
+.char-sprite .char-coin { transform-box: fill-box; transform-origin: 50% 50%; }
+.char-sprite[data-phase="in"]:not([data-calm="true"]) .char-coin { animation: char-flip 640ms ease-in-out 380ms 1; }
+.char-bubble { animation: char-bubble-in 220ms cubic-bezier(0.23, 1, 0.32, 1) 1 both; }
+.char-bubble-fade { animation: char-fade-in 200ms ease-out 1 both; }
+@keyframes char-peek-r { from { transform: translateX(140%) rotate(14deg); } to { transform: translateX(14px) rotate(-8deg); } }
+@keyframes char-peek-l { from { transform: translateX(-140%) rotate(-14deg); } to { transform: translateX(-14px) rotate(8deg); } }
+@keyframes char-duck-r { from { transform: translateX(14px) rotate(-8deg); } to { transform: translateX(140%) rotate(10deg); } }
+@keyframes char-duck-l { from { transform: translateX(-14px) rotate(8deg); } to { transform: translateX(-140%) rotate(-10deg); } }
+@keyframes char-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes char-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes char-flip { 0%, 100% { transform: scaleX(1); } 25% { transform: scaleX(0.08); } 50% { transform: scaleX(-1); } 75% { transform: scaleX(0.08); } }
+@keyframes char-bubble-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
 /* Icon line weight (only when changed, so icons drawn thinner on purpose keep their weight). */
 [data-icon-stroke] svg.lucide { stroke-width: var(--cc-icon-stroke); }
 

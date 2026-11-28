@@ -23,6 +23,7 @@ export function FastPathCard() {
       <Toggle on={!!v?.smallTalkSkipsTools} disabled={!v} onChange={(x) => set({ smallTalkSkipsTools: x })} label="Small talk skips tools" hint="“Hey Tony”, “thanks, that's all”: no tool planner or router, straight to the reply." />
       <Toggle on={!!v?.instantCues} disabled={!v} onChange={(x) => set({ instantCues: x })} label="Instant answers" hint="Time, date, weather and PC stats answered with no model run (weather and stats need the cache below)." />
       <Toggle on={!!v?.statsCache} disabled={!v} onChange={(x) => set({ statsCache: x })} label="Stats cache" hint="CPU, RAM, GPU, VRAM and GPU temperature every 5 s, home weather every 10 min; Tony reads these instead of looking them up live." />
+      <Toggle on={!!v?.stableHistory} disabled={!v} onChange={(x) => set({ stableHistory: x })} label="Keep the conversation cached" hint="Desktop: Tony's history moves in steps of 6 messages instead of sliding every turn, so the model doesn't re-read it each time (about 0.5-0.7 s on your turns, down to about 0.2 s on two turns in three). He sees 6-10 earlier messages instead of 6." />
       {msg && <p className="mt-2 text-xs text-amber">{msg}</p>}
     </Card>
   );

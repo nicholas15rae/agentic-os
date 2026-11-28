@@ -93,6 +93,16 @@ const history = (thread: ThreadId = tonyThread()): ChatMessage[] =>
     .slice(-8)
     .map((t) => ({ role: t.who === "user" ? "user" : "assistant", content: t.text }));
 
+/** Latency pass (fastpath.json `stableHistory`): Tony's own turn gets up to 11 earlier messages
+ * and how many came before them, so Rust can keep his history window still between turns (the
+ * engine then keeps it cached). With the switch off Rust keeps the newest 6, as before. */
+function turnHistory(thread: ThreadId): { history: ChatMessage[]; historyBase: number } {
+  const all = store().turns.filter((t) => t.thread === thread && (t.who === "user" || t.who === "agent"));
+  const from = Math.max(0, all.length - 12);
+  const history = all.slice(from, -1).map((t) => ({ role: t.who === "user" ? "user" : "assistant", content: t.text }) as ChatMessage);
+  return { history, historyBase: from };
+}
+
 /** Says can overlap (osRun's routing notice + streamed chunks), so the cue duck is held while
  * any is in flight. Replaced on a hard speech stop, so a cancelled say can't release a later one's duck. */
 let ttsDuck = { depth: 0 };
@@ -1953,7 +1963,7 @@ async function osRun(plan: ActionPlan, channel: Channel, thread: ThreadId, addre
   // askCards: a Spotify write held by the Ask tier comes back as `pendingSpotify` (card below), not a failure note.
   // cuePlaying: Rust keeps "volume 30" during a Gabagool cue away from Spotify (same rule as cueOwnsVolume).
   // The route before the switchboard hold (`sent`): Rust holds a frozen agent itself, with Tony's note.
-  const req = { text: task, role: sent.role, explicit: thread !== "auto" && sent.role === thread, routeKind: sent.kind, routeReason: sent.reason, history: history(thread).slice(0, -1), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn(), answering: answeringIds(store().turns, thread) };
+  const req = { text: task, role: sent.role, explicit: thread !== "auto" && sent.role === thread, routeKind: sent.kind, routeReason: sent.reason, ...turnHistory(thread), context, streamId, traceId, askCards: true, cuePlaying: cuePlayingNow(), noDelegate: !!plan.noDelegate, activeBusinessId: activeBusinessForTurn(), answering: answeringIds(store().turns, thread) };
   // The steps Rust reports as they happen (`os-step`): what Tony sent an agent and what came back
   // still reach the chat when the turn then fails or is cut.
   const liveSteps: OsTurnResult["steps"] = [];

@@ -226,6 +226,8 @@ export function testReplyLine(t: TestReply): string {
 /** fastpath.rs `FastPath` (all false by default). */
 export interface FastPathSettings {
   smallTalkSkipsTools: boolean;
+  /** Latency pass: Tony's history window moves in steps so the engine keeps it cached. */
+  stableHistory?: boolean;
   instantCues: boolean;
   statsCache: boolean;
 }

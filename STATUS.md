@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-28 09:45. One page for every Claude Code session and branch.
+Updated 2026-11-28 09:55. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## RESTART STEPS: Nic's one final restart (written 11-27 22:20 by `claude/section-26-merge-latency-61c93b`)
@@ -24,8 +24,19 @@ Every fix is behind its own switch, **off by default**, and none is live: the ap
 - [x] 1. **Stream ElevenLabs** (`latency.streamTts`, Settings → Voice detection → Latency). The first sentence of a reply comes as 24 kHz PCM through Rust `tts_stream` over a Tauri channel, and plays from its first 100 ms of audio. Tony's cloned voice and `eleven_v4_turbo` are unchanged (no flash). The other sentences come whole, as before. Anything that wouldn't reach ElevenLabs right now (kill switch, breaker cooldown, another engine, an error before the first byte) falls back to today's path. A hold replays the sentence whole.
 - [x] 2. **Whisper early start** (`latency.earlyStt`, desktop). After 150 ms of quiet, the clip so far goes to Whisper (the same `stt_transcribe` call). If the turn ends with no new word and the final clip starts with that same audio, that text is the final. A word in between throws it away. A failed early decode falls back to today's decode. Bench on real Tony clips: Whisper wait median 0.54 s → 0.17 s at a 500 ms end wait (0 s at 700 ms). Transcripts were the same apart from one comma
 - [x] 3. **Shorter end-of-turn wait** (`latency.smartEnd`; `latency.smartEndMs` 500 by default, adjustable 300-650 ms in Settings). Silero already runs on the CPU (onnxruntime wasm) and gates every frame. A pause now ends the turn at the shorter wait only if Silero judged every frame of it as clear silence (probability ≤ 0.15). A breath, an "mmm", a trailing sound, or energy-only detection keeps the full `vad.endSilenceMs` (700). Only listens that use the global pause get it; barge-in and Brainstorm keep their own. Saves 0.2 s on clean pauses. **Risk:** a long, fully silent pause mid-thought can still end your turn; raise the wait if it cuts you off. It hasn't been tried on your mic yet
-- [ ] 4. Trim Tony's turn setup
-- [ ] 5. Before / after table
+- [x] 4. **Tony's turn setup, profiled** (from the engine's own log, `bench_voice_latency.py prefill`). The Rust setup (routing, recall, prompt build) isn't the cost. **The cost is prompt prefill:** on your real turns (11-27 21:31-21:36) the engine re-read **540-790 tokens per turn (0.47-0.76 s)**, and only the ~1,450-token system prompt stayed cached. The cause is the rolling history window (the newest 6 messages): each turn drops the oldest message, so everything after the system prompt is new to the engine. The bench's "extra 0.4 s on small talk" breaks down as about 0.2 s re-reading the per-turn TURN CONTEXT block (~120 tokens; the bench sends no history) plus the inbox posting text only at a sentence end or after 400 ms. That second part is a bench artifact: the voice waits for the first sentence anyway. **Fix** (`fastpath.json` `stableHistory`, Settings → Engine / Models → Fast replies → "Keep the conversation cached", off): the desktop sends up to 11 earlier messages plus their position. Rust keeps a window that starts on a multiple of 6 messages (6-10 messages), so two turns in three only add to the end of the prompt. Nothing was removed from the prompt. With the switch off, Rust keeps the newest 6 exactly as before
+- [x] 5. **Before / after**, end of speech → Tony's first audio, desktop voice turn. Measured 11-28 09:30-09:40 on the live services (engine + fast path on, as you left them).
+
+| Stage | Before | After (all four switches on) | How measured |
+|---|---|---|---|
+| End-of-turn silence wait | 0.70 s | **0.50 s** on a clean silent pause; 0.70 s when Silero hears a breath or trailing sound | `vad.endSilenceMs` vs `latency.smartEndMs` (unit-tested gate; not yet on your mic) |
+| Whisper (large-v3-turbo, beam 5, GPU) | **0.46 s** median (0.26-0.75) on your 20 latest turns; 0.51-0.54 s on bench clips | **0.17 s** at a 0.5 s end wait; **0 s** at 0.7 s (decode starts 150 ms into the pause) | `/health` last decodes; `bench_voice_latency.py early --end 500/700` |
+| Tony to first token: prompt prefill | **0.55 s** median (0.47-0.76) re-reading ~650 tokens per turn | about **0.3 s** on 2 turns in 3 (prior answer + your line + turn block re-read; estimate from the log's ~0.85 ms/token); the 3rd turn as before | engine log (`prefill`) |
+| Tony: first sentence written | ~0.15-0.3 s (22 ms/token) | same | engine log |
+| ElevenLabs, first sentence (eleven_v4_turbo, your voice) | **0.82 s** median (0.45-0.87) for the whole MP3 | **0.29 s** median (0.27-0.33) to the first 100 ms of PCM | `bench_voice_latency.py tts` (2 × 3 sentences) |
+| **Total, typical turn** | **about 2.7-2.9 s** | **about 1.4-1.6 s** (2 turns in 3), about 1.6-1.8 s on the 3rd | sum of the medians above |
+
+The handoff's earlier Whisper number (0.28-0.34 s) was on short lines. Last night's real lines took longer, and the GPU had only 379 MB free with the engine loaded. Not live: none of this runs until a rebuild from this branch with the switches on. Try them one at a time; Shorter end-of-turn wait is the one that can cut you off.
 
 ## HANDOFF: UI fixes round (branch `claude/ui-fixes-round-4f8159`, from main 0a3cb36), updated 11-28 09:25
 
@@ -308,6 +319,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| latency pass step 4 (stable history) | cargo lib 1,718 pass; 6 failed = 2 known CRLF scans (allm, buildhub) + 4 real-browser tests under load (taskworker::quality 70/70 alone); stable_history 2/2, fastpath 5/5; vitest 3,568/3,568; tsc clean | 11-28 09:55 |
 | latency pass step 3 (smart end) | vitest 3,568/3,568 (+6 vad-fast-end, vad-gate 11/11 unchanged); tsc clean; Settings → Voice & Triggers → Latency checked in the browser preview (renders; toggle enables the 300-650 ms select) | 11-28 09:45 |
 | latency pass step 2 (early Whisper) | vitest 3,562/3,562 (+5 stt-early); tsc clean. Bench (`early --end 500/700`): 0.54 → 0.17 s / 0.51 → 0 s. Not checked in the app | 11-28 09:40 |
 | latency pass step 1 (stream TTS) | vitest 3,557/3,557 (+6 tts-stream); tsc clean; cargo elevenlabs 11/11; cargo check OK. Live bench: streamed PCM playable at 0.27-0.33 s vs whole MP3 0.45-0.87 s. Not checked in the app (no rebuild) | 11-28 09:40 |
@@ -383,14 +395,14 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-28 09:42 by `python scripts/update_status.py`._
+_Refreshed 2026-11-28 09:50 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/tony-honesty-6769c2` | 2 | `b5f3d12` 2026-11-28 fix(tony): read whole threads, not previews (honesty fix 2, switch ... | clean |
-| `claude/section-26-merge-latency-61c93b` | 2 | `a08744b` 2026-11-28 feat(voice): start Whisper in the pause before the end-of-turn wait... | 5 files |
+| `claude/section-26-merge-latency-61c93b` | 3 | `3a94d29` 2026-11-28 feat(voice): Silero-checked shorter end-of-turn wait, 500 ms adjust... | 6 files |
+| `claude/tony-honesty-6769c2` | 2 | `b5f3d12` 2026-11-28 fix(tony): read whole threads, not previews (honesty fix 2, switch ... | 6 files |
 | `claude/login-widget-navigation-8ae672` | 15 | `c692448` 2026-11-27 fix(phone): camera for QR pairing, plus a typed pairing code | 6 files |
 | `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 7 files |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |

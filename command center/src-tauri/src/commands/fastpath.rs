@@ -9,6 +9,9 @@
 //!                        model run (from the clock or the stats cache); anything the cache can't
 //!                        answer falls through to the normal turn. Same idea as the desktop
 //!                        voice path's S20.10 cues, now on every turn (phone, inbox, typed).
+//!   stableHistory        (latency pass) the history window moves in steps of 6 messages, so
+//!                        most turns only append to Tony's prompt and the engine re-reads ~150
+//!                        tokens instead of the whole history (~650, 0.5-0.7 s on Nic's turns).
 //!   statsCache           a background job keeps CPU / RAM / GPU / VRAM / GPU temperature
 //!                        (every 5 s) and home weather (every 10 min) in memory; Tony's home
 //!                        `weather.current` and the stats cue read it instead of a live lookup.
@@ -37,6 +40,9 @@ pub struct FastPath {
     pub small_talk_skips_tools: bool,
     pub instant_cues: bool,
     pub stats_cache: bool,
+    /// Latency pass: Tony's history window moves in steps instead of sliding every turn, so the
+    /// engine keeps the conversation cached (agents::stable_history). Desktop turns only.
+    pub stable_history: bool,
 }
 
 /// fastpath.json in `dir`; missing / unreadable = everything off.
@@ -231,7 +237,7 @@ mod tests {
         assert_eq!(read(&dir), FastPath::default());
         std::fs::write(dir.join(FILE), "{broken").unwrap();
         assert_eq!(read(&dir), FastPath::default());
-        let on = FastPath { small_talk_skips_tools: true, instant_cues: true, stats_cache: false };
+        let on = FastPath { small_talk_skips_tools: true, instant_cues: true, stats_cache: false, stable_history: false };
         write(&dir, &on).unwrap();
         assert_eq!(read(&dir), on);
         std::fs::write(dir.join(FILE), r#"{"instantCues":true}"#).unwrap();

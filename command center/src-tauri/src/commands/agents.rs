@@ -1927,6 +1927,10 @@ pub struct OsTurnRequest {
     pub(crate) route_reason: Option<String>,
     #[serde(default)]
     pub(crate) history: Vec<ChatMessage>,
+    /// Latency pass: how many messages of this conversation came before `history[0]` (the desktop
+    /// sends it). Lets `stable_history` keep the window still between turns. None = unknown.
+    #[serde(default)]
+    pub(crate) history_base: Option<u64>,
     /// Live dashboard state rendered as text by the webview.
     #[serde(default)]
     pub(crate) context: String,
@@ -2328,6 +2332,37 @@ pub(crate) fn cap_history(history: Vec<ChatMessage>, keep: usize, total_chars: u
     out
 }
 
+/// `stable_history`'s step: the window's start only moves in multiples of this many messages.
+pub(crate) const HISTORY_STEP: u64 = 6;
+
+/// Latency pass, step 4 (pure). `cap_history` keeps the last `keep` messages, so every turn drops
+/// the oldest two and the whole history after Tony's system message is new to the engine (it
+/// re-read 540-790 tokens, 0.47-0.76 s, on each of Nic's turns). Here the window starts at a
+/// multiple of `HISTORY_STEP` in the conversation (`base` = messages before `history[0]`), so it
+/// holds `keep` to `keep + STEP - 1` messages and only jumps every few turns; in between, a turn
+/// only appends. Messages are clipped and stripped as in `cap_history`; over `total_chars`, the
+/// start moves on by whole steps (still the same for the same messages), and as a last resort
+/// the newest message alone is kept, as `cap_history` does.
+pub(crate) fn stable_history(history: Vec<ChatMessage>, base: u64, keep: usize, total_chars: usize, msg_chars: usize) -> Vec<ChatMessage> {
+    let n = history.len() as u64;
+    let total = base + n;
+    let keep = keep.max(1) as u64;
+    let mut start = if total <= keep { 0 } else { (total - keep) / HISTORY_STEP * HISTORY_STEP };
+    start = start.max(base);
+    let clipped: Vec<ChatMessage> = history.into_iter().map(|m| ChatMessage { content: super::envelope::clip(strip_turn_context(&m.content), msg_chars), role: m.role }).collect();
+    loop {
+        let from = (start - base) as usize;
+        let chars: usize = clipped[from..].iter().map(|m| m.content.len()).sum();
+        if chars <= total_chars || from + 1 >= clipped.len() {
+            return clipped[from..].to_vec();
+        }
+        start = ((start / HISTORY_STEP) + 1) * HISTORY_STEP;
+        if start >= total {
+            return clipped[clipped.len().saturating_sub(1)..].to_vec();
+        }
+    }
+}
+
 /// The newest Memory Scroll summary as a prompt block (pure; empty when off / unknown).
 pub(crate) fn scroll_summary_block(seed: Option<&str>, max: usize) -> String {
     match seed.map(str::trim).filter(|s| !s.is_empty() && max > 0) {
@@ -2498,7 +2533,13 @@ async fn os_turn_traced(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     let keep = cfg.scheduler.history_turns.max(2) as usize;
     let hp = cfg.memory.hot_path.clone();
     // Nic's words and Tony's answers only: never an old turn's turn-context block.
-    let history: Vec<ChatMessage> = cap_history(req.history, keep, hp.history_chars as usize, hp.history_msg_chars as usize);
+    // Latency pass (fastpath.json `stableHistory`): the window moves in steps, so most turns only
+    // append to the prompt and the engine keeps the rest cached (no full history re-read).
+    let stable = req.history_base.filter(|_| state.config_dir().is_some_and(|d| super::fastpath::read(&d).stable_history));
+    let history: Vec<ChatMessage> = match stable {
+        Some(base) => stable_history(req.history, base, keep, hp.history_chars as usize, hp.history_msg_chars as usize),
+        None => cap_history(req.history, keep, hp.history_chars as usize, hp.history_msg_chars as usize),
+    };
 
     // ── Tool pre-executor (Part 2) — runs BEFORE delegation, using only the
     // target agent's own granted tools, and regardless of whether a
@@ -5853,6 +5894,49 @@ mod core_memory_tests {
         .unwrap();
         os.modes.set_active(super::super::modes::LEARNING_ID).unwrap();
         (state, os, BridgeState::default())
+    }
+
+    #[test]
+    fn stable_history_only_appends_between_steps() {
+        let conv: Vec<ChatMessage> = (0..40).map(|i| ChatMessage::new(if i % 2 == 0 { "user" } else { "assistant" }, &format!("m{i}"))).collect();
+        // What the desktop sends before turn t: up to the last 11 messages, and how many came before.
+        let window = |t: usize| {
+            let sent = &conv[t.saturating_sub(11)..t];
+            let base = t.saturating_sub(11) as u64;
+            stable_history(sent.to_vec(), base, 6, 6000, 1500).into_iter().map(|m| m.content).collect::<Vec<_>>()
+        };
+        let mut appended = 0;
+        let mut prev: Vec<String> = vec![];
+        for t in (8..=36).step_by(2) {
+            let w = window(t);
+            assert!((6..=11).contains(&w.len()), "t={t}: {}", w.len());
+            assert_eq!(w.last().unwrap(), &format!("m{}", t - 1), "newest message always kept");
+            if w.len() > 2 && w[..w.len() - 2] == prev[..] {
+                appended += 1;
+            }
+            prev = w;
+        }
+        assert!(appended >= 8, "most turns only append ({appended} of 15)");
+        // The old rule slides every turn.
+        let slide = |t: usize| cap_history(conv[t - 7..t].to_vec(), 6, 6000, 1500).into_iter().map(|m| m.content).collect::<Vec<_>>();
+        assert_ne!(slide(10)[..4], slide(12)[..4]);
+    }
+
+    #[test]
+    fn stable_history_respects_the_char_cap_and_short_conversations() {
+        let short: Vec<ChatMessage> = (0..3).map(|i| ChatMessage::new("user", &format!("m{i}"))).collect();
+        assert_eq!(stable_history(short.clone(), 0, 6, 6000, 1500).len(), 3);
+        let big: Vec<ChatMessage> = (0..10).map(|i| ChatMessage::new("user", &"x".repeat(1000 + i))).collect();
+        let w = stable_history(big.clone(), 2, 6, 3500, 1500);
+        assert!(w.iter().map(|m| m.content.len()).sum::<usize>() <= 3500 || w.len() == 1);
+        assert_eq!(w.last().unwrap().content.len(), 1009);
+        // Turn-context blocks are stripped, as in cap_history.
+        let tagged = vec![ChatMessage::new("user", &format!("hi
+
+{TURN_CONTEXT_HEAD}
+stuff
+{TURN_CONTEXT_END}"))];
+        assert_eq!(stable_history(tagged, 0, 6, 6000, 1500)[0].content, "hi");
     }
 
     fn turn_req(text: &str) -> OsTurnRequest {

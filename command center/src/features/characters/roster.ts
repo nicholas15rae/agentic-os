@@ -20,7 +20,7 @@ export const CHARACTERS: CharacterDef[] = [
   {
     id: "gabagool",
     name: "Gabagool",
-    description: "The coins mascot: a cheeky slice of gabagool holding a gold coin. Pops up when you get things done and on streaks.",
+    description: "The coins mascot: a cheeky slice of gabagool holding a gold coin. Peeks in now and then when you earn coins, finish something or hit a streak, then ducks back out.",
     corner: "br",
     reactsTo: ["done", "streak", "reward", "hello"],
     lines: {
@@ -28,7 +28,7 @@ export const CHARACTERS: CharacterDef[] = [
       done: ["Nice one. That's a coin.", "Done and dusted.", "Look at you go.", "Another one off the list."],
       streak: ["{n} done today. You're on a roll.", "That's {n}. Coins are raining.", "{n} today. Somebody's cooking."],
       reward: ["Coins! Treat yourself.", "Cha-ching."],
-      hello: ["Hey. I'll be in the corner."],
+      hello: ["Hey, what's up?", "Hey. I'll be in the corner."],
     },
   },
 ];

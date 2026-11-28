@@ -17,7 +17,7 @@ export function CharactersCard() {
   return (
     <Card
       title="Live characters"
-      hint="Small characters tucked in a corner over the app. They pop up when you get something done (and on streaks), or when you tap them. They never take a click meant for the page and never sit on a safety control. Right-click or press and hold one for Mute / Hide."
+      hint="Hidden by default. Now and then a character peeks in from the edge of the screen (coins earned, something finished, a streak, a rare hello at most once an hour), says one line and ducks back out. Never during a call, typing, full screen, the Trading page or Do Not Disturb, never on a safety control, and its bubble never takes a click. Click one for its menu; ignore it and it leaves on its own. Reduced motion makes it fade instead."
     >
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -28,13 +28,13 @@ export function CharactersCard() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="w-40 shrink-0 fs-12 text-ink-2">Pop-ups</span>
-          <button role="switch" aria-checked={!muted} onClick={() => S.setMuted(!muted)} className={seg(!muted)} title="Muted: they stay in their corner; taps still work">
+          <button role="switch" aria-checked={!muted} onClick={() => S.setMuted(!muted)} className={seg(!muted)} title="Muted: no pop-ins at all">
             {muted ? "Muted" : "On"}
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="w-40 shrink-0 fs-12 text-ink-2">How often</span>
-          <div role="group" aria-label="How often characters pop up on their own" className="flex flex-wrap gap-1.5">
+          <div role="group" aria-label="How often characters pop in" className="flex flex-wrap gap-1.5">
             {FREQUENCIES.map((f) => (
               <button key={f} aria-pressed={frequency === f} onClick={() => S.setFrequency(f)} className={seg(frequency === f)}>
                 {FREQUENCY_LABEL[f]}
@@ -62,13 +62,13 @@ export function CharactersCard() {
                   </option>
                 ))}
               </select>
-              <button className="pill-glass !h-8 !px-3 fs-12" onClick={() => S.tap(c.id)} disabled={!visible || !p.on} title="Make it pop up now">
+              <button className="pill-glass !h-8 !px-3 fs-12" onClick={() => S.preview(c.id)} disabled={!visible || !p.on} title="Make it pop in now">
                 Try it
               </button>
             </div>
           );
         })}
-        <button className="pill-glass !h-9 fs-13" onClick={() => S.reset()} title="Shown, pop-ups on, now and then, each in its own corner">
+        <button className="pill-glass !h-9 fs-13" onClick={() => S.reset()} title="Allowed, pop-ups on, Normal, each on its own side">
           Reset characters
         </button>
       </div>

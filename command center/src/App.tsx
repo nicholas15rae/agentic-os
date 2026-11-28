@@ -30,6 +30,7 @@ import { installUiPull, installUiPush } from "@/features/appearance/ui-sync";
 import { CharacterLayer } from "@/features/characters/CharacterLayer";
 import { installCharacterEvents } from "@/features/characters/events";
 import { useToasts } from "@/features/reminders/notify";
+import { useVoice } from "@/features/voice/voice-store";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -111,7 +112,8 @@ function MainApp() {
   useEffect(bootOps, []); // business registry + review-digest badge
   useEffect(installPageLinks, []); // page presets: a page ↔ Tony's mode, a page's own wallpaper
   useEffect(installWallTone, []); // widget text legibility follows the wallpaper's brightness
-  useEffect(() => installCharacterEvents(useToasts), []); // live characters pop up when things get done
+  // Live characters pop in now and then (things done, streaks, a rare hello); never on a call, typing, full screen, Trading or DND.
+  useEffect(() => installCharacterEvents({ toasts: useToasts, voiceState: () => useVoice.getState().state, section: () => useNav.getState().section }), []);
   return (
     <>
       <WallpaperSlideshow />

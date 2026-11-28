@@ -1,12 +1,12 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { CORNERS, FREQUENCIES, POP_MS, dayKey, isStreak, mayPop, pickLine, type CharacterEvent, type Corner, type Frequency } from "./logic";
+import { CORNERS, HELLO_GAP_MS, POP_MS, dayKey, isStreak, mayPop, migrateFrequency, pickLine, type CharacterEvent, type Corner, type Frequency } from "./logic";
 import { CHARACTERS, characterById } from "./roster";
 
 /**
- * UI fixes 2: the overlay characters' settings (saved) and what they are doing (not saved).
- * Settings → Appearance → Live characters edits the saved part; right-click or press and hold a
- * character for the quick Mute / Hide menu.
+ * The pop-in characters' settings (saved) and what they are doing (not saved). Nothing is on
+ * screen at rest: a character only exists while it pops in. Settings → Appearance → Live
+ * characters edits the saved part; clicking a character opens its menu (Mute / Hide / Settings).
  */
 export interface CharacterPrefs {
   on: boolean;
@@ -16,22 +16,22 @@ export interface CharacterPrefs {
 export interface CharacterPop {
   id: string;
   text: string;
-  /** "react" = a tap (a quick reaction), "pop" = something happened. */
-  kind: "pop" | "react";
   at: number;
 }
 
 export interface CharactersState {
-  /** Show the characters at all (Hide turns this off). */
+  /** Characters may pop in at all (Hide characters turns this off). */
   visible: boolean;
-  /** No pop-ups on their own (taps still work). */
+  /** No pop-ins (Mute pop-ups). */
   muted: boolean;
   frequency: Frequency;
   chars: Record<string, CharacterPrefs>;
-  /** The day the hello was last said (saved, so it is once a day, not once per launch). */
-  helloDay: string;
+  /** When the last random "hey, what's up" was (saved, so it stays at most once an hour across launches). */
+  lastHelloAt: number;
   // ── Not saved ──
   pop: CharacterPop | null;
+  /** His menu is open: he stays until it closes. */
+  held: boolean;
   lastPopAt: number;
   lastLine: string | null;
   done: { day: string; n: number };
@@ -39,12 +39,14 @@ export interface CharactersState {
   setMuted: (v: boolean) => void;
   setFrequency: (f: Frequency) => void;
   setChar: (id: string, patch: Partial<CharacterPrefs>) => void;
-  /** Something happened: the first character that is on may pop up (frequency and mute permitting). Returns whether one did. */
+  /** Something happened: the first character that is on may pop in (frequency, mute and quiet permitting). Returns whether one did. */
   emit: (e: CharacterEvent, now?: number) => boolean;
-  /** You tapped a character: it always reacts. */
-  tap: (id: string, now?: number) => void;
-  /** Tuck away now. */
-  tuck: () => void;
+  /** Settings → Try it: pop in now, whatever the frequency. */
+  preview: (id: string, now?: number) => void;
+  /** Keep him while his menu is open; letting go sends him off shortly after. */
+  hold: (on: boolean) => void;
+  /** Duck out now. */
+  leave: () => void;
   /** Settings back to the defaults. */
   reset: () => void;
 }
@@ -59,7 +61,7 @@ export const CHARACTER_DEFAULTS = {
 /** The characters that are on, in roster order. Pure. */
 export const activeCharacters = (s: Pick<CharactersState, "visible" | "chars">) => (s.visible ? CHARACTERS.filter((c) => s.chars[c.id]?.on ?? true) : []);
 
-/** Rehydration / import guard. Pure. */
+/** Rehydration / import guard (older saves' frequencies are mapped). Pure. */
 export function sanitizeCharacters(raw: unknown): typeof CHARACTER_DEFAULTS {
   const r = (raw ?? {}) as Partial<CharactersState>;
   const chars: Record<string, CharacterPrefs> = {};
@@ -70,79 +72,93 @@ export function sanitizeCharacters(raw: unknown): typeof CHARACTER_DEFAULTS {
   return {
     visible: typeof r.visible === "boolean" ? r.visible : true,
     muted: typeof r.muted === "boolean" ? r.muted : false,
-    frequency: FREQUENCIES.includes(r.frequency as Frequency) ? (r.frequency as Frequency) : "normal",
+    frequency: migrateFrequency(r.frequency),
     chars,
   };
 }
 
-let tuckTimer: ReturnType<typeof setTimeout> | undefined;
+/** Why a pop-in must wait right now (a call, typing, full screen, Trading, Do Not Disturb). Set by events.ts. */
+let quietCheck: () => string | null = () => null;
+export function setQuietCheck(fn: () => string | null): void {
+  quietCheck = fn;
+}
+
+let leaveTimer: ReturnType<typeof setTimeout> | undefined;
 
 export const useCharacters = create<CharactersState>()(
   persist(
     (set, get) => {
+      const scheduleLeave = (ms: number) => {
+        clearTimeout(leaveTimer);
+        const pop = get().pop;
+        leaveTimer = setTimeout(() => {
+          const s = get();
+          if (s.pop === pop && !s.held) set({ pop: null });
+        }, ms);
+      };
       const show = (pop: CharacterPop) => {
-        set({ pop, lastLine: pop.text, ...(pop.kind === "pop" ? { lastPopAt: pop.at } : {}) });
-        clearTimeout(tuckTimer);
-        tuckTimer = setTimeout(() => get().pop === pop && set({ pop: null }), POP_MS);
+        set({ pop, held: false, lastLine: pop.text, lastPopAt: pop.at });
+        scheduleLeave(POP_MS);
       };
       return {
         ...CHARACTER_DEFAULTS,
-        helloDay: "",
+        lastHelloAt: 0,
         pop: null,
+        held: false,
         lastPopAt: 0,
         lastLine: null,
         done: { day: "", n: 0 },
-        setVisible: (visible) => set(visible ? { visible } : { visible, pop: null }),
-        setMuted: (muted) => set({ muted }),
-        setFrequency: (frequency) => FREQUENCIES.includes(frequency) && set({ frequency }),
+        setVisible: (visible) => set(visible ? { visible } : { visible, pop: null, held: false }),
+        setMuted: (muted) => set(muted ? { muted, pop: null, held: false } : { muted }),
+        setFrequency: (f) => set({ frequency: migrateFrequency(f) }),
         setChar: (id, patch) =>
           set((s) => {
             if (!characterById(id)) return s;
             const cur = s.chars[id] ?? { on: true, corner: characterById(id)!.corner };
             const next = { on: typeof patch.on === "boolean" ? patch.on : cur.on, corner: patch.corner && CORNERS.includes(patch.corner) ? patch.corner : cur.corner };
-            return { chars: { ...s.chars, [id]: next }, ...(next.on || s.pop?.id !== id ? {} : { pop: null }) };
+            return { chars: { ...s.chars, [id]: next }, ...(next.on || s.pop?.id !== id ? {} : { pop: null, held: false }) };
           }),
         emit: (e, now = Date.now()) => {
           const s = get();
-          // A finished thing counts towards today's streak even when nobody pops up for it.
+          // A finished thing counts towards today's streak even when nobody pops in for it.
           let kind = e.kind;
-          // Hello: once a day at most.
-          if (kind === "hello") {
-            if (s.helloDay === dayKey(now)) return false;
-            set({ helloDay: dayKey(now) });
-          }
           if (kind === "done") {
             const day = dayKey(now);
             const n = s.done.day === day ? s.done.n + 1 : 1;
             set({ done: { day, n } });
             if (isStreak(n)) kind = "streak";
           }
+          if (s.pop) return false; // one at a time
+          if (kind === "hello" && now - s.lastHelloAt < HELLO_GAP_MS) return false;
           const who = activeCharacters(s).find((c) => c.reactsTo.includes(kind));
-          if (!who || !mayPop(now, s.lastPopAt, s.frequency, s.muted, "event")) return false;
-          const n = get().done.n;
-          const text = e.text?.trim() || pickLine(who.lines[kind] ?? who.lines.done, s.lastLine).replace("{n}", String(n));
-          show({ id: who.id, text, kind: "pop", at: now });
+          if (!who || !mayPop(now, s.lastPopAt, s.frequency, s.muted) || quietCheck()) return false;
+          const text = e.text?.trim() || pickLine(who.lines[kind] ?? who.lines.done, s.lastLine).replace("{n}", String(get().done.n));
+          if (kind === "hello") set({ lastHelloAt: now });
+          show({ id: who.id, text, at: now });
           return true;
         },
-        tap: (id, now = Date.now()) => {
+        preview: (id, now = Date.now()) => {
           const c = characterById(id);
           if (!c) return;
-          // A second tap while it is up tucks it away.
-          if (get().pop?.id === id) return set({ pop: null });
-          show({ id, text: pickLine(c.lines.tap, get().lastLine), kind: "react", at: now });
+          show({ id, text: pickLine([...(c.lines.hello ?? []), ...c.lines.done], get().lastLine), at: now });
         },
-        tuck: () => set({ pop: null }),
-        reset: () => set({ ...CHARACTER_DEFAULTS, pop: null }),
+        hold: (on) => {
+          set({ held: on });
+          if (!on && get().pop) scheduleLeave(1_200);
+        },
+        leave: () => set({ pop: null, held: false }),
+        reset: () => set({ ...CHARACTER_DEFAULTS, pop: null, held: false }),
       };
     },
     {
       name: "cc.characters",
-      version: 1,
-      partialize: (s) => ({ visible: s.visible, muted: s.muted, frequency: s.frequency, chars: s.chars, helloDay: s.helloDay }),
+      version: 2,
+      partialize: (s) => ({ visible: s.visible, muted: s.muted, frequency: s.frequency, chars: s.chars, lastHelloAt: s.lastHelloAt }),
+      migrate: (persisted) => persisted as never,
       merge: (persisted, current) => {
         if (persisted == null) return current;
-        const day = (persisted as { helloDay?: unknown }).helloDay;
-        return { ...current, ...sanitizeCharacters(persisted), helloDay: typeof day === "string" ? day.slice(0, 10) : "" };
+        const at = (persisted as { lastHelloAt?: unknown }).lastHelloAt;
+        return { ...current, ...sanitizeCharacters(persisted), lastHelloAt: typeof at === "number" && Number.isFinite(at) ? at : 0 };
       },
     },
   ),

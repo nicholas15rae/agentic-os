@@ -1,23 +1,57 @@
 /**
- * UI fixes 2: live pop-up characters (pure logic). Small animated characters live in an overlay
- * above the app: subtle at rest (tiny idle loop, tucked in a corner), they pop up when something
- * happens or when tapped, react, then tuck away. Rules: never block clicks, never cover a safety
- * control, easy to mute or hide, reduced motion respected, frequency adjustable.
+ * Live pop-in characters (pure logic). Hidden by default: now and then a character peeks in from
+ * a screen edge, says one short line and ducks back out after a few seconds, like a mouse that
+ * doesn't know he's being watched. Rules: never block clicks, never cover a safety control, never
+ * during a call, typing, full screen, the Trading page or Do Not Disturb; easy to mute or hide;
+ * reduced motion makes him fade instead of move; frequency adjustable.
  */
 
 export type Corner = "br" | "bl" | "tr" | "tl";
 export const CORNERS: readonly Corner[] = ["br", "bl", "tr", "tl"];
 
-/** How often a character pops up on its own. "taps" = only when you tap it. */
-export type Frequency = "taps" | "rare" | "normal" | "lively";
-export const FREQUENCIES: readonly Frequency[] = ["taps", "rare", "normal", "lively"];
-export const FREQUENCY_LABEL: Record<Frequency, string> = { taps: "Only when tapped", rare: "Rarely", normal: "Now and then", lively: "Often" };
+/** How often a character pops in on its own. */
+export type Frequency = "off" | "rare" | "normal";
+export const FREQUENCIES: readonly Frequency[] = ["off", "rare", "normal"];
+export const FREQUENCY_LABEL: Record<Frequency, string> = { off: "Off", rare: "Rare", normal: "Normal" };
 
-/** The least time between two pop-ups a character makes on its own. */
-export const GAP_MS: Record<Frequency, number> = { taps: Infinity, rare: 20 * 60_000, normal: 5 * 60_000, lively: 60_000 };
+/** Older saves had four levels: tap-only becomes Off, Often becomes Normal. Pure. */
+export function migrateFrequency(v: unknown): Frequency {
+  if (v === "taps") return "off";
+  if (v === "lively") return "normal";
+  return FREQUENCIES.includes(v as Frequency) ? (v as Frequency) : "normal";
+}
 
-/** How long a pop-up stays before it tucks away. */
-export const POP_MS = 4_500;
+/** The least time between two pop-ins. */
+export const GAP_MS: Record<Frequency, number> = { off: Infinity, rare: 20 * 60_000, normal: 5 * 60_000 };
+
+/** The random "hey, what's up" comes at most this often. */
+export const HELLO_GAP_MS = 60 * 60_000;
+
+/** How long he stays (unless his menu is open) before ducking out. */
+export const POP_MS = 5_000;
+
+/** What is going on that a pop-in would interrupt. */
+export interface QuietContext {
+  /** A call or a live voice conversation with Tony. */
+  inCall: boolean;
+  /** A field has the focus, or a key went down a moment ago. */
+  typing: boolean;
+  fullscreen: boolean;
+  /** The page on screen (the Trading page is never interrupted). */
+  section: string;
+  /** Do Not Disturb (any feature can set it through `setQuiet`). */
+  dnd: boolean;
+}
+
+/** Why a pop-in must wait right now, or null when it may come. Pure. */
+export function quietReason(c: QuietContext): string | null {
+  if (c.dnd) return "do not disturb";
+  if (c.inCall) return "on a call";
+  if (c.typing) return "typing";
+  if (c.fullscreen) return "full screen";
+  if (c.section === "trading") return "trading";
+  return null;
+}
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
@@ -87,9 +121,8 @@ export function bubbleSpot(at: Rect & { corner: Corner }, obstacles: readonly Re
   return null;
 }
 
-/** May a character pop up now? A tap always may; an event waits for the frequency's gap and never while muted. Pure. */
-export function mayPop(now: number, lastPopAt: number, frequency: Frequency, muted: boolean, source: "tap" | "event"): boolean {
-  if (source === "tap") return true;
+/** May a character pop in now? Never while muted or Off; otherwise after the frequency's gap. Pure. */
+export function mayPop(now: number, lastPopAt: number, frequency: Frequency, muted: boolean): boolean {
   if (muted) return false;
   return now - lastPopAt >= GAP_MS[frequency];
 }

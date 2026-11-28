@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-28 09:55. One page for every Claude Code session and branch.
+Updated 2026-11-28 10:00. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## RESTART STEPS: Nic's one final restart (written 11-27 22:20 by `claude/section-26-merge-latency-61c93b`)
@@ -19,7 +19,7 @@ State: Section 26 is merged into main, keeper 492853e included. `G:\agentic-os-e
 
 ## HANDOFF: Latency pass (branch `claude/section-26-merge-latency-61c93b`, from main b803a9f), updated 11-28
 
-Every fix is behind its own switch, **off by default**, and none is live: the app isn't rebuilt (you asked). The after numbers come from `python scripts/bench_voice_latency.py tts|stt|early|prefill`, run against the live ElevenLabs, Whisper and engine. Not merged into main.
+Every fix is behind its own switch, **off by default**, and none is live: the app isn't rebuilt (you asked). The after numbers come from `python scripts/bench_voice_latency.py tts|stt|early|prefill`, run against the live ElevenLabs, Whisper and engine. **Merged into main and pushed 11-28 (your go-ahead); app not rebuilt.**
 
 - [x] 1. **Stream ElevenLabs** (`latency.streamTts`, Settings → Voice detection → Latency). The first sentence of a reply comes as 24 kHz PCM through Rust `tts_stream` over a Tauri channel, and plays from its first 100 ms of audio. Tony's cloned voice and `eleven_v4_turbo` are unchanged (no flash). The other sentences come whole, as before. Anything that wouldn't reach ElevenLabs right now (kill switch, breaker cooldown, another engine, an error before the first byte) falls back to today's path. A hold replays the sentence whole.
 - [x] 2. **Whisper early start** (`latency.earlyStt`, desktop). After 150 ms of quiet, the clip so far goes to Whisper (the same `stt_transcribe` call). If the turn ends with no new word and the final clip starts with that same audio, that text is the final. A word in between throws it away. A failed early decode falls back to today's decode. Bench on real Tony clips: Whisper wait median 0.54 s → 0.17 s at a 500 ms end wait (0 s at 700 ms). Transcripts were the same apart from one comma
@@ -395,13 +395,13 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-28 09:50 by `python scripts/update_status.py`._
+_Refreshed 2026-11-28 09:52 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/section-26-merge-latency-61c93b` | 3 | `3a94d29` 2026-11-28 feat(voice): Silero-checked shorter end-of-turn wait, 500 ms adjust... | 6 files |
+| `claude/section-26-merge-latency-61c93b` | 4 | `42e1a62` 2026-11-28 feat(tony): history window moves in steps so the engine keeps it ca... | 1 files |
 | `claude/tony-honesty-6769c2` | 2 | `b5f3d12` 2026-11-28 fix(tony): read whole threads, not previews (honesty fix 2, switch ... | 6 files |
 | `claude/login-widget-navigation-8ae672` | 15 | `c692448` 2026-11-27 fix(phone): camera for QR pairing, plus a typed pairing code | 6 files |
 | `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 7 files |

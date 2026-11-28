@@ -57,6 +57,24 @@ export const isBelowGateFrame = (levelDb: number, prob: number | null, thrDb: nu
 /** Extra quiet a below-the-gate band needs (vs a clear pause) before it ends the utterance. */
 export const BAND_GRACE_MS = 1000;
 
+/**
+ * Latency pass, step 3 (`latency.smartEnd`): a pause may end the turn after the shorter
+ * `fastEndMs` only if Silero decided every frame of it and called each one clearly silent
+ * (probability at or under this). A breath, an "mmm", a trailing vowel or a frame Silero didn't
+ * judge makes it a soft pause, which waits the full `endSilenceMs` like today.
+ */
+export const DEEP_QUIET_PROB = 0.15;
+/** The shorter wait's range (Settings → Voice detection → Latency). */
+export const FAST_END_MIN_MS = 300;
+export const FAST_END_DEFAULT_MS = 500;
+
+/** The shorter wait in effect: clamped to [FAST_END_MIN_MS, endSilenceMs]; null = off. Pure. */
+export function fastEndFor(on: boolean | undefined, ms: unknown, endSilenceMs: number): number | null {
+  if (!on || !Number.isFinite(endSilenceMs)) return null;
+  const v = typeof ms === "number" && Number.isFinite(ms) ? ms : FAST_END_DEFAULT_MS;
+  return Math.round(Math.min(endSilenceMs, Math.max(FAST_END_MIN_MS, v)));
+}
+
 /** Settings v7 migration: the old 0–100 sensitivity → an absolute gate (60 → -44 dB). */
 export function migrateSensitivity(sensitivity: number): number {
   const s = Number.isFinite(sensitivity) ? sensitivity : 60;
@@ -78,11 +96,16 @@ export class Gate {
   private quietMs = 0;
   private belowMs = 0;
   private speechMs = 0;
+  /** This pause had a frame that wasn't clearly silent to Silero (see DEEP_QUIET_PROB). */
+  private softPause = false;
+  /** Why the last `end` fired (tests, the log): the shorter wait, or the usual one. */
+  endedFast = false;
 
   constructor(
     private readonly frameMs: number,
     private readonly endSilenceMs: number,
     private readonly maxUtteranceMs: number,
+    private readonly fastEndMs: number | null = null,
   ) {
     this.onsetFrames = Math.max(1, Math.ceil(ONSET_MS / frameMs - 1e-9));
   }
@@ -99,10 +122,14 @@ export class Gate {
     }
     this.speechMs += this.frameMs;
     const quiet = isQuietFrame(levelDb, prob, thrDb);
+    if (!quiet || this.quietMs === 0) this.softPause = false;
+    if (quiet && (prob === null || prob > DEEP_QUIET_PROB)) this.softPause = true;
     this.quietMs = quiet ? this.quietMs + this.frameMs : 0;
+    const fast = this.fastEndMs !== null && quiet && !this.softPause && this.quietMs >= this.fastEndMs;
     this.belowMs = quiet || isBelowGateFrame(levelDb, prob, thrDb) ? this.belowMs + this.frameMs : 0;
     const bandEnded = this.belowMs >= this.endSilenceMs + BAND_GRACE_MS;
-    if (!bandEnded && !utteranceShouldEnd(this.quietMs, this.endSilenceMs, this.speechMs, this.maxUtteranceMs)) return null;
+    if (!fast && !bandEnded && !utteranceShouldEnd(this.quietMs, this.endSilenceMs, this.speechMs, this.maxUtteranceMs)) return null;
+    this.endedFast = fast && this.quietMs < this.endSilenceMs;
     this.speaking = false;
     this.run = 0;
     return "end";

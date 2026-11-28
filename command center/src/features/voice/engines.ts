@@ -3,7 +3,7 @@ import { useSettings } from "@/stores/settings";
 import { micLevel, useVoice, voiceLevel } from "./voice-store";
 import { speechStarted } from "./speech-start";
 import { SileroStream, preloadSilero } from "./silero";
-import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, isQuietFrame, thresholdFor } from "./vad-gate";
+import { DEFAULT_ACTIVATION_DB, DEFAULT_BARGE_MARGIN_DB, Gate, dbfs, fastEndFor, isQuietFrame, thresholdFor } from "./vad-gate";
 import { PARTIAL_MIN_MS, PARTIAL_QUIET_MS, PartialLoop, newCaptureId, partialMsFrom, replyStreaming, sttPartial, type SpeechTick } from "./stt-partials";
 import { PhoneSttStream, streamFinalMs, streamUrl } from "./stt-stream";
 import { MIC_LOCKED_MSG, MicLockedError, assertMicAllowed, captureClosed, captureOpened, micEnabled, publishMeter, registerCapture, unpublishMeter, type MeterSnapshot } from "./mic-gate";
@@ -232,7 +232,11 @@ export class MicCapture {
     // `Infinity` disables either check (continuous mode never ends on silence or a time cap).
     const endMs = opts.endSilenceMs ?? vad.endSilenceMs;
     const maxMs = opts.maxUtteranceMs ?? vad.maxUtteranceMs;
-    const gate = new Gate(frameMs, endMs, maxMs);
+    // Latency pass: the shorter Silero-checked wait, only for a listen that uses the global pause
+    // (a caller's own pause, e.g. a barge-in or Brainstorm dictation, is left as it is).
+    const lat = useSettings.getState().latency;
+    const fastMs = opts.endSilenceMs === undefined ? fastEndFor(lat?.smartEnd, lat?.smartEndMs, endMs) : null;
+    const gate = new Gate(frameMs, endMs, maxMs, fastMs);
     const meter = this.meter;
     let floorDb = -100;
     let frames = 0;

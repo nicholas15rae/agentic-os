@@ -3,6 +3,14 @@
 Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
+## HANDOFF: Section 26 merge + gateway (branch `claude/gabagoul-section-status-225cdd`), updated 11-27 20:05
+
+- section-26-engine merged (33841f2) + 2 test-isolation fixes (agent_runner defaults; gateway Tony reads engine.json from the gateway's config dir). Local `main` moved to this branch. **Not pushed: waiting on Nic.**
+- Tests on the merge: tsc clean; vitest 3,498/3,498; pytest 1,978 pass, 1 skip; cargo lib 1,717 (+2 known CRLF: allm, buildhub).
+- **Switches changed 19:33-19:34 (not by this session):** engine.json route_tony=true (enabled already true), fastpath.json all three on. Desktop Tony is on the engine now. Ask Nic: keep, or turn back off?
+- **Gateway NOT restarted yet** (restarting on main moves phone Tony to the engine while route_tony is on). Plan: ff `G:gentic os` to main; copy `G:gentic-os-engine\data\engine` -> `G:gentic os\data\engine` (incl. engine.pid so the running llama-server pid 39608 is adopted, not loaded twice); stop the sidecar (:8081, python pid 50796); restart `python server.py --port 8080` in `G:gentic os`. Trading bridge is answering, so the gateway won't touch it.
+- Then: Settings -> Engine / Models -> check the model row says "loaded" (else "Load") -> "Test reply". Next task: Learned instant cues (contract first, for Nic's OK).
+
 ## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 18:30
 
 For the next session (Claude Ultra, Monday). Nothing is merged into main or pushed, and **no switch is on**. The desktop app now runs from this branch: built 18:19, restarted 18:21 from `G:\agentic-os-engine\command center\src-tauri\target\release\command-center.exe` (pid 18728), with origin/main 3d2e38d merged in first. Tony is on LM Studio. Read `docs/section-26-plan.md`, `docs/section-26-allm-inventory.md`, `docs/section-26-bizops-prompt.md`.
@@ -319,15 +327,17 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 19:24 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 20:08 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/gabagoul-section-status-225cdd` | 29 | `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: d... | clean |
-| `section-26-engine` | 67 | `913cef7` 2026-11-27 feat(engine): engine sidecar + engine_call so the Engine / Models s... | 1 files |
+| `claude/gabagoul-section-status-225cdd` | 73 | `8852576` 2026-11-27 fix(engine): tests never read the live engine.json; gateway Tony re... | 1 files |
+| `claude/login-widget-navigation-8ae672` | 34 | `9f97041` 2026-11-27 feat(phone): Section 27.6 battery and data saver | clean |
+| `section-26-engine` | 70 | `492853e` 2026-11-27 feat(engine): keeper restarts the engine sidecar after a reboot; ha... | clean |
 | `claude/phone-apk-agentic-os-764f34` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
+| `claude/section-26-merge-latency-61c93b` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
 | `feat/language-hub` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | clean |
 | `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | no worktree |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |

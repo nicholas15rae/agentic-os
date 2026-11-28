@@ -225,6 +225,37 @@
   animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important;
 }
 
+/*
+ * UI fixes 2: live characters (features/characters). At rest a character is tucked small in its
+ * corner; it pops up to full size with a springy overshoot and tucks away faster than it came.
+ * Every keyframe runs ONCE, triggered by `data-anim` (idle bursts, pop, react), so nothing loops
+ * and the GPU idles between bursts. Reduced motion (OS or Appearance) shortens them to nothing.
+ */
+.char-sprite {
+  transform: scale(0.72);
+  transform-origin: var(--char-origin, bottom right);
+  opacity: 0.92;
+  transition: transform 200ms cubic-bezier(0.4, 0, 1, 1), opacity 200ms ease-in;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35));
+}
+.char-sprite:hover { transform: scale(0.8); opacity: 1; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.char-sprite[data-up="true"] { transform: scale(1); opacity: 1; transition: transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 160ms ease-out; }
+.char-sprite :is(.char-body, .char-eyes, .char-coin) { transform-box: fill-box; transform-origin: 50% 100%; }
+.char-sprite .char-eyes, .char-sprite .char-coin { transform-origin: 50% 50%; }
+.char-sprite[data-anim="idle"] .char-eyes { animation: char-blink 1.2s ease-in-out 1; }
+.char-sprite[data-anim="idle"] .char-body { animation: char-bob 1.2s ease-in-out 1; }
+.char-sprite[data-anim="pop"] .char-body { animation: char-hop 680ms cubic-bezier(0.3, 0.7, 0.4, 1) 1; }
+.char-sprite[data-anim="pop"] .char-coin { animation: char-flip 680ms ease-in-out 1; }
+.char-sprite[data-anim="react"] .char-body { animation: char-wiggle 520ms ease-in-out 1; }
+.char-sprite[data-anim="react"] .char-eyes { animation: char-blink 520ms ease-in-out 1; }
+.char-bubble { animation: char-bubble-in 220ms cubic-bezier(0.23, 1, 0.32, 1) 1 both; }
+@keyframes char-blink { 0%, 40%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.12); } 60% { transform: scaleY(1); } }
+@keyframes char-bob { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-2px) scale(1.02, 0.98); } }
+@keyframes char-hop { 0% { transform: translateY(0) scale(1); } 30% { transform: translateY(-12%) scale(0.96, 1.05); } 55% { transform: translateY(0) scale(1.06, 0.93); } 75% { transform: translateY(-3%) scale(0.99, 1.01); } 100% { transform: translateY(0) scale(1); } }
+@keyframes char-flip { 0%, 100% { transform: scaleX(1); } 25% { transform: scaleX(0.08); } 50% { transform: scaleX(-1); } 75% { transform: scaleX(0.08); } }
+@keyframes char-wiggle { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-7deg); } 55% { transform: rotate(6deg); } 80% { transform: rotate(-2deg); } }
+@keyframes char-bubble-in { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
+
 /* Icon line weight (only when changed, so icons drawn thinner on purpose keep their weight). */
 [data-icon-stroke] svg.lucide { stroke-width: var(--cc-icon-stroke); }
 

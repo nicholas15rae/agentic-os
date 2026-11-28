@@ -8,6 +8,7 @@ import { DEFAULT_TOKENS, OPTIONS_OF, RANGE_OF, type ThemeTokens, type TokenKey }
 import { followDesktop, lastPushError, pullUi, setFollowDesktop } from "@/features/appearance/ui-sync";
 import { isDesktopApp } from "@/stores/settings";
 import { applyUiFile, saveUiFile, parseUiFile, readBackup, restoreBackup, type UiFile } from "@/features/appearance/ui-file";
+import { CharactersCard } from "@/features/characters/CharactersCard";
 
 /**
  * Settings → Appearance, the control centre (AGENTS.md, "Everything Is Customizable"): every design
@@ -39,6 +40,7 @@ export function AppearanceStudio() {
           <Preview page={scope || null} />
         </div>
       </Card>
+      <CharactersCard />
       {!isDesktopApp() && <FollowDesktopCard />}
       <FileCard />
     </>

@@ -27,6 +27,9 @@ import { SecurityGate } from "@/features/security/SecurityGate";
 import { installPageLinks } from "@/core/widgets/page-links";
 import { installWallTone } from "@/features/wallpaper/wall-tone";
 import { installUiPull, installUiPush } from "@/features/appearance/ui-sync";
+import { CharacterLayer } from "@/features/characters/CharacterLayer";
+import { installCharacterEvents } from "@/features/characters/events";
+import { useToasts } from "@/features/reminders/notify";
 
 // Heavier tabs load on demand.
 const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.Element> | (() => React.JSX.Element)> = {
@@ -54,7 +57,8 @@ const SECTION_VIEWS: Record<Section, React.LazyExoticComponent<() => React.JSX.E
 /**
  * Layer stack (back → front):
  *   WallpaperSlideshow (-z-10) → WeatherCanvas (-z-5) → shell + section →
- *   VoiceHUD / orb (z-50) → drawers and modals (z-75…z-85: Agents drawer,
+ *   VoiceHUD / orb (z-50) → live characters (z-60, corners only, never on a
+ *   safety control) → drawers and modals (z-75…z-85: Agents drawer,
  *   Intake / settings modals z-80, Play Place full screen z-85) →
  *   ConfirmCard (z-90) → Toasts (z-95)
  * The ConfirmCard sits above every modal because a modal can raise one (the
@@ -107,6 +111,7 @@ function MainApp() {
   useEffect(bootOps, []); // business registry + review-digest badge
   useEffect(installPageLinks, []); // page presets: a page ↔ Tony's mode, a page's own wallpaper
   useEffect(installWallTone, []); // widget text legibility follows the wallpaper's brightness
+  useEffect(() => installCharacterEvents(useToasts), []); // live characters pop up when things get done
   return (
     <>
       <WallpaperSlideshow />
@@ -126,6 +131,7 @@ function MainApp() {
       <MobileTabs />
       {section === "command" && <PageSwitcher mobile />}
       <VoiceHUD />
+      <CharacterLayer />
       <ConfirmCard />
       <Toasts />
     </>
